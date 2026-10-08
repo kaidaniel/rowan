@@ -447,12 +447,46 @@ impl Analyzer {
         self.analysed_funcs.insert(foid);
         // --- symbolic summaries (§7.3/§9): analyse the body once, instantiate per call ---
         if self.use_summaries && self.model_call == 0 {
-            let summ = self.summarise(foid, state);
+            let bound = self.compute_bindings(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
+            // the classes of the arguments: the summary is specialised on them
+            let mut sig: Vec<(String, ObjId)> = Vec::new();
+            let one_class = |an: &Analyzer, v: &Value| -> Option<ObjId> {
+                if v.pts.is_empty() || v.pts.iter().any(|o| an.kind(o) != Kind::Instance) {
+                    return None;
+                }
+                let mut cls: Option<ObjId> = None;
+                for o in v.pts.iter() {
+                    let c = an.instance_class(o)?;
+                    match cls {
+                        None => cls = Some(c),
+                        Some(x) if x == c => {}
+                        _ => return None,
+                    }
+                }
+                cls
+            };
+            if super::enabled("sigsum") {
+                if let Some(sv) = &self_v {
+                    if let Some(c) = one_class(self, sv) {
+                        if let Some(FuncNode::Def(f)) = Some(fi.node) {
+                            if let Some(p0) = crate::scopes::all_params(&f.parameters).first() {
+                                sig.push((p0.name.id.to_string(), c));
+                            }
+                        }
+                    }
+                }
+                for (name, v) in bound.iter() {
+                    if let Some(c) = one_class(self, v) {
+                        sig.push((intern::str_get(*name).to_string(), c));
+                    }
+                }
+                sig.sort();
+            }
+            let summ = self.summarise_sig(foid, state, sig);
             let Some(summ) = summ else {
                 return Value::new(); // recursion through the symbolic path: ⊥ summary
             };
             let (call_ctx, ctx_single) = self.receiver_ctx(&self_v, &site);
-            let bound = self.compute_bindings(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
             let mut bind: IndexMap<u32, Value> = IndexMap::new();
             for (name, ph) in summ.ph_by_name.iter() {
                 if let Some(bv) = bound.get(name) {

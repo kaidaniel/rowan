@@ -28,7 +28,7 @@ semantic fixes that the prototype did not have, so the prototype is history, not
 | `rowan/src/report.rs` | dedupe, schema table, text, JSON lines, `--golden` and `--facts` documents. |
 | `rowan/src/main.rs` | CLI; runs the analysis on a thread with a 1 GiB stack. |
 | `rowan/py/` | PyO3 binding (`rowan.analyse(source, …)` / `analyse_file(path)` → `--golden` JSON string). Builds with maturin; see known problems. |
-| `tests/run_golden.py`, `tests/cases/` | golden harness, 91 cases: `a01`–`e36` from the original design (Appendix A and the prototype era), `f37` (recency), `g40`–`g65` (AST node coverage, closures taking closures returning lambdas, reassignment, control flow, inputs indexing results of input functions, classes, string keys, containers, guards, modules, generators, recursion, kwargs forwarding, configs, pandas, annotations, mutation through layers, comprehensions, dispatch, a CLI script, dict methods, a larger mixed program), `h66`–`h72` (larger programs passing objects around: an event bus with closures / bound methods / partials in per-topic lists, a fluent builder and a stage pipeline, a plugin registry with a class decorator and a recursive visitor, a dependency-injection container resolving services in constructors, an order state machine with a nested transition table, a dataclass graph with a stack walk and a defaultdict grouping, a middleware chain of closures over closures), `i73`–`i92` (layered config, an inventory of objects, properties with setters and observers, a tree built from a flat list, command objects with undo, a record pipeline with map / filter / sorted / setdefault, a memoising decorator, context managers, generator chains, exception paths, an inheritance chain with a mixin, NamedTuple / TypedDict, computed string keys, kwargs forwarding, a task queue, a JSON round trip, ranking with enumerate / zip, nested path helpers, feature flags, accumulators), `j93` (one 800-line order-management program: layered settings, dataclass entities, repositories keyed by functions, an event bus, a rule-chain pricer, a guarded state machine, a middleware router, reporting with plugins, a recursive org tree, three scenario runs; 21 of its checks are `#@todo`, see below). The `h`, `i` and `j` cases were written as value-analysis specifications *before* running the engine; the engine was fixed until it produced them, and the few expectations that turned out wrong on re-reading carry a comment saying why. `#@todo` directives are expectations the engine does not meet yet: the harness counts them and does not check them. | Directives: `#@ tier key [; …]`, `#@row`, `#@schema`; a `#@` directive must be the last thing on its line. |
+| `tests/run_golden.py`, `tests/cases/` | golden harness, 92 cases: `a01`–`e36` from the original design (Appendix A and the prototype era), `f37` (recency), `g40`–`g65` (AST node coverage, closures taking closures returning lambdas, reassignment, control flow, inputs indexing results of input functions, classes, string keys, containers, guards, modules, generators, recursion, kwargs forwarding, configs, pandas, annotations, mutation through layers, comprehensions, dispatch, a CLI script, dict methods, a larger mixed program), `h66`–`h72` (larger programs passing objects around: an event bus with closures / bound methods / partials in per-topic lists, a fluent builder and a stage pipeline, a plugin registry with a class decorator and a recursive visitor, a dependency-injection container resolving services in constructors, an order state machine with a nested transition table, a dataclass graph with a stack walk and a defaultdict grouping, a middleware chain of closures over closures), `i73`–`i92` (layered config, an inventory of objects, properties with setters and observers, a tree built from a flat list, command objects with undo, a record pipeline with map / filter / sorted / setdefault, a memoising decorator, context managers, generator chains, exception paths, an inheritance chain with a mixin, NamedTuple / TypedDict, computed string keys, kwargs forwarding, a task queue, a JSON round trip, ranking with enumerate / zip, nested path helpers, feature flags, accumulators), `j93` (one 800-line order-management program: layered settings, dataclass entities, repositories keyed by functions, an event bus, a rule-chain pricer, a guarded state machine, a middleware router, reporting with plugins, a recursive org tree, three scenario runs; 21 of its checks are `#@todo`, see below). The `h`, `i` and `j` cases were written as value-analysis specifications *before* running the engine; the engine was fixed until it produced them, and the few expectations that turned out wrong on re-reading carry a comment saying why. `#@todo` directives are expectations the engine does not meet yet: the harness counts them and does not check them. | Directives: `#@ tier key [; …]`, `#@row`, `#@schema`; a `#@` directive must be the last thing on its line. |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | `--json` output snapshots on `examples/etl_report.py` and three large fixtures (modules of the old prototype kept as analysis *inputs* only). The regression guard for refactors of the internals; `--update` after reviewing a diff. |
 | `vscode-rowan/` | VS Code extension (plain JS): runs `rowan FILE --facts` on open/save, hover = facts for (line, name), verdicts as diagnostics; `node test.js` checks the rendering. |
 
@@ -46,7 +46,8 @@ Env: `ROWAN_DEBUG=1` (entry-point progress, slow instantiations, which event mak
 site tabulate and which call sites fall back to the summary), `ROWAN_NO=…` with the option
 names `recency,scc,site,narrowed,positional` and the bisecting switches
 `paramnarrow,partialclear,usermodel,dispatch1,inph,isinst,ddfactory,ddnarrow,boundtmpl,bindsub,ifexp,dcfield,split,builtincls,clonectx`
-(`Analyzer::disabled`), `ROWAN_LIMITS=tab=24,call=32,clones=8,chain=2,path=3` (the budgets:
+(`Analyzer::disabled`), `ROWAN_ON=sigsum` (experimental refinements, `Analyzer::enabled`),
+`ROWAN_LIMITS=tab=24,call=32,clones=8,chain=2,path=3` (the budgets:
 literal-event and call tabulations per function, clones per allocation site, chained call
 context depth, placeholder path depth; `Analyzer::limit`).
 
@@ -184,7 +185,7 @@ harness on row-check failures). Facts record the rendered text at recording time
 
 | input | time | notes |
 | --- | --- | --- |
-| golden suite (91 cases) | 0.5 s | one process per case |
+| golden suite (92 cases) | 0.5 s | one process per case |
 | `tests/cases/j93_order_system.py` (830 lines, deep call graph) | 0.08 s | 21 checks open (`#@todo`) |
 | `tests/fixtures/proto_summary.py` (1.2k lines) | 1.5 s | 0 ✗, 5 ⚠~ |
 | old prototype `models.py` (1.7k lines, reaches a whole interpreter via a typed field) | 41 s | 165 ✗ (false positives, see below) |
@@ -250,6 +251,16 @@ harness on row-check failures). Facts record the rendered text at recording time
    re-analyses only changed files and their dependents; the extension talks to it instead of
    spawning the CLI per save.
 5. **More examples** (as time allows), each specified before running.
+
+Status: step 1 done (commit `ea08dab`). Step 2 done as `tests/cases/k94_pkg` (three modules,
+`k94_modules.py` the entry; 10 of 19 checks pass, the rest are `#@todo` with the `j93`
+cause). The experimental fix for that cause is in the tree behind `ROWAN_ON=sigsum`:
+`summarise_sig` keys summaries by the classes of the receiver and of parameters bound to
+instances of one class (`SummaryKey` gained that signature, `MAX_SIGNATURES = 8` per
+function) and gives the placeholders those classes. As implemented it regresses `h67`,
+`h68`, `i77`, `i83` (a self placeholder typed with the *subclass* changes `super()` chains
+and the symreq class guards) — finish it before step 3, since a 2,000-line program would
+mostly re-document this gap.
 
 Open engine items carried over: precision on self-referential programs (`register`-closure
 pattern, dispatch over `self.objects` tables), the spec §15.4 runtime oracle on real

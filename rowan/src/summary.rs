@@ -89,7 +89,12 @@ pub struct Event {
     pub ph: ObjId,
 }
 
-pub type SummaryKey = (ObjId, Vec<(ObjId, Vec<ObjId>)>, Vec<(ObjId, ObjId)>);
+/// (function, code held by its cells, classes of instance cells, classes of the arguments)
+pub type SummaryKey = (ObjId, Vec<(ObjId, Vec<ObjId>)>, Vec<(ObjId, ObjId)>, Vec<(String, ObjId)>);
+
+/// How many distinct argument-class signatures one function is summarised for; beyond
+/// that the unspecialised summary is used.
+pub const MAX_SIGNATURES: usize = 8;
 
 pub struct Summary {
     pub foid: ObjId,
@@ -349,6 +354,25 @@ impl Analyzer {
     /// Compute (or fetch) the summary of function object foid.  None while it is being
     /// computed (recursion): the caller then behaves as a ⊥ summary.
     pub fn summarise(&mut self, foid: ObjId, state: &mut State) -> Option<Rc<Summary>> {
+        self.summarise_sig(foid, state, Vec::new())
+    }
+
+    /// `sig`: parameter name -> class, for parameters bound to instances of one class at the
+    /// call site; the placeholders carry those classes so methods resolve by class.
+    pub fn summarise_sig(&mut self, foid: ObjId, state: &mut State, sig: Vec<(String, ObjId)>) -> Option<Rc<Summary>> {
+        let sig = {
+            let n = self.sig_count.entry(foid).or_default();
+            if sig.is_empty() {
+                sig
+            } else if n.contains(&sig) {
+                sig
+            } else if n.len() < MAX_SIGNATURES {
+                n.push(sig.clone());
+                sig
+            } else {
+                Vec::new()
+            }
+        };
         let fi = self.func_info(foid);
         let fnode = fi.node;
         let mut code_cells: IndexMap<ObjId, Value> = IndexMap::new();
@@ -398,7 +422,7 @@ impl Analyzer {
         typed_cells.sort();
         let mut cc: Vec<(ObjId, Vec<ObjId>)> = code_cells.iter().map(|(c, v)| (*c, v.pts.to_vec())).collect();
         cc.sort();
-        let skey: SummaryKey = (foid, cc, typed_cells.clone());
+        let skey: SummaryKey = (foid, cc, typed_cells.clone(), sig.clone());
         if let Some(done) = self.summary_table.get(&skey) {
             return Some(done.clone());
         }
@@ -522,8 +546,10 @@ impl Analyzer {
                 kwonly.extend(p.kwonlyargs.iter().map(|x| &x.parameter));
             }
             let mut self_ph: Option<ObjId> = None;
+            let sig_cls = |name: &str| -> Option<ObjId> { sig.iter().find(|(n, _)| n == name).map(|(_, c)| *c) };
             if fi.cls.is_some() && !fi.is_static.get() && !positional.is_empty() {
-                let sp = self.new_placeholder(PhKind::SelfPh, foid, positional[0].name.id.as_str(), None, Ns::Item, None, fi.cls, "");
+                let self_cls = sig_cls(positional[0].name.id.as_str()).or(fi.cls);
+                let sp = self.new_placeholder(PhKind::SelfPh, foid, positional[0].name.id.as_str(), None, Ns::Item, None, self_cls, "");
                 self_ph = Some(sp);
                 ph_by_name.insert(s(positional[0].name.id.as_str()), sp);
                 positional.remove(0);
@@ -532,7 +558,7 @@ impl Analyzer {
             for p in &positional {
                 let cls = match &p.annotation {
                     Some(ann) => self.annotation_class(ann, &fi, state),
-                    None => None,
+                    None => sig_cls(p.name.id.as_str()),
                 };
                 let ph = self.new_placeholder(PhKind::Param, foid, p.name.id.as_str(), None, Ns::Item, None, cls, "");
                 ph_by_name.insert(s(p.name.id.as_str()), ph);
@@ -542,7 +568,7 @@ impl Analyzer {
             for p in &kwonly {
                 let cls = match &p.annotation {
                     Some(ann) => self.annotation_class(ann, &fi, state),
-                    None => None,
+                    None => sig_cls(p.name.id.as_str()),
                 };
                 let ph = self.new_placeholder(PhKind::Param, foid, p.name.id.as_str(), None, Ns::Item, None, cls, "");
                 ph_by_name.insert(s(p.name.id.as_str()), ph);

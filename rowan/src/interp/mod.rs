@@ -34,6 +34,15 @@ pub const MAX_ACTIVE: usize = 4;
 pub const MAX_MUTATED: usize = 24;
 pub const MAX_CLONES: usize = 8;
 
+/// `ROWAN_ON=name,...` switches experimental refinements on (`sigsum`: summaries specialised
+/// by the classes of their arguments).
+pub fn enabled(name: &str) -> bool {
+    thread_local! {
+        static ON: std::collections::HashSet<String> = std::env::var("ROWAN_ON").map(|v| v.split(',').map(|s| s.trim().to_string()).collect()).unwrap_or_default();
+    }
+    ON.with(|s| s.contains(name))
+}
+
 /// `ROWAN_NO=name,...` also switches named engine refinements off (bisecting).
 pub fn disabled(name: &str) -> bool {
     thread_local! {
@@ -493,6 +502,8 @@ pub struct Analyzer {
     pub filename: String,
     pub use_summaries: bool,
     pub summary_table: FxHashMap<crate::summary::SummaryKey, Rc<Summary>>,
+    /// argument-class signatures seen per function (capped, see `MAX_SIGNATURES`)
+    pub sig_count: FxHashMap<ObjId, Vec<Vec<(String, ObjId)>>>,
     pub tab_count: FxHashMap<(ObjId, &'static str), usize>,
     pub module_done: bool,
     pub fresh_init: FxHashSet<ObjId>,
@@ -586,6 +597,7 @@ impl Analyzer {
             filename: filename.to_string(),
             use_summaries,
             summary_table: FxHashMap::default(),
+            sig_count: FxHashMap::default(),
             tab_count: FxHashMap::default(),
             module_done: false,
             fresh_init: FxHashSet::default(),
