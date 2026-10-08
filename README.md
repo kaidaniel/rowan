@@ -17,7 +17,7 @@ rowan/target/release/rowan prog.py                # text report
 rowan/target/release/rowan prog.py --json         # JSON lines (verdicts, schemas, summaries)
 rowan/target/release/rowan prog.py --facts        # per-name facts for editor integration
 rowan/target/release/rowan lib.py --no-entry      # only what the module itself runs (no entry-point pass)
-uv run --no-project python tests/run_golden.py    # golden suite (63 cases)
+uv run --no-project python tests/run_golden.py    # golden suite (70 cases)
 uv run --no-project python tests/run_snapshots.py # output snapshots on larger inputs
 ```
 
@@ -41,6 +41,15 @@ A PyO3 binding (`rowan/py/`, `rowan.analyse_file(path)` → the `--golden` JSON)
 maturin; see `AGENTS.md` for its status.
 
 ## What the report contains
+
+Records are written in a compact form: `{"id": ..., "role"?: ..., "tag"~: ..., **}` is a
+dict that always has `"id"`, has `"role"` on some paths only (`?`), had `"tag"` unless
+unknown code removed it (`~`), and may hold other keys (`**` = open; without it the record
+is closed and these are all its keys). Objects use the same notation with attributes:
+`obj(name=..., out?=..., **)`. The hover in the VS Code extension and the
+`module-level records` section of the text report use this form; `--json` and `--facts`
+also carry the underlying sets (`present`, `definite`, `likely`, `absent`, `closed`,
+`sources`, `mutators`).
 
 ```
 == diagnostics ==
@@ -79,7 +88,7 @@ input (becomes a schema entry), `⚠data` data-derived key into a closed record.
 | `rowan/src/summary.rs` | symbolic function summaries (spec §7.3/§9): placeholders, deferred accesses, imprecision events, footprints, instantiation with allocation-site resolution, SCC re-iteration |
 | `rowan/src/models/` | library models: builtins, `dict`/`list`/`str`, `json`/`yaml`/`pickle`, `copy`, `dataclasses`, `collections`, `csv.DictReader`, `argparse`, `os.environ`, `functools.partial`, `requests`, pandas |
 | `rowan/src/report.rs` | per-access verdict combination, schema table, text / JSON / facts output |
-| `tests/run_golden.py`, `tests/cases/` | golden harness: expectations are `#@` comments in the case files (63 cases) |
+| `tests/run_golden.py`, `tests/cases/` | golden harness: expectations are `#@` comments in the case files (70 cases) |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | output snapshots on the example and three large fixture programs |
 | `examples/etl_report.py` | a realistic script with planted bugs (all found; also golden case e34) |
 | `vscode-rowan/`, `rowan/py/` | VS Code extension; PyO3 binding |

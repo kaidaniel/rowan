@@ -30,7 +30,7 @@ pub const UNROLL_MAX: usize = 16;
 pub const LOOP_MAX_ITER: usize = 40;
 pub const REC_MAX_ITER: usize = 8;
 pub const PATH_DEPTH: u32 = 3;
-pub const MAX_ACTIVE: usize = 2;
+pub const MAX_ACTIVE: usize = 4;
 pub const MAX_MUTATED: usize = 24;
 pub const MAX_CLONES: usize = 8;
 
@@ -63,6 +63,8 @@ pub const NOEFFECT_METHOD_NAMES: &[&str] = &[
     "assert_called_with",
 ];
 pub const DICT_METHOD_NAMES: &[&str] = &["get", "items", "keys", "values", "update", "pop", "setdefault", "copy", "popitem", "clear"];
+/// Methods that make a class-less placeholder a list (modelled by `list.*`).
+pub const LIST_METHOD_NAMES: &[&str] = &["append", "extend", "insert", "remove", "sort", "reverse"];
 pub const ITEM_GUARDS: &[&str] = &["KeyError", "LookupError", "Exception", "BaseException", "IndexError", "*"];
 pub const ATTR_GUARDS: &[&str] = &["AttributeError", "Exception", "BaseException", "*"];
 pub const KNOWN_IDENTITY_DECORATORS: &[&str] = &[
@@ -230,6 +232,8 @@ pub struct Frame {
     pub loop_depth: u32,
     pub label: String,
     pub symbolic: bool,
+    /// indices of the enclosing unrolled loop iterations (part of the call context)
+    pub unroll: Vec<usize>,
 }
 
 impl Frame {
@@ -248,6 +252,7 @@ impl Frame {
             loop_depth: 0,
             label: label.to_string(),
             symbolic: false,
+            unroll: Vec::new(),
         }
     }
 }
@@ -514,6 +519,8 @@ pub struct Analyzer {
     pub none_v: Value,
     /// `#@row NAME:` checks requested by the golden harness: (line, name)
     pub row_check_requests: Vec<(u32, String)>,
+    /// locals of the callers of the running call (innermost last), for liveness
+    pub env_stack: Vec<IndexMap<StrId, Value>>,
     pub row_checks: Vec<RowCheck>,
     /// collect `facts` (the `--facts` mode)
     pub facts_on: bool,
@@ -599,6 +606,7 @@ impl Analyzer {
             series: 0,
             none_v: Value::lit(intern::key_none()),
             row_check_requests: Vec::new(),
+            env_stack: Vec::new(),
             row_checks: Vec::new(),
             facts_on: false,
             facts: IndexMap::new(),
@@ -772,6 +780,14 @@ impl Analyzer {
         let fr = self.frame();
         let ctx = ctx.map(|c| c.to_string()).unwrap_or_else(|| fr.ctx.clone());
         let label = if label.is_empty() { format!("{}@{}", kind.name(), site) } else { label.to_string() };
+        // inside unrolled loop iterations each iteration is straight-line code: its own site
+        let site_buf;
+        let site: &str = if !fr.unroll.is_empty() && !fr.symbolic {
+            site_buf = format!("{}#{}", site, fr.unroll.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("."));
+            &site_buf
+        } else {
+            site
+        };
         let (single, recent) = match single {
             Some(x) => (x, false),
             None => {
@@ -792,7 +808,15 @@ impl Analyzer {
             }
             oid
         } else {
-            self.alloc_raw(kind, site, &ctx, single, &label, payload)
+            let existed = self.obj_index.get(&(kind, site.to_string(), ctx.clone())).copied();
+            let oid = self.alloc_raw(kind, site, &ctx, single, &label, payload);
+            if existed == Some(oid) && self.is_live(oid, state) {
+                // allocated again while the earlier object is still reachable (a method run
+                // twice on one receiver, a call repeated in an unrolled loop): one summary
+                // object for both, weak
+                self.obj_mut(oid).single = false;
+            }
+            oid
         };
         let obj_single = self.obj(oid).single;
         if kind.is_record() || kind == Kind::Frame {
@@ -1235,6 +1259,89 @@ impl Analyzer {
                 }
             }
         }
+    }
+
+    /// Is `oid` reachable from a binding the program can still use: the locals of every
+    /// active frame, loop overlays, cells, module objects, narrowed values, the return value?
+    pub fn is_live(&self, oid: ObjId, state: &State) -> bool {
+        fn push_value(v: &Value, work: &mut Vec<ObjId>) {
+            work.extend(v.pts.iter());
+            match &v.kv {
+                KeyVal::KeysOf(ko) => work.extend(ko.objs.iter()),
+                KeyVal::Param(p) => work.push(*p),
+                _ => {}
+            }
+        }
+        let mut work: Vec<ObjId> = Vec::new();
+        for v in state.env.values() {
+            push_value(v, &mut work);
+        }
+        for env in &self.env_stack {
+            for v in env.values() {
+                push_value(v, &mut work);
+            }
+        }
+        for v in state.narrowed.values() {
+            push_value(v, &mut work);
+        }
+        if let Some(r) = &state.ret {
+            push_value(r, &mut work);
+        }
+        for fr in &self.frames {
+            work.push(fr.module);
+            work.extend(fr.cells.values().copied());
+            for ov in &fr.overlays {
+                for v in ov.values() {
+                    push_value(v, &mut work);
+                }
+            }
+        }
+        let mut seen: FxHashSet<ObjId> = FxHashSet::default();
+        while let Some(o) = work.pop() {
+            if o == oid {
+                return true;
+            }
+            if !seen.insert(o) {
+                continue;
+            }
+            for (_, v) in state.slots.for_key(&o) {
+                push_value(&v, &mut work);
+            }
+            if let Some(kv) = state.elems.get(&o) {
+                push_value(&Value::kv_only(kv), &mut work);
+            }
+            if !self.has_obj(o) {
+                continue;
+            }
+            match &self.obj(o).payload {
+                Payload::Func(fi) => work.extend(fi.closure.values().copied()),
+                Payload::Ph(p) => {
+                    if let Some(par) = p.parent {
+                        work.push(par);
+                    }
+                }
+                Payload::Method(_, v) | Payload::View(_, v) | Payload::Enumerate(v) => push_value(v, &mut work),
+                Payload::Bound(f, v) | Payload::Super(f, v) => {
+                    work.push(*f);
+                    push_value(v, &mut work);
+                }
+                Payload::Zip(a, b) | Payload::Pair(a, b) => {
+                    push_value(a, &mut work);
+                    push_value(b, &mut work);
+                }
+                Payload::Partial(f, args, kw) => {
+                    push_value(f, &mut work);
+                    for a in args {
+                        push_value(a, &mut work);
+                    }
+                    for v in kw.values() {
+                        push_value(v, &mut work);
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Row-check support for the golden harness: after a statement at a requested line.

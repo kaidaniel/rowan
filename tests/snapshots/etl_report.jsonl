@@ -13,6 +13,7 @@
 ["verdict", "", 106, 30, "'output'", "item", "proven", [115], "dict@L25"]
 ["verdict", "", 107, 10, "'verbose'", "item", "input", [115], "dict@L25"]
 ["verdict", "", 110, 15, "'region'", "attr", "proven", [115], "Summary@L60"]
+["verdict", "", 111, 10, "'EU'", "item", "proven", [115], "defaultdict@L108"]
 ["verdict", "", 111, 24, "'cusomers'", "attr", "missing", [115], "args@L98"]
 ["verdict", "", 29, 23, "'min_amount'", "item", "proven", [115, 100], "dict@L25"]
 ["verdict", "", 37, 22, "'customer_id'", "item", "input", [115, 101], "DictReader row@L36"]

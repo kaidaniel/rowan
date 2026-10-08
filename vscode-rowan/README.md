@@ -1,9 +1,11 @@
 # rowan for VS Code
 
-Hover over a variable in a Python file to see what rowan infers about it:
-the keys / attributes its objects have (always, on some paths, known absent), whether the
-record is closed or open and where other keys could come from, the keys this program
-requires of an external input, possible literal values, and the verdicts on that line.
+Hover over a variable in a Python file to see what rowan infers about it: the keys /
+attributes its objects have, written as `{"id": ..., "role"?: ..., **}` (`?` = on some
+paths only, `~` = unless unknown code removed it, `**` = other keys possible, i.e. the record
+is open; `obj(a=..., b?=...)` for attributes), where other keys could come from, the keys
+this program requires of an external input, possible literal values, and the verdicts on
+that line.
 Missing-key verdicts are also shown as diagnostics (✗ error, ⚠ warning, ◌ information).
 
 The extension runs the `rowan` binary (`rowan FILE --facts`) when a Python file is

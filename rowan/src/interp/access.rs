@@ -10,10 +10,29 @@ use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, STAR};
 use crate::state::{Kind, State};
 
-use super::{is_scalar_method, Analyzer, ClassInfo, Payload, ViewKind, ATTR_GUARDS, DICT_METHOD_NAMES, ITEM_GUARDS, PATH_DEPTH, STR_METHOD_NAMES};
+use super::{is_scalar_method, Analyzer, ClassInfo, Payload, ViewKind, ATTR_GUARDS, DICT_METHOD_NAMES, ITEM_GUARDS, LIST_METHOD_NAMES, PATH_DEPTH, STR_METHOD_NAMES};
 
 pub fn param_slot_key(ph: u32) -> KeyId {
     intern::key_tuple(vec![key_str_lit("@"), intern::key_int(ph as i64)])
+}
+
+/// Slot key of the i-th `append` through a placeholder list (`-1`: an append or extend whose
+/// position is unknown); applied to the actual list's positions at instantiation.
+pub fn append_slot_key(i: i64) -> KeyId {
+    intern::key_tuple(vec![key_str_lit("+"), intern::key_int(i)])
+}
+
+pub fn append_slot_of(k: KeyId) -> Option<i64> {
+    intern::with_key(k, |kk| match kk {
+        intern::Key::Tuple(items) if items.len() == 2 => {
+            let a = intern::key_as_str(items[0])?;
+            if &*a != "+" {
+                return None;
+            }
+            intern::key_as_int(items[1])
+        }
+        _ => None,
+    })
 }
 
 /// `("@", ph)` slot keys: the placeholder, if the key is one.
@@ -65,6 +84,26 @@ impl Analyzer {
         let line_data = Value::data(&format!("L{}", node.line));
         for oid in obj.pts.iter() {
             let kind = self.kind(oid);
+            if kind == Kind::Dict && ns == Ns::Item && self.obj(oid).label.starts_with("defaultdict@") {
+                // `dd[k]` inserts the factory's value when `k` is absent
+                let dflt = state.slot(oid, Ns::Item, STAR);
+                let row = state.row(oid, ns);
+                if key.kv.is_literal() {
+                    let ks = crate::domain::kv_literals(&key.kv);
+                    let strong = single_target && ks.len() == 1 && self.strongable(oid);
+                    let mut r = row.clone();
+                    for k in ks.iter() {
+                        if !r.definite.contains(k) {
+                            r = r.store(k, strong);
+                            state.set_slot(oid, ns, k, dflt.clone(), false);
+                        }
+                    }
+                    state.set_row(oid, ns, r);
+                } else if key.kv.as_param().is_none() {
+                    let src = Source::new(&self.obj(oid).label, SourceKind::Data);
+                    state.set_row(oid, ns, row.data_store(src));
+                }
+            }
             match kind {
                 Kind::Locidx => {
                     let v = crate::models::pandas::loc_get(self, oid, key, node, state);
@@ -172,6 +211,9 @@ impl Analyzer {
             if content_unknown {
                 let p = self.path_placeholder_value(oid, ns, param_slot_key(ph), &row, state);
                 v = v.join(&p);
+            } else if !row.present.is_empty() {
+                // a closed record with several entries: which one is decided per call site
+                self.record_event("narrow", ph);
             }
             let kv2 = match v.single() {
                 Some(o) if self.is_ph(o) => KeyVal::Param(o),
@@ -710,6 +752,9 @@ impl Analyzer {
         let has_cls = ph.cls.get().is_some();
         if DICT_METHOD_NAMES.contains(&name) && !has_cls {
             return self.method_value(&format!("dict.{}", name), &Value::obj(oid));
+        }
+        if LIST_METHOD_NAMES.contains(&name) && !has_cls {
+            return self.method_value(&format!("list.{}", name), &Value::obj(oid));
         }
         if is_scalar_method(name) && !has_cls {
             let q = if STR_METHOD_NAMES.contains(&name) { format!("str.{}", name) } else { format!("unknown.{}", name) };

@@ -283,10 +283,11 @@ impl Analyzer {
             if items.len() <= UNROLL_MAX {
                 // unrolled: `continue` rejoins at the next iteration, `break` at the exit
                 let mut breaks: Option<State> = None;
-                for item in items {
+                for (idx, item) in items.iter().enumerate() {
                     if !state.reachable {
                         break;
                     }
+                    self.frame_mut().unroll.push(idx);
                     self.bind_iter_target(&f.target, &Elem::One(item.clone()), state);
                     if has_jump {
                         self.loop_stack.push(LoopCtx::default());
@@ -305,6 +306,7 @@ impl Analyzer {
                     } else {
                         self.exec_block(&f.body, state);
                     }
+                    self.frame_mut().unroll.pop();
                 }
                 if !f.orelse.is_empty() && state.reachable {
                     self.exec_block(&f.orelse, state);
@@ -562,7 +564,14 @@ impl Analyzer {
             self.exec_stmt(st, state);
         }
         self.frames.pop();
-        self.store_name(s(c.name.id.as_str()), Value::obj(coid), state);
+        let mut cv = Value::obj(coid);
+        if !is_dataclass && !c.decorator_list.is_empty() {
+            cv = self.apply_decorators(&c.decorator_list, cnode, cv, state);
+            if cv.pts.is_empty() {
+                cv = Value::obj(coid);
+            }
+        }
+        self.store_name(s(c.name.id.as_str()), cv, state);
     }
 
     pub fn import_module(&mut self, name: &str, node: &Node, state: &mut State) -> Value {

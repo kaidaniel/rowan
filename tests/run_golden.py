@@ -167,9 +167,9 @@ def row_problems(row: Dict[str, Any], spec: Dict[str, Any]) -> str:
     if "absent" in spec and not {key_str(k) for k in spec["absent"]} <= absent:
         problems.append(f"absent={sorted(absent)} want ⊇ {sorted(key_str(k) for k in spec['absent'])}")
     if spec.get("closed") and not row["closed"]:
-        problems.append(f"expected closed, got {row.get('text', row)}")
+        problems.append(f"expected closed, got {row.get('details', row.get('text', row))}")
     if spec.get("open") and row["closed"]:
-        problems.append(f"expected open, got {row.get('text', row)}")
+        problems.append(f"expected open, got {row.get('details', row.get('text', row))}")
     return "; ".join(problems)
 
 

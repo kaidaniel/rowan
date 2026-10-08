@@ -361,7 +361,12 @@ impl Analyzer {
             let ll = self.obj(oid).literal_len;
             if matches!(kind, Kind::Tuple | Kind::List) && ll.is_some() {
                 for i in 0..n {
-                    parts[i] = parts[i].join(&state.slot(oid, Ns::Pos, key_int(i as i64)));
+                    let mut sv = state.slot(oid, Ns::Pos, key_int(i as i64));
+                    if sv.empty() && self.is_entry_object(oid) {
+                        // an entry tuple inside a summary: its positions are deferred loads
+                        sv = self.load_item(&Value::obj(oid), Ns::Item, &Value::lit(key_int(i as i64)), node, state, false);
+                    }
+                    parts[i] = parts[i].join(&sv);
                 }
             } else if kind == Kind::Pair {
                 if let Payload::Pair(k, val) = self.obj(oid).payload.clone() {
@@ -371,6 +376,12 @@ impl Analyzer {
                     if n >= 2 {
                         parts[1] = parts[1].join(&val);
                     }
+                }
+            } else if kind == Kind::Ph {
+                // unpacking a placeholder: its elements (an iteration event for the call site)
+                let e = self.iterate(&Value::obj(oid), node, state).elem.flat();
+                for i in 0..n {
+                    parts[i] = parts[i].join(&e);
                 }
             } else {
                 let e = self.elem_of(&Value::obj(oid), node, state);
@@ -564,7 +575,8 @@ impl Analyzer {
             }
         }
         if let Some(its) = &items {
-            if its.is_empty() {
+            // no items *and* no containers: nothing is known; empty containers iterate zero times
+            if its.is_empty() && v.pts.is_empty() {
                 items = None;
             }
         }

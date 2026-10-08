@@ -28,7 +28,7 @@ semantic fixes that the prototype did not have, so the prototype is history, not
 | `rowan/src/report.rs` | dedupe, schema table, text, JSON lines, `--golden` and `--facts` documents. |
 | `rowan/src/main.rs` | CLI; runs the analysis on a thread with a 1 GiB stack. |
 | `rowan/py/` | PyO3 binding (`rowan.analyse(source, …)` / `analyse_file(path)` → `--golden` JSON string). Builds with maturin; see known problems. |
-| `tests/run_golden.py`, `tests/cases/` | golden harness, 63 cases: `a01`–`e36` from the original design (Appendix A and the prototype era), `f37` (recency), `g40`–`g65` (AST node coverage, closures taking closures returning lambdas, reassignment, control flow, inputs indexing results of input functions, classes, string keys, containers, guards, modules, generators, recursion, kwargs forwarding, configs, pandas, annotations, mutation through layers, comprehensions, dispatch, a CLI script, dict methods, a larger mixed program). Directives: `#@ tier key [; …]`, `#@row`, `#@schema`; a `#@` directive must be the last thing on its line. |
+| `tests/run_golden.py`, `tests/cases/` | golden harness, 70 cases: `a01`–`e36` from the original design (Appendix A and the prototype era), `f37` (recency), `g40`–`g65` (AST node coverage, closures taking closures returning lambdas, reassignment, control flow, inputs indexing results of input functions, classes, string keys, containers, guards, modules, generators, recursion, kwargs forwarding, configs, pandas, annotations, mutation through layers, comprehensions, dispatch, a CLI script, dict methods, a larger mixed program), `h66`–`h72` (larger programs passing objects around: an event bus with closures / bound methods / partials in per-topic lists, a fluent builder and a stage pipeline, a plugin registry with a class decorator and a recursive visitor, a dependency-injection container resolving services in constructors, an order state machine with a nested transition table, a dataclass graph with a stack walk and a defaultdict grouping, a middleware chain of closures over closures). The `h` cases were written as value-analysis specifications *before* running the engine (mostly `#@row` checks); the engine was fixed until it produced them. Directives: `#@ tier key [; …]`, `#@row`, `#@schema`; a `#@` directive must be the last thing on its line. |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | `--json` output snapshots on `examples/etl_report.py` and three large fixtures (modules of the old prototype kept as analysis *inputs* only). The regression guard for refactors of the internals; `--update` after reviewing a diff. |
 | `vscode-rowan/` | VS Code extension (plain JS): runs `rowan FILE --facts` on open/save, hover = facts for (line, name), verdicts as diagnostics; `node test.js` checks the rendering. |
 
@@ -42,7 +42,13 @@ uv run --no-project python tests/run_snapshots.py   # SAME on all snapshots
 ROWAN_SUMMARIES=0 …                                 # old per-call-site engine (34/63; kept for comparison)
 ```
 
-Env: `ROWAN_DEBUG=1` (entry-point progress, slow instantiations), `ROWAN_NO=recency,scc,site,narrowed,positional`.
+Env: `ROWAN_DEBUG=1` (entry-point progress, slow instantiations, which event makes a call
+site tabulate), `ROWAN_NO=recency,scc,site,narrowed,positional`.
+
+Row notation in reports and hovers: `{"a": ..., "b"?: ..., "c"~: ..., **}` — definite
+keys plain, `?` set on some paths only, `~` unless unknown code removed it, `**` open;
+`obj(a=..., b?=...)` for attribute rows (`Row::compact`; `Row::details` is the internal
+form with sources / mutators / terms, printed by the harness on row-check failures).
 
 ## Design notes
 
@@ -68,10 +74,42 @@ Env: `ROWAN_DEBUG=1` (entry-point progress, slow instantiations), `ROWAN_NO=rece
   read inside a nested summary is an entry fact (path placeholder) of that summary.
 * Requirements recorded under an `if`/`try`/boolean operator inside a summarised function
   are "sometimes" (`branch_depth`); inside a loop body they stay per-element (`always`).
-* Flow: `if` prunes a branch when the test is definitely truthy/falsy; `k in d` on a closed
+* Flow: `if` prunes a branch when the test is definitely truthy/falsy (truthiness of a set
+  of literals when they agree; `x is None` / `x is not None` when `x` is a known literal or
+  only holds objects; `==` / `!=` between two single literals); `k in d` on a closed
   record without `k` makes the branch infeasible (so `__contains__` guards and
   `assert "k" in d` can make code dead); a guarded load in a real `try` narrows the key in on
   the fall-through path; a successful access narrows the key in.
+* Object identity across activations: a function tabulated inside another tabulated frame
+  gets a context chained to the frame's (`L10:4/L7:11`, at most two levels, then the site
+  alone); methods get `o<receiver>/<site>`; calls and allocations inside unrolled loop
+  iterations carry the iteration index (`#i`), so each iteration is straight-line code. When
+  an allocation site is nevertheless hit again while the earlier object is still reachable
+  (`Analyzer::is_live`: from every active frame's locals, overlays, cells, module objects),
+  the object becomes weak instead of being re-initialised. An unreachable earlier object is
+  overwritten as before (recursion through the same site).
+* Tabulation triggers: besides concrete bindings, an event on a path placeholder whose key
+  is a parameter-slot key (`d[k]` with `k` a parameter) is decidable when the parent is
+  concrete even if the slot is absent (truth / narrow / iter); `binding_of` resolves such
+  keys through the parameter's binding; `dict.get` with a default, `setdefault`, a
+  parameter-keyed load from a closed literal dict, and undecidable `is None` / `==`
+  comparisons record events; a callee summary instantiated inside another summary hands its
+  events up to the enclosing summary (`propagate_events`), so the outer call site tabulates.
+* Placeholders as lists: `append`/`extend`/… on a class-less placeholder are list models; an
+  append through a placeholder is recorded as the i-th append and becomes a positional
+  append on the actual list at instantiation (`append_slot_key`); element slots are always
+  joined at instantiation. Unpacking a placeholder iterates it (an `iter` event); an entry
+  tuple's positions inside a summary are deferred loads. Weak (loop) literal containers keep
+  per-position slots, joined across allocations. An empty literal container iterates zero
+  times.
+* Models added for the `h` cases: class decorators (applied like function decorators),
+  `reversed` keeps positions, `dataclasses.field(default_factory=…)` calls the factory per
+  construction site, `defaultdict` loads insert the factory value under literal keys (the
+  row stays closed; unknown keys open it), `dict.get` on a key absent from every closed
+  target is the default alone, unknown-call results have open attribute rows.
+* Limits: `MAX_ACTIVE = 4` activations of one function on the tabulation stack,
+  `MAX_TABULATIONS = 24` literal-event tabulations per function, `MAX_CALL_TABULATIONS = 32`,
+  `MAX_CHAINS_PER_FINDING = 8` call chains reported per finding (the shortest).
 
 ## Options (default on; `ROWAN_NO=…` switches one off)
 
@@ -96,8 +134,8 @@ Env: `ROWAN_DEBUG=1` (entry-point progress, slow instantiations), `ROWAN_NO=rece
 
 | input | time | notes |
 | --- | --- | --- |
-| golden suite (63 cases) | 0.5 s | one process per case |
-| `tests/fixtures/proto_summary.py` (1.2k lines) | 0.8 s | 0 ✗ |
+| golden suite (70 cases) | 0.3 s | one process per case |
+| `tests/fixtures/proto_summary.py` (1.2k lines) | 0.7 s | 0 ✗, 5 ⚠~ |
 | old prototype `models.py` (1.7k lines, reaches a whole interpreter via a typed field) | 41 s | 165 ✗ (false positives, see below) |
 | old prototype `interp.py` (3.4k lines) | 69 s | 961 ✗ |
 | 137 scripts from local projects | 0.8 s total | no failures; precision not assessed |
@@ -123,9 +161,14 @@ Env: `ROWAN_DEBUG=1` (entry-point progress, slow instantiations), `ROWAN_NO=rece
 * `Row::concretise` pre-resolves the referenced entry rows transitively before substituting;
   a row whose entry rows reference many placeholders resolves all of them even when a lens
   kills everything.
-* Comparisons are not evaluated (`d["a"] < 0` keeps both branches); class attributes are not
-  records; `match` patterns do not narrow (spec §16); no `getattr` with computed names;
-  pandas ops with data-derived columns stay open.
+* Ordering comparisons are not evaluated (`d["a"] < 0` keeps both branches); class
+  attributes are not records; `match` patterns do not narrow (spec §16); no `getattr` with
+  computed names; pandas ops with data-derived columns stay open.
+* A store through a pointer to several objects is weak on each of them, even when every
+  path stores (`resp["logged"] = True` after `resp = a() if c else b()`): the joined row
+  shows the key as `?` (golden `h72`, `maybe`). Path-sensitive ownership would fix it.
+* The result of an unknown call whose arguments hold records may alias those records (its
+  item row is their join with a mutator); its attribute row is open.
 * Leaked ASTs (see above); a long-running server should re-exec or accept the leak.
 
 ## Next steps

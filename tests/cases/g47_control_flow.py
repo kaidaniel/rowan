@@ -11,7 +11,7 @@ def find(items, want):
 
 found = find([{"id": 1, "a": 1}, {"id": 2, "b": 2}], 2)
 found["id"]                              #@ ok id
-found["a"]                               #@ possibly a
+found["a"]                               #@ missing a
 
 
 def scan(rows):

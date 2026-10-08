@@ -13,13 +13,13 @@ use crate::domain::{
 };
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, StrId, STAR};
-use crate::interp::access::param_slot_of;
+use crate::interp::access::{append_slot_of, param_slot_of};
 use crate::interp::{debug_enabled, Analyzer, Frame, FrameKind, FuncInfo, FuncNode, Payload, Verdict};
 use crate::state::{Kind, State};
 
 pub const MAX_SUMMARY_ROUNDS: usize = 3;
 pub const MAX_REL_CHAIN: usize = 1;
-pub const MAX_TABULATIONS: usize = 12;
+pub const MAX_TABULATIONS: usize = 24;
 pub const MAX_CALL_TABULATIONS: usize = 32;
 pub const MAX_SYMREQ_TARGETS: usize = 8;
 
@@ -439,7 +439,7 @@ impl Analyzer {
         let saved_rec_hit = std::mem::take(&mut self.rec_hit);
         let saved_recent = std::mem::take(&mut self.recent_stack);
         if let Some(f0) = saved_frames.first() {
-            self.frames.push(Frame { kind: f0.kind, scope: f0.scope, module: f0.module, ctx: f0.ctx.clone(), single: f0.single, single_nl: f0.single_nl, func: f0.func, cells: f0.cells.clone(), class_oid: f0.class_oid, overlays: Vec::new(), loop_depth: f0.loop_depth, label: f0.label.clone(), symbolic: f0.symbolic });
+            self.frames.push(Frame { unroll: Vec::new(), kind: f0.kind, scope: f0.scope, module: f0.module, ctx: f0.ctx.clone(), single: f0.single, single_nl: f0.single_nl, func: f0.func, cells: f0.cells.clone(), class_oid: f0.class_oid, overlays: Vec::new(), loop_depth: f0.loop_depth, label: f0.label.clone(), symbolic: f0.symbolic });
         }
         self.cond_depth = 0;
         self.sum_stack.push(foid);
@@ -772,6 +772,19 @@ impl Analyzer {
                         if key == STAR {
                             let it = self.iterate(&Value::obj(par), &Node::none(), state);
                             v = v.join(&it.elem.flat());
+                        } else if let Some(kph) = param_slot_of(key) {
+                            // `d[k]` with `k` a parameter: the slots named by the literals `k`
+                            // is bound to at this call site, else every slot
+                            let kv = self.binding_of(summary, kph, bind, state, memo).kv;
+                            let lits = kv_literals(&kv);
+                            if lits.is_empty() {
+                                v = v.join(&state.all_slots(par, p.ns));
+                            } else {
+                                for k in lits.iter() {
+                                    v = v.join(&state.slot(par, p.ns, k));
+                                }
+                                v = v.join(&state.slot(par, p.ns, STAR));
+                            }
                         } else if intern::with_key(key, |k| matches!(k, intern::Key::Tuple(_))) {
                             v = v.join(&state.all_slots(par, p.ns));
                         } else {
@@ -787,8 +800,47 @@ impl Analyzer {
         v
     }
 
+    /// A callee summary instantiated inside another summary: the callee's events whose
+    /// placeholders stand for this summary's placeholders become events of this summary, so
+    /// that the outer call site tabulates (and then analyses the callee concretely).
+    pub fn propagate_events(&mut self, summary: &Summary, bind: &IndexMap<ObjId, Value>, state: &mut State) {
+        let mut memo: FxHashMap<ObjId, Value> = FxHashMap::default();
+        for ev in &summary.events {
+            let v = self.binding_of(summary, ev.ph, bind, state, &mut memo);
+            let mut phs: Vec<ObjId> = v.pts.iter().filter(|o| self.kind(*o) == Kind::Ph).collect();
+            if let Some(p) = v.kv.as_param() {
+                if !phs.contains(&p) {
+                    phs.push(p);
+                }
+            }
+            if phs.is_empty() && v.empty() {
+                let mut ph = ev.ph;
+                while self.kind(ph) == Kind::Ph {
+                    let p = self.ph_info(ph);
+                    let Some(par) = p.parent else { break };
+                    if !matches!(p.kind, PhKind::Path | PhKind::Narrow) {
+                        break;
+                    }
+                    let pv = self.binding_of(summary, par, bind, state, &mut memo);
+                    let ops: Vec<ObjId> = pv.pts.iter().filter(|o| self.kind(*o) == Kind::Ph).collect();
+                    if !ops.is_empty() {
+                        phs = ops;
+                        break;
+                    }
+                    ph = par;
+                }
+            }
+            for p in phs {
+                self.record_event(ev.kind, p);
+            }
+        }
+    }
+
     pub fn should_tabulate(&mut self, summary: &Summary, bind: &IndexMap<ObjId, Value>, state: &mut State) -> bool {
         let Some(ev) = self.tabulation_reason(summary, bind, state) else { return false };
+        if debug_enabled() {
+            eprintln!("tabulate {} because of {} on {}", self.func_info(summary.foid).qualname, ev.kind, self.obj(ev.ph).label);
+        }
         let kkey: &'static str = if ev.kind == "call" || ev.kind == "dispatch" { ev.kind } else { "lit" };
         let key = (summary.foid, kkey);
         let n = self.tab_count.get(&key).copied().unwrap_or(0);
@@ -835,6 +887,17 @@ impl Analyzer {
                             && (self.kind(o) != Kind::Instance || key.and_then(intern::key_as_str).map(|k| self.class_resolves(o, &k)).unwrap_or(false))
                     });
                     v = if !useful.is_empty() { Value::with_kv(useful, pv.kv.clone()) } else { Value::new() };
+                }
+            }
+            if v.empty() && matches!(ev.kind, "truth" | "narrow" | "iter") && self.kind(ev.ph) == Kind::Ph {
+                let p = self.ph_info(ev.ph);
+                if p.kind == PhKind::Path && p.key.and_then(param_slot_of).is_some() {
+                    if let Some(par) = p.parent {
+                        let pv = self.binding_of(summary, par, bind, state, &mut memo);
+                        if pv.pts.iter().any(|o| self.kind(o) != Kind::Ph) {
+                            return Some(ev.clone());
+                        }
+                    }
                 }
             }
             if v.empty() {
@@ -1000,7 +1063,14 @@ impl Analyzer {
         inst.erow_cache.clear();
         inst.conc_cache.clear();
         // 3. slots
+        let mut appends: Vec<(ObjId, i64, Value)> = Vec::new();
         for ((oid, ns, k), v) in &summary.slots_fp {
+            if let Some(i) = append_slot_of(*k) {
+                if *ns == Ns::Pos {
+                    appends.push((*oid, i, v.clone()));
+                    continue;
+                }
+            }
             let tg = inst.resolve(self, state, &pre, *oid);
             if tg.is_empty() {
                 continue;
@@ -1020,10 +1090,35 @@ impl Analyzer {
                 None => vec![*k],
             };
             for a in tg.iter() {
-                let strong = (is_template && !inst.collided.contains(&a)) || (tg.len() == 1 && self.strongable(a) && targets_count.get(&(a, *ns)).copied().unwrap_or(1) == 1 && keys.len() == 1);
+                let strong = *ns != Ns::Elem && ((is_template && !inst.collided.contains(&a)) || (tg.len() == 1 && self.strongable(a) && targets_count.get(&(a, *ns)).copied().unwrap_or(1) == 1 && keys.len() == 1));
                 for kk in &keys {
                     state.set_slot(a, *ns, *kk, nv.clone(), strong);
                 }
+            }
+        }
+        // 3b. appends through placeholders, in order: positions of the actual lists
+        appends.sort_by_key(|(o, i, _)| (*o, if *i < 0 { i64::MAX } else { *i }));
+        for (oid, i, v) in &appends {
+            let tg = inst.resolve(self, state, &pre, *oid);
+            let nv = inst.remap_value(self, state, &pre, v);
+            for a in tg.iter() {
+                if !matches!(self.kind(a), Kind::List | Kind::Tuple | Kind::Set) {
+                    continue;
+                }
+                let ll = self.obj(a).literal_len;
+                if *i >= 0 && tg.len() == 1 && self.strongable(a) {
+                    if let Some(n) = ll {
+                        if n < 16 {
+                            state.set_slot(a, Ns::Pos, intern::key_int(n as i64), nv.clone(), true);
+                            self.obj_mut(a).literal_len = Some(n + 1);
+                            continue;
+                        }
+                    }
+                }
+                if ll.is_some() {
+                    state.drop_obj_ns(a, Ns::Pos);
+                }
+                self.obj_mut(a).literal_len = None;
             }
         }
         // 4. elems

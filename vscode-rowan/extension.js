@@ -30,21 +30,47 @@ function keyList(keys) {
   return keys.length ? keys.join(", ") : "∅";
 }
 
+/** A key as the engine prints it (Python repr) in the compact form: strings double-quoted. */
+function displayKey(k, ns) {
+  const m = /^'(.*)'$/.exec(k);
+  if (m) return ns === "attr" ? m[1] : `"${m[1].replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  return k;
+}
+
+/**
+ * `{"a": ..., "b"?: ..., "c"~: ..., **}`: definite keys plain, keys set on some paths with
+ * `?`, keys unknown code may have removed with `~`, `**` when other keys are possible (the
+ * record is open).  Attribute rows: `obj(a=..., b?=..., **)`.
+ */
+function rowText(row, ns) {
+  const present = row.present || [];
+  const definite = new Set(row.definite || []);
+  const likely = new Set(row.likely || []);
+  const parts = present.map((k) => {
+    const mark = definite.has(k) ? "" : likely.has(k) ? "~" : "?";
+    return ns === "attr" ? `${displayKey(k, ns)}${mark}=...` : `${displayKey(k, ns)}${mark}: ...`;
+  });
+  if (!row.closed) parts.push("**");
+  return ns === "attr" ? `obj(${parts.join(", ")})` : `{${parts.join(", ")}}`;
+}
+
 function describeRow(row, ns) {
   const lines = [];
   const present = row.present || [];
   const definite = row.definite || [];
+  const likely = row.likely || [];
   const absent = row.absent || [];
   const maybe = present.filter((k) => !definite.includes(k));
   const label = ns === "attr" ? "attributes" : "keys";
-  if (definite.length) lines.push(`- always has ${label}: ${keyList(definite)}`);
-  if (maybe.length) lines.push(`- may have (set on some paths): ${keyList(maybe)}`);
-  if (!definite.length && !maybe.length) lines.push(`- no ${label} known` + (row.closed ? " (empty)" : ""));
+  lines.push("- `" + rowText(row, ns) + "`");
+  const legend = [];
+  if (maybe.some((k) => !likely.includes(k))) legend.push("`?` set on some paths only");
+  if (maybe.some((k) => likely.includes(k))) legend.push("`~` unless unknown code removed it");
+  if (!row.closed) legend.push(`\`**\` other ${label} possible`);
+  if (legend.length) lines.push(`- ${legend.join("; ")}`);
   if (absent.length) lines.push(`- known absent: ${keyList(absent)}`);
-  if (row.closed) {
-    lines.push(`- closed: no other ${label}`);
-  } else {
-    if (row.sources && row.sources.length) lines.push(`- open: other ${label} may come from ${row.sources.join(", ")}`);
+  if (!row.closed) {
+    if (row.sources && row.sources.length) lines.push(`- other ${label} may come from ${row.sources.join(", ")}`);
     if (row.mutators && row.mutators.length) lines.push(`- unknown code may have changed it: ${row.mutators.join(", ")}`);
     if (row.top) lines.push("- nothing is known about its contents");
     if (row.symbolic) lines.push("- plus whatever the caller passes in (summary analysis)");

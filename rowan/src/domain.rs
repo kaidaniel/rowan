@@ -945,8 +945,46 @@ impl Row {
     }
 }
 
-impl fmt::Display for Row {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+/// A key as it appears in the compact row form: strings in double quotes, others as in Python.
+pub fn key_display(k: KeyId) -> String {
+    match intern::key_as_str(k) {
+        Some(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        None => intern::key_repr(k),
+    }
+}
+
+impl Row {
+    /// `{"a": ..., "b"?: ..., "c"~: ..., **}`: definite keys plain, keys set on some paths
+    /// only with `?`, keys that unknown code may have removed with `~`, `**` when the record
+    /// may hold other keys (open).  Attribute rows render as `obj(a=..., b?=..., **)`.
+    pub fn compact(&self, attrs: bool) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for k in intern::sorted_by_str(self.present.iter()) {
+            let mark = if self.definite.contains(k) {
+                ""
+            } else if self.likely.contains(k) {
+                "~"
+            } else {
+                "?"
+            };
+            if attrs {
+                parts.push(format!("{}{}=...", intern::key_py_str(k), mark));
+            } else {
+                parts.push(format!("{}{}: ...", key_display(k), mark));
+            }
+        }
+        if !self.closed() {
+            parts.push("**".into());
+        }
+        if attrs {
+            format!("obj({})", parts.join(", "))
+        } else {
+            format!("{{{}}}", parts.join(", "))
+        }
+    }
+
+    /// The full internal form (sets, sources, mutators, symbolic terms).
+    pub fn details(&self) -> String {
         let mut parts = vec![format!("present={}", keys_str(self.present.iter())), format!("definite={}", keys_str(self.definite.iter()))];
         if self.likely != self.definite {
             parts.push(format!("likely={}", keys_str(self.likely.iter())));
@@ -984,7 +1022,13 @@ impl fmt::Display for Row {
             parts.push("TOP".into());
         }
         parts.push(if self.closed() { "closed".into() } else { "open".into() });
-        write!(f, "⟨{}⟩", parts.join(", "))
+        format!("⟨{}⟩", parts.join(", "))
+    }
+}
+
+impl fmt::Display for Row {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.compact(false))
     }
 }
 

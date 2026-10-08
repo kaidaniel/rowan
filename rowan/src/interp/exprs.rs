@@ -136,6 +136,11 @@ impl Analyzer {
             }
             ast::Expr::Compare(c) => {
                 let a = self.eval(&c.left, state);
+                if c.ops.len() == 1 {
+                    if let Some(b) = self.compare_const(c.ops[0], &a, &c.comparators[0], state) {
+                        return Value::lit(intern::key_bool(b));
+                    }
+                }
                 for cmp in c.comparators.iter() {
                     let b = self.eval(cmp, state);
                     if a.pts.contains(self.series) || b.pts.contains(self.series) {
@@ -256,13 +261,16 @@ impl Analyzer {
         } else {
             state.elems.insert(oid, KeyVal::Lits(intern::KeySet::new()));
         }
-        if literal && single {
+        if literal && (single || self.obj(oid).literal_len == Some(vals.len()) || !state.has_slot(oid, Ns::Elem, STAR) || state.slot(oid, Ns::Elem, STAR).pts.is_empty()) {
+            // positions are structural: the same literal always has the same length, so a
+            // weak (loop) allocation keeps per-position slots, joined across allocations
             self.obj_mut(oid).literal_len = Some(vals.len());
             for (i, v) in vals.iter().enumerate() {
-                state.set_slot(oid, Ns::Pos, key_int(i as i64), v.clone(), true);
+                state.set_slot(oid, Ns::Pos, key_int(i as i64), v.clone(), single);
             }
         } else {
             self.obj_mut(oid).literal_len = None;
+            state.drop_obj_ns(oid, Ns::Pos);
         }
         Value::obj(oid)
     }
@@ -303,21 +311,70 @@ impl Analyzer {
         acc
     }
 
+    /// `a is None`, `a is not None`, `a == lit`, `a != lit` when the outcome is decidable
+    /// from the value's literals: a value with only non-placeholder objects is never None.
+    fn compare_const(&mut self, op: ast::CmpOp, a: &Value, right: &'static ast::Expr, state: &mut State) -> Option<bool> {
+        let none = intern::key_none();
+        let lits = crate::domain::kv_literals(&a.kv);
+        let has_ph = a.pts.iter().any(|o| self.kind(o) == Kind::Ph || self.kind(o) == Kind::Unknown);
+        let known_lits = a.kv.is_literal() || a.kv.is_bot();
+        match op {
+            ast::CmpOp::Is | ast::CmpOp::IsNot if matches!(right, ast::Expr::NoneLiteral(_)) => {
+                let is_none = if a.pts.is_empty() && a.kv.is_literal() && lits.len() == 1 && lits.contains(none) {
+                    true
+                } else if !has_ph && known_lits && !lits.contains(none) && (!a.pts.is_empty() || !lits.is_empty()) {
+                    false
+                } else {
+                    // undecidable here: decided per call site when the operand is concrete there
+                    for o in a.pts.iter() {
+                        if self.kind(o) == Kind::Ph {
+                            self.record_event("truth", o);
+                        }
+                    }
+                    if let Some(ph) = a.kv.as_param() {
+                        self.record_event("truth", ph);
+                    }
+                    return None;
+                };
+                Some(if op == ast::CmpOp::Is { is_none } else { !is_none })
+            }
+            ast::CmpOp::Eq | ast::CmpOp::NotEq => {
+                let b = self.eval(right, state);
+                let bl = crate::domain::kv_literals(&b.kv);
+                if !a.pts.is_empty() || !b.pts.is_empty() || !a.kv.is_literal() || !b.kv.is_literal() || lits.len() != 1 || bl.len() != 1 {
+                    return None;
+                }
+                let eq = lits == bl;
+                Some(if op == ast::CmpOp::Eq { eq } else { !eq })
+            }
+            _ => None,
+        }
+    }
+
     /// True/False when a value is definitely truthy/falsy, else None.
     pub fn truthiness(&mut self, v: &Value, state: &State) -> Option<bool> {
-        if let Some(k) = v.kv.as_lit() {
-            if v.pts.is_empty() {
-                return Some(intern::with_key(k, |kk| match kk {
-                    intern::Key::Str(s) => !s.is_empty(),
-                    intern::Key::Int(i) => *i != 0,
-                    intern::Key::Float(b) => f64::from_bits(*b) != 0.0,
-                    intern::Key::Bool(b) => *b,
-                    intern::Key::None => false,
-                    intern::Key::Tuple(t) => !t.is_empty(),
-                    intern::Key::Bytes(b) => !b.is_empty(),
-                    intern::Key::Ellipsis => true,
-                    intern::Key::Inv(..) => true,
-                }));
+        if v.pts.is_empty() && v.kv.is_literal() {
+            let lits = crate::domain::kv_literals(&v.kv);
+            if !lits.is_empty() {
+                let truthy = |k: KeyId| {
+                    intern::with_key(k, |kk| match kk {
+                        intern::Key::Str(s) => !s.is_empty(),
+                        intern::Key::Int(i) => *i != 0,
+                        intern::Key::Float(b) => f64::from_bits(*b) != 0.0,
+                        intern::Key::Bool(b) => *b,
+                        intern::Key::None => false,
+                        intern::Key::Tuple(t) => !t.is_empty(),
+                        intern::Key::Bytes(b) => !b.is_empty(),
+                        intern::Key::Ellipsis => true,
+                        intern::Key::Inv(..) => true,
+                    })
+                };
+                let mut it = lits.iter();
+                let first = truthy(it.next().unwrap());
+                if it.all(|k| truthy(k) == first) {
+                    return Some(first);
+                }
+                return None;
             }
         }
         if let Some(ph) = v.kv.as_param() {
@@ -535,10 +592,12 @@ impl Analyzer {
                 if !understood {
                     self.cond_depth += 1;
                 }
-                for item in items {
+                for (idx, item) in items.iter().enumerate() {
                     let mut s2 = state.copy();
                     self.frame_mut().overlays.push(IndexMap::new());
+                    self.frame_mut().unroll.push(idx);
                     self.comp_run_one(g, gens, i, &Elem::One(item.clone()), &mut s2, body);
+                    self.frame_mut().unroll.pop();
                     self.frame_mut().overlays.pop();
                     if s2.reachable {
                         if understood {

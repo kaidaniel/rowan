@@ -79,9 +79,23 @@ pub fn dedupe(verdicts: &[Verdict]) -> Vec<Verdict> {
             file: first.file.clone(),
         });
     }
+    // the same finding reached through many call chains: keep the shortest few chains
+    let mut by_finding: IndexMap<(String, u32, u32, String, Ns, String, Tier, String, String), Vec<Verdict>> = IndexMap::new();
+    for v in out {
+        by_finding.entry((v.file.clone(), v.line, v.col, key_repr(v.key), v.ns, v.text.clone(), v.tier, v.obj.clone(), v.note.clone())).or_default().push(v);
+    }
+    let mut out: Vec<Verdict> = Vec::new();
+    for (_, mut vs) in by_finding {
+        vs.sort_by(|a, b| (a.chain.len(), &a.chain).cmp(&(b.chain.len(), &b.chain)));
+        vs.truncate(MAX_CHAINS_PER_FINDING);
+        out.extend(vs);
+    }
     out.sort_by(|a, b| (&a.file, a.line, a.col, key_repr(a.key), &a.chain).cmp(&(&b.file, b.line, b.col, key_repr(b.key), &b.chain)));
     out
 }
+
+/// How many distinct call chains one finding is reported under (the shortest ones).
+pub const MAX_CHAINS_PER_FINDING: usize = 8;
 
 pub struct SchemaEntry {
     pub always: bool,
@@ -216,7 +230,7 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
                 for oid in v.pts.iter() {
                     match an.kind(oid) {
                         Kind::Dict | Kind::Frame | Kind::Unknown | Kind::Namespace => lines.push(format!("  {} = {}: {}", name, an.obj(oid).label, st.row(oid, Ns::Item))),
-                        Kind::Instance => lines.push(format!("  {} = {}: attrs {}", name, an.obj(oid).label, st.row(oid, Ns::Attr))),
+                        Kind::Instance => lines.push(format!("  {} = {}: {}", name, an.obj(oid).label, st.row(oid, Ns::Attr).compact(true))),
                         _ => {}
                     }
                 }
@@ -292,6 +306,7 @@ pub fn golden_json(an: &Analyzer) -> J {
                     "absent": r.absent.iter().map(key_repr).collect::<Vec<_>>(),
                     "closed": r.closed(),
                     "text": r.to_string(),
+                    "details": r.details(),
                 }
             }),
         })
@@ -322,6 +337,7 @@ fn row_json(r: &crate::domain::Row) -> J {
         "source_ids": r.sources.iter().map(|(s, _)| source_label(s)).collect::<Vec<_>>(),
         "mutators": muts,
         "text": r.to_string(),
+        "details": r.details(),
     })
 }
 

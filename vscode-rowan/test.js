@@ -12,9 +12,8 @@ const res = JSON.parse(execFileSync(bin, [file, "--facts"], { maxBuffer: 64 * 10
 const idx = indexResult(res);
 
 const r8 = renderHover("r", idx.facts.get("8:r"), idx.verdicts.get(8) || []);
-assert(r8.includes("always has keys: 'id'"), r8);
-assert(r8.includes("may have (set on some paths): 'role'"), r8);
-assert(r8.includes("closed"), r8);
+assert(r8.includes('`{"id": ..., "role"?: ...}`'), r8);
+assert(r8.includes("`?` set on some paths only"), r8);
 
 const r9 = renderHover("r", idx.facts.get("9:r"), (idx.verdicts.get(9) || []).filter((v) => v.text.includes("r")));
 assert(r9.includes("⚠ `r[\"role\"]`"), r9);

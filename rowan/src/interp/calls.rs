@@ -217,7 +217,9 @@ impl Analyzer {
             d.dterms = Default::default();
             d.pstores = d.pstores.map(|(r, _, l)| (r, false, l));
             state.set_row(rid, Ns::Item, Row::from_data(d));
-            state.set_row(rid, Ns::Attr, Row::with_mutators(intern::IdSet::one(site_id)));
+            // as an object the result is unknown: its attributes come from the call
+            let src = Source::new(&site, SourceKind::Call);
+            state.set_row(rid, Ns::Attr, Row::with_source(src).mutate(site_id));
             for (oid, ns) in &arg_recs {
                 for (k, v) in state.obj_slots(*oid, *ns) {
                     state.set_slot(rid, Ns::Item, k, v, false);
@@ -277,8 +279,7 @@ impl Analyzer {
                 } else if let Some(kv) = kwargs.get(&s(fname)) {
                     v = Some(kv.clone());
                 } else if let Some(d) = default {
-                    let is_field_call = matches!(d, ast::Expr::Call(c) if super::dotted_last(&c.func) == "field");
-                    v = Some(if is_field_call { Value::data("field") } else { self.eval(d, state) });
+                    v = Some(self.dataclass_default(d, node, state));
                 } else if !star_kwargs.is_empty() {
                     v = Some(join_values(star_kwargs.iter().flat_map(|sk| sk.pts.iter().map(|x| state.slot(x, Ns::Item, fk)).collect::<Vec<_>>())));
                 }
@@ -313,6 +314,28 @@ impl Analyzer {
         Value::obj(inst)
     }
 
+    /// The default of a dataclass field: `field(default_factory=f)` calls `f` (a fresh
+    /// container per construction site), `field(default=x)` and plain defaults evaluate.
+    pub fn dataclass_default(&mut self, d: &'static ast::Expr, node: &Node, state: &mut State) -> Value {
+        if let ast::Expr::Call(c) = d {
+            if super::dotted_last(&c.func) == "field" {
+                for kw in c.arguments.keywords.iter() {
+                    let Some(arg) = &kw.arg else { continue };
+                    match arg.id.as_str() {
+                        "default_factory" => {
+                            let f = self.eval(&kw.value, state);
+                            return self.call_value(&f, node, None, state, Some(vec![]));
+                        }
+                        "default" => return self.eval(&kw.value, state),
+                        _ => {}
+                    }
+                }
+                return Value::data("field");
+            }
+        }
+        self.eval(d, state)
+    }
+
     /// Dataclass fields in constructor order: base classes' fields first (MRO, nearest last).
     pub fn dataclass_fields_mro(&self, cls: u32) -> Vec<(String, Option<&'static ast::Expr>)> {
         let mut out: Vec<(String, Option<&'static ast::Expr>)> = Vec::new();
@@ -335,14 +358,14 @@ impl Analyzer {
             if let Some(r) = sv.single() {
                 if self.kind(r) == Kind::Instance {
                     let recv = self.obj(r);
+                    // per receiver and call site: two calls of one method on one receiver
+                    // allocate distinct objects
                     let ctx = if !recv.single {
                         site.to_string()
-                    } else if recv.ctx.starts_with('o') && recv.ctx[1..].chars().all(|c| c.is_ascii_digit()) && recv.ctx.len() > 1 {
-                        recv.ctx.clone()
                     } else if self.site_clones.get(&recv.site).copied().unwrap_or(0) >= MAX_CLONES {
                         String::new()
                     } else {
-                        format!("o{}", recv.id)
+                        format!("o{}/{}", recv.id, site)
                     };
                     return (ctx, recv.single);
                 }
@@ -361,6 +384,22 @@ impl Analyzer {
         // the call context: per call site (line and column) with `fixes`; the prototype used
         // the line only, so two calls on one line shared their clones
         let site = if node.addr != 0 { format!("L{}:{}", node.line, node.col) } else { format!("L{}", node.line) };
+        // inside a tabulated frame the context is chained to the frame's, so two activations
+        // of the caller give distinct objects (bounded depth; beyond it the site alone)
+        let site = {
+            let fr = self.frame();
+            let mut site = site;
+            if !fr.symbolic {
+                for i in &fr.unroll {
+                    site.push_str(&format!("#{}", i));
+                }
+            }
+            if fr.kind != FrameKind::Module && !fr.symbolic && !fr.ctx.is_empty() && fr.ctx.matches('/').count() < 2 && !fr.ctx.starts_with("entry") {
+                format!("{}/{}", fr.ctx, site)
+            } else {
+                site
+            }
+        };
         self.analysed_funcs.insert(foid);
         // --- symbolic summaries (§7.3/§9): analyse the body once, instantiate per call ---
         if self.use_summaries && self.model_call == 0 {
@@ -390,6 +429,9 @@ impl Analyzer {
                 bind.insert(ps, sv.clone());
             }
             if !self.should_tabulate(&summ, &bind, state) {
+                if !self.sum_stack.is_empty() {
+                    self.propagate_events(&summ, &bind, state);
+                }
                 let saved_chain = std::mem::take(&mut self.call_chain);
                 self.call_chain = chain_extend(&saved_chain, &[node.line]);
                 let r = self.instantiate(&summ, &bind, state, node, &call_ctx, ctx_single);
@@ -508,6 +550,7 @@ impl Analyzer {
             new_fr.cells.insert(*n, *c);
         }
         let saved_env = std::mem::take(&mut state.env);
+        self.env_stack.push(saved_env.clone());
         let saved_ret = state.ret.take();
         self.frames.push(new_fr);
         let saved_chain = std::mem::take(&mut self.call_chain);
@@ -643,6 +686,7 @@ impl Analyzer {
         self.rec_widened.remove(&key);
         self.call_chain = saved_chain;
         self.frames.pop();
+        self.env_stack.pop();
         state.env = saved_env;
         state.ret = saved_ret;
         ret
@@ -657,11 +701,13 @@ impl Analyzer {
             new_fr.cells.insert(*n, *c);
         }
         let saved_env = std::mem::take(&mut state.env);
+        self.env_stack.push(saved_env.clone());
         self.frames.push(new_fr);
         let fake = Node::synthetic(fi.node.node().module, fi.node.node().line);
         self.bind_params(&fi, &Some(self_v), &args, &IndexMap::new(), &[], &[], state, &fake);
         f(self, state);
         self.frames.pop();
+        self.env_stack.pop();
         state.env = saved_env;
     }
 

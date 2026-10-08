@@ -8,6 +8,7 @@ use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
 
 use crate::domain::{join_values, kv_join, kv_map, FnKind, KeyVal, Ns, RenameFn, Row, RowData, Source, SourceKind, Value, DATA};
+use crate::interp::access::append_slot_key;
 use crate::interp::funcs::Elem;
 use crate::interp::{Analyzer, Call, Payload, ViewKind};
 use crate::intern::{self, key_str_lit, s, KeySet, STAR};
@@ -281,10 +282,13 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     }
                 }
                 if let Some(items) = &it.items {
-                    if an.obj(oid).single && items.len() <= 64 && !reorders {
+                    let reversed = c.qual.as_str() == "builtins.reversed";
+                    if an.obj(oid).single && items.len() <= 64 && (!reorders || reversed) {
                         an.obj_mut(oid).literal_len = Some(items.len());
+                        let n = items.len();
                         for (i, item) in items.iter().enumerate() {
-                            st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), item.clone(), true);
+                            let pos = if reversed { n - 1 - i } else { i };
+                            st.set_slot(oid, Ns::Pos, intern::key_int(pos as i64), item.clone(), true);
                         }
                     }
                 }
@@ -480,6 +484,23 @@ fn m_get(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(key) = c.args.first() else { return Value::data("get") };
     let default = c.args.get(1).cloned().unwrap_or_else(|| an.none_v.clone());
     let recv = c.recv.clone().unwrap_or_default();
+    if key.kv.as_lit().is_some() {
+        // whether the default applies is decided per call site when the receiver is concrete there
+        for o in recv.pts.iter() {
+            if an.kind(o) == Kind::Ph {
+                an.record_event("narrow", o);
+            }
+        }
+    }
+    if let Some(k) = key.kv.as_lit() {
+        let recs = an.record_objects(&recv);
+        if !recs.is_empty() && recs.len() == recv.pts.len() && recs.iter().all(|o| an.kind(*o) != Kind::Frame) {
+            // absent from every closed target: the default alone, no load
+            if recs.iter().all(|o| { let r = st.row(*o, Ns::Item); r.closed() && !r.present.contains(k) }) {
+                return default;
+            }
+        }
+    }
     let out = an.load_item(&recv, Ns::Item, key, &c.node, st, false);
     // the default is only possible when the key may be absent on some target
     if let Some(k) = key.kv.as_lit() {
@@ -495,6 +516,24 @@ fn m_setdefault(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(key) = c.args.first() else { return Value::data("setdefault") };
     let default = c.args.get(1).cloned().unwrap_or_else(|| an.none_v.clone());
     let recv = c.recv.clone().unwrap_or_default();
+    let recs = an.record_objects(&recv);
+    if let Some(k) = key.kv.as_lit() {
+        if !recs.is_empty() && recs.len() == recv.pts.len() {
+            let rows: Vec<Row> = recs.iter().map(|o| st.row(*o, Ns::Item)).collect();
+            if rows.iter().all(|r| r.definite.contains(k)) {
+                // present everywhere: the stored value, nothing is written
+                return an.load_item(&recv, Ns::Item, key, &c.node, st, false);
+            }
+            if rows.iter().all(|r| r.closed() && !r.present.contains(k)) {
+                // absent everywhere: the default is stored and returned
+                an.store_item(&recv, Ns::Item, key, &default, &c.node, st);
+                return default;
+            }
+        }
+    } else if let Some(ph) = key.kv.as_param() {
+        // presence of a parameter key: decided per call site
+        an.record_event("narrow", ph);
+    }
     let cur = an.load_item(&recv, Ns::Item, key, &c.node, st, false);
     let nv = if !cur.empty() { cur.join(&default) } else { default };
     an.store_item(&recv, Ns::Item, key, &nv, &c.node, st);
@@ -600,7 +639,7 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual);
     let recv = c.recv.clone().unwrap_or_default();
     for oid in recv.pts.iter() {
-        if !matches!(an.kind(oid), Kind::List | Kind::Set | Kind::Tuple) {
+        if !matches!(an.kind(oid), Kind::List | Kind::Set | Kind::Tuple | Kind::Ph) {
             continue;
         }
         let elem = if (name == "extend" || name == "update") && !c.args.is_empty() {
@@ -615,6 +654,13 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             None => elem.kv.clone(),
         };
         st.elems.insert(oid, nk);
+        if an.kind(oid) == Kind::Ph {
+            // through a placeholder: the i-th append, positional at instantiation
+            let positional = name == "append" && an.frame().loop_depth == 0 && an.cond_depth == 0;
+            let i = if positional { (0..16).find(|i| !st.has_slot(oid, Ns::Pos, append_slot_key(*i))).unwrap_or(-1) } else { -1 };
+            st.set_slot(oid, Ns::Pos, append_slot_key(i), elem.clone(), true);
+            continue;
+        }
         let ll = an.obj(oid).literal_len;
         let single = an.obj(oid).single;
         if let Some(n) = ll {
@@ -761,8 +807,10 @@ fn m_defaultdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("{}@L{}", name, c.line));
     let src_arg: Option<Value>;
     if name == "defaultdict" || name == "Counter" {
-        let r = st.row(oid, Ns::Item).data_store(Source::new(&format!("{}@L{}", name, c.line), SourceKind::Data));
-        st.set_row(oid, Ns::Item, r);
+        if name == "Counter" {
+            let r = st.row(oid, Ns::Item).data_store(Source::new(&format!("{}@L{}", name, c.line), SourceKind::Data));
+            st.set_row(oid, Ns::Item, r);
+        }
         if name == "defaultdict" && !c.args.is_empty() {
             let dflt = if !c.args[0].pts.is_empty() { an.call_value(&c.args[0], &c.node, None, st, Some(vec![])) } else { Value::data("default") };
             st.set_slot(oid, Ns::Item, STAR, Value::with_kv(dflt.pts, DATA), false);
