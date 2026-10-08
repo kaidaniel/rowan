@@ -218,7 +218,15 @@ def main(argv: List[str]) -> int:
     args = [a for a in argv if not a.startswith("-")]
     paths = args or sorted(glob.glob(os.path.join(HERE, "cases", "*.py"))
                            + glob.glob(os.path.join(HERE, "cases", "*", "*.py")))
-    paths = [p for p in paths if not os.path.basename(p).startswith("helpers")]
+    # in a package directory only the entry module is a case (its name shares the directory's
+    # prefix: `k94_pkg/k94_modules.py`); the other files are modules it imports
+    def is_case(p):
+        d = os.path.basename(os.path.dirname(p))
+        if d == "cases":
+            return True
+        prefix = d.split("_")[0]
+        return os.path.basename(p).startswith(prefix + "_")
+    paths = [p for p in paths if is_case(p)]
     ok_all = True
     results = []
     for p in paths:
