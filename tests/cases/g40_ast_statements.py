@@ -1,4 +1,3 @@
-#@engine rust
 """Every statement kind, with the record facts it should produce."""
 import json
 import os as operating_system
@@ -104,7 +103,7 @@ r["b"]                               #@ ok b
 with open("f") as fh:
     cfg2 = json.load(fh)
 cfg2["key"]                          #@ input key
-#@schema json.load@L105: always={key}
+#@schema json.load@L104: always={key}
 
 # Global / Nonlocal
 G = {"g": 1}

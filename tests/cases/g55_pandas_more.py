@@ -1,4 +1,3 @@
-#@engine rust
 """More DataFrame shapes: column assignment, drop/rename/merge/concat/groupby, iterrows,
 to_dict records, filtering, apply on rows."""
 import pandas as pd
@@ -55,4 +54,4 @@ wide2 = wide.copy()
 wide2["e"] = 1
 wide["e"]                                        #@ missing e
 wide2["e"]                                       #@ ok e
-#@schema read_csv@L6: always={qty,price,cust,region}
+#@schema read_csv@L5: always={qty,price,cust,region}

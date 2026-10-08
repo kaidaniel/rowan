@@ -1,4 +1,3 @@
-#@engine rust
 """Generators, generator expressions, next(), yield from, consumed by loops and list()."""
 
 

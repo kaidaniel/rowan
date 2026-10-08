@@ -197,12 +197,10 @@ impl Analyzer {
         let tv = self.eval(test, state);
         let mut then_s = state.copy();
         let mut else_s = state.copy();
-        if self.opts.fixes {
-            match self.truthiness(&tv, state) {
-                Some(true) => else_s.reachable = false,
-                Some(false) => then_s.reachable = false,
-                None => {}
-            }
+        match self.truthiness(&tv, state) {
+            Some(true) => else_s.reachable = false,
+            Some(false) => then_s.reachable = false,
+            None => {}
         }
         self.narrow(test, true, &mut then_s);
         self.narrow(test, false, &mut else_s);
@@ -282,7 +280,7 @@ impl Analyzer {
         let it = self.iterate(&itv, &iter_node, state);
         let has_jump = contains_jump(&f.body);
         if let Some(items) = &it.items {
-            if items.len() <= UNROLL_MAX && (!has_jump || self.opts.fixes) {
+            if items.len() <= UNROLL_MAX {
                 // unrolled: `continue` rejoins at the next iteration, `break` at the exit
                 let mut breaks: Option<State> = None;
                 for item in items {
@@ -386,7 +384,7 @@ impl Analyzer {
         let elem_v = it.elem.value_part();
         self.promote_elem_reqs(&mut exit_s, &back, &elem_v, state);
         self.promote_elem_narrowing(&mut exit_s, &back, &elem_v);
-        if self.opts.fixes && exit_acc.is_none() && back.reachable {
+        if exit_acc.is_none() && back.reachable {
             // every element of the iterable went through the body: its row after the loop is
             // the body's exit row, not the join with "not processed yet"
             for oid in elem_v.pts.iter() {

@@ -402,7 +402,7 @@ impl Analyzer {
         if !recs.is_empty() {
             match &lv.kv {
                 KeyVal::Lit(k) => self.narrow_record(&rv, Ns::Item, *k, member, state),
-                KeyVal::Param(ph) if self.opts.fixes => {
+                KeyVal::Param(ph) => {
                     // `k in d` with k a parameter: decided per call site when k is a literal there
                     self.record_event("narrow", *ph);
                 }
@@ -518,12 +518,12 @@ impl Analyzer {
         let targets: Vec<u32> = rec.pts.iter().filter(|o| self.is_record_like(*o)).collect();
         let single = targets.len() == 1;
         for oid in targets {
-            if self.opts.fixes && self.kind(oid) == Kind::Ph {
+            if self.kind(oid) == Kind::Ph {
                 self.record_event("narrow", oid);
             }
             let row = state.row(oid, ns);
             if member {
-                if self.opts.fixes && single && row.closed() && !row.present.contains(k) {
+                if single && row.closed() && !row.present.contains(k) {
                     // `k in d` on a closed record without k: this path is infeasible
                     state.reachable = false;
                     continue;

@@ -1,4 +1,4 @@
-# rowan — static key-set inference for Python records (Phase-0 prototype)
+# rowan — static key-set inference for Python records
 
 `rowan` reads a Python program (plus local imports) and infers, for every dict-like
 value — dicts, DataFrame columns, object attributes, TypedDicts, `**kwargs`, JSON,
@@ -7,53 +7,38 @@ which keys the program *demands* of it. Demands on values that enter from outsid
 (`read_csv`, `json.load`, request bodies, entry-point parameters) are reported as
 inferred schemas.
 
-The design is in `SPECIFICATION.md`. This directory is the Phase-0 Python prototype
-(§15.1 of the spec): it validates the domain, the models and the heap treatment; it
-is not the fast engine (§15.3).
+The design is in `SPECIFICATION.md`; `AGENTS.md` has the engineering notes for whoever
+works on it next. The engine is written in Rust (`rowan/`); it was ported from a Python
+prototype that has since been removed (see git history before `a1f4d7a` if you need it).
 
 ```
-python -m rowan path/to/program.py            # text report
-python -m rowan path/to/program.py --json     # JSON lines (verdicts, schemas, summaries)
-python -m rowan lib.py --no-entry             # only what the module itself runs (no entry-point pass)
-python tests/run_golden.py [-v] [case.py …]   # golden suite (36 cases)
-ROWAN_SUMMARIES=0 python -m rowan prog.py     # the older per-call-site engine (for comparison)
-ROWAN_DEBUG=1 python -m rowan prog.py         # progress / summary statistics on stderr
+cd rowan && cargo build --release                 # the engine: rowan/target/release/rowan
+rowan/target/release/rowan prog.py                # text report
+rowan/target/release/rowan prog.py --json         # JSON lines (verdicts, schemas, summaries)
+rowan/target/release/rowan prog.py --facts        # per-name facts for editor integration
+rowan/target/release/rowan lib.py --no-entry      # only what the module itself runs (no entry-point pass)
+uv run --no-project python tests/run_golden.py    # golden suite (63 cases)
+uv run --no-project python tests/run_snapshots.py # output snapshots on larger inputs
 ```
 
-## Rust engine (`rowan-rs/`)
-
-The engine has been ported to Rust (spec §15.3); the Python package above is kept as the
-frozen oracle. It parses with `ruff_python_parser`, interns keys / sources / lenses to
-`u32` ids, and reproduces the prototype's verdicts and schemas exactly in `--compat` mode
-(`python tests/diff_engines.py` checks that on every golden case, the example and the
-prototype's own modules). Its default mode adds the improvements listed in `AGENTS.md`
-(allocation-site resolution of placeholders, recency abstraction for loop allocations,
-SCC re-iteration for mutual recursion, `narrowed` facts in state equality, positional
-unpacking of tuple keys).
-
-```
-cd rowan-rs && cargo build --release
-rowan-rs/target/release/rowan-rs prog.py [--json] [--no-rows] [--no-summaries] [--no-entry] [--no-imports] [--compat]
-uv run --no-project python tests/run_golden.py --rust    # golden suite on the Rust engine (63 cases)
-uv run --no-project python tests/run_golden.py --both    # both engines (the 36 prototype cases run on both)
-uv run --no-project python tests/diff_engines.py         # differential check: Python oracle vs rowan-rs --compat
-```
-
-`ROWAN_SUMMARIES=0`, `ROWAN_DEBUG=1` work as for the prototype; `ROWAN_COMPAT=1` is
-`--compat`; `ROWAN_NO=recency,scc,site,narrowed,positional,fixes` switches improvements off
-individually (`fixes` is a set of semantic corrections over the prototype found by the
-extended golden suite; `AGENTS.md` lists them). Python is run through `uv`
-(`.python-version` = 3.14). `rowan-rs/py/` holds a PyO3 binding (`rowan_rs.analyse_file(path)` returns
-the `--golden` JSON); see `AGENTS.md` for its status.
+Options: `--no-rows`, `--no-summaries`, `--no-entry`, `--no-imports`. Environment:
+`ROWAN_SUMMARIES=0` (older per-call-site engine), `ROWAN_DEBUG=1` (progress and slow
+instantiations on stderr), `ROWAN_NO=recency,scc,site,narrowed,positional` (switch one
+analysis refinement off, for bisecting). Python tooling runs through `uv`
+(`.python-version` = 3.14); the Python side is only the test harness.
 
 ## VS Code extension (`vscode-rowan/`)
 
 Hover over a variable to see the keys / attributes rowan infers for its objects (always,
 on some paths, known absent, open sources), the keys the program requires of an external
 input, possible literal values, and the verdicts on that line; verdicts also appear as
-diagnostics. It runs `rowan-rs FILE --facts` on open and save. Build the engine, then
-install `vscode-rowan/rowan-0.1.0.vsix` (built with `npm run package` in that folder; `Extensions: Install from VSIX…`) or open the
-folder in VS Code and press F5; see `vscode-rowan/README.md`.
+diagnostics. It runs `rowan FILE --facts` on open and save. Build the engine, then
+install `vscode-rowan/rowan-0.1.0.vsix` (built with `npm run package` in that folder;
+`Extensions: Install from VSIX…`) or open the folder in VS Code and press F5; see
+`vscode-rowan/README.md`.
+
+A PyO3 binding (`rowan/py/`, `rowan.analyse_file(path)` → the `--golden` JSON) builds with
+maturin; see `AGENTS.md` for its status.
 
 ## What the report contains
 
@@ -84,19 +69,22 @@ input (becomes a schema entry), `⚠data` data-derived key into a closed record.
 
 ## Layout
 
-| file | what |
+| path | what |
 | --- | --- |
-| `rowan/domain.py` | the abstract domains: `Row` (present/definite/likely/absent, open-source lenses, mutators), `Lens` steps (rename / kill) with inverse images for requirement propagation, `KeyVal` (Lit / Lits / KeysOf / Data / ⊥), `ReqInfo`, `Value`, `classify()` |
-| `rowan/state.py`, `rowan/layered.py` | abstract objects and the flow-sensitive state (env, rows, slots, container elements, requirements, return accumulator); `layered.py` holds the persistent layered maps (O(1) copy, O(diff) join/equality/footprint) |
-| `rowan/scopes.py` | lexical scopes: locals, cells captured by closures, free variables |
-| `rowan/interp.py` | the abstract interpreter over the AST: statements, expressions, calls (symbolic summaries, with per-call-site analysis as the fallback), closures as cell objects, classes / MRO / properties / `__getitem__`, declared field classes, loops (literal unrolling, exhaustive key iteration), narrowing (`in`, `.get`, `hasattr`, `isinstance` incl. attribute chains, `all(k in d …)`, `S <= d.keys()`, `k in d` for a key that is one of several literals), guarded loads in `try`, unknown calls with attribution, entry-point analysis of uncalled functions |
-| `rowan/summary.py` | symbolic function summaries (spec §7.3/§9): placeholders, symbolic state, deferred accesses (`SymReq`), imprecision events, footprint computation (diff + reachability), instantiation |
-| `rowan/models.py` | library models: builtins, `dict`/`list`/`str` methods, `json`/`yaml`/`pickle`, `copy`, `dataclasses`, `collections`, `csv.DictReader`, `argparse`, `os.environ`, `functools.partial`, `requests`, pandas (read_*, `[]`/`loc`, `assign`, `rename` incl. callables, `drop`, `merge`/`join` with suffixing, `concat`, `groupby.agg`, `set_index`/`reset_index` with index tracking, `apply(axis=1)`, `iterrows`, `to_dict`, `melt`, `add_prefix`, `columns = …`) |
-| `rowan/report.py` | per-access verdict combination across points-to targets, schema table, text / JSON output |
-| `tests/run_golden.py`, `tests/cases/` | golden harness: expectations are `#@` comments in the case files |
-| `examples/etl_report.py` | a realistic script with planted bugs (all found) |
+| `rowan/src/intern.rs` | interners (keys, strings, sources, lenses → `u32`), sorted id-sets |
+| `rowan/src/domain.rs` | the abstract domains: `Row` (present/definite/likely/absent, open-source lenses, mutators), `Lens` steps with inverse images, `KeyVal`, `ReqInfo`, `Value`, `classify()` |
+| `rowan/src/state.rs`, `rowan/src/layered.rs` | abstract objects and the flow-sensitive state; persistent layered maps (O(1) copy, O(diff) join/equality/footprint) |
+| `rowan/src/scopes.rs`, `rowan/src/frontend.rs` | lexical scopes; parsing (ruff), node locations |
+| `rowan/src/interp/` | the abstract interpreter over the AST: statements, expressions, calls, closures as cell objects, classes / MRO / properties / dunder protocols, declared types, loops with recency, narrowing, guarded loads, unknown calls with attribution, entry-point analysis of uncalled functions |
+| `rowan/src/summary.rs` | symbolic function summaries (spec §7.3/§9): placeholders, deferred accesses, imprecision events, footprints, instantiation with allocation-site resolution, SCC re-iteration |
+| `rowan/src/models/` | library models: builtins, `dict`/`list`/`str`, `json`/`yaml`/`pickle`, `copy`, `dataclasses`, `collections`, `csv.DictReader`, `argparse`, `os.environ`, `functools.partial`, `requests`, pandas |
+| `rowan/src/report.rs` | per-access verdict combination, schema table, text / JSON / facts output |
+| `tests/run_golden.py`, `tests/cases/` | golden harness: expectations are `#@` comments in the case files (63 cases) |
+| `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | output snapshots on the example and three large fixture programs |
+| `examples/etl_report.py` | a realistic script with planted bugs (all found; also golden case e34) |
+| `vscode-rowan/`, `rowan/py/` | VS Code extension; PyO3 binding |
 
-## Deviations from the spec in this prototype
+## Deviations from the spec
 
 * **Symbolic summaries, with concrete fallback.** A function body is analysed once
   against placeholders (its parameters, `self`, and lazily every pre-existing object it
@@ -105,10 +93,8 @@ input (becomes a schema entry), `⚠data` data-derived key into a closed record.
   body is about — a call or method dispatch through a parameter that is an actual object
   here, `isinstance`/truthiness/`in` on a parameter that is a literal here, iteration
   over a parameter that is a literal container here — and, for the literal/structural
-  events, at most `MAX_TABULATIONS` (12) times per function. Recursion inside a summary
-  iterates to a fixpoint over at most 6 rounds; mutual recursion through a function
-  already being summarised uses that function's current partial summary (the callee's
-  summary is then cached as final — a known imprecision, spec §9.6).
+  events, at most 12 times per function. Recursion inside a summary iterates to a fixpoint
+  over at most 3 rounds; summaries computed against a partial summary are redone per round.
 * **What a summary keeps** is the exit/entry *difference* of the heap, minus objects the
   caller can never reach; deferred accesses carry one call site of context inside the
   summary (the caller's concrete chain is prepended on use); closure summaries are
@@ -116,58 +102,27 @@ input (becomes a schema entry), `⚠data` data-derived key into a closed record.
 * **Declared types are trusted** for narrowing (§8.5): a parameter annotated with a
   user class, a field assigned `C(...)` in the class body, a dataclass field `x: C` give a
   placeholder its class, which resolves methods and filters the objects it can stand for;
-  a field annotated `Any`/`object` makes accesses through it unreportable (the report
-  drops an access when one of its possible targets is unknowable).
+  a field annotated `Any`/`object` makes accesses through them unreportable.
+* **A successful access narrows the key in**: after `r["x"]` the key is assumed present
+  on that path (the program went on). `.get`/`.setdefault` do not record requirements.
+* **Loops**: literal iterables are unrolled (also with `break`/`continue`); otherwise a
+  fixpoint over at most 40 iterations, with a recency abstraction (the object allocated by
+  the current iteration is strong) and the iterable's element objects keeping the body's
+  exit row after a loop without `break`.
 * **Requirement levels are forward-accumulated**: `always` means "on every path from
-  program start", joins demote to `sometimes`; requirements on a loop's own elements
-  (reader rows, frame rows) are kept `always` since they are per element.
+  program start", joins and conditions demote to `sometimes`; requirements on a loop's own
+  elements stay `always` since they are per element.
 * **Disjunctions** are reported as alternatives (`'email': or provided by …`,
   `'amount' | 'amt'`) rather than by demoting to `sometimes`.
-* **Performance.** The heap parts of a state live in layered persistent maps
-  (`rowan/layered.py`): copying a state is O(1) and joining two states costs time
-  proportional to what changed since they were forked. Measured on this analyser's own
-  modules (entry-point pass included, imports followed; "✗" counts definite-missing
-  lines in the report, all of which were false positives):
 
-  | module (lines incl. imports) | per-call-site engine (`ROWAN_SUMMARIES=0`) | symbolic summaries |
-  | --- | --- | --- |
-  | 36-case golden suite | 0.3 s | 0.3 s |
-  | `scopes.py`, `layered.py`, `domain.py` (0.2–0.9k) | 0.2–0.6 s | 0.2–0.7 s |
-  | `report.py`, `state.py` (~1k) | 1 s / 28 s, 169 ✗ | 1.3 s / 1.0 s, 0 ✗ |
-  | `summary.py` (2.6k) | — | 29 s, 0 ✗, 260 ⚠ |
-  | `models.py` (7.6k: its entry points reach the whole interpreter) | 23 s, 11 ✗ | not completed in 50 min (see below) |
-  | `interp.py` (7.6k, 380 roots) | minutes (not completed) | not completed (see below) |
+## Performance
 
-  The Rust engine on the same inputs (release build, Apple M-series; `--compat` is the
-  prototype's algorithm, "default" adds the improvements):
-
-  | module | rowan-rs `--compat` | rowan-rs default |
-  | --- | --- | --- |
-  | 37-case golden suite | 0.4 s (one process per case) | 0.4 s |
-  | `scopes.py` … `state.py` | 0.00–0.02 s, 0 ✗ | 0.00–0.02 s, 0 ✗ |
-  | `summary.py` | 0.6 s, 0 ✗ | 0.8 s, 0 ✗ |
-  | `models.py` | 154 s, 126 ✗ | 41 s, 165 ✗ (same accesses, more contexts) |
-  | `interp.py` | 540 s, 1039 ✗ | 69 s, 961 ✗ |
-
-  The two heavy rows are the analyser analysing its own interpreter: `models.py`'s
-  functions take a `Call` whose `an: Analyzer` field now has a declared class, so the
-  symbolic analysis follows `an.iterate(...)`, `an.call_value(...)` into the
-  interpreter's mutually recursive core (the per-call-site engine saw an unknown object
-  there and gave up, cheaply and imprecisely). Summarising that core is where the time
-  goes: its functions are instantiated thousands of times while the summaries of their
-  callers are built, and in the abstract heap of a 7.6k-line program run under one
-  `Analyzer` every placeholder stands for dozens of objects, so each deferred access is
-  evaluated against dozens of rows. An intermediate version of this engine finished
-  `models.py` in ~100 s with 0 ✗; the precision work after it (declared field classes,
-  `isinstance` narrowing on parameters and attribute chains, strong constructor stores)
-  made these summaries larger and the run no longer completes in 50 minutes. Everything
-  measured on ordinary modules got faster and reported no false ✗. `--no-entry` analyses
-  only what a module runs itself (`interp.py`: 0.6 s), and `ROWAN_SUMMARIES=0` selects
-  the per-call-site engine.
+Release build, Apple M-series: the 63-case golden suite runs in under a second (one
+process per case); a 1.2k-line module analyses in about a second, 1.7k lines (`models.py`
+of the old prototype, which reached a whole interpreter through a typed field) in about
+40 s, 3.4k lines (`interp.py`) in about 70 s. 137 scripts from local projects analysed in
+0.8 s total without failures.
 
 ## Known limitations
 
-See SPECIFICATION.md §16. Notably: keys from arbitrary string computation, `getattr`
-with computed names, `match` statements (bodies analysed, no narrowing), pandas
-operations whose columns come from data, Series index semantics, `__getattr__`
-magic, and the optimistic tiers (`✓~`, `⚠~`) are deliberately unsound.
+See SPECIFICATION.md §16 and the known-problems section of AGENTS.md.

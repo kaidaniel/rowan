@@ -1,4 +1,3 @@
-#@engine rust
 """Inheritance, super(), properties, class/static methods, dunder protocols, class attributes,
 attributes set outside __init__, isinstance narrowing."""
 from dataclasses import dataclass, field

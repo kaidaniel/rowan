@@ -272,7 +272,7 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             Elem::One(elem) => {
                 st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(elem.pts.clone(), DATA), true);
                 st.elems.insert(oid, elem.kv.clone());
-                let reorders = an.opts.fixes && matches!(c.qual.as_str(), "builtins.sorted" | "builtins.reversed");
+                let reorders = matches!(c.qual.as_str(), "builtins.sorted" | "builtins.reversed");
                 if reorders {
                     if let Some(keyfn) = c.kw("key") {
                         if !keyfn.pts.is_empty() {
@@ -481,13 +481,11 @@ fn m_get(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let default = c.args.get(1).cloned().unwrap_or_else(|| an.none_v.clone());
     let recv = c.recv.clone().unwrap_or_default();
     let out = an.load_item(&recv, Ns::Item, key, &c.node, st, false);
-    if an.opts.fixes {
-        // the default is only possible when the key may be absent on some target
-        if let Some(k) = key.kv.as_lit() {
-            let recs = an.record_objects(&recv);
-            if !recs.is_empty() && recs.len() == recv.pts.len() && recs.iter().all(|o| an.kind(*o) != Kind::Frame && st.row(*o, Ns::Item).definite.contains(k)) {
-                return out;
-            }
+    // the default is only possible when the key may be absent on some target
+    if let Some(k) = key.kv.as_lit() {
+        let recs = an.record_objects(&recv);
+        if !recs.is_empty() && recs.len() == recv.pts.len() && recs.iter().all(|o| an.kind(*o) != Kind::Frame && st.row(*o, Ns::Item).definite.contains(k)) {
+            return out;
         }
     }
     out.join(&default)

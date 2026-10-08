@@ -1,4 +1,3 @@
-#@engine rust
 """Nested loops with break/continue/else, early returns, flags, try inside loops, while with
 compound conditions."""
 

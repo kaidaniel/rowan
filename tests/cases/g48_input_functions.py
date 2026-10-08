@@ -1,4 +1,3 @@
-#@engine rust
 """Function inputs used to index the result of a function that is itself an input."""
 
 

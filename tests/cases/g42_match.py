@@ -1,4 +1,3 @@
-#@engine rust
 """`match` statements: cases are joined (no pattern narrowing yet, spec §16)."""
 
 

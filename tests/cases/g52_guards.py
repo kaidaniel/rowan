@@ -1,4 +1,3 @@
-#@engine rust
 """Guards: `in`, `.get`, `setdefault`, try/except, hasattr, early-out patterns."""
 import json
 
@@ -36,9 +35,9 @@ try:
 except ValueError:
     pass
 # .get / .setdefault do not require a key; tls and retries are proven inside their guards
-#@schema json.load@L5: always={db,pw,secret}
-#@schema json.load@L5['db']: sometimes={host}
-#@schema json.load@L5['tls']: sometimes={cert}
+#@schema json.load@L4: always={db,pw,secret}
+#@schema json.load@L4['db']: sometimes={host}
+#@schema json.load@L4['tls']: sometimes={cert}
 
 closed = {"a": 1}
 if "b" in closed:

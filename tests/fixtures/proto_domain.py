@@ -1,3 +1,5 @@
+# Analysis input only: a module of the former Python prototype, kept as a large realistic
+# fixture for tests/run_snapshots.py. It is not used as code.
 """Abstract domains for rowan (SPECIFICATION.md §5.4, §7).
 
 Everything here is immutable and hashable so that states can be compared for

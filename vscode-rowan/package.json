@@ -19,13 +19,13 @@
         "rowan.binaryPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the rowan-rs binary. Empty: look for rowan-rs/target/release/rowan-rs in the workspace, then `rowan-rs` on PATH."
+          "description": "Path to the rowan binary. Empty: look for rowan/target/release/rowan in the workspace, then `rowan` on PATH."
         },
         "rowan.extraArgs": {
           "type": "array",
           "items": { "type": "string" },
           "default": [],
-          "description": "Extra arguments for rowan-rs (e.g. [\"--no-entry\"], [\"--compat\"])."
+          "description": "Extra arguments for rowan (e.g. [\"--no-entry\"])."
         },
         "rowan.analyseOnSave": {
           "type": "boolean",

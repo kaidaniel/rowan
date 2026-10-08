@@ -1,3 +1,5 @@
+# Analysis input only: a module of the former Python prototype, kept as a large realistic
+# fixture for tests/run_snapshots.py. It is not used as code.
 """Abstract objects and the flow-sensitive analysis state.
 
 The heap parts of a state (rows, slots, elems, reqs) live in layered persistent maps

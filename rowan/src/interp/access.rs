@@ -105,7 +105,7 @@ impl Analyzer {
                 }
                 Kind::List | Kind::Tuple | Kind::Set => {
                     let is_slice = matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice"));
-                    if is_slice && self.opts.fixes && kind != Kind::Set {
+                    if is_slice && kind != Kind::Set {
                         // a slice is a container of the same elements (positions unknown)
                         let elem = state.slot(oid, Ns::Elem, STAR);
                         let kv = state.elems.get(&oid).unwrap_or(DATA);
@@ -168,7 +168,7 @@ impl Analyzer {
             let mut v = self.all_values(oid, ns, state);
             // the key's value is unknown: the content may also come from the object's open
             // sources / entry content — not from a closed record the function built itself
-            let content_unknown = !self.opts.fixes || !row.sources.is_empty() || !row.mutators.is_empty() || row.top || !row.terms.is_empty() || !row.dterms.is_empty() || !row.lterms.is_empty();
+            let content_unknown = !row.sources.is_empty() || !row.mutators.is_empty() || row.top || !row.terms.is_empty() || !row.dterms.is_empty() || !row.lterms.is_empty();
             if content_unknown {
                 let p = self.path_placeholder_value(oid, ns, param_slot_key(ph), &row, state);
                 v = v.join(&p);
@@ -202,7 +202,7 @@ impl Analyzer {
                     if let Some(m) = self.may_raise.last_mut() {
                         *m = true;
                     }
-                    if self.opts.fixes && try_guard && cls.tier != Tier::Missing && is_lit && single_target && self.strongable(oid) {
+                    if try_guard && cls.tier != Tier::Missing && is_lit && single_target && self.strongable(oid) {
                         // no exception raised: the key is present from here on
                         row = row.narrow_in(k, true);
                         state.set_row(oid, ns, row.clone());
@@ -432,7 +432,7 @@ impl Analyzer {
             }
             let mut row = state.row(oid, ns);
             let is_lit = matches!(key.kv, KeyVal::Lit(_));
-            if let (KeyVal::Param(ph), true) = (&key.kv, self.opts.fixes) {
+            if let KeyVal::Param(ph) = &key.kv {
                 // `del d[k]` with k a parameter: decided per call site when k is a literal there
                 self.record_event("narrow", *ph);
             }

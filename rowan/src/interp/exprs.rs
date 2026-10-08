@@ -164,13 +164,8 @@ impl Analyzer {
             }
             ast::Expr::YieldFrom(y) => {
                 let v = self.eval(&y.value, state);
-                let v = if self.opts.fixes {
-                    let nd = frontend::node(&*y.value);
-                    let it = self.iterate(&v, &nd, state);
-                    it.elem.flat()
-                } else {
-                    v
-                };
+                let nd = frontend::node(&*y.value);
+                let v = self.iterate(&v, &nd, state).elem.flat();
                 self.yield_value(v, state);
                 Value::data("yield")
             }
@@ -427,7 +422,7 @@ impl Analyzer {
         if op == ast::Operator::Mod {
             if let Some(x) = a.kv.as_lit() {
                 if let Some(sx) = intern::key_as_str(x) {
-                    let (sx, spec) = if self.opts.fixes && sx.matches("%d").count() == 1 && !sx.contains("%s") { (sx.replace("%d", "%s").into(), "%d") } else { (sx, "%s") };
+                    let (sx, spec) = if sx.matches("%d").count() == 1 && !sx.contains("%s") { (sx.replace("%d", "%s").into(), "%d") } else { (sx, "%s") };
                     let n = sx.matches("%s").count();
                     if n == 1 && !sx.replace("%s", "").contains('%') {
                         let _ = spec;

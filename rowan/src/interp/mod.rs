@@ -389,12 +389,12 @@ pub enum StoreTarget {
     Slot(ObjId, Ns, KeyId),
 }
 
-/// Engine options.  Everything on by default; `compat()` reproduces the Python prototype
-/// exactly (used for differential testing against the oracle).
+/// Engine options, all on by default; `ROWAN_NO=recency,scc,site,narrowed,positional`
+/// switches one off (for bisecting a change in results).
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
     /// resolve a placeholder to allocation sites with one representative row per distinct
-    /// entry row, instead of per object (AGENTS.md next step 3)
+    /// entry row, instead of per object
     pub site_resolution: bool,
     /// `State::same` compares the path-sensitive `narrowed` facts too
     pub narrowed_same: bool,
@@ -403,35 +403,19 @@ pub struct Options {
     pub scc: bool,
     /// recency abstraction for objects allocated in loops
     pub recency: bool,
-    /// positional slots for tuples held in non-literal containers
+    /// positional unpacking of literal tuple keys
     pub positional: bool,
-    /// semantic fixes over the prototype found by the extended golden suite: literal loops
-    /// with break/continue are unrolled, slicing a list yields a list, requirements recorded
-    /// under a condition inside a summarised function are "sometimes"
-    pub fixes: bool,
-    /// (part of `fixes`, separately switchable) call contexts keyed by line *and* column
-    pub ctx_col: bool,
-    /// (part of `fixes`) summary entry snapshot taken before the parameters are bound
-    pub early_base: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { site_resolution: true, narrowed_same: true, scc: true, recency: true, positional: true, fixes: true, ctx_col: true, early_base: true }
+        Options { site_resolution: true, narrowed_same: true, scc: true, recency: true, positional: true }
     }
 }
 
 impl Options {
-    pub fn compat() -> Self {
-        Options { site_resolution: false, narrowed_same: false, scc: false, recency: false, positional: false, fixes: false, ctx_col: false, early_base: false }
-    }
-    /// `ROWAN_COMPAT=1` → compat; `ROWAN_NO=recency,scc,site,narrowed,positional` switches
-    /// individual options off.
     pub fn from_env() -> Self {
-        let mut o = match std::env::var("ROWAN_COMPAT") {
-            Ok(v) if !v.is_empty() && v != "0" => Options::compat(),
-            _ => Options::default(),
-        };
+        let mut o = Options::default();
         if let Ok(v) = std::env::var("ROWAN_NO") {
             for name in v.split(',') {
                 match name.trim() {
@@ -440,13 +424,6 @@ impl Options {
                     "scc" => o.scc = false,
                     "recency" => o.recency = false,
                     "positional" => o.positional = false,
-                    "fixes" => {
-                        o.fixes = false;
-                        o.ctx_col = false;
-                        o.early_base = false;
-                    }
-                    "ctxcol" => o.ctx_col = false,
-                    "earlybase" => o.early_base = false,
                     _ => {}
                 }
             }
@@ -1125,12 +1102,10 @@ impl Analyzer {
     /// The value of a declared field: an instance of its annotated user class with `fixes`
     /// (nested TypedDicts / dataclasses), otherwise opaque data.
     pub fn typed_field_value(&mut self, cls: ObjId, field: &str, state: &mut State, ctx: &str) -> Value {
-        if self.opts.fixes {
-            if let Some(fc) = self.field_class(cls, field, state) {
-                if self.class_info_opt(fc).is_some() && !self.fresh_in_progress.contains(&fc) {
-                    let inst = self.fresh_instance(fc, state, &format!("{}.{}", ctx, field));
-                    return Value::obj(inst);
-                }
+        if let Some(fc) = self.field_class(cls, field, state) {
+            if self.class_info_opt(fc).is_some() && !self.fresh_in_progress.contains(&fc) {
+                let inst = self.fresh_instance(fc, state, &format!("{}.{}", ctx, field));
+                return Value::obj(inst);
             }
         }
         Value::data(&format!("field {}", field))

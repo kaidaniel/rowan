@@ -1,15 +1,15 @@
 [package]
-name = "rowan-rs"
+name = "rowan"
 version = "0.1.0"
 edition = "2021"
-description = "rowan: static key-set inference for Python records (Rust engine)"
+description = "rowan: static key-set inference for Python records"
 
 [[bin]]
-name = "rowan-rs"
+name = "rowan"
 path = "src/main.rs"
 
 [lib]
-name = "rowan_rs"
+name = "rowan"
 path = "src/lib.rs"
 
 [dependencies]

@@ -1,4 +1,3 @@
-#@engine rust
 """Polymorphism: a dict of classes, methods overridden in subclasses, abstract bases."""
 
 

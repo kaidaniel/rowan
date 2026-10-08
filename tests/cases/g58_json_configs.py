@@ -1,4 +1,3 @@
-#@engine rust
 """Config loading patterns: defaults merged with a file, nested sections, env overrides."""
 import json
 import os
@@ -26,8 +25,8 @@ cfg["log_level"]                         #@ input log_level
 section = cfg.get("cache", {})
 section["ttl"]                           #@ possibly ttl
 # "db" comes from DEFAULTS (proven), so only log_level is required of the file
-#@schema json.load@L12: always={log_level}
-#@schema json.load@L12['db']: always={user,password}
+#@schema json.load@L11: always={log_level}
+#@schema json.load@L11['db']: always={user,password}
 
 
 def env_override(cfg):
@@ -47,4 +46,4 @@ raw = json.loads(text)
 for item in raw["items"]:                #@ input items
     item["id"]                           #@ input id
     item.get("name")                     #@ none name
-#@schema json.loads@L46['items']['*']: always={id}
+#@schema json.loads@L45['items']['*']: always={id}

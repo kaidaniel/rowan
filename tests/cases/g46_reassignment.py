@@ -1,4 +1,3 @@
-#@engine rust
 """Variables rebound to different records: in sequence, in branches, in loops, after calls,
 through aliases, shadowed in nested scopes."""
 x = {"a": 1}

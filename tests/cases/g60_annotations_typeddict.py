@@ -1,4 +1,3 @@
-#@engine rust
 """Annotations as declared rows: TypedDict, dataclasses, Optional / Union / forward refs,
 typed parameters of entry points, Any fields."""
 from dataclasses import dataclass

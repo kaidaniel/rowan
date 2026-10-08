@@ -1,4 +1,3 @@
-#@engine rust
 """**kwargs through layers, dict(**a, **b), update chains, defaults merging."""
 
 

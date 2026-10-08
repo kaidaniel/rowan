@@ -1,4 +1,3 @@
-#@engine rust
 """Keys built from strings: case changes, affixes, formatting, replacements, and how they
 flow through renames."""
 raw = {"Name": 1, "AGE": 2, "e-mail": 3}

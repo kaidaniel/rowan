@@ -115,7 +115,7 @@ impl Analyzer {
                     // unbound method called with explicit self: Base.method(self, ...)
                     return self.call_user(oid, Some(args[0].clone()), args[1..].to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, call_ast, false);
                 }
-                if fi.is_classmethod.get() && self.opts.fixes {
+                if fi.is_classmethod.get() {
                     if let Some(cls) = fi.cls {
                         // `Cls.make(...)`: the class is the first argument
                         return self.call_user(oid, Some(Value::obj(cls)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, call_ast, false);
@@ -148,7 +148,7 @@ impl Analyzer {
                 let q = format!("call of {}", self.obj(oid).label);
                 self.unknown_call(&q, Some(&Value::obj(oid)), args, kwargs, star_args, star_kwargs, state, node)
             }
-            Kind::Partial if self.opts.fixes => {
+            Kind::Partial => {
                 let call = Call { qual: "partial.__call__".into(), recv: Some(Value::obj(oid)), args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
                 crate::models::partial_call(self, state, &call)
             }
@@ -261,14 +261,14 @@ impl Analyzer {
         let row = if ci.open_base { Row::with_source(Source::new(&format!("instance {}@L{}", ci.name, node.line), SourceKind::Class)) } else { Row::new() };
         // the allocation site includes the class: `cls()` with several possible classes must
         // not collapse onto one instance (prototype: same site, last class wins)
-        let site = if self.opts.fixes { format!("{}:{}", super::site_string(node), ci.name) } else { super::site_string(node) };
+        let site = format!("{}:{}", super::site_string(node), ci.name);
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", ci.name, node.line), Payload::Cls(cls), Some(row), Ns::Attr, None, None);
         let ns = if ci.typed_dict { Ns::Item } else { Ns::Attr };
         if ci.typed_dict {
             state.set_row(inst, Ns::Item, Row::new());
         }
         if ci.has_fields() {
-            let fields = if self.opts.fixes { self.dataclass_fields_mro(cls) } else { ci.fields() };
+            let fields = self.dataclass_fields_mro(cls);
             for (i, (fname, default)) in fields.iter().enumerate() {
                 let fk = key_str_lit(fname);
                 let mut v: Option<Value> = None;
@@ -360,7 +360,7 @@ impl Analyzer {
         let fnode = fi.node;
         // the call context: per call site (line and column) with `fixes`; the prototype used
         // the line only, so two calls on one line shared their clones
-        let site = if self.opts.ctx_col && node.addr != 0 { format!("L{}:{}", node.line, node.col) } else { format!("L{}", node.line) };
+        let site = if node.addr != 0 { format!("L{}:{}", node.line, node.col) } else { format!("L{}", node.line) };
         self.analysed_funcs.insert(foid);
         // --- symbolic summaries (§7.3/§9): analyse the body once, instantiate per call ---
         if self.use_summaries && self.model_call == 0 {

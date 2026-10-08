@@ -1,4 +1,3 @@
-#@engine rust
 """Recency abstraction (Rust engine): the object allocated by the current loop iteration is
 strong — attributes set on it after construction are proven on it, and keys every iteration
 sets are proven on the per-site summary object the collection holds afterwards."""

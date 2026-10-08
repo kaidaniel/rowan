@@ -1,5 +1,5 @@
 .DS_Store
 __pycache__/
 *.pyc
-rowan-rs/target/
-rowan-rs/py/target/
+rowan/target/
+rowan/py/target/

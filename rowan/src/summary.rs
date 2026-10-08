@@ -338,7 +338,7 @@ impl Analyzer {
             Payload::Ph(p) if self.kind(oid) == Kind::Ph => p.cls.get(),
             _ => None,
         };
-        let conditional = self.opts.fixes && self.branch_depth > 0;
+        let conditional = self.branch_depth > 0;
         let sr = SymReq { node: *node, key_kv, row: row.clone(), oid, ns, guarded, rel_chain: self.call_chain.clone(), kind, file: fname, text, cls: guard, conditional };
         self.defer(sr);
     }
@@ -563,10 +563,10 @@ impl Analyzer {
             st.env = IndexMap::new();
             let self_v = self_ph.map(|sp| Value::with_kv(ObjSet::one(sp), KeyVal::Param(sp)));
             let fake = Node::synthetic(fnode.node().module, fnode.node().line);
-            // the entry snapshot: with `fixes`, before the parameters are bound, so that cells
-            // holding captured parameters and the *args / **kwargs containers are part of the
-            // footprint and get instantiated at each call site (the prototype loses them)
-            let base_early = if self.opts.early_base { Some(st.copy()) } else { None };
+            // the entry snapshot is taken before the parameters are bound, so that cells holding
+            // captured parameters and the *args / **kwargs containers are part of the footprint
+            // and get instantiated at each call site
+            let base_early = Some(st.copy());
             self.bind_params(&fi, &self_v, &args, &kwargs, &[], &[], &mut st, &fake);
             if let Some(p) = params {
                 if let Some(va) = &p.vararg {
@@ -1167,7 +1167,7 @@ impl Analyzer {
     #[allow(clippy::too_many_arguments)]
     pub fn emit_access(&mut self, node: &Node, kv: &KeyVal, row: &Row, oid: ObjId, ns: Ns, guarded: bool, chain: &Chain, file: &str, state: &mut State, text: &str, guard_cls: Option<ObjId>, conditional: bool) -> Vec<(KeyId, Tier)> {
         let mut out: Vec<(KeyId, Tier)> = Vec::new();
-        let conditional = conditional || (self.opts.fixes && self.branch_depth > 0);
+        let conditional = conditional || self.branch_depth > 0;
         if row.symbolic() {
             if !self.sum_stack.is_empty() {
                 self.defer(SymReq { node: *node, key_kv: kv.clone(), row: row.clone(), oid, ns, guarded, rel_chain: chain.clone(), kind: "load", file: file.to_string(), text: text.to_string(), cls: guard_cls, conditional });
@@ -1385,7 +1385,7 @@ impl Inst {
         }
         let mut erow = |r: Rho| -> Row { erows.get(&r).cloned().unwrap_or_default() };
         let mut kv_of = |ph: ObjId| -> KeyVal { kvs.get(&ph).cloned().unwrap_or(DATA) };
-        let bot_is_data = an.opts.fixes;
+        let bot_is_data = true;
         let mut hit = if row.is_entry() { erow(row.entry_rho().unwrap()) } else { row.concretise_opt(&mut erow, &mut kv_of, bot_is_data) };
         if hit.symbolic() && !self.in_summary {
             hit = hit.concretise_opt(&mut erow, &mut kv_of, bot_is_data);
@@ -1447,7 +1447,7 @@ impl Inst {
         if !existed {
             self.new_clones.insert(nid);
         }
-        if an.opts.fixes && self.clones.values().any(|c| *c == nid) {
+        if self.clones.values().any(|c| *c == nid) {
             self.collided.insert(nid);
             self.new_clones.remove(&nid);
         }
@@ -1547,7 +1547,7 @@ impl Inst {
                 continue;
             }
             let mut v = pre.slot(p, ph.ns, key);
-            if an.opts.fixes && matches!(an.kind(p), Kind::List | Kind::Tuple) && ph.ns == Ns::Item {
+            if matches!(an.kind(p), Kind::List | Kind::Tuple) && ph.ns == Ns::Item {
                 // `xs[i]` through a placeholder: the positional slot, else the element slot
                 v = match intern::key_as_int(key) {
                     Some(i) if i >= 0 => pre.slot(p, Ns::Pos, key),
@@ -1566,7 +1566,7 @@ impl Inst {
                 if ph.ns == Ns::Cell {
                     // a data cell not bound at this (symbolic) call site: still an entry fact
                     // of the summary being built, resolved when *it* is instantiated
-                    v = if an.opts.fixes && !an.sum_stack.is_empty() && an.is_entry_object(p) { an.path_placeholder_value(p, ph.ns, key, &Row::new(), state) } else { Value::new() };
+                    v = if !an.sum_stack.is_empty() && an.is_entry_object(p) { an.path_placeholder_value(p, ph.ns, key, &Row::new(), state) } else { Value::new() };
                 } else if row.open() || an.kind(p) == Kind::Ph {
                     v = an.path_placeholder_value(p, ph.ns, key, &row, state);
                 }

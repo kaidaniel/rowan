@@ -1,4 +1,3 @@
-#@engine rust
 """Comprehension corner cases: nested generators, conditions, walrus, unpacking targets."""
 pairs = [("a", {"v": 1}), ("b", {"v": 2, "w": 3})]
 by_name = {name: rec for name, rec in pairs}

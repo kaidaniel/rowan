@@ -1,4 +1,3 @@
-#@engine rust
 """dict / set methods: pop, popitem, clear, copy, fromkeys, keys/values/items views,
 setdefault chains, key-set arithmetic."""
 d = {"a": 1, "b": 2, "c": 3}

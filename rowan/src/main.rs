@@ -1,8 +1,8 @@
-//! CLI: rowan-rs FILE.py [--json] [--golden] [--no-rows] [--no-summaries] [--no-entry] [--no-imports]
+//! CLI: rowan FILE.py [--json] [--golden] [--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports]
 use std::io::Write;
 
-use rowan_rs::interp::Analyzer;
-use rowan_rs::report;
+use rowan::interp::Analyzer;
+use rowan::report;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -14,10 +14,8 @@ fn main() {
     let mut show_summaries = true;
     let mut entry = true;
     let mut imports = true;
-    let mut compat = false;
     for a in &args {
         match a.as_str() {
-            "--compat" => compat = true,
             "--json" => json = true,
             "--golden" => golden = true,
             "--facts" => facts = true,
@@ -33,12 +31,12 @@ fn main() {
         }
     }
     let Some(file) = file else {
-        eprintln!("usage: rowan-rs FILE.py [--json|--golden] [--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports] [--compat]");
+        eprintln!("usage: rowan FILE.py [--json|--golden|--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports]");
         std::process::exit(2);
     };
     let out = std::thread::Builder::new()
         .stack_size(1 << 30)
-        .spawn(move || run(&file, json, golden, facts, show_rows, show_summaries, entry, imports, compat))
+        .spawn(move || run(&file, json, golden, facts, show_rows, show_summaries, entry, imports))
         .unwrap()
         .join();
     match out {
@@ -48,25 +46,22 @@ fn main() {
             let _ = so.write_all(b"\n");
         }
         Ok(Err(e)) => {
-            eprintln!("rowan-rs: {}", e);
+            eprintln!("rowan: {}", e);
             std::process::exit(1);
         }
         Err(_) => {
-            eprintln!("rowan-rs: analysis panicked");
+            eprintln!("rowan: analysis panicked");
             std::process::exit(1);
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run(file: &str, json: bool, golden: bool, facts: bool, show_rows: bool, show_summaries: bool, entry: bool, imports: bool, compat: bool) -> Result<String, String> {
+fn run(file: &str, json: bool, golden: bool, facts: bool, show_rows: bool, show_summaries: bool, entry: bool, imports: bool) -> Result<String, String> {
     let src = std::fs::read_to_string(file).map_err(|e| format!("{}: {}", file, e))?;
     let dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".into());
     let dir = std::fs::canonicalize(&dir).map(|p| p.to_string_lossy().to_string()).unwrap_or(dir);
     let mut an = Analyzer::new(src.clone(), file, vec![dir], entry, imports, None)?;
-    if compat {
-        an.opts = rowan_rs::interp::Options::compat();
-    }
     an.facts_on = facts;
     if golden {
         // `#@row NAME:` expectations are evaluated at the statement on that line

@@ -1,4 +1,3 @@
-#@engine rust
 """async def / await / async for / async with."""
 import json
 
@@ -41,4 +40,4 @@ async def main(urls):
     return r
 
 
-#@schema json.load@L11: always={timeout}
+#@schema json.load@L10: always={timeout}

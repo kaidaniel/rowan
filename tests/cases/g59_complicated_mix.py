@@ -1,4 +1,3 @@
-#@engine rust
 """A larger program mixing registries, closures, classes, loops and configs."""
 import json
 
@@ -66,4 +65,4 @@ STEPS["load"]["requires"]                #@ ok load ; ok requires
 STEPS["parse"]["after"]                  #@ missing after
 runner.done["load"]                      #@ ok load
 runner.done["nope"]                      #@ missing nope
-#@schema json.load@L17['rows']['*']: always={id}
+#@schema json.load@L16['rows']['*']: always={id}

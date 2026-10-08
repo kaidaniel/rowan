@@ -1,4 +1,3 @@
-#@engine rust
 """Imports: functions, module-level dicts, classes, aliases; module attribute writes."""
 import helpers2
 import helpers2 as h2

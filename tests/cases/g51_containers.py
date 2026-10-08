@@ -1,4 +1,3 @@
-#@engine rust
 """Records inside containers: lists, tuples, sets, nested dicts, zip / enumerate / items,
 sorted, append in loops, indexing with constants and variables."""
 rows = [{"id": 1, "name": "a"}, {"id": 2}]

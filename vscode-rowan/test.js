@@ -6,7 +6,7 @@ const path = require("path");
 const { renderHover, indexResult } = require("./extension.js");
 
 const root = path.join(__dirname, "..");
-const bin = process.env.ROWAN_RS || path.join(root, "rowan-rs", "target", "release", "rowan-rs");
+const bin = process.env.ROWAN_BIN || path.join(root, "rowan", "target", "release", "rowan");
 const file = path.join(root, "tests", "cases", "a01_conditional_key.py");
 const res = JSON.parse(execFileSync(bin, [file, "--facts"], { maxBuffer: 64 * 1024 * 1024 }).toString());
 const idx = indexResult(res);

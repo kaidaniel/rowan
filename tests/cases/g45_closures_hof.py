@@ -1,4 +1,3 @@
-#@engine rust
 """Closures taking closures, returning lambdas, decorators with arguments, registries of
 callables, partial application."""
 import functools

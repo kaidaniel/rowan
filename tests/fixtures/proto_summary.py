@@ -1,3 +1,5 @@
+# Analysis input only: a module of the former Python prototype, kept as a large realistic
+# fixture for tests/run_snapshots.py. It is not used as code.
 """Symbolic function summaries (SPECIFICATION.md §7.3, §9).
 
 A function body is analysed once against *placeholder* objects — its parameters,

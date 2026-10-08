@@ -1,4 +1,4 @@
-// rowan VS Code extension: runs `rowan-rs FILE --facts` and shows the inferred facts about a
+// rowan VS Code extension: runs `rowan FILE --facts` and shows the inferred facts about a
 // variable on hover (keys it has, keys required of it, possible literal values) plus the
 // missing-key verdicts as diagnostics.  Plain JavaScript, no build step.
 "use strict";
@@ -120,12 +120,12 @@ function findBinary(config, workspaceFolders) {
   const configured = config.get("binaryPath");
   if (configured) return configured;
   for (const f of workspaceFolders || []) {
-    for (const rel of ["rowan-rs/target/release/rowan-rs", "rowan-rs/target/debug/rowan-rs"]) {
+    for (const rel of ["rowan/target/release/rowan", "rowan/target/debug/rowan"]) {
       const p = path.join(f.uri.fsPath, rel);
       if (fs.existsSync(p)) return p;
     }
   }
-  return "rowan-rs";
+  return "rowan";
 }
 
 function runEngine(bin, file, extraArgs, timeoutSeconds) {
@@ -135,7 +135,7 @@ function runEngine(bin, file, extraArgs, timeoutSeconds) {
       try {
         resolve(JSON.parse(stdout));
       } catch (e) {
-        reject(new Error("rowan-rs returned invalid JSON"));
+        reject(new Error("rowan returned invalid JSON"));
       }
     });
   });

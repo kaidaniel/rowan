@@ -1,4 +1,3 @@
-#@engine rust
 """A small command-line tool: argparse, csv rows, a json config, an output summary."""
 import argparse
 import csv
@@ -47,5 +46,5 @@ def main():
 
 
 main()
-#@schema csv.DictReader@L18: always={region,amount} sometimes={id}
-#@schema json.load@L36: always={verbose}
+#@schema csv.DictReader@L17: always={region,amount} sometimes={id}
+#@schema json.load@L35: always={verbose}

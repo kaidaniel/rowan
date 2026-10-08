@@ -6,16 +6,16 @@ record is closed or open and where other keys could come from, the keys this pro
 requires of an external input, possible literal values, and the verdicts on that line.
 Missing-key verdicts are also shown as diagnostics (✗ error, ⚠ warning, ◌ information).
 
-The extension runs the `rowan-rs` binary (`rowan-rs FILE --facts`) when a Python file is
+The extension runs the `rowan` binary (`rowan FILE --facts`) when a Python file is
 opened or saved, and on the command **Rowan: Analyse current file**. Unsaved edits are not
 analysed until you save.
 
 ## Setup
 
-1. Build the engine: `cd rowan-rs && cargo build --release`.
+1. Build the engine: `cd rowan && cargo build --release`.
 2. Install the extension from the `.vsix` (`Extensions: Install from VSIX…`), or open this
    folder in VS Code and press F5 to run it in an Extension Development Host.
-3. If the workspace does not contain `rowan-rs/target/release/rowan-rs`, set
+3. If the workspace does not contain `rowan/target/release/rowan`, set
    `rowan.binaryPath` to the binary.
 
 Settings: `rowan.binaryPath`, `rowan.extraArgs` (e.g. `["--no-entry"]` to skip the

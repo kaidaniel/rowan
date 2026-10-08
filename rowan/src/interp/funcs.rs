@@ -178,7 +178,7 @@ impl Analyzer {
                 }
                 // the decorator application's call site: the decorator itself with `fixes`
                 // (stacked decorators applied at the def's site shared one clone context)
-                let at = if self.opts.fixes { frontend::node(d) } else { fnode };
+                let at = frontend::node(d);
                 fv = self.call_value(&dv, &at, None, state, Some(vec![fv.clone()]));
                 continue;
             }
