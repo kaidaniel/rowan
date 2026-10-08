@@ -19,7 +19,7 @@
         "rowan.binaryPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the rowan binary. Empty: look for rowan/target/release/rowan in the workspace, then `rowan` on PATH."
+          "description": "Path to the rowan binary. Empty: look for rowan/target/release/rowan under a workspace folder, under any ancestor of the analysed file, or next to the extension; then ~/.cargo/bin/rowan; then `rowan` on PATH."
         },
         "rowan.extraArgs": {
           "type": "array",

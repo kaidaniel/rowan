@@ -142,16 +142,44 @@ function severityFor(tier) {
 
 // ----------------------------------------------------------------- running the engine
 
-function findBinary(config, workspaceFolders) {
+const BIN_RELS = ["rowan/target/release/rowan", "rowan/target/debug/rowan", "target/release/rowan", "target/debug/rowan"];
+
+/**
+ * The engine binary: the `rowan.binaryPath` setting; else the build output under a
+ * workspace folder, under any ancestor of the analysed file, or next to this extension
+ * (running from the repository); else `~/.cargo/bin/rowan` (`cargo install --path rowan`);
+ * else `rowan` on PATH.  Returns null when nothing exists and PATH has no `rowan`.
+ */
+function findBinary(config, workspaceFolders, filePath) {
   const configured = config.get("binaryPath");
   if (configured) return configured;
-  for (const f of workspaceFolders || []) {
-    for (const rel of ["rowan/target/release/rowan", "rowan/target/debug/rowan"]) {
-      const p = path.join(f.uri.fsPath, rel);
+  const roots = [];
+  for (const f of workspaceFolders || []) roots.push(f.uri.fsPath);
+  if (filePath) {
+    let dir = path.dirname(filePath);
+    for (let i = 0; i < 12; i++) {
+      roots.push(dir);
+      const up = path.dirname(dir);
+      if (up === dir) break;
+      dir = up;
+    }
+  }
+  roots.push(path.join(__dirname, ".."));
+  for (const root of roots) {
+    for (const rel of BIN_RELS) {
+      const p = path.join(root, rel);
       if (fs.existsSync(p)) return p;
     }
   }
-  return "rowan";
+  const home = process.env.HOME || process.env.USERPROFILE;
+  if (home) {
+    const p = path.join(home, ".cargo", "bin", "rowan");
+    if (fs.existsSync(p)) return p;
+  }
+  for (const dir of (process.env.PATH || "").split(path.delimiter)) {
+    if (dir && fs.existsSync(path.join(dir, "rowan"))) return path.join(dir, "rowan");
+  }
+  return null;
 }
 
 function runEngine(bin, file, extraArgs, timeoutSeconds) {
@@ -196,7 +224,17 @@ function activate(context) {
   async function analyse(doc) {
     if (!doc || doc.languageId !== "python" || doc.uri.scheme !== "file") return;
     const config = vscode.workspace.getConfiguration("rowan");
-    const bin = findBinary(config, vscode.workspace.workspaceFolders);
+    const bin = findBinary(config, vscode.workspace.workspaceFolders, doc.uri.fsPath);
+    if (!bin) {
+      status.text = "$(warning) rowan: engine not found";
+      status.show();
+      const choice = await vscode.window.showErrorMessage(
+        "rowan: engine binary not found. Build it with `cargo build --release` in the rowan/ directory of the rowan repository (or `cargo install --path rowan`), or set rowan.binaryPath.",
+        "Open settings"
+      );
+      if (choice === "Open settings") vscode.commands.executeCommand("workbench.action.openSettings", "rowan.binaryPath");
+      return;
+    }
     status.text = "$(sync~spin) rowan";
     status.show();
     try {

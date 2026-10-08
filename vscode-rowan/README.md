@@ -17,8 +17,10 @@ analysed until you save.
 1. Build the engine: `cd rowan && cargo build --release`.
 2. Install the extension from the `.vsix` (`Extensions: Install from VSIX…`), or open this
    folder in VS Code and press F5 to run it in an Extension Development Host.
-3. If the workspace does not contain `rowan/target/release/rowan`, set
-   `rowan.binaryPath` to the binary.
+3. The extension finds the binary under a workspace folder, under any ancestor of the
+   file being analysed, or next to the extension when run from the repository, then in
+   `~/.cargo/bin` (`cargo install --path rowan` puts it there, for use from any
+   workspace), then on PATH. Otherwise set `rowan.binaryPath` to the binary.
 
 Settings: `rowan.binaryPath`, `rowan.extraArgs` (e.g. `["--no-entry"]` to skip the
 entry-point pass on large files), `rowan.analyseOnSave`, `rowan.timeoutSeconds`.
