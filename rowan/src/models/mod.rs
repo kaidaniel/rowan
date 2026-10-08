@@ -7,7 +7,7 @@ pub mod pandas;
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
 
-use crate::domain::{join_values, kv_join, kv_map, FnKind, KeyVal, Ns, RenameFn, Row, RowData, Source, SourceKind, Value, DATA};
+use crate::domain::{join_values, kv_join, FnKind, KeyVal, Ns, RenameFn, Row, RowData, Source, SourceKind, Value, DATA};
 use crate::interp::access::append_slot_key;
 use crate::interp::funcs::Elem;
 use crate::interp::{Analyzer, Call, Payload, ViewKind};
@@ -56,7 +56,7 @@ impl Registry {
         r(
             &[
                 "builtins.int", "builtins.float", "builtins.bool", "builtins.len", "builtins.print", "builtins.repr", "builtins.isinstance",
-                "builtins.type", "builtins.id", "builtins.hash", "builtins.abs", "builtins.round", "builtins.min", "builtins.max", "builtins.sum",
+                "builtins.type", "builtins.id", "builtins.hash", "builtins.abs", "builtins.round",  "builtins.sum",
                 "builtins.any", "builtins.all", "builtins.format", "builtins.input", "builtins.callable", "builtins.issubclass", "builtins.hex",
                 "builtins.chr", "builtins.ord", "builtins.range", "builtins.open", "builtins.hasattr", "builtins.divmod", "builtins.pow",
                 "builtins.bytes", "builtins.object",
@@ -73,6 +73,7 @@ impl Registry {
         r(&["dict.setdefault"], m_setdefault);
         r(&["dict.update"], m_update);
         r(&["dict.pop"], m_pop);
+        r(&["builtins.max", "builtins.min"], m_minmax);
         r(&["dict.popitem"], m_popitem);
         r(&["dict.clear"], m_clear);
         r(&["dict.keys", "dict.values", "dict.items"], m_views);
@@ -179,6 +180,11 @@ fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let recs = an.record_objects(src);
         if !recs.is_empty() {
             an.copy_into(oid, Ns::Item, src, st, true, &KeySet::new());
+            if let Some(s1) = src.single() {
+                if an.is_entry_object(s1) {
+                    an.obj_mut(oid).copied_from = Some(s1);
+                }
+            }
         } else {
             for x in src.pts.iter() {
                 match an.kind(x) {
@@ -283,12 +289,17 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
                 if let Some(items) = &it.items {
                     let reversed = c.qual.as_str() == "builtins.reversed";
-                    if an.obj(oid).single && items.len() <= 64 && (!reorders || reversed) {
+                    let sorted = c.qual.as_str() == "builtins.sorted";
+                    if an.obj(oid).single && items.len() <= 64 && kind != Kind::Set {
+                        // the count is known even when the order is not (sorted: every
+                        // position may hold any item)
                         an.obj_mut(oid).literal_len = Some(items.len());
                         let n = items.len();
+                        let all = join_values(items.clone());
                         for (i, item) in items.iter().enumerate() {
                             let pos = if reversed { n - 1 - i } else { i };
-                            st.set_slot(oid, Ns::Pos, intern::key_int(pos as i64), item.clone(), true);
+                            let v = if sorted { all.clone() } else { item.clone() };
+                            st.set_slot(oid, Ns::Pos, intern::key_int(pos as i64), v, true);
                         }
                     }
                 }
@@ -299,6 +310,22 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         an.obj_mut(oid).literal_len = Some(0);
     }
     Value::obj(oid)
+}
+
+/// `max(xs, key=f)` / `min(xs)`: an element of the container (the key function runs on it);
+/// with several arguments, any of them.
+fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    if c.args.len() == 1 {
+        let it = an.iterate(&c.args[0], &c.node, st);
+        let elem = it.elem.one_or_empty();
+        if let Some(kf) = c.kw("key") {
+            if !kf.pts.is_empty() {
+                an.call_value(&kf, &c.node, None, st, Some(vec![elem.clone()]));
+            }
+        }
+        return elem;
+    }
+    join_values(c.args.clone())
 }
 
 fn m_zip(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -378,6 +405,26 @@ fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     an.obj_mut(oid).literal_len = None;
     if c.args.len() >= 2 {
         let it = an.iterate(&c.args[1], &c.node, st);
+        if !c.qual.ends_with("filter") && an.obj(oid).single {
+            if let Some(items) = &it.items {
+                if items.len() <= crate::interp::UNROLL_MAX {
+                    // known items: the function per item, positions kept
+                    let mut outs = Vec::new();
+                    for (i, item) in items.iter().enumerate() {
+                        an.frame_mut().unroll.push(i);
+                        let r = an.call_value(&c.args[0], &c.node, None, st, Some(vec![item.clone()]));
+                        an.frame_mut().unroll.pop();
+                        st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), r.clone(), true);
+                        outs.push(r);
+                    }
+                    let res = join_values(outs);
+                    st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(res.pts.clone(), DATA), true);
+                    st.elems.insert(oid, res.kv);
+                    an.obj_mut(oid).literal_len = Some(items.len());
+                    return Value::obj(oid);
+                }
+            }
+        }
         let elem = it.elem.one_or_empty();
         let res = if c.qual.ends_with("filter") { elem } else { an.call_value(&c.args[0], &c.node, None, st, Some(vec![elem])) };
         st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(res.pts.clone(), DATA), true);
@@ -386,9 +433,9 @@ fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::obj(oid)
 }
 
-fn m_str(_an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
+fn m_str(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
     if let Some(a) = c.args.first() {
-        return Value::kv_only(kv_map(&a.kv, &RenameFn::new(FnKind::Str)));
+        return Value::kv_only(an.rename_kv(&a.kv, &RenameFn::new(FnKind::Str)));
     }
     Value::lit_str("")
 }
@@ -415,11 +462,11 @@ fn m_super(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::obj(oid)
 }
 
-fn m_str_fn(_an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
+fn m_str_fn(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
     let fname = last(&c.qual);
     if let Some(a) = c.args.first() {
         let f = FnKind::from_name(fname).filter(|f| matches!(f, FnKind::Upper | FnKind::Lower | FnKind::Strip | FnKind::Title)).unwrap_or(FnKind::Strip);
-        return Value::kv_only(kv_map(&a.kv, &RenameFn::new(f)));
+        return Value::kv_only(an.rename_kv(&a.kv, &RenameFn::new(f)));
     }
     Value::data("str")
 }
@@ -428,12 +475,12 @@ fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual);
     let kv = c.recv.as_ref().map(|r| r.kv.clone()).unwrap_or(DATA);
     match name {
-        "upper" | "lower" | "strip" | "title" => Value::kv_only(kv_map(&kv, &RenameFn::new(FnKind::from_name(name).unwrap()))),
-        "lstrip" | "rstrip" => Value::kv_only(kv_map(&kv, &RenameFn::new(FnKind::Strip))),
+        "upper" | "lower" | "strip" | "title" => Value::kv_only(an.rename_kv(&kv, &RenameFn::new(FnKind::from_name(name).unwrap()))),
+        "lstrip" | "rstrip" => Value::kv_only(an.rename_kv(&kv, &RenameFn::new(FnKind::Strip))),
         "capitalize" | "casefold" | "swapcase" => Value::data("str"),
         "replace" if c.args.len() >= 2 && c.args[0].kv.as_lit().is_some() && c.args[1].kv.as_lit().is_some() => {
             let arg = intern::key_tuple(vec![c.args[0].kv.as_lit().unwrap(), c.args[1].kv.as_lit().unwrap()]);
-            Value::kv_only(kv_map(&kv, &RenameFn::with_arg(FnKind::Replace, arg)))
+            Value::kv_only(an.rename_kv(&kv, &RenameFn::with_arg(FnKind::Replace, arg)))
         }
         "format" => {
             if let Some(k) = kv.as_lit() {
@@ -449,10 +496,10 @@ fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             }
                         }
                         if !pre.is_empty() {
-                            out = kv_map(&out, &RenameFn::with_arg(FnKind::Prefix, key_str_lit(&pre)));
+                            out = an.rename_kv(&out, &RenameFn::with_arg(FnKind::Prefix, key_str_lit(&pre)));
                         }
                         if !post.is_empty() {
-                            out = kv_map(&out, &RenameFn::with_arg(FnKind::Suffix, key_str_lit(&post)));
+                            out = an.rename_kv(&out, &RenameFn::with_arg(FnKind::Suffix, key_str_lit(&post)));
                         }
                         return Value::kv_only(out);
                     }
@@ -489,8 +536,12 @@ fn m_get(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         for o in recv.pts.iter() {
             if an.kind(o) == Kind::Ph {
                 an.record_event("narrow", o);
+            } else if let Some(src) = an.obj(o).copied_from {
+                an.record_event("narrow", src);
             }
         }
+    } else if let Some(ph) = key.kv.as_param() {
+        an.record_event("narrow", ph);
     }
     if let Some(k) = key.kv.as_lit() {
         let recs = an.record_objects(&recv);
@@ -577,10 +628,78 @@ fn m_update(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     an.none_v.clone()
 }
 
+/// `xs.pop()` / `xs.pop(i)` on one list: positional when the list's positions are known.
+fn list_pop_one(an: &mut Analyzer, st: &mut State, oid: u32, c: &Call) -> Value {
+    let ll = an.obj(oid).literal_len;
+    let single = an.obj(oid).single;
+    let idx = c.args.first().and_then(|a| a.kv.as_lit()).and_then(intern::key_as_int);
+    let keyed = c.args.first().map(|a| a.kv.as_lit().is_none()).unwrap_or(false);
+    if let (Some(n), false) = (ll, keyed) {
+        if single && n > 0 && an.frame().loop_depth == 0 {
+            let i = match idx {
+                None => n as i64 - 1,
+                Some(i) if i < 0 => n as i64 + i,
+                Some(i) => i,
+            };
+            if 0 <= i && (i as usize) < n {
+                let v = st.slot(oid, Ns::Pos, intern::key_int(i));
+                for j in (i as usize)..(n - 1) {
+                    let nv = st.slot(oid, Ns::Pos, intern::key_int(j as i64 + 1));
+                    st.set_slot(oid, Ns::Pos, intern::key_int(j as i64), nv, true);
+                }
+                st.pop_slot(oid, Ns::Pos, intern::key_int(n as i64 - 1));
+                an.obj_mut(oid).literal_len = Some(n - 1);
+                return v;
+            }
+        }
+    }
+    an.obj_mut(oid).literal_len = None;
+    an.elem_of(&Value::obj(oid), &c.node, st)
+}
+
 fn m_pop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let recv = c.recv.clone().unwrap_or_default();
+    let int_key = c.args.first().and_then(|a| a.kv.as_lit()).map(|k| intern::key_as_int(k).is_some()).unwrap_or(false);
+    let listy = recv.pts.iter().all(|o| matches!(an.kind(o), Kind::Ph | Kind::List | Kind::Tuple));
+    if !recv.pts.is_empty() && listy && (c.args.is_empty() || int_key) {
+        // list.pop through a placeholder (or with no key): an element
+        let mut outs = Vec::new();
+        for oid in recv.pts.iter() {
+            match an.kind(oid) {
+                Kind::Ph => outs.push(an.iterate(&Value::obj(oid), &c.node, st).elem.flat()),
+                _ => outs.push(list_pop_one(an, st, oid, c)),
+            }
+        }
+        return join_values(outs);
+    }
     let Some(key) = c.args.first() else { return Value::data("pop") };
     let has_default = c.args.len() > 1;
-    let recv = c.recv.clone().unwrap_or_default();
+    if key.kv.as_lit().is_some() {
+        // presence on a placeholder (or a copy of one): decided per call site
+        for o in recv.pts.iter() {
+            if an.kind(o) == Kind::Ph {
+                an.record_event("narrow", o);
+            } else if let Some(src) = an.obj(o).copied_from {
+                an.record_event("narrow", src);
+            }
+        }
+    }
+    if let Some(k) = key.kv.as_lit() {
+        let recs = an.record_objects(&recv);
+        if !recs.is_empty() && recs.len() == recv.pts.len() && recs.iter().all(|o| an.kind(*o) != Kind::Frame) {
+            let rows: Vec<Row> = recs.iter().map(|o| st.row(*o, Ns::Item)).collect();
+            if has_default && rows.iter().all(|r| r.closed() && !r.present.contains(k)) {
+                // absent everywhere: the default alone
+                return c.args[1].clone();
+            }
+            if rows.iter().all(|r| r.definite.contains(k)) {
+                // present everywhere: the value alone
+                let out = an.load_item(&recv, Ns::Item, key, &c.node, st, !has_default);
+                an.delete_item(&recv, Ns::Item, key, &c.node, st, false);
+                return out;
+            }
+        }
+    }
     let mut out = an.load_item(&recv, Ns::Item, key, &c.node, st, !has_default);
     an.delete_item(&recv, Ns::Item, key, &c.node, st, false);
     if has_default {
@@ -680,8 +799,11 @@ fn m_lpop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let recv = c.recv.clone().unwrap_or_default();
     let mut outs = Vec::new();
     for oid in recv.pts.iter() {
-        outs.push(an.elem_of(&Value::obj(oid), &c.node, st));
-        an.obj_mut(oid).literal_len = None;
+        if an.kind(oid) == Kind::Ph {
+            outs.push(an.iterate(&Value::obj(oid), &c.node, st).elem.flat());
+            continue;
+        }
+        outs.push(list_pop_one(an, st, oid, c));
     }
     if outs.is_empty() {
         Value::data("pop")

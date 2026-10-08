@@ -3,7 +3,7 @@
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{kv_join, kv_map, FnKind, KeyVal, KeysOf, Ns, ObjSet, RenameFn, Value, DATA, BOT};
+use crate::domain::{kv_join, kv_map, FnKind, KeyVal, KeysOf, Ns, ObjSet, RenameFn, Row, Value, DATA, BOT};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_float, key_int, key_str_lit, s, KeyId, STAR};
 use crate::state::{Kind, State};
@@ -50,6 +50,11 @@ impl Analyzer {
             }
             ast::Expr::Subscript(sub) => {
                 let obj = self.eval(&sub.value, state);
+                if let ast::Expr::Slice(sl) = &*sub.slice {
+                    if let Some(v) = self.slice_positional(&obj, sl, node, state) {
+                        return v;
+                    }
+                }
                 let key = self.eval_key(&sub.slice, state);
                 let nd = frontend::node(node);
                 self.load_item(&obj, Ns::Item, &key, &nd, state, true)
@@ -59,7 +64,8 @@ impl Analyzer {
                 if !self.may_raise.is_empty() {
                     let all_safe = fv.pts.iter().all(|o| match &self.obj(o).payload {
                         Payload::Method(q, _) if self.kind(o) == Kind::Method => SAFE_METHODS.contains(&q.as_str()),
-                        _ => false,
+                        // user code: whether it raises is reported by its own analysis
+                        _ => matches!(self.kind(o), Kind::Function | Kind::Bound | Kind::Class | Kind::Partial),
                     });
                     if !all_safe {
                         *self.may_raise.last_mut().unwrap() = true;
@@ -111,7 +117,10 @@ impl Analyzer {
             ast::Expr::UnaryOp(u) => {
                 let v = self.eval(&u.operand, state);
                 match u.op {
-                    ast::UnaryOp::Not => Value::data("bool"),
+                    ast::UnaryOp::Not => match self.truthiness(&v, state) {
+                        Some(b) => Value::lit(intern::key_bool(!b)),
+                        None => Value::data("bool"),
+                    },
                     ast::UnaryOp::USub => {
                         if let Some(k) = v.kv.as_lit() {
                             if let Some(i) = intern::key_as_int(k) {
@@ -191,10 +200,22 @@ impl Analyzer {
         let Some(foid) = self.frame().func else { return };
         let ctx = self.frame().ctx.clone();
         let label = format!("generator {}", self.frame().label);
-        let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, false, &label, Payload::None);
+        let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &label, Payload::None);
         state.set_slot(gid, Ns::Elem, STAR, v.clone(), false);
         let cur = state.elems.get(&gid).unwrap_or_else(|| v.kv.clone());
         state.elems.insert(gid, kv_join(&cur, &v.kv));
+        // straight-line yields keep their order
+        let positional = self.frame().single && self.frame().loop_depth == 0 && self.cond_depth == 0 && self.obj(gid).single;
+        match (positional, self.obj(gid).literal_len) {
+            (true, Some(n)) if n < 16 => {
+                state.set_slot(gid, Ns::Pos, key_int(n as i64), v, true);
+                self.obj_mut(gid).literal_len = Some(n + 1);
+            }
+            _ => {
+                self.obj_mut(gid).literal_len = None;
+                state.drop_obj_ns(gid, Ns::Pos);
+            }
+        }
         let fi = self.func_info(foid);
         if fi.generator.get().is_none() {
             fi.generator.set(Some(gid));
@@ -311,6 +332,74 @@ impl Analyzer {
         acc
     }
 
+    /// `kv_map` that also records a narrowing event when the key is a parameter: the renamed
+    /// key is only known once the parameter is bound to a literal (at the call site).
+    pub fn rename_kv(&mut self, kv: &KeyVal, f: &RenameFn) -> KeyVal {
+        if let KeyVal::Param(ph) = kv {
+            self.record_event("narrow", *ph);
+        }
+        kv_map(kv, f)
+    }
+
+    /// `xs[lo:hi]` with constant bounds on one list/tuple with known positions: a container
+    /// with the selected positions.
+    fn slice_positional(&mut self, obj: &Value, sl: &'static ast::ExprSlice, node: &'static ast::Expr, state: &mut State) -> Option<Value> {
+        if sl.step.is_some() {
+            return None;
+        }
+        fn bound(e: &Option<Box<ast::Expr>>) -> Option<Option<i64>> {
+            match e {
+                None => Some(None),
+                Some(x) => match &**x {
+                    ast::Expr::NumberLiteral(n) => match &n.value {
+                        ast::Number::Int(i) => i.as_i64().map(Some),
+                        _ => None,
+                    },
+                    ast::Expr::UnaryOp(u) if u.op == ast::UnaryOp::USub => match &*u.operand {
+                        ast::Expr::NumberLiteral(n) => match &n.value {
+                            ast::Number::Int(i) => i.as_i64().map(|i| Some(-i)),
+                            _ => None,
+                        },
+                        _ => None,
+                    },
+                    _ => None,
+                },
+            }
+        }
+        let lo = bound(&sl.lower)?;
+        let hi = bound(&sl.upper)?;
+        let oid = obj.single()?;
+        let kind = self.kind(oid);
+        if !matches!(kind, Kind::List | Kind::Tuple) {
+            return None;
+        }
+        let n = self.obj(oid).literal_len? as i64;
+        let norm = |b: Option<i64>, dflt: i64| -> i64 {
+            let b = b.unwrap_or(dflt);
+            let b = if b < 0 { n + b } else { b };
+            b.clamp(0, n)
+        };
+        let lo = norm(lo, 0);
+        let hi = norm(hi, n);
+        let nd = frontend::node(node);
+        let nid = self.alloc_at(kind, &nd, state, &format!("{}@L{}", kind.name(), nd.line), Payload::None, None, Ns::Item, None, None);
+        let vals: Vec<Value> = (lo..hi.max(lo)).map(|i| state.slot(oid, Ns::Pos, key_int(i))).collect();
+        let single = self.obj(nid).single;
+        let acc = crate::domain::join_values(vals.clone());
+        state.set_slot(nid, Ns::Elem, STAR, Value::with_kv(acc.pts, DATA), single);
+        let kv = state.elems.get(&oid).unwrap_or(DATA);
+        state.elems.insert(nid, kv);
+        if single {
+            self.obj_mut(nid).literal_len = Some(vals.len());
+            for (i, v) in vals.iter().enumerate() {
+                state.set_slot(nid, Ns::Pos, key_int(i as i64), v.clone(), true);
+            }
+        } else {
+            self.obj_mut(nid).literal_len = None;
+        }
+        Some(Value::obj(nid))
+    }
+
     /// `a is None`, `a is not None`, `a == lit`, `a != lit` when the outcome is decidable
     /// from the value's literals: a value with only non-placeholder objects is never None.
     fn compare_const(&mut self, op: ast::CmpOp, a: &Value, right: &'static ast::Expr, state: &mut State) -> Option<bool> {
@@ -338,10 +427,43 @@ impl Analyzer {
                 };
                 Some(if op == ast::CmpOp::Is { is_none } else { !is_none })
             }
+            ast::CmpOp::In | ast::CmpOp::NotIn => {
+                if let Some(ph) = a.kv.as_param() {
+                    self.record_event("narrow", ph);
+                }
+                // a literal key in records whose rows decide it
+                if a.pts.is_empty() && a.kv.is_literal() && lits.len() == 1 {
+                    let k = lits.iter().next().unwrap();
+                    let b = self.eval(right, state);
+                    let recs = self.record_objects(&b);
+                    if !b.pts.is_empty() && recs.len() == b.pts.len() && recs.iter().all(|o| matches!(self.kind(*o), Kind::Dict)) {
+                        let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
+                        let member = if rows.iter().all(|r| r.definite.contains(k)) {
+                            true
+                        } else if rows.iter().all(|r| r.closed() && !r.present.contains(k)) {
+                            false
+                        } else {
+                            return None;
+                        };
+                        return Some(if op == ast::CmpOp::In { member } else { !member });
+                    }
+                }
+                None
+            }
             ast::CmpOp::Eq | ast::CmpOp::NotEq => {
                 let b = self.eval(right, state);
                 let bl = crate::domain::kv_literals(&b.kv);
                 if !a.pts.is_empty() || !b.pts.is_empty() || !a.kv.is_literal() || !b.kv.is_literal() || lits.len() != 1 || bl.len() != 1 {
+                    for v in [&a, &b] {
+                        for o in v.pts.iter() {
+                            if self.kind(o) == Kind::Ph {
+                                self.record_event("truth", o);
+                            }
+                        }
+                        if let Some(ph) = v.kv.as_param() {
+                            self.record_event("truth", ph);
+                        }
+                    }
                     return None;
                 }
                 let eq = lits == bl;
@@ -437,13 +559,13 @@ impl Analyzer {
                 }
             }
             if let Some(x) = la {
-                if intern::key_is_str(x) && matches!(b.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
-                    return Value::kv_only(kv_map(&b.kv, &RenameFn::with_arg(FnKind::Prefix, x)));
+                if intern::key_is_str(x) && matches!(b.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_) | KeyVal::Param(_)) {
+                    return Value::kv_only(self.rename_kv(&b.kv, &RenameFn::with_arg(FnKind::Prefix, x)));
                 }
             }
             if let Some(y) = lb {
-                if intern::key_is_str(y) && matches!(a.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
-                    return Value::kv_only(kv_map(&a.kv, &RenameFn::with_arg(FnKind::Suffix, y)));
+                if intern::key_is_str(y) && matches!(a.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_) | KeyVal::Param(_)) {
+                    return Value::kv_only(self.rename_kv(&a.kv, &RenameFn::with_arg(FnKind::Suffix, y)));
                 }
             }
             if let (Some(x), Some(y)) = (la, lb) {
@@ -479,26 +601,73 @@ impl Analyzer {
         if op == ast::Operator::Mod {
             if let Some(x) = a.kv.as_lit() {
                 if let Some(sx) = intern::key_as_str(x) {
-                    let (sx, spec) = if sx.matches("%d").count() == 1 && !sx.contains("%s") { (sx.replace("%d", "%s").into(), "%d") } else { (sx, "%s") };
-                    let n = sx.matches("%s").count();
-                    if n == 1 && !sx.replace("%s", "").contains('%') {
-                        let _ = spec;
-                        let mut parts = sx.splitn(2, "%s");
-                        let pre = parts.next().unwrap_or("").to_string();
-                        let post = parts.next().unwrap_or("").to_string();
-                        let mut kv = b.kv.clone();
-                        if let Some(k) = kv.as_lit() {
-                            if !intern::key_is_str(k) {
-                                kv = KeyVal::Lit(key_str_lit(&intern::key_py_str(k)));
+                    // "%s ... %d" with the arguments: literal segments around at most one
+                    // non-literal argument (a parameter: decided per call site)
+                    let sx2 = sx.replace("%d", "%s");
+                    let n = sx2.matches("%s").count();
+                    if n >= 1 && !sx2.replace("%s", "").contains('%') {
+                        let segs: Vec<String> = sx2.split("%s").map(|s| s.to_string()).collect();
+                        let args: Vec<KeyVal> = if n == 1 {
+                            vec![b.kv.clone()]
+                        } else {
+                            match b.single() {
+                                Some(t) if matches!(self.kind(t), Kind::Tuple) && self.obj(t).literal_len == Some(n) => (0..n).map(|i| state.slot(t, Ns::Pos, key_int(i as i64)).kv).collect(),
+                                _ => Vec::new(),
+                            }
+                        };
+                        if args.len() == n {
+                            for a in &args {
+                                if let Some(ph) = a.as_param() {
+                                    self.record_event("narrow", ph);
+                                }
+                            }
+                            let to_str = |kv: &KeyVal| -> KeyVal {
+                                match kv.as_lit() {
+                                    Some(k) if !intern::key_is_str(k) => KeyVal::Lit(key_str_lit(&intern::key_py_str(k))),
+                                    _ => kv.clone(),
+                                }
+                            };
+                            let args: Vec<KeyVal> = args.iter().map(to_str).collect();
+                            let nonlit: Vec<usize> = (0..n).filter(|i| args[*i].as_lit().is_none()).collect();
+                            if nonlit.len() <= 1 {
+                                let hole = nonlit.first().copied();
+                                // literal text before and after the hole (or the whole string)
+                                let text = |from: usize, to: usize| -> String {
+                                    let mut out = String::new();
+                                    for i in from..to {
+                                        out.push_str(&segs[i]);
+                                        if i < n {
+                                            out.push_str(&intern::key_py_str(args[i].as_lit().unwrap()));
+                                        }
+                                    }
+                                    out
+                                };
+                                match hole {
+                                    None => return Value::lit(key_str_lit(&text(0, n + 1))),
+                                    Some(h) => {
+                                        let pre = format!("{}{}", text(0, h), segs[h]);
+                                        let post = {
+                                            let mut s = String::new();
+                                            for i in (h + 1)..(n + 1) {
+                                                if i <= n && i > h + 1 - 1 && i - 1 > h {
+                                                    s.push_str(&intern::key_py_str(args[i - 1].as_lit().unwrap()));
+                                                }
+                                                s.push_str(&segs[i]);
+                                            }
+                                            s
+                                        };
+                                        let mut kv = args[h].clone();
+                                        if !pre.is_empty() {
+                                            kv = self.rename_kv(&kv, &RenameFn::with_arg(FnKind::Prefix, key_str_lit(&pre)));
+                                        }
+                                        if !post.is_empty() {
+                                            kv = self.rename_kv(&kv, &RenameFn::with_arg(FnKind::Suffix, key_str_lit(&post)));
+                                        }
+                                        return Value::kv_only(kv);
+                                    }
+                                }
                             }
                         }
-                        if !pre.is_empty() {
-                            kv = kv_map(&kv, &RenameFn::with_arg(FnKind::Prefix, key_str_lit(&pre)));
-                        }
-                        if !post.is_empty() {
-                            kv = kv_map(&kv, &RenameFn::with_arg(FnKind::Suffix, key_str_lit(&post)));
-                        }
-                        return Value::kv_only(kv);
                     }
                 }
             }
@@ -558,10 +727,10 @@ impl Analyzer {
                     }
                 }
                 if !pre.is_empty() {
-                    kv = kv_map(&kv, &RenameFn::with_arg(FnKind::Prefix, key_str_lit(&pre)));
+                    kv = self.rename_kv(&kv, &RenameFn::with_arg(FnKind::Prefix, key_str_lit(&pre)));
                 }
                 if !post.is_empty() {
-                    kv = kv_map(&kv, &RenameFn::with_arg(FnKind::Suffix, key_str_lit(&post)));
+                    kv = self.rename_kv(&kv, &RenameFn::with_arg(FnKind::Suffix, key_str_lit(&post)));
                 }
                 return Value::kv_only(kv);
             }

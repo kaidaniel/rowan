@@ -164,7 +164,25 @@ impl Analyzer {
                 }
                 continue;
             }
-            if KNOWN_IDENTITY_DECORATORS.contains(&q.as_str()) || q.ends_with(".setter") || q.ends_with(".getter") || q.ends_with(".deleter") || q.ends_with(".register") {
+            let is_setter = q.ends_with(".setter") || matches!(&d.expression, ast::Expr::Attribute(a) if a.attr.id.as_str() == "setter");
+            if is_setter {
+                // `@name.setter`: remember the setter, keep the getter bound to the name
+                if let (Some(cls), Some(f)) = (self.frame().class_oid, fobj) {
+                    if let ast::Expr::Attribute(a) = &d.expression {
+                        if let ast::Expr::Name(n) = &*a.value {
+                            let nk = key_str_lit(n.id.as_str());
+                            self.prop_setters.insert((cls, nk), f);
+                            if let Some(getter) = self.cls_slots.get(&(cls, Ns::Attr, nk)).cloned() {
+                                if !getter.pts.is_empty() {
+                                    fv = getter;
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            if KNOWN_IDENTITY_DECORATORS.contains(&q.as_str()) || q.ends_with(".getter") || q.ends_with(".deleter") || q.ends_with(".register") {
                 continue;
             }
             if q.starts_with("user:") {
@@ -518,7 +536,19 @@ impl Analyzer {
                 Kind::Enumerate => {
                     let Payload::Enumerate(inner) = self.obj(oid).payload.clone() else { continue };
                     let ii = self.iterate(&inner, node, state);
-                    items = None;
+                    match (ii.items, items.as_mut()) {
+                        (Some(inner_items), Some(its)) => {
+                            // known items: (index, item) pairs with literal indices
+                            let ctx = self.frame().ctx.clone();
+                            for (i, item) in inner_items.into_iter().enumerate() {
+                                let idx = Value::lit(key_int(i as i64));
+                                let pid = self.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), its.len()), &ctx, true, "pair", Payload::Pair(idx.clone(), item.clone()));
+                                self.obj_mut(pid).payload = Payload::Pair(idx, item);
+                                its.push(Value::obj(pid));
+                            }
+                        }
+                        _ => items = None,
+                    }
                     pair = true;
                     pairs.push((Value::data("index"), ii.elem.one_or_empty()));
                 }
@@ -759,6 +789,9 @@ impl Analyzer {
         let payload = self.obj(oid).payload.clone();
         let nid = self.alloc(kind, &format!("{}:{}:{}", tag, self.site_of(node), kind.name()), state, &label, payload, None, if kind == Kind::Instance { Ns::Attr } else { Ns::Item }, None, None);
         seen.insert(oid, nid);
+        if self.is_entry_object(oid) {
+            self.obj_mut(nid).copied_from = Some(oid);
+        }
         let ll = self.obj(oid).literal_len;
         self.obj_mut(nid).literal_len = ll;
         let nsingle = self.obj(nid).single;

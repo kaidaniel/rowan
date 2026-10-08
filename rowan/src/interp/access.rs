@@ -318,6 +318,16 @@ impl Analyzer {
             let pid = self.path_placeholder(oid, ns, k, state, None, "");
             return Value::with_kv(ObjSet::one(pid), KeyVal::Param(pid));
         }
+        if !self.sum_stack.is_empty() && row.sources.is_empty() && row.mutators.is_empty() && !row.top {
+            if let Some(src) = self.obj(oid).copied_from {
+                if self.is_entry_object(src) {
+                    // a copy of an entry object, not updated from elsewhere since: the content
+                    // comes from the original
+                    let pid = self.path_placeholder(src, ns, k, state, None, "");
+                    return Value::with_kv(ObjSet::one(pid), KeyVal::Param(pid));
+                }
+            }
+        }
         let label = format!("{}[{}]", self.obj(oid).label, intern::key_repr(k));
         let pid = self.alloc_raw(Kind::Unknown, &format!("path:{}:{}:{}", oid, ns, intern::key_repr(k)), "", true, &label, Payload::None);
         let d = self.obj(oid).depth + 1;
@@ -538,7 +548,8 @@ impl Analyzer {
                 }
                 Kind::Unknown => self.load_unknown_attr(oid, name, node, state, guarded),
                 Kind::Ph => self.load_ph_attr(oid, name, node, state, guarded, single),
-                Kind::Function | Kind::Bound => Value::data(&format!("L{}", node.line)),
+                Kind::Function => state.slot_opt(oid, Ns::Attr, nk).unwrap_or_else(|| Value::data(&format!("L{}", node.line))),
+                Kind::Bound => Value::data(&format!("L{}", node.line)),
                 Kind::View => {
                     if let Payload::View(ViewKind::Keys, recv) = &self.obj(oid).payload {
                         if name == "str" {
@@ -993,13 +1004,30 @@ impl Analyzer {
             state.narrowed.retain(|k, _| !intern::str_get(*k).contains(&needle));
         }
         let nk = key_str_lit(name);
-        let targets: Vec<u32> = obj.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Instance | Kind::Module | Kind::Class | Kind::Unknown | Kind::Frame | Kind::Namespace | Kind::Ph)).collect();
+        let targets: Vec<u32> = obj.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Instance | Kind::Module | Kind::Class | Kind::Unknown | Kind::Frame | Kind::Namespace | Kind::Ph | Kind::Function)).collect();
         for &oid in &targets {
             let kind = self.kind(oid);
             let strong = targets.len() == 1 && self.obj(oid).single;
             if kind == Kind::Frame {
                 crate::models::pandas::frame_setattr(self, oid, name, v, node, state, strong);
                 continue;
+            }
+            // a property with a setter: the setter runs instead of the store
+            let cls_of = match kind {
+                Kind::Instance => self.instance_class(oid),
+                Kind::Ph => match &self.obj(oid).payload {
+                    Payload::Ph(p) => p.cls.get(),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(cls) = cls_of {
+                if let Some(defc) = self.class_lookup(cls, name) {
+                    if let Some(&setter) = self.prop_setters.get(&(defc, nk)) {
+                        self.call_user(setter, Some(Value::obj(oid)), vec![v.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
+                        continue;
+                    }
+                }
             }
             let strong_key = strong || (targets.len() == 1 && self.fresh_init.contains(&oid));
             let r = state.row(oid, Ns::Attr).store(nk, strong_key);

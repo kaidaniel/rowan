@@ -382,6 +382,9 @@ pub struct Obj {
     pub iter_elem: bool,
     /// record this object is a view of (virtual row -> frame)
     pub derived_from: Option<ObjId>,
+    /// for a `dict(x)` / `copy` of an entry object inside a summary: that object (its
+    /// unknown content stands for the copy's as long as the copy did not overwrite it)
+    pub copied_from: Option<ObjId>,
     /// access-path depth under an open source (placeholders, elements)
     pub depth: u32,
 }
@@ -521,6 +524,11 @@ pub struct Analyzer {
     pub row_check_requests: Vec<(u32, String)>,
     /// locals of the callers of the running call (innermost last), for liveness
     pub env_stack: Vec<IndexMap<StrId, Value>>,
+    /// `@name.setter` functions by (defining class, attribute)
+    pub prop_setters: FxHashMap<(ObjId, KeyId), ObjId>,
+    /// per running call (tabulated body or summary): did it raise an uncaught exception /
+    /// call unknown code?
+    pub raise_stack: Vec<bool>,
     pub row_checks: Vec<RowCheck>,
     /// collect `facts` (the `--facts` mode)
     pub facts_on: bool,
@@ -569,6 +577,7 @@ impl Analyzer {
                 literal_len: None,
                 iter_elem: false,
                 derived_from: None,
+                copied_from: None,
                 depth: 0,
             }],
             obj_index: FxHashMap::default(),
@@ -607,6 +616,8 @@ impl Analyzer {
             none_v: Value::lit(intern::key_none()),
             row_check_requests: Vec::new(),
             env_stack: Vec::new(),
+            prop_setters: FxHashMap::default(),
+            raise_stack: Vec::new(),
             row_checks: Vec::new(),
             facts_on: false,
             facts: IndexMap::new(),
@@ -749,6 +760,7 @@ impl Analyzer {
             literal_len: None,
             iter_elem: false,
             derived_from: None,
+            copied_from: None,
             depth: 0,
         });
         self.obj_index.insert(key, oid);
@@ -809,12 +821,25 @@ impl Analyzer {
             oid
         } else {
             let existed = self.obj_index.get(&(kind, site.to_string(), ctx.clone())).copied();
-            let oid = self.alloc_raw(kind, site, &ctx, single, &label, payload);
+            let payload2 = payload.clone();
+            let mut oid = self.alloc_raw(kind, site, &ctx, single, &label, payload);
             if existed == Some(oid) && self.is_live(oid, state) {
                 // allocated again while the earlier object is still reachable (a method run
-                // twice on one receiver, a call repeated in an unrolled loop): one summary
-                // object for both, weak
-                self.obj_mut(oid).single = false;
+                // twice on one receiver, a call repeated in a loop)
+                if self.opts.recency && single && !self.recent_stack.is_empty() {
+                    // inside a loop: a strong recent object, folded into the summary object
+                    // at the loop's back-edge (the earlier object becomes that summary)
+                    let rsite = format!("{}#recent", site);
+                    let r = self.alloc_raw(kind, &rsite, &ctx, true, &label, payload2);
+                    let top = self.recent_stack.last_mut().unwrap();
+                    if !top.iter().any(|(o, _, _, _)| *o == r) {
+                        top.push((r, kind, site.to_string(), ctx.clone()));
+                    }
+                    oid = r;
+                } else {
+                    // one summary object for both, weak
+                    self.obj_mut(oid).single = false;
+                }
             }
             oid
         };

@@ -107,6 +107,8 @@ pub struct Summary {
     pub rows_fp: Vec<(ObjId, Ns, Row)>,
     pub slots_fp: Vec<((ObjId, Ns, KeyId), Value)>,
     pub elems_fp: Vec<(ObjId, KeyVal)>,
+    /// the body may raise an uncaught exception (or calls unknown code)
+    pub raises: bool,
 }
 
 impl Summary {
@@ -445,6 +447,7 @@ impl Analyzer {
         self.sum_stack.push(foid);
         self.sum_reqs.push(IndexMap::new());
         self.sum_events.push(IndexMap::new());
+        self.raise_stack.push(false);
         self.sum_obj_mark.push(self.objects.len() as ObjId);
         self.sum_deps.push(FxHashSet::default());
         let verdict_mark = self.verdicts.len();
@@ -466,6 +469,7 @@ impl Analyzer {
             self.notes.truncate(notes_mark);
             *self.sum_reqs.last_mut().unwrap() = IndexMap::new();
             *self.sum_events.last_mut().unwrap() = IndexMap::new();
+            *self.raise_stack.last_mut().unwrap() = false;
             let obj_mark = *self.sum_obj_mark.last().unwrap();
             let mut st = State::new();
             st.symbolic = true;
@@ -651,6 +655,7 @@ impl Analyzer {
                 rows_fp: Vec::new(),
                 slots_fp: Vec::new(),
                 elems_fp: Vec::new(),
+                raises: self.raise_stack.last().copied().unwrap_or(false),
             };
             summ.compute_footprint(self, &base);
             if self.sum_hit.contains(&foid) {
@@ -688,6 +693,7 @@ impl Analyzer {
         self.sum_stack.pop();
         self.sum_reqs.pop();
         self.sum_events.pop();
+        self.raise_stack.pop();
         self.sum_obj_mark.pop();
         let deps = self.sum_deps.pop().unwrap_or_default();
         self.sum_hit.remove(&foid);
@@ -808,6 +814,13 @@ impl Analyzer {
         for ev in &summary.events {
             let v = self.binding_of(summary, ev.ph, bind, state, &mut memo);
             let mut phs: Vec<ObjId> = v.pts.iter().filter(|o| self.kind(*o) == Kind::Ph).collect();
+            for o in v.pts.iter() {
+                if let Some(src) = self.obj(o).copied_from {
+                    if self.kind(src) == Kind::Ph && !phs.contains(&src) {
+                        phs.push(src);
+                    }
+                }
+            }
             if let Some(p) = v.kv.as_param() {
                 if !phs.contains(&p) {
                     phs.push(p);
@@ -891,7 +904,7 @@ impl Analyzer {
             }
             if v.empty() && matches!(ev.kind, "truth" | "narrow" | "iter") && self.kind(ev.ph) == Kind::Ph {
                 let p = self.ph_info(ev.ph);
-                if p.kind == PhKind::Path && p.key.and_then(param_slot_of).is_some() {
+                if p.kind == PhKind::Path {
                     if let Some(par) = p.parent {
                         let pv = self.binding_of(summary, par, bind, state, &mut memo);
                         if pv.pts.iter().any(|o| self.kind(o) != Kind::Ph) {
@@ -903,7 +916,7 @@ impl Analyzer {
             if v.empty() {
                 continue;
             }
-            let concrete: Vec<ObjId> = v.pts.iter().filter(|o| self.kind(*o) != Kind::Ph).collect();
+            let concrete: Vec<ObjId> = v.pts.iter().filter(|o| self.kind(*o) != Kind::Ph && !self.obj(*o).copied_from.map(|s| self.kind(s) == Kind::Ph).unwrap_or(false)).collect();
             match ev.kind {
                 "call" => {
                     if !concrete.is_empty() {
@@ -918,13 +931,18 @@ impl Analyzer {
                 "iter" => {
                     for o in &concrete {
                         let k = self.kind(*o);
-                        if matches!(k, Kind::List | Kind::Tuple | Kind::Set) && self.obj(*o).literal_len.is_some() {
-                            return Some(ev.clone());
+                        // known items, or concrete element objects (copies and dispatch on
+                        // them are precise then); not open input rows
+                        if matches!(k, Kind::List | Kind::Tuple | Kind::Set) {
+                            let elems = state.slot(*o, Ns::Elem, STAR);
+                            if self.obj(*o).literal_len.is_some() || elems.pts.iter().any(|e| matches!(self.kind(e), Kind::Dict | Kind::Instance | Kind::List | Kind::Tuple)) {
+                                return Some(ev.clone());
+                            }
                         }
                         if k == Kind::Dict && self.literal_dict_items(*o, state).is_some() {
                             return Some(ev.clone());
                         }
-                        if matches!(k, Kind::View | Kind::Zip | Kind::Pair) {
+                        if matches!(k, Kind::View | Kind::Zip | Kind::Pair | Kind::Enumerate) {
                             return Some(ev.clone());
                         }
                     }

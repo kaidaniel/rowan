@@ -37,4 +37,4 @@
 ["verdict", "", 88, 21, "'total'", "item", "proven", [115, 105], "vars@L86"]
 ["verdict", "", 88, 36, "'n_orders'", "item", "proven", [115, 105], "vars@L86"]
 ["verdict", "", 89, 26, "'region'", "item", "proven", [115, 105], "vars@L86"]
-["verdict", "", 89, 43, "'count'", "item", "possibly", [115, 105], "vars@L86"]
+["verdict", "", 89, 43, "'count'", "item", "missing", [115, 105], "vars@L86"]

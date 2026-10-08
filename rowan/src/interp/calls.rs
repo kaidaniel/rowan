@@ -10,6 +10,7 @@ use crate::domain::{chain_extend, join_rows, join_values, Classification, KeyVal
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
 use crate::state::{Footprint, Kind, State};
+use crate::domain::ObjId;
 
 use super::funcs::cell_key;
 use super::{is_generator, Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, Payload, Verdict, MAX_ACTIVE, MAX_CLONES, MAX_MUTATED, NOEFFECT_METHOD_NAMES, REC_MAX_ITER};
@@ -31,6 +32,7 @@ pub struct Sig {
 }
 
 pub struct CacheHit {
+    pub raises: bool,
     pub ret: Value,
     pub fp_state: State,
     pub fp: Footprint,
@@ -185,6 +187,13 @@ impl Analyzer {
 
     pub fn unknown_call(&mut self, qual: &str, recv: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
         let site = format!("{}@L{}", qual, node.line);
+        // unknown code may raise
+        if let Some(t) = self.raise_stack.last_mut() {
+            *t = true;
+        }
+        if let Some(m) = self.may_raise.last_mut() {
+            *m = true;
+        }
         let name = qual.rsplit('.').next().unwrap_or(qual);
         if NOEFFECT_METHOD_NAMES.contains(&name) && recv.map(|r| self.record_objects(r).is_empty()).unwrap_or(true) {
             return Value::data(&format!("L{}", node.line));
@@ -434,6 +443,9 @@ impl Analyzer {
                 }
                 let saved_chain = std::mem::take(&mut self.call_chain);
                 self.call_chain = chain_extend(&saved_chain, &[node.line]);
+                if summ.raises {
+                    self.note_raise();
+                }
                 let r = self.instantiate(&summ, &bind, state, node, &call_ctx, ctx_single);
                 self.call_chain = saved_chain;
                 return r;
@@ -486,6 +498,9 @@ impl Analyzer {
         let sig = self.call_signature(foid, &site, entry, &self_v, &args, &kwargs, &star_args, &star_kwargs, state);
         if let Some(sig) = &sig {
             if let Some(hit) = self.call_cache.get(sig).cloned() {
+                if hit.raises {
+                    self.note_raise();
+                }
                 for k in &hit.fp.rows {
                     if let Some(r) = hit.fp_state.rows.get(k) {
                         state.rows.insert(*k, r);
@@ -499,6 +514,29 @@ impl Analyzer {
                 for k in &hit.fp.elems {
                     if let Some(v) = hit.fp_state.elems.get(k) {
                         state.elems.insert(*k, v);
+                    }
+                }
+                // recent objects the replayed call allocated: folded at the loop's back-edge
+                // like the originals, or a later activation resets them under live references
+                if !self.recent_stack.is_empty() {
+                    let mut oids: Vec<ObjId> = hit.fp.rows.iter().map(|(o, _)| *o).collect();
+                    oids.extend(hit.fp.slots.iter().map(|(o, _)| *o));
+                    oids.extend(hit.fp.elems.iter().copied());
+                    let mut recents: Vec<(ObjId, Kind, String, String)> = Vec::new();
+                    for o in oids {
+                        if !self.has_obj(o) {
+                            continue;
+                        }
+                        let ob = self.obj(o);
+                        if let Some(base) = ob.site.strip_suffix("#recent") {
+                            recents.push((o, ob.kind, base.to_string(), ob.ctx.clone()));
+                        }
+                    }
+                    let top = self.recent_stack.last_mut().unwrap();
+                    for r in recents {
+                        if !top.iter().any(|(x, _, _, _)| *x == r.0) {
+                            top.push(r);
+                        }
                     }
                 }
                 for (src, d) in hit.fp_state.reqs.items() {
@@ -551,8 +589,17 @@ impl Analyzer {
         }
         let saved_env = std::mem::take(&mut state.env);
         self.env_stack.push(saved_env.clone());
+        self.raise_stack.push(false);
         let saved_ret = state.ret.take();
         self.frames.push(new_fr);
+        if let FuncNode::Def(f) = fnode {
+            if is_generator(&f.body) {
+                // the yielded values of this activation
+                let gid = self.alloc(Kind::List, &format!("gen:{}", foid), state, &format!("generator {}", fi.qualname), Payload::None, None, Ns::Item, None, Some(&ctx));
+                self.obj_mut(gid).literal_len = Some(0);
+                state.elems.insert(gid, KeyVal::Lits(KeySet::new()));
+            }
+        }
         let saved_chain = std::mem::take(&mut self.call_chain);
         self.call_chain = chain_extend(&saved_chain, &[node.line]);
         self.active.insert(key.clone(), true);
@@ -581,13 +628,15 @@ impl Analyzer {
             if st.reachable {
                 ret = ret.join(&self.none_v);
             }
+            // no normal completion (every path raises): the caller is unreachable after the call
+            let completed = st.reachable || st.exits.is_some();
             if let Some(ex) = st.exits.take() {
                 let mut exs = ex.copy_ref();
                 st = if st.reachable { st.join(&mut exs) } else { exs };
                 st.exits = None;
             }
             st.ret = Some(ret.clone());
-            st.reachable = true;
+            st.reachable = completed;
             if self.rec_widened.contains(&key) {
                 self.rec_widened.remove(&key);
                 let (w_self, w_args, w_kwargs) = self.rec_entry.get(&key).cloned().unwrap();
@@ -663,15 +712,15 @@ impl Analyzer {
                         nv
                     })
                     .collect();
-                self.call_cache.insert(sig, Rc::new(CacheHit { ret: ret.clone(), fp_state, fp, verdicts: rel_verdicts }));
+                let raises = self.raise_stack.last().copied().unwrap_or(false);
+                self.call_cache.insert(sig, Rc::new(CacheHit { raises, ret: ret.clone(), fp_state, fp, verdicts: rel_verdicts }));
             }
         }
         state.set_to(&mut st);
-        if let Some(gen) = fi.generator.get() {
-            if let FuncNode::Def(f) = fnode {
-                if is_generator(&f.body) {
-                    ret = Value::obj(gen);
-                }
+        if let FuncNode::Def(f) = fnode {
+            if is_generator(&f.body) {
+                let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
+                ret = Value::obj(gid);
             }
         }
         let rows: Vec<(u32, Row)> = ret.pts.iter().filter(|o| self.is_record_like(*o)).map(|o| (o, state.row(o, Ns::Item))).collect();
@@ -687,9 +736,23 @@ impl Analyzer {
         self.call_chain = saved_chain;
         self.frames.pop();
         self.env_stack.pop();
+        let raised = self.raise_stack.pop().unwrap_or(false);
+        if raised {
+            self.note_raise();
+        }
         state.env = saved_env;
         state.ret = saved_ret;
         ret
+    }
+
+    /// The call that just completed may raise: the enclosing call and try body learn it.
+    pub fn note_raise(&mut self) {
+        if let Some(t) = self.raise_stack.last_mut() {
+            *t = true;
+        }
+        if let Some(m) = self.may_raise.last_mut() {
+            *m = true;
+        }
     }
 
     pub fn in_method_frame(&mut self, foid: u32, self_v: Value, args: Vec<Value>, state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &mut State)) {
@@ -867,6 +930,16 @@ impl Analyzer {
             let kill: KeySet = KeySet::from_iter(positional.iter().chain(kwonly.iter()).map(|n| intern::key(intern::Key::Str(intern::str_get(*n)))));
             for sk in star_kwargs {
                 self.copy_into(did, Ns::Item, sk, state, true, &kill);
+                // `**kw` forwarded from a placeholder (or a copy of one): the new dict is not
+                // concrete either; its events reach the enclosing summary
+                if let Some(s1) = sk.single() {
+                    let src = if self.kind(s1) == Kind::Ph { Some(s1) } else { self.obj(s1).copied_from.filter(|c| self.kind(*c) == Kind::Ph) };
+                    if let Some(src) = src {
+                        if self.is_entry_object(src) {
+                            self.obj_mut(did).copied_from = Some(src);
+                        }
+                    }
+                }
             }
             bound.insert(s(kw.name.id.as_str()), Value::obj(did));
         }

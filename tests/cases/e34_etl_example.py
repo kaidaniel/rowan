@@ -70,7 +70,7 @@ def to_rows(summaries):
     rows = [asdict(s) for s in summaries]
     for row in rows:
         row["avg"] = row["total"] / row["n_orders"]
-        row["label"] = f"{row['region']} ({row['count']})"   # bug: no 'count' key   #@ possibly count
+        row["label"] = f"{row['region']} ({row['count']})"   # bug: no 'count' key   #@ missing count
     return rows
 
 

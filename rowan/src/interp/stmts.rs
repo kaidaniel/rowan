@@ -63,6 +63,22 @@ impl Analyzer {
                 if let Some(e) = &r.exc {
                     self.eval(e, state);
                 }
+                // uncaught here (no enclosing handler for it): the running call raises
+                let name = r.exc.as_ref().map(|e| match &**e {
+                    ast::Expr::Call(c) => dotted_last(&c.func),
+                    other => dotted_last(other),
+                });
+                let caught = self.guards.iter().any(|g| {
+                    g.contains("*") || g.contains("Exception") || g.contains("BaseException") || name.as_ref().map(|n| g.contains(n)).unwrap_or(false)
+                });
+                if !caught {
+                    if let Some(t) = self.raise_stack.last_mut() {
+                        *t = true;
+                    }
+                    if let Some(m) = self.may_raise.last_mut() {
+                        *m = true;
+                    }
+                }
                 state.reachable = false;
             }
             ast::Stmt::Assert(a) => {
@@ -122,6 +138,7 @@ impl Analyzer {
             }
             ast::Stmt::Try(t) => self.stmt_try(t, state),
             ast::Stmt::With(w) => {
+                let mut managers: Vec<(Value, Node)> = Vec::new();
                 for item in &w.items {
                     let v = self.eval(&item.context_expr, state);
                     let n = frontend::node(&item.context_expr);
@@ -132,8 +149,15 @@ impl Analyzer {
                     if let Some(ov) = &item.optional_vars {
                         self.bind_target(ov, &entered.unwrap(), state);
                     }
+                    managers.push((v, n));
                 }
                 self.exec_block(&w.body, state);
+                // the managers' __exit__ runs on the way out (innermost first)
+                if state.reachable {
+                    for (v, n) in managers.iter().rev() {
+                        self.call_method_if_defined(v, "__exit__", n, state);
+                    }
+                }
             }
             ast::Stmt::FunctionDef(f) => {
                 let v = self.make_function(FuncNode::Def(f), state, None);
@@ -255,7 +279,7 @@ impl Analyzer {
             };
             let recs = self.recent_stack.pop().unwrap_or_default();
             self.rename_recent(&mut back, &head, recs, mark);
-            let new_head = pre.join(&mut back);
+            let new_head = pre.join_loop(&mut back);
             if new_head.same(&head) {
                 break;
             }
@@ -374,7 +398,7 @@ impl Analyzer {
             };
             let recs = self.recent_stack.pop().unwrap_or_default();
             self.rename_recent(&mut back, &head, recs, mark);
-            let new_head = pre.join(&mut back);
+            let new_head = pre.join_loop(&mut back);
             if new_head.same(&head) {
                 break;
             }

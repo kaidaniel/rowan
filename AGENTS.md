@@ -28,7 +28,7 @@ semantic fixes that the prototype did not have, so the prototype is history, not
 | `rowan/src/report.rs` | dedupe, schema table, text, JSON lines, `--golden` and `--facts` documents. |
 | `rowan/src/main.rs` | CLI; runs the analysis on a thread with a 1 GiB stack. |
 | `rowan/py/` | PyO3 binding (`rowan.analyse(source, …)` / `analyse_file(path)` → `--golden` JSON string). Builds with maturin; see known problems. |
-| `tests/run_golden.py`, `tests/cases/` | golden harness, 70 cases: `a01`–`e36` from the original design (Appendix A and the prototype era), `f37` (recency), `g40`–`g65` (AST node coverage, closures taking closures returning lambdas, reassignment, control flow, inputs indexing results of input functions, classes, string keys, containers, guards, modules, generators, recursion, kwargs forwarding, configs, pandas, annotations, mutation through layers, comprehensions, dispatch, a CLI script, dict methods, a larger mixed program), `h66`–`h72` (larger programs passing objects around: an event bus with closures / bound methods / partials in per-topic lists, a fluent builder and a stage pipeline, a plugin registry with a class decorator and a recursive visitor, a dependency-injection container resolving services in constructors, an order state machine with a nested transition table, a dataclass graph with a stack walk and a defaultdict grouping, a middleware chain of closures over closures). The `h` cases were written as value-analysis specifications *before* running the engine (mostly `#@row` checks); the engine was fixed until it produced them. Directives: `#@ tier key [; …]`, `#@row`, `#@schema`; a `#@` directive must be the last thing on its line. |
+| `tests/run_golden.py`, `tests/cases/` | golden harness, 90 cases: `a01`–`e36` from the original design (Appendix A and the prototype era), `f37` (recency), `g40`–`g65` (AST node coverage, closures taking closures returning lambdas, reassignment, control flow, inputs indexing results of input functions, classes, string keys, containers, guards, modules, generators, recursion, kwargs forwarding, configs, pandas, annotations, mutation through layers, comprehensions, dispatch, a CLI script, dict methods, a larger mixed program), `h66`–`h72` (larger programs passing objects around: an event bus with closures / bound methods / partials in per-topic lists, a fluent builder and a stage pipeline, a plugin registry with a class decorator and a recursive visitor, a dependency-injection container resolving services in constructors, an order state machine with a nested transition table, a dataclass graph with a stack walk and a defaultdict grouping, a middleware chain of closures over closures), `i73`–`i92` (layered config, an inventory of objects, properties with setters and observers, a tree built from a flat list, command objects with undo, a record pipeline with map / filter / sorted / setdefault, a memoising decorator, context managers, generator chains, exception paths, an inheritance chain with a mixin, NamedTuple / TypedDict, computed string keys, kwargs forwarding, a task queue, a JSON round trip, ranking with enumerate / zip, nested path helpers, feature flags, accumulators). The `h` and `i` cases were written as value-analysis specifications *before* running the engine (mostly `#@row` checks); the engine was fixed until it produced them, and the few expectations that turned out wrong on re-reading carry a comment saying why. Directives: `#@ tier key [; …]`, `#@row`, `#@schema`; a `#@` directive must be the last thing on its line. |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | `--json` output snapshots on `examples/etl_report.py` and three large fixtures (modules of the old prototype kept as analysis *inputs* only). The regression guard for refactors of the internals; `--update` after reviewing a diff. |
 | `vscode-rowan/` | VS Code extension (plain JS): runs `rowan FILE --facts` on open/save, hover = facts for (line, name), verdicts as diagnostics; `node test.js` checks the rendering. |
 
@@ -107,6 +107,31 @@ form with sources / mutators / terms, printed by the harness on row-check failur
   construction site, `defaultdict` loads insert the factory value under literal keys (the
   row stays closed; unknown keys open it), `dict.get` on a key absent from every closed
   target is the default alone, unknown-call results have open attribute rows.
+* Exceptions: `raise` outside a handler that catches it marks the running call as raising
+  (`raise_stack`; summaries carry `raises`, cache hits too); a user call marks the enclosing
+  `try` body as "may raise" only when its callee reported it; a call whose every path raises
+  leaves the caller unreachable. So `except` branches are dead when the callee provably does
+  not raise for these arguments (golden `i82`).
+* Values decided from literals: `k in d` on concrete closed records, `not x`, `==` between
+  single literals; `dict.pop(k, default)` returns the default alone on a closed record
+  without `k` and the value alone when `k` is definite; `list.pop()` / `pop(i)` on a
+  positional list outside loops is positional; `max` / `min` of a container are its element;
+  `map(f, xs)` over known items keeps positions (one call per item); `sorted(xs)` keeps the
+  count (every position may hold any item); `enumerate(xs)` over known items yields literal
+  indices; `xs[a:b]` with constant bounds on a positional container keeps positions;
+  `"%s_%d" % (a, b)` and `"lit" + param` rename parameter keys and record an event so the
+  call site decides them.
+* Property setters (`@x.setter`) run on attribute stores, on instances and on typed
+  placeholders; function objects hold attributes; `with` calls `__exit__`; generators yield
+  into one list per activation, positional for straight-line yields.
+* Copies: `dict(x)` / `copy` of an entry object inside a summary remember the original
+  (`Obj::copied_from`): deferred loads go to it while the copy's row is purely symbolic, events
+  on the copy reach the original's binding, and a copy of a placeholder does not count as a
+  concrete binding (so the enclosing call site tabulates instead). The `**kwargs` dict built
+  from a forwarded placeholder is such a copy.
+* Loops: a call-cache replay inside a loop registers the recent objects it re-creates, so
+  the back-edge folds them; the loop-head join keeps requirements recorded in the body as
+  "always" (`State::join_loop`).
 * Limits: `MAX_ACTIVE = 4` activations of one function on the tabulation stack,
   `MAX_TABULATIONS = 24` literal-event tabulations per function, `MAX_CALL_TABULATIONS = 32`,
   `MAX_CHAINS_PER_FINDING = 8` call chains reported per finding (the shortest).
@@ -134,7 +159,7 @@ form with sources / mutators / terms, printed by the harness on row-check failur
 
 | input | time | notes |
 | --- | --- | --- |
-| golden suite (70 cases) | 0.3 s | one process per case |
+| golden suite (90 cases) | 0.4 s | one process per case |
 | `tests/fixtures/proto_summary.py` (1.2k lines) | 0.7 s | 0 ✗, 5 ⚠~ |
 | old prototype `models.py` (1.7k lines, reaches a whole interpreter via a typed field) | 41 s | 165 ✗ (false positives, see below) |
 | old prototype `interp.py` (3.4k lines) | 69 s | 961 ✗ |

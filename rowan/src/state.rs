@@ -246,6 +246,19 @@ impl State {
         s
     }
 
+    /// The join at a loop head: like `join`, but a requirement recorded only in the loop body
+    /// stays "always" (per element of the iteration; spec: in-loop demands are not conditional).
+    pub fn join_loop(&mut self, o: &mut State) -> State {
+        let demoted = self.reqs.copy();
+        let mut s = self.join(o);
+        let mut a = demoted;
+        let mut b = o.reqs.copy();
+        if self.reachable && o.reachable {
+            s.reqs = a.join_with(&mut b, &mut |x, y| x.join(y), &mut |x| x.clone());
+        }
+        s
+    }
+
     /// Join all heap facts (rows/slots/elems/reqs) of `o` into self, in place.
     pub fn join_heap_all(&mut self, o: &mut State) {
         if !o.reachable {
