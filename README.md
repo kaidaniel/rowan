@@ -20,6 +20,30 @@ ROWAN_SUMMARIES=0 python -m rowan prog.py     # the older per-call-site engine (
 ROWAN_DEBUG=1 python -m rowan prog.py         # progress / summary statistics on stderr
 ```
 
+## Rust engine (`rowan-rs/`)
+
+The engine has been ported to Rust (spec §15.3); the Python package above is kept as the
+frozen oracle. It parses with `ruff_python_parser`, interns keys / sources / lenses to
+`u32` ids, and reproduces the prototype's verdicts and schemas exactly in `--compat` mode
+(`python tests/diff_engines.py` checks that on every golden case, the example and the
+prototype's own modules). Its default mode adds the improvements listed in `AGENTS.md`
+(allocation-site resolution of placeholders, recency abstraction for loop allocations,
+SCC re-iteration for mutual recursion, `narrowed` facts in state equality, positional
+unpacking of tuple keys).
+
+```
+cd rowan-rs && cargo build --release
+rowan-rs/target/release/rowan-rs prog.py [--json] [--no-rows] [--no-summaries] [--no-entry] [--no-imports] [--compat]
+python tests/run_golden.py --rust            # golden suite on the Rust engine (37 cases)
+python tests/run_golden.py --both            # both engines
+python tests/diff_engines.py                 # differential check: Python oracle vs rowan-rs --compat
+```
+
+`ROWAN_SUMMARIES=0`, `ROWAN_DEBUG=1` work as for the prototype; `ROWAN_COMPAT=1` is
+`--compat`; `ROWAN_NO=recency,scc,site,narrowed,positional` switches improvements off
+individually. `rowan-rs/py/` holds a PyO3 binding (`rowan_rs.analyse_file(path)` returns
+the `--golden` JSON); see `AGENTS.md` for its status.
+
 ## What the report contains
 
 ```
@@ -102,6 +126,17 @@ input (becomes a schema entry), `⚠data` data-derived key into a closed record.
   | `summary.py` (2.6k) | — | 29 s, 0 ✗, 260 ⚠ |
   | `models.py` (7.6k: its entry points reach the whole interpreter) | 23 s, 11 ✗ | not completed in 50 min (see below) |
   | `interp.py` (7.6k, 380 roots) | minutes (not completed) | not completed (see below) |
+
+  The Rust engine on the same inputs (release build, Apple M-series; `--compat` is the
+  prototype's algorithm, "default" adds the improvements):
+
+  | module | rowan-rs `--compat` | rowan-rs default |
+  | --- | --- | --- |
+  | 37-case golden suite | 0.4 s (one process per case) | 0.4 s |
+  | `scopes.py` … `state.py` | 0.00–0.02 s, 0 ✗ | 0.00–0.02 s, 0 ✗ |
+  | `summary.py` | 0.6 s, 0 ✗ | 0.8 s, 0 ✗ |
+  | `models.py` | 154 s, 126 ✗ | 41 s, 165 ✗ (same accesses, more contexts) |
+  | `interp.py` | 540 s, 1039 ✗ | 69 s, 961 ✗ |
 
   The two heavy rows are the analyser analysing its own interpreter: `models.py`'s
   functions take a `Call` whose `an: Analyzer` field now has a declared class, so the

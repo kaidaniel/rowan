@@ -1,0 +1,305 @@
+//! Lexical scope analysis (port of `rowan/scopes.py`): which names of a function are
+//! locals, cells (captured by nested functions), free, or globals.
+
+use rustc_hash::{FxHashMap, FxHashSet};
+use ruff_python_ast as ast;
+use ruff_python_ast::visitor::source_order::{self, SourceOrderVisitor};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScopeKind {
+    Module,
+    Function,
+    Class,
+}
+
+#[derive(Debug, Default)]
+pub struct Scope {
+    pub kind: ScopeKind,
+    pub parent: Option<usize>,
+    pub locals: FxHashSet<String>,
+    pub globals_decl: FxHashSet<String>,
+    pub nonlocals_decl: FxHashSet<String>,
+    pub uses: FxHashSet<String>,
+    pub children: Vec<usize>,
+    pub free: FxHashSet<String>,
+    pub cells: FxHashSet<String>,
+}
+
+impl Default for ScopeKind {
+    fn default() -> Self {
+        ScopeKind::Module
+    }
+}
+
+impl Scope {
+    pub fn is_local(&self, name: &str) -> bool {
+        self.locals.contains(name) && !self.globals_decl.contains(name) && !self.nonlocals_decl.contains(name)
+    }
+}
+
+/// Scopes of one module, keyed by the address of the defining node.
+#[derive(Debug, Default)]
+pub struct Scopes {
+    pub scopes: Vec<Scope>,
+    pub by_node: FxHashMap<usize, usize>,
+}
+
+impl Scopes {
+    pub fn module(&self) -> usize {
+        0
+    }
+    pub fn of_node(&self, addr: usize) -> Option<usize> {
+        self.by_node.get(&addr).copied()
+    }
+    pub fn get(&self, id: usize) -> &Scope {
+        &self.scopes[id]
+    }
+    /// A detached function scope for a node we never collected (defensive).
+    pub fn add_detached(&mut self, kind: ScopeKind) -> usize {
+        self.scopes.push(Scope { kind, parent: None, ..Default::default() });
+        self.scopes.len() - 1
+    }
+}
+
+pub fn node_addr<T>(n: &T) -> usize {
+    n as *const T as usize
+}
+
+struct Collector<'a> {
+    scopes: &'a mut Scopes,
+    scope: usize,
+}
+
+impl<'a> Collector<'a> {
+    fn enter(&mut self, addr: usize, kind: ScopeKind) -> usize {
+        let id = self.scopes.scopes.len();
+        self.scopes.scopes.push(Scope { kind, parent: Some(self.scope), ..Default::default() });
+        self.scopes.by_node.insert(addr, id);
+        self.scopes.scopes[self.scope].children.push(id);
+        id
+    }
+    fn cur(&mut self) -> &mut Scope {
+        &mut self.scopes.scopes[self.scope]
+    }
+    fn visit_params(&mut self, inner: usize, params: &ast::Parameters) {
+        for p in all_params(params) {
+            self.scopes.scopes[inner].locals.insert(p.name.id.to_string());
+            if let Some(ann) = &p.annotation {
+                self.visit_expr(ann);
+            }
+        }
+    }
+}
+
+pub fn all_params(params: &ast::Parameters) -> Vec<&ast::Parameter> {
+    let mut out: Vec<&ast::Parameter> = Vec::new();
+    out.extend(params.posonlyargs.iter().map(|p| &p.parameter));
+    out.extend(params.args.iter().map(|p| &p.parameter));
+    out.extend(params.kwonlyargs.iter().map(|p| &p.parameter));
+    if let Some(v) = &params.vararg {
+        out.push(v);
+    }
+    if let Some(k) = &params.kwarg {
+        out.push(k);
+    }
+    out
+}
+
+impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
+    fn visit_stmt(&mut self, stmt: &'b ast::Stmt) {
+        match stmt {
+            ast::Stmt::FunctionDef(f) => {
+                self.cur().locals.insert(f.name.id.to_string());
+                for d in &f.decorator_list {
+                    self.visit_expr(&d.expression);
+                }
+                for p in f.parameters.posonlyargs.iter().chain(f.parameters.args.iter()).chain(f.parameters.kwonlyargs.iter()) {
+                    if let Some(d) = &p.default {
+                        self.visit_expr(d);
+                    }
+                }
+                if let Some(r) = &f.returns {
+                    self.visit_expr(r);
+                }
+                let inner = self.enter(node_addr(f), ScopeKind::Function);
+                self.visit_params(inner, &f.parameters);
+                let saved = self.scope;
+                self.scope = inner;
+                for s in &f.body {
+                    self.visit_stmt(s);
+                }
+                self.scope = saved;
+            }
+            ast::Stmt::ClassDef(c) => {
+                self.cur().locals.insert(c.name.id.to_string());
+                for d in &c.decorator_list {
+                    self.visit_expr(&d.expression);
+                }
+                if let Some(args) = &c.arguments {
+                    for b in args.args.iter() {
+                        self.visit_expr(b);
+                    }
+                    for kw in args.keywords.iter() {
+                        self.visit_expr(&kw.value);
+                    }
+                }
+                let inner = self.enter(node_addr(c), ScopeKind::Class);
+                let saved = self.scope;
+                self.scope = inner;
+                for s in &c.body {
+                    self.visit_stmt(s);
+                }
+                self.scope = saved;
+            }
+            ast::Stmt::Global(g) => {
+                for n in &g.names {
+                    self.cur().globals_decl.insert(n.id.to_string());
+                }
+            }
+            ast::Stmt::Nonlocal(g) => {
+                for n in &g.names {
+                    self.cur().nonlocals_decl.insert(n.id.to_string());
+                    self.cur().uses.insert(n.id.to_string());
+                }
+            }
+            ast::Stmt::Import(i) => {
+                for a in &i.names {
+                    let name = a.asname.as_ref().map(|x| x.id.to_string()).unwrap_or_else(|| a.name.id.to_string());
+                    let top = name.split('.').next().unwrap_or("").to_string();
+                    self.cur().locals.insert(top);
+                }
+            }
+            ast::Stmt::ImportFrom(i) => {
+                for a in &i.names {
+                    if a.name.id.as_str() != "*" {
+                        let name = a.asname.as_ref().map(|x| x.id.to_string()).unwrap_or_else(|| a.name.id.to_string());
+                        self.cur().locals.insert(name);
+                    }
+                }
+            }
+            _ => source_order::walk_stmt(self, stmt),
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &'b ast::Expr) {
+        match expr {
+            ast::Expr::Lambda(l) => {
+                if let Some(params) = &l.parameters {
+                    for p in params.posonlyargs.iter().chain(params.args.iter()).chain(params.kwonlyargs.iter()) {
+                        if let Some(d) = &p.default {
+                            self.visit_expr(d);
+                        }
+                    }
+                }
+                let inner = self.enter(node_addr(l), ScopeKind::Function);
+                if let Some(params) = &l.parameters {
+                    for p in all_params(params) {
+                        self.scopes.scopes[inner].locals.insert(p.name.id.to_string());
+                    }
+                }
+                let saved = self.scope;
+                self.scope = inner;
+                self.visit_expr(&l.body);
+                self.scope = saved;
+            }
+            ast::Expr::Name(n) => {
+                if matches!(n.ctx, ast::ExprContext::Store | ast::ExprContext::Del) {
+                    self.cur().locals.insert(n.id.to_string());
+                } else {
+                    self.cur().uses.insert(n.id.to_string());
+                }
+            }
+            ast::Expr::Named(n) => {
+                if let ast::Expr::Name(t) = &*n.target {
+                    self.cur().locals.insert(t.id.to_string());
+                }
+                self.visit_expr(&n.value);
+            }
+            _ => source_order::walk_expr(self, expr),
+        }
+    }
+
+    fn visit_except_handler(&mut self, h: &'b ast::ExceptHandler) {
+        let ast::ExceptHandler::ExceptHandler(h) = h;
+        if let Some(n) = &h.name {
+            self.cur().locals.insert(n.id.to_string());
+        }
+        source_order::walk_except_handler(self, &ast::ExceptHandler::ExceptHandler(h.clone()));
+    }
+
+    fn visit_pattern(&mut self, p: &'b ast::Pattern) {
+        if let ast::Pattern::MatchAs(m) = p {
+            if let Some(n) = &m.name {
+                self.cur().locals.insert(n.id.to_string());
+            }
+        }
+        source_order::walk_pattern(self, p);
+    }
+}
+
+fn resolve(scopes: &mut Scopes, id: usize) {
+    let children = scopes.scopes[id].children.clone();
+    for ch in &children {
+        resolve(scopes, *ch);
+    }
+    if scopes.scopes[id].kind == ScopeKind::Function {
+        let names: Vec<String> = scopes.scopes[id].uses.union(&scopes.scopes[id].nonlocals_decl).cloned().collect();
+        for name in names {
+            if scopes.scopes[id].is_local(&name) || scopes.scopes[id].globals_decl.contains(&name) {
+                continue;
+            }
+            let mut p = scopes.scopes[id].parent;
+            let mut path: Vec<usize> = Vec::new();
+            while let Some(pid) = p {
+                match scopes.scopes[pid].kind {
+                    ScopeKind::Function => {
+                        if scopes.scopes[pid].is_local(&name) {
+                            scopes.scopes[pid].cells.insert(name.clone());
+                            scopes.scopes[id].free.insert(name.clone());
+                            for mid in &path {
+                                scopes.scopes[*mid].free.insert(name.clone());
+                            }
+                            break;
+                        }
+                        path.push(pid);
+                    }
+                    ScopeKind::Module => break,
+                    ScopeKind::Class => {}
+                }
+                p = scopes.scopes[pid].parent;
+            }
+        }
+    }
+    for ch in &children {
+        let free: Vec<String> = scopes.scopes[*ch].free.iter().cloned().collect();
+        for name in free {
+            if scopes.scopes[id].kind == ScopeKind::Function && !scopes.scopes[id].is_local(&name) && !scopes.scopes[id].free.contains(&name) {
+                let mut p = scopes.scopes[id].parent;
+                while let Some(pid) = p {
+                    if scopes.scopes[pid].kind == ScopeKind::Module {
+                        break;
+                    }
+                    if scopes.scopes[pid].kind == ScopeKind::Function && scopes.scopes[pid].is_local(&name) {
+                        scopes.scopes[id].free.insert(name.clone());
+                        break;
+                    }
+                    p = scopes.scopes[pid].parent;
+                }
+            }
+        }
+    }
+}
+
+pub fn analyse(module: &ast::ModModule) -> Scopes {
+    let mut scopes = Scopes::default();
+    scopes.scopes.push(Scope { kind: ScopeKind::Module, parent: None, ..Default::default() });
+    scopes.by_node.insert(node_addr(module), 0);
+    {
+        let mut coll = Collector { scopes: &mut scopes, scope: 0 };
+        for s in &module.body {
+            coll.visit_stmt(s);
+        }
+    }
+    resolve(&mut scopes, 0);
+    scopes
+}

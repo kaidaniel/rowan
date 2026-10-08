@@ -1,6 +1,6 @@
 """Golden-case harness.
 
-Expectations are comments inside the case files:
+Expectations are comments inside the case files (run with --rust / --both to use the Rust engine in rowan-rs/):
 
     r["role"]                 #@ possibly role
     r["rolle"]                #@ missing rolle ; none tenant
@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import ast
 import glob
+import json
 import os
 import re
+import subprocess
 import sys
 import traceback
 from typing import Any, Dict, List, Tuple
@@ -84,6 +86,125 @@ def collect_expectations(src: str):
                 key = parse_key(toks[1]) if len(toks) > 1 else None
                 verdict_exp.setdefault(i, []).append((tier, key))
     return verdict_exp, row_exp, schema_exp
+
+
+RUST_BIN = os.environ.get("ROWAN_RS", os.path.join(os.path.dirname(HERE), "rowan-rs", "target", "release", "rowan-rs"))
+if not os.path.exists(RUST_BIN):
+    RUST_BIN = os.path.join(os.path.dirname(HERE), "rowan-rs", "target", "debug", "rowan-rs")
+
+
+def check_results(verdict_exp, row_exp_checks, schema_exp, vs, sch) -> List[str]:
+    """Shared expectation checker.  `vs`: list of dicts with line/chain/key/key_str/tier;
+    `row_exp_checks`: [(line, name, spec, problem)]; `sch`: {label: {key_repr: {"always": bool}}}."""
+    failures: List[str] = []
+    for ln, exps in sorted(verdict_exp.items()):
+        here = [v for v in vs if v["line"] == ln or ln in v["chain"]]
+        for tier, key in exps:
+            if tier == "none" and key is None:
+                bad = [v for v in here if v["tier"] not in ("proven",)]
+                if bad:
+                    failures.append(f"L{ln}: expected no diagnostics, got " + ", ".join(f"{v['tier']} {v['key']}" for v in bad))
+                continue
+            matches = [v for v in here if v["key"] == key_str(key) or (isinstance(key, str) and v["key_str"].startswith(key))]
+            if tier == "none":
+                if matches:
+                    failures.append(f"L{ln}: expected no verdict for {key!r}, got " + ", ".join(v["tier"] for v in matches))
+                continue
+            if tier == "any":
+                if not matches:
+                    failures.append(f"L{ln}: expected some verdict for {key!r}, got none")
+                continue
+            if not matches:
+                got = ", ".join(f"{v['tier']} {v['key']}" for v in here) or "nothing"
+                failures.append(f"L{ln}: expected {tier} {key!r}; got {got}")
+            elif not any(v["tier"] == tier for v in matches):
+                failures.append(f"L{ln}: expected {tier} {key!r}; got " + ", ".join(sorted({v["tier"] for v in matches})))
+    for ln, name, spec, problem in row_exp_checks:
+        if problem:
+            failures.append(f"L{ln} row {name}: {problem}")
+    for label, spec in schema_exp:
+        hits = {k: v for k, v in sch.items() if label in k}
+        if spec.get("none"):
+            keys = {k for e in hits.values() for k in e}
+            if keys:
+                failures.append(f"schema {label}: expected none, got {sorted(keys)}")
+            continue
+        if not hits:
+            failures.append(f"schema {label}: no requirements recorded (have: {sorted(sch)})")
+            continue
+        merged: Dict[str, Any] = {}
+        for e in hits.values():
+            merged.update(e)
+        always = {k for k, e in merged.items() if e["always"]}
+        allk = set(merged)
+        for k in spec.get("always", set()):
+            if key_str(k) not in always:
+                failures.append(f"schema {label}: {k!r} should be always; got {'sometimes' if key_str(k) in allk else 'nothing'}")
+        for k in spec.get("sometimes", set()):
+            if key_str(k) not in allk:
+                failures.append(f"schema {label}: {k!r} missing")
+            elif key_str(k) in always:
+                failures.append(f"schema {label}: {k!r} should be sometimes, got always")
+        if "only" in spec:
+            extra = allk - {key_str(k) for k in spec["only"]}
+            if extra:
+                failures.append(f"schema {label}: unexpected keys {sorted(extra)}")
+    return failures
+
+
+def row_problems(row: Dict[str, Any], spec: Dict[str, Any]) -> str:
+    """`row`: {"present": [repr...], "definite": [...], "absent": [...], "closed": bool}."""
+    present = set(row["present"])
+    definite = set(row["definite"])
+    absent = set(row["absent"])
+    problems = []
+    if "present" in spec and present != {key_str(k) for k in spec["present"]}:
+        problems.append(f"present={sorted(present)} want {sorted(key_str(k) for k in spec['present'])}")
+    if "definite" in spec and definite != {key_str(k) for k in spec["definite"]}:
+        problems.append(f"definite={sorted(definite)} want {sorted(key_str(k) for k in spec['definite'])}")
+    if "absent" in spec and not {key_str(k) for k in spec["absent"]} <= absent:
+        problems.append(f"absent={sorted(absent)} want ⊇ {sorted(key_str(k) for k in spec['absent'])}")
+    if spec.get("closed") and not row["closed"]:
+        problems.append(f"expected closed, got {row.get('text', row)}")
+    if spec.get("open") and row["closed"]:
+        problems.append(f"expected open, got {row.get('text', row)}")
+    return "; ".join(problems)
+
+
+def run_case_rust(path: str, verbose: bool = False) -> Tuple[bool, List[str]]:
+    with open(path, encoding="utf-8") as f:
+        src = f.read()
+    verdict_exp, row_exp, schema_exp = collect_expectations(src)
+    try:
+        cmd = [RUST_BIN, path, "--golden"] + (["--compat"] if os.environ.get("ROWAN_COMPAT") else [])
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except Exception as e:  # noqa: BLE001
+        return False, [f"could not run {RUST_BIN}: {e}"]
+    if out.returncode != 0:
+        return False, [f"rowan-rs failed (exit {out.returncode}): {out.stderr.strip()[-2000:]}"]
+    try:
+        res = json.loads(out.stdout)
+    except json.JSONDecodeError as e:
+        return False, [f"bad JSON from rowan-rs: {e}: {out.stdout[:200]}"]
+    row_checks = []
+    for rc in res["rows"]:
+        for name, spec in row_exp.get(rc["line"], []):
+            if name != rc["name"]:
+                continue
+            if rc["row"] is None:
+                row_checks.append((rc["line"], name, spec, "no record object"))
+            else:
+                row_checks.append((rc["line"], name, spec, row_problems(rc["row"], spec)))
+    seen_rows = {(rc["line"], rc["name"]) for rc in res["rows"]}
+    for ln, specs in row_exp.items():
+        for name, spec in specs:
+            if (ln, name) not in seen_rows:
+                row_checks.append((ln, name, spec, "statement never executed"))
+    failures = check_results(verdict_exp, row_checks, schema_exp, res["verdicts"], res["schemas"])
+    if verbose or failures:
+        print(f"\n===== {os.path.basename(path)} [rust] =====")
+        print(res["report"])
+    return not failures, failures
 
 
 def run_case(path: str, verbose: bool = False) -> Tuple[bool, List[str]]:
@@ -196,21 +317,39 @@ def run_case(path: str, verbose: bool = False) -> Tuple[bool, List[str]]:
 
 def main(argv: List[str]) -> int:
     verbose = "-v" in argv
+    engine = "python"
+    for a in argv:
+        if a.startswith("--engine="):
+            engine = a.split("=", 1)[1]
+    if "--rust" in argv:
+        engine = "rust"
+    if "--both" in argv:
+        engine = "both"
     args = [a for a in argv if not a.startswith("-")]
     paths = args or sorted(glob.glob(os.path.join(HERE, "cases", "*.py"))
                            + glob.glob(os.path.join(HERE, "cases", "*", "*.py")))
     paths = [p for p in paths if not os.path.basename(p).startswith("helpers")]
     ok_all = True
     results = []
+    engines = ["python", "rust"] if engine == "both" else [engine]
     for p in paths:
-        ok, fails = run_case(p, verbose)
-        results.append((os.path.basename(p), ok, fails))
-        ok_all &= ok
+        with open(p, encoding="utf-8") as f:
+            head = f.read(200)
+        m = re.search(r"#@engine\s+(\w+)", head)
+        only = m.group(1) if m else None
+        for eng in engines:
+            if only is not None and (only != eng or (only == "rust" and os.environ.get("ROWAN_COMPAT"))):
+                continue   # a case for one engine only (and `--compat` is the prototype's behaviour)
+            ok, fails = (run_case_rust if eng == "rust" else run_case)(p, verbose)
+            results.append((os.path.basename(p) + ("" if len(engines) == 1 else f" [{eng}]"), ok, fails))
+            ok_all &= ok
     print("\n===== summary =====")
+    npass = sum(1 for _n, ok, _f in results if ok)
     for name, ok, fails in results:
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")
         for f in fails:
             print(f"        - {f}")
+    print(f"  {npass}/{len(results)} passed ({engine})")
     return 0 if ok_all else 1
 
 

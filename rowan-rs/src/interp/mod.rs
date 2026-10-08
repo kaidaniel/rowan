@@ -1,0 +1,1509 @@
+//! Abstract interpreter over the Python AST (SPECIFICATION.md §5–§10).  Port of
+//! `rowan/interp.py`; the statement/expression/narrowing/access/call parts live in the
+//! sibling files of this module.
+
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
+use indexmap::IndexMap;
+use ruff_python_ast as ast;
+use rustc_hash::{FxHashMap, FxHashSet};
+
+use crate::domain::{
+    Chain, Classification, KeyVal, KeysOf, Ns, ObjId, Row, Source, SourceKind, Tier, Value,
+};
+use crate::frontend::{self, Node};
+use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
+use crate::models::Registry;
+use crate::scopes::{self as scopemod, Scopes};
+use crate::state::{Kind, State};
+use crate::summary::{Summary, SymReq, Event, PH};
+
+pub mod access;
+pub mod calls;
+pub mod exprs;
+pub mod funcs;
+pub mod narrow;
+pub mod stmts;
+
+pub const UNROLL_MAX: usize = 16;
+pub const LOOP_MAX_ITER: usize = 40;
+pub const REC_MAX_ITER: usize = 8;
+pub const PATH_DEPTH: u32 = 3;
+pub const MAX_ACTIVE: usize = 2;
+pub const MAX_MUTATED: usize = 24;
+pub const MAX_CLONES: usize = 8;
+
+pub fn debug_enabled() -> bool {
+    match std::env::var("ROWAN_DEBUG") {
+        Ok(v) => !(v.is_empty() || v == "0"),
+        Err(_) => false,
+    }
+}
+
+pub const SAFE_METHODS: &[&str] = &[
+    "dict.get", "dict.keys", "dict.values", "dict.items", "dict.setdefault", "dict.copy", "list.append", "str.upper", "str.lower",
+    "str.strip", "str.title", "str.format", "str.join",
+];
+pub const STR_METHOD_NAMES: &[&str] = &[
+    "strip", "lower", "upper", "title", "split", "replace", "startswith", "endswith", "format", "join", "lstrip", "rstrip", "encode",
+    "decode", "isdigit", "isalpha", "zfill", "casefold", "capitalize", "partition", "rsplit", "splitlines", "find", "count", "ljust",
+    "rjust", "center",
+];
+pub const SCALAR_EXTRA_NAMES: &[&str] = &[
+    "append", "extend", "sort", "index", "insert", "remove", "add", "isoformat", "strftime", "timestamp", "date", "time",
+    "total_seconds", "to_bytes", "bit_length", "as_integer_ratio", "is_integer", "hex", "conjugate", "real", "imag", "tolist",
+    "item", "copy", "clear", "reverse",
+];
+pub fn is_scalar_method(name: &str) -> bool {
+    STR_METHOD_NAMES.contains(&name) || SCALAR_EXTRA_NAMES.contains(&name)
+}
+pub const NOEFFECT_METHOD_NAMES: &[&str] = &[
+    "info", "debug", "warning", "warn", "error", "critical", "exception", "log", "write", "flush", "close", "print", "assert_called",
+    "assert_called_with",
+];
+pub const DICT_METHOD_NAMES: &[&str] = &["get", "items", "keys", "values", "update", "pop", "setdefault", "copy", "popitem", "clear"];
+pub const ITEM_GUARDS: &[&str] = &["KeyError", "LookupError", "Exception", "BaseException", "IndexError", "*"];
+pub const ATTR_GUARDS: &[&str] = &["AttributeError", "Exception", "BaseException", "*"];
+pub const KNOWN_IDENTITY_DECORATORS: &[&str] = &[
+    "functools.lru_cache", "functools.cache", "functools.wraps", "contextlib.contextmanager", "abc.abstractmethod", "typing.overload",
+    "typing.final", "builtins.staticmethod", "builtins.classmethod", "pytest.fixture", "asyncio.coroutine", "dataclasses.dataclass",
+    "typing.no_type_check", "functools.total_ordering", "typing.runtime_checkable",
+];
+
+// ---------------------------------------------------------------------------
+// records produced for the reporter
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Verdict {
+    pub line: u32,
+    pub col: u32,
+    pub key: KeyId,
+    pub tier: Tier,
+    pub obj: String,
+    /// call sites (lines) active when the access ran
+    pub chain: Chain,
+    pub note: String,
+    pub providers: Vec<String>,
+    pub ns: Ns,
+    pub text: String,
+    pub oid: ObjId,
+    /// module the access is in (empty = main file)
+    pub file: String,
+}
+
+impl Verdict {
+    pub fn dedupe_key(&self) -> (String, u32, u32, String, Tier, ObjId, Chain) {
+        (self.file.clone(), self.line, self.col, intern::key_repr(self.key), self.tier, self.oid, self.chain.clone())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum FuncNode {
+    Def(&'static ast::StmtFunctionDef),
+    Lambda(&'static ast::ExprLambda),
+}
+
+impl FuncNode {
+    pub fn params(&self) -> Option<&'static ast::Parameters> {
+        match self {
+            FuncNode::Def(f) => Some(&f.parameters),
+            FuncNode::Lambda(l) => l.parameters.as_deref(),
+        }
+    }
+    pub fn node(&self) -> Node {
+        match self {
+            FuncNode::Def(f) => frontend::node(*f),
+            FuncNode::Lambda(l) => frontend::node(*l),
+        }
+    }
+    pub fn is_lambda(&self) -> bool {
+        matches!(self, FuncNode::Lambda(_))
+    }
+    pub fn addr(&self) -> usize {
+        match self {
+            FuncNode::Def(f) => *f as *const _ as usize,
+            FuncNode::Lambda(l) => *l as *const _ as usize,
+        }
+    }
+    pub fn body(&self) -> &'static [ast::Stmt] {
+        match self {
+            FuncNode::Def(f) => &f.body,
+            FuncNode::Lambda(_) => &[],
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct FuncInfo {
+    pub node: FuncNode,
+    pub name: String,
+    pub qualname: String,
+    pub module: ObjId,
+    pub scope: usize,
+    /// free name -> cell oid
+    pub closure: IndexMap<StrId, ObjId>,
+    pub defaults: IndexMap<StrId, Value>,
+    /// defining class oid
+    pub cls: Option<ObjId>,
+    pub is_property: Cell<bool>,
+    pub is_static: Cell<bool>,
+    pub is_classmethod: Cell<bool>,
+    pub generator: Cell<Option<ObjId>>,
+}
+
+impl FuncInfo {
+    pub fn clone_with_closure(&self, closure: IndexMap<StrId, ObjId>) -> FuncInfo {
+        FuncInfo {
+            node: self.node,
+            name: self.name.clone(),
+            qualname: self.qualname.clone(),
+            module: self.module,
+            scope: self.scope,
+            closure,
+            defaults: self.defaults.clone(),
+            cls: self.cls,
+            is_property: Cell::new(self.is_property.get()),
+            is_static: Cell::new(self.is_static.get()),
+            is_classmethod: Cell::new(self.is_classmethod.get()),
+            generator: Cell::new(self.generator.get()),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ClassInfo {
+    pub name: String,
+    pub node: &'static ast::StmtClassDef,
+    pub bases: Vec<ObjId>,
+    pub module: ObjId,
+    /// inherits from something we do not see
+    pub open_base: bool,
+    pub dataclass_fields: RefCell<Option<Vec<(String, Option<&'static ast::Expr>)>>>,
+    pub typed_dict: bool,
+    pub named_tuple: bool,
+    /// attr → classes assigned to self.attr (lazy)
+    pub field_classes: RefCell<Option<FxHashMap<String, Vec<ObjId>>>>,
+    pub any_fields: RefCell<Option<FxHashSet<String>>>,
+}
+
+impl ClassInfo {
+    pub fn has_fields(&self) -> bool {
+        self.dataclass_fields.borrow().is_some()
+    }
+    pub fn fields(&self) -> Vec<(String, Option<&'static ast::Expr>)> {
+        self.dataclass_fields.borrow().clone().unwrap_or_default()
+    }
+}
+
+#[derive(Debug)]
+pub struct ModuleInfo {
+    pub name: String,
+    pub path: Option<String>,
+    pub idx: u32,
+    pub tree: &'static ast::ModModule,
+    pub scopes: Scopes,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FrameKind {
+    Module,
+    Function,
+    Class,
+}
+
+#[derive(Debug)]
+pub struct Frame {
+    pub kind: FrameKind,
+    pub scope: usize,
+    pub module: ObjId,
+    pub ctx: String,
+    pub single: bool,
+    /// `single` ignoring loops: with the recency abstraction an allocation inside a loop is
+    /// a strong "recent" object when this holds
+    pub single_nl: bool,
+    pub func: Option<ObjId>,
+    pub cells: IndexMap<StrId, ObjId>,
+    pub class_oid: Option<ObjId>,
+    pub overlays: Vec<IndexMap<StrId, Value>>,
+    pub loop_depth: u32,
+    pub label: String,
+    pub symbolic: bool,
+}
+
+impl Frame {
+    pub fn new(kind: FrameKind, scope: usize, module: ObjId, ctx: &str, single: bool, label: &str) -> Frame {
+        Frame {
+            kind,
+            scope,
+            module,
+            ctx: ctx.to_string(),
+            single,
+            single_nl: single,
+            func: None,
+            cells: IndexMap::new(),
+            class_oid: None,
+            overlays: Vec::new(),
+            loop_depth: 0,
+            label: label.to_string(),
+            symbolic: false,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct LoopCtx {
+    pub breaks: Option<State>,
+    pub continues: Option<State>,
+}
+
+/// Everything a model needs about a call.
+pub struct Call {
+    pub qual: String,
+    pub recv: Option<Value>,
+    pub args: Vec<Value>,
+    pub kwargs: IndexMap<StrId, Value>,
+    pub star_args: Vec<Value>,
+    pub star_kwargs: Vec<Value>,
+    pub node: Node,
+    pub call_ast: Option<&'static ast::ExprCall>,
+    pub site: String,
+    pub line: u32,
+}
+
+impl Call {
+    pub fn arg(&self, i: usize, name: Option<&str>) -> Option<Value> {
+        if i < self.args.len() {
+            return Some(self.args[i].clone());
+        }
+        if let Some(n) = name {
+            if let Some(v) = self.kwargs.get(&s(n)) {
+                return Some(v.clone());
+            }
+        }
+        None
+    }
+    pub fn kw(&self, name: &str) -> Option<Value> {
+        self.kwargs.get(&s(name)).cloned()
+    }
+    pub fn arg_node(&self, i: usize, name: Option<&str>) -> Option<&'static ast::Expr> {
+        let c = self.call_ast?;
+        if i < c.arguments.args.len() && !matches!(c.arguments.args[i], ast::Expr::Starred(_)) {
+            return Some(&c.arguments.args[i]);
+        }
+        if let Some(n) = name {
+            for kw in c.arguments.keywords.iter() {
+                if kw.arg.as_ref().map(|a| a.id.as_str()) == Some(n) {
+                    return Some(&kw.value);
+                }
+            }
+        }
+        None
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ViewKind {
+    Keys,
+    Values,
+    Items,
+    Rows,
+    Elems,
+}
+
+impl ViewKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            ViewKind::Keys => "keys",
+            ViewKind::Values => "values",
+            ViewKind::Items => "items",
+            ViewKind::Rows => "rows",
+            ViewKind::Elems => "elems",
+        }
+    }
+    pub fn from_name(n: &str) -> ViewKind {
+        match n {
+            "keys" => ViewKind::Keys,
+            "values" => ViewKind::Values,
+            "items" => ViewKind::Items,
+            "rows" => ViewKind::Rows,
+            _ => ViewKind::Elems,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum Payload {
+    None,
+    Module(Rc<ModuleInfo>),
+    Func(Rc<FuncInfo>),
+    Class(Rc<ClassInfo>),
+    Ph(Rc<PH>),
+    /// instance: its class
+    Cls(ObjId),
+    /// external qualname / response tag
+    Str(String),
+    Method(String, Value),
+    Bound(ObjId, Value),
+    Super(ObjId, Value),
+    View(ViewKind, Value),
+    Zip(Value, Value),
+    Enumerate(Value),
+    Pair(Value, Value),
+    Partial(Value, Vec<Value>, IndexMap<StrId, Value>),
+    Groupby(Vec<ObjId>, Option<KeySet>, bool, Option<(KeySet, bool)>),
+    Locidx(String, ObjId),
+}
+
+impl Payload {
+    pub fn is_none(&self) -> bool {
+        matches!(self, Payload::None)
+    }
+}
+
+#[derive(Debug)]
+pub struct Obj {
+    pub id: ObjId,
+    pub kind: Kind,
+    pub site: String,
+    pub ctx: String,
+    pub single: bool,
+    pub label: String,
+    pub payload: Payload,
+    /// containers built from a literal: positional slots are valid
+    pub literal_len: Option<usize>,
+    /// summary object standing for "the current element" of a loop
+    pub iter_elem: bool,
+    /// record this object is a view of (virtual row -> frame)
+    pub derived_from: Option<ObjId>,
+    /// access-path depth under an open source (placeholders, elements)
+    pub depth: u32,
+}
+
+/// Where a narrowed value is written back (`_narrow_isinstance`'s `store` closure).
+#[derive(Clone)]
+pub enum StoreTarget {
+    Name(StrId),
+    Narrowed(StrId),
+    Slot(ObjId, Ns, KeyId),
+}
+
+/// Engine options.  Everything on by default; `compat()` reproduces the Python prototype
+/// exactly (used for differential testing against the oracle).
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    /// resolve a placeholder to allocation sites with one representative row per distinct
+    /// entry row, instead of per object (AGENTS.md next step 3)
+    pub site_resolution: bool,
+    /// `State::same` compares the path-sensitive `narrowed` facts too
+    pub narrowed_same: bool,
+    /// re-iterate summaries computed against a partial summary of a function still being
+    /// summarised (proper SCC iteration for mutual recursion)
+    pub scc: bool,
+    /// recency abstraction for objects allocated in loops
+    pub recency: bool,
+    /// positional slots for tuples held in non-literal containers
+    pub positional: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options { site_resolution: true, narrowed_same: true, scc: true, recency: true, positional: true }
+    }
+}
+
+impl Options {
+    pub fn compat() -> Self {
+        Options { site_resolution: false, narrowed_same: false, scc: false, recency: false, positional: false }
+    }
+    /// `ROWAN_COMPAT=1` → compat; `ROWAN_NO=recency,scc,site,narrowed,positional` switches
+    /// individual options off.
+    pub fn from_env() -> Self {
+        let mut o = match std::env::var("ROWAN_COMPAT") {
+            Ok(v) if !v.is_empty() && v != "0" => Options::compat(),
+            _ => Options::default(),
+        };
+        if let Ok(v) = std::env::var("ROWAN_NO") {
+            for name in v.split(',') {
+                match name.trim() {
+                    "site" | "site_resolution" => o.site_resolution = false,
+                    "narrowed" | "narrowed_same" => o.narrowed_same = false,
+                    "scc" => o.scc = false,
+                    "recency" => o.recency = false,
+                    "positional" => o.positional = false,
+                    _ => {}
+                }
+            }
+        }
+        o
+    }
+}
+
+pub struct RowCheck {
+    pub line: u32,
+    pub name: String,
+    pub row: Option<Row>,
+    pub ns: Ns,
+}
+
+pub struct Analyzer {
+    pub filename: String,
+    pub use_summaries: bool,
+    pub summary_table: FxHashMap<crate::summary::SummaryKey, Rc<Summary>>,
+    pub tab_count: FxHashMap<(ObjId, &'static str), usize>,
+    pub module_done: bool,
+    pub fresh_init: FxHashSet<ObjId>,
+    pub cell_classes: FxHashMap<ObjId, ObjId>,
+    pub sum_stack: Vec<ObjId>,
+    pub sum_reqs: Vec<IndexMap<crate::summary::SymKey, SymReq>>,
+    pub sum_events: Vec<IndexMap<(&'static str, ObjId), Event>>,
+    pub sum_hit: FxHashSet<ObjId>,
+    pub sum_partial: FxHashMap<ObjId, Rc<Summary>>,
+    pub sum_obj_mark: Vec<ObjId>,
+    /// per summary on the stack: functions further down the stack whose *partial* summary
+    /// this computation used (the result is then provisional, re-done per round of theirs)
+    pub sum_deps: Vec<FxHashSet<ObjId>>,
+    /// recency abstraction: per loop iteration being analysed (innermost last), the recent
+    /// objects allocated in it: (recent oid, kind, site, ctx)
+    pub recent_stack: Vec<Vec<(ObjId, Kind, String, String)>>,
+    pub summary_provisional: FxHashMap<crate::summary::SummaryKey, (Rc<Summary>, FxHashSet<ObjId>)>,
+    pub model_call: u32,
+    pub search_paths: Vec<String>,
+    pub analyse_entry_points: bool,
+    pub objects: Vec<Obj>,
+    pub obj_index: FxHashMap<(Kind, String, String), ObjId>,
+    pub verdicts: Vec<Verdict>,
+    pub verdict_keys: FxHashSet<(String, u32, u32, String, Tier, ObjId, Chain)>,
+    pub notes: Vec<String>,
+    pub notes_set: FxHashSet<String>,
+    pub summaries: IndexMap<(String, String), (Value, Vec<(ObjId, Row)>)>,
+    pub models: Registry,
+    pub frames: Vec<Frame>,
+    pub active: FxHashMap<(ObjId, String), bool>,
+    pub active_by_func: FxHashMap<ObjId, Vec<(ObjId, String)>>,
+    pub rec_table: FxHashMap<(ObjId, String), (Value, State, crate::state::Footprint)>,
+    pub rec_hit: FxHashSet<(ObjId, String)>,
+    pub rec_entry: FxHashMap<(ObjId, String), (Option<Value>, Vec<Value>, IndexMap<StrId, Value>)>,
+    pub rec_widened: FxHashSet<(ObjId, String)>,
+    pub loop_stack: Vec<LoopCtx>,
+    pub guards: Vec<FxHashSet<String>>,
+    pub may_raise: Vec<bool>,
+    pub cond_depth: i32,
+    pub call_chain: Vec<u32>,
+    pub analysed_funcs: FxHashSet<ObjId>,
+    pub modules: IndexMap<String, ObjId>,
+    pub exh_log: Option<Vec<(ObjId, Ns, Row, KeySet, intern::LensId)>>,
+    pub final_state: Option<State>,
+    pub user_classes: Vec<ObjId>,
+    /// class attributes (flow-insensitive)
+    pub cls_slots: FxHashMap<(ObjId, Ns, KeyId), Value>,
+    pub site_clones: FxHashMap<String, usize>,
+    pub call_cache: FxHashMap<calls::Sig, Rc<calls::CacheHit>>,
+    pub entry_instances: FxHashMap<ObjId, ObjId>,
+    pub fresh_in_progress: FxHashSet<ObjId>,
+    pub main_module: ObjId,
+    pub main_tree: &'static ast::ModModule,
+    pub series: ObjId,
+    pub none_v: Value,
+    /// `#@row NAME:` checks requested by the golden harness: (line, name)
+    pub row_check_requests: Vec<(u32, String)>,
+    pub row_checks: Vec<RowCheck>,
+    pub main_stmt_lines: FxHashSet<usize>,
+    pub t0: std::time::Instant,
+    pub opts: Options,
+}
+
+pub fn site_string(n: &Node) -> String {
+    format!("L{}:{}-{}", n.line, n.col, n.end_col)
+}
+
+impl Analyzer {
+    pub fn new(source: String, filename: &str, search_paths: Vec<String>, analyse_entry_points: bool, follow_imports: bool, use_summaries: Option<bool>) -> Result<Analyzer, String> {
+        let use_summaries = use_summaries.unwrap_or_else(|| std::env::var("ROWAN_SUMMARIES").map(|v| v != "0").unwrap_or(true));
+        let (idx, tree) = frontend::parse("__main__", Some(filename), source)?;
+        let mut an = Analyzer {
+            filename: filename.to_string(),
+            use_summaries,
+            summary_table: FxHashMap::default(),
+            tab_count: FxHashMap::default(),
+            module_done: false,
+            fresh_init: FxHashSet::default(),
+            cell_classes: FxHashMap::default(),
+            sum_stack: Vec::new(),
+            sum_reqs: Vec::new(),
+            sum_events: Vec::new(),
+            sum_hit: FxHashSet::default(),
+            sum_partial: FxHashMap::default(),
+            sum_obj_mark: Vec::new(),
+            sum_deps: Vec::new(),
+            recent_stack: Vec::new(),
+            summary_provisional: FxHashMap::default(),
+            model_call: 0,
+            search_paths: if follow_imports { search_paths } else { Vec::new() },
+            analyse_entry_points,
+            objects: vec![Obj {
+                id: 0,
+                kind: Kind::Unknown,
+                site: String::new(),
+                ctx: String::new(),
+                single: true,
+                label: "<none>".into(),
+                payload: Payload::None,
+                literal_len: None,
+                iter_elem: false,
+                derived_from: None,
+                depth: 0,
+            }],
+            obj_index: FxHashMap::default(),
+            verdicts: Vec::new(),
+            verdict_keys: FxHashSet::default(),
+            notes: Vec::new(),
+            notes_set: FxHashSet::default(),
+            summaries: IndexMap::new(),
+            models: Registry::new(),
+            frames: Vec::new(),
+            active: FxHashMap::default(),
+            active_by_func: FxHashMap::default(),
+            rec_table: FxHashMap::default(),
+            rec_hit: FxHashSet::default(),
+            rec_entry: FxHashMap::default(),
+            rec_widened: FxHashSet::default(),
+            loop_stack: Vec::new(),
+            guards: Vec::new(),
+            may_raise: Vec::new(),
+            cond_depth: 0,
+            call_chain: Vec::new(),
+            analysed_funcs: FxHashSet::default(),
+            modules: IndexMap::new(),
+            exh_log: None,
+            final_state: None,
+            user_classes: Vec::new(),
+            cls_slots: FxHashMap::default(),
+            site_clones: FxHashMap::default(),
+            call_cache: FxHashMap::default(),
+            entry_instances: FxHashMap::default(),
+            fresh_in_progress: FxHashSet::default(),
+            main_module: 0,
+            main_tree: tree,
+            series: 0,
+            none_v: Value::lit(intern::key_none()),
+            row_check_requests: Vec::new(),
+            row_checks: Vec::new(),
+            main_stmt_lines: FxHashSet::default(),
+            t0: std::time::Instant::now(),
+            opts: Options::from_env(),
+        };
+        an.main_module = an.make_module("__main__", Some(filename), idx, tree);
+        an.series = an.alloc_global(Kind::Series, "builtin:Series", "Series", Payload::None);
+        Ok(an)
+    }
+
+    // ------------------------------------------------------------------ setup
+    fn make_module(&mut self, name: &str, path: Option<&str>, idx: u32, tree: &'static ast::ModModule) -> ObjId {
+        let info = ModuleInfo { name: name.to_string(), path: path.map(|p| p.to_string()), idx, tree, scopes: scopemod::analyse(tree) };
+        let oid = self.alloc_global(Kind::Module, &format!("module:{}", name), &format!("module {}", name), Payload::Module(Rc::new(info)));
+        self.modules.insert(name.to_string(), oid);
+        oid
+    }
+
+    pub fn frame(&self) -> &Frame {
+        self.frames.last().expect("no frame")
+    }
+    pub fn frame_mut(&mut self) -> &mut Frame {
+        self.frames.last_mut().expect("no frame")
+    }
+
+    pub fn obj(&self, oid: ObjId) -> &Obj {
+        &self.objects[oid as usize]
+    }
+    pub fn obj_mut(&mut self, oid: ObjId) -> &mut Obj {
+        &mut self.objects[oid as usize]
+    }
+    pub fn kind(&self, oid: ObjId) -> Kind {
+        self.objects[oid as usize].kind
+    }
+    pub fn label(&self, oid: ObjId) -> String {
+        self.objects[oid as usize].label.clone()
+    }
+    pub fn has_obj(&self, oid: ObjId) -> bool {
+        (oid as usize) < self.objects.len() && oid > 0
+    }
+
+    pub fn module_info(&self, moid: ObjId) -> Rc<ModuleInfo> {
+        match &self.obj(moid).payload {
+            Payload::Module(m) => m.clone(),
+            _ => panic!("not a module: {}", moid),
+        }
+    }
+    pub fn func_info(&self, foid: ObjId) -> Rc<FuncInfo> {
+        match &self.obj(foid).payload {
+            Payload::Func(f) => f.clone(),
+            _ => panic!("not a function: {}", foid),
+        }
+    }
+    pub fn func_info_opt(&self, foid: ObjId) -> Option<Rc<FuncInfo>> {
+        match &self.obj(foid).payload {
+            Payload::Func(f) => Some(f.clone()),
+            _ => None,
+        }
+    }
+    pub fn class_info(&self, coid: ObjId) -> Rc<ClassInfo> {
+        match &self.obj(coid).payload {
+            Payload::Class(c) => c.clone(),
+            _ => panic!("not a class: {} ({})", coid, self.obj(coid).label),
+        }
+    }
+    pub fn class_info_opt(&self, coid: ObjId) -> Option<Rc<ClassInfo>> {
+        if !self.has_obj(coid) {
+            return None;
+        }
+        match &self.obj(coid).payload {
+            Payload::Class(c) => Some(c.clone()),
+            _ => None,
+        }
+    }
+    /// The class of an instance object (payload), if it is a user class.
+    pub fn instance_class(&self, oid: ObjId) -> Option<ObjId> {
+        match &self.obj(oid).payload {
+            Payload::Cls(c) => Some(*c),
+            _ => None,
+        }
+    }
+    pub fn ph_info(&self, oid: ObjId) -> Rc<PH> {
+        match &self.obj(oid).payload {
+            Payload::Ph(p) => p.clone(),
+            _ => panic!("not a placeholder: {}", oid),
+        }
+    }
+    pub fn ph_info_opt(&self, oid: ObjId) -> Option<Rc<PH>> {
+        match &self.obj(oid).payload {
+            Payload::Ph(p) => Some(p.clone()),
+            _ => None,
+        }
+    }
+    pub fn external_qual(&self, oid: ObjId) -> String {
+        match &self.obj(oid).payload {
+            Payload::Str(q) => q.clone(),
+            _ => String::new(),
+        }
+    }
+    pub fn is_record_like(&self, oid: ObjId) -> bool {
+        self.kind(oid).is_record_like()
+    }
+    pub fn now(&self) -> f64 {
+        self.t0.elapsed().as_secs_f64()
+    }
+
+    // ------------------------------------------------------------ allocation
+    pub fn alloc_global(&mut self, kind: Kind, site: &str, label: &str, payload: Payload) -> ObjId {
+        let label = if label.is_empty() { site } else { label };
+        self.alloc_raw(kind, site, "", true, label, payload)
+    }
+
+    pub fn alloc_raw(&mut self, kind: Kind, site: &str, ctx: &str, single: bool, label: &str, payload: Payload) -> ObjId {
+        let key = (kind, site.to_string(), ctx.to_string());
+        if let Some(&oid) = self.obj_index.get(&key) {
+            let o = &mut self.objects[oid as usize];
+            o.single = o.single && single;
+            if !payload.is_none() {
+                o.payload = payload;
+            }
+            return oid;
+        }
+        let n = self.site_clones.get(site).copied().unwrap_or(0);
+        if n >= MAX_CLONES && !ctx.is_empty() {
+            // too many clones of one allocation site: collapse onto the context-free summary object
+            return self.alloc_raw(kind, site, "", false, label, payload);
+        }
+        self.site_clones.insert(site.to_string(), n + 1);
+        let oid = self.objects.len() as ObjId;
+        self.objects.push(Obj {
+            id: oid,
+            kind,
+            site: site.to_string(),
+            ctx: ctx.to_string(),
+            single,
+            label: label.to_string(),
+            payload,
+            literal_len: None,
+            iter_elem: false,
+            derived_from: None,
+            depth: 0,
+        });
+        self.obj_index.insert(key, oid);
+        oid
+    }
+
+    pub fn site_of(&self, node: &Node) -> String {
+        site_string(node)
+    }
+
+    /// Allocate an object at `site` (string) in the current frame's context.  `single`:
+    /// explicit strength; `None` = the frame decides (strong outside loops; inside a loop a
+    /// strong *recent* object with the recency abstraction, else the weak per-site object).
+    pub fn alloc(&mut self, kind: Kind, site: &str, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, single: Option<bool>, ctx: Option<&str>) -> ObjId {
+        self.alloc_full(kind, site, state, label, payload, row, ns, single, ctx, true)
+    }
+
+    /// `alloc` for an object cloned from a template: `tsingle` is the template's strength.
+    #[allow(clippy::too_many_arguments)]
+    pub fn alloc_in_frame(&mut self, kind: Kind, site: &str, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, tsingle: bool, ctx: &str, ctx_single: bool) -> ObjId {
+        if !tsingle || !ctx_single {
+            return self.alloc_full(kind, site, state, label, payload, row, ns, Some(false), Some(ctx), true);
+        }
+        self.alloc_full(kind, site, state, label, payload, row, ns, None, Some(ctx), true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn alloc_full(&mut self, kind: Kind, site: &str, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, single: Option<bool>, ctx: Option<&str>, _reserved: bool) -> ObjId {
+        let fr = self.frame();
+        let ctx = ctx.map(|c| c.to_string()).unwrap_or_else(|| fr.ctx.clone());
+        let label = if label.is_empty() { format!("{}@{}", kind.name(), site) } else { label.to_string() };
+        let (single, recent) = match single {
+            Some(x) => (x, false),
+            None => {
+                let strong = fr.single && fr.loop_depth == 0;
+                if !strong && self.opts.recency && fr.single_nl && !self.recent_stack.is_empty() {
+                    (true, true)
+                } else {
+                    (strong, false)
+                }
+            }
+        };
+        let oid = if recent {
+            let rsite = format!("{}#recent", site);
+            let oid = self.alloc_raw(kind, &rsite, &ctx, true, &label, payload);
+            let top = self.recent_stack.last_mut().unwrap();
+            if !top.iter().any(|(o, _, _, _)| *o == oid) {
+                top.push((oid, kind, site.to_string(), ctx.clone()));
+            }
+            oid
+        } else {
+            self.alloc_raw(kind, site, &ctx, single, &label, payload)
+        };
+        let obj_single = self.obj(oid).single;
+        if kind.is_record() || kind == Kind::Frame {
+            let fresh = row.unwrap_or_default();
+            if state.has_row(oid, ns) && !obj_single {
+                let j = state.row(oid, ns).join(&fresh);
+                state.set_row(oid, ns, j);
+            } else {
+                state.set_row(oid, ns, fresh);
+                if obj_single {
+                    // strong re-allocation: drop stale slots of this object
+                    state.drop_obj(oid);
+                }
+            }
+        } else if kind.is_container() && obj_single {
+            state.drop_obj(oid);
+            state.elems.remove(&oid);
+        }
+        oid
+    }
+
+    /// `alloc` at an AST node.
+    pub fn alloc_at(&mut self, kind: Kind, node: &Node, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, single: Option<bool>, ctx: Option<&str>) -> ObjId {
+        let site = site_string(node);
+        self.alloc(kind, &site, state, label, payload, row, ns, single, ctx)
+    }
+
+    /// Short form used by most models: a record-ish object at a node with a row.
+    pub fn alloc_simple(&mut self, kind: Kind, node: &Node, state: &mut State, label: &str) -> ObjId {
+        self.alloc_at(kind, node, state, label, Payload::None, None, Ns::Item, None, None)
+    }
+
+    pub fn unknown_source(&mut self, site: &str, kind: SourceKind, state: &mut State, label: &str, ctx: &str, _ns: Ns, path: Vec<KeyId>) -> ObjId {
+        let src = intern::source(Source { site: site.into(), kind, path });
+        let slabel = crate::domain::source_label(src);
+        let kname = match kind {
+            SourceKind::External => "external",
+            SourceKind::Call => "call",
+            SourceKind::Param => "param",
+            SourceKind::Name => "name",
+            SourceKind::Data => "data",
+            SourceKind::Class => "class",
+        };
+        let label = if label.is_empty() { slabel.clone() } else { label.to_string() };
+        let oid = self.alloc_raw(Kind::Unknown, &format!("{}:{}", kname, slabel), ctx, true, &label, Payload::None);
+        for n in [Ns::Item, Ns::Attr] {
+            if !state.has_row(oid, n) {
+                state.set_row(oid, n, Row::with_source(src));
+            }
+        }
+        oid
+    }
+
+    // ------------------------------------------------------------ reporting
+    pub fn file_of_frame(&self) -> String {
+        let m = self.frame().module;
+        if m == self.main_module {
+            return String::new();
+        }
+        let mi = self.module_info(m);
+        let p = mi.path.clone().unwrap_or_else(|| mi.name.clone());
+        std::path::Path::new(&p).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or(p)
+    }
+
+    pub fn verdict(&mut self, node: &Node, key: KeyId, cls: &Classification, oid: ObjId, ns: Ns, file_override: Option<&str>, text_override: Option<&str>) {
+        if matches!(cls.tier, Tier::Map | Tier::Sym) {
+            return;
+        }
+        let text = match text_override {
+            Some(t) if !t.is_empty() => t.to_string(),
+            _ => self.node_text(node),
+        };
+        let fname = match file_override {
+            Some(f) => f.to_string(),
+            None => self.file_of_frame(),
+        };
+        let chain = self.call_chain.clone();
+        let dk = (fname.clone(), node.line, node.col, intern::key_repr(key), cls.tier, oid, chain.clone());
+        if self.verdict_keys.contains(&dk) {
+            return;
+        }
+        self.verdict_keys.insert(dk);
+        self.verdicts.push(Verdict {
+            line: node.line,
+            col: node.col,
+            key,
+            tier: cls.tier,
+            obj: self.obj(oid).label.clone(),
+            chain,
+            note: cls.note.clone(),
+            providers: cls.providers.iter().map(|(s, _)| crate::domain::source_label(*s)).collect(),
+            ns,
+            text,
+            oid,
+            file: fname,
+        });
+    }
+
+    pub fn node_text(&self, node: &Node) -> String {
+        if node.addr == 0 {
+            return String::new();
+        }
+        frontend::text_at(node)
+    }
+
+    pub fn note(&mut self, msg: String) {
+        if !self.notes_set.contains(&msg) {
+            self.notes_set.insert(msg.clone());
+            self.notes.push(msg);
+        }
+    }
+
+    pub fn access_site(&self, node: &Node) -> String {
+        format!("L{}", node.line)
+    }
+
+    pub fn access_site_id(&self, node: &Node) -> StrId {
+        s(&format!("L{}", node.line))
+    }
+
+    // ------------------------------------------------------------- entry
+    pub fn run(&mut self) {
+        crate::state::set_narrowed_same(self.opts.narrowed_same);
+        let mut state = State::new();
+        let main = self.main_module;
+        self.run_module(main, &mut state);
+        self.module_done = true;
+        if self.analyse_entry_points {
+            self.analyse_uncalled(&mut state);
+        }
+        self.final_state = Some(state);
+    }
+
+    pub fn run_module(&mut self, moid: ObjId, state: &mut State) {
+        let info = self.module_info(moid);
+        let fr = Frame::new(FrameKind::Module, info.scopes.module(), moid, "", true, &format!("<module {}>", info.name));
+        self.frames.push(fr);
+        self.exec_block(&info.tree.body, state);
+        self.frames.pop();
+        state.reachable = true;
+        state.exits = None;
+    }
+
+    /// Entry-point rule (§6.4): functions never called get analysed with open parameters.
+    fn analyse_uncalled(&mut self, state: &mut State) {
+        let n = self.objects.len();
+        for oid in 1..n as ObjId {
+            if self.kind(oid) != Kind::Function || self.analysed_funcs.contains(&oid) {
+                continue;
+            }
+            let fi = self.func_info(oid);
+            if !fi.closure.is_empty() {
+                continue; // inner closures are reached through their factory
+            }
+            if fi.module != self.main_module {
+                continue;
+            }
+            let FuncNode::Def(fnode) = fi.node else { continue };
+            if debug_enabled() {
+                eprintln!(
+                    "[rowan] entry {} L{} t={:.1}s objs={} summaries={} verdicts={}",
+                    fi.qualname,
+                    frontend::node(fnode).line,
+                    self.now(),
+                    self.objects.len(),
+                    self.summary_table.len(),
+                    self.verdicts.len()
+                );
+            }
+            let mut st = state.copy();
+            st.ret = None;
+            let mut args: Vec<Value> = Vec::new();
+            let mi = self.module_info(fi.module);
+            self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
+            let mut params = scopemod::all_params(&fnode.parameters);
+            let mut self_val: Option<Value> = None;
+            if let Some(cls) = fi.cls {
+                if !fi.is_static.get() {
+                    let inst = match self.entry_instances.get(&cls) {
+                        Some(&i) => i,
+                        None => {
+                            let cname = self.class_info(cls).name.clone();
+                            let i = self.fresh_instance(cls, state, &format!("entry:{}", cname));
+                            self.entry_instances.insert(cls, i);
+                            st = state.copy();
+                            st.ret = None;
+                            i
+                        }
+                    };
+                    self_val = Some(Value::obj(inst));
+                    if !params.is_empty() {
+                        params.remove(0);
+                    }
+                }
+            }
+            for a in params {
+                let is_var = fnode.parameters.vararg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false)
+                    || fnode.parameters.kwarg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);
+                if is_var {
+                    continue;
+                }
+                let pname = s(a.name.id.as_str());
+                if let Some(d) = fi.defaults.get(&pname) {
+                    args.push(d.clone());
+                    continue;
+                }
+                let mut v = match &a.annotation {
+                    Some(ann) => self.param_from_annotation(ann, &fi, &mut st),
+                    None => None,
+                };
+                if v.is_none() {
+                    let poid = self.unknown_source(&format!("param {}.{}", fi.qualname, a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
+                    v = Some(Value::obj(poid));
+                }
+                args.push(v.unwrap());
+            }
+            let fake = Node::synthetic(mi.idx, frontend::node(fnode).line);
+            self.call_user(oid, self_val, args, IndexMap::new(), vec![], vec![], &mut st, &fake, None, true);
+            self.frames.pop();
+            // keep schema requirements discovered in entry points
+            for (src, d) in st.reqs.items() {
+                let tgt = state.reqs.writable(&src);
+                for (k, info) in d.iter() {
+                    let nv = match tgt.get(k) {
+                        Some(cur) => cur.join(info),
+                        None => info.clone(),
+                    };
+                    tgt.insert(*k, nv);
+                }
+            }
+        }
+    }
+
+    /// Strip `Optional[X]`, `list[X]`, `"X"`, `X | None` down to the inner expression.
+    pub fn strip_annotation(ann: &'static ast::Expr) -> Option<&'static ast::Expr> {
+        let mut node = ann;
+        while let ast::Expr::Subscript(sub) = node {
+            node = &sub.slice;
+            if let ast::Expr::Tuple(t) = node {
+                if let Some(first) = t.elts.first() {
+                    node = first;
+                }
+            }
+        }
+        if let ast::Expr::BinOp(b) = node {
+            if b.op == ast::Operator::BitOr {
+                node = &b.left;
+            }
+        }
+        if let ast::Expr::StringLiteral(sl) = node {
+            let txt = sl.value.to_str().to_string();
+            return frontend::parse_expression(&txt);
+        }
+        Some(node)
+    }
+
+    /// A declared row for an annotated entry-point parameter (§8.5).
+    pub fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, state: &mut State) -> Option<Value> {
+        let node = Self::strip_annotation(ann)?;
+        let v = self.eval(node, state);
+        for oid in v.pts.iter() {
+            let o = self.kind(oid);
+            if o == Kind::Class {
+                let ci = self.class_info(oid);
+                if ci.has_fields() {
+                    let fields: KeySet = KeySet::from_iter(ci.fields().iter().map(|(f, _)| key_str_lit(f)));
+                    let ns = if ci.typed_dict { Ns::Item } else { Ns::Attr };
+                    let inst = self.alloc(
+                        Kind::Instance,
+                        &format!("param:{}:{}", fi.qualname, ci.name),
+                        state,
+                        &format!("{} param", ci.name),
+                        Payload::Cls(oid),
+                        Some(Row::closed_with(fields.clone())),
+                        ns,
+                        Some(true),
+                        Some(&format!("entry:{}", fi.qualname)),
+                    );
+                    for f in fields.iter() {
+                        state.set_slot(inst, ns, f, Value::data(&format!("field {}", intern::key_py_str(f))), true);
+                    }
+                    return Some(Value::obj(inst));
+                }
+                let inst = self.fresh_instance(oid, state, &format!("entry:{}", fi.qualname));
+                return Some(Value::obj(inst));
+            }
+            if o == Kind::External && self.external_qual(oid).ends_with("DataFrame") {
+                let src = Source::new(&format!("param {}", fi.qualname), SourceKind::Param);
+                let fid = self.alloc(
+                    Kind::Frame,
+                    &format!("param:{}", fi.qualname),
+                    state,
+                    "frame param",
+                    Payload::None,
+                    Some(Row::with_source(src)),
+                    Ns::Item,
+                    Some(true),
+                    Some(&format!("entry:{}", fi.qualname)),
+                );
+                return Some(Value::obj(fid));
+            }
+        }
+        None
+    }
+
+    pub fn fresh_instance(&mut self, cls_oid: ObjId, state: &mut State, ctx: &str) -> ObjId {
+        let ci = self.class_info(cls_oid);
+        if self.fresh_in_progress.contains(&cls_oid) {
+            // self-referential annotation: open instance
+            return self.unknown_source(&format!("instance {}", ci.name), SourceKind::Class, state, &format!("{} (recursive)", ci.name), "", Ns::Attr, vec![]);
+        }
+        self.fresh_in_progress.insert(cls_oid);
+        let r = self.fresh_instance_inner(cls_oid, &ci, state, ctx);
+        self.fresh_in_progress.remove(&cls_oid);
+        r
+    }
+
+    fn fresh_instance_inner(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> ObjId {
+        let has_init = self.class_lookup(cls_oid, "__init__").is_some();
+        let has_fields = self.mro(cls_oid).iter().any(|c| self.class_info_opt(*c).map(|ci| ci.has_fields()).unwrap_or(false));
+        // a class that never initialises its own attributes is only used through subclasses
+        let open_inst = ci.open_base || !(has_init || has_fields);
+        let row = if open_inst { Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)) } else { Row::new() };
+        let inst = self.alloc(
+            Kind::Instance,
+            &format!("instance:{}:{}", ci.name, ctx),
+            state,
+            &format!("{}()", ci.name),
+            Payload::Cls(cls_oid),
+            Some(row),
+            Ns::Attr,
+            Some(true),
+            Some(ctx),
+        );
+        // dataclass / TypedDict / NamedTuple fields (own and inherited) are present on a fresh instance
+        let mut seen: FxHashSet<ObjId> = FxHashSet::default();
+        let mut order = vec![cls_oid];
+        while !order.is_empty() {
+            let c = order.remove(0);
+            if !seen.insert(c) {
+                continue;
+            }
+            let Some(cinfo) = self.class_info_opt(c) else { continue };
+            if cinfo.has_fields() {
+                let ns = if cinfo.typed_dict { Ns::Item } else { Ns::Attr };
+                for (f, _) in cinfo.fields() {
+                    let k = key_str_lit(&f);
+                    let r = state.row(inst, ns).store(k, true);
+                    state.set_row(inst, ns, r);
+                    state.set_slot(inst, ns, k, Value::data(&format!("field {}", f)), true);
+                }
+            }
+            order.extend(cinfo.bases.iter().copied());
+        }
+        if let Some(init_cls) = self.class_lookup(cls_oid, "__init__") {
+            let inits = self.cls_slots.get(&(init_cls, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
+            for init in inits.pts.iter() {
+                if self.kind(init) != Kind::Function {
+                    continue;
+                }
+                let fi = self.func_info(init);
+                let Some(params_all) = fi.node.params() else { continue };
+                let params: Vec<&ast::Parameter> = scopemod::all_params(params_all).into_iter().skip(1).collect();
+                let mut args = Vec::new();
+                for a in params {
+                    let is_var = params_all.vararg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false)
+                        || params_all.kwarg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);
+                    if is_var {
+                        continue;
+                    }
+                    let pname = s(a.name.id.as_str());
+                    if let Some(d) = fi.defaults.get(&pname) {
+                        args.push(d.clone());
+                        continue;
+                    }
+                    let v = match &a.annotation {
+                        Some(ann) => self.param_from_annotation(ann, &fi, state),
+                        None => None,
+                    };
+                    args.push(match v {
+                        Some(v) => v,
+                        None => Value::obj(self.unknown_source(&format!("param {}.{}", fi.qualname, a.name.id), SourceKind::Param, state, &format!("param {}", a.name.id), "", Ns::Item, vec![])),
+                    });
+                }
+                let fake = Node::synthetic(fi.node.node().module, fi.node.node().line);
+                self.call_user(init, Some(Value::obj(inst)), args, IndexMap::new(), vec![], vec![], state, &fake, None, true);
+            }
+        }
+        inst
+    }
+
+    /// Row-check support for the golden harness: after a statement at a requested line.
+    pub fn after_stmt(&mut self, stmt: &ast::Stmt, state: &mut State) {
+        if self.row_check_requests.is_empty() {
+            return;
+        }
+        let n = frontend::node(stmt);
+        if n.module != self.module_info(self.main_module).idx {
+            return;
+        }
+        let reqs: Vec<(u32, String)> = self.row_check_requests.iter().filter(|(ln, _)| *ln == n.line).cloned().collect();
+        for (ln, name) in reqs {
+            let v = self.load_name(s(&name), &n, state);
+            let mut rows: Vec<Row> = Vec::new();
+            let mut ns_used = Ns::Item;
+            for oid in v.pts.iter() {
+                let ns = if matches!(self.kind(oid), Kind::Instance | Kind::Namespace) { Ns::Attr } else { Ns::Item };
+                ns_used = ns;
+                rows.push(state.row(oid, ns));
+            }
+            let row = if rows.is_empty() { None } else { Some(crate::domain::join_rows(rows)) };
+            self.row_checks.push(RowCheck { line: ln, name, row, ns: ns_used });
+        }
+    }
+}
+
+impl Analyzer {
+    /// Recency abstraction, back-edge step: the recent objects allocated during a loop
+    /// iteration are folded into their weak per-site summary objects, and every reference
+    /// to them written during the iteration is re-pointed to the summary object.
+    pub fn rename_recent(&mut self, back: &mut State, head: &State, recs: Vec<(ObjId, Kind, String, String)>, mark: ObjId) {
+        if recs.is_empty() {
+            return;
+        }
+        let mut map: FxHashMap<ObjId, ObjId> = FxHashMap::default();
+        for (r, kind, site, ctx) in &recs {
+            let (label, payload, iter_elem, derived, depth) = {
+                let o = self.obj(*r);
+                (o.label.clone(), o.payload.clone(), o.iter_elem, o.derived_from, o.depth)
+            };
+            let sid = self.alloc_raw(*kind, site, ctx, false, &label, payload);
+            {
+                let so = self.obj_mut(sid);
+                so.single = false;
+                so.literal_len = None;
+                so.iter_elem = iter_elem;
+                so.depth = depth;
+                if so.derived_from.is_none() {
+                    so.derived_from = derived;
+                }
+            }
+            map.insert(*r, sid);
+        }
+        let rename_value = |v: &Value, map: &FxHashMap<ObjId, ObjId>| -> Option<Value> {
+            let hit_pts = v.pts.iter().any(|o| map.contains_key(&o));
+            let hit_kv = matches!(&v.kv, KeyVal::KeysOf(ko) if ko.objs.iter().any(|o| map.contains_key(&o)));
+            if !hit_pts && !hit_kv {
+                return None;
+            }
+            let pts = v.pts.map(|o| *map.get(&o).unwrap_or(&o));
+            let kv = match &v.kv {
+                KeyVal::KeysOf(ko) if hit_kv => KeyVal::KeysOf(KeysOf { objs: ko.objs.map(|o| *map.get(&o).unwrap_or(&o)), ..ko.clone() }),
+                other => other.clone(),
+            };
+            Some(Value::with_kv(pts, kv))
+        };
+        // 1. the recent objects' own facts move to the summary objects (weakly)
+        for (&r, &sid) in &map {
+            for ns in [Ns::Item, Ns::Attr] {
+                if let Some(row) = back.rows.get(&(r, ns)) {
+                    let nr = match back.rows.get(&(sid, ns)) {
+                        Some(cur) => cur.join(&row),
+                        None => row,
+                    };
+                    back.rows.insert((sid, ns), nr);
+                    back.rows.remove(&(r, ns));
+                }
+            }
+            for ((ns, k), v) in back.slots_of(r) {
+                if ns == Ns::Pos {
+                    continue;
+                }
+                let v = rename_value(&v, &map).unwrap_or(v);
+                back.set_slot(sid, ns, k, v, false);
+            }
+            back.drop_obj(r);
+            if let Some(kv) = back.elems.get(&r) {
+                let kv = rename_value(&Value::kv_only(kv.clone()), &map).map(|v| v.kv).unwrap_or(kv);
+                let nv = match back.elems.get(&sid) {
+                    Some(cur) => crate::domain::kv_join(&cur, &kv),
+                    None => kv,
+                };
+                back.elems.insert(sid, nv);
+                back.elems.remove(&r);
+            }
+        }
+        // 2. references written during the iteration
+        let fp = back.footprint(head);
+        for (oid, sk) in fp.slots {
+            if map.contains_key(&oid) {
+                continue;
+            }
+            if let Some(v) = back.slots.get(&oid, &sk) {
+                if let Some(nv) = rename_value(&v, &map) {
+                    back.slots.set(&oid, sk, nv);
+                }
+            }
+        }
+        for oid in fp.elems {
+            if map.contains_key(&oid) {
+                continue;
+            }
+            if let Some(kv) = back.elems.get(&oid) {
+                if let Some(nv) = rename_value(&Value::kv_only(kv), &map) {
+                    back.elems.insert(oid, nv.kv);
+                }
+            }
+        }
+        let env_updates: Vec<(StrId, Value)> = back.env.iter().filter_map(|(k, v)| rename_value(v, &map).map(|nv| (*k, nv))).collect();
+        for (k, nv) in env_updates {
+            back.env.insert(k, nv);
+        }
+        let nar_updates: Vec<(StrId, Value)> = back.narrowed.iter().filter_map(|(k, v)| rename_value(v, &map).map(|nv| (*k, nv))).collect();
+        for (k, nv) in nar_updates {
+            back.narrowed.insert(k, nv);
+        }
+        if let Some(r) = &back.ret {
+            if let Some(nv) = rename_value(r, &map) {
+                back.ret = Some(nv);
+            }
+        }
+        for ov in self.frame_mut().overlays.iter_mut() {
+            let ups: Vec<(StrId, Value)> = ov.iter().filter_map(|(k, v)| rename_value(v, &map).map(|nv| (*k, nv))).collect();
+            for (k, nv) in ups {
+                ov.insert(k, nv);
+            }
+        }
+        // 3. objects allocated during the iteration that hold references in their payloads
+        let n = self.objects.len() as ObjId;
+        for oid in mark..n {
+            let o = &mut self.objects[oid as usize];
+            if let Some(d) = o.derived_from {
+                if let Some(&sd) = map.get(&d) {
+                    o.derived_from = Some(sd);
+                }
+            }
+            let rv = |v: &Value| rename_value(v, &map).unwrap_or_else(|| v.clone());
+            o.payload = match &o.payload {
+                Payload::Method(q, v) => Payload::Method(q.clone(), rv(v)),
+                Payload::Bound(f, v) => Payload::Bound(*map.get(f).unwrap_or(f), rv(v)),
+                Payload::Super(c, v) => Payload::Super(*c, rv(v)),
+                Payload::View(k, v) => Payload::View(*k, rv(v)),
+                Payload::Zip(a, b) => Payload::Zip(rv(a), rv(b)),
+                Payload::Enumerate(v) => Payload::Enumerate(rv(v)),
+                Payload::Pair(a, b) => Payload::Pair(rv(a), rv(b)),
+                Payload::Partial(f, args, kw) => Payload::Partial(rv(f), args.iter().map(&rv).collect(), kw.iter().map(|(k, v)| (*k, rv(v))).collect()),
+                Payload::Groupby(fs, ks, ai, sel) => Payload::Groupby(fs.iter().map(|f| *map.get(f).unwrap_or(f)).collect(), ks.clone(), *ai, sel.clone()),
+                Payload::Locidx(nm, x) => Payload::Locidx(nm.clone(), *map.get(x).unwrap_or(x)),
+                other => other.clone(),
+            };
+        }
+        // 4. flow-insensitive class attributes
+        let ups: Vec<((ObjId, Ns, KeyId), Value)> = self.cls_slots.iter().filter_map(|(k, v)| rename_value(v, &map).map(|nv| (*k, nv))).collect();
+        for (k, nv) in ups {
+            self.cls_slots.insert(k, nv);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AST helpers
+// ---------------------------------------------------------------------------
+
+pub fn chain_text(node: &ast::Expr) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    let mut n = node;
+    while let ast::Expr::Attribute(a) = n {
+        parts.push(a.attr.id.as_str());
+        n = &a.value;
+    }
+    let ast::Expr::Name(nm) = n else { return None };
+    parts.push(nm.id.as_str());
+    parts.reverse();
+    Some(parts.join("."))
+}
+
+pub fn is_main_guard(test: &ast::Expr) -> bool {
+    let ast::Expr::Compare(c) = test else { return false };
+    let ast::Expr::Name(l) = &*c.left else { return false };
+    if l.id.as_str() != "__name__" || c.ops.len() != 1 || c.ops[0] != ast::CmpOp::Eq {
+        return false;
+    }
+    matches!(&c.comparators[0], ast::Expr::StringLiteral(sl) if sl.value.to_str() == "__main__")
+}
+
+/// True if the loop body has a break/continue targeting this loop.
+pub fn contains_jump(body: &[ast::Stmt]) -> bool {
+    fn visit(n: &ast::Stmt) -> bool {
+        match n {
+            ast::Stmt::Break(_) | ast::Stmt::Continue(_) => true,
+            ast::Stmt::For(f) => f.orelse.iter().any(visit),
+            ast::Stmt::While(w) => w.orelse.iter().any(visit),
+            ast::Stmt::FunctionDef(_) | ast::Stmt::ClassDef(_) => false,
+            ast::Stmt::If(i) => i.body.iter().any(visit) || i.elif_else_clauses.iter().any(|c| c.body.iter().any(visit)),
+            ast::Stmt::With(w) => w.body.iter().any(visit),
+            ast::Stmt::Try(t) => {
+                t.body.iter().any(visit)
+                    || t.handlers.iter().any(|h| {
+                        let ast::ExceptHandler::ExceptHandler(h) = h;
+                        h.body.iter().any(visit)
+                    })
+                    || t.orelse.iter().any(visit)
+                    || t.finalbody.iter().any(visit)
+            }
+            ast::Stmt::Match(m) => m.cases.iter().any(|c| c.body.iter().any(visit)),
+            _ => false,
+        }
+    }
+    body.iter().any(visit)
+}
+
+pub fn is_generator(body: &[ast::Stmt]) -> bool {
+    struct V(bool);
+    impl<'a> ast::visitor::source_order::SourceOrderVisitor<'a> for V {
+        fn visit_expr(&mut self, e: &'a ast::Expr) {
+            if matches!(e, ast::Expr::Yield(_) | ast::Expr::YieldFrom(_)) {
+                self.0 = true;
+            }
+            if !self.0 {
+                ast::visitor::source_order::walk_expr(self, e);
+            }
+        }
+        fn visit_stmt(&mut self, st: &'a ast::Stmt) {
+            // nested functions own their yields in Python too, but ast.walk descends into them:
+            // the prototype marks the outer function as well; keep that behaviour
+            if !self.0 {
+                ast::visitor::source_order::walk_stmt(self, st);
+            }
+        }
+    }
+    let mut v = V(false);
+    for st in body {
+        use ast::visitor::source_order::SourceOrderVisitor;
+        v.visit_stmt(st);
+        if v.0 {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn dotted_last(n: &ast::Expr) -> String {
+    match n {
+        ast::Expr::Name(x) => x.id.to_string(),
+        ast::Expr::Attribute(a) => a.attr.id.to_string(),
+        ast::Expr::Call(c) => dotted_last(&c.func),
+        other => frontend::text(other),
+    }
+}
+
+/// All names used in an expression (ast.walk + isinstance(ast.Name)).
+pub fn names_in(e: &ast::Expr) -> Vec<String> {
+    struct V(Vec<String>);
+    impl<'a> ast::visitor::source_order::SourceOrderVisitor<'a> for V {
+        fn visit_expr(&mut self, e: &'a ast::Expr) {
+            if let ast::Expr::Name(n) = e {
+                self.0.push(n.id.to_string());
+            }
+            ast::visitor::source_order::walk_expr(self, e);
+        }
+    }
+    use ast::visitor::source_order::SourceOrderVisitor;
+    let mut v = V(Vec::new());
+    v.visit_expr(e);
+    v.0
+}
+
+pub fn contains_call(e: &ast::Expr) -> bool {
+    struct V(bool);
+    impl<'a> ast::visitor::source_order::SourceOrderVisitor<'a> for V {
+        fn visit_expr(&mut self, e: &'a ast::Expr) {
+            if matches!(e, ast::Expr::Call(_)) {
+                self.0 = true;
+            }
+            ast::visitor::source_order::walk_expr(self, e);
+        }
+    }
+    use ast::visitor::source_order::SourceOrderVisitor;
+    let mut v = V(false);
+    v.visit_expr(e);
+    v.0
+}
+
+pub fn literal_key_of(e: &ast::Expr) -> Option<KeyId> {
+    Some(match e {
+        ast::Expr::StringLiteral(sl) => key_str_lit(sl.value.to_str()),
+        ast::Expr::NumberLiteral(n) => match &n.value {
+            ast::Number::Int(i) => intern::key_int(i.as_i64()?),
+            ast::Number::Float(f) => intern::key_float(*f),
+            ast::Number::Complex { .. } => return None,
+        },
+        ast::Expr::BooleanLiteral(b) => intern::key_bool(b.value),
+        ast::Expr::NoneLiteral(_) => intern::key_none(),
+        _ => return None,
+    })
+}
+
+pub fn is_constant(e: &ast::Expr) -> bool {
+    matches!(
+        e,
+        ast::Expr::StringLiteral(_) | ast::Expr::NumberLiteral(_) | ast::Expr::BooleanLiteral(_) | ast::Expr::NoneLiteral(_) | ast::Expr::BytesLiteral(_) | ast::Expr::EllipsisLiteral(_)
+    )
+}
+
+pub const BUILTIN_NAMES: &[&str] = &[
+    "dict", "list", "set", "tuple", "len", "print", "str", "int", "float", "bool", "range", "enumerate", "zip", "sorted", "min", "max", "sum",
+    "any", "all", "isinstance", "type", "open", "getattr", "setattr", "hasattr", "repr", "iter", "next", "abs", "round", "map", "filter",
+    "reversed", "id", "hash", "object", "Exception", "KeyError", "ValueError", "TypeError", "AttributeError", "IndexError", "LookupError",
+    "RuntimeError", "property", "staticmethod", "classmethod", "super", "vars", "format", "frozenset", "bytes", "input",
+    "NotImplementedError", "StopIteration", "BaseException", "callable", "chr", "ord", "divmod", "pow", "slice", "issubclass", "memoryview",
+    "bytearray", "complex", "globals", "locals", "exec", "eval", "compile", "delattr", "help", "hex", "oct", "bin", "ascii", "breakpoint",
+    "FileNotFoundError", "OSError", "IOError", "ZeroDivisionError", "AssertionError", "NameError", "ImportError", "ModuleNotFoundError",
+    "PermissionError", "TimeoutError", "ConnectionError", "StopAsyncIteration", "GeneratorExit", "KeyboardInterrupt", "SystemExit", "Warning",
+    "UserWarning", "DeprecationWarning", "__name__", "__file__", "__doc__", "NotImplemented", "Ellipsis", "None", "True", "False", "anext",
+    "aiter", "__import__", "__build_class__", "__debug__", "__loader__", "__package__", "__spec__", "ArithmeticError", "BlockingIOError",
+    "BrokenPipeError", "BufferError", "BytesWarning", "ChildProcessError", "ConnectionAbortedError", "ConnectionRefusedError",
+    "ConnectionResetError", "EOFError", "EnvironmentError", "FloatingPointError", "FutureWarning", "ImportWarning", "IndentationError",
+    "InterruptedError", "IsADirectoryError", "MemoryError", "NotADirectoryError", "OverflowError", "PendingDeprecationWarning",
+    "ProcessLookupError", "RecursionError", "ReferenceError", "ResourceWarning", "RuntimeWarning", "SyntaxError", "SyntaxWarning",
+    "SystemError", "TabError", "UnboundLocalError", "UnicodeDecodeError", "UnicodeEncodeError", "UnicodeError", "UnicodeTranslateError",
+    "UnicodeWarning", "copyright", "credits", "exit", "license", "quit",
+];
+
+pub fn is_builtin_name(n: &str) -> bool {
+    BUILTIN_NAMES.contains(&n)
+}
