@@ -440,6 +440,17 @@ impl Options {
     }
 }
 
+/// Facts about one name at one line of the main module, joined over every execution of
+/// the statement (hover support): the value it held and the rows of the objects it pointed to.
+#[derive(Clone)]
+pub struct Fact {
+    /// recorded inside a summary body (rows are relative to the function's entry)
+    pub symbolic: bool,
+    pub value: Value,
+    /// object -> (item row, attr row) as they were when the name was read / written
+    pub rows: IndexMap<ObjId, (Option<Row>, Option<Row>)>,
+}
+
 pub struct RowCheck {
     pub line: u32,
     pub name: String,
@@ -509,6 +520,9 @@ pub struct Analyzer {
     /// `#@row NAME:` checks requested by the golden harness: (line, name)
     pub row_check_requests: Vec<(u32, String)>,
     pub row_checks: Vec<RowCheck>,
+    /// collect `facts` (the `--facts` mode)
+    pub facts_on: bool,
+    pub facts: IndexMap<(u32, StrId, bool), Fact>,
     pub main_stmt_lines: FxHashSet<usize>,
     pub t0: std::time::Instant,
     pub opts: Options,
@@ -590,6 +604,8 @@ impl Analyzer {
             none_v: Value::lit(intern::key_none()),
             row_check_requests: Vec::new(),
             row_checks: Vec::new(),
+            facts_on: false,
+            facts: IndexMap::new(),
             main_stmt_lines: FxHashSet::default(),
             t0: std::time::Instant::now(),
             opts: Options::from_env(),
@@ -1170,6 +1186,45 @@ impl Analyzer {
             }
         }
         inst
+    }
+
+    /// Hover facts: a name was read or written at `node` holding `v` (concrete analyses only;
+    /// the symbolic rows of a summary body are not meaningful to a reader).
+    pub fn record_fact(&mut self, node: &Node, name: StrId, v: &Value, state: &State) {
+        if !self.facts_on || node.addr == 0 {
+            return;
+        }
+        let symbolic = !self.sum_stack.is_empty();
+        if node.module != self.module_info(self.main_module).idx {
+            return;
+        }
+        let mut rows: Vec<(ObjId, Option<Row>, Option<Row>)> = Vec::new();
+        for oid in v.pts.iter() {
+            let k = self.kind(oid);
+            let item = if matches!(k, Kind::Dict | Kind::Frame | Kind::Unknown | Kind::Namespace | Kind::Ph | Kind::Module | Kind::Class) || state.has_row(oid, Ns::Item) { Some(state.row(oid, Ns::Item)) } else { None };
+            let attr = if matches!(k, Kind::Instance | Kind::Namespace | Kind::Unknown | Kind::Ph | Kind::Module | Kind::Class) || state.has_row(oid, Ns::Attr) { Some(state.row(oid, Ns::Attr)) } else { None };
+            rows.push((oid, item, attr));
+        }
+        let join_opt = |a: &Option<Row>, b: &Option<Row>| -> Option<Row> {
+            match (a, b) {
+                (Some(x), Some(y)) => Some(x.join(y)),
+                (Some(x), None) | (None, Some(x)) => Some(x.clone()),
+                _ => None,
+            }
+        };
+        let e = self.facts.entry((node.line, name, symbolic)).or_insert_with(|| Fact { symbolic, value: Value::new(), rows: IndexMap::new() });
+        e.value = e.value.join(v);
+        for (oid, item, attr) in rows {
+            match e.rows.get_mut(&oid) {
+                Some((ci, ca)) => {
+                    *ci = join_opt(ci, &item);
+                    *ca = join_opt(ca, &attr);
+                }
+                None => {
+                    e.rows.insert(oid, (item, attr));
+                }
+            }
+        }
     }
 
     /// Row-check support for the golden harness: after a statement at a requested line.

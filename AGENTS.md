@@ -32,6 +32,7 @@ Two engines, one behaviour:
 | `rowan-rs/src/report.rs` | dedupe, schema table, text, JSON lines, and the `--golden` JSON document the harness consumes. |
 | `rowan-rs/src/main.rs` | CLI; runs the analysis on a thread with a 1 GiB stack. |
 | `rowan-rs/py/` | PyO3 binding (`rowan_rs.analyse(source, …)` / `analyse_file(path)` → `--golden` JSON string). Builds with maturin; see known problems. |
+| `vscode-rowan/` | VS Code extension (plain JS, no build): runs `rowan-rs FILE --facts` on open/save, hover = facts for (line, name), verdicts as diagnostics; `node test.js` checks the rendering against the engine. `--facts` (`report::facts_json`) records, at every `Name` load/store in the main module, the value and the rows of its objects, joined per (line, name); facts from symbolic summary bodies are flagged `symbolic` (rows relative to the function's entry). |
 | `tests/run_golden.py` | golden harness; `--rust`, `--both`, `--engine=…`; a case may be restricted to one engine with a `#@engine rust` comment (used by `f37_loop_recency.py`, which documents behaviour the prototype does not have). `ROWAN_COMPAT=1` passes `--compat` to the Rust engine. |
 | `tests/diff_engines.py` | differential check (spec §15.4, static half): dedupe'd verdict sets and schema tables must be identical between the oracle and `rowan-rs --compat`. |
 
@@ -39,7 +40,7 @@ Run:
 
 ```
 cd rowan-rs && cargo build --release && cargo test --release --lib
-rowan-rs/target/release/rowan-rs FILE.py [--json|--golden] [--no-rows --no-summaries --no-entry --no-imports --compat]
+rowan-rs/target/release/rowan-rs FILE.py [--json|--golden|--facts] [--no-rows --no-summaries --no-entry --no-imports --compat]
 python tests/run_golden.py --rust        # 37/37 (default mode); ROWAN_COMPAT=1 … → 36/36 (f37 skipped)
 python tests/run_golden.py               # Python oracle, 36/36
 python tests/diff_engines.py             # 38 programs: 36 cases + example + 6 prototype modules, all SAME

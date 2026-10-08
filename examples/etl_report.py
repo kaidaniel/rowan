@@ -62,6 +62,25 @@ def summarise(orders, cfg):
             log.info("big region %s", r["region"])
     return out
 
+def f():
+    x = {
+        "one": 1,
+        "two": 2,
+    }
+    return {"x": x}
+
+
+
+
+
+
+
+
+
+def g():
+    x = f()["x"]
+    return x
+
 
 def to_rows(summaries):
     rows = [asdict(s) for s in summaries]

@@ -316,7 +316,14 @@ impl Analyzer {
     // ------------------------------------------------------------ targets
     pub fn bind_target(&mut self, t: &'static ast::Expr, v: &Value, state: &mut State) {
         match t {
-            ast::Expr::Name(n) => self.store_name(s(n.id.as_str()), v.clone(), state),
+            ast::Expr::Name(n) => {
+                let name = s(n.id.as_str());
+                self.store_name(name, v.clone(), state);
+                if self.facts_on {
+                    let nd = frontend::node(t);
+                    self.record_fact(&nd, name, v, state);
+                }
+            }
             ast::Expr::Attribute(a) => {
                 let obj = self.eval(&a.value, state);
                 let n = frontend::node(t);

@@ -44,6 +44,15 @@ python tests/diff_engines.py                 # differential check: Python oracle
 individually. `rowan-rs/py/` holds a PyO3 binding (`rowan_rs.analyse_file(path)` returns
 the `--golden` JSON); see `AGENTS.md` for its status.
 
+## VS Code extension (`vscode-rowan/`)
+
+Hover over a variable to see the keys / attributes rowan infers for its objects (always,
+on some paths, known absent, open sources), the keys the program requires of an external
+input, possible literal values, and the verdicts on that line; verdicts also appear as
+diagnostics. It runs `rowan-rs FILE --facts` on open and save. Build the engine, then
+install `vscode-rowan/rowan-0.1.0.vsix` (built with `npm run package` in that folder; `Extensions: Install from VSIX…`) or open the
+folder in VS Code and press F5; see `vscode-rowan/README.md`.
+
 ## What the report contains
 
 ```

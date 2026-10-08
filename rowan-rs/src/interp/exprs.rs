@@ -29,7 +29,12 @@ impl Analyzer {
             ast::Expr::EllipsisLiteral(_) => Value::data("..."),
             ast::Expr::Name(n) => {
                 let nd = frontend::node(node);
-                self.load_name(s(n.id.as_str()), &nd, state)
+                let name = s(n.id.as_str());
+                let v = self.load_name(name, &nd, state);
+                if self.facts_on {
+                    self.record_fact(&nd, name, &v, state);
+                }
+                v
             }
             ast::Expr::Attribute(a) => {
                 if !state.narrowed.is_empty() {

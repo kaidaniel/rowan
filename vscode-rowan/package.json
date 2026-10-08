@@ -1,0 +1,47 @@
+{
+  "name": "rowan",
+  "displayName": "rowan — key-set inference for Python",
+  "description": "Hover over a variable to see the keys / values rowan infers for it; missing-key verdicts as diagnostics.",
+  "version": "0.1.0",
+  "publisher": "rowan",
+  "license": "MIT",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Programming Languages", "Linters"],
+  "activationEvents": ["onLanguage:python"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "rowan.analyse", "title": "Rowan: Analyse current file" }
+    ],
+    "configuration": {
+      "title": "rowan",
+      "properties": {
+        "rowan.binaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the rowan-rs binary. Empty: look for rowan-rs/target/release/rowan-rs in the workspace, then `rowan-rs` on PATH."
+        },
+        "rowan.extraArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Extra arguments for rowan-rs (e.g. [\"--no-entry\"], [\"--compat\"])."
+        },
+        "rowan.analyseOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Re-analyse a Python file whenever it is saved (and when it is opened)."
+        },
+        "rowan.timeoutSeconds": {
+          "type": "number",
+          "default": 60,
+          "description": "Give up on an analysis after this many seconds."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node test.js",
+    "package": "npx @vscode/vsce package --no-dependencies"
+  }
+}

@@ -298,3 +298,81 @@ pub fn golden_json(an: &Analyzer) -> J {
         .collect();
     json!({"verdicts": verdicts, "schemas": schemas, "rows": rows, "notes": an.notes, "report": format_text(an, true, true)})
 }
+
+fn row_json(r: &crate::domain::Row) -> J {
+    let srcs: Vec<String> = {
+        let mut v: Vec<String> = r.sources.iter().map(|(s, l)| format!("{}{}", source_label(s), crate::domain::lens_str(l))).collect();
+        v.sort();
+        v
+    };
+    let muts: Vec<String> = {
+        let mut v: Vec<String> = r.mutators.iter().map(|m| m.to_string()).collect();
+        v.sort();
+        v
+    };
+    json!({
+        "present": intern::sorted_by_str(r.present.iter()).iter().map(|k| key_repr(*k)).collect::<Vec<_>>(),
+        "definite": intern::sorted_by_str(r.definite.iter()).iter().map(|k| key_repr(*k)).collect::<Vec<_>>(),
+        "likely": intern::sorted_by_str(r.likely.iter()).iter().map(|k| key_repr(*k)).collect::<Vec<_>>(),
+        "absent": intern::sorted_by_str(r.absent.iter()).iter().map(|k| key_repr(*k)).collect::<Vec<_>>(),
+        "closed": r.closed(),
+        "top": r.top,
+        "symbolic": r.symbolic(),
+        "sources": srcs,
+        "source_ids": r.sources.iter().map(|(s, _)| source_label(s)).collect::<Vec<_>>(),
+        "mutators": muts,
+        "text": r.to_string(),
+    })
+}
+
+/// The `--facts` document for editor integration: per (line, name) the value and the rows
+/// of the objects it may point to, the verdicts, and the schema table.
+pub fn facts_json(an: &Analyzer) -> J {
+    let sch = schema_rows(an);
+    let mut facts: Vec<J> = Vec::new();
+    for ((line, name, symbolic), f) in &an.facts {
+        let objects: Vec<J> = f
+            .rows
+            .iter()
+            .map(|(oid, (item, attr))| {
+                let o = an.obj(*oid);
+                json!({
+                    "id": oid,
+                    "label": o.label,
+                    "kind": o.kind.name(),
+                    "item": item.as_ref().map(row_json),
+                    "attr": attr.as_ref().map(row_json),
+                })
+            })
+            .collect();
+        let values: J = match &f.value.kv {
+            crate::domain::KeyVal::Lit(k) => json!([key_repr(*k)]),
+            crate::domain::KeyVal::Lits(ks) => json!(intern::sorted_by_str(ks.iter()).iter().map(|k| key_repr(*k)).collect::<Vec<_>>()),
+            crate::domain::KeyVal::KeysOf(ko) => json!([format!("{}", crate::domain::KeyVal::KeysOf(ko.clone()))]),
+            crate::domain::KeyVal::Data(_) => json!(["<data>"]),
+            crate::domain::KeyVal::Param(_) => json!(["<parameter>"]),
+            crate::domain::KeyVal::Bot => json!([]),
+        };
+        // requirements recorded on the open sources of these objects
+        let mut required: serde_json::Map<String, J> = serde_json::Map::new();
+        for (_, (item, attr)) in &f.rows {
+            for r in [item, attr].into_iter().flatten() {
+                for (src, _) in r.sources.iter() {
+                    let label = source_label(src);
+                    if let Some(entry) = sch.get(&label) {
+                        let keys: serde_json::Map<String, J> = entry.iter().map(|(k, e)| (k.clone(), json!(e.always))).collect();
+                        required.insert(label, J::Object(keys));
+                    }
+                }
+            }
+        }
+        facts.push(json!({"line": line, "name": name.to_string(), "symbolic": symbolic, "values": values, "objects": objects, "required": required}));
+    }
+    let verdicts: Vec<J> = dedupe(&an.verdicts).iter().map(|v| verdict_json(an, v)).collect();
+    let mut schemas = serde_json::Map::new();
+    for (label, entry) in sch {
+        let keys: serde_json::Map<String, J> = entry.iter().map(|(k, e)| (k.clone(), json!({"always": e.always, "sites": e.sites}))).collect();
+        schemas.insert(label, J::Object(keys));
+    }
+    json!({"file": an.filename, "facts": facts, "verdicts": verdicts, "schemas": schemas, "notes": an.notes})
+}
