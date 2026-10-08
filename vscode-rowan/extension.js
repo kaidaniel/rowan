@@ -54,7 +54,7 @@ function rowText(row, ns) {
   return ns === "attr" ? `obj(${parts.join(", ")})` : `{${parts.join(", ")}}`;
 }
 
-function describeRow(row, ns) {
+function describeRow(row, ns, withText) {
   const lines = [];
   const present = row.present || [];
   const definite = row.definite || [];
@@ -62,7 +62,7 @@ function describeRow(row, ns) {
   const absent = row.absent || [];
   const maybe = present.filter((k) => !definite.includes(k));
   const label = ns === "attr" ? "attributes" : "keys";
-  lines.push("- `" + rowText(row, ns) + "`");
+  if (!withText) lines.push("- `" + rowText(row, ns) + "`");
   const legend = [];
   if (maybe.some((k) => !likely.includes(k))) legend.push("`?` set on some paths only");
   if (maybe.some((k) => likely.includes(k))) legend.push("`~` unless unknown code removed it");
@@ -91,8 +91,10 @@ function renderHover(name, facts, verdicts) {
   out.push(`**rowan** · \`${name}\``);
   for (const f of main) {
     if (f.symbolic) out.push("_inside a function analysed symbolically: facts are relative to its entry_");
-    const values = (f.values || []).filter((v) => v !== "<data>" && v !== "<parameter>");
-    if (values.length) out.push(`- possible values: ${values.map((v) => "`" + v + "`").join(", ")}`);
+    // the value as far as it is known: literals, records with their values, `...` for unknown
+    const text = (f.text || "").trim();
+    const withText = text.length > 0 && text !== "...";
+    if (withText) out.push(`- value: \`${text}\``);
     else if ((f.values || []).includes("<parameter>")) out.push("- value: whatever the caller passes");
     const objs = f.objects || [];
     if (objs.length > 1) out.push(`- may point to ${objs.length} objects:`);
@@ -105,7 +107,7 @@ function renderHover(name, facts, verdicts) {
         continue;
       }
       out.push(head);
-      for (const l of describeRow(row, ns)) out.push((objs.length > 1 ? "  " : "") + l);
+      for (const l of describeRow(row, ns, withText)) out.push((objs.length > 1 ? "  " : "") + l);
     }
     const req = f.required || {};
     for (const src of Object.keys(req)) {

@@ -4,7 +4,9 @@
 use indexmap::IndexMap;
 use serde_json::{json, Value as J};
 
-use crate::domain::{source_is_data, source_label, Ns, Tier};
+use crate::domain::{source_is_data, source_label, KeyVal, Ns, ObjId, Row, Tier, Value};
+use crate::intern::{KeyId, STAR};
+use crate::state::State;
 use crate::intern::{self, key_repr};
 use crate::interp::{Analyzer, Verdict};
 use crate::state::Kind;
@@ -227,13 +229,12 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
             let mut names: Vec<(String, crate::domain::Value)> = st.obj_slots(m, Ns::Attr).into_iter().map(|(k, v)| (intern::key_py_str(k), v)).collect();
             names.sort_by(|a, b| a.0.cmp(&b.0));
             for (name, v) in names {
-                for oid in v.pts.iter() {
-                    match an.kind(oid) {
-                        Kind::Dict | Kind::Frame | Kind::Unknown | Kind::Namespace => lines.push(format!("  {} = {}: {}", name, an.obj(oid).label, st.row(oid, Ns::Item))),
-                        Kind::Instance => lines.push(format!("  {} = {}: {}", name, an.obj(oid).label, st.row(oid, Ns::Attr).compact(true))),
-                        _ => {}
-                    }
+                let records = v.pts.iter().any(|o| matches!(an.kind(o), Kind::Dict | Kind::Frame | Kind::Unknown | Kind::Namespace | Kind::Instance | Kind::List | Kind::Tuple));
+                if !records {
+                    continue;
                 }
+                let labels: Vec<String> = v.pts.iter().map(|o| an.obj(o).label.clone()).collect();
+                lines.push(format!("  {} = {}: {}", name, labels.join(" | "), render_value(an, st, &v, 0, &mut Vec::new())));
             }
         }
     }
@@ -343,6 +344,160 @@ fn row_json(r: &crate::domain::Row) -> J {
 
 /// The `--facts` document for editor integration: per (line, name) the value and the rows
 /// of the objects it may point to, the verdicts, and the schema table.
+/// A value as the user would write it, as far as it is known: literals (`1`, `"a"`, several as
+/// `1 | 2`), dicts in the row notation with their values (`{"a": 1, "b"?: {...}, **}`), lists
+/// / tuples by position when known (`[1, 2]`, else `[int, ...]`), instances as
+/// `Cls(a=1, **)`, functions / classes by name, `...` for anything unknown.  Depth and width
+/// are limited and cycles stop at `...`.
+pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &mut Vec<ObjId>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    // literals
+    let lits = crate::domain::kv_literals(&v.kv);
+    if v.kv.is_literal() && !lits.is_empty() {
+        let mut ls: Vec<String> = intern::sorted_by_str(lits.iter()).iter().map(|k| crate::domain::key_display(*k)).collect();
+        if ls.len() > 4 {
+            ls.truncate(4);
+            ls.push("…".into());
+        }
+        parts.extend(ls);
+    }
+    for o in v.pts.iter() {
+        parts.push(render_object(an, state, o, depth, seen));
+    }
+    if parts.is_empty() {
+        return "...".into();
+    }
+    parts.sort();
+    parts.dedup();
+    parts.join(" | ")
+}
+
+fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut Vec<ObjId>) -> String {
+    const MAX_DEPTH: u32 = 3;
+    const MAX_ITEMS: usize = 8;
+    if !an.has_obj(o) {
+        return "...".into();
+    }
+    let kind = an.kind(o);
+    if seen.contains(&o) {
+        return "…".into();
+    }
+    let deeper = depth + 1;
+    let mark = |r: &Row, k: KeyId| -> &'static str {
+        if r.definite.contains(k) {
+            ""
+        } else if r.likely.contains(k) {
+            "~"
+        } else {
+            "?"
+        }
+    };
+    match kind {
+        Kind::Dict | Kind::Frame | Kind::Namespace => {
+            let row = state.row(o, Ns::Item);
+            if depth >= MAX_DEPTH {
+                return if row.present.is_empty() && row.closed() { "{}".into() } else { "{…}".into() };
+            }
+            seen.push(o);
+            let mut items: Vec<String> = Vec::new();
+            let keys = intern::sorted_by_str(row.present.iter());
+            for k in keys.iter().take(MAX_ITEMS) {
+                let val = match state.slot_opt(o, Ns::Item, *k) {
+                    Some(sv) => render_value(an, state, &sv, deeper, seen),
+                    None => "...".into(),
+                };
+                items.push(format!("{}{}: {}", crate::domain::key_display(*k), mark(&row, *k), val));
+            }
+            if keys.len() > MAX_ITEMS {
+                items.push("…".into());
+            }
+            if !row.closed() {
+                items.push("**".into());
+            }
+            seen.pop();
+            format!("{{{}}}", items.join(", "))
+        }
+        Kind::List | Kind::Tuple | Kind::Set => {
+            let (open, close) = match kind {
+                Kind::List => ("[", "]"),
+                Kind::Tuple => ("(", ")"),
+                _ => ("{", "}"),
+            };
+            if depth >= MAX_DEPTH {
+                return format!("{}…{}", open, close);
+            }
+            seen.push(o);
+            let out = match an.obj(o).literal_len {
+                Some(n) if kind != Kind::Set => {
+                    let mut items: Vec<String> = (0..n.min(MAX_ITEMS)).map(|i| match state.slot_opt(o, Ns::Pos, intern::key_int(i as i64)) {
+                        Some(sv) => render_value(an, state, &sv, deeper, seen),
+                        None => "...".into(),
+                    }).collect();
+                    if n > MAX_ITEMS {
+                        items.push("…".into());
+                    }
+                    format!("{}{}{}", open, items.join(", "), close)
+                }
+                _ => {
+                    let elem = state.slot_opt(o, Ns::Elem, STAR);
+                    let ekv = state.elems.get(&o);
+                    let known_empty = matches!(&ekv, Some(KeyVal::Lits(ks)) if ks.is_empty());
+                    let mut ev = elem.unwrap_or_default();
+                    if let Some(kv) = ekv {
+                        if kv.is_literal() && ev.kv.is_bot() {
+                            ev = Value::with_kv(ev.pts.clone(), kv);
+                        }
+                    }
+                    if ev.empty() && known_empty {
+                        format!("{}{}", open, close)
+                    } else if ev.empty() {
+                        format!("{}...{}", open, close)
+                    } else {
+                        format!("{}{}, ...{}", open, render_value(an, state, &ev, deeper, seen), close)
+                    }
+                }
+            };
+            seen.pop();
+            out
+        }
+        Kind::Instance => {
+            let name = an.instance_class(o).and_then(|c| an.class_info_opt(c)).map(|ci| ci.name.clone()).unwrap_or_else(|| "object".into());
+            let row = state.row(o, Ns::Attr);
+            if depth >= MAX_DEPTH {
+                return format!("{}(…)", name);
+            }
+            seen.push(o);
+            let mut items: Vec<String> = Vec::new();
+            let keys = intern::sorted_by_str(row.present.iter());
+            for k in keys.iter().take(MAX_ITEMS) {
+                let val = match state.slot_opt(o, Ns::Attr, *k) {
+                    Some(sv) => render_value(an, state, &sv, deeper, seen),
+                    None => "...".into(),
+                };
+                items.push(format!("{}{}={}", intern::key_py_str(*k), mark(&row, *k), val));
+            }
+            if keys.len() > MAX_ITEMS {
+                items.push("…".into());
+            }
+            if !row.closed() {
+                items.push("**".into());
+            }
+            seen.pop();
+            format!("{}({})", name, items.join(", "))
+        }
+        Kind::Function => an.obj(o).label.trim_start_matches("def ").to_string(),
+        Kind::Bound => {
+            let l = an.obj(o).label.clone();
+            let name = l.trim_start_matches("def ").split(" bound").next().unwrap_or(&l).to_string();
+            format!("{} (bound)", name)
+        }
+        Kind::Class => an.obj(o).label.clone(),
+        Kind::Module => an.obj(o).label.clone(),
+        Kind::Ph => "...".into(),
+        _ => "...".into(),
+    }
+}
+
 pub fn facts_json(an: &Analyzer) -> J {
     let sch = schema_rows(an);
     let mut facts: Vec<J> = Vec::new();
@@ -382,7 +537,7 @@ pub fn facts_json(an: &Analyzer) -> J {
                 }
             }
         }
-        facts.push(json!({"line": line, "name": name.to_string(), "symbolic": symbolic, "values": values, "objects": objects, "required": required}));
+        facts.push(json!({"line": line, "name": name.to_string(), "symbolic": symbolic, "values": values, "text": f.texts.join(" | "), "objects": objects, "required": required}));
     }
     let verdicts: Vec<J> = dedupe(&an.verdicts).iter().map(|v| verdict_json(an, v)).collect();
     let mut schemas = serde_json::Map::new();

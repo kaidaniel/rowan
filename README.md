@@ -43,14 +43,16 @@ maturin; see `AGENTS.md` for its status.
 
 ## What the report contains
 
-Records are written in a compact form: `{"id": ..., "role"?: ..., "tag"~: ..., **}` is a
-dict that always has `"id"`, has `"role"` on some paths only (`?`), had `"tag"` unless
-unknown code removed it (`~`), and may hold other keys (`**` = open; without it the record
-is closed and these are all its keys). Objects use the same notation with attributes:
-`obj(name=..., out?=..., **)`. The hover in the VS Code extension and the
-`module-level records` section of the text report use this form; `--json` and `--facts`
-also carry the underlying sets (`present`, `definite`, `likely`, `absent`, `closed`,
-`sources`, `mutators`).
+Values are written as far as they are known: `{"id": 1, "role"?: "admin", "tags": ["x"], **}`
+is a dict that always has `"id"` (value `1`), has `"role"` on some paths only (`?`), and may
+hold other keys (`**` = open; without it the record is closed and these are all its keys);
+`~` marks a key unknown code may have removed; several possible values read `1 | 2`; lists
+and tuples show their elements by position when known (`[int, ...]` otherwise); objects
+read `Order(id=1, lines=[...], **)`; `...` stands for anything unknown; nesting stops at
+three levels. The hover in the VS Code extension (also for plain values: `x: 1`), the
+`module-level records` section of the text report and the `text` field of `--facts` use
+this form; `--json` and `--facts` also carry the underlying sets (`present`, `definite`,
+`likely`, `absent`, `closed`, `sources`, `mutators`).
 
 ```
 == diagnostics ==

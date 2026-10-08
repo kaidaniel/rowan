@@ -50,10 +50,13 @@ names `recency,scc,site,narrowed,positional` and the bisecting switches
 literal-event and call tabulations per function, clones per allocation site, chained call
 context depth, placeholder path depth; `Analyzer::limit`).
 
-Row notation in reports and hovers: `{"a": ..., "b"?: ..., "c"~: ..., **}` — definite
-keys plain, `?` set on some paths only, `~` unless unknown code removed it, `**` open;
-`obj(a=..., b?=...)` for attribute rows (`Row::compact`; `Row::details` is the internal
-form with sources / mutators / terms, printed by the harness on row-check failures).
+Row notation in reports and hovers: `{"a": 1, "b"?: {...}, "c"~: ..., **}` — definite
+keys plain, `?` set on some paths only, `~` unless unknown code removed it, `**` open, values
+rendered as far as known (`report::render_value`: literals, `1 | 2`, positional lists,
+`Cls(a=1, **)`, `...` unknown; depth 3, 8 items, cycles stop); `Row::compact` is the keys-only
+form, `Row::details` the internal form with sources / mutators / terms (printed by the
+harness on row-check failures). Facts record the rendered text at recording time
+(`Fact::texts`; `--facts` `text`).
 
 ## Design notes
 
@@ -226,16 +229,29 @@ form with sources / mutators / terms, printed by the harness on row-check failur
   first concrete call site).
 * Leaked ASTs (see above); a long-running server should re-exec or accept the leak.
 
-## Next steps
+## Next steps (agreed plan, in this order; one commit per step)
 
-1. Precision on self-referential programs: the `register`-closure pattern (stores through a
-   cell of a sibling closure seen only via the summary of the factory) and dispatch over
-   `self.objects`-style tables are the two dominant ✗/⚠ families.
-2. Spec §15.4 runtime oracle (`sys.settrace` + wrapped `__getitem__`) and a noise budget on
-   real repositories; the snapshot tests are the static half.
-3. Report volume: verdicts are per call chain; collapse chains per site in the text report
-   before tuning tiers.
-4. Binding: retry the wheel on a different toolchain; when it loads, the harness and the
-   extension can import `rowan` and skip the subprocess.
-5. Incremental analysis (summaries cached by body hash) and the LSP mode of §15.5 (the
-   extension currently re-runs the CLI on save; a server would keep summaries warm).
+1. **Values in the row notation and the hover.** Render known values, not just keys:
+   `{"a": 1, "b": {"c": [1, 2, 3]}, **}`; a value with several literals as `1 | 2`; objects
+   whose contents are unknown by kind (`dict`, `list`, `Cls(...)`); `...` when nothing is
+   known; depth and width limits with a cycle guard. Non-record names get their value too
+   (`x: 1`). Done in the engine (`Analyzer::render_value` at fact-recording time, `--facts`
+   gains `text`, the text report's module-level records use it) and in the extension.
+2. **Cross-module analysis, verified and documented.** Local imports (the directory of the
+   analysed file and `--search-path`s) are followed today; site-packages are not (pandas and
+   friends are modelled, not analysed: C extensions, size). Add a multi-file golden package
+   that imports across three modules and check that summaries, classes and module dicts flow.
+3. **A ~2,000-line example as a package of several modules**, specified by hand first (as
+   `h`/`i`/`j`), exercising step 2; fix what it uncovers.
+4. **Incremental analysis.** Cache per module: parsed AST + module-level facts + the
+   summaries of its functions, keyed by the file's content hash and the hashes of the modules
+   it imports; reuse when unchanged. Then a server mode (`rowan serve`, JSON lines over stdio:
+   `analyse {path}`, `changed [{path}]`, `facts {path}`) that keeps the caches warm and
+   re-analyses only changed files and their dependents; the extension talks to it instead of
+   spawning the CLI per save.
+5. **More examples** (as time allows), each specified before running.
+
+Open engine items carried over: precision on self-referential programs (`register`-closure
+pattern, dispatch over `self.objects` tables), the spec §15.4 runtime oracle on real
+repositories, the PyO3 wheel on another toolchain, `j93`'s open checks (classes propagated
+through summary bindings).

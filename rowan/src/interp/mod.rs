@@ -478,6 +478,8 @@ pub struct Fact {
     pub value: Value,
     /// object -> (item row, attr row) as they were when the name was read / written
     pub rows: IndexMap<ObjId, (Option<Row>, Option<Row>)>,
+    /// the value rendered (`report::render_value`) at each recording, distinct texts
+    pub texts: Vec<String>,
 }
 
 pub struct RowCheck {
@@ -1307,8 +1309,12 @@ impl Analyzer {
                 _ => None,
             }
         };
-        let e = self.facts.entry((node.line, name, symbolic)).or_insert_with(|| Fact { symbolic, value: Value::new(), rows: IndexMap::new() });
+        let text = crate::report::render_value(self, state, v, 0, &mut Vec::new());
+        let e = self.facts.entry((node.line, name, symbolic)).or_insert_with(|| Fact { symbolic, value: Value::new(), rows: IndexMap::new(), texts: Vec::new() });
         e.value = e.value.join(v);
+        if !e.texts.contains(&text) && e.texts.len() < 4 {
+            e.texts.push(text);
+        }
         for (oid, item, attr) in rows {
             match e.rows.get_mut(&oid) {
                 Some((ci, ca)) => {
