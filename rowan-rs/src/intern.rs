@@ -25,6 +25,8 @@ pub enum Key {
     Float(u64),
     Bool(bool),
     None,
+    Bytes(Vec<u8>),
+    Ellipsis,
     Tuple(Vec<KeyId>),
     /// `fn⁻¹(key)`: the source key x with fn(x) == key
     Inv(Arc<str>, KeyId),
@@ -185,6 +187,23 @@ fn key_repr_inner(k: &Key) -> String {
         Key::Bool(true) => "True".into(),
         Key::Bool(false) => "False".into(),
         Key::None => "None".into(),
+        Key::Bytes(b) => {
+            let mut out = String::from("b'");
+            for &c in b {
+                match c {
+                    b'\\' => out.push_str("\\\\"),
+                    b'\'' => out.push_str("\\'"),
+                    b'\n' => out.push_str("\\n"),
+                    b'\t' => out.push_str("\\t"),
+                    b'\r' => out.push_str("\\r"),
+                    0x20..=0x7e => out.push(c as char),
+                    _ => out.push_str(&format!("\\x{:02x}", c)),
+                }
+            }
+            out.push('\'');
+            out
+        }
+        Key::Ellipsis => "Ellipsis".into(),
         Key::Tuple(items) => {
             let parts: Vec<String> = items.iter().map(|k| key_repr(*k)).collect();
             if parts.len() == 1 {

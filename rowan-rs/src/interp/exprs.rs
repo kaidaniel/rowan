@@ -25,8 +25,8 @@ impl Analyzer {
             },
             ast::Expr::BooleanLiteral(b) => Value::lit(intern::key_bool(b.value)),
             ast::Expr::NoneLiteral(_) => self.none_v.clone(),
-            ast::Expr::BytesLiteral(_) => Value::data("bytes"),
-            ast::Expr::EllipsisLiteral(_) => Value::data("..."),
+            ast::Expr::BytesLiteral(b) => Value::lit(intern::key(intern::Key::Bytes(b.value.bytes().collect()))),
+            ast::Expr::EllipsisLiteral(_) => Value::lit(intern::key(intern::Key::Ellipsis)),
             ast::Expr::Name(n) => {
                 let nd = frontend::node(node);
                 let name = s(n.id.as_str());
@@ -164,6 +164,13 @@ impl Analyzer {
             }
             ast::Expr::YieldFrom(y) => {
                 let v = self.eval(&y.value, state);
+                let v = if self.opts.fixes {
+                    let nd = frontend::node(&*y.value);
+                    let it = self.iterate(&v, &nd, state);
+                    it.elem.flat()
+                } else {
+                    v
+                };
                 self.yield_value(v, state);
                 Value::data("yield")
             }
@@ -271,6 +278,7 @@ impl Analyzer {
         let mut pre = state.copy();
         let mut st = state.copy();
         self.cond_depth += 1;
+        self.branch_depth += 1;
         let mut prev: &'static ast::Expr = &b.values[0];
         for v in b.values[1..].iter() {
             let truth = self.truthiness(&acc, &st);
@@ -289,6 +297,7 @@ impl Analyzer {
             }
             prev = v;
         }
+        self.branch_depth -= 1;
         self.cond_depth -= 1;
         if st.reachable {
             let j = pre.join(&mut st);
@@ -310,6 +319,8 @@ impl Analyzer {
                     intern::Key::Bool(b) => *b,
                     intern::Key::None => false,
                     intern::Key::Tuple(t) => !t.is_empty(),
+                    intern::Key::Bytes(b) => !b.is_empty(),
+                    intern::Key::Ellipsis => true,
                     intern::Key::Inv(..) => true,
                 }));
             }
@@ -416,12 +427,19 @@ impl Analyzer {
         if op == ast::Operator::Mod {
             if let Some(x) = a.kv.as_lit() {
                 if let Some(sx) = intern::key_as_str(x) {
+                    let (sx, spec) = if self.opts.fixes && sx.matches("%d").count() == 1 && !sx.contains("%s") { (sx.replace("%d", "%s").into(), "%d") } else { (sx, "%s") };
                     let n = sx.matches("%s").count();
                     if n == 1 && !sx.replace("%s", "").contains('%') {
+                        let _ = spec;
                         let mut parts = sx.splitn(2, "%s");
                         let pre = parts.next().unwrap_or("").to_string();
                         let post = parts.next().unwrap_or("").to_string();
                         let mut kv = b.kv.clone();
+                        if let Some(k) = kv.as_lit() {
+                            if !intern::key_is_str(k) {
+                                kv = KeyVal::Lit(key_str_lit(&intern::key_py_str(k)));
+                            }
+                        }
                         if !pre.is_empty() {
                             kv = kv_map(&kv, &RenameFn::with_arg(FnKind::Prefix, key_str_lit(&pre)));
                         }

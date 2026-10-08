@@ -30,6 +30,10 @@ from rowan.domain import Inv, key_str  # noqa: E402
 from rowan.interp import Analyzer  # noqa: E402
 from rowan.report import dedupe, format_text, schema_rows  # noqa: E402
 
+# `#@rust tier key` / `#@py tier key`: expectations that hold for one engine only (the engines
+# differ where the Rust engine's `fixes` are stricter than the prototype)
+ENGINE_TAG = "py"
+
 TIER_ALIASES = {"ok": "proven", "proven": "proven", "likely": "likely", "possibly": "possibly",
                 "missing": "missing", "likely-missing": "likely-missing", "input": "input",
                 "datakey": "datakey", "none": "none", "any": "any", "map": "none"}
@@ -74,9 +78,11 @@ def collect_expectations(src: str):
                 spec["none"] = True
             schema_exp.append((m.group(1).strip(), spec))
             continue
-        m = re.search(r"#@\s+(.*)$", line)
+        m = re.search(r"#@(rust|py)?\s+(.*)$", line)
+        if m and m.group(1) and m.group(1) != ENGINE_TAG:
+            continue          # an expectation for the other engine only
         if m:
-            for part in m.group(1).split(";"):
+            for part in m.group(2).split(";"):
                 toks = part.strip().split(None, 1)
                 if not toks:
                     continue
@@ -172,9 +178,14 @@ def row_problems(row: Dict[str, Any], spec: Dict[str, Any]) -> str:
 
 
 def run_case_rust(path: str, verbose: bool = False) -> Tuple[bool, List[str]]:
+    global ENGINE_TAG
     with open(path, encoding="utf-8") as f:
         src = f.read()
-    verdict_exp, row_exp, schema_exp = collect_expectations(src)
+    ENGINE_TAG = "py" if os.environ.get("ROWAN_COMPAT") else "rust"
+    try:
+        verdict_exp, row_exp, schema_exp = collect_expectations(src)
+    finally:
+        ENGINE_TAG = "py"
     try:
         cmd = [RUST_BIN, path, "--golden"] + (["--compat"] if os.environ.get("ROWAN_COMPAT") else [])
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=600)

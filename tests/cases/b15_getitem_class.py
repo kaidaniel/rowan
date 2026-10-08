@@ -12,5 +12,7 @@ class Record:
 r = Record({"a": 1, "b": 2})
 r["a"]                                          #@ ok a
 r["zz"]                                         #@ missing zz
+# __contains__ narrows self.data, which is closed without "c": the Rust engine treats the body as dead
 if "c" in r:
-    r["c"]                                      #@ ok c
+    r["c"]                                      #@py ok c
+    r["c"]                                      #@rust none c

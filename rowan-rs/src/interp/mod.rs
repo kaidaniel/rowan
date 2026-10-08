@@ -405,17 +405,25 @@ pub struct Options {
     pub recency: bool,
     /// positional slots for tuples held in non-literal containers
     pub positional: bool,
+    /// semantic fixes over the prototype found by the extended golden suite: literal loops
+    /// with break/continue are unrolled, slicing a list yields a list, requirements recorded
+    /// under a condition inside a summarised function are "sometimes"
+    pub fixes: bool,
+    /// (part of `fixes`, separately switchable) call contexts keyed by line *and* column
+    pub ctx_col: bool,
+    /// (part of `fixes`) summary entry snapshot taken before the parameters are bound
+    pub early_base: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { site_resolution: true, narrowed_same: true, scc: true, recency: true, positional: true }
+        Options { site_resolution: true, narrowed_same: true, scc: true, recency: true, positional: true, fixes: true, ctx_col: true, early_base: true }
     }
 }
 
 impl Options {
     pub fn compat() -> Self {
-        Options { site_resolution: false, narrowed_same: false, scc: false, recency: false, positional: false }
+        Options { site_resolution: false, narrowed_same: false, scc: false, recency: false, positional: false, fixes: false, ctx_col: false, early_base: false }
     }
     /// `ROWAN_COMPAT=1` → compat; `ROWAN_NO=recency,scc,site,narrowed,positional` switches
     /// individual options off.
@@ -432,6 +440,13 @@ impl Options {
                     "scc" => o.scc = false,
                     "recency" => o.recency = false,
                     "positional" => o.positional = false,
+                    "fixes" => {
+                        o.fixes = false;
+                        o.ctx_col = false;
+                        o.early_base = false;
+                    }
+                    "ctxcol" => o.ctx_col = false,
+                    "earlybase" => o.early_base = false,
                     _ => {}
                 }
             }
@@ -501,6 +516,9 @@ pub struct Analyzer {
     pub guards: Vec<FxHashSet<String>>,
     pub may_raise: Vec<bool>,
     pub cond_depth: i32,
+    /// like `cond_depth` without loops: a requirement recorded under an `if`/`try`/boolean
+    /// operator is "sometimes"; one inside a loop body is per element (always)
+    pub branch_depth: i32,
     pub call_chain: Vec<u32>,
     pub analysed_funcs: FxHashSet<ObjId>,
     pub modules: IndexMap<String, ObjId>,
@@ -587,6 +605,7 @@ impl Analyzer {
             guards: Vec::new(),
             may_raise: Vec::new(),
             cond_depth: 0,
+            branch_depth: 0,
             call_chain: Vec::new(),
             analysed_funcs: FxHashSet::default(),
             modules: IndexMap::new(),
@@ -1076,7 +1095,8 @@ impl Analyzer {
                         Some(&format!("entry:{}", fi.qualname)),
                     );
                     for f in fields.iter() {
-                        state.set_slot(inst, ns, f, Value::data(&format!("field {}", intern::key_py_str(f))), true);
+                        let v = self.typed_field_value(oid, &intern::key_py_str(f), state, &format!("entry:{}", fi.qualname));
+                        state.set_slot(inst, ns, f, v, true);
                     }
                     return Some(Value::obj(inst));
                 }
@@ -1100,6 +1120,20 @@ impl Analyzer {
             }
         }
         None
+    }
+
+    /// The value of a declared field: an instance of its annotated user class with `fixes`
+    /// (nested TypedDicts / dataclasses), otherwise opaque data.
+    pub fn typed_field_value(&mut self, cls: ObjId, field: &str, state: &mut State, ctx: &str) -> Value {
+        if self.opts.fixes {
+            if let Some(fc) = self.field_class(cls, field, state) {
+                if self.class_info_opt(fc).is_some() && !self.fresh_in_progress.contains(&fc) {
+                    let inst = self.fresh_instance(fc, state, &format!("{}.{}", ctx, field));
+                    return Value::obj(inst);
+                }
+            }
+        }
+        Value::data(&format!("field {}", field))
     }
 
     pub fn fresh_instance(&mut self, cls_oid: ObjId, state: &mut State, ctx: &str) -> ObjId {
@@ -1146,7 +1180,8 @@ impl Analyzer {
                     let k = key_str_lit(&f);
                     let r = state.row(inst, ns).store(k, true);
                     state.set_row(inst, ns, r);
-                    state.set_slot(inst, ns, k, Value::data(&format!("field {}", f)), true);
+                    let v = self.typed_field_value(c, &f, state, ctx);
+                    state.set_slot(inst, ns, k, v, true);
                 }
             }
             order.extend(cinfo.bases.iter().copied());
@@ -1529,6 +1564,8 @@ pub fn literal_key_of(e: &ast::Expr) -> Option<KeyId> {
         },
         ast::Expr::BooleanLiteral(b) => intern::key_bool(b.value),
         ast::Expr::NoneLiteral(_) => intern::key_none(),
+        ast::Expr::BytesLiteral(b) => intern::key(intern::Key::Bytes(b.value.bytes().collect())),
+        ast::Expr::EllipsisLiteral(_) => intern::key(intern::Key::Ellipsis),
         _ => return None,
     })
 }

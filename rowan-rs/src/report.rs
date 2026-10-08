@@ -11,9 +11,9 @@ use crate::state::Kind;
 
 /// One verdict per (access site, key, call chain): per-target verdicts are combined (§13).
 pub fn dedupe(verdicts: &[Verdict]) -> Vec<Verdict> {
-    let mut groups: IndexMap<(String, u32, u32, String, Vec<u32>, Ns), Vec<&Verdict>> = IndexMap::new();
+    let mut groups: IndexMap<(String, u32, u32, String, Vec<u32>, Ns, String), Vec<&Verdict>> = IndexMap::new();
     for v in verdicts {
-        groups.entry((v.file.clone(), v.line, v.col, key_repr(v.key), v.chain.clone(), v.ns)).or_default().push(v);
+        groups.entry((v.file.clone(), v.line, v.col, key_repr(v.key), v.chain.clone(), v.ns, v.text.clone())).or_default().push(v);
     }
     let mut out: Vec<Verdict> = Vec::new();
     for (_, vs) in groups {

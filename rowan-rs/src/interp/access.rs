@@ -58,6 +58,9 @@ impl Analyzer {
     pub fn load_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
         let mut acc = Value::new();
         let guarded = self.is_guarded(ns) || !report;
+        // a real try/except guard (as opposed to a model's unreported load): no exception
+        // means the key was present from here on
+        let try_guard = report && self.is_guarded(ns);
         let single_target = obj.pts.len() == 1;
         let line_data = Value::data(&format!("L{}", node.line));
         for oid in obj.pts.iter() {
@@ -101,6 +104,18 @@ impl Analyzer {
                     acc = acc.join(&line_data);
                 }
                 Kind::List | Kind::Tuple | Kind::Set => {
+                    let is_slice = matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice"));
+                    if is_slice && self.opts.fixes && kind != Kind::Set {
+                        // a slice is a container of the same elements (positions unknown)
+                        let elem = state.slot(oid, Ns::Elem, STAR);
+                        let kv = state.elems.get(&oid).unwrap_or(DATA);
+                        let nid = self.alloc_at(kind, node, state, &format!("{}@L{}", kind.name(), node.line), Payload::None, None, Ns::Item, None, None);
+                        self.obj_mut(nid).literal_len = None;
+                        state.set_slot(nid, Ns::Elem, STAR, elem, true);
+                        state.elems.insert(nid, kv);
+                        acc = acc.join(&Value::obj(nid));
+                        continue;
+                    }
                     let ll = self.obj(oid).literal_len;
                     let idx = key.kv.as_lit().and_then(|k| intern::with_key(k, |kk| if let intern::Key::Int(i) = kk { Some(*i) } else { None }));
                     match (idx, ll) {
@@ -126,7 +141,7 @@ impl Analyzer {
                     acc = acc.join(&v);
                 }
                 k if k.is_record() => {
-                    let v = self.load_record(oid, ns, key, node, state, guarded, single_target);
+                    let v = self.load_record(oid, ns, key, node, state, guarded, single_target, try_guard);
                     acc = acc.join(&v);
                 }
                 _ => acc = acc.join(&line_data),
@@ -138,7 +153,8 @@ impl Analyzer {
         acc
     }
 
-    fn load_record(&mut self, oid: u32, ns: Ns, key: &Value, node: &Node, state: &mut State, guarded: bool, single_target: bool) -> Value {
+    #[allow(clippy::too_many_arguments)]
+    fn load_record(&mut self, oid: u32, ns: Ns, key: &Value, node: &Node, state: &mut State, guarded: bool, single_target: bool, try_guard: bool) -> Value {
         let kind = self.kind(oid);
         let mut row = state.row(oid, ns);
         let kv = &key.kv;
@@ -150,8 +166,13 @@ impl Analyzer {
                 *m = true;
             }
             let mut v = self.all_values(oid, ns, state);
-            let p = self.path_placeholder_value(oid, ns, param_slot_key(ph), &row, state);
-            v = v.join(&p);
+            // the key's value is unknown: the content may also come from the object's open
+            // sources / entry content — not from a closed record the function built itself
+            let content_unknown = !self.opts.fixes || !row.sources.is_empty() || !row.mutators.is_empty() || row.top || !row.terms.is_empty() || !row.dterms.is_empty() || !row.lterms.is_empty();
+            if content_unknown {
+                let p = self.path_placeholder_value(oid, ns, param_slot_key(ph), &row, state);
+                v = v.join(&p);
+            }
             let kv2 = match v.single() {
                 Some(o) if self.is_ph(o) => KeyVal::Param(o),
                 _ => DATA,
@@ -180,6 +201,11 @@ impl Analyzer {
                 } else if guarded && cls.tier != Tier::Proven {
                     if let Some(m) = self.may_raise.last_mut() {
                         *m = true;
+                    }
+                    if self.opts.fixes && try_guard && cls.tier != Tier::Missing && is_lit && single_target && self.strongable(oid) {
+                        // no exception raised: the key is present from here on
+                        row = row.narrow_in(k, true);
+                        state.set_row(oid, ns, row.clone());
                     }
                 }
                 if !guarded && cls.tier != Tier::Sym {
@@ -406,6 +432,10 @@ impl Analyzer {
             }
             let mut row = state.row(oid, ns);
             let is_lit = matches!(key.kv, KeyVal::Lit(_));
+            if let (KeyVal::Param(ph), true) = (&key.kv, self.opts.fixes) {
+                // `del d[k]` with k a parameter: decided per call site when k is a literal there
+                self.record_event("narrow", *ph);
+            }
             for k in intern::sorted_by_str(crate::domain::kv_literals(&key.kv).iter()) {
                 if report && !self.is_guarded(ns) {
                     let cls = classify(&row, k);

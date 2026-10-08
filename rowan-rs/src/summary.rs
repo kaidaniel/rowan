@@ -76,6 +76,9 @@ pub struct SymReq {
     pub file: String,
     pub text: String,
     pub cls: Option<ObjId>,
+    /// recorded under a condition (relative to the function's entry): a requirement derived
+    /// from it is "sometimes"
+    pub conditional: bool,
 }
 
 pub type SymKey = (Node, KeyVal, ObjId, Ns, bool, Chain, &'static str, Option<ObjId>);
@@ -335,7 +338,8 @@ impl Analyzer {
             Payload::Ph(p) if self.kind(oid) == Kind::Ph => p.cls.get(),
             _ => None,
         };
-        let sr = SymReq { node: *node, key_kv, row: row.clone(), oid, ns, guarded, rel_chain: self.call_chain.clone(), kind, file: fname, text, cls: guard };
+        let conditional = self.opts.fixes && self.branch_depth > 0;
+        let sr = SymReq { node: *node, key_kv, row: row.clone(), oid, ns, guarded, rel_chain: self.call_chain.clone(), kind, file: fname, text, cls: guard, conditional };
         self.defer(sr);
     }
 
@@ -425,6 +429,8 @@ impl Analyzer {
         let saved_guards = std::mem::take(&mut self.guards);
         let saved_may_raise = std::mem::take(&mut self.may_raise);
         let saved_cond = self.cond_depth;
+        let saved_branch = self.branch_depth;
+        self.branch_depth = 0;
         let saved_exh = self.exh_log.take();
         let saved_active = std::mem::take(&mut self.active);
         let saved_abf = std::mem::take(&mut self.active_by_func);
@@ -557,6 +563,10 @@ impl Analyzer {
             st.env = IndexMap::new();
             let self_v = self_ph.map(|sp| Value::with_kv(ObjSet::one(sp), KeyVal::Param(sp)));
             let fake = Node::synthetic(fnode.node().module, fnode.node().line);
+            // the entry snapshot: with `fixes`, before the parameters are bound, so that cells
+            // holding captured parameters and the *args / **kwargs containers are part of the
+            // footprint and get instantiated at each call site (the prototype loses them)
+            let base_early = if self.opts.early_base { Some(st.copy()) } else { None };
             self.bind_params(&fi, &self_v, &args, &kwargs, &[], &[], &mut st, &fake);
             if let Some(p) = params {
                 if let Some(va) = &p.vararg {
@@ -571,7 +581,10 @@ impl Analyzer {
                     self.store_name(s(kw.name.id.as_str()), Value::with_kv(ObjSet::one(ph), KeyVal::Param(ph)), &mut st);
                 }
             }
-            let base = st.copy();
+            let base = match base_early {
+                Some(b) => b,
+                None => st.copy(),
+            };
             // run the body
             match fnode {
                 FuncNode::Lambda(l) => {
@@ -689,6 +702,7 @@ impl Analyzer {
         self.guards = saved_guards;
         self.may_raise = saved_may_raise;
         self.cond_depth = saved_cond;
+        self.branch_depth = saved_branch;
         self.exh_log = saved_exh;
         self.active = saved_active;
         self.active_by_func = saved_abf;
@@ -921,6 +935,7 @@ impl Analyzer {
             obj_mark: self.objects.len() as ObjId,
             in_summary,
             clones: IndexMap::new(),
+            collided: FxHashSet::default(),
             resolved: FxHashMap::default(),
             kv_cache: FxHashMap::default(),
             erow_cache: FxHashMap::default(),
@@ -1005,7 +1020,7 @@ impl Analyzer {
                 None => vec![*k],
             };
             for a in tg.iter() {
-                let strong = is_template || (tg.len() == 1 && self.strongable(a) && targets_count.get(&(a, *ns)).copied().unwrap_or(1) == 1 && keys.len() == 1);
+                let strong = (is_template && !inst.collided.contains(&a)) || (tg.len() == 1 && self.strongable(a) && targets_count.get(&(a, *ns)).copied().unwrap_or(1) == 1 && keys.len() == 1);
                 for kk in &keys {
                     state.set_slot(a, *ns, *kk, nv.clone(), strong);
                 }
@@ -1016,7 +1031,7 @@ impl Analyzer {
             let tg = inst.resolve(self, state, &pre, *oid);
             for a in tg.iter() {
                 let nk = inst.remap_value(self, state, &pre, &Value::kv_only(kv.clone())).kv;
-                if inst.clones.values().any(|c| *c == a) || summary.templates.contains(oid) {
+                if (inst.clones.values().any(|c| *c == a) || summary.templates.contains(oid)) && !inst.collided.contains(&a) {
                     state.elems.insert(a, nk);
                 } else {
                     let nv = match state.elems.get(&a) {
@@ -1100,7 +1115,7 @@ impl Analyzer {
                 }
             }
             for (row_c, members) in groups {
-                let tiers = self.emit_access(&sr.node, &kv, &row_c, members[0], sr.ns, sr.guarded, &sr_chain, &sr.file, state, &sr.text, sr.cls);
+                let tiers = self.emit_access(&sr.node, &kv, &row_c, members[0], sr.ns, sr.guarded, &sr_chain, &sr.file, state, &sr.text, sr.cls, sr.conditional);
                 for (k, tier) in tiers {
                     if tier == Tier::Missing {
                         for a in &members {
@@ -1149,11 +1164,13 @@ impl Analyzer {
 
     /// Classify an access against a (concrete or symbolic) row and record its consequences.
     #[allow(clippy::too_many_arguments)]
-    pub fn emit_access(&mut self, node: &Node, kv: &KeyVal, row: &Row, oid: ObjId, ns: Ns, guarded: bool, chain: &Chain, file: &str, state: &mut State, text: &str, guard_cls: Option<ObjId>) -> Vec<(KeyId, Tier)> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_access(&mut self, node: &Node, kv: &KeyVal, row: &Row, oid: ObjId, ns: Ns, guarded: bool, chain: &Chain, file: &str, state: &mut State, text: &str, guard_cls: Option<ObjId>, conditional: bool) -> Vec<(KeyId, Tier)> {
         let mut out: Vec<(KeyId, Tier)> = Vec::new();
+        let conditional = conditional || (self.opts.fixes && self.branch_depth > 0);
         if row.symbolic() {
             if !self.sum_stack.is_empty() {
-                self.defer(SymReq { node: *node, key_kv: kv.clone(), row: row.clone(), oid, ns, guarded, rel_chain: chain.clone(), kind: "load", file: file.to_string(), text: text.to_string(), cls: guard_cls });
+                self.defer(SymReq { node: *node, key_kv: kv.clone(), row: row.clone(), oid, ns, guarded, rel_chain: chain.clone(), kind: "load", file: file.to_string(), text: text.to_string(), cls: guard_cls, conditional });
             }
             return out;
         }
@@ -1169,6 +1186,16 @@ impl Analyzer {
                 self.verdict(node, k, &cls, oid, ns, Some(file), Some(text));
                 if cls.tier == Tier::Input {
                     self.require_providers(&cls, row, &site, true, state);
+                    if conditional {
+                        for (src, terms) in &cls.providers {
+                            let tgt = state.reqs.writable(src);
+                            for t in terms.iter() {
+                                if let Some(cur) = tgt.get(&t).cloned() {
+                                    tgt.insert(t, crate::domain::ReqInfo { always: false, ..cur });
+                                }
+                            }
+                        }
+                    }
                 }
             }
         } else if let KeyVal::KeysOf(_) = kv {
@@ -1227,6 +1254,9 @@ struct Inst {
     obj_mark: ObjId,
     in_summary: bool,
     clones: IndexMap<ObjId, ObjId>,
+    /// clones shared by several templates (same allocation site and context, e.g. the levels
+    /// of a recursive structure): their facts combine instead of overwriting each other
+    collided: FxHashSet<ObjId>,
     resolved: FxHashMap<ObjId, ObjSet>,
     kv_cache: FxHashMap<ObjId, KeyVal>,
     erow_cache: FxHashMap<Rho, Row>,
@@ -1355,9 +1385,10 @@ impl Inst {
         }
         let mut erow = |r: Rho| -> Row { erows.get(&r).cloned().unwrap_or_default() };
         let mut kv_of = |ph: ObjId| -> KeyVal { kvs.get(&ph).cloned().unwrap_or(DATA) };
-        let mut hit = if row.is_entry() { erow(row.entry_rho().unwrap()) } else { row.concretise(&mut erow, &mut kv_of) };
+        let bot_is_data = an.opts.fixes;
+        let mut hit = if row.is_entry() { erow(row.entry_rho().unwrap()) } else { row.concretise_opt(&mut erow, &mut kv_of, bot_is_data) };
         if hit.symbolic() && !self.in_summary {
-            hit = hit.concretise(&mut erow, &mut kv_of);
+            hit = hit.concretise_opt(&mut erow, &mut kv_of, bot_is_data);
         }
         self.conc_cache.insert(ck, hit.clone());
         hit
@@ -1415,6 +1446,10 @@ impl Inst {
         let existed = !self.fresh_clone(nid);
         if !existed {
             self.new_clones.insert(nid);
+        }
+        if an.opts.fixes && self.clones.values().any(|c| *c == nid) {
+            self.collided.insert(nid);
+            self.new_clones.remove(&nid);
         }
         self.clones.insert(t, nid);
         an.obj_mut(nid).literal_len = tll;
@@ -1512,6 +1547,16 @@ impl Inst {
                 continue;
             }
             let mut v = pre.slot(p, ph.ns, key);
+            if an.opts.fixes && matches!(an.kind(p), Kind::List | Kind::Tuple) && ph.ns == Ns::Item {
+                // `xs[i]` through a placeholder: the positional slot, else the element slot
+                v = match intern::key_as_int(key) {
+                    Some(i) if i >= 0 => pre.slot(p, Ns::Pos, key),
+                    _ => Value::new(),
+                };
+                if v.empty() {
+                    v = pre.slot(p, Ns::Elem, STAR);
+                }
+            }
             let star = pre.slot(p, ph.ns, STAR);
             if !star.pts.is_empty() {
                 v = v.join(&Value::with_kv(star.pts, DATA));
@@ -1519,7 +1564,9 @@ impl Inst {
             if v.empty() {
                 let row = pre.row(p, ph.ns);
                 if ph.ns == Ns::Cell {
-                    v = Value::new();
+                    // a data cell not bound at this (symbolic) call site: still an entry fact
+                    // of the summary being built, resolved when *it* is instantiated
+                    v = if an.opts.fixes && !an.sum_stack.is_empty() && an.is_entry_object(p) { an.path_placeholder_value(p, ph.ns, key, &Row::new(), state) } else { Value::new() };
                 } else if row.open() || an.kind(p) == Kind::Ph {
                     v = an.path_placeholder_value(p, ph.ns, key, &row, state);
                 }

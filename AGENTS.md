@@ -36,16 +36,28 @@ Two engines, one behaviour:
 | `tests/run_golden.py` | golden harness; `--rust`, `--both`, `--engine=…`; a case may be restricted to one engine with a `#@engine rust` comment (used by `f37_loop_recency.py`, which documents behaviour the prototype does not have). `ROWAN_COMPAT=1` passes `--compat` to the Rust engine. |
 | `tests/diff_engines.py` | differential check (spec §15.4, static half): dedupe'd verdict sets and schema tables must be identical between the oracle and `rowan-rs --compat`. |
 
-Run:
+Run (Python via `uv`; `.python-version` pins 3.14 — the system `python3` is 3.9 and cannot
+parse `match`):
 
 ```
 cd rowan-rs && cargo build --release && cargo test --release --lib
 rowan-rs/target/release/rowan-rs FILE.py [--json|--golden|--facts] [--no-rows --no-summaries --no-entry --no-imports --compat]
-python tests/run_golden.py --rust        # 37/37 (default mode); ROWAN_COMPAT=1 … → 36/36 (f37 skipped)
-python tests/run_golden.py               # Python oracle, 36/36
-python tests/diff_engines.py             # 38 programs: 36 cases + example + 6 prototype modules, all SAME
-ROWAN_SUMMARIES=0 …                      # old per-call-site engine in either engine (34/36 for both, same two cases)
+uv run --no-project python tests/run_golden.py --rust     # 63/63 (default mode)
+ROWAN_COMPAT=1 uv run --no-project python tests/run_golden.py --rust   # 36/36: the prototype's cases, prototype semantics
+uv run --no-project python tests/run_golden.py            # Python oracle, 36/36
+uv run --no-project python tests/diff_engines.py          # 43 programs identical between oracle and rowan-rs --compat
+ROWAN_SUMMARIES=0 …                                       # old per-call-site engine (34/36 in both engines, same two cases)
 ```
+
+Golden cases: `a01`–`e36` are the prototype's (both engines); `f37` and `g40`–`g65` are
+`#@engine rust` cases written against the Rust engine (AST node coverage, closures taking
+closures returning lambdas, reassignment, control flow, inputs indexing results of input
+functions, classes, string keys, containers, guards, modules, generators, recursion, kwargs
+forwarding, configs, pandas, annotations, mutation through layers, comprehensions, dispatch,
+a CLI script, dict methods, a larger mixed program).  Harness directives: `#@ tier key`,
+`#@row`, `#@schema`, plus `#@rust …` / `#@py …` for one engine only (used where the Rust
+engine's stricter dead-branch reasoning differs from the prototype, e.g. `b15`).  A `#@`
+directive must be the last thing on its line: the key runs to the end of the line.
 
 Env: `ROWAN_DEBUG=1` (entry-point progress, slow instantiations), `ROWAN_COMPAT=1`,
 `ROWAN_NO=recency,scc,site,narrowed,positional` (switch improvements off one by one).
@@ -99,6 +111,39 @@ Env: `ROWAN_DEBUG=1` (entry-point progress, slow instantiations), `ROWAN_COMPAT=
   or a `Lits` of same-arity tuples) yields per-position key values instead of data. The
   old note "container element positions are weak" was not reproduced on a concrete example;
   this is the one positional gap that was found.
+* `fixes` (with the separately switchable `ctx_col` and `early_base`): prototype gaps found
+  by the `g*` cases, all confirmed identical in the prototype first —
+  summaries: the entry snapshot is taken *before* parameters are bound, so cells holding
+  captured parameters and the `*args`/`**kwargs` containers are instantiated per call
+  (closures over parameters, `compose`, decorators with arguments); a data cell read inside
+  a nested summary becomes an entry fact instead of ⊥; call contexts are keyed by line *and*
+  column (two calls on one line no longer share clones) and stacked decorators are applied
+  at the decorator's own site; clones of distinct templates that land on one object (levels
+  of a recursive structure) combine instead of overwriting; a parameter-keyed store whose
+  key is unknown opens the row as a map instead of being dropped, and a parameter-keyed load
+  on a closed record the function built itself adds no placeholder; requirements recorded
+  under an `if`/`try`/boolean operator (not a loop) are "sometimes"; `in`/`not in`, `del`
+  and `isinstance`-style narrowing on a parameter ask for per-call analysis when the call
+  site has a literal / concrete value —
+  flow: literal loops containing `break`/`continue` are unrolled; `if` prunes a branch when
+  the test is definitely truthy/falsy; `k in d` on a closed record without `k` makes the
+  branch infeasible (so `__contains__`-based guards and `assert "k" in d` can kill code);
+  a guarded load in a real `try` narrows the key in on the fall-through path; after a loop
+  without `break`, the iterable's element objects keep the body's exit row (every element
+  went through the body) —
+  values: bytes/Ellipsis constants are keys (port bug); slicing a list yields a list;
+  `sorted`/`reversed` call the `key` callback and drop positions; `yield from` yields the
+  iterable's elements; `functools.partial` objects are callable; `Cls.classmethod(...)`
+  binds the class; dataclass fields include inherited ones in order; instances of different
+  classes constructed at one site are distinct objects; `dict.get(k, default)` omits the
+  default when `k` is proven; `"%d" % i` formats; declared fields annotated with a user
+  class hold an instance of it.
+  `--compat` turns all of this off; `tests/diff_engines.py` still reports SAME everywhere.
+
+Known prototype behaviours the new cases document rather than change: a successful access
+narrows the key in (`r["x"]` after a possibly-present store makes later reads proven, a01);
+`.get`/`.setdefault` record no requirement; comparisons are not evaluated (`d["a"] < 0`
+keeps both branches); class attributes are not records.
 
 ## Measured (release build, Apple M-series; "✗" = definitely-missing lines in the report)
 

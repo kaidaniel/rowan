@@ -850,6 +850,12 @@ impl Row {
 
     /// Replace the symbolic part by actual entry rows and actual key values of placeholders.
     pub fn concretise(&self, entry_row_of: &mut dyn FnMut(Rho) -> Row, kv_of: &mut dyn FnMut(ObjId) -> KeyVal) -> Row {
+        self.concretise_opt(entry_row_of, kv_of, false)
+    }
+
+    /// `bot_is_data`: a parameter-keyed store whose key has no known value opens the row as
+    /// a data-keyed map instead of being dropped.
+    pub fn concretise_opt(&self, entry_row_of: &mut dyn FnMut(Rho) -> Row, kv_of: &mut dyn FnMut(ObjId) -> KeyVal, bot_is_data: bool) -> Row {
         if !self.symbolic() {
             return self.clone();
         }
@@ -922,6 +928,9 @@ impl Row {
             } else if let KeyVal::KeysOf(_) = kv {
                 out = out.data_store(Source::new(&format!("keys-of-store@{}", r), SourceKind::Data));
             } else if let KeyVal::Bot = kv {
+                if bot_is_data {
+                    out = out.data_store(Source::new(&format!("store@param{}", r), SourceKind::Data));
+                }
                 continue;
             } else {
                 out = out.data_store(Source::new(&format!("store@param{}", r), SourceKind::Data));

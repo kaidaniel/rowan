@@ -34,14 +34,16 @@ unpacking of tuple keys).
 ```
 cd rowan-rs && cargo build --release
 rowan-rs/target/release/rowan-rs prog.py [--json] [--no-rows] [--no-summaries] [--no-entry] [--no-imports] [--compat]
-python tests/run_golden.py --rust            # golden suite on the Rust engine (37 cases)
-python tests/run_golden.py --both            # both engines
-python tests/diff_engines.py                 # differential check: Python oracle vs rowan-rs --compat
+uv run --no-project python tests/run_golden.py --rust    # golden suite on the Rust engine (63 cases)
+uv run --no-project python tests/run_golden.py --both    # both engines (the 36 prototype cases run on both)
+uv run --no-project python tests/diff_engines.py         # differential check: Python oracle vs rowan-rs --compat
 ```
 
 `ROWAN_SUMMARIES=0`, `ROWAN_DEBUG=1` work as for the prototype; `ROWAN_COMPAT=1` is
-`--compat`; `ROWAN_NO=recency,scc,site,narrowed,positional` switches improvements off
-individually. `rowan-rs/py/` holds a PyO3 binding (`rowan_rs.analyse_file(path)` returns
+`--compat`; `ROWAN_NO=recency,scc,site,narrowed,positional,fixes` switches improvements off
+individually (`fixes` is a set of semantic corrections over the prototype found by the
+extended golden suite; `AGENTS.md` lists them). Python is run through `uv`
+(`.python-version` = 3.14). `rowan-rs/py/` holds a PyO3 binding (`rowan_rs.analyse_file(path)` returns
 the `--golden` JSON); see `AGENTS.md` for its status.
 
 ## VS Code extension (`vscode-rowan/`)

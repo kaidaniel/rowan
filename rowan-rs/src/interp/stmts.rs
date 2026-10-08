@@ -145,11 +145,13 @@ impl Analyzer {
                 self.eval(&m.subject, state);
                 let mut outs: Vec<State> = Vec::new();
                 self.cond_depth += 1;
+                self.branch_depth += 1;
                 for case in &m.cases {
                     let mut cs = state.copy();
                     self.exec_block(&case.body, &mut cs);
                     outs.push(cs);
                 }
+                self.branch_depth -= 1;
                 self.cond_depth -= 1;
                 outs.push(state.copy());
                 let mut out = outs.remove(0);
@@ -192,18 +194,27 @@ impl Analyzer {
             self.exec_block(body, state);
             return;
         }
-        self.eval(test, state);
+        let tv = self.eval(test, state);
         let mut then_s = state.copy();
         let mut else_s = state.copy();
+        if self.opts.fixes {
+            match self.truthiness(&tv, state) {
+                Some(true) => else_s.reachable = false,
+                Some(false) => then_s.reachable = false,
+                None => {}
+            }
+        }
         self.narrow(test, true, &mut then_s);
         self.narrow(test, false, &mut else_s);
         self.cond_depth += 1;
+        self.branch_depth += 1;
         if then_s.reachable {
             self.exec_block(body, &mut then_s);
         }
         if else_s.reachable {
             self.exec_orelse(rest, &mut else_s);
         }
+        self.branch_depth -= 1;
         self.cond_depth -= 1;
         let j = then_s.join(&mut else_s);
         state.replace_with(j);
@@ -271,16 +282,38 @@ impl Analyzer {
         let it = self.iterate(&itv, &iter_node, state);
         let has_jump = contains_jump(&f.body);
         if let Some(items) = &it.items {
-            if items.len() <= UNROLL_MAX && !has_jump {
+            if items.len() <= UNROLL_MAX && (!has_jump || self.opts.fixes) {
+                // unrolled: `continue` rejoins at the next iteration, `break` at the exit
+                let mut breaks: Option<State> = None;
                 for item in items {
                     if !state.reachable {
                         break;
                     }
                     self.bind_iter_target(&f.target, &Elem::One(item.clone()), state);
-                    self.exec_block(&f.body, state);
+                    if has_jump {
+                        self.loop_stack.push(LoopCtx::default());
+                        self.exec_block(&f.body, state);
+                        let ctx = self.loop_stack.pop().unwrap();
+                        if let Some(mut c) = ctx.continues {
+                            let j = state.join(&mut c);
+                            state.replace_with(j);
+                        }
+                        if let Some(mut b) = ctx.breaks {
+                            breaks = Some(match breaks.take() {
+                                None => b,
+                                Some(mut e) => e.join(&mut b),
+                            });
+                        }
+                    } else {
+                        self.exec_block(&f.body, state);
+                    }
                 }
                 if !f.orelse.is_empty() && state.reachable {
                     self.exec_block(&f.orelse, state);
+                }
+                if let Some(mut b) = breaks {
+                    let j = state.join(&mut b);
+                    state.replace_with(j);
                 }
                 return;
             }
@@ -353,6 +386,19 @@ impl Analyzer {
         let elem_v = it.elem.value_part();
         self.promote_elem_reqs(&mut exit_s, &back, &elem_v, state);
         self.promote_elem_narrowing(&mut exit_s, &back, &elem_v);
+        if self.opts.fixes && exit_acc.is_none() && back.reachable {
+            // every element of the iterable went through the body: its row after the loop is
+            // the body's exit row, not the join with "not processed yet"
+            for oid in elem_v.pts.iter() {
+                if self.is_record_like(oid) && self.obj(oid).single {
+                    for ns in [Ns::Item, Ns::Attr] {
+                        if back.has_row(oid, ns) {
+                            exit_s.set_row(oid, ns, back.row(oid, ns));
+                        }
+                    }
+                }
+            }
+        }
         for (oid, ns, srcrow, kill, chain) in exh_ops {
             let r = exit_s.row(oid, ns).copy_from(&srcrow, true, &kill, chain);
             exit_s.set_row(oid, ns, r);
@@ -389,6 +435,7 @@ impl Analyzer {
         self.guards.push(caught);
         self.may_raise.push(false);
         self.cond_depth += 1;
+        self.branch_depth += 1;
         self.exec_block(&t.body, state);
         self.guards.pop();
         let body_may_raise = self.may_raise.pop().unwrap_or(false) || !state.reachable;
@@ -415,6 +462,7 @@ impl Analyzer {
             self.exec_block(&h.body, &mut hs);
             results.push(hs);
         }
+        self.branch_depth -= 1;
         self.cond_depth -= 1;
         let mut out = results.remove(0);
         for mut r in results {

@@ -115,6 +115,12 @@ impl Analyzer {
                     // unbound method called with explicit self: Base.method(self, ...)
                     return self.call_user(oid, Some(args[0].clone()), args[1..].to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, call_ast, false);
                 }
+                if fi.is_classmethod.get() && self.opts.fixes {
+                    if let Some(cls) = fi.cls {
+                        // `Cls.make(...)`: the class is the first argument
+                        return self.call_user(oid, Some(Value::obj(cls)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, call_ast, false);
+                    }
+                }
                 self.call_user(oid, None, args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, call_ast, false)
             }
             Kind::Bound => {
@@ -141,6 +147,10 @@ impl Analyzer {
             Kind::Unknown => {
                 let q = format!("call of {}", self.obj(oid).label);
                 self.unknown_call(&q, Some(&Value::obj(oid)), args, kwargs, star_args, star_kwargs, state, node)
+            }
+            Kind::Partial if self.opts.fixes => {
+                let call = Call { qual: "partial.__call__".into(), recv: Some(Value::obj(oid)), args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
+                crate::models::partial_call(self, state, &call)
             }
             Kind::Ph => {
                 self.record_event("call", oid);
@@ -249,13 +259,16 @@ impl Analyzer {
     pub fn construct(&mut self, cls: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
         let ci = self.class_info(cls);
         let row = if ci.open_base { Row::with_source(Source::new(&format!("instance {}@L{}", ci.name, node.line), SourceKind::Class)) } else { Row::new() };
-        let inst = self.alloc_at(Kind::Instance, node, state, &format!("{}@L{}", ci.name, node.line), Payload::Cls(cls), Some(row), Ns::Attr, None, None);
+        // the allocation site includes the class: `cls()` with several possible classes must
+        // not collapse onto one instance (prototype: same site, last class wins)
+        let site = if self.opts.fixes { format!("{}:{}", super::site_string(node), ci.name) } else { super::site_string(node) };
+        let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", ci.name, node.line), Payload::Cls(cls), Some(row), Ns::Attr, None, None);
         let ns = if ci.typed_dict { Ns::Item } else { Ns::Attr };
         if ci.typed_dict {
             state.set_row(inst, Ns::Item, Row::new());
         }
         if ci.has_fields() {
-            let fields = ci.fields();
+            let fields = if self.opts.fixes { self.dataclass_fields_mro(cls) } else { ci.fields() };
             for (i, (fname, default)) in fields.iter().enumerate() {
                 let fk = key_str_lit(fname);
                 let mut v: Option<Value> = None;
@@ -300,6 +313,23 @@ impl Analyzer {
         Value::obj(inst)
     }
 
+    /// Dataclass fields in constructor order: base classes' fields first (MRO, nearest last).
+    pub fn dataclass_fields_mro(&self, cls: u32) -> Vec<(String, Option<&'static ast::Expr>)> {
+        let mut out: Vec<(String, Option<&'static ast::Expr>)> = Vec::new();
+        for c in self.mro(cls).into_iter().rev() {
+            if let Some(ci) = self.class_info_opt(c) {
+                for (name, d) in ci.fields() {
+                    if let Some(e) = out.iter_mut().find(|(n, _)| *n == name) {
+                        e.1 = d;
+                    } else {
+                        out.push((name, d));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     fn receiver_ctx(&self, self_v: &Option<Value>, site: &str) -> (String, bool) {
         if let Some(sv) = self_v {
             if let Some(r) = sv.single() {
@@ -328,7 +358,9 @@ impl Analyzer {
         }
         let fi = self.func_info(foid);
         let fnode = fi.node;
-        let site = format!("L{}", node.line);
+        // the call context: per call site (line and column) with `fixes`; the prototype used
+        // the line only, so two calls on one line shared their clones
+        let site = if self.opts.ctx_col && node.addr != 0 { format!("L{}:{}", node.line, node.col) } else { format!("L{}", node.line) };
         self.analysed_funcs.insert(foid);
         // --- symbolic summaries (§7.3/§9): analyse the body once, instantiate per call ---
         if self.use_summaries && self.model_call == 0 {

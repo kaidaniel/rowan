@@ -176,7 +176,10 @@ impl Analyzer {
                 if let Some(c) = call_ast {
                     dv = self.call_value(&dv, &frontend::node(&d.expression), Some(c), state, None); // decorator factory
                 }
-                fv = self.call_value(&dv, &fnode, None, state, Some(vec![fv.clone()]));
+                // the decorator application's call site: the decorator itself with `fixes`
+                // (stacked decorators applied at the def's site shared one clone context)
+                let at = if self.opts.fixes { frontend::node(d) } else { fnode };
+                fv = self.call_value(&dv, &at, None, state, Some(vec![fv.clone()]));
                 continue;
             }
             let txt = if q.is_empty() { frontend::text(&d.expression) } else { q.clone() };
