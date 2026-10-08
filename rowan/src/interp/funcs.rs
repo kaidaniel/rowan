@@ -556,7 +556,7 @@ impl Analyzer {
                     items = None;
                     exhaustive = false;
                     self.record_event("iter", oid);
-                    if self.obj(oid).depth >= PATH_DEPTH {
+                    if self.obj(oid).depth >= super::limit("path", PATH_DEPTH as usize) as u32 {
                         elems.push(Value::data("deep"));
                         continue;
                     }
@@ -566,7 +566,7 @@ impl Analyzer {
                 Kind::Unknown => {
                     items = None;
                     exhaustive = false;
-                    if self.obj(oid).depth >= PATH_DEPTH {
+                    if self.obj(oid).depth >= super::limit("path", PATH_DEPTH as usize) as u32 {
                         elems.push(Value::data("deep"));
                         continue;
                     }
@@ -683,7 +683,8 @@ impl Analyzer {
             return None;
         }
         let row = state.row(oid, Ns::Item);
-        if row.open() || row.present != row.definite || row.present.len() > UNROLL_MAX || row.present.is_empty() {
+        // an empty closed dict iterates zero times (known), like an empty list
+        if row.open() || row.present != row.definite || row.present.len() > UNROLL_MAX {
             return None;
         }
         if state.has_slot(oid, Ns::Item, STAR) {

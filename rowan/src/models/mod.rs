@@ -55,7 +55,7 @@ impl Registry {
         r(&["builtins.str"], m_str);
         r(
             &[
-                "builtins.int", "builtins.float", "builtins.bool", "builtins.len", "builtins.print", "builtins.repr", "builtins.isinstance",
+                "builtins.int", "builtins.float", "builtins.bool", "builtins.len", "builtins.print", "builtins.repr", 
                 "builtins.type", "builtins.id", "builtins.hash", "builtins.abs", "builtins.round",  "builtins.sum",
                 "builtins.any", "builtins.all", "builtins.format", "builtins.input", "builtins.callable", "builtins.issubclass", "builtins.hex",
                 "builtins.chr", "builtins.ord", "builtins.range", "builtins.open", "builtins.hasattr", "builtins.divmod", "builtins.pow",
@@ -74,6 +74,7 @@ impl Registry {
         r(&["dict.update"], m_update);
         r(&["dict.pop"], m_pop);
         r(&["builtins.max", "builtins.min"], m_minmax);
+        r(&["builtins.isinstance"], m_isinstance);
         r(&["dict.popitem"], m_popitem);
         r(&["dict.clear"], m_clear);
         r(&["dict.keys", "dict.values", "dict.items"], m_views);
@@ -312,6 +313,87 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::obj(oid)
 }
 
+/// `isinstance(x, C)`: decided when every object of `x` has a known kind / class; a
+/// placeholder records an event so the call site decides.
+fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let (Some(v), Some(cv)) = (c.args.first(), c.args.get(1)) else { return Value::data("bool") };
+    if crate::interp::disabled("isinst") {
+        return Value::data("bool");
+    }
+    let mut classes: Vec<u32> = Vec::new();
+    for o in cv.pts.iter() {
+        match an.kind(o) {
+            Kind::Class | Kind::External => classes.push(o),
+            Kind::Tuple => {
+                for (_, cs) in st.slots_of(o) {
+                    classes.extend(cs.pts.iter().filter(|x| matches!(an.kind(*x), Kind::Class | Kind::External)));
+                }
+            }
+            _ => return Value::data("bool"),
+        }
+    }
+    if classes.is_empty() {
+        return Value::data("bool");
+    }
+    let mut verdicts: Vec<bool> = Vec::new();
+    let builtin = |an: &Analyzer, cls: u32| -> Option<String> { if an.kind(cls) == Kind::External { Some(an.external_qual(cls).rsplit('.').next().unwrap_or("").to_string()) } else { None } };
+    // literal values (no objects)
+    if v.pts.is_empty() {
+        let lits = crate::domain::kv_literals(&v.kv);
+        if !v.kv.is_literal() || lits.is_empty() {
+            if let Some(ph) = v.kv.as_param() {
+                an.record_event("isinstance", ph);
+            }
+            return Value::data("bool");
+        }
+        for k in lits.iter() {
+            let kind = intern::with_key(k, |kk| match kk {
+                intern::Key::Str(_) => "str",
+                intern::Key::Bool(_) => "bool",
+                intern::Key::Int(_) => "int",
+                intern::Key::Float(_) => "float",
+                intern::Key::None => "NoneType",
+                intern::Key::Tuple(_) => "tuple",
+                intern::Key::Bytes(_) => "bytes",
+                _ => "?",
+            });
+            let hit = classes.iter().any(|cls| match builtin(an, *cls) {
+                Some(b) => b == kind || (b == "int" && kind == "bool") || (b == "object"),
+                None => false,
+            });
+            verdicts.push(hit);
+        }
+    }
+    for o in v.pts.iter() {
+        let k = an.kind(o);
+        if matches!(k, Kind::Ph | Kind::Unknown) {
+            if k == Kind::Ph {
+                an.record_event("isinstance", o);
+            }
+            return Value::data("bool");
+        }
+        let hit = classes.iter().any(|cls| match builtin(an, *cls) {
+            Some(b) => match b.as_str() {
+                "dict" | "defaultdict" | "OrderedDict" | "Counter" => matches!(k, Kind::Dict),
+                "list" => k == Kind::List,
+                "tuple" => k == Kind::Tuple,
+                "set" | "frozenset" => k == Kind::Set,
+                "object" => true,
+                _ => false,
+            },
+            None => k == Kind::Instance && an.instance_class(o).map(|ic| an.is_subclass(ic, *cls)).unwrap_or(false),
+        });
+        verdicts.push(hit);
+    }
+    if verdicts.iter().all(|b| *b) {
+        Value::lit(intern::key_bool(true))
+    } else if verdicts.iter().all(|b| !*b) {
+        Value::lit(intern::key_bool(false))
+    } else {
+        Value::data("bool")
+    }
+}
+
 /// `max(xs, key=f)` / `min(xs)`: an element of the container (the key function runs on it);
 /// with several arguments, any of them.
 fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -511,6 +593,35 @@ fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "split" | "splitlines" | "partition" | "rsplit" => {
             let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("split@L{}", c.line));
             an.obj_mut(oid).literal_len = None;
+            // a literal string split by a literal separator: the parts, in order; a parameter
+            // string is decided per call site
+            if let Some(ph) = kv.as_param() {
+                an.record_event("narrow", ph);
+            }
+            let sep: Option<Option<String>> = match c.args.first() {
+                None => Some(None),
+                Some(a) => a.kv.as_lit().and_then(intern::key_as_str).map(|s| Some(s.to_string())),
+            };
+            if let (Some(k), Some(sep), true) = (kv.as_lit(), sep, name == "split" && an.obj(oid).single && !crate::interp::disabled("split")) {
+                if let Some(text) = intern::key_as_str(k) {
+                    let parts: Vec<String> = match sep {
+                        Some(sep) if !sep.is_empty() => text.split(sep.as_str()).map(|p| p.to_string()).collect(),
+                        _ => text.split_whitespace().map(|p| p.to_string()).collect(),
+                    };
+                    if parts.len() <= 16 && c.args.len() <= 1 {
+                        let mut ks = KeySet::new();
+                        for (i, p) in parts.iter().enumerate() {
+                            let v = Value::lit(key_str_lit(p));
+                            st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), v, true);
+                            ks = ks.insert(key_str_lit(p));
+                        }
+                        an.obj_mut(oid).literal_len = Some(parts.len());
+                        st.set_slot(oid, Ns::Elem, STAR, Value::new(), true);
+                        st.elems.insert(oid, KeyVal::Lits(ks));
+                        return Value::obj(oid);
+                    }
+                }
+            }
             st.set_slot(oid, Ns::Elem, STAR, Value::new(), true);
             st.elems.insert(oid, DATA);
             Value::obj(oid)
@@ -934,8 +1045,15 @@ fn m_defaultdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             st.set_row(oid, Ns::Item, r);
         }
         if name == "defaultdict" && !c.args.is_empty() {
-            let dflt = if !c.args[0].pts.is_empty() { an.call_value(&c.args[0], &c.node, None, st, Some(vec![])) } else { Value::data("default") };
-            st.set_slot(oid, Ns::Item, STAR, Value::with_kv(dflt.pts, DATA), false);
+            if !c.args[0].pts.is_empty() && !crate::interp::disabled("ddfactory") {
+                // the factory runs per inserted key (see `load_item`); no shared default
+                an.dd_factories.insert(oid, c.args[0].clone());
+            } else if !c.args[0].pts.is_empty() {
+                let dflt = an.call_value(&c.args[0], &c.node, None, st, Some(vec![]));
+                st.set_slot(oid, Ns::Item, STAR, Value::with_kv(dflt.pts, DATA), false);
+            } else {
+                st.set_slot(oid, Ns::Item, STAR, Value::data("default"), false);
+            }
         }
         src_arg = if name == "defaultdict" { c.args.get(1).cloned() } else { c.args.first().cloned() };
     } else {

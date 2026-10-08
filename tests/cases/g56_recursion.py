@@ -38,8 +38,8 @@ def flatten(d, prefix=""):
 
 
 flat = flatten({"a": 1, "b": {"c": 2}})
-flat["a"]                                #@ none a
-flat["q"]                                #@ none q
+flat["a"]                                #@ ok a
+flat["q"]                                #@ missing q
 
 
 def ping(n, log):

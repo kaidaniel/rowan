@@ -34,6 +34,35 @@ pub const MAX_ACTIVE: usize = 4;
 pub const MAX_MUTATED: usize = 24;
 pub const MAX_CLONES: usize = 8;
 
+/// `ROWAN_NO=name,...` also switches named engine refinements off (bisecting).
+pub fn disabled(name: &str) -> bool {
+    thread_local! {
+        static OFF: std::collections::HashSet<String> = std::env::var("ROWAN_NO").map(|v| v.split(',').map(|s| s.trim().to_string()).collect()).unwrap_or_default();
+    }
+    OFF.with(|s| s.contains(name))
+}
+
+/// Tunable limits: `ROWAN_LIMITS=tab=24,call=32,clones=8,chain=2,path=3,active=4` overrides
+/// the defaults (for bisecting precision / time trade-offs).
+pub fn limit(name: &str, default: usize) -> usize {
+    thread_local! {
+        static LIMITS: std::collections::HashMap<String, usize> = {
+            let mut m = std::collections::HashMap::new();
+            if let Ok(v) = std::env::var("ROWAN_LIMITS") {
+                for part in v.split(',') {
+                    if let Some((k, n)) = part.split_once('=') {
+                        if let Ok(n) = n.trim().parse::<usize>() {
+                            m.insert(k.trim().to_string(), n);
+                        }
+                    }
+                }
+            }
+            m
+        };
+    }
+    LIMITS.with(|m| m.get(name).copied().unwrap_or(default))
+}
+
 pub fn debug_enabled() -> bool {
     match std::env::var("ROWAN_DEBUG") {
         Ok(v) => !(v.is_empty() || v == "0"),
@@ -51,7 +80,7 @@ pub const STR_METHOD_NAMES: &[&str] = &[
     "rjust", "center",
 ];
 pub const SCALAR_EXTRA_NAMES: &[&str] = &[
-    "append", "extend", "sort", "index", "insert", "remove", "add", "isoformat", "strftime", "timestamp", "date", "time",
+    "append", "extend", "sort", "index", "insert", "remove", "isoformat", "strftime", "timestamp", "date", "time",
     "total_seconds", "to_bytes", "bit_length", "as_integer_ratio", "is_integer", "hex", "conjugate", "real", "imag", "tolist",
     "item", "copy", "clear", "reverse",
 ];
@@ -526,6 +555,11 @@ pub struct Analyzer {
     pub env_stack: Vec<IndexMap<StrId, Value>>,
     /// `@name.setter` functions by (defining class, attribute)
     pub prop_setters: FxHashMap<(ObjId, KeyId), ObjId>,
+    /// `defaultdict(factory)`: the factory, called once per inserted key
+    pub dd_factories: FxHashMap<ObjId, Value>,
+    /// `self.f = p` in `__init__` with `p` a parameter: the classes of the arguments seen for
+    /// `p` at construction sites, by (class, field) — the field's class when there is one
+    pub ctor_field_classes: FxHashMap<(ObjId, String), FxHashSet<ObjId>>,
     /// per running call (tabulated body or summary): did it raise an uncaught exception /
     /// call unknown code?
     pub raise_stack: Vec<bool>,
@@ -617,6 +651,8 @@ impl Analyzer {
             row_check_requests: Vec::new(),
             env_stack: Vec::new(),
             prop_setters: FxHashMap::default(),
+            dd_factories: FxHashMap::default(),
+            ctor_field_classes: FxHashMap::default(),
             raise_stack: Vec::new(),
             row_checks: Vec::new(),
             facts_on: false,
@@ -743,7 +779,7 @@ impl Analyzer {
             return oid;
         }
         let n = self.site_clones.get(site).copied().unwrap_or(0);
-        if n >= MAX_CLONES && !ctx.is_empty() {
+        if n >= limit("clones", MAX_CLONES) && !ctx.is_empty() {
             // too many clones of one allocation site: collapse onto the context-free summary object
             return self.alloc_raw(kind, site, "", false, label, payload);
         }

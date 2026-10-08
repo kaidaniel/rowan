@@ -50,4 +50,4 @@ ids[template.format("org")]              #@ missing org_id
 
 parts = "a.b.c".split(".")
 tree = {"a": {"b": {"c": 1}}}
-tree[parts[0]]                           #@ none a
+tree[parts[0]]                           #@ ok a

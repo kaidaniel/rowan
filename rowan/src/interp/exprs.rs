@@ -102,7 +102,15 @@ impl Analyzer {
                 v
             }
             ast::Expr::If(i) => {
-                self.eval(&i.test, state);
+                let tv = self.eval(&i.test, state);
+                // a decided test: one branch only
+                if !super::disabled("ifexp") {
+                    match self.truthiness(&tv, state) {
+                        Some(true) => return self.eval(&i.body, state),
+                        Some(false) => return self.eval(&i.orelse, state),
+                        None => {}
+                    }
+                }
                 let mut a = state.copy();
                 let mut b = state.copy();
                 self.narrow(&i.test, true, &mut a);
@@ -435,6 +443,17 @@ impl Analyzer {
                 if a.pts.is_empty() && a.kv.is_literal() && lits.len() == 1 {
                     let k = lits.iter().next().unwrap();
                     let b = self.eval(right, state);
+                    // membership in a placeholder record: decided per call site
+                    for o in b.pts.iter() {
+                        if super::disabled("inph") {
+                            break;
+                        }
+                        if self.kind(o) == Kind::Ph {
+                            self.record_event("narrow", o);
+                        } else if let Some(src) = self.obj(o).copied_from {
+                            self.record_event("narrow", src);
+                        }
+                    }
                     let recs = self.record_objects(&b);
                     if !b.pts.is_empty() && recs.len() == b.pts.len() && recs.iter().all(|o| matches!(self.kind(*o), Kind::Dict)) {
                         let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();

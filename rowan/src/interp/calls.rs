@@ -315,12 +315,47 @@ impl Analyzer {
             self.fresh_init.insert(inst);
             for f in fv.pts.iter() {
                 if self.kind(f) == Kind::Function {
+                    self.note_ctor_field_classes(init, f, args, kwargs);
                     self.call_user(f, Some(Value::obj(inst)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, None, false);
                 }
             }
             self.fresh_init.remove(&inst);
         }
         Value::obj(inst)
+    }
+
+    /// `self.f = p` statements of `__init__` whose `p` is a parameter: record the classes of
+    /// the instances passed for `p` here, so `self.f` resolves its methods by class later.
+    fn note_ctor_field_classes(&mut self, init_cls: u32, init: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>) {
+        let fi = self.func_info(init);
+        let FuncNode::Def(f) = fi.node else { return };
+        let params: Vec<String> = crate::scopes::all_params(&f.parameters).into_iter().skip(1).map(|p| p.name.id.to_string()).collect();
+        for st in &f.body {
+            let ast::Stmt::Assign(a) = st else { continue };
+            if a.targets.len() != 1 {
+                continue;
+            }
+            let ast::Expr::Attribute(t) = &a.targets[0] else { continue };
+            let ast::Expr::Name(base) = &*t.value else { continue };
+            if base.id.as_str() != "self" {
+                continue;
+            }
+            let ast::Expr::Name(src) = &*a.value else { continue };
+            let pname = src.id.as_str();
+            let v = match params.iter().position(|p| p == pname) {
+                Some(i) if i < args.len() => Some(args[i].clone()),
+                _ => kwargs.get(&s(pname)).cloned(),
+            };
+            let Some(v) = v else { continue };
+            let classes: Vec<u32> = v.pts.iter().filter_map(|o| if self.kind(o) == Kind::Instance { self.instance_class(o) } else { None }).collect();
+            let mixed = classes.is_empty() || v.pts.iter().any(|o| self.kind(o) != Kind::Instance);
+            let entry = self.ctor_field_classes.entry((init_cls, t.attr.id.to_string())).or_default();
+            if mixed {
+                // not an instance (or not only instances): the field has no single class
+                entry.insert(u32::MAX);
+            }
+            entry.extend(classes);
+        }
     }
 
     /// The default of a dataclass field: `field(default_factory=f)` calls `f` (a fresh
@@ -371,7 +406,7 @@ impl Analyzer {
                     // allocate distinct objects
                     let ctx = if !recv.single {
                         site.to_string()
-                    } else if self.site_clones.get(&recv.site).copied().unwrap_or(0) >= MAX_CLONES {
+                    } else if self.site_clones.get(&recv.site).copied().unwrap_or(0) >= super::limit("clones", MAX_CLONES) {
                         String::new()
                     } else {
                         format!("o{}/{}", recv.id, site)
@@ -403,7 +438,7 @@ impl Analyzer {
                     site.push_str(&format!("#{}", i));
                 }
             }
-            if fr.kind != FrameKind::Module && !fr.symbolic && !fr.ctx.is_empty() && fr.ctx.matches('/').count() < 2 && !fr.ctx.starts_with("entry") {
+            if fr.kind != FrameKind::Module && !fr.symbolic && !fr.ctx.is_empty() && fr.ctx.matches('/').count() < super::limit("chain", 2) && !fr.ctx.starts_with("entry") {
                 format!("{}/{}", fr.ctx, site)
             } else {
                 site

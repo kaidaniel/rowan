@@ -28,6 +28,8 @@ from typing import Any, Dict, List, Tuple
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
+TODO_COUNT = [0]  # `#@todo` directives seen: expectations the engine does not meet yet
+
 TIER_ALIASES = {"ok": "proven", "proven": "proven", "likely": "likely", "possibly": "possibly",
                 "missing": "missing", "likely-missing": "likely-missing", "input": "input",
                 "datakey": "datakey", "none": "none", "any": "any", "map": "none"}
@@ -57,6 +59,9 @@ def collect_expectations(src: str):
     row_exp: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}
     schema_exp: List[Tuple[str, Dict[str, Any]]] = []
     for i, line in enumerate(src.splitlines(), 1):
+        if "#@todo" in line:
+            TODO_COUNT[0] += 1
+            continue
         m = re.search(r"#@row\s+(\w+)\s*:\s*(.*)$", line)
         if m:
             spec: Dict[str, Any] = {}
@@ -226,7 +231,7 @@ def main(argv: List[str]) -> int:
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")
         for f in fails:
             print(f"        - {f}")
-    print(f"  {npass}/{len(results)} passed")
+    print(f"  {npass}/{len(results)} passed" + (f"  ({TODO_COUNT[0]} #@todo expectations not checked)" if TODO_COUNT[0] else ""))
     return 0 if ok_all else 1
 
 

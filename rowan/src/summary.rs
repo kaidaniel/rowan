@@ -617,7 +617,10 @@ impl Analyzer {
                 }
             }
             self.frames.pop();
-            let templates: FxHashSet<ObjId> = (obj_mark..self.objects.len() as ObjId).filter(|o| !matches!(self.kind(*o), Kind::Ph | Kind::Method | Kind::Bound | Kind::External | Kind::Super | Kind::View)).collect();
+            // bound methods / method values / views made in the body hold receivers that are
+            // templates themselves: cloned with them (their payloads are remapped)
+            let old_filter = crate::interp::disabled("boundtmpl");
+            let templates: FxHashSet<ObjId> = (obj_mark..self.objects.len() as ObjId).filter(|o| !matches!(self.kind(*o), Kind::Ph | Kind::External | Kind::Super) && !(old_filter && matches!(self.kind(*o), Kind::Method | Kind::Bound | Kind::View))).collect();
             let rel_full: Vec<Verdict> = self.verdicts[verdict_mark..].to_vec();
             let mut seen_rel: FxHashSet<(String, u32, u32, String, Tier, ObjId, Chain)> = FxHashSet::default();
             let mut rel_list: Vec<Verdict> = Vec::new();
@@ -689,6 +692,12 @@ impl Analyzer {
             }
             summary = Some(Rc::new(summ));
             break;
+        }
+        // not converged within the rounds: widened, but final for the callers from here on
+        if let Some(s) = &summary {
+            if !crate::interp::disabled("partialclear") {
+                s.partial.set(false);
+            }
         }
         self.sum_stack.pop();
         self.sum_reqs.pop();
@@ -802,6 +811,24 @@ impl Analyzer {
                 _ => Value::new(),
             }
         };
+        // a value holding this summary's own placeholders (a cell holding a parameter): the
+        // bindings of those placeholders
+        let v = if !crate::interp::disabled("bindsub") && (v.pts.iter().any(|o| bind.contains_key(&o)) || v.kv.as_param().map(|p| bind.contains_key(&p)).unwrap_or(false)) {
+            let mut out = Value::with_kv(v.pts.filter(|o| !bind.contains_key(&o)), if v.kv.as_param().map(|p| bind.contains_key(&p)).unwrap_or(false) { crate::domain::BOT } else { v.kv.clone() });
+            for o in v.pts.iter() {
+                if let Some(b) = bind.get(&o) {
+                    out = out.join(b);
+                }
+            }
+            if let Some(p) = v.kv.as_param() {
+                if let Some(b) = bind.get(&p) {
+                    out = out.join(b);
+                }
+            }
+            out
+        } else {
+            v
+        };
         memo.insert(ph, v.clone());
         v
     }
@@ -850,14 +877,19 @@ impl Analyzer {
     }
 
     pub fn should_tabulate(&mut self, summary: &Summary, bind: &IndexMap<ObjId, Value>, state: &mut State) -> bool {
-        let Some(ev) = self.tabulation_reason(summary, bind, state) else { return false };
+        let Some(ev) = self.tabulation_reason(summary, bind, state) else {
+            if debug_enabled() {
+                eprintln!("summary used for {} ({} events{})", self.func_info(summary.foid).qualname, summary.events.len(), if summary.partial.get() { ", partial" } else { "" });
+            }
+            return false;
+        };
         if debug_enabled() {
             eprintln!("tabulate {} because of {} on {}", self.func_info(summary.foid).qualname, ev.kind, self.obj(ev.ph).label);
         }
         let kkey: &'static str = if ev.kind == "call" || ev.kind == "dispatch" { ev.kind } else { "lit" };
         let key = (summary.foid, kkey);
         let n = self.tab_count.get(&key).copied().unwrap_or(0);
-        let budget = if kkey == "call" || kkey == "dispatch" { MAX_CALL_TABULATIONS } else { MAX_TABULATIONS };
+        let budget = if kkey == "call" || kkey == "dispatch" { crate::interp::limit("call", MAX_CALL_TABULATIONS) } else { crate::interp::limit("tab", MAX_TABULATIONS) };
         if n >= budget {
             return false;
         }
@@ -1549,13 +1581,19 @@ impl Inst {
         if let Some(&n) = self.clones.get(&t) {
             return n;
         }
-        let (tkind, tsite, tlabel, tsingle, tll, titer, tdepth, tderived, payload) = {
+        let (tkind, tsite, tctx, tlabel, tsingle, tll, titer, tdepth, tderived, payload) = {
             let o = an.obj(t);
-            (o.kind, o.site.clone(), o.label.clone(), o.single, o.literal_len, o.iter_elem, o.depth, o.derived_from, o.payload.clone())
+            (o.kind, o.site.clone(), o.ctx.clone(), o.label.clone(), o.single, o.literal_len, o.iter_elem, o.depth, o.derived_from, o.payload.clone())
         };
         let tsite = tsite.strip_suffix("#recent").map(|x| x.to_string()).unwrap_or(tsite);
+        // templates allocated at one line in different inner contexts (two objects built by
+        // one constructor inside the body) stay distinct in the clone
+        let tsite = if tctx.is_empty() || crate::interp::disabled("clonectx") { tsite } else { format!("{}|{}", tsite, tctx) };
         let ns = if matches!(tkind, Kind::Instance | Kind::Namespace) { Ns::Attr } else { Ns::Item };
         let nid = an.alloc_in_frame(tkind, &tsite, state, &tlabel, Payload::None, None, ns, tsingle, &self.call_ctx, self.ctx_single);
+        if let Some(f) = an.dd_factories.get(&t).cloned() {
+            an.dd_factories.insert(nid, f);
+        }
         let existed = !self.fresh_clone(nid);
         if !existed {
             self.new_clones.insert(nid);

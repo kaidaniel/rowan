@@ -84,9 +84,18 @@ impl Analyzer {
         let line_data = Value::data(&format!("L{}", node.line));
         for oid in obj.pts.iter() {
             let kind = self.kind(oid);
+            if kind == Kind::Ph && ns == Ns::Item {
+                // a placeholder declared as a defaultdict: insertion is decided per call site
+                if let Payload::Ph(p) = &self.obj(oid).payload {
+                    if let Some(c) = p.cls.get() {
+                        if self.class_info_opt(c).is_none() && self.obj(c).label.ends_with("defaultdict") && !super::disabled("ddnarrow") {
+                            self.record_event("narrow", oid);
+                        }
+                    }
+                }
+            }
             if kind == Kind::Dict && ns == Ns::Item && self.obj(oid).label.starts_with("defaultdict@") {
-                // `dd[k]` inserts the factory's value when `k` is absent
-                let dflt = state.slot(oid, Ns::Item, STAR);
+                // `dd[k]` inserts the factory's value when `k` is absent (a fresh one per key)
                 let row = state.row(oid, ns);
                 if key.kv.is_literal() {
                     let ks = crate::domain::kv_literals(&key.kv);
@@ -94,12 +103,21 @@ impl Analyzer {
                     let mut r = row.clone();
                     for k in ks.iter() {
                         if !r.definite.contains(k) {
+                            let dflt = match self.dd_factories.get(&oid).cloned() {
+                                Some(f) => self.call_value(&f, node, None, state, Some(vec![])),
+                                None => state.slot(oid, Ns::Item, STAR),
+                            };
                             r = r.store(k, strong);
-                            state.set_slot(oid, ns, k, dflt.clone(), false);
+                            state.set_slot(oid, ns, k, dflt, false);
                         }
                     }
                     state.set_row(oid, ns, r);
                 } else if key.kv.as_param().is_none() {
+                    // an unknown key: some key gets the factory's value
+                    if let Some(f) = self.dd_factories.get(&oid).cloned() {
+                        let dflt = self.call_value(&f, node, None, state, Some(vec![]));
+                        state.set_slot(oid, ns, STAR, Value::with_kv(dflt.pts, DATA), false);
+                    }
                     let src = Source::new(&self.obj(oid).label, SourceKind::Data);
                     state.set_row(oid, ns, row.data_store(src));
                 }
@@ -211,8 +229,9 @@ impl Analyzer {
             if content_unknown {
                 let p = self.path_placeholder_value(oid, ns, param_slot_key(ph), &row, state);
                 v = v.join(&p);
-            } else if !row.present.is_empty() {
-                // a closed record with several entries: which one is decided per call site
+            }
+            // which entry is read is decided per call site, when the key is a literal there
+            if (content_unknown || !row.present.is_empty()) && !super::disabled("paramnarrow") {
                 self.record_event("narrow", ph);
             }
             let kv2 = match v.single() {
@@ -311,7 +330,7 @@ impl Analyzer {
 
     /// `_path_placeholder`: the (unknown) content of an open object's slot.
     pub fn path_placeholder_value(&mut self, oid: u32, ns: Ns, k: KeyId, row: &Row, state: &mut State) -> Value {
-        if self.obj(oid).depth >= PATH_DEPTH {
+        if self.obj(oid).depth >= super::limit("path", PATH_DEPTH as usize) as u32 {
             return Value::data("deep");
         }
         if !self.sum_stack.is_empty() && self.is_entry_object(oid) {
@@ -702,7 +721,8 @@ impl Analyzer {
             }
         }
         if let Some(c) = cls_of {
-            if let Some(defc) = self.class_lookup(c, name) {
+            let is_field = self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name);
+            if let (Some(defc), false) = (self.class_lookup(c, name), is_field) {
                 let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
                 return self.bound_outs(&cv, oid, c, node, state);
             }
@@ -746,8 +766,10 @@ impl Analyzer {
         if let Some(v) = state.slot_opt(oid, Ns::Attr, nk) {
             return v;
         }
-        // declared class (annotation / self): resolve methods and class attributes
-        if let Some(pcls) = ph.cls.get() {
+        // declared class (annotation / self): resolve methods and class attributes (a
+        // dataclass field's default is instance data, not a class attribute)
+        let is_field = !super::disabled("dcfield") && ph.cls.get().map(|c| self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name)).unwrap_or(false);
+        if let (Some(pcls), false) = (ph.cls.get(), is_field) {
             if let Some(c) = self.class_lookup(pcls, name) {
                 let cv = self.cls_slots.get(&(c, Ns::Attr, nk)).cloned().unwrap_or_default();
                 let out = self.bound_outs(&cv, oid, pcls, node, state);
@@ -760,14 +782,25 @@ impl Analyzer {
                 self.record_event("dispatch", oid);
             }
         }
-        let has_cls = ph.cls.get().is_some();
-        if DICT_METHOD_NAMES.contains(&name) && !has_cls {
-            return self.method_value(&format!("dict.{}", name), &Value::obj(oid));
+        // a declared builtin class (`isinstance(x, dict)`, `self.xs = []`) selects a model
+        // family; only a user class counts as "has a class" for method lookup
+        let builtin_cls: Option<String> = if super::disabled("builtincls") { None } else { ph.cls.get().filter(|c| self.class_info_opt(*c).is_none()).map(|c| self.obj(c).label.rsplit('.').next().unwrap_or("").to_string()) };
+        let has_cls = ph.cls.get().is_some() && builtin_cls.is_none();
+        let dictish = builtin_cls.as_deref().map(|b| matches!(b, "dict" | "defaultdict" | "OrderedDict" | "Counter")).unwrap_or(true);
+        let listish = builtin_cls.as_deref().map(|b| matches!(b, "list" | "set" | "frozenset" | "deque")).unwrap_or(true);
+        // a builtin container model for the name, and / or the user classes defining it: a
+        // class-less placeholder may be either, so both are kept and the call site decides
+        let model: Option<Value> = if !has_cls && DICT_METHOD_NAMES.contains(&name) && dictish {
+            Some(self.method_value(&format!("dict.{}", name), &Value::obj(oid)))
+        } else if !has_cls && (LIST_METHOD_NAMES.contains(&name) || matches!(name, "add" | "discard")) && listish {
+            Some(self.method_value(&format!("list.{}", name), &Value::obj(oid)))
+        } else {
+            None
+        };
+        if model.is_some() && super::disabled("usermodel") {
+            return model.unwrap();
         }
-        if LIST_METHOD_NAMES.contains(&name) && !has_cls {
-            return self.method_value(&format!("list.{}", name), &Value::obj(oid));
-        }
-        if is_scalar_method(name) && !has_cls {
+        if model.is_none() && is_scalar_method(name) && !has_cls {
             let q = if STR_METHOD_NAMES.contains(&name) { format!("str.{}", name) } else { format!("unknown.{}", name) };
             return self.method_value(&q, &Value::kv_only(KeyVal::Param(oid)));
         }
@@ -785,12 +818,27 @@ impl Analyzer {
                     }
                 }
                 if !outs.is_empty() {
-                    if cands.len() > 1 {
+                    // the receiver's class decides (also between the model and the user method)
+                    if cands.len() > 1 || model.is_some() || !super::disabled("dispatch1") {
                         self.record_event("dispatch", oid);
                     }
-                    return join_values(outs);
+                    if model.is_some() {
+                        self.record_event("narrow", oid);
+                    }
+                    let mut v = join_values(outs);
+                    if let Some(m) = model {
+                        v = v.join(&m);
+                    }
+                    return v;
                 }
             }
+        }
+        if let Some(m) = model {
+            return m;
+        }
+        if is_scalar_method(name) && !has_cls {
+            let q = if STR_METHOD_NAMES.contains(&name) { format!("str.{}", name) } else { format!("unknown.{}", name) };
+            return self.method_value(&q, &Value::kv_only(KeyVal::Param(oid)));
         }
         let row = state.row(oid, Ns::Attr);
         if !guarded {
@@ -858,6 +906,17 @@ impl Analyzer {
 
     /// The one user class an attribute of instances of `cls` is known to hold.
     pub fn field_class(&mut self, cls: u32, name: &str, state: &State) -> Option<u32> {
+        // the classes of constructor arguments stored into the field (one class: that one)
+        for c in self.mro(cls) {
+            if let Some(set) = self.ctor_field_classes.get(&(c, name.to_string())) {
+                if set.len() == 1 && !set.contains(&u32::MAX) {
+                    return set.iter().next().copied();
+                }
+                if !set.is_empty() {
+                    return None;
+                }
+            }
+        }
         for c in self.mro(cls) {
             let Some(ci) = self.class_info_opt(c) else { continue };
             if ci.field_classes.borrow().is_none() {
