@@ -16,7 +16,9 @@ df["amount"] = df.apply(amount, axis=1)
 regions = []
 for t in df.itertuples(index=False):
     regions.append(t.region)                             #@ input region
-    #@row t: definite={region,amount} absent={Index} open
+    # (absent={Index} needs the file: an input column named Index would be a field)
+    #@todo row t: absent={Index}
+    #@row t: definite={region,amount} open
 ids = []
 for rec in df.to_dict("records"):
     if rec["amount"] > 0:                                #@ ok amount

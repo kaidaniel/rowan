@@ -189,6 +189,8 @@ impl Analyzer {
                         for v in args.iter().chain(kwargs.values()) {
                             self.concrete_events(v, state, 2);
                         }
+                        let vals: Vec<&Value> = args.iter().chain(kwargs.values()).collect();
+                        crate::models::pandas::symbolic_frames_event(self, state, &vals);
                     }
                     return m(self, state, &call);
                 }

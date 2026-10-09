@@ -97,7 +97,7 @@ pub fn install(r: &mut dyn FnMut(&[&'static str], Model)) {
         &[
             "pandas.to_datetime", "pandas.to_numeric", "pandas.isna", "pandas.notna", "pandas.isnull", "pandas.notnull", "pandas.cut",
             "pandas.qcut", "pandas.date_range", "pandas.Timestamp", "pandas.Timedelta", "pandas.to_timedelta", "pandas.factorize", "pandas.unique",
-            "pandas.array", "pandas.Categorical", "pandas.Index", "pandas.MultiIndex", "pandas.NamedAgg", "pandas.Grouper", "pandas.set_option",
+            "pandas.array", "pandas.Categorical", "pandas.Index", "pandas.MultiIndex", "pandas.Grouper", "pandas.set_option",
             "pandas.option_context", "pandas.testing.assert_frame_equal", "pandas.ExcelWriter", "pandas.eval",
         ],
         series_call,
@@ -105,14 +105,45 @@ pub fn install(r: &mut dyn FnMut(&[&'static str], Model)) {
     r(&["Series.*"], series_method);
     r(&["io.StringIO", "io.BytesIO"], string_io);
     r(&["pandas.Series"], series_ctor);
+    r(&["pandas.NamedAgg"], named_agg);
     r(&["Series.str.*", "Series.dt.*", "Series.cat.*", "Series.sparse.*", "Series.list.*", "Series.struct.*"], accessor_method);
     r(&["DataFrame.*"], df_dispatch);
     r(&["groupby.*"], groupby_method);
 }
 
+/// Inside a summary a frame made before the call has a symbolic row: the models build
+/// concrete rows, so such a call is decided where the frame is known (a "concrete" event).
+pub fn symbolic_frames_event(an: &mut Analyzer, st: &State, vals: &[&Value]) {
+    if an.sum_stack.is_empty() {
+        return;
+    }
+    for v in vals {
+        for o in v.pts.iter() {
+            let k = an.kind(o);
+            if (k == Kind::Frame || is_series_obj(an, o)) && st.row(o, Ns::Item).symbolic() {
+                an.record_event("concrete", o);
+            }
+            if k == Kind::Groupby {
+                if let Payload::Groupby(fs, ..) = an.obj(o).payload.clone() {
+                    for f in fs {
+                        if st.row(f, Ns::Item).symbolic() {
+                            an.record_event("concrete", f);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn call_values(c: &Call) -> Vec<&Value> {
+    c.recv.iter().chain(c.args.iter()).chain(c.kwargs.values()).chain(c.star_args.iter()).collect()
+}
+
 /// Every `DataFrame.<m>(…)`: the op's model; with `inplace=True` its result replaces the
 /// receiver's columns (and what is known of its rows) and the call returns None.
 fn df_dispatch(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    symbolic_frames_event(an, st, &call_values(c));
     let name = last(&c.qual).to_string();
     let m: Model = match name.as_str() {
         "merge" => df_merge,
@@ -351,6 +382,39 @@ fn series_like_id(an: &mut Analyzer, st: &mut State, c: &Call, ss: &[u32], idx: 
 }
 
 /// `pd.Series(data, index=, name=)`: a dict's keys (or the positions, or index=) are the index.
+/// `pd.NamedAgg(column=, aggfunc=)`: the (column, function) pair.
+fn named_agg(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let col = c.arg(0, Some("column")).unwrap_or_default();
+    let f = c.arg(1, Some("aggfunc")).unwrap_or_default();
+    let tid = an.alloc_at(Kind::Tuple, &c.node, st, "tuple", Payload::None, None, Ns::Item, None, None);
+    an.obj_mut(tid).literal_len = Some(2);
+    st.set_slot(tid, Ns::Pos, intern::key_int(0), col, true);
+    st.set_slot(tid, Ns::Pos, intern::key_int(1), f, true);
+    Value::obj(tid)
+}
+
+/// Named aggregations `name=(column, f)`, from keywords and `**dict`: (name, surely, column).
+fn named_aggs(an: &Analyzer, st: &State, c: &Call) -> Vec<(KeyId, bool, Option<KeyId>)> {
+    let col_of = |v: &Value| -> Option<KeyId> {
+        v.pts.iter().find_map(|x| (an.kind(x) == Kind::Tuple && an.obj(x).literal_len == Some(2)).then(|| st.slot(x, Ns::Pos, intern::key_int(0)).kv.as_lit()).flatten())
+    };
+    let mut out = Vec::new();
+    for (k, v) in c.kwargs.iter() {
+        if c.qual.ends_with(".agg") || c.qual.ends_with(".aggregate") {
+            out.push((intern::key(intern::Key::Str(intern::str_get(*k))), true, col_of(v)));
+        }
+    }
+    for sk in &c.star_kwargs {
+        for d in sk.pts.iter().filter(|o| an.kind(*o) == Kind::Dict) {
+            let r = st.row(d, Ns::Item);
+            for k in r.present.iter() {
+                out.push((k, r.definite.contains(k), col_of(&st.slot(d, Ns::Item, k))));
+            }
+        }
+    }
+    out
+}
+
 fn series_ctor(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let data = c.arg(0, Some("data"));
     let index = c.kw("index").or_else(|| c.arg(1, None));
@@ -397,6 +461,7 @@ fn series_ctor(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    symbolic_frames_event(an, st, &call_values(c));
     let name = last(&c.qual).to_string();
     let ss = recv_series(an, c);
     if ss.is_empty() {
@@ -492,7 +557,9 @@ fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     row = Row::from_data(d);
                 }
             }
-            new_frame(an, st, c, row, None, None)
+            let v = new_frame(an, st, c, row, None, None);
+            fresh_index(st, &v);
+            v
         }
         "rename" => {
             let a = c.arg(0, Some("index"));
@@ -698,10 +765,10 @@ fn frames(an: &Analyzer, v: Option<&Value>) -> Vec<u32> {
     }
 }
 
+/// The source's index levels (no slot: one unnamed level).
 fn copy_meta(src: u32, dst: u32, state: &mut State) {
-    if let Some(m) = state.slot_opt(src, Ns::Meta, key_str_lit("index")) {
-        state.set_slot(dst, Ns::Meta, key_str_lit("index"), m, true);
-    }
+    let lv = index_levels(state, src);
+    set_index_levels(state, dst, lv.as_deref());
 }
 
 // ------------------------------------------------------------- what literal data tells
@@ -1034,13 +1101,42 @@ fn derived(an: &mut Analyzer, st: &mut State, c: &Call, row: Row, fs: &[u32], ro
     v
 }
 
+/// A new frame. What its index is stays unknown unless the op says (`fresh_index` for a
+/// new RangeIndex, `derive` / `src` for the source's).
 fn new_frame(an: &mut Analyzer, st: &mut State, c: &Call, row: Row, label: Option<&str>, src: Option<u32>) -> Value {
     let label = label.map(|l| l.to_string()).unwrap_or_else(|| format!("frame@L{}", c.line));
     let nid = an.alloc_at(Kind::Frame, &c.node, st, &label, Payload::None, Some(row), Ns::Item, None, None);
+    set_index_levels(st, nid, None);
+    set_labels(st, nid, None);
+    set_nrows(st, nid, None);
     if let Some(s) = src {
         copy_meta(s, nid, st);
     }
     Value::obj(nid)
+}
+
+/// The frame has a new RangeIndex (one unnamed level).
+fn fresh_index(st: &mut State, v: &Value) {
+    if let Some(nid) = v.single() {
+        set_index_levels(st, nid, Some(&[None]));
+    }
+}
+
+/// A frame's columns for a model: a symbolic row (a frame from before the call, inside a
+/// summary) is open beyond its concrete part.
+fn frame_row(st: &State, f: u32) -> Row {
+    let r = st.row(f, Ns::Item);
+    if !r.symbolic() {
+        return r;
+    }
+    Row::from_data(RowData {
+        present: r.present.clone(),
+        definite: r.definite.clone(),
+        likely: r.likely.clone(),
+        sources: r.sources.insert((Source::new("frame before the call", SourceKind::Call), EMPTY_LENS)),
+        mutators: r.mutators.clone(),
+        ..Default::default()
+    })
 }
 
 fn recv_row(an: &Analyzer, st: &State, c: &Call) -> Row {
@@ -1048,7 +1144,7 @@ fn recv_row(an: &Analyzer, st: &State, c: &Call) -> Row {
     if fs.is_empty() {
         Row::top()
     } else {
-        join_rows(fs.iter().map(|f| st.row(*f, Ns::Item)))
+        join_rows(fs.iter().map(|f| frame_row(st, *f)))
     }
 }
 
@@ -1056,6 +1152,7 @@ fn open_frame_from(an: &mut Analyzer, oid: u32, node: &Node, state: &mut State, 
     let row = state.row(oid, Ns::Item);
     let r = Row::from_data(RowData { sources: intern::IdSet::one((Source::new(&format!("{}@L{}", op, node.line), SourceKind::Call), EMPTY_LENS)), mutators: row.mutators.clone(), ..Default::default() });
     let nid = an.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(r), Ns::Item, None, None);
+    set_index_levels(state, nid, None);
     Value::obj(nid)
 }
 
@@ -1071,6 +1168,36 @@ pub fn lit_key_seq(an: &Analyzer, st: &State, v: &Value) -> Option<Vec<KeyId>> {
     }
     let n = an.obj(o).literal_len?;
     (0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64)).kv.as_lit().filter(|_| true)).collect()
+}
+
+/// The keys a list of column names surely holds and those it may hold (one appended on
+/// some paths only, items past a known prefix); None when not literal.
+fn list_keys_split(an: &mut Analyzer, st: &State, v: &Value) -> Option<(KeySet, KeySet)> {
+    let all = an.lit_keys(v, st)?;
+    if v.pts.is_empty() {
+        let sure = if matches!(v.kv, KeyVal::Lit(_)) { all.clone() } else { KeySet::new() };
+        return Some((all, sure));
+    }
+    let mut sure: Option<KeySet> = None;
+    for o in v.pts.iter() {
+        let s1 = match an.kind(o) {
+            Kind::List | Kind::Tuple => {
+                let n = an.obj(o).literal_len.or(an.obj(o).known_prefix).unwrap_or(0);
+                KeySet::from_iter((0..n).filter_map(|i| {
+                    let x = st.slot(o, Ns::Pos, intern::key_int(i as i64));
+                    if x.pts.is_empty() { if let KeyVal::Lit(k) = x.kv { return Some(k) } }
+                    None
+                }))
+            }
+            Kind::Set => KeySet::new(),
+            _ => st.row(o, Ns::Item).definite.clone(),
+        };
+        sure = Some(match sure {
+            None => s1,
+            Some(p0) => p0.intersection(&s1),
+        });
+    }
+    Some((all, sure.unwrap_or_default()))
 }
 
 /// A closed row with exactly `ks`, in this column order.
@@ -1252,7 +1379,8 @@ fn read_frame(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let r = st.row(*f, Ns::Item);
                 rows.push(if orient == "values" { Row::with_source(Source::new(&format!("read_json@L{}", c.line), SourceKind::Call)) } else { Row::new().copy_from(&r, true, &KeySet::new(), EMPTY_LENS) });
             }
-            return new_frame(an, st, c, join_rows(rows.into_iter()), None, None);
+            let v = new_frame(an, st, c, join_rows(rows.into_iter()), None, None);
+            return v;
         }
     }
     let tag = frame_producer(&c.qual).unwrap_or_else(|| last(&c.qual)).to_string();
@@ -1297,6 +1425,9 @@ fn read_frame(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     let v = new_frame(an, st, c, row, Some(&format!("{}@L{}", tag, c.line)), None);
+    if c.kw("index_col").map(|ic| ic.kv == an.none_v.kv || key_is_bool(&Some(ic), false)).unwrap_or(true) {
+        fresh_index(st, &v);
+    }
     if let (Some(ks), Some(nid)) = (index, v.pts.first()) {
         let seq: Vec<Option<KeyId>> = match c.kw("index_col").and_then(|ic| lit_key_seq(an, st, &ic)) {
             Some(seq) => seq.into_iter().map(Some).collect(),
@@ -1361,7 +1492,9 @@ fn pd_dataframe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         for k in exclude.iter() {
             row = row.delete(k, true);
         }
-        new_frame(an, st, c, row, None, None)
+        let v = new_frame(an, st, c, row, None, None);
+        fresh_index(st, &v);
+        v
     };
     // `columns=` names (sequences) or selects (dicts, frames): the frame has exactly those
     if let Some(ks) = &cols {
@@ -1565,6 +1698,13 @@ fn frame_meta_from_data(an: &mut Analyzer, st: &mut State, c: &Call, nid: u32, d
     if labs.is_none() {
         labs = n.map(range_labels);
     }
+    if an.kind(d) == Kind::Frame {
+        if let Some(m) = st.slot_opt(d, Ns::Meta, mk("index")) {
+            st.set_slot(nid, Ns::Meta, mk("index"), m, true);
+        }
+    } else {
+        set_index_levels(st, nid, Some(&[None]));
+    }
     set_nrows(st, nid, n);
     set_labels(st, nid, labs.as_ref());
     for (k, v) in colvals {
@@ -1730,8 +1870,23 @@ fn concat(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let v = new_frame(an, st, c, row, None, None);
     if let Some(nid) = v.single() {
         set_labels(st, nid, None);
-        if !axis1 && keys.is_some() {
-            set_index_levels(st, nid, Some(&[None, None]));
+        let piece_frames: Vec<u32> = pieces.iter().flat_map(|p0| p0.pts.iter().filter(|o| an.kind(*o) == Kind::Frame).collect::<Vec<_>>()).collect();
+        let ignore = key_is_bool(&c.kw("ignore_index"), true);
+        if axis1 {
+            let lv = levels_of(st, &piece_frames);
+            set_index_levels(st, nid, if piece_frames.len() == pieces.len() { lv.as_deref() } else { None });
+        } else if ignore {
+            set_index_levels(st, nid, Some(&[None]));
+        } else {
+            match levels_of(st, &piece_frames).filter(|_| piece_frames.len() == pieces.len()) {
+                Some(mut lv) => {
+                    if keys.is_some() {
+                        lv.insert(0, None);
+                    }
+                    set_index_levels(st, nid, Some(&lv));
+                }
+                None => set_index_levels(st, nid, None),
+            }
         }
         if !axis1 {
             if let Some(names) = c.kw("names").and_then(|n| lit_key_seq(an, st, &n)) {
@@ -1782,7 +1937,7 @@ fn rows_of(st: &State, fs: &[u32]) -> Row {
     if fs.is_empty() {
         Row::top()
     } else {
-        join_rows(fs.iter().map(|f| st.row(*f, Ns::Item)))
+        join_rows(fs.iter().map(|f| frame_row(st, *f)))
     }
 }
 
@@ -1919,6 +2074,7 @@ fn merge_impl(an: &mut Analyzer, st: &mut State, c: &Call, left: Value, right: V
         }
     }
     let mut row = combine_overlap(&lrow, &rrow, &keys, &lsuf, &rsuf);
+    let fresh = !by_index;
     match c.kw("indicator") {
         Some(v) if key_is_bool(&Some(v.clone()), true) => row = row.store(mk("_merge"), true),
         Some(v) => {
@@ -1928,7 +2084,11 @@ fn merge_impl(an: &mut Analyzer, st: &mut State, c: &Call, left: Value, right: V
         }
         None => {}
     }
-    new_frame(an, st, c, row, None, None)
+    let v = new_frame(an, st, c, row, None, None);
+    if fresh {
+        fresh_index(st, &v);
+    }
+    v
 }
 
 fn pd_merge(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -1992,7 +2152,20 @@ fn df_join(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     let row = combine_overlap(&lrow, &rrow, &KeySet::new(), &lsuf, &rsuf);
-    derived(an, st, c, row, &lf, Rows::Other, false)
+    let v = derived(an, st, c, row, &lf, Rows::Other, false);
+    // the result keeps the left frame's index (its rows, for how="left" / "inner")
+    if let Some(nid) = v.single() {
+        let lv = levels_of(st, &lf);
+        set_index_levels(st, nid, lv.as_deref());
+        let how = lit_key(&c.kw("how")).and_then(intern::key_as_str).map(|s0| s0.to_string()).unwrap_or_else(|| "left".into());
+        let lab = match (lf.as_slice(), how.as_str()) {
+            ([f], "left") => labels(st, *f),
+            ([f], "inner") => labels(st, *f).map(|k| k.subset()),
+            _ => None,
+        };
+        set_labels(st, nid, lab.as_ref());
+    }
+    v
 }
 
 fn rename_step(an: &mut Analyzer, st: &mut State, cols: &Value, c: &Call, fs: &[u32]) -> Option<Vec<Step>> {
@@ -2431,6 +2604,9 @@ pub fn transpose_of(an: &mut Analyzer, st: &mut State, node: &Node, fs: &[u32]) 
         None => Row::with_source(Source::new(&format!("T@L{}", node.line), SourceKind::Call)),
     };
     let nid = an.alloc_at(Kind::Frame, node, st, &format!("frame@L{}", node.line), Payload::None, Some(newcols), Ns::Item, None, None);
+    let cn = if fs.len() == 1 { colname(st, fs[0]) } else { None };
+    set_index_levels(st, nid, Some(&[cn]));
+    set_nrows(st, nid, None);
     let newlab = if row.closed() { Some(Known { may: row.present.clone(), sure: row.definite.clone() }) } else { None };
     set_labels(st, nid, newlab.as_ref());
     if let Some(n) = row.closed().then(|| row.present.len() as i64).filter(|_| row.present == row.definite) {
@@ -2620,6 +2796,7 @@ fn agg_names(an: &mut Analyzer, st: &State, v: &Value) -> Option<(Vec<KeyId>, bo
 }
 
 fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    symbolic_frames_event(an, st, &call_values(c));
     let mut name = last(&c.qual).to_string();
     let recv = c.recv.clone().unwrap_or_default();
     let gids: Vec<u32> = recv.pts.iter().filter(|o| an.kind(*o) == Kind::Groupby).collect();
@@ -2711,6 +2888,7 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 set_labels(st, nid, group_labels.as_ref());
             }
         } else if !ai {
+            set_index_levels(st, nid, Some(&[None]));
             set_labels(st, nid, None);
         }
         v
@@ -2749,22 +2927,18 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         Value::obj(sid)
     };
     if name == "agg" || name == "aggregate" {
-        if !c.kwargs.is_empty() {
-            let mut named: Vec<KeyId> = Vec::new();
-            for v in c.kwargs.values() {
-                for x in v.pts.iter() {
-                    if an.kind(x) == Kind::Tuple && an.obj(x).literal_len == Some(2) {
-                        let col = st.slot(x, Ns::Pos, intern::key_int(0));
-                        if let Some(k) = col.kv.as_lit() {
-                            named.push(k);
-                        }
-                    }
-                }
-            }
-            let _ = require_cols(an, st, c, &fs, &KeySet::from_vec(named));
+        let named = named_aggs(an, st, c);
+        if !named.is_empty() || !c.star_kwargs.is_empty() {
+            let sure_cols = KeySet::from_iter(named.iter().filter(|(_, d, _)| *d).filter_map(|(_, _, col)| *col));
+            let _ = require_cols(an, st, c, &fs, &sure_cols);
             let mut row = Row::new();
-            for k in c.kwargs.keys() {
-                row = row.store(intern::key(intern::Key::Str(intern::str_get(*k))), true);
+            for (k, d, _) in &named {
+                row = row.store(*k, *d);
+            }
+            if c.star_kwargs.iter().any(|sk| sk.pts.iter().any(|o| an.kind(o) != Kind::Dict || !st.row(o, Ns::Item).closed())) {
+                let mut dd = row.data();
+                dd.sources = dd.sources.insert((Source::new(&format!("agg@L{}", c.line), SourceKind::Call), EMPTY_LENS));
+                row = Row::from_data(dd);
             }
             return frame_result(an, st, row, false);
         }
@@ -3037,6 +3211,7 @@ fn df_agg(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let set_lab = |an: &mut Analyzer, st: &mut State, v: &Value, lab: Option<Known>| {
         let _ = an;
         if let Some(nid) = v.single() {
+            set_index_levels(st, nid, Some(&[None]));
             set_labels(st, nid, lab.as_ref());
         }
     };
@@ -3132,6 +3307,7 @@ fn df_corr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let lab = Known { may: r.present.clone(), sure: r.definite.clone() };
     let v = new_frame(an, st, c, r, None, None);
     if let Some(nid) = v.single() {
+        set_index_levels(st, nid, Some(&[None]));
         set_labels(st, nid, Some(&lab));
     }
     v
@@ -3184,6 +3360,7 @@ fn describe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let has_num = chosen.iter().any(|(_, n)| *n);
     let has_obj = chosen.iter().any(|(_, n)| !*n);
     let v = new_frame(an, st, c, out, None, None);
+    fresh_index(st, &v);
     if let Some(nid) = v.single() {
         let lab = describe_labels(has_num, has_obj);
         set_labels(st, nid, Some(&lab));
@@ -3525,6 +3702,7 @@ fn melt(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     row = row.store(val, true);
     let v = new_frame(an, st, c, row, None, None);
+    fresh_index(st, &v);
     if let ([f], Some(nid), Some(k)) = (fs.as_slice(), v.single(), var) {
         // the variable column holds the folded columns' names
         let folded = match keys_arg(an, st, &vv) {
@@ -4031,7 +4209,9 @@ fn json_normalize(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
     }
-    new_frame(an, st, c, rows_frame(&rows), None, None)
+    let v = new_frame(an, st, c, rows_frame(&rows), None, None);
+    fresh_index(st, &v);
+    v
 }
 
 fn explode(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -4263,7 +4443,15 @@ fn df_combine(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         d.sources = a.sources.union(&b.sources);
         out = Row::from_data(d);
     }
-    new_frame(an, st, c, out, None, None)
+    let v = new_frame(an, st, c, out, None, None);
+    if let Some(nid) = v.single() {
+        let la = levels_of(st, &fs);
+        let lb = levels_of(st, &os);
+        if la == lb {
+            set_index_levels(st, nid, la.as_deref());
+        }
+    }
+    v
 }
 
 fn set_axis(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -4464,7 +4652,12 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         mutators: row.mutators.clone(),
         ..Default::default()
     });
-    new_frame(an, st, c, r, None, None)
+    let v = new_frame(an, st, c, r, None, None);
+    if let Some(nid) = v.single() {
+        // what the index became is not known either
+        set_index_levels(st, nid, None);
+    }
+    v
 }
 
 // ------------------------------------------------------------- frame hooks used by the interpreter
@@ -4677,10 +4870,17 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
             for k in intern::sorted_by_str(ks.iter()) {
                 frame_getitem_n(an, oid, &Value::lit(k), node, state, guarded, narrow);
             }
-            let r = match lit_key_seq(an, state, key) {
+            let mut r = match lit_key_seq(an, state, key) {
                 Some(seq) => closed_ordered(&seq),
                 None => Row::closed_with(ks.clone()),
             };
+            // a column the list holds on some paths only is selected on those only
+            if let Some((_, sure)) = list_keys_split(an, state, key) {
+                let mut d = r.data();
+                d.definite = d.definite.intersection(&sure.union(&KeySet::from_iter(lit_key_seq(an, state, key).unwrap_or_default())));
+                d.likely = d.definite.clone();
+                r = Row::from_data(d);
+            }
             let nid = an.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(r), Ns::Item, None, None);
             derive(state, oid, nid, Rows::Same, &ks);
             return Value::obj(nid);
