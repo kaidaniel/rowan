@@ -320,7 +320,11 @@ impl Analyzer {
             let mut body_s = head.copy();
             let mark = self.objects.len() as u32;
             self.recent_stack.push(Vec::new());
-            self.eval(&w.test, &mut body_s);
+            let tv = self.eval(&w.test, &mut body_s);
+            // a test decided at the loop head prunes: false means no iteration from here
+            if self.truthiness(&tv, &body_s) == Some(false) {
+                body_s.reachable = false;
+            }
             self.narrow(&w.test, true, &mut body_s);
             self.loop_stack.push(LoopCtx::default());
             if body_s.reachable {
@@ -348,6 +352,11 @@ impl Analyzer {
         self.cond_depth -= 1;
         self.frame_mut().loop_depth -= 1;
         let mut exit_s = head.copy();
+        // a test that is true at the head never falls through (the loop leaves by break)
+        let tv = self.eval(&w.test, &mut exit_s);
+        if self.truthiness(&tv, &exit_s) == Some(true) {
+            exit_s.reachable = false;
+        }
         self.narrow(&w.test, false, &mut exit_s);
         if !w.orelse.is_empty() && exit_s.reachable {
             self.exec_block(&w.orelse, &mut exit_s);

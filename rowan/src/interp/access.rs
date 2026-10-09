@@ -359,7 +359,9 @@ impl Analyzer {
             }
         }
         let label = format!("{}[{}]", self.obj(oid).label, intern::key_repr(k));
-        let pid = self.alloc_raw(Kind::Unknown, &format!("path:{}:{}:{}", oid, ns, intern::key_repr(k)), "", true, &label, Payload::None);
+        // the content under an unknown key stands for many values: stores on it are weak
+        let single = !(k == STAR || param_slot_of(k).is_some());
+        let pid = self.alloc_raw(Kind::Unknown, &format!("path:{}:{}:{}", oid, ns, intern::key_repr(k)), "", single, &label, Payload::None);
         let d = self.obj(oid).depth + 1;
         self.obj_mut(pid).depth = d;
         if !state.has_row(pid, Ns::Item) {
@@ -1174,6 +1176,13 @@ impl Analyzer {
                 }
             }
             let strong_key = strong || (targets.len() == 1 && self.fresh_init.contains(&oid));
+            if kind == Kind::Unknown && !strong && state.slot_opt(oid, Ns::Attr, nk).is_none() {
+                // a weak store on open content (an element under an unknown key, say)
+                // joins with what was there, which is unknown
+                let row = state.row(oid, Ns::Attr);
+                let prior = self.path_placeholder_value(oid, Ns::Attr, nk, &row, state);
+                state.set_slot(oid, Ns::Attr, nk, prior, true);
+            }
             let r = state.row(oid, Ns::Attr).store(nk, strong_key);
             state.set_row(oid, Ns::Attr, r);
             state.set_slot(oid, Ns::Attr, nk, v.clone(), strong);

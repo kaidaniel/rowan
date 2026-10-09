@@ -91,7 +91,9 @@ def retry(fn):
 
 rr = retry(lambda: 1)
 rr["attempts"]                           #@ ok attempts
-rr["value"]                              #@ possibly value
+# The first iteration runs (0 < 3), sets the value and breaks; the while test is true at the
+# loop head, so the loop never falls through without the value.
+rr["value"]                              #@ ok value
 # The lambda never raises, so the except branch is dead (the callee reported no raise).
 rr["error"]                              #@ missing error
 rr["other"]                              #@ missing other

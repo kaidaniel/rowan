@@ -1232,6 +1232,8 @@ impl Analyzer {
                 None => vec![*k],
             };
             for a in tg.iter() {
+                // a store under an unknown key (STAR: the parameter's value was not a
+                // literal) may have hit any key: never strong, it would wipe the others
                 let strong = *ns != Ns::Elem && ((is_template && !inst.collided.contains(&a)) || (tg.len() == 1 && self.strongable(a) && targets_count.get(&(a, *ns)).copied().unwrap_or(1) == 1 && keys.len() == 1));
                 for kk in &keys {
                     state.set_slot(a, *ns, *kk, nv.clone(), strong);
@@ -1772,6 +1774,24 @@ impl Inst {
             if let Some(kph) = param_slot_of(key) {
                 let kv = self.kv_of(an, state, pre, kph);
                 let lits = kv_literals(&kv);
+                if matches!(an.kind(p), Kind::List | Kind::Tuple) && ph.ns == Ns::Item {
+                    // `xs[i]` with `i` a parameter: the positions it may name, else every
+                    // element (a store through it then reaches all of them, weakly)
+                    let ints: Vec<i64> = lits.iter().filter_map(intern::key_as_int).collect();
+                    if !lits.is_empty() && ints.len() == lits.len() && an.obj(p).literal_len.is_some() {
+                        let n = an.obj(p).literal_len.unwrap() as i64;
+                        for i in ints {
+                            let j = if i < 0 { n + i } else { i };
+                            if 0 <= j && j < n {
+                                acc = acc.join(&pre.slot(p, Ns::Pos, intern::key_int(j)));
+                            }
+                        }
+                    } else {
+                        acc = acc.join(&pre.all_slots(p, Ns::Pos));
+                        acc = acc.join(&pre.slot(p, Ns::Elem, STAR));
+                    }
+                    continue;
+                }
                 if !lits.is_empty() {
                     for k in lits.iter() {
                         acc = acc.join(&pre.slot(p, ph.ns, k));
