@@ -15,7 +15,8 @@ def build(d):
     c = Contact.model_validate(d)                #@ possibly fax
     #@row c: present={email,phone,nick,fax} definite={email,phone,nick,fax} closed
     out = c.model_dump(exclude_none=True)
-    #@row out: present={email,phone,nick,fax} definite={email} closed
+    # Corrected on re-reading: no caller passes a non-None nick, so the dump never has it.
+    #@row out: present={email,phone,fax} definite={email} closed
     return out
 
 

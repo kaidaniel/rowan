@@ -31,7 +31,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.str.", "Series.dt.", "Series.cat.", "Series.sparse.", "Series.list.", "Series.struct.", "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
+    "parser.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
 ];
 
 pub struct Registry {
@@ -867,9 +867,9 @@ fn m_asdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 continue;
             }
             let cls = an.instance_class(o).unwrap();
-            an.frame_mut().unroll.push(900 + depth as usize);
-            let d = an.alloc_simple(Kind::Dict, &c.node, st, &format!("asdict@L{}", c.line));
-            an.frame_mut().unroll.pop();
+            // one dict per converted instance (siblings at one depth must not share it)
+            let d = an.alloc_at(Kind::Dict, &c.node, st, &format!("asdict@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("asdict{}:{}", depth, o)));
+            st.set_row(d, Ns::Item, Row::new());
             for (f, _) in an.dataclass_fields_mro(cls) {
                 let fk = key_str_lit(&f);
                 let row = st.row(o, Ns::Attr);

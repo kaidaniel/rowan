@@ -79,6 +79,12 @@ impl Analyzer {
             }
             ast::Expr::Subscript(sub) => {
                 let obj = self.eval(&sub.value, state);
+                // a generic pydantic model parametrised: `Page[User]`
+                if let Some(c) = obj.single().filter(|c| self.kind(*c) == Kind::Class && crate::models::pydantic::is_validated(self, *c)) {
+                    if let Some(v) = self.pyd_specialise(c, &sub.slice, state) {
+                        return v;
+                    }
+                }
                 {
                     let nd = frontend::node(node);
                     if let Some(v) = self.t_subscript(&obj, &sub.slice, &nd, state) {
@@ -168,7 +174,7 @@ impl Analyzer {
                 let fv = self.eval(&c.func, state);
                 if !self.may_raise.is_empty() {
                     let all_safe = fv.pts.iter().all(|o| match &self.obj(o).payload {
-                        Payload::Method(q, _) if self.kind(o) == Kind::Method => SAFE_METHODS.contains(&q.as_str()),
+                        Payload::Method(q, _) if self.kind(o) == Kind::Method => SAFE_METHODS.contains(&q.as_str()) || SELF_REPORTING.iter().any(|p| q.starts_with(p)),
                         // user code: whether it raises is reported by its own analysis
                         // builtins that raise only on wrong types (len, str, sorted, …)
                         Payload::Str(q) if self.kind(o) == Kind::External => q.strip_prefix("builtins.").map(|n| SAFE_BUILTINS.contains(&n) || is_exception_name(n)).unwrap_or(false),
@@ -2047,3 +2053,7 @@ impl Analyzer {
         Some(crate::domain::join_values(outs))
     }
 }
+
+/// Models that say themselves where they raise (raise_here / may_raise_here): their calls are
+/// not "may raise anything".
+const SELF_REPORTING: &[&str] = &["pydantic.", "fieldinfo.", "pydverr.", "typeadapter.", "fastapi.client.", "fastapi.response.", "fastapi.request."];

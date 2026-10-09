@@ -260,9 +260,11 @@ pub struct ClassInfo {
     pub named_tuple: bool,
     /// subclasses `dict` directly
     pub dict_base: bool,
-    /// subclasses pydantic's `BaseModel`: annotated fields like a dataclass (other members
-    /// come from pydantic: the base stays open)
+    /// subclasses pydantic's `BaseModel`: annotated fields like a dataclass, validated
+    /// (models::pydantic)
     pub pydantic: bool,
+    /// decorated with `pydantic.dataclasses.dataclass`: validated like a model, no model API
+    pub pyd_dataclass: std::cell::Cell<bool>,
     /// subclasses something in `torch.nn` (`nn.Module`): calling an instance runs `forward`
     pub nn_module: bool,
     /// attr → classes assigned to self.attr (lazy)
@@ -750,10 +752,19 @@ pub struct Analyzer {
     pub pyd_classes: FxHashMap<ObjId, Rc<crate::models::pydantic::PClass>>,
     pub pyd_adapters: Vec<crate::models::pydantic::Ann>,
     pub pyd_depth: u32,
+    pub pyd_ann_depth: u32,
+    /// validation problems found per running validation; raised ValidationErrors' problems;
+    /// the field being validated
+    pub pyd_errs: Vec<Vec<crate::models::pydantic::PErr>>,
+    pub pyd_verrs: Vec<Vec<crate::models::pydantic::PErr>>,
+    pub pyd_field: Option<KeyId>,
+    pub pyd_last_failed: bool,
     /// pydantic instances: the fields their input surely / maybe gave (`model_fields_set`)
     pub pyd_set: FxHashMap<ObjId, (KeySet, KeySet)>,
     /// pydantic instances validated from placeholders: those inputs
     pub pyd_inputs: FxHashMap<ObjId, Vec<ObjId>>,
+    /// specialisations of generic models: their type variables' bindings
+    pub pyd_generic: FxHashMap<ObjId, Vec<(String, crate::models::pydantic::Ann)>>,
     /// a requirement-only entry run (`param F.x` schemas of a called function): no verdicts,
     /// row checks, facts or notes
     pub quiet: bool,
@@ -929,8 +940,14 @@ impl Analyzer {
             pyd_classes: FxHashMap::default(),
             pyd_adapters: Vec::new(),
             pyd_depth: 0,
+            pyd_ann_depth: 0,
+            pyd_errs: Vec::new(),
+            pyd_verrs: Vec::new(),
+            pyd_field: None,
+            pyd_last_failed: false,
             pyd_set: FxHashMap::default(),
             pyd_inputs: FxHashMap::default(),
+            pyd_generic: FxHashMap::default(),
             quiet: false,
             fa_routes: Vec::new(),
             fa_includes: Vec::new(),

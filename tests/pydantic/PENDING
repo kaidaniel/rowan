@@ -1,21 +1,7 @@
 # pydantic cases written but not yet expected to pass (paths relative to tests/pydantic/)
-small/y012_extra_forbid_ignore.py
 small/y013_frozen.py
 small/y019_dump_alias_json_mode.py
 small/y020_dump_json_loads.py
-small/y030_type_adapter.py
-small/y031_root_model.py
-small/y032_pydantic_dataclass.py
-small/y033_generic_model.py
-small/y034_discriminated_union.py
-small/y035_settings.py
-small/y036_validation_errors.py
-small/y037_setattr.py
-small/y039_v1_validators.py
-small/y041_merge_dumps.py
-small/y042_partial_update.py
-small/y044_kwargs_unpacking.py
-small/y045_pipeline_functions.py
 models/ym01_user_service.py
 models/ym02_order_pipeline.py
 models/ym03_config_settings.py

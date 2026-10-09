@@ -1980,7 +1980,15 @@ impl Inst {
         for p in parents.iter() {
             if key == STAR {
                 let it = an.iterate(&Value::obj(p), &Node::none(), state);
-                acc = acc.join(&it.elem.flat());
+                let e = it.elem.flat();
+                for o in e.pts.iter() {
+                    if !pre.has_row(o, Ns::Item) && !pre.has_row(o, Ns::Attr) {
+                        for ns in [Ns::Item, Ns::Attr] {
+                            self.born.entry((o, ns)).or_insert_with(|| state.row(o, ns));
+                        }
+                    }
+                }
+                acc = acc.join(&e);
                 continue;
             }
             if let Some(kph) = param_slot_of(key) {

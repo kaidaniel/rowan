@@ -47,11 +47,9 @@ models/sm03_inventory_report.py
 models/sm04_event_pipeline.py
 models/sm05_job_runner.py
 models/sm06_log_report.py
-small/s051_sorted_key_lambda.py
 small/s053_min_max_default.py
 small/s055_partial_positional.py
 small/s056_partial_keyword.py
-small/s057_reduce_dict_acc.py
 small/s058_wraps_decorator.py
 small/s059_lru_cache.py
 small/s060_cached_property.py
@@ -93,4 +91,3 @@ small/s095_abc_dispatch.py
 small/s096_getattr_getitem.py
 small/s097_yield_from.py
 small/s099_defaultdict_factory.py
-small/s100_callback_chain.py

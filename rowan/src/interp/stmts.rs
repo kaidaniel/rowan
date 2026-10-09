@@ -1088,6 +1088,8 @@ impl Analyzer {
                 }
             }
         }
+        // a handler for a class catches its subclasses too
+        let caught = expand_caught(caught);
         // returns inside the try are collected apart from the earlier ones: the finally runs
         // on their way out
         let has_finally = !t.finalbody.is_empty() && !crate::interp::disabled("finally");
@@ -1349,6 +1351,7 @@ impl Analyzer {
             named_tuple,
             dict_base,
             pydantic,
+            pyd_dataclass: std::cell::Cell::new(false),
             nn_module,
             field_classes: std::cell::RefCell::new(None),
             any_fields: std::cell::RefCell::new(None),
@@ -1362,6 +1365,9 @@ impl Analyzer {
             if let Some(q) = self.decorator_qualname(&d.expression, state) {
                 if q.ends_with("dataclass") || q.ends_with("attrs.define") || q.ends_with("attr.s") {
                     is_dataclass = true;
+                    if q.starts_with("pydantic") {
+                        info.pyd_dataclass.set(true);
+                    }
                 }
             }
         }
@@ -1720,4 +1726,28 @@ fn collect_assigned(st: &ast::Stmt, out: &mut Vec<intern::StrId>) {
         ast::Stmt::With(w) => w.body.iter().for_each(|x| collect_assigned(x, out)),
         _ => {}
     }
+}
+
+/// The exception names a handler set catches, with the known subclasses of each
+/// (`except ValueError` catches pydantic's `ValidationError`, `except LookupError` a
+/// `KeyError`).
+pub fn expand_caught(mut caught: FxHashSet<String>) -> FxHashSet<String> {
+    const SUBS: &[(&str, &[&str])] = &[
+        ("ValueError", &["ValidationError", "JSONDecodeError", "UnicodeDecodeError", "UnicodeEncodeError", "UnicodeError"]),
+        ("LookupError", &["KeyError", "IndexError"]),
+        ("ArithmeticError", &["ZeroDivisionError", "OverflowError", "FloatingPointError"]),
+        ("OSError", &["FileNotFoundError", "PermissionError", "IsADirectoryError", "NotADirectoryError", "FileExistsError", "TimeoutError", "ConnectionError"]),
+        ("IOError", &["FileNotFoundError", "PermissionError"]),
+        ("EnvironmentError", &["FileNotFoundError", "PermissionError"]),
+        ("RuntimeError", &["NotImplementedError", "RecursionError"]),
+        ("ImportError", &["ModuleNotFoundError"]),
+    ];
+    let mut more: Vec<String> = Vec::new();
+    for (p, subs) in SUBS {
+        if caught.contains(*p) {
+            more.extend(subs.iter().map(|x| x.to_string()));
+        }
+    }
+    caught.extend(more);
+    caught
 }

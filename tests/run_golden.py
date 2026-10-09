@@ -211,7 +211,9 @@ def check_results(verdict_exp, row_exp_checks, schema_exp, vs, sch) -> List[str]
                 failures.append(f"schema {label}: expected none, got {sorted(keys)}")
             continue
         if not hits:
-            failures.append(f"schema {label}: no requirements recorded (have: {sorted(sch)})")
+            # nothing required is what `only={}` (with no always / sometimes) says
+            if spec.get("always") or spec.get("sometimes") or "only" not in spec:
+                failures.append(f"schema {label}: no requirements recorded (have: {sorted(sch)})")
             continue
         merged: Dict[str, Any] = {}
         for e in hits.values():

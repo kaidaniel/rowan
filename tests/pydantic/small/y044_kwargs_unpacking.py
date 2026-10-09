@@ -18,7 +18,8 @@ def from_email(msg):
     d = {"title": msg["subject"]}                #@ possibly subject
     if msg.get("urgent"):
         d["priority"] = 1
-    #@row d: present={title,priority} definite={title} closed
+    # Corrected on re-reading: the directive applies to the store inside the `if` above.
+    #@row d: present={title,priority} definite={title,priority} closed
     return open_ticket(d, assignee="triage")
 
 

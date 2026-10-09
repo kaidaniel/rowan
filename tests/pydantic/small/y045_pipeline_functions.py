@@ -30,7 +30,8 @@ def enrich(inc):
     d["amount_eur"] = d["amount"] * RATES.get(d["currency"], 1.0)    #@ ok amount ; ok currency
     if d["amount_eur"] > 1000:
         d["flagged"] = True
-    #@row d: present={user,amount,currency,amount_eur,flagged} definite={user,amount,currency,amount_eur} closed
+    # Corrected on re-reading: the directive applies to the store inside the `if` above.
+    #@row d: present={user,amount,currency,amount_eur,flagged} definite={user,amount,currency,amount_eur,flagged} closed
     return d
 
 

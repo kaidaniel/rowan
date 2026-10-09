@@ -635,13 +635,20 @@ impl Analyzer {
         let srcrow = join_rows(recs.iter().map(|x| state.row(*x, ns_of(self, *x))));
         let r = state.row(oid, ns).copy_from(&srcrow, strong, kill, intern::EMPTY_LENS);
         state.set_row(oid, ns, r);
-        for x in recs {
+        // a key every source surely has replaces the value (`{**a, **b}`: b's wins)
+        let mut vals: indexmap::IndexMap<KeyId, Value> = indexmap::IndexMap::new();
+        for &x in &recs {
             let xns = ns_of(self, x);
             for (k, val) in state.obj_slots(x, xns) {
                 if !kill.contains(k) {
-                    state.set_slot(oid, ns, k, val, false);
+                    let cur = vals.entry(k).or_default();
+                    *cur = cur.join(&val);
                 }
             }
+        }
+        for (k, val) in vals {
+            let sure = strong && self.obj(oid).single && !crate::interp::disabled("copystrong") && k != intern::STAR && srcrow.definite.contains(k) && recs.iter().all(|x| state.row(*x, ns_of(self, *x)).definite.contains(k));
+            state.set_slot(oid, ns, k, val, sure);
         }
     }
 
@@ -735,6 +742,10 @@ impl Analyzer {
                 Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("fieldinfo.")) => {
                     let Payload::Method(q, _) = self.obj(oid).payload.clone() else { unreachable!() };
                     crate::models::pydantic::fieldinfo_attr(self, state, &q, name, node)
+                }
+                Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("pydverr.")) => {
+                    let Payload::Method(q, _) = self.obj(oid).payload.clone() else { unreachable!() };
+                    self.method_value(&format!("{}.{}", q, name), &Value::obj(oid))
                 }
                 Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("typeadapter.") || q.starts_with("fastapi.")) => {
                     let Payload::Method(q, _) = self.obj(oid).payload.clone() else { unreachable!() };
@@ -1591,6 +1602,23 @@ impl Analyzer {
                                 self.pyd_set.insert(oid, (ns, maybe.insert(nk)));
                             }
                         }
+                        match self.pyd_assign(oid, cls, name, v, node, state) {
+                            None => continue,
+                            Some(nv) if pc.validate_assignment => {
+                                let r = state.row(oid, Ns::Attr).store(nk, strong);
+                                state.set_row(oid, Ns::Attr, r);
+                                state.set_slot(oid, Ns::Attr, nk, nv, strong);
+                                continue;
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                }
+            }
+            if kind == Kind::Ph && !name.starts_with('_') {
+                if let Some(cls) = self.ph_info(oid).cls.get().filter(|c| crate::models::pydantic::is_model(self, *c)) {
+                    if self.pyd_assign(oid, cls, name, v, node, state).is_none() {
+                        continue;
                     }
                 }
             }

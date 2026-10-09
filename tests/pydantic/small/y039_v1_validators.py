@@ -17,7 +17,9 @@ class Transfer(BaseModel):
         if "from" in values:
             values = dict(values)
             values["src"] = values.pop("from")
-        #@row values: present={src,dst,amount,currency} definite={src,amount} absent={from} closed
+        # Corrected on re-reading: this directive applies to the store above (inside the `if`);
+        # every input there has dst and currency too.
+        #@row values: present={src,dst,amount,currency} definite={src,dst,amount,currency} absent={from} closed
         return values
 
     @validator("currency", pre=True)
@@ -32,8 +34,10 @@ class Transfer(BaseModel):
 
     @root_validator(skip_on_failure=True)
     def distinct(cls, values):
-        #@row values: present={src,dst,amount,currency} definite={src,dst,amount,currency} closed
+        # Corrected on re-reading: a directive line below the `def` applied to the def statement;
+        # moved below the first body line.
         if values["src"] == values["dst"]:       #@ ok src ; ok dst
+        #@row values: present={src,dst,amount,currency} definite={src,dst,amount,currency} closed
             raise ValueError("same account")
         return values
 
@@ -59,4 +63,6 @@ if __name__ == "__main__":
         except ValidationError:
             pass
 
-#@schema param transfer.d: always={dst,amount} sometimes={src,from} only={dst,amount,src,from}
+# Corrected on re-reading: `from` is read only behind `"from" in values` (dropping it alone
+# never fails for it), so per key only `src` is sometimes required.
+#@schema param transfer.d: always={dst,amount} sometimes={src} only={dst,amount,src,from}

@@ -34,6 +34,12 @@ pub enum Ann {
     Optional(Box<Ann>),
     /// `int` / `float` / `str` / `bool`: literals are coerced (lax mode)
     Scalar(&'static str),
+    /// a `TypedDict` class: a dict of its declared keys (extras dropped)
+    TypedDict(ObjId),
+    /// a type variable of a generic model (`T`), bound by `Model[X]`
+    Var(String),
+    /// a union of models (`Cat | Dog`), with the discriminator field when given
+    Union(Vec<Ann>, Option<String>),
     Other,
 }
 
@@ -52,6 +58,8 @@ pub struct PField {
     /// `Optional[X]` / `X | None`: the value may be None
     pub optional: bool,
     pub ann: Ann,
+    /// `Literal["cat", …]`: the values the field takes (a union's tags)
+    pub lits: Option<Vec<KeyId>>,
 }
 
 #[derive(Clone, Debug)]
@@ -63,6 +71,16 @@ pub struct Validator {
     pub mode: String,
 }
 
+/// One problem a validation finds: where (the input key), pydantic's error type, whether
+/// it surely happens, whether its record has a `ctx`.
+#[derive(Clone, Debug)]
+pub struct PErr {
+    pub loc: Option<KeyId>,
+    pub typ: &'static str,
+    pub sure: bool,
+    pub ctx: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct PClass {
     pub fields: Vec<PField>,
@@ -70,6 +88,10 @@ pub struct PClass {
     pub populate_by_name: bool,
     /// `frozen=True`: assignment raises
     pub frozen: bool,
+    /// `validate_assignment=True`: an assigned field value is validated
+    pub validate_assignment: bool,
+    /// a `BaseSettings`: (env_prefix, env_nested_delimiter)
+    pub settings: Option<(String, Option<String>)>,
     pub root: bool,
     pub model_before: Vec<Validator>,
     pub model_after: Vec<Validator>,
@@ -113,6 +135,11 @@ pub fn attr_value(an: &mut Analyzer, st: &mut State, recv: ObjId, name: &str, no
 /// Is `cls` a pydantic model class (a `BaseModel` / `BaseSettings` / `RootModel` above it)?
 pub fn is_model(an: &Analyzer, cls: ObjId) -> bool {
     an.class_info_opt(cls).is_some() && an.mro(cls).iter().any(|c| an.class_info_opt(*c).map(|x| x.pydantic).unwrap_or(false))
+}
+
+/// Is `cls` validated by pydantic (a model or a pydantic dataclass)?
+pub fn is_validated(an: &Analyzer, cls: ObjId) -> bool {
+    is_model(an, cls) || (an.class_info_opt(cls).is_some() && an.mro(cls).iter().any(|c| an.class_info_opt(*c).map(|x| x.pyd_dataclass.get()).unwrap_or(false)))
 }
 
 /// Is `oid` an instance of a pydantic model class?
@@ -167,7 +194,10 @@ impl Analyzer {
         let mut fields: Vec<PField> = Vec::new();
         let mut extra = Extra::Ignore;
         let mut populate_by_name = false;
+        let mut root_ann: Option<Ann> = None;
+        let mut settings: Option<(String, Option<String>)> = None;
         let mut frozen = false;
+        let mut validate_assignment = false;
         let mut root = false;
         let (mut model_before, mut model_after, mut root_post, mut field_validators, mut computed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut privates: Vec<(String, Option<&'static ast::Expr>, Option<&'static ast::Expr>)> = Vec::new();
@@ -176,15 +206,20 @@ impl Analyzer {
         // bases first: a subclass overrides fields, config and validators keep accumulating
         for c in self.mro(cls).into_iter().rev() {
             let Some(ci) = self.class_info_opt(c) else { continue };
-            if !is_model(self, c) {
+            if !is_validated(self, c) {
                 continue;
             }
             let cnode: &'static ast::StmtClassDef = ci.node;
             if let Some(args) = &cnode.arguments {
+                if args.args.iter().any(|b| type_name(b) == "BaseSettings") && settings.is_none() {
+                    settings = Some((String::new(), None));
+                }
                 for b in args.args.iter() {
                     if let ast::Expr::Subscript(sb) = b {
                         if type_name(&sb.value) == "RootModel" {
                             root = true;
+                            let t: &'static ast::Expr = &sb.slice;
+                            root_ann = Some(self.pyd_ann(t, ci.module, state));
                         }
                     } else if type_name(b) == "RootModel" {
                         root = true;
@@ -208,6 +243,8 @@ impl Analyzer {
                         if name == "model_config" {
                             if let Some(v) = &a.value {
                                 config_of(v, &mut extra, &mut populate_by_name, &mut frozen);
+                                validate_assignment |= config_flag(v, "validate_assignment");
+                                settings_of(v, &mut settings);
                             }
                             continue;
                         }
@@ -232,7 +269,7 @@ impl Analyzer {
                         }
                         let ann = self.pyd_ann(&a.annotation, ci.module, state);
                         let optional = ann_optional(&a.annotation);
-                        let mut f = PField { name: name.clone(), alias: None, ser_alias: None, alts: Vec::new(), default: None, factory: None, required: true, optional, ann };
+                        let mut f = PField { name: name.clone(), alias: None, ser_alias: None, alts: Vec::new(), default: None, factory: None, required: true, optional, ann, lits: literal_tags(&a.annotation) };
                         if let Some(v) = &a.value {
                             let v: &'static ast::Expr = v;
                             match v {
@@ -284,6 +321,8 @@ impl Analyzer {
                         if let [ast::Expr::Name(n)] = &a.targets[..] {
                             if n.id.as_str() == "model_config" {
                                 config_of(&a.value, &mut extra, &mut populate_by_name, &mut frozen);
+                                validate_assignment |= config_flag(&a.value, "validate_assignment");
+                                settings_of(&a.value, &mut settings);
                             }
                         }
                     }
@@ -296,6 +335,7 @@ impl Analyzer {
                                         "extra" => extra = extra_of(&a.value).unwrap_or(extra),
                                         "allow_population_by_field_name" | "populate_by_name" => populate_by_name = bool_lit(&a.value).unwrap_or(populate_by_name),
                                         "frozen" => frozen = bool_lit(&a.value).unwrap_or(frozen),
+                                        "validate_assignment" => validate_assignment = bool_lit(&a.value).unwrap_or(validate_assignment),
                                         "allow_mutation" => frozen = !bool_lit(&a.value).unwrap_or(!frozen),
                                         _ => {}
                                     }
@@ -358,9 +398,14 @@ impl Analyzer {
             }
         }
         if root && !fields.iter().any(|f| f.name == "root") {
-            fields.push(PField { name: "root".into(), alias: None, ser_alias: None, alts: Vec::new(), default: None, factory: None, required: true, optional: false, ann: Ann::Other });
+            fields.push(PField { name: "root".into(), alias: None, ser_alias: None, alts: Vec::new(), default: None, factory: None, required: true, optional: false, ann: root_ann.unwrap_or(Ann::Other), lits: None });
         }
-        let p = Rc::new(PClass { fields, extra, populate_by_name, frozen, root, model_before, model_after, root_post, field_validators, computed, privates, field_serializers, model_serializer });
+        if let Some(bind) = self.pyd_generic.get(&cls).cloned() {
+            for f in fields.iter_mut() {
+                f.ann = subst(&f.ann, &bind);
+            }
+        }
+        let p = Rc::new(PClass { fields, extra, populate_by_name, frozen, validate_assignment, settings, root, model_before, model_after, root_post, field_validators, computed, privates, field_serializers, model_serializer });
         self.pyd_classes.insert(cls, p.clone());
         p
     }
@@ -376,7 +421,18 @@ impl Analyzer {
                 };
                 match base.as_str() {
                     "Optional" => Ann::Optional(Box::new(self.pyd_ann(elts[0], module, state))),
-                    "Annotated" => self.pyd_ann(elts[0], module, state),
+                    "Annotated" => {
+                        let inner = self.pyd_ann(elts[0], module, state);
+                        // `Field(discriminator="kind")` on a union
+                        let disc = elts.iter().skip(1).find_map(|m| match m {
+                            ast::Expr::Call(c) if dotted_last(&c.func) == "Field" => kw(c, "discriminator").and_then(str_lit),
+                            _ => None,
+                        });
+                        match (inner, disc) {
+                            (Ann::Union(ms, _), Some(d)) => Ann::Union(ms, Some(d)),
+                            (x, _) => x,
+                        }
+                    }
                     "list" | "List" | "Sequence" | "set" | "Set" | "tuple" | "Tuple" | "frozenset" | "FrozenSet" | "Iterable" => {
                         if base.to_lowercase().starts_with("tuple") && elts.len() != 1 && !(elts.len() == 2 && is_ellipsis(elts[1])) {
                             return Ann::Other;
@@ -394,7 +450,13 @@ impl Analyzer {
                                 inner
                             }
                         } else {
-                            Ann::Other
+                            let ms: Vec<Ann> = non_none.iter().map(|x| self.pyd_ann(x, module, state)).collect();
+                            let u = if ms.iter().all(|m| matches!(m, Ann::Model(_))) { Ann::Union(ms, None) } else { Ann::Other };
+                            if non_none.len() < elts.len() {
+                                Ann::Optional(Box::new(u))
+                            } else {
+                                u
+                            }
                         }
                     }
                     _ => Ann::Other,
@@ -405,7 +467,30 @@ impl Analyzer {
                 match (matches!(l, ast::Expr::NoneLiteral(_)), matches!(r, ast::Expr::NoneLiteral(_))) {
                     (false, true) => Ann::Optional(Box::new(self.pyd_ann(l, module, state))),
                     (true, false) => Ann::Optional(Box::new(self.pyd_ann(r, module, state))),
-                    _ => Ann::Other,
+                    _ => {
+                        // `A | B | None`: the members, flattened
+                        let mut ms: Vec<Ann> = Vec::new();
+                        let mut none = false;
+                        for x in [self.pyd_ann(l, module, state), self.pyd_ann(r, module, state)] {
+                            match x {
+                                Ann::Union(xs, _) => ms.extend(xs),
+                                Ann::Optional(inner) => {
+                                    none = true;
+                                    match *inner {
+                                        Ann::Union(xs, _) => ms.extend(xs),
+                                        y => ms.push(y),
+                                    }
+                                }
+                                y => ms.push(y),
+                            }
+                        }
+                        let u = if ms.iter().all(|m| matches!(m, Ann::Model(_))) { Ann::Union(ms, None) } else { Ann::Other };
+                        if none {
+                            Ann::Optional(Box::new(u))
+                        } else {
+                            u
+                        }
+                    }
                 }
             }
             ast::Expr::StringLiteral(s0) => {
@@ -420,12 +505,53 @@ impl Analyzer {
             ast::Expr::Name(_) | ast::Expr::Attribute(_) => {
                 let n = type_name(e);
                 let v = state.slot_opt(module, Ns::Attr, key_str_lit(&n)).unwrap_or_default();
-                let mut found = v.pts.iter().find(|o| self.kind(*o) == Kind::Class && is_model(self, *o));
+                let mut found = v.pts.iter().find(|o| self.kind(*o) == Kind::Class && is_validated(self, *o));
                 if found.is_none() {
                     // by name among the program's classes (this module's first): the state at
                     // hand may be a summary's, without the module's names
-                    let cands: Vec<ObjId> = self.user_classes.iter().copied().filter(|c| self.class_info_opt(*c).map(|ci| ci.name == n).unwrap_or(false) && is_model(self, *c)).collect();
+                    let cands: Vec<ObjId> = self.user_classes.iter().copied().filter(|c| self.class_info_opt(*c).map(|ci| ci.name == n).unwrap_or(false) && is_validated(self, *c)).collect();
                     found = cands.iter().copied().find(|c| self.class_info(*c).module == module).or_else(|| cands.first().copied());
+                }
+                if found.is_none() {
+                    let td = v.pts.iter().find(|o| self.kind(*o) == Kind::Class && self.class_info_opt(*o).map(|ci| ci.typed_dict).unwrap_or(false)).or_else(|| {
+                        let c: Vec<ObjId> = self.user_classes.iter().copied().filter(|c| self.class_info_opt(*c).map(|ci| ci.name == n && ci.typed_dict).unwrap_or(false)).collect();
+                        c.iter().copied().find(|x| self.class_info(*x).module == module).or_else(|| c.first().copied())
+                    });
+                    if let Some(t) = td {
+                        return Ann::TypedDict(t);
+                    }
+                }
+                if found.is_none() && self.pyd_ann_depth < 8 {
+                    // a type alias: `Pet = Annotated[Union[Cat, Dog], …]` in the module
+                    let tree = self.module_info(module).tree;
+                    let alias = tree.body.iter().find_map(|st0| match st0 {
+                        ast::Stmt::Assign(a) if matches!(&a.targets[..], [ast::Expr::Name(t)] if t.id.as_str() == n) => {
+                            let v: &'static ast::Expr = &a.value;
+                            match v {
+                                ast::Expr::Subscript(_) | ast::Expr::BinOp(_) => Some(v),
+                                _ => None,
+                            }
+                        }
+                        ast::Stmt::TypeAlias(ta) if matches!(&*ta.name, ast::Expr::Name(t) if t.id.as_str() == n) => Some(&*ta.value),
+                        _ => None,
+                    });
+                    if let Some(e2) = alias {
+                        self.pyd_ann_depth += 1;
+                        let a = self.pyd_ann(e2, module, state);
+                        self.pyd_ann_depth -= 1;
+                        return a;
+                    }
+                }
+                if found.is_none() {
+                    // a type variable: `T = TypeVar("T")` in the module
+                    let tree = self.module_info(module).tree;
+                    let is_var = tree.body.iter().any(|st0| match st0 {
+                        ast::Stmt::Assign(a) => matches!(&a.targets[..], [ast::Expr::Name(t)] if t.id.as_str() == n) && matches!(&*a.value, ast::Expr::Call(c) if dotted_last(&c.func) == "TypeVar"),
+                        _ => false,
+                    });
+                    if is_var {
+                        return Ann::Var(n);
+                    }
                 }
                 match found {
                     Some(c) => Ann::Model(c),
@@ -462,10 +588,89 @@ impl Analyzer {
             state.set_row(did, Ns::Item, r);
             state.set_slot(did, Ns::Item, kk, v.clone(), true);
         }
-        self.pyd_validate(cls, &Value::obj(did), state, node, true)
+        if let Some((prefix, delim)) = pc.settings.clone() {
+            self.pyd_settings_env(&pc, &prefix, delim.as_deref(), did, state, node);
+        }
+        let out = self.pyd_validate(cls, &Value::obj(did), state, node, true);
+        if self.pyd_last_failed {
+            // whether it fails depends on a parameter's input: decided per call site
+            for sk in star_kwargs {
+                for o in sk.pts.iter() {
+                    if self.kind(o) == Kind::Ph {
+                        self.record_event("concrete", o);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// A settings class's input: each field not given as a keyword from the environment
+    /// (`PREFIX` + name, case-insensitive; a nested model from `PREFIX_FIELD__SUB` keys).
+    fn pyd_settings_env(&mut self, pc: &PClass, prefix: &str, delim: Option<&str>, did: ObjId, state: &mut State, node: &Node) {
+        let Some(env) = crate::models::external_record(self, "os.environ", state) else { return };
+        let er = state.row(env, Ns::Item);
+        let up = |k: KeyId| intern::key_as_str(k).map(|x| x.to_uppercase());
+        for f in pc.fields.iter() {
+            let fk = key_str_lit(f.alias.as_deref().unwrap_or(&f.name));
+            let given = state.row(did, Ns::Item);
+            if given.definite.contains(fk) {
+                continue;
+            }
+            let want = format!("{}{}", prefix, f.alias.as_deref().unwrap_or(&f.name)).to_uppercase();
+            let mut v = Value::new();
+            let mut sure = false;
+            let mut maybe = false;
+            for k in er.present.iter() {
+                if up(k).as_deref() == Some(want.as_str()) {
+                    v = v.join(&state.slot(env, Ns::Item, k));
+                    maybe = true;
+                    sure |= er.definite.contains(k);
+                }
+            }
+            // a nested model: `PREFIX_DB__POOL` → {"pool": …}
+            if let (Some(d), Ann::Model(_)) = (delim, &f.ann) {
+                let pre = format!("{}{}", want, d.to_uppercase());
+                let subs: Vec<(KeyId, KeyId, bool)> = er.present.iter().filter_map(|k| {
+                    let u = up(k)?;
+                    let rest = u.strip_prefix(&pre)?;
+                    Some((k, key_str_lit(&rest.to_lowercase()), er.definite.contains(k)))
+                }).collect();
+                if !subs.is_empty() {
+                    let nid = self.alloc_at(Kind::Dict, node, state, &format!("env@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("envnest{}", f.name)));
+                    let mut row = Row::new();
+                    for (k, sk, d0) in subs {
+                        row = row.store(sk, d0);
+                        state.set_slot(nid, Ns::Item, sk, state.slot(env, Ns::Item, k), true);
+                    }
+                    if er.open() {
+                        row = row.data_store(crate::domain::Source::new("os.environ", crate::domain::SourceKind::External));
+                    }
+                    state.set_row(nid, Ns::Item, row);
+                    v = v.join(&Value::obj(nid));
+                    maybe = true;
+                    sure = true;
+                }
+            }
+            if !maybe && er.open() && !er.absent.iter().any(|k| up(k).as_deref() == Some(want.as_str())) {
+                // a variable the program does not set: maybe there
+                v = Value::data(&format!("env {}", want));
+                maybe = true;
+            }
+            if !maybe {
+                continue;
+            }
+            let given_maybe = given.present.contains(fk);
+            let r = given.store(fk, sure || given.definite.contains(fk));
+            state.set_row(did, Ns::Item, r);
+            let cur = if given_maybe { state.slot(did, Ns::Item, fk) } else { Value::new() };
+            state.set_slot(did, Ns::Item, fk, cur.join(&v), true);
+        }
     }
 
     fn pyd_root_instance(&mut self, cls: ObjId, data: &Value, state: &mut State, node: &Node) -> Value {
+        let ann = self.pyd_class(cls, state).fields.iter().find(|f| f.name == "root").map(|f| f.ann.clone()).unwrap_or(Ann::Other);
+        let data = &self.pyd_convert(&ann, data, state, node);
         let site = format!("{}:{}", crate::interp::site_string(node), self.class_info(cls).name);
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", self.class_info(cls).name, node.line), Payload::Cls(cls), Some(Row::new()), Ns::Attr, None, None);
         let rk = key_str_lit("root");
@@ -512,10 +717,15 @@ impl Analyzer {
             return join_values(outs);
         }
         let mut data = Value::with_kv(crate::domain::ObjSet::from_vec(rest), data.kv.clone());
+        self.pyd_errs.push(Vec::new());
         // `mode="before"` model validators (v1 `root_validator(pre=True)`) see the raw input
         // and return what is validated
         for v in pc.model_before.clone() {
-            data = self.call_user(v.func, Some(Value::obj(cls)), vec![data.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
+            let (out, sure, maybe) = self.pyd_catching(v.func, Value::obj(cls), vec![data.clone()], state, node);
+            if maybe {
+                self.pyd_err(None, "value_error", sure, true);
+            }
+            data = out;
         }
         let site = format!("{}:{}", crate::interp::site_string(node), self.class_info(cls).name);
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", self.class_info(cls).name, node.line), Payload::Cls(cls), Some(Row::new()), Ns::Attr, None, None);
@@ -554,6 +764,19 @@ impl Analyzer {
             }
             field_keys.extend(f.alts.iter().map(|a| key_str_lit(a)));
             let mut val = Value::new();
+            // a value that depends on whether a parameter's input has the key: per call site
+            {
+                let nsf = |an: &Analyzer, o: ObjId| if matches!(an.kind(o), Kind::Instance | Kind::Namespace) { Ns::Attr } else { Ns::Item };
+                let uncertain = recs.iter().any(|o| {
+                    let r = state.row(*o, nsf(self, *o));
+                    !r.definite.contains(kk) && (r.present.contains(kk) || r.open())
+                });
+                if uncertain && !self.sum_stack.is_empty() {
+                    for ph in self.ph_sources(&recs, state) {
+                        self.record_event("concrete", ph);
+                    }
+                }
+            }
             if !recs.is_empty() {
                 // by name too when `populate_by_name` (the alias wins when both are there)
                 let mut keys = vec![kk];
@@ -564,6 +787,10 @@ impl Analyzer {
                 let ns_of = |an: &Analyzer, o: ObjId| if matches!(an.kind(o), Kind::Instance | Kind::Namespace) { Ns::Attr } else { Ns::Item };
                 let definite = recs.iter().all(|o| keys.iter().any(|k| state.row(*o, ns_of(self, *o)).definite.contains(*k)));
                 let present = recs.iter().any(|o| keys.iter().any(|k| state.row(*o, ns_of(self, *o)).present.contains(*k) || state.row(*o, ns_of(self, *o)).open()));
+                if f.required && !definite && report {
+                    let sure_missing = !other_data && recs.iter().all(|o| !state.row(*o, ns_of(self, *o)).open() && !keys.iter().any(|k| state.row(*o, ns_of(self, *o)).present.contains(*k)));
+                    self.pyd_err(Some(kk), "missing", sure_missing, false);
+                }
                 if f.required && definite && report {
                     // the field is there: the read succeeds
                     for &o in &recs {
@@ -653,13 +880,20 @@ impl Analyzer {
             if val.empty() {
                 val = Value::data(&format!("{}.{}", self.class_info(cls).name, f.name));
             }
+            self.pyd_field = Some(kk);
+            // a field surely missing / surely not converting: its validators do not run
+            let failed = |an: &Analyzer| an.pyd_errs.last().map(|es| es.iter().any(|e| e.sure && e.loc == Some(kk))).unwrap_or(false);
             // field validators before the type's conversion, then the conversion, then after
-            for v in pc.field_validators.iter().filter(|v| (v.fields.contains(&f.name) || v.fields.iter().any(|x| x == "*")) && matches!(v.mode.as_str(), "before" | "wrap" | "plain")).cloned().collect::<Vec<_>>() {
-                val = self.pyd_call_validator(cls, &v, &val, inst, &f.name, state, node);
+            if !failed(self) {
+                for v in pc.field_validators.iter().filter(|v| (v.fields.contains(&f.name) || v.fields.iter().any(|x| x == "*")) && matches!(v.mode.as_str(), "before" | "wrap" | "plain")).cloned().collect::<Vec<_>>() {
+                    val = self.pyd_call_validator(cls, &v, &val, inst, &f.name, state, node);
+                }
+                val = self.pyd_convert(&f.ann, &val, state, node);
             }
-            val = self.pyd_convert(&f.ann, &val, state, node);
-            for v in pc.field_validators.iter().filter(|v| (v.fields.contains(&f.name) || v.fields.iter().any(|x| x == "*")) && v.mode == "after").cloned().collect::<Vec<_>>() {
-                val = self.pyd_call_validator(cls, &v, &val, inst, &f.name, state, node);
+            if !failed(self) {
+                for v in pc.field_validators.iter().filter(|v| (v.fields.contains(&f.name) || v.fields.iter().any(|x| x == "*")) && v.mode == "after").cloned().collect::<Vec<_>>() {
+                    val = self.pyd_call_validator(cls, &v, &val, inst, &f.name, state, node);
+                }
             }
             let r = state.row(inst, Ns::Attr).store(nk, true);
             state.set_row(inst, Ns::Attr, r);
@@ -674,6 +908,24 @@ impl Analyzer {
         let phs: Vec<ObjId> = recs.iter().copied().filter(|o| self.kind(*o) == Kind::Ph).collect();
         if !phs.is_empty() {
             self.pyd_inputs.insert(inst, phs);
+        }
+        self.pyd_field = None;
+        // extra keys with `extra="forbid"`: an error per key
+        if pc.extra == Extra::Forbid && report {
+            let fk: KeySet = KeySet::from_iter(field_keys.iter().copied());
+            for &o in &recs {
+                let ns = if matches!(self.kind(o), Kind::Instance | Kind::Namespace) { Ns::Attr } else { Ns::Item };
+                let row = state.row(o, ns);
+                for k in row.present.iter() {
+                    if !fk.contains(k) {
+                        let sure = recs.len() == 1 && row.definite.contains(k);
+                        self.pyd_err(Some(k), "extra_forbidden", sure, false);
+                    }
+                }
+                if row.open() {
+                    self.pyd_err(None, "extra_forbidden", false, false);
+                }
+            }
         }
         // extra keys: attributes with `extra="allow"`
         if pc.extra == Extra::Allow {
@@ -715,10 +967,77 @@ impl Analyzer {
         }
         self.pyd_init_privates(cls, inst, state, node);
         for v in pc.model_after.clone() {
-            self.call_user(v.func, Some(Value::obj(inst)), vec![], IndexMap::new(), vec![], vec![], state, node, None, false);
+            let (_, sure, maybe) = self.pyd_catching(v.func, Value::obj(inst), vec![], state, node);
+            if maybe {
+                self.pyd_err(None, "value_error", sure, true);
+            }
+        }
+        // the problems found: a ValidationError (surely, or on some paths)
+        let errs = self.pyd_errs.pop().unwrap_or_default();
+        self.pyd_last_failed = !errs.is_empty();
+        if !errs.is_empty() {
+            // whether it fails depends on a parameter's input: decided per call site
+            for &o in &recs {
+                if self.kind(o) == Kind::Ph {
+                    self.record_event("concrete", o);
+                }
+            }
+        }
+        if report && !errs.is_empty() && state.reachable {
+            let idx = self.pyd_verrs.len();
+            self.pyd_verrs.push(errs.clone());
+            let eo = self.alloc_raw(Kind::Namespace, &format!("pydverr:{}", crate::interp::site_string(node)), "", false, "ValidationError", Payload::Method(format!("pydverr.{}", idx), Value::new()));
+            self.obj_mut(eo).payload = Payload::Method(format!("pydverr.{}", idx), Value::new());
+            state.set_row(eo, Ns::Attr, Row::new().data_store(crate::domain::Source::new("ValidationError", crate::domain::SourceKind::Data)));
+            self.cur_exc = Some(Value::obj(eo));
+            if errs.iter().any(|e| e.sure) {
+                self.raise_here("ValidationError", state);
+            } else {
+                self.may_raise_here("ValidationError", state);
+            }
+            self.cur_exc = None;
         }
         outs.push(Value::obj(inst));
         join_values(outs)
+    }
+
+    fn pyd_err(&mut self, loc: Option<KeyId>, typ: &'static str, sure: bool, ctx: bool) {
+        if let Some(top) = self.pyd_errs.last_mut() {
+            top.push(PErr { loc, typ, sure, ctx });
+        }
+    }
+
+    /// A validator called the way pydantic calls it: a ValueError / AssertionError it raises
+    /// is a validation error (collected; validation goes on); others escape. Returns the
+    /// value and whether the validator surely / maybe raised such an error.
+    fn pyd_catching(&mut self, f: ObjId, self_v: Value, args: Vec<Value>, state: &mut State, node: &Node) -> (Value, bool, bool) {
+        let mut pre = state.copy();
+        self.guards.push(rustc_hash::FxHashSet::from_iter(["ValueError", "AssertionError", "PydanticCustomError", "PydanticKnownError", "ValidationError"].iter().map(|x| x.to_string())));
+        self.may_raise.push(false);
+        self.raise_states.push(None);
+        self.raise_values.push(None);
+        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
+        self.try_sum_depth.push(self.sum_stack.len());
+        let out = self.call_user(f, Some(self_v), args, IndexMap::new(), vec![], vec![], state, node, None, false);
+        self.guards.pop();
+        self.try_marks.pop();
+        self.try_sum_depth.pop();
+        let flagged = self.may_raise.pop().unwrap_or(false);
+        let raised_at = self.raise_states.pop().flatten();
+        self.raise_values.pop();
+        let _ = &mut pre;
+        // an exception pydantic does not catch (KeyError, …) escapes: the enclosing try / call
+        // learns it may raise
+        if flagged {
+            if let Some(m) = self.may_raise.last_mut() {
+                *m = true;
+            }
+        }
+        let Some(mut r) = raised_at else { return (out, false, false) };
+        let died = !state.reachable;
+        let after = if state.reachable { state.copy().join(&mut r) } else { r };
+        state.replace_with(after);
+        (out.join(&Value::data("validator")), died, true)
     }
 
     /// Private attributes get their defaults, then a user `model_post_init` runs.
@@ -743,9 +1062,140 @@ impl Analyzer {
         }
     }
 
+    /// An assignment `o.name = v` on a model instance / typed placeholder: Some(value to
+    /// store) — validated when `validate_assignment` — or None when it raises (a non-field
+    /// on a model without `extra="allow"`: ValueError).
+    pub fn pyd_assign(&mut self, oid: ObjId, cls: ObjId, name: &str, v: &Value, node: &Node, state: &mut State) -> Option<Value> {
+        let pc = self.pyd_class(cls, state);
+        let nk = key_str_lit(name);
+        match pc.fields.iter().find(|f| f.name == name) {
+            Some(f) if pc.validate_assignment => {
+                let ann = f.ann.clone();
+                Some(self.pyd_convert(&ann, v, state, node))
+            }
+            Some(_) => Some(v.clone()),
+            None if self.class_lookup(cls, name).is_some() => Some(v.clone()),
+            None if pc.extra == Extra::Allow => {
+                self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
+                Some(v.clone())
+            }
+            None => {
+                self.verdict(node, nk, &Classification::with_note(Tier::Missing, "pydantic model has no such field"), oid, Ns::Attr, None, None);
+                self.raise_here("ValueError", state);
+                None
+            }
+        }
+    }
+
     /// Is `name` a private attribute of model class `cls`?
     pub fn pyd_is_private(&mut self, cls: ObjId, name: &str, state: &State) -> bool {
         name.starts_with('_') && !name.starts_with("__") && is_model(self, cls) && self.pyd_class(cls, state).privates.iter().any(|p| p.0 == name)
+    }
+
+    /// `Model[X, …]` of a generic model: a class of its own (the model's body, its type
+    /// variables bound to the arguments, in the order of `Generic[T, …]`).
+    pub fn pyd_specialise(&mut self, cls: ObjId, slice: &'static ast::Expr, state: &mut State) -> Option<Value> {
+        let ci = self.class_info(cls);
+        let params: Vec<String> = ci.node.arguments.as_ref().map(|a| {
+            a.args.iter().filter_map(|b| match b {
+                ast::Expr::Subscript(sb) if matches!(dotted_last(&sb.value).as_str(), "Generic" | "BaseModel") => Some(match &*sb.slice {
+                    ast::Expr::Tuple(t) => t.elts.iter().map(type_name).collect::<Vec<_>>(),
+                    other => vec![type_name(other)],
+                }),
+                _ => None,
+            }).flatten().collect()
+        }).unwrap_or_default();
+        if params.is_empty() {
+            return None;
+        }
+        let elts: Vec<&'static ast::Expr> = match slice {
+            ast::Expr::Tuple(t) => t.elts.iter().collect(),
+            other => vec![other],
+        };
+        let module = self.frame().module;
+        let mut bind: Vec<(String, Ann)> = Vec::new();
+        let mut key = String::new();
+        for (p, e) in params.iter().zip(elts.iter()) {
+            // a name holding a class (`Envelope[cls]`): that class; else the annotation
+            let v = self.eval(e, state);
+            let a = match v.pts.iter().find(|o| self.kind(*o) == Kind::Class) {
+                Some(c) if is_validated(self, c) => Ann::Model(c),
+                Some(c) if self.class_info_opt(c).map(|x| x.typed_dict).unwrap_or(false) => Ann::TypedDict(c),
+                _ => self.pyd_ann(e, module, state),
+            };
+            key.push_str(&format!("{:?};", a));
+            bind.push((p.clone(), a));
+        }
+        let site = format!("generic:{}:{}", cls, key);
+        let label = format!("{}[…]", ci.name);
+        let info = std::rc::Rc::new(crate::interp::ClassInfo {
+            name: ci.name.clone(),
+            node: ci.node,
+            bases: vec![cls],
+            module: ci.module,
+            open_base: false,
+            dataclass_fields: std::cell::RefCell::new(Some(Vec::new())),
+            typed_dict: false,
+            named_tuple: false,
+            dict_base: false,
+            pydantic: ci.pydantic,
+            pyd_dataclass: std::cell::Cell::new(ci.pyd_dataclass.get()),
+            nn_module: false,
+            field_classes: std::cell::RefCell::new(None),
+            any_fields: std::cell::RefCell::new(None),
+        });
+        let spec = self.alloc_raw(Kind::Class, &site, "", true, &label, Payload::Class(info));
+        self.pyd_generic.insert(spec, bind);
+        self.pyd_classes.remove(&spec);
+        Some(Value::obj(spec))
+    }
+
+    /// The keys of a `TypedDict` class: (name, required, type), bases first; `total=False`
+    /// and `NotRequired[...]` make a key optional, `Required[...]` required.
+    pub fn typed_dict_fields(&mut self, cls: ObjId, state: &State) -> Vec<(String, bool, Ann)> {
+        let mut out: Vec<(String, bool, Ann)> = Vec::new();
+        for c in self.mro(cls).into_iter().rev() {
+            let Some(ci) = self.class_info_opt(c) else { continue };
+            if !ci.typed_dict {
+                continue;
+            }
+            let node: &'static ast::StmtClassDef = ci.node;
+            let total = node.arguments.as_ref().and_then(|a| a.keywords.iter().find(|k| k.arg.as_ref().map(|x| x.as_str() == "total").unwrap_or(false))).and_then(|k| bool_lit(&k.value)).unwrap_or(true);
+            for st in &node.body {
+                let ast::Stmt::AnnAssign(a) = st else { continue };
+                let ast::Expr::Name(n) = &*a.target else { continue };
+                let (req, inner): (bool, &'static ast::Expr) = match &*a.annotation {
+                    ast::Expr::Subscript(sb) if dotted_last(&sb.value) == "NotRequired" => (false, &sb.slice),
+                    ast::Expr::Subscript(sb) if dotted_last(&sb.value) == "Required" => (true, &sb.slice),
+                    other => (total, other),
+                };
+                let ann = self.pyd_ann(inner, ci.module, state);
+                out.retain(|x| x.0 != n.id.as_str());
+                out.push((n.id.to_string(), req, ann));
+            }
+        }
+        out
+    }
+
+    /// The placeholders a record stands for or was built from (a dict display spreading
+    /// parameters: the parameters whose rows its row refers to).
+    pub fn ph_sources(&self, recs: &[ObjId], state: &State) -> Vec<ObjId> {
+        let mut out: Vec<ObjId> = Vec::new();
+        for &o in recs {
+            if self.kind(o) == Kind::Ph {
+                out.push(o);
+                continue;
+            }
+            for ns in [Ns::Item, Ns::Attr] {
+                for r in state.row(o, ns).refs().iter() {
+                    let (p, _) = crate::domain::unrho(r);
+                    if self.has_obj(p) && self.kind(p) == Kind::Ph && !out.contains(&p) {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// A required field's read: `d[k]` on a dict / input, `o.k` on an object (verdicts and
@@ -822,7 +1272,11 @@ impl Analyzer {
             state.set_row(info, Ns::Attr, irow);
             args.push(Value::obj(info));
         }
-        let out = self.call_user(v.func, Some(Value::obj(cls)), args, IndexMap::new(), vec![], vec![], state, node, None, false);
+        let (out, sure, maybe) = self.pyd_catching(v.func, Value::obj(cls), args, state, node);
+        if maybe {
+            let loc = self.pyd_field;
+            self.pyd_err(loc, "value_error", sure, true);
+        }
         if out.empty() {
             val.clone()
         } else {
@@ -848,9 +1302,135 @@ impl Analyzer {
                 }
                 out
             }
-            Ann::Optional(inner) => self.pyd_convert(inner, val, state, node),
-            Ann::Scalar(t) => Value::with_kv(val.pts.clone(), coerce_kv(t, &val.kv)),
-            Ann::List(inner) if matches!(**inner, Ann::Model(_) | Ann::Optional(_)) => {
+            Ann::Optional(inner) => {
+                // None passes; the rest is converted
+                let none = intern::key_none();
+                let has_none = val.kv.as_lit() == Some(none) || matches!(&val.kv, KeyVal::Lits(ks) if ks.contains(none));
+                if !has_none {
+                    return self.pyd_convert(inner, val, state, node);
+                }
+                let rest_kv = match &val.kv {
+                    KeyVal::Lits(ks) => KeyVal::lits(ks.remove(none)),
+                    _ => KeyVal::Bot,
+                };
+                let rest = Value::with_kv(val.pts.clone(), rest_kv);
+                let conv = if rest.empty() { rest } else { self.pyd_convert(inner, &rest, state, node) };
+                conv.join(&self.none_v.clone())
+            }
+            Ann::Union(ms, disc) => {
+                let models: Vec<ObjId> = ms.iter().filter_map(|m| if let Ann::Model(c) = m { Some(*c) } else { None }).collect();
+                let mut outs: Vec<Value> = Vec::new();
+                if !val.kv.is_bot() {
+                    outs.push(Value::kv_only(val.kv.clone()));
+                }
+                for o in val.pts.iter() {
+                    // an instance of a member stays
+                    if self.kind(o) == Kind::Instance && self.instance_class(o).map(|c| models.iter().any(|m| self.mro(c).contains(m))).unwrap_or(false) {
+                        outs.push(Value::obj(o));
+                        continue;
+                    }
+                    if !matches!(self.kind(o), Kind::Dict | Kind::Unknown | Kind::Ph) {
+                        outs.push(Value::obj(o));
+                        continue;
+                    }
+                    let mut chosen: Vec<ObjId> = models.clone();
+                    if let Some(d) = disc {
+                        // the tag: a required read; it picks the member
+                        let dk = key_str_lit(d);
+                        let tag = self.load_item(&Value::obj(o), Ns::Item, &Value::lit(dk), node, state, true);
+                        if let KeyVal::Param(p) = &tag.kv {
+                            self.record_event("concrete", *p);
+                        }
+                        for x in tag.pts.iter() {
+                            if self.kind(x) == Kind::Ph {
+                                self.record_event("concrete", x);
+                            }
+                        }
+                        if tag.pts.is_empty() && tag.kv.is_literal() {
+                            let tl = crate::domain::kv_literals(&tag.kv);
+                            chosen = models.iter().copied().filter(|m| {
+                                let pc = self.pyd_class(*m, state);
+                                pc.fields.iter().find(|f| f.name == *d).and_then(|f| f.lits.clone()).map(|ls| ls.iter().any(|l| tl.contains(*l))).unwrap_or(true)
+                            }).collect();
+                            if chosen.is_empty() {
+                                // no member has that tag: a ValidationError
+                                self.may_raise_here("ValidationError", state);
+                                continue;
+                            }
+                        }
+                    }
+                    if chosen.len() == 1 {
+                        outs.push(self.pyd_validate_opts(chosen[0], &Value::obj(o), state, node, true));
+                        continue;
+                    }
+                    // each member on its own branch (the input's requirements per member)
+                    let mut branches: Vec<State> = Vec::new();
+                    for m in chosen {
+                        let mut b = state.copy();
+                        self.branch_depth += 1;
+                        let x = self.pyd_validate_opts(m, &Value::obj(o), &mut b, node, true);
+                        self.branch_depth -= 1;
+                        outs.push(x);
+                        if b.reachable {
+                            branches.push(b);
+                        }
+                    }
+                    if !branches.is_empty() {
+                        let mut joined = branches.remove(0);
+                        for mut b in branches {
+                            joined = joined.join(&mut b);
+                        }
+                        state.replace_with(joined);
+                    }
+                }
+                join_values(outs)
+            }
+            Ann::Scalar(t) => {
+                let t = *t;
+                if val.pts.is_empty() && val.kv.is_literal() && matches!(t, "int" | "float") {
+                    let lits = crate::domain::kv_literals(&val.kv);
+                    let fails = |k: KeyId| {
+                        let c = coerce_kv(t, &KeyVal::Lit(k));
+                        let k2 = c.as_lit().unwrap();
+                        if t == "int" { intern::key_as_int(k2).is_none() } else { !intern::key_is_number(k2) }
+                    };
+                    let bad = lits.iter().filter(|k| fails(*k)).count();
+                    if bad > 0 {
+                        let loc = self.pyd_field;
+                        self.pyd_err(loc, if t == "int" { "int_parsing" } else { "float_parsing" }, bad == lits.len(), false);
+                    }
+                }
+                Value::with_kv(val.pts.clone(), coerce_kv(t, &val.kv))
+            }
+            Ann::TypedDict(td) => {
+                let td = *td;
+                let fields = self.typed_dict_fields(td, state);
+                let recs: Vec<ObjId> = val.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown | Kind::Ph)).collect();
+                if recs.is_empty() {
+                    return val.clone();
+                }
+                let recv = Value::objs(crate::domain::ObjSet::from_vec(recs.clone()));
+                let nid = self.alloc_at(Kind::Dict, node, state, &format!("dict@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("td{}", td)));
+                let mut row = Row::new();
+                for (name, required, fann) in fields {
+                    let k = key_str_lit(&name);
+                    let definite = recs.iter().all(|o| state.row(*o, Ns::Item).definite.contains(k));
+                    let maybe = recs.iter().any(|o| state.row(*o, Ns::Item).present.contains(k) || state.row(*o, Ns::Item).open());
+                    let v = if required && !definite {
+                        self.load_item(&recv, Ns::Item, &Value::lit(k), node, state, true)
+                    } else if maybe {
+                        self.pyd_read_guarded(&recs, k, state)
+                    } else {
+                        continue;
+                    };
+                    let v = self.pyd_convert(&fann, &v, state, node);
+                    row = row.store(k, required || definite);
+                    state.set_slot(nid, Ns::Item, k, v, true);
+                }
+                state.set_row(nid, Ns::Item, row);
+                Value::obj(nid)
+            }
+            Ann::List(inner) if !matches!(**inner, Ann::Other) => {
                 let mut outs: Vec<Value> = Vec::new();
                 for o in val.pts.iter() {
                     if !matches!(self.kind(o), Kind::List | Kind::Tuple | Kind::Set | Kind::Unknown | Kind::Ph) {
@@ -878,7 +1458,7 @@ impl Analyzer {
                 }
                 join_values(outs)
             }
-            Ann::Dict(inner) if matches!(**inner, Ann::Model(_)) => {
+            Ann::Dict(inner) if !matches!(**inner, Ann::Other) => {
                 let mut outs: Vec<Value> = Vec::new();
                 for o in val.pts.iter() {
                     if matches!(self.kind(o), Kind::Unknown | Kind::Ph) {
@@ -930,6 +1510,30 @@ pub struct DumpOpts {
     pub unknown_sel: bool,
     /// the default dump, under a wrap model serializer
     pub raw: bool,
+}
+
+/// The values of a `Literal[...]` annotation.
+fn literal_tags(e: &ast::Expr) -> Option<Vec<KeyId>> {
+    let ast::Expr::Subscript(sb) = e else { return None };
+    if dotted_last(&sb.value) != "Literal" {
+        return None;
+    }
+    let elts: Vec<&ast::Expr> = match &*sb.slice {
+        ast::Expr::Tuple(t) => t.elts.iter().collect(),
+        other => vec![other],
+    };
+    elts.into_iter().map(literal_key).collect()
+}
+
+fn subst(a: &Ann, bind: &[(String, Ann)]) -> Ann {
+    match a {
+        Ann::Var(n) => bind.iter().find(|(m, _)| m == n).map(|(_, x)| x.clone()).unwrap_or(Ann::Other),
+        Ann::List(x) => Ann::List(Box::new(subst(x, bind))),
+        Ann::Dict(x) => Ann::Dict(Box::new(subst(x, bind))),
+        Ann::Optional(x) => Ann::Optional(Box::new(subst(x, bind))),
+        Ann::Union(xs, d) => Ann::Union(xs.iter().map(|x| subst(x, bind)).collect(), d.clone()),
+        other => other.clone(),
+    }
 }
 
 /// pydantic's lax coercion of known literals to a scalar annotation (`1` → `1.0` for
@@ -1062,6 +1666,44 @@ fn config_of(v: &ast::Expr, extra: &mut Extra, populate: &mut bool, frozen: &mut
     }
 }
 
+/// A boolean option of `ConfigDict(…)` / a config dict literal.
+fn config_flag(v: &ast::Expr, name: &str) -> bool {
+    match v {
+        ast::Expr::Call(c) => kw(c, name).and_then(bool_lit).unwrap_or(false),
+        ast::Expr::Dict(d) => d.items.iter().any(|it| it.key.as_ref().and_then(str_lit).as_deref() == Some(name) && bool_lit(&it.value) == Some(true)),
+        _ => false,
+    }
+}
+
+/// `SettingsConfigDict(env_prefix=…, env_nested_delimiter=…)` (also a dict literal).
+fn settings_of(v: &ast::Expr, settings: &mut Option<(String, Option<String>)>) {
+    let Some(st) = settings.as_mut() else { return };
+    match v {
+        ast::Expr::Call(c) => {
+            if let Some(p) = kw(c, "env_prefix").and_then(str_lit) {
+                st.0 = p;
+            }
+            if let Some(d) = kw(c, "env_nested_delimiter").and_then(str_lit) {
+                st.1 = Some(d);
+            }
+        }
+        ast::Expr::Dict(d) => {
+            for item in d.items.iter() {
+                match item.key.as_ref().and_then(str_lit).as_deref() {
+                    Some("env_prefix") => {
+                        if let Some(p) = str_lit(&item.value) {
+                            st.0 = p;
+                        }
+                    }
+                    Some("env_nested_delimiter") => st.1 = str_lit(&item.value),
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn is_classvar(e: &ast::Expr) -> bool {
     match e {
         ast::Expr::Subscript(sb) => type_name(&sb.value) == "ClassVar",
@@ -1118,6 +1760,15 @@ impl Analyzer {
             Kind::Ph => self.ph_info(oid).cls.get(),
             _ => None,
         };
+        // a root model dumps to its root
+        if let Some(c) = cls.filter(|c| is_model(self, *c)) {
+            let pc = self.pyd_class(c, state);
+            if pc.root {
+                let ann = pc.fields.iter().find(|f| f.name == "root").map(|f| f.ann.clone()).unwrap_or(Ann::Other);
+                let v = self.load_attr(&Value::obj(oid), "root", node, state, false);
+                return self.pyd_dump_value(&ann, &v, opts, state, node);
+            }
+        }
         // a model serializer decides the dump (`mode="wrap"`: around the default one)
         if let Some(c) = cls.filter(|c| is_model(self, *c)) {
             if !opts.raw {
@@ -1218,6 +1869,10 @@ impl Analyzer {
             }
             if opts.unknown_sel {
                 meet(None);
+            }
+            if keep.is_none() && ph {
+                // which keys the dump has depends on the receiver's values: per call site
+                self.record_event("concrete", oid);
             }
             if keep == Some(false) {
                 continue;
@@ -1741,6 +2396,63 @@ pub fn fieldinfo_attr(an: &mut Analyzer, st: &mut State, q: &str, name: &str, no
     }
 }
 
+/// A ValidationError's methods (`pydverr.<idx>.<name>`): `errors()` (one record per
+/// problem, in field order; `include_url=False` leaves out `url`), `error_count()`.
+pub fn m_pydverr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let mut it = c.qual.splitn(3, '.');
+    let (_, idx, name) = (it.next(), it.next().and_then(|x| x.parse::<usize>().ok()), it.next().unwrap_or(""));
+    let Some(errs) = idx.and_then(|i| an.pyd_verrs.get(i).cloned()) else { return Value::data("ValidationError") };
+    match name {
+        "errors" => {
+            let url = !matches!(c.kwargs.get(&s("include_url")).and_then(|v| v.kv.as_lit()), Some(k) if k == intern::key_bool(false));
+            let mut items: Vec<Value> = Vec::new();
+            for (i, e) in errs.iter().enumerate() {
+                let d = an.alloc_at(Kind::Dict, &c.node, st, &format!("error@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("verr{}:{}:{}", idx.unwrap(), i, url)));
+                let mut row = Row::new();
+                // one tuple per record (records made at one site must not share it)
+                let lt = an.alloc_at(Kind::Tuple, &c.node, st, &format!("loc@L{}", c.line), Payload::None, None, Ns::Item, None, Some(&format!("verrloc{}:{}", idx.unwrap(), i)));
+                match e.loc {
+                    Some(k) => {
+                        st.set_slot(lt, Ns::Pos, intern::key_int(0), Value::lit(k), true);
+                        st.set_slot(lt, Ns::Elem, intern::STAR, Value::lit(k), true);
+                        st.elems.insert(lt, KeyVal::Lit(k));
+                        an.obj_mut(lt).literal_len = Some(1);
+                    }
+                    None => {
+                        st.set_slot(lt, Ns::Elem, intern::STAR, Value::data("loc"), true);
+                        st.elems.insert(lt, crate::domain::DATA);
+                        an.obj_mut(lt).literal_len = None;
+                    }
+                }
+                let loc = Value::obj(lt);
+                let mut entries: Vec<(&str, Value)> = vec![("type", Value::lit_str(e.typ)), ("loc", loc), ("msg", Value::data("msg")), ("input", Value::data("input"))];
+                if url {
+                    entries.push(("url", Value::data("url")));
+                }
+                if e.ctx {
+                    entries.push(("ctx", Value::data("ctx")));
+                }
+                for (k, v) in entries {
+                    let kk = key_str_lit(k);
+                    row = row.store(kk, true);
+                    st.set_slot(d, Ns::Item, kk, v, true);
+                }
+                st.set_row(d, Ns::Item, row);
+                items.push(Value::obj(d));
+            }
+            if errs.iter().all(|e| e.sure) {
+                an.alloc_positional(Kind::List, &c.node, Some(items), Value::new(), crate::domain::DATA, st)
+            } else {
+                let elem = join_values(items);
+                an.alloc_positional(Kind::List, &c.node, None, elem, crate::domain::DATA, st)
+            }
+        }
+        "error_count" if errs.iter().all(|e| e.sure) => Value::lit(intern::key_int(errs.len() as i64)),
+        "title" => Value::data("title"),
+        _ => Value::data("ValidationError"),
+    }
+}
+
 /// `field_info.is_required()`.
 pub fn m_fieldinfo(_an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
     match c.qual.as_str() {
@@ -1827,6 +2539,7 @@ pub fn json_of_models(an: &mut Analyzer, st: &mut State, c: &Call, ms: &[ObjId])
 pub fn install(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {
     r(&["pydantic.*"], m_instance);
     r(&["fieldinfo.*"], m_fieldinfo);
+    r(&["pydverr.*"], m_pydverr);
     r(&["pydantic.cls.*"], m_class);
     r(&["pydantic.TypeAdapter", "pydantic.type_adapter.TypeAdapter"], m_type_adapter);
     r(&["pydantic.Field", "pydantic.fields.Field", "pydantic.PrivateAttr", "pydantic.ConfigDict", "pydantic_settings.SettingsConfigDict"], crate::models::noeffect);

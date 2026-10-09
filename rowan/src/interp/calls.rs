@@ -85,6 +85,10 @@ impl Analyzer {
                 }
             }
         }
+        // an argument raised: the call never happens
+        if !state.reachable && !crate::interp::disabled("deadcall") {
+            return Value::new();
+        }
         if fv.pts.is_empty() {
             return self.unknown_call("?", None, &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
@@ -392,10 +396,20 @@ impl Analyzer {
             state.set_row(inst, Ns::Item, Row::new());
         }
         // a pydantic model (without its own `__init__`): validation of the keyword input
-        if crate::models::pydantic::is_model(self, cls) && !super::disabled("pydantic") {
-            let own_init = self.class_lookup(cls, "__init__").map(|c| crate::models::pydantic::is_model(self, c) && self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__")))).unwrap_or(false);
+        if crate::models::pydantic::is_validated(self, cls) && !super::disabled("pydantic") {
+            let own_init = self.class_lookup(cls, "__init__").map(|c| crate::models::pydantic::is_validated(self, c) && self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__")))).unwrap_or(false);
             if !own_init {
-                return self.pyd_construct(cls, args, kwargs, star_kwargs, state, node);
+                // a pydantic dataclass takes its fields positionally too
+                let mut kw = kwargs.clone();
+                if crate::models::pydantic::is_validated(self, cls) && !crate::models::pydantic::is_model(self, cls) {
+                    let names: Vec<String> = self.dataclass_fields_mro(cls).into_iter().map(|(n, _)| n).collect();
+                    for (i, a) in args.iter().enumerate() {
+                        if let Some(n) = names.get(i) {
+                            kw.insert(intern::s(n), a.clone());
+                        }
+                    }
+                }
+                return self.pyd_construct(cls, args, &kw, star_kwargs, state, node);
             }
         }
         // a dict subclass without its own `__init__`: dict's constructor fills its items
