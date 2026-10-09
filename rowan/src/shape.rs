@@ -839,8 +839,12 @@ pub fn broadcast(a: &Shape, b: &Shape, f: &TFacts) -> Result<Shape, (DimId, DimI
     }
     // a known shape against a fully unknown one: at least its rank, its dims maybe larger
     for (x, y) in [(&a, &b), (&b, &a)] {
-        if let (Some(dx), true) = (x.dims(), y.is_any()) {
-            return Ok(Shape { prefix: vec![], rest: Some(Rest::Any), suffix: dx.iter().map(|d| if is_one(*d, f) == Some(true) { unknown() } else { unknown() }).collect(), assume: vec![] });
+        if y.is_any() {
+            let n = match x.dims() {
+                Some(dx) => dx.len(),
+                None => x.suffix.len(),
+            };
+            return Ok(Shape { prefix: vec![], rest: Some(Rest::Any), suffix: vec![unknown(); n], assume: vec![] });
         }
     }
     // rests over the same symbol: spell out the same number of trailing dims on both
