@@ -740,6 +740,9 @@ impl Analyzer {
                 }
             } else if an.torch_on && v.kv.is_bot() && v.pts.len() == 1 && an.t_sym_of_obj(v.pts.first().unwrap()).is_some() {
                 Some(K::Named)
+            } else if an.torch_on && v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| matches!(an.kind(o), Kind::Ph | Kind::Unknown)) {
+                // an unknown without a name (an unknown call's result): any shape
+                Some(K::Named)
             } else {
                 None
             }
@@ -1046,6 +1049,16 @@ impl Analyzer {
                             return Some(self.t_list_layer(&ty, Some(part), None, node, st));
                         }
                     }
+                }
+            }
+        }
+        // an element of a list of tensors without known positions (built by `append`)
+        if let Some(o) = obj.single() {
+            if matches!(self.kind(o), Kind::List | Kind::Tuple) && self.obj(o).literal_len.is_none() && self.t_layer_type(o).is_none() && !matches!(idx, E::Slice(_)) {
+                let e = self.t_list_elem(o, st);
+                if tensor_shape(&e).is_some() {
+                    let _ = self.eval(idx, st);
+                    return Some(e);
                 }
             }
         }
@@ -2407,8 +2420,7 @@ impl Analyzer {
         }
         if let Some(o) = list.single() {
             if matches!(self.kind(o), Kind::List | Kind::Tuple) {
-                let e = st.slot(o, Ns::Elem, STAR);
-                let e = Value::with_kv(e.pts.clone(), crate::domain::kv_join(&e.kv, &st.elems.get(&o).unwrap_or(crate::domain::BOT)));
+                let e = self.t_list_elem(o, st);
                 return (None, Some(self.t_shape(&e, st).unwrap_or_else(Shape::any)));
             }
         }
@@ -3998,5 +4010,17 @@ impl Analyzer {
             return false;
         }
         true
+    }
+}
+
+impl Analyzer {
+    /// Any element of a list / tuple without known positions: its objects and the label of
+    /// its values (kept apart in the state).
+    pub fn t_list_elem(&self, o: u32, st: &State) -> Value {
+        let e = st.slot(o, Ns::Elem, STAR);
+        match st.elems.get(&o) {
+            Some(kv) if !kv.is_bot() => Value::with_kv(e.pts.clone(), kv),
+            _ => e,
+        }
     }
 }
