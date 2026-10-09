@@ -547,6 +547,8 @@ pub struct Fact {
 }
 
 pub struct RowCheck {
+    /// the module's path relative to the main file's directory ("" for the main file)
+    pub file: String,
     pub line: u32,
     pub name: String,
     pub row: Option<Row>,
@@ -729,8 +731,11 @@ pub struct Analyzer {
     pub main_tree: &'static ast::ModModule,
     pub series: ObjId,
     pub none_v: Value,
-    /// `#@row NAME:` checks requested by the golden harness: (line, name)
-    pub row_check_requests: Vec<(u32, String)>,
+    /// `#@row NAME:` checks requested by the golden harness: (file relative to the main
+    /// file's directory, "" for the main file; line; name)
+    pub row_check_requests: Vec<(String, u32, String)>,
+    /// module index -> its path relative to the main file's directory (`rel_file`)
+    pub rel_files: std::cell::RefCell<FxHashMap<u32, String>>,
     /// per summary being built: its row-check observations
     pub sum_obs: Vec<Vec<crate::summary::Obs>>,
     /// per summary being built: the hover facts recorded in its body (resolved per call)
@@ -894,6 +899,7 @@ impl Analyzer {
             series: 0,
             none_v: Value::lit(intern::key_none()),
             row_check_requests: Vec::new(),
+            rel_files: Default::default(),
             sum_obs: Vec::new(),
             sum_fact_obs: Vec::new(),
             env_stack: Vec::new(),
@@ -1234,9 +1240,33 @@ impl Analyzer {
         if m == self.main_module {
             return String::new();
         }
-        let mi = self.module_info(m);
-        let p = mi.path.clone().unwrap_or_else(|| mi.name.clone());
-        std::path::Path::new(&p).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or(p)
+        let idx = self.module_info(m).idx;
+        self.rel_file(idx)
+    }
+
+    /// The path of module `idx` relative to the main file's directory ("" for the main
+    /// module; the file name when it lies elsewhere, the module name when it has no file).
+    pub fn rel_file(&self, idx: u32) -> String {
+        if idx == self.module_info(self.main_module).idx {
+            return String::new();
+        }
+        if let Some(f) = self.rel_files.borrow().get(&idx) {
+            return f.clone();
+        }
+        let canon = |p: &str| std::fs::canonicalize(p).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string());
+        let f = match frontend::module_path(idx) {
+            Some(p) => {
+                let main_dir = std::path::Path::new(&canon(&self.filename)).parent().map(|d| d.to_path_buf());
+                let cp = canon(&p);
+                match main_dir.as_ref().and_then(|d| std::path::Path::new(&cp).strip_prefix(d).ok()) {
+                    Some(r) => r.to_string_lossy().to_string(),
+                    None => std::path::Path::new(&p).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or(p),
+                }
+            }
+            None => frontend::module_name(idx),
+        };
+        self.rel_files.borrow_mut().insert(idx, f.clone());
+        f
     }
 
     pub fn verdict(&mut self, node: &Node, key: KeyId, cls: &Classification, oid: ObjId, ns: Ns, file_override: Option<&str>, text_override: Option<&str>) {
@@ -1979,14 +2009,12 @@ impl Analyzer {
             return;
         }
         let n = frontend::node(stmt);
-        if n.module != self.module_info(self.main_module).idx {
-            return;
-        }
+        let file = self.rel_file(n.module);
         if !state.reachable && !matches!(stmt, ast::Stmt::Return(_) | ast::Stmt::Break(_) | ast::Stmt::Continue(_)) {
             // the statement raised on this path: nothing to observe after it
             return;
         }
-        let reqs: Vec<(u32, String)> = self.row_check_requests.iter().filter(|(ln, _)| *ln == n.line).cloned().collect();
+        let reqs: Vec<(u32, String)> = self.row_check_requests.iter().filter(|(f, ln, _)| *ln == n.line && *f == file).map(|(_, ln, name)| (*ln, name.clone())).collect();
         for (ln, name) in reqs {
             let v = self.load_name(s(&name), &n, state);
             let mut rows: Vec<Row> = Vec::new();
@@ -2004,7 +2032,7 @@ impl Analyzer {
             // resolved per call
             if !self.sum_stack.is_empty() && !disabled("obs") {
                 if let Some(top) = self.sum_obs.last_mut() {
-                    top.push(crate::summary::Obs { line: ln, name, rows: obs_rows, must, value: v.clone() });
+                    top.push(crate::summary::Obs { file: file.clone(), line: ln, name, rows: obs_rows, must, value: v.clone() });
                 }
                 continue;
             }
@@ -2023,7 +2051,7 @@ impl Analyzer {
             } else {
                 None
             };
-            self.row_checks.push(RowCheck { line: ln, name, row, ns: ns_used, value, tensor });
+            self.row_checks.push(RowCheck { file: file.clone(), line: ln, name, row, ns: ns_used, value, tensor });
         }
     }
 }

@@ -103,6 +103,7 @@ pub const MAX_SIGNATURES: usize = 8;
 /// summary's entry); resolved at every instantiation.
 #[derive(Clone, Debug)]
 pub struct Obs {
+    pub file: String,
     pub line: u32,
     pub name: String,
     pub rows: Vec<(ObjId, Ns, Row)>,
@@ -1536,13 +1537,13 @@ impl Analyzer {
             }
             if in_summary {
                 if let Some(top) = self.sum_obs.last_mut() {
-                    top.push(Obs { line: ob.line, name: ob.name.clone(), rows, must: ob.must.clone(), value });
+                    top.push(Obs { file: ob.file.clone(), line: ob.line, name: ob.name.clone(), rows, must: ob.must.clone(), value });
                 }
             } else {
                 let ns = rows.first().map(|r| r.1).unwrap_or(Ns::Item);
                 let row = if rows.is_empty() { None } else { Some(ob.must.iter().fold(crate::domain::join_rows(rows.into_iter().map(|r| r.2)), |r, k| r.store(*k, true))) };
                 let value = self.value_info(&value);
-                self.row_checks.push(crate::interp::RowCheck { line: ob.line, name: ob.name.clone(), row, ns, value, tensor: None });
+                self.row_checks.push(crate::interp::RowCheck { file: ob.file.clone(), line: ob.line, name: ob.name.clone(), row, ns, value, tensor: None });
             }
         }
         // hover facts inside the body, for this call

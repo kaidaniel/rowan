@@ -339,9 +339,9 @@ pub fn golden_json(an: &Analyzer) -> J {
         .map(|rc| {
             let value = json!({"lits": rc.value.lits.iter().map(|k| key_repr(*k)).collect::<Vec<_>>(), "unknown": rc.value.unknown, "objects": rc.value.objects});
             let mut out = match &rc.row {
-            None => json!({"line": rc.line, "name": rc.name, "row": J::Null, "value": value}),
+            None => json!({"file": rc.file, "line": rc.line, "name": rc.name, "row": J::Null, "value": value}),
             Some(r) => json!({
-                "line": rc.line, "name": rc.name, "value": value,
+                "file": rc.file, "line": rc.line, "name": rc.name, "value": value,
                 "row": {
                     "present": r.present.iter().map(key_repr).collect::<Vec<_>>(),
                     "definite": r.definite.iter().map(key_repr).collect::<Vec<_>>(),

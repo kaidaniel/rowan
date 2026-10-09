@@ -263,10 +263,25 @@ def row_problems(row: Dict[str, Any], spec: Dict[str, Any]) -> str:
     return "; ".join(problems)
 
 
+def case_files(path: str) -> List[Tuple[str, str]]:
+    """(path relative to the entry's directory, "" for the entry; source) of the files whose
+    directives a case checks: the entry and, in a package case (a directory whose name shares
+    the entry's prefix: `k94_pkg/k94_modules.py`), every module under that directory."""
+    with open(path, encoding="utf-8") as f:
+        out = [("", f.read())]
+    d = os.path.dirname(os.path.abspath(path))
+    prefix = os.path.basename(path).split("_")[0]
+    if prefix and os.path.basename(d).startswith(prefix + "_"):
+        for p in sorted(glob.glob(os.path.join(d, "**", "*.py"), recursive=True)):
+            if os.path.abspath(p) != os.path.abspath(path):
+                with open(p, encoding="utf-8") as f:
+                    out.append((os.path.relpath(p, d), f.read()))
+    return out
+
+
 def run_case(path: str, verbose: bool = False) -> Tuple[bool, List[str]]:
     with open(path, encoding="utf-8") as f:
         src = f.read()
-    verdict_exp, row_exp, schema_exp = collect_expectations(src)
     # `#@argv ...`: extra engine arguments for this case (relative paths against its dir)
     argv: List[str] = []
     m = re.search(r"^#@argv\s+(.*)$", src, re.M)
@@ -283,10 +298,27 @@ def run_case(path: str, verbose: bool = False) -> Tuple[bool, List[str]]:
         res = json.loads(out.stdout)
     except json.JSONDecodeError as e:
         return False, [f"bad JSON from rowan: {e}: {out.stdout[:200]}"]
+    failures: List[str] = []
+    for rel, fsrc in case_files(path):
+        fails = check_file(fsrc, rel, res)
+        failures += [f"{rel}: {f}" if rel else f for f in fails]
+    if verbose or failures:
+        print(f"\n===== {os.path.basename(path)} =====")
+        print(res["report"])
+    return not failures, failures
+
+
+def check_file(src: str, rel: str, res: Dict[str, Any]) -> List[str]:
+    """Check the directives of one file of a case (`rel`: "" for the entry) against rowan's
+    golden output for the whole case."""
+    verdict_exp, row_exp, schema_exp = collect_expectations(src)
+    rows_here = [rc for rc in res["rows"] if rc.get("file", "") == rel]
+    # verdicts in this file (or reached through a call on one of its lines: the chain)
+    vs_here = [v for v in res["verdicts"] if (v.get("file") or "") == rel or v.get("chain")]
     # a line can run several times (a function called from several places, or analysed as an
     # entry point with open parameters): its row is the join over the runs
     joined: Dict[Tuple[int, str], Any] = {}
-    for rc in res["rows"]:
+    for rc in rows_here:
         key = (rc["line"], rc["name"])
         r = rc["row"]
         if key not in joined:
@@ -319,7 +351,7 @@ def run_case(path: str, verbose: bool = False) -> Tuple[bool, List[str]]:
                 row_checks.append((ln, name, spec, "statement never executed"))
     # values: joined over the runs of the line like rows
     values: Dict[Tuple[int, str], Dict[str, Any]] = {}
-    for rc in res["rows"]:
+    for rc in rows_here:
         v = rc.get("value")
         if v is None:
             continue
@@ -346,12 +378,13 @@ def run_case(path: str, verbose: bool = False) -> Tuple[bool, List[str]]:
                 if lost:
                     prob = f"value {desc} leaves out {sorted(lost)}"
             row_checks.append((ln, f"value of {name}", spec, prob))
-    failures = check_results(verdict_exp, row_checks, schema_exp, res["verdicts"], res["schemas"])
-    failures += SHAPES[0].check(res)
-    if verbose or failures:
-        print(f"\n===== {os.path.basename(path)} =====")
-        print(res["report"])
-    return not failures, failures
+    failures = check_results(verdict_exp, row_checks, schema_exp, [v if (v.get("file") or "") == rel else dict(v, line=-1) for v in vs_here], res["schemas"])
+    if not rel:
+        failures += SHAPES[0].check(res)
+    return failures
+
+
+SUITES = ("torch", "pandas", "pydantic", "fastapi", "stdlib", "apps", "numpy")
 
 
 def main(argv: List[str]) -> int:
@@ -363,7 +396,7 @@ def main(argv: List[str]) -> int:
     # suites (tests/torch/, tests/pandas/: {small,models}/*.py): every file is a case, except
     # the ones listed in the suite's PENDING (written, not yet expected to pass; `--pending`
     # runs only those)
-    suites = [os.path.join(HERE, d) for d in ("torch", "pandas") if os.path.isdir(os.path.join(HERE, d))]
+    suites = [os.path.join(HERE, d) for d in SUITES if os.path.isdir(os.path.join(HERE, d))]
     pending: Dict[str, str] = {}  # case path -> suite dir
     for sd in suites:
         pf = os.path.join(sd, "PENDING")
@@ -373,7 +406,13 @@ def main(argv: List[str]) -> int:
                     name = ln.split("#")[0].strip()
                     if name:
                         pending[os.path.join(sd, name)] = sd
+    # a suite case is a file in `small/` / `models/`, or the entry of a package case below them
+    # (`apps/large/a01_shop/a01_main.py`)
     suite_cases = sorted(p for sd in suites for p in glob.glob(os.path.join(sd, "*", "*.py")))
+    for sd in suites:
+        for d in sorted(glob.glob(os.path.join(sd, "*", "*", ""))):
+            prefix = os.path.basename(os.path.dirname(d)).split("_")[0]
+            suite_cases += sorted(glob.glob(os.path.join(d, prefix + "_*.py")))
     if not args:
         if pending_only:
             paths = [p for p in suite_cases if p in pending]
@@ -383,7 +422,7 @@ def main(argv: List[str]) -> int:
     # prefix: `k94_pkg/k94_modules.py`); the other files are modules it imports
     def is_case(p):
         d = os.path.basename(os.path.dirname(p))
-        if d == "cases" or os.path.dirname(os.path.dirname(p)) in suites:
+        if d == "cases" or os.path.dirname(os.path.dirname(p)) in suites or p in suite_cases:
             return True
         prefix = d.split("_")[0]
         return os.path.basename(p).startswith(prefix + "_")
