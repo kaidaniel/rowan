@@ -22,7 +22,7 @@ A verdict matches a line if it was recorded at that line or while a call made fr
 active.  A `#@` directive must be the last thing on its line (the key runs to its end).
 
     python tests/run_golden.py [-v] [case…]
-    python tests/run_golden.py --pending [--prune]   # the pending torch cases (prune: drop passing ones)
+    python tests/run_golden.py --pending [--prune]   # the pending torch / pandas cases (prune: drop passing ones)
 """
 from __future__ import annotations
 
@@ -76,7 +76,10 @@ def collect_expectations(src: str):
     SHAPES[0] = ShapeExpectations()
     SHAPES[0].eff = directive_lines(src)
     schema_exp: List[Tuple[str, Dict[str, Any]]] = []
-    for i, line in enumerate(src.splitlines(), 1):
+    eff = SHAPES[0].eff
+    for i0, line in enumerate(src.splitlines(), 1):
+        # a line holding only a directive comment applies to the code line above it
+        i = eff[i0] if i0 < len(eff) else i0
         if "#@todo" in line:
             TODO_COUNT[0] += 1
             if os.environ.get("ROWAN_TODO") != "check":
@@ -87,7 +90,7 @@ def collect_expectations(src: str):
             line = re.sub(r"#@todo\s+schema\b", "#@schema", line)
             line = re.sub(r"#@todo\s+(shape|dim|requires)\b", r"#@\1", line)
             line = re.sub(r"#@todo\s+", "#@ ", line)
-        if SHAPES[0].parse_line(i, line):
+        if SHAPES[0].parse_line(i0, line):
             continue
         m = re.search(r"#@value\s+(.*)$", line)
         if m:
@@ -328,25 +331,30 @@ def main(argv: List[str]) -> int:
     pending_only = "--pending" in argv
     paths = args or sorted(glob.glob(os.path.join(HERE, "cases", "*.py"))
                            + glob.glob(os.path.join(HERE, "cases", "*", "*.py")))
-    # torch cases (tests/torch/{small,models}/): every file is a case, except the ones listed
-    # in tests/torch/PENDING (written, not yet expected to pass; `--pending` runs only those)
-    torch_dir = os.path.join(HERE, "torch")
-    pending = set()
-    if os.path.exists(os.path.join(torch_dir, "PENDING")):
-        with open(os.path.join(torch_dir, "PENDING")) as f:
-            pending = {ln.split("#")[0].strip() for ln in f if ln.split("#")[0].strip()}
-    torch_cases = sorted(glob.glob(os.path.join(torch_dir, "*", "*.py")))
-    rel = lambda p: os.path.relpath(p, torch_dir)  # noqa: E731
+    # suites (tests/torch/, tests/pandas/: {small,models}/*.py): every file is a case, except
+    # the ones listed in the suite's PENDING (written, not yet expected to pass; `--pending`
+    # runs only those)
+    suites = [os.path.join(HERE, d) for d in ("torch", "pandas") if os.path.isdir(os.path.join(HERE, d))]
+    pending: Dict[str, str] = {}  # case path -> suite dir
+    for sd in suites:
+        pf = os.path.join(sd, "PENDING")
+        if os.path.exists(pf):
+            with open(pf) as f:
+                for ln in f:
+                    name = ln.split("#")[0].strip()
+                    if name:
+                        pending[os.path.join(sd, name)] = sd
+    suite_cases = sorted(p for sd in suites for p in glob.glob(os.path.join(sd, "*", "*.py")))
     if not args:
         if pending_only:
-            paths = [p for p in torch_cases if rel(p) in pending]
+            paths = [p for p in suite_cases if p in pending]
         else:
-            paths += [p for p in torch_cases if rel(p) not in pending]
+            paths += [p for p in suite_cases if p not in pending]
     # in a package directory only the entry module is a case (its name shares the directory's
     # prefix: `k94_pkg/k94_modules.py`); the other files are modules it imports
     def is_case(p):
         d = os.path.basename(os.path.dirname(p))
-        if d == "cases" or os.path.dirname(os.path.dirname(p)) == torch_dir:
+        if d == "cases" or os.path.dirname(os.path.dirname(p)) in suites:
             return True
         prefix = d.split("_")[0]
         return os.path.basename(p).startswith(prefix + "_")
@@ -364,14 +372,18 @@ def main(argv: List[str]) -> int:
         for f in fails:
             print(f"        - {f}")
     if pending_only and "--prune" in argv:
-        passed = {os.path.relpath(p, torch_dir) for p, (_n, ok, _f) in zip(paths, results) if ok}
-        with open(os.path.join(torch_dir, "PENDING")) as f:
-            lines = f.read().splitlines()
-        with open(os.path.join(torch_dir, "PENDING"), "w") as f:
-            f.write("\n".join(ln for ln in lines if ln.split("#")[0].strip() not in passed) + "\n")
+        passed = {p for p, (_n, ok, _f) in zip(paths, results) if ok}
+        for sd in suites:
+            pf = os.path.join(sd, "PENDING")
+            if not os.path.exists(pf):
+                continue
+            with open(pf) as f:
+                lines = f.read().splitlines()
+            with open(pf, "w") as f:
+                f.write("\n".join(ln for ln in lines if os.path.join(sd, ln.split("#")[0].strip()) not in passed or not ln.split("#")[0].strip()) + "\n")
         print(f"  pruned {len(passed)} passing cases from PENDING")
     print(f"  {npass}/{len(results)} passed" + (f"  ({TODO_COUNT[0]} #@todo expectations not checked)" if TODO_COUNT[0] else "")
-          + (f"  ({len(pending)} torch cases pending)" if pending and not args and not pending_only else ""))
+          + (f"  ({len(pending)} suite cases pending)" if pending and not args and not pending_only else ""))
     return 0 if ok_all else 1
 
 
