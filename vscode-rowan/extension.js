@@ -5,7 +5,7 @@
 
 const path = require("path");
 const fs = require("fs");
-const { execFile } = require("child_process");
+const { execFile, spawn } = require("child_process");
 
 let vscode = null;
 try {
@@ -184,6 +184,95 @@ function findBinary(config, workspaceFolders, filePath) {
   return null;
 }
 
+/**
+ * One `rowan serve` process per binary path: JSON lines over stdio, requests answered in
+ * order and matched by id.  The server keeps the result of each analysed file and reuses it
+ * while the file and every module it loaded are unchanged.
+ */
+const servers = new Map();
+
+function getServer(bin, extraArgs) {
+  const key = bin + "\u0000" + extraArgs.join("\u0000");
+  let srv = servers.get(key);
+  if (srv && !srv.dead) return srv;
+  const child = spawn(bin, ["serve", ...extraArgs], { stdio: ["pipe", "pipe", "pipe"] });
+  srv = { child, pending: new Map(), nextId: 1, dead: false, buffer: "" };
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    srv.buffer += chunk;
+    let nl;
+    while ((nl = srv.buffer.indexOf("\n")) >= 0) {
+      const line = srv.buffer.slice(0, nl);
+      srv.buffer = srv.buffer.slice(nl + 1);
+      if (!line.trim()) continue;
+      let msg;
+      try {
+        msg = JSON.parse(line);
+      } catch (e) {
+        continue;
+      }
+      const waiter = srv.pending.get(msg.id);
+      if (waiter) {
+        srv.pending.delete(msg.id);
+        waiter(msg);
+      }
+    }
+  });
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", () => {});
+  const fail = () => {
+    srv.dead = true;
+    for (const waiter of srv.pending.values()) waiter({ ok: false, error: "rowan server exited" });
+    srv.pending.clear();
+    if (servers.get(key) === srv) servers.delete(key);
+  };
+  child.on("error", fail);
+  child.on("exit", fail);
+  servers.set(key, srv);
+  return srv;
+}
+
+function serverRequest(srv, req, timeoutSeconds) {
+  return new Promise((resolve) => {
+    const id = srv.nextId++;
+    const timer = setTimeout(() => {
+      srv.pending.delete(id);
+      resolve({ ok: false, error: "rowan server timed out" });
+    }, timeoutSeconds * 1000);
+    srv.pending.set(id, (msg) => {
+      clearTimeout(timer);
+      resolve(msg);
+    });
+    try {
+      srv.child.stdin.write(JSON.stringify({ id, ...req }) + "\n");
+    } catch (e) {
+      clearTimeout(timer);
+      srv.pending.delete(id);
+      resolve({ ok: false, error: String(e) });
+    }
+  });
+}
+
+function stopServers() {
+  for (const srv of servers.values()) {
+    try {
+      srv.child.stdin.write(JSON.stringify({ id: 0, cmd: "shutdown" }) + "\n");
+      srv.child.kill();
+    } catch (e) {
+      /* already gone */
+    }
+  }
+  servers.clear();
+}
+
+async function runEngineServer(bin, file, extraArgs, timeoutSeconds, changed) {
+  const srv = getServer(bin, extraArgs);
+  if (changed && changed.length) await serverRequest(srv, { cmd: "changed", paths: changed }, timeoutSeconds);
+  const msg = await serverRequest(srv, { cmd: "analyse", path: file }, timeoutSeconds);
+  if (!msg.ok) throw new Error(msg.error || "rowan server error");
+  return msg.result;
+}
+
 function runEngine(bin, file, extraArgs, timeoutSeconds) {
   return new Promise((resolve, reject) => {
     execFile(bin, [file, "--facts", ...extraArgs], { maxBuffer: 256 * 1024 * 1024, timeout: timeoutSeconds * 1000 }, (err, stdout, stderr) => {
@@ -240,7 +329,19 @@ function activate(context) {
     status.text = "$(sync~spin) rowan";
     status.show();
     try {
-      const res = await runEngine(bin, doc.uri.fsPath, config.get("extraArgs") || [], config.get("timeoutSeconds") || 60);
+      const extraArgs = config.get("extraArgs") || [];
+      const timeoutSeconds = config.get("timeoutSeconds") || 60;
+      let res;
+      if (config.get("useServer") !== false) {
+        // the saved file changed: the server drops every result that depends on it
+        try {
+          res = await runEngineServer(bin, doc.uri.fsPath, extraArgs, timeoutSeconds, [doc.uri.fsPath]);
+        } catch (e) {
+          res = await runEngine(bin, doc.uri.fsPath, extraArgs, timeoutSeconds);
+        }
+      } else {
+        res = await runEngine(bin, doc.uri.fsPath, extraArgs, timeoutSeconds);
+      }
       const idx = indexResult(res);
       results.set(doc.uri.fsPath, idx);
       const diags = [];
@@ -308,6 +409,8 @@ function activate(context) {
   }
 }
 
-function deactivate() {}
+function deactivate() {
+  stopServers();
+}
 
 module.exports = { activate, deactivate, renderHover, describeRow, indexResult, severityFor, findBinary };

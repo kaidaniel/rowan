@@ -66,7 +66,27 @@ impl Node {
     }
 }
 
+thread_local! {
+    /// parsed modules by (path, content hash): a long-lived process (`rowan serve`) parses
+    /// each version of a file once, and the leaked trees stay bounded by distinct versions
+    static PARSE_CACHE: std::cell::RefCell<std::collections::HashMap<(String, u64), (u32, &'static ast::ModModule)>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// A content hash for cache keys (not cryptographic).
+pub fn content_hash(source: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    source.hash(&mut h);
+    h.finish()
+}
+
 pub fn parse(name: &str, path: Option<&str>, source: String) -> Result<(u32, &'static ast::ModModule), String> {
+    let key = path.map(|p| (p.to_string(), content_hash(&source)));
+    if let Some(k) = &key {
+        if let Some(hit) = PARSE_CACHE.with(|c| c.borrow().get(k).copied()) {
+            return Ok(hit);
+        }
+    }
     let parsed = ruff_python_parser::parse_module(&source).map_err(|e| format!("{}: {}", path.unwrap_or(name), e))?;
     let module: &'static ast::ModModule = Box::leak(Box::new(parsed.into_syntax()));
     let lines = LineIndex::from_source_text(&source);
@@ -86,6 +106,9 @@ pub fn parse(name: &str, path: Option<&str>, source: String) -> Result<(u32, &'s
             r.nodes.insert(a, idx);
         }
     });
+    if let Some(k) = key {
+        PARSE_CACHE.with(|c| c.borrow_mut().insert(k, (idx, module)));
+    }
     Ok((idx, module))
 }
 

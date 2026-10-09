@@ -21,6 +21,14 @@ uv run --no-project python tests/run_golden.py    # golden suite (92 cases)
 uv run --no-project python tests/run_snapshots.py # output snapshots on larger inputs
 ```
 
+`rowan serve` keeps one process alive and speaks JSON lines over stdio:
+`{"id":1,"cmd":"analyse","path":"/abs/file.py"}` answers with the `--facts` document under
+`result` (plus `cached`, `ms` and `deps`, the modules it loaded); the result is reused while
+the file and every module it loaded are unchanged (content hashes), `{"cmd":"changed",
+"paths":[…]}` drops the results that depend on those files, `{"cmd":"shutdown"}` exits.
+Parsed modules are kept per (path, content hash). The VS Code extension uses it by default
+(`rowan.useServer`).
+
 Options: `--no-rows`, `--no-summaries`, `--no-entry`, `--no-imports`, `--search-path DIR`
 (repeatable; the file's directory and the directory above its outermost package are
 searched first). Imports are followed into local modules and packages (`pkg/__init__.py`,

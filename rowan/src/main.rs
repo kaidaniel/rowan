@@ -15,9 +15,11 @@ fn main() {
     let mut entry = true;
     let mut imports = true;
     let mut search: Vec<String> = Vec::new();
+    let mut serve = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
+            "serve" => serve = true,
             "--search-path" => match it.next() {
                 Some(d) => search.push(d.clone()),
                 None => {
@@ -38,6 +40,19 @@ fn main() {
             }
             other => file = Some(other.to_string()),
         }
+    }
+    if serve {
+        let search2 = search.clone();
+        let out = std::thread::Builder::new()
+            .stack_size(1 << 30)
+            .spawn(move || serve_loop(search2, entry, imports))
+            .unwrap()
+            .join();
+        if out.is_err() {
+            eprintln!("rowan: server panicked");
+            std::process::exit(1);
+        }
+        return;
     }
     let Some(file) = file else {
         eprintln!("usage: rowan FILE.py [--json|--golden|--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports] [--search-path DIR]...");
@@ -65,8 +80,79 @@ fn main() {
     }
 }
 
+/// `rowan serve`: JSON lines over stdio. Requests: `{"cmd":"analyse","path":P}` (also
+/// `"facts"`) returns the `--facts` document for `P`, from a cache when `P` and every module
+/// it loaded are unchanged (content hashes); `{"cmd":"changed","paths":[…]}` drops the
+/// cached results that depend on those files; `{"cmd":"shutdown"}` exits. Every response
+/// echoes the request's `id` and carries `ok`; a result has `cached`, `ms`, `deps` and
+/// `result`. Parsed trees are cached per (path, content hash) in the process.
+fn serve_loop(search: Vec<String>, entry: bool, imports: bool) {
+    use std::io::{BufRead, Write};
+    let stdin = std::io::stdin();
+    let mut out = std::io::stdout();
+    let mut cache: std::collections::HashMap<String, (Vec<(String, u64)>, String)> = std::collections::HashMap::new();
+    let file_hash = |p: &str| -> Option<u64> { std::fs::read_to_string(p).ok().map(|s| rowan::frontend::content_hash(&s)) };
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let req: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = writeln!(out, "{}", serde_json::json!({"ok": false, "error": format!("bad request: {}", e)}));
+                let _ = out.flush();
+                continue;
+            }
+        };
+        let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let cmd = req.get("cmd").and_then(|c| c.as_str()).unwrap_or("").to_string();
+        let reply = match cmd.as_str() {
+            "analyse" | "facts" => {
+                let path = req.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                let t0 = std::time::Instant::now();
+                let fresh = cache.get(&path).filter(|(deps, _)| deps.iter().all(|(p, h)| file_hash(p) == Some(*h))).map(|(deps, r)| (deps.clone(), r.clone()));
+                match fresh {
+                    Some((deps, result)) => {
+                        let dep_paths: Vec<&str> = deps.iter().map(|(p, _)| p.as_str()).collect();
+                        format!("{{\"id\":{},\"ok\":true,\"path\":{},\"cached\":true,\"ms\":{},\"deps\":{},\"result\":{}}}", id, serde_json::json!(path), t0.elapsed().as_millis(), serde_json::json!(dep_paths), result)
+                    }
+                    None => match run_with_deps(&path, search.clone(), false, false, true, true, true, entry, imports) {
+                        Ok((result, deps)) => {
+                            let hashed: Vec<(String, u64)> = deps.iter().map(|p| (p.clone(), file_hash(p).unwrap_or(0))).collect();
+                            cache.insert(path.clone(), (hashed, result.clone()));
+                            format!("{{\"id\":{},\"ok\":true,\"path\":{},\"cached\":false,\"ms\":{},\"deps\":{},\"result\":{}}}", id, serde_json::json!(path), t0.elapsed().as_millis(), serde_json::json!(deps), result)
+                        }
+                        Err(e) => serde_json::json!({"id": id, "ok": false, "path": path, "error": e}).to_string(),
+                    },
+                }
+            }
+            "changed" => {
+                let paths: Vec<String> = req.get("paths").and_then(|p| p.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()).unwrap_or_default();
+                let before = cache.len();
+                cache.retain(|_, (deps, _)| !deps.iter().any(|(p, _)| paths.contains(p)));
+                serde_json::json!({"id": id, "ok": true, "dropped": before - cache.len()}).to_string()
+            }
+            "shutdown" => {
+                let _ = writeln!(out, "{}", serde_json::json!({"id": id, "ok": true}));
+                let _ = out.flush();
+                break;
+            }
+            other => serde_json::json!({"id": id, "ok": false, "error": format!("unknown command {:?}", other)}).to_string(),
+        };
+        let _ = writeln!(out, "{}", reply);
+        let _ = out.flush();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run(file: &str, search: Vec<String>, json: bool, golden: bool, facts: bool, show_rows: bool, show_summaries: bool, entry: bool, imports: bool) -> Result<String, String> {
+    run_with_deps(file, search, json, golden, facts, show_rows, show_summaries, entry, imports).map(|(s, _)| s)
+}
+
+/// `run`, also returning the paths of every module the analysis loaded (the entry first).
+#[allow(clippy::too_many_arguments)]
+fn run_with_deps(file: &str, search: Vec<String>, json: bool, golden: bool, facts: bool, show_rows: bool, show_summaries: bool, entry: bool, imports: bool) -> Result<(String, Vec<String>), String> {
     let src = std::fs::read_to_string(file).map_err(|e| format!("{}: {}", file, e))?;
     let dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".into());
     let dir = std::fs::canonicalize(&dir).map(|p| p.to_string_lossy().to_string()).unwrap_or(dir);
@@ -96,18 +182,26 @@ fn run(file: &str, search: Vec<String>, json: bool, golden: bool, facts: bool, s
         }
     }
     an.run();
+    let mut deps: Vec<String> = vec![file.to_string()];
+    for (_, &m) in an.modules.iter() {
+        if let Some(p) = &an.module_info(m).path {
+            if !deps.contains(p) {
+                deps.push(p.clone());
+            }
+        }
+    }
     if std::env::var("ROWAN_DEBUG").is_ok() {
         eprintln!("work: {} (tabulations {}, objects {}, {} ms{})", an.work, an.tab_count.values().sum::<usize>(), an.objects.len(), an.started.elapsed().as_millis(), if an.over_deadline() { ", degraded after the deadline" } else { "" });
     }
     if facts {
-        return Ok(serde_json::to_string(&report::facts_json(&an)).unwrap());
+        return Ok((serde_json::to_string(&report::facts_json(&an)).unwrap(), deps));
     }
     if golden {
-        return Ok(serde_json::to_string(&report::golden_json(&an)).unwrap());
+        return Ok((serde_json::to_string(&report::golden_json(&an)).unwrap(), deps));
     }
     if json {
         let lines: Vec<String> = report::to_json(&an).into_iter().map(|j| serde_json::to_string(&j).unwrap()).collect();
-        return Ok(lines.join("\n"));
+        return Ok((lines.join("\n"), deps));
     }
-    Ok(report::format_text(&an, show_rows, show_summaries))
+    Ok((report::format_text(&an, show_rows, show_summaries), deps))
 }

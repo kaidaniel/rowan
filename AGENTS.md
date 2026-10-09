@@ -30,7 +30,7 @@ semantic fixes that the prototype did not have, so the prototype is history, not
 | `rowan/py/` | PyO3 binding (`rowan.analyse(source, …)` / `analyse_file(path)` → `--golden` JSON string). Builds with maturin; see known problems. |
 | `tests/run_golden.py`, `tests/cases/` | golden harness, 94 cases: `a01`–`e36` from the original design (Appendix A and the prototype era), `f37` (recency), `g40`–`g65` (AST node coverage, closures taking closures returning lambdas, reassignment, control flow, inputs indexing results of input functions, classes, string keys, containers, guards, modules, generators, recursion, kwargs forwarding, configs, pandas, annotations, mutation through layers, comprehensions, dispatch, a CLI script, dict methods, a larger mixed program), `h66`–`h72` (larger programs passing objects around: an event bus with closures / bound methods / partials in per-topic lists, a fluent builder and a stage pipeline, a plugin registry with a class decorator and a recursive visitor, a dependency-injection container resolving services in constructors, an order state machine with a nested transition table, a dataclass graph with a stack walk and a defaultdict grouping, a middleware chain of closures over closures), `i73`–`i92` (layered config, an inventory of objects, properties with setters and observers, a tree built from a flat list, command objects with undo, a record pipeline with map / filter / sorted / setdefault, a memoising decorator, context managers, generator chains, exception paths, an inheritance chain with a mixin, NamedTuple / TypedDict, computed string keys, kwargs forwarding, a task queue, a JSON round trip, ranking with enumerate / zip, nested path helpers, feature flags, accumulators), `j93` (one 800-line order-management program: layered settings, dataclass entities, repositories keyed by functions, an event bus, a rule-chain pricer, a guarded state machine, a middleware router, reporting with plugins, a recursive org tree, three scenario runs; all 86 checks pass), `k94_pkg` (three flat modules importing each other), `l95_pkg` (a real package with `__init__.py` re-exports, a subpackage and relative imports), `m96_pkg` (a 1,700-line warehouse system as a package of twelve modules: layered config with profiles, dataclass entities with a dataclass subclass and `__post_init__`, an inventory with FIFO lot consumption and function-keyed indexes, receipts validated by a rule chain, an order book with a repository, pick planning with decorator-registered strategies and box packing, shipping with rate rules and a guarded state machine, an event bus, reports with plugins, a scheduler with generators and a context manager, labels, cycle counts; three scenarios, 155 checks). The `h`, `i` and `j` cases were written as value-analysis specifications *before* running the engine; the engine was fixed until it produced them, and the few expectations that turned out wrong on re-reading carry a comment saying why. `#@todo` directives mark expectations the engine does not meet yet: the harness counts them and does not check them unless `ROWAN_TODO=check` is set (none at present). | Directives: `#@ tier key [; …]`, `#@row`, `#@schema`; a `#@` directive must be the last thing on its line. |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | `--json` output snapshots on `examples/etl_report.py` and three large fixtures (modules of the old prototype kept as analysis *inputs* only). The regression guard for refactors of the internals; `--update` after reviewing a diff. |
-| `vscode-rowan/` | VS Code extension (plain JS): runs `rowan FILE --facts` on open/save, hover = facts for (line, name), verdicts as diagnostics; `node test.js` checks the rendering. |
+| `vscode-rowan/` | VS Code extension (plain JS): talks to `rowan serve` (one process per binary; falls back to `rowan FILE --facts`) on open/save, hover = facts for (line, name), verdicts as diagnostics; `node test.js` checks the rendering. |
 
 Run (Python only for the harness, via `uv`; `.python-version` pins 3.14):
 
@@ -300,12 +300,22 @@ harness on row-check failures). Facts record the rendered text at recording time
    with the entry); the fixes it needed are listed under "From the `m96` package" above.
    Five earlier expectations that said "the comparison is not evaluated" now follow the
    program (`g47`, `g51`, `g56`, `i74`, `i75`, `i78`, `d31`, `j93`'s free shipping).
-6. **Incremental analysis.** Cache per module: parsed AST + module-level facts + the
-   summaries of its functions (signature-keyed after step 3), keyed by the file's content
-   hash and the hashes of the modules it imports; reuse when unchanged. Then a server mode
-   (`rowan serve`, JSON lines over stdio: `analyse {path}`, `changed [{path}]`,
-   `facts {path}`) that keeps the caches warm and re-analyses only changed files and their
-   dependents; the extension talks to it instead of spawning the CLI per save.
+6. **Incremental analysis.** Done as far as it pays today: `rowan serve` (JSON lines over
+   stdio: `analyse` / `facts {path}`, `changed [paths]`, `shutdown`; `main.rs::serve_loop`)
+   keeps, per analysed file, its result and the content hashes of every module the analysis
+   loaded, and answers from the cache while none changed; parsed trees are cached per
+   (path, content hash) (`frontend::PARSE_CACHE`), so a long-lived process parses each
+   version of a file once and the leak stays bounded by versions. The extension spawns one
+   server per binary (`rowan.useServer`, default on), sends `changed` for the saved file
+   and `analyse`, and falls back to the CLI if the server dies. Measured on `m96_pkg`
+   (1,716 lines): first analysis 160 ms, unchanged repeat 8 ms round trip, after editing an
+   imported module 125 ms. What is *not* done: reusing the summaries of unchanged modules
+   inside a re-analysis. They reference process-local object ids, placeholders and template
+   objects; reuse would mean keeping one `Analyzer` alive across runs, resetting its per-run
+   state (verdicts, facts, states, call cache, budgets) and dropping the summaries whose
+   function or transitive callees live in a changed module. The engine's time is dominated
+   by tabulations driven from the entry module, which a change there redoes anyway, so the
+   gain is bounded; worth doing once a real project shows entries that take seconds.
 7. **Site-packages, allowlisted.** With the cache in place, follow installed pure-Python
    packages (`--follow PKG`, or a config list; a registered model always wins): a library
    then costs once per version. Not pandas / numpy: their column names live in `Index`
@@ -319,7 +329,7 @@ harness on row-check failures). Facts record the rendered text at recording time
    self-referential lines 69 s); a budget hit costs precision, not time.
 8. **More examples** (as time allows), each specified before running.
 
-Status: steps 1–5 done (commits `ea08dab`, `639ca1a`, `ecd773b`, `e95115d` and the
+Status: steps 1–6 done (commits `ea08dab`, `639ca1a`, `ecd773b`, `e95115d` and the
 budget / context commit after it); no `#@todo` expectations remain — `ROWAN_TODO=check` makes
 the harness check any that are added later.
 

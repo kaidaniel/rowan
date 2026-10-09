@@ -27,6 +27,11 @@
           "default": [],
           "description": "Extra arguments for rowan (e.g. [\"--no-entry\"])."
         },
+        "rowan.useServer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Keep one `rowan serve` process per workspace: results are reused while a file and the modules it imports are unchanged, and parsed modules are kept in memory."
+        },
         "rowan.analyseOnSave": {
           "type": "boolean",
           "default": true,
