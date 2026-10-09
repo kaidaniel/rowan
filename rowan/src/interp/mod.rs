@@ -194,6 +194,12 @@ pub struct FuncInfo {
     pub is_property: Cell<bool>,
     pub is_static: Cell<bool>,
     pub is_classmethod: Cell<bool>,
+    /// decorated with `contextlib.contextmanager`
+    pub is_contextmanager: Cell<bool>,
+    /// `functools.cached_property`: the first access stores the value on the instance
+    pub is_cached: Cell<bool>,
+    /// `functools.lru_cache` / `cache`: repeated arguments give the cached result
+    pub is_memo: Cell<bool>,
     pub generator: Cell<Option<ObjId>>,
 }
 
@@ -211,9 +217,22 @@ impl FuncInfo {
             is_property: Cell::new(self.is_property.get()),
             is_static: Cell::new(self.is_static.get()),
             is_classmethod: Cell::new(self.is_classmethod.get()),
+            is_contextmanager: Cell::new(self.is_contextmanager.get()),
+            is_cached: Cell::new(self.is_cached.get()),
+            is_memo: Cell::new(self.is_memo.get()),
             generator: Cell::new(self.generator.get()),
         }
     }
+}
+
+/// The body of a `with` whose manager is a `@contextmanager` generator: run where the
+/// generator (one frame above `depth`) yields.
+pub struct CmHook {
+    pub body: &'static [ast::Stmt],
+    pub target: Option<&'static ast::Expr>,
+    pub depth: usize,
+    pub env_after: Option<IndexMap<StrId, Value>>,
+    pub ran: bool,
 }
 
 #[derive(Debug)]
@@ -227,6 +246,8 @@ pub struct ClassInfo {
     pub dataclass_fields: RefCell<Option<Vec<(String, Option<&'static ast::Expr>)>>>,
     pub typed_dict: bool,
     pub named_tuple: bool,
+    /// subclasses `dict` directly
+    pub dict_base: bool,
     /// attr → classes assigned to self.attr (lazy)
     pub field_classes: RefCell<Option<FxHashMap<String, Vec<ObjId>>>>,
     pub any_fields: RefCell<Option<FxHashSet<String>>>,
@@ -360,6 +381,8 @@ pub enum ViewKind {
     Items,
     Rows,
     Elems,
+    /// `obj.__dict__`: the instance's attributes as a dict
+    Attrs,
 }
 
 impl ViewKind {
@@ -370,6 +393,7 @@ impl ViewKind {
             ViewKind::Items => "items",
             ViewKind::Rows => "rows",
             ViewKind::Elems => "elems",
+            ViewKind::Attrs => "attrs",
         }
     }
     pub fn from_name(n: &str) -> ViewKind {
@@ -399,11 +423,13 @@ pub enum Payload {
     Super(ObjId, Value),
     View(ViewKind, Value),
     Zip(Value, Value),
-    Enumerate(Value),
+    Enumerate(Value, Option<i64>),
     Pair(Value, Value),
     Partial(Value, Vec<Value>, IndexMap<StrId, Value>),
     Groupby(Vec<ObjId>, Option<KeySet>, bool, Option<(KeySet, bool)>),
     Locidx(String, ObjId),
+    /// `range(start, stop, step)` with known bounds
+    Range(i64, i64, i64),
 }
 
 impl Payload {
@@ -434,6 +460,9 @@ pub struct Obj {
     pub copied_from: Option<ObjId>,
     /// access-path depth under an open source (placeholders, elements)
     pub depth: u32,
+    /// a one-shot iterator (generator, generator expression, `iter(...)`): a full iteration
+    /// exhausts it
+    pub iterator: bool,
 }
 
 /// Where a narrowed value is written back (`_narrow_isinstance`'s `store` closure).
@@ -565,6 +594,37 @@ pub struct Analyzer {
     /// per enclosing try (or swallowing with): the joined state at the guarded accesses
     /// that may raise inside it (the handler's entry, precisely)
     pub raise_states: Vec<Option<State>>,
+    /// per enclosing try (parallel to `raise_states`): the frame depth and caller-env depth
+    /// it runs in and the state before it, so a raise inside a callee hands the handler the
+    /// try frame's locals
+    pub try_marks: Vec<(usize, usize, State)>,
+    /// per enclosing try (parallel to `raise_states`): the exceptions raised at those points
+    /// (what the handler's `as` name holds)
+    pub raise_values: Vec<Option<Value>>,
+    /// the exception the next `record_raise_state` is about
+    pub cur_exc: Option<Value>,
+    /// exception names handled by the running `except` clauses (innermost last): what a bare
+    /// `raise` re-raises
+    pub handling: Vec<FxHashSet<String>>,
+    /// the right operand of a comparison link already evaluated (chained comparisons)
+    pub cmp_right: Option<Value>,
+    /// per running comprehension: the cells of its variables (closed over by functions made
+    /// inside it, which see the variable's latest value)
+    pub comp_cells: Vec<FxHashMap<StrId, ObjId>>,
+    /// (canonical key, key as written) while an access with a numerically-equal key runs
+    pub key_alias: Option<(KeyId, KeyId)>,
+    /// a `with` over a `@contextmanager` call: its body runs at the generator's yield
+    pub cm_hook: Option<CmHook>,
+    /// the next user call is analysed concretely (no summary)
+    pub force_tab_once: bool,
+    /// `vars(obj)` dicts: stores into them are stores of obj's attributes
+    pub attr_mirrors: FxHashMap<ObjId, ObjId>,
+    /// Enum classes: their members in definition order
+    pub enum_members: FxHashMap<ObjId, Vec<(String, ObjId)>>,
+    /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
+    pub bypass_setattr: bool,
+    /// results of memoised functions per (function, literal arguments)
+    pub memo_results: FxHashMap<(ObjId, Vec<KeyId>, Vec<(StrId, KeyId)>), Value>,
     pub cond_depth: i32,
     /// like `cond_depth` without loops: a requirement recorded under an `if`/`try`/boolean
     /// operator is "sometimes"; one inside a loop body is per element (always)
@@ -673,6 +733,7 @@ impl Analyzer {
                 derived_from: None,
                 copied_from: None,
                 depth: 0,
+                iterator: false,
             }],
             obj_index: FxHashMap::default(),
             verdicts: Vec::new(),
@@ -692,6 +753,19 @@ impl Analyzer {
             guards: Vec::new(),
             may_raise: Vec::new(),
             raise_states: Vec::new(),
+            try_marks: Vec::new(),
+            raise_values: Vec::new(),
+            cur_exc: None,
+            handling: Vec::new(),
+            cmp_right: None,
+            comp_cells: Vec::new(),
+            key_alias: None,
+            cm_hook: None,
+            force_tab_once: false,
+            attr_mirrors: FxHashMap::default(),
+            enum_members: FxHashMap::default(),
+            bypass_setattr: false,
+            memo_results: FxHashMap::default(),
             cond_depth: 0,
             branch_depth: 0,
             call_chain: Vec::new(),
@@ -868,6 +942,7 @@ impl Analyzer {
             derived_from: None,
             copied_from: None,
             depth: 0,
+            iterator: site.starts_with("gen:"),
         });
         self.obj_index.insert(key, oid);
         oid
@@ -1016,6 +1091,11 @@ impl Analyzer {
         if matches!(cls.tier, Tier::Map | Tier::Sym) {
             return;
         }
+        // a key written as `True` that reached the dict's `1`: reported as written
+        let key = match self.key_alias {
+            Some((c, o)) if c == key => o,
+            _ => key,
+        };
         let text = match text_override {
             Some(t) if !t.is_empty() => t.to_string(),
             _ => self.node_text(node),
@@ -1460,7 +1540,7 @@ impl Analyzer {
                         work.push(par);
                     }
                 }
-                Payload::Method(_, v) | Payload::View(_, v) | Payload::Enumerate(v) => push_value(v, &mut work),
+                Payload::Method(_, v) | Payload::View(_, v) | Payload::Enumerate(v, _) => push_value(v, &mut work),
                 Payload::Bound(f, v) | Payload::Super(f, v) => {
                     work.push(*f);
                     push_value(v, &mut work);
@@ -1636,7 +1716,7 @@ impl Analyzer {
                 Payload::Super(c, v) => Payload::Super(*c, rv(v)),
                 Payload::View(k, v) => Payload::View(*k, rv(v)),
                 Payload::Zip(a, b) => Payload::Zip(rv(a), rv(b)),
-                Payload::Enumerate(v) => Payload::Enumerate(rv(v)),
+                Payload::Enumerate(v, s0) => Payload::Enumerate(rv(v), *s0),
                 Payload::Pair(a, b) => Payload::Pair(rv(a), rv(b)),
                 Payload::Partial(f, args, kw) => Payload::Partial(rv(f), args.iter().map(&rv).collect(), kw.iter().map(|(k, v)| (*k, rv(v))).collect()),
                 Payload::Groupby(fs, ks, ai, sel) => Payload::Groupby(fs.iter().map(|f| *map.get(f).unwrap_or(f)).collect(), ks.clone(), *ai, sel.clone()),

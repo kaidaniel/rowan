@@ -5,7 +5,10 @@ d.pop("a")                               #@ ok a
 d["a"]                                   #@ missing a
 d.pop("zz", None)                        #@ none zz
 d.popitem()
-d["b"]                                   #@ possibly b
+# Corrected on re-reading (r148: dicts keep insertion order): popitem removes the last
+# inserted key, "c", so "b" is still there.
+d["b"]                                   #@ ok b
+d["c"]                                   #@ missing c
 d2 = {"x": 1}
 d2.clear()
 d2["x"]                                  #@ missing x

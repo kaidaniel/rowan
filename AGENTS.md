@@ -28,7 +28,7 @@ cd rowan && cargo build --release && cargo test --release --lib && cd ..
 rowan/target/release/rowan FILE.py [--json|--golden|--facts] [--no-rows --no-summaries --no-entry --no-imports]
                                    [--search-path DIR]… [--follow PKG]… [--site-packages DIR]…
 rowan/target/release/rowan serve                    # JSON lines over stdio (README has the protocol)
-uv run --no-project python tests/run_golden.py      # 133/133 in ~0.6 s; paths select cases; -v shows reports
+uv run --no-project python tests/run_golden.py      # 313/313 in ~1.1 s; paths select cases; -v shows reports
 uv run --no-project python tests/run_snapshots.py   # SAME on 4 snapshots (fixed caps, no deadline); --update after review
 cd vscode-rowan && node test.js && npm run package  # hover rendering check; rebuilds rowan-0.1.0.vsix
 ```
@@ -37,12 +37,13 @@ Env: `ROWAN_DEBUG=1` (decisions: which event tabulates a call, summary used, bud
 cache hits, effort line), `ROWAN_DEBUG=2` (plus every event, raise, guarded access, try
 decision, unreachable statement), `ROWAN_NO=…` (switch one refinement off:
 `recency,scc,site,narrowed,positional` options and the bisecting switches
-`paramnarrow,partialclear,usermodel,dispatch1,inph,isinst,ddfactory,ddnarrow,boundtmpl,bindsub,ifexp,dcfield,split,builtincls,clonectx,sigsum`),
+`paramnarrow,partialclear,usermodel,dispatch1,inph,isinst,ddfactory,ddnarrow,boundtmpl,bindsub,ifexp,dcfield,split,builtincls,clonectx,sigsum`;
+for the r–w rounds `globalrd,raisestate,chaincmp,counterread,range,extinst,whileunroll,matchpat,compcell,dunderdict,numkey,finally,yieldfrom,filteritems,zipn,cmhook,truthdunder,exhaust,getattrdunder,listcat,listinplace,iadd,excvalue,ntmethods,useriter,enummembers,initsubclass,clsattrpath,c3,descriptors,setattrdunder,dictsub,dunmissing,typeddictcall,keysetops,memo,nextend,kwreq,fmtkw,pctmap`),
 `ROWAN_LIMITS=ms=2000,tab=256,call=256,clones=256,chain=2,path=3` (soft deadline, then hard
 caps), `ROWAN_FOLLOW=pkg,…`, `ROWAN_SUMMARIES=0` (old per-call-site engine, comparison only),
 `ROWAN_TODO=check` (harness checks `#@todo` expectations; none exist today).
 
-## Layout (Rust engine `rowan/`, ~18k lines)
+## Layout (Rust engine `rowan/`, ~20k lines)
 
 | file | role |
 | --- | --- |
@@ -58,15 +59,16 @@ caps), `ROWAN_FOLLOW=pkg,…`, `ROWAN_SUMMARIES=0` (old per-call-site engine, co
 | `report.rs` | dedupe, schema table, text / JSON lines / `--golden` / `--facts` (`text` = rendered value). |
 | `main.rs` | CLI, `serve_loop`, `run_with_deps`, site-packages discovery; analysis on a 1 GiB-stack thread. |
 | `rowan/py/` | PyO3 binding; the wheel does not load on this machine (see problems). |
-| `tests/run_golden.py`, `tests/cases/` | 133 golden cases. Directives: `#@ tier key [; …]` (verdict on that line's access), `#@row NAME: present={..} definite={..} closed|open` (row of NAME on that line), `#@schema src@L<n>: always={..}`, `#@todo …` (reported, not checked), `#@argv …` (per-case flags, relative paths against the case dir). A package case is a directory whose entry shares its prefix (`k94_pkg/k94_modules.py`); other files there are modules. |
+| `tests/run_golden.py`, `tests/cases/` | 313 golden cases. Directives: `#@ tier key [; …]` (verdict on that line's access), `#@row NAME: present={..} definite={..} closed|open` (row of NAME on that line), `#@schema src@L<n>: always={..}`, `#@todo …` (reported, not checked), `#@argv …` (per-case flags, relative paths against the case dir). A package case is a directory whose entry shares its prefix (`k94_pkg/k94_modules.py`); other files there are modules. |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | `--json` snapshots on the example and three old-prototype modules (inputs only); the regression guard for internals. |
 | `vscode-rowan/` | extension: talks to `rowan serve` (falls back to the CLI), hover = facts for (line, name), verdicts as diagnostics. |
 
 Cases: `a01`–`e36` original design, `f37` recency, `g40`–`g65` AST coverage, `h66`–`h72`
 objects passed around, `i73`–`i92` patterns, `j93` an 830-line system, `k94_pkg` flat
 modules, `l95_pkg` a real package, `m96_pkg` a 1,700-line twelve-module warehouse (155
-checks), `n97_pkg` site-packages, `o98`–`o103`, `p104`–`p105`, `q106`–`q135` one-hypothesis
-cases. Every `h`+ case was written as a value specification *before* running the engine;
+checks), `n97_pkg` site-packages, `o98`–`o103`, `p104`–`p105`, `q106`–`q135` and six rounds
+of 30 more (`r136`–`r165`, `s166`–`s195`, `t196`–`t225`, `u226`–`u255`, `v256`–`v285`,
+`w286`–`w315`, the last on input schemas) one-hypothesis cases. Every `h`+ case was written as a value specification *before* running the engine;
 expectations that turned out wrong carry a comment saying why. Convention: a comparison or
 arithmetic on known numbers / strings is decided; anything involving an unknown value keeps
 both paths and is written as `?`; `json.loads` results are open by design.
@@ -94,23 +96,45 @@ both paths and is written as `?`; `json.loads` results are open by design.
   `sorted` with known literal keys (stable, `reverse=`), `reversed`, slices with known
   bounds, generator yields (with a `next()` cursor), `zip`/`enumerate`/`map` over known
   items keep positions; appends of unknown count keep the prefix (`known_prefix`); `sorted`
-  with unknown keys keeps only the count.
+  with unknown keys keeps only the count. `insert`/`del xs[i]`/`pop`/`clear`/in-place
+  `sort`/`reverse`, `a + b`, `a * n`, step slices, starred targets, `zip(*rows)` and
+  `range` (positions up to 64, bounds decide `in`) keep them too; `xs += ys` extends in
+  place. Dicts keep insertion order in `RowData.order` (`ordered_keys`): iteration,
+  `popitem`, `move_to_end`. One-shot iterators (`Obj.iterator`) are exhausted by a full
+  iteration; numeric keys `True`/`1`/`1.0` are one key (`canon_key`).
 * **Values.** `+ - * // / %` and `< <= > >=` on literals, `len`, `sum`, `bool`, `min`/`max`,
   `%` and f-string formatting with widths, `str.split/partition/join/startswith/endswith`,
   membership in positional containers of literals, `and`/`or`/`not`/`IfExp` on decided
-  truthiness, `x is None`, `==`; `while` tests decided at the head prune; `k in d` on closed
-  records can make a branch dead.
+  truthiness, `x is None`, `==`, chained comparisons, substring `in`, `any`/`all`,
+  `int`/`float` (a literal that is no number raises ValueError), `str.format`, string
+  methods, `reduce`, `filter`; `while` iterations whose test is decided at the head are
+  unrolled (constant tests like `while True` are not); `match` decides literal, singleton,
+  or-, capture and mapping patterns; `k in d` on closed records can make a branch dead.
+  `__bool__`/`__len__` decide truth at control flow (`truth_of`). A summary reads a module
+  name that is rebound anywhere (`Scopes::rebound`) as a deferred load per call site.
 * **Classes.** Dataclass `__init__` (also for subclasses, `super().__init__`,
   `Base.__init__(self,…)`, `__post_init__`), properties with setters, classmethods bound to
   the accessed class, class decorators, `super()` chains, dataclass fields as instance data,
   `ctor_field_classes` + `infer_field_classes` (fields assigned `Cls(...)`, `{}`, `[]`,
   `defaultdict(...)`, annotations) typing attribute placeholders; a dict/list method name on
-  a class-less placeholder uses the container model alone plus a dispatch event.
+  a class-less placeholder uses the container model alone plus a dispatch event. C3 MRO
+  (`mro`; `super()` follows the receiver's MRO), `__init_subclass__`, `__getattr__`,
+  `__setattr__` / `object.__setattr__`, descriptors (`__get__`/`__set__`/`__set_name__`),
+  `__iter__`, `__missing__` on dict subclasses, `__dict__`/`vars()` as the attributes
+  (`ViewKind::Attrs`, `attr_mirrors`), Enum members (`enum_members`), `cached_property`,
+  `lru_cache` (`memo_results`, literal arguments only). `namedtuple`, `itemgetter`,
+  `attrgetter` and `re.match` are small generated modules analysed like imported code.
 * **Exceptions.** `raise`, unknown calls and raising callees mark the enclosing try /
   call; a try body ending in `return`/`break`/`continue` did not raise; a guarded access
   that is definitely missing raises there (the handler starts from the states at the
   raising accesses, `raise_states`); safe builtins do not count; a `with` whose `__exit__`
   returns True swallows; a call whose every path raises leaves the caller unreachable.
+  A `raise` (also inside a callee, `try_marks`) records its state and exception value
+  (`raise_values`: a raised instance, or a KeyError with the key in `args`) for the
+  handler's `as` name; a bare `raise` re-raises the handled names (`handling`). `finally`
+  runs on the normal path, on the try's returns before they leave, and on an escaping
+  exception a `return` in it swallows. `@contextmanager` bodies run at the generator's
+  `yield` (`CmHook`).
 * **Imports.** Local modules and packages (`__init__.py`, `import a.b.c` as attributes,
   relative imports via `ModuleInfo::pkg`, `from pkg import sub`), roots = file dir, the dir
   above its outermost package, `--search-path`; allowlisted installed packages
@@ -129,7 +153,7 @@ both paths and is written as `?`; `json.loads` results are open by design.
 
 | input | time | notes |
 | --- | --- | --- |
-| golden suite (133 cases) | 0.6 s | one process per case |
+| golden suite (313 cases) | 1.1 s | one process per case |
 | `j93_order_system.py` (830 lines) / `m96_pkg` (1,716 lines) | 0.09 s / 0.10 s | all checks pass |
 | `tests/fixtures/proto_summary.py` (1.2k lines, self-referential) | 2.5 s (hits the deadline) | 0 ✗, 28 ⚠ |
 | old prototype `interp.py` (3.4k lines) | ~70 s before the deadline existed | 961 ✗, noisy (see problems) |
@@ -145,8 +169,12 @@ both paths and is written as `?`; `json.loads` results are open by design.
 * A store through a name holding several objects is weak on each (golden `h72`, `maybe`).
 * An unknown call whose arguments hold records may alias them; its attribute row is open.
 * Mutual recursion widens after 3 rounds; `while` loops with unknown conditions join;
-  comparisons on unknown values keep both branches; `match` does not narrow; no computed
-  `getattr`; pandas columns from data stay open.
+  comparisons on unknown values keep both branches; `match` class / sequence patterns stay
+  undecided; `getattr` needs a known name; pandas columns from data stay open.
+* `dict(zip(keys, row))` with a row of unknown length makes every key definite (design
+  case `d30`); with both lengths known zip stops at the shorter. A `for` over a one-shot
+  iterator exhausts it even when the loop breaks. `ChainMap` is a merged copy (stores do
+  not reach the first map). `lru_cache` results are flow-insensitive.
 * Recency's flow-insensitive side tables other than `cls_slots` are not renamed (stale
   cache entries only waste memory). `Row::concretise` resolves referenced entry rows
   transitively. ASTs are leaked per file version.
@@ -161,5 +189,6 @@ example, server, site-packages, more examples) is complete; each step was one co
 items, in the order they seem worth doing: (1) summary reuse across runs in the server;
 (2) the weak store through several objects (path-sensitive ownership or a narrowed row on
 the name); (3) precision on self-referential programs and a runtime oracle on real repos;
-(4) more one-hypothesis cases — writing expectations *before* running the engine has found
-a real bug in roughly one case out of four. Keep this file under 200 lines.
+(4) more one-hypothesis cases — writing expectations *before* running the engine found 75
+engine bugs in the six rounds r–w (21, 13, 22, 12, 2, 5): library and protocol models
+dominate; the core flow / aliasing round (v) found two. Keep this file under 200 lines.

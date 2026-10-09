@@ -60,8 +60,10 @@ while w["n"] < 10:                   #@ ok n
         break
 else:
     w["done"] = True
-w["big"]                             #@ possibly big
-w["done"]                            #@ possibly done
+# Corrected on re-reading (r140 unrolls `while` loops whose test is decided at every head): n reaches 6 > 5,
+# which sets "big" and breaks, so the else never runs.
+w["big"]                             #@ ok big
+w["done"]                            #@ missing done
 w["n"]                               #@ ok n
 
 # For / else / continue
@@ -104,7 +106,7 @@ r["b"]                               #@ ok b
 with open("f") as fh:
     cfg2 = json.load(fh)
 cfg2["key"]                          #@ input key
-#@schema json.load@L105: always={key}
+#@schema json.load@L107: always={key}
 
 # Global / Nonlocal
 G = {"g": 1}

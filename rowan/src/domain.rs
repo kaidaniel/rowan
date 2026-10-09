@@ -491,6 +491,18 @@ pub fn source_label(s: SourceId) -> String {
 // Row
 // ---------------------------------------------------------------------------
 
+/// Insertion orders of two joined rows: equal, or one a prefix of the other (the longer
+/// one; the extra keys are not definite then), else unknown.
+fn join_order(a: &Arc<[KeyId]>, b: &Arc<[KeyId]>) -> Arc<[KeyId]> {
+    if a == b || b.len() <= a.len() && a[..b.len()] == b[..] {
+        a.clone()
+    } else if b[..a.len().min(b.len())] == a[..] {
+        b.clone()
+    } else {
+        Arc::from(Vec::new())
+    }
+}
+
 pub type SrcSet = IdSet<(SourceId, LensId)>;
 pub type TermSet = IdSet<(Rho, LensId)>;
 pub type PStoreSet = IdSet<(Rho, bool, LensId)>;
@@ -510,6 +522,9 @@ pub struct RowData {
     pub dterms: TermSet,
     pub lterms: TermSet,
     pub pstores: PStoreSet,
+    /// insertion order of the keys stored strongly (a dict iterates in this order); it
+    /// describes the row only when it holds exactly the present keys (`ordered_keys`)
+    pub order: Arc<[KeyId]>,
 }
 
 /// Provision facts for one (object, namespace) at one program point; immutable, shared,
@@ -674,12 +689,34 @@ impl Row {
             dterms: join_dterms(&self.dterms, &o.dterms),
             lterms: join_dterms(&self.lterms, &o.lterms),
             pstores: join_pstores(&self.pstores, &o.pstores),
+            order: join_order(&self.order, &o.order),
         })
+    }
+
+    /// The same row with its insertion order replaced.
+    pub fn with_order(&self, order: Vec<KeyId>) -> Row {
+        let mut d = self.data();
+        d.order = order.into();
+        Row::from_data(d)
+    }
+
+    /// The present keys in insertion order, when the order is known for all of them.
+    pub fn ordered_keys(&self) -> Option<Vec<KeyId>> {
+        if self.order.len() == self.present.len() && self.order.iter().all(|k| self.present.contains(*k)) {
+            Some(self.order.to_vec())
+        } else {
+            None
+        }
     }
 
     // -- transfers (§7.3) --------------------------------------------------
     pub fn store(&self, k: KeyId, strong: bool) -> Row {
         let mut d = self.data();
+        if strong && !d.order.contains(&k) {
+            let mut o = d.order.to_vec();
+            o.push(k);
+            d.order = o.into();
+        }
         d.present = d.present.insert(k);
         if strong {
             d.definite = d.definite.insert(k);
@@ -709,6 +746,9 @@ impl Row {
     pub fn delete(&self, k: KeyId, strong: bool) -> Row {
         let mut d = self.data();
         if strong {
+            if d.order.contains(&k) {
+                d.order = d.order.iter().copied().filter(|x| *x != k).collect::<Vec<_>>().into();
+            }
             d.present = d.present.remove(k);
             d.definite = d.definite.remove(k);
             d.likely = d.likely.remove(k);
@@ -750,6 +790,7 @@ impl Row {
             dterms: self.dterms.map(|(r, l)| (r, push(l))),
             lterms: self.lterms.map(|(r, l)| (r, push(l))),
             pstores: self.pstores.map(|(r, st, l)| (r, st, push(l))),
+            order: self.order.iter().map(|k| step.apply(*k)).collect::<Vec<_>>().into(),
         })
     }
 
@@ -788,6 +829,21 @@ impl Row {
             dterms: if strong { self.dterms.union(&o.dterms.map(|(r, l)| (r, lens_concat(l, pre)))) } else { self.dterms.clone() },
             lterms: if strong { self.lterms.union(&o.lterms.map(|(r, l)| (r, lens_concat(l, pre)))) } else { self.lterms.clone() },
             pstores: self.pstores.union(&o.pstores.map(|(r, st, l)| (r, st && strong, lens_concat(l, pre)))),
+            order: {
+                // a strong copy of a row whose order is known appends its new keys in order
+                let mut ord = self.order.to_vec();
+                match (strong, o.ordered_keys()) {
+                    (true, Some(ks)) => {
+                        for k in ks.into_iter().filter(|k| !kill.contains(*k)).filter_map(|k| lens_apply(chain, k)) {
+                            if !ord.contains(&k) {
+                                ord.push(k);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                ord.into()
+            },
         })
     }
 
@@ -906,6 +962,7 @@ impl Row {
             dterms: TermSet::from_vec(dterms),
             lterms: TermSet::from_vec(lterms),
             pstores: PStoreSet::new(),
+            order: self.order.clone(),
         });
         let mut remaining: Vec<(Rho, bool, LensId)> = Vec::new();
         for (r, strong, l) in self.pstores.union(&PStoreSet::from_vec(pstores)).iter() {

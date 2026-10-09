@@ -17,7 +17,7 @@ rowan/target/release/rowan prog.py                # text report
 rowan/target/release/rowan prog.py --json         # JSON lines (verdicts, schemas, summaries)
 rowan/target/release/rowan prog.py --facts        # per-name facts for editor integration
 rowan/target/release/rowan lib.py --no-entry      # only what the module itself runs (no entry-point pass)
-uv run --no-project python tests/run_golden.py    # golden suite (133 cases)
+uv run --no-project python tests/run_golden.py    # golden suite (313 cases)
 uv run --no-project python tests/run_snapshots.py # output snapshots on larger inputs
 ```
 
@@ -107,7 +107,7 @@ input (becomes a schema entry), `⚠data` data-derived key into a closed record.
 | `rowan/src/summary.rs` | symbolic function summaries (spec §7.3/§9): placeholders, deferred accesses, imprecision events, footprints, instantiation with allocation-site resolution, SCC re-iteration |
 | `rowan/src/models/` | library models: builtins, `dict`/`list`/`str`, `json`/`yaml`/`pickle`, `copy`, `dataclasses`, `collections`, `csv.DictReader`, `argparse`, `os.environ`, `functools.partial`, `requests`, pandas |
 | `rowan/src/report.rs` | per-access verdict combination, schema table, text / JSON / facts output |
-| `tests/run_golden.py`, `tests/cases/` | golden harness: expectations are `#@` comments in the case files (133 cases, each written before running the engine) |
+| `tests/run_golden.py`, `tests/cases/` | golden harness: expectations are `#@` comments in the case files (313 cases, each written before running the engine) |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | output snapshots on the example and three large fixture programs |
 | `examples/etl_report.py` | a realistic script with planted bugs (all found; also golden case e34) |
 | `vscode-rowan/`, `rowan/py/` | VS Code extension (uses `rowan serve`); PyO3 binding (does not load on the current macOS toolchain) |
@@ -148,7 +148,7 @@ input (becomes a schema entry), `⚠data` data-derived key into a closed record.
 
 ## Performance
 
-Release build, Apple M-series: the 133-case golden suite runs in 0.6 s (one process per
+Release build, Apple M-series: the 313-case golden suite runs in 1.1 s (one process per
 case); an 830-line program and a 1,700-line twelve-module package analyse in 0.1 s each;
 a 1.2k-line self-referential module hits the 2 s soft deadline and finishes in 2.5 s with
 reduced precision. 137 scripts from local projects analysed in 0.8 s total without

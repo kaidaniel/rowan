@@ -7,7 +7,9 @@ registry["other"]                               #@ none other
 table = {}
 for i in range(3):
     table[f"col_{i}"] = i
-table["col_1"]                                  #@ none col_1
+# Corrected on re-reading (r159 added a `range` model): range(3) is 0, 1, 2, so "col_1" is
+# definitely stored; "none" recorded that range was not modelled.
+table["col_1"]                                  #@ ok col_1
 
 by_id = {item["id"]: item for item in items}
 by_id[7]                                        #@ none 7

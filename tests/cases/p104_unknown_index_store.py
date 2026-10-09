@@ -24,7 +24,9 @@ class Table:
 t = Table()
 i = t.alloc({"kind": "f", "qualname": "x"})
 j = t.alloc({"kind": "d"})
-k = int("1")
+# Changed when `int` got a model: `int("1")` is now known to be 1, so the index comes from an
+# unknown string instead (the hypothesis is about an unknown index).
+k = int(text_in)
 t.tag(k, {"kind": "ph"})
 # The index is unknown, so the store may have hit either object: qualname is possible.
 first = t.objects[0].payload              #@row first: present={kind,qualname} definite={kind} closed

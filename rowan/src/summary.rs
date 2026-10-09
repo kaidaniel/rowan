@@ -225,7 +225,7 @@ impl Summary {
                     }
                 }
                 Payload::Cls(c) => work.push(*c),
-                Payload::Method(_, v) | Payload::View(_, v) | Payload::Enumerate(v) => push_value(v, &mut work),
+                Payload::Method(_, v) | Payload::View(_, v) | Payload::Enumerate(v, _) => push_value(v, &mut work),
                 Payload::Bound(f, v) | Payload::Super(f, v) => {
                     work.push(*f);
                     push_value(v, &mut work);
@@ -1725,7 +1725,7 @@ impl Inst {
                 let b2 = self.remap_value(an, state, pre, &b);
                 Payload::Zip(a2, b2)
             }
-            Payload::Enumerate(v) => Payload::Enumerate(self.remap_value(an, state, pre, &v)),
+            Payload::Enumerate(v, s0) => Payload::Enumerate(self.remap_value(an, state, pre, &v), s0),
             Payload::Pair(a, b) => {
                 let a2 = self.remap_value(an, state, pre, &a);
                 let b2 = self.remap_value(an, state, pre, &b);
@@ -1810,6 +1810,21 @@ impl Inst {
                 continue;
             }
             let mut v = pre.slot(p, ph.ns, key);
+            if ph.ns == Ns::Attr && an.kind(p) == Kind::Class && v.empty() && !crate::interp::disabled("clsattrpath") {
+                // a class's attribute through a parameter: its class table, or its name
+                if let Some(name) = intern::key_as_str(key) {
+                    if matches!(&*name, "__name__" | "__qualname__") && an.class_lookup(p, &name).is_none() {
+                        let n = an.class_info_opt(p).map(|ci| ci.name.clone()).unwrap_or_default();
+                        acc = acc.join(&Value::lit(intern::key_str_lit(&n)));
+                        continue;
+                    }
+                    let cv = an.class_attr_value(p, &name);
+                    if !cv.empty() {
+                        acc = acc.join(&cv);
+                        continue;
+                    }
+                }
+            }
             if matches!(an.kind(p), Kind::List | Kind::Tuple) && ph.ns == Ns::Item {
                 // `xs[i]` through a placeholder: the positional slot, else the element slot
                 v = match intern::key_as_int(key) {

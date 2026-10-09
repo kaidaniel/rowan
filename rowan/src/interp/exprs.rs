@@ -9,7 +9,7 @@ use crate::intern::{self, key_float, key_int, key_str_lit, s, KeyId, STAR};
 use crate::state::{Kind, State};
 
 use super::funcs::Elem;
-use super::{is_constant, names_in, Analyzer, Payload, SAFE_METHODS, UNROLL_MAX};
+use super::{is_constant, names_in, Analyzer, Payload, ViewKind, SAFE_METHODS, UNROLL_MAX};
 
 impl Analyzer {
     pub fn eval(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {
@@ -66,7 +66,7 @@ impl Analyzer {
                         Payload::Method(q, _) if self.kind(o) == Kind::Method => SAFE_METHODS.contains(&q.as_str()),
                         // user code: whether it raises is reported by its own analysis
                         // builtins that raise only on wrong types (len, str, sorted, …)
-                        Payload::Str(q) if self.kind(o) == Kind::External => q.strip_prefix("builtins.").map(|n| SAFE_BUILTINS.contains(&n)).unwrap_or(false),
+                        Payload::Str(q) if self.kind(o) == Kind::External => q.strip_prefix("builtins.").map(|n| SAFE_BUILTINS.contains(&n) || is_exception_name(n)).unwrap_or(false),
                         _ => matches!(self.kind(o), Kind::Function | Kind::Bound | Kind::Class | Kind::Partial),
                     });
                     if !all_safe {
@@ -107,7 +107,8 @@ impl Analyzer {
                 let tv = self.eval(&i.test, state);
                 // a decided test: one branch only
                 if !super::disabled("ifexp") {
-                    match self.truthiness(&tv, state) {
+                    let nd = frontend::node(node);
+                    match self.truth_of(&tv, state, &nd) {
                         Some(true) => return self.eval(&i.body, state),
                         Some(false) => return self.eval(&i.orelse, state),
                         None => {}
@@ -127,7 +128,7 @@ impl Analyzer {
             ast::Expr::UnaryOp(u) => {
                 let v = self.eval(&u.operand, state);
                 match u.op {
-                    ast::UnaryOp::Not => match self.truthiness(&v, state) {
+                    ast::UnaryOp::Not => match self.truth_of(&v, state, &frontend::node(node)) {
                         Some(b) => Value::lit(intern::key_bool(!b)),
                         None => Value::data("bool"),
                     },
@@ -159,6 +160,23 @@ impl Analyzer {
                     if let Some(b) = self.compare_const(c.ops[0], &a, &c.comparators[0], state) {
                         return Value::lit(intern::key_bool(b));
                     }
+                } else if !super::disabled("chaincmp") {
+                    // `a < b <= c`: each link on the operands' values; a false link decides
+                    // the chain (the rest is not evaluated), all true links make it true
+                    let mut left = a.clone();
+                    let mut all_known = true;
+                    for (op, cmp) in c.ops.iter().zip(c.comparators.iter()) {
+                        let b = self.eval(cmp, state);
+                        match self.compare_values(*op, &left, &b, cmp, state) {
+                            Some(false) => return Value::lit(intern::key_bool(false)),
+                            Some(true) => {}
+                            None => all_known = false,
+                        }
+                        left = b;
+                    }
+                    if all_known {
+                        return Value::lit(intern::key_bool(true));
+                    }
                 }
                 for cmp in c.comparators.iter() {
                     let b = self.eval(cmp, state);
@@ -180,8 +198,15 @@ impl Analyzer {
             ast::Expr::Starred(st) => self.eval(&st.value, state),
             ast::Expr::Await(a) => self.eval(&a.value, state),
             ast::Expr::Yield(y) => {
-                if let Some(v) = &y.value {
-                    let v = self.eval(v, state);
+                let v = match &y.value {
+                    Some(v) => self.eval(v, state),
+                    None => self.none_v.clone(),
+                };
+                if self.cm_hook.as_ref().map(|h| !h.ran && self.frames.len() == h.depth + 1).unwrap_or(false) {
+                    self.run_cm_body(v, state);
+                    return self.none_v.clone();
+                }
+                if y.value.is_some() {
                     self.yield_value(v, state);
                 }
                 Value::data("yield")
@@ -189,21 +214,69 @@ impl Analyzer {
             ast::Expr::YieldFrom(y) => {
                 let v = self.eval(&y.value, state);
                 let nd = frontend::node(&*y.value);
-                let v = self.iterate(&v, &nd, state).elem.flat();
-                self.yield_value(v, state);
+                let it = self.iterate(&v, &nd, state);
+                match it.items {
+                    // known items: yielded one by one, in order
+                    Some(items) if !super::disabled("yieldfrom") => {
+                        for item in items {
+                            self.yield_value(item, state);
+                        }
+                    }
+                    _ => {
+                        self.yield_value(it.elem.flat(), state);
+                        // an unknown number of items: positions after this are unknown
+                        if let Some(foid) = self.frame().func {
+                            if let Some(gid) = self.func_info(foid).generator.get() {
+                                self.obj_mut(gid).literal_len = None;
+                                state.drop_obj_ns(gid, Ns::Pos);
+                            }
+                        }
+                    }
+                }
                 Value::data("yield")
             }
             ast::Expr::Slice(_) => Value::data("slice"),
             ast::Expr::DictComp(dc) => self.expr_dictcomp(dc, node, state),
             ast::Expr::ListComp(lc) => self.seq_comp(node, Kind::List, &lc.elt, &lc.generators, state),
             ast::Expr::SetComp(sc) => self.seq_comp(node, Kind::Set, &sc.elt, &sc.generators, state),
-            ast::Expr::Generator(g) => self.seq_comp(node, Kind::List, &g.elt, &g.generators, state),
+            ast::Expr::Generator(g) => {
+                let v = self.seq_comp(node, Kind::List, &g.elt, &g.generators, state);
+                if let Some(o) = v.single() {
+                    self.obj_mut(o).iterator = true;
+                }
+                v
+            }
             ast::Expr::IpyEscapeCommand(_) => {
                 let nd = frontend::node(node);
                 self.note(format!("unsupported expression IpyEscapeCommand at L{}", nd.line));
                 Value::data(&format!("L{}", nd.line))
             }
         }
+    }
+
+    /// At a `@contextmanager` generator's yield: the with body runs in the caller's frame with
+    /// the target bound to the yielded value, then the generator goes on.
+    fn run_cm_body(&mut self, v: Value, state: &mut State) {
+        let Some(mut h) = self.cm_hook.take() else { return };
+        let callee_fr = self.frames.pop().unwrap();
+        let caller_env = self.env_stack.last().cloned().unwrap_or_default();
+        let callee_env = std::mem::replace(&mut state.env, caller_env);
+        let callee_ret = state.ret.take();
+        let callee_exits = state.exits.take();
+        if let Some(t) = h.target {
+            self.bind_target(t, &v, state);
+        }
+        self.exec_block(h.body, state);
+        let after = std::mem::replace(&mut state.env, callee_env);
+        if let Some(top) = self.env_stack.last_mut() {
+            *top = after.clone();
+        }
+        h.env_after = Some(after);
+        h.ran = true;
+        state.ret = callee_ret;
+        state.exits = callee_exits;
+        self.frames.push(callee_fr);
+        self.cm_hook = Some(h);
     }
 
     fn yield_value(&mut self, v: Value, state: &mut State) {
@@ -370,8 +443,40 @@ impl Analyzer {
     }
 
     fn slice_positional(&mut self, obj: &Value, sl: &'static ast::ExprSlice, node: &'static ast::Expr, state: &mut State) -> Option<Value> {
-        if sl.step.is_some() {
-            return None;
+        if let Some(step_e) = sl.step.as_deref() {
+            // a known step (positive or negative) with known or default bounds
+            let step = self.int_value(step_e, state)?;
+            if step == 0 {
+                return None;
+            }
+            let oid = obj.single()?;
+            let kind = self.kind(oid);
+            if !matches!(kind, Kind::List | Kind::Tuple) {
+                return None;
+            }
+            let n = self.obj(oid).literal_len? as i64;
+            let lo = match sl.lower.as_deref() { None => None, Some(e) => Some(self.int_value(e, state)?) };
+            let hi = match sl.upper.as_deref() { None => None, Some(e) => Some(self.int_value(e, state)?) };
+            let norm = |b: i64| if b < 0 { b + n } else { b };
+            let idx: Vec<i64> = if step > 0 {
+                let s = lo.map(norm).unwrap_or(0).clamp(0, n);
+                let e = hi.map(norm).unwrap_or(n).clamp(0, n);
+                (s..e).step_by(step as usize).collect()
+            } else {
+                let s = lo.map(norm).unwrap_or(n - 1).clamp(-1, n - 1);
+                let e = hi.map(norm).unwrap_or(-1).clamp(-1, n - 1);
+                let mut v = Vec::new();
+                let mut i = s;
+                while i > e {
+                    v.push(i);
+                    i += step;
+                }
+                v
+            };
+            let vals: Vec<Value> = idx.iter().map(|i| state.slot(oid, Ns::Pos, key_int(*i))).collect();
+            let kv = state.elems.get(&oid).unwrap_or(DATA);
+            let nd = frontend::node(node);
+            return Some(self.alloc_positional(kind, &nd, Some(vals), Value::new(), kv, state));
         }
         fn bound(e: &Option<Box<ast::Expr>>) -> Option<Option<i64>> {
             match e {
@@ -415,22 +520,47 @@ impl Analyzer {
         let lo = norm(lo, 0);
         let hi = norm(hi, n);
         let nd = frontend::node(node);
-        let nid = self.alloc_at(kind, &nd, state, &format!("{}@L{}", kind.name(), nd.line), Payload::None, None, Ns::Item, None, None);
         let vals: Vec<Value> = (lo..hi.max(lo)).map(|i| state.slot(oid, Ns::Pos, key_int(i))).collect();
-        let single = self.obj(nid).single;
-        let acc = crate::domain::join_values(vals.clone());
-        state.set_slot(nid, Ns::Elem, STAR, Value::with_kv(acc.pts, DATA), single);
         let kv = state.elems.get(&oid).unwrap_or(DATA);
+        Some(self.alloc_positional(kind, &nd, Some(vals), Value::new(), kv, state))
+    }
+
+    /// A fresh list / tuple at `nd`: with `vals` its positions are known (while the allocation
+    /// is single), otherwise its elements are `elem`; `kv` is its element key-value.
+    pub fn alloc_positional(&mut self, kind: Kind, nd: &Node, vals: Option<Vec<Value>>, elem: Value, kv: KeyVal, state: &mut State) -> Value {
+        let nid = self.alloc_at(kind, nd, state, &format!("{}@L{}", kind.name(), nd.line), Payload::None, None, Ns::Item, None, None);
+        let single = self.obj(nid).single;
+        let acc = match &vals {
+            Some(vs) => crate::domain::join_values(vs.clone()),
+            None => elem,
+        };
+        state.set_slot(nid, Ns::Elem, STAR, Value::with_kv(acc.pts, DATA), single);
         state.elems.insert(nid, kv);
-        if single {
-            self.obj_mut(nid).literal_len = Some(vals.len());
-            for (i, v) in vals.iter().enumerate() {
-                state.set_slot(nid, Ns::Pos, key_int(i as i64), v.clone(), true);
+        match vals {
+            Some(vs) if single => {
+                self.obj_mut(nid).literal_len = Some(vs.len());
+                for (i, v) in vs.iter().enumerate() {
+                    state.set_slot(nid, Ns::Pos, key_int(i as i64), v.clone(), true);
+                }
             }
-        } else {
-            self.obj_mut(nid).literal_len = None;
+            _ => self.obj_mut(nid).literal_len = None,
         }
-        Some(Value::obj(nid))
+        Value::obj(nid)
+    }
+
+    /// `compare_const` on an already evaluated right operand `b` (written as `right`).
+    fn compare_values(&mut self, op: ast::CmpOp, a: &Value, b: &Value, right: &'static ast::Expr, state: &mut State) -> Option<bool> {
+        self.cmp_right = Some(b.clone());
+        let r = self.compare_const(op, a, right, state);
+        self.cmp_right = None;
+        r
+    }
+
+    fn eval_right(&mut self, right: &'static ast::Expr, state: &mut State) -> Value {
+        match self.cmp_right.take() {
+            Some(v) => v,
+            None => self.eval(right, state),
+        }
     }
 
     /// `a is None`, `a is not None`, `a == lit`, `a != lit` when the outcome is decidable
@@ -467,7 +597,17 @@ impl Analyzer {
                 // a literal key in records whose rows decide it
                 if a.pts.is_empty() && a.kv.is_literal() && lits.len() == 1 {
                     let k = lits.iter().next().unwrap();
-                    let b = self.eval(right, state);
+                    let b = self.eval_right(right, state);
+                    // a substring test on known strings
+                    if let (Some(needle), Some(hay)) = (intern::key_as_str(k), b.kv.as_lit().filter(|_| b.pts.is_empty()).and_then(intern::key_as_str)) {
+                        let found = hay.contains(&*needle);
+                        return Some(if op == ast::CmpOp::In { found } else { !found });
+                    }
+                    if b.pts.is_empty() {
+                        if let Some(ph) = b.kv.as_param() {
+                            self.record_event("narrow", ph);
+                        }
+                    }
                     // membership in a placeholder record: decided per call site
                     for o in b.pts.iter() {
                         if super::disabled("inph") {
@@ -477,6 +617,15 @@ impl Analyzer {
                             self.record_event("narrow", o);
                         } else if let Some(src) = self.obj(o).copied_from {
                             self.record_event("narrow", src);
+                        }
+                    }
+                    // a range with known bounds: membership of a known int
+                    if let Some(o) = b.single() {
+                        if let (Payload::Range(lo, hi, step), Some(x)) = (&self.obj(o).payload, intern::key_as_int(k)) {
+                            let (lo, hi, step) = (*lo, *hi, *step);
+                            let inside = if step > 0 { x >= lo && x < hi } else { x <= lo && x > hi };
+                            let member = inside && (x - lo) % step == 0;
+                            return Some(if op == ast::CmpOp::In { member } else { !member });
                         }
                     }
                     // a positional container of known literals: membership is decided
@@ -502,6 +651,45 @@ impl Analyzer {
                             }
                         }
                     }
+                    // a view of a dict: its keys are the dict's (live); its values are decided
+                    // when they are all known literals
+                    if let Some(o) = b.single() {
+                        if let Payload::View(vk, inner) = self.obj(o).payload.clone() {
+                            match vk {
+                                ViewKind::Keys => {
+                                    let b2 = inner;
+                                    let recs = self.record_objects(&b2);
+                                    if !b2.pts.is_empty() && recs.len() == b2.pts.len() && recs.iter().all(|o| matches!(self.kind(*o), Kind::Dict)) {
+                                        let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
+                                        if rows.iter().all(|r| r.definite.contains(k)) {
+                                            return Some(op == ast::CmpOp::In);
+                                        }
+                                        if rows.iter().all(|r| r.closed() && !r.present.contains(k)) {
+                                            return Some(op != ast::CmpOp::In);
+                                        }
+                                    }
+                                    return None;
+                                }
+                                ViewKind::Values => {
+                                    if let Some(d) = inner.single().filter(|d| self.kind(*d) == Kind::Dict) {
+                                        if let Some(items) = self.literal_dict_items(d, state) {
+                                            let mut found = false;
+                                            for (_, v) in &items {
+                                                match v.kv.as_lit().filter(|_| v.pts.is_empty()) {
+                                                    Some(x) if x == k => found = true,
+                                                    Some(_) => {}
+                                                    None => return None,
+                                                }
+                                            }
+                                            return Some(if op == ast::CmpOp::In { found } else { !found });
+                                        }
+                                    }
+                                    return None;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     let recs = self.record_objects(&b);
                     if !b.pts.is_empty() && recs.len() == b.pts.len() && recs.iter().all(|o| matches!(self.kind(*o), Kind::Dict)) {
                         let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
@@ -518,7 +706,7 @@ impl Analyzer {
                 None
             }
             ast::CmpOp::Eq | ast::CmpOp::NotEq => {
-                let b = self.eval(right, state);
+                let b = self.eval_right(right, state);
                 let bl = crate::domain::kv_literals(&b.kv);
                 if !a.pts.is_empty() || !b.pts.is_empty() || !a.kv.is_literal() || !b.kv.is_literal() || lits.len() != 1 || bl.len() != 1 {
                     for v in [&a, &b] {
@@ -539,7 +727,7 @@ impl Analyzer {
             ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE => {
                 // two single literals of one kind (numbers, or strings) are ordered here;
                 // anything else is decided per call site when it is concrete there
-                let b = self.eval(right, state);
+                let b = self.eval_right(right, state);
                 let bl = crate::domain::kv_literals(&b.kv);
                 if !a.pts.is_empty() || !b.pts.is_empty() || !a.kv.is_literal() || !b.kv.is_literal() || lits.len() != 1 || bl.len() != 1 {
                     for v in [&a, &b] {
@@ -569,6 +757,96 @@ impl Analyzer {
     }
 
     /// True/False when a value is definitely truthy/falsy, else None.
+    /// The members of a key view / set / frozenset when they are all known: a keys view of a
+    /// closed dict, a set built from known literals.
+    pub fn known_members(&self, v: &Value, state: &State) -> Option<intern::KeySet> {
+        let o = v.single()?;
+        match (self.kind(o), &self.obj(o).payload) {
+            (Kind::View, Payload::View(ViewKind::Keys, inner)) => {
+                let d = inner.single().filter(|d| self.kind(*d) == Kind::Dict)?;
+                let row = state.row(d, Ns::Item);
+                (row.closed() && row.present == row.definite && !row.symbolic()).then(|| row.present.clone())
+            }
+            (Kind::Set, _) => {
+                let n = self.obj(o).literal_len?;
+                let ks: Option<Vec<KeyId>> = (0..n).map(|i| {
+                    let s = state.slot(o, Ns::Pos, key_int(i as i64));
+                    s.kv.as_lit().filter(|_| s.pts.is_empty())
+                }).collect();
+                ks.map(|k| k.into_iter().collect())
+            }
+            _ => None,
+        }
+    }
+
+    /// The known positions of a list / tuple that can be updated in place (one strong object
+    /// outside loops), else None.
+    pub fn known_positions(&self, oid: u32, state: &State) -> Option<Vec<Value>> {
+        if !matches!(self.kind(oid), Kind::List | Kind::Tuple) || !self.obj(oid).single || self.frame().loop_depth > 0 {
+            return None;
+        }
+        let n = self.obj(oid).literal_len?;
+        Some((0..n).map(|i| state.slot(oid, Ns::Pos, key_int(i as i64))).collect())
+    }
+
+    /// The positions of `oid` become `vals`.
+    pub fn set_positions(&mut self, oid: u32, vals: Vec<Value>, state: &mut State) {
+        let old = self.obj(oid).literal_len.unwrap_or(0);
+        for i in vals.len()..old {
+            state.pop_slot(oid, Ns::Pos, key_int(i as i64));
+        }
+        for (i, v) in vals.iter().enumerate() {
+            state.set_slot(oid, Ns::Pos, key_int(i as i64), v.clone(), true);
+        }
+        let acc = crate::domain::join_values(vals.clone());
+        state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), DATA), true);
+        self.obj_mut(oid).literal_len = Some(vals.len());
+        self.obj_mut(oid).known_prefix = None;
+    }
+
+    /// A one-shot iterator iterated to its end: later iterations see nothing.
+    pub fn exhaust(&mut self, v: &Value, state: &mut State) {
+        if super::disabled("exhaust") {
+            return;
+        }
+        if let Some(o) = v.single() {
+            if self.obj(o).iterator && self.obj(o).single {
+                if let Some(n) = self.obj(o).literal_len {
+                    state.set_slot(o, Ns::Attr, key_str_lit("__cursor"), Value::lit(key_int(n as i64)), true);
+                }
+            }
+        }
+    }
+
+    /// An instance whose class (or a base) defines `__bool__` or `__len__`.
+    pub fn has_truth_dunder(&self, oid: u32) -> bool {
+        match self.instance_class(oid) {
+            Some(c) => self.class_lookup(c, "__bool__").is_some() || self.class_lookup(c, "__len__").is_some(),
+            None => false,
+        }
+    }
+
+    /// `truthiness`, with instances whose class defines `__bool__` / `__len__` decided by
+    /// calling it (control-flow tests).
+    pub fn truth_of(&mut self, v: &Value, state: &mut State, node: &Node) -> Option<bool> {
+        if !v.pts.is_empty() && v.pts.iter().any(|o| self.kind(o) == Kind::Instance && self.has_truth_dunder(o)) && !super::disabled("truthdunder") {
+            let mut verdicts: Vec<bool> = Vec::new();
+            for o in v.pts.iter() {
+                if self.kind(o) != Kind::Instance || !self.has_truth_dunder(o) {
+                    verdicts.push(self.truthiness(&Value::obj(o), state)?);
+                    continue;
+                }
+                let cls = self.instance_class(o).unwrap();
+                let name = if self.class_lookup(cls, "__bool__").is_some() { "__bool__" } else { "__len__" };
+                let r = self.call_method_with(&Value::obj(o), name, Vec::new(), node, state)?;
+                verdicts.push(self.truthiness(&r, state)?);
+            }
+            verdicts.dedup();
+            return if verdicts.len() == 1 { Some(verdicts[0]) } else { None };
+        }
+        self.truthiness(v, state)
+    }
+
     pub fn truthiness(&mut self, v: &Value, state: &State) -> Option<bool> {
         if v.pts.is_empty() && v.kv.is_literal() {
             let lits = crate::domain::kv_literals(&v.kv);
@@ -625,6 +903,7 @@ impl Analyzer {
                     None => return None,
                     Some(n) => verdicts.push(n > 0),
                 },
+                Kind::Instance if self.has_truth_dunder(oid) => return None,
                 Kind::Instance | Kind::Function | Kind::Bound | Kind::Class | Kind::Module | Kind::Namespace => verdicts.push(true),
                 _ => return None,
             }
@@ -645,6 +924,19 @@ impl Analyzer {
                 if let Some(ph) = v.kv.as_param() {
                     self.record_event("narrow", ph);
                 }
+            }
+        }
+        // set operations on key views / sets with known members: a set of the result
+        if matches!(op, ast::Operator::BitAnd | ast::Operator::BitOr | ast::Operator::Sub | ast::Operator::BitXor) && !super::disabled("keysetops") {
+            if let (Some(x), Some(y)) = (self.known_members(a, state), self.known_members(b, state)) {
+                let r = match op {
+                    ast::Operator::BitAnd => x.intersection(&y),
+                    ast::Operator::BitOr => x.union(&y),
+                    ast::Operator::Sub => x.difference(&y),
+                    _ => x.difference(&y).union(&y.difference(&x)),
+                };
+                let vals: Vec<Value> = intern::sorted_by_str(r.iter()).into_iter().map(Value::lit).collect();
+                return self.alloc_positional(Kind::Set, node, Some(vals), Value::new(), KeyVal::lits(r), state);
             }
         }
         if op == ast::Operator::BitOr {
@@ -679,6 +971,17 @@ impl Analyzer {
                     return Value::lit(r);
                 }
             }
+            // two lists with known positions: the concatenation's positions
+            if let (Some(x), Some(y)) = (a.single(), b.single()) {
+                if matches!((self.kind(x), self.kind(y)), (Kind::List, Kind::List) | (Kind::Tuple, Kind::Tuple)) && !super::disabled("listcat") {
+                    let (px, py) = (self.obj(x).literal_len.map(|n| (0..n).map(|i| state.slot(x, Ns::Pos, key_int(i as i64))).collect::<Vec<_>>()), self.obj(y).literal_len.map(|n| (0..n).map(|i| state.slot(y, Ns::Pos, key_int(i as i64))).collect::<Vec<_>>()));
+                    if let (Some(mut px), Some(py)) = (px, py) {
+                        px.extend(py);
+                        let kv = kv_join(&state.elems.get(&x).unwrap_or(DATA), &state.elems.get(&y).unwrap_or(DATA));
+                        return self.alloc_positional(self.kind(x), node, Some(px), Value::new(), kv, state);
+                    }
+                }
+            }
             let lists: Vec<u32> = both.iter().filter(|o| self.kind(*o) == Kind::List).collect();
             if !lists.is_empty() {
                 let oid = self.alloc_at(Kind::List, node, state, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, None);
@@ -695,6 +998,25 @@ impl Analyzer {
                 state.set_slot(oid, Ns::Elem, STAR, acc, true);
                 state.elems.insert(oid, kv.unwrap_or(DATA));
                 return Value::obj(oid);
+            }
+        }
+        if op == ast::Operator::Mult && !super::disabled("listcat") {
+            // a list with known positions times a known count
+            let (seq, cnt) = if a.pts.len() == 1 { (a, b) } else { (b, a) };
+            if let (Some(x), Some(n)) = (seq.single(), cnt.kv.as_lit().filter(|_| cnt.pts.is_empty()).and_then(intern::key_as_int)) {
+                if matches!(self.kind(x), Kind::List | Kind::Tuple) {
+                    if let Some(len) = self.obj(x).literal_len {
+                        if len * (n.max(0) as usize) <= 64 {
+                            let px: Vec<Value> = (0..len).map(|i| state.slot(x, Ns::Pos, key_int(i as i64))).collect();
+                            let mut out: Vec<Value> = Vec::new();
+                            for _ in 0..n.max(0) {
+                                out.extend(px.iter().cloned());
+                            }
+                            let kv = state.elems.get(&x).unwrap_or(DATA);
+                            return self.alloc_positional(self.kind(x), node, Some(out), Value::new(), kv, state);
+                        }
+                    }
+                }
             }
         }
         if op == ast::Operator::Sub {
@@ -721,6 +1043,21 @@ impl Analyzer {
             }
         }
         if op == ast::Operator::Mod {
+            // `"%(name)s" % mapping`: each named field is a read of the mapping
+            if let Some(sx) = a.kv.as_lit().filter(|_| a.pts.is_empty()).and_then(intern::key_as_str) {
+                let recs = self.record_objects(b);
+                if !recs.is_empty() && sx.contains("%(") && !super::disabled("pctmap") {
+                    let mut rest: &str = &sx;
+                    while let Some(i) = rest.find("%(") {
+                        let after = &rest[i + 2..];
+                        let Some(j) = after.find(')') else { break };
+                        let name = after[..j].to_string();
+                        self.load_item(b, Ns::Item, &Value::lit(key_str_lit(&name)), node, state, true);
+                        rest = &after[j..];
+                    }
+                    return Value::data(&format!("fmt@L{}", node.line));
+                }
+            }
             if let Some(x) = a.kv.as_lit() {
                 if let Some(sx) = intern::key_as_str(x) {
                     // the formatted text depends on the arguments: a parameter among them is
@@ -926,7 +1263,9 @@ impl Analyzer {
     // comprehensions ---------------------------------------------------------
     fn comp(&mut self, gens: &'static [ast::Comprehension], state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State)) {
         self.frame_mut().overlays.push(IndexMap::new());
+        self.comp_cells.push(Default::default());
         self.comp_gen(gens, 0, state, body);
+        self.comp_cells.pop();
         self.frame_mut().overlays.pop();
     }
 
@@ -937,6 +1276,7 @@ impl Analyzer {
         }
         let g = &gens[i];
         let itv = self.eval(&g.iter, state);
+        let exhaust_after = itv.clone();
         let gn = frontend::node(&g.iter);
         let it = self.iterate(&itv, &gn, state);
         let understood = g.ifs.iter().all(|c| cond_is_exclusion(c, &g.target));
@@ -963,6 +1303,7 @@ impl Analyzer {
                     }
                 }
                 self.comp_known.pop();
+                self.exhaust(&exhaust_after, state);
                 return;
             }
         }
@@ -1005,7 +1346,7 @@ impl Analyzer {
         let mut decided = true;
         for cond in &g.ifs {
             let cv = self.eval(cond, st);
-            match self.truthiness(&cv, st) {
+            match self.truth_of(&cv, st, &frontend::node(cond)) {
                 Some(true) => {}
                 Some(false) => {
                     st.reachable = false;
@@ -1040,6 +1381,18 @@ impl Analyzer {
             }
         }
         self.bind_iter_target(target, it, state);
+        if !self.comp_cells.is_empty() && !super::disabled("compcell") {
+            // the variable's cell holds its latest value
+            let ctx = self.frame().ctx.clone();
+            let addr = target as *const ast::Expr as usize;
+            for n in names_in(target) {
+                let sid = s(&n);
+                let cid = self.alloc_raw(Kind::Cell, &format!("compcell:{}:{}", addr, n), &ctx, true, &format!("cell {}", n), Payload::None);
+                let v = self.frame().overlays.iter().rev().find_map(|ov| ov.get(&sid).cloned()).unwrap_or_default();
+                state.set_slot(cid, Ns::Cell, super::funcs::cell_key(), v, true);
+                self.comp_cells.last_mut().unwrap().insert(sid, cid);
+            }
+        }
     }
 
     fn expr_dictcomp(&mut self, dc: &'static ast::ExprDictComp, node: &'static ast::Expr, state: &mut State) -> Value {
@@ -1266,10 +1619,15 @@ fn format_percent_literal(fmt: &str, b: &Value, state: &State, an: &Analyzer) ->
 }
 
 /// builtins whose calls do not raise for the values this analysis sees
+/// A builtin exception class: constructing one does not raise.
+pub fn is_exception_name(n: &str) -> bool {
+    n.ends_with("Error") || n.ends_with("Exception") || n.ends_with("Warning") || matches!(n, "StopIteration" | "KeyboardInterrupt" | "SystemExit" | "GeneratorExit")
+}
+
 const SAFE_BUILTINS: &[&str] = &["len", "str", "repr", "bool", "int", "float", "sorted", "reversed", "list", "dict", "set", "tuple", "frozenset", "min", "max", "sum", "abs", "round", "isinstance", "issubclass", "hasattr", "enumerate", "zip", "range", "print", "id", "hash", "type", "callable", "any", "all", "map", "filter", "format", "iter"];
 
 /// `format(value, spec)` for a known literal and a plain spec: `[[fill]align][0][width][.prec][type]`.
-fn format_spec_literal(k: KeyId, spec: &str) -> Option<String> {
+pub(crate) fn format_spec_literal(k: KeyId, spec: &str) -> Option<String> {
     let chars: Vec<char> = spec.chars().collect();
     let mut i = 0;
     let mut fill = ' ';

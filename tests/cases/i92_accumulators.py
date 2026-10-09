@@ -1,5 +1,5 @@
 """Accumulating over a literal list of sales: a defaultdict(int) of totals, a plain dict of
-counts with `.get`, a Counter (open: its keys are data), per-category lists via setdefault.
+counts with `.get`, a Counter (keys from the known items), per-category lists via setdefault.
 
 Expectations were written from the program text before running the engine."""
 from collections import Counter, defaultdict
@@ -13,7 +13,9 @@ for s in SALES:
     counts[s["cat"]] = counts.get(s["cat"], 0) + 1
 _ = 0                                     #@row totals: present={a,b} definite={a,b} closed
 _ = 0                                     #@row counts: present={a,b} definite={a,b} closed
-cnt = Counter(s["cat"] for s in SALES)    #@row cnt: present={} definite={} open
+# Corrected on re-reading (r160): the categories of the three literal sales are known, so the
+# Counter's keys are exactly {a, b}; "open" recorded a modelling limit, not the program.
+cnt = Counter(s["cat"] for s in SALES)    #@row cnt: present={a,b} definite={a,b} closed
 per = {}
 for s in SALES:
     per.setdefault(s["cat"], []).append(s["n"])

@@ -96,6 +96,20 @@ impl Analyzer {
                 closure.insert(sid, cid);
             }
         }
+        // a function made inside a comprehension closes over the comprehension's variables
+        // (at module level they are not "free" in the scope analysis: look at the uses)
+        if !self.comp_cells.is_empty() {
+            let sc = mi.scopes.get(scope);
+            for n in sc.uses.iter().filter(|n| !sc.is_local(n)) {
+                let sid = s(n);
+                if closure.contains_key(&sid) {
+                    continue;
+                }
+                if let Some(cid) = self.comp_cells.iter().rev().find_map(|m| m.get(&sid).copied()) {
+                    closure.insert(sid, cid);
+                }
+            }
+        }
         let mut defaults: IndexMap<StrId, Value> = IndexMap::new();
         if let Some(params) = node.params() {
             for p in params.posonlyargs.iter().chain(params.args.iter()).chain(params.kwonlyargs.iter()) {
@@ -117,6 +131,9 @@ impl Analyzer {
             is_property: std::cell::Cell::new(false),
             is_static: std::cell::Cell::new(false),
             is_classmethod: std::cell::Cell::new(false),
+            is_contextmanager: std::cell::Cell::new(false),
+            is_cached: std::cell::Cell::new(false),
+            is_memo: std::cell::Cell::new(false),
             generator: std::cell::Cell::new(None),
         };
         let n = node.node();
@@ -149,6 +166,9 @@ impl Analyzer {
             if q.ends_with("property") || q == "builtins.property" {
                 if let Some(fi) = &fi {
                     fi.is_property.set(true);
+                    if q.ends_with("cached_property") {
+                        fi.is_cached.set(true);
+                    }
                 }
                 continue;
             }
@@ -157,6 +177,12 @@ impl Analyzer {
                     fi.is_static.set(true);
                 }
                 continue;
+            }
+            if q.ends_with("contextmanager") && !crate::interp::disabled("cmhook") {
+                if let Some(fi) = &fi {
+                    fi.is_contextmanager.set(true);
+                    continue;
+                }
             }
             if q.ends_with("classmethod") {
                 if let Some(fi) = &fi {
@@ -179,6 +205,12 @@ impl Analyzer {
                             }
                         }
                     }
+                }
+                continue;
+            }
+            if matches!(q.as_str(), "functools.lru_cache" | "functools.cache") {
+                if let Some(fi) = &fi {
+                    fi.is_memo.set(true);
                 }
                 continue;
             }
@@ -271,6 +303,14 @@ impl Analyzer {
             }
         }
         if let Some(v) = state.slot_opt(fr_module, Ns::Attr, intern::key(intern::Key::Str(str_get(name)))) {
+            // a summary reading a module name that is rebound elsewhere: the value is the one at
+            // each call site (a deferred load), not the one when the summary was made
+            if fr_kind == FrameKind::Function && self.is_entry_object(fr_module) && !crate::interp::disabled("globalrd") {
+                let data_only = v.pts.iter().all(|o| matches!(self.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance));
+                if data_only && self.module_info(fr_module).scopes.rebound.contains(&*str_get(name)) {
+                    return self.path_placeholder_value(fr_module, Ns::Attr, intern::key(intern::Key::Str(str_get(name))), &Row::new(), state);
+                }
+            }
             return v;
         }
         let nm = str_get(name);
@@ -361,6 +401,11 @@ impl Analyzer {
                 let n = frontend::node(t);
                 self.store_item(&obj, Ns::Item, &key, v, &n, state);
             }
+            ast::Expr::Tuple(ast::ExprTuple { elts, .. }) | ast::Expr::List(ast::ExprList { elts, .. })
+                if elts.iter().any(|e| matches!(e, ast::Expr::Starred(_))) =>
+            {
+                self.bind_starred(elts, v, state, &frontend::node(t));
+            }
             ast::Expr::Tuple(ast::ExprTuple { elts, .. }) | ast::Expr::List(ast::ExprList { elts, .. }) => {
                 let n = frontend::node(t);
                 let parts = self.unpack(v, elts.len(), state, &n);
@@ -374,6 +419,35 @@ impl Analyzer {
             }
             ast::Expr::Starred(st) => self.bind_target(&st.value, v, state),
             _ => {}
+        }
+    }
+
+    /// `a, *mid, z = v`: the targets before the star take the leading positions, those after
+    /// it the trailing ones, and the starred target a fresh list of the middle. Without a known
+    /// length the leading targets keep their positions and the rest take any element.
+    fn bind_starred(&mut self, elts: &'static [ast::Expr], v: &Value, state: &mut State, n: &Node) {
+        let si = elts.iter().position(|e| matches!(e, ast::Expr::Starred(_))).unwrap_or(0);
+        let after = elts.len() - si - 1;
+        let known = v.single().filter(|o| matches!(self.kind(*o), Kind::List | Kind::Tuple)).and_then(|o| self.obj(o).literal_len.filter(|l| *l >= si + after).map(|l| (o, l)));
+        let (lead, mid, trail): (Vec<Value>, Value, Vec<Value>) = if let Some((oid, len)) = known {
+            let at = |i: usize, state: &State| state.slot(oid, Ns::Pos, key_int(i as i64));
+            let lead = (0..si).map(|i| at(i, state)).collect();
+            let trail = (len - after..len).map(|i| at(i, state)).collect();
+            let vals: Vec<Value> = (si..len - after).map(|i| at(i, state)).collect();
+            let kv = state.elems.get(&oid).unwrap_or(DATA);
+            (lead, self.alloc_positional(Kind::List, n, Some(vals), Value::new(), kv, state), trail)
+        } else {
+            let lead = self.unpack(v, si, state, n);
+            let e = self.iterate(v, n, state).elem.flat();
+            let mid = self.alloc_positional(Kind::List, n, None, e.clone(), DATA, state);
+            (lead, mid, (0..after).map(|_| e.clone()).collect())
+        };
+        for (sub, pv) in elts[..si].iter().zip(lead.iter()) {
+            self.bind_target(sub, pv, state);
+        }
+        self.bind_target(&elts[si], &mid, state);
+        for (sub, pv) in elts[si + 1..].iter().zip(trail.iter()) {
+            self.bind_target(sub, pv, state);
         }
     }
 
@@ -483,7 +557,7 @@ impl Analyzer {
                 }
                 Kind::View => {
                     let Payload::View(vk, recv) = self.obj(oid).payload.clone() else { continue };
-                    if matches!(vk, ViewKind::Rows | ViewKind::Elems) {
+                    if matches!(vk, ViewKind::Rows | ViewKind::Elems | ViewKind::Attrs) {
                         items = None;
                         exhaustive = false;
                         if vk == ViewKind::Rows {
@@ -527,7 +601,8 @@ impl Analyzer {
                     let ki = self.iterate(&ks, node, state);
                     let vi = self.iterate(&vs, node, state);
                     match (ki.items, vi.items, items.as_mut()) {
-                        (Some(kit), Some(vit), Some(its)) if kit.len() == vit.len() => {
+                        (Some(kit), Some(vit), Some(its)) => {
+                            // zip stops at the shorter input
                             let ctx = self.frame().ctx.clone();
                             for (k, val) in kit.into_iter().zip(vit.into_iter()) {
                                 let pid = self.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), its.len()), &ctx, true, "pair", Payload::Pair(k.clone(), val.clone()));
@@ -541,14 +616,14 @@ impl Analyzer {
                     pairs.push((ki.elem.flat_or_one(), vi.elem.flat_or_one()));
                 }
                 Kind::Enumerate => {
-                    let Payload::Enumerate(inner) = self.obj(oid).payload.clone() else { continue };
+                    let Payload::Enumerate(inner, start) = self.obj(oid).payload.clone() else { continue };
                     let ii = self.iterate(&inner, node, state);
-                    match (ii.items, items.as_mut()) {
-                        (Some(inner_items), Some(its)) => {
+                    match (ii.items, items.as_mut(), start) {
+                        (Some(inner_items), Some(its), Some(start)) => {
                             // known items: (index, item) pairs with literal indices
                             let ctx = self.frame().ctx.clone();
                             for (i, item) in inner_items.into_iter().enumerate() {
-                                let idx = Value::lit(key_int(i as i64));
+                                let idx = Value::lit(key_int(start + i as i64));
                                 let pid = self.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), its.len()), &ctx, true, "pair", Payload::Pair(idx.clone(), item.clone()));
                                 self.obj_mut(pid).payload = Payload::Pair(idx, item);
                                 its.push(Value::obj(pid));
@@ -558,6 +633,31 @@ impl Analyzer {
                     }
                     pair = true;
                     pairs.push((Value::data("index"), ii.elem.one_or_empty()));
+                }
+                Kind::Class if self.enum_members.contains_key(&oid) => {
+                    // an Enum class: its members in order
+                    let ms: Vec<Value> = self.enum_members[&oid].iter().map(|(_, m)| Value::obj(*m)).collect();
+                    if let Some(its) = items.as_mut() {
+                        its.extend(ms.iter().cloned());
+                    }
+                    elems.push(join_values(ms));
+                }
+                Kind::Instance if self.instance_class(oid).and_then(|c| self.class_lookup(c, "__iter__")).is_some() && !crate::interp::disabled("useriter") => {
+                    // a user iterable: what its `__iter__` returns
+                    let r = self.call_method_with(&Value::obj(oid), "__iter__", Vec::new(), node, state).unwrap_or_default();
+                    let sub = self.iterate(&r, node, state);
+                    match (sub.items, items.as_mut()) {
+                        (Some(si), Some(its)) => its.extend(si),
+                        _ => items = None,
+                    }
+                    exhaustive = false;
+                    match sub.elem {
+                        Elem::One(e) => elems.push(e),
+                        Elem::Pair(k, v) => {
+                            pair = true;
+                            pairs.push((k, v));
+                        }
+                    }
                 }
                 Kind::Ph => {
                     items = None;
@@ -601,7 +701,16 @@ impl Analyzer {
         if v.pts.is_empty() {
             items = None;
             exhaustive = false;
-            if v.kv.is_literal() {
+            let one_str = v.kv.as_lit().and_then(intern::key_as_str);
+            if let Some(text) = one_str {
+                // one known string: its characters
+                let chars: Vec<KeyId> = text.chars().map(|ch| intern::key_str_lit(&ch.to_string())).collect();
+                if chars.len() <= UNROLL_MAX {
+                    items = Some(chars.iter().map(|k| Value::lit(*k)).collect());
+                }
+                let ks: KeySet = chars.into_iter().collect();
+                elems.push(Value::kv_only(KeyVal::lits(ks)));
+            } else if v.kv.is_literal() {
                 let ks = crate::domain::kv_literals(&v.kv);
                 if ks.len() <= UNROLL_MAX {
                     items = Some(intern::sorted_by_str(ks.iter()).into_iter().map(Value::lit).collect());
@@ -697,7 +806,9 @@ impl Analyzer {
         if state.has_slot(oid, Ns::Item, STAR) {
             return None;
         }
-        Some(intern::sorted_by_str(row.present.iter()).into_iter().map(|k| (k, state.slot(oid, Ns::Item, k))).collect())
+        // insertion order when it is known (else a fixed order by key)
+        let keys = row.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(row.present.iter()));
+        Some(keys.into_iter().map(|k| (k, state.slot(oid, Ns::Item, k))).collect())
     }
 
     pub fn elem_of(&mut self, v: &Value, node: &Node, state: &State) -> Value {

@@ -74,6 +74,33 @@ impl Analyzer {
         }
     }
 
+    /// `True`, `1` and `1.0` are one dict key: a numeric literal key equal to a key the record
+    /// has (or may have) is that key.
+    pub fn canon_key(&self, oid: u32, ns: Ns, k: KeyId, state: &State) -> KeyId {
+        let Some(x) = numeric_of(k) else { return k };
+        let row = state.row(oid, ns);
+        if row.present.contains(k) {
+            return k;
+        }
+        for p in row.present.iter() {
+            if numeric_of(p) == Some(x) {
+                return p;
+            }
+        }
+        k
+    }
+
+    pub fn canon_kv(&self, oid: u32, ns: Ns, kv: &KeyVal, state: &State) -> KeyVal {
+        if crate::interp::disabled("numkey") {
+            return kv.clone();
+        }
+        match kv {
+            KeyVal::Lit(k) => KeyVal::Lit(self.canon_key(oid, ns, *k, state)),
+            KeyVal::Lits(ks) => KeyVal::Lits(ks.map(|k| self.canon_key(oid, ns, k, state))),
+            other => other.clone(),
+        }
+    }
+
     pub fn load_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
         let mut acc = Value::new();
         let guarded = self.is_guarded(ns) || !report;
@@ -84,6 +111,9 @@ impl Analyzer {
         let line_data = Value::data(&format!("L{}", node.line));
         for oid in obj.pts.iter() {
             let kind = self.kind(oid);
+            // a Counter reads a missing key as 0 without inserting it: the row is put back
+            // after the (never failing) access
+            let mut counter_restore: Option<Row> = None;
             if kind == Kind::Ph && ns == Ns::Item {
                 // a placeholder declared as a defaultdict: insertion is decided per call site
                 if let Payload::Ph(p) = &self.obj(oid).payload {
@@ -97,6 +127,9 @@ impl Analyzer {
             if kind == Kind::Dict && ns == Ns::Item && (self.obj(oid).label.starts_with("defaultdict@") || self.obj(oid).label.starts_with("Counter@")) {
                 // `dd[k]` inserts the factory's value when `k` is absent (a fresh one per key)
                 let row = state.row(oid, ns);
+                if self.obj(oid).label.starts_with("Counter@") && !super::disabled("counterread") {
+                    counter_restore = Some(row.clone());
+                }
                 if key.kv.is_literal() {
                     let ks = crate::domain::kv_literals(&key.kv);
                     let strong = single_target && ks.len() == 1 && self.strongable(oid);
@@ -146,6 +179,20 @@ impl Analyzer {
                             }
                             continue;
                         }
+                        // `__missing__` answers the keys the dict does not have
+                        if self.class_lookup(cls, "__missing__").is_some() && !super::disabled("dunmissing") {
+                            if let Some(k) = key.kv.as_lit().filter(|_| key.pts.is_empty()) {
+                                let row = state.row(oid, Ns::Item);
+                                if !row.definite.contains(k) {
+                                    let r = self.call_method_with(&Value::obj(oid), "__missing__", vec![key.clone()], node, state).unwrap_or_default();
+                                    acc = acc.join(&r);
+                                    if row.present.contains(k) {
+                                        acc = acc.join(&state.slot(oid, Ns::Item, k));
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
                         if let Some(ci) = self.class_info_opt(cls) {
                             if !ci.typed_dict && !ci.named_tuple && !ci.open_base {
                                 acc = acc.join(&line_data);
@@ -157,7 +204,25 @@ impl Analyzer {
                 _ => {}
             }
             match kind {
-                Kind::View | Kind::Pair | Kind::Zip | Kind::Enumerate => {
+                Kind::Pair => {
+                    // a (key, value) pair indexed by 0 / 1 (or -2 / -1)
+                    let idx = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
+                    match (idx, self.obj(oid).payload.clone()) {
+                        (Some(0 | -2), Payload::Pair(k, _)) => acc = acc.join(&k),
+                        (Some(1 | -1), Payload::Pair(_, v)) => acc = acc.join(&v),
+                        _ => acc = acc.join(&line_data),
+                    }
+                }
+                Kind::View => {
+                    if let Payload::View(ViewKind::Attrs, inst) = self.obj(oid).payload.clone() {
+                        // `obj.__dict__[k]`: an attribute load
+                        let v = self.load_item(&inst, Ns::Attr, key, node, state, report);
+                        acc = acc.join(&v);
+                    } else {
+                        acc = acc.join(&line_data);
+                    }
+                }
+                Kind::Zip | Kind::Enumerate => {
                     acc = acc.join(&line_data);
                 }
                 Kind::List | Kind::Tuple | Kind::Set => {
@@ -205,10 +270,25 @@ impl Analyzer {
                     acc = acc.join(&v);
                 }
                 k if k.is_record() => {
-                    let v = self.load_record(oid, ns, key, node, state, guarded, single_target, try_guard);
+                    let ckv = self.canon_kv(oid, ns, &key.kv, state);
+                    let v = if ckv != key.kv {
+                        let saved = self.key_alias.take();
+                        if let (KeyVal::Lit(c), KeyVal::Lit(o)) = (&ckv, &key.kv) {
+                            self.key_alias = Some((*c, *o));
+                        }
+                        let ck = Value::with_kv(key.pts.clone(), ckv);
+                        let v = self.load_record(oid, ns, &ck, node, state, guarded, single_target, try_guard);
+                        self.key_alias = saved;
+                        v
+                    } else {
+                        self.load_record(oid, ns, key, node, state, guarded, single_target, try_guard)
+                    };
                     acc = acc.join(&v);
                 }
                 _ => acc = acc.join(&line_data),
+            }
+            if let Some(r) = counter_restore {
+                state.set_row(oid, ns, r);
             }
         }
         if obj.pts.is_empty() {
@@ -270,19 +350,16 @@ impl Analyzer {
                     if crate::interp::debug_level() == 2 {
                         eprintln!("  guarded access may raise: {:?} tier {:?} at L{}", intern::key_repr(k), cls.tier, node.line);
                     }
-                    // the handler sees the state as it is here
-                    match self.raise_states.last_mut() {
-                        Some(slot) => {
-                            let mut here = state.copy();
-                            *slot = Some(match slot.take() {
-                                None => here,
-                                Some(mut prev) => prev.join(&mut here),
-                            });
-                        }
-                        None => {
-                            if let Some(m) = self.may_raise.last_mut() {
-                                *m = true;
-                            }
+                    // the handler sees the state as it is here (and a KeyError / AttributeError
+                    // carrying the key)
+                    if !self.raise_states.is_empty() && !super::disabled("excvalue") {
+                        let cname = if ns == Ns::Item { "KeyError" } else { "AttributeError" };
+                        let e = self.exception_object(cname, vec![Value::lit(k)], node, state);
+                        self.cur_exc = Some(e);
+                    }
+                    if !self.record_raise_state(state) {
+                        if let Some(m) = self.may_raise.last_mut() {
+                            *m = true;
                         }
                     }
                     if try_guard && cls.tier == Tier::Missing && is_lit && single_target && !row.symbolic() {
@@ -417,6 +494,23 @@ impl Analyzer {
                     crate::models::pandas::frame_setitem(self, oid, key, v, node, state, strong);
                     continue;
                 }
+                Kind::View => {
+                    // `obj.__dict__[k] = v`: an attribute store
+                    if let Payload::View(ViewKind::Attrs, inst) = self.obj(oid).payload.clone() {
+                        let insts: Vec<u32> = inst.pts.iter().collect();
+                        for i in &insts {
+                            let s1 = strong && insts.len() == 1 && self.strongable(*i);
+                            self.store_key(*i, Ns::Attr, &key.kv, v, s1, node, state);
+                        }
+                    }
+                    continue;
+                }
+                Kind::Dict if self.attr_mirrors.contains_key(&oid) => {
+                    // a `vars(obj)` dict: obj's attributes change with it
+                    let inst = self.attr_mirrors[&oid];
+                    let s1 = strong && self.strongable(inst);
+                    self.store_key(inst, Ns::Attr, &key.kv, v, s1, node, state);
+                }
                 Kind::Instance if ns == Ns::Item => {
                     if let Some(cls) = self.instance_class(oid) {
                         if let Some(m) = self.class_lookup(cls, "__setitem__") {
@@ -437,6 +531,7 @@ impl Analyzer {
     }
 
     pub fn store_key(&mut self, oid: u32, ns: Ns, kv: &KeyVal, v: &Value, strong: bool, node: &Node, state: &mut State) {
+        let kv = &self.canon_kv(oid, ns, kv, state);
         let row = state.row(oid, ns);
         match kv {
             KeyVal::Param(ph) => {
@@ -529,6 +624,8 @@ impl Analyzer {
                     }
                 }
             }
+            let ckey = Value::with_kv(key.pts.clone(), self.canon_kv(oid, ns, &key.kv, state));
+            let key = &ckey;
             let mut row = state.row(oid, ns);
             let is_lit = matches!(key.kv, KeyVal::Lit(_));
             if let KeyVal::Param(ph) = &key.kv {
@@ -577,7 +674,20 @@ impl Analyzer {
                     }
                 }
                 Kind::Parser | Kind::Groupby | Kind::Partial => self.method_value(&format!("{}.{}", k.name(), name), &Value::obj(oid)),
+                Kind::Instance if name == "__class__" => match self.instance_class(oid) {
+                    Some(c) => Value::obj(c),
+                    None => Value::data(&format!("L{}", node.line)),
+                },
+                Kind::Namespace | Kind::Instance | Kind::Ph if name == "__dict__" && !super::disabled("dunderdict") => {
+                    let vid = self.alloc_raw(Kind::View, &format!("view:attrs:{}", oid), "", true, "__dict__", Payload::View(ViewKind::Attrs, Value::obj(oid)));
+                    self.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(oid));
+                    Value::obj(vid)
+                }
                 Kind::Namespace | Kind::Instance => self.load_instance_attr(oid, name, node, state, guarded, single),
+                Kind::Class if matches!(name, "__name__" | "__qualname__") && self.class_lookup(oid, name).is_none() => {
+                    let n = self.class_info_opt(oid).map(|ci| ci.name.clone()).unwrap_or_default();
+                    Value::lit(key_str_lit(&n))
+                }
                 Kind::Class => {
                     if self.class_lookup(oid, name).is_some() {
                         // a classmethod reached through a class binds that class (not the
@@ -630,10 +740,30 @@ impl Analyzer {
                     let Payload::Super(cls, self_v) = self.obj(oid).payload.clone() else { continue };
                     let ci = self.class_info(cls);
                     let mut found: Option<u32> = None;
-                    for b in &ci.bases {
-                        found = self.class_lookup(*b, name);
-                        if found.is_some() {
-                            break;
+                    // the receiver's own class decides the order: the classes after `cls` in
+                    // its MRO (one receiver class; otherwise the defining class's bases)
+                    let recv_cls: Vec<u32> = self_v
+                        .pts
+                        .iter()
+                        .filter_map(|o| match self.kind(o) {
+                            Kind::Instance => self.instance_class(o),
+                            Kind::Class => Some(o),
+                            Kind::Ph => self.ph_info(o).cls.get(),
+                            _ => None,
+                        })
+                        .collect();
+                    if let [rc] = recv_cls[..] {
+                        let order = self.mro(rc);
+                        if let Some(pos) = order.iter().position(|c| *c == cls) {
+                            found = order[pos + 1..].iter().copied().find(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, nk)));
+                        }
+                    }
+                    if found.is_none() {
+                        for b in &ci.bases {
+                            found = self.class_lookup(*b, name);
+                            if found.is_some() {
+                                break;
+                            }
                         }
                     }
                     match found {
@@ -677,8 +807,8 @@ impl Analyzer {
         Value::obj(self.alloc_raw(Kind::Method, &key, "", true, qual, Payload::Method(qual.to_string(), recv.clone())))
     }
 
-    /// Breadth-first linearisation of the user classes above `cls`.
-    pub fn mro(&self, cls: u32) -> Vec<u32> {
+    /// Breadth-first linearisation of the user classes above `cls` (when C3 fails).
+    pub fn mro_bfs(&self, cls: u32) -> Vec<u32> {
         let mut seen: Vec<u32> = Vec::new();
         let mut order = vec![cls];
         let mut out: Vec<u32> = Vec::new();
@@ -697,8 +827,46 @@ impl Analyzer {
     }
 
     /// Return the class oid (in MRO) that defines `name`, or None.
+    /// The C3 method resolution order of a user class (user classes only).
+    pub fn mro(&self, cls: u32) -> Vec<u32> {
+        fn c3(an: &Analyzer, cls: u32, depth: usize) -> Option<Vec<u32>> {
+            if depth > 64 {
+                return None;
+            }
+            let bases: Vec<u32> = an.class_info_opt(cls).map(|ci| ci.bases.clone()).unwrap_or_default();
+            let mut seqs: Vec<Vec<u32>> = Vec::new();
+            for b in &bases {
+                seqs.push(c3(an, *b, depth + 1)?);
+            }
+            seqs.push(bases.clone());
+            let mut out = vec![cls];
+            loop {
+                seqs.retain(|s| !s.is_empty());
+                if seqs.is_empty() {
+                    return Some(out);
+                }
+                // the first head that is in no other sequence's tail
+                let head = seqs.iter().map(|s| s[0]).find(|h| seqs.iter().all(|s| !s[1..].contains(h)))?;
+                out.push(head);
+                for s in seqs.iter_mut() {
+                    if s[0] == head {
+                        s.remove(0);
+                    }
+                }
+            }
+        }
+        if crate::interp::disabled("c3") {
+            return self.mro_bfs(cls);
+        }
+        c3(self, cls, 0).unwrap_or_else(|| self.mro_bfs(cls))
+    }
+
     pub fn class_lookup(&self, cls: u32, name: &str) -> Option<u32> {
         let nk = key_str_lit(name);
+        let order = self.mro(cls);
+        if !order.is_empty() {
+            return order.into_iter().find(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, nk)));
+        }
         let mut seen: Vec<u32> = Vec::new();
         let mut order = vec![cls];
         while !order.is_empty() {
@@ -738,13 +906,31 @@ impl Analyzer {
         }
     }
 
-    fn bound_outs(&mut self, cv: &Value, oid: u32, cls: u32, node: &Node, state: &mut State) -> Value {
+    fn bound_outs(&mut self, cv: &Value, oid: u32, cls: u32, name: &str, node: &Node, state: &mut State) -> Value {
         let mut outs: Vec<Value> = Vec::new();
+        // a descriptor object in the class (its class has `__get__`): what `__get__` returns
+        if !super::disabled("descriptors") {
+            let descs: Vec<u32> = cv.pts.iter().filter(|d| self.kind(*d) == Kind::Instance && self.instance_class(*d).and_then(|dc| self.class_lookup(dc, "__get__")).is_some()).collect();
+            if !descs.is_empty() && descs.len() == cv.pts.len() {
+                for d in descs {
+                    if let Some(r) = self.call_method_with(&Value::obj(d), "__get__", vec![Value::obj(oid), Value::obj(cls)], node, state) {
+                        outs.push(r);
+                    }
+                }
+                return join_values(outs);
+            }
+        }
         for f in cv.pts.iter() {
             if self.kind(f) == Kind::Function {
                 let fi = self.func_info(f);
                 if fi.is_property.get() {
-                    outs.push(self.call_user(f, Some(Value::obj(oid)), vec![], IndexMap::new(), vec![], vec![], state, node, None, false));
+                    let r = self.call_user(f, Some(Value::obj(oid)), vec![], IndexMap::new(), vec![], vec![], state, node, None, false);
+                    if fi.is_cached.get() && matches!(self.kind(oid), Kind::Instance | Kind::Ph) {
+                        // stored on the instance: later accesses find this value
+                        let strong = self.strongable(oid);
+                        self.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit(name)), &r, strong, node, state);
+                    }
+                    outs.push(r);
                 } else if fi.is_static.get() {
                     outs.push(Value::obj(f));
                 } else if fi.is_classmethod.get() {
@@ -764,8 +950,53 @@ impl Analyzer {
         join_values(outs)
     }
 
+    /// A class whose hierarchy includes a `NamedTuple` class.
+    pub fn is_named_tuple_class(&self, cls: u32) -> bool {
+        let mut work = vec![cls];
+        let mut seen: Vec<u32> = Vec::new();
+        while let Some(c) = work.pop() {
+            if seen.contains(&c) {
+                continue;
+            }
+            seen.push(c);
+            let Some(ci) = self.class_info_opt(c) else { continue };
+            if ci.named_tuple {
+                return true;
+            }
+            work.extend(ci.bases.iter().copied());
+        }
+        false
+    }
+
     pub fn load_instance_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool, single_target: bool) -> Value {
         let nk = key_str_lit(name);
+        // the methods every NamedTuple has
+        if matches!(name, "_asdict" | "_replace" | "_fields") && !super::disabled("ntmethods") {
+            if let Some(cls) = self.instance_class(oid) {
+                if self.class_lookup(cls, name).is_none() && self.is_named_tuple_class(cls) {
+                    if name == "_fields" {
+                        let fs: Vec<Value> = self.dataclass_fields_mro(cls).iter().map(|(f, _)| Value::lit(key_str_lit(f))).collect();
+                        let kv = KeyVal::lits(fs.iter().filter_map(|v| v.kv.as_lit()).collect());
+                        return self.alloc_positional(Kind::Tuple, node, Some(fs), Value::new(), kv, state);
+                    }
+                    return self.method_value(&format!("namedtuple.{}", name), &Value::obj(oid));
+                }
+            }
+        }
+        // `__getattr__` answers what normal lookup does not find
+        if let Some(cls) = self.instance_class(oid) {
+            if !name.starts_with("__") && self.class_lookup(cls, name).is_none() && self.class_lookup(cls, "__getattr__").is_some() && !super::disabled("getattrdunder") {
+                let row = state.row(oid, Ns::Attr);
+                if !row.definite.contains(nk) {
+                    let fallback = self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, state).unwrap_or_default();
+                    if !row.present.contains(nk) {
+                        return fallback;
+                    }
+                    let own = state.slot(oid, Ns::Attr, nk);
+                    return own.join(&fallback);
+                }
+            }
+        }
         let v = state.slot_opt(oid, Ns::Attr, nk);
         let row = state.row(oid, Ns::Attr);
         let cls_of = self.instance_class(oid);
@@ -788,7 +1019,7 @@ impl Analyzer {
             let is_field = self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name);
             if let (Some(defc), false) = (self.class_lookup(c, name), is_field) {
                 let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
-                return self.bound_outs(&cv, oid, c, node, state);
+                return self.bound_outs(&cv, oid, c, name, node, state);
             }
         }
         let cls = classify(&row, nk);
@@ -836,7 +1067,7 @@ impl Analyzer {
         if let (Some(pcls), false) = (ph.cls.get(), is_field) {
             if let Some(c) = self.class_lookup(pcls, name) {
                 let cv = self.cls_slots.get(&(c, Ns::Attr, nk)).cloned().unwrap_or_default();
-                let out = self.bound_outs(&cv, oid, pcls, node, state);
+                let out = self.bound_outs(&cv, oid, pcls, name, node, state);
                 if !ph.exact.get() && self.subclass_overrides(pcls, Some(c), name) {
                     self.record_event("dispatch", oid);
                 }
@@ -1188,6 +1419,22 @@ impl Analyzer {
                         self.call_user(setter, Some(Value::obj(oid)), vec![v.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
                         continue;
                     }
+                    // a data descriptor (an object whose class has `__set__`) takes the store
+                    if !super::disabled("descriptors") {
+                        let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
+                        let descs: Vec<u32> = cv.pts.iter().filter(|d| self.kind(*d) == Kind::Instance && self.instance_class(*d).and_then(|dc| self.class_lookup(dc, "__set__")).is_some()).collect();
+                        if !descs.is_empty() {
+                            for d in descs {
+                                self.call_method_with(&Value::obj(d), "__set__", vec![Value::obj(oid), v.clone()], node, state);
+                            }
+                            continue;
+                        }
+                    }
+                }
+                // a user `__setattr__` takes every assignment (`object.__setattr__` bypasses it)
+                if !self.bypass_setattr && !super::disabled("setattrdunder") && self.class_lookup(cls, "__setattr__").is_some() {
+                    self.call_method_with(&Value::obj(oid), "__setattr__", vec![Value::lit(nk), v.clone()], node, state);
+                    continue;
                 }
             }
             let strong_key = strong || (targets.len() == 1 && self.fresh_init.contains(&oid));
@@ -1247,4 +1494,21 @@ pub fn walk_stmts(body: &'static [ast::Stmt]) -> Vec<&'static ast::Stmt> {
     }
     body.iter().for_each(|x| go(x, &mut out));
     out
+}
+
+/// The number a literal key stands for as a dict key (`True` is 1, `2.0` is 2).
+fn numeric_of(k: KeyId) -> Option<(i64, u64)> {
+    intern::with_key(k, |kk| match kk {
+        intern::Key::Int(i) => Some((*i, 0)),
+        intern::Key::Bool(b) => Some((*b as i64, 0)),
+        intern::Key::Float(bits) => {
+            let f = f64::from_bits(*bits);
+            if f.fract() == 0.0 && f.abs() < 9.0e15 {
+                Some((f as i64, 0))
+            } else {
+                Some((i64::MIN, *bits))
+            }
+        }
+        _ => None,
+    })
 }

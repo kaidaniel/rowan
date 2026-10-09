@@ -23,6 +23,8 @@ pub struct Scope {
     pub children: Vec<usize>,
     pub free: FxHashSet<String>,
     pub cells: FxHashSet<String>,
+    /// binding occurrences per name (one inside a loop counts twice)
+    pub binds: FxHashMap<String, u32>,
 }
 
 impl Default for ScopeKind {
@@ -42,6 +44,9 @@ impl Scope {
 pub struct Scopes {
     pub scopes: Vec<Scope>,
     pub by_node: FxHashMap<usize, usize>,
+    /// module names bound more than once (twice in the text, in a loop, or by a function
+    /// through `global`): their value at a call depends on when the call happens
+    pub rebound: FxHashSet<String>,
 }
 
 impl Scopes {
@@ -68,6 +73,7 @@ pub fn node_addr<T>(n: &T) -> usize {
 struct Collector<'a> {
     scopes: &'a mut Scopes,
     scope: usize,
+    loop_depth: u32,
 }
 
 impl<'a> Collector<'a> {
@@ -80,6 +86,11 @@ impl<'a> Collector<'a> {
     }
     fn cur(&mut self) -> &mut Scope {
         &mut self.scopes.scopes[self.scope]
+    }
+    fn bind(&mut self, name: String) {
+        let w = if self.loop_depth > 0 { 2 } else { 1 };
+        *self.cur().binds.entry(name.clone()).or_insert(0) += w;
+        self.cur().locals.insert(name);
     }
     fn visit_params(&mut self, inner: usize, params: &ast::Parameters) {
         for p in all_params(params) {
@@ -109,7 +120,7 @@ impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
     fn visit_stmt(&mut self, stmt: &'b ast::Stmt) {
         match stmt {
             ast::Stmt::FunctionDef(f) => {
-                self.cur().locals.insert(f.name.id.to_string());
+                self.bind(f.name.id.to_string());
                 for d in &f.decorator_list {
                     self.visit_expr(&d.expression);
                 }
@@ -123,15 +134,16 @@ impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
                 }
                 let inner = self.enter(node_addr(f), ScopeKind::Function);
                 self.visit_params(inner, &f.parameters);
-                let saved = self.scope;
+                let saved = (self.scope, self.loop_depth);
                 self.scope = inner;
+                self.loop_depth = 0;
                 for s in &f.body {
                     self.visit_stmt(s);
                 }
-                self.scope = saved;
+                (self.scope, self.loop_depth) = saved;
             }
             ast::Stmt::ClassDef(c) => {
-                self.cur().locals.insert(c.name.id.to_string());
+                self.bind(c.name.id.to_string());
                 for d in &c.decorator_list {
                     self.visit_expr(&d.expression);
                 }
@@ -166,16 +178,21 @@ impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
                 for a in &i.names {
                     let name = a.asname.as_ref().map(|x| x.id.to_string()).unwrap_or_else(|| a.name.id.to_string());
                     let top = name.split('.').next().unwrap_or("").to_string();
-                    self.cur().locals.insert(top);
+                    self.bind(top);
                 }
             }
             ast::Stmt::ImportFrom(i) => {
                 for a in &i.names {
                     if a.name.id.as_str() != "*" {
                         let name = a.asname.as_ref().map(|x| x.id.to_string()).unwrap_or_else(|| a.name.id.to_string());
-                        self.cur().locals.insert(name);
+                        self.bind(name);
                     }
                 }
+            }
+            ast::Stmt::For(_) | ast::Stmt::While(_) => {
+                self.loop_depth += 1;
+                source_order::walk_stmt(self, stmt);
+                self.loop_depth -= 1;
             }
             _ => source_order::walk_stmt(self, stmt),
         }
@@ -204,14 +221,14 @@ impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
             }
             ast::Expr::Name(n) => {
                 if matches!(n.ctx, ast::ExprContext::Store | ast::ExprContext::Del) {
-                    self.cur().locals.insert(n.id.to_string());
+                    self.bind(n.id.to_string());
                 } else {
                     self.cur().uses.insert(n.id.to_string());
                 }
             }
             ast::Expr::Named(n) => {
                 if let ast::Expr::Name(t) = &*n.target {
-                    self.cur().locals.insert(t.id.to_string());
+                    self.bind(t.id.to_string());
                 }
                 self.visit_expr(&n.value);
             }
@@ -222,7 +239,7 @@ impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
     fn visit_except_handler(&mut self, h: &'b ast::ExceptHandler) {
         let ast::ExceptHandler::ExceptHandler(h) = h;
         if let Some(n) = &h.name {
-            self.cur().locals.insert(n.id.to_string());
+            self.bind(n.id.to_string());
         }
         source_order::walk_except_handler(self, &ast::ExceptHandler::ExceptHandler(h.clone()));
     }
@@ -230,7 +247,7 @@ impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
     fn visit_pattern(&mut self, p: &'b ast::Pattern) {
         if let ast::Pattern::MatchAs(m) = p {
             if let Some(n) = &m.name {
-                self.cur().locals.insert(n.id.to_string());
+                self.bind(n.id.to_string());
             }
         }
         source_order::walk_pattern(self, p);
@@ -295,11 +312,20 @@ pub fn analyse(module: &ast::ModModule) -> Scopes {
     scopes.scopes.push(Scope { kind: ScopeKind::Module, parent: None, ..Default::default() });
     scopes.by_node.insert(node_addr(module), 0);
     {
-        let mut coll = Collector { scopes: &mut scopes, scope: 0 };
+        let mut coll = Collector { scopes: &mut scopes, scope: 0, loop_depth: 0 };
         for s in &module.body {
             coll.visit_stmt(s);
         }
     }
     resolve(&mut scopes, 0);
+    let mut rebound: FxHashSet<String> = scopes.scopes[0].binds.iter().filter(|(_, n)| **n >= 2).map(|(k, _)| k.clone()).collect();
+    for sc in scopes.scopes.iter().skip(1) {
+        for g in sc.globals_decl.iter() {
+            if sc.locals.contains(g) {
+                rebound.insert(g.clone());
+            }
+        }
+    }
+    scopes.rebound = rebound;
     scopes
 }

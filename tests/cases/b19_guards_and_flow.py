@@ -29,4 +29,6 @@ while e["n"] < 3:                               #@ ok n
     e["n"] += 1
     if e["n"] == 2:
         e["two"] = True
-e["two"]                                        #@ possibly two
+# Corrected on re-reading (r140 unrolls `while` loops whose test is decided at every head): n runs 1, 2, 3, so
+# "two" is set at n == 2 on the only path.
+e["two"]                                        #@ ok two

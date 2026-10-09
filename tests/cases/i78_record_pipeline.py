@@ -29,8 +29,9 @@ taxed = list(map(with_tax, ORDERS))
 first = taxed[0]                          #@row first: present={id,cust,total,rush,tax} definite={id,cust,total,rush,tax} closed
 second = taxed[1]                         #@row second: present={id,cust,total,tax} definite={id,cust,total,tax} closed
 large = list(filter(big, taxed))
-# Which orders pass the filter is open: the element is the join of all three.
-any_large = large[0]                      #@row any_large: present={id,cust,total,rush,tax} definite={id,cust,total,tax} closed
+# Corrected on re-reading (s170 added a model for filter over known items): totals 30, 5, 12
+# against `> 10` keep orders 1 and 3, so the first kept order is order 1, with the rush flag.
+any_large = large[0]                      #@row any_large: present={id,cust,total,rush,tax} definite={id,cust,total,rush,tax} closed
 # The sort keys are known numbers (30, 5, 12), so the order is known: the top order is the
 # first one, which has the rush flag.
 ranked = sorted(taxed, key=lambda o: o["total"], reverse=True)

@@ -111,6 +111,24 @@ impl Analyzer {
     pub fn call_one(&mut self, oid: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
         let kind = self.kind(oid);
         match kind {
+            Kind::Function if self.func_info(oid).is_memo.get() && self.sum_stack.is_empty() && star_args.is_empty() && star_kwargs.is_empty() && !super::disabled("memo") => {
+                // a memoised function with known arguments: the first call's result is the
+                // result of every later call with the same arguments
+                let lit = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty());
+                let pos: Option<Vec<KeyId>> = args.iter().map(lit).collect();
+                let kws: Option<Vec<(StrId, KeyId)>> = kwargs.iter().map(|(k, v)| lit(v).map(|x| (*k, x))).collect();
+                let key = pos.zip(kws).map(|(p, k)| (oid, p, k));
+                if let Some(k) = &key {
+                    if let Some(v) = self.memo_results.get(k) {
+                        return v.clone();
+                    }
+                }
+                let r = self.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, call_ast, false);
+                if let Some(k) = key {
+                    self.memo_results.insert(k, r.clone());
+                }
+                r
+            }
             Kind::Function => {
                 let fi = self.func_info(oid);
                 if fi.cls.is_some() && !fi.is_static.get() && !args.is_empty() && !fi.is_classmethod.get() {
@@ -287,6 +305,13 @@ impl Analyzer {
 
     pub fn construct(&mut self, cls: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
         let ci = self.class_info(cls);
+        // a TypedDict class makes a plain dict
+        if ci.typed_dict && !super::disabled("typeddictcall") {
+            let call = Call { qual: "builtins.dict".into(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
+            if let Some(m) = self.models.lookup("builtins.dict") {
+                return m(self, state, &call);
+            }
+        }
         let row = if ci.open_base { Row::with_source(Source::new(&format!("instance {}@L{}", ci.name, node.line), SourceKind::Class)) } else { Row::new() };
         // the allocation site includes the class: `cls()` with several possible classes must
         // not collapse onto one instance (prototype: same site, last class wins)
@@ -294,6 +319,26 @@ impl Analyzer {
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", ci.name, node.line), Payload::Cls(cls), Some(row), Ns::Attr, None, None);
         if ci.typed_dict {
             state.set_row(inst, Ns::Item, Row::new());
+        }
+        // a dict subclass without its own `__init__`: dict's constructor fills its items
+        let dict_based = self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|x| x.dict_base).unwrap_or(false));
+        if dict_based && self.class_lookup(cls, "__init__").is_none() && !super::disabled("dictsub") {
+            state.set_row(inst, Ns::Item, Row::new());
+            if let Some(a0) = args.first() {
+                if !self.record_objects(a0).is_empty() {
+                    self.copy_into(inst, Ns::Item, a0, state, true, &crate::intern::KeySet::new());
+                } else {
+                    let r = state.row(inst, Ns::Item).data_store(Source::new(&format!("{}@L{}", ci.name, node.line), SourceKind::Data));
+                    state.set_row(inst, Ns::Item, r);
+                }
+            }
+            for (k, v) in kwargs.iter() {
+                self.store_key(inst, Ns::Item, &KeyVal::Lit(intern::key(intern::Key::Str(intern::str_get(*k)))), v, true, node, state);
+            }
+            for sk in star_kwargs {
+                self.copy_into(inst, Ns::Item, sk, state, true, &crate::intern::KeySet::new());
+            }
+            return Value::obj(inst);
         }
         // the generated `__init__` of a dataclass base applies to a subclass without its own
         let dc_init = ci.has_fields() || {
@@ -343,10 +388,33 @@ impl Analyzer {
                     v = Some(args[i].clone());
                 } else if let Some(kv) = kwargs.get(&s(fname)) {
                     v = Some(kv.clone());
+                } else if !star_kwargs.is_empty() {
+                    // `**data` supplies the field when it has the key (over the default); a
+                    // field without a default must come from it: a read (a requirement on an
+                    // open input)
+                    let present = star_kwargs.iter().any(|sk| sk.pts.iter().any(|x| state.row(x, Ns::Item).present.contains(fk)));
+                    let definite = star_kwargs.iter().all(|sk| !sk.pts.is_empty() && sk.pts.iter().all(|x| state.row(x, Ns::Item).definite.contains(fk)));
+                    let mut acc = join_values(star_kwargs.iter().flat_map(|sk| sk.pts.iter().map(|x| state.slot(x, Ns::Item, fk)).collect::<Vec<_>>()));
+                    match default {
+                        Some(d) if !definite => {
+                            let dv = self.dataclass_default(d, node, state);
+                            acc = if present { acc.join(&dv) } else { dv.join(&acc) };
+                        }
+                        Some(_) => {}
+                        None if !definite && !super::disabled("kwreq") => {
+                            for sk in star_kwargs {
+                                let recs: Vec<u32> = self.record_objects(sk).into_iter().filter(|o| state.row(*o, Ns::Item).open()).collect();
+                                if !recs.is_empty() {
+                                    let lv = self.load_item(&Value::with_kv(crate::domain::ObjSet::from_vec(recs), sk.kv.clone()), Ns::Item, &Value::lit(fk), node, state, true);
+                                    acc = acc.join(&lv);
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                    v = Some(acc);
                 } else if let Some(d) = default {
                     v = Some(self.dataclass_default(d, node, state));
-                } else if !star_kwargs.is_empty() {
-                    v = Some(join_values(star_kwargs.iter().flat_map(|sk| sk.pts.iter().map(|x| state.slot(x, Ns::Item, fk)).collect::<Vec<_>>())));
                 }
                 if v.is_none() && star_kwargs.is_empty() {
                     if !ci.typed_dict {
@@ -507,7 +575,8 @@ impl Analyzer {
         };
         self.analysed_funcs.insert(foid);
         // --- symbolic summaries (§7.3/§9): analyse the body once, instantiate per call ---
-        if self.use_summaries && self.model_call == 0 {
+        let forced = std::mem::take(&mut self.force_tab_once);
+        if self.use_summaries && self.model_call == 0 && !forced {
             let bound = self.compute_bindings(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
             // the classes of the arguments: the summary is specialised on them
             let mut sig: Vec<(String, ObjId)> = Vec::new();
@@ -893,6 +962,63 @@ impl Analyzer {
         ret
     }
 
+    /// An exception raised here is caught by the innermost enclosing try: its handler starts
+    /// from this state (with the try frame's locals when the raise is inside a callee).
+    pub fn record_raise_state(&mut self, state: &mut State) -> bool {
+        let Some((fl, el, pre)) = self.try_marks.last() else { return false };
+        let mut here = state.copy();
+        if self.frames.len() > *fl {
+            here.env = self.env_stack.get(*el).cloned().unwrap_or_else(|| pre.env.clone());
+            here.narrowed = pre.narrowed.clone();
+            here.ret = pre.ret.clone();
+            here.exits = pre.exits.clone();
+        }
+        let exc = self.cur_exc.take().unwrap_or_else(|| Value::data("exception"));
+        if let Some(rv) = self.raise_values.last_mut() {
+            *rv = Some(match rv.take() {
+                None => exc,
+                Some(prev) => prev.join(&exc),
+            });
+        }
+        let Some(slot) = self.raise_states.last_mut() else { return false };
+        *slot = Some(match slot.take() {
+            None => here,
+            Some(mut prev) => prev.join(&mut here),
+        });
+        true
+    }
+
+    /// A builtin exception (`KeyError(key)`, …) as a value: open attributes, known `args`.
+    pub fn exception_object(&mut self, cls_name: &str, args: Vec<Value>, node: &Node, state: &mut State) -> Value {
+        let t = self.alloc_positional(Kind::Tuple, node, Some(args), Value::new(), DATA, state);
+        let row = Row::with_source(crate::domain::Source::new(cls_name, crate::domain::SourceKind::Data));
+        let oid = self.alloc_at(Kind::Namespace, node, state, &format!("{}@L{}", cls_name, node.line), Payload::None, Some(row), Ns::Attr, None, None);
+        let strong = self.obj(oid).single;
+        self.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
+        Value::obj(oid)
+    }
+
+    /// An exception named `name` is raised here (the rest of the path is dead).
+    pub fn raise_here(&mut self, name: &str, state: &mut State) {
+        self.may_raise_here(name, state);
+        state.reachable = false;
+    }
+
+    /// An exception named `name` may be raised here: a handler that catches it starts from
+    /// this state; otherwise the enclosing call raises.
+    pub fn may_raise_here(&mut self, name: &str, state: &mut State) {
+        let caught = self.guards.iter().any(|g| g.contains("*") || g.contains("Exception") || g.contains("BaseException") || g.contains(name));
+        if caught && self.record_raise_state(state) {
+            return;
+        }
+        if let Some(t) = self.raise_stack.last_mut() {
+            *t = true;
+        }
+        if let Some(m) = self.may_raise.last_mut() {
+            *m = true;
+        }
+    }
+
     /// The call that just completed may raise: the enclosing call and try body learn it.
     pub fn note_raise(&mut self) {
         if crate::interp::debug_level() == 2 {
@@ -1074,7 +1200,18 @@ impl Analyzer {
             if let (Some(d), false) = (fi.defaults.get(name), kw_present) {
                 bound.insert(*name, d.clone());
             } else if !star_kwargs.is_empty() {
-                let vals: Vec<Value> = star_kwargs.iter().flat_map(|sk| sk.pts.iter().map(|x| state.slot(x, Ns::Item, nk)).collect::<Vec<_>>()).collect();
+                let mut vals: Vec<Value> = star_kwargs.iter().flat_map(|sk| sk.pts.iter().map(|x| state.slot(x, Ns::Item, nk)).collect::<Vec<_>>()).collect();
+                if fi.defaults.get(name).is_none() && !kw_definite && !super::disabled("kwreq") {
+                    // a required parameter only `**kw` can supply: read from it (a requirement on
+                    // an input; a missing key is a TypeError at the call)
+                    for sk in star_kwargs {
+                        let recs: Vec<u32> = self.record_objects(sk).into_iter().filter(|o| state.row(*o, Ns::Item).open()).collect();
+                        if !recs.is_empty() {
+                            let v = self.load_item(&Value::with_kv(crate::domain::ObjSet::from_vec(recs), sk.kv.clone()), Ns::Item, &Value::lit(nk), node, state, true);
+                            vals.push(v);
+                        }
+                    }
+                }
                 let mut v = if vals.is_empty() { Value::data("kw") } else { join_values(vals) };
                 if !kw_definite {
                     v = match fi.defaults.get(name) {
@@ -1088,7 +1225,7 @@ impl Analyzer {
             }
         }
         if let Some(va) = &a.vararg {
-            let tid = self.alloc(Kind::Tuple, &format!("varargs:{}", fi.qualname), state, &format!("*{}", va.name.id), Payload::None, None, Ns::Item, None, None);
+            let tid = self.alloc(Kind::Tuple, &format!("varargs:{}@{}", fi.qualname, self.site_of(node)), state, &format!("*{}", va.name.id), Payload::None, None, Ns::Item, None, None);
             let mut acc = if !rest_pos.is_empty() { join_values(rest_pos.iter().cloned()) } else { Value::new() };
             if !star_args.is_empty() {
                 acc = acc.join(&extra);
@@ -1102,7 +1239,7 @@ impl Analyzer {
             bound.insert(s(va.name.id.as_str()), Value::obj(tid));
         }
         if let Some(kw) = &a.kwarg {
-            let did = self.alloc(Kind::Dict, &format!("kwargs:{}", fi.qualname), state, &format!("**{}", kw.name.id), Payload::None, None, Ns::Item, None, None);
+            let did = self.alloc(Kind::Dict, &format!("kwargs:{}@{}", fi.qualname, self.site_of(node)), state, &format!("**{}", kw.name.id), Payload::None, None, Ns::Item, None, None);
             let mut row = Row::new();
             for (name, v) in kwargs.iter() {
                 if used_kw.contains(name) {

@@ -33,9 +33,12 @@ def run(tasks, workers):
 
 
 ws = [Worker("a"), Worker("b")]
-res = run(TASKS, ws)                      #@row res: present={t1,t2,t3} definite={} closed
-r1 = res["t1"]                            #@row r1: present={task,worker,retried} definite={task,worker} closed
+# Corrected on re-reading (r140 unrolls `while` loops whose test is decided at every head): `pending` is a list of
+# known length popped once per iteration, so every task is handled and t1 (no retry) has no
+# "retried".
+res = run(TASKS, ws)                      #@row res: present={t1,t2,t3} definite={t1,t2,t3} closed
+r1 = res["t1"]                            #@row r1: present={task,worker} definite={task,worker} closed
 wa = ws[0]                                #@row wa: present={name,done} definite={name,done} closed
-done0 = wa.done[0]                        #@row done0: present={task,worker,retried} definite={task,worker} closed
+done0 = wa.done[0]                        #@row done0: present={task,worker} definite={task,worker} closed
 res["t4"]                                 #@ missing t4
 r1["worker"]                              #@ ok worker

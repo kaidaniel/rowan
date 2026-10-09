@@ -8,7 +8,7 @@ use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeySet};
 use crate::state::{Kind, State};
 
-use super::{contains_jump, dotted_last, is_main_guard, Analyzer, ClassInfo, Frame, FrameKind, FuncNode, LoopCtx, Payload, LOOP_MAX_ITER, UNROLL_MAX};
+use super::{contains_jump, dotted_last, is_constant, is_main_guard, Analyzer, ClassInfo, Frame, FrameKind, FuncNode, LoopCtx, Payload, LOOP_MAX_ITER, UNROLL_MAX};
 use super::funcs::Elem;
 
 impl Analyzer {
@@ -55,6 +55,13 @@ impl Analyzer {
                 let cur = self.eval(&a.target, state);
                 let rhs = self.eval(&a.value, state);
                 let n = frontend::node(a);
+                // `xs += ys` on a list extends it in place (other names see it)
+                if a.op == ast::Operator::Add && !cur.pts.is_empty() && cur.pts.iter().all(|o| self.kind(o) == Kind::List) && !crate::interp::disabled("iadd") {
+                    let m = self.method_value("list.extend", &cur);
+                    self.call_value(&m, &n, None, state, Some(vec![rhs]));
+                    self.bind_target(&a.target, &cur, state);
+                    return;
+                }
                 let res = self.binop(a.op, &cur, &rhs, &n, state);
                 self.bind_target(&a.target, &res, state);
             }
@@ -77,17 +84,27 @@ impl Analyzer {
                 self.exit_count += 1;
             }
             ast::Stmt::Raise(r) => {
-                if let Some(e) = &r.exc {
-                    self.eval(e, state);
-                }
+                let exc_v = match &r.exc {
+                    Some(e) => Some(self.eval(e, state)),
+                    // a bare raise re-raises what the running handler holds: not tracked
+                    None => None,
+                };
                 // uncaught here (no enclosing handler for it): the running call raises
                 let name = r.exc.as_ref().map(|e| match &**e {
                     ast::Expr::Call(c) => dotted_last(&c.func),
                     other => dotted_last(other),
                 });
+                // a bare `raise` re-raises what the running handler caught
+                let names: Vec<String> = match &name {
+                    Some(n) => vec![n.clone()],
+                    None => self.handling.last().map(|h| h.iter().cloned().collect()).unwrap_or_default(),
+                };
                 let caught = self.guards.iter().any(|g| {
-                    g.contains("*") || g.contains("Exception") || g.contains("BaseException") || name.as_ref().map(|n| g.contains(n)).unwrap_or(false)
+                    g.contains("*") || g.contains("Exception") || g.contains("BaseException") || names.iter().any(|n| g.contains(n) || n == "*" && !g.is_empty())
                 });
+                self.cur_exc = exc_v.filter(|v| v.pts.iter().any(|o| self.kind(o) == Kind::Instance));
+                let recorded = state.reachable && !crate::interp::disabled("raisestate") && self.record_raise_state(state);
+                self.cur_exc = None;
                 if !caught {
                     if crate::interp::debug_level() == 2 {
                         eprintln!("  raise statement at L{} in {}", frontend::node(r).line, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
@@ -95,8 +112,11 @@ impl Analyzer {
                     if let Some(t) = self.raise_stack.last_mut() {
                         *t = true;
                     }
-                    if let Some(m) = self.may_raise.last_mut() {
-                        *m = true;
+                    // the enclosing try already has this state for its handlers / finally
+                    if !recorded {
+                        if let Some(m) = self.may_raise.last_mut() {
+                            *m = true;
+                        }
                     }
                 }
                 state.reachable = false;
@@ -190,6 +210,7 @@ impl Analyzer {
                 state.reachable = false;
             }
             ast::Stmt::Try(t) => self.stmt_try(t, state),
+            ast::Stmt::With(w) if self.with_contextmanager(w, state) => {}
             ast::Stmt::With(w) => {
                 let mut managers: Vec<(Value, Node)> = Vec::new();
                 for item in &w.items {
@@ -212,11 +233,15 @@ impl Analyzer {
                     self.guards.push(FxHashSet::from_iter(["*".to_string()]));
                     self.may_raise.push(false);
                     self.raise_states.push(None);
+                    self.raise_values.push(None);
+                    self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
                     let exits_before = self.exit_count;
                     self.exec_block(&w.body, state);
                     self.guards.pop();
+                    self.try_marks.pop();
                     let flagged = self.may_raise.pop().unwrap_or(false);
                     let raised_at = self.raise_states.pop().flatten();
+                    self.raise_values.pop();
                     let died = !state.reachable && self.exit_count == exits_before;
                     let generic = flagged || (died && raised_at.is_none());
                     let mut after = state.copy();
@@ -246,18 +271,41 @@ impl Analyzer {
             }
             ast::Stmt::ClassDef(c) => self.stmt_classdef(c, state),
             ast::Stmt::Match(m) => {
-                self.eval(&m.subject, state);
+                let subj = self.eval(&m.subject, state);
                 let mut outs: Vec<State> = Vec::new();
                 self.cond_depth += 1;
                 self.branch_depth += 1;
+                // cases in order: a case that cannot match is skipped, one that surely matches
+                // (with no guard, or a guard that is true) ends the match
+                let mut matched = false;
                 for case in &m.cases {
                     let mut cs = state.copy();
+                    let decided = if crate::interp::disabled("matchpat") { None } else { self.match_pattern(&case.pattern, &subj, &mut cs) };
+                    if decided == Some(false) || !cs.reachable {
+                        continue;
+                    }
+                    let mut sure = decided == Some(true);
+                    if let Some(g) = &case.guard {
+                        let gv = self.eval(g, &mut cs);
+                        match self.truthiness(&gv, &cs) {
+                            Some(false) => continue,
+                            Some(true) => {}
+                            None => sure = false,
+                        }
+                        self.narrow(g, true, &mut cs);
+                    }
                     self.exec_block(&case.body, &mut cs);
                     outs.push(cs);
+                    if sure {
+                        matched = true;
+                        break;
+                    }
                 }
                 self.branch_depth -= 1;
                 self.cond_depth -= 1;
-                outs.push(state.copy());
+                if !matched {
+                    outs.push(state.copy());
+                }
                 let mut out = outs.remove(0);
                 for mut o in outs {
                     out = out.join(&mut o);
@@ -271,6 +319,203 @@ impl Analyzer {
         }
     }
 
+    /// `with cm(...) as x: body` where `cm` is a `@contextmanager` generator function: the
+    /// generator runs concretely and the body runs at its yield. False: not that case.
+    fn with_contextmanager(&mut self, w: &'static ast::StmtWith, state: &mut State) -> bool {
+        if w.items.len() != 1 {
+            return false;
+        }
+        let item = &w.items[0];
+        let ast::Expr::Call(call) = &item.context_expr else { return false };
+        // only a plain name / attribute callee (evaluating it twice has no effect)
+        if !matches!(&*call.func, ast::Expr::Name(_) | ast::Expr::Attribute(_)) {
+            return false;
+        }
+        let mut probe = state.copy();
+        let fv = self.eval(&call.func, &mut probe);
+        let Some(f) = fv.single() else { return false };
+        if self.kind(f) != Kind::Function || !self.func_info(f).is_contextmanager.get() {
+            return false;
+        }
+        let prev = self.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.frames.len(), env_after: None, ran: false });
+        self.force_tab_once = true;
+        let n = frontend::node(&item.context_expr);
+        let fv = self.eval(&call.func, state);
+        self.call_value(&fv, &n, Some(call), state, None);
+        self.force_tab_once = false;
+        let h = std::mem::replace(&mut self.cm_hook, prev);
+        match h {
+            Some(h) if h.ran => {
+                if let Some(env) = h.env_after {
+                    state.env = env;
+                }
+                if !state.reachable {
+                    // the generator did not finish normally after the body: still go on after
+                    // the with (an exception there would be the body's)
+                    state.reachable = true;
+                }
+            }
+            _ => {
+                // the generator never reached its yield here: the body with an unknown value
+                if let Some(t) = item.optional_vars.as_deref() {
+                    self.bind_target(t, &Value::data("with"), state);
+                }
+                self.exec_block(&w.body, state);
+            }
+        }
+        true
+    }
+
+    /// Whether `pat` matches `subj` (None: depends), binding its capture names in `state`.
+    fn match_pattern(&mut self, pat: &'static ast::Pattern, subj: &Value, state: &mut State) -> Option<bool> {
+        let record_events = |an: &mut Analyzer, v: &Value, kind: &'static str| {
+            for o in v.pts.iter() {
+                if an.kind(o) == Kind::Ph {
+                    an.record_event(kind, o);
+                }
+            }
+            if let Some(ph) = v.kv.as_param() {
+                an.record_event(kind, ph);
+            }
+        };
+        match pat {
+            ast::Pattern::MatchAs(a) => {
+                let r = match &a.pattern {
+                    Some(p) => self.match_pattern(p, subj, state),
+                    None => Some(true),
+                };
+                if let Some(n) = &a.name {
+                    self.store_name(s(n.id.as_str()), subj.clone(), state);
+                }
+                r
+            }
+            ast::Pattern::MatchOr(o) => {
+                let mut any_unknown = false;
+                for p in &o.patterns {
+                    match self.match_pattern(p, subj, state) {
+                        Some(true) => return Some(true),
+                        Some(false) => {}
+                        None => any_unknown = true,
+                    }
+                }
+                if any_unknown { None } else { Some(false) }
+            }
+            ast::Pattern::MatchValue(v) => {
+                let pv = self.eval(&v.value, state);
+                let a = crate::domain::kv_literals(&subj.kv);
+                let b = crate::domain::kv_literals(&pv.kv);
+                if subj.pts.is_empty() && pv.pts.is_empty() && subj.kv.is_literal() && pv.kv.is_literal() && b.len() == 1 && !a.is_empty() {
+                    let k = b.iter().next().unwrap();
+                    if a.len() == 1 {
+                        return Some(a.contains(k));
+                    }
+                    if !a.contains(k) {
+                        return Some(false);
+                    }
+                    return None;
+                }
+                if !subj.pts.is_empty() && subj.pts.iter().all(|o| self.kind(o).is_container() || self.kind(o) == Kind::Instance && self.instance_class(o).map(|c| self.class_lookup(c, "__eq__").is_none()).unwrap_or(false)) {
+                    // containers / plain instances never equal a literal
+                    return Some(false);
+                }
+                record_events(self, subj, "truth");
+                None
+            }
+            ast::Pattern::MatchSingleton(sg) => {
+                let want = match sg.value {
+                    ast::Singleton::None => intern::key_none(),
+                    ast::Singleton::True => intern::key_bool(true),
+                    ast::Singleton::False => intern::key_bool(false),
+                };
+                let lits = crate::domain::kv_literals(&subj.kv);
+                if subj.pts.is_empty() && subj.kv.is_literal() && !lits.is_empty() {
+                    if lits.len() == 1 {
+                        return Some(lits.contains(want));
+                    }
+                    return if lits.contains(want) { None } else { Some(false) };
+                }
+                if !subj.pts.is_empty() && subj.pts.iter().all(|o| self.kind(o).is_container() || self.kind(o) == Kind::Instance) {
+                    return Some(false);
+                }
+                record_events(self, subj, "truth");
+                None
+            }
+            ast::Pattern::MatchMapping(mm) => {
+                if subj.pts.is_empty() {
+                    if subj.kv.is_literal() {
+                        return Some(false);
+                    }
+                    return None;
+                }
+                let recs: Vec<u32> = subj.pts.iter().filter(|o| self.kind(*o) == Kind::Dict).collect();
+                if recs.len() != subj.pts.len() {
+                    if subj.pts.iter().all(|o| matches!(self.kind(o), Kind::List | Kind::Tuple | Kind::Set)) {
+                        return Some(false);
+                    }
+                    record_events(self, subj, "narrow");
+                    for p in &mm.patterns {
+                        self.match_pattern(p, &Value::data("match"), state);
+                    }
+                    return None;
+                }
+                let mut result = Some(true);
+                let node = frontend::node(pat);
+                for (kexpr, p) in mm.keys.iter().zip(mm.patterns.iter()) {
+                    let kv = self.eval(kexpr, state);
+                    let Some(k) = kv.kv.as_lit().filter(|_| kv.pts.is_empty()) else {
+                        result = None;
+                        continue;
+                    };
+                    let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
+                    let present = if rows.iter().all(|r| r.definite.contains(k)) {
+                        Some(true)
+                    } else if rows.iter().all(|r| r.closed() && !r.present.contains(k) && !r.symbolic()) {
+                        Some(false)
+                    } else {
+                        None
+                    };
+                    if present == Some(false) {
+                        return Some(false);
+                    }
+                    let sv = self.load_item(subj, Ns::Item, &kv, &node, state, false);
+                    let sub = self.match_pattern(p, &sv, state);
+                    result = match (result, present, sub) {
+                        (_, _, Some(false)) => return Some(false),
+                        (Some(true), Some(true), Some(true)) => Some(true),
+                        _ => None,
+                    };
+                }
+                if let Some(rest) = &mm.rest {
+                    self.store_name(s(rest.id.as_str()), Value::data("match rest"), state);
+                }
+                result
+            }
+            ast::Pattern::MatchClass(c) => {
+                for p in c.arguments.patterns.iter() {
+                    self.match_pattern(p, &Value::data("match"), state);
+                }
+                for kw in c.arguments.keywords.iter() {
+                    self.match_pattern(&kw.pattern, &Value::data("match"), state);
+                }
+                record_events(self, subj, "isinstance");
+                None
+            }
+            ast::Pattern::MatchSequence(sq) => {
+                let el = Value::data("match");
+                for p in &sq.patterns {
+                    self.match_pattern(p, &el, state);
+                }
+                None
+            }
+            ast::Pattern::MatchStar(st) => {
+                if let Some(n) = &st.name {
+                    self.store_name(s(n.id.as_str()), Value::data("match rest"), state);
+                }
+                Some(true)
+            }
+        }
+    }
+
     fn stmt_delete(&mut self, d: &'static ast::StmtDelete, state: &mut State) {
         for t in &d.targets {
             match t {
@@ -278,6 +523,28 @@ impl Analyzer {
                     let obj = self.eval(&sub.value, state);
                     let key = self.eval_key(&sub.slice, state);
                     let n = frontend::node(t);
+                    // `del xs[i]` on a list: later positions move down
+                    for o in obj.pts.iter() {
+                        if self.kind(o) != Kind::List {
+                            continue;
+                        }
+                        let idx = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
+                        match (self.known_positions(o, state), idx) {
+                            (Some(mut ps), Some(i)) if obj.pts.len() == 1 => {
+                                let len = ps.len() as i64;
+                                let at = if i < 0 { len + i } else { i };
+                                if 0 <= at && at < len {
+                                    ps.remove(at as usize);
+                                    self.set_positions(o, ps, state);
+                                }
+                            }
+                            _ => {
+                                self.obj_mut(o).literal_len = None;
+                                self.obj_mut(o).known_prefix = None;
+                                state.drop_obj_ns(o, Ns::Pos);
+                            }
+                        }
+                    }
                     self.delete_item(&obj, Ns::Item, &key, &n, state, true);
                 }
                 ast::Expr::Attribute(a) => {
@@ -301,7 +568,7 @@ impl Analyzer {
         let tv = self.eval(test, state);
         let mut then_s = state.copy();
         let mut else_s = state.copy();
-        let decided = self.truthiness(&tv, state);
+        let decided = self.truth_of(&tv, state, &frontend::node(test));
         match decided {
             Some(true) => else_s.reachable = false,
             Some(false) => then_s.reachable = false,
@@ -339,6 +606,70 @@ impl Analyzer {
     }
 
     fn stmt_while(&mut self, w: &'static ast::StmtWhile, state: &mut State) {
+        // iterations whose test is decided at the head run as straight-line code (a constant
+        // test such as `while True` is decided by the body alone: not unrolled); the rest of
+        // the loop, from where the test stops being decided, is analysed as a loop
+        let mut breaks: Option<State> = None;
+        if !is_constant(&w.test) && !crate::interp::disabled("whileunroll") {
+            let mut idx = 0usize;
+            loop {
+                if !state.reachable {
+                    break;
+                }
+                let mut probe = state.copy();
+                let tv = self.eval(&w.test, &mut probe);
+                let decided = self.truth_of(&tv, &mut probe, &frontend::node(&*w.test));
+                match decided {
+                    Some(false) => {
+                        state.replace_with(probe);
+                        self.narrow(&w.test, false, state);
+                        if !w.orelse.is_empty() {
+                            self.exec_block(&w.orelse, state);
+                        }
+                        if let Some(mut b) = breaks {
+                            let j = if state.reachable { state.join(&mut b) } else { b };
+                            state.replace_with(j);
+                        }
+                        return;
+                    }
+                    Some(true) if idx < UNROLL_MAX => {
+                        state.replace_with(probe);
+                        self.narrow(&w.test, true, state);
+                        self.frame_mut().unroll.push(1000 + idx);
+                        self.loop_stack.push(LoopCtx::default());
+                        self.exec_block(&w.body, state);
+                        let ctx = self.loop_stack.pop().unwrap();
+                        self.frame_mut().unroll.pop();
+                        if let Some(mut c) = ctx.continues {
+                            let j = if state.reachable { state.join(&mut c) } else { c };
+                            state.replace_with(j);
+                        }
+                        if let Some(mut b) = ctx.breaks {
+                            breaks = Some(match breaks.take() {
+                                None => b,
+                                Some(mut e) => e.join(&mut b),
+                            });
+                        }
+                        idx += 1;
+                    }
+                    _ => break,
+                }
+            }
+            if !state.reachable {
+                if let Some(b) = breaks {
+                    state.replace_with(b);
+                }
+                return;
+            }
+        }
+        self.stmt_while_loop(w, state);
+        if let Some(mut b) = breaks {
+            let j = if state.reachable { state.join(&mut b) } else { b };
+            state.replace_with(j);
+        }
+    }
+
+    fn stmt_while_loop(&mut self, w: &'static ast::StmtWhile, state: &mut State) {
         let mut pre = state.copy();
         let mut head = state.copy();
         let mut exit_acc: Option<State> = None;
@@ -399,6 +730,9 @@ impl Analyzer {
         let itv = self.eval(&f.iter, state);
         let iter_node = frontend::node(&*f.iter);
         let it = self.iterate(&itv, &iter_node, state);
+        // a one-shot iterator is used up by the loop (a break leaves it partly consumed: the
+        // later iterations see the rest, which is not tracked)
+        self.exhaust(&itv, state);
         let has_jump = contains_jump(&f.body);
         if let Some(items) = &it.items {
             if items.len() <= UNROLL_MAX {
@@ -579,21 +913,40 @@ impl Analyzer {
                 }
             }
         }
+        // returns inside the try are collected apart from the earlier ones: the finally runs
+        // on their way out
+        let has_finally = !t.finalbody.is_empty() && !crate::interp::disabled("finally");
+        let outer_exits = if has_finally { state.exits.take() } else { None };
+        let raise_before = self.raise_stack.last().copied().unwrap_or(false);
         let mut pre = state.copy();
         self.guards.push(caught);
         self.may_raise.push(false);
         self.raise_states.push(None);
+        self.raise_values.push(None);
+        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
         self.cond_depth += 1;
         self.branch_depth += 1;
         let exits_before = self.exit_count;
         self.exec_block(&t.body, state);
         self.guards.pop();
+        self.try_marks.pop();
         // a body that ended because it returned (or broke out) did not raise
         let flagged = self.may_raise.pop().unwrap_or(false);
-        let raised_at = self.raise_states.pop().flatten();
+        let mut raised_at = self.raise_states.pop().flatten();
+        let raised_exc = self.raise_values.pop().flatten();
         let died = !state.reachable && self.exit_count == exits_before;
         let generic = flagged || (died && raised_at.is_none());
         let body_may_raise = generic || raised_at.is_some();
+        // where an exception leaves the body (for a finally without handlers)
+        let mut finally_escape: Option<State> = None;
+        if has_finally && t.handlers.is_empty() && body_may_raise {
+            let mut e = if generic { pre.copy() } else { State::bottom() };
+            if let Some(r) = raised_at.as_mut() {
+                let mut r2 = r.copy();
+                e = if e.reachable { e.join(&mut r2) } else { r2 };
+            }
+            finally_escape = Some(e);
+        }
         if crate::interp::debug_level() == 2 {
             eprintln!("  try at L{}: may_raise={} at_access={} reachable={} exited={}", frontend::node(t).line, flagged, raised_at.is_some(), state.reachable, self.exit_count != exits_before);
         }
@@ -625,9 +978,30 @@ impl Analyzer {
             }
             if let Some(name) = &h.name {
                 let hn = frontend::node(h);
-                self.store_name(s(name.id.as_str()), Value::data(&format!("exc@L{}", hn.line)), &mut hs);
+                // the exceptions raised at the recorded points (anything else: unknown)
+                let unknown = Value::data(&format!("exc@L{}", hn.line));
+                let ev = match &raised_exc {
+                    Some(v) if !generic => v.clone(),
+                    Some(v) => v.join(&unknown),
+                    None => unknown,
+                };
+                self.store_name(s(name.id.as_str()), ev, &mut hs);
             }
+            let mut names: FxHashSet<String> = FxHashSet::default();
+            match &h.type_ {
+                None => {
+                    names.insert("*".into());
+                }
+                Some(ty) => match &**ty {
+                    ast::Expr::Tuple(tup) => names.extend(tup.elts.iter().map(dotted_last)),
+                    other => {
+                        names.insert(dotted_last(other));
+                    }
+                },
+            }
+            self.handling.push(names);
             self.exec_block(&h.body, &mut hs);
+            self.handling.pop();
             results.push(hs);
         }
         self.branch_depth -= 1;
@@ -636,7 +1010,67 @@ impl Analyzer {
         for mut r in results {
             out = out.join(&mut r);
         }
-        if !t.finalbody.is_empty() {
+        if has_finally {
+            let inner_exits = out.exits.take();
+            let mut ret_acc = out.ret.take();
+            let mut exits_acc: Option<State> = None;
+            let add_exits = |e: Option<std::sync::Arc<State>>, acc: &mut Option<State>| {
+                if let Some(e) = e {
+                    let mut s2 = e.copy_ref();
+                    *acc = Some(match acc.take() {
+                        None => s2,
+                        Some(mut a) => a.join(&mut s2),
+                    });
+                }
+            };
+            // the normal way out
+            if out.reachable {
+                self.exec_block(&t.finalbody, &mut out);
+            }
+            add_exits(out.exits.take(), &mut exits_acc);
+            if let Some(r) = out.ret.take() {
+                ret_acc = Some(match ret_acc { None => r, Some(a) => a.join(&r) });
+            }
+            // returns made inside the try: the finally runs before the function returns
+            let mut ways: Vec<State> = Vec::new();
+            if let Some(ie) = inner_exits {
+                ways.push(ie.copy_ref());
+            }
+            // an exception leaving the try (no handler here) that a `return` in the finally
+            // swallows
+            let n_exit_ways = ways.len();
+            if t.handlers.is_empty() && contains_return(&t.finalbody) && body_may_raise {
+                if let Some(esc) = finally_escape.take() {
+                    ways.push(esc);
+                }
+            }
+            for (wi, mut w) in ways.into_iter().enumerate() {
+                let is_escape = wi >= n_exit_ways;
+                w.reachable = true;
+                w.ret = None;
+                w.exits = None;
+                self.exec_block(&t.finalbody, &mut w);
+                if is_escape {
+                    if !w.reachable && !flagged {
+                        // the finally returned on every path: the exception does not leave
+                        if let Some(r) = self.raise_stack.last_mut() {
+                            *r = raise_before;
+                        }
+                    }
+                    // a finally that completes re-raises: nothing continues from here
+                    w.reachable = false;
+                } else if w.reachable {
+                    w.record_exit();
+                }
+                add_exits(w.exits.take(), &mut exits_acc);
+                if let Some(r) = w.ret.take() {
+                    ret_acc = Some(match ret_acc { None => r, Some(a) => a.join(&r) });
+                }
+            }
+            add_exits(outer_exits, &mut exits_acc);
+            out.exits = exits_acc.map(std::sync::Arc::new);
+            out.ret = ret_acc;
+        } else if !t.finalbody.is_empty() {
             if !out.reachable {
                 out = pre.copy();
             }
@@ -654,6 +1088,8 @@ impl Analyzer {
         let mut open_base = false;
         let mut typed_dict = false;
         let mut named_tuple = false;
+        let mut is_enum = false;
+        let mut dict_base = false;
         if let Some(args) = &c.arguments {
             for b in args.args.iter() {
                 let bv = self.eval(b, state);
@@ -662,6 +1098,12 @@ impl Analyzer {
                         Kind::Class => bases.push(oid),
                         Kind::External => {
                             let q = self.external_qual(oid);
+                            if (q.ends_with("Enum") || q.ends_with("Flag")) && q.starts_with("enum.") {
+                                is_enum = true;
+                            }
+                            if q == "builtins.dict" {
+                                dict_base = true;
+                            }
                             if q.ends_with("TypedDict") {
                                 typed_dict = true;
                             } else if q.ends_with("NamedTuple") {
@@ -688,6 +1130,7 @@ impl Analyzer {
             dataclass_fields: std::cell::RefCell::new(None),
             typed_dict,
             named_tuple,
+            dict_base,
             field_classes: std::cell::RefCell::new(None),
             any_fields: std::cell::RefCell::new(None),
         };
@@ -732,6 +1175,75 @@ impl Analyzer {
             self.exec_stmt(st, state);
         }
         self.frames.pop();
+        // an Enum: each plain class-level `NAME = value` is a member, an instance of the class
+        // with known `name` and `value`, in definition order
+        let enum_base = info.bases.iter().any(|b| self.enum_members.contains_key(b));
+        if (is_enum || enum_base) && !crate::interp::disabled("enummembers") {
+            let mut members: Vec<(String, u32)> = Vec::new();
+            for st in &c.body {
+                let ast::Stmt::Assign(a) = st else { continue };
+                let [ast::Expr::Name(n)] = &a.targets[..] else { continue };
+                let name = n.id.to_string();
+                if name.starts_with('_') {
+                    continue;
+                }
+                let nk = key_str_lit(&name);
+                let Some(v) = self.cls_slots.get(&(coid, Ns::Attr, nk)).cloned() else { continue };
+                if v.pts.iter().any(|o| matches!(self.kind(o), Kind::Function | Kind::Class)) {
+                    continue;
+                }
+                let mid = self.alloc_raw(Kind::Instance, &format!("enum:{}:{}", coid, name), "", true, &format!("{}.{}", c.name.id, name), Payload::Cls(coid));
+                let mut row = Row::new();
+                for (k, val) in [("name", Value::lit(nk)), ("value", v.clone())] {
+                    let kk = key_str_lit(k);
+                    row = row.store(kk, true);
+                    state.set_slot(mid, Ns::Attr, kk, val, true);
+                }
+                state.set_row(mid, Ns::Attr, row);
+                self.cls_slots.insert((coid, Ns::Attr, nk), Value::obj(mid));
+                members.push((name, mid));
+            }
+            self.enum_members.insert(coid, members);
+        }
+        // `__set_name__(owner, name)` on descriptor objects assigned in the class body
+        if !crate::interp::disabled("descriptors") {
+            for st in &c.body {
+                let ast::Stmt::Assign(a) = st else { continue };
+                let [ast::Expr::Name(n)] = &a.targets[..] else { continue };
+                let v = self.cls_slots.get(&(coid, Ns::Attr, key_str_lit(n.id.as_str()))).cloned().unwrap_or_default();
+                for d in v.pts.iter() {
+                    if self.kind(d) == Kind::Instance && self.instance_class(d).and_then(|dc| self.class_lookup(dc, "__set_name__")).is_some() {
+                        self.call_method_with(&Value::obj(d), "__set_name__", vec![Value::obj(coid), Value::lit(key_str_lit(n.id.as_str()))], &cnode, state);
+                    }
+                }
+            }
+        }
+        // a base's `__init_subclass__` runs for the new class (an implicit classmethod)
+        if !crate::interp::disabled("initsubclass") {
+            let found = info.bases.iter().find_map(|b| self.class_lookup(*b, "__init_subclass__"));
+            if let Some(defc) = found {
+                let fv = self.cls_slots.get(&(defc, Ns::Attr, key_str_lit("__init_subclass__"))).cloned().unwrap_or_default();
+                let mut kwargs: indexmap::IndexMap<intern::StrId, Value> = indexmap::IndexMap::new();
+                if let Some(args) = &c.arguments {
+                    for kw in args.keywords.iter() {
+                        if let Some(a) = &kw.arg {
+                            if a.as_str() != "metaclass" {
+                                let v = self.eval(&kw.value, state);
+                                kwargs.insert(s(a.as_str()), v);
+                            }
+                        }
+                    }
+                }
+                for f in fv.pts.iter() {
+                    if self.kind(f) == Kind::Function {
+                        // concretely: the class's own attributes (`cls.__name__`) are known here
+                        self.force_tab_once = true;
+                        self.call_user(f, Some(Value::obj(coid)), vec![], kwargs.clone(), vec![], vec![], state, &cnode, None, false);
+                        self.force_tab_once = false;
+                    }
+                }
+            }
+        }
         let mut cv = Value::obj(coid);
         if !is_dataclass && !c.decorator_list.is_empty() {
             cv = self.apply_decorators(&c.decorator_list, cnode, cv, state);
@@ -841,4 +1353,26 @@ impl Analyzer {
         self.modules.insert(name.to_string(), oid);
         oid
     }
+}
+
+/// A `return` somewhere in these statements (not inside nested functions or classes).
+fn contains_return(body: &[ast::Stmt]) -> bool {
+    body.iter().any(|s| match s {
+        ast::Stmt::Return(_) => true,
+        ast::Stmt::If(i) => contains_return(&i.body) || i.elif_else_clauses.iter().any(|c| contains_return(&c.body)),
+        ast::Stmt::For(f) => contains_return(&f.body) || contains_return(&f.orelse),
+        ast::Stmt::While(w) => contains_return(&w.body) || contains_return(&w.orelse),
+        ast::Stmt::With(w) => contains_return(&w.body),
+        ast::Stmt::Try(t) => {
+            contains_return(&t.body)
+                || contains_return(&t.orelse)
+                || contains_return(&t.finalbody)
+                || t.handlers.iter().any(|h| {
+                    let ast::ExceptHandler::ExceptHandler(h) = h;
+                    contains_return(&h.body)
+                })
+        }
+        ast::Stmt::Match(m) => m.cases.iter().any(|c| contains_return(&c.body)),
+        _ => false,
+    })
 }

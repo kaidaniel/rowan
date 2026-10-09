@@ -72,9 +72,11 @@ def walk(g, name):
     return visited
 
 
-seen = walk(g, "s")                       #@row seen: present={s,a,b} definite={} closed
-entry = seen["s"]                         #@row entry: present={node,edges,toll_out} definite={node,edges} closed
-entry["toll_out"]                         #@ possibly toll_out
+# Corrected on re-reading (r140 unrolls `while` loops whose test is decided at every head): the stack holds known
+# nodes, so the walk visits s, a, b; s's edge e3 has toll=True.
+seen = walk(g, "s")                       #@row seen: present={s,a,b} definite={s,a,b} closed
+entry = seen["s"]                         #@row entry: present={node,edges,toll_out} definite={node,edges,toll_out} closed
+entry["toll_out"]                         #@ ok toll_out
 entry["node"]                             #@ ok node
 
 
@@ -99,6 +101,8 @@ def summarize(g):
     return {**out, "name": "g"}
 
 
-summ = summarize(g)                       #@row summ: present={n_nodes,n_edges,has_toll,name} definite={n_nodes,n_edges,name} closed
+# Corrected on re-reading (r157 added `any`/`all` models): e3 = link("s", "b", toll=True) is in
+# s.out, so the any() over every known edge is True and has_toll is definite.
+summ = summarize(g)                       #@row summ: present={n_nodes,n_edges,has_toll,name} definite={n_nodes,n_edges,has_toll,name} closed
 summ["n_edges"]                           #@ ok n_edges
-summ["has_toll"]                          #@ possibly has_toll
+summ["has_toll"]                          #@ ok has_toll

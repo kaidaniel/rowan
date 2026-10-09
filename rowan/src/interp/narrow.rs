@@ -225,6 +225,9 @@ impl Analyzer {
         let mut classes: Vec<u32> = Vec::new();
         let mut kinds: Vec<Kind> = Vec::new();
         let mut star = false;
+        // an external class we know nothing about: still never a base of a user class whose
+        // whole hierarchy is known (unless it is an ABC / protocol checked by structure)
+        let mut star_structural = false;
         let in_summary = !self.sum_stack.is_empty();
         let mut narrowed: Vec<(u32, u32)> = Vec::new();
         for c in cv.pts.iter() {
@@ -233,9 +236,13 @@ impl Analyzer {
                 Kind::External => {
                     let q = self.external_qual(c);
                     let q = q.rsplit('.').next().unwrap_or("").to_string();
+                    let full = self.external_qual(c);
                     match Self::kinds_for_external(&q, false) {
                         Some(ks) => kinds.extend(ks),
-                        None => star = true,
+                        None => {
+                            star = true;
+                            star_structural |= is_structural_qual(&full);
+                        }
                     }
                 }
                 Kind::Tuple | Kind::List => {
@@ -248,9 +255,13 @@ impl Analyzer {
                                 Kind::External => {
                                     let q = self.external_qual(c2);
                                     let q = q.rsplit('.').next().unwrap_or("").to_string();
+                                    let full = self.external_qual(c2);
                                     match Self::kinds_for_external(&q, true) {
                                         Some(ks) => kinds.extend(ks),
-                                        None => star = true,
+                                        None => {
+                                            star = true;
+                                            star_structural |= is_structural_qual(&full);
+                                        }
                                     }
                                 }
                                 _ => {}
@@ -261,7 +272,7 @@ impl Analyzer {
                 _ => return,
             }
         }
-        if star {
+        if star && (star_structural || crate::interp::disabled("extinst")) {
             return;
         }
         let mut keep: Vec<u32> = Vec::new();
@@ -269,8 +280,11 @@ impl Analyzer {
             let m: Option<bool> = match self.kind(oid) {
                 Kind::Instance => match self.instance_class(oid) {
                     None => None,
-                    Some(pc) => Some(classes.iter().any(|c| self.is_subclass(pc, *c)) || classes.contains(&pc)),
+                    Some(pc) if classes.iter().any(|c| self.is_subclass(pc, *c)) || classes.contains(&pc) => Some(true),
+                    Some(pc) if star && !self.hierarchy_closed(pc) => None,
+                    Some(_) => Some(false),
                 },
+                _ if star => None,
                 Kind::Unknown => None,
                 Kind::Ph => {
                     self.record_event("isinstance", oid);
@@ -317,6 +331,24 @@ impl Analyzer {
             }
         }
         self.store_narrowed(&store, Value::with_kv(new_pts, cur.kv.clone()), state);
+    }
+
+    /// A user class whose bases are all user classes (or `object`), transitively.
+    pub fn hierarchy_closed(&self, cls: u32) -> bool {
+        let mut work = vec![cls];
+        let mut seen: Vec<u32> = Vec::new();
+        while let Some(c) = work.pop() {
+            if seen.contains(&c) {
+                continue;
+            }
+            seen.push(c);
+            let Some(ci) = self.class_info_opt(c) else { return false };
+            if ci.open_base {
+                return false;
+            }
+            work.extend(ci.bases.iter().copied());
+        }
+        true
     }
 
     pub fn is_subclass(&self, cls: u32, base: u32) -> bool {
@@ -567,4 +599,10 @@ impl Analyzer {
             src = self.obj(sid).derived_from;
         }
     }
+}
+
+/// Classes whose isinstance checks go by structure (ABCs with subclass hooks, protocols):
+/// an unrelated user class may pass them.
+fn is_structural_qual(q: &str) -> bool {
+    q.starts_with("collections.abc") || q.starts_with("typing") || q.starts_with("abc.") || q.starts_with("numbers") || q.starts_with("os.PathLike")
 }
