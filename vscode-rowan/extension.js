@@ -23,7 +23,7 @@ const TIER_SYMBOL = {
 const TIER_TEXT = {
   proven: "ok", likely: "ok (likely — unknown code ran in between)", possibly: "possibly missing",
   missing: "definitely missing", "likely-missing": "likely missing", input: "depends on input",
-  datakey: "data-derived key into a closed record", map: "map key", unknown: "unknown",
+  datakey: "data-derived key into a dict whose keys are all known", map: "map key", unknown: "unknown",
 };
 
 function keyList(keys) {
@@ -38,9 +38,10 @@ function displayKey(k, ns) {
 }
 
 /**
- * `{"a": ..., "b"?: ..., "c"~: ..., **}`: definite keys plain, keys set on some paths with
- * `?`, keys unknown code may have removed with `~`, `**` when other keys are possible (the
- * record is open).  Attribute rows: `obj(a=..., b?=..., **)`.
+ * Notation (as the engine prints values): `?` an unknown value; `{"a": 1, "b"?: ?, "c"~: ?,
+ * **?}` a dict with "a" always, "b" on some paths, "c" unless unknown code removed it, and
+ * possibly other keys (`**?`); `Name(a=1, **?)` an object; `list[X]` a list of unknown length;
+ * `…` what the printer left out.
  */
 const VALUE_WIDTH = 40;
 const CLOSE_OF = { "{": "}", "[": "]", "(": ")" };
@@ -138,9 +139,9 @@ function rowText(row, ns) {
   const likely = new Set(row.likely || []);
   const parts = present.map((k) => {
     const mark = definite.has(k) ? "" : likely.has(k) ? "~" : "?";
-    return ns === "attr" ? `${displayKey(k, ns)}${mark}=...` : `${displayKey(k, ns)}${mark}: ...`;
+    return ns === "attr" ? `${displayKey(k, ns)}${mark}=?` : `${displayKey(k, ns)}${mark}: ?`;
   });
-  if (!row.closed) parts.push("**");
+  if (!row.closed) parts.push("**?");
   return ns === "attr" ? `obj(${parts.join(", ")})` : `{${parts.join(", ")}}`;
 }
 
@@ -154,9 +155,10 @@ function describeRow(row, ns, withText) {
   const label = ns === "attr" ? "attributes" : "keys";
   if (!withText) lines.push("- `" + rowText(row, ns) + "`");
   const legend = [];
-  if (maybe.some((k) => !likely.includes(k))) legend.push("`?` set on some paths only");
-  if (maybe.some((k) => likely.includes(k))) legend.push("`~` unless unknown code removed it");
-  if (!row.closed) legend.push(`\`**\` other ${label} possible`);
+  const mark = ns === "attr" ? (m) => `\`a${m}=\`` : (m) => `\`"k"${m}:\``;
+  if (maybe.some((k) => !likely.includes(k))) legend.push(`${mark("?")} set on some paths only`);
+  if (maybe.some((k) => likely.includes(k))) legend.push(`${mark("~")} there unless unknown code removed it`);
+  if (!row.closed) legend.push(`\`**?\` other ${label} possible`);
   if (legend.length) lines.push(`- ${legend.join("; ")}`);
   if (absent.length) lines.push(`- known absent: ${keyList(absent)}`);
   if (!row.closed) {
@@ -181,13 +183,15 @@ function renderHover(name, facts, verdicts) {
   out.push(`**rowan** · \`${name}\``);
   for (const f of main) {
     if (f.symbolic) out.push("_inside a function analysed symbolically: facts are relative to its entry_");
-    // the value as far as it is known: literals, records with their values, `...` for unknown
+    // the value as far as it is known (`?` for unknown)
     const text = (f.text || "").trim();
-    const withText = text.length > 0 && text !== "...";
+    const withText = text.length > 0 && text !== "?";
     if (withText) {
       const pretty = prettyValue(text);
       if (pretty.length === 1) out.push(`- value: \`${text}\``);
       else out.push("- value:", "", "```text", ...pretty, "```", "");
+      // `?` as a value (not the `"k"?:` mark): say what it means
+      if (/(^|[\s:=(\[,|*])\?($|[\s,)\]}|])/.test(text)) out.push("- `?` = a value rowan does not know");
     }
     else if ((f.values || []).includes("<parameter>")) out.push("- value: whatever the caller passes");
     const objs = f.objects || [];

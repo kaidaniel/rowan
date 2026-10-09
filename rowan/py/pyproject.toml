@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "rowan"
 version = "0.1.0"
-description = "rowan static key-set inference (PyO3 binding)"
+description = "rowan, an abstract interpreter for Python (PyO3 binding)"
 requires-python = ">=3.8"
 
 [tool.maturin]

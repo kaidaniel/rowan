@@ -1,10 +1,10 @@
 # AGENTS.md — rowan, handoff notes
 
-Static key-set inference for Python records: for every dict-like value (dicts, DataFrame
-columns, object attributes, kwargs, JSON/CSV rows, argparse namespaces…) which keys it has
-at each point, which keys the program demands of it, and inferred schemas for external
-inputs. Design: `SPECIFICATION.md` (17 sections + Appendix A; §9.8 and §16 note where the
-engine went further). User-facing: `README.md` (notation, CLI, server, report). This file
+An abstract interpreter for Python: every name holds a set of possible values (literals,
+objects, `?` unknown); reports what names hold, accesses that can fail, and the schemas the
+program demands of its inputs. Key sets of dicts / instance attributes (`Row`) are one model
+among others. Design: `SPECIFICATION.md` (§2 values and models, §2.2 notation; §9.8 and §16
+note where the engine went further). User-facing: `README.md` (notation, CLI, server, report). This file
 is for whoever picks the work up. Everything here was true at the last commit.
 
 ## Working conventions (the owner's standing instructions)
@@ -121,7 +121,7 @@ both paths and is written as `?`; `json.loads` results are open by design.
   `State.name_keys`: a store / `setdefault` through a name makes the key definite for that
   name's object, whichever it is. Row checks and hover facts inside a summary body are
   `Obs` / `FactObs` kept with the summary and resolved at every instantiation (hover values
-  there show as `...`). Entry runs (functions nobody calls, also closures and lambdas made but
+  there show as `?`). Entry runs (functions nobody calls, also closures and lambdas made but
   not called, up to 4 rounds) get open parameters: defaults are `default | anything`, `*args`
   / `**kw` unknown. A summary reads a module
   name that is rebound anywhere (`Scopes::rebound`) as a deferred load per call site.

@@ -1,4 +1,4 @@
-//! rowan — static key-set inference for Python records (Rust engine).
+//! rowan — an abstract interpreter for Python (Rust engine).
 pub mod domain;
 pub mod frontend;
 pub mod intern;

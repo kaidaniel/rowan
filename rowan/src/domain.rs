@@ -1011,9 +1011,10 @@ pub fn key_display(k: KeyId) -> String {
 }
 
 impl Row {
-    /// `{"a": ..., "b"?: ..., "c"~: ..., **}`: definite keys plain, keys set on some paths
-    /// only with `?`, keys that unknown code may have removed with `~`, `**` when the record
-    /// may hold other keys (open).  Attribute rows render as `obj(a=..., b?=..., **)`.
+    /// `{"a": ?, "b"?: ?, "c"~: ?, **?}`: definite keys plain, keys set on some paths only
+    /// with `?`, keys that unknown code may have removed with `~`, `**?` when other keys may
+    /// exist (open; values are not part of the key set: `?`).  Attributes render as
+    /// `obj(a=?, b?=?, **?)`.
     pub fn compact(&self, attrs: bool) -> String {
         let mut parts: Vec<String> = Vec::new();
         for k in intern::sorted_by_str(self.present.iter()) {
@@ -1025,13 +1026,13 @@ impl Row {
                 "?"
             };
             if attrs {
-                parts.push(format!("{}{}=...", intern::key_py_str(k), mark));
+                parts.push(format!("{}{}=?", intern::key_py_str(k), mark));
             } else {
-                parts.push(format!("{}{}: ...", key_display(k), mark));
+                parts.push(format!("{}{}: ?", key_display(k), mark));
             }
         }
         if !self.closed() {
-            parts.push("**".into());
+            parts.push("**?".into());
         }
         if attrs {
             format!("obj({})", parts.join(", "))
@@ -1331,7 +1332,7 @@ pub fn classify(row: &Row, k: KeyId) -> Classification {
         if row.present.contains(k) {
             return Classification::with_note(Tier::Possibly, "set on some paths only");
         }
-        return Classification::with_note(Tier::Missing, "closed row");
+        return Classification::with_note(Tier::Missing, "all keys known");
     }
     let prov = row.provides(k);
     let mut ext: Vec<(SourceId, KeySet)> = prov.iter().filter(|(s, _)| !source_is_data(*s)).cloned().collect();

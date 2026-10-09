@@ -1,22 +1,41 @@
-# rowan — static key-set inference for Python records
+# rowan — an abstract interpreter for Python
 
-Status: draft v0.1 for review. Working name only. Sections are numbered for review; open questions are collected in §17 and reference section numbers.
+Status: started as draft v0.1 of a design for *key-set inference on Python records*; the
+engine that implements it became a general abstract interpreter (§0, §2), and this document
+now describes it that way. Section numbers are kept (other documents cite them); open
+questions are collected in §17.
 
 ---
 
 ## 0. Summary
 
-**What it does.** `rowan` is a whole-program static analyser for Python that infers, for every dict-like value in a program (dicts, DataFrame columns, object attributes, TypedDicts, `**kwargs`, JSON, config/env, `DictReader` rows, …), two things:
+**What it does.** `rowan` is a whole-program abstract interpreter for Python. Every
+expression evaluates to an abstract *value*: a set of possibilities, each a literal
+(`1`, `"a"`, `None`), an abstract heap object (a dict, list, tuple, set, instance, class,
+function, closure, generator, iterator, module, exception, …) or *unknown* (`?`: data from
+outside, a parameter nobody passes, the result of unknown code). Objects carry what is
+known about their contents through *models*, one per kind of thing: the key sets of dicts
+and the attributes of instances (§2.1), list and tuple positions, literal arithmetic and
+comparisons, string operations, iterator cursors, dict insertion order, exception values,
+and models of the standard library and pandas (§11). Control flow (branches, loops,
+exceptions, `match`, `with`, generators, closures, calls) is interpreted over these values,
+per call site where it matters (§9).
 
-1. **Provision** — which keys the value has at each program point: a may-set, a must-set, and whether the row is *closed* (fully known) or *open* (unknown keys possible), with every source of openness *attributed* to a program point (a `read_csv`, an unknown call, a data-derived store).
-2. **Requirement** — which keys the program demands of it, propagated backward to where the value came from. For values that enter from outside (`read_csv`, `json.load`, request bodies, env), the requirement *is* the inferred schema.
+What it reports, from those values:
 
-From these it produces: inferred schemas for external inputs, documented key-sets for functions that return records, and tiered diagnostics for accesses that will definitely / possibly / likely fail.
+1. **What each name holds** at each point, in a notation that reads like Python (§2.2): `{"id": 1, "role"?: "admin", **?}`, `[1, ?]`, `list[Order(id=?)]`, `1 | 2 | ?`.
+2. **Accesses that can fail** — a key or attribute that is definitely, possibly or likely missing, with tiers (§3.1).
+3. **Requirements on inputs** — which keys and attributes the program demands of values that enter from outside (`read_csv`, `json.load`, request bodies, env, parameters of functions nobody calls), propagated back to where they came from: the inferred schema (§3.2).
+
+Key sets were the starting point and remain the model behind 2 and 3 (§2.1): may-set,
+must-set, closed/open, with every source of openness *attributed* to a program point. They
+are not privileged otherwise: an unknown dict value, list element, attribute or literal is
+the same `?`.
 
 **How.** Four stages: (1) Python → small SSA IR with an explicit heap and closures-as-objects; (2) points-to + call graph (Andersen-style, with context spent only where it matters: 1-call-site heap cloning for factory allocations, 1-object sensitivity for receivers); (3) per function, two abstract-interpretation fixpoints over a *row lattice* whose elements are symbolic in the function's inputs, so that a function's fixpoint directly yields a polymorphic summary (a jump function) instantiated at every call site — the IDE framework in abstract-interpretation clothing; (4) library models supply row transformers for stdlib/pandas, and a reporter turns rows + requirements into verdicts.
 
 **Key decisions.**
-- D1 Analyse *records*, not dicts: one mechanism for every key-addressed value; types differ only in their models (§2).
+- D1 One value domain for everything; what is known about an object's contents comes from the model for its kind (§2). Key-addressed values (dicts, instances, DataFrame columns, namespaces, …) share one key-set model; types differ only in their models.
 - D2 Facts live on abstract heap objects, not on variables; aliasing is a points-to question (§6).
 - D3 Uncertainty is *attributed*, never collapsed to ⊤: "unknown function `lib.f` may have changed this" is carried alongside the optimistic key set, so a sound reading and a useful reading coexist in one value (§7, §10, §13).
 - D4 Context sensitivity through summaries (functional approach), not call strings; heap identity is the only k-limited thing (§9, §14).
@@ -37,15 +56,26 @@ From these it produces: inferred schemas for external inputs, documented key-set
 - G4 Developer-tool latency: whole-program first run in seconds for ~50k LOC; incremental re-analysis of a changed function and its dependents well under a second (engine phase, §15.3).
 - G5 Precision where naive tools fail: closures, factories, object state, kwargs plumbing — no merging by variable name.
 
-**Non-goals (v1).** Type inference beyond what call resolution needs; soundness against dynamic features; tracking non-key values; concurrency; pandas MultiIndex/row-label semantics.
+**Non-goals (v1).** Type inference as an end in itself (values are tracked as far as they matter for the reports and the notation); soundness against dynamic features beyond `exec`/`eval` of literal code; concurrency; pandas MultiIndex/row-label semantics.
 
 **Success criteria (prototype).** Zero false ✗ on the golden suite (Appendix A) and on the differential runtime harness (§15.4); every runtime-observed key set contained in the sound concretization; report volume on real repos within a budget set after a baseline run (target: a handful per KLOC, majority actionable).
 
 ---
 
-## 2. The record model
+## 2. Values and models
 
-**Definition.** A *record* is any value addressable by a finite set of names. The core manipulates triples `(object, namespace, key)` and nothing else.
+A value is a set of possibilities: literals, abstract objects (§6.1) and possibly *unknown*.
+An object's kind selects the models that describe its contents and behaviour: dicts and
+instances the key-set model below; lists and tuples positions (known length, known prefix,
+or any number of elements like `X`); generators and iterators a cursor; classes their
+attributes, MRO and protocol methods (`__getitem__`, `__iter__`, `__bool__`, descriptors,
+…); functions and closures their bodies and captured cells; library calls their models
+(§11). Unknown is one thing for every kind — an unknown dict value, list element, attribute
+or argument are all `?`.
+
+### 2.1 The key-set model (records)
+
+**Definition.** A *record* is any value addressable by a finite set of names. The key-set model manipulates triples `(object, namespace, key)`.
 
 **Namespaces**
 - `item` — `obj[key]` on dicts and dict subclasses, DataFrame columns, TypedDict, `os.environ`, `**kwargs`.
@@ -53,14 +83,30 @@ From these it produces: inferred schemas for external inputs, documented key-set
 
 `item` and `attr` are distinct namespaces on the same object. Models may alias them: DataFrame `df.col` ≡ `df["col"]` for identifier-like columns; `vars(o)` / `o.__dict__` expose `attr` as an `item` view of the same object.
 
-**Not records**
-- Lists, tuples, sets: containers with one element slot (v1). Fixed-arity tuple literals get positional int keys (v2).
+**Not records** (other models describe them)
+- Lists, tuples, sets: positions when known, else an element value (§2).
 - Instances of user classes defining `__getitem__` / `__getattr__`: `obj[k]` lowers to a method call and requirements flow through the method body. `Mapping` / `UserDict` subclasses are analysed through their methods unless a model says otherwise.
 - pandas Series: not a record (its index is row labels, i.e. data). Exceptions are the virtual rows produced by `iterrows` / `apply(axis=1)` / `itertuples`, which are records keyed by the frame's columns.
 
 **Keys.** Literals of type `str`, `int`, `bool`, tuples of those, and enum members are tracked; anything else is `Data` (§5.4).
 
 **Decision.** All type-specific semantics (what `merge`, `asdict`, `**` do to key sets) live in models (§11); the core never special-cases a type.
+
+### 2.2 Notation for values
+
+Values are printed as Python-like text (the text report, the editor hover, `--facts`):
+
+| Shown | Meaning |
+| --- | --- |
+| `1`, `"a"`, `None` | a known literal |
+| `1 \| 2 \| ?` | one of several possibilities (`?` listed last) |
+| `?` | a value nothing is known about |
+| `{"id": 1, "role"?: "admin", "x"~: ?}` | a dict with exactly these keys: `"id"` always, `"role"` on some paths only (`?` after the key), `"x"` unless unknown code removed it (`~`) |
+| `{"id": 1, **?}` | the same, plus possibly other keys (an unknown dict spread in: the record is open) |
+| `Order(id=1, **?)` | an instance and its attributes, same marks |
+| `[1, ?]`, `(1,)` | a list / tuple with known positions |
+| `list[X]`, `set[X]`, `tuple[X, ...]` | any number of elements, each like `X` (`list[?]`: nothing known) |
+| `{…}`, `[…]`, `Name(…)`, `…` | left out by the printer (depth, more than eight entries, a cycle) |
 
 ---
 
@@ -95,7 +141,7 @@ point(**kw) -> dict
   returns : {x, y} ∪ keys(kw)
 ```
 
-### 3.4 Machine output
+### 3.4 Machine output (the JSON field names `row`, `present`, `definite`, `closed` describe the key-set model of §2.1)
 JSON lines: `{"kind": "verdict" | "schema" | "summary", "site": "file:line:col", "object": "<stable id>", …}`. Object ids are `alloc@file:line:col[context]`, stable across runs for IDE integration.
 
 ---

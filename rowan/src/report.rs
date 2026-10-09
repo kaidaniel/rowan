@@ -224,17 +224,22 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
     if show_rows {
         if let Some(st) = &an.final_state {
             lines.push(String::new());
-            lines.push("== module-level records at exit ==".into());
+            lines.push("== module-level values at exit ==".into());
             let m = an.main_module;
             let mut names: Vec<(String, crate::domain::Value)> = st.obj_slots(m, Ns::Attr).into_iter().map(|(k, v)| (intern::key_py_str(k), v)).collect();
             names.sort_by(|a, b| a.0.cmp(&b.0));
             for (name, v) in names {
-                let records = v.pts.iter().any(|o| matches!(an.kind(o), Kind::Dict | Kind::Frame | Kind::Unknown | Kind::Namespace | Kind::Instance | Kind::List | Kind::Tuple));
-                if !records {
+                // definitions (functions, classes, imported modules) are not values worth listing
+                if !v.pts.is_empty() && v.pts.iter().all(|o| matches!(an.kind(o), Kind::Function | Kind::Class | Kind::Module | Kind::External)) {
                     continue;
                 }
-                let labels: Vec<String> = v.pts.iter().map(|o| an.obj(o).label.clone()).collect();
-                lines.push(format!("  {} = {}: {}", name, labels.join(" | "), render_value(an, st, &v, 0, &mut Vec::new())));
+                let labels: Vec<String> = v.pts.iter().filter(|o| an.kind(*o) != Kind::Unknown).map(|o| an.obj(o).label.clone()).collect();
+                let rendered = render_value(an, st, &v, 0, &mut Vec::new());
+                if labels.is_empty() {
+                    lines.push(format!("  {} = {}", name, rendered));
+                } else {
+                    lines.push(format!("  {} = {}  [{}]", name, rendered, labels.join(" | ")));
+                }
             }
         }
     }
@@ -346,11 +351,12 @@ fn row_json(r: &crate::domain::Row) -> J {
 
 /// The `--facts` document for editor integration: per (line, name) the value and the rows
 /// of the objects it may point to, the verdicts, and the schema table.
-/// A value as the user would write it, as far as it is known: literals (`1`, `"a"`, several as
-/// `1 | 2`), dicts in the row notation with their values (`{"a": 1, "b"?: {...}, **}`), lists
-/// / tuples by position when known (`[1, 2]`, else `[int, ...]`), instances as
-/// `Cls(a=1, **)`, functions / classes by name, `...` for anything unknown.  Depth and width
-/// are limited and cycles stop at `...`.
+/// A value as the user would write it, as far as it is known (spec §2.2): literals (`1`,
+/// `"a"`, several as `1 | 2 | ?`), dicts with their keys and values (`{"a": 1, "b"?: ?, **?}`),
+/// lists / tuples by position when known (`[1, 2]`, `(1,)`), else `list[X]` /
+/// `tuple[X, ...]`, instances as `Cls(a=1, **?)`, functions / classes by name, `?` for
+/// anything unknown (`**?`: other keys or attributes may exist).  Depth and width are
+/// limited (`…` marks what is not shown; also a cycle).
 /// How deep rendered values go before nested containers are cut to `[…]` / `{…}` / `Name(…)`
 /// (`--value-depth N`; default 3).
 pub static VALUE_DEPTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(3);
@@ -370,11 +376,20 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
     for o in v.pts.iter() {
         parts.push(render_object(an, state, o, depth, seen));
     }
+    // a part nothing is known about (data, a parameter, keys of something): `?`
+    if !v.kv.is_literal() && !v.kv.is_bot() {
+        parts.push("?".into());
+    }
     if parts.is_empty() {
-        return "...".into();
+        return "?".into();
     }
     parts.sort();
     parts.dedup();
+    // the unknown part last: `1 | 2 | ?`
+    if parts.len() > 1 && parts.iter().any(|p| p == "?") {
+        parts.retain(|p| p != "?");
+        parts.push("?".into());
+    }
     parts.join(" | ")
 }
 
@@ -382,10 +397,11 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
     let max_depth: u32 = VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed);
     const MAX_ITEMS: usize = 8;
     if !an.has_obj(o) {
-        return "...".into();
+        return "?".into();
     }
     let kind = an.kind(o);
     if seen.contains(&o) {
+        // a cycle back to an object being printed
         return "…".into();
     }
     let deeper = depth + 1;
@@ -410,7 +426,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
             for k in keys.iter().take(MAX_ITEMS) {
                 let val = match state.slot_opt(o, Ns::Item, *k) {
                     Some(sv) => render_value(an, state, &sv, deeper, seen),
-                    None => "...".into(),
+                    None => "?".into(),
                 };
                 items.push(format!("{}{}: {}", crate::domain::key_display(*k), mark(&row, *k), val));
             }
@@ -418,32 +434,39 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
                 items.push("…".into());
             }
             if !row.closed() {
-                items.push("**".into());
+                items.push("**?".into());
             }
             seen.pop();
             format!("{{{}}}", items.join(", "))
         }
         Kind::List | Kind::Tuple | Kind::Set => {
-            let (open, close) = match kind {
-                Kind::List => ("[", "]"),
-                Kind::Tuple => ("(", ")"),
-                _ => ("{", "}"),
+            let (open, close, ty) = match kind {
+                Kind::List => ("[", "]", "list"),
+                Kind::Tuple => ("(", ")", "tuple"),
+                _ => ("{", "}", "set"),
             };
-            if depth >= max_depth {
-                return format!("{}…{}", open, close);
-            }
             seen.push(o);
             let out = match an.obj(o).literal_len {
+                // known positions: the elements in order
                 Some(n) if kind != Kind::Set => {
+                    if depth >= max_depth {
+                        seen.pop();
+                        return if n == 0 { format!("{}{}", open, close) } else { format!("{}…{}", open, close) };
+                    }
                     let mut items: Vec<String> = (0..n.min(MAX_ITEMS)).map(|i| match state.slot_opt(o, Ns::Pos, intern::key_int(i as i64)) {
                         Some(sv) => render_value(an, state, &sv, deeper, seen),
-                        None => "...".into(),
+                        None => "?".into(),
                     }).collect();
                     if n > MAX_ITEMS {
                         items.push("…".into());
                     }
-                    format!("{}{}{}", open, items.join(", "), close)
+                    if kind == Kind::Tuple && n == 1 {
+                        format!("({},)", items[0])
+                    } else {
+                        format!("{}{}{}", open, items.join(", "), close)
+                    }
                 }
+                // unknown length: what any element may be, in typing notation
                 _ => {
                     let elem = state.slot_opt(o, Ns::Elem, STAR);
                     let ekv = state.elems.get(&o);
@@ -454,12 +477,13 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
                             ev = Value::with_kv(ev.pts.clone(), kv);
                         }
                     }
+                    let inner = if depth >= max_depth { "…".to_string() } else if ev.empty() { "?".to_string() } else { render_value(an, state, &ev, deeper, seen) };
                     if ev.empty() && known_empty {
                         format!("{}{}", open, close)
-                    } else if ev.empty() {
-                        format!("{}...{}", open, close)
+                    } else if kind == Kind::Tuple {
+                        format!("tuple[{}, ...]", inner)
                     } else {
-                        format!("{}{}, ...{}", open, render_value(an, state, &ev, deeper, seen), close)
+                        format!("{}[{}]", ty, inner)
                     }
                 }
             };
@@ -478,7 +502,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
             for k in keys.iter().take(MAX_ITEMS) {
                 let val = match state.slot_opt(o, Ns::Attr, *k) {
                     Some(sv) => render_value(an, state, &sv, deeper, seen),
-                    None => "...".into(),
+                    None => "?".into(),
                 };
                 items.push(format!("{}{}={}", intern::key_py_str(*k), mark(&row, *k), val));
             }
@@ -486,7 +510,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
                 items.push("…".into());
             }
             if !row.closed() {
-                items.push("**".into());
+                items.push("**?".into());
             }
             seen.pop();
             format!("{}({})", name, items.join(", "))
@@ -499,8 +523,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         }
         Kind::Class => an.obj(o).label.clone(),
         Kind::Module => an.obj(o).label.clone(),
-        Kind::Ph => "...".into(),
-        _ => "...".into(),
+        _ => "?".into(),
     }
 }
 

@@ -1,7 +1,7 @@
 {
   "name": "rowan",
-  "displayName": "rowan — key-set inference for Python",
-  "description": "Hover over a variable to see the keys / values rowan infers for it; missing-key verdicts as diagnostics.",
+  "displayName": "rowan — abstract interpretation for Python",
+  "description": "Hover over a variable to see the values rowan infers for it; accesses that can fail as diagnostics.",
   "version": "0.1.0",
   "publisher": "rowan",
   "license": "MIT",

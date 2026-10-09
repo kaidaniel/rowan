@@ -1,11 +1,17 @@
-# rowan — static key-set inference for Python records
+# rowan — an abstract interpreter for Python
 
-`rowan` reads a Python program (plus local imports) and infers, for every dict-like
-value — dicts, DataFrame columns, object attributes, TypedDicts, `**kwargs`, JSON,
-CSV rows, argparse namespaces, `os.environ` — which keys it has at each point and
-which keys the program *demands* of it. Demands on values that enter from outside
-(`read_csv`, `json.load`, request bodies, entry-point parameters) are reported as
-inferred schemas.
+`rowan` reads a Python program (plus local imports) and interprets it abstractly: every
+name holds a set of possible values — literals, objects (dicts, lists, instances,
+functions, closures, iterators, exceptions, …) or `?` for a value it cannot know. From
+that it reports what each name holds at each point, the key and attribute accesses that
+can fail (definitely, possibly, or only if unknown code interfered), and what the program
+demands of values that enter from outside (`read_csv`, `json.load`, request bodies,
+`os.environ`, parameters of functions nobody calls): the inferred schemas.
+
+It started as key-set inference for dict-like records; the key sets of dicts and instance
+attributes are now one model among others (list positions, literal arithmetic, string
+operations, iterators, the standard library and pandas). Functions with no callers are
+analysed with open parameters, so their variables get results too.
 
 The design is in `SPECIFICATION.md`; `AGENTS.md` has the engineering notes for whoever
 works on it next. The engine is written in Rust (`rowan/`); it was ported from a Python
@@ -17,7 +23,7 @@ rowan/target/release/rowan prog.py                # text report
 rowan/target/release/rowan prog.py --json         # JSON lines (verdicts, schemas, summaries)
 rowan/target/release/rowan prog.py --facts        # per-name facts for editor integration
 rowan/target/release/rowan lib.py --no-entry      # only what the module itself runs (no entry-point pass)
-uv run --no-project python tests/run_golden.py    # golden suite (313 cases)
+uv run --no-project python tests/run_golden.py    # golden suite (417 cases)
 uv run --no-project python tests/run_snapshots.py # output snapshots on larger inputs
 ```
 
@@ -60,21 +66,28 @@ maturin; see `AGENTS.md` for its status.
 
 ## What the report contains
 
-Values are written as far as they are known: `{"id": 1, "role"?: "admin", "tags": ["x"], **}`
-is a dict that always has `"id"` (value `1`), has `"role"` on some paths only (`?`), and may
-hold other keys (`**` = open; without it the record is closed and these are all its keys);
-`~` marks a key unknown code may have removed; several possible values read `1 | 2`; lists
-and tuples show their elements by position when known (`[int, ...]` otherwise); objects
-read `Order(id=1, lines=[...], **)`; `...` stands for anything unknown; nesting stops at
-three levels. The hover in the VS Code extension (also for plain values: `x: 1`), the
-`module-level records` section of the text report and the `text` field of `--facts` use
-this form; `--json` and `--facts` also carry the underlying sets (`present`, `definite`,
-`likely`, `absent`, `closed`, `sources`, `mutators`).
+Values are written as Python-like text, as far as they are known (spec §2.2):
+
+| Shown | Meaning |
+| --- | --- |
+| `?` | a value rowan does not know (any type) |
+| `1 \| 2 \| ?` | one of several possibilities |
+| `{"id": 1, "role"?: "admin", "x"~: ?}` | a dict with exactly these keys: `"id"` always, `"role"` on some paths only, `"x"` unless unknown code removed it |
+| `{"id": 1, **?}` | the same, plus possibly other keys (an unknown dict spread in) |
+| `Order(id=1, **?)` | an instance and its attributes, same marks |
+| `[1, ?]`, `(1,)` | a list / tuple with known positions |
+| `list[X]`, `set[X]`, `tuple[X, ...]` | any number of elements, each like `X` |
+| `{…}`, `[…]`, `Name(…)`, `…` | left out by the printer (nesting depth, more than eight entries, a cycle) |
+
+The hover in the VS Code extension, the `module-level values` section of the text report
+and the `text` field of `--facts` use this form; `--json` and `--facts` also carry the
+key-set model's underlying sets (`present`, `definite`, `likely`, `absent`, `closed`,
+`sources`, `mutators`).
 
 ```
 == diagnostics ==
-  L61   ✗     r['totl']        item['totl'] definitely missing  (closed row)  [row@L59]  via L96>L85
-  L70   ✗     row['count']     item['count'] definitely missing  (closed row)  [vars@L67]
+  L61   ✗     r['totl']        item['totl'] definitely missing  (all keys known)  [row@L59]  via L96>L85
+  L70   ✗     row['count']     item['count'] definitely missing  (all keys known)  [vars@L67]
   L88   ◌     cfg['verbose']   item['verbose'] depends on input  ← json.load@L28  [dict@L25]
   L11   ✓~    opts['host']     ok (likely — unknown code ran in between)
   L12   ⚠~    opts['user']     likely missing  (only lib.apply_defaults@L10 could have added it)
@@ -91,9 +104,10 @@ this form; `--json` and `--facts` also carry the underlying sets (`present`, `de
 
 Tiers (spec §3.1): `✓` proven, `✓~` likely (optimistic: unknown code intervened),
 `⚠` possibly missing (set on some paths only / depends on which object), `✗`
-definitely missing (closed row, deleted, renamed away, suffixed by a merge, projected
+definitely missing (all keys known, deleted, renamed away, suffixed by a merge, projected
 out), `⚠~` likely missing (only unknown code could have added it), `◌` depends on
-input (becomes a schema entry), `⚠data` data-derived key into a closed record.
+input (becomes a schema entry), `⚠data` data-derived key into a dict whose keys are all
+known.
 `via L96>L85` is the call chain the access ran under: verdicts are per call context.
 
 ## Layout
@@ -108,7 +122,7 @@ input (becomes a schema entry), `⚠data` data-derived key into a closed record.
 | `rowan/src/summary.rs` | symbolic function summaries (spec §7.3/§9): placeholders, deferred accesses, imprecision events, footprints, instantiation with allocation-site resolution, SCC re-iteration |
 | `rowan/src/models/` | library models: builtins, `dict`/`list`/`str`, `json`/`yaml`/`pickle`, `copy`, `dataclasses`, `collections`, `csv.DictReader`, `argparse`, `os.environ`, `functools.partial`, `requests`, pandas |
 | `rowan/src/report.rs` | per-access verdict combination, schema table, text / JSON / facts output |
-| `tests/run_golden.py`, `tests/cases/` | golden harness: expectations are `#@` comments in the case files (313 cases, each written before running the engine) |
+| `tests/run_golden.py`, `tests/cases/` | golden harness: expectations are `#@` comments in the case files (417 cases, each written before running the engine) |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | output snapshots on the example and three large fixture programs |
 | `examples/etl_report.py` | a realistic script with planted bugs (all found; also golden case e34) |
 | `vscode-rowan/`, `rowan/py/` | VS Code extension (uses `rowan serve`); PyO3 binding (does not load on the current macOS toolchain) |
@@ -149,7 +163,7 @@ input (becomes a schema entry), `⚠data` data-derived key into a closed record.
 
 ## Performance
 
-Release build, Apple M-series: the 313-case golden suite runs in 1.1 s (one process per
+Release build, Apple M-series: the 417-case golden suite runs in 1.3 s (one process per
 case); an 830-line program and a 1,700-line twelve-module package analyse in 0.1 s each;
 a 1.2k-line self-referential module hits the 2 s soft deadline and finishes in 2.5 s with
 reduced precision. 137 scripts from local projects analysed in 0.8 s total without

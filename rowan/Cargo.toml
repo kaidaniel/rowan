@@ -2,7 +2,7 @@
 name = "rowan"
 version = "0.1.0"
 edition = "2021"
-description = "rowan: static key-set inference for Python records"
+description = "rowan: an abstract interpreter for Python (values, failing accesses, input schemas)"
 
 [[bin]]
 name = "rowan"
