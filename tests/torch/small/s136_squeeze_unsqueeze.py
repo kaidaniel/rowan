@@ -20,7 +20,9 @@ def symbolic(x):
     v = u.squeeze(1)  #@shape v: [x.shape[0], x.shape[1], x.shape[2]]
     w = x.unsqueeze(-1).squeeze(-1)  #@shape w: [x.shape[0], x.shape[1], x.shape[2]]
     n = x[:, None]  #@shape n: [x.shape[0], 1, x.shape[1], x.shape[2]]
-    y = x.squeeze(1)  #@shape y: [*, x.shape[2]]
+    # (was `[*, x.shape[2]]`: the join of [B, T, C] and [B, C] keeps both trailing positions,
+    # unknown where they differ — also true, and more precise)
+    y = x.squeeze(1)  #@shape y: [*, ?, x.shape[2]]
     r = y.dim()  #@dim r: ?
     return v, w, n, y
 

@@ -1,6 +1,9 @@
 # a parameter rebound (x = x.view(...)) keeps dims in the original tensor's terms (checks use the saved x0)
 import torch
 import torch.nn as nn
+#@rename x0=x
+# (rowan names a parameter's dims by the parameter, `x.shape[...]`, also after `x` is rebound;
+# the checks say `x0` so that the oracle can evaluate them; the harness reads x0 as x)
 
 
 def rebind(x, n_heads):

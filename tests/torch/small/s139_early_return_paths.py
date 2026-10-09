@@ -21,7 +21,9 @@ def use(x, flag):
     a, n = encode(x, True)  #@shape a: [x.shape[0], x.shape[2]]
     #@dim n: x.shape[1]
     b, m = encode(x, False)  #@shape b: [x.shape[0], x.shape[1], x.shape[2]]
-    c, k = encode(x, flag)  #@shape c: [*, x.shape[2]]
+    # (was `[*, x.shape[2]]`: the join of [B, C] and [B, T, C] keeps both trailing positions,
+    # unknown where they differ — also true, and more precise)
+    c, k = encode(x, flag)  #@shape c: [*, ?, x.shape[2]]
     #@dim k: x.shape[1]
     p = maybe_proj(x, None)  #@shape p: none
     q = maybe_proj(x, torch.randn(C, 2))  #@shape q: [x.shape[0], x.shape[1], 2]

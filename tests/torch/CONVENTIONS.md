@@ -92,8 +92,9 @@ for *any* call, in terms of the function's own names:
   Only the operands whose rank is unknown appear in the `if`. Known ranks pick the exact
   case: 1-D @ 1-D is `[]`, `(n, m) @ (m,)` is `[n]`.
 * **Joins:** after `if`/`else` with different shapes, dims that differ become `?`. Two
-  ranks that differ keep the common trailing dims, with the leading part an unknown rest
-  `*`.
+  ranks that differ keep as many trailing positions as both have, `?` where they differ, and
+  the leading part an unknown rest `*`. So `[B, T, C] ⊔ [B, C]` is `[*, ?, C]`, not
+  `[*, C]`.
 * **Loops** whose body preserves the shape keep it; otherwise the changing dims become
   `?`.
 
@@ -167,6 +168,9 @@ every dim is literal, and a mismatch then is a `#@shape-error`.
   the caller's names.
 * **Defaults**: a parameter with a default is "the default or anything" in the function's own
   analysis; give shape hyper-parameters no default when a check depends on them.
+* **`#@rename a=b`** (a line of its own): harness-only, the expectations' name `a` stands for
+  `b`. Use it when the oracle needs a saved copy (`x0 = x` before `x` is rebound) but rowan
+  names the dims by the parameter.
 * **Oracle limits**: no lambda on a directive line (the lambda's frame would evaluate it); a
   line that raises cannot carry a `#@shape` check; a closure's dims must be free variables of
   the closure for the oracle to evaluate them; never rebind a name that a check expression

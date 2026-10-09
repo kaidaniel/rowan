@@ -436,11 +436,22 @@ class ShapeExpectations:
         self.requires: Dict[int, List[str]] = {}
         self.errors: Dict[int, str] = {}
         self.eff: Optional[List[int]] = None
+        self.renames: List[Tuple[str, str]] = []
 
     def any(self) -> bool:
         return bool(self.shapes or self.dims or self.requires or self.errors)
 
     def parse_line(self, i: int, line: str) -> bool:
+        m = re.match(r"\s*#@rename\s+(\w+)=(\w+)\s*$", line)
+        if m:
+            # harness-only: a name the expectations use stands for another (the oracle
+            # evaluates the expectations as written)
+            self.renames.append((m.group(1), m.group(2)))
+            return True
+        for a, b in self.renames:
+            if "#@" in line:
+                head, _, tail = line.partition("#@")
+                line = head + "#@" + re.sub(rf"\b{a}\b", b, tail)
         if self.eff is not None and i < len(self.eff):
             i = self.eff[i]
         m = re.search(r"#@(shape|dim)(?:@L(\d+))?\s+(.*)$", line)
