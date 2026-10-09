@@ -3,9 +3,9 @@
 An abstract interpreter for Python: every name holds a set of possible values (literals,
 objects, `?` unknown); reports what names hold, accesses that can fail, and the schemas the
 program demands of its inputs. Key sets of dicts / instance attributes (`Row`) are one model
-among others. Design: `SPECIFICATION.md` (§2 values and models, §2.2 notation; §9.8 and §16
-note where the engine went further). User-facing: `README.md` (notation, CLI, server, report). This file
-is for whoever picks the work up. Everything here was true at the last commit.
+among others; tensor shapes (PyTorch) are another. Design: `SPECIFICATION.md` (§2 values and
+models, §2.2 notation, §2.3 tensors; §9.8 and §16 note where the engine went further).
+User-facing: `README.md`. This file is for whoever picks the work up; true at the last commit.
 
 ## Working conventions (the owner's standing instructions)
 
@@ -17,8 +17,8 @@ is for whoever picks the work up. Everything here was true at the last commit.
   why. Value analysis (which keys, which columns) matters more than bug-finding verdicts.
 * Commit without being asked whenever a round of bug fixes or a feature is complete and the
   tests pass (golden, snapshots, `cargo test`), one commit per round / step so any of them
-  can be reverted; never commit a failing state. Commit messages end with
-  `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
+  can be reverted; never commit a failing state. Commit messages end with a
+  `Co-Authored-By: Claude <model> <noreply@anthropic.com>` line naming the model at work.
 * Work the plan in order, with a written plan first when a request mixes several things;
   if time remains, write more example programs that probe specific hypotheses about bugs.
 * Keep this file under 200 lines and up to date with every change.
@@ -30,15 +30,15 @@ cd rowan && cargo build --release && cargo test --release --lib && cd ..
 rowan/target/release/rowan FILE.py [--json|--golden|--facts] [--no-rows --no-summaries --no-entry --no-imports] [--value-depth N]
                                    [--search-path DIR]… [--follow PKG]… [--site-packages DIR]…
 rowan/target/release/rowan serve                    # JSON lines over stdio (README has the protocol)
-uv run --no-project python tests/run_golden.py      # 417/417 in ~1.3 s; paths select cases; -v shows reports
+uv run --no-project python tests/run_golden.py      # 549/549 in ~2 s (417 cases + 132 torch); paths select cases; -v
+uv run --no-project python tests/run_golden.py --pending [--prune]   # torch cases listed in tests/torch/PENDING
+uv run --no-project --with torch --with numpy python tests/torch_oracle.py  # torch expectations vs real PyTorch
 uv run --no-project python tests/run_snapshots.py   # SAME on 4 snapshots (fixed caps, no deadline); --update after review
 cd vscode-rowan && node test.js && npm run package  # hover rendering check; rebuilds rowan-0.1.0.vsix
 ```
 
-Env: `ROWAN_DEBUG=1` (which event tabulates a call, summary used, budget / cache hits,
-effort), `ROWAN_DEBUG=2` (plus every event, raise, guarded access, try decision, unreachable
-statement), `ROWAN_NO=a,b` (switch refinements off; the names are the
-`disabled("…")` calls in the source: `rg 'disabled\("' rowan/src`),
+Env: `ROWAN_DEBUG=1|2` (tabulation reasons, summaries, budgets; 2: every event, raise, try
+decision), `ROWAN_NO=a,b` (switch refinements off: `rg 'disabled\("' rowan/src`),
 `ROWAN_LIMITS=ms=2000,tab=256,call=256,clones=256,chain=2,path=3` (soft deadline, then hard
 caps), `ROWAN_FOLLOW=pkg,…`, `ROWAN_SUMMARIES=0` (old per-call-site engine, comparison
 only), `ROWAN_TODO=check` (the harness checks `#@todo` expectations too).
@@ -56,24 +56,22 @@ only), `ROWAN_TODO=check` (the harness checks `#@todo` expectations too).
 | `interp/{stmts,exprs,funcs,narrow,access,calls}.rs` | statements (if/while/for/try/with/raise/imports), expressions (arithmetic and comparisons on literals, `%` and f-string formatting, comprehensions with positions), functions / targets / iteration / generators / copies, narrowing, record and attribute access (placeholder method resolution, field classes), calls (bindings, star forwarding, tabulation vs summary, call cache, contexts, dataclass init, classmethods). |
 | `summary.rs` | placeholders (`PH`: kind, cls, `exact`), events, `summarise_sig` (per key variant: function, code cells, typed cells, argument classes; its own allocation context), footprints, `Inst` (instantiation: resolve, path_value, clones, deferred stores, appends), `propagate_events`, `should_tabulate` (budgets). |
 | `models/{mod,pandas}.rs` | library models (`Registry::lookup`); builtins (`len`, `sum`, `bool`, `sorted` by literal keys, `next` with cursor…), dict/list/str methods, `copy`, `dataclasses`, `collections`, `json`, `csv`, `argparse`, pandas. |
+| `shape.rs`, `models/torch.rs` | tensor shapes: dim polynomials over atoms, shapes with rests and assumptions, constraints, path facts (`State.tf`), printing (`PrintCtx`: scopes, self aliases, hover names); the torch model (ops, `nn` layers, functional, `nn.Module`, requirements / errors, hover rendering). |
 | `report.rs` | dedupe, schema table, text / JSON lines / `--golden` / `--facts` (`text` = rendered value). |
 | `main.rs` | CLI, `serve_loop`, `run_with_deps`, site-packages discovery; analysis on a 1 GiB-stack thread. |
 | `rowan/py/` | PyO3 binding; the wheel does not load on this machine (see problems). |
+| `tests/torch/`, `tests/shapes.py`, `tests/torch_oracle.py` | 115 small torch programs + 17 models (`CONVENTIONS.md`: directives `#@shape`, `#@dim`, `#@requires`, `#@shape-error`, canonical forms); `PENDING` lists cases not passing yet (empty); the oracle runs each case under real PyTorch. |
 | `tests/run_golden.py`, `tests/cases/` | 417 golden cases. Directives: `#@ tier key [; …]` (verdict on that line's access; tier `sound` = anything but `missing`), `#@row NAME: present={..} definite={..} closed|open` (row of NAME on that line), `#@value NAME: exactly={..}|unknown|includes={..} [; NAME2: …]` (the name's value), `#@schema src@L<n>: always={..} sometimes={..} only={..}`, row floors `possible={..}` / `definite_within={..}`; a row on a line run several times (calls, entry runs) is the join of the runs, `#@todo …` (reported, not checked), `#@argv …` (per-case flags, relative paths against the case dir). A package case is a directory whose entry shares its prefix (`k94_pkg/k94_modules.py`); other files there are modules. |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | `--json` snapshots on the example and three old-prototype modules (inputs only); the regression guard for internals. |
 | `vscode-rowan/` | extension: talks to `rowan serve` (falls back to the CLI), hover = facts for (line, name), verdicts as diagnostics. |
 
-Cases: `a01`–`e36` original design, `f37` recency, `g40`–`g65` AST coverage, `h66`–`h72`
-objects passed around, `i73`–`i92` patterns, `j93` an 830-line system, `k94_pkg` flat
-modules, `l95_pkg` a real package, `m96_pkg` a 1,700-line twelve-module warehouse (155
-checks), `n97_pkg` site-packages, `o98`–`o103`, `p104`–`p105`, `q106`–`q135` and six rounds
-of 30 more (`r136`–`r165`, `s166`–`s195`, `t196`–`t225`, `u226`–`u255`, `v256`–`v285`,
-`w286`–`w315`, the last on input schemas) one-hypothesis cases, and `x316`–`x368` on known
-weaknesses (precise answer, `#@todo` where out of reach, and a checked soundness floor);
-`y369`–`y418` assert inside functions: called, uncalled, closures, higher-order. Every `h`+ case was written as a value specification *before* running the engine;
-expectations that turned out wrong carry a comment saying why. Convention: a comparison or
-arithmetic on known numbers / strings is decided; anything involving an unknown value keeps
-both paths and is written as `?`; `json.loads` results are open by design.
+Cases: `a01`–`e36` design, `f37`–`i92` AST / objects / patterns, `j93` an 830-line system,
+`k94`–`n97` packages and site-packages (`m96_pkg`: 1,700 lines), `o98`–`w315` rounds of
+one-hypothesis cases, `x316`–`x368` known weaknesses (`#@todo` + soundness floors),
+`y369`–`y418` inside functions, `z419` the owner's. Every `h`+ case was written as a value
+specification *before* running the engine; wrong expectations carry a comment saying why.
+Convention: decided on known values, `?` on unknown ones; `json.loads` results are open
+unless the text is a literal.
 
 ## How the engine works (the parts not in the spec)
 
@@ -93,25 +91,17 @@ both paths and is written as `?`; `json.loads` results are open by design.
   live makes the object weak; recency folds loop allocations at the back-edge. The content
   under an unknown key (`xs[i]`, `d[k]` with unknown i/k on open objects) is a weak
   `Kind::Unknown` path object: stores on it are weak and join with the unknown prior.
-* **Positions.** Literal containers, appends in straight-line code (a decided `if` counts as
-  straight-line), `extend` with known items, comprehensions whose filters are decided,
-  `sorted` with known literal keys (stable, `reverse=`), `reversed`, slices with known
-  bounds, generator yields (with a `next()` cursor), `zip`/`enumerate`/`map` over known
-  items keep positions; appends of unknown count keep the prefix (`known_prefix`); `sorted`
-  with unknown keys keeps only the count. `insert`/`del xs[i]`/`pop`/`clear`/in-place
-  `sort`/`reverse`, `a + b`, `a * n`, step slices, starred targets, `zip(*rows)` and
-  `range` (positions up to 64, bounds decide `in`) keep them too; `xs += ys` extends in
-  place. Dicts keep insertion order in `RowData.order` (`ordered_keys`): iteration,
-  `popitem`, `move_to_end`. One-shot iterators (`Obj.iterator`) are exhausted by a full
-  iteration; numeric keys `True`/`1`/`1.0` are one key (`canon_key`).
-* **Values.** `+ - * // / %` and `< <= > >=` on literals, `len`, `sum`, `bool`, `min`/`max`,
-  `%` and f-string formatting with widths, `str.split/partition/join/startswith/endswith`,
-  membership in positional containers of literals, `and`/`or`/`not`/`IfExp` on decided
-  truthiness, `x is None`, `==`, chained comparisons, substring `in`, `any`/`all`,
-  `int`/`float` (a literal that is no number raises ValueError), `str.format`, string
-  methods, `reduce`, `filter`; `while` iterations whose test is decided at the head are
-  unrolled (constant tests like `while True` are not); `match` decides literal, singleton,
-  or-, capture and mapping patterns; `k in d` on closed records can make a branch dead.
+* **Positions.** Literal containers, straight-line appends (a decided `if` is straight),
+  `extend`, decided comprehensions, `sorted` by literal keys, `reversed`, known slices,
+  generator yields (`next()` cursor), `zip`/`enumerate`/`map`, `insert`/`del`/`pop`/
+  `clear`/in-place `sort`/`reverse`, `a + b`, `a * n`, starred targets, `range` (up to 64)
+  keep positions (64 in torch programs, else 16); unknown-count appends keep the prefix
+  (`known_prefix`). Dicts keep insertion order (`RowData.order`); one-shot iterators
+  (`Obj.iterator`) exhaust; `True`/`1`/`1.0` are one key (`canon_key`).
+* **Values.** Arithmetic, comparisons, formatting, string methods, membership, `and`/`or`/
+  `not`/`IfExp`, `is None`, `any`/`all`, `int`/`float` (ValueError on non-numbers), `reduce`,
+  `filter` on known values; `while` tests decided at the head unroll; `match` decides
+  literal / singleton / or / capture / mapping patterns; `k in d` on closed records prunes.
   `__bool__`/`__len__` decide truth at control flow (`truth_of`). Branch facts
   (`State.facts`, `CondFact`): the join of an `if` on a pure test (names, literals,
   comparisons, `in`, `is`, `not`), of a try whose two exits set a flag differently, and of a
@@ -151,49 +141,59 @@ both paths and is written as `?`; `json.loads` results are open by design.
   runs on the normal path, on the try's returns before they leave, and on an escaping
   exception a `return` in it swallows. `@contextmanager` bodies run at the generator's
   `yield` (`CmHook`).
-* **Imports.** Local modules and packages (`__init__.py`, `import a.b.c` as attributes,
-  relative imports via `ModuleInfo::pkg`, `from pkg import sub`), roots = file dir, the dir
-  above its outermost package, `--search-path`; allowlisted installed packages
-  (`--follow`) from site-packages unless a model covers them.
-* **Budgets.** `MAX_MS = 2000`: past it no new tabulations and no new clones (results stay
-  deterministic per machine speed, less precise on inputs that take longer); hard caps
-  `MAX_TABULATIONS` / `MAX_CALL_TABULATIONS` = 256 per function, `MAX_CLONES` = 256 per site,
-  `MAX_ACTIVE` = 4, `MAX_SUMMARY_ROUNDS` = 3, `UNROLL_MAX` = 16, `PATH_DEPTH` = 3.
-* **Server.** `rowan serve` caches each analysed file's `--facts` result with the content
-  hashes of every module it loaded and reuses it while none changed; parsed trees are
-  cached per (path, hash). Summaries are *not* reused across runs (process-local ids).
-  Measured on `m96_pkg`: 160 ms first, 8 ms unchanged, 125 ms after an edit.
+* **Imports.** Local modules / packages (relative imports via `ModuleInfo::pkg`), roots = file
+  dir, the dir above its outermost package, `--search-path`; `--follow` packages from
+  site-packages unless a model covers them.
+* **Tensors** (`TORCH_PLAN.md` decisions log, `tests/torch/CONVENTIONS.md`). A tensor is a
+  `Data` label `\x01T<shape>` (`\x01TB` bool, `…~<dim>` tensor-or-int for arithmetic on
+  unknowns), a symbolic int `\x01D<dim>`, a number `\x01N`, an unknown-rank size `\x01S`;
+  everything else sees unknown data. Unknowns used as tensors have the shape `[*x.shape]` of
+  their symbol (unknown call results: the variable bound to). Operations check conditions:
+  decided false → `shape_errors` (the op raises), undecided → `shape_reqs` + a fact in
+  `State.tf` (ranks, dim substitutions oriented literal > named > earlier parameter; linear
+  equations solved; joins keep only common facts). Dims that differ at a join become a
+  `Join` atom (`?`), stable across loops. In a module that imports torch (`torch_modules`)
+  every function is tabulated (never summarised) and also gets an entry run; the entry
+  instance's `__init__` gets open arguments in its own scope (defaults open), and dims print
+  through the shortest self-attribute path holding them (`t_print_ctx`). Hover: `Tensor[B,
+  T, 4*C]` with dims named by locals / letters, the line's requirements, and the calls'
+  shapes as examples (`Fact.primary`).
+* **Budgets.** `MAX_MS = 2000` (then no new tabulations / clones); caps: 256 tabulations per
+  function / call, 256 clones per site, `MAX_ACTIVE` 4, 3 summary rounds, unroll 16, path 3.
+* **Server.** `rowan serve` caches `--facts` per file with the content hashes of the modules
+  it loaded; parse trees per (path, hash); summaries are not reused across runs. `m96_pkg`:
+  160 ms first, 8 ms unchanged, 125 ms after an edit.
 
 ## Measured (release, Apple M-series)
 
 | input | time | notes |
 | --- | --- | --- |
-| golden suite (366 cases) | 1.2 s | one process per case |
-| `j93_order_system.py` (830 lines) / `m96_pkg` (1,716 lines) | 0.09 s / 0.10 s | all checks pass |
-| `tests/fixtures/proto_summary.py` (1.2k lines, self-referential) | 2.6 s (hits the deadline) | 0 ✗, 28 ⚠ |
-| old prototype `interp.py` (3.4k lines) | ~70 s before the deadline existed | 961 ✗, noisy (see problems) |
+| golden suite (417 + 132 torch cases) | 2.0 s | one process per case; torch models ~0.02 s each |
+| `j93` (830 lines) / `m96_pkg` (1,716 lines) / `proto_summary.py` (1.2k, self-referential) | 0.09 s / 0.10 s / 2.6 s (deadline) | all pass / all pass / 0 ✗, 28 ⚠ |
 
 ## Known problems and limits
 
-* PyO3 wheel: builds but fails to load on macOS 26 / Xcode 26 with rustc 1.91 (dyld
-  "mis-aligned LINKEDIT string pool"); CLI and extension do not use it.
-* Large self-referential programs (the old prototype) are noisy: stores through a sibling
-  closure's cell seen only via the factory's summary, dispatch over `self.objects` tables.
-  Precision on real repositories (spec §15.4 runtime oracle) was never measured; only
-  robustness (137 local scripts, no failures).
+* PyO3 wheel: fails to load on macOS 26 / Xcode 26 (dyld LINKEDIT); CLI / extension skip it.
+* Large self-referential programs are noisy (sibling closures' cells via summaries, dispatch
+  over `self.objects`); precision on real repositories never measured (robustness: 137
+  local scripts, no failures).
 * A store through a name holding several objects is weak on each (golden `h72`, `maybe`;
   `x346`/`x347` keep the precise answer as `#@todo`).
 * An unknown call whose arguments hold records may alias them; its attribute row is open.
 * Mutual recursion widens after 3 rounds; `while` loops with unknown conditions join;
   comparisons on unknown values keep both branches; `match` class / sequence patterns stay
   undecided; `getattr` needs a known name; pandas columns from data stay open.
-* `dict(zip(keys, row))` with a row of unknown length makes every key definite (`d30`); a
-  `for` over a one-shot iterator exhausts it even on break; `ChainMap` is a merged copy.
-* Recency's side tables but `cls_slots` are not renamed; ASTs leak per file version.
+* `dict(zip(keys, row))` with an unknown-length row makes every key definite (`d30`); a
+  broken-off `for` exhausts its iterator; `ChainMap` is a copy; ASTs leak per file version.
+* Torch: dtype / device not modelled; `einsum` letters broadcast without requirements;
+  element counts of `view` checked only when literal; an unknown-count `Sequential` is the
+  join of its input and one module's output; facts from `!=`/`<` tests are not learned.
 
 ## Where to go next
 
-Open items, in the order they seem worth doing: (1) summary reuse across runs in the server;
+Open items, in the order they seem worth doing: (0) torch: shape facts from `<`/`!=`,
+dtype tracking, substitution-based instantiation if tabulation gets slow on big models;
+(1) summary reuse across runs in the server;
 (2) the weak store through several objects when the name read differs from the one stored
 through (`x346`, `x347`); hover values in resolved function facts; (3) precision on self-referential programs and a runtime oracle on real repos;
 (4) more cases written before running the engine (rounds r–w found 75 bugs, mostly in

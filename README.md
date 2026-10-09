@@ -10,8 +10,20 @@ demands of values that enter from outside (`read_csv`, `json.load`, request bodi
 
 It started as key-set inference for dict-like records; the key sets of dicts and instance
 attributes are now one model among others (list positions, literal arithmetic, string
-operations, iterators, the standard library and pandas). Functions with no callers are
-analysed with open parameters, so their variables get results too.
+operations, iterators, the standard library, pandas, and PyTorch tensor shapes). Functions with
+no callers are analysed with open parameters, so their variables get results too.
+
+**PyTorch.** In a program that imports torch, every tensor has a symbolic shape in the terms
+of the function it is in: `h = self.fc(x)` inside `forward` is `Tensor[*x.shape[:-1], 4*self.n_embd]`,
+`x @ y` on two parameters is `Tensor[*broadcast(x.shape[:-2], y.shape[:-2]), x.shape[-2],
+y.shape[-1]]` (if both have at least 2 dims). Layers and functions check their conditions: a
+definite mismatch (`Linear(512 -> 10) given last dim 256`, an RNN given 4 dims) is reported;
+an undecided one (`x.shape[-1] == self.n_embd`) is a *requirement* shown at the line and
+listed under `== tensor shapes ==`, and holds from there on. The hover names dims by the
+locals that hold them (`B, T, C = x.shape` → `Tensor[B, T, 3*self.n_embd]`). The design is in
+`SPECIFICATION.md` §2.3 and `TORCH_PLAN.md`; the 132 torch test programs (115 small, 17
+well-known models from a from-scratch transformer to nanoGPT, ResNet, U-Net, ViT, BERT) are
+in `tests/torch/`, each checked against real PyTorch by `tests/torch_oracle.py`.
 
 The design is in `SPECIFICATION.md`; `AGENTS.md` has the engineering notes for whoever
 works on it next. The engine is written in Rust (`rowan/`); it was ported from a Python
@@ -23,7 +35,7 @@ rowan/target/release/rowan prog.py                # text report
 rowan/target/release/rowan prog.py --json         # JSON lines (verdicts, schemas, summaries)
 rowan/target/release/rowan prog.py --facts        # per-name facts for editor integration
 rowan/target/release/rowan lib.py --no-entry      # only what the module itself runs (no entry-point pass)
-uv run --no-project python tests/run_golden.py    # golden suite (417 cases)
+uv run --no-project python tests/run_golden.py    # golden suite (417 cases + 132 torch cases)
 uv run --no-project python tests/run_snapshots.py # output snapshots on larger inputs
 ```
 
@@ -79,6 +91,7 @@ Values are written as Python-like text, as far as they are known (spec §2.2):
 | `[1, ?]`, `(1,)` | a list / tuple with known positions |
 | `list[X]`, `set[X]`, `tuple[X, ...]` | any number of elements, each like `X` |
 | `{…}`, `[…]`, `Name(…)`, `…` | left out by the printer (nesting depth, more than eight entries, a cycle) |
+| `Tensor[B, T, 4*C]`, `Tensor[*x.shape[:-1], 10]`, `Tensor[*, 10]` | a tensor of that shape (dims named in the legend; `*`: unknown leading dims) |
 
 The hover in the VS Code extension, the `module-level values` section of the text report
 and the `text` field of `--facts` use this form; `--json` and `--facts` also carry the
@@ -121,9 +134,11 @@ known.
 | `rowan/src/scopes.rs`, `rowan/src/frontend.rs` | lexical scopes; parsing (ruff), node locations |
 | `rowan/src/interp/` | the abstract interpreter over the AST: statements, expressions, calls, closures as cell objects, classes / MRO / properties / dunder protocols, declared types, loops with recency, narrowing, guarded loads, unknown calls with attribution, entry-point analysis of uncalled functions |
 | `rowan/src/summary.rs` | symbolic function summaries (spec §7.3/§9): placeholders, deferred accesses, imprecision events, footprints, instantiation with allocation-site resolution, SCC re-iteration |
-| `rowan/src/models/` | library models: builtins, `dict`/`list`/`str`, `json`/`yaml`/`pickle`, `copy`, `dataclasses`, `collections`, `csv.DictReader`, `argparse`, `os.environ`, `functools.partial`, `requests`, pandas |
+| `rowan/src/models/` | library models: builtins, `dict`/`list`/`str`, `json`/`yaml`/`pickle`, `copy`, `dataclasses`, `collections`, `csv.DictReader`, `argparse`, `os.environ`, `functools.partial`, `requests`, pandas, torch (`torch.rs`) |
+| `rowan/src/shape.rs` | tensor shapes: symbolic dims, shapes, facts, printing |
 | `rowan/src/report.rs` | per-access verdict combination, schema table, text / JSON / facts output |
 | `tests/run_golden.py`, `tests/cases/` | golden harness: expectations are `#@` comments in the case files (417 cases, each written before running the engine) |
+| `tests/torch/`, `tests/torch_oracle.py` | 132 torch cases (`CONVENTIONS.md`); the oracle runs them under real PyTorch |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | output snapshots on the example and three large fixture programs |
 | `examples/etl_report.py` | a realistic script with planted bugs (all found; also golden case e34) |
 | `vscode-rowan/`, `rowan/py/` | VS Code extension (uses `rowan serve`); PyO3 binding (does not load on the current macOS toolchain) |
@@ -164,8 +179,8 @@ known.
 
 ## Performance
 
-Release build, Apple M-series: the 417-case golden suite runs in 1.3 s (one process per
-case); an 830-line program and a 1,700-line twelve-module package analyse in 0.1 s each;
+Release build, Apple M-series: the 549-case golden suite runs in 2 s (one process per
+case; each torch model in about 0.02 s); an 830-line program and a 1,700-line twelve-module package analyse in 0.1 s each;
 a 1.2k-line self-referential module hits the 2 s soft deadline and finishes in 2.5 s with
 reduced precision. 137 scripts from local projects analysed in 0.8 s total without
 failures. Comparisons and arithmetic on known numbers, positions through comprehensions,

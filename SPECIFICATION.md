@@ -108,6 +108,55 @@ Values are printed as Python-like text (the text report, the editor hover, `--fa
 | `[1, ?]`, `(1,)` | a list / tuple with known positions |
 | `list[X]`, `set[X]`, `tuple[X, ...]` | any number of elements, each like `X` (`list[?]`: nothing known) |
 | `{…}`, `[…]`, `Name(…)`, `…` | left out by the printer (depth, more than eight entries, a cycle) |
+| `Tensor[B, T, 4*C]` | a tensor of that shape (§2.4); the legend names the dims (`B, T, C: x.shape`) |
+| `Tensor[*x.shape[:-1], 10]`, `Tensor[*, 10]` | leading dims as a slice of another tensor's shape / unknown in number |
+| `Tensor[…] (if x.dim() >= 2)` | a shape that holds under a rank assumption (`x @ y` with ranks unknown) |
+
+### 2.3 Tensor shapes (PyTorch)
+
+In a program that imports torch, tensors are values whose model is their *shape*: a list of
+symbolic dims, possibly with a *rest* of unknown length.
+- **Dims** are integer polynomials over atoms. The atoms are:
+  - `x.shape[i]`, the dims of an unknown named `x` (a parameter, an attribute read, an unknown
+    call's result, named by its variable);
+  - named ints (`n`, `self.n_embd`, `config.n_embd`);
+  - `a // k`, `a % k`, `max`, `min`;
+  - `?`, unknown.
+
+  Two dims are equal when their difference normalises to 0, and different when it is a
+  nonzero constant; otherwise the question is undecided.
+- **A rest** is a slice of one unknown's shape (`*x.shape[:-1]`), a broadcast of rests, or
+  `*` (unknown).
+- **Operations check their conditions.** A condition decided false is a *shape error*: the
+  operation raises, and the path ends there. An undecided condition is a *requirement* at
+  that line (`x.shape[-1] == 512`, `x.dim() in (2, 3)`), and from there on it is a *fact* on
+  the path. The facts are ranks of unknowns and dim equalities (a substitution oriented to
+  literals, then named ints, then the earlier parameter). `assert` and `if` tests on dims and
+  ranks give facts too; joins keep the facts both sides have.
+- **Ranks unknown:** `x @ y` with unknown ranks is the ≥2-D case under the assumption
+  `x.dim() >= 2, y.dim() >= 2`, and the assumption disappears once the ranks are known.
+- **Dims that differ at a join** become one atom per set of alternatives (shown `?`). The atom
+  stays the same over loop iterations, so a requirement on it becomes a fact.
+- **Where symbols come from:**
+  - every function of such a module is also analysed on its own with open parameters;
+  - methods see `self` as built by `__init__` from open arguments;
+  - dims from `__init__` print through the shortest self-attribute path holding them, else in
+    `__init__`'s own names.
+- **Coverage.** The model covers:
+  - creation;
+  - elementwise ops with broadcasting;
+  - `matmul` / `mm` / `bmm` / `einsum`;
+  - shape ops (`view` with `-1`, `permute`, `transpose`, `squeeze`, `flatten`, `unflatten`,
+    `expand`, `repeat`, `chunk` / `split` / `unbind`, `cat` / `stack`);
+  - reductions;
+  - indexing (ints, slices, `None`, `...`, masks, index tensors);
+  - `nn` layers: Linear, Embedding, the norms, conv / pool / upsample formulas,
+    RNN / LSTM / GRU, MultiheadAttention, Transformer layers, Sequential / ModuleList /
+    ModuleDict;
+  - `torch.nn.functional`;
+  - user `nn.Module` subclasses (calling one runs `forward`).
+
+  dtype and device are not modelled.
 
 ---
 
