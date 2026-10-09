@@ -116,8 +116,8 @@ def cohorts(users, ev):
     buyers["bought"] = 1                                        #@row buyers: present={user_id,bought} definite={user_id,bought} closed
     merged = users.merge(buyers, on="user_id", how="left")      #@ input user_id
     # (first written `ok bought`: users is an open input; a `bought` column of its own would make
-    # the merge give bought_x / bought_y)
-    merged["bought"] = merged["bought"].fillna(0).astype(int)   #@ possibly bought
+    # the merge give bought_x / bought_y. rowan says possibly; no input here shows the miss)
+    merged["bought"] = merged["bought"].fillna(0).astype(int)   #@ sound bought
     #@row merged: present={user_id,signup_date,cohort,bought,bought_x,bought_y} definite={user_id,signup_date,cohort,bought} open
     table = merged.groupby("cohort").agg(users=("user_id", "nunique"), buyers=("bought", "sum")).reset_index()
     #@row table: present={cohort,users,buyers} definite={cohort,users,buyers} closed
