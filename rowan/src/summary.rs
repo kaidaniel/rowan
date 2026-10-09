@@ -2059,6 +2059,16 @@ impl Inst {
                 continue;
             }
             let mut v = pre.slot(p, ph.ns, key);
+            // a module name read as a deferred load, met while building another summary: the
+            // load stays deferred (the summary must not mutate the module's actual list)
+            if ph.ns == Ns::Attr && an.kind(p) == Kind::Module && !an.sum_stack.is_empty() && !crate::interp::disabled("globalrd2") {
+                if let Some(name) = intern::key_as_str(key) {
+                    if an.deferred_global(p, &name, &v) {
+                        acc = acc.join(&an.path_placeholder_value(p, Ns::Attr, key, &Row::new(), state));
+                        continue;
+                    }
+                }
+            }
             if ph.ns == Ns::Attr && an.kind(p) == Kind::Class && v.empty() && !crate::interp::disabled("clsattrpath") {
                 // a class's attribute through a parameter: its class table, or its name
                 if let Some(name) = intern::key_as_str(key) {
