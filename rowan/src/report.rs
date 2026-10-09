@@ -163,7 +163,9 @@ fn group_alt_keys(entry: &IndexMap<String, SchemaEntry>) -> Vec<(String, &Schema
 pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> String {
     let mut lines: Vec<String> = Vec::new();
     let all = dedupe(&an.verdicts);
-    let vs: Vec<&Verdict> = all.iter().filter(|v| !matches!(v.tier, Tier::Proven | Tier::Map)).collect();
+    // an attribute read from an input is a requirement (listed with the schemas), not a
+    // finding: reading attributes of objects from outside is what programs do
+    let vs: Vec<&Verdict> = all.iter().filter(|v| !matches!(v.tier, Tier::Proven | Tier::Map) && !(v.tier == Tier::Input && v.ns == Ns::Attr)).collect();
     let oks = all.iter().filter(|v| v.tier == Tier::Proven).count();
     lines.push("== diagnostics ==".into());
     if vs.is_empty() {

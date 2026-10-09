@@ -107,7 +107,7 @@ Tiers (spec §3.1): `✓` proven, `✓~` likely (optimistic: unknown code interv
 `⚠` possibly missing (set on some paths only / depends on which object), `✗`
 definitely missing (all keys known, deleted, renamed away, suffixed by a merge, projected
 out), `⚠~` likely missing (only unknown code could have added it), `◌` depends on
-input (becomes a schema entry), `⚠data` data-derived key into a dict whose keys are all
+input (becomes a schema entry; for attributes not listed as a diagnostic), `⚠data` data-derived key into a dict whose keys are all
 known.
 `via L96>L85` is the call chain the access ran under: verdicts are per call context.
 

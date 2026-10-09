@@ -275,7 +275,9 @@ function renderHover(name, facts, verdicts) {
   return out.join("\n");
 }
 
-function severityFor(tier) {
+function severityFor(tier, ns) {
+  // an attribute read from an input is a requirement (see the hover / schemas), not a finding
+  if (tier === "input" && ns === "attr") return null;
   switch (tier) {
     case "missing": return "error";
     case "possibly":
@@ -493,7 +495,7 @@ function activate(context) {
       const diags = [];
       for (const [line, vs] of idx.verdicts) {
         for (const v of vs) {
-          const sev = severityFor(v.tier);
+          const sev = severityFor(v.tier, v.ns);
           if (!sev) continue;
           const ln = Math.max(0, line - 1);
           const textLen = (v.text || "").length || 1;
