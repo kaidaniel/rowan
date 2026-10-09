@@ -15,8 +15,10 @@ is for whoever picks the work up. Everything here was true at the last commit.
   the program text first, then make the engine produce them. Never derive an expectation
   from engine output; when one turns out wrong on re-reading, fix it with a comment saying
   why. Value analysis (which keys, which columns) matters more than bug-finding verdicts.
-* Commit when asked, one commit per step of a plan, so any step can be reverted; commit
-  messages end with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
+* Commit without being asked whenever a round of bug fixes or a feature is complete and the
+  tests pass (golden, snapshots, `cargo test`), one commit per round / step so any of them
+  can be reverted; never commit a failing state. Commit messages end with
+  `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
 * Work the plan in order, with a written plan first when a request mixes several things;
   if time remains, write more example programs that probe specific hypotheses about bugs.
 * Keep this file under 200 lines and up to date with every change.
