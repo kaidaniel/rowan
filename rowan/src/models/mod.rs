@@ -432,7 +432,7 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         _ => Kind::List,
     };
     let oid = an.alloc_simple(kind, &c.node, st, &format!("{}@L{}", last(&c.qual), c.line));
-    an.obj_mut(oid).literal_len = None;
+    an.set_llen(oid, st, None);
     if let Some(a) = c.args.first() {
         let it = an.iterate(a, &c.node, st);
         if c.qual == "builtins.iter" {
@@ -457,12 +457,12 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             _ => Some((0..items.len()).collect()),
                         };
                         if let Some(order) = order {
-                            an.obj_mut(oid).literal_len = Some(items.len());
+                            an.set_llen(oid, st, Some(items.len()));
                             for (i, j) in order.into_iter().enumerate() {
                                 st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), items[j].clone(), true);
                             }
                         } else {
-                            an.obj_mut(oid).literal_len = Some(items.len());
+                            an.set_llen(oid, st, Some(items.len()));
                             let all = join_values(items.clone());
                             for i in 0..items.len() {
                                 st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), all.clone(), true);
@@ -486,7 +486,7 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     let reversed = c.qual.as_str() == "builtins.reversed";
                     let sorted = c.qual.as_str() == "builtins.sorted";
                     if an.obj(oid).single && items.len() <= 64 {
-                        an.obj_mut(oid).literal_len = Some(items.len());
+                        an.set_llen(oid, st, Some(items.len()));
                         let n = items.len();
                         // sorted: when every sort key is a known literal (or a tuple of
                         // them) the order is known (stable sort); otherwise the count is
@@ -519,7 +519,7 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     } else {
         st.elems.insert(oid, KeyVal::Lits(KeySet::new()));
-        an.obj_mut(oid).literal_len = Some(0);
+        an.set_llen(oid, st, Some(0));
     }
     Value::obj(oid)
 }
@@ -767,7 +767,7 @@ fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // a generator with known yields: the item at the cursor, which moves on
     if let Some(g) = a.single() {
         if matches!(an.kind(g), Kind::List) && an.obj(g).single {
-            if let Some(n) = an.obj(g).literal_len {
+            if let Some(n) = an.llen(g, st) {
                 let cur = st.slot_opt(g, Ns::Attr, key_str_lit("__cursor")).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_int).unwrap_or(0);
                 if cur >= 0 && (cur as usize) < n {
                     st.set_slot(g, Ns::Attr, key_str_lit("__cursor"), Value::lit(intern::key_int(cur + 1)), true);
@@ -1005,7 +1005,7 @@ fn m_vars(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("map@L{}", c.line));
-    an.obj_mut(oid).literal_len = None;
+    an.set_llen(oid, st, None);
     if c.args.len() >= 2 {
         let it = an.iterate(&c.args[1], &c.node, st);
         if c.qual.ends_with("filter") && !crate::interp::disabled("filteritems") {
@@ -1036,7 +1036,7 @@ fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(res.pts.clone(), crate::models::torch::elem_kv(&res.kv)), true);
                 st.elems.insert(oid, res.kv);
                 if all_decided && an.obj(oid).single {
-                    an.obj_mut(oid).literal_len = Some(kept.len());
+                    an.set_llen(oid, st, Some(kept.len()));
                     for (i, v) in kept.into_iter().enumerate() {
                         st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), v, true);
                     }
@@ -1064,7 +1064,7 @@ fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     let res = join_values(outs);
                     st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(res.pts.clone(), crate::models::torch::elem_kv(&res.kv)), true);
                     st.elems.insert(oid, res.kv);
-                    an.obj_mut(oid).literal_len = Some(n.min(items.len()));
+                    an.set_llen(oid, st, Some(n.min(items.len())));
                     return Value::obj(oid);
                 }
             }
@@ -1123,7 +1123,7 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // `type("Name", (), {...})`: a class whose attributes are the namespace's items
     if c.args.len() == 3 && !crate::interp::disabled("type3") {
         let name = c.args[0].kv.as_lit().filter(|_| c.args[0].pts.is_empty()).and_then(intern::key_as_str);
-        let no_bases = c.args[1].single().map(|o| an.obj(o).literal_len == Some(0)).unwrap_or(false);
+        let no_bases = c.args[1].single().map(|o| an.llen(o, st) == Some(0)).unwrap_or(false);
         let ns = c.args[2].single().filter(|o| an.kind(*o) == Kind::Dict);
         if let (Some(name), true, Some(ns)) = (name.filter(|n| n.chars().all(|ch| ch.is_alphanumeric() || ch == '_')), no_bases, ns) {
             let row = st.row(ns, Ns::Item);
@@ -1494,7 +1494,7 @@ fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             st.set_slot(oid, Ns::Elem, STAR, Value::new(), true);
             st.elems.insert(oid, join_values(vals.clone()).kv);
-            an.obj_mut(oid).literal_len = Some(3);
+            an.set_llen(oid, st, Some(3));
             Value::obj(oid)
         }
         "replace" if c.args.len() >= 2 && c.args[0].kv.as_lit().is_some() && c.args[1].kv.as_lit().is_some() => {
@@ -1593,7 +1593,7 @@ fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         "split" | "splitlines" | "partition" | "rsplit" => {
             let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("split@L{}", c.line));
-            an.obj_mut(oid).literal_len = None;
+            an.set_llen(oid, st, None);
             // a literal string split by a literal separator: the parts, in order; a parameter
             // string is decided per call site
             if let Some(ph) = kv.as_param() {
@@ -1616,7 +1616,7 @@ fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), v, true);
                             ks = ks.insert(key_str_lit(p));
                         }
-                        an.obj_mut(oid).literal_len = Some(parts.len());
+                        an.set_llen(oid, st, Some(parts.len()));
                         st.set_slot(oid, Ns::Elem, STAR, Value::new(), true);
                         st.elems.insert(oid, KeyVal::Lits(ks));
                         return Value::obj(oid);
@@ -1742,7 +1742,7 @@ fn m_update(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// `xs.pop()` / `xs.pop(i)` on one list: positional when the list's positions are known.
 fn list_pop_one(an: &mut Analyzer, st: &mut State, oid: u32, c: &Call) -> Value {
-    let ll = an.obj(oid).literal_len;
+    let ll = an.llen(oid, st);
     let single = an.obj(oid).single;
     let idx = c.args.first().and_then(|a| a.kv.as_lit()).and_then(intern::key_as_int);
     let keyed = c.args.first().map(|a| a.kv.as_lit().is_none()).unwrap_or(false);
@@ -1760,12 +1760,12 @@ fn list_pop_one(an: &mut Analyzer, st: &mut State, oid: u32, c: &Call) -> Value 
                     st.set_slot(oid, Ns::Pos, intern::key_int(j as i64), nv, true);
                 }
                 st.pop_slot(oid, Ns::Pos, intern::key_int(n as i64 - 1));
-                an.obj_mut(oid).literal_len = Some(n - 1);
+                an.set_llen(oid, st, Some(n - 1));
                 return v;
             }
         }
     }
-    an.obj_mut(oid).literal_len = None;
+    an.set_llen(oid, st, None);
     an.elem_of(&Value::obj(oid), &c.node, st)
 }
 
@@ -1946,10 +1946,10 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         };
         // extend by known items in straight-line code: each item gets its position
         if let (Some(items), Kind::List) = (&ext_items, an.kind(oid)) {
-            let ll = an.obj(oid).literal_len;
+            let ll = an.llen(oid, st);
             if let Some(n) = ll {
                 let cap = if an.torch_on { 64 } else { 16 };
-                if an.obj(oid).single && an.frame().loop_depth == 0 && an.cond_depth == 0 && n + items.len() <= cap {
+                if an.obj(oid).single && an.frame().loop_depth == 0 && n + items.len() <= cap {
                     for (i, item) in items.iter().enumerate() {
                         st.set_slot(oid, Ns::Pos, intern::key_int((n + i) as i64), item.clone(), true);
                         st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(item.pts.clone(), crate::models::torch::elem_kv(&item.kv)), false);
@@ -1959,7 +1959,7 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         };
                         st.elems.insert(oid, nk);
                     }
-                    an.obj_mut(oid).literal_len = Some(n + items.len());
+                    an.set_llen(oid, st, Some(n + items.len()));
                     continue;
                 }
             }
@@ -1977,22 +1977,25 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             st.set_slot(oid, Ns::Pos, append_slot_key(i), elem.clone(), true);
             continue;
         }
-        let ll = an.obj(oid).literal_len;
+        let ll = an.llen(oid, st);
         let single = an.obj(oid).single;
         if let Some(n) = ll {
-            if single && name == "append" && an.frame().loop_depth == 0 && an.cond_depth == 0 && n < if an.torch_on { 64 } else { 16 } {
+            if single && name == "append" && an.frame().loop_depth == 0 && n < if an.torch_on { 64 } else { 16 } {
                 st.set_slot(oid, Ns::Pos, intern::key_int(n as i64), elem, true);
-                an.obj_mut(oid).literal_len = Some(n + 1);
+                an.set_llen(oid, st, Some(n + 1));
                 continue;
             }
             // appends of unknown count: the positions so far stay valid
             if name == "append" || name == "extend" {
-                an.obj_mut(oid).known_prefix = Some(n);
-            } else {
-                st.drop_obj_ns(oid, Ns::Pos);
+                an.set_prefix(oid, st, n);
+                continue;
             }
+            st.drop_obj_ns(oid, Ns::Pos);
+        } else if name == "append" || name == "extend" {
+            // the length was unknown already: the known prefix stays
+            continue;
         }
-        an.obj_mut(oid).literal_len = None;
+        an.set_llen(oid, st, None);
     }
     // the last element after an append (whatever the length)
     if name == "append" && !crate::interp::disabled("lastelem") {
@@ -2089,7 +2092,7 @@ fn m_set(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             }
                         }
                         st.elems.insert(oid, kv);
-                        an.obj_mut(oid).literal_len = None;
+                        an.set_llen(oid, st, None);
                         st.drop_obj_ns(oid, Ns::Pos);
                     }
                 }
@@ -2276,8 +2279,7 @@ fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
             }
             for oid in recv.pts.iter() {
-                an.obj_mut(oid).literal_len = None;
-                an.obj_mut(oid).known_prefix = None;
+                an.set_llen(oid, st, None);
                 st.drop_obj_ns(oid, Ns::Pos);
                 if name == "insert" {
                     if let Some(x) = c.args.get(1) {
@@ -2348,7 +2350,7 @@ fn m_view(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if matches!(name, "tolist" | "to_list" | "copy") {
         if let Some(recv) = &c.recv {
             let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("{}@L{}", name, c.line));
-            an.obj_mut(oid).literal_len = None;
+            an.set_llen(oid, st, None);
             let it = an.iterate(recv, &c.node, st);
             let elem = it.elem.one_or_empty();
             st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(elem.pts.clone(), crate::models::torch::elem_kv(&elem.kv)), true);
@@ -2383,7 +2385,7 @@ fn json_literal(an: &mut Analyzer, st: &mut State, c: &Call, j: &serde_json::Val
             st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), single);
             st.elems.insert(oid, acc.kv.clone());
             if single {
-                an.obj_mut(oid).literal_len = Some(vals.len());
+                an.set_llen(oid, st, Some(vals.len()));
                 for (i, v) in vals.iter().enumerate() {
                     st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
                 }
@@ -3035,7 +3037,7 @@ fn m_parser_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             if name == "parse_known_args" {
                 let tid = an.alloc_simple(Kind::Tuple, &c.node, st, "parse_known_args result");
-                an.obj_mut(tid).literal_len = Some(2);
+                an.set_llen(tid, st, Some(2));
                 st.set_slot(tid, Ns::Pos, intern::key_int(0), Value::obj(nid), true);
                 st.set_slot(tid, Ns::Pos, intern::key_int(1), Value::data("rest"), true);
                 return Value::obj(tid);
@@ -3057,7 +3059,7 @@ fn m_partial(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn m_chain(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("chain@L{}", c.line));
-    an.obj_mut(oid).literal_len = None;
+    an.set_llen(oid, st, None);
     let mut acc = Value::new();
     let mut kv: Option<KeyVal> = None;
     for a in &c.args {
@@ -3131,7 +3133,7 @@ fn m_range(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     };
     let Some((lo, hi, step)) = bounds.filter(|_| c.kwargs.is_empty() && !crate::interp::disabled("range")) else {
         let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("range@L{}", c.line));
-        an.obj_mut(oid).literal_len = None;
+        an.set_llen(oid, st, None);
         // (for the tensor model: an int of unknown value)
         st.elems.insert(oid, if an.torch_on { KeyVal::data(&crate::shape::dim_label(crate::shape::unknown())) } else { DATA });
         return Value::obj(oid);
@@ -3208,7 +3210,7 @@ fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             return Value::data("len");
         }
-        if let Some(n) = an.obj(o).literal_len {
+        if let Some(n) = an.llen(o, st) {
             return Value::lit(intern::key_int(n as i64));
         }
         if matches!(an.kind(o), Kind::Dict) {
@@ -3311,7 +3313,7 @@ fn literal_sort_key(an: &mut Analyzer, st: &mut State, c: &Call, item: &Value) -
     if an.kind(o) != Kind::Tuple {
         return None;
     }
-    let n = an.obj(o).literal_len?;
+    let n = an.llen(o, st)?;
     let mut ks = Vec::new();
     for i in 0..n {
         let s = st.slot(o, Ns::Pos, intern::key_int(i as i64));

@@ -1158,7 +1158,7 @@ impl Analyzer {
                         // them are precise then); not open input rows
                         if matches!(k, Kind::List | Kind::Tuple | Kind::Set) {
                             let elems = state.slot(*o, Ns::Elem, STAR);
-                            if self.obj(*o).literal_len.is_some() || elems.pts.iter().any(|e| matches!(self.kind(e), Kind::Dict | Kind::Instance | Kind::List | Kind::Tuple)) {
+                            if self.llen(*o, state).is_some() || elems.pts.iter().any(|e| matches!(self.kind(e), Kind::Dict | Kind::Instance | Kind::List | Kind::Tuple)) {
                                 return Some(ev.clone());
                             }
                         }
@@ -1365,15 +1365,25 @@ impl Analyzer {
             let tg = inst.resolve(self, state, &pre, *oid);
             let nv = inst.remap_value(self, state, &pre, v);
             for a in tg.iter() {
+                // through a placeholder of the summary being built: an append of its own (in
+                // order, positional while this call is straight-line code)
+                if self.kind(a) == Kind::Ph && !crate::interp::disabled("phappend") {
+                    let positional = *i >= 0 && tg.len() == 1 && self.frame().loop_depth == 0 && self.cond_depth == 0;
+                    let j = if positional { (0..16).find(|j| !state.has_slot(a, Ns::Pos, crate::interp::access::append_slot_key(*j))).unwrap_or(-1) } else { -1 };
+                    let k = crate::interp::access::append_slot_key(j);
+                    let strong = j >= 0;
+                    state.set_slot(a, Ns::Pos, k, nv.clone(), strong);
+                    continue;
+                }
                 if !matches!(self.kind(a), Kind::List | Kind::Tuple | Kind::Set) {
                     continue;
                 }
-                let ll = self.obj(a).literal_len;
+                let ll = self.llen(a, state);
                 if *i >= 0 && tg.len() == 1 && self.strongable(a) {
                     if let Some(n) = ll {
                         if n < 16 {
                             state.set_slot(a, Ns::Pos, intern::key_int(n as i64), nv.clone(), true);
-                            self.obj_mut(a).literal_len = Some(n + 1);
+                            self.set_llen(a, state, Some(n + 1));
                             continue;
                         }
                     }
@@ -1381,7 +1391,7 @@ impl Analyzer {
                 if ll.is_some() {
                     state.drop_obj_ns(a, Ns::Pos);
                 }
-                self.obj_mut(a).literal_len = None;
+                self.set_llen(a, state, None);
             }
         }
         // 3c. the elements the body appended last
@@ -1911,7 +1921,7 @@ impl Inst {
         }
         let (tkind, tsite, tctx, tlabel, tsingle, tll, titer, tdepth, tderived, payload) = {
             let o = an.obj(t);
-            (o.kind, o.site.clone(), o.ctx.clone(), o.label.clone(), o.single, o.literal_len, o.iter_elem, o.depth, o.derived_from, o.payload.clone())
+            (o.kind, o.site.clone(), o.ctx.clone(), o.label.clone(), o.single, an.llen(t, &self.summary.exit), o.iter_elem, o.depth, o.derived_from, o.payload.clone())
         };
         let tsite = tsite.strip_suffix("#recent").map(|x| x.to_string()).unwrap_or(tsite);
         // templates allocated at one line in different inner contexts (two objects built by
@@ -1938,7 +1948,7 @@ impl Inst {
             self.new_clones.remove(&nid);
         }
         self.clones.insert(t, nid);
-        an.obj_mut(nid).literal_len = tll;
+        an.set_llen(nid, state, tll);
         an.obj_mut(nid).iter_elem = titer;
         an.obj_mut(nid).depth = tdepth;
         if let Some(d) = tderived {
@@ -2027,8 +2037,8 @@ impl Inst {
                     // `xs[i]` with `i` a parameter: the positions it may name, else every
                     // element (a store through it then reaches all of them, weakly)
                     let ints: Vec<i64> = lits.iter().filter_map(intern::key_as_int).collect();
-                    if !lits.is_empty() && ints.len() == lits.len() && an.obj(p).literal_len.is_some() {
-                        let n = an.obj(p).literal_len.unwrap() as i64;
+                    if !lits.is_empty() && ints.len() == lits.len() && an.llen(p, pre).is_some() {
+                        let n = an.llen(p, pre).unwrap() as i64;
                         for i in ints {
                             let j = if i < 0 { n + i } else { i };
                             if 0 <= j && j < n {

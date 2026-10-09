@@ -241,7 +241,7 @@ impl Analyzer {
         if !matches!(self.kind(o), Kind::Tuple | Kind::List) {
             return None;
         }
-        let n = self.obj(o).literal_len?;
+        let n = self.llen(o, st)?;
         Some((0..n).map(|i| st.slot(o, Ns::Pos, key_int(i as i64))).collect())
     }
 
@@ -310,12 +310,12 @@ impl Analyzer {
         st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), single);
         st.elems.insert(oid, acc.kv.clone());
         if single {
-            self.obj_mut(oid).literal_len = Some(vals.len());
+            self.set_llen(oid, st, Some(vals.len()));
             for (i, v) in vals.iter().enumerate() {
                 st.set_slot(oid, Ns::Pos, key_int(i as i64), v.clone(), true);
             }
         } else {
-            self.obj_mut(oid).literal_len = None;
+            self.set_llen(oid, st, None);
         }
         if let Some(m) = marker {
             self.obj_mut(oid).payload = Payload::Str(m.into());
@@ -334,7 +334,7 @@ impl Analyzer {
         let single = self.obj(oid).single;
         st.set_slot(oid, Ns::Elem, STAR, elem.clone(), single);
         st.elems.insert(oid, elem.kv.clone());
-        self.obj_mut(oid).literal_len = None;
+        self.set_llen(oid, st, None);
         self.obj_mut(oid).payload = Payload::Str(match count {
             Some(d) => format!("torch.n:{}", d.0),
             None => "torch.n".into(),
@@ -1172,7 +1172,7 @@ impl Analyzer {
         }
         // an element of a list of tensors without known positions (built by `append`)
         if let Some(o) = obj.single() {
-            if matches!(self.kind(o), Kind::List | Kind::Tuple) && self.obj(o).literal_len.is_none() && self.t_layer_type(o).is_none() && !matches!(idx, E::Slice(_)) {
+            if matches!(self.kind(o), Kind::List | Kind::Tuple) && self.llen(o, st).is_none() && self.t_layer_type(o).is_none() && !matches!(idx, E::Slice(_)) {
                 let e = self.t_list_elem(o, st);
                 if tensor_shape(&e).is_some() {
                     let _ = self.eval(idx, st);
@@ -3932,7 +3932,7 @@ impl Analyzer {
             (s, true)
         } else if let Some(o) = v.single() {
             if matches!(&self.obj(o).payload, Payload::Str(q) if q == "torch.Size") {
-                let len = self.obj(o).literal_len?;
+                let len = self.llen(o, st)?;
                 if star.is_none() && len != n || star.is_some() && len < fixed {
                     let m = format!("cannot unpack a torch.Size of {} dims into {} names", len, n);
                     self.t_error(node, m, st);
@@ -4055,7 +4055,7 @@ impl Analyzer {
         let (chain, entry) = self.t_note_ctx();
         let shape = if let Some(s) = size_shape(v) {
             Some(sh::norm_shape(&s, &st.tf))
-        } else if let Some(o) = v.single().filter(|o| v.kv.is_bot() && (matches!(&self.obj(*o).payload, Payload::Str(q) if q == "torch.Size") || (self.kind(*o) == Kind::Tuple && self.obj(*o).literal_len.is_some()))) {
+        } else if let Some(o) = v.single().filter(|o| v.kv.is_bot() && (matches!(&self.obj(*o).payload, Payload::Str(q) if q == "torch.Size") || (self.kind(*o) == Kind::Tuple && self.llen(*o, st).is_some()))) {
             self.t_shape_arg(&Value::obj(o), st)
         } else if tensor_shape(v).is_some() {
             // a tensor or some other object (a user method's result): no shape claimed
@@ -4434,7 +4434,7 @@ impl Analyzer {
         collect(v);
         for o in v.pts.iter() {
             if matches!(self.kind(o), Kind::Tuple | Kind::List) {
-                if let Some(n) = self.obj(o).literal_len {
+                if let Some(n) = self.llen(o, st) {
                     for i in 0..n.min(8) {
                         collect(&st.slot(o, Ns::Pos, key_int(i as i64)));
                     }

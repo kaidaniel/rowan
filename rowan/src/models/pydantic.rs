@@ -2418,12 +2418,12 @@ pub fn m_pydverr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         st.set_slot(lt, Ns::Pos, intern::key_int(0), Value::lit(k), true);
                         st.set_slot(lt, Ns::Elem, intern::STAR, Value::lit(k), true);
                         st.elems.insert(lt, KeyVal::Lit(k));
-                        an.obj_mut(lt).literal_len = Some(1);
+                        an.set_llen(lt, st, Some(1));
                     }
                     None => {
                         st.set_slot(lt, Ns::Elem, intern::STAR, Value::data("loc"), true);
                         st.elems.insert(lt, crate::domain::DATA);
-                        an.obj_mut(lt).literal_len = None;
+                        an.set_llen(lt, st, None);
                     }
                 }
                 let loc = Value::obj(lt);

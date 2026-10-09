@@ -564,8 +564,7 @@ impl Analyzer {
                                 }
                             }
                             _ => {
-                                self.obj_mut(o).literal_len = None;
-                                self.obj_mut(o).known_prefix = None;
+                                self.set_llen(o, state, None);
                                 state.drop_obj_ns(o, Ns::Pos);
                             }
                         }

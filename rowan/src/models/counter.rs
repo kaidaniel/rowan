@@ -364,7 +364,7 @@ pub const DEQUE_METHODS: &[&str] = &["append", "appendleft", "pop", "popleft", "
 
 /// The known items of a list-like object (positions of a single object), or None.
 fn known_items(an: &Analyzer, o: ObjId, st: &State) -> Option<Vec<Value>> {
-    let n = an.obj(o).literal_len?;
+    let n = an.llen(o, st)?;
     Some((0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect())
 }
 
@@ -374,7 +374,7 @@ fn set_items(an: &mut Analyzer, o: ObjId, items: Vec<Value>, st: &mut State) {
     for (i, v) in items.iter().enumerate() {
         st.set_slot(o, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
     }
-    an.obj_mut(o).literal_len = Some(items.len());
+    an.set_llen(o, st, Some(items.len()));
     st.set_slot(o, Ns::Elem, intern::STAR, Value::with_kv(all.pts.clone(), crate::models::torch::elem_kv(&all.kv)), true);
     st.elems.insert(o, if items.is_empty() { KeyVal::Lits(intern::KeySet::new()) } else { all.kv.clone() });
 }
@@ -402,7 +402,7 @@ pub fn deque_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let e = c.arg(0, Some("iterable")).map(|it| an.iterate(&it, &c.node, st).elem.one_or_empty()).unwrap_or_default();
             st.set_slot(oid, Ns::Elem, intern::STAR, Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv)), false);
             st.elems.insert(oid, e.kv.clone());
-            an.obj_mut(oid).literal_len = None;
+            an.set_llen(oid, st, None);
         }
     }
     Value::obj(oid)
@@ -497,7 +497,7 @@ pub fn m_deque(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         ("pop" | "popleft", None) => {
             an.may_raise_here("IndexError", st);
             let e = st.slot(oid, Ns::Elem, intern::STAR);
-            an.obj_mut(oid).literal_len = None;
+            an.set_llen(oid, st, None);
             st.drop_obj_ns(oid, Ns::Pos);
             e
         }
@@ -517,6 +517,6 @@ fn forget(an: &mut Analyzer, oid: ObjId, arg: &Value, c: &Call, st: &mut State) 
     st.set_slot(oid, Ns::Elem, intern::STAR, cur.join(&Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv))), false);
     let kv = crate::domain::kv_join(&st.elems.get(&oid).unwrap_or(KeyVal::Bot), &e.kv);
     st.elems.insert(oid, kv);
-    an.obj_mut(oid).literal_len = None;
+    an.set_llen(oid, st, None);
     st.drop_obj_ns(oid, Ns::Pos);
 }

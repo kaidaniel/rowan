@@ -995,6 +995,11 @@ impl Analyzer {
                         state.elems.insert(*k, v);
                     }
                 }
+                for k in hit.fp.slots.iter().map(|(o, _)| o).chain(hit.fp.elems.iter()) {
+                    if let Some(v) = hit.fp_state.lens.get(k) {
+                        state.lens.insert(*k, v);
+                    }
+                }
                 // recent objects the replayed call allocated: folded at the loop's back-edge
                 // like the originals, or a later activation resets them under live references
                 if !self.recent_stack.is_empty() {
@@ -1075,7 +1080,7 @@ impl Analyzer {
             if is_generator(&f.body) {
                 // the yielded values of this activation
                 let gid = self.alloc(Kind::List, &format!("gen:{}", foid), state, &format!("generator {}", fi.qualname), Payload::None, None, Ns::Item, None, Some(&ctx));
-                self.obj_mut(gid).literal_len = Some(0);
+                self.set_llen(gid, state, Some(0));
                 state.elems.insert(gid, KeyVal::Lits(KeySet::new()));
             }
         }
@@ -1523,7 +1528,7 @@ impl Analyzer {
             }
             state.set_slot(tid, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), DATA), true);
             state.elems.insert(tid, if !rest_pos.is_empty() { acc.kv.clone() } else { DATA });
-            self.obj_mut(tid).literal_len = if star_args.is_empty() { Some(rest_pos.len()) } else { None };
+            self.set_llen(tid, state, if star_args.is_empty() { Some(rest_pos.len()) } else { None });
             for (i, v) in rest_pos.iter().enumerate() {
                 state.set_slot(tid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
             }

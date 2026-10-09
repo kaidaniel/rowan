@@ -83,10 +83,10 @@ def apply_rules(df, rules):
         n_bad = int((~passed).sum())
         results.append({"column": col, "status": "ok" if n_bad == 0 else "failed", "failed": n_bad, "checked": len(passed)})
     table = pd.DataFrame(results)
-    # (results has one record per rule; rowan does not know that the loop ran, so nothing is
-    # definite: an empty list makes a frame without columns)
-    #@todo row table: definite={column,status}
-    #@row table: present={column,status,failed,checked} definite={} closed
+    # (results has one record per rule, and every call passes rules with known items: column
+    # and status are in every record; failed / checked only when some column exists; this was
+    # a to-do with definite={} while appends in a branch lost their positions)
+    #@row table: present={column,status,failed,checked} definite={column,status} closed
     return table
 
 

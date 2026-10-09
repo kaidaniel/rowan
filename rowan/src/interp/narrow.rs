@@ -252,7 +252,7 @@ impl Analyzer {
                     }
                 }
                 Kind::Tuple | Kind::List => {
-                    let n = self.obj(c).literal_len.unwrap_or(0);
+                    let n = self.llen(c, state).unwrap_or(0);
                     for i in 0..n {
                         let sub = state.slot(c, Ns::Pos, intern::key_int(i as i64));
                         for c2 in sub.pts.iter() {

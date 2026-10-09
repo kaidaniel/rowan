@@ -20,7 +20,7 @@ fn lit_of(an: &Analyzer, st: &State, v: &Value, as_seq: bool) -> Option<KeyId> {
     match an.kind(o) {
         Kind::Tuple => an.literal_tuple(o, st, 0),
         Kind::List if as_seq => {
-            let n = an.obj(o).literal_len?;
+            let n = an.llen(o, st)?;
             let items: Option<Vec<KeyId>> = (0..n)
                 .map(|i| {
                     let x = st.slot(o, Ns::Pos, intern::key_int(i as i64));

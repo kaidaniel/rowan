@@ -612,6 +612,9 @@ impl Analyzer {
         let _ = &mut pre;
         // other exceptions (KeyError, …) escape: TestClient raises them at the call
         if flagged {
+            if crate::interp::debug_level() == 2 {
+                eprintln!("  handler {} may raise (escapes the TestClient call at L{})", self.func_info(func).qualname, node.line);
+            }
             if let Some(m) = self.may_raise.last_mut() {
                 *m = true;
             }

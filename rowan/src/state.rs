@@ -106,6 +106,10 @@ pub struct State {
     pub slots: TwoLevel<ObjId, SlotKey, Value>,
     /// literal element keys of containers
     pub elems: LayerMap<ObjId, KeyVal>,
+    /// lists / tuples: (the length when known on this path, the number of leading positions
+    /// known: all of them when the length is known); written at birth, so a key on one side
+    /// only of a join is an object born there
+    pub lens: LayerMap<ObjId, (Option<usize>, usize)>,
     /// Source -> {key term -> ReqInfo}
     pub reqs: TwoLevel<SourceId, KeyId, ReqInfo>,
     pub ret: Option<Value>,
@@ -181,6 +185,7 @@ impl State {
             rows: LayerMap::new(),
             slots: TwoLevel::new(),
             elems: LayerMap::new(),
+            lens: LayerMap::new(),
             reqs: TwoLevel::new(),
             ret: None,
             reachable: true,
@@ -208,6 +213,7 @@ impl State {
             rows: self.rows.copy_ref(),
             slots: self.slots.copy_ref(),
             elems: self.elems.copy_ref(),
+            lens: self.lens.copy_ref(),
             reqs: self.reqs.copy_ref(),
             ret: self.ret.clone(),
             reachable: self.reachable,
@@ -227,6 +233,7 @@ impl State {
             rows: self.rows.copy(),
             slots: self.slots.copy(),
             elems: self.elems.copy(),
+            lens: self.lens.copy(),
             reqs: self.reqs.copy(),
             ret: self.ret.clone(),
             reachable: self.reachable,
@@ -258,6 +265,7 @@ impl State {
         self.rows = o.rows.copy();
         self.slots = o.slots.copy();
         self.elems = o.elems.copy();
+        self.lens = o.lens.copy();
         self.reqs = o.reqs.copy();
         self.ret = o.ret.clone();
         self.reachable = o.reachable;
@@ -324,6 +332,7 @@ impl State {
         s.rows = self.rows.join(&o.rows, &mut |a, b| a.join(b));
         s.slots = self.slots.join(&mut o.slots, &mut |a, b| a.join(b));
         s.elems = self.elems.join(&o.elems, &mut |a, b| kv_join(a, b));
+        s.lens = self.lens.join(&o.lens, &mut join_len);
         s.reqs = self.reqs.join_with(&mut o.reqs, &mut |a, b| a.join(b), &mut |a| a.demote());
         s.ret = ret;
         s.exits = exits;
@@ -357,6 +366,7 @@ impl State {
         self.rows = self.rows.join(&o.rows, &mut |a, b| a.join(b));
         self.slots = self.slots.join(&mut o.slots, &mut |a, b| a.join(b));
         self.elems = self.elems.join(&o.elems, &mut |a, b| kv_join(a, b));
+        self.lens = self.lens.join(&o.lens, &mut join_len);
         self.reqs = self.reqs.join_with(&mut o.reqs, &mut |a, b| a.join(b), &mut |a| a.demote());
         self.lasts = join_lasts(&self.lasts, &o.lasts);
     }
@@ -387,6 +397,22 @@ impl State {
                 Some(cur) => {
                     if cur != v {
                         self.slots.set(oid, *sk, cur.join(&v));
+                    }
+                }
+            }
+        }
+        // the lengths of the objects the callee touched
+        let mut touched: Vec<ObjId> = fp.slots.iter().map(|(o, _)| *o).chain(fp.elems.iter().copied()).collect();
+        touched.sort_unstable();
+        touched.dedup();
+        for k in touched {
+            if let Some(v) = o.lens.get(&k) {
+                match self.lens.get(&k) {
+                    None => self.lens.insert(k, v),
+                    Some(cur) => {
+                        if cur != v {
+                            self.lens.insert(k, join_len(&cur, &v));
+                        }
                     }
                 }
             }
@@ -434,6 +460,7 @@ impl State {
             && self.rows.same(&o.rows)
             && self.slots.same(&o.slots)
             && self.elems.same(&o.elems)
+            && self.lens.same(&o.lens)
             && self.reqs.same(&o.reqs)
             && match (&self.exits, &o.exits) {
                 (Some(a), Some(b)) => a.same(b),
@@ -655,4 +682,11 @@ fn join_lasts(a: &Arc<Vec<(ObjId, Value)>>, b: &Arc<Vec<(ObjId, Value)>>) -> Arc
         return a.clone();
     }
     Arc::new(a.iter().filter_map(|(o, v)| b.iter().find(|(p, _)| p == o).map(|(_, w)| (*o, v.join(w)))).collect())
+}
+
+/// Lengths at a join: the length when equal, the shorter known prefix.
+pub fn join_len(a: &(Option<usize>, usize), b: &(Option<usize>, usize)) -> (Option<usize>, usize) {
+    let pa = a.0.unwrap_or(a.1);
+    let pb = b.0.unwrap_or(b.1);
+    (if a.0 == b.0 { a.0 } else { None }, pa.min(pb))
 }

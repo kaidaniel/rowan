@@ -407,7 +407,7 @@ impl Analyzer {
                         // an unknown number of items: positions after this are unknown
                         if let Some(foid) = self.frame().func {
                             if let Some(gid) = self.func_info(foid).generator.get() {
-                                self.obj_mut(gid).literal_len = None;
+                                self.set_llen(gid, state, None);
                                 state.drop_obj_ns(gid, Ns::Pos);
                             }
                         }
@@ -476,14 +476,14 @@ impl Analyzer {
         state.elems.insert(gid, kv_join(&cur, &v.kv));
         // straight-line yields keep their order
         let positional = self.frame().single && self.frame().loop_depth == 0 && self.cond_depth == 0 && self.obj(gid).single;
-        let ll = if fresh { Some(0) } else { self.obj(gid).literal_len };
+        let ll = if fresh { Some(0) } else { self.llen(gid, state) };
         match (positional, ll) {
             (true, Some(n)) if n < 16 => {
                 state.set_slot(gid, Ns::Pos, key_int(n as i64), v, true);
-                self.obj_mut(gid).literal_len = Some(n + 1);
+                self.set_llen(gid, state, Some(n + 1));
             }
             _ => {
-                self.obj_mut(gid).literal_len = None;
+                self.set_llen(gid, state, None);
                 state.drop_obj_ns(gid, Ns::Pos);
             }
         }
@@ -502,7 +502,7 @@ impl Analyzer {
                 }
                 let nd = frontend::node(node);
                 let tid = self.alloc_at(Kind::Tuple, &nd, state, "tuple", Payload::None, None, Ns::Item, None, None);
-                self.obj_mut(tid).literal_len = Some(parts.len());
+                self.set_llen(tid, state, Some(parts.len()));
                 for (i, p) in parts.iter().enumerate() {
                     state.set_slot(tid, Ns::Pos, key_int(i as i64), p.clone(), true);
                 }
@@ -581,15 +581,15 @@ impl Analyzer {
         } else {
             state.elems.insert(oid, KeyVal::Lits(intern::KeySet::new()));
         }
-        if literal && (single || self.obj(oid).literal_len == Some(vals.len()) || !state.has_slot(oid, Ns::Elem, STAR) || state.slot(oid, Ns::Elem, STAR).pts.is_empty()) {
+        if literal && (single || self.llen(oid, state) == Some(vals.len()) || !state.has_slot(oid, Ns::Elem, STAR) || state.slot(oid, Ns::Elem, STAR).pts.is_empty()) {
             // positions are structural: the same literal always has the same length, so a
             // weak (loop) allocation keeps per-position slots, joined across allocations
-            self.obj_mut(oid).literal_len = Some(vals.len());
+            self.set_llen(oid, state, Some(vals.len()));
             for (i, v) in vals.iter().enumerate() {
                 state.set_slot(oid, Ns::Pos, key_int(i as i64), v.clone(), single);
             }
         } else {
-            self.obj_mut(oid).literal_len = None;
+            self.set_llen(oid, state, None);
             state.drop_obj_ns(oid, Ns::Pos);
         }
         if kind == Kind::Set {
@@ -670,7 +670,7 @@ impl Analyzer {
             if !matches!(kind, Kind::List | Kind::Tuple) {
                 return None;
             }
-            let n = self.obj(oid).literal_len? as i64;
+            let n = self.llen(oid, state)? as i64;
             let lo = match sl.lower.as_deref() { None => None, Some(e) => Some(self.int_value(e, state)?) };
             let hi = match sl.upper.as_deref() { None => None, Some(e) => Some(self.int_value(e, state)?) };
             let norm = |b: i64| if b < 0 { b + n } else { b };
@@ -727,7 +727,7 @@ impl Analyzer {
         if !matches!(kind, Kind::List | Kind::Tuple) {
             return None;
         }
-        let n = self.obj(oid).literal_len? as i64;
+        let n = self.llen(oid, state)? as i64;
         let norm = |b: Option<i64>, dflt: i64| -> i64 {
             let b = b.unwrap_or(dflt);
             let b = if b < 0 { n + b } else { b };
@@ -754,12 +754,12 @@ impl Analyzer {
         state.elems.insert(nid, kv);
         match vals {
             Some(vs) if single => {
-                self.obj_mut(nid).literal_len = Some(vs.len());
+                self.set_llen(nid, state, Some(vs.len()));
                 for (i, v) in vs.iter().enumerate() {
                     state.set_slot(nid, Ns::Pos, key_int(i as i64), v.clone(), true);
                 }
             }
-            _ => self.obj_mut(nid).literal_len = None,
+            _ => self.set_llen(nid, state, None),
         }
         Value::obj(nid)
     }
@@ -896,7 +896,7 @@ impl Analyzer {
                     // a positional container of known literals: membership is decided
                     if let Some(o) = b.single() {
                         if matches!(self.kind(o), Kind::List | Kind::Tuple | Kind::Set) {
-                            if let Some(n) = self.obj(o).literal_len {
+                            if let Some(n) = self.llen(o, state) {
                                 let mut all_lit = true;
                                 let mut found = false;
                                 for i in 0..n {
@@ -1048,7 +1048,7 @@ impl Analyzer {
                 (row.closed() && row.present == row.definite && !row.symbolic()).then(|| row.present.clone())
             }
             (Kind::Set | Kind::List | Kind::Tuple, _) => {
-                let n = self.obj(o).literal_len?;
+                let n = self.llen(o, state)?;
                 let ks: Option<Vec<KeyId>> = (0..n).map(|i| {
                     let s = state.slot(o, Ns::Pos, key_int(i as i64));
                     s.kv.as_lit().filter(|_| s.pts.is_empty())
@@ -1065,14 +1065,14 @@ impl Analyzer {
         if self.kind(oid) != Kind::Set || crate::interp::disabled("setmembers") {
             return;
         }
-        let Some(n) = self.obj(oid).literal_len else { return };
+        let Some(n) = self.llen(oid, state) else { return };
         let mut ks: Vec<KeyId> = Vec::with_capacity(n);
         for i in 0..n {
             let v = state.slot(oid, Ns::Pos, key_int(i as i64));
             match (v.pts.is_empty(), v.kv.as_lit()) {
                 (true, Some(k)) => ks.push(k),
                 _ => {
-                    self.obj_mut(oid).literal_len = None;
+                    self.set_llen(oid, state, None);
                     state.drop_obj_ns(oid, Ns::Pos);
                     return;
                 }
@@ -1088,7 +1088,7 @@ impl Analyzer {
         for (i, k) in sorted.iter().enumerate() {
             state.set_slot(oid, Ns::Pos, key_int(i as i64), Value::lit(*k), true);
         }
-        self.obj_mut(oid).literal_len = Some(sorted.len());
+        self.set_llen(oid, state, Some(sorted.len()));
         state.set_slot(oid, Ns::Elem, STAR, Value::kv_only(crate::models::torch::elem_kv(&KeyVal::lits(ks.clone()))), true);
         state.elems.insert(oid, if ks.is_empty() { KeyVal::Lits(intern::KeySet::new()) } else { KeyVal::lits(ks) });
     }
@@ -1109,13 +1109,13 @@ impl Analyzer {
         if !matches!(self.kind(oid), Kind::List | Kind::Tuple) || !self.obj(oid).single || self.frame().loop_depth > 0 {
             return None;
         }
-        let n = self.obj(oid).literal_len?;
+        let n = self.llen(oid, state)?;
         Some((0..n).map(|i| state.slot(oid, Ns::Pos, key_int(i as i64))).collect())
     }
 
     /// The positions of `oid` become `vals`.
     pub fn set_positions(&mut self, oid: u32, vals: Vec<Value>, state: &mut State) {
-        let old = self.obj(oid).literal_len.unwrap_or(0);
+        let old = self.llen(oid, state).unwrap_or(0);
         for i in vals.len()..old {
             state.pop_slot(oid, Ns::Pos, key_int(i as i64));
         }
@@ -1124,8 +1124,7 @@ impl Analyzer {
         }
         let acc = crate::domain::join_values(vals.clone());
         state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
-        self.obj_mut(oid).literal_len = Some(vals.len());
-        self.obj_mut(oid).known_prefix = None;
+        self.set_llen(oid, state, Some(vals.len()));
     }
 
     /// A one-shot iterator iterated to its end: later iterations see nothing.
@@ -1135,7 +1134,7 @@ impl Analyzer {
         }
         if let Some(o) = v.single() {
             if self.obj(o).iterator && self.obj(o).single {
-                if let Some(n) = self.obj(o).literal_len {
+                if let Some(n) = self.llen(o, state) {
                     state.set_slot(o, Ns::Attr, key_str_lit("__cursor"), Value::lit(key_int(n as i64)), true);
                 }
             }
@@ -1211,8 +1210,8 @@ impl Analyzer {
                     self.record_event("truth", oid);
                     return None;
                 }
-                Kind::List | Kind::Tuple | Kind::Set if self.obj(oid).literal_len.is_some() => {
-                    verdicts.push(self.obj(oid).literal_len.unwrap() > 0);
+                Kind::List | Kind::Tuple | Kind::Set if self.llen(oid, state).is_some() => {
+                    verdicts.push(self.llen(oid, state).unwrap() > 0);
                 }
                 Kind::Dict => {
                     let row = state.row(oid, Ns::Item);
@@ -1224,7 +1223,7 @@ impl Analyzer {
                         return None;
                     }
                 }
-                Kind::List | Kind::Tuple | Kind::Set => match self.obj(oid).literal_len {
+                Kind::List | Kind::Tuple | Kind::Set => match self.llen(oid, state) {
                     None => return None,
                     Some(n) => verdicts.push(n > 0),
                 },
@@ -1325,7 +1324,7 @@ impl Analyzer {
             // two lists with known positions: the concatenation's positions
             if let (Some(x), Some(y)) = (a.single(), b.single()) {
                 if matches!((self.kind(x), self.kind(y)), (Kind::List, Kind::List) | (Kind::Tuple, Kind::Tuple)) && !super::disabled("listcat") {
-                    let (px, py) = (self.obj(x).literal_len.map(|n| (0..n).map(|i| state.slot(x, Ns::Pos, key_int(i as i64))).collect::<Vec<_>>()), self.obj(y).literal_len.map(|n| (0..n).map(|i| state.slot(y, Ns::Pos, key_int(i as i64))).collect::<Vec<_>>()));
+                    let (px, py) = (self.llen(x, state).map(|n| (0..n).map(|i| state.slot(x, Ns::Pos, key_int(i as i64))).collect::<Vec<_>>()), self.llen(y, state).map(|n| (0..n).map(|i| state.slot(y, Ns::Pos, key_int(i as i64))).collect::<Vec<_>>()));
                     if let (Some(mut px), Some(py)) = (px, py) {
                         px.extend(py);
                         let kv = kv_join(&state.elems.get(&x).unwrap_or(DATA), &state.elems.get(&y).unwrap_or(DATA));
@@ -1356,7 +1355,7 @@ impl Analyzer {
             let (seq, cnt) = if a.pts.len() == 1 { (a, b) } else { (b, a) };
             if let (Some(x), Some(n)) = (seq.single(), cnt.kv.as_lit().filter(|_| cnt.pts.is_empty()).and_then(intern::key_as_int)) {
                 if matches!(self.kind(x), Kind::List | Kind::Tuple) {
-                    if let Some(len) = self.obj(x).literal_len {
+                    if let Some(len) = self.llen(x, state) {
                         if len * (n.max(0) as usize) <= 64 {
                             let px: Vec<Value> = (0..len).map(|i| state.slot(x, Ns::Pos, key_int(i as i64))).collect();
                             let mut out: Vec<Value> = Vec::new();
@@ -1468,7 +1467,7 @@ impl Analyzer {
                     let mut arg_kvs: Vec<KeyVal> = vec![b.kv.clone()];
                     if let Some(tp) = b.single() {
                         if matches!(self.kind(tp), Kind::Tuple) {
-                            if let Some(n) = self.obj(tp).literal_len {
+                            if let Some(n) = self.llen(tp, state) {
                                 arg_kvs = (0..n).map(|i| state.slot(tp, Ns::Pos, key_int(i as i64)).kv).collect();
                             }
                         }
@@ -1492,7 +1491,7 @@ impl Analyzer {
                             vec![b.kv.clone()]
                         } else {
                             match b.single() {
-                                Some(t) if matches!(self.kind(t), Kind::Tuple) && self.obj(t).literal_len == Some(n) => (0..n).map(|i| state.slot(t, Ns::Pos, key_int(i as i64)).kv).collect(),
+                                Some(t) if matches!(self.kind(t), Kind::Tuple) && self.llen(t, state) == Some(n) => (0..n).map(|i| state.slot(t, Ns::Pos, key_int(i as i64)).kv).collect(),
                                 _ => Vec::new(),
                             }
                         };
@@ -1818,7 +1817,7 @@ impl Analyzer {
     fn seq_comp(&mut self, node: &'static ast::Expr, kind: Kind, elt: &'static ast::Expr, gens: &'static [ast::Comprehension], state: &mut State) -> Value {
         let nd = frontend::node(node);
         let oid = self.alloc_at(kind, &nd, state, &format!("{}comp@L{}", kind.name(), nd.line), Payload::None, None, Ns::Item, None, None);
-        self.obj_mut(oid).literal_len = None;
+        self.set_llen(oid, state, None);
         state.drop_obj_ns(oid, Ns::Pos);
         let base_depth = self.cond_depth;
         let strong = self.obj(oid).single && matches!(kind, Kind::List | Kind::Tuple | Kind::Set);
@@ -1844,9 +1843,9 @@ impl Analyzer {
         self.comp(gens, state, &mut body);
         self.comp_known.truncate(mark);
         if positional {
-            self.obj_mut(oid).literal_len = Some(n);
+            self.set_llen(oid, state, Some(n));
         } else {
-            self.obj_mut(oid).literal_len = None;
+            self.set_llen(oid, state, None);
             state.drop_obj_ns(oid, Ns::Pos);
         }
         if kind == Kind::Set {
@@ -1943,7 +1942,7 @@ fn format_percent_literal(fmt: &str, b: &Value, state: &State, an: &Analyzer) ->
             b.kv.as_lit().map(|k| vec![k])
         } else {
             b.single().filter(|o| an.kind(*o) == Kind::Tuple).and_then(|o| {
-                let n = an.obj(o).literal_len?;
+                let n = an.llen(o, state)?;
                 (0..n).map(|i| {
                     let x = state.slot(o, Ns::Pos, key_int(i as i64));
                     x.kv.as_lit().filter(|_| x.pts.is_empty())
@@ -1994,7 +1993,7 @@ fn format_percent_literal(fmt: &str, b: &Value, state: &State, an: &Analyzer) ->
         vec![b.kv.as_lit().filter(|_| b.pts.is_empty())?]
     } else {
         let t = b.single()?;
-        if !matches!(an.kind(t), Kind::Tuple) || an.obj(t).literal_len != Some(n) {
+        if !matches!(an.kind(t), Kind::Tuple) || an.llen(t, state) != Some(n) {
             return None;
         }
         let mut v = Vec::new();
@@ -2193,4 +2192,4 @@ impl Analyzer {
 
 /// Models that say themselves where they raise (raise_here / may_raise_here): their calls are
 /// not "may raise anything".
-const SELF_REPORTING: &[&str] = &["pydantic.", "fieldinfo.", "pydverr.", "typeadapter.", "fastapi.client.", "fastapi.response.", "fastapi.request."];
+const SELF_REPORTING: &[&str] = &["pydantic.", "fieldinfo.", "pydverr.", "typeadapter.", "fastapi.client.", "fastapi.response.", "fastapi.request.", "fastapi.bg.", "fastapi.app.", "fastapi.router.", "fastapi.state."];

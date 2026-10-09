@@ -494,7 +494,7 @@ impl Analyzer {
     fn bind_starred(&mut self, elts: &'static [ast::Expr], v: &Value, state: &mut State, n: &Node) {
         let si = elts.iter().position(|e| matches!(e, ast::Expr::Starred(_))).unwrap_or(0);
         let after = elts.len() - si - 1;
-        let known = v.single().filter(|o| matches!(self.kind(*o), Kind::List | Kind::Tuple)).and_then(|o| self.obj(o).literal_len.filter(|l| *l >= si + after).map(|l| (o, l)));
+        let known = v.single().filter(|o| matches!(self.kind(*o), Kind::List | Kind::Tuple)).and_then(|o| self.llen(o, state).filter(|l| *l >= si + after).map(|l| (o, l)));
         let (lead, mid, trail): (Vec<Value>, Value, Vec<Value>) = if let Some((oid, len)) = known {
             let at = |i: usize, state: &State| state.slot(oid, Ns::Pos, key_int(i as i64));
             let lead = (0..si).map(|i| at(i, state)).collect();
@@ -521,7 +521,7 @@ impl Analyzer {
         let mut parts: Vec<Value> = (0..n).map(|_| Value::new()).collect();
         for oid in v.pts.iter() {
             let kind = self.kind(oid);
-            let ll = self.obj(oid).literal_len;
+            let ll = self.llen(oid, state);
             if matches!(kind, Kind::Tuple | Kind::List) && ll.is_some() {
                 for i in 0..n {
                     let mut sv = state.slot(oid, Ns::Pos, key_int(i as i64));
@@ -610,7 +610,7 @@ impl Analyzer {
             let kind = self.kind(oid);
             match kind {
                 Kind::List | Kind::Tuple | Kind::Set => {
-                    let ll = self.obj(oid).literal_len;
+                    let ll = self.llen(oid, state);
                     // a generator partly consumed by next(): iteration starts at its cursor
                     let cursor = state.slot_opt(oid, Ns::Attr, key_str_lit("__cursor")).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_int).unwrap_or(0).max(0) as usize;
                     match (ll, items.as_mut()) {
@@ -1019,8 +1019,8 @@ impl Analyzer {
         if self.is_entry_object(oid) {
             self.obj_mut(nid).copied_from = Some(oid);
         }
-        let ll = self.obj(oid).literal_len;
-        self.obj_mut(nid).literal_len = ll;
+        let ll = self.llen(oid, state);
+        self.set_llen(nid, state, ll);
         let nsingle = self.obj(nid).single;
         for ns in [Ns::Item, Ns::Attr] {
             if state.has_row(oid, ns) {

@@ -474,7 +474,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
                 _ => ("{", "}", "set"),
             };
             seen.push(o);
-            let out = match an.obj(o).literal_len {
+            let out = match an.llen(o, state) {
                 // known positions: the elements in order
                 Some(n) if kind != Kind::Set => {
                     if depth >= max_depth {

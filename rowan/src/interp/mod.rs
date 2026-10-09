@@ -1173,6 +1173,40 @@ impl Analyzer {
         oid
     }
 
+    /// The length of a list / tuple on this path (positions 0..n are its items), else None.
+    pub fn llen(&self, o: ObjId, st: &State) -> Option<usize> {
+        match st.lens.get(&o) {
+            Some(v) => v.0,
+            None => self.objects[o as usize].literal_len,
+        }
+    }
+
+    /// The number of leading positions known (the length when known; after appends of unknown
+    /// count, the length before them).
+    pub fn prefix(&self, o: ObjId, st: &State) -> Option<usize> {
+        let p = match st.lens.get(&o) {
+            Some((Some(n), _)) => n,
+            Some((None, p)) => p,
+            None => self.objects[o as usize].literal_len.or(self.objects[o as usize].known_prefix).unwrap_or(0),
+        };
+        Some(p).filter(|p| *p > 0)
+    }
+
+    /// (also the object's own field: what a state not descended from the one it was made in,
+    /// a summary's, reads)
+    pub fn set_llen(&mut self, o: ObjId, st: &mut State, v: Option<usize>) {
+        st.lens.insert(o, (v, v.unwrap_or(0)));
+        self.objects[o as usize].literal_len = v;
+        self.objects[o as usize].known_prefix = None;
+    }
+
+    /// The length is unknown now, its first `n` positions are still known.
+    pub fn set_prefix(&mut self, o: ObjId, st: &mut State, n: usize) {
+        st.lens.insert(o, (None, n));
+        self.objects[o as usize].literal_len = None;
+        self.objects[o as usize].known_prefix = Some(n);
+    }
+
     pub fn site_of(&self, node: &Node) -> String {
         site_string(node)
     }
@@ -1250,6 +1284,8 @@ impl Analyzer {
             oid
         };
         let obj_single = self.obj(oid).single;
+        // born here: its length is unknown until the code making it says
+        state.lens.insert(oid, (None, 0));
         if kind.is_record() || kind == Kind::Frame {
             let fresh = row.unwrap_or_default();
             if state.has_row(oid, ns) && !obj_single {
@@ -2246,7 +2282,7 @@ impl Analyzer {
             };
             return Some(intern::key_tuple(vec![one(k)?, one(v)?]));
         }
-        let n = self.obj(o).literal_len?;
+        let n = self.llen(o, state)?;
         let mut items = Vec::with_capacity(n);
         for i in 0..n {
             let v = state.slot(o, Ns::Pos, intern::key_int(i as i64));
@@ -2363,6 +2399,7 @@ impl Analyzer {
                     so.derived_from = derived;
                 }
             }
+            back.lens.insert(sid, (None, 0));
             map.insert(*r, sid);
         }
         let rename_value = |v: &Value, map: &FxHashMap<ObjId, ObjId>| -> Option<Value> {

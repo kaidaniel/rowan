@@ -494,13 +494,13 @@ impl Analyzer {
                         let elem = state.slot(oid, Ns::Elem, STAR);
                         let kv = state.elems.get(&oid).unwrap_or(DATA);
                         let nid = self.alloc_at(kind, node, state, &format!("{}@L{}", kind.name(), node.line), Payload::None, None, Ns::Item, None, None);
-                        self.obj_mut(nid).literal_len = None;
+                        self.set_llen(nid, state, None);
                         state.set_slot(nid, Ns::Elem, STAR, elem, true);
                         state.elems.insert(nid, kv);
                         acc = acc.join(&Value::obj(nid));
                         continue;
                     }
-                    let ll = self.obj(oid).literal_len;
+                    let ll = self.llen(oid, state);
                     let idx = key.kv.as_lit().and_then(|k| intern::with_key(k, |kk| if let intern::Key::Int(i) = kk { Some(*i) } else { None }));
                     // the element appended last
                     if let (Some(-1), None, Some(v)) = (idx, ll, state.last_of(oid)) {
@@ -508,7 +508,7 @@ impl Analyzer {
                         continue;
                     }
                     // positions below a known prefix stay valid after appends of unknown count
-                    if let (Some(i), None, Some(p)) = (idx, ll, self.obj(oid).known_prefix) {
+                    if let (Some(i), None, Some(p)) = (idx, ll, self.prefix(oid, state)) {
                         if 0 <= i && (i as usize) < p {
                             acc = acc.join(&state.slot(oid, Ns::Pos, intern::key_int(i)));
                             continue;
@@ -767,7 +767,7 @@ impl Analyzer {
                 }
                 Kind::List | Kind::Tuple | Kind::Set => {
                     state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), crate::models::torch::elem_kv(&v.kv)), false);
-                    if let (Some(k), Some(n)) = (key.kv.as_lit(), self.obj(oid).literal_len) {
+                    if let (Some(k), Some(n)) = (key.kv.as_lit(), self.llen(oid, state)) {
                         if let Some(i) = intern::with_key(k, |kk| if let intern::Key::Int(i) = kk { Some(*i) } else { None }) {
                             if 0 <= i && (i as usize) < n {
                                 state.set_slot(oid, Ns::Pos, intern::key_int(i), v.clone(), strong);

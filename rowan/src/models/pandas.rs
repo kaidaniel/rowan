@@ -409,7 +409,7 @@ fn named_agg(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let col = c.arg(0, Some("column")).unwrap_or_default();
     let f = c.arg(1, Some("aggfunc")).unwrap_or_default();
     let tid = an.alloc_at(Kind::Tuple, &c.node, st, "tuple", Payload::None, None, Ns::Item, None, None);
-    an.obj_mut(tid).literal_len = Some(2);
+    an.set_llen(tid, st, Some(2));
     st.set_slot(tid, Ns::Pos, intern::key_int(0), col, true);
     st.set_slot(tid, Ns::Pos, intern::key_int(1), f, true);
     Value::obj(tid)
@@ -418,7 +418,7 @@ fn named_agg(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// Named aggregations `name=(column, f)`, from keywords and `**dict`: (name, surely, column).
 fn named_aggs(an: &Analyzer, st: &State, c: &Call) -> Vec<(KeyId, bool, Option<KeyId>)> {
     let col_of = |v: &Value| -> Option<KeyId> {
-        v.pts.iter().find_map(|x| (an.kind(x) == Kind::Tuple && an.obj(x).literal_len == Some(2)).then(|| st.slot(x, Ns::Pos, intern::key_int(0)).kv.as_lit()).flatten())
+        v.pts.iter().find_map(|x| (an.kind(x) == Kind::Tuple && an.llen(x, st) == Some(2)).then(|| st.slot(x, Ns::Pos, intern::key_int(0)).kv.as_lit()).flatten())
     };
     let mut out = Vec::new();
     for (k, v) in c.kwargs.iter() {
@@ -458,7 +458,7 @@ fn series_ctor(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         Some(d) if is_series_obj(an, d) => (Some(st.row(d, Ns::Item)), vals(st, d, vkey())),
         Some(d) if matches!(an.kind(d), Kind::List | Kind::Tuple) => {
             let items = lit_key_seq(an, st, &Value::obj(d));
-            let n = an.obj(d).literal_len;
+            let n = an.llen(d, st);
             let idx = n.map(|n| range_labels(n as i64).row());
             (idx, items.map(|it| Known::exact(KeySet::from_iter(it))))
         }
@@ -1149,7 +1149,7 @@ fn dtype_of_value(an: &Analyzer, st: &State, v: &Value) -> Option<&'static str> 
     if !matches!(an.kind(o), Kind::List | Kind::Tuple) {
         return None;
     }
-    if an.obj(o).literal_len == Some(0) {
+    if an.llen(o, st) == Some(0) {
         return Some("object");
     }
     match st.elems.get(&o) {
@@ -1255,7 +1255,7 @@ pub fn lit_key_seq(an: &Analyzer, st: &State, v: &Value) -> Option<Vec<KeyId>> {
     if !matches!(an.kind(o), Kind::List | Kind::Tuple) {
         return None;
     }
-    let n = an.obj(o).literal_len?;
+    let n = an.llen(o, st)?;
     (0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64)).kv.as_lit().filter(|_| true)).collect()
 }
 
@@ -1271,7 +1271,7 @@ fn list_keys_split(an: &mut Analyzer, st: &State, v: &Value) -> Option<(KeySet, 
     for o in v.pts.iter() {
         let s1 = match an.kind(o) {
             Kind::List | Kind::Tuple => {
-                let n = an.obj(o).literal_len.or(an.obj(o).known_prefix).unwrap_or(0);
+                let n = an.llen(o, st).or(an.prefix(o, st)).unwrap_or(0);
                 KeySet::from_iter((0..n).filter_map(|i| {
                     let x = st.slot(o, Ns::Pos, intern::key_int(i as i64));
                     if x.pts.is_empty() { if let KeyVal::Lit(k) = x.kv { return Some(k) } }
@@ -1434,7 +1434,7 @@ pub fn json_of_frame(an: &mut Analyzer, st: &mut State, c: &Call, f: u32, orient
             let site = format!("{}:jrecs", crate::interp::site_string(&c.node));
             let lid = an.alloc(Kind::List, &site, st, &format!("records@L{}", c.line), Payload::None, None, Ns::Item, None, None);
             let n = nrows(st, f);
-            an.obj_mut(lid).literal_len = n.map(|n| n as usize);
+            an.set_llen(lid, st, n.map(|n| n as usize));
             if let Some(n) = n {
                 for i in 0..n {
                     st.set_slot(lid, Ns::Pos, intern::key_int(i), Value::obj(vrow), true);
@@ -1534,12 +1534,29 @@ fn item_columns(an: &Analyzer, st: &State, v: &Value) -> Option<Vec<Result<Row, 
         return None;
     }
     let mut out = Vec::new();
+    // a record that is one of several dicts: a key all of them have is surely a column, one
+    // some of them have maybe
+    let mut rec: Option<Row> = None;
     for x in v.pts.iter() {
         match an.kind(x) {
-            Kind::Dict | Kind::Frame => out.push(Ok(st.row(x, Ns::Item))),
-            Kind::List | Kind::Tuple => out.push(Err(an.obj(x).literal_len?)),
+            Kind::Dict | Kind::Frame => {
+                let mut d = Row::new().copy_from(&st.row(x, Ns::Item), true, &KeySet::new(), EMPTY_LENS).data();
+                // a key the record has is a column of the frame
+                d.definite = d.present.clone();
+                d.likely = d.likely.union(&d.present);
+                let r = Row::from_data(d);
+                rec = Some(match rec {
+                    None => r,
+                    Some(cur) if !crate::interp::disabled("recalts") => cur.join(&r),
+                    Some(cur) => cur.copy_from(&r, true, &KeySet::new(), EMPTY_LENS),
+                });
+            }
+            Kind::List | Kind::Tuple => out.push(Err(an.llen(x, st)?)),
             _ => return None,
         }
+    }
+    if let Some(r) = rec {
+        out.push(Ok(r));
     }
     Some(out)
 }
@@ -1551,13 +1568,8 @@ fn rows_frame(rows: &[Result<Row, usize>]) -> Row {
     let mut lens: Vec<usize> = Vec::new();
     for r in rows {
         match r {
-            Ok(r) => {
-                let mut d = Row::new().copy_from(r, true, &KeySet::new(), EMPTY_LENS).data();
-                // a key some record has is a column of the frame
-                d.definite = d.present.clone();
-                d.likely = d.likely.union(&d.present);
-                row = row.copy_from(&Row::from_data(d), true, &KeySet::new(), EMPTY_LENS);
-            }
+            // (a record's keys: definite where it surely has them, `item_columns`)
+            Ok(r) => row = row.copy_from(r, true, &KeySet::new(), EMPTY_LENS),
             Err(n) => lens.push(*n),
         }
     }
@@ -1752,7 +1764,7 @@ fn frame_meta_from_data(an: &mut Analyzer, st: &mut State, c: &Call, nid: u32, d
             }
         }
         Kind::List | Kind::Tuple => {
-            if let Some(len) = an.obj(d).literal_len {
+            if let Some(len) = an.llen(d, st) {
                 n = n.or(Some(len as i64));
                 for k in cols.present.iter() {
                     let mut may = KeySet::new();
@@ -2145,7 +2157,7 @@ fn suffix_pair(an: &Analyzer, st: &State, v: Option<Value>) -> (String, String) 
     let mut suffixes = ("_x".to_string(), "_y".to_string());
     if let Some(sv) = v {
         for x in sv.pts.iter() {
-            if matches!(an.kind(x), Kind::Tuple | Kind::List) && an.obj(x).literal_len == Some(2) {
+            if matches!(an.kind(x), Kind::Tuple | Kind::List) && an.llen(x, st) == Some(2) {
                 let a = st.slot(x, Ns::Pos, intern::key_int(0));
                 let b = st.slot(x, Ns::Pos, intern::key_int(1));
                 if let (Some(ka), Some(kb)) = (a.kv.as_lit(), b.kv.as_lit()) {
@@ -2976,7 +2988,7 @@ fn agg_names(an: &mut Analyzer, st: &State, v: &Value) -> Option<(Vec<KeyId>, bo
         }
     };
     if matches!(an.kind(o), Kind::List | Kind::Tuple) {
-        let n = an.obj(o).literal_len?;
+        let n = an.llen(o, st)?;
         let mut out = Vec::new();
         let mut lambdas = 0;
         for i in 0..n {
@@ -3435,7 +3447,7 @@ fn df_agg(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         for (k, v) in c.kwargs.iter() {
             names.push(intern::key(intern::Key::Str(intern::str_get(*k))));
             for x in v.pts.iter() {
-                if an.kind(x) == Kind::Tuple && an.obj(x).literal_len == Some(2) {
+                if an.kind(x) == Kind::Tuple && an.llen(x, st) == Some(2) {
                     if let Some(col) = st.slot(x, Ns::Pos, intern::key_int(0)).kv.as_lit() {
                         cols = cols.store(col, true);
                     }
@@ -3723,7 +3735,7 @@ fn itertuples(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let vrow = if plain {
             let t = an.alloc(Kind::Namespace, &site, st, &format!("tuple@L{}", c.line), Payload::None, Some(Row::new()), Ns::Attr, Some(false), None);
             if order.is_some() && base.present == base.definite {
-                an.obj_mut(t).literal_len = Some(fields.len());
+                an.set_llen(t, st, Some(fields.len()));
                 for i in 0..fields.len() {
                     st.set_slot(t, Ns::Pos, intern::key_int(i as i64), Value::data("cell"), true);
                 }
@@ -3744,7 +3756,7 @@ fn itertuples(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 st.set_slot(t, Ns::Attr, *k, Value::data(&format!("cell {}", intern::key_py_str(*k))), false);
             }
             if order.is_some() {
-                an.obj_mut(t).literal_len = Some(fields.len());
+                an.set_llen(t, st, Some(fields.len()));
             }
             t
         };
@@ -3764,7 +3776,7 @@ fn itertuples(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn lit_list(an: &mut Analyzer, st: &mut State, node: &Node, tag: &str, items: &[KeyId], kind: Kind) -> u32 {
     let site = format!("{}:{}", crate::interp::site_string(node), tag);
     let lid = an.alloc(kind, &site, st, &format!("{}@L{}", kind.name(), node.line), Payload::None, None, Ns::Item, None, None);
-    an.obj_mut(lid).literal_len = Some(items.len());
+    an.set_llen(lid, st, Some(items.len()));
     for (i, k) in items.iter().enumerate() {
         st.set_slot(lid, Ns::Pos, intern::key_int(i as i64), Value::lit(*k), true);
     }
@@ -3803,7 +3815,7 @@ fn to_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let lid = an.alloc(Kind::List, &site, st, &format!("records@L{}", c.line), Payload::None, None, Ns::Item, None, None);
                 // one record per row (positions known when the row count is)
                 let n = nrows(st, *f);
-                an.obj_mut(lid).literal_len = n.map(|n| n as usize);
+                an.set_llen(lid, st, n.map(|n| n as usize));
                 if let Some(n) = n {
                     for i in 0..n {
                         st.set_slot(lid, Ns::Pos, intern::key_int(i), Value::obj(vrow), true);
@@ -4478,7 +4490,7 @@ fn json_normalize(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let mut meta_cols: Vec<KeyId> = Vec::new();
                 if let Some(m) = c.kw("meta") {
                     if let Some(mo) = m.single() {
-                        let n = an.obj(mo).literal_len.unwrap_or(0);
+                        let n = an.llen(mo, st).unwrap_or(0);
                         for i0 in 0..n {
                             let e = st.slot(mo, Ns::Pos, intern::key_int(i0 as i64));
                             match keys_arg(an, st, &Some(e)) {
@@ -5036,7 +5048,7 @@ pub fn frame_getattr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, state
                 // (rows, columns): the column count when the columns are known
                 let row = state.row(oid, Ns::Item);
                 let tid = an.alloc_at(Kind::Tuple, node, state, "tuple", Payload::None, None, Ns::Item, None, None);
-                an.obj_mut(tid).literal_len = Some(2);
+                an.set_llen(tid, state, Some(2));
                 let n = match nrows(state, oid) {
                     Some(n) => Value::lit(intern::key_int(n)),
                     None => Value::data("rows"),
@@ -5414,7 +5426,7 @@ pub fn loc_get(an: &mut Analyzer, lo: u32, key: &Value, node: &Node, state: &mut
     let positional = name == "iloc" || name == "iat";
     let mut parts: Option<(Value, Value)> = None;
     for x in key.pts.iter() {
-        if an.kind(x) == Kind::Tuple && an.obj(x).literal_len == Some(2) {
+        if an.kind(x) == Kind::Tuple && an.llen(x, state) == Some(2) {
             parts = Some((state.slot(x, Ns::Pos, intern::key_int(0)), state.slot(x, Ns::Pos, intern::key_int(1))));
         }
     }
@@ -5502,7 +5514,7 @@ pub fn loc_get(an: &mut Analyzer, lo: u32, key: &Value, node: &Node, state: &mut
 pub fn loc_set(an: &mut Analyzer, lo: u32, key: &Value, v: &Value, node: &Node, state: &mut State) {
     let Payload::Locidx(name, foid) = an.obj(lo).payload.clone() else { return };
     for x in key.pts.iter() {
-        if an.kind(x) == Kind::Tuple && an.obj(x).literal_len == Some(2) {
+        if an.kind(x) == Kind::Tuple && an.llen(x, state) == Some(2) {
             let cols = state.slot(x, Ns::Pos, intern::key_int(1));
             if name == "iloc" || name == "iat" {
                 return;
