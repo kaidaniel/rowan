@@ -10,5 +10,5 @@ def f(a, b, c):
         z = 1
     else:
         z = 100
-    _ = z # _ is the join of 1 and 100 - either a useful approximation of 'anything'.  #@value _: exactly={1,100} ; _: includes={1,100}
+    _ = z # _ is the join of 1 and 100. #@value _: exactly={1,100} ; _: includes={1,100}
     
