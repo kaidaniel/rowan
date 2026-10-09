@@ -21,7 +21,10 @@ uv run --no-project python tests/run_golden.py    # golden suite (92 cases)
 uv run --no-project python tests/run_snapshots.py # output snapshots on larger inputs
 ```
 
-Options: `--no-rows`, `--no-summaries`, `--no-entry`, `--no-imports`. Environment:
+Options: `--no-rows`, `--no-summaries`, `--no-entry`, `--no-imports`, `--search-path DIR`
+(repeatable; the file's directory and the directory above its outermost package are
+searched first). Imports are followed into local modules and packages (`pkg/__init__.py`,
+`import a.b.c`, relative imports); installed packages are modelled, not analysed. Environment:
 `ROWAN_SUMMARIES=0` (older per-call-site engine), `ROWAN_DEBUG=1` (progress, which event
 makes a call site re-analyse, slow instantiations on stderr), `ROWAN_NO=…` (switch one
 analysis refinement off, for bisecting; names in `AGENTS.md`),

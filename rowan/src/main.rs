@@ -1,4 +1,4 @@
-//! CLI: rowan FILE.py [--json] [--golden] [--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports]
+//! CLI: rowan FILE.py [--json] [--golden] [--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports] [--search-path DIR]…
 use std::io::Write;
 
 use rowan::interp::Analyzer;
@@ -14,8 +14,17 @@ fn main() {
     let mut show_summaries = true;
     let mut entry = true;
     let mut imports = true;
-    for a in &args {
+    let mut search: Vec<String> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
         match a.as_str() {
+            "--search-path" => match it.next() {
+                Some(d) => search.push(d.clone()),
+                None => {
+                    eprintln!("--search-path needs a directory");
+                    std::process::exit(2);
+                }
+            },
             "--json" => json = true,
             "--golden" => golden = true,
             "--facts" => facts = true,
@@ -31,12 +40,12 @@ fn main() {
         }
     }
     let Some(file) = file else {
-        eprintln!("usage: rowan FILE.py [--json|--golden|--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports]");
+        eprintln!("usage: rowan FILE.py [--json|--golden|--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports] [--search-path DIR]...");
         std::process::exit(2);
     };
     let out = std::thread::Builder::new()
         .stack_size(1 << 30)
-        .spawn(move || run(&file, json, golden, facts, show_rows, show_summaries, entry, imports))
+        .spawn(move || run(&file, search, json, golden, facts, show_rows, show_summaries, entry, imports))
         .unwrap()
         .join();
     match out {
@@ -57,11 +66,20 @@ fn main() {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run(file: &str, json: bool, golden: bool, facts: bool, show_rows: bool, show_summaries: bool, entry: bool, imports: bool) -> Result<String, String> {
+fn run(file: &str, search: Vec<String>, json: bool, golden: bool, facts: bool, show_rows: bool, show_summaries: bool, entry: bool, imports: bool) -> Result<String, String> {
     let src = std::fs::read_to_string(file).map_err(|e| format!("{}: {}", file, e))?;
     let dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".into());
     let dir = std::fs::canonicalize(&dir).map(|p| p.to_string_lossy().to_string()).unwrap_or(dir);
-    let mut an = Analyzer::new(src.clone(), file, vec![dir], entry, imports, None)?;
+    // import roots: the file's directory, the directory above its outermost package (so
+    // `import pkg.sub` works from inside `pkg`), then the --search-path directories
+    let mut roots = vec![dir];
+    if let Some(r) = rowan::interp::package_root_of_file(file) {
+        if !roots.contains(&r) {
+            roots.push(r);
+        }
+    }
+    roots.extend(search);
+    let mut an = Analyzer::new(src.clone(), file, roots, entry, imports, None)?;
     an.facts_on = facts;
     if golden {
         // `#@row NAME:` expectations are evaluated at the statement on that line

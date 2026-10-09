@@ -92,25 +92,56 @@ impl Analyzer {
                     let name = a.name.id.to_string();
                     let top = name.split('.').next().unwrap_or("").to_string();
                     let n = frontend::node(i);
+                    // `import a.b.c` imports the whole chain and binds `a`
+                    let v = self.import_module(&name, &n, state);
                     if let Some(asn) = &a.asname {
-                        let v = self.import_module(&name, &n, state);
                         self.store_name(s(asn.id.as_str()), v, state);
                     } else {
-                        let v = self.import_module(&top, &n, state);
-                        self.store_name(s(&top), v, state);
+                        let tv = if top == name { v } else { self.import_module(&top, &n, state) };
+                        self.store_name(s(&top), tv, state);
                     }
                 }
             }
             ast::Stmt::ImportFrom(i) => {
-                let modname = i.module.as_ref().map(|m| m.id.to_string()).unwrap_or_default();
                 let n = frontend::node(i);
+                // relative imports resolve against the current module's package
+                let modname = if i.level > 0 {
+                    let pkg = self.module_info(self.frame().module).pkg.clone();
+                    let mut base: Vec<&str> = pkg.split('.').filter(|x| !x.is_empty()).collect();
+                    for _ in 1..i.level {
+                        base.pop();
+                    }
+                    let mut full = base.join(".");
+                    if let Some(m) = &i.module {
+                        if !full.is_empty() {
+                            full.push('.');
+                        }
+                        full.push_str(m.id.as_str());
+                    }
+                    full
+                } else {
+                    i.module.as_ref().map(|m| m.id.to_string()).unwrap_or_default()
+                };
                 let mod_v = if modname.is_empty() { Value::new() } else { self.import_module(&modname, &n, state) };
                 for a in &i.names {
                     if a.name.id.as_str() == "*" {
                         continue;
                     }
-                    let v = if !mod_v.pts.is_empty() { self.load_attr(&mod_v, a.name.id.as_str(), &n, state, false) } else { Value::new() };
-                    let target = a.asname.as_ref().map(|x| x.id.as_str()).unwrap_or(a.name.id.as_str());
+                    let aname = a.name.id.as_str();
+                    let mut v = Value::new();
+                    if let Some(mo) = mod_v.single().filter(|o| self.kind(*o) == Kind::Module) {
+                        // a name the module does not define may be one of its submodules
+                        if state.slot_opt(mo, Ns::Attr, key_str_lit(aname)).is_none() {
+                            let sub = self.import_module(&format!("{}.{}", modname, aname), &n, state);
+                            if sub.single().map(|o| self.kind(o) == Kind::Module).unwrap_or(false) {
+                                v = sub;
+                            }
+                        }
+                    }
+                    if v.pts.is_empty() && !mod_v.pts.is_empty() {
+                        v = self.load_attr(&mod_v, aname, &n, state, false);
+                    }
+                    let target = a.asname.as_ref().map(|x| x.id.as_str()).unwrap_or(aname);
                     self.store_name(s(target), v, state);
                 }
             }
@@ -599,53 +630,90 @@ impl Analyzer {
         self.store_name(s(c.name.id.as_str()), cv, state);
     }
 
+    /// `import a.b.c`: the parents are imported first and each submodule becomes an attribute
+    /// of its package; a module that is not found is an external object.
     pub fn import_module(&mut self, name: &str, node: &Node, state: &mut State) -> Value {
         if let Some(&m) = self.modules.get(name) {
             return Value::obj(m);
         }
-        let _ = node;
-        for base in self.search_paths.clone() {
-            let mut p = std::path::PathBuf::from(&base);
-            for part in name.split('.') {
-                p.push(part);
-            }
-            let p = p.with_extension("py");
-            if p.exists() {
-                let real = std::fs::canonicalize(&p).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string_lossy().to_string());
-                for (_, &moid) in self.modules.clone().iter() {
-                    let mi = self.module_info(moid);
-                    if let Some(mp) = &mi.path {
-                        let mreal = std::fs::canonicalize(mp).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| mp.clone());
-                        if mreal == real {
-                            self.modules.insert(name.to_string(), moid);
-                            return Value::obj(moid);
+        if let Some((parent, leaf)) = name.rsplit_once('.') {
+            let pv = self.import_module(parent, node, state);
+            let mut found: Option<Value> = None;
+            if let Some(po) = pv.single() {
+                if self.kind(po) == Kind::Module {
+                    let ppath = self.module_info(po).path.clone();
+                    if let Some(pp) = ppath.filter(|p| p.ends_with("__init__.py")) {
+                        if let Some(dir) = std::path::Path::new(&pp).parent() {
+                            let dir = dir.to_path_buf();
+                            found = self.load_module_file(name, &dir, leaf, state);
                         }
                     }
+                    if let Some(v) = &found {
+                        state.set_slot(po, Ns::Attr, key_str_lit(leaf), v.clone(), true);
+                    }
                 }
-                let src = match std::fs::read_to_string(&p) {
-                    Ok(s) => s,
-                    Err(_) => break,
-                };
-                let ps = p.to_string_lossy().to_string();
-                match frontend::parse(name, Some(&ps), src) {
-                    Ok((idx, tree)) => {
-                        let moid = self.make_module_pub(name, Some(&ps), idx, tree);
-                        self.run_module(moid, state);
-                        return Value::obj(moid);
-                    }
-                    Err(e) => {
-                        self.note(format!("could not parse {}: {}", ps, e));
-                        break;
-                    }
+            }
+            if let Some(v) = found {
+                return v;
+            }
+        } else {
+            for base in self.search_paths.clone() {
+                let dir = std::path::PathBuf::from(&base);
+                if let Some(v) = self.load_module_file(name, &dir, name, state) {
+                    return v;
                 }
             }
         }
+        let _ = node;
         let oid = self.alloc_raw(Kind::External, &format!("ext:{}", name), "", true, name, Payload::Str(name.to_string()));
         Value::obj(oid)
     }
 
+    /// Load `dir/leaf/__init__.py` or `dir/leaf.py` as module `name` (a file already loaded
+    /// under another name is shared).
+    fn load_module_file(&mut self, name: &str, dir: &std::path::Path, leaf: &str, state: &mut State) -> Option<Value> {
+        let cands = [dir.join(leaf).join("__init__.py"), dir.join(format!("{}.py", leaf))];
+        for p in cands.iter() {
+            if !p.exists() {
+                continue;
+            }
+            let real = std::fs::canonicalize(p).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string_lossy().to_string());
+            for (_, &moid) in self.modules.clone().iter() {
+                let mi = self.module_info(moid);
+                if let Some(mp) = &mi.path {
+                    let mreal = std::fs::canonicalize(mp).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| mp.clone());
+                    if mreal == real {
+                        self.modules.insert(name.to_string(), moid);
+                        return Some(Value::obj(moid));
+                    }
+                }
+            }
+            let src = match std::fs::read_to_string(p) {
+                Ok(s) => s,
+                Err(_) => return None,
+            };
+            let ps = p.to_string_lossy().to_string();
+            return match frontend::parse(name, Some(&ps), src) {
+                Ok((idx, tree)) => {
+                    let moid = self.make_module_pub(name, Some(&ps), idx, tree);
+                    self.run_module(moid, state);
+                    Some(Value::obj(moid))
+                }
+                Err(e) => {
+                    self.note(format!("could not parse {}: {}", ps, e));
+                    None
+                }
+            };
+        }
+        None
+    }
+
     pub fn make_module_pub(&mut self, name: &str, path: Option<&str>, idx: u32, tree: &'static ast::ModModule) -> u32 {
-        let info = super::ModuleInfo { name: name.to_string(), path: path.map(|p| p.to_string()), idx, tree, scopes: crate::scopes::analyse(tree) };
+        let pkg = match path {
+            Some(p) if p.ends_with("__init__.py") => name.to_string(),
+            _ => name.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or_default(),
+        };
+        let info = super::ModuleInfo { name: name.to_string(), path: path.map(|p| p.to_string()), pkg, idx, tree, scopes: crate::scopes::analyse(tree) };
         let oid = self.alloc_global(Kind::Module, &format!("module:{}", name), &format!("module {}", name), Payload::Module(std::rc::Rc::new(info)));
         self.modules.insert(name.to_string(), oid);
         oid

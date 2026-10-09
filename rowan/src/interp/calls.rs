@@ -289,7 +289,6 @@ impl Analyzer {
         // not collapse onto one instance (prototype: same site, last class wins)
         let site = format!("{}:{}", super::site_string(node), ci.name);
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", ci.name, node.line), Payload::Cls(cls), Some(row), Ns::Attr, None, None);
-        let ns = if ci.typed_dict { Ns::Item } else { Ns::Attr };
         if ci.typed_dict {
             state.set_row(inst, Ns::Item, Row::new());
         }

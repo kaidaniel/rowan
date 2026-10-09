@@ -245,6 +245,9 @@ impl ClassInfo {
 pub struct ModuleInfo {
     pub name: String,
     pub path: Option<String>,
+    /// the dotted package the module belongs to (its own name for an `__init__.py`), the
+    /// base of its relative imports
+    pub pkg: String,
     pub idx: u32,
     pub tree: &'static ast::ModModule,
     pub scopes: Scopes,
@@ -699,7 +702,12 @@ impl Analyzer {
 
     // ------------------------------------------------------------------ setup
     fn make_module(&mut self, name: &str, path: Option<&str>, idx: u32, tree: &'static ast::ModModule) -> ObjId {
-        let info = ModuleInfo { name: name.to_string(), path: path.map(|p| p.to_string()), idx, tree, scopes: scopemod::analyse(tree) };
+        let pkg = match path {
+            Some(p) if name == "__main__" => package_of_file(p),
+            Some(p) if p.ends_with("__init__.py") => name.to_string(),
+            _ => name.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or_default(),
+        };
+        let info = ModuleInfo { name: name.to_string(), path: path.map(|p| p.to_string()), pkg, idx, tree, scopes: scopemod::analyse(tree) };
         let oid = self.alloc_global(Kind::Module, &format!("module:{}", name), &format!("module {}", name), Payload::Module(Rc::new(info)));
         self.modules.insert(name.to_string(), oid);
         oid
@@ -1781,4 +1789,36 @@ pub const BUILTIN_NAMES: &[&str] = &[
 
 pub fn is_builtin_name(n: &str) -> bool {
     BUILTIN_NAMES.contains(&n)
+}
+
+/// The dotted package a file belongs to: the chain of enclosing directories that have an
+/// `__init__.py` (empty for a file outside any package).
+pub fn package_of_file(path: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut dir = std::path::Path::new(path).parent().map(|p| p.to_path_buf());
+    while let Some(d) = dir {
+        if !d.join("__init__.py").exists() {
+            break;
+        }
+        match d.file_name() {
+            Some(n) => parts.push(n.to_string_lossy().to_string()),
+            None => break,
+        }
+        dir = d.parent().map(|p| p.to_path_buf());
+    }
+    parts.reverse();
+    parts.join(".")
+}
+
+/// The directory that holds the outermost package of `path` (the import root for `import
+/// pkg.sub` from inside the package), when the file is inside a package.
+pub fn package_root_of_file(path: &str) -> Option<String> {
+    let mut dir = std::path::Path::new(path).parent().map(|p| p.to_path_buf())?;
+    if !dir.join("__init__.py").exists() {
+        return None;
+    }
+    while dir.join("__init__.py").exists() {
+        dir = dir.parent()?.to_path_buf();
+    }
+    Some(dir.to_string_lossy().to_string())
 }
