@@ -306,7 +306,7 @@ pub fn golden_json(an: &Analyzer) -> J {
         .iter()
         .map(|rc| {
             let value = json!({"lits": rc.value.lits.iter().map(|k| key_repr(*k)).collect::<Vec<_>>(), "unknown": rc.value.unknown, "objects": rc.value.objects});
-            match &rc.row {
+            let mut out = match &rc.row {
             None => json!({"line": rc.line, "name": rc.name, "row": J::Null, "value": value}),
             Some(r) => json!({
                 "line": rc.line, "name": rc.name, "value": value,
@@ -319,9 +319,19 @@ pub fn golden_json(an: &Analyzer) -> J {
                     "details": r.details(),
                 }
             }),
-        }})
+            };
+            if let (Some(J::Object(t)), J::Object(o)) = (&rc.tensor, &mut out) {
+                for (k, v) in t {
+                    o.insert(k.clone(), v.clone());
+                }
+            }
+            out
+        })
         .collect();
-    json!({"verdicts": verdicts, "schemas": schemas, "rows": rows, "notes": an.notes, "report": format_text(an, true, true)})
+    let note = |n: &crate::models::torch::ShapeNote| json!({"line": n.line, "chain": n.chain, "entry": n.entry, "text": n.text, "message": n.text});
+    let requires: Vec<J> = an.shape_reqs.iter().map(note).collect();
+    let shape_errors: Vec<J> = an.shape_errors.iter().map(note).collect();
+    json!({"verdicts": verdicts, "schemas": schemas, "rows": rows, "notes": an.notes, "report": format_text(an, true, true), "requires": requires, "shape_errors": shape_errors})
 }
 
 fn row_json(r: &crate::domain::Row) -> J {

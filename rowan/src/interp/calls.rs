@@ -110,6 +110,26 @@ impl Analyzer {
 
     pub fn call_one(&mut self, oid: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
         let kind = self.kind(oid);
+        // torch: a layer object / Sequential, or a user nn.Module (its forward)
+        if matches!(kind, Kind::Namespace | Kind::List) && self.t_layer_type(oid).is_some() {
+            return self.t_layer_call(oid, args, kwargs, node, state);
+        }
+        if kind == Kind::Instance && self.torch_on && self.t_is_module_instance(oid) {
+            if let Some(cls) = self.instance_class(oid) {
+                if self.class_lookup(cls, "__call__").is_none() {
+                    if let Some(m) = self.class_lookup(cls, "forward") {
+                        let f = self.cls_slots.get(&(m, Ns::Attr, key_str_lit("forward"))).cloned().unwrap_or_default();
+                        let mut outs = Vec::new();
+                        for x in f.pts.iter() {
+                            if self.kind(x) == Kind::Function {
+                                outs.push(self.call_user(x, Some(Value::obj(oid)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, call_ast, false));
+                            }
+                        }
+                        return join_values(outs);
+                    }
+                }
+            }
+        }
         match kind {
             Kind::Function if self.func_info(oid).is_memo.get() && self.sum_stack.is_empty() && star_args.is_empty() && star_kwargs.is_empty() && !super::disabled("memo") => {
                 // a memoised function with known arguments: the first call's result is the
@@ -618,7 +638,7 @@ impl Analyzer {
         };
         self.analysed_funcs.insert(foid);
         // --- symbolic summaries (§7.3/§9): analyse the body once, instantiate per call ---
-        let forced = std::mem::take(&mut self.force_tab_once);
+        let forced = std::mem::take(&mut self.force_tab_once) || self.torch_modules.contains(&fi.module);
         if self.use_summaries && self.model_call == 0 && !forced {
             let bound = self.compute_bindings(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
             // the classes of the arguments: the summary is specialised on them

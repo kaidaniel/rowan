@@ -417,6 +417,20 @@ impl Analyzer {
                 }
             }
             ast::Expr::Tuple(ast::ExprTuple { elts, .. }) | ast::Expr::List(ast::ExprList { elts, .. })
+                if self.torch_on && {
+                    let star = elts.iter().position(|e| matches!(e, ast::Expr::Starred(_)));
+                    let n = frontend::node(t);
+                    match self.t_unpack(v, elts.len(), star, &n, state) {
+                        Some(parts) => {
+                            for (sub, pv) in elts.iter().zip(parts.iter()) {
+                                self.bind_target(sub, pv, state);
+                            }
+                            true
+                        }
+                        None => false,
+                    }
+                } => {}
+            ast::Expr::Tuple(ast::ExprTuple { elts, .. }) | ast::Expr::List(ast::ExprList { elts, .. })
                 if elts.iter().any(|e| matches!(e, ast::Expr::Starred(_))) =>
             {
                 self.bind_starred(elts, v, state, &frontend::node(t));

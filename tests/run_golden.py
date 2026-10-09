@@ -22,6 +22,7 @@ A verdict matches a line if it was recorded at that line or while a call made fr
 active.  A `#@` directive must be the last thing on its line (the key runs to its end).
 
     python tests/run_golden.py [-v] [case…]
+    python tests/run_golden.py --pending [--prune]   # the pending torch cases (prune: drop passing ones)
 """
 from __future__ import annotations
 
@@ -362,6 +363,13 @@ def main(argv: List[str]) -> int:
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")
         for f in fails:
             print(f"        - {f}")
+    if pending_only and "--prune" in argv:
+        passed = {os.path.relpath(p, torch_dir) for p, (_n, ok, _f) in zip(paths, results) if ok}
+        with open(os.path.join(torch_dir, "PENDING")) as f:
+            lines = f.read().splitlines()
+        with open(os.path.join(torch_dir, "PENDING"), "w") as f:
+            f.write("\n".join(ln for ln in lines if ln.split("#")[0].strip() not in passed) + "\n")
+        print(f"  pruned {len(passed)} passing cases from PENDING")
     print(f"  {npass}/{len(results)} passed" + (f"  ({TODO_COUNT[0]} #@todo expectations not checked)" if TODO_COUNT[0] else "")
           + (f"  ({len(pending)} torch cases pending)" if pending and not args and not pending_only else ""))
     return 0 if ok_all else 1

@@ -7,5 +7,6 @@ pub mod layered;
 pub mod models;
 pub mod report;
 pub mod scopes;
+pub mod shape;
 pub mod state;
 pub mod summary;

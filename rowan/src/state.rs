@@ -118,6 +118,8 @@ pub struct State {
     /// (name, key): the object the name is bound to has the key, whichever of its possible
     /// objects that is (a store or setdefault through the name)
     pub name_keys: Arc<Vec<(StrId, KeyId)>>,
+    /// tensor-shape facts on this path: ranks and dim equalities (shape.rs)
+    pub tf: Arc<crate::shape::TFacts>,
 }
 
 /// At the join of a branch on a pure test: when `cond` (a canonical test text) is `truth`,
@@ -183,6 +185,7 @@ impl State {
             symbolic: false,
             facts: Arc::new(Vec::new()),
             name_keys: Arc::new(Vec::new()),
+            tf: Arc::new(crate::shape::TFacts::default()),
         }
     }
 
@@ -208,6 +211,7 @@ impl State {
             symbolic: self.symbolic,
             facts: self.facts.clone(),
             name_keys: self.name_keys.clone(),
+            tf: self.tf.clone(),
         }
     }
 
@@ -225,6 +229,7 @@ impl State {
             symbolic: self.symbolic,
             facts: self.facts.clone(),
             name_keys: self.name_keys.clone(),
+            tf: self.tf.clone(),
         }
     }
 
@@ -254,6 +259,7 @@ impl State {
         self.symbolic = o.symbolic;
         self.facts = o.facts.clone();
         self.name_keys = o.name_keys.clone();
+        self.tf = o.tf.clone();
     }
 
     pub fn replace_with(&mut self, mut o: State) {
@@ -301,6 +307,7 @@ impl State {
         s.reachable = true;
         s.symbolic = self.symbolic || o.symbolic;
         s.facts = Arc::new(facts);
+        s.tf = if Arc::ptr_eq(&self.tf, &o.tf) || self.tf == o.tf { self.tf.clone() } else { Arc::new(self.tf.join(&o.tf)) };
         s.name_keys = if Arc::ptr_eq(&self.name_keys, &o.name_keys) { self.name_keys.clone() } else { Arc::new(self.name_keys.iter().filter(|x| o.name_keys.contains(x)).copied().collect()) };
         s
     }
@@ -394,6 +401,7 @@ impl State {
             && self.env == o.env
             && (!NARROWED_SAME.with(|c| c.get()) || self.narrowed == o.narrowed)
             && self.ret == o.ret
+            && (Arc::ptr_eq(&self.tf, &o.tf) || self.tf == o.tf)
             && self.exits.is_none() == o.exits.is_none()
             && self.rows.same(&o.rows)
             && self.slots.same(&o.slots)

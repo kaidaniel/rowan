@@ -662,6 +662,9 @@ impl Analyzer {
 
     // ---------------------------------------------------------- attributes
     pub fn load_attr(&mut self, obj: &Value, name: &str, node: &Node, state: &mut State, report: bool) -> Value {
+        if let Some(v) = self.t_getattr(obj, name, node, state) {
+            return v;
+        }
         let mut acc = Value::new();
         let guarded = self.is_guarded(Ns::Attr) || !report;
         let single = obj.pts.len() == 1;
@@ -1415,6 +1418,9 @@ impl Analyzer {
     }
 
     pub fn store_attr(&mut self, obj: &Value, name: &str, v: &Value, node: &Node, state: &mut State) {
+        if self.torch_on {
+            self.t_note_alias(obj, name, v);
+        }
         if !state.narrowed.is_empty() {
             let needle = format!(".{}", name);
             state.narrowed.retain(|k, _| !intern::str_get(*k).contains(&needle));

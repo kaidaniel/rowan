@@ -1231,6 +1231,7 @@ impl Analyzer {
         let mut is_enum = false;
         let mut dict_base = false;
         let mut pydantic = false;
+        let mut nn_module = false;
         if let Some(args) = &c.arguments {
             for b in args.args.iter() {
                 let bv = self.eval(b, state);
@@ -1244,6 +1245,9 @@ impl Analyzer {
                             }
                             if q == "builtins.dict" {
                                 dict_base = true;
+                            }
+                            if q.starts_with("torch.nn.") {
+                                nn_module = true;
                             }
                             if q.starts_with("pydantic") && q.ends_with("BaseModel") {
                                 pydantic = true;
@@ -1286,6 +1290,7 @@ impl Analyzer {
             named_tuple,
             dict_base,
             pydantic,
+            nn_module,
             field_classes: std::cell::RefCell::new(None),
             any_fields: std::cell::RefCell::new(None),
         };
@@ -1455,6 +1460,11 @@ impl Analyzer {
             }
         }
         let _ = node;
+        if name == "torch" || name.starts_with("torch.") {
+            self.torch_on = true;
+            let m = self.frame().module;
+            self.torch_modules.insert(m);
+        }
         let oid = self.alloc_raw(Kind::External, &format!("ext:{}", name), "", true, name, Payload::Str(name.to_string()));
         Value::obj(oid)
     }

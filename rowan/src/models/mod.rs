@@ -3,6 +3,7 @@
 //! prefix fallbacks.
 
 pub mod pandas;
+pub mod torch;
 
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
@@ -27,7 +28,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "partial.", "response.",
+    "parser.", "partial.", "response.", "torch.", "tensor.", "nnmodule.",
 ];
 
 pub struct Registry {
@@ -139,6 +140,9 @@ impl Registry {
         r(&["logging.getLogger", "logging.getLogger.getChild", "structlog.get_logger", "loguru.logger.bind"], m_get_logger);
         r(&["os.getenv", "os.environ.get"], m_getenv);
         pandas::install(&mut r);
+        r(&["torch.*"], torch::m_torch);
+        r(&["tensor.*"], torch::m_tensor_method);
+        r(&["nnmodule.*"], torch::m_nnmodule);
         Registry { table: t }
     }
 

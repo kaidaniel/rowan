@@ -199,4 +199,39 @@ pass). Agreed with the owner on 2026-10-09:
 
 ## Notes / decisions log
 
-* (add decisions here as they are made)
+* **Runtime oracle** (`tests/torch_oracle.py`, run with
+  `uv run --no-project --with torch --with numpy python tests/torch_oracle.py`): every case
+  is a runnable program. A driver under `if __name__ == "__main__":` calls every function
+  with concrete inputs, and the oracle checks each directive against real PyTorch,
+  evaluating dim expressions in the frame. Expectations are still written by hand. The
+  oracle checks them against PyTorch, never against rowan. Every case must agree with the
+  oracle before the engine work for it starts.
+* **Canonical forms in expectations** (what the engine prints in `--golden`; the hover
+  uses short letters instead):
+  * The dims of an unknown value named `x` (a parameter, an attribute read, …) are
+    `x.shape[i]`. Indices are non-negative once the rank is known. While it is unknown,
+    dims counted from the end stay negative (`x.shape[-1]`).
+  * A rest is a slice of one symbol: `*x.shape[:-1]`, `*x.shape[1:]`, `*x.shape[2:-1]`. A
+    parameter that has not been looked into is `[*x.shape]`.
+  * Named ints are the program's own terms: `n`, `self.n_embd`, `cfg.d_model`.
+    `__init__` arguments use their own names (`d_model`) in every method of the class,
+    unless a self attribute holds the same value (`self.d_model`), which is preferred.
+  * Two dims not known to be equal broadcast to `max(a, b)`. Two rests broadcast to
+    `broadcast(r1, r2)`. An unknown dim is `?`.
+  * `x[:, :T]` gives `min(T, x.shape[1])`, and constants are folded. `x[:, 1:]` gives
+    `x.shape[1] - 1`: dims are assumed ≥ 1.
+  * `x @ y` (and `matmul`) with unknown ranks is the ≥2-D case under assumptions:
+    `[*broadcast(x.shape[:-2], y.shape[:-2]), x.shape[-2], y.shape[-1]] if x.dim() >= 2,
+    y.dim() >= 2`. The assumption is dropped once a rank is known. If a known rank
+    contradicts it, the right case is computed instead.
+* **Entry runs**: in a module that imports torch, every function and method is also
+  analysed on its own with open parameters (flagged `entry`), even when something calls
+  it. `#@shape` without `@L` checks those runs. `@L<n>` checks the runs called from
+  line n.
+* **Requirements**: `a == b`, `x.dim() == 3`, `x.dim() in (2, 3)`, `x.dim() >= 3`. One is
+  recorded only when its condition is undecided, and a `#@requires` line lists all of them
+  for that line. View/reshape element counts are never recorded, only checked when
+  everything is literal.
+* **Unknown non-tensor operands**: in `x * s` with `s` unknown, the result is
+  `broadcast(x.shape, s.shape)`, because `s` may be a tensor. Literals, arithmetic on ints
+  and dims, and `math.*` results are scalars.

@@ -50,6 +50,12 @@ impl Analyzer {
             }
             ast::Expr::Subscript(sub) => {
                 let obj = self.eval(&sub.value, state);
+                {
+                    let nd = frontend::node(node);
+                    if let Some(v) = self.t_subscript(&obj, &sub.slice, &nd, state) {
+                        return v;
+                    }
+                }
                 if let ast::Expr::Slice(sl) = &*sub.slice {
                     if let Some(v) = self.slice_positional(&obj, sl, node, state) {
                         return v;
@@ -148,6 +154,14 @@ impl Analyzer {
             ast::Expr::BoolOp(b) => self.expr_boolop(b, state),
             ast::Expr::UnaryOp(u) => {
                 let v = self.eval(&u.operand, state);
+                if u.op != ast::UnaryOp::Not {
+                    if crate::models::torch::is_tensor(&v) {
+                        return v;
+                    }
+                    if let Some(d) = crate::models::torch::dim_of_label(&v) {
+                        return crate::models::torch::dim_value(if u.op == ast::UnaryOp::USub { crate::shape::scale(d, -1) } else { d });
+                    }
+                }
                 match u.op {
                     ast::UnaryOp::Not => match self.truth_of(&v, state, &frontend::node(node)) {
                         Some(b) => Value::lit(intern::key_bool(!b)),
@@ -175,7 +189,7 @@ impl Analyzer {
                 let nd = frontend::node(node);
                 let r = self.binop(b.op, &a, &c, &nd, state);
                 // an unknown result is named by the expression (`1 + b`)
-                if r.pts.is_empty() && matches!(r.kv, KeyVal::Data(_)) && !super::disabled("exprsym") {
+                if r.pts.is_empty() && matches!(r.kv, KeyVal::Data(l) if !intern::str_get(l).starts_with('\u{1}')) && !super::disabled("exprsym") {
                     let text = frontend::text_at(&nd).split_whitespace().collect::<Vec<_>>().join(" ");
                     if !text.is_empty() && text.len() <= 60 {
                         // the expression names the value only inside this function (its names)
@@ -187,6 +201,11 @@ impl Analyzer {
             }
             ast::Expr::Compare(c) => {
                 let a = self.eval(&c.left, state);
+                if c.ops.len() == 1 && crate::models::torch::is_tensor(&a) && matches!(c.ops[0], ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE | ast::CmpOp::Eq | ast::CmpOp::NotEq) {
+                    let b = self.eval(&c.comparators[0], state);
+                    let nd = frontend::node(node);
+                    return self.t_compare(&a, &b, &nd, state);
+                }
                 if c.ops.len() == 1 {
                     if let Some(b) = self.compare_const(c.ops[0], &a, &c.comparators[0], state) {
                         return Value::lit(intern::key_bool(b));
@@ -950,6 +969,9 @@ impl Analyzer {
     }
 
     pub fn binop(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Value {
+        if let Some(v) = self.t_binop(op, a, b, node, state) {
+            return v;
+        }
         let both = a.pts.union(&b.pts);
         // arithmetic on a parameter (or a field of one): the result is decided per call site
         if matches!(op, ast::Operator::Add | ast::Operator::Sub | ast::Operator::Mult | ast::Operator::FloorDiv | ast::Operator::Div | ast::Operator::Mod) {

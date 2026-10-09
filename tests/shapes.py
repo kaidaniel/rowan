@@ -394,8 +394,9 @@ class ShapeExpectations:
             here = [r for r in rows if r["line"] == line and r["name"] == name]
             if at is not None:
                 return [r for r in here if at in r.get("chain", [])]
-            entry = [r for r in here if r.get("entry")]
-            return entry or here
+            # the line's own analysis: its function's entry run (or the module run), no caller
+            direct = [r for r in here if not r.get("chain")]
+            return direct or here
 
         for line, at, name, spec in self.shapes:
             rs = runs(line, name, at)
@@ -419,10 +420,14 @@ class ShapeExpectations:
                     fails.append(f"L{line} dim {name}: {got if got is not None else 'unknown'}, want {want}")
                     break
         reqs = res.get("requires", [])
+        def mine(r: Dict[str, Any], line: int) -> bool:
+            ch = r.get("chain", [])
+            return (r["line"] == line and not ch) or (bool(ch) and ch[0] == line)
+
         for line, want in self.requires.items():
-            got = sorted({norm_constraint(r["text"]) for r in reqs if r["line"] == line or line in r.get("chain", [])})
+            got = sorted({norm_constraint(r["text"]) for r in reqs if mine(r, line)})
             if sorted(set(want)) != got:
-                texts = sorted({r["text"] for r in reqs if r["line"] == line or line in r.get("chain", [])})
+                texts = sorted({r["text"] for r in reqs if mine(r, line)})
                 fails.append(f"L{line} requires: got {texts or 'none'}, want {want or 'none'}")
         errs = res.get("shape_errors", [])
         for e in errs:

@@ -251,6 +251,8 @@ pub struct ClassInfo {
     /// subclasses pydantic's `BaseModel`: annotated fields like a dataclass (other members
     /// come from pydantic: the base stays open)
     pub pydantic: bool,
+    /// subclasses something in `torch.nn` (`nn.Module`): calling an instance runs `forward`
+    pub nn_module: bool,
     /// attr → classes assigned to self.attr (lazy)
     pub field_classes: RefCell<Option<FxHashMap<String, Vec<ObjId>>>>,
     pub any_fields: RefCell<Option<FxHashSet<String>>>,
@@ -541,6 +543,8 @@ pub struct RowCheck {
     pub ns: Ns,
     /// the name's value: its known literals, whether it may be anything else, its objects
     pub value: ValueInfo,
+    /// tensor facts for the golden harness: {"shape", "dim", "chain", "entry"}
+    pub tensor: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -646,6 +650,20 @@ pub struct Analyzer {
     pub symbol_scope: FxHashMap<ObjId, u32>,
     /// while an entry run's parameters are made: the function they belong to
     pub entry_scope: Option<u32>,
+    /// some module imported torch: tensor semantics for `@`, tensor methods on unknowns, …
+    pub torch_on: bool,
+    /// modules that import torch (their functions all get entry runs and are tabulated)
+    pub torch_modules: FxHashSet<ObjId>,
+    /// the function an entry run (open parameters) is analysing
+    pub entry_run: Option<ObjId>,
+    /// functions that had their entry run
+    pub entry_done: FxHashSet<ObjId>,
+    /// tensor-shape requirements / definite mismatches (models/torch.rs)
+    pub shape_reqs: Vec<crate::models::torch::ShapeNote>,
+    pub shape_errors: Vec<crate::models::torch::ShapeNote>,
+    /// (class, symbol of an `__init__` value) → `self.attr` holding it
+    pub t_sym_alias: FxHashMap<(ObjId, crate::shape::Sym), String>,
+    pub t_dim_alias: FxHashMap<(ObjId, crate::shape::DimId), String>,
     /// Enum classes: their members in definition order
     pub enum_members: FxHashMap<ObjId, Vec<(String, ObjId)>>,
     /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
@@ -814,6 +832,14 @@ impl Analyzer {
             started: std::time::Instant::now(),
             call_cache: FxHashMap::default(),
             entry_instances: FxHashMap::default(),
+            torch_on: false,
+            torch_modules: FxHashSet::default(),
+            entry_run: None,
+            entry_done: FxHashSet::default(),
+            shape_reqs: Vec::new(),
+            shape_errors: Vec::new(),
+            t_sym_alias: FxHashMap::default(),
+            t_dim_alias: FxHashMap::default(),
             fresh_in_progress: FxHashSet::default(),
             main_module: 0,
             main_tree: tree,
@@ -1271,10 +1297,16 @@ impl Analyzer {
 
     fn analyse_uncalled_range(&mut self, from: ObjId, n: ObjId, state: &mut State) {
         for oid in from..n {
-            if self.kind(oid) != Kind::Function || self.analysed_funcs.contains(&oid) {
+            if self.kind(oid) != Kind::Function || self.entry_done.contains(&oid) {
                 continue;
             }
             let fi = self.func_info(oid);
+            // functions of torch modules get their own run even when called (the shapes
+            // inside, in terms of their own parameters)
+            if self.analysed_funcs.contains(&oid) && !self.torch_modules.contains(&fi.module) {
+                continue;
+            }
+            self.entry_done.insert(oid);
             // closures made inside a summary run stand for every call's closure (their cells
             // are relative): they are reached through the real calls
             if !fi.closure.is_empty() && (self.obj(oid).ctx.contains("sum") || disabled("entryclosures")) {
@@ -1377,7 +1409,9 @@ impl Analyzer {
             }
             self.entry_scope = None;
             let fake = Node::synthetic(mi.idx, fi.node.node().line);
+            let saved_entry = self.entry_run.replace(oid);
             self.call_user(oid, self_val, args, IndexMap::new(), star_args, star_kwargs, &mut st, &fake, None, true);
+            self.entry_run = saved_entry;
             self.frames.pop();
             // keep schema requirements discovered in entry points
             for (src, d) in st.reqs.items() {
@@ -1536,6 +1570,10 @@ impl Analyzer {
                 }
                 let fi = self.func_info(init);
                 let Some(params_all) = fi.node.params() else { continue };
+                let saved_scope = self.entry_scope;
+                if self.torch_modules.contains(&fi.module) {
+                    self.entry_scope = Some(init);
+                }
                 let params: Vec<&ast::Parameter> = scopemod::all_params(params_all).into_iter().skip(1).collect();
                 let mut args = Vec::new();
                 for a in params {
@@ -1558,6 +1596,7 @@ impl Analyzer {
                         None => Value::obj(self.unknown_source(&format!("param {}.{}", fi.qualname, a.name.id), SourceKind::Param, state, &format!("param {}", a.name.id), "", Ns::Item, vec![])),
                     });
                 }
+                self.entry_scope = saved_scope;
                 let fake = Node::synthetic(fi.node.node().module, fi.node.node().line);
                 self.call_user(init, Some(Value::obj(inst)), args, IndexMap::new(), vec![], vec![], state, &fake, None, true);
             }
@@ -1829,7 +1868,8 @@ impl Analyzer {
             }
             let row = if rows.is_empty() { None } else { Some(must.iter().fold(crate::domain::join_rows(rows), |r, k| r.store(*k, true))) };
             let value = self.value_info(&v);
-            self.row_checks.push(RowCheck { line: ln, name, row, ns: ns_used, value });
+            let tensor = if self.torch_on { Some(self.t_check_json(&v, state)) } else { None };
+            self.row_checks.push(RowCheck { line: ln, name, row, ns: ns_used, value, tensor });
         }
     }
 }
