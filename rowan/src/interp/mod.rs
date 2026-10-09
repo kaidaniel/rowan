@@ -534,6 +534,13 @@ pub struct Fact {
     pub texts: Vec<String>,
     /// the symbols the texts mention, with what is known about each (`report::value_legend`)
     pub legend: Vec<(String, String)>,
+    /// display names of the tensor dims the texts mention (`B` for x.shape[0])
+    pub t_names: FxHashMap<crate::shape::AtomId, String>,
+    /// the text from the function's own analysis (open parameters), when there is one: the
+    /// hover leads with it; `texts` then holds what calls gave
+    pub primary: Option<String>,
+    /// recorded by an assignment (whose value the hover shows, not the reads on the line)
+    pub written: bool,
 }
 
 pub struct RowCheck {
@@ -668,6 +675,8 @@ pub struct Analyzer {
     pub t_funcs_by_qual: FxHashMap<String, Vec<ObjId>>,
     /// golden rows: the joined value of (line, name, call chain, entry run) so far
     pub t_row_values: FxHashMap<(u32, String, Vec<u32>, bool), Value>,
+    /// the next hover fact is an assignment's
+    pub t_fact_write: bool,
     /// tensor-shape requirements / definite mismatches (models/torch.rs)
     pub shape_reqs: Vec<crate::models::torch::ShapeNote>,
     pub shape_errors: Vec<crate::models::torch::ShapeNote>,
@@ -851,6 +860,7 @@ impl Analyzer {
             t_closure_states: FxHashMap::default(),
             t_funcs_by_qual: FxHashMap::default(),
             t_row_values: FxHashMap::default(),
+            t_fact_write: false,
             shape_reqs: Vec::new(),
             shape_errors: Vec::new(),
             t_sym_alias: FxHashMap::default(),
@@ -1690,7 +1700,7 @@ impl Analyzer {
             }
         }
         let (text, legend) = crate::report::in_scope(scope, || (crate::report::render_value(self, &scratch, v, 0, &mut Vec::new()), crate::report::value_legend(self, &scratch, v)));
-        let e = self.facts.entry((line, name, false)).or_insert_with(|| Fact { symbolic: false, value: Value::new(), rows: IndexMap::new(), texts: Vec::new(), legend: Vec::new() });
+        let e = self.facts.entry((line, name, false)).or_insert_with(|| Fact { symbolic: false, value: Value::new(), rows: IndexMap::new(), texts: Vec::new(), legend: Vec::new(), t_names: FxHashMap::default(), primary: None, written: false });
         e.value = e.value.join(v);
         if !e.texts.contains(&text) && e.texts.len() < 4 {
             e.texts.push(text);
@@ -1760,8 +1770,49 @@ impl Analyzer {
             }
         }
         let scope = self.frame().func.unwrap_or(0);
-        let (text, legend) = crate::report::in_scope(scope, || (crate::report::render_value(self, state, v, 0, &mut Vec::new()), crate::report::value_legend(self, state, v)));
-        let e = self.facts.entry((node.line, name, symbolic)).or_insert_with(|| Fact { symbolic, value: Value::new(), rows: IndexMap::new(), texts: Vec::new(), legend: Vec::new() });
+        // tensors: dims named by locals / letters, printed in the function's own terms
+        let (pctx, tnames, tlegend) = if self.torch_on {
+            let mut ctx = self.t_print_ctx(state);
+            let (names, legend) = crate::shape::with_ctx(ctx.clone(), || self.t_hover_names(v, state));
+            ctx.atom_names = names.clone();
+            (Some(ctx), names, legend)
+        } else {
+            (None, FxHashMap::default(), Vec::new())
+        };
+        let render = |an: &Analyzer| crate::report::in_scope(scope, || (crate::report::render_value(an, state, v, 0, &mut Vec::new()), crate::report::value_legend(an, state, v)));
+        let (text, mut legend) = match pctx {
+            Some(ctx) => crate::shape::with_ctx(ctx, || render(self)),
+            None => render(self),
+        };
+        legend.extend(tlegend);
+        let writing = std::mem::take(&mut self.t_fact_write);
+        let e = self.facts.entry((node.line, name, symbolic)).or_insert_with(|| Fact { symbolic, value: Value::new(), rows: IndexMap::new(), texts: Vec::new(), legend: Vec::new(), t_names: FxHashMap::default(), primary: None, written: false });
+        // in torch programs an assignment's value is what the hover shows (`y = f(y)`)
+        if self.torch_on {
+            if writing && !e.written {
+                e.written = true;
+                e.texts.clear();
+                e.legend.clear();
+                e.primary = None;
+                e.value = Value::new();
+            } else if !writing && e.written {
+                return;
+            }
+        }
+        // the function analysed on its own (not a call from elsewhere): the general answer
+        let own = self.entry_run.is_some() && self.call_chain.len() <= 1 && self.torch_on;
+        if own {
+            e.t_names = tnames;
+            e.primary = Some(match &e.primary {
+                Some(p) if *p != text && !p.split(" | ").any(|x| x == text) => format!("{} | {}", p, text),
+                Some(p) => p.clone(),
+                None => text.clone(),
+            });
+        } else {
+            for (a, n) in tnames {
+                e.t_names.entry(a).or_insert(n);
+            }
+        }
         e.value = e.value.join(v);
         if !e.texts.contains(&text) && e.texts.len() < 4 {
             e.texts.push(text);

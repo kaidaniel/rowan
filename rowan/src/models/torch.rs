@@ -10,6 +10,7 @@ use crate::frontend::Node;
 use crate::intern::{self, key_int, key_str_lit, s, KeyId, StrId, STAR};
 use crate::interp::{Analyzer, Call, Payload};
 use crate::shape::{self as sh, Cons, DimId, RankRel, Rest, Shape};
+use rustc_hash::FxHashMap;
 use crate::state::{Kind, State};
 
 pub const SIZE_PREFIX: &str = "\u{1}S";
@@ -20,6 +21,8 @@ pub struct ShapeNote {
     pub chain: Vec<u32>,
     pub entry: bool,
     pub text: String,
+    /// the requirement and how to print it (the hover renders it with its dim names)
+    pub cons: Option<(Cons, sh::PrintCtx)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -447,9 +450,9 @@ impl Analyzer {
         ctx
     }
 
-    pub fn t_require_note(&mut self, node: &Node, text: String) {
+    pub fn t_require_note(&mut self, node: &Node, text: String, cons: Option<(Cons, sh::PrintCtx)>) {
         let (chain, entry) = self.t_note_ctx();
-        let n = ShapeNote { line: node.line, chain, entry, text };
+        let n = ShapeNote { line: node.line, chain, entry, text, cons };
         if !self.shape_reqs.iter().any(|x| x.line == n.line && x.chain == n.chain && x.entry == n.entry && x.text == n.text) {
             self.shape_reqs.push(n);
         }
@@ -457,7 +460,7 @@ impl Analyzer {
 
     pub fn t_error(&mut self, node: &Node, msg: String, st: &mut State) {
         let (chain, entry) = self.t_note_ctx();
-        let n = ShapeNote { line: node.line, chain, entry, text: msg };
+        let n = ShapeNote { line: node.line, chain, entry, text: msg, cons: None };
         if !self.shape_errors.iter().any(|x| x.line == n.line && x.chain == n.chain && x.text == n.text) {
             self.shape_errors.push(n);
         }
@@ -476,9 +479,9 @@ impl Analyzer {
             }
             None => {
                 let ctx = self.t_outer_print_ctx(st);
-                let text = sh::with_ctx(ctx, || sh::cons_text(&c));
+                let text = sh::with_ctx(ctx.clone(), || sh::cons_text(&c));
                 if !text.contains('?') {
-                    self.t_require_note(node, text);
+                    self.t_require_note(node, text, Some((c.clone(), ctx)));
                 }
                 let mut f = (*st.tf).clone();
                 sh::learn(&mut f, &c);
@@ -4105,5 +4108,168 @@ impl Analyzer {
             Some(kv) if !kv.is_bot() => Value::with_kv(e.pts.clone(), kv),
             _ => e,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// hover rendering
+// ---------------------------------------------------------------------------
+
+impl Analyzer {
+    /// The torch part of a value for the hover (None: not ours): `Tensor[B, T, 4*C]`, a dim
+    /// expression, a size.
+    /// The shape of a named unknown (a parameter) when facts say something about it.
+    pub fn t_known_param_shape(&self, v: &Value, st: &State) -> Option<Shape> {
+        if !self.torch_on || !v.kv.is_bot() || v.pts.len() != 1 {
+            return None;
+        }
+        let o = v.pts.first()?;
+        let sy = self.t_sym_of_obj(o)?;
+        let s = sh::canon(sh::norm_shape(&Shape::of_sym(sy), &st.tf));
+        if s == Shape::of_sym(sy) {
+            return None;
+        }
+        Some(s)
+    }
+
+    pub fn t_render(&self, v: &Value, st: &State) -> Option<String> {
+        if let Some(s) = self.t_known_param_shape(v, st) {
+            return Some(tensor_text(&s));
+        }
+        let l = label(v)?;
+        if let Some(sid) = sh::parse_tensor_label(&l) {
+            let s = sh::canon(sh::norm_shape(&sh::shape_get(sid), &st.tf));
+            if let Some(d) = sh::dual_dim(&l) {
+                let d = sh::norm(d, &st.tf);
+                let mut atoms = Vec::new();
+                sh::dim_atoms(d, &mut atoms);
+                // arithmetic on dims: an int; on unknowns: either
+                if !atoms.is_empty() || s.is_any() {
+                    return Some(sh::dim_text(d));
+                }
+                return Some(format!("{} | {}", sh::dim_text(d), tensor_text(&s)));
+            }
+            return Some(tensor_text(&s));
+        }
+        if let Some(d) = sh::parse_dim_label(&l) {
+            return Some(sh::dim_text(sh::norm(d, &st.tf)));
+        }
+        if &*l == sh::NUM_LABEL {
+            return Some("?".into());
+        }
+        if let Some(s) = size_shape(v) {
+            return Some(format!("torch.Size({})", sh::shape_text(&sh::norm_shape(&s, &st.tf))));
+        }
+        None
+    }
+
+    /// Names for the shape dims a value mentions: locals that hold them (`B, T, C = x.shape`),
+    /// else fresh capital letters; with the legend lines.
+    pub fn t_hover_names(&self, v: &Value, st: &State) -> (FxHashMap<sh::AtomId, String>, Vec<(String, String)>) {
+        let mut names: FxHashMap<sh::AtomId, String> = FxHashMap::default();
+        let mut legend: Vec<(String, String)> = Vec::new();
+        let mut atoms: Vec<sh::AtomId> = Vec::new();
+        let mut collect = |val: &Value| {
+            if let Some(l) = label(val) {
+                if let Some(sid) = sh::parse_tensor_label(&l) {
+                    sh::shape_atoms(&sh::norm_shape(&sh::shape_get(sid), &st.tf), &mut atoms);
+                }
+                if let Some(d) = sh::parse_dim_label(&l).or_else(|| sh::dual_dim(&l)) {
+                    sh::dim_atoms(sh::norm(d, &st.tf), &mut atoms);
+                }
+                if let Some(sz) = size_shape(val) {
+                    sh::shape_atoms(&sh::norm_shape(&sz, &st.tf), &mut atoms);
+                }
+            }
+        };
+        collect(v);
+        for o in v.pts.iter() {
+            if matches!(self.kind(o), Kind::Tuple | Kind::List) {
+                if let Some(n) = self.obj(o).literal_len {
+                    for i in 0..n.min(8) {
+                        collect(&st.slot(o, Ns::Pos, key_int(i as i64)));
+                    }
+                }
+            }
+        }
+        // a named unknown with shape facts (a parameter after `B, T, C = x.shape`)
+        if let Some(s) = self.t_known_param_shape(v, st) {
+            sh::shape_atoms(&s, &mut atoms);
+        }
+        // locals holding exactly one shape dim (also used for requirement texts)
+        let mut used: Vec<String> = Vec::new();
+        for (n, val) in st.env.iter() {
+            let name = intern::str_get(*n).to_string();
+            used.push(name.clone());
+            if let Some(d0) = dim_of_label(val) {
+                // the dim as bound and as it is now (a fact may have rewritten it)
+                for d in [d0, sh::norm(d0, &st.tf)] {
+                    let p = sh::poly(d);
+                    if let [(m, 1)] = &p[..] {
+                        if m.len() == 1 && m[0].1 == 1 && matches!(sh::atom_get(m[0].0), sh::Atom::Dim(..)) && !names.contains_key(&m[0].0) {
+                            names.insert(m[0].0, name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if atoms.is_empty() {
+            return (names, legend);
+        }
+        let mut letters = (b'A'..=b'Z').map(|c| (c as char).to_string()).filter(|c| !used.contains(c));
+        for a in &atoms {
+            if !names.contains_key(a) {
+                if let Some(l) = letters.next() {
+                    names.insert(*a, l);
+                }
+            }
+        }
+        // legend: per tensor whose dims are named, `B, T, C: x.shape` when all its dims are
+        let mut by_sym: Vec<(sh::Sym, Vec<(i32, sh::AtomId)>)> = Vec::new();
+        for a in &atoms {
+            if let sh::Atom::Dim(sy, i) = sh::atom_get(*a) {
+                match by_sym.iter_mut().find(|(s0, _)| *s0 == sy) {
+                    Some((_, v)) => v.push((i, *a)),
+                    None => by_sym.push((sy, vec![(i, *a)])),
+                }
+            }
+        }
+        for (sy, mut ds) in by_sym {
+            let Some(base) = sh::sym_print(sy) else { continue };
+            ds.sort();
+            let rank = st.tf.rank_of(sy);
+            let full = rank.map(|r| ds.len() == r as usize && ds.iter().enumerate().all(|(k, (i, _))| *i == k as i32)).unwrap_or(false);
+            if full {
+                let ns: Vec<String> = ds.iter().map(|(_, a)| names[a].clone()).collect();
+                legend.push((ns.join(", "), format!("{}.shape", base)));
+            } else {
+                for (i, a) in ds {
+                    legend.push((names[&a].clone(), format!("{}.shape[{}]", base, i)));
+                }
+            }
+        }
+        (names, legend)
+    }
+}
+
+pub fn tensor_text(s: &Shape) -> String {
+    let mut parts: Vec<String> = s.prefix.iter().map(|d| sh::dim_text(*d)).collect();
+    if let Some(r) = &s.rest {
+        let t = sh::rest_text(r);
+        // an unknown number of unknown dims: `*` (as PyTorch's docs write `(*, H_in)`)
+        parts.push(if t == "*" { "*".into() } else { format!("*{}", t) });
+    }
+    parts.extend(s.suffix.iter().map(|d| sh::dim_text(*d)));
+    let mut out = format!("Tensor[{}]", parts.join(", "));
+    if !s.assume.is_empty() {
+        out.push_str(&format!(" (if {})", s.assume.iter().map(sh::cons_text).collect::<Vec<_>>().join(", ")));
+    }
+    out
+}
+
+impl Analyzer {
+    /// (hover legend) a symbol shown as a tensor needs no `x: ?` line
+    pub fn facts_sym_is_tensor(&self, _sym: &str) -> bool {
+        true
     }
 }

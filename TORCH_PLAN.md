@@ -151,9 +151,9 @@ pass). Agreed with the owner on 2026-10-09:
 
 ## 5. Steps (each one commit)
 
-0. [ ] This plan. Harness support for `tests/torch/` (cases there are always cases) with
+0. [x] This plan. Harness support for `tests/torch/` (cases there are always cases) with
    `tests/torch/PENDING` listing cases not yet expected to pass, plus the new directives.
-1. [ ] Write the cases first: at least 100 small programs in `tests/torch/small/` (one
+1. [x] Write the cases first: at least 100 small programs in `tests/torch/small/` (one
    API area each, several checks, some with deliberate mismatches) and at least 15
    models in `tests/torch/models/`:
    * a transformer from scratch (MHA, FFN, blocks, positional encoding, causal mask);
@@ -176,19 +176,19 @@ pass). Agreed with the owner on 2026-10-09:
 
    Each has hand-written `#@shape` checks inside `forward` and helpers (uncalled), and at
    least one instantiated `model(x)` with concrete shapes. All start in `PENDING`.
-2. [ ] Domain: `DimE` and `Shape` interners, normalisation, equality, join, printing;
+2. [x] Domain: `DimE` and `Shape` interners, normalisation, equality, join, printing;
    tensor and dim labels; `tfacts` in `State`. Unit tests in `cargo test`.
-3. [ ] Creation, queries (`shape`/`size`/`dim`/unpacking), arithmetic on dims,
+3. [x] Creation, queries (`shape`/`size`/`dim`/unpacking), arithmetic on dims,
    elementwise ops and broadcasting, matmul, shape ops, reductions, indexing.
    Unknowns used as tensors.
-4. [ ] Requirements and diagnostics; facts from asserts, `if … raise` and operations;
+4. [x] Requirements and diagnostics; facts from asserts, `if … raise` and operations;
    report and facts output.
-5. [ ] `nn.Module` subclasses, layer objects, Linear / Embedding / norms / Dropout /
+5. [x] `nn.Module` subclasses, layer objects, Linear / Embedding / norms / Dropout /
    activations / Sequential / ModuleList / ModuleDict, `F.*`; entry `self` through
    `__init__`; dim naming through self attributes.
-6. [ ] Conv / pool / upsample formulas, RNN family, MultiheadAttention, Transformer
+6. [x] Conv / pool / upsample formulas, RNN family, MultiheadAttention, Transformer
    layers, `einsum`, `chunk`/`split`/`cat`/`stack`, `scaled_dot_product_attention`.
-7. [ ] Cross-function precision (tabulation on tensor events; measure; substitution if
+7. [x] Cross-function precision (tabulation on tensor events; measure; substitution if
    needed).
 8. [ ] Hover rendering (letters + legend + requirements) in `extension.js` and
    `test.js`; rebuild the vsix.
@@ -232,6 +232,12 @@ pass). Agreed with the owner on 2026-10-09:
   recorded only when its condition is undecided, and a `#@requires` line lists all of them
   for that line. View/reshape element counts are never recorded, only checked when
   everything is literal.
+* **Cross-function precision** is by tabulation: every function of a torch module is analysed
+  per call site (never summarised), and also once on its own (entry run). Fast enough on the
+  17 models (the whole torch suite runs in a few seconds).
+* **Join atoms**: dims that differ at a join become one atom per set of alternatives (printed
+  `?`), stable over loop iterations, so a requirement on it (`h.shape[-1] == d_model` in a
+  layer loop) becomes a fact.
 * **Unknown non-tensor operands**: in `x * s` with `s` unknown, the result is
   `broadcast(x.shape, s.shape)`, because `s` may be a tensor. Literals, arithmetic on ints
   and dims, and `math.*` results are scalars.

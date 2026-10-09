@@ -179,6 +179,31 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
         lines.push(format!("  {}L{:<4} {:<5} {:<40} {}[{}] {}{}{}  [{}]{}", wher, v.line, v.tier.symbol(), v.text, v.ns, key_repr(v.key), v.tier.text(), prov, note, v.obj, chain));
     }
     lines.push(format!("  ({} accesses proven ok)", oks));
+    // tensor shapes: definite mismatches, then what each line needs of its inputs
+    if an.torch_on {
+        lines.push(String::new());
+        lines.push("== tensor shapes ==".into());
+        let mut seen: Vec<(u32, String)> = Vec::new();
+        let mut errs: Vec<&crate::models::torch::ShapeNote> = an.shape_errors.iter().collect();
+        errs.sort_by_key(|e| (e.line, e.chain.len()));
+        for e in errs {
+            if seen.contains(&(e.line, e.text.clone())) {
+                continue;
+            }
+            seen.push((e.line, e.text.clone()));
+            let chain = if e.chain.is_empty() { String::new() } else { format!("  via {}", e.chain.iter().map(|c| format!("L{}", c)).collect::<Vec<_>>().join(">")) };
+            lines.push(format!("  L{:<4} ✗     shape mismatch: {}{}", e.line, e.text, chain));
+        }
+        let mut reqs: Vec<(u32, String)> = an.shape_reqs.iter().filter(|r| r.chain.is_empty()).map(|r| (r.line, r.text.clone())).collect();
+        reqs.sort();
+        reqs.dedup();
+        for (line, text) in &reqs {
+            lines.push(format!("  L{:<4} needs {}", line, text));
+        }
+        if seen.is_empty() && reqs.is_empty() {
+            lines.push("  (no mismatches, no requirements)".into());
+        }
+    }
     let sch = schema_rows(an);
     lines.push(String::new());
     lines.push("== inferred schemas (requirements on external inputs) ==".into());
@@ -385,13 +410,19 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
         }
         parts.extend(ls);
     }
+    // a tensor parameter with known shape facts: its shape
+    if let Some(s) = an.t_known_param_shape(v, state) {
+        return crate::models::torch::tensor_text(&s);
+    }
     for o in v.pts.iter() {
         parts.push(render_object(an, state, o, depth, seen));
     }
     // a part nothing is known about (data, a parameter, keys of something): `?` (not for a
     // placeholder's own key-value: the placeholder is printed already)
     let own_param = matches!(&v.kv, KeyVal::Param(ph) if v.pts.contains(*ph));
-    if let Some(expr) = data_expr(&v.kv) {
+    if let Some(t) = an.t_render(v, state) {
+        parts.push(t);
+    } else if let Some(expr) = data_expr(&v.kv) {
         parts.push(expr);
     } else if !v.kv.is_literal() && !v.kv.is_bot() && !own_param {
         parts.push("?".into());
@@ -740,7 +771,47 @@ pub fn facts_json(an: &Analyzer) -> J {
                 }
             }
         }
-        facts.push(json!({"line": line, "name": name.to_string(), "symbolic": symbolic, "values": values, "text": f.texts.join(" | "), "legend": f.legend.iter().map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "required": required}));
+        // tensor-shape requirements recorded on this line (in the line's own analysis), in
+        // the dim names of this fact
+        let mut requires: Vec<String> = Vec::new();
+        let mut extra_legend: Vec<(String, String)> = Vec::new();
+        for n in &an.shape_reqs {
+            if n.line != *line || !n.chain.is_empty() {
+                continue;
+            }
+            let t = match &n.cons {
+                Some((c, ctx)) => {
+                    let mut ctx = ctx.clone();
+                    ctx.atom_names = f.t_names.clone();
+                    crate::shape::with_ctx(ctx, || crate::shape::cons_text(c))
+                }
+                None => n.text.clone(),
+            };
+            // the dim names the requirement uses, in the legend too
+            if let Some((c, ctx)) = &n.cons {
+                let mut atoms = Vec::new();
+                cons_atoms(c, &mut atoms);
+                for a in atoms {
+                    if let (Some(nm), crate::shape::Atom::Dim(sy, i)) = (f.t_names.get(&a), crate::shape::atom_get(a)) {
+                        let base = crate::shape::with_ctx(ctx.clone(), || crate::shape::sym_print(sy));
+                        if let Some(b) = base {
+                            let entry = (nm.clone(), format!("{}.shape[{}]", b, i));
+                            if !extra_legend.contains(&entry) && !f.legend.iter().any(|(s0, _)| s0.split(", ").any(|x| x == nm)) {
+                                extra_legend.push(entry);
+                            }
+                        }
+                    }
+                }
+            }
+            if !requires.contains(&t) {
+                requires.push(t);
+            }
+        }
+        let (text, examples): (String, Vec<String>) = match &f.primary {
+            Some(p) => (p.clone(), f.texts.iter().filter(|t| *t != p).cloned().collect()),
+            None => (f.texts.join(" | "), vec![]),
+        };
+        facts.push(json!({"line": line, "name": name.to_string(), "symbolic": symbolic, "values": values, "text": text, "examples": examples, "legend": f.legend.iter().filter(|(s0, d)| !(d == "?" && f.texts.iter().all(|t| t.starts_with("Tensor[")) && an.facts_sym_is_tensor(s0))).chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "required": required, "requires": requires}));
     }
     let verdicts: Vec<J> = dedupe(&an.verdicts).iter().map(|v| verdict_json(an, v)).collect();
     let mut schemas = serde_json::Map::new();
@@ -748,5 +819,20 @@ pub fn facts_json(an: &Analyzer) -> J {
         let keys: serde_json::Map<String, J> = entry.iter().map(|(k, e)| (k.clone(), json!({"always": e.always, "sites": e.sites}))).collect();
         schemas.insert(label, J::Object(keys));
     }
-    json!({"file": an.filename, "facts": facts, "verdicts": verdicts, "schemas": schemas, "notes": an.notes})
+    let shape_errors: Vec<J> = an.shape_errors.iter().map(|n| json!({"line": n.line, "chain": n.chain, "message": n.text})).collect();
+    json!({"file": an.filename, "facts": facts, "verdicts": verdicts, "schemas": schemas, "notes": an.notes, "shape_errors": shape_errors})
+}
+
+fn cons_atoms(c: &crate::shape::Cons, out: &mut Vec<crate::shape::AtomId>) {
+    match c {
+        crate::shape::Cons::Eq(a, b) => {
+            crate::shape::dim_atoms(*a, out);
+            crate::shape::dim_atoms(*b, out);
+        }
+        crate::shape::Cons::Rank(..) => {}
+        crate::shape::Cons::If(m, g) => {
+            cons_atoms(m, out);
+            g.iter().for_each(|x| cons_atoms(x, out));
+        }
+    }
 }

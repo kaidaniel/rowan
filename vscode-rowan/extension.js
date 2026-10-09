@@ -227,6 +227,11 @@ function renderHover(name, facts, verdicts) {
     // the symbols it mentions, with what is known about each
     const legend = f.legend || [];
     for (const [sym, desc] of legend) out.push(`- \`${sym}\`: \`${desc}\``);
+    // tensor shapes: what this line needs of its inputs (rowan could not decide it here)
+    for (const r of f.requires || []) out.push(`- requires \`${r}\``);
+    // what particular calls gave (the value above holds for any call)
+    const ex = f.examples || [];
+    if (ex.length) out.push(`- in calls: ${ex.slice(0, 3).map((e) => "`" + e + "`").join(", ")}${ex.length > 3 ? ", …" : ""}`);
     const qmark = /(^|[\s:=(\[,|*])\?($|[\s,)\]}|])/;
     if (qmark.test(text) || legend.some(([, d]) => qmark.test(d))) out.push("- `?`: unknown");
     const objs = f.objects || [];
@@ -511,6 +516,20 @@ function activate(context) {
           d.source = "rowan";
           diags.push(d);
         }
+      }
+      // definite tensor-shape mismatches
+      const seenErr = new Set();
+      for (const e of res.shape_errors || []) {
+        if (seenErr.has(`${e.line}:${e.message}`)) continue;
+        seenErr.add(`${e.line}:${e.message}`);
+        const ln = Math.max(0, e.line - 1);
+        const lineText = doc.lineAt(Math.min(ln, doc.lineCount - 1)).text;
+        const start = lineText.length - lineText.trimStart().length;
+        const range = new vscode.Range(ln, start, ln, Math.max(start + 1, lineText.length));
+        const chain = e.chain && e.chain.length ? ` (via ${e.chain.map((c) => "L" + c).join(">")})` : "";
+        const d = new vscode.Diagnostic(range, `shape mismatch: ${e.message}${chain}`, vscode.DiagnosticSeverity.Error);
+        d.source = "rowan";
+        diags.push(d);
       }
       diagnostics.set(doc.uri, diags);
       status.text = `$(check) rowan: ${diags.length} findings`;

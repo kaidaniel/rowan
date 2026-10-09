@@ -1241,6 +1241,8 @@ pub struct PrintCtx {
     pub extra: Vec<u32>,
     pub sym_alias: FxHashMap<Sym, String>,
     pub dim_alias: FxHashMap<DimId, String>,
+    /// display names of shape dims (`B` for x.shape[0]): hover text only
+    pub atom_names: FxHashMap<AtomId, String>,
 }
 
 thread_local! {
@@ -1323,6 +1325,9 @@ pub fn atom_text(a: AtomId) -> String {
     }
     match atom_get(a) {
         Atom::Dim(s, i) => {
+            if let Some(n) = CTX.with(|c| c.borrow().atom_names.get(&a).cloned()) {
+                return n;
+            }
             let Some(t) = sym_print(s) else { return "?".into() };
             if needs_parens(&t) {
                 format!("({}).shape[{}]", t, i)
@@ -1584,5 +1589,32 @@ mod tests {
         let y = Shape::of_sym(sym(1, "y"));
         assert_eq!(shape_text(&broadcast(&x, &y, &f).unwrap()), "[*broadcast(x.shape, y.shape)]");
         assert!(broadcast(&Shape::known(vec![lit(3)]), &Shape::known(vec![lit(4)]), &f).is_err());
+    }
+}
+
+/// The shape-dim atoms a dim mentions (also inside compound atoms).
+pub fn dim_atoms(d: DimId, out: &mut Vec<AtomId>) {
+    for (m, _) in poly(d) {
+        for (a, _) in m {
+            match atom_get(a) {
+                Atom::Dim(..) => {
+                    if !out.contains(&a) {
+                        out.push(a);
+                    }
+                }
+                Atom::FloorDiv(x, y) | Atom::Mod(x, y) | Atom::Max(x, y) | Atom::Min(x, y) => {
+                    dim_atoms(x, out);
+                    dim_atoms(y, out);
+                }
+                Atom::Join(v) => v.iter().for_each(|x| dim_atoms(*x, out)),
+                _ => {}
+            }
+        }
+    }
+}
+
+pub fn shape_atoms(s: &Shape, out: &mut Vec<AtomId>) {
+    for d in s.prefix.iter().chain(s.suffix.iter()) {
+        dim_atoms(*d, out);
     }
 }

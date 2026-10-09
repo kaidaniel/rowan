@@ -51,6 +51,17 @@ assert(x1.includes("- value: `b`") && x1.includes("- `b`: `?`") && x1.includes("
 const u8 = renderHover("_", zi.facts.get("8:_"), []);
 assert(u8.includes("- value: `a(b)(a)`") && u8.includes("- `a(b)(a)`: `?`"), u8);
 assert(!x1.includes("**?") && !x1.includes("keys possible"), x1);
+// tensors (nanoGPT's attention): the shape in the function's own terms, dims named by the
+// locals that hold them, the line's requirement, what calls gave
+const g = path.join(root, "tests", "torch", "models", "m02_nanogpt.py");
+const gi = indexResult(JSON.parse(execFileSync(bin, [g, "--facts"], { maxBuffer: 64 * 1024 * 1024 }).toString()));
+const qkv = renderHover("qkv", gi.facts.get("64:qkv"), []);
+assert(qkv.includes("- value: `Tensor[B, T, 3*self.n_embd]`"), qkv);
+assert(qkv.includes("- `B`: `x.shape[0]`") && qkv.includes("- requires `C == self.n_embd`"), qkv);
+assert(qkv.includes("- in calls: `Tensor[3, 10, 96]`"), qkv);
+const gx = renderHover("x", gi.facts.get("64:x"), []);
+assert(gx.includes("- value: `Tensor[B, T, C]`") && gx.includes("- `B, T, C`: `x.shape`"), gx);
+console.log("\n--- sample hover for qkv (nanoGPT attention) ---\n" + qkv);
 console.log("\n--- sample long value ---\n" + lines.join("\n"));
 console.log("ok");
 console.log("\n--- sample hover for r at line 8 ---\n" + r8);
