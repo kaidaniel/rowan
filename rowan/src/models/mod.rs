@@ -1829,7 +1829,52 @@ fn json_tag(q: &str) -> String {
     format!("{}.{}", q.split('.').next().unwrap_or(""), last(q))
 }
 
+/// `json.loads("…")` of a literal: the parsed value (dicts with exactly their keys).
+fn json_literal(an: &mut Analyzer, st: &mut State, c: &Call, j: &serde_json::Value, path: &str) -> Value {
+    let site = format!("{}#json{}", crate::interp::site_string(&c.node), path);
+    match j {
+        serde_json::Value::Null => an.none_v.clone(),
+        serde_json::Value::Bool(b) => Value::lit(intern::key_bool(*b)),
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(i) => Value::lit(intern::key_int(i)),
+            None => Value::lit(intern::key_float(n.as_f64().unwrap_or(0.0))),
+        },
+        serde_json::Value::String(t) => Value::lit(key_str_lit(t)),
+        serde_json::Value::Array(items) => {
+            let vals: Vec<Value> = items.iter().enumerate().map(|(i, x)| json_literal(an, st, c, x, &format!("{}.{}", path, i))).collect();
+            let oid = an.alloc(Kind::List, &site, st, &format!("list@L{}", c.line), Payload::None, None, Ns::Item, None, None);
+            let single = an.obj(oid).single;
+            let acc = join_values(vals.clone());
+            st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), DATA), single);
+            st.elems.insert(oid, acc.kv.clone());
+            if single {
+                an.obj_mut(oid).literal_len = Some(vals.len());
+                for (i, v) in vals.iter().enumerate() {
+                    st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
+                }
+            }
+            Value::obj(oid)
+        }
+        serde_json::Value::Object(m) => {
+            let oid = an.alloc(Kind::Dict, &site, st, &format!("dict@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, None);
+            let strong = an.obj(oid).single;
+            for (k, x) in m.iter() {
+                let v = json_literal(an, st, c, x, &format!("{}.{}", path, k));
+                an.store_key(oid, Ns::Item, &KeyVal::Lit(key_str_lit(k)), &v, strong, &c.node, st);
+            }
+            Value::obj(oid)
+        }
+    }
+}
+
 fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    if c.qual == "json.loads" {
+        if let Some(text) = c.args.first().filter(|a| a.pts.is_empty()).and_then(|a| a.kv.as_lit()).and_then(intern::key_as_str) {
+            if let Ok(j) = serde_json::from_str::<serde_json::Value>(&text) {
+                return json_literal(an, st, c, &j, "");
+            }
+        }
+    }
     let tag = json_tag(&c.qual);
     let src = Source::new(&format!("{}@L{}", tag, c.line), SourceKind::External);
     let oid = an.alloc_at(Kind::Unknown, &c.node, st, &format!("{}@L{}", tag, c.line), Payload::None, Some(Row::with_source(src)), Ns::Item, None, None);

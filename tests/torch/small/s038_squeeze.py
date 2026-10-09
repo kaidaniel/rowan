@@ -14,7 +14,9 @@ def squeeze_literal(x):
 
 def squeeze_symbolic(x):
     B, T, C = x.shape  #@requires x.dim() == 3
-    y = x.squeeze(1)  #@shape y: [*, x.shape[2]]
+    # (was `[*, x.shape[2]]`: the join of [B, T, C] and [B, C] keeps both trailing positions,
+    # unknown where they differ — also true, and more precise)
+    y = x.squeeze(1)  #@shape y: [*, ?, x.shape[2]]
     z = x.squeeze()  #@shape z: [*]
     return y, z
 

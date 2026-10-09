@@ -86,6 +86,10 @@ impl Analyzer {
         if let Some(sy) = self.t_var_names.get(&o) {
             return Some(*sy);
         }
+        // the result of an unknown call that no variable names: nothing to name its dims by
+        if self.kind(o) == Kind::Unknown && self.origins.contains_key(&o) && self.torch_on {
+            return None;
+        }
         let text = self.symbols.get(&o)?;
         let scope = self.symbol_scope.get(&o).copied().unwrap_or(0);
         Some(sh::sym(scope, text))
@@ -2404,6 +2408,7 @@ impl Analyzer {
         if let Some(o) = list.single() {
             if matches!(self.kind(o), Kind::List | Kind::Tuple) {
                 let e = st.slot(o, Ns::Elem, STAR);
+                let e = Value::with_kv(e.pts.clone(), crate::domain::kv_join(&e.kv, &st.elems.get(&o).unwrap_or(crate::domain::BOT)));
                 return (None, Some(self.t_shape(&e, st).unwrap_or_else(Shape::any)));
             }
         }

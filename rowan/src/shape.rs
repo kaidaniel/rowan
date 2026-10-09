@@ -774,6 +774,9 @@ pub fn norm_shape(s: &Shape, f: &TFacts) -> Shape {
 
 /// Broadcast dims; Err((a, b)) on a definite mismatch.
 pub fn bdim(a: DimId, b: DimId, f: &TFacts) -> Result<DimId, (DimId, DimId)> {
+    if has_unknown(a) && is_one(b, f) != Some(true) || has_unknown(b) && is_one(a, f) != Some(true) {
+        return Ok(unknown());
+    }
     if is_one(a, f) == Some(true) {
         return Ok(b);
     }
@@ -832,6 +835,12 @@ pub fn broadcast(a: &Shape, b: &Shape, f: &TFacts) -> Result<Shape, (DimId, DimI
                 }
                 return Ok(Shape { prefix: x.prefix.clone(), rest: x.rest.clone(), suffix: tail, assume });
             }
+        }
+    }
+    // a known shape against a fully unknown one: at least its rank, its dims maybe larger
+    for (x, y) in [(&a, &b), (&b, &a)] {
+        if let (Some(dx), true) = (x.dims(), y.is_any()) {
+            return Ok(Shape { prefix: vec![], rest: Some(Rest::Any), suffix: dx.iter().map(|d| if is_one(*d, f) == Some(true) { unknown() } else { unknown() }).collect(), assume: vec![] });
         }
     }
     // rests over the same symbol: spell out the same number of trailing dims on both
@@ -1027,14 +1036,12 @@ pub fn join_shapes(a: &Shape, b: &Shape) -> Shape {
     let ta: Vec<DimId> = if a.rest.is_none() { a.prefix.clone() } else { a.suffix.clone() };
     let tb: Vec<DimId> = if b.rest.is_none() { b.prefix.clone() } else { b.suffix.clone() };
     let n = ta.len().min(tb.len());
-    let mut tail: Vec<DimId> = Vec::new();
-    for i in 1..=n {
-        let (p, q) = (ta[ta.len() - i], tb[tb.len() - i]);
-        if p != q {
-            break;
-        }
-        tail.insert(0, p);
-    }
+    // the trailing positions both have (dims that differ: unknown); the rest unknown
+    let tail: Vec<DimId> = (0..n).map(|i| {
+        let p = ta[ta.len() - n + i];
+        let q = tb[tb.len() - n + i];
+        if p == q { p } else { unknown() }
+    }).collect();
     Shape { prefix: vec![], rest: Some(Rest::Any), suffix: tail, assume }
 }
 

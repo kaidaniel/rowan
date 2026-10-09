@@ -666,6 +666,8 @@ pub struct Analyzer {
     pub t_closure_states: FxHashMap<ObjId, std::rc::Rc<State>>,
     /// function objects by qualname (a closure's printing sees its factory's symbols)
     pub t_funcs_by_qual: FxHashMap<String, Vec<ObjId>>,
+    /// golden rows: the joined value of (line, name, call chain, entry run) so far
+    pub t_row_values: FxHashMap<(u32, String, Vec<u32>, bool), Value>,
     /// tensor-shape requirements / definite mismatches (models/torch.rs)
     pub shape_reqs: Vec<crate::models::torch::ShapeNote>,
     pub shape_errors: Vec<crate::models::torch::ShapeNote>,
@@ -848,6 +850,7 @@ impl Analyzer {
             t_concrete_closures: FxHashSet::default(),
             t_closure_states: FxHashMap::default(),
             t_funcs_by_qual: FxHashMap::default(),
+            t_row_values: FxHashMap::default(),
             shape_reqs: Vec::new(),
             shape_errors: Vec::new(),
             t_sym_alias: FxHashMap::default(),
@@ -1909,7 +1912,19 @@ impl Analyzer {
             }
             let row = if rows.is_empty() { None } else { Some(must.iter().fold(crate::domain::join_rows(rows), |r, k| r.store(*k, true))) };
             let value = self.value_info(&v);
-            let tensor = if self.torch_on { Some(self.t_check_json(&v, state)) } else { None };
+            let tensor = if self.torch_on {
+                // a line run several times in one analysis (a loop body): the join of its values
+                let (chain, entry) = (self.call_chain.clone(), self.entry_run.is_some());
+                let prev = self.t_row_values.get(&(ln, name.clone(), chain.clone(), entry)).cloned();
+                let joined = match prev {
+                    Some(p) => p.join(&v),
+                    None => v.clone(),
+                };
+                self.t_row_values.insert((ln, name.clone(), chain, entry), joined.clone());
+                Some(self.t_check_json(&joined, state))
+            } else {
+                None
+            };
             self.row_checks.push(RowCheck { line: ln, name, row, ns: ns_used, value, tensor });
         }
     }

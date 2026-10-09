@@ -455,7 +455,12 @@ class ShapeExpectations:
         rows = res.get("rows", [])
 
         def runs(line: int, name: str, at: Optional[int]):
-            here = [r for r in rows if r["line"] == line and r["name"] == name]
+            # the engine joins a line's values within one run: its last record is the join
+            last: Dict[Any, Any] = {}
+            for r in rows:
+                if r["line"] == line and r["name"] == name:
+                    last[(tuple(r.get("chain", [])), r.get("entry"))] = r
+            here = list(last.values())
             if at is not None:
                 return [r for r in here if at in r.get("chain", [])]
             # the line's own analysis: its function's entry run (or the module run), no caller
