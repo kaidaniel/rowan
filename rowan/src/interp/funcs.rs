@@ -670,7 +670,22 @@ impl Analyzer {
                     let Payload::Zip(ks, vs) = self.obj(oid).payload.clone() else { continue };
                     let ki = self.iterate(&ks, node, state);
                     let vi = self.iterate(&vs, node, state);
-                    match (ki.items, vi.items, items.as_mut()) {
+                    // a strict zip that did not raise: both sides as long as the known one
+                    let strict = self.zip_strict.contains(&oid);
+                    let (ki_items, vi_items) = match (ki.items.clone(), vi.items.clone()) {
+                        (Some(k), None) if strict => {
+                            let e = vi.elem.flat_or_one();
+                            let n = k.len();
+                            (Some(k), Some(vec![e; n]))
+                        }
+                        (None, Some(v)) if strict => {
+                            let e = ki.elem.flat_or_one();
+                            let n = v.len();
+                            (Some(vec![e; n]), Some(v))
+                        }
+                        (k, v) => (k, v),
+                    };
+                    match (ki_items, vi_items, items.as_mut()) {
                         (Some(kit), Some(vit), Some(its)) => {
                             // zip stops at the shorter input
                             let ctx = self.frame().ctx.clone();

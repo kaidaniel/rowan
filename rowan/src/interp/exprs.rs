@@ -801,6 +801,18 @@ impl Analyzer {
                 if b.pts.is_empty() || !b.kv.is_bot() {
                     return None;
                 }
+                // builtin classes (`type(x) is dict`): the same class exactly when the same name
+                let builtin_q = |an: &Analyzer, v: &Value| -> Option<Vec<String>> { v.pts.iter().map(|o| if an.kind(o) == Kind::External { Some(an.external_qual(o)).filter(|q| q.starts_with("builtins.")) } else { None }).collect() };
+                if let (Some(qa), Some(qb)) = (builtin_q(self, &a), builtin_q(self, &b)) {
+                    if qb.len() == 1 {
+                        let same_all = qa.iter().all(|q| *q == qb[0]);
+                        let diff_all = qa.iter().all(|q| *q != qb[0]);
+                        if same_all || diff_all {
+                            let same = same_all;
+                            return Some(if op == ast::CmpOp::Is { same } else { !same });
+                        }
+                    }
+                }
                 let opaque = |an: &Analyzer, v: &Value| v.pts.iter().any(|o| matches!(an.kind(o), Kind::Ph | Kind::Unknown | Kind::External | Kind::Class | Kind::Module | Kind::Function));
                 if opaque(self, &a) || opaque(self, &b) {
                     for o in a.pts.iter().chain(b.pts.iter()) {
@@ -1224,6 +1236,12 @@ impl Analyzer {
             }
         }
         if op == ast::Operator::BitOr {
+            // a parameter's `|` (a dict or a set): decided per call site
+            for o in both.iter() {
+                if self.kind(o) == Kind::Ph {
+                    self.record_event("concrete", o);
+                }
+            }
             let recs: Vec<u32> = both.iter().filter(|o| self.kind(*o) == Kind::Dict).collect();
             if !recs.is_empty() {
                 let oid = self.alloc_at(Kind::Dict, node, state, &format!("dict@L{}", node.line), Payload::None, None, Ns::Item, None, None);

@@ -62,6 +62,25 @@ impl Analyzer {
                     self.bind_target(&a.target, &cur, state);
                     return;
                 }
+                // `d |= e` on a dict updates it in place; `s |= t` (`&=`, `-=`, `^=`) on a set too
+                if !cur.pts.is_empty() && !crate::interp::disabled("iupdate") {
+                    let all_dict = cur.pts.iter().all(|o| self.kind(o) == Kind::Dict);
+                    let all_set = cur.pts.iter().all(|o| self.kind(o) == Kind::Set);
+                    let m = match (a.op, all_dict, all_set) {
+                        (ast::Operator::BitOr, true, _) => Some("dict.update"),
+                        (ast::Operator::BitOr, _, true) => Some("set.update"),
+                        (ast::Operator::BitAnd, _, true) => Some("set.intersection_update"),
+                        (ast::Operator::Sub, _, true) => Some("set.difference_update"),
+                        (ast::Operator::BitXor, _, true) => Some("set.symmetric_difference_update"),
+                        _ => None,
+                    };
+                    if let Some(m) = m {
+                        let mv = self.method_value(m, &cur);
+                        self.call_value(&mv, &n, None, state, Some(vec![rhs]));
+                        self.bind_target(&a.target, &cur, state);
+                        return;
+                    }
+                }
                 let res = self.binop(a.op, &cur, &rhs, &n, state);
                 // `t += u` on a tensor is in place: the result must keep t's shape
                 if self.torch_on && crate::models::torch::is_definite_tensor(&cur) && !self.t_inplace_fits(&cur, &res, &n, state) {

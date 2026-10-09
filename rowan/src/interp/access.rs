@@ -722,6 +722,10 @@ impl Analyzer {
                         Value::data(&format!("L{}", node.line))
                     }
                 },
+                Kind::External if matches!(name, "__name__" | "__qualname__") && self.external_qual(oid).starts_with("builtins.") => {
+                    let q = self.external_qual(oid);
+                    Value::lit(key_str_lit(q.rsplit('.').next().unwrap_or("")))
+                }
                 Kind::External => {
                     let q = format!("{}.{}", self.external_qual(oid), name);
                     match crate::models::external_record(self, &q, state) {
@@ -1202,6 +1206,10 @@ impl Analyzer {
         let ph = self.ph_info(oid);
         let nk = key_str_lit(name);
         if let Some(v) = state.slot_opt(oid, Ns::Attr, nk) {
+            // set in this function: the read succeeds
+            if !guarded && state.row(oid, Ns::Attr).definite.contains(nk) && !super::disabled("phslotverdict") {
+                self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
+            }
             return v;
         }
         if self.pandas_on && (crate::models::pandas::FRAME_ONLY_ATTRS.contains(&name) || crate::models::pandas::DF_METHODS.contains(&name) || matches!(name, "str" | "dt" | "cat")) {

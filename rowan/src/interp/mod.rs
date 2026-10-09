@@ -781,6 +781,8 @@ pub struct Analyzer {
     pub fa_dep_cache: Vec<FxHashMap<ObjId, Value>>,
     /// `dependencies=[…]` of apps / routers (also given at include_router)
     pub fa_app_deps: FxHashMap<ObjId, Vec<Value>>,
+    /// zip objects made with `strict=True`
+    pub zip_strict: FxHashSet<ObjId>,
     /// per module: global names a function body mutates (`mutated_in_functions`)
     pub mutated_globals: std::cell::RefCell<FxHashMap<u32, FxHashSet<String>>>,
     /// per summary being built: its row-check observations
@@ -967,6 +969,7 @@ impl Analyzer {
             fa_pending: Vec::new(),
             fa_dep_cache: Vec::new(),
             fa_app_deps: FxHashMap::default(),
+            zip_strict: FxHashSet::default(),
             mutated_globals: Default::default(),
             sum_obs: Vec::new(),
             sum_fact_obs: Vec::new(),
@@ -2189,10 +2192,22 @@ impl Analyzer {
     /// The literal a tuple object stands for: every position one known literal (nested
     /// tuples too).
     pub fn literal_tuple(&self, o: ObjId, state: &State, depth: u32) -> Option<KeyId> {
-        let n = self.obj(o).literal_len?;
         if depth > 4 {
             return None;
         }
+        // a (key, value) pair (zip / enumerate / items): a 2-tuple
+        if self.kind(o) == Kind::Pair {
+            let Payload::Pair(k, v) = &self.obj(o).payload else { return None };
+            let one = |x: &Value| -> Option<KeyId> {
+                match (x.pts.len(), &x.kv) {
+                    (0, KeyVal::Lit(k)) => Some(*k),
+                    (1, KeyVal::Bot) if matches!(self.kind(x.pts.first().unwrap()), Kind::Tuple | Kind::Pair) => self.literal_tuple(x.pts.first().unwrap(), state, depth + 1),
+                    _ => None,
+                }
+            };
+            return Some(intern::key_tuple(vec![one(k)?, one(v)?]));
+        }
+        let n = self.obj(o).literal_len?;
         let mut items = Vec::with_capacity(n);
         for i in 0..n {
             let v = state.slot(o, Ns::Pos, intern::key_int(i as i64));
@@ -2200,7 +2215,7 @@ impl Analyzer {
                 (0, KeyVal::Lit(k)) => *k,
                 (1, KeyVal::Bot) => {
                     let x = v.pts.first().unwrap();
-                    if self.kind(x) != Kind::Tuple {
+                    if !matches!(self.kind(x), Kind::Tuple | Kind::Pair) {
                         return None;
                     }
                     self.literal_tuple(x, state, depth + 1)?
@@ -2240,8 +2255,17 @@ impl Analyzer {
             // inside a summary the rows are relative to its entry: kept with the summary and
             // resolved per call
             if !self.sum_stack.is_empty() && !disabled("obs") {
+                // a tuple of literals is that literal (its positions are not kept with the summary)
+                let mut val = v.clone();
+                if val.kv.is_bot() {
+                    if let Some(o) = val.single().filter(|o| self.kind(*o) == Kind::Tuple) {
+                        if let Some(k) = self.literal_tuple(o, state, 0) {
+                            val = Value::lit(k);
+                        }
+                    }
+                }
                 if let Some(top) = self.sum_obs.last_mut() {
-                    top.push(crate::summary::Obs { file: file.clone(), line: ln, name, rows: obs_rows, must, value: v.clone() });
+                    top.push(crate::summary::Obs { file: file.clone(), line: ln, name, rows: obs_rows, must, value: val });
                 }
                 continue;
             }

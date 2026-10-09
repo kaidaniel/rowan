@@ -626,6 +626,20 @@ fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let is_max = c.qual.ends_with("max");
     // known items (or several arguments) whose keys are known literals: the first extreme one
     let cands: Option<Vec<Value>> = if c.args.len() == 1 { an.iterate(&c.args[0], &c.node, st).items } else { Some(c.args.clone()) };
+    if c.args.len() == 1 {
+        an.exhaust(&c.args[0], st);
+    }
+    let default = c.kw("default");
+    // a known-empty iterable: the default, else ValueError
+    if c.args.len() == 1 && matches!(&cands, Some(its) if its.is_empty()) && !c.args[0].pts.is_empty() {
+        return match default {
+            Some(d) => d,
+            None => {
+                an.raise_here("ValueError", st);
+                Value::new()
+            }
+        };
+    }
     if let Some(items) = cands.filter(|its| !its.is_empty() && its.len() <= crate::interp::UNROLL_MAX) {
         let keyf = c.kw("key").filter(|k| !k.pts.is_empty());
         let mut keys: Vec<Option<KeyId>> = Vec::new();
@@ -671,7 +685,11 @@ fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 an.call_value(&kf, &c.node, None, st, Some(vec![elem.clone()]));
             }
         }
-        return elem;
+        // any number of items: one of them, or the default when there are none
+        return match default {
+            Some(d) => elem.join(&d),
+            None => elem,
+        };
     }
     join_values(c.args.clone())
 }
@@ -703,7 +721,22 @@ fn m_zip(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let a = c.args.first().cloned().unwrap_or_default();
     let b = c.args.get(1).cloned().unwrap_or_default();
     let oid = an.alloc_at(Kind::Zip, &c.node, st, &format!("zip@L{}", c.line), Payload::Zip(a.clone(), b.clone()), None, Ns::Item, None, None);
-    an.obj_mut(oid).payload = Payload::Zip(a, b);
+    an.obj_mut(oid).payload = Payload::Zip(a.clone(), b.clone());
+    // `strict=True`: lengths that differ raise ValueError; otherwise both have the known one
+    let strict = c.kwargs.get(&intern::s("strict")).and_then(|v| v.kv.as_lit()) == Some(intern::key_bool(true));
+    if strict && !crate::interp::disabled("zipstrict") {
+        an.zip_strict.insert(oid);
+        let la = an.iterate(&a, &c.node, st).items.map(|x| x.len());
+        let lb = an.iterate(&b, &c.node, st).items.map(|x| x.len());
+        match (la, lb) {
+            (Some(x), Some(y)) if x != y => {
+                an.raise_here("ValueError", st);
+                return Value::new();
+            }
+            (Some(_), Some(_)) => {}
+            _ => an.may_raise_here("ValueError", st),
+        }
+    }
     Value::obj(oid)
 }
 
@@ -776,8 +809,10 @@ fn m_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         match c.args[1].kv.as_lit().and_then(intern::key_as_str) {
             Some(name) => an.store_attr(&c.args[0], &name, &c.args[2], &c.node, st),
             None => {
-                for o in an.record_objects(&c.args[0]) {
-                    an.store_key(o, Ns::Attr, &c.args[1].kv, &c.args[2], false, &c.node, st);
+                let recs = an.record_objects(&c.args[0]);
+                let strong = recs.len() == 1 && an.strongable(recs[0]) && !crate::interp::disabled("setattrstrong");
+                for o in recs {
+                    an.store_key(o, Ns::Attr, &c.args[1].kv, &c.args[2], strong, &c.node, st);
                 }
             }
         }
@@ -914,6 +949,14 @@ fn m_dc_fields(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn m_vars(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first() else { return Value::data("vars") };
+    // a parameter's vars(): the live view of its attributes (as `obj.__dict__`)
+    if c.qual == "builtins.vars" && !crate::interp::disabled("varsview") {
+        if let Some(p) = a.single().filter(|o| an.kind(*o) == Kind::Ph) {
+            let vid = an.alloc_raw(Kind::View, &format!("view:attrs:{}", p), "", true, "__dict__", Payload::View(ViewKind::Attrs, Value::obj(p)));
+            an.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(p));
+            return Value::obj(vid);
+        }
+    }
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("vars@L{}", c.line));
     if c.qual == "builtins.vars" {
         if let Some(inst) = a.single().filter(|o| an.kind(*o) == Kind::Instance) {
@@ -971,14 +1014,19 @@ fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 return Value::obj(oid);
             }
         }
+        // `map(f, a, b, …)`: f gets one item of each (as many as the shortest has)
+        let others: Vec<crate::interp::funcs::Iteration> = c.args.iter().skip(2).map(|a| an.iterate(a, &c.node, st)).collect();
         if !c.qual.ends_with("filter") && an.obj(oid).single {
-            if let Some(items) = &it.items {
+            let n_known = std::iter::once(it.items.as_ref().map(|x| x.len())).chain(others.iter().map(|o| o.items.as_ref().map(|x| x.len()))).collect::<Option<Vec<usize>>>().and_then(|v| v.into_iter().min());
+            if let (Some(items), Some(n)) = (&it.items, n_known) {
                 if items.len() <= crate::interp::UNROLL_MAX {
                     // known items: the function per item, positions kept
                     let mut outs = Vec::new();
-                    for (i, item) in items.iter().enumerate() {
+                    for (i, item) in items.iter().take(n).enumerate() {
                         an.frame_mut().unroll.push(i);
-                        let r = an.call_value(&c.args[0], &c.node, None, st, Some(vec![item.clone()]));
+                        let mut call_args = vec![item.clone()];
+                        call_args.extend(others.iter().map(|o| o.items.as_ref().unwrap()[i].clone()));
+                        let r = an.call_value(&c.args[0], &c.node, None, st, Some(call_args));
                         an.frame_mut().unroll.pop();
                         st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), r.clone(), true);
                         outs.push(r);
@@ -986,13 +1034,23 @@ fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     let res = join_values(outs);
                     st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(res.pts.clone(), crate::models::torch::elem_kv(&res.kv)), true);
                     st.elems.insert(oid, res.kv);
-                    an.obj_mut(oid).literal_len = Some(items.len());
+                    an.obj_mut(oid).literal_len = Some(n.min(items.len()));
                     return Value::obj(oid);
                 }
             }
         }
         let elem = it.elem.one_or_empty();
-        let res = if c.qual.ends_with("filter") { elem } else { an.call_value(&c.args[0], &c.node, None, st, Some(vec![elem])) };
+        let res = if c.qual.ends_with("filter") {
+            // the predicate still runs on the items (its reads are the program's)
+            if !c.args[0].pts.is_empty() {
+                an.call_value(&c.args[0], &c.node, None, st, Some(vec![elem.clone()]));
+            }
+            elem
+        } else {
+            let mut call_args = vec![elem];
+            call_args.extend(others.iter().map(|o| o.elem.one_or_empty()));
+            an.call_value(&c.args[0], &c.node, None, st, Some(call_args))
+        };
         st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(res.pts.clone(), crate::models::torch::elem_kv(&res.kv)), true);
         st.elems.insert(oid, res.kv);
     }
@@ -1069,6 +1127,60 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let classes: Option<Vec<u32>> = if a.pts.is_empty() { None } else { a.pts.iter().map(|o| if an.kind(o) == Kind::Instance { an.instance_class(o) } else { None }).collect() };
         if let Some(cs) = classes {
             return join_values(cs.into_iter().map(Value::obj).collect::<Vec<Value>>());
+        }
+        // builtin values: their builtin class (the object the builtin name is)
+        if !crate::interp::disabled("typebuiltin") {
+            let builtin = |an: &mut Analyzer, n: &str| -> Value { Value::obj(an.alloc_raw(Kind::External, &format!("ext:builtins.{}", n), "", true, n, Payload::Str(format!("builtins.{}", n)))) };
+            let mut outs: Vec<Value> = Vec::new();
+            let mut known = true;
+            for o in a.pts.iter() {
+                let n = match an.kind(o) {
+                    Kind::Dict if !crate::models::pandas::is_series_obj(an, o) => "dict",
+                    Kind::List => "list",
+                    Kind::Tuple => "tuple",
+                    Kind::Set => "set",
+                    Kind::Ph => {
+                        an.record_event("concrete", o);
+                        known = false;
+                        continue;
+                    }
+                    _ => {
+                        known = false;
+                        continue;
+                    }
+                };
+                outs.push(builtin(an, n));
+            }
+            match &a.kv {
+                KeyVal::Bot => {}
+                kv if kv.is_literal() => {
+                    for k in crate::domain::kv_literals(kv).iter() {
+                        let n = intern::with_key(k, |kk| match kk {
+                            intern::Key::Str(_) => "str",
+                            intern::Key::Int(_) => "int",
+                            intern::Key::Float(_) => "float",
+                            intern::Key::Bool(_) => "bool",
+                            intern::Key::None => "NoneType",
+                            intern::Key::Bytes(_) => "bytes",
+                            intern::Key::Tuple(_) => "tuple",
+                            _ => "",
+                        });
+                        if n.is_empty() {
+                            known = false;
+                        } else {
+                            outs.push(builtin(an, n));
+                        }
+                    }
+                }
+                KeyVal::Param(p) => {
+                    an.record_event("concrete", *p);
+                    known = false;
+                }
+                _ => known = false,
+            }
+            if known && !outs.is_empty() {
+                return join_values(outs);
+            }
         }
     }
     Value::data(&format!("type@L{}", c.line))
@@ -2822,6 +2934,7 @@ fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn m_sum(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(v) = c.args.first() else { return Value::data("sum") };
     let it = an.iterate(v, &c.node, st);
+    an.exhaust(v, st);
     // a sum of tensors: the elements' (broadcast) shape
     if an.torch_on {
         let e = it.elem.flat();
