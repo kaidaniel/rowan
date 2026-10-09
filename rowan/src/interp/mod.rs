@@ -1395,6 +1395,11 @@ impl Analyzer {
             }
             let mut star_args: Vec<Value> = Vec::new();
             let mut star_kwargs: Vec<Value> = Vec::new();
+            if self.torch_modules.contains(&fi.module) {
+                for (i, a) in params.iter().enumerate() {
+                    crate::shape::note_param(crate::shape::sym(oid, a.name.id.as_str()), i as u32);
+                }
+            }
             for a in params {
                 let is_vararg = fparams.vararg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);
                 let is_kwarg = fparams.kwarg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);

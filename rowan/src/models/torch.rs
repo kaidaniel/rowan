@@ -982,6 +982,10 @@ impl Analyzer {
 
     /// Attribute of a tensor (or of an unknown used as one); None: not ours.
     pub fn t_getattr(&mut self, obj: &Value, name: &str, node: &Node, st: &mut State) -> Option<Value> {
+        // `torch.finfo(dt).min` & co.: numbers
+        if obj.pts.is_empty() && matches!(&obj.kv, KeyVal::Data(l) if &*intern::str_get(*l) == sh::NUM_LABEL) {
+            return Some(num_value());
+        }
         // layer objects / return tuples
         if let Some(o) = obj.single() {
             if self.kind(o) == Kind::Dict && matches!(&self.obj(o).payload, Payload::Str(q) if q == "torch.nn.ModuleDict") && !matches!(name, "keys" | "values" | "items" | "get" | "update" | "pop" | "clear") {
@@ -1290,8 +1294,10 @@ impl Analyzer {
                 let hi_i = hi.as_ref().map(|v| self.t_int(v));
                 Some(vec![match (lo_i, hi_i) {
                     (None, None) => d,
+                    // a symbolic bound: `min` when it is surely not negative (a negative
+                    // one counts from the end)
                     (None, Some(None)) => match self.t_dim(hi.as_ref().unwrap(), st) {
-                        Some(t) if !sh::has_unknown(t) => sh::min(t, d),
+                        Some(t) if !sh::has_unknown(t) && sh::poly(t).iter().all(|(_, c)| *c > 0) => sh::min(t, d),
                         _ => sh::unknown(),
                     },
                     (None, Some(Some(h))) => {
@@ -2273,7 +2279,8 @@ impl Analyzer {
         match name {
             "outer" | "ger" => tensor_value(Shape::known(vec![da[0], db[0]])),
             "bmm" => {
-                if !self.t_require_eq(da[0], db[0], node, st, "bmm batch") {
+                let (x, y) = (da[0], db[0]);
+                if !self.t_require(Cons::Eq(x, y), node, st, move || format!("bmm: batch {} vs {}", sh::dim_text(x), sh::dim_text(y))) {
                     return Value::new();
                 }
                 if !self.t_require_eq(da[2], db[1], node, st, "bmm") {
@@ -2419,6 +2426,7 @@ impl Analyzer {
                 return self.t_tuple(vals, &node, st, None);
             }
             "broadcast_shapes" => return Value::data("size"),
+            "finfo" | "iinfo" => return num_value(),
             "manual_seed" | "set_grad_enabled" | "no_grad" | "inference_mode" | "enable_grad" | "device" | "save" | "set_default_dtype" | "is_tensor" | "numel_" | "compile" | "jit" => {
                 return Value::data(&format!("L{}", node.line));
             }
@@ -3138,7 +3146,7 @@ impl Analyzer {
         let Some((e, p)) = self.t_locate(s, -1, node, st, what) else { return Value::new() };
         let d = get_at(&e, p);
         let w = what.to_string();
-        if !self.t_require(Cons::Eq(d, i), node, st, move || format!("{} expects the last dim to be {}, got {}", w, sh::dim_text(i), sh::dim_text(d))) {
+        if !self.t_require(Cons::Eq(d, i), node, st, move || format!("{}({} -> {}) given last dim {}", w, sh::dim_text(i), sh::dim_text(out), sh::dim_text(d))) {
             return Value::new();
         }
         let e = sh::norm_shape(&e, &st.tf);
@@ -3194,7 +3202,11 @@ impl Analyzer {
         if let Some(ci) = cin {
             let got = get_at(&e, pc);
             let w = what.to_string();
-            if !self.t_require(Cons::Eq(got, ci), node, st, move || format!("{} expects {} input channels, got {}", w, sh::dim_text(ci), sh::dim_text(got))) {
+            let co = cout.unwrap_or_else(sh::unknown);
+            if !self.t_require(Cons::Eq(got, ci), node, st, move || {
+                let g = sh::dim_text(got);
+                format!("{}({} -> {}) given {} channel{}", w, sh::dim_text(ci), sh::dim_text(co), g, if g == "1" { "" } else { "s" })
+            }) {
                 return Value::new();
             }
         }
@@ -3362,8 +3374,22 @@ impl Analyzer {
             }
             Some(_) => Shape::known(vec![dl, h]),
             None => {
-                let batched = Shape::known(vec![dl, if bf { sh::dim_at(&e, -3).unwrap_or_else(sh::unknown) } else { sh::unknown() }, h]);
-                sh::join_shapes(&batched, &Shape::known(vec![dl, h]))
+                // 2 or 3 dims: [*R, T, I] (batch first) or [T, *R, I], R the batch (or nothing):
+                // h_n is [D*L, *R, H]
+                let r = if bf {
+                    let x = sh::expose(&e, 0, 2);
+                    let n = x.suffix.len();
+                    sh::merge_rest(&x.prefix, x.rest.as_ref().unwrap(), &x.suffix[..n - 2])
+                } else {
+                    match &e.rest {
+                        Some(Rest::Slice(sym, 0, back)) if e.prefix.is_empty() => Rest::Slice(*sym, 1, *back + e.suffix.len() as u32 - 1).clone(),
+                        _ => Rest::Any,
+                    }
+                };
+                match r {
+                    Rest::Any => sh::join_shapes(&Shape::known(vec![dl, sh::unknown(), h]), &Shape::known(vec![dl, h])),
+                    r => Shape { prefix: vec![dl], rest: Some(r), suffix: vec![h], assume: vec![] },
+                }
             }
         };
         let hn = tensor_value(hn_shape);

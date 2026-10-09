@@ -364,6 +364,22 @@ def shape_problem(spec: Dict[str, Any], got: Optional[Dict[str, Any]]) -> str:
         return "" if e is None else f"shape {shape_text(got)}, want not a tensor"
     if e is None:
         return f"not a tensor, want {spec['text']}"
+    if spec["rest"] == "_":
+        # any rest: the expected leading / trailing dims must be the engine's (its other known
+        # dims belong to the rest)
+        dims_all = e["prefix"] + e["suffix"] if e["rest"] is None else None
+        pre = e["prefix"] if dims_all is None else dims_all
+        suf = e["suffix"] if dims_all is None else dims_all
+        if len(pre) < len(spec["prefix"]) or len(suf) < len(spec["suffix"]) or (dims_all is not None and len(dims_all) < len(spec["prefix"]) + len(spec["suffix"])):
+            return f"shape {shape_text(got)}, want {spec['text']}"
+        pairs = list(zip(spec["prefix"], pre[:len(spec["prefix"])])) + list(zip(spec["suffix"], suf[len(suf) - len(spec["suffix"]):]))
+        for w, g in pairs:
+            if w != "_" and w != g:
+                return f"shape {shape_text(got)}, want {spec['text']} ({g} is not {w})"
+        got_assume = sorted(norm_constraint(a) for a in got.get("assume", []))
+        if got_assume != spec["assume"]:
+            return f"shape {shape_text(got)} assumes {got.get('assume', [])}, want {spec['assume'] or 'no assumptions'}"
+        return ""
     if (spec["rest"] is None) != (e["rest"] is None) or len(spec["prefix"]) != len(e["prefix"]) or len(spec["suffix"]) != len(e["suffix"]):
         return f"shape {shape_text(got)}, want {spec['text']}"
     for w, g in list(zip(spec["prefix"], e["prefix"])) + list(zip(spec["suffix"], e["suffix"])):

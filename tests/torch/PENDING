@@ -1,9 +1,4 @@
 # torch cases written but not yet expected to pass (paths relative to tests/torch/)
-models/m08_vit.py
-models/m11_lstm_tagger.py
 models/m12_seq2seq_attention.py
-models/m13_mlp_mixer.py
-models/m14_word2vec.py
 models/m15_pointnet.py
-models/m16_bert_embeddings.py
 models/m17_tcn.py

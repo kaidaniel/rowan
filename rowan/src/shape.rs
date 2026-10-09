@@ -159,6 +159,21 @@ pub fn sym(scope: u32, text: &str) -> Sym {
         id
     })
 }
+thread_local! {
+    static PARAM_ORDER: RefCell<FxHashMap<Sym, u32>> = RefCell::new(FxHashMap::default());
+}
+
+/// `s` is the `i`-th parameter of its function (orients facts between parameters' dims).
+pub fn note_param(s: Sym, i: u32) {
+    PARAM_ORDER.with(|m| {
+        m.borrow_mut().entry(s).or_insert(i);
+    });
+}
+
+pub fn param_order(s: Sym) -> Option<u32> {
+    PARAM_ORDER.with(|m| m.borrow().get(&s).copied())
+}
+
 pub fn sym_text(s: Sym) -> String {
     T.with(|t| t.borrow().syms[s.0 as usize].1.clone())
 }
@@ -395,6 +410,48 @@ pub fn floordiv(a: DimId, b: DimId) -> DimId {
     if let Some(q) = div_exact(a, b) {
         return q;
     }
+    // normal form (dims are non-negative ints): terms that are whole multiples of a positive
+    // monomial divisor leave the floor, (Y // k1) // k2 == Y // (k1*k2)
+    let pb = poly(b);
+    if let [(bm, bc)] = &pb[..] {
+        if *bc > 0 {
+            let mut out = lit(0);
+            let mut rest: Vec<(Mono, i64)> = Vec::new();
+            for (m, c) in poly(a) {
+                let single = poly_id(vec![(m.clone(), 1)]);
+                let qm = if bm.is_empty() { Some(single) } else { div_exact(single, poly_id(vec![(bm.clone(), 1)])) };
+                match qm {
+                    Some(q) if c % bc == 0 => out = add(out, scale(q, c / bc)),
+                    Some(_) if m.is_empty() => {
+                        out = add(out, lit(c.div_euclid(*bc)));
+                        let r = c.rem_euclid(*bc);
+                        if r != 0 {
+                            rest.push((m, r));
+                        }
+                    }
+                    _ => rest.push((m, c)),
+                }
+            }
+            let rest = poly_id(norm_poly(rest));
+            if as_lit(rest) == Some(0) {
+                return out;
+            }
+            if bm.is_empty() {
+                if let [(rm, 1)] = &poly(rest)[..] {
+                    if rm.len() == 1 && rm[0].1 == 1 {
+                        if let Atom::FloorDiv(y, k1) = atom_get(rm[0].0) {
+                            if let Some(k) = as_lit(k1) {
+                                return add(out, floordiv(y, lit(k * bc)));
+                            }
+                        }
+                    }
+                }
+            }
+            if as_lit(out) != Some(0) {
+                return add(out, of_atom(Atom::FloorDiv(rest, b)));
+            }
+        }
+    }
     of_atom(Atom::FloorDiv(a, b))
 }
 pub fn modulo(a: DimId, b: DimId) -> DimId {
@@ -626,8 +683,15 @@ pub fn learn_eq(f: &mut TFacts, a: DimId, b: DimId) {
         }
     };
     let (ra, rb) = (rank_of(a), rank_of(b));
-    // rewrite the "worse" side (higher rank; ties: the newer atom) if it is a single atom
-    let (from, to) = if ra > rb || (ra == rb && a > b) { (a, b) } else { (b, a) };
+    // two shape dims: the earlier parameter's wins (then the older atom)
+    let order = |d: DimId| -> (u32, DimId) {
+        match single(d).map(atom_get) {
+            Some(Atom::Dim(s, _)) => (param_order(s).unwrap_or(u32::MAX), d),
+            _ => (u32::MAX, d),
+        }
+    };
+    // rewrite the "worse" side (higher rank; ties: the later parameter / newer atom)
+    let (from, to) = if ra > rb || (ra == rb && order(a) > order(b)) { (a, b) } else { (b, a) };
     if let Some(at) = single(from) {
         if !mentions(to, at) {
             f.subst.insert(at, to);
