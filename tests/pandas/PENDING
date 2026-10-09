@@ -1,8 +1,5 @@
 # pandas cases written but not yet expected to pass (paths relative to tests/pandas/)
-small/p010_filter.py
-small/p011_select_dtypes.py
 small/p012_row_subsets.py
-small/p013_na_and_types.py
 small/p017_query.py
 small/p018_eval.py
 small/p020_reindex.py

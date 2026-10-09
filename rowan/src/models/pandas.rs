@@ -144,6 +144,77 @@ fn copy_meta(src: u32, dst: u32, state: &mut State) {
     }
 }
 
+// ------------------------------------------------------------- column dtypes (literal data)
+fn dtype_key(col: KeyId) -> KeyId {
+    intern::key_tuple(vec![key_str_lit("dtype"), col])
+}
+
+/// The dtype ("int", "float", "bool", "object") of a column made of these literals.
+fn dtype_of_lits(ks: &KeySet) -> Option<&'static str> {
+    let (mut i, mut f, mut b, mut st, mut none) = (false, false, false, false, false);
+    for k in ks.iter() {
+        intern::with_key(k, |kk| match kk {
+            intern::Key::Int(_) => i = true,
+            intern::Key::Float(_) => f = true,
+            intern::Key::Bool(_) => b = true,
+            intern::Key::Str(_) => st = true,
+            intern::Key::None => none = true,
+            _ => st = true,
+        });
+    }
+    Some(if st || (b && (i || f || none)) {
+        "object"
+    } else if b {
+        "bool"
+    } else if f || (i && none) {
+        "float"
+    } else if i {
+        "int"
+    } else {
+        // empty or all None
+        "object"
+    })
+}
+
+/// The dtype of a column holding `v` (a list / tuple of literals or one literal), if known.
+fn dtype_of_value(an: &Analyzer, st: &State, v: &Value) -> Option<&'static str> {
+    if v.pts.is_empty() {
+        return if v.kv.is_literal() { dtype_of_lits(&kv_literals(&v.kv)) } else { None };
+    }
+    let o = v.single()?;
+    if !matches!(an.kind(o), Kind::List | Kind::Tuple) {
+        return None;
+    }
+    if an.obj(o).literal_len == Some(0) {
+        return Some("object");
+    }
+    match st.elems.get(&o) {
+        Some(kv) if kv.is_literal() => dtype_of_lits(&kv_literals(&kv)),
+        _ => None,
+    }
+}
+
+fn set_dtype(st: &mut State, f: u32, col: KeyId, d: Option<&'static str>, strong: bool) {
+    let v = match d {
+        Some(d) => Value::lit(key_str_lit(d)),
+        None => Value::data("dtype"),
+    };
+    st.set_slot(f, Ns::Meta, dtype_key(col), v, strong);
+}
+
+fn dtype(st: &State, f: u32, col: KeyId) -> Option<String> {
+    st.slot_opt(f, Ns::Meta, dtype_key(col)).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_str).map(|s| s.to_string())
+}
+
+/// Row subsets and projections keep each column's dtype.
+fn copy_dtypes(st: &mut State, src: u32, dst: u32, cols: &KeySet) {
+    for c in cols.iter() {
+        if let Some(v) = st.slot_opt(src, Ns::Meta, dtype_key(c)) {
+            st.set_slot(dst, Ns::Meta, dtype_key(c), v, true);
+        }
+    }
+}
+
 fn new_frame(an: &mut Analyzer, st: &mut State, c: &Call, row: Row, label: Option<&str>, src: Option<u32>) -> Value {
     let label = label.map(|l| l.to_string()).unwrap_or_else(|| format!("frame@L{}", c.line));
     let nid = an.alloc_at(Kind::Frame, &c.node, st, &label, Payload::None, Some(row), Ns::Item, None, None);
@@ -439,10 +510,18 @@ fn pd_dataframe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             _ => return open(an, st),
         }
     }
-    match row {
+    let v = match row {
         Some(r) => finish(an, st, r),
-        None => open(an, st),
+        None => return open(an, st),
+    };
+    // a dict of columns: each column's dtype from its literal values
+    if let (Some(nid), Some(d)) = (v.single(), data.single().filter(|d| an.kind(*d) == Kind::Dict && !index_orient)) {
+        for k in st.row(d, Ns::Item).present.iter() {
+            let dt = dtype_of_value(an, st, &st.slot(d, Ns::Item, k));
+            set_dtype(st, nid, k, dt, true);
+        }
     }
+    v
 }
 
 fn open_frame_call(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -493,12 +572,43 @@ fn concat(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     new_frame(an, st, c, row, None, None)
 }
 
-fn require_cols(an: &mut Analyzer, st: &mut State, c: &Call, fs: &[u32], keys: &KeySet) {
+/// The op reads these columns of each frame (raising for a missing one): verdicts, and the
+/// frames the program can go on with (those not surely lacking one; all when none is left).
+fn require_cols(an: &mut Analyzer, st: &mut State, c: &Call, fs: &[u32], keys: &KeySet) -> Vec<u32> {
     let guarded = an.is_guarded(Ns::Item);
+    let mut alive = Vec::new();
+    let unsure = fs.iter().any(|f| keys.iter().any(|k| !matches!(classify(&st.row(*f, Ns::Item), k).tier, Tier::Proven | Tier::Likely)));
     for f in fs {
+        let dead = keys.iter().any(|k| classify(&st.row(*f, Ns::Item), k).tier == Tier::Missing);
         for k in intern::sorted_by_str(keys.iter()) {
             frame_getitem(an, *f, &Value::lit(k), &c.node, st, guarded);
         }
+        if !dead {
+            alive.push(*f);
+        }
+    }
+    if !guarded {
+        // (outside a try the analysis goes on past a failing access, as for dicts)
+        return fs.to_vec();
+    }
+    if alive.is_empty() {
+        if !fs.is_empty() && !keys.is_empty() {
+            an.raise_here("KeyError", st);
+        }
+        fs.to_vec()
+    } else {
+        if unsure {
+            an.may_raise_here("KeyError", st);
+        }
+        alive
+    }
+}
+
+fn rows_of(st: &State, fs: &[u32]) -> Row {
+    if fs.is_empty() {
+        Row::top()
+    } else {
+        join_rows(fs.iter().map(|f| st.row(*f, Ns::Item)))
     }
 }
 
@@ -514,15 +624,16 @@ fn merge_impl(an: &mut Analyzer, st: &mut State, c: &Call, left: Value, right: V
     let on_keys = on.as_ref().and_then(|o| an.lit_keys(o, st));
     let lkeys = left_on.as_ref().and_then(|o| an.lit_keys(o, st));
     let rkeys = right_on.as_ref().and_then(|o| an.lit_keys(o, st));
+    let (mut lf, mut rf) = (lf, rf);
     if let Some(ok) = &on_keys {
-        require_cols(an, st, c, &lf, ok);
-        require_cols(an, st, c, &rf, ok);
+        lf = require_cols(an, st, c, &lf, ok);
+        rf = require_cols(an, st, c, &rf, ok);
     }
     if let Some(lk) = &lkeys {
-        require_cols(an, st, c, &lf, lk);
+        lf = require_cols(an, st, c, &lf, lk);
     }
     if let Some(rk) = &rkeys {
-        require_cols(an, st, c, &rf, rk);
+        rf = require_cols(an, st, c, &rf, rk);
     }
     let lrow = if lf.is_empty() { Row::top() } else { join_rows(lf.iter().map(|f| st.row(*f, Ns::Item))) };
     let rrow = if rf.is_empty() { Row::top() } else { join_rows(rf.iter().map(|f| st.row(*f, Ns::Item))) };
@@ -593,9 +704,10 @@ fn df_join(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let rf = frames(an, Some(&other));
     let on = c.kw("on");
     let on_keys = on.as_ref().and_then(|o| an.lit_keys(o, st));
-    if let Some(ok) = &on_keys {
-        require_cols(an, st, c, &lf, ok);
-    }
+    let lf = match &on_keys {
+        Some(ok) => require_cols(an, st, c, &lf, ok),
+        None => lf,
+    };
     let lrow = if lf.is_empty() { Row::top() } else { join_rows(lf.iter().map(|f| st.row(*f, Ns::Item))) };
     let rrow = if rf.is_empty() { Row::top() } else { join_rows(rf.iter().map(|f| st.row(*f, Ns::Item))) };
     let lsuf = c.kw("lsuffix").and_then(|v| v.kv.as_lit()).map(intern::key_py_str).unwrap_or_default();
@@ -721,10 +833,8 @@ fn df_drop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.clone(), mutators: row.mutators.clone(), ..Default::default() });
         return new_frame(an, st, c, r, None, None);
     };
-    if !ignore {
-        require_cols(an, st, c, &fs, &ks);
-    }
-    let mut row = recv_row(an, st, c);
+    let fs = if ignore { fs } else { require_cols(an, st, c, &fs, &ks) };
+    let mut row = rows_of(st, &fs);
     for k in ks.iter() {
         row = row.delete(k, true);
     }
@@ -774,8 +884,8 @@ fn set_index(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.clone(), mutators: row.mutators.clone(), ..Default::default() });
         return new_frame(an, st, c, r, None, None);
     };
-    require_cols(an, st, c, &fs, &ks);
-    let mut row = recv_row(an, st, c);
+    let fs = require_cols(an, st, c, &fs, &ks);
+    let mut row = rows_of(st, &fs);
     if !keep {
         for k in ks.iter() {
             row = row.delete(k, true);
@@ -791,9 +901,10 @@ fn groupby(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let fs = frames(an, c.recv.as_ref());
     let by = c.arg(0, Some("by"));
     let ks = by.as_ref().and_then(|b| an.lit_keys(b, st));
-    if let Some(k) = &ks {
-        require_cols(an, st, c, &fs, k);
-    }
+    let fs = match &ks {
+        Some(k) => require_cols(an, st, c, &fs, k),
+        None => fs,
+    };
     let ai = !key_is_bool(&c.kw("as_index"), false);
     let payload = Payload::Groupby(fs.clone(), ks, ai, None);
     let gid = an.alloc_at(Kind::Groupby, &c.node, st, &format!("groupby@L{}", c.line), payload.clone(), None, Ns::Item, None, None);
@@ -807,7 +918,7 @@ pub fn groupby_select(an: &mut Analyzer, gid: u32, key: &Value, node: &Node, sta
     let cols = cols.filter(|c| !c.is_empty());
     if let Some(cs) = &cols {
         let call = Call { qual: "groupby.select".into(), recv: None, args: vec![], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
-        require_cols(an, state, &call, &fs, cs);
+        let _ = require_cols(an, state, &call, &fs, cs);
     }
     let sel = cols.map(|cs| (cs, matches!(key.kv, KeyVal::Lit(_)) && key.pts.is_empty()));
     let payload = Payload::Groupby(fs, ks, ai, sel);
@@ -847,7 +958,7 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     }
                 }
             }
-            require_cols(an, st, c, &fs, &KeySet::from_vec(named));
+            let _ = require_cols(an, st, c, &fs, &KeySet::from_vec(named));
             let mut row = Row::new();
             for k in c.kwargs.keys() {
                 row = row.store(intern::key(intern::Key::Str(intern::str_get(*k))), true);
@@ -870,7 +981,7 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         row = row.store(k, r.definite.contains(k));
                     }
                 }
-                require_cols(an, st, c, &fs, &row.present.clone());
+                let _ = require_cols(an, st, c, &fs, &row.present.clone());
                 if !ai {
                     for k in keys.iter() {
                         row = row.store(k, true);
@@ -1093,7 +1204,7 @@ fn melt(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let call = Call { qual: "melt".into(), recv: None, args: vec![], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: c.node, call_ast: None, site: c.site.clone(), line: c.line };
         return open_frame_call(an, st, &call);
     };
-    require_cols(an, st, c, &fs, &ids);
+    let _ = require_cols(an, st, c, &fs, &ids);
     let vn = lit_key(&c.kw("var_name")).unwrap_or_else(|| key_str_lit("variable"));
     let vln = lit_key(&c.kw("value_name")).unwrap_or_else(|| key_str_lit("value"));
     let ks = ids.insert(vn).insert(vln);
@@ -1104,7 +1215,9 @@ fn explode(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let fs = frames(an, c.recv.as_ref());
     if let Some(col) = c.arg(0, Some("column")) {
         if let Some(ks) = an.lit_keys(&col, st) {
-            require_cols(an, st, c, &fs, &ks);
+            let fs = require_cols(an, st, c, &fs, &ks);
+            let row = rows_of(st, &fs);
+            return new_frame(an, st, c, row, None, None);
         }
     }
     let row = recv_row(an, st, c);
@@ -1114,11 +1227,56 @@ fn explode(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn df_filter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let items = c.kw("items").or_else(|| c.arg(0, None));
     let row = recv_row(an, st, c);
+    let fs = frames(an, c.recv.as_ref());
+    if axis_is_index(&c.kw("axis")) {
+        return new_frame(an, st, c, row, None, fs.first().copied());
+    }
     if let Some(items) = items {
         if let Some(ks) = an.lit_keys(&items, st) {
-            let p = if row.closed() { ks.intersection(&row.present) } else { ks };
-            return new_frame(an, st, c, row.project(&p), None, None);
+            // listed columns the frame lacks are skipped silently
+            let mut d = Row::closed_with(ks.clone()).data();
+            for k in ks.iter() {
+                if row.closed() && !row.present.contains(k) {
+                    d.present = d.present.remove(k);
+                }
+                if !row.definite.contains(k) {
+                    d.definite = d.definite.remove(k);
+                    d.likely = d.likely.remove(k);
+                }
+            }
+            if let Some(seq) = lit_key_seq(an, st, &items) {
+                d.order = seq.iter().copied().filter(|k| d.present.contains(*k)).collect::<Vec<_>>().into();
+            }
+            return new_frame(an, st, c, Row::from_data(d), None, None);
         }
+    }
+    // like= / regex=: the columns whose names match
+    let test: Option<Box<dyn Fn(&str) -> bool>> = if let Some(l) = lit_key(&c.kw("like")).and_then(intern::key_as_str) {
+        let l = l.to_string();
+        Some(Box::new(move |name: &str| name.contains(&l)))
+    } else if let Some(r) = lit_key(&c.kw("regex")).and_then(intern::key_as_str).and_then(|p| super::minire::Regex::new(&p)) {
+        Some(Box::new(move |name: &str| r.search(name)))
+    } else {
+        None
+    };
+    if let Some(t) = test {
+        let mut d = row.data();
+        for k in row.present.iter() {
+            if !t(&intern::key_py_str(k)) {
+                d.present = d.present.remove(k);
+                d.definite = d.definite.remove(k);
+                d.likely = d.likely.remove(k);
+                d.absent = d.absent.insert(k);
+            }
+        }
+        d.terms = Default::default();
+        d.dterms = Default::default();
+        d.lterms = Default::default();
+        if row.open() {
+            // a matching column the input may have is not known: open, nothing new definite
+            d.sources = row.sources.insert((Source::new(&format!("filter@L{}", c.line), SourceKind::Call), EMPTY_LENS));
+        }
+        return new_frame(an, st, c, Row::from_data(d), None, None);
     }
     let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.insert((Source::new(&format!("filter@L{}", c.line), SourceKind::Call), EMPTY_LENS)), mutators: row.mutators.clone(), ..Default::default() });
     new_frame(an, st, c, r, None, None)
@@ -1137,22 +1295,93 @@ fn reindex(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     new_frame(an, st, c, row, None, None)
 }
 
+/// Does a dtype match a `select_dtypes` spec ("number", "int64", "float", "bool", "object", …)?
+fn dtype_matches(dt: &str, spec: &str) -> Option<bool> {
+    Some(match spec {
+        "number" | "numeric" => matches!(dt, "int" | "float"),
+        "int" | "int64" | "integer" | "signedinteger" => dt == "int",
+        "float" | "float64" | "floating" => dt == "float",
+        "bool" | "boolean" => dt == "bool",
+        "object" | "O" => dt == "object",
+        "datetime" | "datetime64" | "datetime64[ns]" | "category" | "timedelta" => false,
+        _ => return None,
+    })
+}
+
+fn dtype_specs(an: &mut Analyzer, st: &State, v: &Option<Value>) -> Option<Vec<String>> {
+    let v = v.as_ref()?;
+    let ks = an.lit_keys(v, st)?;
+    ks.iter().map(|k| intern::key_as_str(k).map(|s| s.to_string())).collect()
+}
+
 fn select_dtypes(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let fs = frames(an, c.recv.as_ref());
     let row = recv_row(an, st, c);
-    let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.clone(), mutators: row.mutators.clone(), ..Default::default() });
-    new_frame(an, st, c, r, None, None)
+    let inc = c.kw("include").or_else(|| c.arg(0, None));
+    let exc = c.kw("exclude").or_else(|| c.arg(1, None));
+    let inc_s = if inc.is_some() { dtype_specs(an, st, &inc) } else { Some(vec![]) };
+    let exc_s = if exc.is_some() { dtype_specs(an, st, &exc) } else { Some(vec![]) };
+    let weak = || Row::from_data(RowData { present: row.present.clone(), sources: row.sources.clone(), mutators: row.mutators.clone(), top: row.top, ..Default::default() });
+    let (Some(inc_s), Some(exc_s), Some(&f)) = (inc_s, exc_s, fs.first().filter(|_| fs.len() == 1)) else {
+        return new_frame(an, st, c, weak(), None, None);
+    };
+    // per column: Some(true) kept, Some(false) dropped, None unknown
+    let decide = |dt: &str| -> Option<bool> {
+        let mut keep = if inc_s.is_empty() { true } else { false };
+        for sp in &inc_s {
+            if dtype_matches(dt, sp)? {
+                keep = true;
+            }
+        }
+        for sp in &exc_s {
+            if dtype_matches(dt, sp)? {
+                keep = false;
+            }
+        }
+        Some(keep)
+    };
+    let mut d = row.data();
+    for k in row.present.iter() {
+        match dtype(st, f, k).and_then(|dt| decide(&dt)) {
+            Some(true) => {}
+            Some(false) => {
+                d.present = d.present.remove(k);
+                d.definite = d.definite.remove(k);
+                d.likely = d.likely.remove(k);
+                d.absent = d.absent.insert(k);
+            }
+            None => {
+                d.definite = d.definite.remove(k);
+                d.likely = d.likely.remove(k);
+            }
+        }
+    }
+    d.terms = Default::default();
+    d.dterms = Default::default();
+    d.lterms = Default::default();
+    let present = d.present.clone();
+    let v = new_frame(an, st, c, Row::from_data(d), None, None);
+    if let Some(nid) = v.single() {
+        copy_dtypes(st, f, nid, &present);
+    }
+    v
 }
 
 fn sort_values(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let fs = frames(an, c.recv.as_ref());
     let by = c.kw("by").or_else(|| if c.qual.ends_with("nlargest") || c.qual.ends_with("nsmallest") { c.arg(1, Some("columns")) } else { c.arg(0, None) });
+    let mut fs = fs;
     if let Some(by) = by {
         if let Some(ks) = an.lit_keys(&by, st) {
-            require_cols(an, st, c, &fs, &ks);
+            fs = require_cols(an, st, c, &fs, &ks);
         }
     }
-    let row = recv_row(an, st, c);
-    new_frame(an, st, c, row, None, fs.first().copied())
+    let row = rows_of(st, &fs);
+    let v = new_frame(an, st, c, row.clone(), None, fs.first().copied());
+    if let (Some(nid), [f]) = (v.single(), fs.as_slice()) {
+        copy_dtypes(st, *f, nid, &row.present);
+    }
+    v
 }
 
 fn transform(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -1200,8 +1429,19 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if SERIES_RESULT_OPS.contains(&name.as_str()) {
         return series(an);
     }
+    if name == "dropna" && axis_is_columns(&c.kw("axis")) {
+        // the columns holding a NaN go: which ones depends on the data
+        let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.clone(), mutators: row.mutators.clone(), top: row.top, ..Default::default() });
+        return new_frame(an, st, c, r, None, None);
+    }
     if COPY_FRAME_OPS.contains(&name.as_str()) {
-        return new_frame(an, st, c, row, None, fs.first().copied());
+        let v = new_frame(an, st, c, row.clone(), None, fs.first().copied());
+        if matches!(name.as_str(), "copy" | "head" | "tail" | "sample" | "sort_index" | "drop_duplicates" | "dropna" | "query" | "take" | "truncate") {
+            if let (Some(nid), [f]) = (v.single(), fs.as_slice()) {
+                copy_dtypes(st, *f, nid, &row.present);
+            }
+        }
+        return v;
     }
     if OPEN_FRAME_OPS.contains(&name.as_str()) {
         return match fs.first() {
@@ -1212,10 +1452,8 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if name == "get" {
         if let Some(a) = c.args.first() {
             if a.kv.as_lit().is_some() {
-                return match fs.first() {
-                    Some(f) => frame_getitem(an, *f, a, &c.node, st, true),
-                    None => Value::new(),
-                };
+                let _ = fs;
+                return Value::data(&format!("get@L{}", c.line)).join(&an.none_v.clone());
             }
         }
         return series(an);
@@ -1324,6 +1562,11 @@ pub fn frame_setattr(an: &mut Analyzer, oid: u32, name: &str, v: &Value, node: &
 }
 
 pub fn frame_getitem(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, state: &mut State, guarded: bool) -> Value {
+    frame_getitem_n(an, oid, key, node, state, guarded, true)
+}
+
+/// `narrow`: a failing access raises here (false for loads that never fail).
+pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, state: &mut State, guarded: bool, narrow: bool) -> Value {
     let row = state.row(oid, Ns::Item);
     let site = an.access_site(node);
     if let (Some(k), true) = (key.kv.as_lit(), key.pts.is_empty()) {
@@ -1336,9 +1579,10 @@ pub fn frame_getitem(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, stat
             if cls.tier == Tier::Input {
                 an.require_providers(&cls, &row, &site, true, state);
             }
-            if cls.tier != Tier::Missing && an.obj(oid).single {
-                state.set_row(oid, Ns::Item, row.narrow_in(k, true));
-            }
+        }
+        // the program went on: the column was there (also under a try that handles the miss)
+        if narrow && cls.tier != Tier::Missing && an.obj(oid).single {
+            state.set_row(oid, Ns::Item, row.narrow_in(k, true));
         }
         return series(an);
     }
@@ -1352,7 +1596,7 @@ pub fn frame_getitem(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, stat
     if let Some(ks) = ks {
         if !key.pts.is_empty() || matches!(key.kv, KeyVal::Lits(_)) {
             for k in intern::sorted_by_str(ks.iter()) {
-                frame_getitem(an, oid, &Value::lit(k), node, state, guarded);
+                frame_getitem_n(an, oid, &Value::lit(k), node, state, guarded, narrow);
             }
             let r = match lit_key_seq(an, state, key) {
                 Some(seq) => closed_ordered(&seq),
@@ -1380,11 +1624,13 @@ pub fn frame_getitem(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, stat
     series(an)
 }
 
-pub fn frame_setitem(an: &mut Analyzer, oid: u32, key: &Value, _v: &Value, node: &Node, state: &mut State, strong: bool) {
+pub fn frame_setitem(an: &mut Analyzer, oid: u32, key: &Value, v: &Value, node: &Node, state: &mut State, strong: bool) {
     let row = state.row(oid, Ns::Item);
     let ks = if !key.pts.is_empty() { an.lit_keys(key, state) } else { None };
     if let (Some(k), true) = (key.kv.as_lit(), key.pts.is_empty()) {
         state.set_row(oid, Ns::Item, row.store(k, strong));
+        let dt = dtype_of_value(an, state, v);
+        set_dtype(state, oid, k, dt, strong);
         return;
     }
     let ks2 = match (&ks, &key.kv) {

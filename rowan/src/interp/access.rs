@@ -109,6 +109,12 @@ impl Analyzer {
         let try_guard = report && self.is_guarded(ns);
         let single_target = obj.pts.len() == 1;
         let line_data = Value::data(&format!("L{}", node.line));
+        // a frame column read raises KeyError when the column is missing
+        let frame_tiers: Option<Vec<Tier>> = if try_guard && ns == Ns::Item && !obj.pts.is_empty() && obj.pts.iter().all(|o| self.kind(o) == Kind::Frame) {
+            key.kv.as_lit().filter(|_| key.pts.is_empty()).map(|k| obj.pts.iter().map(|o| crate::domain::classify(&state.row(o, ns), k).tier).collect())
+        } else {
+            None
+        };
         for oid in obj.pts.iter() {
             let kind = self.kind(oid);
             // a Counter reads a missing key as 0 without inserting it: the row is put back
@@ -270,7 +276,7 @@ impl Analyzer {
                 }
                 Kind::Series => acc = acc.join(&Value::with_kv(ObjSet::one(self.series), DATA)),
                 Kind::Frame if ns == Ns::Item => {
-                    let v = crate::models::pandas::frame_getitem(self, oid, key, node, state, guarded);
+                    let v = crate::models::pandas::frame_getitem_n(self, oid, key, node, state, guarded, report);
                     acc = acc.join(&v);
                 }
                 k if k.is_record() => {
@@ -297,6 +303,13 @@ impl Analyzer {
         }
         if obj.pts.is_empty() {
             acc = line_data;
+        }
+        if let Some(ts) = frame_tiers {
+            if ts.iter().all(|t| *t == Tier::Missing) {
+                self.raise_here("KeyError", state);
+            } else if ts.iter().any(|t| !matches!(t, Tier::Proven | Tier::Likely)) {
+                self.may_raise_here("KeyError", state);
+            }
         }
         acc
     }

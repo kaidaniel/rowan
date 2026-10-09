@@ -2,6 +2,7 @@
 //! `fn(&mut Analyzer, &mut State, &Call) -> Value`; models are keyed by qualified name with
 //! prefix fallbacks.
 
+pub mod minire;
 pub mod pandas;
 pub mod torch;
 
