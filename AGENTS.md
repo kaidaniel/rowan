@@ -238,29 +238,44 @@ harness on row-check failures). Facts record the rendered text at recording time
    known; depth and width limits with a cycle guard. Non-record names get their value too
    (`x: 1`). Done in the engine (`Analyzer::render_value` at fact-recording time, `--facts`
    gains `text`, the text report's module-level records use it) and in the extension.
-2. **Cross-module analysis, verified and documented.** Local imports (the directory of the
-   analysed file and `--search-path`s) are followed today; site-packages are not (pandas and
-   friends are modelled, not analysed: C extensions, size). Add a multi-file golden package
-   that imports across three modules and check that summaries, classes and module dicts flow.
-3. **A ~2,000-line example as a package of several modules**, specified by hand first (as
-   `h`/`i`/`j`), exercising step 2; fix what it uncovers.
-4. **Incremental analysis.** Cache per module: parsed AST + module-level facts + the
-   summaries of its functions, keyed by the file's content hash and the hashes of the modules
-   it imports; reuse when unchanged. Then a server mode (`rowan serve`, JSON lines over stdio:
-   `analyse {path}`, `changed [{path}]`, `facts {path}`) that keeps the caches warm and
-   re-analyses only changed files and their dependents; the extension talks to it instead of
-   spawning the CLI per save.
-5. **More examples** (as time allows), each specified before running.
+2. **Cross-module analysis, verified and documented.** Imports are followed today only as
+   flat `name.py` modules in the analysed file's directory (`import_module` in
+   `interp/stmts.rs`; `main.rs` passes just that directory): no `package/__init__.py`, no
+   relative imports, no search-path flag, no site-packages. A multi-file golden package
+   (`k94_pkg`, flat siblings) checks that summaries, classes and module dicts flow.
+3. **Finish `sigsum`** (summary specialisation by the classes of the receiver and of
+   instance-bound parameters, `ROWAN_ON=sigsum`): it closes the `j93`/`k94` dispatch gap and
+   is also what makes a cached library summary reusable across callers (a summary that has to
+   decide something about its arguments is tabulated at the call site today, charged to the
+   caller; a signature-keyed summary is the cacheable unit). Regressions to fix first:
+   `h67`, `h68`, `i77`, `i83` (a self placeholder typed with the *subclass* changes
+   `super()` chains and the symreq class guards).
+4. **Real packages.** Resolve `package/__init__.py`, `package.sub`, and relative imports
+   (`from . import x`, `from ..a import b`); add `--search-path DIR` (repeatable). Golden:
+   a package with `__init__.py` re-exports and relative imports.
+5. **A ~2,000-line example as a package of several modules**, specified by hand first (as
+   `h`/`i`/`j`), exercising steps 3–4; fix what it uncovers.
+6. **Incremental analysis.** Cache per module: parsed AST + module-level facts + the
+   summaries of its functions (signature-keyed after step 3), keyed by the file's content
+   hash and the hashes of the modules it imports; reuse when unchanged. Then a server mode
+   (`rowan serve`, JSON lines over stdio: `analyse {path}`, `changed [{path}]`,
+   `facts {path}`) that keeps the caches warm and re-analyses only changed files and their
+   dependents; the extension talks to it instead of spawning the CLI per save.
+7. **Site-packages, allowlisted.** With the cache in place, follow installed pure-Python
+   packages (`--follow PKG`, or a config list; a registered model always wins): a library
+   then costs once per version. Not pandas / numpy: their column names live in `Index`
+   objects over numpy object arrays behind C extensions (pandas 3.0.6 is 636k lines of
+   Python plus 45 `.so` modules), so following the source yields "open" where the model
+   yields the columns, and the one precision measurement on large dispatch-heavy code (the
+   old 3.4k-line interpreter: 961 false positives) says the joins would swamp the result.
+   Note on cost: it is not modules × per-module time — call sites that must decide
+   something about their arguments tabulate the callee in the caller's budget, and time
+   grows with call-graph depth, not lines (830 lines 0.08 s, 1.2k lines 1.5 s, 3.4k
+   self-referential lines 69 s); a budget hit costs precision, not time.
+8. **More examples** (as time allows), each specified before running.
 
-Status: step 1 done (commit `ea08dab`). Step 2 done as `tests/cases/k94_pkg` (three modules,
-`k94_modules.py` the entry; 10 of 19 checks pass, the rest are `#@todo` with the `j93`
-cause). The experimental fix for that cause is in the tree behind `ROWAN_ON=sigsum`:
-`summarise_sig` keys summaries by the classes of the receiver and of parameters bound to
-instances of one class (`SummaryKey` gained that signature, `MAX_SIGNATURES = 8` per
-function) and gives the placeholders those classes. As implemented it regresses `h67`,
-`h68`, `i77`, `i83` (a self placeholder typed with the *subclass* changes `super()` chains
-and the symreq class guards) — finish it before step 3, since a 2,000-line program would
-mostly re-document this gap.
+Status: steps 1–2 done (commits `ea08dab`, `639ca1a`, `ecd773b`; `k94_pkg` passes 10 of 19
+checks, the rest are `#@todo` with the `j93` cause that step 3 addresses).
 
 Open engine items carried over: precision on self-referential programs (`register`-closure
 pattern, dispatch over `self.objects` tables), the spec §15.4 runtime oracle on real
