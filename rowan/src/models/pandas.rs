@@ -12,19 +12,21 @@ use crate::state::{Kind, State};
 use super::{noeffect, Model};
 
 pub const DF_METHODS: &[&str] = &[
-    "merge", "join", "rename", "drop", "assign", "copy", "head", "tail", "sample", "sort_values", "sort_index", "drop_duplicates", "fillna",
-    "dropna", "astype", "reset_index", "set_index", "groupby", "apply", "applymap", "map", "pipe", "iterrows", "itertuples", "to_dict", "to_csv",
-    "to_parquet", "to_excel", "to_json", "to_sql", "to_numpy", "to_records", "to_string", "to_html", "to_markdown", "query", "eval", "where",
-    "mask", "pivot", "pivot_table", "melt", "stack", "unstack", "transpose", "explode", "describe", "corr", "cov", "agg", "aggregate", "filter",
-    "select_dtypes", "insert", "pop", "nlargest", "nsmallest", "isna", "isnull", "notna", "notnull", "round", "abs", "clip", "replace", "shift",
-    "diff", "cumsum", "cumprod", "cummax", "cummin", "rank", "pct_change", "rolling", "expanding", "ewm", "resample", "mean", "sum", "min", "max",
-    "count", "median", "std", "var", "nunique", "idxmax", "idxmin", "any", "all", "value_counts", "memory_usage", "info", "equals", "eq", "ne",
-    "lt", "le", "gt", "ge", "add", "sub", "mul", "div", "truediv", "floordiv", "mod", "pow", "dot", "squeeze", "transform", "reindex",
-    "reindex_like", "set_axis", "add_prefix", "add_suffix", "align", "combine_first", "update", "interpolate", "bfill", "ffill", "pad", "backfill",
-    "convert_dtypes", "infer_objects", "iloc", "loc", "at", "iat", "xs", "get", "items", "keys", "lookup", "first", "last", "nth", "take",
-    "truncate", "between_time", "at_time", "asfreq", "tz_localize", "tz_convert", "plot", "hist", "boxplot", "style", "compare", "duplicated",
-    "isin", "swaplevel", "droplevel", "reorder_levels", "sort", "sem", "skew", "kurt", "prod", "quantile", "mode", "cumcount", "ngroup",
-    "corrwith", "to_period", "to_timestamp", "columns", "index", "shape", "values", "dtypes", "T", "empty", "size", "ndim", "axes",
+    "abs", "add", "add_prefix", "add_suffix", "agg", "aggregate", "align", "all", "any", "apply", "applymap", "asfreq", "asof", "assign", "astype",
+    "at_time", "backfill", "between_time", "bfill", "bool", "boxplot", "clip", "combine", "combine_first", "compare", "convert_dtypes", "copy",
+    "corr", "corrwith", "count", "cov", "cummax", "cummin", "cumprod", "cumsum", "describe", "diff", "div", "divide", "dot", "drop",
+    "drop_duplicates", "droplevel", "dropna", "duplicated", "eq", "equals", "eval", "ewm", "expanding", "explode", "ffill", "fillna", "filter",
+    "first", "first_valid_index", "floordiv", "from_dict", "from_records", "ge", "get", "groupby", "gt", "head", "hist", "idxmax", "idxmin",
+    "infer_objects", "info", "insert", "interpolate", "isetitem", "isin", "isna", "isnull", "items", "iteritems", "iterrows", "itertuples", "join",
+    "keys", "kurt", "kurtosis", "last", "last_valid_index", "le", "lookup", "lt", "map", "mask", "max", "mean", "median", "melt", "memory_usage",
+    "merge", "min", "mod", "mode", "mul", "multiply", "ne", "nlargest", "notna", "notnull", "nsmallest", "nth", "nunique", "pad", "pct_change",
+    "pipe", "pivot", "pivot_table", "plot", "pop", "pow", "prod", "product", "quantile", "query", "radd", "rank", "rdiv", "reindex", "reindex_like",
+    "rename", "rename_axis", "reorder_levels", "replace", "resample", "reset_index", "rfloordiv", "rmod", "rmul", "rolling", "round", "rpow", "rsub",
+    "rtruediv", "sample", "select_dtypes", "sem", "set_axis", "set_flags", "set_index", "shift", "skew", "sort", "sort_index", "sort_values",
+    "squeeze", "stack", "std", "sub", "subtract", "sum", "swapaxes", "swaplevel", "tail", "take", "to_clipboard", "to_csv", "to_dict", "to_excel",
+    "to_feather", "to_gbq", "to_hdf", "to_html", "to_json", "to_latex", "to_markdown", "to_numpy", "to_orc", "to_parquet", "to_period", "to_pickle",
+    "to_records", "to_sql", "to_stata", "to_string", "to_timestamp", "to_xarray", "to_xml", "transform", "transpose", "truediv", "truncate",
+    "tz_convert", "tz_localize", "unstack", "update", "value_counts", "var", "where", "xs", "cumcount", "ngroup",
 ];
 pub const DF_ATTRS: &[&str] = &["columns", "index", "shape", "values", "dtypes", "T", "empty", "size", "ndim", "axes", "style", "plot", "iloc", "loc", "at", "iat", "str", "dt", "cat", "attrs", "flags"];
 
@@ -68,7 +70,7 @@ const COPY_FRAME_OPS: &[&str] = &[
 ];
 const SERIES_RESULT_OPS: &[&str] = &[
     "mean", "sum", "min", "max", "count", "median", "std", "var", "nunique", "idxmax", "idxmin", "any", "all", "value_counts", "memory_usage", "sem",
-    "skew", "kurt", "prod", "quantile", "mode", "squeeze", "duplicated", "dot", "corrwith", "size", "cumcount", "ngroup",
+    "skew", "kurt", "prod", "quantile", "mode", "duplicated", "dot", "corrwith", "size", "cumcount", "ngroup",
 ];
 const NOEFFECT_OPS: &[&str] = &[
     "to_csv", "to_parquet", "to_excel", "to_json", "to_sql", "to_numpy", "to_records", "to_string", "to_html", "to_markdown", "info", "equals", "plot",
@@ -121,6 +123,7 @@ fn df_dispatch(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "explode" => explode,
         "filter" => df_filter,
         "reindex" => reindex,
+        "reindex_like" => reindex_like,
         "select_dtypes" => select_dtypes,
         "sort_values" | "nlargest" | "nsmallest" => sort_values,
         "transform" => transform,
@@ -128,6 +131,8 @@ fn df_dispatch(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "set_axis" => set_axis,
         "rename_axis" => rename_axis,
         "transpose" | "T" => transpose,
+        "query" => df_query,
+        "eval" => df_eval,
         _ => df_generic,
     };
     let res = m(an, st, c);
@@ -1586,12 +1591,29 @@ fn df_drop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 fn df_assign(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    let mut row = recv_row(an, st, c);
-    for k in c.kwargs.keys() {
-        row = row.store(intern::key(intern::Key::Str(intern::str_get(*k))), true);
-    }
     let fs = frames(an, c.recv.as_ref());
-    new_frame(an, st, c, row, None, fs.first().copied())
+    let mut row = recv_row(an, st, c);
+    let mut colvals: Vec<(KeyId, Option<Known>)> = Vec::new();
+    for (k, v) in c.kwargs.iter() {
+        let col = intern::key(intern::Key::Str(intern::str_get(*k)));
+        // a callable gets the frame as built so far (earlier keywords included)
+        if v.pts.iter().any(|o| matches!(an.kind(o), Kind::Function | Kind::Bound | Kind::Partial | Kind::Class)) {
+            let tmp = an.alloc(Kind::Frame, &format!("{}:assign:{}", crate::interp::site_string(&c.node), intern::key_py_str(col)), st, &format!("frame@L{}", c.line), Payload::None, Some(row.clone()), Ns::Item, None, None);
+            an.call_value(v, &c.node, None, st, Some(vec![Value::obj(tmp)]));
+            colvals.push((col, None));
+        } else {
+            let lit = lit_key_seq(an, st, v).map(|s0| Known::exact(KeySet::from_iter(s0))).or_else(|| cell_lit(v).map(|l| Known::exact(KeySet::one(l))));
+            colvals.push((col, lit));
+        }
+        row = row.store(col, true);
+    }
+    let v = derived(an, st, c, row, &fs, Rows::Same, true);
+    if let Some(nid) = v.single() {
+        for (k, kn) in colvals {
+            set_vals(st, nid, k, kn.as_ref());
+        }
+    }
+    v
 }
 
 fn reset_index(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -1671,6 +1693,135 @@ fn reset_index(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     v
+}
+
+/// The names a pandas expression (`query` / `eval`) assigns and reads: identifiers and
+/// `backtick quoted` names, not `@locals`, string literals, keywords, attributes after `.`
+/// or called functions. None when it cannot be read.
+fn expr_names(e: &str) -> Option<(Vec<String>, Vec<String>)> {
+    let mut assigned: Vec<String> = Vec::new();
+    let mut read: Vec<String> = Vec::new();
+    for stmt in e.split(|c| c == '\n' || c == ';') {
+        let cs: Vec<char> = stmt.chars().collect();
+        // `target = expr` (not ==, <=, >=, !=)
+        let mut body_start = 0;
+        let mut i = 0;
+        while i < cs.len() {
+            if cs[i] == '=' && (i + 1 >= cs.len() || cs[i + 1] != '=') && (i == 0 || !matches!(cs[i - 1], '=' | '<' | '>' | '!')) {
+                let lhs: String = cs[..i].iter().collect();
+                let t = lhs.trim().trim_matches('`').to_string();
+                if t.is_empty() {
+                    return None;
+                }
+                assigned.push(t);
+                body_start = i + 1;
+                break;
+            }
+            if cs[i] == '\'' || cs[i] == '"' {
+                break;
+            }
+            i += 1;
+        }
+        let mut i = body_start;
+        let mut prev_dot = false;
+        let mut prev_at = false;
+        while i < cs.len() {
+            let c = cs[i];
+            if c == '\'' || c == '"' {
+                let q = c;
+                i += 1;
+                while i < cs.len() && cs[i] != q {
+                    i += 1;
+                }
+                i += 1;
+                prev_dot = false;
+                continue;
+            }
+            if c == '`' {
+                let st0 = i + 1;
+                i += 1;
+                while i < cs.len() && cs[i] != '`' {
+                    i += 1;
+                }
+                let name: String = cs[st0..i.min(cs.len())].iter().collect();
+                if !prev_dot && !assigned.contains(&name) {
+                    read.push(name);
+                }
+                i += 1;
+                prev_dot = false;
+                continue;
+            }
+            if c.is_alphabetic() || c == '_' {
+                let st0 = i;
+                while i < cs.len() && (cs[i].is_alphanumeric() || cs[i] == '_') {
+                    i += 1;
+                }
+                let name: String = cs[st0..i].iter().collect();
+                let mut j = i;
+                while j < cs.len() && cs[j] == ' ' {
+                    j += 1;
+                }
+                let called = j < cs.len() && cs[j] == '(';
+                let kw = matches!(name.as_str(), "and" | "or" | "not" | "in" | "is" | "True" | "False" | "None" | "if" | "else");
+                if !prev_dot && !prev_at && !called && !kw && !assigned.contains(&name) && !read.contains(&name) {
+                    read.push(name);
+                }
+                prev_dot = false;
+                prev_at = false;
+                continue;
+            }
+            if c.is_ascii_digit() {
+                while i < cs.len() && (cs[i].is_alphanumeric() || cs[i] == '.' || cs[i] == '_') {
+                    i += 1;
+                }
+                continue;
+            }
+            prev_dot = c == '.';
+            prev_at = c == '@';
+            i += 1;
+        }
+    }
+    Some((assigned, read))
+}
+
+fn expr_text(an: &Analyzer, c: &Call) -> Option<String> {
+    let _ = an;
+    lit_key(&c.arg(0, Some("expr"))).and_then(intern::key_as_str).map(|s| s.to_string())
+}
+
+/// The frames that remain after reading the expression's names (index level names aside).
+fn read_expr_names(an: &mut Analyzer, st: &mut State, c: &Call, fs: &[u32], read: &[String]) -> Vec<u32> {
+    let idx: Vec<KeyId> = levels_of(st, fs).map(|l| l.into_iter().flatten().collect()).unwrap_or_default();
+    let ks = KeySet::from_iter(read.iter().map(|n| mk(n)).filter(|k| !idx.contains(k) && *k != mk("index")));
+    require_cols(an, st, c, fs, &ks)
+}
+
+fn df_query(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let fs = frames(an, c.recv.as_ref());
+    let fs = match expr_text(an, c).as_deref().and_then(expr_names) {
+        Some((_, read)) => read_expr_names(an, st, c, &fs, &read),
+        None => fs,
+    };
+    let row = rows_of(st, &fs);
+    derived(an, st, c, row, &fs, Rows::Subset, true)
+}
+
+fn df_eval(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let fs = frames(an, c.recv.as_ref());
+    let Some((assigned, read)) = expr_text(an, c).as_deref().and_then(expr_names) else {
+        let row = recv_row(an, st, c);
+        let r = Row::from_data(RowData { present: row.present.clone(), likely: row.definite.clone(), sources: row.sources.insert((Source::new(&format!("eval@L{}", c.line), SourceKind::Call), EMPTY_LENS)), mutators: row.mutators.clone(), ..Default::default() });
+        return new_frame(an, st, c, r, None, None);
+    };
+    let fs = read_expr_names(an, st, c, &fs, &read);
+    if assigned.is_empty() {
+        return series(an);
+    }
+    let mut row = rows_of(st, &fs);
+    for a in &assigned {
+        row = row.store(mk(a), true);
+    }
+    derived(an, st, c, row, &fs, Rows::Same, true)
 }
 
 fn rename_axis(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -2160,16 +2311,41 @@ fn df_filter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 fn reindex(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let fs = frames(an, c.recv.as_ref());
     let row = recv_row(an, st, c);
-    if let Some(cols) = c.kw("columns") {
+    let cols = if axis_is_columns(&c.kw("axis")) { c.arg(0, Some("labels")) } else { c.kw("columns") };
+    let idx = if axis_is_columns(&c.kw("axis")) { c.kw("index") } else { c.kw("index").or_else(|| c.arg(0, Some("labels"))) };
+    let mut out = row.clone();
+    let mut col_known = true;
+    if let Some(cols) = cols {
         if let Some(seq) = lit_key_seq(an, st, &cols) {
-            return new_frame(an, st, c, closed_ordered(&seq), None, None);
-        }
-        if let Some(ks) = an.lit_keys(&cols, st) {
-            return new_frame(an, st, c, row.project(&ks), None, None);
+            out = closed_ordered(&seq);
+        } else if let Some(ks) = an.lit_keys(&cols, st) {
+            out = Row::closed_with(ks);
+        } else {
+            col_known = false;
+            out = Row::with_source(Source::new(&format!("reindex@L{}", c.line), SourceKind::Call));
         }
     }
-    new_frame(an, st, c, row, None, None)
+    let v = derived(an, st, c, out, &fs, if idx.is_some() { Rows::Other } else { Rows::Same }, col_known);
+    if let (Some(nid), Some(ix)) = (v.single(), idx) {
+        let lab = an.lit_keys(&ix, st).map(Known::exact);
+        set_labels(st, nid, lab.as_ref());
+        set_nrows(st, nid, lit_key_seq(an, st, &ix).map(|s0| s0.len() as i64));
+    }
+    v
+}
+
+fn reindex_like(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let other = c.arg(0, Some("other"));
+    let ofs = frames(an, other.as_ref());
+    let row = if ofs.is_empty() { Row::with_source(Source::new(&format!("reindex_like@L{}", c.line), SourceKind::Call)) } else { rows_of(st, &ofs) };
+    let v = new_frame(an, st, c, row, None, None);
+    if let (Some(nid), [o]) = (v.single(), ofs.as_slice()) {
+        let lab = labels(st, *o);
+        set_labels(st, nid, lab.as_ref());
+    }
+    v
 }
 
 /// Does a dtype match a `select_dtypes` spec ("number", "int64", "float", "bool", "object", …)?
@@ -2318,7 +2494,19 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             "asfreq" | "align" | "reindex_like" | "combine_first" => (Rows::Other, false),
             _ => (Rows::Same, false),
         };
-        return derived(an, st, c, row, &fs, rows, with_vals);
+        let v = derived(an, st, c, row, &fs, rows, with_vals);
+        if matches!(name.as_str(), "head" | "tail" | "nlargest" | "nsmallest") {
+            let n = c.arg(0, Some("n")).and_then(|x| x.kv.as_lit()).and_then(intern::key_as_int).or(if c.args.is_empty() && c.kw("n").is_none() { Some(5) } else { None });
+            if let (Some(nid), Some(n)) = (v.single(), n) {
+                if n >= 0 {
+                    st.set_slot(nid, Ns::Meta, mk("maxrows"), Value::lit(intern::key_int(n)), true);
+                    if let Some(total) = fs.first().filter(|_| fs.len() == 1).and_then(|f| nrows(st, *f)) {
+                        set_nrows(st, nid, Some(total.min(n)));
+                    }
+                }
+            }
+        }
+        return v;
     }
     if OPEN_FRAME_OPS.contains(&name.as_str()) {
         return match fs.first() {
@@ -2327,13 +2515,76 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         };
     }
     if name == "get" {
-        if let Some(a) = c.args.first() {
-            if a.kv.as_lit().is_some() {
-                let _ = fs;
-                return Value::data(&format!("get@L{}", c.line)).join(&an.none_v.clone());
+        let default = c.arg(1, Some("default")).unwrap_or_else(|| an.none_v.clone());
+        if let Some(a) = c.args.first().or(c.kwargs.get(&intern::s("key"))) {
+            if let (Some(k), true) = (a.kv.as_lit(), a.pts.is_empty()) {
+                // the column when there, else the default (never raises)
+                let mut out = Value::new();
+                for f in &fs {
+                    let tier = classify(&st.row(*f, Ns::Item), k).tier;
+                    if tier != Tier::Missing {
+                        out = out.join(&column_series(an, st, *f, k, &c.node));
+                    }
+                    if tier != Tier::Proven {
+                        out = out.join(&default);
+                    }
+                }
+                return out;
+            }
+            if let Some(seq) = lit_key_seq(an, st, a) {
+                // a list: those columns (a KeyError for a missing one is turned into None)
+                let ks = KeySet::from_iter(seq.iter().copied());
+                let mut out = Value::new();
+                for f in &fs {
+                    let r = st.row(*f, Ns::Item);
+                    if ks.iter().any(|k| classify(&r, k).tier != Tier::Proven) {
+                        out = out.join(&default);
+                    }
+                    if ks.iter().all(|k| classify(&r, k).tier != Tier::Missing) {
+                        let v = derived(an, st, c, closed_ordered(&seq), &[*f], Rows::Same, true);
+                        out = out.join(&v);
+                    }
+                }
+                return out;
             }
         }
-        return series(an);
+        return series(an).join(&default);
+    }
+    if name == "squeeze" {
+        let axis = c.kw("axis").or_else(|| c.arg(0, None));
+        let rows_one = fs.len() == 1 && (nrows(st, fs[0]) == Some(1) || st.slot_opt(fs[0], Ns::Meta, mk("maxrows")).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_int).map(|m| m <= 1).unwrap_or(false));
+        let one_col = row.closed() && row.present.len() == 1 && row.present == row.definite;
+        if axis_is_index(&axis) {
+            if rows_one {
+                // a one-row frame: that row (a Series over the columns)
+                let f = fs[0];
+                let sid = new_series(an, st, &c.node, row.clone(), None, "q");
+                mark_view(an, sid, &[f]);
+                return Value::obj(sid);
+            }
+            return derived(an, st, c, row, &fs, Rows::Same, true);
+        }
+        if axis_is_columns(&axis) || axis.is_none() {
+            if one_col {
+                let k = row.present.first().unwrap();
+                if axis.is_none() && rows_one {
+                    // 1 x 1: the cell
+                    return match vals(st, fs[0], k) {
+                        Some(v) if v.may.len() == 1 => Value::lit(v.may.first().unwrap()),
+                        _ => Value::data(&format!("cell@L{}", c.line)),
+                    };
+                }
+                return match fs.as_slice() {
+                    [f] => column_series(an, st, *f, k, &c.node),
+                    _ => series(an),
+                };
+            }
+            if axis.is_none() && rows_one && fs.len() == 1 {
+                let sid = new_series(an, st, &c.node, row.clone(), None, "q");
+                return Value::obj(sid);
+            }
+            return derived(an, st, c, row, &fs, Rows::Same, true);
+        }
     }
     if name == "items" || name == "keys" {
         let kind = if name == "items" { ViewKind::Items } else { ViewKind::Keys };
@@ -2343,7 +2594,7 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         an.obj_mut(vid).payload = Payload::View(kind, recv);
         return Value::obj(vid);
     }
-    if matches!(name.as_str(), "rolling" | "expanding" | "ewm" | "resample" | "squeeze" | "xs") {
+    if matches!(name.as_str(), "rolling" | "expanding" | "ewm" | "resample" | "xs") {
         return new_frame(an, st, c, row, None, None);
     }
     an.note(format!("unmodelled DataFrame.{} at L{}: result treated as an open frame derived from the receiver", name, c.line));

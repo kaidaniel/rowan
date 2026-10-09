@@ -40,7 +40,9 @@ withtot = raw.assign(total=raw["qty"] * raw["price"])         #@ input qty ; inp
 #@row withtot: definite={qty,price,total} open
 withtot["region"]                                              #@ input region
 try:
-    raw["total"]                                               #@ missing total
+    # (first written `missing total`: `raw` is an open read_csv frame, so whether it has
+    # `total` depends on the file; assign did not add it)
+    raw["total"]                                               #@ input total
 except KeyError:
     pass
 #@schema read_csv@L38: always={qty,price,region} only={qty,price,region}

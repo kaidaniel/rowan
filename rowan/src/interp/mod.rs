@@ -1978,6 +1978,10 @@ impl Analyzer {
         if n.module != self.module_info(self.main_module).idx {
             return;
         }
+        if !state.reachable && !matches!(stmt, ast::Stmt::Return(_) | ast::Stmt::Break(_) | ast::Stmt::Continue(_)) {
+            // the statement raised on this path: nothing to observe after it
+            return;
+        }
         let reqs: Vec<(u32, String)> = self.row_check_requests.iter().filter(|(ln, _)| *ln == n.line).cloned().collect();
         for (ln, name) in reqs {
             let v = self.load_name(s(&name), &n, state);

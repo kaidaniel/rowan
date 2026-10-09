@@ -767,7 +767,7 @@ impl Analyzer {
                                 ViewKind::Keys => {
                                     let b2 = inner;
                                     let recs = self.record_objects(&b2);
-                                    if !b2.pts.is_empty() && recs.len() == b2.pts.len() && recs.iter().all(|o| matches!(self.kind(*o), Kind::Dict)) {
+                                    if !b2.pts.is_empty() && recs.len() == b2.pts.len() && recs.iter().all(|o| matches!(self.kind(*o), Kind::Dict | Kind::Frame)) {
                                         let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
                                         if rows.iter().all(|r| r.definite.contains(k)) {
                                             return Some(op == ast::CmpOp::In);
@@ -799,7 +799,7 @@ impl Analyzer {
                         }
                     }
                     let recs = self.record_objects(&b);
-                    if !b.pts.is_empty() && recs.len() == b.pts.len() && recs.iter().all(|o| matches!(self.kind(*o), Kind::Dict)) {
+                    if !b.pts.is_empty() && recs.len() == b.pts.len() && recs.iter().all(|o| matches!(self.kind(*o), Kind::Dict | Kind::Frame)) {
                         let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
                         let member = if rows.iter().all(|r| r.definite.contains(k)) {
                             true

@@ -1,13 +1,4 @@
 # pandas cases written but not yet expected to pass (paths relative to tests/pandas/)
-small/p012_row_subsets.py
-small/p017_query.py
-small/p018_eval.py
-small/p020_reindex.py
-small/p021_rename_axis.py
-small/p022_squeeze.py
-small/p024_get_pop.py
-small/p025_select_pipeline.py
-small/p026_assign.py
 small/p032_del.py
 small/p033_rename_dict.py
 small/p035_prefix_suffix.py
