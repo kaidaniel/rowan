@@ -4891,6 +4891,15 @@ pub fn frame_getattr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, state
             if name == "T" {
                 return transpose_of(an, state, node, &[oid]);
             }
+            if name == "dtypes" {
+                let row = state.row(oid, Ns::Item);
+                let mut d = row.data();
+                d.terms = Default::default();
+                d.dterms = Default::default();
+                d.lterms = Default::default();
+                let sid = new_series(an, state, node, Row::from_data(d), None, "dt");
+                return Value::obj(sid);
+            }
             if name == "shape" {
                 // (rows, columns): the column count when the columns are known
                 let row = state.row(oid, Ns::Item);
@@ -5135,6 +5144,15 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
         return Value::obj(nid);
     }
     if let KeyVal::KeysOf(_) = &key.kv {
+        // one of the column names: that column (a Series named by the key)
+        if key.pts.is_empty() {
+            let idx = labels_row(state, oid);
+            let sid = new_series(an, state, node, idx, Some(Value::kv_only(key.kv.clone())), "ck");
+            if let Some(m) = state.slot_opt(oid, Ns::Meta, mk("index")) {
+                state.set_slot(sid, Ns::Meta, mk("index"), m, true);
+            }
+            return Value::obj(sid);
+        }
         let r = Row::new().copy_from(&row, false, &KeySet::new(), EMPTY_LENS);
         let nid = an.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(r), Ns::Item, None, None);
         return Value::obj(nid);

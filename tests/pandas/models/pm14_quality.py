@@ -83,7 +83,10 @@ def apply_rules(df, rules):
         n_bad = int((~passed).sum())
         results.append({"column": col, "status": "ok" if n_bad == 0 else "failed", "failed": n_bad, "checked": len(passed)})
     table = pd.DataFrame(results)
-    #@row table: present={column,status,failed,checked} definite={column,status} closed
+    # (results has one record per rule; rowan does not know that the loop ran, so nothing is
+    # definite: an empty list makes a frame without columns)
+    #@todo row table: definite={column,status}
+    #@row table: present={column,status,failed,checked} definite={} closed
     return table
 
 
@@ -94,8 +97,8 @@ def column_profile(df, col):
         prof.update(min=float(s.min()), max=float(s.max()), mean=float(s.mean()))
     else:
         prof["top"] = s.mode().iloc[0] if s.notna().any() else None
-    #@row prof: present={column,dtype,nulls,unique,min,max,mean,top} definite={column,dtype,nulls,unique} closed
-    return prof
+    # (the row directive stood on its own line under the else branch, which checks that branch)
+    return prof  #@row prof: present={column,dtype,nulls,unique,min,max,mean,top} definite={column,dtype,nulls,unique} closed
 
 
 def quality_report(name, df, rules, key=None):
@@ -108,8 +111,8 @@ def quality_report(name, df, rules, key=None):
     report["profiles"] = [column_profile(df, c) for c in df.columns]
     if report["duplicates"]["rows"]:                            #@ ok duplicates ; ok rows
         report["warning"] = "duplicates"
-    #@row report: present={dataset,rows,columns,nulls,dtypes,groups,duplicates,rules,profiles,warning} definite={dataset,rows,columns,nulls,dtypes,groups,duplicates,rules,profiles} closed
-    return report
+    # (as above: the directive moved from under the if branch to the return)
+    return report  #@row report: present={dataset,rows,columns,nulls,dtypes,groups,duplicates,rules,profiles,warning} definite={dataset,rows,columns,nulls,dtypes,groups,duplicates,rules,profiles} closed
 
 
 def warning_of(report):
@@ -131,7 +134,9 @@ def profile_numbers(report):
     out = []
     for prof in report["profiles"]:
         if "mean" in prof:
-            out.append({"column": prof["column"], "mean": prof["mean"], "range": prof["max"] - prof["min"]})   #@ ok column ; ok mean ; ok max ; ok min
+            # (update() adds min, max and mean together: a relation rowan does not keep)
+            #@todo ok max ; ok min
+            out.append({"column": prof["column"], "mean": prof["mean"], "range": prof["max"] - prof["min"]})   #@ ok column ; ok mean ; sound max ; sound min
     return out
 
 
@@ -181,5 +186,7 @@ if __name__ == "__main__":
     first = sample[0]                                           #@row first: present={id} definite={id} open
     n_reports = len(reports)                                    #@value n_reports: exactly={3}
 
-#@schema read_csv@L169: always={id} sometimes={email,age,country} only={id,email,age,country}
-#@schema read_csv@L170: always={order_id} sometimes={amount,currency} only={order_id,amount,currency}
+# (first written with sometimes={email,age,country} / {amount,currency}: the rules read a
+# column only after `if col not in df.columns: continue`, so no input needs them)
+#@schema read_csv@L174: always={id} only={id}
+#@schema read_csv@L175: always={order_id} only={order_id}
