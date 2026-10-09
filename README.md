@@ -24,8 +24,9 @@ uv run --no-project python tests/run_snapshots.py # output snapshots on larger i
 Options: `--no-rows`, `--no-summaries`, `--no-entry`, `--no-imports`. Environment:
 `ROWAN_SUMMARIES=0` (older per-call-site engine), `ROWAN_DEBUG=1` (progress, which event
 makes a call site re-analyse, slow instantiations on stderr), `ROWAN_NO=…` (switch one
-analysis refinement off, for bisecting; names in `AGENTS.md`), `ROWAN_LIMITS=tab=24,call=32,clones=8,chain=2,path=3`
-(the per-function budgets and depths). Python tooling runs through `uv`
+analysis refinement off, for bisecting; names in `AGENTS.md`),
+`ROWAN_LIMITS=ms=2000,tab=256,call=256,clones=256,chain=2,path=3` (the soft time limit after
+which the analysis stops refining, then the hard per-function budgets and depths). Python tooling runs through `uv`
 (`.python-version` = 3.14); the Python side is only the test harness.
 
 ## VS Code extension (`vscode-rowan/`)

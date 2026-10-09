@@ -25,7 +25,9 @@ INPUTS = [os.path.join(ROOT, "examples", "etl_report.py")] + sorted(
 
 
 def analyse(path: str) -> list:
-    out = subprocess.run([BIN, path, "--json", "--no-summaries"], capture_output=True, text=True, timeout=1800)
+    # fixed hard caps and no time limit: the snapshots must not depend on machine speed
+    env = {**os.environ, "ROWAN_LIMITS": os.environ.get("ROWAN_LIMITS", "ms=100000000,tab=24,call=32,clones=8")}
+    out = subprocess.run([BIN, path, "--json", "--no-summaries"], capture_output=True, text=True, timeout=1800, env=env)
     if out.returncode != 0:
         raise RuntimeError(out.stderr.strip()[-500:])
     recs = []

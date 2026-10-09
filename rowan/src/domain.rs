@@ -1033,25 +1033,36 @@ impl fmt::Display for Row {
 }
 
 fn cap_terms(ts: TermSet) -> TermSet {
-    let mut by: Vec<(Rho, Vec<LensId>)> = Vec::new();
-    for (r, l) in ts.iter() {
-        if let Some(e) = by.iter_mut().find(|(x, _)| *x == r) {
-            e.1.push(l);
-        } else {
-            by.push((r, vec![l]));
+    // the set is sorted by (rho, lens), so the terms of one rho are contiguous: one pass
+    let items = ts.as_slice();
+    let runs = |f: &mut dyn FnMut(usize, usize)| {
+        let mut i = 0;
+        while i < items.len() {
+            let mut j = i + 1;
+            while j < items.len() && items[j].0 == items[i].0 {
+                j += 1;
+            }
+            f(i, j);
+            i = j;
         }
-    }
-    if by.iter().all(|(_, ls)| ls.len() <= MAX_LENSES) {
+    };
+    let mut over = false;
+    runs(&mut |i, j| {
+        if j - i > MAX_LENSES {
+            over = true;
+        }
+    });
+    if !over {
         return ts;
     }
-    let mut out = Vec::new();
-    for (r, ls) in by {
-        if ls.len() > MAX_LENSES {
-            out.push((r, EMPTY_LENS));
+    let mut out: Vec<(Rho, LensId)> = Vec::with_capacity(items.len());
+    runs(&mut |i, j| {
+        if j - i > MAX_LENSES {
+            out.push((items[i].0, EMPTY_LENS));
         } else {
-            out.extend(ls.into_iter().map(|l| (r, l)));
+            out.extend_from_slice(&items[i..j]);
         }
-    }
+    });
     TermSet::from_vec(out)
 }
 

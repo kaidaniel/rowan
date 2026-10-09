@@ -32,7 +32,11 @@ pub const REC_MAX_ITER: usize = 8;
 pub const PATH_DEPTH: u32 = 3;
 pub const MAX_ACTIVE: usize = 4;
 pub const MAX_MUTATED: usize = 24;
-pub const MAX_CLONES: usize = 8;
+pub const MAX_CLONES: usize = 256;
+/// Milliseconds after which the analysis degrades gracefully: no new tabulations (summaries
+/// are used instead) and no new clones (allocation sites collapse onto their context-free
+/// object). The per-function caps above stay as hard limits. `ROWAN_LIMITS=ms=N`.
+pub const MAX_MS: usize = 2000;
 
 /// `ROWAN_ON=name,...` switches experimental refinements on (`sigsum`: summaries specialised
 /// by the classes of their arguments).
@@ -504,6 +508,9 @@ pub struct Analyzer {
     pub summary_table: FxHashMap<crate::summary::SummaryKey, Rc<Summary>>,
     /// argument-class signatures seen per function (capped, see `MAX_SIGNATURES`)
     pub sig_count: FxHashMap<ObjId, Vec<Vec<(String, ObjId)>>>,
+    /// summary key variants (code cells, typed cells, signature) seen per function: each gets
+    /// its own allocation context
+    pub key_variants: FxHashMap<ObjId, Vec<(Vec<(ObjId, Vec<ObjId>)>, Vec<(ObjId, ObjId)>, Vec<(String, ObjId)>)>>,
     pub tab_count: FxHashMap<(ObjId, &'static str), usize>,
     pub module_done: bool,
     pub fresh_init: FxHashSet<ObjId>,
@@ -557,6 +564,10 @@ pub struct Analyzer {
     /// class attributes (flow-insensitive)
     pub cls_slots: FxHashMap<(ObjId, Ns, KeyId), Value>,
     pub site_clones: FxHashMap<String, usize>,
+    /// statements executed plus objects instantiated (debug output)
+    pub work: usize,
+    /// when the analysis started (see `MAX_MS`)
+    pub started: std::time::Instant,
     pub call_cache: FxHashMap<calls::Sig, Rc<calls::CacheHit>>,
     pub entry_instances: FxHashMap<ObjId, ObjId>,
     pub fresh_in_progress: FxHashSet<ObjId>,
@@ -600,6 +611,7 @@ impl Analyzer {
             use_summaries,
             summary_table: FxHashMap::default(),
             sig_count: FxHashMap::default(),
+            key_variants: FxHashMap::default(),
             tab_count: FxHashMap::default(),
             module_done: false,
             fresh_init: FxHashSet::default(),
@@ -658,6 +670,8 @@ impl Analyzer {
             user_classes: Vec::new(),
             cls_slots: FxHashMap::default(),
             site_clones: FxHashMap::default(),
+            work: 0,
+            started: std::time::Instant::now(),
             call_cache: FxHashMap::default(),
             entry_instances: FxHashMap::default(),
             fresh_in_progress: FxHashSet::default(),
@@ -796,7 +810,7 @@ impl Analyzer {
             return oid;
         }
         let n = self.site_clones.get(site).copied().unwrap_or(0);
-        if n >= limit("clones", MAX_CLONES) && !ctx.is_empty() {
+        if (n >= limit("clones", MAX_CLONES) || self.over_deadline()) && !ctx.is_empty() {
             // too many clones of one allocation site: collapse onto the context-free summary object
             return self.alloc_raw(kind, site, "", false, label, payload);
         }
@@ -1016,6 +1030,11 @@ impl Analyzer {
     }
 
     // ------------------------------------------------------------- entry
+    /// Past the time budget: the analysis keeps going but stops refining (see `MAX_MS`).
+    pub fn over_deadline(&self) -> bool {
+        self.started.elapsed().as_millis() as usize > limit("ms", MAX_MS)
+    }
+
     pub fn run(&mut self) {
         crate::state::set_narrowed_same(self.opts.narrowed_same);
         let mut state = State::new();

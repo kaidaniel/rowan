@@ -479,8 +479,17 @@ impl Analyzer {
                     site.push_str(&format!("#{}", i));
                 }
             }
-            if fr.kind != FrameKind::Module && !fr.symbolic && !fr.ctx.is_empty() && fr.ctx.matches('/').count() < super::limit("chain", 2) && !fr.ctx.starts_with("entry") {
-                format!("{}/{}", fr.ctx, site)
+            if fr.kind != FrameKind::Module && !fr.symbolic && !fr.ctx.is_empty() && !fr.ctx.starts_with("entry") {
+                if fr.ctx.matches('/').count() < super::limit("chain", 2) {
+                    format!("{}/{}", fr.ctx, site)
+                } else {
+                    // deeper chains stay distinct through a hash of the prefix: two activations
+                    // of the caller keep allocating distinct objects at any depth (bounded by
+                    // the tabulation budgets), while the context string stays short
+                    let mut h = rustc_hash::FxHasher::default();
+                    std::hash::Hash::hash(&fr.ctx, &mut h);
+                    format!("h{:x}/{}", std::hash::Hasher::finish(&h) & 0xffff_ffff, site)
+                }
             } else {
                 site
             }
@@ -491,13 +500,19 @@ impl Analyzer {
             let bound = self.compute_bindings(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
             // the classes of the arguments: the summary is specialised on them
             let mut sig: Vec<(String, ObjId)> = Vec::new();
+            // (a placeholder with a declared user class counts as an instance of it, so calls
+            // inside summaries specialise too)
             let one_class = |an: &Analyzer, v: &Value| -> Option<ObjId> {
-                if v.pts.is_empty() || v.pts.iter().any(|o| an.kind(o) != Kind::Instance) {
+                if v.pts.is_empty() {
                     return None;
                 }
                 let mut cls: Option<ObjId> = None;
                 for o in v.pts.iter() {
-                    let c = an.instance_class(o)?;
+                    let c = match an.kind(o) {
+                        Kind::Instance => an.instance_class(o)?,
+                        Kind::Ph => an.ph_info(o).cls.get().filter(|c| an.class_info_opt(*c).is_some())?,
+                        _ => return None,
+                    };
                     match cls {
                         None => cls = Some(c),
                         Some(x) if x == c => {}
@@ -608,6 +623,9 @@ impl Analyzer {
         let sig = self.call_signature(foid, &site, entry, &self_v, &args, &kwargs, &star_args, &star_kwargs, state);
         if let Some(sig) = &sig {
             if let Some(hit) = self.call_cache.get(sig).cloned() {
+                if super::debug_enabled() {
+                    eprintln!("cache hit for {} at {}", self.func_info(foid).qualname, site);
+                }
                 if hit.raises {
                     self.note_raise();
                 }

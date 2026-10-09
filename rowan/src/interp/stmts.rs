@@ -23,6 +23,7 @@ impl Analyzer {
     }
 
     pub fn exec_stmt(&mut self, node: &'static ast::Stmt, state: &mut State) {
+        self.work += 1;
         match node {
             ast::Stmt::Expr(e) => {
                 self.eval(&e.value, state);

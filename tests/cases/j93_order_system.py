@@ -10,11 +10,12 @@ Expectations (the `#@row` lines at the end) were written from the program text b
 running the engine.  Where a comparison is open (amounts, ordering) the affected keys are
 marked as possible (`?`); everything else follows from literal data.
 
-`#@todo` marks expectations the engine does not meet yet (the harness reports but does not
-check them).  They share one cause: objects reached through several layers of fields that
-were assigned from untyped constructor parameters (`svc.pricer`, `self.bus`, the router's
-`svc`) resolve their methods by name across all classes defining that name, so the quotes,
-the bus events, the router responses and the report end up joined over every call."""
+Twenty-one of the checks needed engine work after the file was written: summaries
+specialised by the classes of their arguments (so `svc.pricer.quote` resolves on `Pricer`),
+one allocation context per summary variant and per call chain of any depth (so the quotes,
+events and responses of the three scenarios stay distinct objects), `bool()` deciding on
+literal truthiness (the feature flags), and budgets that degrade by a time limit instead of
+small per-site counts (the scenarios make more calls than the old caps allowed)."""
 import functools
 import json
 import sys
@@ -745,7 +746,7 @@ o2_meta = o2.meta                            #@row o2_meta: present={submitted,r
 o2_addr = o2.customer.address.to_dict()      #@row o2_addr: present={city,country} definite={city,country} closed
 # Order 3: "pay" without an amount is blocked by the guard.
 o3 = S1["o3"]                                #@row o3: present={id,customer,lines,state,history,meta} definite={id,customer,lines,state,history,meta} closed
-o3_meta = o3.meta                            #@todo row o3_meta: present={submitted,blocked,reason} definite={submitted,blocked,reason} closed
+o3_meta = o3.meta                            #@row o3_meta: present={submitted,blocked,reason} definite={submitted,blocked,reason} closed
 customers = S1["w"]["svc"].customers.items   #@row customers: present={1,2,3} definite={1,2,3} closed
 cust_index = S1["w"]["svc"].customers.index  #@row cust_index: present={gold,basic,silver} definite={gold,basic,silver} closed
 prod_index = S1["w"]["svc"].products.index   #@row prod_index: present={tools,food} definite={tools,food} closed
@@ -755,17 +756,17 @@ orders = S1["w"]["svc"].orders               #@row orders: present={1,2,3} defin
 # ---------------------------------------------------------------- checks: quotes
 
 # Scenario 1: gold customer, valid coupon, shipping applies (the amount comparison is open).
-q1 = S1["q1"]                                #@todo row q1: present={subtotal,currency,tax,shipping,free_shipping,discount,loyalty,coupon,total} definite={subtotal,currency,tax,shipping,discount,loyalty,coupon,total} closed
+q1 = S1["q1"]                                #@row q1: present={subtotal,currency,tax,shipping,free_shipping,discount,loyalty,coupon,total} definite={subtotal,currency,tax,shipping,discount,loyalty,coupon,total} closed
 q1_coupon = q1["coupon"]                     #@row q1_coupon: present={code,off} definite={code,off} closed
 q1_loyalty = q1["loyalty"]                   #@row q1_loyalty: present={tier,pct} definite={tier,pct} closed
 # Scenario 1, order 2: basic customer, no coupon.
-q2 = S1["q2"]                                #@todo row q2: present={subtotal,currency,tax,shipping,free_shipping,total} definite={subtotal,currency,tax,shipping,total} closed
+q2 = S1["q2"]                                #@row q2: present={subtotal,currency,tax,shipping,free_shipping,total} definite={subtotal,currency,tax,shipping,total} closed
 # Scenario 2: pickup, so no shipping rule; loyalty still applies; no coupon.
-q1_s2 = S2["q1"]                             #@todo row q1_s2: present={subtotal,currency,tax,discount,loyalty,total} definite={subtotal,currency,tax,discount,loyalty,total} closed
+q1_s2 = S2["q1"]                             #@row q1_s2: present={subtotal,currency,tax,discount,loyalty,total} definite={subtotal,currency,tax,discount,loyalty,total} closed
 # Scenario 3: loyalty off, unknown coupon code.
-q1_s3 = S3["q1"]                             #@todo row q1_s3: present={subtotal,currency,tax,shipping,free_shipping,coupon_error,total} definite={subtotal,currency,tax,shipping,coupon_error,total} closed
+q1_s3 = S3["q1"]                             #@row q1_s3: present={subtotal,currency,tax,shipping,free_shipping,coupon_error,total} definite={subtotal,currency,tax,shipping,coupon_error,total} closed
 q1["tax_included"]                           #@ missing tax_included
-q1_s3["discount"]                            #@todo missing discount
+q1_s3["discount"]                            #@ missing discount
 q1["free_shipping"]                          #@ possibly free_shipping
 trace0 = S1["w"]["pricer"].trace[0]          #@row trace0: present={rule,keys} definite={rule,keys} closed
 
@@ -774,39 +775,39 @@ trace0 = S1["w"]["pricer"].trace[0]          #@row trace0: present={rule,keys} d
 stats = S1["w"]["stats"]                     #@row stats: present={counts,totals,last} definite={counts,totals,last} closed
 counts = stats.counts                        #@row counts: present={pending,paid} definite={pending,paid} closed
 totals = stats.totals                        #@row totals: present={gold,basic,silver} definite={gold,basic,silver} closed
-last = stats.last                            #@todo row last: present={topic,payload,handled,stats} definite={topic,payload,handled,stats} closed
-pay_event = S1["w"]["bus"].log[1]            #@todo row pay_event: present={topic,payload,handled,stats,audited} definite={topic,payload,handled,stats,audited} closed
-ship_event = S1["w"]["bus"].log[2]           #@todo row ship_event: present={topic,payload,handled,note} definite={topic,payload,handled,note} closed
-cancel_event = S1["w"]["bus"].log[4]         #@todo row cancel_event: present={topic,payload,handled} definite={topic,payload,handled} closed
+last = stats.last                            #@row last: present={topic,payload,handled,stats} definite={topic,payload,handled,stats} closed
+pay_event = S1["w"]["bus"].log[1]            #@row pay_event: present={topic,payload,handled,stats,audited} definite={topic,payload,handled,stats,audited} closed
+ship_event = S1["w"]["bus"].log[2]           #@row ship_event: present={topic,payload,handled,note} definite={topic,payload,handled,note} closed
+cancel_event = S1["w"]["bus"].log[4]         #@row cancel_event: present={topic,payload,handled} definite={topic,payload,handled} closed
 audit0 = S1["w"]["audit"][0]                 #@row audit0: present={topic,keys} definite={topic,keys} closed
-pay_event_s2 = S2["w"]["bus"].log[1]         #@todo row pay_event_s2: present={topic,payload,handled,stats} definite={topic,payload,handled,stats} closed
+pay_event_s2 = S2["w"]["bus"].log[1]         #@row pay_event_s2: present={topic,payload,handled,stats} definite={topic,payload,handled,stats} closed
 handlers = S1["w"]["bus"].handlers           #@row handlers: present={order.submit,order.pay,order.ship} definite={order.submit,order.pay,order.ship} closed
 fired = S1["w"]["machine"].fired[0]          #@row fired: present={order,event} definite={order,event} closed
 
 # ---------------------------------------------------------------- checks: router
 
-resp = S1["resp"]                            #@todo row resp: present={status,body,timed} definite={status,body,timed} closed
+resp = S1["resp"]                            #@row resp: present={status,body,timed} definite={status,body,timed} closed
 denied = S1["denied"]                        #@row denied: present={status,error,timed} definite={status,error,timed} closed
-unknown = S1["unknown"]                      #@todo row unknown: present={status,error,timed} definite={status,error,timed} closed
+unknown = S1["unknown"]                      #@row unknown: present={status,error,timed} definite={status,error,timed} closed
 # Order 3 is pending: "cancel" is a valid transition, so ok is True and the status stays 200.
-adv = S1["adv"]                              #@todo row adv: present={status,ok,timed} definite={status,ok,timed} closed
-status = S1["status"]                        #@todo row status: present={status,body,timed} definite={status,body,timed} closed
-resp["data"]                                 #@todo missing data
+adv = S1["adv"]                              #@row adv: present={status,ok,timed} definite={status,ok,timed} closed
+status = S1["status"]                        #@row status: present={status,body,timed} definite={status,body,timed} closed
+resp["data"]                                 #@ missing data
 denied["body"]                               #@ missing body
 
 # ---------------------------------------------------------------- checks: report and plugins
 
-report = S1["report"]                        #@todo row report: present={n,by_state,tiers,top,loyalty,summary,audit} definite={n,by_state,tiers,top,loyalty,summary,audit} closed
-by_state = report["by_state"]                #@todo row by_state: present={shipped,cancelled} definite={shipped,cancelled} closed
+report = S1["report"]                        #@row report: present={n,by_state,tiers,top,loyalty,summary,audit} definite={n,by_state,tiers,top,loyalty,summary,audit} closed
+by_state = report["by_state"]                #@row by_state: present={shipped,cancelled} definite={shipped,cancelled} closed
 tiers = report["tiers"]                      #@row tiers: present={gold,basic,silver} definite={gold,basic,silver} closed
 tier_gold = tiers["gold"]                    #@row tier_gold: present={count,revenue} definite={count,revenue} closed
 top0 = report["top"][0]                      #@row top0: present={rank,id} definite={rank,id} closed
 loyalty = report["loyalty"]                  #@row loyalty: present={gold} definite={gold} closed
 summary = report["summary"]                  #@row summary: present={orders,states,vip,currency} definite={orders,states,vip,currency} closed
 audit_section = report["audit"]              #@row audit_section: present={entries} definite={entries} closed
-report_s3 = S3["report"]                     #@todo row report_s3: present={n,by_state,tiers,top,summary} definite={n,by_state,tiers,top,summary} closed
-report_s3["loyalty"]                         #@todo missing loyalty
-report_s3["audit"]                           #@todo missing audit
+report_s3 = S3["report"]                     #@row report_s3: present={n,by_state,tiers,top,summary} definite={n,by_state,tiers,top,summary} closed
+report_s3["loyalty"]                         #@ missing loyalty
+report_s3["audit"]                           #@ missing audit
 
 # ---------------------------------------------------------------- checks: org tree
 
@@ -826,5 +827,5 @@ ops = paths["root/ops"]                      #@row ops: present={name,children,a
 payload = json.loads(json.dumps(o1.to_dict()))  #@row payload: present={} definite={} open
 payload["id"]                                #@ input id
 payload["customer"]["tier"]                  #@ input tier
-#@schema json.loads@L826: always={id,customer}
-#@schema json.loads@L826['customer']: always={tier}
+#@schema json.loads@L827: always={id,customer}
+#@schema json.loads@L827['customer']: always={tier}

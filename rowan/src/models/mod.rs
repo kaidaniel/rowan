@@ -55,7 +55,7 @@ impl Registry {
         r(&["builtins.str"], m_str);
         r(
             &[
-                "builtins.int", "builtins.float", "builtins.bool", "builtins.len", "builtins.print", "builtins.repr", 
+                "builtins.int", "builtins.float", "builtins.len", "builtins.print", "builtins.repr", 
                 "builtins.type", "builtins.id", "builtins.hash", "builtins.abs", "builtins.round",  "builtins.sum",
                 "builtins.any", "builtins.all", "builtins.format", "builtins.input", "builtins.callable", "builtins.issubclass", "builtins.hex",
                 "builtins.chr", "builtins.ord", "builtins.range", "builtins.open", "builtins.hasattr", "builtins.divmod", "builtins.pow",
@@ -64,6 +64,7 @@ impl Registry {
             noeffect,
         );
         r(&["builtins.super"], m_super);
+        r(&["builtins.bool"], m_bool);
         r(
             &["builtins.str.upper", "builtins.str.lower", "builtins.str.strip", "builtins.str.title", "builtins.str.capitalize", "builtins.str.casefold", "builtins.str.lstrip", "builtins.str.rstrip"],
             m_str_fn,
@@ -1224,4 +1225,13 @@ fn m_getenv(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let env = external_record(an, "os.environ", st).unwrap();
     let call = Call { qual: "dict.get".into(), recv: Some(Value::obj(env)), args: c.args.clone(), kwargs: c.kwargs.clone(), star_args: c.star_args.clone(), star_kwargs: c.star_kwargs.clone(), node: c.node, call_ast: c.call_ast, site: c.site.clone(), line: c.line };
     m_get(an, st, &call)
+}
+
+/// `bool(x)`: the literal when the truthiness of `x` is decided, else unknown data.
+fn m_bool(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let Some(v) = c.args.first() else { return Value::lit(intern::key(intern::Key::Bool(false))) };
+    match an.truthiness(v, st) {
+        Some(b) => Value::lit(intern::key(intern::Key::Bool(b))),
+        None => Value::data("bool"),
+    }
 }

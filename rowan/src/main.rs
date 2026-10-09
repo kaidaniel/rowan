@@ -78,6 +78,9 @@ fn run(file: &str, json: bool, golden: bool, facts: bool, show_rows: bool, show_
         }
     }
     an.run();
+    if std::env::var("ROWAN_DEBUG").is_ok() {
+        eprintln!("work: {} (tabulations {}, objects {}, {} ms{})", an.work, an.tab_count.values().sum::<usize>(), an.objects.len(), an.started.elapsed().as_millis(), if an.over_deadline() { ", degraded after the deadline" } else { "" });
+    }
     if facts {
         return Ok(serde_json::to_string(&report::facts_json(&an)).unwrap());
     }

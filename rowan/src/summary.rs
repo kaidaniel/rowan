@@ -19,8 +19,8 @@ use crate::state::{Kind, State};
 
 pub const MAX_SUMMARY_ROUNDS: usize = 3;
 pub const MAX_REL_CHAIN: usize = 1;
-pub const MAX_TABULATIONS: usize = 24;
-pub const MAX_CALL_TABULATIONS: usize = 32;
+pub const MAX_TABULATIONS: usize = 256;
+pub const MAX_CALL_TABULATIONS: usize = 256;
 pub const MAX_SYMREQ_TARGETS: usize = 8;
 
 pub fn is_code_kind(k: Kind) -> bool {
@@ -101,6 +101,8 @@ pub const MAX_SIGNATURES: usize = 8;
 
 pub struct Summary {
     pub foid: ObjId,
+    /// debug: the summary's context and its key (typed / code cells, signature)
+    pub desc: String,
     pub ph_by_name: IndexMap<StrId, ObjId>,
     pub ph_self: Option<ObjId>,
     pub exit: State,
@@ -328,6 +330,11 @@ impl Analyzer {
     /// The symbolic analysis just lost information about entry object `ph`.
     pub fn record_event(&mut self, kind: &'static str, ph: ObjId) {
         if !self.sum_stack.is_empty() && (self.kind(ph) == Kind::Ph || self.is_entry_object(ph)) {
+            if std::env::var("ROWAN_DEBUG").map(|v| v == "2").unwrap_or(false) {
+                let top = *self.sum_stack.last().unwrap();
+                let par = if self.kind(ph) == Kind::Ph { self.ph_info(ph).parent.map(|p| self.obj(p).label.clone()).unwrap_or_default() } else { String::new() };
+                eprintln!("  event {} on {} (parent {}) in {} [{}]", kind, self.obj(ph).label, par, self.func_info(top).qualname, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
+            }
             self.sum_events.last_mut().unwrap().insert((kind, ph), Event { kind, ph });
         }
     }
@@ -386,9 +393,7 @@ impl Analyzer {
                 (Vec::new(), 0)
             }
         };
-        // placeholders and the objects a summary allocates are keyed by this context: one per
-        // signature, so summaries of one function for different classes share nothing
-        let ctx = if sig_idx == 0 { format!("sum{}", foid) } else { format!("sum{}s{}", foid, sig_idx) };
+        let _ = sig_idx;
         let fi = self.func_info(foid);
         let fnode = fi.node;
         let mut code_cells: IndexMap<ObjId, Value> = IndexMap::new();
@@ -438,7 +443,22 @@ impl Analyzer {
         typed_cells.sort();
         let mut cc: Vec<(ObjId, Vec<ObjId>)> = code_cells.iter().map(|(c, v)| (*c, v.pts.to_vec())).collect();
         cc.sort();
-        let skey: SummaryKey = (foid, cc, typed_cells.clone(), sig.clone());
+        let skey: SummaryKey = (foid, cc.clone(), typed_cells.clone(), sig.clone());
+        // placeholders and the objects a summary allocates are keyed by this context: one per
+        // key variant (code cells, typed cells, signature), so two summaries of one function
+        // share nothing
+        let ctx = {
+            let rest = (cc, typed_cells.clone(), sig.clone());
+            let vs = self.key_variants.entry(foid).or_default();
+            let vi = match vs.iter().position(|x| *x == rest) {
+                Some(i) => i,
+                None => {
+                    vs.push(rest);
+                    vs.len() - 1
+                }
+            };
+            if vi == 0 { format!("sum{}", foid) } else { format!("sum{}v{}", foid, vi) }
+        };
         if let Some(done) = self.summary_table.get(&skey) {
             return Some(done.clone());
         }
@@ -694,8 +714,22 @@ impl Analyzer {
             self.notes.truncate(notes_mark);
             let symreqs: Vec<SymReq> = self.sum_reqs.last().unwrap().values().cloned().collect();
             let events: Vec<Event> = self.sum_events.last().unwrap().values().cloned().collect();
+            let desc = {
+                let mut d = ctx.clone();
+                for (c, k) in &typed_cells {
+                    d.push_str(&format!(" cell{}:{}", c, self.obj(*k).label));
+                }
+                for (c, v) in code_cells.iter() {
+                    d.push_str(&format!(" cell{}:code{:?}", c, v.pts.to_vec()));
+                }
+                for (n, c) in &sig {
+                    d.push_str(&format!(" {}:{}", n, self.obj(*c).label));
+                }
+                d
+            };
             let mut summ = Summary {
                 foid,
+                desc,
                 ph_by_name: ph_by_name.clone(),
                 ph_self: self_ph,
                 exit: st,
@@ -932,19 +966,23 @@ impl Analyzer {
     pub fn should_tabulate(&mut self, summary: &Summary, bind: &IndexMap<ObjId, Value>, state: &mut State) -> bool {
         let Some(ev) = self.tabulation_reason(summary, bind, state) else {
             if debug_enabled() {
-                eprintln!("summary used for {} ({} events{})", self.func_info(summary.foid).qualname, summary.events.len(), if summary.partial.get() { ", partial" } else { "" });
+                eprintln!("summary used for {} ({} events{}) [{}]", self.func_info(summary.foid).qualname, summary.events.len(), if summary.partial.get() { ", partial" } else { "" }, summary.desc);
             }
             return false;
         };
-        if debug_enabled() {
-            eprintln!("tabulate {} because of {} on {}", self.func_info(summary.foid).qualname, ev.kind, self.obj(ev.ph).label);
-        }
         let kkey: &'static str = if ev.kind == "call" || ev.kind == "dispatch" { ev.kind } else { "lit" };
         let key = (summary.foid, kkey);
         let n = self.tab_count.get(&key).copied().unwrap_or(0);
         let budget = if kkey == "call" || kkey == "dispatch" { crate::interp::limit("call", MAX_CALL_TABULATIONS) } else { crate::interp::limit("tab", MAX_TABULATIONS) };
-        if n >= budget {
+        let over_time = self.over_deadline();
+        if n >= budget || over_time {
+            if debug_enabled() {
+                eprintln!("budget: summary used for {} ({} on {}; {})", self.func_info(summary.foid).qualname, ev.kind, self.obj(ev.ph).label, if over_time { "deadline" } else { kkey });
+            }
             return false;
+        }
+        if debug_enabled() {
+            eprintln!("tabulate {} because of {} on {} [{}]", self.func_info(summary.foid).qualname, ev.kind, self.obj(ev.ph).label, summary.desc);
         }
         self.tab_count.insert(key, n + 1);
         true
@@ -1075,6 +1113,7 @@ impl Analyzer {
 
     // --------------------------------------------------------------- instantiate
     pub fn instantiate(&mut self, summary: &Rc<Summary>, bind: &IndexMap<ObjId, Value>, state: &mut State, node: &Node, call_ctx: &str, ctx_single: bool) -> Value {
+        self.work += 1 + summary.templates.len();
         let t0 = std::time::Instant::now();
         let r = self.instantiate_inner(summary, bind, state, node, call_ctx, ctx_single);
         if debug_enabled() {
