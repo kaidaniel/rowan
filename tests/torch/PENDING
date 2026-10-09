@@ -29,15 +29,9 @@ small/s045_unbind.py
 small/s054_std_norm_lse.py
 small/s056_index_basic.py
 small/s057_index_tensor.py
-small/s063_layernorm.py
-small/s064_rmsnorm_groupnorm.py
-small/s065_batchnorm.py
 small/s076_lstm.py
-small/s079_mha_self_attention.py
 small/s080_transformer_encoder.py
-small/s087_module_self_alias.py
 small/s088_module_init_names.py
-small/s089_nested_modules.py
 small/s090_module_driver_calls.py
 small/s092_register_buffer_mask.py
 small/s093_modulelist_loop.py

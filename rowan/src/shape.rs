@@ -739,6 +739,34 @@ pub fn norm_shape(s: &Shape, f: &TFacts) -> Shape {
             }
         }
     }
+    // dims of an unsliced symbol that facts pin down are spelled out (from the end
+    // preferably; never both ends, which could overlap while the rank is unknown)
+    if let Some(Rest::Slice(sym, from, back)) = out.rest.clone() {
+        let pinned_back: Vec<i32> = f.subst.keys().filter_map(|a| match atom_get(*a) {
+            Atom::Dim(s2, i) if s2 == sym && i < 0 => Some(-i),
+            _ => None,
+        }).collect();
+        let pinned_front: Vec<i32> = f.subst.keys().filter_map(|a| match atom_get(*a) {
+            Atom::Dim(s2, i) if s2 == sym && i >= 0 => Some(i + 1),
+            _ => None,
+        }).collect();
+        if let Some(&j) = pinned_back.iter().max() {
+            if out.prefix.is_empty() && from == 0 && j as u32 > back {
+                let extra: Vec<DimId> = (back as i32 + 1..=j).rev().map(|k| sdim(sym, -k)).collect();
+                let mut suf = extra;
+                suf.extend(out.suffix.iter().copied());
+                out.suffix = suf;
+                out.rest = Some(Rest::Slice(sym, 0, j as u32));
+            }
+        } else if let Some(&j) = pinned_front.iter().max() {
+            if out.suffix.is_empty() && back == 0 && j as u32 > from && out.prefix.len() as u32 == from {
+                for k in from as i32..j {
+                    out.prefix.push(sdim(sym, k));
+                }
+                out.rest = Some(Rest::Slice(sym, j as u32, 0));
+            }
+        }
+    }
     out.prefix = out.prefix.iter().map(|d| norm(*d, f)).collect();
     out.suffix = out.suffix.iter().map(|d| norm(*d, f)).collect();
     out

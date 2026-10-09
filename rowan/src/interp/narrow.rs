@@ -20,6 +20,12 @@ impl Analyzer {
         if !state.reachable {
             return;
         }
+        if self.torch_on {
+            self.t_narrow(test, truth, state);
+            if !state.reachable {
+                return;
+            }
+        }
         match test {
             ast::Expr::UnaryOp(u) if u.op == ast::UnaryOp::Not => {
                 self.narrow(&u.operand, !truth, state);

@@ -3707,3 +3707,101 @@ impl Analyzer {
         Some(s)
     }
 }
+
+impl Analyzer {
+    /// The rank-of-x expression `x.dim()`, `x.ndim`, `len(x.shape)`, `x.ndimension()`: x.
+    fn t_rank_operand(e: &'static ruff_python_ast::Expr) -> Option<&'static ruff_python_ast::Expr> {
+        use ruff_python_ast::Expr as E;
+        match e {
+            E::Call(c) if c.arguments.args.is_empty() => match &*c.func {
+                E::Attribute(a) if matches!(a.attr.id.as_str(), "dim" | "ndimension") => Some(&a.value),
+                E::Name(n) if n.id.as_str() == "len" => None,
+                _ => None,
+            },
+            E::Call(c) if c.arguments.args.len() == 1 => match (&*c.func, &c.arguments.args[0]) {
+                (E::Name(n), E::Attribute(a)) if n.id.as_str() == "len" && a.attr.id.as_str() == "shape" => Some(&a.value),
+                (E::Name(n), E::Call(inner)) if n.id.as_str() == "len" && inner.arguments.args.is_empty() => match &*inner.func {
+                    E::Attribute(a) if a.attr.id.as_str() == "size" => Some(&a.value),
+                    _ => None,
+                },
+                _ => None,
+            },
+            E::Attribute(a) if a.attr.id.as_str() == "ndim" => Some(&a.value),
+            _ => None,
+        }
+    }
+
+    /// A test that held (`assert`, the branch of an `if`): dim / rank equalities become facts;
+    /// one that is decided false makes the path dead.
+    pub fn t_narrow(&mut self, test: &'static ruff_python_ast::Expr, truth: bool, st: &mut State) {
+        use ruff_python_ast::{CmpOp, Expr as E};
+        let E::Compare(c) = test else { return };
+        if c.ops.len() != 1 {
+            return;
+        }
+        let eq = match c.ops[0] {
+            CmpOp::Eq => truth,
+            CmpOp::NotEq => !truth,
+            _ => return,
+        };
+        if !eq {
+            return;
+        }
+        let (l, r) = (&*c.left, &c.comparators[0]);
+        // rank: x.dim() == n
+        for (re, ne) in [(l, r), (r, l)] {
+            if let Some(x) = Self::t_rank_operand(re) {
+                let nv = self.eval(ne, st);
+                let Some(n) = self.t_int(&nv) else { return };
+                let xv = self.eval(x, st);
+                let Some(s) = self.t_shape(&xv, st) else { return };
+                self.t_assume_rank(&s, n as u32, st);
+                return;
+            }
+        }
+        let a = self.eval(l, st);
+        let b = self.eval(r, st);
+        let (Some(da), Some(db)) = (self.t_dim(&a, st), self.t_dim(&b, st)) else { return };
+        // only facts about dims (a plain int comparison is the interpreter's business)
+        let symbolic = |v: &Value| dim_of_label(v).is_some() || label(v).map(|l| sh::dual_dim(&l).is_some()).unwrap_or(false);
+        if !symbolic(&a) && !symbolic(&b) {
+            return;
+        }
+        match sh::dim_eq(da, db, &st.tf) {
+            Some(true) => {}
+            Some(false) => st.reachable = false,
+            None => {
+                let mut f = (*st.tf).clone();
+                sh::learn_eq(&mut f, da, db);
+                st.tf = std::sync::Arc::new(f);
+            }
+        }
+    }
+
+    fn t_assume_rank(&mut self, s: &Shape, n: u32, st: &mut State) {
+        if let Some(r) = s.rank() {
+            if r as u32 != n {
+                st.reachable = false;
+            }
+            return;
+        }
+        let fixed = (s.prefix.len() + s.suffix.len()) as i64;
+        if let Some(Rest::Slice(sym, from, back)) = &s.rest {
+            let k = n as i64 - fixed + *from as i64 + *back as i64;
+            if k < (*from + *back) as i64 {
+                st.reachable = false;
+                return;
+            }
+            let c = Cons::Rank(*sym, RankRel::Eq(k as u32));
+            match sh::decide(&c, &st.tf) {
+                Some(false) => st.reachable = false,
+                Some(true) => {}
+                None => {
+                    let mut f = (*st.tf).clone();
+                    sh::learn(&mut f, &c);
+                    st.tf = std::sync::Arc::new(f);
+                }
+            }
+        }
+    }
+}
