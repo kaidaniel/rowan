@@ -26,7 +26,8 @@ raw = pd.read_csv(io.StringIO(CSV))
 pr = raw.pivot(index="day", columns="kind", values="amount")
 pr["in"]                                           #@ input in
 rp = pr.reset_index()
-#@row rp: definite={day} open
+# (first written definite={day}: the access pr["in"] above went through, so "in" is there)
+#@row rp: definite={day,in} open
 #@schema read_csv@L25: always={day,kind,amount} only={day,kind,amount}
 
 if __name__ == "__main__":

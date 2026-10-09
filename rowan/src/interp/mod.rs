@@ -337,6 +337,7 @@ pub struct LoopCtx {
 }
 
 /// Everything a model needs about a call.
+#[derive(Clone)]
 pub struct Call {
     pub qual: String,
     pub recv: Option<Value>,

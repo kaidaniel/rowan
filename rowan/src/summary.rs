@@ -395,12 +395,20 @@ impl Analyzer {
         for oid in v.pts.iter() {
             if self.kind(oid) == Kind::Ph {
                 self.record_event("concrete", oid);
+                // a path below a parameter (`df["c"]`): its root decides too
+                let mut p = self.ph_info(oid).parent;
+                let mut n = 0;
+                while let Some(par) = p {
+                    if self.kind(par) != Kind::Ph || n > 4 {
+                        break;
+                    }
+                    self.record_event("concrete", par);
+                    p = self.ph_info(par).parent;
+                    n += 1;
+                }
             } else if depth > 0 && matches!(self.kind(oid), Kind::List | Kind::Tuple | Kind::Dict | Kind::Set) && !self.is_entry_object(oid) {
                 for (_, x) in state.slots_of(oid) {
                     self.concrete_events(&x, state, depth - 1);
-                }
-                if let Some(e) = state.elems.get(&oid) {
-                    let _ = e;
                 }
             }
         }

@@ -111,7 +111,7 @@ impl Analyzer {
         let line_data = Value::data(&format!("L{}", node.line));
         // a frame column read raises KeyError when the column is missing
         let frame_tiers: Option<Vec<Tier>> = if try_guard && ns == Ns::Item && !obj.pts.is_empty() && obj.pts.iter().all(|o| self.kind(o) == Kind::Frame) {
-            key.kv.as_lit().filter(|_| key.pts.is_empty()).map(|k| obj.pts.iter().map(|o| crate::domain::classify(&state.row(o, ns), k).tier).collect())
+            key.kv.as_lit().filter(|_| key.pts.is_empty()).map(|k| obj.pts.iter().map(|o| crate::models::pandas::column_tier(&state.row(o, ns), k)).collect())
         } else {
             None
         };
@@ -830,6 +830,10 @@ impl Analyzer {
             acc = acc.join(&v);
         }
         if obj.pts.is_empty() {
+            if name == "str" && matches!(obj.kv, KeyVal::KeysOf(_)) {
+                // `df.columns.str.strip().str.lower()`: the accessor of renamed column names
+                return obj.clone();
+            }
             if matches!(obj.kv, KeyVal::Lit(_) | KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
                 return self.method_value(&format!("str.{}", name), obj);
             }
@@ -1459,6 +1463,11 @@ impl Analyzer {
             state.narrowed.retain(|k, _| !intern::str_get(*k).contains(&needle));
         }
         let nk = key_str_lit(name);
+        for o in obj.pts.iter() {
+            if self.kind(o) == Kind::View {
+                crate::models::pandas::view_setattr(self, o, name, v, state);
+            }
+        }
         let targets: Vec<u32> = obj.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Instance | Kind::Module | Kind::Class | Kind::Unknown | Kind::Frame | Kind::Namespace | Kind::Ph | Kind::Function)).collect();
         for &oid in &targets {
             let kind = self.kind(oid);

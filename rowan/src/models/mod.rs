@@ -1891,6 +1891,12 @@ fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn m_view(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual);
+    if name == "map" {
+        // `df.columns.map(f)`: the column names renamed by f
+        if let Some(v) = pandas::columns_map(an, st, c) {
+            return v;
+        }
+    }
     // `obj.__dict__.update(...)`: stores on the instance's attributes
     let attrs_of: Vec<u32> = c.recv.iter().flat_map(|r| r.pts.iter()).filter_map(|v| match &an.obj(v).payload {
         Payload::View(ViewKind::Attrs, inst) => Some(inst.pts.to_vec()),

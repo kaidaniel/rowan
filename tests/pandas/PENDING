@@ -1,14 +1,4 @@
 # pandas cases written but not yet expected to pass (paths relative to tests/pandas/)
-small/p039_melt.py
-small/p040_pivot.py
-small/p041_pivot_table.py
-small/p042_stack_unstack.py
-small/p044_get_dummies.py
-small/p045_crosstab.py
-small/p046_wide_to_long.py
-small/p047_json_normalize.py
-small/p048_combine_update.py
-small/p049_columns_str.py
 small/p068_groupby_filter_apply.py
 small/p070_value_counts.py
 small/p072_resample.py
