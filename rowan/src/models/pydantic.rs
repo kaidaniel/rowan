@@ -1956,7 +1956,7 @@ impl Analyzer {
 
 /// Literal key sets of `include=` / `exclude=`: a set / list / tuple of names, or a dict
 /// (`{"addr": {"zip"}}`: nested, `{"name": True}`: the field).
-fn key_spec(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) -> Option<(KeySet, Vec<(KeyId, Value)>)> {
+pub fn key_spec(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) -> Option<(KeySet, Vec<(KeyId, Value)>)> {
     let _ = node;
     let mut ks: Vec<KeyId> = Vec::new();
     let mut nested: Vec<(KeyId, Value)> = Vec::new();

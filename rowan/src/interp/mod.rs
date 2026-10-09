@@ -777,6 +777,10 @@ pub struct Analyzer {
     /// call_next dispatches (route, request)
     pub fa_hooks: Vec<(ObjId, String, Value, Option<ObjId>)>,
     pub fa_pending: Vec<(usize, crate::models::fastapi::Req)>,
+    /// per request being dispatched: the dependencies' values (each runs once)
+    pub fa_dep_cache: Vec<FxHashMap<ObjId, Value>>,
+    /// `dependencies=[…]` of apps / routers (also given at include_router)
+    pub fa_app_deps: FxHashMap<ObjId, Vec<Value>>,
     /// per module: global names a function body mutates (`mutated_in_functions`)
     pub mutated_globals: std::cell::RefCell<FxHashMap<u32, FxHashSet<String>>>,
     /// per summary being built: its row-check observations
@@ -961,6 +965,8 @@ impl Analyzer {
             fa_handlers: FxHashSet::default(),
             fa_hooks: Vec::new(),
             fa_pending: Vec::new(),
+            fa_dep_cache: Vec::new(),
+            fa_app_deps: FxHashMap::default(),
             mutated_globals: Default::default(),
             sum_obs: Vec::new(),
             sum_fact_obs: Vec::new(),
@@ -1539,6 +1545,11 @@ impl Analyzer {
                 let fake = Node::synthetic(mi.idx, fi.node.node().line);
                 let saved_entry = self.entry_run.replace(oid);
                 if self.fa_entry_through_middleware(oid, &mut st, &fake).is_none() {
+                    if let Some(idx) = self.fa_routes.iter().position(|r| r.func == Some(oid)) {
+                        self.fa_dep_cache.push(FxHashMap::default());
+                        self.fa_route_deps(idx, None, &mut st, &fake);
+                        self.fa_dep_cache.pop();
+                    }
                     let kwargs = self.fa_bind(oid, None, &mut st, &fake, 0);
                     self.call_user(oid, None, vec![], kwargs, vec![], vec![], &mut st, &fake, None, true);
                 }

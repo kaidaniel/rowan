@@ -387,6 +387,18 @@ impl Analyzer {
                         if rec.pts.iter().any(|o| matches!(self.kind(o), Kind::Instance | Kind::Namespace)) {
                             return;
                         }
+                        // a name holding several dicts: those that surely lack the key are not it
+                        if let ast::Expr::Name(n) = &*a.value {
+                            if rec.pts.len() > 1 && !crate::interp::disabled("getfilter") {
+                                let keep: Vec<u32> = rec.pts.iter().filter(|o| !(self.kind(*o) == Kind::Dict && { let r = state.row(*o, Ns::Item); !r.open() && !r.present.contains(k) })).collect();
+                                if !keep.is_empty() && keep.len() < rec.pts.len() {
+                                    let nv = Value::with_kv(ObjSet::from_vec(keep), rec.kv.clone());
+                                    self.store_narrowed(&StoreTarget::Name(s(n.id.as_str())), nv.clone(), state);
+                                    self.narrow_record(&nv, Ns::Item, k, true, state);
+                                    return;
+                                }
+                            }
+                        }
                         self.narrow_record(&rec, Ns::Item, k, true, state);
                     }
                 }

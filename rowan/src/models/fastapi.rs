@@ -228,7 +228,7 @@ impl Analyzer {
         match ann {
             Some(a) => {
                 let pa = self.pyd_ann_pub(a, fi.module, state);
-                matches!(pa, Ann::Model(_) | Ann::List(_) | Ann::Optional(_)) && !matches!(pa, Ann::Optional(ref x) if matches!(**x, Ann::Other)) || matches!(dotted_last(a).as_str(), "dict" | "Dict") || matches!(a, ast::Expr::Subscript(sb) if matches!(dotted_last(&sb.value).as_str(), "dict" | "Dict" | "list" | "List"))
+                bodyish(&pa) || matches!(dotted_last(a).as_str(), "dict" | "Dict") || matches!(a, ast::Expr::Subscript(sb) if matches!(dotted_last(&sb.value).as_str(), "dict" | "Dict"))
             }
             None => false,
         }
@@ -308,8 +308,18 @@ impl Analyzer {
             let raw = match req {
                 Some(r) => match &r.json {
                     Some(j) if embed => {
-                        let k = Value::lit(key_str_lit(&pname));
-                        self.load_item(j, Ns::Item, &k, node, state, false)
+                        // the key in the JSON, else the default
+                        let kk = key_str_lit(&pname);
+                        let recs: Vec<ObjId> = j.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown | Kind::Ph)).collect();
+                        let sure = !recs.is_empty() && recs.iter().all(|o| state.row(*o, Ns::Item).definite.contains(kk));
+                        let maybe = recs.iter().any(|o| state.row(*o, Ns::Item).present.contains(kk) || state.row(*o, Ns::Item).open());
+                        let mut v = if maybe { self.load_item(j, Ns::Item, &Value::lit(kk), node, state, false) } else { Value::new() };
+                        if !sure {
+                            if let Some(d) = &default {
+                                v = v.join(d);
+                            }
+                        }
+                        v
                     }
                     Some(j) => j.clone(),
                     None => Value::data("body"),
@@ -397,6 +407,10 @@ impl Analyzer {
         if depth > 8 {
             return Value::data("depends");
         }
+        // a dependency runs once per request: its value is reused
+        if let Some(v) = g.single().and_then(|o| self.fa_dep_cache.last().and_then(|c| c.get(&o).cloned())) {
+            return v;
+        }
         let mut outs: Vec<Value> = Vec::new();
         for o in g.pts.iter() {
             match self.kind(o) {
@@ -435,7 +449,11 @@ impl Analyzer {
         if outs.is_empty() {
             return Value::data("depends");
         }
-        join_values(outs)
+        let v = join_values(outs);
+        if let (Some(o), Some(c)) = (g.single(), self.fa_dep_cache.last_mut()) {
+            c.insert(o, v.clone());
+        }
+        v
     }
 
     /// The entry run of a handler when middlewares are registered: any request, through the
@@ -453,6 +471,48 @@ impl Analyzer {
         let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
         self.call_user(first, None, vec![robj, Value::obj(cn)], IndexMap::new(), vec![], vec![], state, node, None, false);
         Some(())
+    }
+
+    /// The dependencies a route runs before its handler's parameters: those of the apps /
+    /// routers it belongs to (outermost first), then `dependencies=[…]` of the route.
+    pub fn fa_route_deps(&mut self, idx: usize, req: Option<&Req>, state: &mut State, node: &Node) {
+        let r = self.fa_routes[idx].clone();
+        // the chain of apps / routers above the route's
+        let mut chain: Vec<ObjId> = vec![r.app];
+        let mut cur = r.app;
+        for _ in 0..8 {
+            match self.fa_includes.iter().find(|(_, ro, _)| *ro == cur) {
+                Some((parent, _, _)) => {
+                    chain.push(*parent);
+                    cur = *parent;
+                }
+                None => break,
+            }
+        }
+        let mut lists: Vec<Value> = Vec::new();
+        for a in chain.iter().rev() {
+            lists.extend(self.fa_app_deps.get(a).cloned().unwrap_or_default());
+        }
+        if let Some(e) = r.call.and_then(|c| kw(c, "dependencies")) {
+            let e: &'static ast::Expr = e;
+            lists.push(self.eval_in_module(r.module, e, state));
+        }
+        for l in lists {
+            let it = self.iterate(&l, node, state);
+            let markers: Vec<Value> = match it.items {
+                Some(items) => items,
+                None => vec![it.elem.one_or_empty()],
+            };
+            for m in markers {
+                for o in m.pts.iter() {
+                    if let Some((q, g)) = payload_of(self, o) {
+                        if q == "fastapi.depends" {
+                            self.fa_call_dep(&g, req, state, node, 1);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// A route's handler called with a concrete request: an `HTTPException` (any exception the
@@ -473,8 +533,11 @@ impl Analyzer {
         self.raise_values.push(None);
         self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
         self.try_sum_depth.push(self.sum_stack.len());
+        self.fa_dep_cache.push(rustc_hash::FxHashMap::default());
+        self.fa_route_deps(route, Some(req), state, node);
         let kwargs = self.fa_bind(func, Some(req), state, node, 0);
         let ret = self.call_user(func, None, vec![], kwargs, vec![], vec![], state, node, None, false);
+        self.fa_dep_cache.pop();
         self.guards.pop();
         self.try_marks.pop();
         self.try_sum_depth.pop();
@@ -564,6 +627,23 @@ impl Analyzer {
             }
         }
         opts.by_alias = !matches!(r.call.and_then(|c| kw(c, "response_model_by_alias")), Some(ast::Expr::BooleanLiteral(b)) if !b.value);
+        // response_model_include= / response_model_exclude= (literal sets)
+        for (k, inc) in [("response_model_include", true), ("response_model_exclude", false)] {
+            if let Some(e) = r.call.and_then(|c| kw(c, k)) {
+                let e: &'static ast::Expr = e;
+                let v = self.eval_in_module(r.module, e, state);
+                match crate::models::pydantic::key_spec(self, state, &v, node) {
+                    Some((ks, _)) => {
+                        if inc {
+                            opts.include = Some(ks);
+                        } else {
+                            opts.exclude = Some(ks);
+                        }
+                    }
+                    None => opts.unknown_sel = true,
+                }
+            }
+        }
         if ann.is_none() {
             let fi = self.func_info(func);
             if let FuncNode::Def(f) = &fi.node {
@@ -574,6 +654,11 @@ impl Analyzer {
             }
         }
         let ann = ann.unwrap_or(Ann::Other);
+        // a returned model instance (of a subclass, say) goes through the response model's
+        // fields: dumped, then validated as the response model
+        if !matches!(ann, Ann::Other) {
+            plain = self.pyd_dump_value_pub(&Ann::Other, &plain, &DumpOpts::default(), state, node);
+        }
         let validated = match &ann {
             Ann::Model(c) => self.pyd_validate_opts(*c, &plain, state, node, false),
             Ann::Other => plain,
@@ -675,6 +760,16 @@ impl Analyzer {
     }
 }
 
+/// A type FastAPI reads from the body: a model, a TypedDict, a union of models, a dict, or a
+/// list / Optional of those (scalars and lists of scalars are query parameters).
+fn bodyish(a: &Ann) -> bool {
+    match a {
+        Ann::Model(_) | Ann::TypedDict(_) | Ann::Union(..) | Ann::Dict(_) => true,
+        Ann::List(x) | Ann::Optional(x) => bodyish(x),
+        _ => false,
+    }
+}
+
 fn conv_scalar(ann: &str, text: &str) -> Value {
     match ann {
         "int" => match text.parse::<i64>() {
@@ -717,6 +812,9 @@ pub fn m_fastapi(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let v = fa_obj(an, st, &c.node, "fastapi.app", Value::new(), "faapp");
             if let (Some(o), Some(p)) = (v.single(), c.kwargs.get(&s("prefix")).and_then(str_of)) {
                 an.fa_prefix.insert(o, p);
+            }
+            if let (Some(o), Some(d)) = (v.single(), c.kwargs.get(&s("dependencies")).cloned()) {
+                an.fa_app_deps.entry(o).or_default().push(d);
             }
             v
         }
@@ -784,6 +882,9 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
             if let Some(r) = c.arg(0, Some("router")) {
                 for ro in r.pts.iter() {
                     an.fa_includes.push((o, ro, prefix.clone()));
+                    if let Some(d) = c.kwargs.get(&s("dependencies")).cloned() {
+                        an.fa_app_deps.entry(ro).or_default().push(d);
+                    }
                 }
             }
             an.none_v.clone()
