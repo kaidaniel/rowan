@@ -565,7 +565,7 @@ impl Analyzer {
             return self.t_locate(&s, i, node, st, what);
         }
         if i >= 0 {
-            let e = sh::expose(&s, i as usize + 1, 0);
+            let e = sh::expose_f(&s, i as usize + 1, 0, &st.tf);
             Some((e, Pos::F(i as usize)))
         } else {
             let k = (-i) as usize;
@@ -2119,7 +2119,10 @@ impl Analyzer {
             if a > 0 && !self.t_require_rank(&s, RankRel::Ge(a as u32), node, st, "flatten") {
                 return Value::new();
             }
-            let e = sh::expose(&sh::norm_shape(&s, &st.tf), a as usize, 0);
+            let e = sh::expose_f(&sh::norm_shape(&s, &st.tf), a as usize, 0, &st.tf);
+            if e.prefix.len() < a as usize || e.prefix[..a as usize].iter().any(|d| sh::has_unknown(*d)) && e.suffix.is_empty() && e.rest.is_none() {
+                return tensor_value(Shape::any());
+            }
             let mut p = e.prefix[..a as usize].to_vec();
             p.push(sh::unknown());
             return tensor_value(Shape::known(p));

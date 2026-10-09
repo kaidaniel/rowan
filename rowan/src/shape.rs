@@ -1027,12 +1027,22 @@ pub fn dim_at(s: &Shape, i: i64) -> Option<DimId> {
 /// those positions; the op requires at least that many dims). Leading positions that may
 /// overlap a known tail become unknown dims and the tail is dropped.
 pub fn expose(s: &Shape, n_front: usize, n_back: usize) -> Shape {
+    expose_f(s, n_front, n_back, &TFacts::default())
+}
+
+/// `expose`, using rank facts: a slice rest known to hold enough dims gives up leading dims
+/// even when a known tail follows it.
+pub fn expose_f(s: &Shape, n_front: usize, n_back: usize, f: &TFacts) -> Shape {
     let mut s = s.clone();
     if s.rest.is_none() {
         return s;
     }
     while s.prefix.len() < n_front {
         match s.rest.clone() {
+            Some(Rest::Slice(sym, from, back)) if !s.suffix.is_empty() && (f.rank_ge(sym) as i64 - from as i64 - back as i64) >= 1 => {
+                s.prefix.push(sdim(sym, from as i32));
+                s.rest = Some(Rest::Slice(sym, from + 1, back));
+            }
             Some(Rest::Slice(sym, from, back)) if s.suffix.is_empty() => {
                 s.prefix.push(sdim(sym, from as i32));
                 s.rest = Some(Rest::Slice(sym, from + 1, back));

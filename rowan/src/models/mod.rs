@@ -1639,7 +1639,8 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         if let (Some(items), Kind::List) = (&ext_items, an.kind(oid)) {
             let ll = an.obj(oid).literal_len;
             if let Some(n) = ll {
-                if an.obj(oid).single && an.frame().loop_depth == 0 && an.cond_depth == 0 && n + items.len() <= 16 {
+                let cap = if an.torch_on { 64 } else { 16 };
+                if an.obj(oid).single && an.frame().loop_depth == 0 && an.cond_depth == 0 && n + items.len() <= cap {
                     for (i, item) in items.iter().enumerate() {
                         st.set_slot(oid, Ns::Pos, intern::key_int((n + i) as i64), item.clone(), true);
                         st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(item.pts.clone(), DATA), false);
@@ -1670,7 +1671,7 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let ll = an.obj(oid).literal_len;
         let single = an.obj(oid).single;
         if let Some(n) = ll {
-            if single && name == "append" && an.frame().loop_depth == 0 && an.cond_depth == 0 && n < 16 {
+            if single && name == "append" && an.frame().loop_depth == 0 && an.cond_depth == 0 && n < if an.torch_on { 64 } else { 16 } {
                 st.set_slot(oid, Ns::Pos, intern::key_int(n as i64), elem, true);
                 an.obj_mut(oid).literal_len = Some(n + 1);
                 continue;
