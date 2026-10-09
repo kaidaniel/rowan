@@ -2983,6 +2983,10 @@ impl Analyzer {
             "MultiheadAttention" => self.t_mha(o, args, kwargs, node, st),
             "TransformerEncoderLayer" | "TransformerDecoderLayer" => {
                 let d = self.t_cfg_dim(o, "d_model", st);
+                if !self.t_require_rank(&s0, RankRel::In(vec![2, 3]), node, st, &what) {
+                    return Value::new();
+                }
+                let s0 = sh::norm_shape(&s0, &st.tf);
                 let Some((e, p)) = self.t_locate(&s0, -1, node, st, &what) else { return Value::new() };
                 if !self.t_require_eq(get_at(&e, p), d, node, st, &format!("{} d_model", what)) {
                     return Value::new();
@@ -3917,5 +3921,26 @@ impl Analyzer {
         }
         let scope = self.frames.iter().rev().find_map(|fr| fr.func).unwrap_or(0);
         self.t_var_names.insert(o, sh::sym(scope, &intern::str_get(name)));
+    }
+}
+
+impl Analyzer {
+    /// `t op= u` in place: the broadcast result must have t's shape (false: an error).
+    pub fn t_inplace_fits(&mut self, cur: &Value, res: &Value, node: &Node, st: &mut State) -> bool {
+        let (Some(a), Some(r)) = (self.t_shape(cur, st), self.t_shape(res, st)) else { return true };
+        let grows = match (r.rank(), a.rank()) {
+            (Some(x), Some(y)) => x > y,
+            _ => false,
+        };
+        let differs = match (r.dims(), a.dims()) {
+            (Some(x), Some(y)) if x.len() == y.len() => x.iter().zip(y.iter()).any(|(p, q)| sh::dim_eq(*p, *q, &st.tf) == Some(false)),
+            _ => false,
+        };
+        if grows || differs {
+            let m = self.t_print(st, || format!("in-place op: the result {} does not fit {}", sh::shape_text(&r), sh::shape_text(&a)));
+            self.t_error(node, m, st);
+            return false;
+        }
+        true
     }
 }

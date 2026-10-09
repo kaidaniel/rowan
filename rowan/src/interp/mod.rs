@@ -1397,6 +1397,12 @@ impl Analyzer {
                         continue;
                     }
                     let poid = self.unknown_source(&format!("param {}.{}", fi.qualname, a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
+                    // a number default in a torch module: the parameter (whatever a caller
+                    // passes, the default included) stays a name dims can be written in
+                    if self.torch_modules.contains(&fi.module) && d.pts.is_empty() && d.kv.as_lit().map(intern::key_is_number).unwrap_or(false) {
+                        args.push(Value::obj(poid));
+                        continue;
+                    }
                     args.push(d.join(&Value::obj(poid)));
                     continue;
                 }
@@ -1587,8 +1593,11 @@ impl Analyzer {
                     }
                     let pname = s(a.name.id.as_str());
                     if let Some(d) = fi.defaults.get(&pname) {
-                        args.push(d.clone());
-                        continue;
+                        let number = d.pts.is_empty() && d.kv.as_lit().map(intern::key_is_number).unwrap_or(false);
+                        if !(self.torch_modules.contains(&fi.module) && number) {
+                            args.push(d.clone());
+                            continue;
+                        }
                     }
                     let v = match &a.annotation {
                         Some(ann) => self.param_from_annotation(ann, &fi, state),

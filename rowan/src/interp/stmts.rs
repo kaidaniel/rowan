@@ -63,6 +63,10 @@ impl Analyzer {
                     return;
                 }
                 let res = self.binop(a.op, &cur, &rhs, &n, state);
+                // `t += u` on a tensor is in place: the result must keep t's shape
+                if self.torch_on && crate::models::torch::is_definite_tensor(&cur) && !self.t_inplace_fits(&cur, &res, &n, state) {
+                    return;
+                }
                 self.bind_target(&a.target, &res, state);
             }
             ast::Stmt::Return(r) => {
