@@ -457,6 +457,12 @@ impl Analyzer {
         // the content under an unknown key stands for many values: stores on it are weak
         let single = !(k == STAR || param_slot_of(k).is_some());
         let pid = self.alloc_raw(Kind::Unknown, &format!("path:{}:{}:{}", oid, ns, intern::key_repr(k)), "", single, &label, Payload::None);
+        if let Some(sym) = self.sym_access(oid, ns, k) {
+            if !self.symbols.contains_key(&pid) {
+                let scope = self.symbol_scope.get(&oid).copied().unwrap_or(0);
+                self.set_symbol(pid, sym, scope);
+            }
+        }
         let d = self.obj(oid).depth + 1;
         self.obj_mut(pid).depth = d;
         if !state.has_row(pid, Ns::Item) {

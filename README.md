@@ -71,6 +71,7 @@ Values are written as Python-like text, as far as they are known (spec §2.2):
 | Shown | Meaning |
 | --- | --- |
 | `?` | a value rowan does not know (any type) |
+| `a`, `a(b)`, `cfg["db"]`, `rows[*]`, `json.loads(text)`, `1 + b` | an unknown named in the program's terms (a parameter, the result of an unknown call, a read from another unknown, an input, an expression); shown only inside the function whose names it uses, `?` elsewhere; the hover's legend says what is known about each (`a: ?`) |
 | `1 \| 2 \| ?` | one of several possibilities |
 | `{"id": 1, "role"?: "admin", "x"~: ?}` | a dict with exactly these keys: `"id"` always, `"role"` on some paths only, `"x"` unless unknown code removed it |
 | `{"id": 1, **?}` | the same, plus possibly other keys (an unknown dict spread in) |

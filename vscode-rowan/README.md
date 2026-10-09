@@ -1,8 +1,10 @@
 # rowan for VS Code
 
 Hover over a variable in a Python file to see what rowan infers it holds, in Python-like
-notation: `1 | 2`, `{"id": 1, "role"?: "admin", **?}`, `Order(id=?)`, `list[?]` (`?` = a value
-rowan does not know; `"k"?:` = key set on some paths only; `"k"~:` = unless unknown code
+notation: `1 | 2`, `{"id": 1, "role"?: "admin", **?}`, `{"a": a, "b": b}`, `list[?]` (`?` = a
+value rowan does not know; unknowns it can name are shown by name — a parameter `a`, a call
+`a(b)`, a read `cfg["db"]`, an input `json.loads(text)` — with a legend saying what is known
+about each; `"k"?:` = key set on some paths only; `"k"~:` = unless unknown code
 removed it; `**?` = other keys possible; `list[X]` = any number of elements like `X`). For an
 unknown value the hover says where it comes from (an input, a parameter, unknown code) and
 which keys or attributes the program has seen on it; for dicts and objects, where other keys

@@ -101,6 +101,7 @@ Values are printed as Python-like text (the text report, the editor hover, `--fa
 | `1`, `"a"`, `None` | a known literal |
 | `1 \| 2 \| ?` | one of several possibilities (`?` listed last) |
 | `?` | a value nothing is known about |
+| `a`, `a(b)`, `cfg["db"]`, `rows[*].name`, `json.loads(text)`, `1 + b` | an unknown value named in the program's own terms: a parameter, the result of a call rowan cannot see into, a read from another unknown (`[*]`: any element), an input, an expression over unknowns. A symbol is printed only where its names mean the same thing (inside its function; module-level ones everywhere); elsewhere the value is `?`. The legend under a value says what is known about each symbol (`a: ?`, `cfg: {"db": ?, **?}`). |
 | `{"id": 1, "role"?: "admin", "x"~: ?}` | a dict with exactly these keys: `"id"` always, `"role"` on some paths only (`?` after the key), `"x"` unless unknown code removed it (`~`) |
 | `{"id": 1, **?}` | the same, plus possibly other keys (an unknown dict spread in: the record is open) |
 | `Order(id=1, **?)` | an instance and its attributes, same marks |

@@ -121,7 +121,10 @@ both paths and is written as `?`; `json.loads` results are open by design.
   `State.name_keys`: a store / `setdefault` through a name makes the key definite for that
   name's object, whichever it is. Row checks and hover facts inside a summary body are
   `Obs` / `FactObs` kept with the summary and resolved at every instantiation (hover values
-  there show as `?`). Entry runs (functions nobody calls, also closures and lambdas made but
+  there show as captured symbols). Unknowns print as *symbols* (`Analyzer::symbols` /
+  `symbol_scope`, set where they are made: parameters, placeholders, read paths, unknown
+  calls, inputs; `expr:` data for `1 + b`); a symbol prints only in its function
+  (`report::in_scope`), and `--facts` carries a `legend` per fact. Entry runs (functions nobody calls, also closures and lambdas made but
   not called, up to 4 rounds) get open parameters: defaults are `default | anything`, `*args`
   / `**kw` unknown. A summary reads a module
   name that is rebound anywhere (`Scopes::rebound`) as a deferred load per call site.
@@ -186,8 +189,7 @@ both paths and is written as `?`; `json.loads` results are open by design.
   undecided; `getattr` needs a known name; pandas columns from data stay open.
 * `dict(zip(keys, row))` with a row of unknown length makes every key definite (`d30`); a
   `for` over a one-shot iterator exhausts it even on break; `ChainMap` is a merged copy.
-* Recency's side tables other than `cls_slots` are not renamed; ASTs are leaked per file
-  version. Snapshots depend on the caps the snapshot harness pins (`ROWAN_LIMITS=…`).
+* Recency's side tables but `cls_slots` are not renamed; ASTs leak per file version.
 
 ## Where to go next
 

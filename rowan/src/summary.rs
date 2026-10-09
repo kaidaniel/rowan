@@ -119,6 +119,10 @@ pub struct FactObs {
     pub name: StrId,
     pub value: Value,
     pub rows: Vec<(ObjId, Option<Row>, Option<Row>)>,
+    /// the contents of the objects the value reaches, as they were at that line
+    pub slots: Vec<(ObjId, Ns, KeyId, Value)>,
+    /// the function the line is in (whose names expressions refer to)
+    pub scope: u32,
 }
 
 pub struct Summary {
@@ -306,6 +310,20 @@ impl Analyzer {
         let pctx = self.sum_ctx(func);
         let oid = self.alloc_raw(Kind::Ph, &site, &pctx, true, &label, payload.clone());
         self.obj_mut(oid).payload = payload;
+        if !self.symbols.contains_key(&oid) {
+            let sym = match (kind, parent, key) {
+                (PhKind::Path, Some(p), Some(k)) => self.sym_access(p, ns, k),
+                (_, _, _) if !name.is_empty() => Some(name.to_string()),
+                _ => None,
+            };
+            if let Some(sym) = sym {
+                let scope = match parent {
+                    Some(p) if kind == PhKind::Path => self.symbol_scope.get(&p).copied().unwrap_or(func),
+                    _ => func,
+                };
+                self.set_symbol(oid, sym, scope);
+            }
+        }
         if kind == PhKind::Path {
             let d = parent.map(|p| self.obj(p).depth + 1).unwrap_or(1);
             self.obj_mut(oid).depth = d;
@@ -323,6 +341,12 @@ impl Analyzer {
         let pctx = self.sum_ctx(func);
         let oid = self.alloc_raw(Kind::Ph, &site, &pctx, true, &label, payload.clone());
         self.obj_mut(oid).payload = payload;
+        if let Some(sym) = self.symbols.get(&parent).cloned() {
+            let scope = self.symbol_scope.get(&parent).copied().unwrap_or(0);
+            if !self.symbols.contains_key(&oid) {
+                self.set_symbol(oid, sym, scope);
+            }
+        }
         let d = self.obj(parent).depth;
         self.obj_mut(oid).depth = d;
         if !state.has_row(oid, Ns::Item) {
@@ -1463,12 +1487,20 @@ impl Analyzer {
                     rows.push((a, ci.clone(), ca.clone()));
                 }
             }
+            let mut slots: Vec<(ObjId, Ns, KeyId, Value)> = Vec::new();
+            for (o, ns, k, sv) in &fo.slots {
+                let tg = inst.resolve(self, state, &pre, *o);
+                let nv = inst.remap_value(self, state, &pre, sv);
+                for a in tg.iter() {
+                    slots.push((a, *ns, *k, nv.clone()));
+                }
+            }
             if in_summary {
                 if let Some(top) = self.sum_fact_obs.last_mut() {
-                    top.push(FactObs { line: fo.line, name: fo.name, value: v, rows });
+                    top.push(FactObs { line: fo.line, name: fo.name, value: v, rows, slots, scope: fo.scope });
                 }
             } else {
-                self.record_resolved_fact(fo.line, fo.name, &v, rows, state);
+                self.record_resolved_fact(fo.line, fo.name, &v, rows, slots, fo.scope, state);
             }
         }
         let ret = inst.remap_value(self, state, &pre, &summary.ret);
@@ -1767,6 +1799,10 @@ impl Inst {
         if let Some(o) = an.origins.get(&t).cloned() {
             an.origins.insert(nid, o);
         }
+        if let Some(sym) = an.symbols.get(&t).cloned() {
+            let scope = an.symbol_scope.get(&t).copied().unwrap_or(0);
+            an.set_symbol(nid, sym, scope);
+        }
         if let Some(f) = an.dd_factories.get(&t).cloned() {
             an.dd_factories.insert(nid, f);
         }
@@ -1922,7 +1958,9 @@ impl Inst {
                 v = v.join(&Value::with_kv(star.pts, DATA));
             }
             if v.empty() {
-                let row = pre.row(p, ph.ns);
+                // (an object made while resolving, e.g. the element of an unknown iterable,
+                // has its row in the current state only)
+                let row = if pre.has_row(p, ph.ns) || !state.has_row(p, ph.ns) { pre.row(p, ph.ns) } else { state.row(p, ph.ns) };
                 if ph.ns == Ns::Cell {
                     // a data cell not bound at this (symbolic) call site: still an entry fact
                     // of the summary being built, resolved when *it* is instantiated

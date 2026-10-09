@@ -218,35 +218,31 @@ function renderHover(name, facts, verdicts) {
   out.push(`**rowan** · \`${name}\``);
   for (const f of main) {
     if (f.symbolic) out.push("_inside a function analysed symbolically: facts are relative to its entry_");
-    // the value as far as it is known (`?` for unknown)
+    // the value as far as it is known, in the program's terms: unknowns by their symbol
+    // (`a`, `a(b)`, `cfg["db"]`), else `?`
     const text = (f.text || "").trim() || "?";
     const pretty = prettyValue(text);
     if (pretty.length === 1) out.push(`- value: \`${text}\``);
     else out.push("- value:", "", "```text", ...pretty, "```", "");
-    // `?` as a value (not the `"k"?:` mark): say what it means
-    if (/(^|[\s:=(\[,|*])\?($|[\s,)\]}|])/.test(text)) out.push("- `?` = a value rowan does not know");
+    // the symbols it mentions, with what is known about each
+    const legend = f.legend || [];
+    for (const [sym, desc] of legend) out.push(`- \`${sym}\`: \`${desc}\``);
+    const qmark = /(^|[\s:=(\[,|*])\?($|[\s,)\]}|])/;
+    if (qmark.test(text) || legend.some(([, d]) => qmark.test(d))) out.push("- `?`: unknown");
     const objs = f.objects || [];
     const known = objs.filter((o) => o.kind !== "unknown" && o.kind !== "ph");
-    const unknown = objs.filter((o) => o.kind === "unknown" || o.kind === "ph");
-    // where the unknown part comes from, and what the program learned about it (if anything)
-    for (const o of unknown) {
+    // an unknown without a symbol: where it comes from
+    for (const o of objs.filter((o) => (o.kind === "unknown" || o.kind === "ph") && !o.symbol)) {
       const rows = [o.item, o.attr].filter(Boolean);
       // source names without the internal lens part (`json.load@L3·∖{'x'}`)
       const srcs = [...new Set(rows.flatMap((r) => (r.sources || []).map((x) => x.split("·")[0])))];
       if (o.origin) {
-        // the result of a call rowan cannot see into
+        // made by a call in another function (whose names do not apply here)
         out.push(`- \`?\` is the result of \`${o.origin.text}\` (line ${o.origin.line})`);
-        const given = o.origin.given || [];
-        if (given.length) out.push(`  - it may also be ${given.map((g) => `**${g}**`).join(" or ")}, which it was given (unknown code can return it)`);
-      } else {
-        const from = o.kind === "ph" ? "whatever the caller passes" : srcs.length ? srcs.map(describeSource).join("; ") : o.label;
-        out.push(`- \`?\` comes from ${from}`);
+        continue;
       }
-      for (const [r, ns] of [[o.item, "item"], [o.attr, "attr"]]) {
-        if (!r) continue;
-        const learned = learnedAbout(r, ns, !!(o.origin && (o.origin.given || []).length));
-        if (learned) out.push(`  - ${learned}`);
-      }
+      const from = o.kind === "ph" ? "whatever the caller passes" : srcs.length ? srcs.map(describeSource).join("; ") : o.label;
+      out.push(`- \`?\` comes from ${from}`);
     }
     if (known.length > 1) out.push(`- may be one of ${known.length} objects:`);
     for (const o of known) {

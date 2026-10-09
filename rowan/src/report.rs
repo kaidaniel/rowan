@@ -376,8 +376,12 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
     for o in v.pts.iter() {
         parts.push(render_object(an, state, o, depth, seen));
     }
-    // a part nothing is known about (data, a parameter, keys of something): `?`
-    if !v.kv.is_literal() && !v.kv.is_bot() {
+    // a part nothing is known about (data, a parameter, keys of something): `?` (not for a
+    // placeholder's own key-value: the placeholder is printed already)
+    let own_param = matches!(&v.kv, KeyVal::Param(ph) if v.pts.contains(*ph));
+    if let Some(expr) = data_expr(&v.kv) {
+        parts.push(expr);
+    } else if !v.kv.is_literal() && !v.kv.is_bot() && !own_param {
         parts.push("?".into());
     }
     if parts.is_empty() {
@@ -405,39 +409,13 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         return "…".into();
     }
     let deeper = depth + 1;
-    let mark = |r: &Row, k: KeyId| -> &'static str {
-        if r.definite.contains(k) {
-            ""
-        } else if r.likely.contains(k) {
-            "~"
-        } else {
-            "?"
-        }
-    };
     match kind {
         Kind::Dict | Kind::Frame | Kind::Namespace => {
             let row = state.row(o, Ns::Item);
             if depth >= max_depth {
                 return if row.present.is_empty() && row.closed() { "{}".into() } else { "{…}".into() };
             }
-            seen.push(o);
-            let mut items: Vec<String> = Vec::new();
-            let keys = intern::sorted_by_str(row.present.iter());
-            for k in keys.iter().take(MAX_ITEMS) {
-                let val = match state.slot_opt(o, Ns::Item, *k) {
-                    Some(sv) => render_value(an, state, &sv, deeper, seen),
-                    None => "?".into(),
-                };
-                items.push(format!("{}{}: {}", crate::domain::key_display(*k), mark(&row, *k), val));
-            }
-            if keys.len() > MAX_ITEMS {
-                items.push("…".into());
-            }
-            if !row.closed() {
-                items.push("**?".into());
-            }
-            seen.pop();
-            format!("{{{}}}", items.join(", "))
+            render_record(an, state, o, Ns::Item, None, depth, seen)
         }
         Kind::List | Kind::Tuple | Kind::Set => {
             let (open, close, ty) = match kind {
@@ -492,28 +470,10 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         }
         Kind::Instance => {
             let name = an.instance_class(o).and_then(|c| an.class_info_opt(c)).map(|ci| ci.name.clone()).unwrap_or_else(|| "object".into());
-            let row = state.row(o, Ns::Attr);
             if depth >= max_depth {
                 return format!("{}(…)", name);
             }
-            seen.push(o);
-            let mut items: Vec<String> = Vec::new();
-            let keys = intern::sorted_by_str(row.present.iter());
-            for k in keys.iter().take(MAX_ITEMS) {
-                let val = match state.slot_opt(o, Ns::Attr, *k) {
-                    Some(sv) => render_value(an, state, &sv, deeper, seen),
-                    None => "?".into(),
-                };
-                items.push(format!("{}{}={}", intern::key_py_str(*k), mark(&row, *k), val));
-            }
-            if keys.len() > MAX_ITEMS {
-                items.push("…".into());
-            }
-            if !row.closed() {
-                items.push("**?".into());
-            }
-            seen.pop();
-            format!("{}({})", name, items.join(", "))
+            render_record(an, state, o, Ns::Attr, Some(&name), depth, seen)
         }
         Kind::Function => an.obj(o).label.trim_start_matches("def ").to_string(),
         Kind::Bound => {
@@ -523,8 +483,207 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         }
         Kind::Class => an.obj(o).label.clone(),
         Kind::Module => an.obj(o).label.clone(),
+        // an unknown named in the program's terms (`a`, `a(b)`, `cfg["db"]`), else `?`
+        Kind::Unknown | Kind::Ph => an.symbol_for(o).cloned().unwrap_or_else(|| "?".into()),
+        Kind::External => an.external_qual(o).trim_start_matches("builtins.").to_string(),
         _ => "?".into(),
     }
+}
+
+thread_local! {
+    /// The function whose names expressions are printed for (`expr:` data from elsewhere —
+    /// a callee's `1 + b` returned to its caller — prints as `?`).
+    static RENDER_SCOPE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+pub fn render_scope() -> u32 {
+    RENDER_SCOPE.with(|c| c.get())
+}
+
+/// Run `f` printing values as seen inside function `scope` (0: module level).
+pub fn in_scope<R>(scope: u32, f: impl FnOnce() -> R) -> R {
+    let prev = RENDER_SCOPE.with(|c| c.replace(scope));
+    let r = f();
+    RENDER_SCOPE.with(|c| c.set(prev));
+    r
+}
+
+/// An unknown value computed by an expression rowan names it by (`1 + b`), when that
+/// expression is in the scope being printed.
+pub fn data_expr(kv: &KeyVal) -> Option<String> {
+    let KeyVal::Data(s) = kv else { return None };
+    let label = intern::str_get(*s);
+    let rest = label.strip_prefix("expr:")?;
+    let (scope, text) = rest.split_once(':')?;
+    let here = RENDER_SCOPE.with(|c| c.get());
+    (scope.parse::<u32>().ok()? == here).then(|| text.to_string())
+}
+
+/// The keys (`ns` Item: `{"a": 1, "b"?: ?, **?}`) or attributes (Attr: `Name(a=1, **?)`) of an
+/// object, with their values.
+fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&str>, depth: u32, seen: &mut Vec<ObjId>) -> String {
+    const MAX_ITEMS: usize = 8;
+    let row = state.row(o, ns);
+    let mark = |r: &Row, k: KeyId| -> &'static str {
+        if r.definite.contains(k) {
+            ""
+        } else if r.likely.contains(k) {
+            "~"
+        } else {
+            "?"
+        }
+    };
+    seen.push(o);
+    let mut items: Vec<String> = Vec::new();
+    let keys = intern::sorted_by_str(row.present.iter());
+    for k in keys.iter().take(MAX_ITEMS) {
+        let val = match state.slot_opt(o, ns, *k) {
+            Some(sv) => render_value(an, state, &sv, depth + 1, seen),
+            None => "?".into(),
+        };
+        if ns == Ns::Attr {
+            items.push(format!("{}{}={}", intern::key_py_str(*k), mark(&row, *k), val));
+        } else {
+            items.push(format!("{}{}: {}", crate::domain::key_display(*k), mark(&row, *k), val));
+        }
+    }
+    if keys.len() > MAX_ITEMS {
+        items.push("…".into());
+    }
+    if !row.closed() {
+        items.push("**?".into());
+    }
+    seen.pop();
+    match (ns, name) {
+        (Ns::Attr, Some(n)) => format!("{}({})", n, items.join(", ")),
+        (Ns::Attr, None) => format!("obj({})", items.join(", ")),
+        _ => format!("{{{}}}", items.join(", ")),
+    }
+}
+
+/// The contents (slots) of the objects a value reaches, within the printing depth.
+pub fn reachable_slots(an: &Analyzer, state: &State, v: &Value) -> Vec<(ObjId, Ns, KeyId, Value)> {
+    let max = VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed);
+    let mut out: Vec<(ObjId, Ns, KeyId, Value)> = Vec::new();
+    let mut seen: Vec<ObjId> = Vec::new();
+    let mut work: Vec<(Value, u32)> = vec![(v.clone(), 0)];
+    while let Some((val, d)) = work.pop() {
+        if d > max || out.len() > 256 {
+            continue;
+        }
+        for o in val.pts.iter() {
+            if seen.contains(&o) || matches!(an.kind(o), Kind::Function | Kind::Class | Kind::Module | Kind::External) {
+                continue;
+            }
+            seen.push(o);
+            if matches!(an.kind(o), Kind::Unknown | Kind::Ph) {
+                // unknowns: only their rows matter (`reachable_rows`)
+                continue;
+            }
+            for ns in [Ns::Item, Ns::Attr, Ns::Pos, Ns::Elem] {
+                for (k, sv) in state.obj_slots(o, ns) {
+                    work.push((sv.clone(), d + 1));
+                    out.push((o, ns, k, sv));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The rows (keys / attributes) of every object a value reaches within the printing depth.
+pub fn reachable_rows(an: &Analyzer, state: &State, v: &Value) -> Vec<(ObjId, Option<Row>, Option<Row>)> {
+    let max = VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed);
+    let mut out: Vec<(ObjId, Option<Row>, Option<Row>)> = Vec::new();
+    let mut work: Vec<(Value, u32)> = vec![(v.clone(), 0)];
+    while let Some((val, d)) = work.pop() {
+        if d > max || out.len() > 128 {
+            continue;
+        }
+        for o in val.pts.iter() {
+            if out.iter().any(|(x, _, _)| *x == o) || matches!(an.kind(o), Kind::Function | Kind::Class | Kind::Module | Kind::External) {
+                continue;
+            }
+            out.push((o, state.has_row(o, Ns::Item).then(|| state.row(o, Ns::Item)), state.has_row(o, Ns::Attr).then(|| state.row(o, Ns::Attr))));
+            for ns in [Ns::Item, Ns::Attr, Ns::Pos, Ns::Elem] {
+                for (_, sv) in state.obj_slots(o, ns) {
+                    work.push((sv, d + 1));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The symbols a value mentions (unknown objects printed by name) with what is known about
+/// each: the keys / attributes seen on it, what an unknown call may return, else `?`.
+pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, String)> {
+    fn walk(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &mut Vec<ObjId>, out: &mut Vec<(String, String)>) {
+        if depth > VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed) || out.len() >= 8 {
+            return;
+        }
+        if let Some(expr) = data_expr(&v.kv) {
+            if !out.iter().any(|(s0, _)| *s0 == expr) {
+                out.push((expr, "?".to_string()));
+            }
+        }
+        for o in v.pts.iter() {
+            if seen.contains(&o) {
+                continue;
+            }
+            seen.push(o);
+            match an.kind(o) {
+                Kind::Unknown | Kind::Ph => {
+                    let Some(sym) = an.symbol_for(o) else { continue };
+                    if out.iter().any(|(s, _)| s == sym) {
+                        continue;
+                    }
+                    let mut parts: Vec<String> = Vec::new();
+                    let item = state.row(o, Ns::Item);
+                    if !item.present.is_empty() {
+                        parts.push(render_record(an, state, o, Ns::Item, None, depth, &mut Vec::new()));
+                    }
+                    let attr = state.row(o, Ns::Attr);
+                    if !attr.present.is_empty() {
+                        parts.push(render_record(an, state, o, Ns::Attr, None, depth, &mut Vec::new()));
+                    }
+                    if let Some((_, _, given)) = an.origins.get(&o) {
+                        parts.extend(given.iter().cloned());
+                    }
+                    // keys seen on it describe it; objects an unknown call was given are what it
+                    // may also be (besides anything else)
+                    let given = an.origins.get(&o).map(|(_, _, g)| !g.is_empty()).unwrap_or(false);
+                    let desc = if parts.is_empty() { "?".to_string() } else if given { format!("{} | ?", parts.join(" | ")) } else { parts.join(" | ") };
+                    out.push((sym.clone(), desc));
+                }
+                Kind::Dict | Kind::Frame | Kind::Namespace => {
+                    for (_, sv) in state.obj_slots(o, Ns::Item) {
+                        walk(an, state, &sv, depth + 1, seen, out);
+                    }
+                }
+                Kind::Instance => {
+                    for (_, sv) in state.obj_slots(o, Ns::Attr) {
+                        walk(an, state, &sv, depth + 1, seen, out);
+                    }
+                }
+                Kind::List | Kind::Tuple | Kind::Set => {
+                    for (_, sv) in state.obj_slots(o, Ns::Pos) {
+                        walk(an, state, &sv, depth + 1, seen, out);
+                    }
+                    if let Some(e) = state.slot_opt(o, Ns::Elem, STAR) {
+                        walk(an, state, &e, depth + 1, seen, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(an, state, v, 0, &mut Vec::new(), &mut out);
+    // in the order the value mentions them
+    let text = render_value(an, state, v, 0, &mut Vec::new());
+    out.sort_by_key(|(s0, _)| text.find(s0.as_str()).unwrap_or(usize::MAX));
+    out
 }
 
 pub fn facts_json(an: &Analyzer) -> J {
@@ -544,6 +703,7 @@ pub fn facts_json(an: &Analyzer) -> J {
                     "item": item.as_ref().map(row_json),
                     "attr": attr.as_ref().map(row_json),
                     "origin": origin,
+                    "symbol": an.symbols.get(oid).filter(|_| f.legend.iter().any(|(s0, _)| Some(s0) == an.symbols.get(oid))),
                 })
             })
             .collect();
@@ -568,7 +728,7 @@ pub fn facts_json(an: &Analyzer) -> J {
                 }
             }
         }
-        facts.push(json!({"line": line, "name": name.to_string(), "symbolic": symbolic, "values": values, "text": f.texts.join(" | "), "objects": objects, "required": required}));
+        facts.push(json!({"line": line, "name": name.to_string(), "symbolic": symbolic, "values": values, "text": f.texts.join(" | "), "legend": f.legend.iter().map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "required": required}));
     }
     let verdicts: Vec<J> = dedupe(&an.verdicts).iter().map(|v| verdict_json(an, v)).collect();
     let mut schemas = serde_json::Map::new();

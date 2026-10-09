@@ -289,7 +289,10 @@ impl Analyzer {
                 }
             }
             if !text.is_empty() {
-                self.origins.insert(rid, (text.split_whitespace().collect::<Vec<_>>().join(" "), node.line, given));
+                let t = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let scope = self.frame().func.unwrap_or(0);
+                self.set_symbol(rid, t.clone(), scope);
+                self.origins.insert(rid, (t, node.line, given));
             }
         }
         if !arg_recs.is_empty() {

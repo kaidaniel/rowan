@@ -173,7 +173,17 @@ impl Analyzer {
                 let a = self.eval(&b.left, state);
                 let c = self.eval(&b.right, state);
                 let nd = frontend::node(node);
-                self.binop(b.op, &a, &c, &nd, state)
+                let r = self.binop(b.op, &a, &c, &nd, state);
+                // an unknown result is named by the expression (`1 + b`)
+                if r.pts.is_empty() && matches!(r.kv, KeyVal::Data(_)) && !super::disabled("exprsym") {
+                    let text = frontend::text_at(&nd).split_whitespace().collect::<Vec<_>>().join(" ");
+                    if !text.is_empty() && text.len() <= 60 {
+                        // the expression names the value only inside this function (its names)
+                        let scope = self.frame().func.unwrap_or(0);
+                        return Value::data(&format!("expr:{}:{}", scope, text));
+                    }
+                }
+                r
             }
             ast::Expr::Compare(c) => {
                 let a = self.eval(&c.left, state);

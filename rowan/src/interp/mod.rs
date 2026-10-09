@@ -530,6 +530,8 @@ pub struct Fact {
     pub rows: IndexMap<ObjId, (Option<Row>, Option<Row>)>,
     /// the value rendered (`report::render_value`) at each recording, distinct texts
     pub texts: Vec<String>,
+    /// the symbols the texts mention, with what is known about each (`report::value_legend`)
+    pub legend: Vec<(String, String)>,
 }
 
 pub struct RowCheck {
@@ -637,6 +639,13 @@ pub struct Analyzer {
     /// results of unknown calls: (the call as written, its line, what it was given — which
     /// unknown code may return)
     pub origins: FxHashMap<ObjId, (String, u32, Vec<String>)>,
+    /// unknown objects named in the program's own terms (`a`, `a(b)`, `cfg["db"]`,
+    /// `rows[*]`, `json.loads(text)`): printed instead of `?`
+    pub symbols: FxHashMap<ObjId, String>,
+    /// the function whose names a symbol uses (0: module level); it is printed only there
+    pub symbol_scope: FxHashMap<ObjId, u32>,
+    /// while an entry run's parameters are made: the function they belong to
+    pub entry_scope: Option<u32>,
     /// Enum classes: their members in definition order
     pub enum_members: FxHashMap<ObjId, Vec<(String, ObjId)>>,
     /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
@@ -785,6 +794,9 @@ impl Analyzer {
             force_tab_once: false,
             attr_mirrors: FxHashMap::default(),
             origins: FxHashMap::default(),
+            symbols: FxHashMap::default(),
+            symbol_scope: FxHashMap::default(),
+            entry_scope: None,
             enum_members: FxHashMap::default(),
             bypass_setattr: false,
             cond_depth: 0,
@@ -1096,7 +1108,50 @@ impl Analyzer {
                 state.set_row(oid, n, Row::with_source(src));
             }
         }
+        if !self.symbols.contains_key(&oid) {
+            let sym = match kind {
+                SourceKind::Param => Some(label.trim_start_matches("param ").to_string()),
+                SourceKind::Name => Some(label.trim_start_matches('?').to_string()),
+                _ => None,
+            };
+            if let Some(sym) = sym.filter(|x| !x.is_empty()) {
+                let scope = if kind == SourceKind::Param { self.entry_scope.unwrap_or_else(|| self.frame().func.unwrap_or(0)) } else { 0 };
+                self.set_symbol(oid, sym, scope);
+            }
+        }
         oid
+    }
+
+    pub fn set_symbol(&mut self, oid: ObjId, sym: String, scope: u32) {
+        self.symbols.insert(oid, sym);
+        self.symbol_scope.insert(oid, scope);
+    }
+
+    /// The symbol an object is printed by where the printer is now (`report::in_scope`): a
+    /// symbol uses the names of its function, module-level ones are visible everywhere.
+    pub fn symbol_for(&self, oid: ObjId) -> Option<&String> {
+        let s = self.symbol_scope.get(&oid).copied().unwrap_or(0);
+        if s == 0 || s == crate::report::render_scope() {
+            self.symbols.get(&oid)
+        } else {
+            None
+        }
+    }
+
+    /// The symbol of `parent`'s content under (ns, key): `d["k"]`, `o.x`, `rows[*]`, a cell's
+    /// variable; None when the parent has no symbol.
+    pub fn sym_access(&self, parent: ObjId, ns: Ns, key: KeyId) -> Option<String> {
+        if self.kind(parent) == Kind::Cell {
+            return self.obj(parent).label.strip_prefix("cell ").map(|x| x.to_string());
+        }
+        let base = self.symbols.get(&parent)?;
+        Some(match ns {
+            Ns::Attr => format!("{}.{}", base, intern::key_py_str(key)),
+            Ns::Cell => base.clone(),
+            _ if key == intern::STAR => format!("{}[*]", base),
+            _ if crate::interp::access::param_slot_of(key).is_some() => format!("{}[?]", base),
+            _ => format!("{}[{}]", base, crate::domain::key_display(key)),
+        })
     }
 
     // ------------------------------------------------------------ reporting
@@ -1260,6 +1315,7 @@ impl Analyzer {
             let mut args: Vec<Value> = Vec::new();
             let mi = self.module_info(fi.module);
             self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
+            self.entry_scope = Some(oid);
             let mut params = scopemod::all_params(fparams);
             let mut self_val: Option<Value> = None;
             if let Some(cls) = fi.cls {
@@ -1319,6 +1375,7 @@ impl Analyzer {
                 }
                 args.push(v.unwrap());
             }
+            self.entry_scope = None;
             let fake = Node::synthetic(mi.idx, fi.node.node().line);
             self.call_user(oid, self_val, args, IndexMap::new(), star_args, star_kwargs, &mut st, &fake, None, true);
             self.frames.pop();
@@ -1513,10 +1570,24 @@ impl Analyzer {
     /// A concrete hover fact for a line inside a function whose summary was instantiated:
     /// `rows` are the rows resolved for this call; the text shows them with values unknown
     /// (the caller's state after the call does not tell what the slots held at that line).
-    pub fn record_resolved_fact(&mut self, line: u32, name: StrId, v: &Value, rows: Vec<(ObjId, Option<Row>, Option<Row>)>, state: &State) {
+    pub fn record_resolved_fact(&mut self, line: u32, name: StrId, v: &Value, rows: Vec<(ObjId, Option<Row>, Option<Row>)>, slots: Vec<(ObjId, Ns, KeyId, Value)>, scope: u32, state: &State) {
         let mut scratch = state.copy_ref();
+        // contents as they were at that line (captured, resolved for this call); objects whose
+        // contents were not captured show `?` rather than what they hold after the call
+        let mut cleared: Vec<ObjId> = Vec::new();
+        for (o, _, _, _) in &slots {
+            if !cleared.contains(o) {
+                scratch.drop_obj(*o);
+                cleared.push(*o);
+            }
+        }
+        for (o, ns, k, sv) in &slots {
+            scratch.set_slot(*o, *ns, *k, sv.clone(), false);
+        }
         for (o, item, attr) in &rows {
-            scratch.drop_obj(*o);
+            if !cleared.contains(o) {
+                scratch.drop_obj(*o);
+            }
             if let Some(r) = item {
                 scratch.set_row(*o, Ns::Item, r.clone());
             }
@@ -1524,11 +1595,18 @@ impl Analyzer {
                 scratch.set_row(*o, Ns::Attr, r.clone());
             }
         }
-        let text = crate::report::render_value(self, &scratch, v, 0, &mut Vec::new());
-        let e = self.facts.entry((line, name, false)).or_insert_with(|| Fact { symbolic: false, value: Value::new(), rows: IndexMap::new(), texts: Vec::new() });
+        let (text, legend) = crate::report::in_scope(scope, || (crate::report::render_value(self, &scratch, v, 0, &mut Vec::new()), crate::report::value_legend(self, &scratch, v)));
+        let e = self.facts.entry((line, name, false)).or_insert_with(|| Fact { symbolic: false, value: Value::new(), rows: IndexMap::new(), texts: Vec::new(), legend: Vec::new() });
         e.value = e.value.join(v);
         if !e.texts.contains(&text) && e.texts.len() < 4 {
             e.texts.push(text);
+        }
+        for (sym, desc) in legend {
+            match e.legend.iter_mut().find(|(s0, _)| *s0 == sym) {
+                Some((_, d)) if *d != desc && !d.split(" | ").any(|p| p == desc) => *d = format!("{} | {}", d, desc),
+                Some(_) => {}
+                None => e.legend.push((sym, desc)),
+            }
         }
         let join_opt = |a: &Option<Row>, b: &Option<Row>| -> Option<Row> {
             match (a, b) {
@@ -1538,6 +1616,10 @@ impl Analyzer {
             }
         };
         for (oid, item, attr) in rows {
+            // the objects the name holds (nested ones only shaped the text)
+            if !v.pts.contains(oid) {
+                continue;
+            }
             match e.rows.get_mut(&oid) {
                 Some((ci, ca)) => {
                     *ci = join_opt(ci, &item);
@@ -1573,17 +1655,29 @@ impl Analyzer {
             }
         };
         if symbolic && !disabled("factobs") {
+            let full = self.sum_fact_obs.last().map(|t| t.len() >= 4096).unwrap_or(true);
+            let slots = if full { Vec::new() } else { crate::report::reachable_slots(self, state, v) };
+            let rows = if full { Vec::new() } else { crate::report::reachable_rows(self, state, v) };
+            let fscope = self.frame().func.unwrap_or(0);
             if let Some(top) = self.sum_fact_obs.last_mut() {
-                if top.len() < 4096 {
-                    top.push(crate::summary::FactObs { line: node.line, name, value: v.clone(), rows: rows.clone() });
+                if !full {
+                    top.push(crate::summary::FactObs { line: node.line, name, value: v.clone(), rows: rows.clone(), slots, scope: fscope });
                 }
             }
         }
-        let text = crate::report::render_value(self, state, v, 0, &mut Vec::new());
-        let e = self.facts.entry((node.line, name, symbolic)).or_insert_with(|| Fact { symbolic, value: Value::new(), rows: IndexMap::new(), texts: Vec::new() });
+        let scope = self.frame().func.unwrap_or(0);
+        let (text, legend) = crate::report::in_scope(scope, || (crate::report::render_value(self, state, v, 0, &mut Vec::new()), crate::report::value_legend(self, state, v)));
+        let e = self.facts.entry((node.line, name, symbolic)).or_insert_with(|| Fact { symbolic, value: Value::new(), rows: IndexMap::new(), texts: Vec::new(), legend: Vec::new() });
         e.value = e.value.join(v);
         if !e.texts.contains(&text) && e.texts.len() < 4 {
             e.texts.push(text);
+        }
+        for (sym, desc) in legend {
+            match e.legend.iter_mut().find(|(s0, _)| *s0 == sym) {
+                Some((_, d)) if *d != desc && !d.split(" | ").any(|p| p == desc) => *d = format!("{} | {}", d, desc),
+                Some(_) => {}
+                None => e.legend.push((sym, desc)),
+            }
         }
         for (oid, item, attr) in rows {
             match e.rows.get_mut(&oid) {

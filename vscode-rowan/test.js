@@ -12,7 +12,7 @@ const res = JSON.parse(execFileSync(bin, [file, "--facts"], { maxBuffer: 64 * 10
 const idx = indexResult(res);
 
 const r8 = renderHover("r", idx.facts.get("8:r"), idx.verdicts.get(8) || []);
-assert(r8.includes('- value: `{"id": ?, "role"?: "admin"}`'), r8);
+assert(r8.includes('- value: `{"id": u.id, "role"?: "admin"}`'), r8);
 assert(r8.includes('`"k"?:` set on some paths only'), r8);
 
 const r9 = renderHover("r", idx.facts.get("9:r"), (idx.verdicts.get(9) || []).filter((v) => v.text.includes("r")));
@@ -47,9 +47,9 @@ assert(/[\[{(]…[\]})]/.test(shallow), shallow.slice(0, 400));
 const z = path.join(root, "tests", "cases", "z419_manually_created.py");
 const zi = indexResult(JSON.parse(execFileSync(bin, [z, "--facts"], { maxBuffer: 64 * 1024 * 1024 }).toString()));
 const x1 = renderHover("x1", zi.facts.get("6:x1"), []);
-assert(x1.includes("- value: `?`") && x1.includes("whatever a caller passes as `b` to `f`"), x1);
+assert(x1.includes("- value: `b`") && x1.includes("- `b`: `?`") && x1.includes("- `?`: unknown"), x1);
 const u8 = renderHover("_", zi.facts.get("8:_"), []);
-assert(u8.includes("is the result of `a(b)(a)` (line 8)") && !u8.includes("may also be"), u8);
+assert(u8.includes("- value: `a(b)(a)`") && u8.includes("- `a(b)(a)`: `?`"), u8);
 assert(!x1.includes("**?") && !x1.includes("keys possible"), x1);
 console.log("\n--- sample long value ---\n" + lines.join("\n"));
 console.log("ok");

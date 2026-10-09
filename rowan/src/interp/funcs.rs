@@ -695,6 +695,12 @@ impl Analyzer {
                     let row = state.row(oid, Ns::Item);
                     let label = format!("elem of {}", self.obj(oid).label);
                     let eid = self.alloc_raw(Kind::Unknown, &format!("elem:{}", oid), "", false, &label, Payload::None);
+                    if let Some(sym) = self.sym_access(oid, Ns::Item, STAR) {
+                        if !self.symbols.contains_key(&eid) {
+                            let scope = self.symbol_scope.get(&oid).copied().unwrap_or(0);
+                            self.set_symbol(eid, sym, scope);
+                        }
+                    }
                     self.obj_mut(eid).iter_elem = true;
                     let d = self.obj(oid).depth + 1;
                     self.obj_mut(eid).depth = d;
