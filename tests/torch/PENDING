@@ -1,4 +1,1 @@
 # torch cases written but not yet expected to pass (paths relative to tests/torch/)
-models/m12_seq2seq_attention.py
-models/m15_pointnet.py
-models/m17_tcn.py

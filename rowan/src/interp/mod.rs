@@ -1631,8 +1631,14 @@ impl Analyzer {
                     let pname = s(a.name.id.as_str());
                     if let Some(d) = fi.defaults.get(&pname) {
                         let number = d.pts.is_empty() && d.kv.as_lit().map(intern::key_is_number).unwrap_or(false);
-                        if !(self.torch_modules.contains(&fi.module) && number) {
+                        if !self.torch_modules.contains(&fi.module) {
                             args.push(d.clone());
+                            continue;
+                        }
+                        if !number {
+                            // the default, or whatever a caller passes
+                            let poid = self.unknown_source(&format!("param {}.{}", fi.qualname, a.name.id), SourceKind::Param, state, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
+                            args.push(d.join(&Value::obj(poid)));
                             continue;
                         }
                     }

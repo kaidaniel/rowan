@@ -202,7 +202,9 @@ def norm_dim(expr: str, where: Dict[str, str]) -> str:
     expr = expr.strip()
     if expr == "_":
         return "_"
-    return pstr(poly(_parse(expr, where)))
+    out = pstr(poly(_parse(expr, where)))
+    # an expression with an unknown part is unknown
+    return Q if Q in out else out
 
 
 def norm_rest(text: str, where: Dict[str, str]) -> str:

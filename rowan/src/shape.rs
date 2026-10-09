@@ -332,17 +332,26 @@ fn norm_poly(mut terms: Vec<(Mono, i64)>) -> Poly {
 }
 
 pub fn add(a: DimId, b: DimId) -> DimId {
+    if has_unknown(a) || has_unknown(b) {
+        return unknown();
+    }
     let mut t = poly(a);
     t.extend(poly(b));
     poly_id(norm_poly(t))
 }
 pub fn scale(a: DimId, k: i64) -> DimId {
+    if has_unknown(a) {
+        return if k == 0 { lit(0) } else { unknown() };
+    }
     poly_id(norm_poly(poly(a).into_iter().map(|(m, c)| (m, c * k)).collect()))
 }
 pub fn sub(a: DimId, b: DimId) -> DimId {
     add(a, scale(b, -1))
 }
 pub fn mul(a: DimId, b: DimId) -> DimId {
+    if has_unknown(a) || has_unknown(b) {
+        return if as_lit(a) == Some(0) || as_lit(b) == Some(0) { lit(0) } else { unknown() };
+    }
     let pa = poly(a);
     let pb = poly(b);
     let mut t = Vec::new();
@@ -710,6 +719,32 @@ pub fn learn_eq(f: &mut TFacts, a: DimId, b: DimId) {
     if let Some(at) = single(to) {
         if !mentions(from, at) {
             f.subst.insert(at, from);
+            return;
+        }
+    }
+    // a linear equation: solve it for one atom of coefficient ±1 (a shape dim first)
+    let diff = poly(sub(a, b));
+    let mut best: Option<(u8, AtomId, i64)> = None;
+    for (m, c) in &diff {
+        if m.len() == 1 && m[0].1 == 1 && (*c == 1 || *c == -1) {
+            let at = m[0].0;
+            let r = match atom_get(at) {
+                Atom::Dim(..) => 3,
+                Atom::Named(_) => 1,
+                _ => 0,
+            };
+            if r > 0 && best.map(|(br, _, _)| r > br).unwrap_or(true) {
+                best = Some((r, at, *c));
+            }
+        }
+    }
+    if let Some((_, at, c)) = best {
+        // c*at + rest == 0  →  at = -rest / c
+        let rest: Vec<(Mono, i64)> = diff.iter().filter(|(m, _)| !(m.len() == 1 && m[0].0 == at && m[0].1 == 1)).cloned().collect();
+        let rest = poly_id(norm_poly(rest));
+        let val = scale(rest, -c);
+        if !mentions(val, at) {
+            f.subst.insert(at, val);
         }
     }
 }
@@ -908,7 +943,10 @@ pub fn norm_shape(s: &Shape, f: &TFacts) -> Shape {
 
 /// Broadcast dims; Err((a, b)) on a definite mismatch.
 pub fn bdim(a: DimId, b: DimId, f: &TFacts) -> Result<DimId, (DimId, DimId)> {
-    if has_unknown(a) && is_one(b, f) != Some(true) || has_unknown(b) && is_one(a, f) != Some(true) {
+    if a == b {
+        return Ok(a);
+    }
+    if is_vague(a) && is_one(b, f) != Some(true) || is_vague(b) && is_one(a, f) != Some(true) {
         return Ok(unknown());
     }
     if is_one(a, f) == Some(true) {
@@ -1526,8 +1564,9 @@ mod tests {
         learn_rank(&mut f, x, RankRel::Eq(3));
         assert_eq!(norm(sdim(x, -2), &f), sdim(x, 1));
         let s = norm_shape(&Shape::of_sym(x), &f);
-        assert_eq!(shape_text(&s), "[x.shape[0], x.shape[1], x.shape[2]]");
-        assert_eq!(dim_eq(sdim(x, 2), lit(512), &f), None); // x.shape[-1] substitution is on the -1 atom only
+        // (a fact about x.shape[-1] also holds for x.shape[2] once the rank is known)
+        assert_eq!(shape_text(&s), "[x.shape[0], x.shape[1], 512]");
+        assert_eq!(dim_eq(sdim(x, 2), lit(512), &f), Some(true));
         let n = named(sym(1, "d"));
         let mut g = TFacts::default();
         learn_eq(&mut g, sdim(x, -1), n);
