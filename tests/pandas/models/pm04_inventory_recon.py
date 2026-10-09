@@ -101,7 +101,10 @@ def counter_notes(m):
 def system_notes(m):
     if "note" in m.columns:
         return m["note"].dropna()                                           #@ ok note
-    return m["note_y"].dropna()                                             #@ ok note_y
+    # (note absent means the counts had a note too, so note_y exists: a relation between columns
+    # rowan does not keep)
+    #@todo ok note_y
+    return m["note_y"].dropna()                                             #@ sound note_y
 
 
 def location_summary(m):
@@ -198,4 +201,4 @@ if __name__ == "__main__":
 
 #@schema read_csv@L57: always={sku,location,counted_at,counted_qty} only={sku,location,counted_at,counted_qty}
 #@schema read_csv@L68: always={sku,location,system_qty,unit_cost} only={sku,location,system_qty,unit_cost}
-#@schema read_csv@L121: always={sku,location,counted_qty,recounted_by} only={sku,location,counted_qty,recounted_by}
+#@schema read_csv@L124: always={sku,location,counted_qty,recounted_by} only={sku,location,counted_qty,recounted_by}

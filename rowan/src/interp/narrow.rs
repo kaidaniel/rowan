@@ -443,7 +443,15 @@ impl Analyzer {
         let recs: Vec<u32> = rv.pts.iter().filter(|o| self.is_record_like(*o)).collect();
         if !recs.is_empty() {
             match &lv.kv {
-                KeyVal::Lit(k) => self.narrow_record(&rv, Ns::Item, *k, member, state),
+                KeyVal::Lit(k) => {
+                    // whichever object the name holds has the key (several objects: none narrows)
+                    if member && recs.len() > 1 && !crate::interp::disabled("innamekey") {
+                        if let ast::Expr::Name(nm) = rec_expr {
+                            state.add_name_key(s(nm.id.as_str()), *k);
+                        }
+                    }
+                    self.narrow_record(&rv, Ns::Item, *k, member, state)
+                }
                 KeyVal::Param(ph) => {
                     // `k in d` with k a parameter: decided per call site when k is a literal there
                     self.record_event("narrow", *ph);

@@ -779,11 +779,13 @@ impl Row {
     pub fn rename(&self, step: &Step) -> Row {
         let f = |ks: &KeySet| ks.map(|k| step.apply(k));
         let push = |l: LensId| lens_push(l, step.clone());
+        // a key stays absent when every key renamed to it was absent
+        let absent = if crate::interp::disabled("renameabsent") { KeySet::new() } else { self.absent.filter(|k| step.inverse(k).iter().all(|c| self.absent.contains(c))) };
         Row::from_data(RowData {
             present: f(&self.present),
             definite: f(&self.definite),
             likely: f(&self.likely),
-            absent: KeySet::new(),
+            absent,
             absent_likely: KeySet::new(),
             sources: self.sources.map(|(s, l)| (s, push(l))),
             mutators: self.mutators.clone(),

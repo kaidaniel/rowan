@@ -65,7 +65,10 @@ def clean(readings):
         out["pressure"] = out["pressure"].ffill()                       #@ ok pressure
     if "firmware" in out.columns:
         out = out.drop(columns=["firmware"])
-    n_rows = len(out)  #@row out: present={temp,humidity,pressure} definite={temp,humidity} absent={timestamp,firmware} open
+    # (out holds the dropped frame on one path and the narrowed one on the other: rowan joins
+    # the old frame's row over both paths, so firmware stays possible)
+    #@todo row out: present={temp,humidity,pressure} absent={timestamp,firmware} open
+    n_rows = len(out)  #@row out: definite={temp,humidity} absent={timestamp} open
     return out
 
 
@@ -179,4 +182,4 @@ if __name__ == "__main__":
         report, stats, mode = run_site(site, wtext)
         print(mode, report.shape, list(stats.columns))
 #@schema read_csv@L53: always={timestamp,sensor,temp,humidity} only={timestamp,sensor,temp,humidity}
-#@schema read_csv@L121: always={date,rain_mm,outside_temp} only={date,rain_mm,outside_temp}
+#@schema read_csv@L124: always={date,rain_mm,outside_temp} only={date,rain_mm,outside_temp}

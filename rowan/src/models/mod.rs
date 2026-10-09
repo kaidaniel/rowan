@@ -2647,6 +2647,11 @@ fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             if row.closed() && row.present == row.definite && !row.symbolic() {
                 return Value::lit(intern::key_int(row.definite.len() as i64));
             }
+            // keys set on some paths: between the sure and the possible count
+            if row.closed() && !row.symbolic() && row.present.len() - row.definite.len() <= 8 && !crate::interp::disabled("lenrange") {
+                let ks = intern::KeySet::from_iter((row.definite.len()..=row.present.len()).map(|n| intern::key_int(n as i64)));
+                return Value::kv_only(crate::domain::KeyVal::lits(ks));
+            }
         }
     }
     Value::data("len")

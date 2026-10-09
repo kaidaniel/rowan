@@ -2375,6 +2375,21 @@ fn df_assign(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         row = row.store(col, true);
     }
+    // `assign(**{"a b": …})`: the dict's keys
+    for sk in &c.star_kwargs {
+        for d in sk.pts.iter().filter(|o| an.kind(*o) == Kind::Dict) {
+            let r = st.row(d, Ns::Item);
+            for k in r.present.iter() {
+                row = row.store(k, r.definite.contains(k));
+                colvals.push((k, None));
+            }
+            if r.open() {
+                let mut dd = row.data();
+                dd.sources = dd.sources.insert((Source::new(&format!("assign@L{}", c.line), SourceKind::Call), EMPTY_LENS));
+                row = Row::from_data(dd);
+            }
+        }
+    }
     let v = derived(an, st, c, row, &fs, Rows::Same, true);
     if let Some(nid) = v.single() {
         for (k, kn) in colvals {
@@ -2986,9 +3001,9 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             if spec.single().map(|o| an.kind(o) == Kind::Dict).unwrap_or(false) {
                 let d = spec.single().unwrap();
                 let r = st.row(d, Ns::Item);
-                if r.closed() && r.present == r.definite {
+                if r.closed() {
                     let cols: Vec<KeyId> = r.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(r.present.iter()));
-                    let _ = require_cols(an, st, c, &fs, &r.present);
+                    let _ = require_cols(an, st, c, &fs, &r.definite);
                     let mut specs: Vec<(KeyId, Option<(Vec<KeyId>, bool)>)> = Vec::new();
                     for col in &cols {
                         let v = st.slot(d, Ns::Item, *col);
@@ -2998,14 +3013,15 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     let mut row = Row::new();
                     let mut open = false;
                     for (col, s0) in &specs {
+                        let sure = r.definite.contains(*col);
                         if !multi {
-                            row = row.store(*col, true);
+                            row = row.store(*col, sure);
                             continue;
                         }
                         match s0 {
                             Some((fnames, _)) => {
                                 for f in fnames {
-                                    row = row.store(intern::key_tuple(vec![*col, *f]), true);
+                                    row = row.store(intern::key_tuple(vec![*col, *f]), sure);
                                 }
                             }
                             None => open = true,
@@ -4478,6 +4494,12 @@ fn df_combine(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let mut out = Row::new();
     for k in a.present.union(&b.present).iter() {
         out = out.store(k, a.definite.contains(k) || b.definite.contains(k));
+    }
+    // a column neither side may have is not there
+    for k in a.absent.union(&b.absent).iter() {
+        if !side_status(&a, k).0 && !side_status(&b, k).0 {
+            out = out.delete(k, true);
+        }
     }
     if a.open() || b.open() {
         let mut d = out.data();
