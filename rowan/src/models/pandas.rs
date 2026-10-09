@@ -95,7 +95,7 @@ pub fn install(r: &mut dyn FnMut(&[&'static str], Model)) {
     r(&["pandas.melt"], melt);
     r(
         &[
-            "pandas.Series", "pandas.to_datetime", "pandas.to_numeric", "pandas.isna", "pandas.notna", "pandas.isnull", "pandas.notnull", "pandas.cut",
+            "pandas.to_datetime", "pandas.to_numeric", "pandas.isna", "pandas.notna", "pandas.isnull", "pandas.notnull", "pandas.cut",
             "pandas.qcut", "pandas.date_range", "pandas.Timestamp", "pandas.Timedelta", "pandas.to_timedelta", "pandas.factorize", "pandas.unique",
             "pandas.array", "pandas.Categorical", "pandas.Index", "pandas.MultiIndex", "pandas.NamedAgg", "pandas.Grouper", "pandas.set_option",
             "pandas.option_context", "pandas.testing.assert_frame_equal", "pandas.ExcelWriter", "pandas.eval",
@@ -103,6 +103,7 @@ pub fn install(r: &mut dyn FnMut(&[&'static str], Model)) {
         series_call,
     );
     r(&["Series.*"], series_method);
+    r(&["pandas.Series"], series_ctor);
     r(&["Series.str.*", "Series.dt.*", "Series.cat.*", "Series.sparse.*", "Series.list.*", "Series.struct.*"], accessor_method);
     r(&["DataFrame.*"], df_dispatch);
     r(&["groupby.*"], groupby_method);
@@ -138,6 +139,7 @@ fn df_dispatch(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "sort_values" | "nlargest" | "nsmallest" => sort_values,
         "transform" => transform,
         "update" => df_update,
+        "describe" => describe,
         "combine_first" | "combine" => df_combine,
         "set_axis" => set_axis,
         "rename_axis" => rename_axis,
@@ -309,6 +311,12 @@ pub fn series_getattr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, st: 
         }
         "name" => series_name(an, st, oid),
         "values" | "array" | "dtype" | "shape" | "size" | "empty" | "nbytes" | "ndim" | "hasnans" | "is_unique" | "is_monotonic_increasing" | "is_monotonic_decreasing" | "index" | "axes" | "dtypes" | "flags" | "attrs" => Value::data(&format!("{}@L{}", name, node.line)),
+        "iloc" | "loc" | "at" | "iat" if oid != an.series => {
+            let label = format!("{} of {}", name, an.obj(oid).label);
+            let lid = an.alloc_raw(Kind::Locidx, &format!("sloc:{}:{}", name, oid), "", true, &label, Payload::Locidx(format!("s{}", name), oid));
+            an.obj_mut(lid).payload = Payload::Locidx(format!("s{}", name), oid);
+            Value::obj(lid)
+        }
         "iloc" | "loc" | "at" | "iat" => Value::data(&format!("{}@L{}", name, node.line)),
         "T" => Value::obj(oid),
         _ => an.method_value(&format!("Series.{}", name), &Value::obj(oid)),
@@ -335,6 +343,52 @@ fn series_like_id(an: &mut Analyzer, st: &mut State, c: &Call, ss: &[u32], idx: 
         }
     }
     sid
+}
+
+/// `pd.Series(data, index=, name=)`: a dict's keys (or the positions, or index=) are the index.
+fn series_ctor(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let data = c.arg(0, Some("data"));
+    let index = c.kw("index").or_else(|| c.arg(1, None));
+    let name = c.kw("name").or_else(|| c.arg(3, None)).unwrap_or_else(|| an.none_v.clone());
+    let idx_kw = index.as_ref().and_then(|v| an.lit_keys(v, st));
+    let (idx, vk): (Option<Row>, Option<Known>) = match data.as_ref().and_then(|d| d.single()) {
+        Some(d) if an.kind(d) == Kind::Dict && !is_series_obj(an, d) => {
+            let r = st.row(d, Ns::Item);
+            let mut vals_ = KeySet::new();
+            let mut ok = r.closed();
+            for k in r.present.iter() {
+                match cell_lit(&st.slot(d, Ns::Item, k)) {
+                    Some(l) => vals_ = vals_.insert(l),
+                    None => ok = false,
+                }
+            }
+            (Some(Row::new().copy_from(&r, true, &KeySet::new(), EMPTY_LENS)), ok.then(|| Known::exact(vals_)))
+        }
+        Some(d) if is_series_obj(an, d) => (Some(st.row(d, Ns::Item)), vals(st, d, vkey())),
+        Some(d) if matches!(an.kind(d), Kind::List | Kind::Tuple) => {
+            let items = lit_key_seq(an, st, &Value::obj(d));
+            let n = an.obj(d).literal_len;
+            let idx = n.map(|n| range_labels(n as i64).row());
+            (idx, items.map(|it| Known::exact(KeySet::from_iter(it))))
+        }
+        None => (Some(Row::new()), Some(Known::exact(KeySet::new()))),
+        _ => (None, None),
+    };
+    let idx = match idx_kw {
+        Some(ks) => Some(Row::closed_with(ks)),
+        None => idx,
+    };
+    let idx = idx.unwrap_or_else(|| Row::with_source(Source::new("index", SourceKind::Data)));
+    let sid = new_series(an, st, &c.node, idx, Some(name), "c");
+    set_vals(st, sid, vkey(), vk.as_ref());
+    if let Some(v) = &vk {
+        let dt = dtype_of_lits(&v.may);
+        st.set_slot(sid, Ns::Meta, dtype_key(vkey()), match dt {
+            Some(d) => Value::lit(mk(d)),
+            None => Value::data("dtype"),
+        }, true);
+    }
+    Value::obj(sid)
 }
 
 fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -519,7 +573,7 @@ fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             d.likely = KeySet::new();
             series_like(an, st, c, &ss, Row::from_data(d), "h")
         }
-        "copy" | "sort_values" | "sort_index" | "astype" | "fillna" | "round" | "abs" | "clip" | "cumsum" | "cumprod" | "cummax" | "cummin" | "shift" | "diff" | "rank" | "pct_change" | "isna" | "isnull" | "notna" | "notnull" | "replace" | "where" | "mask" | "map" | "apply" | "transform" | "isin" | "between" | "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "add" | "sub" | "mul" | "div" | "truediv" | "floordiv" | "mod" | "pow" | "interpolate" | "ffill" | "bfill" | "convert_dtypes" | "infer_objects" | "explode" | "rolling" | "expanding" | "ewm" | "mean_" => {
+        "copy" | "sort_values" | "sort_index" | "astype" | "fillna" | "round" | "abs" | "clip" | "cumsum" | "cumprod" | "cummax" | "cummin" | "shift" | "diff" | "rank" | "pct_change" | "isna" | "isnull" | "notna" | "notnull" | "replace" | "where" | "mask" | "map" | "apply" | "transform" | "isin" | "between" | "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "add" | "sub" | "mul" | "div" | "truediv" | "floordiv" | "mod" | "pow" | "interpolate" | "ffill" | "bfill" | "convert_dtypes" | "infer_objects" | "explode" | "mean_" => {
             let sid = series_like_id(an, st, c, &ss, idx, "m");
             if !matches!(name.as_str(), "copy" | "sort_values" | "sort_index") {
                 set_vals(st, sid, vkey(), None);
@@ -527,10 +581,28 @@ fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             Value::obj(sid)
         }
+        "rolling" | "expanding" | "ewm" | "resample" => {
+            let v = window_of(an, st, c, Vec::new(), None, None, &name);
+            if let Some(g) = v.single() {
+                st.set_slot(g, Ns::Meta, mk("srcseries"), Value::with_kv(ObjSet::from_vec(ss.clone()), DATA), true);
+            }
+            v
+        }
         "unstack" => match ss.as_slice() {
             [one] => unstack(an, st, c, *one, true),
             _ => open_frame_call(an, st, c),
         },
+        "describe" => {
+            let dt: Vec<Option<String>> = ss.iter().map(|x| st.slot_opt(*x, Ns::Meta, dtype_key(vkey())).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_str).map(|s0| s0.to_string())).collect();
+            let row = if dt.iter().all(|d| matches!(d.as_deref(), Some("int") | Some("float"))) {
+                describe_labels(true, false).row()
+            } else if dt.iter().all(|d| d.is_some()) && dt.iter().all(|d| !matches!(d.as_deref(), Some("int") | Some("float"))) {
+                describe_labels(false, true).row()
+            } else {
+                Row::with_source(Source::new("describe", SourceKind::Data))
+            };
+            series_like(an, st, c, &ss, row, "d")
+        }
         "unique" | "tolist" | "to_list" | "to_numpy" => Value::data(&format!("{}@L{}", name, c.line)),
         _ if SERIES_SCALAR_OPS.contains(&name.as_str()) => Value::data(&format!("{}@L{}", name, c.line)),
         _ => series(an),
@@ -2413,6 +2485,24 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let g0 = gids[0];
     let Payload::Groupby(fs, ks, ai, sel) = an.obj(g0).payload.clone() else { return Value::new() };
     let window = gb_str(st, g0, "window");
+    if let Some(src) = st.slot_opt(g0, Ns::Meta, mk("srcseries")) {
+        // a window over a Series
+        let ss: Vec<u32> = src.pts.iter().collect();
+        let same = window.as_deref() != Some("resample");
+        let idx = if same && !ss.is_empty() { join_rows(ss.iter().map(|x| st.row(*x, Ns::Item))) } else { Row::with_source(Source::new("index", SourceKind::Data)) };
+        return match name.as_str() {
+            "ohlc" => new_frame(an, st, c, closed_ordered(&[mk("open"), mk("high"), mk("low"), mk("close")]), None, None),
+            "agg" | "aggregate" => match c.args.first().cloned().and_then(|a| agg_names(an, st, &a)) {
+                Some((fnames, true)) => new_frame(an, st, c, closed_ordered(&fnames), None, None),
+                _ => series_like(an, st, c, &ss, idx, "w"),
+            },
+            _ => {
+                let sid = series_like_id(an, st, c, &ss, idx, "w");
+                set_vals(st, sid, vkey(), None);
+                Value::obj(sid)
+            }
+        };
+    }
     let grouped = window.is_none() || st.slot_opt(g0, Ns::Meta, mk("grouped")).is_some();
     let base = rows_of(st, &fs);
     let keys = if grouped { ks.clone().unwrap_or_default() } else { KeySet::new() };
@@ -2638,7 +2728,11 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let v = frame_result(an, st, row, same);
             if window.as_deref() == Some("resample") {
                 if let Some(nid) = v.single() {
-                    set_index_levels(st, nid, Some(&[on]));
+                    let lv = match on {
+                        Some(o) => Some(vec![Some(o)]),
+                        None => levels_of(st, &fs),
+                    };
+                    set_index_levels(st, nid, lv.as_deref());
                     set_labels(st, nid, None);
                 }
             }
@@ -2717,8 +2811,9 @@ fn df_apply(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let fnv = c.arg(0, Some("func"));
     let rowwise = axis_is_columns(&c.kw("axis"));
     let Some(fnv) = fnv.filter(|f| !f.pts.is_empty()) else { return series(an) };
+    let base = recv_row(an, st, c);
+    let expand = key_is(&c.kw("result_type"), "expand");
     if rowwise {
-        let base = recv_row(an, st, c);
         let label = format!("row of {}", fs.first().map(|f| an.obj(*f).label.clone()).unwrap_or_else(|| "frame".into()));
         let vrow = an.alloc_at(Kind::Dict, &c.node, st, &label, Payload::None, Some(base.clone()), Ns::Item, Some(false), None);
         mark_view(an, vrow, &fs);
@@ -2728,25 +2823,107 @@ fn df_apply(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let mut oargs = vec![Value::obj(vrow)];
         oargs.extend(c.args[1..].iter().cloned());
         let res = an.call_value(&fnv, &c.node, None, st, Some(oargs));
-        if key_is(&c.kw("result_type"), "expand") && !an.record_objects(&res).is_empty() {
-            let recs = an.record_objects(&res);
+        let sers: Vec<u32> = res.pts.iter().filter(|o| is_series_obj(an, *o)).collect();
+        let dicts: Vec<u32> = res.pts.iter().filter(|o| an.kind(*o) == Kind::Dict && !is_series_obj(an, *o)).collect();
+        // a Series per row (or dicts with result_type="expand"): its keys are the columns
+        let recs: Vec<u32> = if expand { sers.iter().chain(dicts.iter()).copied().collect() } else { sers.clone() };
+        if !recs.is_empty() && recs.len() + if expand { 0 } else { dicts.len() } == res.pts.len() {
             let row = join_rows(recs.iter().map(|x| st.row(*x, Ns::Item)));
-            return new_frame(an, st, c, row, None, None);
+            return derived(an, st, c, row, &fs, Rows::Same, false);
         }
-        let recs = an.record_objects(&res);
-        if !frames(an, Some(&res)).is_empty() || !recs.is_empty() {
-            if !recs.is_empty() {
-                let row = join_rows(recs.iter().map(|x| st.row(*x, Ns::Item)));
-                return new_frame(an, st, c, row, None, None);
+        // anything else: one value per row (a dict per row stays a dict)
+        let idx = match fs.as_slice() {
+            [f] => labels_row(st, *f),
+            _ => Row::with_source(Source::new("index", SourceKind::Data)),
+        };
+        let sid = new_series(an, st, &c.node, idx, None, "a");
+        if !dicts.is_empty() {
+            st.set_slot(sid, Ns::Meta, mk("elem"), res.clone(), true);
+        }
+        return Value::obj(sid);
+    }
+    // column by column: f gets each column (a Series over the rows)
+    let col = match fs.as_slice() {
+        [f] => labels_row(st, *f),
+        _ => Row::with_source(Source::new("index", SourceKind::Data)),
+    };
+    let cid = new_series(an, st, &c.node, col, Some(Value::data("column name")), "col");
+    let mut oargs = vec![Value::obj(cid)];
+    oargs.extend(c.args[1..].iter().cloned());
+    let res = an.call_value(&fnv, &c.node, None, st, Some(oargs));
+    let sers: Vec<u32> = res.pts.iter().filter(|o| is_series_obj(an, *o) && *o != cid).collect();
+    if !sers.is_empty() {
+        // a Series per column: a frame with the frame's columns over the returned index
+        let idx = join_rows(sers.iter().map(|x| st.row(*x, Ns::Item)));
+        let v = new_frame(an, st, c, base.clone(), None, None);
+        if let Some(nid) = v.single() {
+            let lab = idx.closed().then(|| Known { may: idx.present.clone(), sure: idx.definite.clone() });
+            set_labels(st, nid, lab.as_ref());
+        }
+        return v;
+    }
+    if is_seriesish(an, &res) {
+        // an element-wise transform: the same frame shape
+        return derived(an, st, c, base, &fs, Rows::Same, false);
+    }
+    // a scalar per column: a Series over the columns
+    let sid = new_series(an, st, &c.node, Row::new().copy_from(&base, true, &KeySet::new(), EMPTY_LENS), None, "r");
+    Value::obj(sid)
+}
+
+/// The statistics `describe()` gives for numeric / other columns.
+const NUM_STATS: &[&str] = &["count", "mean", "std", "min", "25%", "50%", "75%", "max"];
+const OBJ_STATS: &[&str] = &["count", "unique", "top", "freq"];
+
+fn describe_labels(num: bool, obj: bool) -> Known {
+    let mut ks: Vec<KeyId> = Vec::new();
+    if obj {
+        ks.extend(OBJ_STATS.iter().map(|x| mk(x)));
+    }
+    if num {
+        for k in NUM_STATS.iter().map(|x| mk(x)) {
+            if !ks.contains(&k) {
+                ks.push(k);
             }
         }
-        return series(an);
     }
-    let mut oargs = vec![series(an)];
-    oargs.extend(c.args[1..].iter().cloned());
-    an.call_value(&fnv, &c.node, None, st, Some(oargs));
+    Known::exact(KeySet::from_iter(ks))
+}
+
+fn describe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let fs = frames(an, c.recv.as_ref());
     let row = recv_row(an, st, c);
-    new_frame(an, st, c, row, None, None)
+    let all = key_is(&c.kw("include"), "all");
+    let [f] = fs.as_slice() else { return open_frame_call(an, st, c) };
+    if !row.closed() || c.kw("include").map(|_| !all).unwrap_or(false) || c.kw("exclude").is_some() {
+        let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.insert((Source::new(&format!("describe@L{}", c.line), SourceKind::Call), EMPTY_LENS)), ..Default::default() });
+        return new_frame(an, st, c, r, None, None);
+    }
+    let mut kinds: Vec<(KeyId, Option<bool>)> = Vec::new();
+    for k in row.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(row.present.iter())) {
+        let numeric = dtype(st, *f, k).map(|d| matches!(d.as_str(), "int" | "float"));
+        kinds.push((k, numeric));
+    }
+    if kinds.iter().any(|(_, n)| n.is_none()) {
+        let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.insert((Source::new(&format!("describe@L{}", c.line), SourceKind::Call), EMPTY_LENS)), ..Default::default() });
+        return new_frame(an, st, c, r, None, None);
+    }
+    let any_num = kinds.iter().any(|(k, n)| *n == Some(true) && row.present.contains(*k));
+    let any_num_def = kinds.iter().any(|(k, n)| *n == Some(true) && row.definite.contains(*k));
+    let chosen: Vec<(KeyId, bool)> = kinds.iter().filter(|(_, n)| all || !any_num || *n == Some(true)).map(|(k, n)| (*k, n.unwrap_or(false))).collect();
+    let mut out = Row::new();
+    for (k, _) in &chosen {
+        out = out.store(*k, row.definite.contains(*k) && (all || !any_num || any_num_def));
+    }
+    let has_num = chosen.iter().any(|(_, n)| *n);
+    let has_obj = chosen.iter().any(|(_, n)| !*n);
+    let v = new_frame(an, st, c, out, None, None);
+    if let Some(nid) = v.single() {
+        let lab = describe_labels(has_num, has_obj);
+        set_labels(st, nid, Some(&lab));
+        set_nrows(st, nid, Some(lab.may.len() as i64));
+    }
+    v
 }
 
 fn df_pipe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -2770,21 +2947,88 @@ fn iterrows(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::obj(vid)
 }
 
-fn itertuples(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    let base = recv_row(an, st, c);
-    let fs = frames(an, c.recv.as_ref());
-    let vrow = an.alloc_at(Kind::Namespace, &c.node, st, &format!("row@L{}", c.line), Payload::None, Some(base.clone()), Ns::Attr, Some(false), None);
-    mark_view(an, vrow, &fs);
-    for k in base.present.iter() {
-        if intern::key_is_str(k) {
-            st.set_slot(vrow, Ns::Attr, k, Value::data(&format!("cell {}", intern::key_py_str(k))), false);
-        }
+fn is_identifier(s0: &str) -> bool {
+    const KW: &[&str] = &["False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"];
+    let mut cs = s0.chars();
+    match cs.next() {
+        Some(ch) if ch.is_alphabetic() || ch == '_' => {}
+        _ => return false,
     }
-    let r = st.row(vrow, Ns::Attr).store(key_str_lit("Index"), true);
-    st.set_row(vrow, Ns::Attr, r);
+    cs.all(|ch| ch.is_alphanumeric() || ch == '_') && !KW.contains(&s0)
+}
+
+/// `itertuples(index=True, name="Pandas")`: namedtuples whose fields are Index and the
+/// columns (a name that is no identifier, starts with "_" or repeats becomes `_<position>`);
+/// `name=None`: plain tuples.
+fn itertuples(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let fs = frames(an, c.recv.as_ref());
+    let with_index = !key_is_bool(&c.kw("index").or_else(|| c.arg(0, None)), false);
+    let plain = c.kw("name").map(|v| v.kv == an.none_v.kv && v.pts.is_empty()).unwrap_or(false);
+    let mut rows_v = Value::new();
+    for (j, f) in fs.iter().enumerate() {
+        let base = st.row(*f, Ns::Item);
+        let order = base.ordered_keys().filter(|_| base.closed());
+        let mut fields: Vec<(KeyId, bool)> = Vec::new();
+        if with_index {
+            fields.push((mk("Index"), true));
+        }
+        match &order {
+            Some(o) => {
+                let mut seen: Vec<String> = Vec::new();
+                for k in o {
+                    let pos = fields.len();
+                    let name = intern::key_py_str(*k);
+                    let ok = intern::key_is_str(*k) && is_identifier(&name) && !name.starts_with('_') && !seen.contains(&name) && !(with_index && name == "Index");
+                    seen.push(name.clone());
+                    fields.push((if ok { *k } else { mk(&format!("_{}", pos)) }, base.definite.contains(*k)));
+                }
+            }
+            None => {
+                for k in base.present.iter() {
+                    if intern::key_is_str(k) && is_identifier(&intern::key_py_str(k)) {
+                        fields.push((k, base.definite.contains(k)));
+                    }
+                }
+            }
+        }
+        let site = format!("{}:t{}", crate::interp::site_string(&c.node), j);
+        let vrow = if plain {
+            let t = an.alloc(Kind::Namespace, &site, st, &format!("tuple@L{}", c.line), Payload::None, Some(Row::new()), Ns::Attr, Some(false), None);
+            if order.is_some() && base.present == base.definite {
+                an.obj_mut(t).literal_len = Some(fields.len());
+                for i in 0..fields.len() {
+                    st.set_slot(t, Ns::Pos, intern::key_int(i as i64), Value::data("cell"), true);
+                }
+            }
+            t
+        } else {
+            let mut r = Row::new();
+            for (k, def) in &fields {
+                r = r.store(*k, *def);
+            }
+            if order.is_none() && base.open() {
+                let mut d = r.data();
+                d.sources = base.sources.clone();
+                r = Row::from_data(d);
+            }
+            let t = an.alloc(Kind::Namespace, &site, st, &format!("row@L{}", c.line), Payload::None, Some(r.clone()), Ns::Attr, Some(false), None);
+            for (k, _) in &fields {
+                st.set_slot(t, Ns::Attr, *k, Value::data(&format!("cell {}", intern::key_py_str(*k))), false);
+            }
+            if order.is_some() {
+                an.obj_mut(t).literal_len = Some(fields.len());
+            }
+            t
+        };
+        mark_view(an, vrow, &[*f]);
+        rows_v = rows_v.join(&Value::obj(vrow));
+    }
+    if rows_v.pts.is_empty() {
+        return Value::data(&format!("itertuples@L{}", c.line));
+    }
     let ctx = an.frame().ctx.clone();
-    let vid = an.alloc_raw(Kind::View, &format!("view:elems:{}", c.site), &ctx, true, "itertuples", Payload::View(ViewKind::Elems, Value::obj(vrow)));
-    an.obj_mut(vid).payload = Payload::View(ViewKind::Elems, Value::obj(vrow));
+    let vid = an.alloc_raw(Kind::View, &format!("view:elems:{}", c.site), &ctx, true, "itertuples", Payload::View(ViewKind::Elems, rows_v.clone()));
+    an.obj_mut(vid).payload = Payload::View(ViewKind::Elems, rows_v);
     Value::obj(vid)
 }
 
@@ -3662,6 +3906,20 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if matches!(name.as_str(), "rolling" | "expanding" | "ewm" | "resample") {
         return window_of(an, st, c, fs.clone(), None, None, &name);
     }
+    if name == "value_counts" {
+        let subset = keys_arg(an, st, &c.arg(0, Some("subset"))).or_else(|| row.closed().then(|| row.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(row.present.iter()))));
+        let nm = if key_is_bool(&c.kw("normalize"), true) { "proportion" } else { "count" };
+        let sid = new_series(an, st, &c.node, Row::with_source(Source::new("values", SourceKind::Data)), Some(Value::lit(mk(nm))), "v");
+        match subset {
+            Some(cols) => {
+                let _ = require_cols(an, st, c, &fs, &KeySet::from_iter(cols.iter().copied()));
+                let lv: Vec<Option<KeyId>> = cols.into_iter().map(Some).collect();
+                set_index_levels(st, sid, Some(&lv));
+            }
+            None => set_index_levels(st, sid, None),
+        }
+        return Value::obj(sid);
+    }
     if FRAME_REDUCTIONS.contains(&name.as_str()) && !axis_is_columns(&c.kw("axis")) {
         // one value per column: a Series over the columns (numeric_only: the numeric ones)
         let mut idx = row.clone();
@@ -4126,6 +4384,18 @@ fn frame_with(an: &mut Analyzer, foid: u32, node: &Node, state: &mut State, row:
 
 pub fn loc_get(an: &mut Analyzer, lo: u32, key: &Value, node: &Node, state: &mut State) -> Value {
     let Payload::Locidx(name, foid) = an.obj(lo).payload.clone() else { return Value::new() };
+    if name.starts_with('s') && is_series_obj(an, foid) {
+        // an element of a tracked Series (a dict per row stays one)
+        if key.pts.is_empty() && key.kv.as_lit().is_some() {
+            return state.slot_opt(foid, Ns::Meta, mk("elem")).unwrap_or_else(|| Value::data(&format!("cell@L{}", node.line)));
+        }
+        let idx = state.row(foid, Ns::Item);
+        let mut d = idx.data();
+        d.definite = KeySet::new();
+        d.likely = KeySet::new();
+        let sid = new_series(an, state, node, Row::from_data(d), Some(series_name(an, state, foid)), "l");
+        return Value::obj(sid);
+    }
     let row = state.row(foid, Ns::Item);
     let positional = name == "iloc" || name == "iat";
     let mut parts: Option<(Value, Value)> = None;

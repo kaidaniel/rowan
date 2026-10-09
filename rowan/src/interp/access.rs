@@ -1054,6 +1054,8 @@ impl Analyzer {
                 let cls = classify(&row, nk);
                 if !guarded {
                     self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
+                } else if !super::disabled("guardedverdicts") {
+                    self.verdict_guarded(node, nk, &cls, oid, Ns::Attr);
                 }
                 if let Some(c) = cls_of {
                     if self.field_is_any(c, name) {
@@ -1090,6 +1092,16 @@ impl Analyzer {
             if cls.tier != Tier::Missing && single_target && self.strongable(oid) {
                 state.set_row(oid, Ns::Attr, row.narrow_in(nk, true));
                 self.propagate_narrowing(oid, Ns::Attr, nk, state);
+            }
+        } else if !super::disabled("guardedverdicts") {
+            self.verdict_guarded(node, nk, &cls, oid, Ns::Attr);
+            if self.is_guarded(Ns::Attr) && !matches!(cls.tier, Tier::Proven | Tier::Likely | Tier::Map) {
+                // an AttributeError the enclosing try handles
+                if cls.tier == Tier::Missing && single_target && !row.symbolic() && self.instance_class(oid).is_none() {
+                    self.raise_here("AttributeError", state);
+                } else {
+                    self.may_raise_here("AttributeError", state);
+                }
             }
         }
         if row.open() {

@@ -14,5 +14,9 @@ m["amount"]                                              #@ input amount
 by_region = m.groupby("region")["amount"].sum().reset_index()   #@ input region
 #@row by_region: present={region,amount} definite={region,amount} closed
 by_region["amount"]                                      #@ ok amount
-#@schema read_csv@L9: always={cust,amount} only={cust,amount}
-#@schema read_csv@L10: always={cust,region} only={cust,region}
+# both inputs are open: either could hold `amount` / `region`, so each is required of one of
+# them (the other is its alternative); which one needs the files' contents
+#@todo schema read_csv@L9: always={cust,amount} only={cust,amount}
+#@todo schema read_csv@L10: always={cust,region} only={cust,region}
+#@schema read_csv@L9: always={cust} only={cust,amount,region}
+#@schema read_csv@L10: always={cust} only={cust,amount,region}

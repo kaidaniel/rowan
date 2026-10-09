@@ -13,8 +13,9 @@ def big(df):
 
 
 def top(g):
-    #@row g: present={v,tag} definite={v} absent={k} closed
+    # (the row directive was on its own line under `def`, which checks the `def` statement)
     return g.nlargest(1, "v")
+    #@row g: present={v,tag} definite={v} absent={k} closed
 
 
 def spread(g):

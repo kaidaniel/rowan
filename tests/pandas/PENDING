@@ -1,16 +1,8 @@
 # pandas cases written but not yet expected to pass (paths relative to tests/pandas/)
-small/p068_groupby_filter_apply.py
-small/p070_value_counts.py
-small/p072_resample.py
-small/p074_merge_schema.py
-small/p077_itertuples_fields.py
-small/p078_apply_axis1_results.py
 small/p079_apply_columnwise.py
 small/p081_to_dict_orients.py
 small/p083_to_records.py
 small/p084_from_dict_roundtrip.py
-small/p085_series_to_frame.py
-small/p086_series_reset_index.py
 small/p087_str_split_expand.py
 small/p089_dt_accessors.py
 small/p091_value_counts_dict.py
