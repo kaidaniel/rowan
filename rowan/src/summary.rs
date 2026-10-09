@@ -108,6 +108,8 @@ pub struct Obs {
     pub rows: Vec<(ObjId, Ns, Row)>,
     /// keys the name's object surely has (stored through the name)
     pub must: Vec<KeyId>,
+    /// the name's value (relative to the summary's entry)
+    pub value: Value,
 }
 
 /// A hover fact recorded in a summary body (relative to its entry); resolved per call.
@@ -1427,6 +1429,7 @@ impl Analyzer {
         // 8. row checks inside the body: resolved for this call (inside another summary they
         // become that summary's, relative to its entry)
         for ob in &summary.obs {
+            let value = inst.remap_value(self, state, &pre, &ob.value);
             let mut rows: Vec<(ObjId, Ns, Row)> = Vec::new();
             for (o, ns, expr) in &ob.rows {
                 let tg = inst.resolve(self, state, &pre, *o);
@@ -1439,12 +1442,13 @@ impl Analyzer {
             }
             if in_summary {
                 if let Some(top) = self.sum_obs.last_mut() {
-                    top.push(Obs { line: ob.line, name: ob.name.clone(), rows, must: ob.must.clone() });
+                    top.push(Obs { line: ob.line, name: ob.name.clone(), rows, must: ob.must.clone(), value });
                 }
             } else {
                 let ns = rows.first().map(|r| r.1).unwrap_or(Ns::Item);
                 let row = if rows.is_empty() { None } else { Some(ob.must.iter().fold(crate::domain::join_rows(rows.into_iter().map(|r| r.2)), |r, k| r.store(*k, true))) };
-                self.row_checks.push(crate::interp::RowCheck { line: ob.line, name: ob.name.clone(), row, ns });
+                let value = self.value_info(&value);
+                self.row_checks.push(crate::interp::RowCheck { line: ob.line, name: ob.name.clone(), row, ns, value });
             }
         }
         // hover facts inside the body, for this call

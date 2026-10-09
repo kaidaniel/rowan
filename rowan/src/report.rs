@@ -297,10 +297,12 @@ pub fn golden_json(an: &Analyzer) -> J {
     let rows: Vec<J> = an
         .row_checks
         .iter()
-        .map(|rc| match &rc.row {
-            None => json!({"line": rc.line, "name": rc.name, "row": J::Null}),
+        .map(|rc| {
+            let value = json!({"lits": rc.value.lits.iter().map(|k| key_repr(*k)).collect::<Vec<_>>(), "unknown": rc.value.unknown, "objects": rc.value.objects});
+            match &rc.row {
+            None => json!({"line": rc.line, "name": rc.name, "row": J::Null, "value": value}),
             Some(r) => json!({
-                "line": rc.line, "name": rc.name,
+                "line": rc.line, "name": rc.name, "value": value,
                 "row": {
                     "present": r.present.iter().map(key_repr).collect::<Vec<_>>(),
                     "definite": r.definite.iter().map(key_repr).collect::<Vec<_>>(),
@@ -310,7 +312,7 @@ pub fn golden_json(an: &Analyzer) -> J {
                     "details": r.details(),
                 }
             }),
-        })
+        }})
         .collect();
     json!({"verdicts": verdicts, "schemas": schemas, "rows": rows, "notes": an.notes, "report": format_text(an, true, true)})
 }

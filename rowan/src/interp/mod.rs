@@ -537,6 +537,15 @@ pub struct RowCheck {
     pub name: String,
     pub row: Option<Row>,
     pub ns: Ns,
+    /// the name's value: its known literals, whether it may be anything else, its objects
+    pub value: ValueInfo,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ValueInfo {
+    pub lits: Vec<KeyId>,
+    pub unknown: bool,
+    pub objects: Vec<String>,
 }
 
 pub struct Analyzer {
@@ -1668,6 +1677,27 @@ impl Analyzer {
         false
     }
 
+    /// What a value is, for the golden harness's `#@value` checks: literals it may be, whether
+    /// it may also be something unknown, and the (known) objects it may be.
+    pub fn value_info(&self, v: &Value) -> ValueInfo {
+        let mut info = ValueInfo::default();
+        if v.kv.is_literal() {
+            info.lits = crate::domain::kv_literals(&v.kv).iter().collect();
+        } else if !v.kv.is_bot() {
+            info.unknown = true;
+        }
+        for o in v.pts.iter() {
+            match self.kind(o) {
+                Kind::Unknown | Kind::Ph | Kind::External => info.unknown = true,
+                _ => info.objects.push(self.obj(o).label.clone()),
+            }
+        }
+        if v.pts.is_empty() && v.kv.is_bot() {
+            info.unknown = true;
+        }
+        info
+    }
+
     /// Row-check support for the golden harness: after a statement at a requested line.
     pub fn after_stmt(&mut self, stmt: &ast::Stmt, state: &mut State) {
         if self.row_check_requests.is_empty() {
@@ -1695,12 +1725,13 @@ impl Analyzer {
             // resolved per call
             if !self.sum_stack.is_empty() && !disabled("obs") {
                 if let Some(top) = self.sum_obs.last_mut() {
-                    top.push(crate::summary::Obs { line: ln, name, rows: obs_rows, must });
+                    top.push(crate::summary::Obs { line: ln, name, rows: obs_rows, must, value: v.clone() });
                 }
                 continue;
             }
             let row = if rows.is_empty() { None } else { Some(must.iter().fold(crate::domain::join_rows(rows), |r, k| r.store(*k, true))) };
-            self.row_checks.push(RowCheck { line: ln, name, row, ns: ns_used });
+            let value = self.value_info(&v);
+            self.row_checks.push(RowCheck { line: ln, name, row, ns: ns_used, value });
         }
     }
 }

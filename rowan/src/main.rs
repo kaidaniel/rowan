@@ -250,6 +250,16 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
                     an.row_check_requests.push((i as u32 + 1, name));
                 }
             }
+            // `#@value NAME: …; NAME2: …` (also under `#@todo value`)
+            let vhit = line.find("#@value").map(|p| p + 7).or_else(|| line.find("#@todo value").map(|p| p + 12));
+            if let Some(pos) = vhit {
+                for clause in line[pos..].split(';') {
+                    let name: String = clause.trim_start().chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                    if !name.is_empty() && !an.row_check_requests.contains(&(i as u32 + 1, name.clone())) {
+                        an.row_check_requests.push((i as u32 + 1, name));
+                    }
+                }
+            }
         }
     }
     an.run();

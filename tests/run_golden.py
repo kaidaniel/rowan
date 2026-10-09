@@ -11,6 +11,9 @@ Tiers: ok|proven, likely, possibly, missing, likely-missing, input, datakey, non
 that key at this line), any (some verdict for the key), sound (no `missing` verdict for the
 key: the key may really be there, so only that would be wrong; `likely-missing`, "missing
 unless unknown code added it", is a hedged and true statement).
+Values: `#@value NAME: exactly={12}` (the value is one of these literals and nothing else),
+`#@value NAME: unknown` (rowan claims no specific value), `#@value NAME: includes={1,100}`
+(floor: unknown, or a set holding these); several names on one line separated by `;`.
 Row checks beyond present/definite/closed/open: `possible={..}` (each key is present, or the
 row is open) and `definite_within={..}` (every definite key is listed): soundness floors for
 cases whose precise answer is a `#@todo`.  Keys are bare words or Python literals.
@@ -33,7 +36,8 @@ from typing import Any, Dict, List, Tuple
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
-TODO_COUNT = [0]  # `#@todo` directives seen: expectations the engine does not meet yet
+TODO_COUNT = [0]
+VALUE_EXP: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}  # line -> [(name, spec)] for `#@value`  # `#@todo` directives seen: expectations the engine does not meet yet
 
 TIER_ALIASES = {"ok": "proven", "proven": "proven", "likely": "likely", "possibly": "possibly",
                 "missing": "missing", "likely-missing": "likely-missing", "input": "input",
@@ -62,6 +66,7 @@ def parse_set(s: str) -> set:
 def collect_expectations(src: str):
     verdict_exp: Dict[int, List[Tuple[str, Any]]] = {}
     row_exp: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}
+    VALUE_EXP.clear()
     schema_exp: List[Tuple[str, Dict[str, Any]]] = []
     for i, line in enumerate(src.splitlines(), 1):
         if "#@todo" in line:
@@ -70,8 +75,22 @@ def collect_expectations(src: str):
                 continue
             # ROWAN_TODO=check: the open expectations are checked like the others
             line = re.sub(r"#@todo\s+row\b", "#@row", line)
+            line = re.sub(r"#@todo\s+value\b", "#@value", line)
             line = re.sub(r"#@todo\s+schema\b", "#@schema", line)
             line = re.sub(r"#@todo\s+", "#@ ", line)
+        m = re.search(r"#@value\s+(.*)$", line)
+        if m:
+            for clause in m.group(1).split(";"):
+                cm = re.match(r"\s*(\w+)\s*:\s*(.*)$", clause)
+                if not cm:
+                    raise ValueError(f"line {i}: bad #@value clause {clause!r}")
+                spec: Dict[str, Any] = {}
+                for part in re.findall(r"(\w+)=(\{[^}]*\})", cm.group(2)):
+                    spec[part[0]] = parse_set(part[1])
+                if re.search(r"\bunknown\b", cm.group(2)):
+                    spec["unknown"] = True
+                VALUE_EXP.setdefault(i, []).append((cm.group(1), spec))
+            continue
         m = re.search(r"#@row\s+(\w+)\s*:\s*(.*)$", line)
         if m:
             spec: Dict[str, Any] = {}
@@ -255,6 +274,35 @@ def run_case(path: str, verbose: bool = False) -> Tuple[bool, List[str]]:
         for name, spec in specs:
             if (ln, name) not in seen_rows:
                 row_checks.append((ln, name, spec, "statement never executed"))
+    # values: joined over the runs of the line like rows
+    values: Dict[Tuple[int, str], Dict[str, Any]] = {}
+    for rc in res["rows"]:
+        v = rc.get("value")
+        if v is None:
+            continue
+        j = values.setdefault((rc["line"], rc["name"]), {"lits": set(), "unknown": False, "objects": set()})
+        j["lits"] |= set(v["lits"])
+        j["unknown"] = j["unknown"] or v["unknown"]
+        j["objects"] |= set(v["objects"])
+    for ln, specs in VALUE_EXP.items():
+        for name, spec in specs:
+            got = values.get((ln, name))
+            if got is None:
+                row_checks.append((ln, name, spec, "statement never executed"))
+                continue
+            desc = f"lits={sorted(got['lits'])} unknown={got['unknown']} objects={sorted(got['objects'])}"
+            prob = ""
+            if "exactly" in spec:
+                want = {key_str(k) for k in spec["exactly"]}
+                if got["unknown"] or got["objects"] or got["lits"] != want:
+                    prob = f"value {desc}, want exactly {sorted(want)}"
+            if spec.get("unknown") and not got["unknown"]:
+                prob = f"value {desc}, but it may be anything: rowan must not claim a specific value"
+            if "includes" in spec and not got["unknown"]:
+                lost = {key_str(k) for k in spec["includes"]} - got["lits"]
+                if lost:
+                    prob = f"value {desc} leaves out {sorted(lost)}"
+            row_checks.append((ln, f"value of {name}", spec, prob))
     failures = check_results(verdict_exp, row_checks, schema_exp, res["verdicts"], res["schemas"])
     if verbose or failures:
         print(f"\n===== {os.path.basename(path)} =====")
