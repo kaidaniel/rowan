@@ -147,6 +147,37 @@ impl Analyzer {
         } else {
             None
         };
+        // `Color["RED"]`: an Enum's member by name
+        if ns == Ns::Item && !obj.pts.is_empty() && obj.pts.iter().all(|o| self.enum_members.contains_key(&o)) && !super::disabled("enumitem") {
+            let mut out = Value::new();
+            for oid in obj.pts.iter() {
+                let ms = self.enum_members[&oid].clone();
+                match key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_str) {
+                    Some(nm) => match ms.iter().find(|(n, _)| *n == *nm) {
+                        Some((_, m)) => {
+                            let cls = Classification::new(Tier::Proven);
+                            if !guarded { self.verdict(node, key_str_lit(&nm), &cls, oid, Ns::Item, None, None); } else { self.verdict_guarded(node, key_str_lit(&nm), &cls, oid, Ns::Item); }
+                            out = out.join(&Value::obj(*m));
+                        }
+                        None => {
+                            let cls = Classification::with_note(Tier::Missing, "no such Enum member");
+                            if !guarded { self.verdict(node, key_str_lit(&nm), &cls, oid, Ns::Item, None, None); } else { self.verdict_guarded(node, key_str_lit(&nm), &cls, oid, Ns::Item); }
+                            if obj.pts.len() == 1 {
+                                self.raise_here("KeyError", state);
+                            }
+                        }
+                    },
+                    None => {
+                        if let Some(p) = key.kv.as_param() {
+                            self.record_event("concrete", p);
+                        }
+                        self.may_raise_here("KeyError", state);
+                        out = out.join(&join_values(ms.iter().map(|(_, m)| Value::obj(*m)).collect::<Vec<_>>()));
+                    }
+                }
+            }
+            return out;
+        }
         for oid in obj.pts.iter() {
             let kind = self.kind(oid);
             // a Counter reads a missing key as 0 without inserting it: the row is put back
@@ -816,6 +847,24 @@ impl Analyzer {
                             }
                         }
                         if changed { Value::with_kv(out.pts, v.kv.clone()) } else { v }
+                    } else if name == "__members__" && self.enum_members.contains_key(&oid) {
+                        let ms = self.enum_members[&oid].clone();
+                        let d = self.alloc_raw(Kind::Dict, &format!("enum-members:{}", oid), "", true, "__members__", Payload::None);
+                        let mut row = Row::new();
+                        let mut order = Vec::new();
+                        for (n, m) in &ms {
+                            let k = key_str_lit(n);
+                            row = row.store(k, true);
+                            order.push(k);
+                            state.set_slot(d, Ns::Item, k, Value::obj(*m), true);
+                        }
+                        state.set_row(d, Ns::Item, row.with_order(order));
+                        Value::obj(d)
+                    } else if self.enum_members.contains_key(&oid) && !name.starts_with("__") && !self.class_info(oid).open_base && !super::disabled("enumattr") {
+                        // an Enum's attribute that is no member nor method: AttributeError
+                        let cls = Classification::with_note(Tier::Missing, "no such Enum member");
+                        if !guarded { self.verdict(node, nk, &cls, oid, Ns::Attr, None, None); } else { self.verdict_guarded(node, nk, &cls, oid, Ns::Attr); }
+                        Value::data(&format!("L{}", node.line))
                     } else if crate::models::pydantic::PYD_ATTRS.contains(&name) && crate::models::pydantic::is_model(self, oid) {
                         crate::models::pydantic::attr_value(self, state, oid, name, node)
                     } else if crate::models::pydantic::PYD_METHODS.contains(&name) && crate::models::pydantic::is_model(self, oid) {

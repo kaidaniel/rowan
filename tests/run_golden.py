@@ -114,7 +114,7 @@ def collect_expectations(src: str):
                 spec: Dict[str, Any] = {}
                 for part in re.findall(r"(\w+)=(\{[^}]*\})", cm.group(2)):
                     spec[part[0]] = parse_set(part[1])
-                if re.search(r"\bunknown\b", cm.group(2)):
+                if re.search(r"\bunknown\b", re.sub(r"\{[^}]*\}", "", cm.group(2))):
                     spec["unknown"] = True
                 VALUE_EXP.setdefault(i, []).append((cm.group(1), spec))
             continue

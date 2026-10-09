@@ -397,6 +397,46 @@ impl Analyzer {
     }
 
     pub fn construct(&mut self, cls: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
+        // `Color(3)`: the Enum member with that value, else ValueError
+        if let (Some(ms), Some(a)) = (self.enum_members.get(&cls).cloned(), args.first()) {
+            if !super::disabled("enumcall") {
+                let vk = key_str_lit("value");
+                let lits = if a.pts.is_empty() && a.kv.is_literal() { Some(crate::domain::kv_literals(&a.kv)) } else { None };
+                let mut out = Value::new();
+                match lits {
+                    Some(ls) => {
+                        let mut all_hit = true;
+                        for l in ls.iter() {
+                            let hit = ms.iter().find(|(_, m)| state.slot(*m, Ns::Attr, vk).kv.as_lit() == Some(l));
+                            match hit {
+                                Some((_, m)) => out = out.join(&Value::obj(*m)),
+                                None => all_hit = false,
+                            }
+                        }
+                        if out.empty() {
+                            self.raise_here("ValueError", state);
+                            return Value::new();
+                        }
+                        if !all_hit {
+                            self.may_raise_here("ValueError", state);
+                        }
+                    }
+                    None => {
+                        if let Some(p) = a.kv.as_param() {
+                            self.record_event("concrete", p);
+                        }
+                        // a member given: itself
+                        let given: Vec<u32> = a.pts.iter().filter(|o| ms.iter().any(|(_, m)| m == o)).collect();
+                        if !given.is_empty() && given.len() == a.pts.len() && a.kv.is_bot() {
+                            return Value::objs(crate::domain::ObjSet::from_vec(given));
+                        }
+                        self.may_raise_here("ValueError", state);
+                        out = join_values(ms.iter().map(|(_, m)| Value::obj(*m)).collect::<Vec<_>>());
+                    }
+                }
+                return out;
+            }
+        }
         let ci = self.class_info(cls);
         // a TypedDict class makes a plain dict
         if ci.typed_dict && !super::disabled("typeddictcall") {
