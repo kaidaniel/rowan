@@ -546,6 +546,10 @@ fn norm_once(d: DimId, f: &TFacts) -> DimId {
 }
 
 fn norm_atom(a: AtomId, f: &TFacts) -> DimId {
+    // a fact about the atom as written (`x.shape[-1]`), before its index is normalised
+    if let Some(d) = f.subst.get(&a) {
+        return *d;
+    }
     let at = atom_get(a);
     let a2 = match at {
         Atom::Dim(s, i) if i < 0 => match f.rank_of(s) {
@@ -627,6 +631,15 @@ pub fn learn_eq(f: &mut TFacts, a: DimId, b: DimId) {
     if let Some(at) = single(from) {
         if !mentions(to, at) {
             f.subst.insert(at, to);
+            // the same dim counted from the other end, once the rank is known
+            if let Atom::Dim(sym, i) = atom_get(at) {
+                if let Some(r) = f.rank_of(sym) {
+                    let j = if i < 0 { r as i32 + i } else { i - r as i32 };
+                    if (i < 0 && j >= 0) || (i >= 0 && j < 0) {
+                        f.subst.insert(atom(Atom::Dim(sym, j)), to);
+                    }
+                }
+            }
             return;
         }
     }
@@ -679,6 +692,19 @@ pub fn learn_rank(f: &mut TFacts, s: Sym, r: RankRel) {
         }
         _ => r,
     };
+    // an exact rank: facts about dims counted from one end also hold counted from the other
+    if let RankRel::Eq(r) = new {
+        let mirrored: Vec<(AtomId, DimId)> = f.subst.iter().filter_map(|(a, d)| match atom_get(*a) {
+            Atom::Dim(sy, i) if sy == s => {
+                let j = if i < 0 { r as i32 + i } else { i - r as i32 };
+                if (i < 0 && j >= 0) || (i >= 0 && j < 0) { Some((atom(Atom::Dim(sy, j)), *d)) } else { None }
+            }
+            _ => None,
+        }).collect();
+        for (a, d) in mirrored {
+            f.subst.entry(a).or_insert(d);
+        }
+    }
     f.rank.insert(s, new);
 }
 

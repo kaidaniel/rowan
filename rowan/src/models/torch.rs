@@ -956,6 +956,10 @@ impl Analyzer {
     pub fn t_getattr(&mut self, obj: &Value, name: &str, node: &Node, st: &mut State) -> Option<Value> {
         // layer objects / return tuples
         if let Some(o) = obj.single() {
+            if self.kind(o) == Kind::Dict && matches!(&self.obj(o).payload, Payload::Str(q) if q == "torch.nn.ModuleDict") && !matches!(name, "keys" | "values" | "items" | "get" | "update" | "pop" | "clear") {
+                let k = Value::lit(key_str_lit(name));
+                return Some(self.load_item(obj, Ns::Item, &k, node, st, true));
+            }
             if let Payload::Str(q) = &self.obj(o).payload {
                 if q == "torch.return_types" {
                     let i = match name {
@@ -2788,10 +2792,17 @@ impl Analyzer {
             return self.t_list_layer(ty, Some(items), None, &node, st);
         }
         if ty == "ModuleDict" || ty == "ParameterDict" {
-            return c.args.first().cloned().unwrap_or_else(|| {
+            let v = c.args.first().cloned().unwrap_or_else(|| {
                 let o = self.alloc_at(Kind::Dict, &node, st, &format!("dict@L{}", node.line), Payload::None, None, Ns::Item, None, None);
                 Value::obj(o)
             });
+            // its items are also its attributes (`self.transformer.wte`)
+            for o in v.pts.iter() {
+                if self.kind(o) == Kind::Dict {
+                    self.obj_mut(o).payload = Payload::Str("torch.nn.ModuleDict".into());
+                }
+            }
+            return v;
         }
         if ty == "ParameterList" {
             return c.args.first().cloned().unwrap_or_else(|| self.alloc_positional(Kind::List, &node, Some(vec![]), Value::new(), DATA, st));
