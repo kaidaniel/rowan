@@ -12,6 +12,19 @@ could come from; then the keys this program requires of an external input and th
 on that line.
 Missing-key verdicts are also shown as diagnostics (✗ error, ⚠ warning, ◌ information).
 
+In PyTorch code a tensor's hover shows its shape in the function's own terms, dims named by
+the locals that hold them or by letters, with a legend and what the line requires:
+
+```
+qkv
+- value: Tensor[B, T, 3*self.n_embd]
+- B: x.shape[0]   T: x.shape[1]   C: x.shape[2]
+- requires C == self.n_embd
+- in calls: Tensor[3, 10, 96], …
+```
+
+Definite shape mismatches (`Linear(32 -> 96) given last dim 48`) are error diagnostics.
+
 The extension keeps one `rowan serve` process per binary and asks it to analyse a Python
 file when it is opened or saved, and on the command **Rowan: Analyse current file**; the
 server reuses a result while the file and every module it imports are unchanged. If the
