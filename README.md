@@ -17,7 +17,7 @@ rowan/target/release/rowan prog.py                # text report
 rowan/target/release/rowan prog.py --json         # JSON lines (verdicts, schemas, summaries)
 rowan/target/release/rowan prog.py --facts        # per-name facts for editor integration
 rowan/target/release/rowan lib.py --no-entry      # only what the module itself runs (no entry-point pass)
-uv run --no-project python tests/run_golden.py    # golden suite (92 cases)
+uv run --no-project python tests/run_golden.py    # golden suite (133 cases)
 uv run --no-project python tests/run_snapshots.py # output snapshots on larger inputs
 ```
 
@@ -107,10 +107,10 @@ input (becomes a schema entry), `⚠data` data-derived key into a closed record.
 | `rowan/src/summary.rs` | symbolic function summaries (spec §7.3/§9): placeholders, deferred accesses, imprecision events, footprints, instantiation with allocation-site resolution, SCC re-iteration |
 | `rowan/src/models/` | library models: builtins, `dict`/`list`/`str`, `json`/`yaml`/`pickle`, `copy`, `dataclasses`, `collections`, `csv.DictReader`, `argparse`, `os.environ`, `functools.partial`, `requests`, pandas |
 | `rowan/src/report.rs` | per-access verdict combination, schema table, text / JSON / facts output |
-| `tests/run_golden.py`, `tests/cases/` | golden harness: expectations are `#@` comments in the case files (92 cases; `#@todo` marks known gaps) |
+| `tests/run_golden.py`, `tests/cases/` | golden harness: expectations are `#@` comments in the case files (133 cases, each written before running the engine) |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | output snapshots on the example and three large fixture programs |
 | `examples/etl_report.py` | a realistic script with planted bugs (all found; also golden case e34) |
-| `vscode-rowan/`, `rowan/py/` | VS Code extension; PyO3 binding |
+| `vscode-rowan/`, `rowan/py/` | VS Code extension (uses `rowan serve`); PyO3 binding (does not load on the current macOS toolchain) |
 
 ## Deviations from the spec
 
@@ -120,9 +120,12 @@ input (becomes a schema entry), `⚠data` data-derived key into a closed record.
   analysed concretely instead only when it has information an *imprecision event* of the
   body is about — a call or method dispatch through a parameter that is an actual object
   here, `isinstance`/truthiness/`in` on a parameter that is a literal here, iteration
-  over a parameter that is a literal container here — and, for the literal/structural
-  events, at most 12 times per function. Recursion inside a summary iterates to a fixpoint
-  over at most 3 rounds; summaries computed against a partial summary are redone per round.
+  over a parameter that is a literal container here, arithmetic or formatting on a
+  parameter, a forwarded `*args` / `**kwargs` — within a 2 s soft deadline and hard caps
+  (256 per function). Summaries are specialised by the classes of the receiver and of
+  instance arguments, and by the closure cells they see. Recursion inside a summary
+  iterates to a fixpoint over at most 3 rounds; summaries computed against a partial
+  summary are redone per round.
 * **What a summary keeps** is the exit/entry *difference* of the heap, minus objects the
   caller can never reach; deferred accesses carry one call site of context inside the
   summary (the caller's concrete chain is prepended on use); closure summaries are
@@ -145,11 +148,13 @@ input (becomes a schema entry), `⚠data` data-derived key into a closed record.
 
 ## Performance
 
-Release build, Apple M-series: the 63-case golden suite runs in under a second (one
-process per case); a 1.2k-line module analyses in about a second, 1.7k lines (`models.py`
-of the old prototype, which reached a whole interpreter through a typed field) in about
-40 s, 3.4k lines (`interp.py`) in about 70 s. 137 scripts from local projects analysed in
-0.8 s total without failures.
+Release build, Apple M-series: the 133-case golden suite runs in 0.6 s (one process per
+case); an 830-line program and a 1,700-line twelve-module package analyse in 0.1 s each;
+a 1.2k-line self-referential module hits the 2 s soft deadline and finishes in 2.5 s with
+reduced precision. 137 scripts from local projects analysed in 0.8 s total without
+failures. Comparisons and arithmetic on known numbers, positions through comprehensions,
+sorting and generators, and string formatting are evaluated, so small programs usually get
+exact rows.
 
 ## Known limitations
 

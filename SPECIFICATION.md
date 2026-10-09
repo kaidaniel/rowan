@@ -506,9 +506,9 @@ LSP (hover: row and requirements; diagnostics), CI mode (schema drift between co
 ---
 
 ## 16. Known limitations
-- Keys from string computation outside the `Map` vocabulary (`f"col_{i}"`) → pattern (v2) or `Data`.
+- Keys from string computation outside the `Map` vocabulary → `Data`, unless the parts are known literals (the engine evaluates `%` / f-string formatting, `split`, `partition`, `join` on known values).
 - `getattr` / `setattr` with computed names, `exec`, `__getattr__` / `__getitem__` magic on unmodelled classes, metaclasses → unknown.
-- One element slot per container: a list of heterogeneous dicts joins their rows (may-only).
+- One element slot per container when positions are unknown: a list of heterogeneous dicts joins their rows (may-only). The engine keeps positions for literal containers, straight-line appends, decided comprehensions and known-key sorts.
 - Module-global state mutated from many places: flow-insensitive join → may-only.
 - Depth-dependent recursion: no must-information (case 10).
 - Unknown decorators and framework-driven dispatch: unknown in the sound reading; mitigated by the entry-point rule (§6.4) and models.
