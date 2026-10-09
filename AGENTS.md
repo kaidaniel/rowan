@@ -30,20 +30,18 @@ cd rowan && cargo build --release && cargo test --release --lib && cd ..
 rowan/target/release/rowan FILE.py [--json|--golden|--facts] [--no-rows --no-summaries --no-entry --no-imports] [--value-depth N]
                                    [--search-path DIR]… [--follow PKG]… [--site-packages DIR]…
 rowan/target/release/rowan serve                    # JSON lines over stdio (README has the protocol)
-uv run --no-project python tests/run_golden.py      # 313/313 in ~1.1 s; paths select cases; -v shows reports
+uv run --no-project python tests/run_golden.py      # 366/366 in ~1.2 s; paths select cases; -v shows reports
 uv run --no-project python tests/run_snapshots.py   # SAME on 4 snapshots (fixed caps, no deadline); --update after review
 cd vscode-rowan && node test.js && npm run package  # hover rendering check; rebuilds rowan-0.1.0.vsix
 ```
 
-Env: `ROWAN_DEBUG=1` (decisions: which event tabulates a call, summary used, budget hits,
-cache hits, effort line), `ROWAN_DEBUG=2` (plus every event, raise, guarded access, try
-decision, unreachable statement), `ROWAN_NO=…` (switch one refinement off:
-`recency,scc,site,narrowed,positional` options and the bisecting switches
-`paramnarrow,partialclear,usermodel,dispatch1,inph,isinst,ddfactory,ddnarrow,boundtmpl,bindsub,ifexp,dcfield,split,builtincls,clonectx,sigsum`;
-for the r–w rounds `globalrd,raisestate,chaincmp,counterread,range,extinst,whileunroll,matchpat,compcell,dunderdict,numkey,finally,yieldfrom,filteritems,zipn,cmhook,truthdunder,exhaust,getattrdunder,listcat,listinplace,iadd,excvalue,ntmethods,useriter,enummembers,initsubclass,clsattrpath,c3,descriptors,setattrdunder,dictsub,dunmissing,typeddictcall,keysetops,memo,nextend,kwreq,fmtkw,pctmap`),
+Env: `ROWAN_DEBUG=1` (which event tabulates a call, summary used, budget / cache hits,
+effort), `ROWAN_DEBUG=2` (plus every event, raise, guarded access, try decision, unreachable
+statement), `ROWAN_NO=a,b` (switch refinements off; the names are the
+`disabled("…")` calls in the source: `rg 'disabled\("' rowan/src`),
 `ROWAN_LIMITS=ms=2000,tab=256,call=256,clones=256,chain=2,path=3` (soft deadline, then hard
-caps), `ROWAN_FOLLOW=pkg,…`, `ROWAN_SUMMARIES=0` (old per-call-site engine, comparison only),
-`ROWAN_TODO=check` (harness checks `#@todo` expectations; none exist today).
+caps), `ROWAN_FOLLOW=pkg,…`, `ROWAN_SUMMARIES=0` (old per-call-site engine, comparison
+only), `ROWAN_TODO=check` (the harness checks `#@todo` expectations too).
 
 ## Layout (Rust engine `rowan/`, ~20k lines)
 
@@ -61,7 +59,7 @@ caps), `ROWAN_FOLLOW=pkg,…`, `ROWAN_SUMMARIES=0` (old per-call-site engine, co
 | `report.rs` | dedupe, schema table, text / JSON lines / `--golden` / `--facts` (`text` = rendered value). |
 | `main.rs` | CLI, `serve_loop`, `run_with_deps`, site-packages discovery; analysis on a 1 GiB-stack thread. |
 | `rowan/py/` | PyO3 binding; the wheel does not load on this machine (see problems). |
-| `tests/run_golden.py`, `tests/cases/` | 313 golden cases. Directives: `#@ tier key [; …]` (verdict on that line's access), `#@row NAME: present={..} definite={..} closed|open` (row of NAME on that line), `#@schema src@L<n>: always={..}`, `#@todo …` (reported, not checked), `#@argv …` (per-case flags, relative paths against the case dir). A package case is a directory whose entry shares its prefix (`k94_pkg/k94_modules.py`); other files there are modules. |
+| `tests/run_golden.py`, `tests/cases/` | 366 golden cases. Directives: `#@ tier key [; …]` (verdict on that line's access; tier `sound` = anything but `missing`), `#@row NAME: present={..} definite={..} closed|open` (row of NAME on that line), `#@schema src@L<n>: always={..} sometimes={..} only={..}`, row floors `possible={..}` / `definite_within={..}`, `#@todo …` (reported, not checked), `#@argv …` (per-case flags, relative paths against the case dir). A package case is a directory whose entry shares its prefix (`k94_pkg/k94_modules.py`); other files there are modules. |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | `--json` snapshots on the example and three old-prototype modules (inputs only); the regression guard for internals. |
 | `vscode-rowan/` | extension: talks to `rowan serve` (falls back to the CLI), hover = facts for (line, name), verdicts as diagnostics. |
 
@@ -70,7 +68,9 @@ objects passed around, `i73`–`i92` patterns, `j93` an 830-line system, `k94_pk
 modules, `l95_pkg` a real package, `m96_pkg` a 1,700-line twelve-module warehouse (155
 checks), `n97_pkg` site-packages, `o98`–`o103`, `p104`–`p105`, `q106`–`q135` and six rounds
 of 30 more (`r136`–`r165`, `s166`–`s195`, `t196`–`t225`, `u226`–`u255`, `v256`–`v285`,
-`w286`–`w315`, the last on input schemas) one-hypothesis cases. Every `h`+ case was written as a value specification *before* running the engine;
+`w286`–`w315`, the last on input schemas) one-hypothesis cases, and `x316`–`x368` on known
+weaknesses: each has the precise answer (a `#@todo` where out of reach) and a checked
+soundness floor. Every `h`+ case was written as a value specification *before* running the engine;
 expectations that turned out wrong carry a comment saying why. Convention: a comparison or
 arithmetic on known numbers / strings is decided; anything involving an unknown value keeps
 both paths and is written as `?`; `json.loads` results are open by design.
@@ -112,7 +112,12 @@ both paths and is written as `?`; `json.loads` results are open by design.
   methods, `reduce`, `filter`; `while` iterations whose test is decided at the head are
   unrolled (constant tests like `while True` are not); `match` decides literal, singleton,
   or-, capture and mapping patterns; `k in d` on closed records can make a branch dead.
-  `__bool__`/`__len__` decide truth at control flow (`truth_of`). A summary reads a module
+  `__bool__`/`__len__` decide truth at control flow (`truth_of`). Branch facts
+  (`State.facts`, `CondFact`): the join of an `if` on a pure test (names, literals,
+  comparisons, `in`, `is`, `not`), of a try whose two exits set a flag differently, and of a
+  `for` over a name / `range(name)` records each side's rows; a later identical test restores
+  them while the test's names, the objects it reads (`guards`) and the rows are unchanged
+  (rebinding, unknown calls and deletes drop facts; tests on lists / sets give none). A summary reads a module
   name that is rebound anywhere (`Scopes::rebound`) as a deferred load per call site.
 * **Classes.** Dataclass `__init__` (also for subclasses, `super().__init__`,
   `Base.__init__(self,…)`, `__post_init__`), properties with setters, classmethods bound to
@@ -147,17 +152,16 @@ both paths and is written as `?`; `json.loads` results are open by design.
   `MAX_ACTIVE` = 4, `MAX_SUMMARY_ROUNDS` = 3, `UNROLL_MAX` = 16, `PATH_DEPTH` = 3.
 * **Server.** `rowan serve` caches each analysed file's `--facts` result with the content
   hashes of every module it loaded and reuses it while none changed; parsed trees are
-  cached per (path, hash). Summaries of unchanged modules are *not* reused across runs (they
-  hold process-local ids); that is the next refinement if a project shows multi-second
-  entries. Measured on `m96_pkg`: 160 ms first, 8 ms unchanged, 125 ms after an edit.
+  cached per (path, hash). Summaries are *not* reused across runs (process-local ids).
+  Measured on `m96_pkg`: 160 ms first, 8 ms unchanged, 125 ms after an edit.
 
 ## Measured (release, Apple M-series)
 
 | input | time | notes |
 | --- | --- | --- |
-| golden suite (313 cases) | 1.1 s | one process per case |
+| golden suite (366 cases) | 1.2 s | one process per case |
 | `j93_order_system.py` (830 lines) / `m96_pkg` (1,716 lines) | 0.09 s / 0.10 s | all checks pass |
-| `tests/fixtures/proto_summary.py` (1.2k lines, self-referential) | 2.5 s (hits the deadline) | 0 ✗, 28 ⚠ |
+| `tests/fixtures/proto_summary.py` (1.2k lines, self-referential) | 2.6 s (hits the deadline) | 0 ✗, 28 ⚠ |
 | old prototype `interp.py` (3.4k lines) | ~70 s before the deadline existed | 961 ✗, noisy (see problems) |
 
 ## Known problems and limits
@@ -168,7 +172,8 @@ both paths and is written as `?`; `json.loads` results are open by design.
   closure's cell seen only via the factory's summary, dispatch over `self.objects` tables.
   Precision on real repositories (spec §15.4 runtime oracle) was never measured; only
   robustness (137 local scripts, no failures).
-* A store through a name holding several objects is weak on each (golden `h72`, `maybe`).
+* A store through a name holding several objects is weak on each (golden `h72`, `maybe`;
+  `x346`/`x347` keep the precise answer as `#@todo`).
 * An unknown call whose arguments hold records may alias them; its attribute row is open.
 * Mutual recursion widens after 3 rounds; `while` loops with unknown conditions join;
   comparisons on unknown values keep both branches; `match` class / sequence patterns stay
@@ -191,6 +196,5 @@ example, server, site-packages, more examples) is complete; each step was one co
 items, in the order they seem worth doing: (1) summary reuse across runs in the server;
 (2) the weak store through several objects (path-sensitive ownership or a narrowed row on
 the name); (3) precision on self-referential programs and a runtime oracle on real repos;
-(4) more one-hypothesis cases — writing expectations *before* running the engine found 75
-engine bugs in the six rounds r–w (21, 13, 22, 12, 2, 5): library and protocol models
-dominate; the core flow / aliasing round (v) found two. Keep this file under 200 lines.
+(4) more cases written before running the engine (rounds r–w found 75 bugs, mostly in
+models; x found 5 wrong answers). Keep this file under 200 lines.

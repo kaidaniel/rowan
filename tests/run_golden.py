@@ -8,7 +8,12 @@ Expectations are comments inside the case files:
     #@schema read_csv@L1: always={qty,price} sometimes={email}
 
 Tiers: ok|proven, likely, possibly, missing, likely-missing, input, datakey, none (no verdict for
-that key at this line), any (some verdict for the key).  Keys are bare words or Python literals.
+that key at this line), any (some verdict for the key), sound (no `missing` verdict for the
+key: the key may really be there, so only that would be wrong; `likely-missing`, "missing
+unless unknown code added it", is a hedged and true statement).
+Row checks beyond present/definite/closed/open: `possible={..}` (each key is present, or the
+row is open) and `definite_within={..}` (every definite key is listed): soundness floors for
+cases whose precise answer is a `#@todo`.  Keys are bare words or Python literals.
 A verdict matches a line if it was recorded at that line or while a call made from that line was
 active.  A `#@` directive must be the last thing on its line (the key runs to its end).
 
@@ -32,7 +37,7 @@ TODO_COUNT = [0]  # `#@todo` directives seen: expectations the engine does not m
 
 TIER_ALIASES = {"ok": "proven", "proven": "proven", "likely": "likely", "possibly": "possibly",
                 "missing": "missing", "likely-missing": "likely-missing", "input": "input",
-                "datakey": "datakey", "none": "none", "any": "any", "map": "none"}
+                "datakey": "datakey", "none": "none", "any": "any", "map": "none", "sound": "sound"}
 
 
 def key_str(k: Any) -> str:
@@ -122,6 +127,11 @@ def check_results(verdict_exp, row_exp_checks, schema_exp, vs, sch) -> List[str]
                 if matches:
                     failures.append(f"L{ln}: expected no verdict for {key!r}, got " + ", ".join(v["tier"] for v in matches))
                 continue
+            if tier == "sound":
+                wrong = [v for v in matches if v["tier"] == "missing"]
+                if wrong:
+                    failures.append(f"L{ln}: {key!r} may be present, but rowan says " + ", ".join(sorted({v['tier'] for v in wrong})))
+                continue
             if tier == "any":
                 if not matches:
                     failures.append(f"L{ln}: expected some verdict for {key!r}, got none")
@@ -176,6 +186,14 @@ def row_problems(row: Dict[str, Any], spec: Dict[str, Any]) -> str:
         problems.append(f"definite={sorted(definite)} want {sorted(key_str(k) for k in spec['definite'])}")
     if "absent" in spec and not {key_str(k) for k in spec["absent"]} <= absent:
         problems.append(f"absent={sorted(absent)} want ⊇ {sorted(key_str(k) for k in spec['absent'])}")
+    if "possible" in spec and row["closed"]:
+        lost = {key_str(k) for k in spec["possible"]} - present
+        if lost:
+            problems.append(f"possible keys {sorted(lost)} not in present={sorted(present)} of a closed row")
+    if "definite_within" in spec:
+        extra = definite - {key_str(k) for k in spec["definite_within"]}
+        if extra:
+            problems.append(f"definite={sorted(definite)} claims {sorted(extra)}, not definite in the program")
     if spec.get("closed") and not row["closed"]:
         problems.append(f"expected closed, got {row.get('details', row.get('text', row))}")
     if spec.get("open") and row["closed"]:

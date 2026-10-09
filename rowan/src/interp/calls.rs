@@ -117,17 +117,29 @@ impl Analyzer {
                 let lit = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty());
                 let pos: Option<Vec<KeyId>> = args.iter().map(lit).collect();
                 let kws: Option<Vec<(StrId, KeyId)>> = kwargs.iter().map(|(k, v)| lit(v).map(|x| (*k, x))).collect();
-                let key = pos.zip(kws).map(|(p, k)| (oid, p, k));
-                if let Some(k) = &key {
-                    if let Some(v) = self.memo_results.get(k) {
-                        return v.clone();
+                // the cache is a hidden dict in the (flow-sensitive) state: on paths where the
+                // first call happened the result is reused, elsewhere the call runs
+                let key = pos.zip(kws).map(|(p, k)| {
+                    let mut parts = p;
+                    for (n, v) in k {
+                        parts.push(intern::key_tuple(vec![key_str_lit(&intern::str_get(n)), v]));
                     }
+                    intern::key_tuple(parts)
+                });
+                let Some(mk) = key else {
+                    return self.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, call_ast, false);
+                };
+                let memo = self.alloc_raw(Kind::Dict, &format!("memo:{}", oid), "", true, "lru_cache", Payload::None);
+                let row = state.row(memo, Ns::Item);
+                if row.definite.contains(mk) {
+                    return state.slot(memo, Ns::Item, mk);
                 }
                 let r = self.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, call_ast, false);
-                if let Some(k) = key {
-                    self.memo_results.insert(k, r.clone());
-                }
-                r
+                let out = if row.present.contains(mk) { r.join(&state.slot(memo, Ns::Item, mk)) } else { r };
+                let row = state.row(memo, Ns::Item).store(mk, true);
+                state.set_row(memo, Ns::Item, row);
+                state.set_slot(memo, Ns::Item, mk, out.clone(), true);
+                out
             }
             Kind::Function => {
                 let fi = self.func_info(oid);
@@ -229,6 +241,14 @@ impl Analyzer {
         }
         if let Some(m) = self.may_raise.last_mut() {
             *m = true;
+        }
+        // unknown code may change what an earlier test read: facts about it no longer hold
+        if !state.facts.is_empty() {
+            let mut objs: Vec<u32> = recv.map(|r| r.pts.to_vec()).unwrap_or_default();
+            for v in args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()) {
+                objs.extend(v.pts.iter());
+            }
+            self.kill_facts_on(&objs, state);
         }
         let name = qual.rsplit('.').next().unwrap_or(qual);
         if NOEFFECT_METHOD_NAMES.contains(&name) && recv.map(|r| self.record_objects(r).is_empty()).unwrap_or(true) {
@@ -962,12 +982,29 @@ impl Analyzer {
         ret
     }
 
+    /// Drop the facts whose test read one of `objs`.
+    pub fn kill_facts_on(&mut self, objs: &[u32], state: &mut State) {
+        if objs.is_empty() || state.facts.is_empty() {
+            return;
+        }
+        let kept: Vec<_> = state.facts.iter().filter(|f| !f.deps.iter().any(|(_, v)| v.pts.iter().any(|o| objs.contains(&o)))).cloned().collect();
+        if kept.len() != state.facts.len() {
+            state.facts = std::sync::Arc::new(kept);
+        }
+    }
+
     /// An exception raised here is caught by the innermost enclosing try: its handler starts
     /// from this state (with the try frame's locals when the raise is inside a callee).
     pub fn record_raise_state(&mut self, state: &mut State) -> bool {
         let Some((fl, el, pre)) = self.try_marks.last() else { return false };
         let mut here = state.copy();
-        if self.frames.len() > *fl {
+        if self.frames.len() < *fl {
+            // the try is in a `@contextmanager` generator whose with body is running
+            if let Some((_, env)) = self.cm_frames.iter().rev().find(|(d, _)| *d == *fl) {
+                here.env = env.clone();
+                here.narrowed = Default::default();
+            }
+        } else if self.frames.len() > *fl {
             here.env = self.env_stack.get(*el).cloned().unwrap_or_else(|| pre.env.clone());
             here.narrowed = pre.narrowed.clone();
             here.ret = pre.ret.clone();

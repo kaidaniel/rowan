@@ -248,6 +248,9 @@ pub struct ClassInfo {
     pub named_tuple: bool,
     /// subclasses `dict` directly
     pub dict_base: bool,
+    /// subclasses pydantic's `BaseModel`: annotated fields like a dataclass (other members
+    /// come from pydantic: the base stays open)
+    pub pydantic: bool,
     /// attr → classes assigned to self.attr (lazy)
     pub field_classes: RefCell<Option<FxHashMap<String, Vec<ObjId>>>>,
     pub any_fields: RefCell<Option<FxHashSet<String>>>,
@@ -615,6 +618,9 @@ pub struct Analyzer {
     pub key_alias: Option<(KeyId, KeyId)>,
     /// a `with` over a `@contextmanager` call: its body runs at the generator's yield
     pub cm_hook: Option<CmHook>,
+    /// while a `@contextmanager` body runs: (generator frame depth, its locals), so a try in
+    /// the generator around the yield sees its own names when the body raises
+    pub cm_frames: Vec<(usize, IndexMap<StrId, Value>)>,
     /// the next user call is analysed concretely (no summary)
     pub force_tab_once: bool,
     /// `vars(obj)` dicts: stores into them are stores of obj's attributes
@@ -623,8 +629,6 @@ pub struct Analyzer {
     pub enum_members: FxHashMap<ObjId, Vec<(String, ObjId)>>,
     /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
     pub bypass_setattr: bool,
-    /// results of memoised functions per (function, literal arguments)
-    pub memo_results: FxHashMap<(ObjId, Vec<KeyId>, Vec<(StrId, KeyId)>), Value>,
     pub cond_depth: i32,
     /// like `cond_depth` without loops: a requirement recorded under an `if`/`try`/boolean
     /// operator is "sometimes"; one inside a loop body is per element (always)
@@ -761,11 +765,11 @@ impl Analyzer {
             comp_cells: Vec::new(),
             key_alias: None,
             cm_hook: None,
+            cm_frames: Vec::new(),
             force_tab_once: false,
             attr_mirrors: FxHashMap::default(),
             enum_members: FxHashMap::default(),
             bypass_setattr: false,
-            memo_results: FxHashMap::default(),
             cond_depth: 0,
             branch_depth: 0,
             call_chain: Vec::new(),

@@ -55,6 +55,7 @@ impl Registry {
         r(&["builtins.hasattr"], m_hasattr);
         r(&["builtins.vars", "attr.asdict", "attrs.asdict"], m_vars);
         r(&["dataclasses.asdict"], m_asdict);
+        r(&["pydantic.model_dump"], m_model_dump);
         r(&["dataclasses.fields"], m_dc_fields);
         r(&["builtins.map", "builtins.filter"], m_map);
         r(&["builtins.str"], m_str);
@@ -121,6 +122,8 @@ impl Registry {
         r(&["asyncio.run", "asyncio.create_task", "asyncio.ensure_future", "asyncio.wait_for", "asyncio.shield"], m_first_arg);
         r(&["asyncio.gather"], m_gather);
         r(&["re.match", "re.search", "re.fullmatch"], m_re_match);
+        r(&["builtins.exec", "builtins.eval"], m_exec);
+        r(&["builtins.globals"], m_globals);
         r(&["types.SimpleNamespace", "argparse.Namespace"], m_simplenamespace);
         r(&["collections.namedtuple", "typing.NamedTuple"], m_namedtuple);
         r(&["dataclasses.field", "typing.cast", "typing.TypeVar", "typing.NewType"], m_passthrough);
@@ -751,6 +754,13 @@ fn m_asdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     m_vars(an, st, c)
 }
 
+/// `model.model_dump()` / `model.dict()`: like `asdict` on the model.
+fn m_model_dump(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let Some(recv) = c.recv.clone() else { return Value::data("model_dump") };
+    let call = Call { qual: "dataclasses.asdict".into(), recv: None, args: vec![recv], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: c.node, call_ast: None, site: c.site.clone(), line: c.line };
+    m_asdict(an, st, &call)
+}
+
 /// `dataclasses.fields(C)`: one field object per field, in order, with its `name`.
 fn m_dc_fields(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first() else { return Value::data("fields") };
@@ -892,7 +902,39 @@ fn m_reduce(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 /// `type(x)` with one argument: the class of an instance of a known class (else unknown).
-fn m_type(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
+fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // `type("Name", (), {...})`: a class whose attributes are the namespace's items
+    if c.args.len() == 3 && !crate::interp::disabled("type3") {
+        let name = c.args[0].kv.as_lit().filter(|_| c.args[0].pts.is_empty()).and_then(intern::key_as_str);
+        let no_bases = c.args[1].single().map(|o| an.obj(o).literal_len == Some(0)).unwrap_or(false);
+        let ns = c.args[2].single().filter(|o| an.kind(*o) == Kind::Dict);
+        if let (Some(name), true, Some(ns)) = (name.filter(|n| n.chars().all(|ch| ch.is_alphanumeric() || ch == '_')), no_bases, ns) {
+            let row = st.row(ns, Ns::Item);
+            if row.closed() && row.present == row.definite {
+                let modname = format!("<type {} {}>", name, c.site);
+                let moid = match an.modules.get(&modname) {
+                    Some(&m) => m,
+                    None => {
+                        let Ok((idx, tree)) = crate::frontend::parse(&modname, None, format!("class {}:\n    pass\n", name)) else { return Value::data("type") };
+                        let m = an.make_module_pub(&modname, None, idx, tree);
+                        an.run_module(m, st);
+                        m
+                    }
+                };
+                let cv = st.slot(moid, Ns::Attr, key_str_lit(&name));
+                if let Some(cls) = cv.single() {
+                    for k in row.present.iter() {
+                        if intern::key_as_str(k).is_some() {
+                            let v = st.slot(ns, Ns::Item, k);
+                            an.cls_slots.insert((cls, Ns::Attr, k), v);
+                        }
+                    }
+                }
+                return cv;
+            }
+        }
+        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+    }
     if c.args.len() == 1 {
         let a = &c.args[0];
         let classes: Option<Vec<u32>> = if a.pts.is_empty() { None } else { a.pts.iter().map(|o| if an.kind(o) == Kind::Instance { an.instance_class(o) } else { None }).collect() };
@@ -1903,6 +1945,38 @@ fn m_simplenamespace(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         an.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit(&intern::str_get(*k))), v, true, &c.node, st);
     }
     Value::obj(oid)
+}
+
+/// `exec(code)` / `eval(code)`: a literal code string is run here, in this frame; anything
+/// else may change every record this frame reaches (and gives an unknown value).
+/// `globals()`: the module's names as a dict (stores through it bind names).
+fn m_globals(an: &mut Analyzer, _st: &mut State, _c: &Call) -> Value {
+    let m = an.frame().module;
+    let vid = an.alloc_raw(Kind::View, &format!("view:attrs:{}", m), "", true, "globals()", Payload::View(ViewKind::Attrs, Value::obj(m)));
+    an.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(m));
+    Value::obj(vid)
+}
+
+fn m_exec(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let is_eval = c.qual.ends_with("eval");
+    let code = c.args.first().and_then(|a| a.kv.as_lit().filter(|_| a.pts.is_empty())).and_then(intern::key_as_str);
+    if let (Some(code), 1) = (code, c.args.len()) {
+        if is_eval {
+            if let Some(e) = crate::frontend::parse_expression(&code) {
+                return an.eval(e, st);
+            }
+        } else if let Ok((_, tree)) = crate::frontend::parse(&format!("<exec L{}>", c.line), None, code.to_string()) {
+            an.exec_block(&tree.body, st);
+            st.reachable = true;
+            return an.none_v.clone();
+        }
+    }
+    // unknown code: everything reachable from the frame's names (and the module's) may change
+    let mut reach: Vec<Value> = st.env.values().cloned().collect();
+    let module = an.frame().module;
+    reach.push(Value::obj(module));
+    reach.extend(c.args.iter().cloned());
+    an.unknown_call(&c.qual, None, &reach, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node)
 }
 
 fn m_re_match(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {

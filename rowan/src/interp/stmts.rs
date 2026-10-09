@@ -574,6 +574,12 @@ impl Analyzer {
             Some(false) => then_s.reachable = false,
             None => {}
         }
+        let cond = if decided.is_none() && !crate::interp::disabled("condfacts") { self.cond_key(test) } else { None };
+        if let Some((key, pos, _)) = &cond {
+            // an earlier join on the same test: each branch gets back the rows it had then
+            self.apply_cond_facts(*key, *pos, &mut then_s);
+            self.apply_cond_facts(*key, !*pos, &mut else_s);
+        }
         self.narrow(test, true, &mut then_s);
         self.narrow(test, false, &mut else_s);
         // a decided test leaves one branch: straight-line code, not a conditional (appends
@@ -593,8 +599,97 @@ impl Analyzer {
             self.branch_depth -= 1;
             self.cond_depth -= 1;
         }
-        let j = then_s.join(&mut else_s);
+        let mut j = then_s.join(&mut else_s);
+        if then_s.reachable && else_s.reachable && conditional && !crate::interp::disabled("condfacts") {
+            let mut new: Vec<std::sync::Arc<crate::state::CondFact>> = Vec::new();
+            let mut assigned: Vec<intern::StrId> = Vec::new();
+            for st in body.iter() {
+                collect_assigned(st, &mut assigned);
+            }
+            for c in rest.iter() {
+                for st in c.body.iter() {
+                    collect_assigned(st, &mut assigned);
+                }
+            }
+            if let Some((key, pos, names)) = cond {
+                // the test's names keep their values through the branches (narrowing aside):
+                // their joined values stand for them; a branch that assigns one gives no fact
+                let deps: Vec<(intern::StrId, Value)> = names.iter().map(|n| (*n, self.dep_value(&mut j, *n))).collect();
+                let mutable_seq = deps.iter().any(|(_, v)| v.pts.iter().any(|o| matches!(self.kind(o), Kind::List | Kind::Set)));
+                if !names.iter().any(|n| assigned.contains(n)) && !mutable_seq {
+                    new.extend(cond_facts_for(key, pos, deps, &then_s, &else_s, &j));
+                }
+            }
+            let vals: Vec<(intern::StrId, Option<Value>, Option<Value>, Option<Value>)> = assigned.iter().map(|n| (*n, self.name_value(&then_s, *n), self.name_value(&else_s, *n), self.name_value(&j, *n))).collect();
+            new.extend(name_facts(&vals, &then_s, &else_s, &j, self.frame().func.unwrap_or(0)));
+            add_facts(&mut j, new);
+        }
         state.replace_with(j);
+    }
+
+    /// The canonical text of a pure test (names, literals, comparisons, `in`, `is`, `not`,
+    /// `and` / `or`), whether it is negated, and the names it reads.
+    fn cond_key(&self, test: &'static ast::Expr) -> Option<(intern::StrId, bool, Vec<intern::StrId>)> {
+        fn pure(e: &ast::Expr) -> bool {
+            match e {
+                ast::Expr::Name(_) | ast::Expr::StringLiteral(_) | ast::Expr::NumberLiteral(_) | ast::Expr::BooleanLiteral(_) | ast::Expr::NoneLiteral(_) => true,
+                ast::Expr::Compare(c) => pure(&c.left) && c.comparators.iter().all(pure),
+                ast::Expr::UnaryOp(u) => u.op == ast::UnaryOp::Not && pure(&u.operand),
+                ast::Expr::BoolOp(b) => b.values.iter().all(pure),
+                _ => false,
+            }
+        }
+        let (inner, pos) = match test {
+            ast::Expr::UnaryOp(u) if u.op == ast::UnaryOp::Not => (&*u.operand, false),
+            other => (other, true),
+        };
+        if !pure(inner) {
+            return None;
+        }
+        let text: String = frontend::text(inner).split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            return None;
+        }
+        let names: Vec<intern::StrId> = super::names_in(inner).iter().map(|n| s(n)).collect();
+        Some((s(&format!("{}@{}", text, self.frame().func.unwrap_or(0))), pos, names))
+    }
+
+    /// The value a plain name has in `st` (a local, else a module-level name), if bound.
+    fn name_value(&self, st: &State, n: intern::StrId) -> Option<Value> {
+        if let Some(v) = st.env.get(&n) {
+            return Some(v.clone());
+        }
+        st.slot_opt(self.frame().module, Ns::Attr, intern::key(intern::Key::Str(intern::str_get(n))))
+    }
+
+    /// A name's value for a fact's dependencies: its binding, else the (fixed) unknown object
+    /// a free name stands for.
+    fn dep_value(&mut self, st: &mut State, n: intern::StrId) -> Value {
+        match self.name_value(st, n) {
+            Some(v) => v,
+            None => self.load_name(n, &Node::none(), st),
+        }
+    }
+
+    /// Rows a branch of an earlier join on `key` had, put back where unchanged since.
+    fn apply_cond_facts(&mut self, key: intern::StrId, truth: bool, st: &mut State) {
+        if !st.reachable {
+            return;
+        }
+        let facts = st.facts.clone();
+        for f in facts.iter().filter(|f| f.cond == key && f.truth == truth) {
+            if !f.deps.iter().all(|(n, v)| self.dep_value(st, *n) == *v) {
+                continue;
+            }
+            if !f.guards.iter().all(|((o, ns), r)| st.row(*o, *ns) == *r) {
+                continue;
+            }
+            for (k, branch, joined) in &f.rows {
+                if st.row(k.0, k.1) == *joined {
+                    st.set_row(k.0, k.1, branch.clone());
+                }
+            }
+        }
     }
 
     fn exec_orelse(&mut self, rest: &'static [ast::ElifElseClause], state: &mut State) {
@@ -864,6 +959,33 @@ impl Analyzer {
         if let Some(mut e) = exit_acc {
             exit_s = exit_s.join(&mut e);
         }
+        // the loop ran at least once exactly when its iterable was non-empty: a later test of
+        // that (`if xs:`, `if n > 0:` for `range(n)`) gets the rows the iterations left
+        if f.orelse.is_empty() && !has_jump && back.reachable && pre.reachable && exit_s.reachable && !crate::interp::disabled("loopfacts") {
+            let mut assigned: Vec<intern::StrId> = Vec::new();
+            f.body.iter().for_each(|x| collect_assigned(x, &mut assigned));
+            let func = self.frame().func.unwrap_or(0);
+            let tests: Vec<(String, intern::StrId)> = match &*f.iter {
+                ast::Expr::Name(n) => vec![(n.id.to_string(), s(n.id.as_str()))],
+                ast::Expr::Call(c) if c.arguments.args.len() == 1 && matches!(&*c.func, ast::Expr::Name(r) if r.id.as_str() == "range") => match &c.arguments.args[0] {
+                    ast::Expr::Name(n) => vec![(format!("{} > 0", n.id), s(n.id.as_str())), (format!("{} >= 1", n.id), s(n.id.as_str()))],
+                    _ => vec![],
+                },
+                _ => vec![],
+            };
+            let mut new = Vec::new();
+            for (text, name) in tests {
+                if assigned.contains(&name) {
+                    continue;
+                }
+                let deps = vec![(name, self.dep_value(&mut exit_s, name))];
+                if deps[0].1.pts.iter().any(|o| matches!(self.kind(o), Kind::List | Kind::Set)) {
+                    continue;
+                }
+                new.extend(cond_facts_for(s(&format!("{}@{}", text, func)), true, deps, &back, &pre, &exit_s));
+            }
+            add_facts(&mut exit_s, new);
+        }
         state.replace_with(exit_s);
     }
 
@@ -939,7 +1061,7 @@ impl Analyzer {
         let body_may_raise = generic || raised_at.is_some();
         // where an exception leaves the body (for a finally without handlers)
         let mut finally_escape: Option<State> = None;
-        if has_finally && t.handlers.is_empty() && body_may_raise {
+        if has_finally && t.handlers.is_empty() && body_may_raise && (contains_return(&t.finalbody) || contains_jump(&t.finalbody)) {
             let mut e = if generic { pre.copy() } else { State::bottom() };
             if let Some(r) = raised_at.as_mut() {
                 let mut r2 = r.copy();
@@ -1006,9 +1128,26 @@ impl Analyzer {
         }
         self.branch_depth -= 1;
         self.cond_depth -= 1;
+        // two ways out of the try (the body and one handler) that set a flag differently: a
+        // later test of the flag tells which ran
+        let two: Vec<usize> = (0..results.len()).filter(|i| results[*i].reachable).collect();
+        let pair = if two.len() == 2 && !crate::interp::disabled("condfacts") { Some((results[two[0]].copy(), results[two[1]].copy())) } else { None };
         let mut out = results.remove(0);
         for mut r in results {
             out = out.join(&mut r);
+        }
+        if let Some((a, b)) = pair {
+            let mut assigned: Vec<intern::StrId> = Vec::new();
+            for st in t.body.iter().chain(t.orelse.iter()) {
+                collect_assigned(st, &mut assigned);
+            }
+            for h in &t.handlers {
+                let ast::ExceptHandler::ExceptHandler(h) = h;
+                h.body.iter().for_each(|x| collect_assigned(x, &mut assigned));
+            }
+            let vals: Vec<(intern::StrId, Option<Value>, Option<Value>, Option<Value>)> = assigned.iter().map(|n| (*n, self.name_value(&a, *n), self.name_value(&b, *n), self.name_value(&out, *n))).collect();
+            let new = name_facts(&vals, &a, &b, &out, self.frame().func.unwrap_or(0));
+            add_facts(&mut out, new);
         }
         if has_finally {
             let inner_exits = out.exits.take();
@@ -1039,7 +1178,8 @@ impl Analyzer {
             // an exception leaving the try (no handler here) that a `return` in the finally
             // swallows
             let n_exit_ways = ways.len();
-            if t.handlers.is_empty() && contains_return(&t.finalbody) && body_may_raise {
+            // (a `break` / `continue` in the finally swallows it as well)
+            if t.handlers.is_empty() && (contains_return(&t.finalbody) || contains_jump(&t.finalbody)) && body_may_raise {
                 if let Some(esc) = finally_escape.take() {
                     ways.push(esc);
                 }
@@ -1090,6 +1230,7 @@ impl Analyzer {
         let mut named_tuple = false;
         let mut is_enum = false;
         let mut dict_base = false;
+        let mut pydantic = false;
         if let Some(args) = &c.arguments {
             for b in args.args.iter() {
                 let bv = self.eval(b, state);
@@ -1103,6 +1244,9 @@ impl Analyzer {
                             }
                             if q == "builtins.dict" {
                                 dict_base = true;
+                            }
+                            if q.starts_with("pydantic") && q.ends_with("BaseModel") {
+                                pydantic = true;
                             }
                             if q.ends_with("TypedDict") {
                                 typed_dict = true;
@@ -1120,6 +1264,16 @@ impl Analyzer {
                     open_base = true;
                 }
             }
+            // a metaclass other than ABCMeta may add anything to the class and its instances
+            for kw in args.keywords.iter() {
+                if kw.arg.as_ref().map(|a| a.as_str() == "metaclass").unwrap_or(false) {
+                    let mv = self.eval(&kw.value, state);
+                    let abc = mv.pts.iter().all(|o| self.kind(o) == Kind::External && self.external_qual(o).ends_with("ABCMeta")) && !mv.pts.is_empty();
+                    if !abc {
+                        open_base = true;
+                    }
+                }
+            }
         }
         let info = ClassInfo {
             name: c.name.id.to_string(),
@@ -1131,6 +1285,7 @@ impl Analyzer {
             typed_dict,
             named_tuple,
             dict_base,
+            pydantic,
             field_classes: std::cell::RefCell::new(None),
             any_fields: std::cell::RefCell::new(None),
         };
@@ -1146,7 +1301,7 @@ impl Analyzer {
                 }
             }
         }
-        if is_dataclass || typed_dict || named_tuple {
+        if is_dataclass || typed_dict || named_tuple || pydantic {
             let mut fields: Vec<(String, Option<&'static ast::Expr>)> = Vec::new();
             for st in &c.body {
                 if let ast::Stmt::AnnAssign(a) = st {
@@ -1375,4 +1530,114 @@ fn contains_return(body: &[ast::Stmt]) -> bool {
         ast::Stmt::Match(m) => m.cases.iter().any(|c| contains_return(&c.body)),
         _ => false,
     })
+}
+
+/// Facts of a join on test `key` (positive `pos`): the then-branch rows when it holds, the
+/// else-branch rows when not, for every row the branches leave different.
+fn cond_facts_for(key: intern::StrId, pos: bool, deps: Vec<(intern::StrId, Value)>, then_s: &State, else_s: &State, j: &State) -> Vec<std::sync::Arc<crate::state::CondFact>> {
+    let mut guards: Vec<((u32, Ns), crate::domain::Row)> = Vec::new();
+    for (_, v) in &deps {
+        for o in v.pts.iter() {
+            for ns in [Ns::Item, Ns::Attr] {
+                guards.push(((o, ns), j.row(o, ns)));
+            }
+        }
+    }
+    let mut rt = Vec::new();
+    let mut re = Vec::new();
+    let mut keys = then_s.rows.diff_keys(&else_s.rows);
+    keys.extend(else_s.rows.diff_keys(&then_s.rows));
+    keys.sort_by_key(|(o, n)| (*o, *n));
+    keys.dedup();
+    for k in keys.into_iter().take(64) {
+        let (tr, er, jr) = (then_s.row(k.0, k.1), else_s.row(k.0, k.1), j.row(k.0, k.1));
+        if tr == er {
+            continue;
+        }
+        rt.push((k, tr, jr.clone()));
+        re.push((k, er, jr));
+    }
+    if rt.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        std::sync::Arc::new(crate::state::CondFact { cond: key, truth: pos, deps: deps.clone(), rows: rt, guards: guards.clone() }),
+        std::sync::Arc::new(crate::state::CondFact { cond: key, truth: !pos, deps, rows: re, guards }),
+    ]
+}
+
+/// Names bound to literals of different truth in the two branches (`has = True` / `False`):
+/// testing the name later tells which branch ran.
+fn name_facts(vals: &[(intern::StrId, Option<Value>, Option<Value>, Option<Value>)], a: &State, b: &State, j: &State, func: u32) -> Vec<std::sync::Arc<crate::state::CondFact>> {
+    let truth_of = |v: &Value| -> Option<bool> {
+        if !v.pts.is_empty() {
+            return None;
+        }
+        let k = v.kv.as_lit()?;
+        intern::with_key(k, |kk| match kk {
+            intern::Key::Bool(x) => Some(*x),
+            intern::Key::None => Some(false),
+            intern::Key::Int(i) => Some(*i != 0),
+            intern::Key::Str(s) => Some(!s.is_empty()),
+            _ => None,
+        })
+    };
+    let mut out = Vec::new();
+    for (name, va, vb, jv) in vals.iter() {
+        let (Some(va), Some(vb), Some(jv)) = (va, vb, jv) else { continue };
+        let (Some(ta), Some(tb)) = (truth_of(va), truth_of(vb)) else { continue };
+        if ta == tb {
+            continue;
+        }
+        // the key a later bare `if name:` test computes (`cond_key`)
+        let key = s(&format!("{}@{}", intern::str_get(*name), func));
+        let deps = vec![(*name, jv.clone())];
+        let mut facts = cond_facts_for(key, ta, deps, a, b, j);
+        out.append(&mut facts);
+    }
+    out
+}
+
+/// Add facts to a state (keeping the most recent few).
+fn add_facts(st: &mut State, new: Vec<std::sync::Arc<crate::state::CondFact>>) {
+    if new.is_empty() {
+        return;
+    }
+    let mut all: Vec<std::sync::Arc<crate::state::CondFact>> = st.facts.iter().cloned().collect();
+    all.extend(new);
+    let n = all.len();
+    if n > 32 {
+        all.drain(0..n - 32);
+    }
+    st.facts = std::sync::Arc::new(all);
+}
+
+/// Plain names a statement (and the blocks inside it) assigns.
+fn collect_assigned(st: &ast::Stmt, out: &mut Vec<intern::StrId>) {
+    let add = |t: &ast::Expr, out: &mut Vec<intern::StrId>| {
+        for n in super::names_in(t) {
+            let id = s(&n);
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+    };
+    match st {
+        ast::Stmt::Assign(a) => a.targets.iter().for_each(|t| add(t, out)),
+        ast::Stmt::AnnAssign(a) => add(&a.target, out),
+        ast::Stmt::AugAssign(a) => add(&a.target, out),
+        ast::Stmt::If(i) => {
+            i.body.iter().for_each(|x| collect_assigned(x, out));
+            i.elif_else_clauses.iter().for_each(|c| c.body.iter().for_each(|x| collect_assigned(x, out)));
+        }
+        ast::Stmt::Try(t) => {
+            t.body.iter().chain(t.orelse.iter()).chain(t.finalbody.iter()).for_each(|x| collect_assigned(x, out));
+            for h in &t.handlers {
+                let ast::ExceptHandler::ExceptHandler(h) = h;
+                h.body.iter().for_each(|x| collect_assigned(x, out));
+            }
+        }
+        ast::Stmt::With(w) => w.body.iter().for_each(|x| collect_assigned(x, out)),
+        _ => {}
+    }
 }

@@ -209,8 +209,11 @@ impl Analyzer {
                 continue;
             }
             if matches!(q.as_str(), "functools.lru_cache" | "functools.cache") {
-                if let Some(fi) = &fi {
+                if let (Some(fi), Some(f)) = (&fi, fobj) {
                     fi.is_memo.set(true);
+                    // the (empty) cache exists from the definition on, on every path
+                    let memo = self.alloc_raw(Kind::Dict, &format!("memo:{}", f), "", true, "lru_cache", Payload::None);
+                    state.set_row(memo, Ns::Item, crate::domain::Row::new());
                 }
                 continue;
             }
@@ -323,6 +326,11 @@ impl Analyzer {
     }
 
     pub fn store_name(&mut self, name: StrId, v: Value, state: &mut State) {
+        // a fact about a test reading this name no longer holds once it is rebound
+        if !state.facts.is_empty() && state.facts.iter().any(|f| f.deps.iter().any(|(n, _)| *n == name)) {
+            let kept: Vec<_> = state.facts.iter().filter(|f| !f.deps.iter().any(|(n, _)| *n == name)).cloned().collect();
+            state.facts = std::sync::Arc::new(kept);
+        }
         if !state.narrowed.is_empty() {
             let nm = str_get(name);
             let prefix = format!("{}.", nm);

@@ -603,6 +603,8 @@ impl Analyzer {
     }
 
     pub fn delete_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) {
+        let objs: Vec<u32> = obj.pts.iter().collect();
+        self.kill_facts_on(&objs, state);
         let targets = self.record_objects(obj);
         for &oid in &targets {
             let kind = self.kind(oid);
@@ -970,6 +972,14 @@ impl Analyzer {
 
     pub fn load_instance_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool, single_target: bool) -> Value {
         let nk = key_str_lit(name);
+        // pydantic's serialisers on a model: a dict of the fields
+        if matches!(name, "model_dump" | "dict") && !super::disabled("pydantic") {
+            if let Some(cls) = self.instance_class(oid) {
+                if self.class_lookup(cls, name).is_none() && self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|x| x.pydantic).unwrap_or(false)) {
+                    return self.method_value("pydantic.model_dump", &Value::obj(oid));
+                }
+            }
+        }
         // the methods every NamedTuple has
         if matches!(name, "_asdict" | "_replace" | "_fields") && !super::disabled("ntmethods") {
             if let Some(cls) = self.instance_class(oid) {
@@ -1352,6 +1362,10 @@ impl Analyzer {
             return self.method_value(&format!("dict.{}", name), &Value::obj(oid));
         }
         if is_scalar_method(name) {
+            // a mutating method of a list-like unknown: facts about tests on it are void
+            if matches!(name, "append" | "extend" | "insert" | "remove" | "clear" | "sort" | "reverse" | "pop") {
+                self.kill_facts_on(&[oid], state);
+            }
             let q = if STR_METHOD_NAMES.contains(&name) { format!("str.{}", name) } else { format!("unknown.{}", name) };
             return self.method_value(&q, &Value::data(&format!("L{}", node.line)));
         }

@@ -113,6 +113,23 @@ pub struct State {
     pub exits: Option<Arc<State>>,
     /// rows of untouched objects are entry rows (summary analysis)
     pub symbolic: bool,
+    /// what a test that was joined over said about rows (see `CondFact`)
+    pub facts: Arc<Vec<Arc<CondFact>>>,
+}
+
+/// At the join of a branch on a pure test: when `cond` (a canonical test text) is `truth`,
+/// rows were as in `rows` (the branch row, and the joined row it was folded into). A later
+/// test with the same text, while the names it reads still hold `deps`, restores the branch
+/// row of every object whose row is still the joined one (unchanged since).
+#[derive(Debug)]
+pub struct CondFact {
+    pub cond: StrId,
+    pub truth: bool,
+    pub deps: Vec<(StrId, Value)>,
+    pub rows: Vec<((ObjId, Ns), Row, Row)>,
+    /// rows of the objects the test reads, as at the join: the fact holds only while they are
+    /// unchanged (a test like `"x" in cfg` reads cfg's keys)
+    pub guards: Vec<((ObjId, Ns), Row)>,
 }
 
 impl Default for State {
@@ -134,6 +151,7 @@ impl State {
             reachable: true,
             exits: None,
             symbolic: false,
+            facts: Arc::new(Vec::new()),
         }
     }
 
@@ -157,6 +175,7 @@ impl State {
             reachable: self.reachable,
             exits: self.exits.clone(),
             symbolic: self.symbolic,
+            facts: self.facts.clone(),
         }
     }
 
@@ -172,6 +191,7 @@ impl State {
             reachable: self.reachable,
             exits: self.exits.clone(),
             symbolic: self.symbolic,
+            facts: self.facts.clone(),
         }
     }
 
@@ -199,6 +219,7 @@ impl State {
         self.reachable = o.reachable;
         self.exits = o.exits.clone();
         self.symbolic = o.symbolic;
+        self.facts = o.facts.clone();
     }
 
     pub fn replace_with(&mut self, mut o: State) {
@@ -230,6 +251,8 @@ impl State {
             s.exits = exits;
             return s;
         }
+        // facts both sides still hold
+        let facts: Vec<Arc<CondFact>> = self.facts.iter().filter(|f| o.facts.iter().any(|g| Arc::ptr_eq(f, g))).cloned().collect();
         let mut s = State::new();
         s.env = join_env(&self.env, &o.env);
         if !self.narrowed.is_empty() && !o.narrowed.is_empty() {
@@ -243,6 +266,7 @@ impl State {
         s.exits = exits;
         s.reachable = true;
         s.symbolic = self.symbolic || o.symbolic;
+        s.facts = Arc::new(facts);
         s
     }
 
