@@ -144,7 +144,7 @@ unless the text is a literal.
 * **Imports.** Local modules / packages (relative imports via `ModuleInfo::pkg`), roots = file
   dir, the dir above its outermost package, `--search-path`; `--follow` packages from
   site-packages unless a model covers them.
-* **Tensors** (`TORCH_PLAN.md` decisions log, `tests/torch/CONVENTIONS.md`). A tensor is a
+* **Tensors** (SPECIFICATION §2.3, `tests/torch/CONVENTIONS.md`). A tensor is a
   `Data` label `\x01T<shape>` (`\x01TB` bool, `…~<dim>` tensor-or-int for arithmetic on
   unknowns), a symbolic int `\x01D<dim>`, a number `\x01N`, an unknown-rank size `\x01S`;
   everything else sees unknown data. Unknowns used as tensors have the shape `[*x.shape]` of

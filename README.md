@@ -21,7 +21,7 @@ definite mismatch (`Linear(512 -> 10) given last dim 256`, an RNN given 4 dims) 
 an undecided one (`x.shape[-1] == self.n_embd`) is a *requirement* shown at the line and
 listed under `== tensor shapes ==`, and holds from there on. The hover names dims by the
 locals that hold them (`B, T, C = x.shape` → `Tensor[B, T, 3*self.n_embd]`). The design is in
-`SPECIFICATION.md` §2.3 and `TORCH_PLAN.md`; the 162 torch test programs (145 small, 17
+`SPECIFICATION.md` §2.3 and `tests/torch/CONVENTIONS.md`; the 162 torch test programs (145 small, 17
 well-known models from a from-scratch transformer to nanoGPT, ResNet, U-Net, ViT, BERT) are
 in `tests/torch/`, each checked against real PyTorch by `tests/torch_oracle.py`.
 
