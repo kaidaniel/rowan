@@ -510,6 +510,8 @@ pub fn ceildiv(a: DimId, b: DimId) -> DimId {
 pub struct TFacts {
     /// unknowns used as tensors on this path (`x.size(0)` ran: x is a tensor)
     pub tensors: std::collections::BTreeSet<Sym>,
+    /// unknowns used as sizes on this path (`torch.zeros(T, d)` ran: d is an int)
+    pub ints: std::collections::BTreeSet<Sym>,
     pub rank: BTreeMap<Sym, RankRel>,
     /// atom := dim (oriented: a literal wins, then a named int, then the older atom)
     pub subst: BTreeMap<AtomId, DimId>,
@@ -530,7 +532,8 @@ impl TFacts {
         }
         let subst = self.subst.iter().filter(|(a, d)| o.subst.get(a) == Some(d)).map(|(a, d)| (*a, *d)).collect();
         let tensors = self.tensors.intersection(&o.tensors).copied().collect();
-        TFacts { tensors, rank, subst }
+        let ints = self.ints.intersection(&o.ints).copied().collect();
+        TFacts { tensors, ints, rank, subst }
     }
     pub fn rank_of(&self, s: Sym) -> Option<u32> {
         match self.rank.get(&s) {

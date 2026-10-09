@@ -307,7 +307,7 @@ impl Analyzer {
         let oid = self.alloc(Kind::Tuple, &site, st, &format!("tuple@L{}", node.line), Payload::None, None, Ns::Item, None, None);
         let single = self.obj(oid).single;
         let acc = join_values(vals.clone());
-        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), DATA), single);
+        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), single);
         st.elems.insert(oid, acc.kv.clone());
         if single {
             self.obj_mut(oid).literal_len = Some(vals.len());
@@ -783,6 +783,10 @@ impl Analyzer {
                     _ => None,
                 }
             } else if an.torch_on && v.kv.is_bot() && v.pts.len() == 1 && an.t_sym_of_obj(v.pts.first().unwrap()).is_some() {
+                // a name used as a size on this path is an int
+                if st.tf.ints.contains(&an.t_sym_of_obj(v.pts.first().unwrap()).unwrap()) {
+                    return Some(K::Int);
+                }
                 Some(K::Named)
             } else if an.torch_on && v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| matches!(an.kind(o), Kind::Ph | Kind::Unknown)) {
                 // an unknown without a name (an unknown call's result): any shape
@@ -845,7 +849,8 @@ impl Analyzer {
         };
         if ka == K::Int && kb == K::Int {
             // plain ints are the interpreter's; a symbolic one makes a symbolic dim
-            if dim_of_label(a).is_none() && dim_of_label(b).is_none() {
+            let symbolic = |an: &Analyzer, v: &Value| dim_of_label(v).is_some() || (v.kv.is_bot() && v.pts.len() == 1 && an.t_sym_of_obj(v.pts.first().unwrap()).is_some());
+            if !symbolic(self, a) && !symbolic(self, b) {
                 return None;
             }
             if int_op {
@@ -1717,6 +1722,7 @@ impl Analyzer {
                         pos.push(v.clone());
                     }
                 }
+                self.t_mark_ints(&pos, st);
                 let target = if pos.len() == args.len() { self.t_sizes_call(c, &pos, st) } else { self.t_sizes(&pos, &c.star_args, st) };
                 let Some(target) = target else { return tensor_value(Shape::any()) };
                 return self.t_view(&s, &target, &node, st, name);
@@ -1848,6 +1854,24 @@ impl Analyzer {
             }
             "masked_select" => return tensor_value(Shape::known(vec![sh::unknown()])),
             "trace" => return tensor_value(Shape::known(vec![])),
+            "repeat_interleave" => {
+                let r = self.t_kw(c, args, 0, "repeats").and_then(|v| self.t_dim(&v, st));
+                let d = self.t_kw(c, args, 1, "dim").and_then(|v| self.t_int(&v));
+                return match (r, d) {
+                    (Some(r), Some(d)) => match self.t_locate(&s, d, &node, st, name) {
+                        Some((e, p)) => {
+                            let x = get_at(&e, p);
+                            tensor_value(replace_at(&sh::norm_shape(&e, &st.tf), p, &[sh::mul(x, r)]))
+                        }
+                        None => Value::new(),
+                    },
+                    (Some(r), None) => match s.dims() {
+                        Some(dd) => tensor_value(Shape::known(vec![sh::mul(sh::product(&dd), r)])),
+                        None => tensor_value(Shape::known(vec![sh::unknown()])),
+                    },
+                    _ => tensor_value(Shape::any()),
+                };
+            }
             "multinomial" => {
                 let n = self.t_kw(c, args, 0, "num_samples").and_then(|v| self.t_dim(&v, st)).unwrap_or_else(sh::unknown);
                 return match s.rank() {
@@ -2398,6 +2422,7 @@ impl Analyzer {
                 self.t_error(&node, m, st);
                 return Value::new();
             }
+            self.t_mark_ints(&pos, st);
             let sz = if pos.len() == c.args.len() { self.t_sizes_call(c, &pos, st) } else { self.t_sizes(&pos, &c.star_args, st) };
             return sz.map(tensor_value).unwrap_or_else(|| tensor_value(Shape::any()));
         }
@@ -2939,6 +2964,8 @@ impl Analyzer {
         let set = |an: &mut Analyzer, st: &mut State, name: &str, v: Value| {
             an.store_key(o, Ns::Attr, &KeyVal::Lit(key_str_lit(name)), &v, strong, &node, st);
         };
+        let given: Vec<Value> = c.args.clone();
+        self.t_mark_ints(&given, st);
         for (i, p) in params.iter().enumerate() {
             if let Some(v) = c.arg(i, Some(p)) {
                 set(self, st, p, v);
@@ -3944,6 +3971,15 @@ impl Analyzer {
 
 pub const QUOT_PREFIX: &str = "\u{1}Q";
 
+/// What an element slot keeps of its values: tensor / dim labels (everything else reads
+/// them as unknown data), else plain data.
+pub fn elem_kv(kv: &KeyVal) -> KeyVal {
+    match kv {
+        KeyVal::Data(l) if intern::str_get(*l).starts_with('\u{1}') => kv.clone(),
+        _ => DATA,
+    }
+}
+
 /// `d / k` (true division of a dim by an int literal): a float, but `int()` / `math.ceil()`
 /// of it are dims again.
 pub fn quotient_value(d: DimId, k: i64) -> Value {
@@ -4477,4 +4513,23 @@ pub fn m_tensor_or_builtin(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
     }
     let args = c.args.clone();
     an.t_method(name, &recv, &args, c, st)
+}
+
+impl Analyzer {
+    /// Named unknowns given as sizes / layer widths are ints from here on (on this path).
+    pub fn t_mark_ints(&self, vals: &[Value], st: &mut State) {
+        let mut syms: Vec<sh::Sym> = Vec::new();
+        for v in vals {
+            if v.kv.is_bot() && v.pts.len() == 1 {
+                if let Some(sy) = self.t_sym_of_obj(v.pts.first().unwrap()) {
+                    syms.push(sy);
+                }
+            }
+        }
+        if !syms.is_empty() && syms.iter().any(|x| !st.tf.ints.contains(x)) {
+            let mut f = (*st.tf).clone();
+            f.ints.extend(syms);
+            st.tf = std::sync::Arc::new(f);
+        }
+    }
 }

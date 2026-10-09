@@ -448,7 +448,7 @@ impl Analyzer {
                 Some(k) => kv_join(&k, &v.kv),
             });
         }
-        state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts, DATA), single);
+        state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts, crate::models::torch::elem_kv(&acc.kv)), single);
         if !vals.is_empty() {
             let kvacc = kvacc.unwrap();
             let nv = match state.elems.get(&oid) {
@@ -625,7 +625,7 @@ impl Analyzer {
             Some(vs) => crate::domain::join_values(vs.clone()),
             None => elem,
         };
-        state.set_slot(nid, Ns::Elem, STAR, Value::with_kv(acc.pts, DATA), single);
+        state.set_slot(nid, Ns::Elem, STAR, Value::with_kv(acc.pts, crate::models::torch::elem_kv(&acc.kv)), single);
         state.elems.insert(nid, kv);
         match vals {
             Some(vs) if single => {
@@ -890,7 +890,7 @@ impl Analyzer {
             state.set_slot(oid, Ns::Pos, key_int(i as i64), v.clone(), true);
         }
         let acc = crate::domain::join_values(vals.clone());
-        state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), DATA), true);
+        state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
         self.obj_mut(oid).literal_len = Some(vals.len());
         self.obj_mut(oid).known_prefix = None;
     }
@@ -1534,7 +1534,7 @@ impl Analyzer {
             } else {
                 positional = false;
             }
-            st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), DATA), false);
+            st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), crate::models::torch::elem_kv(&v.kv)), false);
             let cur = st.elems.get(&oid).unwrap_or_else(|| v.kv.clone());
             st.elems.insert(oid, kv_join(&cur, &v.kv));
         };

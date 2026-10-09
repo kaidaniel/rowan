@@ -1,11 +1,8 @@
 # torch cases written but not yet expected to pass (paths relative to tests/torch/)
 small/s119_numpy_mix.py
-small/s120_index_stores.py
-small/s121_comprehension_heads.py
 small/s124_recursion.py
 small/s125_generators_zip.py
 small/s129_tensor_isinstance.py
 small/s130_user_methods_tensor_names.py
 small/s132_sequential_comprehension.py
 small/s137_config_dict_dims.py
-small/s142_keyword_order.py

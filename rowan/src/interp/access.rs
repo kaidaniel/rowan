@@ -489,7 +489,7 @@ impl Analyzer {
                     continue;
                 }
                 Kind::List | Kind::Tuple | Kind::Set => {
-                    state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), DATA), false);
+                    state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), crate::models::torch::elem_kv(&v.kv)), false);
                     if let (Some(k), Some(n)) = (key.kv.as_lit(), self.obj(oid).literal_len) {
                         if let Some(i) = intern::with_key(k, |kk| if let intern::Key::Int(i) = kk { Some(*i) } else { None }) {
                             if 0 <= i && (i as usize) < n {

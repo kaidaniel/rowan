@@ -437,7 +437,7 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
             }
             Elem::One(elem) => {
-                st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(elem.pts.clone(), DATA), true);
+                st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(elem.pts.clone(), crate::models::torch::elem_kv(&elem.kv)), true);
                 st.elems.insert(oid, elem.kv.clone());
                 let reorders = matches!(c.qual.as_str(), "builtins.sorted" | "builtins.reversed");
                 if reorders {
@@ -914,7 +914,7 @@ fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     }
                 }
                 let res = join_values(kept.clone());
-                st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(res.pts.clone(), DATA), true);
+                st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(res.pts.clone(), crate::models::torch::elem_kv(&res.kv)), true);
                 st.elems.insert(oid, res.kv);
                 if all_decided && an.obj(oid).single {
                     an.obj_mut(oid).literal_len = Some(kept.len());
@@ -938,7 +938,7 @@ fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         outs.push(r);
                     }
                     let res = join_values(outs);
-                    st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(res.pts.clone(), DATA), true);
+                    st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(res.pts.clone(), crate::models::torch::elem_kv(&res.kv)), true);
                     st.elems.insert(oid, res.kv);
                     an.obj_mut(oid).literal_len = Some(items.len());
                     return Value::obj(oid);
@@ -947,7 +947,7 @@ fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         let elem = it.elem.one_or_empty();
         let res = if c.qual.ends_with("filter") { elem } else { an.call_value(&c.args[0], &c.node, None, st, Some(vec![elem])) };
-        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(res.pts.clone(), DATA), true);
+        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(res.pts.clone(), crate::models::torch::elem_kv(&res.kv)), true);
         st.elems.insert(oid, res.kv);
     }
     Value::obj(oid)
@@ -1734,7 +1734,7 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 if an.obj(oid).single && an.frame().loop_depth == 0 && an.cond_depth == 0 && n + items.len() <= cap {
                     for (i, item) in items.iter().enumerate() {
                         st.set_slot(oid, Ns::Pos, intern::key_int((n + i) as i64), item.clone(), true);
-                        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(item.pts.clone(), DATA), false);
+                        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(item.pts.clone(), crate::models::torch::elem_kv(&item.kv)), false);
                         let nk = match st.elems.get(&oid) {
                             Some(cur) => kv_join(&cur, &item.kv),
                             None => item.kv.clone(),
@@ -1746,7 +1746,7 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
             }
         }
-        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(elem.pts.clone(), DATA), false);
+        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(elem.pts.clone(), crate::models::torch::elem_kv(&elem.kv)), false);
         let nk = match st.elems.get(&oid) {
             Some(cur) => kv_join(&cur, &elem.kv),
             None => elem.kv.clone(),
@@ -1844,7 +1844,7 @@ fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 st.drop_obj_ns(oid, Ns::Pos);
                 if name == "insert" {
                     if let Some(x) = c.args.get(1) {
-                        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(x.pts.clone(), DATA), false);
+                        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(x.pts.clone(), crate::models::torch::elem_kv(&x.kv)), false);
                         let e = st.elems.get(&oid).unwrap_or_else(|| x.kv.clone());
                         st.elems.insert(oid, kv_join(&e, &x.kv));
                     }
@@ -1908,7 +1908,7 @@ fn m_view(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             an.obj_mut(oid).literal_len = None;
             let it = an.iterate(recv, &c.node, st);
             let elem = it.elem.one_or_empty();
-            st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(elem.pts.clone(), DATA), true);
+            st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(elem.pts.clone(), crate::models::torch::elem_kv(&elem.kv)), true);
             st.elems.insert(oid, elem.kv);
             return Value::obj(oid);
         }
@@ -1937,7 +1937,7 @@ fn json_literal(an: &mut Analyzer, st: &mut State, c: &Call, j: &serde_json::Val
             let oid = an.alloc(Kind::List, &site, st, &format!("list@L{}", c.line), Payload::None, None, Ns::Item, None, None);
             let single = an.obj(oid).single;
             let acc = join_values(vals.clone());
-            st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), DATA), single);
+            st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), single);
             st.elems.insert(oid, acc.kv.clone());
             if single {
                 an.obj_mut(oid).literal_len = Some(vals.len());
@@ -2603,6 +2603,16 @@ fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn m_sum(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(v) = c.args.first() else { return Value::data("sum") };
     let it = an.iterate(v, &c.node, st);
+    // a sum of tensors: the elements' (broadcast) shape
+    if an.torch_on {
+        let e = it.elem.flat();
+        if crate::models::torch::is_tensor(&e) {
+            if let Some(s) = an.t_shape(&e, st) {
+                let start = c.args.get(1).and_then(|x| an.t_shape(x, st)).unwrap_or_else(|| crate::shape::Shape::known(vec![]));
+                return an.t_broadcast(&s, &start, &c.node, st, "sum");
+            }
+        }
+    }
     if let Some(items) = it.items {
         let mut acc_i: i64 = 0;
         let mut acc_f: f64 = 0.0;
