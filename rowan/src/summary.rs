@@ -1414,6 +1414,7 @@ impl Analyzer {
         }
         // 6. symbolic requirements → verdicts / requirements now
         let mut failed: Vec<(ObjId, Ns, KeyId)> = Vec::new();
+        let mut sure_fail = false;
         for sr in &summary.symreqs {
             let tg = inst.resolve(self, state, &pre, sr.oid);
             if tg.is_empty() {
@@ -1473,8 +1474,13 @@ impl Analyzer {
             }
             // (an access of the callee raises into a try around this call)
             let sr_guarded = sr.guarded || (self.is_guarded(sr.ns) && !crate::interp::disabled("callguard"));
+            let ngroups = groups.len();
+            let mut all_missing = ngroups > 0;
             for (row_c, members) in groups {
                 let tiers = self.emit_access(&sr.node, &kv, &row_c, members[0], sr.ns, sr_guarded, &sr_chain, &sr.file, state, &sr.text, sr.cls, sr.conditional);
+                if tiers.is_empty() || tiers.iter().any(|(_, t)| *t != Tier::Missing) {
+                    all_missing = false;
+                }
                 for (k, tier) in tiers {
                     if tier == Tier::Missing {
                         for a in &members {
@@ -1489,6 +1495,14 @@ impl Analyzer {
                     }
                 }
             }
+            // an access on every path of the callee that surely fails, under a try around the
+            // call that catches it: the call raises there (as a guarded access does)
+            if all_missing && !sr.guarded && !sr.conditional && self.is_guarded(sr.ns) && !crate::interp::disabled("surefail") {
+                sure_fail = true;
+            }
+        }
+        if sure_fail && !in_summary {
+            state.reachable = false;
         }
         // an access that definitely fails ends the call: its fall-through narrowing never happened
         for (a, ns, k) in failed {

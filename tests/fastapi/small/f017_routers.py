@@ -11,7 +11,9 @@ def save(kind, key, rec):
     bucket = STORE[kind]                             #@ ok items ; ok users
     stored = {"key": key, **rec}
     bucket[key] = stored
-    #@row stored: definite={key} open
+    # Corrected on re-reading: every caller passes a dict it built itself (closed), so `stored`
+    # is the join of those: closed.
+    #@row stored: present={key,title,qty,email,admin} definite={key} closed
     return stored
 
 

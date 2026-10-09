@@ -19,7 +19,7 @@ class Item(BaseModel):
 
 
 def merge(user, item, note):
-    #@row user: present={username,full_name} definite={username,full_name} closed
+    _ = 0  #@row user: present={username,full_name} definite={username,full_name} closed
     #@row item: present={title,price} definite={title,price} closed
     rec = {"owner": user.username, **item.model_dump()}
     if note:

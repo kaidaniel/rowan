@@ -26,7 +26,7 @@ def put(sess, key, value):
 
 @app.post("/kv/{key}")
 def write(key: str, value: int = 0, sess: dict = Depends(session)):
-    #@row sess: present={open,ops} definite={open,ops} closed
+    _ = 0  #@row sess: present={open,ops} definite={open,ops} closed
     put(sess, key, value)
     if value > 10:
         put(sess, key + "_big", value)

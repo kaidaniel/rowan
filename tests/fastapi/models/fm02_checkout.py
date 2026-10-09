@@ -110,7 +110,7 @@ ORDERS = {}
 
 
 def send_receipt(order, address):
-    #@row order: present={id,customer,total,discount,gift_note,lines} definite={id,customer,total,discount,gift_note,lines} closed
+    _ = 0  #@row order: present={id,customer,total,discount,gift_note,lines} definite={id,customer,total,discount,gift_note,lines} closed
     #@row address: present={street,city,country} definite={street,city,country} closed
     rec = {"to": order["customer"], "total": order["total"], "city": address["city"]}  #@ ok customer ; ok total ; ok city
     if order["gift_note"]:                           #@ ok gift_note
@@ -126,7 +126,7 @@ app = FastAPI()
 
 @app.exception_handler(OutOfStock)
 async def out_of_stock(request: Request, exc: OutOfStock):
-    #@row exc: present={sku,wanted,have} definite={sku,wanted,have} closed
+    _ = 0  #@row exc: present={sku,wanted,have} definite={sku,wanted,have} closed
     return JSONResponse(status_code=409, content={"error": "out_of_stock", "sku": exc.sku, "have": exc.have})
 
 

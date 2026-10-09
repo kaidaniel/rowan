@@ -20,7 +20,7 @@ def price_with_tax(item, rate):
 
 
 def summarize(item):
-    #@row item: present={name,price,tags,note} definite={name,price,tags,note} closed
+    _ = 0  #@row item: present={name,price,tags,note} definite={name,price,tags,note} closed
     d = item.model_dump()
     #@row d: present={name,price,tags,note} definite={name,price,tags,note} closed
     d["n_tags"] = len(item.tags)

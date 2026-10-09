@@ -333,7 +333,10 @@ impl Analyzer {
             // each call site (a deferred load), not the one when the summary was made
             if fr_kind == FrameKind::Function && self.is_entry_object(fr_module) && !crate::interp::disabled("globalrd") {
                 let data_only = v.pts.iter().all(|o| matches!(self.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance));
-                if data_only && self.module_info(fr_module).scopes.rebound.contains(&*str_get(name)) {
+                // (also a list / set the summary may mutate: its effects land at the positions
+                // the call site has, not those of the state the summary was made in)
+                let mutable_seq = !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::List | Kind::Set)) && !crate::interp::disabled("globalseq") && self.mutated_in_functions(fr_module, &str_get(name));
+                if data_only && (mutable_seq || self.module_info(fr_module).scopes.rebound.contains(&*str_get(name))) {
                     return self.path_placeholder_value(fr_module, Ns::Attr, intern::key(intern::Key::Str(str_get(name))), &Row::new(), state);
                 }
             }

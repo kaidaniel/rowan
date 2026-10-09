@@ -68,7 +68,7 @@ async def context_middleware(request: Request, call_next):
 
 @app.exception_handler(AuthError)
 async def auth_error(request: Request, exc: AuthError):
-    #@row exc: present={reason,status} definite={reason,status} closed
+    _ = 0  #@row exc: present={reason,status} definite={reason,status} closed
     ctx = request.state.ctx
     #@row ctx: present={path,method,request_id} definite={path,method} closed
     return JSONResponse(status_code=exc.status, content={"error": exc.reason, "path": ctx["path"]})  #@ ok path

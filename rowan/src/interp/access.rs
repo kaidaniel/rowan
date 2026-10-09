@@ -749,9 +749,13 @@ impl Analyzer {
                 }
                 Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("typeadapter.") || q.starts_with("fastapi.")) => {
                     let Payload::Method(q, _) = self.obj(oid).payload.clone() else { unreachable!() };
-                    match crate::models::fastapi::object_attr(self, oid, name, node, state) {
-                        Some(v) => v,
-                        None => self.method_value(&format!("{}.{}", q, name), &Value::obj(oid)),
+                    if let Some(v) = state.slot_opt(oid, Ns::Attr, nk) {
+                        v
+                    } else {
+                        match crate::models::fastapi::object_attr(self, oid, name, node, state) {
+                            Some(v) => v,
+                            None => self.method_value(&format!("{}.{}", q, name), &Value::obj(oid)),
+                        }
                     }
                 }
                 Kind::Namespace | Kind::Instance => self.load_instance_attr(oid, name, node, state, guarded, single),

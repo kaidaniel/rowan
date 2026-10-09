@@ -36,7 +36,7 @@ def window(p):
 
 @app.get("/rows")
 def rows(p: Paging = Depends(), found: bool = Depends(has_bar)):
-    #@row p: present={skip,limit,capped} definite={skip,limit} closed
+    _ = 0  #@row p: present={skip,limit,capped} definite={skip,limit} closed
     w = window(p)
     w["found"] = found
     lim = p.limit                                    #@ ok limit

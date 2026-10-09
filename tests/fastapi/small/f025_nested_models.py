@@ -27,7 +27,7 @@ class Order(BaseModel):
 
 
 def address_label(addr):
-    #@row addr: present={street,city,zip} definite={street,city,zip} closed
+    _ = 0  #@row addr: present={street,city,zip} definite={street,city,zip} closed
     return f"{addr.street}, {addr.zip} {addr.city}"
 
 

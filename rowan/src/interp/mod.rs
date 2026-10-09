@@ -773,6 +773,12 @@ pub struct Analyzer {
     pub fa_includes: Vec<(ObjId, ObjId, String)>,
     pub fa_prefix: FxHashMap<ObjId, String>,
     pub fa_handlers: FxHashSet<ObjId>,
+    /// FastAPI hooks: (app, "exc" / "mw", exception class, function); requests a middleware's
+    /// call_next dispatches (route, request)
+    pub fa_hooks: Vec<(ObjId, String, Value, Option<ObjId>)>,
+    pub fa_pending: Vec<(usize, crate::models::fastapi::Req)>,
+    /// per module: global names a function body mutates (`mutated_in_functions`)
+    pub mutated_globals: std::cell::RefCell<FxHashMap<u32, FxHashSet<String>>>,
     /// per summary being built: its row-check observations
     pub sum_obs: Vec<Vec<crate::summary::Obs>>,
     /// per summary being built: the hover facts recorded in its body (resolved per call)
@@ -953,6 +959,9 @@ impl Analyzer {
             fa_includes: Vec::new(),
             fa_prefix: FxHashMap::default(),
             fa_handlers: FxHashSet::default(),
+            fa_hooks: Vec::new(),
+            fa_pending: Vec::new(),
+            mutated_globals: Default::default(),
             sum_obs: Vec::new(),
             sum_fact_obs: Vec::new(),
             env_stack: Vec::new(),
@@ -1397,6 +1406,38 @@ impl Analyzer {
 
     // ------------------------------------------------------------- entry
     /// Past the time budget: the analysis keeps going but stops refining (see `MAX_MS`).
+    /// Whether a function body of module `m` calls a mutating method on the global `name`
+    /// (`LOG.append(…)`): a textual scan of the indented lines, cached per module.
+    pub fn mutated_in_functions(&self, m: ObjId, name: &str) -> bool {
+        let idx = self.module_info(m).idx;
+        if !self.mutated_globals.borrow().contains_key(&idx) {
+            let mut set: FxHashSet<String> = FxHashSet::default();
+            const MUT: &[&str] = &["append", "extend", "insert", "add", "update", "pop", "remove", "discard", "clear", "appendleft", "popleft", "extendleft", "sort", "reverse"];
+            for line in frontend::module_source_lines(idx) {
+                if !line.starts_with(' ') && !line.starts_with('\t') {
+                    continue;
+                }
+                let b = line.as_bytes();
+                let mut i = 0;
+                while let Some(p) = line[i..].find('.') {
+                    let dot = i + p;
+                    // the name before the dot
+                    let mut st = dot;
+                    while st > 0 && (b[st - 1].is_ascii_alphanumeric() || b[st - 1] == b'_') {
+                        st -= 1;
+                    }
+                    let after: String = line[dot + 1..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                    if st < dot && (st == 0 || b[st - 1] != b'.') && MUT.contains(&after.as_str()) && line[dot + 1 + after.len()..].starts_with('(') {
+                        set.insert(line[st..dot].to_string());
+                    }
+                    i = dot + 1;
+                }
+            }
+            self.mutated_globals.borrow_mut().insert(idx, set);
+        }
+        self.mutated_globals.borrow().get(&idx).map(|s| s.contains(name)).unwrap_or(false)
+    }
+
     /// A module of the program itself: the main file's directory or below.
     pub fn is_local_module(&self, m: ObjId) -> bool {
         if m == self.main_module {
@@ -1496,10 +1537,12 @@ impl Analyzer {
                 self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
                 self.entry_scope = Some(oid);
                 let fake = Node::synthetic(mi.idx, fi.node.node().line);
-                let kwargs = self.fa_bind(oid, None, &mut st, &fake, 0);
-                self.entry_scope = None;
                 let saved_entry = self.entry_run.replace(oid);
-                self.call_user(oid, None, vec![], kwargs, vec![], vec![], &mut st, &fake, None, true);
+                if self.fa_entry_through_middleware(oid, &mut st, &fake).is_none() {
+                    let kwargs = self.fa_bind(oid, None, &mut st, &fake, 0);
+                    self.call_user(oid, None, vec![], kwargs, vec![], vec![], &mut st, &fake, None, true);
+                }
+                self.entry_scope = None;
                 self.entry_run = saved_entry;
                 self.frames.pop();
                 for (src, d) in st.reqs.items() {

@@ -68,7 +68,6 @@ small/s072_batched.py
 small/s073_itemgetter.py
 small/s074_attrgetter_methodcaller.py
 small/s075_operator_reduce.py
-small/s076_contextmanager_dict.py
 small/s077_suppress_keyerror.py
 small/s078_exitstack.py
 small/s079_closing_nullcontext.py

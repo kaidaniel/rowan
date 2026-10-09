@@ -34,7 +34,7 @@ def get_admin(user: dict = Depends(get_user)):
 
 @app.get("/settings")
 def settings(admin: dict = Depends(get_admin), db: dict = Depends(get_db)):
-    #@row db: present={users,settings} definite={users,settings} closed
+    _ = 0  #@row db: present={users,settings} definite={users,settings} closed
     out = dict(db["settings"])                       #@ ok settings
     out["by"] = admin["name"]                        #@ ok name
     #@row out: present={theme,by} definite={theme,by} closed

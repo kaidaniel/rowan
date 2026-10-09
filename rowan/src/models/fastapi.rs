@@ -37,6 +37,10 @@ pub struct Req {
     pub url_query: Vec<(String, String)>,
     pub headers: Option<Value>,
     pub path: Vec<(String, String)>,
+    /// the request object (shared by the middlewares and the handler)
+    pub obj: Option<Value>,
+    /// any request (an entry run through the middlewares): values stay open
+    pub open: bool,
 }
 
 const HTTP_METHODS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "options"];
@@ -44,6 +48,26 @@ const HTTP_METHODS: &[&str] = &["get", "post", "put", "patch", "delete", "head",
 fn fa_obj(an: &mut Analyzer, st: &mut State, node: &Node, qual: &str, v: Value, ctx: &str) -> Value {
     let oid = an.alloc_at(Kind::Namespace, node, st, qual, Payload::Method(qual.to_string(), v.clone()), Some(Row::new()), Ns::Attr, None, Some(ctx));
     an.obj_mut(oid).payload = Payload::Method(qual.to_string(), v);
+    // its attributes as slots (read through a placeholder in a summary like any object's)
+    let attrs: &[&str] = match qual {
+        "fastapi.request" => &["query_params", "headers", "cookies", "path_params", "method", "url", "client", "state", "scope", "app", "json", "body", "form"],
+        "fastapi.response" => &["json", "status_code", "headers", "text", "content", "raise_for_status"],
+        "fastapi.bg" => &["add_task"],
+        _ => &[],
+    };
+    if !attrs.is_empty() {
+        let mut row = Row::new();
+        for a in attrs {
+            let v = match object_attr(an, oid, a, node, st) {
+                Some(v) => v,
+                None => an.method_value(&format!("{}.{}", qual, a), &Value::obj(oid)),
+            };
+            let k = key_str_lit(a);
+            row = row.store(k, true);
+            st.set_slot(oid, Ns::Attr, k, v, true);
+        }
+        st.set_row(oid, Ns::Attr, row);
+    }
     Value::obj(oid)
 }
 
@@ -93,6 +117,18 @@ fn match_path(tmpl: &str, url: &str) -> Option<Vec<(String, String)>> {
 }
 
 impl Analyzer {
+    /// The name an exception class value stands for (`NotFound`, `KeyError`).
+    fn exc_name(&self, v: &Value) -> String {
+        for o in v.pts.iter() {
+            match self.kind(o) {
+                Kind::Class => return self.class_info(o).name.clone(),
+                Kind::External => return self.external_qual(o).rsplit('.').next().unwrap_or("").to_string(),
+                _ => {}
+            }
+        }
+        String::new()
+    }
+
     fn eval_in_module(&mut self, module: ObjId, e: &'static ast::Expr, state: &mut State) -> Value {
         let mi = self.module_info(module);
         self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), module, "fastapi", true, "<fastapi>"));
@@ -201,6 +237,10 @@ impl Analyzer {
     #[allow(clippy::too_many_arguments)]
     fn fa_param(&mut self, func: ObjId, p: &'static ast::ParameterWithDefault, req: Option<&Req>, body_params: &[String], state: &mut State, node: &Node, depth: u32) -> Value {
         let fi = self.func_info(func);
+        let dep_req = req;
+        let shared_obj = req.and_then(|r| r.obj.clone());
+        // an open request is any request: the values are those of an entry run
+        let req = req.filter(|r| !r.open);
         let pname = p.parameter.name.id.to_string();
         let (meta, ann) = match &p.parameter.annotation {
             Some(a) => {
@@ -226,12 +266,15 @@ impl Analyzer {
                 } else {
                     g.clone()
                 };
-                return self.fa_call_dep(&g, req, state, node, depth + 1);
+                return self.fa_call_dep(&g, dep_req, state, node, depth + 1);
             }
         }
         // the request, background tasks, a response
         match ann_name.as_str() {
             "Request" | "WebSocket" | "HTTPConnection" => {
+                if let Some(o) = shared_obj {
+                    return o;
+                }
                 let body = match req.and_then(|r| r.json.clone()) {
                     Some(j) => j,
                     None if req.is_some() => Value::data("body"),
@@ -395,13 +438,36 @@ impl Analyzer {
         join_values(outs)
     }
 
+    /// The entry run of a handler when middlewares are registered: any request, through the
+    /// first middleware (its `call_next` runs the handler). None without middlewares.
+    pub fn fa_entry_through_middleware(&mut self, func: ObjId, state: &mut State, node: &Node) -> Option<()> {
+        let mws: Vec<ObjId> = self.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
+        let first = *mws.first()?;
+        let idx = self.fa_routes.iter().position(|r| r.func == Some(func))?;
+        let fi = self.func_info(func);
+        let body = Value::obj(self.unknown_source(&format!("param {}.request", fi.py_qualname()), SourceKind::Param, state, "request.json()", "", Ns::Item, vec![]));
+        let robj = fa_obj(self, state, node, "fastapi.request", body, &format!("entryreq{}", func));
+        let rq = Req { obj: Some(robj.clone()), open: true, ..Default::default() };
+        let n = self.fa_pending.len();
+        self.fa_pending.push((idx, rq));
+        let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
+        self.call_user(first, None, vec![robj, Value::obj(cn)], IndexMap::new(), vec![], vec![], state, node, None, false);
+        Some(())
+    }
+
     /// A route's handler called with a concrete request: an `HTTPException` (any exception the
     /// handler raises) ends in a response, so the call continues on those paths too.
     fn fa_dispatch(&mut self, route: usize, req: &Req, state: &mut State, node: &Node) -> Value {
         let r = self.fa_routes[route].clone();
         let Some(func) = r.func else { return Value::data("response") };
         let mut pre = state.copy();
-        self.guards.push(rustc_hash::FxHashSet::from_iter(["HTTPException".to_string(), "RequestValidationError".to_string(), "ValidationError".to_string()]));
+        // exception handlers (`@app.exception_handler(E)`): E is caught too
+        let hooks: Vec<(String, Value, ObjId)> = self.fa_hooks.iter().filter(|h| h.1 == "exc").filter_map(|h| h.3.map(|f| (self.exc_name(&h.2), h.2.clone(), f))).collect();
+        let mut caught: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::from_iter(["HTTPException".to_string(), "RequestValidationError".to_string(), "ValidationError".to_string()]);
+        for (n, _, _) in &hooks {
+            caught.insert(n.clone());
+        }
+        self.guards.push(crate::interp::stmts::expand_caught(caught));
         self.may_raise.push(false);
         self.raise_states.push(None);
         self.raise_values.push(None);
@@ -414,23 +480,54 @@ impl Analyzer {
         self.try_sum_depth.pop();
         let flagged = self.may_raise.pop().unwrap_or(false);
         let raised_at = self.raise_states.pop().flatten();
-        self.raise_values.pop();
-        let raised = flagged || raised_at.is_some() || !state.reachable;
+        let raised_v = self.raise_values.pop().flatten().unwrap_or_default();
+        let _ = &mut pre;
+        // other exceptions (KeyError, …) escape: TestClient raises them at the call
+        if flagged {
+            if let Some(m) = self.may_raise.last_mut() {
+                *m = true;
+            }
+        }
         let mut out = if state.reachable { self.fa_response_value(&r, func, &ret, state, node) } else { Value::new() };
-        if raised {
-            // the error response: {"detail": …}
-            let did = self.alloc_at(Kind::Dict, node, state, &format!("error@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some("faerr"));
-            let dk = key_str_lit("detail");
-            state.set_row(did, Ns::Item, Row::new().store(dk, true));
-            state.set_slot(did, Ns::Item, dk, Value::data("detail"), true);
-            out = out.join(&Value::obj(did));
-            let mut after = state.copy();
-            if flagged || (!state.reachable && raised_at.is_none()) {
-                after = if after.reachable { pre.join(&mut after) } else { pre.copy() };
+        if let Some(mut rs) = raised_at {
+            // the raised exceptions: a registered handler's response, else (an HTTPException, a
+            // validation error) the error response {"detail": …}
+            let mut unmatched = raised_v.pts.is_empty() || !raised_v.kv.is_bot();
+            let mut rest: Vec<ObjId> = Vec::new();
+            for o in raised_v.pts.iter() {
+                let cls = if self.kind(o) == Kind::Instance { self.instance_class(o) } else { None };
+                let hit = hooks.iter().find(|(n, hv, _)| match cls {
+                    Some(c) => hv.pts.iter().any(|h| self.kind(h) == Kind::Class && self.mro(c).contains(&h)) || self.mro(c).iter().any(|m| self.class_info_opt(*m).map(|ci| ci.name == *n).unwrap_or(false)),
+                    None => n == "KeyError" && self.obj(o).label.starts_with("KeyError") || n == "Exception",
+                }).cloned();
+                match hit {
+                    Some((_, _, hf)) => {
+                        let robj = req.obj.clone().unwrap_or_else(|| Value::data("request"));
+                        let resp = self.call_user(hf, None, vec![robj, Value::obj(o)], IndexMap::new(), vec![], vec![], &mut rs, node, None, false);
+                        let mut rv: Vec<Value> = Vec::new();
+                        for x in resp.pts.iter() {
+                            if let Some((q, v)) = payload_of(self, x) {
+                                if q == "fastapi.jsonresponse" {
+                                    rv.push(v);
+                                }
+                            }
+                        }
+                        out = out.join(&join_values(rv));
+                    }
+                    None => rest.push(o),
+                }
             }
-            if let Some(mut rs) = raised_at {
-                after = if after.reachable { after.join(&mut rs) } else { rs };
+            if !rest.is_empty() {
+                unmatched = true;
             }
+            if unmatched {
+                let did = self.alloc_at(Kind::Dict, node, state, &format!("error@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some("faerr"));
+                let dk = key_str_lit("detail");
+                rs.set_row(did, Ns::Item, Row::new().store(dk, true));
+                rs.set_slot(did, Ns::Item, dk, Value::data("detail"), true);
+                out = out.join(&Value::obj(did));
+            }
+            let after = if state.reachable { state.copy().join(&mut rs) } else { rs };
             state.replace_with(after);
         }
         out
@@ -520,7 +617,29 @@ impl Analyzer {
                 let mut st = pre.copy();
                 let mut rq = req.clone();
                 rq.path = params;
-                let v = self.fa_dispatch(idx, &rq, &mut st, &c.node);
+                // one request object for the middlewares and the handler
+                let body = rq.json.clone().unwrap_or_else(|| Value::data("concrete"));
+                let robj = fa_obj(self, &mut st, &c.node, "fastapi.request", body, &format!("req{}", c.line));
+                rq.obj = Some(robj.clone());
+                let mws: Vec<ObjId> = self.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
+                let v = if mws.is_empty() {
+                    self.fa_dispatch(idx, &rq, &mut st, &c.node)
+                } else {
+                    // the (first) middleware runs with call_next dispatching the route
+                    let n = self.fa_pending.len();
+                    self.fa_pending.push((idx, rq.clone()));
+                    let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
+                    let resp = self.call_user(mws[0], None, vec![robj.clone(), Value::obj(cn)], IndexMap::new(), vec![], vec![], &mut st, &c.node, None, false);
+                    let mut bodies: Vec<Value> = Vec::new();
+                    for x in resp.pts.iter() {
+                        if let Some((q, v)) = payload_of(self, x) {
+                            if q == "fastapi.response" || q == "fastapi.jsonresponse" {
+                                bodies.push(v);
+                            }
+                        }
+                    }
+                    join_values(bodies)
+                };
                 outs.push(v);
                 states.push(st);
                 if path.is_some() {
@@ -530,11 +649,20 @@ impl Analyzer {
             }
         }
         if states.is_empty() {
-            // no route: a 404 / 405 response
+            // no route: a 404 / 405 response (through the middlewares, which run for it too)
             let did = self.alloc_at(Kind::Dict, &c.node, state, &format!("error@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, Some("fa404"));
             let dk = key_str_lit("detail");
             state.set_row(did, Ns::Item, Row::new().store(dk, true));
             state.set_slot(did, Ns::Item, dk, Value::data("detail"), true);
+            let mws: Vec<ObjId> = self.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
+            if let Some(first) = mws.first().copied() {
+                let body = req.json.clone().unwrap_or_else(|| Value::data("concrete"));
+                let robj = fa_obj(self, state, &c.node, "fastapi.request", body, &format!("req{}", c.line));
+                let n = self.fa_pending.len();
+                self.fa_pending.push((usize::MAX, Req { obj: Some(robj.clone()), json: Some(Value::obj(did)), ..Default::default() }));
+                let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
+                self.call_user(first, None, vec![robj, Value::obj(cn)], IndexMap::new(), vec![], vec![], state, &c.node, None, false);
+            }
             return fa_obj(self, state, &c.node, "fastapi.response", Value::obj(did), "faresp");
         }
         let mut out = states.remove(0);
@@ -569,6 +697,13 @@ fn conv_scalar(ann: &str, text: &str) -> Value {
 pub fn m_fastapi(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let q = c.qual.as_str();
     let last = q.rsplit('.').next().unwrap_or("");
+    // a middleware's call_next(request): the route's response
+    if let Some(n) = q.strip_prefix("fastapi.callnext.").and_then(|x| x.parse::<usize>().ok()) {
+        let Some((idx, rq)) = an.fa_pending.get(n).cloned() else { return Value::data("response") };
+        // (no route: the 404 body)
+        let body = if idx == usize::MAX { rq.json.clone().unwrap_or_default() } else { an.fa_dispatch(idx, &rq, st, &c.node) };
+        return fa_obj(an, st, &c.node, "fastapi.response", body, &format!("mwresp{}", n));
+    }
     // methods on our objects: `fastapi.<kind>.<method>`
     if let Some(recv) = c.recv.clone() {
         if let Some(o) = recv.single() {
@@ -671,7 +806,13 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
             an.none_v.clone()
         }
         // decorators that register a function the framework calls (identity)
-        ("fastapi.app", "middleware" | "exception_handler" | "on_event") => fa_obj(an, st, &c.node, "fastapi.hook", Value::new(), &format!("hook{}", c.site)),
+        ("fastapi.app", "exception_handler" | "middleware") => {
+            let exc = if name == "exception_handler" { c.arg(0, Some("exc_class_or_status_code")).unwrap_or_default() } else { Value::new() };
+            let idx = an.fa_hooks.len();
+            an.fa_hooks.push((o, if name == "middleware" { "mw".into() } else { "exc".into() }, exc, None));
+            fa_obj(an, st, &c.node, &format!("fastapi.hook.{}", idx), Value::new(), &format!("hook{}", idx))
+        }
+        ("fastapi.app", "on_event") => fa_obj(an, st, &c.node, "fastapi.hookx", Value::new(), &format!("hook{}", c.site)),
         ("fastapi.app", "dependency_overrides") => Value::data("overrides"),
         ("fastapi.app", _) => an.none_v.clone(),
         ("fastapi.request", "json" | "body" | "form") => pv.clone(),
@@ -720,7 +861,6 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
 /// `request.query_params`, `app.routes`).
 pub fn object_attr(an: &mut Analyzer, oid: ObjId, name: &str, node: &Node, state: &mut State) -> Option<Value> {
     let (kind, pv) = payload_of(an, oid)?;
-    let _ = pv;
     match (kind.as_str(), name) {
         ("fastapi.response", "status_code") => Some(Value::data("status_code")),
         ("fastapi.response", "text" | "content" | "reason_phrase" | "url") => Some(Value::data(name)),
@@ -728,7 +868,15 @@ pub fn object_attr(an: &mut Analyzer, oid: ObjId, name: &str, node: &Node, state
             let c = Call { qual: format!("{}.{}", kind, name), recv: Some(Value::obj(oid)), args: vec![], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
             Some(m_fastapi(an, state, &c))
         }
-        ("fastapi.request", "method" | "url" | "client" | "state" | "scope" | "app") => Some(Value::data(name)),
+        ("fastapi.request", "state") => {
+            // an object the middlewares and handlers set attributes on (open for any request)
+            let sid = an.alloc_at(Kind::Namespace, node, state, "request.state", Payload::None, Some(Row::new()), Ns::Attr, None, Some(&format!("state{}", oid)));
+            // a fresh object per request: what the middlewares / dependencies set on it
+            let _ = pv;
+            state.set_row(sid, Ns::Attr, Row::new());
+            Some(Value::obj(sid))
+        }
+        ("fastapi.request", "method" | "url" | "client" | "scope" | "app") => Some(Value::data(name)),
         ("fastapi.app", "state" | "routes" | "dependency_overrides" | "title" | "version") => Some(Value::data(name)),
         _ => None,
     }
@@ -739,6 +887,15 @@ pub fn object_attr(an: &mut Analyzer, oid: ObjId, name: &str, node: &Node, state
 pub fn apply_route(an: &mut Analyzer, dv: &Value, f: &Value) {
     for o in dv.pts.iter() {
         if let Some((q, _)) = payload_of(an, o) {
+            if let Some(idx) = q.strip_prefix("fastapi.hook.").and_then(|x| x.parse::<usize>().ok()) {
+                for fo in f.pts.iter() {
+                    if an.kind(fo) == Kind::Function {
+                        an.fa_hooks[idx].3 = Some(fo);
+                        // (run around each handler, not on its own)
+                        an.entry_done.insert(fo);
+                    }
+                }
+            }
             if let Some(idx) = q.strip_prefix("fastapi.route.").and_then(|x| x.parse::<usize>().ok()) {
                 for fo in f.pts.iter() {
                     if an.kind(fo) == Kind::Function {

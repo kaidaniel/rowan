@@ -92,7 +92,7 @@ class TodoService:
         self.owner = owner
 
     def create(self, todo):
-        #@row todo: present={title,priority,tags,due} definite={title,priority,tags,due} closed
+        _ = 0  #@row todo: present={title,priority,tags,due} definite={title,priority,tags,due} closed
         data = todo.model_dump()
         data["owner"] = self.owner
         data["tags"] = sorted(set(t.lower() for t in data["tags"]))  #@ ok tags
@@ -130,7 +130,7 @@ class TodoService:
 
 
 def get_service(uow: dict = Depends(unit_of_work), owner: str = Depends(current_owner)):
-    #@row uow: present={ops,committed} definite={ops,committed} closed
+    _ = 0  #@row uow: present={ops,committed} definite={ops,committed} closed
     return TodoService(REPO, uow, owner)
 
 

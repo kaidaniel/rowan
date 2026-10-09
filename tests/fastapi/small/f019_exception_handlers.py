@@ -25,7 +25,7 @@ class Conflict(Exception):
 
 @app.exception_handler(NotFound)
 async def not_found(request: Request, exc: NotFound):
-    #@row exc: present={kind,key} definite={kind,key} closed
+    _ = 0  #@row exc: present={kind,key} definite={kind,key} closed
     body = {"error": f"{exc.kind} not found", "key": exc.key}
     SEEN.append(body)
     return JSONResponse(status_code=404, content=body)
@@ -33,7 +33,7 @@ async def not_found(request: Request, exc: NotFound):
 
 @app.exception_handler(Conflict)
 async def conflict(request: Request, exc: Conflict):
-    #@row exc: present={key,current,retry} definite={key,current,retry} closed
+    _ = 0  #@row exc: present={key,current,retry} definite={key,current,retry} closed
     return JSONResponse(status_code=409, content={"key": exc.key, "retry": exc.retry})
 
 

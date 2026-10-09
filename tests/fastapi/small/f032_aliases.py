@@ -19,7 +19,7 @@ class Account(BaseModel):
 
 
 def to_record(s):
-    #@row s: present={user_name,email_address,newsletter} definite={user_name,email_address,newsletter} closed
+    _ = 0  #@row s: present={user_name,email_address,newsletter} definite={user_name,email_address,newsletter} closed
     rec = s.model_dump()
     #@row rec: present={user_name,email_address,newsletter} definite={user_name,email_address,newsletter} absent={userName} closed
     wire = s.model_dump(by_alias=True)

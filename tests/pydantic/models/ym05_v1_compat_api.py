@@ -44,7 +44,7 @@ class Note(BaseModel):
 
     @root_validator(skip_on_failure=True)
     def owner_tag(cls, values):
-        #@row values: present={id,title,body,tags,owner,archived} definite={id,title,body,tags,owner,archived} closed
+        _ = 0  #@row values: present={id,title,body,tags,owner,archived} definite={id,title,body,tags,owner,archived} closed
         if values["owner"] and not values["tags"]:   #@ ok owner ; ok tags
             values["tags"] = [Tag(name=values["owner"])]
         return values

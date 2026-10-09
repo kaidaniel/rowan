@@ -1317,7 +1317,8 @@ impl Analyzer {
                                 typed_dict = true;
                             } else if q.ends_with("NamedTuple") {
                                 named_tuple = true;
-                            } else if matches!(q.as_str(), "builtins.object" | "object" | "abc.ABC" | "typing.Protocol" | "typing.Generic") || q.ends_with("Generic") {
+                            } else if matches!(q.as_str(), "builtins.object" | "object" | "abc.ABC" | "typing.Protocol" | "typing.Generic") || q.ends_with("Generic") || (q.strip_prefix("builtins.").map(crate::interp::exprs::is_exception_name).unwrap_or(false) && !crate::interp::disabled("excbase")) {
+                                // (a builtin exception base adds nothing to the instance's `vars()`)
                             } else {
                                 open_base = true;
                             }

@@ -21,7 +21,7 @@ ITEMS = {
 
 
 def apply_patch(stored, changes):
-    #@row changes: present={name,price,tags} closed
+    _ = 0  #@row changes: present={name,price,tags} closed
     merged = {**stored, **changes}
     #@row merged: present={name,price,tags} definite={name,price} closed
     return merged

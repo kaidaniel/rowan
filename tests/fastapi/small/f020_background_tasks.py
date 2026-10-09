@@ -11,7 +11,7 @@ AUDIT = []
 
 
 def send_email(to, ctx):
-    #@row ctx: present={subject,name,plan} definite={subject,name} closed
+    _ = 0  #@row ctx: present={subject,name,plan} definite={subject,name} closed
     msg = {"to": to, "subject": ctx["subject"], "text": f"hi {ctx['name']}"}  #@ ok subject ; ok name
     if "plan" in ctx:
         msg["plan"] = ctx["plan"]

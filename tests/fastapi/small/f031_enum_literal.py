@@ -18,7 +18,7 @@ SPEED = {"fast": 2, "slow": 1}
 
 
 def describe(name, mode):
-    #@value name: exactly={"alexnet","resnet"}
+    _ = 0  #@value name: exactly={"alexnet","resnet"}
     #@value mode: exactly={"fast","slow"}
     cfg = CONFIG[name]                               #@ ok alexnet ; ok resnet
     #@row cfg: present={layers,year,skip} definite={layers,year} closed
