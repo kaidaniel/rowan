@@ -1,0 +1,3 @@
+{"user": {"name": "a", "role": "x"}, "action": "view", "trace": 1}
+{"user": {"name": "b"}, "action": "delete", "id": 7}
+{"user": {"name": "c"}}

@@ -1289,6 +1289,11 @@ impl Analyzer {
         let mut nn_module = false;
         if let Some(args) = &c.arguments {
             for b in args.args.iter() {
+                // `RootModel[list[int]]`, `Generic[T]`: the subscripted class decides
+                let b: &ast::Expr = match b {
+                    ast::Expr::Subscript(sb) => &sb.value,
+                    other => other,
+                };
                 let bv = self.eval(b, state);
                 for oid in bv.pts.iter() {
                     match self.kind(oid) {
@@ -1304,14 +1309,13 @@ impl Analyzer {
                             if q.starts_with("torch.nn.") {
                                 nn_module = true;
                             }
-                            if q.starts_with("pydantic") && q.ends_with("BaseModel") {
+                            if crate::models::pydantic::is_pydantic_base(&q) {
                                 pydantic = true;
-                            }
-                            if q.ends_with("TypedDict") {
+                            } else if q.ends_with("TypedDict") {
                                 typed_dict = true;
                             } else if q.ends_with("NamedTuple") {
                                 named_tuple = true;
-                            } else if matches!(q.as_str(), "builtins.object" | "object" | "abc.ABC" | "typing.Protocol" | "typing.Generic") {
+                            } else if matches!(q.as_str(), "builtins.object" | "object" | "abc.ABC" | "typing.Protocol" | "typing.Generic") || q.ends_with("Generic") {
                             } else {
                                 open_base = true;
                             }

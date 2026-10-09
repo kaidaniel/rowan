@@ -162,6 +162,13 @@ impl Analyzer {
                 Kind::External => return Some(self.external_qual(oid)),
                 Kind::Function => return Some(format!("user:{}", self.func_info(oid).qualname)),
                 Kind::Class => return Some(format!("class:{}", self.class_info(oid).name)),
+                Kind::Method => {
+                    if let Payload::Method(q, _) = &self.obj(oid).payload {
+                        if q.starts_with("fastapi.") {
+                            return Some(q.clone());
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -173,7 +180,7 @@ impl Analyzer {
             let q = self.decorator_qualname(&d.expression, state).unwrap_or_default();
             let fobj = fv.pts.first();
             let fi = fobj.and_then(|o| self.func_info_opt(o));
-            if q.ends_with("property") || q == "builtins.property" {
+            if q.ends_with("property") || q == "builtins.property" || q.ends_with("computed_field") {
                 if let Some(fi) = &fi {
                     fi.is_property.set(true);
                     if q.ends_with("cached_property") {
@@ -225,6 +232,12 @@ impl Analyzer {
                     let memo = self.alloc_raw(Kind::Dict, &format!("memo:{}", f), "", true, "lru_cache", Payload::None);
                     state.set_row(memo, Ns::Item, crate::domain::Row::new());
                 }
+                continue;
+            }
+            if q.starts_with("fastapi.") {
+                // `@app.get("/x")`: the route decorator registers the handler
+                let dv = self.eval(&d.expression, state);
+                crate::models::fastapi::apply_route(self, &dv, &fv);
                 continue;
             }
             if KNOWN_IDENTITY_DECORATORS.contains(&q.as_str()) || q.ends_with(".getter") || q.ends_with(".deleter") || q.ends_with(".register") {

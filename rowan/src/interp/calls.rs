@@ -391,6 +391,13 @@ impl Analyzer {
         if ci.typed_dict {
             state.set_row(inst, Ns::Item, Row::new());
         }
+        // a pydantic model (without its own `__init__`): validation of the keyword input
+        if crate::models::pydantic::is_model(self, cls) && !super::disabled("pydantic") {
+            let own_init = self.class_lookup(cls, "__init__").map(|c| crate::models::pydantic::is_model(self, c) && self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__")))).unwrap_or(false);
+            if !own_init {
+                return self.pyd_construct(cls, args, kwargs, star_kwargs, state, node);
+            }
+        }
         // a dict subclass without its own `__init__`: dict's constructor fills its items
         let dict_based = self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|x| x.dict_base).unwrap_or(false));
         if dict_based && self.class_lookup(cls, "__init__").is_none() && !super::disabled("dictsub") {

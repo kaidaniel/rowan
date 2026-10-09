@@ -4,6 +4,8 @@
 
 pub mod minire;
 pub mod pandas;
+pub mod pydantic;
+pub mod fastapi;
 pub mod torch;
 
 use indexmap::IndexMap;
@@ -29,7 +31,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.str.", "Series.dt.", "Series.cat.", "Series.sparse.", "Series.list.", "Series.struct.", "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "partial.", "response.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
+    "parser.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
 ];
 
 pub struct Registry {
@@ -57,7 +59,6 @@ impl Registry {
         r(&["builtins.hasattr"], m_hasattr);
         r(&["builtins.vars", "attr.asdict", "attrs.asdict"], m_vars);
         r(&["dataclasses.asdict"], m_asdict);
-        r(&["pydantic.model_dump"], m_model_dump);
         r(&["dataclasses.fields"], m_dc_fields);
         r(&["builtins.map", "builtins.filter"], m_map);
         r(&["builtins.str"], m_str);
@@ -143,6 +144,9 @@ impl Registry {
         r(&["logging.getLogger", "logging.getLogger.getChild", "structlog.get_logger", "loguru.logger.bind"], m_get_logger);
         r(&["os.getenv", "os.environ.get"], m_getenv);
         pandas::install(&mut r);
+        pydantic::install(&mut r);
+        fastapi::install(&mut r);
+        r(&["typeadapter.*"], m_typeadapter);
         r(&["torch.*"], torch::m_torch);
         r(&["numpy.*", "np.*"], torch::m_numpy);
         r(&["math.*"], m_math);
@@ -871,13 +875,6 @@ fn m_asdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 /// `model.model_dump()` / `model.dict()`: like `asdict` on the model.
-fn m_model_dump(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    let Some(recv) = c.recv.clone() else { return Value::data("model_dump") };
-    let call = Call { qual: "dataclasses.asdict".into(), recv: None, args: vec![recv], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: c.node, call_ast: None, site: c.site.clone(), line: c.line };
-    m_asdict(an, st, &call)
-}
-
-/// `dataclasses.fields(C)`: one field object per field, in order, with its `name`.
 fn m_dc_fields(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first() else { return Value::data("fields") };
     let cls = a.single().and_then(|o| match an.kind(o) {
@@ -2012,8 +2009,28 @@ fn json_literal(an: &mut Analyzer, st: &mut State, c: &Call, j: &serde_json::Val
     }
 }
 
+/// `json.loads(text)` (pydantic's `model_validate_json` reads its text the same way).
+pub fn json_loads(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    m_json_load(an, st, c)
+}
+
+/// `TypeAdapter` methods: `typeadapter.<idx>.<method>`.
+fn m_typeadapter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let mut it = c.qual.splitn(3, '.');
+    let (_, idx, method) = (it.next(), it.next().and_then(|x| x.parse::<usize>().ok()), it.next().unwrap_or(""));
+    match idx {
+        Some(i) => pydantic::adapter_call(an, st, i, method, c),
+        None => Value::data("TypeAdapter"),
+    }
+}
+
 fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if c.qual == "json.loads" {
+        // the text of a model's model_dump_json(): its dump
+        let ms = c.args.first().map(pydantic::json_models).unwrap_or_default();
+        if !ms.is_empty() {
+            return pydantic::json_of_models(an, st, c, &ms);
+        }
         // the text of a frame's to_json: its structure
         let texts = c.args.first().map(pandas::json_texts).unwrap_or_default();
         if !texts.is_empty() {

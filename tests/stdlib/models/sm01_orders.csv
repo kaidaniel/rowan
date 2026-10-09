@@ -1,0 +1,6 @@
+order_id,customer,sku,qty,price,coupon,channel
+o1, ann ,apple,3,1.50,,web
+o2,bob,pear,1,2.00,SPRING,store
+o3,ann,pear,2,2.00,,web
+o4,cy,fig,5,0.80,SPRING,web
+o5,bob,apple,1,1.50,,store

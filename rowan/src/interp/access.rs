@@ -732,6 +732,13 @@ impl Analyzer {
                     self.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(oid));
                     Value::obj(vid)
                 }
+                Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("typeadapter.") || q.starts_with("fastapi.")) => {
+                    let Payload::Method(q, _) = self.obj(oid).payload.clone() else { unreachable!() };
+                    match crate::models::fastapi::object_attr(self, oid, name, node, state) {
+                        Some(v) => v,
+                        None => self.method_value(&format!("{}.{}", q, name), &Value::obj(oid)),
+                    }
+                }
                 Kind::Namespace | Kind::Instance => self.load_instance_attr(oid, name, node, state, guarded, single),
                 Kind::Class if matches!(name, "__name__" | "__qualname__") && self.class_lookup(oid, name).is_none() => {
                     let n = self.class_info_opt(oid).map(|ci| ci.name.clone()).unwrap_or_default();
@@ -754,6 +761,8 @@ impl Analyzer {
                             }
                         }
                         if changed { Value::with_kv(out.pts, v.kv.clone()) } else { v }
+                    } else if crate::models::pydantic::PYD_METHODS.contains(&name) && crate::models::pydantic::is_model(self, oid) {
+                        self.method_value(&format!("pydantic.cls.{}", name), &Value::obj(oid))
                     } else if name == "__init__" && self.dataclass_init_owner(oid).is_some() {
                         let dc = self.dataclass_init_owner(oid).unwrap();
                         Value::obj(self.alloc_raw(Kind::Method, &format!("dcinit:{}", oid), "", true, &format!("{}.__init__", self.obj(oid).label), Payload::Method(format!("dcinit.class.{}", dc), Value::obj(oid))))
@@ -1033,11 +1042,11 @@ impl Analyzer {
 
     pub fn load_instance_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool, single_target: bool) -> Value {
         let nk = key_str_lit(name);
-        // pydantic's serialisers on a model: a dict of the fields
-        if matches!(name, "model_dump" | "dict") && !super::disabled("pydantic") {
+        // pydantic's API on a model instance (`model_dump`, `model_copy`, …)
+        if crate::models::pydantic::PYD_METHODS.contains(&name) && !super::disabled("pydantic") {
             if let Some(cls) = self.instance_class(oid) {
-                if self.class_lookup(cls, name).is_none() && self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|x| x.pydantic).unwrap_or(false)) {
-                    return self.method_value("pydantic.model_dump", &Value::obj(oid));
+                if self.class_lookup(cls, name).is_none() && crate::models::pydantic::is_model(self, cls) && !state.row(oid, Ns::Attr).present.contains(nk) {
+                    return self.method_value(&format!("pydantic.{}", name), &Value::obj(oid));
                 }
             }
         }
@@ -1151,6 +1160,12 @@ impl Analyzer {
         // declared class (annotation / self): resolve methods and class attributes (a
         // dataclass field's default is instance data, not a class attribute)
         let is_field = !super::disabled("dcfield") && ph.cls.get().map(|c| self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name)).unwrap_or(false);
+        // pydantic's API on a placeholder typed with a model class
+        if let Some(pcls) = ph.cls.get() {
+            if !is_field && crate::models::pydantic::PYD_METHODS.contains(&name) && self.class_lookup(pcls, name).is_none() && crate::models::pydantic::is_model(self, pcls) && !super::disabled("pydantic") {
+                return self.method_value(&format!("pydantic.{}", name), &Value::obj(oid));
+            }
+        }
         if let (Some(pcls), false) = (ph.cls.get(), is_field) {
             if let Some(c) = self.class_lookup(pcls, name) {
                 let cv = self.cls_slots.get(&(c, Ns::Attr, nk)).cloned().unwrap_or_default();

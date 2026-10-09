@@ -736,6 +736,14 @@ pub struct Analyzer {
     pub row_check_requests: Vec<(String, u32, String)>,
     /// module index -> its path relative to the main file's directory (`rel_file`)
     pub rel_files: std::cell::RefCell<FxHashMap<u32, String>>,
+    /// pydantic model classes described (`pyd_class`), `TypeAdapter` types by index
+    pub pyd_classes: FxHashMap<ObjId, Rc<crate::models::pydantic::PClass>>,
+    pub pyd_adapters: Vec<crate::models::pydantic::Ann>,
+    /// FastAPI: routes, `include_router` edges (app, router, prefix), router prefixes, handlers
+    pub fa_routes: Vec<crate::models::fastapi::FaRoute>,
+    pub fa_includes: Vec<(ObjId, ObjId, String)>,
+    pub fa_prefix: FxHashMap<ObjId, String>,
+    pub fa_handlers: FxHashSet<ObjId>,
     /// per summary being built: its row-check observations
     pub sum_obs: Vec<Vec<crate::summary::Obs>>,
     /// per summary being built: the hover facts recorded in its body (resolved per call)
@@ -900,6 +908,12 @@ impl Analyzer {
             none_v: Value::lit(intern::key_none()),
             row_check_requests: Vec::new(),
             rel_files: Default::default(),
+            pyd_classes: FxHashMap::default(),
+            pyd_adapters: Vec::new(),
+            fa_routes: Vec::new(),
+            fa_includes: Vec::new(),
+            fa_prefix: FxHashMap::default(),
+            fa_handlers: FxHashSet::default(),
             sum_obs: Vec::new(),
             sum_fact_obs: Vec::new(),
             env_stack: Vec::new(),
@@ -1390,7 +1404,10 @@ impl Analyzer {
             let fi = self.func_info(oid);
             // functions of torch modules get their own run even when called (the shapes
             // inside, in terms of their own parameters)
-            if self.analysed_funcs.contains(&oid) && !self.torch_modules.contains(&fi.module) || self.t_concrete_closures.contains(&oid) {
+            // a FastAPI handler: called by the framework with any request (also when the
+            // program's own TestClient calls it), in any module
+            let handler = self.fa_handlers.contains(&oid);
+            if (self.analysed_funcs.contains(&oid) && !self.torch_modules.contains(&fi.module) && !handler) || self.t_concrete_closures.contains(&oid) {
                 continue;
             }
             self.entry_done.insert(oid);
@@ -1402,7 +1419,32 @@ impl Analyzer {
             if matches!(fi.node, FuncNode::Lambda(_)) && disabled("entryclosures") {
                 continue;
             }
-            if fi.module != self.main_module {
+            if fi.module != self.main_module && !handler {
+                continue;
+            }
+            if handler && !disabled("fastapi") {
+                let mut st = state.copy();
+                st.ret = None;
+                let mi = self.module_info(fi.module);
+                self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
+                self.entry_scope = Some(oid);
+                let fake = Node::synthetic(mi.idx, fi.node.node().line);
+                let kwargs = self.fa_bind(oid, None, &mut st, &fake, 0);
+                self.entry_scope = None;
+                let saved_entry = self.entry_run.replace(oid);
+                self.call_user(oid, None, vec![], kwargs, vec![], vec![], &mut st, &fake, None, true);
+                self.entry_run = saved_entry;
+                self.frames.pop();
+                for (src, d) in st.reqs.items() {
+                    let tgt = state.reqs.writable(&src);
+                    for (k, info) in d.iter() {
+                        let nv = match tgt.get(k) {
+                            Some(cur) => cur.join(info),
+                            None => info.clone(),
+                        };
+                        tgt.insert(*k, nv);
+                    }
+                }
                 continue;
             }
             let Some(fparams) = fi.node.params().or_else(|| None) else {
