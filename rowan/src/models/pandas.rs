@@ -2102,8 +2102,19 @@ fn combine_overlap(lrow: &Row, rrow: &Row, keys: &KeySet, lsuf: &str, rsuf: &str
         }
     }
     if lrow.open() || rrow.open() {
+        // a column the other side surely has comes from an open side only suffixed: that
+        // side's input does not provide the plain name
+        let kill_for = |other: &Row| -> KeySet { other.definite.difference(keys) };
+        let mark = |r: &Row, other: &Row| {
+            let k = kill_for(other);
+            if k.is_empty() || crate::interp::disabled("mergekill") {
+                r.sources.clone()
+            } else {
+                r.sources.map(|(s0, l)| (s0, crate::domain::lens_push(l, Step::Kill(k.clone()))))
+            }
+        };
         let mut d = row.data();
-        d.sources = lrow.sources.union(&rrow.sources);
+        d.sources = mark(lrow, rrow).union(&mark(rrow, lrow));
         d.mutators = lrow.mutators.union(&rrow.mutators);
         d.top = lrow.top || rrow.top;
         row = Row::from_data(d);

@@ -115,8 +115,10 @@ def cohorts(users, ev):
     buyers = ev.loc[ev["step"] == "purchase", ["user_id"]].drop_duplicates()
     buyers["bought"] = 1                                        #@row buyers: present={user_id,bought} definite={user_id,bought} closed
     merged = users.merge(buyers, on="user_id", how="left")      #@ input user_id
-    merged["bought"] = merged["bought"].fillna(0).astype(int)   #@ ok bought
-    #@row merged: present={user_id,signup_date,cohort,bought} definite={user_id,signup_date,cohort,bought} open
+    # (first written `ok bought`: users is an open input; a `bought` column of its own would make
+    # the merge give bought_x / bought_y)
+    merged["bought"] = merged["bought"].fillna(0).astype(int)   #@ possibly bought
+    #@row merged: present={user_id,signup_date,cohort,bought,bought_x,bought_y} definite={user_id,signup_date,cohort,bought} open
     table = merged.groupby("cohort").agg(users=("user_id", "nunique"), buyers=("bought", "sum")).reset_index()
     #@row table: present={cohort,users,buyers} definite={cohort,users,buyers} closed
     table["rate"] = table["buyers"] / table["users"]
@@ -128,7 +130,8 @@ def cohort_revenue(table):
 
 
 def device_by_step(ev):
-    tab = pd.crosstab(ev["device"], ev["step"], margins=True)   #@ input device ; ok step
+    # (first written `input device`: the only call is behind `if "device" in ev.columns`)
+    tab = pd.crosstab(ev["device"], ev["step"], margins=True)   #@ ok device ; ok step
     #@row tab: present={All} definite={All} open
     return tab["All"]                                           #@ ok All
 
@@ -143,7 +146,8 @@ def purchase_value(ev):
     if "amount" in ev.columns:
         ev = ev.assign(value=ev["amount"].fillna(0.0))          #@ ok amount
     n_cols = len(ev.columns)                                    #@row ev: present={step,ts,session_id,user_id,device,coupon,amount,value} definite={step,ts,session_id,user_id} open
-    return float(ev["value"].sum())                             #@ possibly value
+    # (first written `possibly`: ev is an open input, which may hold `value` itself)
+    return float(ev["value"].sum())                             #@ input value
 
 
 def run(events_text, users_text):
@@ -180,5 +184,6 @@ if __name__ == "__main__":
     report = {"a": res_a[0], "b": res_b[0]}                     #@row report: present={a,b} definite={a,b} closed
     first = res_a[1]["view->cart"]                              #@ ok "view->cart"
 
-#@schema read_csv@L52: always={step,ts,session_id,user_id} sometimes={device,coupon,amount} only={step,ts,session_id,user_id,amount,device,coupon}
+# (first written sometimes={device,coupon,amount}: their reads are all behind `in` tests)
+#@schema read_csv@L52: always={step,ts,session_id,user_id} only={step,ts,session_id,user_id}
 #@schema read_csv@L63: always={user_id,signup_date} only={user_id,signup_date}
