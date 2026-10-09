@@ -40,7 +40,7 @@ claims the oracle does not check.
    several inputs per function).
 0b. [x] Run the lenient oracle on `tests/cases/`; every refuted claim is an engine bug (or a
    misread program): fix them.
-1. [ ] Cases, expectations by hand, each agreeing with the oracle: 100 small programs (one
+1. [x] Cases, expectations by hand, each agreeing with the oracle: 100 small programs (one
    API area each) and 15 larger programs (realistic pipelines: ETL, reporting, feature
    engineering, joins of several sources, groupby reports, time series, …). All `PENDING`.
    They cover the modelled API (§11.2) **and APIs not modelled yet** (`where`/`mask`,
@@ -50,10 +50,10 @@ claims the oracle does not check.
    `clip`, `round`, `isin`, `between`, `idxmax`, `corr`, `to_records`, `from_records`,
    `DataFrame.agg` with lists / dicts, `groupby(...).transform/filter/size/nth/first`, …),
    which then get models.
-2. [ ] Fix the engine until `PENDING` is empty (soundness first: a claim the oracle refutes
+2. [x] Fix the engine until `PENDING` is empty (soundness first: a claim the oracle refutes
    is a bug; then precision).
 3. [ ] A round of one-hypothesis cases on the weak spots found, fixed the same way.
-4. [ ] Docs (README, SPECIFICATION §11.3, AGENTS.md), delete this plan.
+4. [x] Docs (README, SPECIFICATION §11.2 / §11.3, AGENTS.md); delete this plan after step 3.
 
 ## Notes / decisions log
 

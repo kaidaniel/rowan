@@ -25,6 +25,16 @@ locals that hold them (`B, T, C = x.shape` → `Tensor[B, T, 3*self.n_embd]`). T
 well-known models from a from-scratch transformer to nanoGPT, ResNet, U-Net, ViT, BERT) are
 in `tests/torch/`, each checked against real PyTorch by `tests/torch_oracle.py`.
 
+**pandas.** A frame's key set is its columns; beside it rowan keeps what literal data tells
+(index levels, row labels and count, each column's literal values and dtype), so a
+`pivot_table` / `crosstab` / `get_dummies` over known values has known columns, `describe()` the
+numeric ones, `reset_index()` the index names; a Series whose index matters (a column, a row,
+`df.sum()`, a grouped aggregate) is a record of its labels. Merges decide each column by which
+side may have it (an open input never provides a plain name the other side surely has), and
+calls inside functions are analysed per call site. 115 test programs (100 small, 15
+pipelines) in `tests/pandas/` are checked against real pandas by the runtime oracle
+`tests/oracle.py`, which also checks every claim of the 417 plain-Python cases that runs.
+
 The design is in `SPECIFICATION.md`; `AGENTS.md` has the engineering notes for whoever
 works on it next. The engine is written in Rust (`rowan/`); it was ported from a Python
 prototype that has since been removed (see git history before `a1f4d7a` if you need it).
@@ -35,7 +45,8 @@ rowan/target/release/rowan prog.py                # text report
 rowan/target/release/rowan prog.py --json         # JSON lines (verdicts, schemas, summaries)
 rowan/target/release/rowan prog.py --facts        # per-name facts for editor integration
 rowan/target/release/rowan lib.py --no-entry      # only what the module itself runs (no entry-point pass)
-uv run --no-project python tests/run_golden.py    # golden suite (417 cases + 162 torch cases)
+uv run --no-project python tests/run_golden.py    # golden suite (417 cases + 162 torch + 115 pandas)
+uv run --no-project --with pandas python tests/oracle.py   # the runtime oracle on the cases (strict on tests/pandas)
 uv run --no-project python tests/run_snapshots.py # output snapshots on larger inputs
 ```
 
@@ -139,6 +150,7 @@ known.
 | `rowan/src/report.rs` | per-access verdict combination, schema table, text / JSON / facts output |
 | `tests/run_golden.py`, `tests/cases/` | golden harness: expectations are `#@` comments in the case files (417 cases, each written before running the engine) |
 | `tests/torch/`, `tests/torch_oracle.py` | 162 torch cases (`CONVENTIONS.md`); the oracle runs them under real PyTorch |
+| `tests/pandas/`, `tests/oracle.py` | 115 pandas cases (`CONVENTIONS.md`, `PENDING`); the oracle runs every case under real pandas / Python (rows, values, verdicts, schemas by mutation) |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | output snapshots on the example and three large fixture programs |
 | `examples/etl_report.py` | a realistic script with planted bugs (all found; also golden case e34) |
 | `vscode-rowan/`, `rowan/py/` | VS Code extension (uses `rowan serve`); PyO3 binding (does not load on the current macOS toolchain) |

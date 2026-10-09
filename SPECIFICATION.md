@@ -507,40 +507,45 @@ A declarative layer covers most models: `identity`, `copy(src)`, `gen(keys)`, `k
 
 **Builtins / stdlib.** `dict.{get, setdefault, update, pop, popitem, keys, values, items, copy, clear, fromkeys}`; `dict()`; `dict(zip(ks, vs))` (`Lits` → closed); `{**}` / PEP 584 union; `copy.copy` (new outer object, inner slots aliased); `copy.deepcopy` (fresh recursively); `json.load(s)` (open `Adder`, nested access-path placeholders); `json.dump(s)` (reads: no requirement); `csv.DictReader` (rows: open `Adder` per reader; `fieldnames=` → closed); `os.environ` (open `Adder`, program-wide); `argparse` (`add_argument("--x")` → attr `x` on the parsed namespace); `dataclasses.asdict` / `fields`; `vars`; `getattr(o, Lit)`; `collections.defaultdict` / `Counter` (map role, never raise); `functools.{partial, wraps, lru_cache}`; `sorted` / `map` / `filter` / `min` / `max` with `key=`; `itertools.groupby`.
 
-**pandas** (`df` is a DataFrame):
+**pandas** (`df` is a DataFrame). A frame's row is its **columns** (keys may be tuples:
+MultiIndex columns; a plain key on them reads the top level). What literal data tells is kept
+beside the row in meta slots: the **index levels** (names in order; *unknown* unless the op says
+— constructors / `merge` / `melt` / `concat(ignore_index=)` give a fresh RangeIndex, derived
+frames their source's, `join` the left's), the **row labels** and **row count** (known for
+literal data), and per column its **literal values** (`may` / `sure` sets) and **dtype**
+(`int`, `float`, `num`, `bool`, `object`). A **Series** whose index matters (a column, a frame's
+row, a reduction over the columns, a grouped aggregate, `pd.Series(…)`) is a dict-like object:
+its keys are the index labels, with a name, index levels and values; masks and arithmetic give
+the generic Series. Inside a function a pandas call on a parameter (or on a path below it, or
+on a frame made before the call) is decided per call site (a `concrete` event).
 
-| call | row effect | requirement |
+| call | columns | also |
 | --- | --- | --- |
-| `read_csv/excel/parquet/sql/json(…)` | fresh frame, open `Adder(L)`; `usecols=Lits` or `names=Lits` → closed | — |
-| `pd.DataFrame({"a": …})` | closed {a, …}; `pd.DataFrame(list_of_records)` → present = ∪, definite = ∪ (NaN-filled) | — |
-| `df[Lit]`, `df.Lit` | Series (no record) | Lit |
-| `df[Lits]` (list subscript) | fresh frame, `project(Lits)` | Lits |
-| `df[mask]`, `df.loc[mask]`, `head/tail/sample/sort_values/drop_duplicates/fillna/dropna/astype/copy/reset_index(drop=True)` | copy (same row) | `sort_values(by=…)`: by |
-| `df[Lit] = v`, `df.loc[…, Lit] = v`, `df.insert(…, Lit, v)` | strong/weak store Lit | — |
-| `df.assign(a=…, b=…)` | copy + gen {a, b} | — |
-| `df.drop(columns=Lits)`, `drop(Lits, axis=1)`, `del df[Lit]`, `df.pop(Lit)` | kill | Lits |
-| `df.rename(columns=map or fn)`, `add_prefix`, `add_suffix` | rename | — |
-| `df.merge(o, on=k, how=…)`, `pd.merge` | fresh: copy(df) ∪ copy(o); a non-key column `c` definite in both → gen `c_x`, `c_y`, kill `c` (custom `suffixes=` honoured); overlap only possible → gen `c_x`, `c_y`, keep `c` as present-only | k (or `left_on` / `right_on`) on each side |
-| `df.join(o, lsuffix=, rsuffix=)` | as merge | — |
-| `pd.concat([…], axis=0)` | union; definite = ∪ (NaN-filled) | — |
-| `pd.concat([…], axis=1)` | union | — |
-| `df.set_index(Lit)`, `reset_index()` | kill Lit / gen the index name when known | Lit |
-| `df.groupby(k)[v].agg(f)`, `.sum()`, … | Series or frame with columns {v…}, index k | k, v |
-| `df.groupby(k).agg(name=(col, f), …)` | closed {name, …} | k, cols |
-| `df.groupby(k).agg({"c": f})` | closed {c, …} | k, c |
-| `df.groupby(k).apply(fn)`, `df.pipe(fn)` | callback(fn, row_of=df); result from fn's summary | k |
-| `df.apply(fn, axis=1)`, `df.iterrows()`, `df.to_dict("records")` | callback / virtual item-record with df's RowExpr | — |
-| `df.itertuples()` | virtual attr-record with df's RowExpr | — |
-| `for c in df`, `df.columns`, `df.to_dict()` | `KeysOf(df)` | — |
-| `df.columns = Lits` | project(Lits) | — |
-| `df.query("…")`, `df.eval("…")` | copy / gen | column names parsed from the literal (v2) |
-| `df.pivot / pivot_table / melt / stack / unstack / T / get_dummies / crosstab / explode`, `pd.json_normalize` | fresh frame, open `Adder(L)`; `melt` with literal `id_vars / var_name / value_name` → closed | literal args |
-| `df.filter(items=Lits)` / `filter(like=…)` | project / open | — |
-| `df.values`, `to_numpy`, `shape`, `len`, `describe()` | no record | — |
-| unmodelled `pandas.DataFrame.*` returning a frame | copy + `Adder(L)` | — |
+| `read_csv/excel/parquet/sql/json(…)` | open; `usecols=` / `names=` closed (in order) | `usecols` required; `index_col=` leaves (required); `read_json` of a `to_json` text: the frame's |
+| `pd.DataFrame(dict / records / rows / frame / dict of Series, columns=, index=)`, `from_dict(orient=index / tight)`, `from_records(exclude=)`, `DataFrame(**split)` | keys / union of records (definite when the count is known) / `0..n-1` / the frame's; `columns=` exactly those | row count, labels, column values and dtypes from literals |
+| `df[k]`, `df.k`, `df.get(k, d)` | a column Series (name k, the frame's index) | `get`: never raises; a method name is not a column |
+| `df[[…]]`, `df.loc[:, […]]`, `iloc[:, slice / positions]`, `filter(items / like / regex)`, `select_dtypes`, `reindex(columns=)`, `reindex_like` | projection in order (a list holding a column on some paths only: that column possible, a `sometimes` requirement); positions by the known column order | — |
+| masks, `loc[mask]`, `query`, `head/tail/sample/drop_duplicates/dropna/nlargest`, sorts, copies, element-wise ops | same columns | row subsets weaken labels / values to `may`; `query` / `eval` read the expression's names (`eval` assigns) |
+| `df[k] = v`, `insert`, `assign(k=v / callable, **dict)`, `eval("c = …")` | store k | values / dtype from the stored value |
+| `drop`, `del`, `pop`, `rename(columns=map / fn / lambda, errors=raise)`, `add_prefix/suffix`, `df.columns = […] / .str.lower() / .map(f)`, `set_axis` | kill / rename (lens; renamed-away names absent) | — |
+| `set_index`, `reset_index(level=, names=, drop=)`, `rename_axis`, `T` / `transpose` | index levels ↔ columns (`index` / `level_i` for unnamed levels) | labels from a key column's values |
+| `merge` / `merge_asof` / `join` | per column, the cases of which side has it: both → the suffixes (`""` keeps the name), one → the name; keys once; `how=cross`, `indicator=` (`_merge`) | an open side does not provide a plain name the other side surely has |
+| `concat(rows / axis=1, keys=, names=, join=inner)` | union (NaN-filled: definite when the pieces are known); axis=1: Series by name (unnamed: position), `keys=` → (key, column) | index levels |
+| `groupby(k)…` reductions / `size` / `agg(name=(c, f), **dict)` / `agg({c: f or […]})` / `agg([…])` / `transform` / `cumcount` / `apply` / `filter` / `describe` | value columns; MultiIndex `(col, f)`; Series named by a single selection; `as_index=False` puts the keys first | group labels from the key's values; `apply` gets each group without the key (pandas 3) |
+| `rolling/expanding/ewm/resample` (also on groups and Series) | the frame's columns (`on=` kept / moved to the index) | `ohlc` |
+| `pivot`, `pivot_table(margins=)`, `crosstab`, `unstack`, `stack`, `melt`, `get_dummies`, `wide_to_long`, `json_normalize` | from the literal values of the column / level that becomes the columns (open when unknown); `All` margins; `melt` / `wide_to_long` / `json_normalize` from literals | — |
+| `describe`, `agg` on frames, `corr/cov`, reductions | statistics labels / Series over the columns (`numeric_only`) | numeric columns from dtypes |
+| `iterrows`, `itertuples` (`Index`, `_<pos>`, `name=None`), `apply(axis=1)`, `to_dict(orient)`, `to_records`, `to_json` / `json.loads` | rows as records with the frame's columns; accesses on a row narrow the row, not the frame (a frame may have no rows) | known values fill the cells |
+| `if k not in df.columns: raise …` | — | k required of the inputs |
+| an unmodelled method returning a frame | the receiver's columns, open, index unknown | — |
 
 ### 11.3 Model tests
-Every model has a 3-line runtime oracle test: build concrete inputs, run pandas / the stdlib, compare the real key set against the model's row (§15.4).
+Programs with hand-written expectations, checked against the real library by a runtime oracle
+(`tests/oracle.py`; `tests/torch_oracle.py` for shapes): it runs each case once per input, traces
+every line, and refutes a row (`definite ⊆ K`, `absent ∩ K = ∅`, `K ⊆ present` when closed), a
+value, a verdict (`ok` never raised, `missing` always, `possibly` both — strict) or a schema (a
+`read_csv` returning the frame minus one column must raise for an `always` column and must not for
+a column outside `only`). `tests/pandas/` (115 programs) runs strict; `tests/cases/` lenient.
 
 ---
 
