@@ -312,7 +312,9 @@ pub fn lens_provides(l: LensId, k: KeyId) -> KeySet {
     if l == EMPTY_LENS {
         return KeySet::one(k);
     }
-    with_lens(l, |lens| {
+    // (a copy: inverting a step may intern keys)
+    let lens = intern::lens_get(l);
+    {
         let mut cands = vec![k];
         for step in lens.steps.iter().rev() {
             match step {
@@ -334,7 +336,7 @@ pub fn lens_provides(l: LensId, k: KeyId) -> KeySet {
             }
         }
         KeySet::from_vec(cands)
-    })
+    }
 }
 
 /// Forward image of a single source key; None if killed.
@@ -342,7 +344,7 @@ pub fn lens_apply(l: LensId, k: KeyId) -> Option<KeyId> {
     if l == EMPTY_LENS {
         return Some(k);
     }
-    with_lens(l, |lens| lens_apply_steps(&lens.steps, k))
+    lens_apply_steps(&intern::lens_get(l).steps, k)
 }
 
 pub fn lens_apply_steps(steps: &[Step], mut k: KeyId) -> Option<KeyId> {

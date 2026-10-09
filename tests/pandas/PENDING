@@ -1,8 +1,4 @@
 # pandas cases written but not yet expected to pass (paths relative to tests/pandas/)
-small/p032_del.py
-small/p033_rename_dict.py
-small/p035_prefix_suffix.py
-small/p037_reset_index.py
 small/p039_melt.py
 small/p040_pivot.py
 small/p041_pivot_table.py
@@ -16,21 +12,14 @@ small/p049_columns_str.py
 small/p053_merge_cross.py
 small/p054_merge_suffixes.py
 small/p055_merge_indicator.py
-small/p056_join_index.py
 small/p057_concat_rows.py
 small/p059_concat_axis1.py
 small/p060_merge_asof.py
 small/p062_groupby_agg_dict_list.py
-small/p064_groupby_size.py
-small/p066_groupby_multikey.py
-small/p067_groupby_transform.py
 small/p068_groupby_filter_apply.py
-small/p069_groupby_select_cumcount.py
 small/p070_value_counts.py
-small/p071_rolling_window.py
 small/p072_resample.py
 small/p074_merge_schema.py
-small/p075_groupby_schema.py
 small/p077_itertuples_fields.py
 small/p078_apply_axis1_results.py
 small/p079_apply_columnwise.py

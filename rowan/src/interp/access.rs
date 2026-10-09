@@ -1106,7 +1106,7 @@ impl Analyzer {
         if let Some(v) = state.slot_opt(oid, Ns::Attr, nk) {
             return v;
         }
-        if self.pandas_on && crate::models::pandas::FRAME_ONLY_ATTRS.contains(&name) {
+        if self.pandas_on && (crate::models::pandas::FRAME_ONLY_ATTRS.contains(&name) || crate::models::pandas::DF_METHODS.contains(&name)) {
             // a frame's indexers / columns: decided per call site
             self.record_event("concrete", oid);
         }

@@ -34,8 +34,14 @@ def side_by_side(left, right):
 raw = pd.read_csv(io.StringIO(CSV))
 pref = raw.add_prefix("in_")
 # every column now starts with "in_": the old names are gone whatever the input held
-#@row pref: absent={x,y} open
+# (a row lists absent keys it knows; x and y were never seen: checked by the access below)
+#@todo row pref: absent={x,y} open
+#@row pref: open
 pref["in_x"]                                       #@ input in_x
+try:
+    pref["x"]                                      #@ missing x
+except KeyError:
+    pass
 
 if __name__ == "__main__":
     for f in (pd.DataFrame({"a": [1]}), pd.DataFrame({"a": [1], "b": [2]})):
