@@ -1216,8 +1216,11 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::data(&format!("type@L{}", c.line))
 }
 
-fn m_str(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
+fn m_str(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if let Some(a) = c.args.first() {
+        if let Some(t) = an.enum_text(a, st) {
+            return t;
+        }
         return Value::kv_only(an.rename_kv(&a.kv, &RenameFn::new(FnKind::Str)));
     }
     Value::lit_str("")

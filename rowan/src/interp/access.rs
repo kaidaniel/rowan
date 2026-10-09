@@ -90,18 +90,191 @@ impl Analyzer {
 
     /// `True`, `1` and `1.0` are one dict key: a numeric literal key equal to a key the record
     /// has (or may have) is that key.
+    /// A mixed-in Enum member (`StrEnum`, `IntEnum`) and its value are one key too.
     pub fn canon_key(&self, oid: u32, ns: Ns, k: KeyId, state: &State) -> KeyId {
-        let Some(x) = numeric_of(k) else { return k };
+        let members = !self.member_key.is_empty() && !super::disabled("memberkey");
+        let base = |k: KeyId| if members { intern::key_member_value(k).unwrap_or(k) } else { k };
+        let kb = base(k);
+        let x = numeric_of(kb);
+        if x.is_none() && !members {
+            return k;
+        }
         let row = state.row(oid, ns);
         if row.present.contains(k) {
             return k;
         }
         for p in row.present.iter() {
-            if numeric_of(p) == Some(x) {
+            let pb = base(p);
+            if (members && pb == kb) || (x.is_some() && numeric_of(pb) == x) {
                 return p;
             }
         }
         k
+    }
+
+    /// Enum members (and Flag combinations) used as keys are their `Key::Member` literals.
+    pub fn keyify(&self, v: &Value) -> Value {
+        if v.pts.is_empty() || self.member_key.is_empty() || super::disabled("memberkey") {
+            return v.clone();
+        }
+        let mut ks: Vec<KeyId> = Vec::new();
+        let mut rest: Vec<u32> = Vec::new();
+        for o in v.pts.iter() {
+            match self.member_key.get(&o) {
+                Some(k) => ks.push(*k),
+                None => rest.push(o),
+            }
+        }
+        if ks.is_empty() {
+            return v.clone();
+        }
+        let out = Value::with_kv(crate::domain::ObjSet::from_vec(rest), v.kv.clone());
+        out.join(&Value::kv_only(KeyVal::lits(KeySet::from_iter(ks))))
+    }
+
+    /// A mixed-in member key compares as its value (`Mode.FAST == "fast"`).
+    pub fn member_base(&self, v: &Value) -> Value {
+        if !v.kv.is_literal() {
+            return v.clone();
+        }
+        let lits = crate::domain::kv_literals(&v.kv);
+        if !lits.iter().any(intern::key_is_member) {
+            return v.clone();
+        }
+        Value::with_kv(v.pts.clone(), KeyVal::lits(KeySet::from_iter(lits.iter().map(|k| intern::key_member_value(k).unwrap_or(k)))))
+    }
+
+    /// The class and literal `value` of a member object of a Flag / Enum.
+    pub fn member_value(&self, o: u32, state: &State) -> Option<(u32, KeyId)> {
+        if !self.member_key.contains_key(&o) {
+            return None;
+        }
+        let Payload::Cls(cls) = self.obj(o).payload else { return None };
+        let v = state.slot(o, Ns::Attr, key_str_lit("value"));
+        v.kv.as_lit().filter(|_| v.pts.is_empty()).map(|k| (cls, k))
+    }
+
+    /// `str(m)` / `f"{m}"` of Enum members: the value (StrEnum, IntEnum, IntFlag), else `Cls.NAME`.
+    pub fn enum_text(&self, v: &Value, state: &State) -> Option<Value> {
+        if v.pts.is_empty() || !v.kv.is_bot() || super::disabled("enumtext") {
+            return None;
+        }
+        let mut out: Vec<KeyId> = Vec::new();
+        for o in v.pts.iter() {
+            let mk = *self.member_key.get(&o)?;
+            let Payload::Cls(cls) = self.obj(o).payload else { return None };
+            let ek = self.enum_kind.get(&cls).copied().unwrap_or_default();
+            if ek.repr_value {
+                let (_, val) = self.member_value(o, state)?;
+                out.push(key_str_lit(&intern::key_py_str(val)));
+            } else {
+                let q = intern::with_key(mk, |k| if let intern::Key::Member(q, _) = k { Some(q.to_string()) } else { None })?;
+                out.push(key_str_lit(&q));
+            }
+        }
+        Some(Value::kv_only(KeyVal::lits(KeySet::from_iter(out))))
+    }
+
+    /// `a | b`, `a & b`, `a ^ b` on members of one Flag class with known values: the member
+    /// with the resulting value, else a combination (`Perm.R|W`) allocated here.
+    pub fn flag_binop(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Option<Value> {
+        if !matches!(op, ast::Operator::BitOr | ast::Operator::BitAnd | ast::Operator::BitXor) || self.member_key.is_empty() || super::disabled("flagops") {
+            return None;
+        }
+        if a.pts.len() != 1 || b.pts.len() != 1 || !a.kv.is_bot() || !b.kv.is_bot() {
+            return None;
+        }
+        let (ca, va) = self.member_value(a.pts.first()?, state)?;
+        let (cb, vb) = self.member_value(b.pts.first()?, state)?;
+        if ca != cb || !self.enum_kind.get(&ca).map(|k| k.flag).unwrap_or(false) {
+            return None;
+        }
+        let (x, y) = (intern::key_as_int(va)?, intern::key_as_int(vb)?);
+        let r = match op {
+            ast::Operator::BitOr => x | y,
+            ast::Operator::BitAnd => x & y,
+            _ => x ^ y,
+        };
+        Some(Value::obj(self.flag_member(ca, r, node, state)))
+    }
+
+    /// The member of Flag class `cls` with value `r`: a defined one, else a combination object.
+    pub fn flag_member(&mut self, cls: u32, r: i64, node: &Node, state: &mut State) -> u32 {
+        let vk = key_str_lit("value");
+        let ms = self.enum_members.get(&cls).cloned().unwrap_or_default();
+        for (_, m) in &ms {
+            if state.slot(*m, Ns::Attr, vk).kv.as_lit() == Some(intern::key_int(r)) {
+                return *m;
+            }
+        }
+        // the name: the members it combines, highest value first (`R|W`); None for 0 / unnamed bits
+        let mut parts: Vec<(i64, String)> = Vec::new();
+        let mut covered = 0i64;
+        for (n, m) in &ms {
+            if let Some(v) = state.slot(*m, Ns::Attr, vk).kv.as_lit().and_then(intern::key_as_int) {
+                if v != 0 && (v & (v - 1)) == 0 && r & v == v {
+                    parts.push((v, n.clone()));
+                    covered |= v;
+                }
+            }
+        }
+        parts.sort_by(|p, q| q.0.cmp(&p.0));
+        let name = if r != 0 && covered == r { Value::lit_str(&parts.iter().map(|p| p.1.as_str()).collect::<Vec<_>>().join("|")) } else { self.none_v.clone() };
+        let cname = self.class_info(cls).name.clone();
+        let qual = format!("{}({})", cname, r);
+        let mid = self.alloc_raw(Kind::Instance, &format!("flag:{}:{}", cls, r), "", true, &qual, Payload::Cls(cls));
+        let mut row = Row::new();
+        for (k, val) in [("name", name), ("value", Value::lit(intern::key_int(r)))] {
+            let kk = key_str_lit(k);
+            row = row.store(kk, true);
+            state.set_slot(mid, Ns::Attr, kk, val, true);
+        }
+        state.set_row(mid, Ns::Attr, row);
+        let text = match state.slot(mid, Ns::Attr, key_str_lit("name")).kv.as_lit().and_then(intern::key_as_str) {
+            Some(n) => format!("{}.{}", cname, n),
+            None => qual,
+        };
+        let ek = self.enum_kind.get(&cls).copied().unwrap_or_default();
+        let mk = intern::key_member(&text, if ek.mixed { Some(intern::key_int(r)) } else { None });
+        self.member_key.insert(mid, mk);
+        self.key_member.insert(mk, mid);
+        let _ = node;
+        mid
+    }
+
+    /// `a in b` on members of one Flag class with known values: `a & b == a`.
+    pub fn flag_contains(&self, a: &Value, b: &Value, state: &State) -> Option<bool> {
+        if self.member_key.is_empty() || a.pts.len() != 1 || b.pts.len() != 1 || !a.kv.is_bot() || !b.kv.is_bot() {
+            return None;
+        }
+        let (ca, va) = self.member_value(a.pts.first()?, state)?;
+        let (cb, vb) = self.member_value(b.pts.first()?, state)?;
+        if ca != cb || !self.enum_kind.get(&ca).map(|k| k.flag).unwrap_or(false) {
+            return None;
+        }
+        let (x, y) = (intern::key_as_int(va)?, intern::key_as_int(vb)?);
+        Some(x & y == x)
+    }
+
+    /// Member keys (read back from a record's keys) are the member objects.
+    pub fn unkey(&self, v: &Value) -> Value {
+        if self.key_member.is_empty() || super::disabled("memberkey") {
+            return v.clone();
+        }
+        let lits = crate::domain::kv_literals(&v.kv);
+        if !lits.iter().any(intern::key_is_member) || !v.kv.is_literal() {
+            return v.clone();
+        }
+        let mut pts = v.pts.clone();
+        let mut rest: Vec<KeyId> = Vec::new();
+        for k in lits.iter() {
+            match self.key_member.get(&k) {
+                Some(m) => pts = pts.union(&crate::domain::ObjSet::one(*m)),
+                None => rest.push(k),
+            }
+        }
+        let kv = if rest.is_empty() { KeyVal::Bot } else { KeyVal::lits(KeySet::from_iter(rest)) };
+        Value::with_kv(pts, kv)
     }
 
     pub fn canon_kv(&self, oid: u32, ns: Ns, kv: &KeyVal, state: &State) -> KeyVal {
@@ -762,6 +935,8 @@ impl Analyzer {
 
     // ---------------------------------------------------------- attributes
     pub fn load_attr(&mut self, obj: &Value, name: &str, node: &Node, state: &mut State, report: bool) -> Value {
+        let unk = self.unkey(obj);
+        let obj = &unk;
         if let Some(v) = self.t_getattr(obj, name, node, state) {
             return v;
         }

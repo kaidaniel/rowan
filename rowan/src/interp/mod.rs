@@ -351,6 +351,15 @@ pub struct LoopCtx {
     pub continues: Option<State>,
 }
 
+#[derive(Clone, Copy, Default, Debug)]
+pub struct EnumKind {
+    pub mixed: bool,
+    pub repr_value: bool,
+    pub flag: bool,
+    /// str-based (`auto()` is the lower-cased name in a StrEnum)
+    pub is_str: bool,
+}
+
 /// Everything a model needs about a call.
 #[derive(Clone)]
 pub struct Call {
@@ -718,6 +727,12 @@ pub struct Analyzer {
     pub t_dim_alias: FxHashMap<(ObjId, crate::shape::DimId), String>,
     /// Enum classes: their members in definition order
     pub enum_members: FxHashMap<ObjId, Vec<(String, ObjId)>>,
+    /// Enum classes: (mixes in str / int: equal to its value, `str()` is the value (ReprEnum:
+    /// StrEnum, IntEnum, IntFlag), a Flag)
+    pub enum_kind: FxHashMap<ObjId, EnumKind>,
+    /// members and Flag combinations ↔ their keys (`Key::Member`)
+    pub member_key: FxHashMap<ObjId, intern::KeyId>,
+    pub key_member: FxHashMap<intern::KeyId, ObjId>,
     /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
     pub bypass_setattr: bool,
     pub cond_depth: i32,
@@ -917,6 +932,9 @@ impl Analyzer {
             symbol_scope: FxHashMap::default(),
             entry_scope: None,
             enum_members: FxHashMap::default(),
+            enum_kind: FxHashMap::default(),
+            member_key: FxHashMap::default(),
+            key_member: FxHashMap::default(),
             bypass_setattr: false,
             cond_depth: 0,
             branch_depth: 0,

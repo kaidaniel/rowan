@@ -520,7 +520,10 @@ impl Analyzer {
                 }
                 Value::data(&format!("slice[{}]@L{}", b.join(":"), nd.line))
             }
-            _ => self.eval(node, state),
+            _ => {
+                let v = self.eval(node, state);
+                self.keyify(&v)
+            }
         }
     }
 
@@ -841,6 +844,18 @@ impl Analyzer {
                 if let Some(ph) = a.kv.as_param() {
                     self.record_event("narrow", ph);
                 }
+                // members of a Flag: bits; else a member is its key
+                if !self.member_key.is_empty() && !a.pts.is_empty() {
+                    let b = self.eval_right(right, state);
+                    if let Some(r) = self.flag_contains(a, &b, state) {
+                        return Some(if op == ast::CmpOp::In { r } else { !r });
+                    }
+                    self.cmp_right = Some(b);
+                    let ka = self.keyify(a);
+                    if ka.pts.is_empty() {
+                        return self.compare_const(op, &ka, right, state);
+                    }
+                }
                 // a literal key in records whose rows decide it
                 if a.pts.is_empty() && a.kv.is_literal() && lits.len() == 1 {
                     let k = lits.iter().next().unwrap();
@@ -954,6 +969,15 @@ impl Analyzer {
             }
             ast::CmpOp::Eq | ast::CmpOp::NotEq => {
                 let b = self.eval_right(right, state);
+                // Enum members: their keys (a mixed-in one: its value)
+                let (a, b, lits) = if self.member_key.is_empty() {
+                    (a.clone(), b, lits)
+                } else {
+                    let ka = self.member_base(&self.keyify(a));
+                    let kb = self.member_base(&self.keyify(&b));
+                    let l = crate::domain::kv_literals(&ka.kv);
+                    (ka, kb, l)
+                };
                 let bl = crate::domain::kv_literals(&b.kv);
                 // a builtin dict / list / tuple / set never equals a str / number / bool / None
                 let container = |an: &Analyzer, v: &Value| !v.pts.is_empty() && v.pts.iter().all(|o| matches!(an.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set) && !crate::models::pandas::is_series_obj(an, o)) && matches!(v.kv, KeyVal::Bot);
@@ -1159,6 +1183,7 @@ impl Analyzer {
                         intern::Key::Bytes(b) => !b.is_empty(),
                         intern::Key::Ellipsis => true,
                         intern::Key::Inv(..) => true,
+                        intern::Key::Member(..) => true,
                     })
                 };
                 let mut it = lits.iter();
@@ -1215,6 +1240,9 @@ impl Analyzer {
 
     pub fn binop(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Value {
         if let Some(v) = self.binop_dunder(op, a, b, node, state) {
+            return v;
+        }
+        if let Some(v) = self.flag_binop(op, a, b, node, state) {
             return v;
         }
         if let Some(v) = self.t_binop(op, a, b, node, state) {
@@ -1573,6 +1601,7 @@ impl Analyzer {
                                     }
                                 } else {
                                     let v = self.eval(&i.expression, state);
+                                    let v = self.enum_text(&v, state).unwrap_or(v);
                                     parts.push(Part::Hole(v));
                                 }
                             }

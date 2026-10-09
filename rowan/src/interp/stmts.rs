@@ -1305,6 +1305,8 @@ impl Analyzer {
         let mut typed_dict = false;
         let mut named_tuple = false;
         let mut is_enum = false;
+        let mut ek = crate::interp::EnumKind::default();
+        let mut str_mixin = false;
         let mut dict_base = false;
         let mut pydantic = false;
         let mut nn_module = false;
@@ -1318,11 +1320,36 @@ impl Analyzer {
                 let bv = self.eval(b, state);
                 for oid in bv.pts.iter() {
                     match self.kind(oid) {
-                        Kind::Class => bases.push(oid),
+                        Kind::Class => {
+                            if let Some(k) = self.enum_kind.get(&oid) {
+                                ek.mixed |= k.mixed;
+                                ek.is_str |= k.is_str;
+                                ek.repr_value |= k.repr_value;
+                                ek.flag |= k.flag;
+                            }
+                            bases.push(oid)
+                        }
                         Kind::External => {
                             let q = self.external_qual(oid);
                             if (q.ends_with("Enum") || q.ends_with("Flag")) && q.starts_with("enum.") {
                                 is_enum = true;
+                            }
+                            match q.as_str() {
+                                "enum.StrEnum" | "enum.IntEnum" | "enum.IntFlag" | "enum.ReprEnum" => {
+                                    ek.mixed = true;
+                                    ek.repr_value = true;
+                                }
+                                "builtins.str" | "builtins.int" => ek.mixed = true,
+                                _ => {}
+                            }
+                            if q == "enum.StrEnum" {
+                                ek.is_str = true;
+                            }
+                            if q == "builtins.str" {
+                                str_mixin = true;
+                            }
+                            if matches!(q.as_str(), "enum.Flag" | "enum.IntFlag") {
+                                ek.flag = true;
                             }
                             if q == "builtins.dict" {
                                 dict_base = true;
@@ -1449,6 +1476,10 @@ impl Analyzer {
         let enum_base = info.bases.iter().any(|b| self.enum_members.contains_key(b));
         if (is_enum || enum_base) && !crate::interp::disabled("enummembers") {
             let mut members: Vec<(String, u32)> = Vec::new();
+            self.enum_kind.insert(coid, ek);
+            // `auto()`: the lower-cased name (StrEnum), the next power of two (Flag), else the
+            // last int value + 1
+            let mut last_int: i64 = 0;
             for st in &c.body {
                 let ast::Stmt::Assign(a) = st else { continue };
                 let [ast::Expr::Name(n)] = &a.targets[..] else { continue };
@@ -1457,9 +1488,32 @@ impl Analyzer {
                     continue;
                 }
                 let nk = key_str_lit(&name);
+                let is_auto = match &*a.value {
+                    ast::Expr::Call(cl) => match &*cl.func {
+                        ast::Expr::Name(f) => f.id.as_str() == "auto",
+                        ast::Expr::Attribute(at) => at.attr.as_str() == "auto",
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                // (`class M(str, Enum)` with `auto()`: str of an int, deprecated: left unknown)
+                if is_auto && !(str_mixin && !ek.is_str) && !crate::interp::disabled("enumauto") {
+                    let av = if ek.is_str && !ek.flag {
+                        Value::lit(key_str_lit(&name.to_lowercase()))
+                    } else if ek.flag {
+                        let nx = if last_int <= 0 { 1 } else { 1i64 << (64 - (last_int as u64).leading_zeros()) };
+                        Value::lit(crate::intern::key_int(nx))
+                    } else {
+                        Value::lit(crate::intern::key_int(last_int + 1))
+                    };
+                    self.cls_slots.insert((coid, Ns::Attr, nk), av);
+                }
                 let Some(v) = self.cls_slots.get(&(coid, Ns::Attr, nk)).cloned() else { continue };
                 if v.pts.iter().any(|o| matches!(self.kind(o), Kind::Function | Kind::Class)) {
                     continue;
+                }
+                if let Some(i) = v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(crate::intern::key_as_int) {
+                    last_int = last_int.max(i);
                 }
                 let mid = self.alloc_raw(Kind::Instance, &format!("enum:{}:{}", coid, name), "", true, &format!("{}.{}", c.name.id, name), Payload::Cls(coid));
                 let mut row = Row::new();
@@ -1470,6 +1524,10 @@ impl Analyzer {
                 }
                 state.set_row(mid, Ns::Attr, row);
                 self.cls_slots.insert((coid, Ns::Attr, nk), Value::obj(mid));
+                let mval = if ek.mixed { v.kv.as_lit().filter(|_| v.pts.is_empty()) } else { None };
+                let mk = crate::intern::key_member(&format!("{}.{}", c.name.id, name), mval);
+                self.member_key.insert(mid, mk);
+                self.key_member.insert(mk, mid);
                 members.push((name, mid));
             }
             self.enum_members.insert(coid, members);

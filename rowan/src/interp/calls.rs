@@ -230,7 +230,13 @@ impl Analyzer {
                     }
                     return self.none_v.clone();
                 }
-                let call = Call { qual: qual.clone(), recv: Some(recv.clone()), args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
+                let mut args = args.to_vec();
+                if qual.starts_with("dict.") || qual.starts_with("set.") {
+                    if let Some(a) = args.first_mut() {
+                        *a = self.keyify(a);
+                    }
+                }
+                let call = Call { qual: qual.clone(), recv: Some(recv.clone()), args, kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
                 if qual.starts_with("str.") {
                     if let Some(v) = crate::models::pure::try_pure(self, state, &call) {
                         return v;
@@ -239,7 +245,7 @@ impl Analyzer {
                 if let Some(m) = self.models.lookup(&qual) {
                     return m(self, state, &call);
                 }
-                self.unknown_call(&qual, Some(&recv), args, kwargs, star_args, star_kwargs, state, node)
+                self.unknown_call(&qual, Some(&recv), &call.args, kwargs, star_args, star_kwargs, state, node)
             }
             Kind::Unknown => {
                 let q = format!("call of {}", self.obj(oid).label);

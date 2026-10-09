@@ -30,6 +30,9 @@ pub enum Key {
     Tuple(Vec<KeyId>),
     /// `fn⁻¹(key)`: the source key x with fn(x) == key
     Inv(Arc<str>, KeyId),
+    /// an Enum member as a key: `Cls.NAME`, with its value when the enum mixes in str / int
+    /// (`StrEnum`, `IntEnum`, `class M(str, Enum)`: equal to and hashed as the value)
+    Member(Arc<str>, Option<KeyId>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -150,6 +153,22 @@ pub fn key_inv(fn_name: &str, k: KeyId) -> KeyId {
     key(Key::Inv(Arc::from(fn_name), k))
 }
 
+pub fn key_member(qual: &str, value: Option<KeyId>) -> KeyId {
+    key(Key::Member(Arc::from(qual), value))
+}
+
+/// The value a mixed-in Enum member key equals (`Mode.FAST` → `"fast"`).
+pub fn key_member_value(id: KeyId) -> Option<KeyId> {
+    with_key(id, |k| match k {
+        Key::Member(_, v) => *v,
+        _ => None,
+    })
+}
+
+pub fn key_is_member(id: KeyId) -> bool {
+    with_key(id, |k| matches!(k, Key::Member(..)))
+}
+
 pub fn key_none() -> KeyId {
     key(Key::None)
 }
@@ -213,6 +232,8 @@ fn key_repr_inner(k: &Key) -> String {
             }
         }
         Key::Inv(f, k) => format!("{}⁻¹({})", f, key_repr(*k)),
+        Key::Member(_, Some(v)) => key_repr(*v),
+        Key::Member(q, None) => q.to_string(),
     }
 }
 

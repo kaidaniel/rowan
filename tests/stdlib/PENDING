@@ -8,8 +8,6 @@ small/s020_set_keys.py
 small/s021_str_format.py
 small/s023_fstrings.py
 small/s035_dataclass_initvar_frozen.py
-small/s037_enum_basic.py
-small/s038_enum_flag_strenum.py
 small/s039_typeddict.py
 small/s040_typing_namedtuple.py
 small/s041_namespace_proxy.py

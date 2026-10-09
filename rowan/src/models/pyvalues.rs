@@ -107,7 +107,7 @@ fn truthy(k: KeyId) -> Option<bool> {
         Key::Bytes(b) => !b.is_empty(),
         Key::Tuple(t) => !t.is_empty(),
         Key::Ellipsis => true,
-        Key::Inv(..) => return None,
+        Key::Inv(..) | Key::Member(..) => return None,
     })
 }
 
@@ -259,7 +259,7 @@ fn py_repr_k(k: &Key, ascii: bool) -> Option<String> {
                 format!("({})", parts.join(", "))
             }
         }
-        Key::Inv(..) => return None,
+        Key::Inv(..) | Key::Member(..) => return None,
     })
 }
 
@@ -948,7 +948,7 @@ pub fn format_value(value: KeyId, spec: &str) -> Option<String> {
             let sp = parse_spec(spec, '>', None)?;
             format_float_spec(x, sp)
         }
-        Key::Inv(..) => None,
+        Key::Inv(..) | Key::Member(..) => None,
         _ => {
             if spec.is_empty() {
                 py_str(value)
@@ -1364,7 +1364,7 @@ fn py_eq(a: KeyId, b: KeyId) -> Option<bool> {
         return Some(num_cmp(x, y) == Some(Ordering::Equal));
     }
     match (key_get(a), key_get(b)) {
-        (Key::Inv(..), _) | (_, Key::Inv(..)) => None,
+        (Key::Inv(..) | Key::Member(..), _) | (_, Key::Inv(..) | Key::Member(..)) => None,
         (Key::Tuple(x), Key::Tuple(y)) => {
             if x.len() != y.len() {
                 return Some(false);
