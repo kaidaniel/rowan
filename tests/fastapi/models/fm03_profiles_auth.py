@@ -47,7 +47,7 @@ def request_context(request):
     rid = request.headers.get("x-request-id")
     if rid is not None:
         ctx["request_id"] = rid
-    #@row ctx: present={path,method,request_id} definite={path,method} closed
+    _ = 0  #@row ctx: present={path,method,request_id} definite={path,method} closed
     return ctx
 
 

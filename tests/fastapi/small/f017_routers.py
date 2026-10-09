@@ -70,4 +70,4 @@ if __name__ == "__main__":
         client.post("/v1/users/cyd", json={})
     except KeyError:
         pass
-    #@row STORE: present={items,users} definite={items,users} closed
+    _ = 0  #@row STORE: present={items,users} definite={items,users} closed

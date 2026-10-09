@@ -46,6 +46,6 @@ if __name__ == "__main__":
         k.name = "c"
     except FrozenInstanceError:
         blocked = True
-    #@value blocked: exactly={True}
+    _ = 0  #@value blocked: exactly={True}
     table = {Key("a", "b"): 1}
     v = table[k]                                 #@value v: exactly={1}

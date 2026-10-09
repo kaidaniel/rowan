@@ -68,7 +68,7 @@ def from_env():
     layer = {"env": s.env, "workers": s.workers}
     if s.db_url:
         layer["db"] = {"url": s.db_url}
-    #@row layer: present={env,workers,db} definite={env,workers} closed
+    _ = 0  #@row layer: present={env,workers,db} definite={env,workers} closed
     return layer
 
 
@@ -76,7 +76,7 @@ def build(*layers):
     merged = DEFAULTS
     for layer in layers:
         merged = deep_merge(merged, layer)
-    #@row merged: present={name,env,db,cache,workers,flags,debug} definite={name,env,db,cache} closed
+    _ = 0  #@row merged: present={name,env,db,cache,workers,flags,debug} definite={name,env,db,cache} closed
     cfg = AppConfig.model_validate(merged)
     #@row cfg: present={name,env,db,cache,flags,workers} definite={name,env,db,cache,flags,workers} closed
     db = cfg.db

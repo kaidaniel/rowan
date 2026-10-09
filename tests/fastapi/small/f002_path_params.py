@@ -16,7 +16,7 @@ def find_user(uid):
     user = USERS.get(uid)
     if user is None:
         raise HTTPException(status_code=404, detail="no such user")
-    #@row user: present={id,name,email} definite={id,name} closed
+    _ = 0  #@row user: present={id,name,email} definite={id,name} closed
     return user
 
 

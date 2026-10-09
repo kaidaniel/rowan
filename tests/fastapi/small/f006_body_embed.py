@@ -34,7 +34,7 @@ def weighted(item: Dict[str, Any] = Body(...), importance: int = Body(1)):
     w = {"name": item["name"], "importance": importance}
     if importance > 2:
         w["urgent"] = True
-    #@row w: present={name,importance,urgent} definite={name,importance} closed
+    _ = 0  #@row w: present={name,importance,urgent} definite={name,importance} closed
     return w
 #@schema param weighted.item: always={name} only={name}
 

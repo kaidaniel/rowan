@@ -12,7 +12,7 @@ def trace_of(request):
     tenant = request.headers.get("x-tenant")
     if tenant:
         t["tenant"] = tenant
-    #@row t: present={path,method,tenant} definite={path,method} closed
+    _ = 0  #@row t: present={path,method,tenant} definite={path,method} closed
     return t
 
 

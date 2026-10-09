@@ -33,7 +33,7 @@ if __name__ == "__main__":
         a._replace(bogus=1)
     except (TypeError, ValueError):
         rejected = True
-    #@value rejected: exactly={True}
+    _ = 0  #@value rejected: exactly={True}
     f = Row._fields                              #@value f: exactly={("id","name","tags")}
     dflt = Row._field_defaults                   #@row dflt: present={name,tags} definite={name,tags} closed
     P3 = namedtuple("P3", Point._fields + ("z",))

@@ -14,7 +14,7 @@ def route_event(kind, data):
         ev = {"kind": kind, "x": data["x"], "y": data["y"]}  #@ input x ; input y
     else:
         ev = {"kind": kind, "text": data.get("text", "")}
-    #@row ev: present={kind,x,y,text} definite={kind} closed
+    _ = 0  #@row ev: present={kind,x,y,text} definite={kind} closed
     return ev
 
 
@@ -38,7 +38,7 @@ async def raw(request: Request):
     out = {"user": user, "n": len(tags)}
     if verbose:
         out["keys"] = sorted(payload)
-    #@row out: present={user,n,keys} definite={user,n} closed
+    _ = 0  #@row out: present={user,n,keys} definite={user,n} closed
     return out
 #@schema json.loads@L33: always={user} only={user}
 

@@ -25,7 +25,7 @@ def normalize_event(raw):
     ev = {"kind": kind, "user": user, "weight": KNOWN_KINDS[kind], "value": float(raw.get("value", 0))}  #@ ok view ; ok click ; ok buy
     if "props" in raw:
         ev["n_props"] = len(raw["props"])            #@ ok props
-    #@row ev: present={kind,user,weight,value,n_props} definite={kind,user,weight,value} closed
+    _ = 0  #@row ev: present={kind,user,weight,value,n_props} definite={kind,user,weight,value} closed
     #@row raw: definite={kind,user} open
     return ev
 

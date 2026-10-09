@@ -80,7 +80,7 @@ def on_sale(data):
     out = {"handled": "sale", "left": row["qty"]}    #@ ok qty
     if row["qty"] == 0:
         out["reorder"] = True
-    #@row out: present={handled,left,reorder} definite={handled,left} closed
+    _ = 0  #@row out: present={handled,left,reorder} definite={handled,left} closed
     return out
 
 

@@ -23,7 +23,7 @@ def filters(q: Optional[str] = None, active: bool = True):
     f = {"active": active}
     if q:
         f["q"] = q
-    #@row f: present={active,q} definite={active} closed
+    _ = 0  #@row f: present={active,q} definite={active} closed
     return f
 
 

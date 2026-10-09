@@ -33,7 +33,7 @@ def get_model(model: Model, mode: Literal["fast", "slow"] = "fast"):
     info = describe(name, mode)
     if model is Model.resnet:
         info["skip"] = CONFIG[name]["skip"]          #@ ok skip
-    #@row info: present={name,layers,speed,skip} definite={name,layers,speed} closed
+    _ = 0  #@row info: present={name,layers,speed,skip} definite={name,layers,speed} closed
     return info
 
 

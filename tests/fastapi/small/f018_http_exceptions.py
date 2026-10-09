@@ -21,7 +21,7 @@ def get_account(acc_id):
         raise HTTPException(status_code=404, detail={"error": "no account", "field": "account"})
     if acc.get("frozen"):
         raise HTTPException(status_code=423, detail={"error": "frozen", "field": "account"}, headers={"Retry-After": "60"})
-    #@row acc: present={balance,owner,frozen} definite={balance,owner} closed
+    _ = 0  #@row acc: present={balance,owner,frozen} definite={balance,owner} closed
     return acc
 
 

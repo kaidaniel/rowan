@@ -13,7 +13,7 @@ def normalize(payload):
     rec = {"name": name, "qty": qty}
     if "tags" in payload:
         rec["tags"] = sorted(payload["tags"])        #@ ok tags
-    #@row rec: present={name,qty,tags} definite={name,qty} closed
+    _ = 0  #@row rec: present={name,qty,tags} definite={name,qty} closed
     #@row payload: definite={name} open
     return rec
 

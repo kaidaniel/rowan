@@ -26,7 +26,7 @@ def merge(user, item, note):
         rec["note"] = note
     if user.full_name is not None:
         rec["display"] = user.full_name
-    #@row rec: present={owner,title,price,note,display} definite={owner,title,price} closed
+    _ = 0  #@row rec: present={owner,title,price,note,display} definite={owner,title,price} closed
     return rec
 
 

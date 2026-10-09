@@ -41,7 +41,7 @@ def create_item(item: Item):
         s["sku"] = sku_of(item)
     except AttributeError:
         pass
-    #@row s: present={name,price,tags,note,n_tags,gross} definite={name,price,tags,note,n_tags,gross} closed
+    _ = 0  #@row s: present={name,price,tags,note,n_tags,gross} definite={name,price,tags,note,n_tags,gross} closed
     return s
 
 

@@ -38,7 +38,7 @@ def whoami(
         ctx.update(describe(ctx))
     except KeyError:
         ctx["anonymous"] = True
-    #@row ctx: present={agent,token,session,lang,who,anonymous} definite={agent,lang} closed
+    _ = 0  #@row ctx: present={agent,token,session,lang,who,anonymous} definite={agent,lang} closed
     return ctx
 
 

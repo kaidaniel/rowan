@@ -21,14 +21,14 @@ def get_user(x_user: str = Header(...), db: dict = Depends(get_db)):
     user = users.get(x_user)
     if user is None:
         raise HTTPException(status_code=401, detail="unknown user")
-    #@row user: present={name,admin} definite={name} closed
+    _ = 0  #@row user: present={name,admin} definite={name} closed
     return user
 
 
 def get_admin(user: dict = Depends(get_user)):
     if not user.get("admin"):
         raise HTTPException(status_code=403, detail="admins only")
-    #@row user: present={name,admin} definite={name,admin} closed
+    _ = 0  #@row user: present={name,admin} definite={name,admin} closed
     return user
 
 

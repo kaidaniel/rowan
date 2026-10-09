@@ -137,7 +137,7 @@ def admin_listing(store):
         u = store.load(uid)
         entry = {"id": u.id, "name": u.display, "admin": u.role == "admin"}   #@ ok display ; ok role
         out.append(entry)
-    #@row entry: present={id,name,admin} definite={id,name,admin} closed
+    _ = 0  #@row entry: present={id,name,admin} definite={id,name,admin} closed
     return out
 
 

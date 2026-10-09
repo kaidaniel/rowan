@@ -62,7 +62,7 @@ def reserve(sku, qty):
     item = CATALOG.get(sku)
     if item is None:
         raise UnknownSku(sku)
-    #@row item: present={price,stock,backorder} definite={price,stock} closed
+    _ = 0  #@row item: present={price,stock,backorder} definite={price,stock} closed
     if item["stock"] < qty and not item.get("backorder"):  #@ ok stock
         raise OutOfStock(sku, qty, item["stock"])
     item["stock"] = max(0, item["stock"] - qty)
@@ -88,7 +88,7 @@ def apply_coupon(code, subtotal):
     c = COUPONS.get(code)
     if c is None:
         raise HTTPException(status_code=400, detail={"error": "bad coupon", "code": code})
-    #@row c: present={kind,value,min_total} definite={kind,value} closed
+    _ = 0  #@row c: present={kind,value,min_total} definite={kind,value} closed
     if subtotal < c.get("min_total", 0):
         return 0.0
     if c["kind"] == "percent":                       #@ ok kind
@@ -115,7 +115,7 @@ def send_receipt(order, address):
     rec = {"to": order["customer"], "total": order["total"], "city": address["city"]}  #@ ok customer ; ok total ; ok city
     if order["gift_note"]:                           #@ ok gift_note
         rec["note"] = order["gift_note"]
-    #@row rec: present={to,total,city,note} definite={to,total,city} closed
+    _ = 0  #@row rec: present={to,total,city,note} definite={to,total,city} closed
     RECEIPTS.append(rec)
 
 
@@ -140,7 +140,7 @@ def build_order(order, lines, discount):
     oid = len(ORDERS) + 1
     out = {"id": oid, "customer": order.customer, "total": round(subtotal - discount, 2),
            "discount": discount or None, "gift_note": order.gift_note, "lines": lines}
-    #@row out: present={id,customer,total,discount,gift_note,lines} definite={id,customer,total,discount,gift_note,lines} closed
+    _ = 0  #@row out: present={id,customer,total,discount,gift_note,lines} definite={id,customer,total,discount,gift_note,lines} closed
     ORDERS[oid] = out
     return out
 

@@ -21,7 +21,7 @@ def list_items(page: int = 1, size: int = Query(10, le=100), q: Optional[str] = 
     out = {"page": page, "start": b["start"]}           #@ ok start
     if q is not None:
         out["q"] = q.lower()
-    #@row out: present={page,start,q} definite={page,start} closed
+    _ = 0  #@row out: present={page,start,q} definite={page,start} closed
     out["stop"] = b["stop"]                              #@ ok stop
     return out
 

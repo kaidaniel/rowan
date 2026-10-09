@@ -34,7 +34,7 @@ if __name__ == "__main__":
         Child(1, "t", "n", True)
     except TypeError:
         bad = True
-    #@value bad: exactly={True}
+    _ = 0  #@value bad: exactly={True}
     i2 = clone_with(i, qty=5)                    #@row i2: present={sku,qty} definite={sku,qty} closed
     c2 = clone_with(c, name="m")
     nm = c2.name                                 #@value nm: exactly={m}

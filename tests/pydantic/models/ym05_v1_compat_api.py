@@ -73,7 +73,7 @@ def create(store, request):
         note = Note.parse_obj(request["body"])   #@ possibly title
     except ValidationError as e:
         return Envelope[Note](status=422, error=str(e.errors()[0]["loc"])).dict()
-    #@row note: present={id,title,body,tags,owner,archived} definite={id,title,body,tags,owner,archived} absent={text} closed
+    _ = 0  #@row note: present={id,title,body,tags,owner,archived} definite={id,title,body,tags,owner,archived} absent={text} closed
     row = store.put(note)
     #@row row: present={id,title,body,tags,owner,archived} definite={id,title,body,tags,owner,archived} closed
     return Envelope[Note](status=201, data=note).dict()

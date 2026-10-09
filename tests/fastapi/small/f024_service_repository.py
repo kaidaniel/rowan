@@ -33,7 +33,7 @@ class TodoService:
         rec = {"title": data["title"].strip(), "done": bool(data.get("done", False))}  #@ input title
         if "priority" in data:
             rec["priority"] = int(data["priority"])  #@ ok priority
-        #@row rec: present={title,done,priority} definite={title,done} closed
+        _ = 0  #@row rec: present={title,done,priority} definite={title,done} closed
         #@row data: definite={title} open
         return rec
 

@@ -15,7 +15,7 @@ def send_email(to, ctx):
     msg = {"to": to, "subject": ctx["subject"], "text": f"hi {ctx['name']}"}  #@ ok subject ; ok name
     if "plan" in ctx:
         msg["plan"] = ctx["plan"]
-    #@row msg: present={to,subject,text,plan} definite={to,subject,text} closed
+    _ = 0  #@row msg: present={to,subject,text,plan} definite={to,subject,text} closed
     OUTBOX.append(msg)
 
 

@@ -128,5 +128,7 @@ library functions (`key=`, `map`, `executor.submit(f, …)`, `Thread(target=f)`,
   write temporary files under `tempfile`), deterministic (no time / random dependence in
   claims), each case runs in under a few seconds.
 * Put the directive at the end of the statement's line, or on a comment line of its own
-  directly below. Keys: bare words or Python literals (`"Amount Due"`, `0`).
+  directly below. A directive line applies to the code line directly above it, even when that
+  line is inside an `if` / `for` body: to check after the block, write a statement after it
+  (`_ = 0  #@row out: …`). Keys: bare words or Python literals (`"Amount Due"`, `0`).
 * One-line header comment saying what the case probes.

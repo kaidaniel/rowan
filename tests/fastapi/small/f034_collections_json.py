@@ -17,7 +17,7 @@ def tally(events):
         status[ev["status"]] += 1                    #@ input status
         kinds[ev["kind"]] += 1                       #@ input kind
         by_user[ev.get("user", "anon")].append(ev["kind"])
-    #@row status: present={ok,error} definite={ok,error} closed
+    _ = 0  #@row status: present={ok,error} definite={ok,error} closed
     #@row kinds: open
     #@row by_user: open
     return status, kinds, by_user

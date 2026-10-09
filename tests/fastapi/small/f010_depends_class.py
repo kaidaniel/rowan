@@ -11,7 +11,7 @@ class Paging:
         self.limit = min(limit, 20)
         if limit > 20:
             self.capped = True
-        #@row self: present={skip,limit,capped} definite={skip,limit} closed
+        _ = 0  #@row self: present={skip,limit,capped} definite={skip,limit} closed
 
 
 class Contains:
@@ -30,7 +30,7 @@ def window(p):
     w = {"from": p.skip, "to": p.skip + p.limit}
     if getattr(p, "capped", False):
         w["capped"] = True
-    #@row w: present={from,to,capped} definite={from,to} closed
+    _ = 0  #@row w: present={from,to,capped} definite={from,to} closed
     return w
 
 
