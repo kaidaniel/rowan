@@ -1,5 +1,3 @@
 # torch cases written but not yet expected to pass (paths relative to tests/torch/)
 small/s119_numpy_mix.py
 small/s124_recursion.py
-small/s125_generators_zip.py
-small/s129_tensor_isinstance.py

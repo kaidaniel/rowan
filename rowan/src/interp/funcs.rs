@@ -525,6 +525,16 @@ impl Analyzer {
                     parts[i] = parts[i].join(&e);
                 }
             } else {
+                // an iterable whose items are known by position (zip / enumerate of known lists)
+                if matches!(kind, Kind::Zip | Kind::Enumerate) && !crate::interp::disabled("unpackzip") {
+                    let it = self.iterate(&Value::obj(oid), node, state);
+                    if let Some(items) = it.items.filter(|v| v.len() == n) {
+                        for i in 0..n {
+                            parts[i] = parts[i].join(&items[i]);
+                        }
+                        continue;
+                    }
+                }
                 let e = self.elem_of(&Value::obj(oid), node, state);
                 for i in 0..n {
                     parts[i] = parts[i].join(&e);

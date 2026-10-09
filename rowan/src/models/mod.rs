@@ -496,6 +496,26 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// placeholder records an event so the call site decides.
 fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let (Some(v), Some(cv)) = (c.args.first(), c.args.get(1)) else { return Value::data("bool") };
+    // isinstance(x, torch.Tensor): decided for tensors and for containers / literals
+    if an.torch_on {
+        if let Some(q) = cv.single().filter(|o| an.kind(*o) == Kind::External).map(|o| an.external_qual(o)) {
+            if q == "torch.Tensor" || q == "torch.nn.Parameter" || q == "torch.nn.parameter.Parameter" {
+                let tensor = crate::models::torch::is_tensor(v);
+                let not_tensor = !tensor
+                    && !v.pts.is_empty()
+                    && v.pts.iter().all(|o| matches!(an.kind(o), Kind::List | Kind::Tuple | Kind::Dict | Kind::Set | Kind::Namespace | Kind::Function | Kind::Class) || (an.kind(o) == Kind::Instance && !an.t_is_module_instance(o)))
+                    && (v.kv.is_bot() || v.kv.is_literal())
+                    || v.pts.is_empty() && v.kv.is_literal();
+                if tensor && q == "torch.Tensor" {
+                    return Value::lit(intern::key_bool(true));
+                }
+                if not_tensor {
+                    return Value::lit(intern::key_bool(false));
+                }
+                return Value::data("bool");
+            }
+        }
+    }
     if crate::interp::disabled("isinst") {
         return Value::data("bool");
     }
