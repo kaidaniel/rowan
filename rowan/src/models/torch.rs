@@ -311,12 +311,12 @@ impl Analyzer {
 
     /// Run `f` with the printing context of the current function (its symbols, those of
     /// its class's `__init__`, aliases through self attributes).
-    pub fn t_print<R>(&self, f: impl FnOnce() -> R) -> R {
-        let ctx = self.t_print_ctx();
+    pub fn t_print<R>(&self, st: &State, f: impl FnOnce() -> R) -> R {
+        let ctx = self.t_print_ctx(st);
         sh::with_ctx(ctx, f)
     }
 
-    pub fn t_print_ctx(&self) -> sh::PrintCtx {
+    pub fn t_print_ctx(&self, st: &State) -> sh::PrintCtx {
         let scope = self.frames.iter().rev().find_map(|fr| fr.func).unwrap_or(0);
         let mut ctx = sh::PrintCtx { all: false, scope, ..Default::default() };
         if scope != 0 && self.has_obj(scope) && self.kind(scope) == Kind::Function {
@@ -328,14 +328,36 @@ impl Analyzer {
                         }
                     }
                 }
-                for ((c, sy), t) in self.t_sym_alias.iter() {
-                    if *c == cls {
-                        ctx.sym_alias.insert(*sy, t.clone());
-                    }
-                }
-                for ((c, d), t) in self.t_dim_alias.iter() {
-                    if *c == cls {
-                        ctx.dim_alias.insert(*d, t.clone());
+                // aliases: the shortest attribute path from self (through instances, not
+                // layer configs) holding an `__init__` value
+                if let Some(selfv) = st.env.get(&s("self")) {
+                    let mut queue: std::collections::VecDeque<(u32, String, u32)> = selfv.pts.iter().filter(|o| self.kind(*o) == Kind::Instance).map(|o| (o, "self".to_string(), 0)).collect();
+                    let mut seen: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
+                    while let Some((o, path, depth)) = queue.pop_front() {
+                        if !seen.insert(o) || queue.len() > 256 {
+                            continue;
+                        }
+                        for (k, v) in st.obj_slots(o, Ns::Attr) {
+                            let Some(name) = intern::key_as_str(k) else { continue };
+                            let p = format!("{}.{}", path, name);
+                            if let Some(d) = dim_of_label(&v).or_else(|| label(&v).and_then(|l| sh::dual_dim(&l))) {
+                                ctx.dim_alias.entry(d).or_insert_with(|| p.clone());
+                                continue;
+                            }
+                            if let KeyVal::Data(l) = &v.kv {
+                                if let Some(sy) = expr_sym(&intern::str_get(*l)) {
+                                    ctx.sym_alias.entry(sy).or_insert_with(|| p.clone());
+                                }
+                            }
+                            if v.pts.len() == 1 {
+                                let x = v.pts.first().unwrap();
+                                if let Some(sy) = self.t_sym_of_obj(x) {
+                                    ctx.sym_alias.entry(sy).or_insert_with(|| p.clone());
+                                } else if self.kind(x) == Kind::Instance && depth < 3 {
+                                    queue.push_back((x, p.clone(), depth + 1));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -366,12 +388,12 @@ impl Analyzer {
         match sh::decide(&c, &st.tf) {
             Some(true) => true,
             Some(false) => {
-                let m = self.t_print(msg);
+                let m = self.t_print(st, msg);
                 self.t_error(node, m, st);
                 false
             }
             None => {
-                let text = self.t_print(|| sh::cons_text(&c));
+                let text = self.t_print(st, || sh::cons_text(&c));
                 if !text.contains('?') {
                     self.t_require_note(node, text);
                 }
@@ -403,7 +425,7 @@ impl Analyzer {
                 RankRel::In(v) => v.contains(&(r as u32)),
             };
             if !ok {
-                let m = format!("{} needs {}, got {} ({})", what, rel_text(&rel), r, self.t_print(|| sh::shape_text(s)));
+                let m = format!("{} needs {}, got {} ({})", what, rel_text(&rel), r, self.t_print(st, || sh::shape_text(s)));
                 self.t_error(node, m, st);
             }
             return ok;
@@ -575,21 +597,6 @@ fn unused(_: StrId, _: KeyId, _: IndexMap<u8, u8>, _: Vec<Value>) {
 // operators, attributes, indexing
 // ---------------------------------------------------------------------------
 
-/// Is the value surely a Python number / dim (not a tensor)?
-fn is_scalar(v: &Value) -> bool {
-    if !v.pts.is_empty() {
-        return false;
-    }
-    match &v.kv {
-        KeyVal::Lit(k) => intern::key_is_number(*k) || matches!(intern::key_get(*k), intern::Key::Bool(_)),
-        KeyVal::Data(l) => {
-            let t = intern::str_get(*l);
-            t.starts_with(sh::DIM_PREFIX) || &*t == sh::NUM_LABEL
-        }
-        _ => false,
-    }
-}
-
 fn is_int_like(an: &Analyzer, v: &Value) -> bool {
     if !v.pts.is_empty() {
         return false;
@@ -749,7 +756,7 @@ impl Analyzer {
         match sh::broadcast(a, b, &st.tf) {
             Ok(s) => tensor_value(s),
             Err((x, y)) => {
-                let m = self.t_print(|| format!("{}: shapes {} and {} do not broadcast ({} vs {})", what, sh::shape_text(a), sh::shape_text(b), sh::dim_text(x), sh::dim_text(y)));
+                let m = self.t_print(st, || format!("{}: shapes {} and {} do not broadcast ({} vs {})", what, sh::shape_text(a), sh::shape_text(b), sh::dim_text(x), sh::dim_text(y)));
                 self.t_error(node, m, st);
                 Value::new()
             }
@@ -829,7 +836,7 @@ impl Analyzer {
                 match sh::broadcast(&Shape::known(x.clone()), &Shape::known(y.clone()), &st.tf) {
                     Ok(s) => Rest::Dims(s.dims().unwrap()),
                     Err((p, q)) => {
-                        let m = self.t_print(|| format!("{}: batch dims {} and {} do not broadcast", what, sh::dim_text(p), sh::dim_text(q)));
+                        let m = self.t_print(st, || format!("{}: batch dims {} and {} do not broadcast", what, sh::dim_text(p), sh::dim_text(q)));
                         self.t_error(node, m, st);
                         return Value::new();
                     }
@@ -1319,7 +1326,7 @@ impl Analyzer {
                             _ => false,
                         };
                         if grows || differs {
-                            let m = self.t_print(|| format!("{}: in-place result {} would not fit {}", name, sh::shape_text(&r), sh::shape_text(&s)));
+                            let m = self.t_print(st, || format!("{}: in-place result {} would not fit {}", name, sh::shape_text(&r), sh::shape_text(&s)));
                             self.t_error(&node, m, st);
                             return Value::new();
                         }
@@ -1689,7 +1696,7 @@ impl Analyzer {
                     let numel = sh::product(&d);
                     if let (Some(n), Some(p)) = (sh::as_lit(numel), sh::as_lit(prod)) {
                         if p == 0 || n % p != 0 {
-                            let m = format!("{}: shape {} is invalid for input of size {}", what, self.t_print(|| sh::shape_text(target)), n);
+                            let m = format!("{}: shape {} is invalid for input of size {}", what, self.t_print(st, || sh::shape_text(target)), n);
                             self.t_error(node, m, st);
                             return Value::new();
                         }
@@ -1703,7 +1710,7 @@ impl Analyzer {
         } else if let Some(d) = s.dims() {
             if let (Some(n), Some(p)) = (sh::as_lit(sh::product(&d)), sh::as_lit(sh::product(&t))) {
                 if n != p {
-                    let m = format!("{}: shape {} is invalid for input of size {}", what, self.t_print(|| sh::shape_text(target)), n);
+                    let m = format!("{}: shape {} is invalid for input of size {}", what, self.t_print(st, || sh::shape_text(target)), n);
                     self.t_error(node, m, st);
                     return Value::new();
                 }
@@ -1743,7 +1750,7 @@ impl Analyzer {
             }
             if let Some(x) = src {
                 if sh::is_one(x, &st.tf) != Some(true) && sh::dim_eq(x, *d, &st.tf) == Some(false) {
-                    let m = self.t_print(|| format!("expand: dim {} cannot expand to {}", sh::dim_text(x), sh::dim_text(*d)));
+                    let m = self.t_print(st, || format!("expand: dim {} cannot expand to {}", sh::dim_text(x), sh::dim_text(*d)));
                     self.t_error(node, m, st);
                     return Value::new();
                 }
@@ -2469,7 +2476,7 @@ impl Analyzer {
                     }
                     Some(prev) => {
                         if sh::dim_eq(prev, *d, &st.tf) == Some(false) && sh::is_one(prev, &st.tf) == Some(false) && sh::is_one(*d, &st.tf) == Some(false) {
-                            let m = self.t_print(|| format!("einsum: '{}' is {} in one operand and {} in another", ch, sh::dim_text(prev), sh::dim_text(*d)));
+                            let m = self.t_print(st, || format!("einsum: '{}' is {} in one operand and {} in another", ch, sh::dim_text(prev), sh::dim_text(*d)));
                             self.t_error(&node, m, st);
                             return Value::new();
                         }
@@ -3018,7 +3025,7 @@ impl Analyzer {
             let o = sh::norm(o, &st.tf);
             if let Some(v) = sh::as_lit(o) {
                 if v < 1 {
-                    let m = format!("{}: output size {} is too small (input {})", what, v, self.t_print(|| sh::dim_text(h)));
+                    let m = format!("{}: output size {} is too small (input {})", what, v, self.t_print(st, || sh::dim_text(h)));
                     self.t_error(node, m, st);
                     return Value::new();
                 }
@@ -3586,36 +3593,7 @@ impl Analyzer {
 }
 
 impl Analyzer {
-    /// `self.<name> = v` inside a method: remember that `self.<name>` holds an `__init__` value
-    /// (printed through it in the class's methods). The first (shortest) alias wins.
-    pub fn t_note_alias(&mut self, obj: &Value, name: &str, v: &Value) {
-        let Some(o) = obj.single() else { return };
-        if self.kind(o) != Kind::Instance {
-            return;
-        }
-        let Some(cls) = self.instance_class(o) else { return };
-        let Some(f) = self.frames.iter().rev().find_map(|fr| fr.func) else { return };
-        if !self.has_obj(f) || self.kind(f) != Kind::Function || self.func_info(f).cls.is_none() {
-            return;
-        }
-        let alias = format!("self.{}", name);
-        if let Some(d) = dim_of_label(v) {
-            self.t_dim_alias.entry((cls, d)).or_insert(alias);
-            return;
-        }
-        if let KeyVal::Data(l) = &v.kv {
-            if let Some(sy) = expr_sym(&intern::str_get(*l)) {
-                self.t_sym_alias.entry((cls, sy)).or_insert(alias);
-                return;
-            }
-        }
-        if v.pts.len() == 1 {
-            let p = v.pts.first().unwrap();
-            if let Some(sy) = self.t_sym_of_obj(p) {
-                self.t_sym_alias.entry((cls, sy)).or_insert(alias);
-            }
-        }
-    }
+    pub fn t_note_alias(&mut self, _obj: &Value, _name: &str, _v: &Value) {}
 }
 
 impl Analyzer {
@@ -3633,11 +3611,11 @@ impl Analyzer {
         };
         let dual = label(v).map(|l| sh::dual_dim(&l).is_some()).unwrap_or(false);
         let dim = if dim_of_label(v).is_some() || dual || self.t_int(v).is_some() || (!v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::Ph | Kind::Unknown))) {
-            self.t_dim(v, st).map(|d| self.t_print(|| sh::dim_text(d)))
+            self.t_dim(v, st).map(|d| self.t_print(st, || sh::dim_text(d)))
         } else {
             None
         };
-        let shape_json = shape.map(|s| self.t_print(|| sh::shape_json(&s)));
+        let shape_json = shape.map(|s| self.t_print(st, || sh::shape_json(&s)));
         serde_json::json!({"shape": shape_json, "dim": dim, "chain": chain, "entry": entry})
     }
 }

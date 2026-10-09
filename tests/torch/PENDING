@@ -1,7 +1,6 @@
 # torch cases written but not yet expected to pass (paths relative to tests/torch/)
 models/m01_transformer.py
 models/m02_nanogpt.py
-models/m03_resnet.py
 models/m05_vgg.py
 models/m06_alexnet.py
 models/m07_unet.py

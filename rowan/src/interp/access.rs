@@ -1419,7 +1419,7 @@ impl Analyzer {
 
     pub fn store_attr(&mut self, obj: &Value, name: &str, v: &Value, node: &Node, state: &mut State) {
         if self.torch_on {
-            self.t_note_alias(obj, name, v);
+
         }
         if !state.narrowed.is_empty() {
             let needle = format!(".{}", name);
