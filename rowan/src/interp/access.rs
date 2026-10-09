@@ -761,6 +761,8 @@ impl Analyzer {
                             }
                         }
                         if changed { Value::with_kv(out.pts, v.kv.clone()) } else { v }
+                    } else if crate::models::pydantic::PYD_ATTRS.contains(&name) && crate::models::pydantic::is_model(self, oid) {
+                        crate::models::pydantic::attr_value(self, state, oid, name, node)
                     } else if crate::models::pydantic::PYD_METHODS.contains(&name) && crate::models::pydantic::is_model(self, oid) {
                         self.method_value(&format!("pydantic.cls.{}", name), &Value::obj(oid))
                     } else if name == "__init__" && self.dataclass_init_owner(oid).is_some() {
@@ -1042,10 +1044,35 @@ impl Analyzer {
 
     pub fn load_instance_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool, single_target: bool) -> Value {
         let nk = key_str_lit(name);
+        // a pydantic private attribute: its hidden slot
+        if let Some(cls) = self.instance_class(oid) {
+            if name.starts_with('_') && self.pyd_is_private(cls, name, state) {
+                if !guarded {
+                    self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
+                }
+                return state.slot(oid, Ns::Attr, crate::models::pydantic::priv_key(name));
+            }
+            if name == "__pydantic_private__" && crate::models::pydantic::is_model(self, cls) {
+                let pc = self.pyd_class(cls, state);
+                let did = self.alloc_at(Kind::Dict, node, state, &format!("private@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("priv{}", oid)));
+                let mut row = Row::new();
+                for (pn, _, _) in pc.privates.iter() {
+                    let k = key_str_lit(pn);
+                    row = row.store(k, true);
+                    let v = state.slot(oid, Ns::Attr, crate::models::pydantic::priv_key(pn));
+                    state.set_slot(did, Ns::Item, k, v, true);
+                }
+                state.set_row(did, Ns::Item, row);
+                return Value::obj(did);
+            }
+        }
         // pydantic's API on a model instance (`model_dump`, `model_copy`, …)
         if crate::models::pydantic::PYD_METHODS.contains(&name) && !super::disabled("pydantic") {
             if let Some(cls) = self.instance_class(oid) {
                 if self.class_lookup(cls, name).is_none() && crate::models::pydantic::is_model(self, cls) && !state.row(oid, Ns::Attr).present.contains(nk) {
+                    if crate::models::pydantic::PYD_ATTRS.contains(&name) {
+                        return crate::models::pydantic::attr_value(self, state, oid, name, node);
+                    }
                     return self.method_value(&format!("pydantic.{}", name), &Value::obj(oid));
                 }
             }
@@ -1101,6 +1128,10 @@ impl Analyzer {
             let is_field = self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name);
             if let (Some(defc), false) = (self.class_lookup(c, name), is_field) {
                 let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
+                // a class attribute (not a method): the access succeeds
+                if !guarded && !cv.pts.iter().any(|f| matches!(self.kind(f), Kind::Function | Kind::Bound)) && !super::disabled("classattrverdict") {
+                    self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
+                }
                 return self.bound_outs(&cv, oid, c, name, node, state);
             }
         }
@@ -1160,8 +1191,19 @@ impl Analyzer {
         // declared class (annotation / self): resolve methods and class attributes (a
         // dataclass field's default is instance data, not a class attribute)
         let is_field = !super::disabled("dcfield") && ph.cls.get().map(|c| self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name)).unwrap_or(false);
-        // pydantic's API on a placeholder typed with a model class
+        // pydantic's API on a placeholder typed with a model class (and its private attributes)
         if let Some(pcls) = ph.cls.get() {
+            if name.starts_with('_') && self.pyd_is_private(pcls, name, state) {
+                let pk = crate::models::pydantic::priv_key(name);
+                if let Some(v) = state.slot_opt(oid, Ns::Attr, pk) {
+                    return v;
+                }
+                let row = state.row(oid, Ns::Attr);
+                return self.path_placeholder_value(oid, Ns::Attr, pk, &row, state);
+            }
+            if !is_field && crate::models::pydantic::PYD_ATTRS.contains(&name) && self.class_lookup(pcls, name).is_none() && crate::models::pydantic::is_model(self, pcls) && !super::disabled("pydantic") {
+                return crate::models::pydantic::attr_value(self, state, oid, name, node);
+            }
             if !is_field && crate::models::pydantic::PYD_METHODS.contains(&name) && self.class_lookup(pcls, name).is_none() && crate::models::pydantic::is_model(self, pcls) && !super::disabled("pydantic") {
                 return self.method_value(&format!("pydantic.{}", name), &Value::obj(oid));
             }
@@ -1527,6 +1569,15 @@ impl Analyzer {
             if kind == Kind::Frame {
                 crate::models::pandas::frame_setattr(self, oid, name, v, node, state, strong);
                 continue;
+            }
+            if matches!(kind, Kind::Instance | Kind::Ph) && name.starts_with('_') {
+                let cls = if kind == Kind::Ph { self.ph_info(oid).cls.get() } else { self.instance_class(oid) };
+                if let Some(cls) = cls {
+                    if self.pyd_is_private(cls, name, state) {
+                        state.set_slot(oid, Ns::Attr, crate::models::pydantic::priv_key(name), v.clone(), strong);
+                        continue;
+                    }
+                }
             }
             // a property with a setter: the setter runs instead of the store
             let cls_of = match kind {

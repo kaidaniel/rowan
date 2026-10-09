@@ -113,6 +113,9 @@ pub const KNOWN_IDENTITY_DECORATORS: &[&str] = &[
     "functools.lru_cache", "functools.cache", "functools.wraps", "contextlib.contextmanager", "abc.abstractmethod", "typing.overload",
     "typing.final", "builtins.staticmethod", "builtins.classmethod", "pytest.fixture", "asyncio.coroutine", "dataclasses.dataclass",
     "typing.no_type_check", "functools.total_ordering", "typing.runtime_checkable",
+    // pydantic registers these (models::pydantic reads them from the class body)
+    "pydantic.field_validator", "pydantic.model_validator", "pydantic.validator", "pydantic.root_validator", "pydantic.field_serializer",
+    "pydantic.model_serializer", "pydantic.computed_field", "pydantic.functional_validators.field_validator", "pydantic.dataclasses.dataclass",
 ];
 
 // ---------------------------------------------------------------------------
@@ -203,6 +206,13 @@ pub struct FuncInfo {
     /// `functools.lru_cache` / `cache`: repeated arguments give the cached result
     pub is_memo: Cell<bool>,
     pub generator: Cell<Option<ObjId>>,
+}
+
+impl FuncInfo {
+    /// The qualified name as Python spells it (no `class ` markers): `Conn.__init__`.
+    pub fn py_qualname(&self) -> String {
+        self.qualname.replace("class ", "")
+    }
 }
 
 impl FuncInfo {
@@ -739,6 +749,12 @@ pub struct Analyzer {
     /// pydantic model classes described (`pyd_class`), `TypeAdapter` types by index
     pub pyd_classes: FxHashMap<ObjId, Rc<crate::models::pydantic::PClass>>,
     pub pyd_adapters: Vec<crate::models::pydantic::Ann>,
+    pub pyd_depth: u32,
+    /// pydantic instances: the fields their input surely / maybe gave (`model_fields_set`)
+    pub pyd_set: FxHashMap<ObjId, (KeySet, KeySet)>,
+    /// a requirement-only entry run (`param F.x` schemas of a called function): no verdicts,
+    /// row checks, facts or notes
+    pub quiet: bool,
     /// FastAPI: routes, `include_router` edges (app, router, prefix), router prefixes, handlers
     pub fa_routes: Vec<crate::models::fastapi::FaRoute>,
     pub fa_includes: Vec<(ObjId, ObjId, String)>,
@@ -910,6 +926,9 @@ impl Analyzer {
             rel_files: Default::default(),
             pyd_classes: FxHashMap::default(),
             pyd_adapters: Vec::new(),
+            pyd_depth: 0,
+            pyd_set: FxHashMap::default(),
+            quiet: false,
             fa_routes: Vec::new(),
             fa_includes: Vec::new(),
             fa_prefix: FxHashMap::default(),
@@ -1284,7 +1303,7 @@ impl Analyzer {
     }
 
     pub fn verdict(&mut self, node: &Node, key: KeyId, cls: &Classification, oid: ObjId, ns: Ns, file_override: Option<&str>, text_override: Option<&str>) {
-        if matches!(cls.tier, Tier::Map | Tier::Sym) {
+        if matches!(cls.tier, Tier::Map | Tier::Sym) || self.quiet {
             return;
         }
         // a key written as `True` that reached the dict's `1`: reported as written
@@ -1339,6 +1358,9 @@ impl Analyzer {
     }
 
     pub fn note(&mut self, msg: String) {
+        if self.quiet {
+            return;
+        }
         if !self.notes_set.contains(&msg) {
             self.notes_set.insert(msg.clone());
             self.notes.push(msg);
@@ -1355,6 +1377,21 @@ impl Analyzer {
 
     // ------------------------------------------------------------- entry
     /// Past the time budget: the analysis keeps going but stops refining (see `MAX_MS`).
+    /// A module of the program itself: the main file's directory or below.
+    pub fn is_local_module(&self, m: ObjId) -> bool {
+        if m == self.main_module {
+            return true;
+        }
+        let idx = self.module_info(m).idx;
+        let Some(p) = frontend::module_path(idx) else { return false };
+        let canon = |p: &str| std::fs::canonicalize(p).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string());
+        let main_dir = std::path::Path::new(&canon(&self.filename)).parent().map(|d| d.to_path_buf());
+        match main_dir {
+            Some(d) => std::path::Path::new(&canon(&p)).starts_with(&d) && !p.contains("site-packages"),
+            None => false,
+        }
+    }
+
     pub fn over_deadline(&self) -> bool {
         self.started.elapsed().as_millis() as usize > limit("ms", MAX_MS)
     }
@@ -1391,12 +1428,16 @@ impl Analyzer {
             if start >= n {
                 break;
             }
-            self.analyse_uncalled_range(start, n, state);
+            self.analyse_uncalled_range(start, n, state, false);
             start = n;
         }
+        // then the requirement-only runs of the functions the program calls (last: summaries
+        // made while quiet hold no verdicts and must not be reused by a reporting run)
+        let n = self.objects.len() as ObjId;
+        self.analyse_uncalled_range(1, n, state, true);
     }
 
-    fn analyse_uncalled_range(&mut self, from: ObjId, n: ObjId, state: &mut State) {
+    fn analyse_uncalled_range(&mut self, from: ObjId, n: ObjId, state: &mut State, quiet_pass: bool) {
         for oid in from..n {
             if self.kind(oid) != Kind::Function || self.entry_done.contains(&oid) {
                 continue;
@@ -1407,7 +1448,13 @@ impl Analyzer {
             // a FastAPI handler: called by the framework with any request (also when the
             // program's own TestClient calls it), in any module
             let handler = self.fa_handlers.contains(&oid);
-            if (self.analysed_funcs.contains(&oid) && !self.torch_modules.contains(&fi.module) && !handler) || self.t_concrete_closures.contains(&oid) {
+            // a function the program calls: a requirement-only run with open parameters gives
+            // its own input contract (`param F.x` schemas)
+            let quiet = self.analysed_funcs.contains(&oid) && !self.torch_modules.contains(&fi.module) && !handler;
+            if quiet != quiet_pass {
+                continue;
+            }
+            if quiet && (disabled("paramschemas") || !fi.closure.is_empty() || !matches!(fi.node, FuncNode::Def(_)) || !self.is_local_module(fi.module) || self.over_deadline()) || self.t_concrete_closures.contains(&oid) {
                 continue;
             }
             self.entry_done.insert(oid);
@@ -1419,7 +1466,7 @@ impl Analyzer {
             if matches!(fi.node, FuncNode::Lambda(_)) && disabled("entryclosures") {
                 continue;
             }
-            if fi.module != self.main_module && !handler {
+            if fi.module != self.main_module && !handler && !(quiet && self.is_local_module(fi.module)) {
                 continue;
             }
             if handler && !disabled("fastapi") {
@@ -1520,7 +1567,7 @@ impl Analyzer {
                 if is_vararg || is_kwarg {
                     // a caller may pass any arguments here
                     if !disabled("entrystar") {
-                        let poid = self.unknown_source(&format!("param {}.{}", fi.qualname, a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
+                        let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
                         if is_vararg {
                             star_args.push(Value::obj(poid));
                         } else {
@@ -1536,7 +1583,7 @@ impl Analyzer {
                         args.push(d.clone());
                         continue;
                     }
-                    let poid = self.unknown_source(&format!("param {}.{}", fi.qualname, a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
+                    let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
                     // a number default in a torch module: the parameter (whatever a caller
                     // passes, the default included) stays a name dims can be written in
                     if self.torch_modules.contains(&fi.module) && d.pts.is_empty() && d.kv.as_lit().map(intern::key_is_number).unwrap_or(false) {
@@ -1551,7 +1598,7 @@ impl Analyzer {
                     None => None,
                 };
                 if v.is_none() {
-                    let poid = self.unknown_source(&format!("param {}.{}", fi.qualname, a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
+                    let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
                     v = Some(Value::obj(poid));
                 }
                 args.push(v.unwrap());
@@ -1560,8 +1607,19 @@ impl Analyzer {
             let fake = Node::synthetic(mi.idx, fi.node.node().line);
             let saved_entry = self.entry_run.replace(oid);
             let before = self.objects.len() as ObjId;
+            let saved_quiet = std::mem::replace(&mut self.quiet, quiet);
             self.call_user(oid, self_val, args, IndexMap::new(), star_args, star_kwargs, &mut st, &fake, None, true);
+            self.quiet = saved_quiet;
             self.entry_run = saved_entry;
+            if quiet {
+                // functions made by a requirement-only run are not the program's
+                let after = self.objects.len() as ObjId;
+                for o in before..after {
+                    if self.kind(o) == Kind::Function {
+                        self.entry_done.insert(o);
+                    }
+                }
+            }
             if self.torch_modules.contains(&fi.module) {
                 let after = self.objects.len() as ObjId;
                 let made: Vec<ObjId> = (before..after).filter(|o| self.kind(*o) == Kind::Function && !self.func_info(*o).closure.is_empty()).collect();
@@ -1573,8 +1631,13 @@ impl Analyzer {
                 }
             }
             self.frames.pop();
-            // keep schema requirements discovered in entry points
+            // keep schema requirements discovered in entry points (a requirement-only run: those
+            // of the function's own parameters)
+            let own = format!("param {}.", fi.py_qualname());
             for (src, d) in st.reqs.items() {
+                if quiet && !crate::domain::source_label(src).starts_with(&own) {
+                    continue;
+                }
                 let tgt = state.reqs.writable(&src);
                 for (k, info) in d.iter() {
                     let nv = match tgt.get(k) {
@@ -1751,7 +1814,7 @@ impl Analyzer {
                         }
                         if !number {
                             // the default, or whatever a caller passes
-                            let poid = self.unknown_source(&format!("param {}.{}", fi.qualname, a.name.id), SourceKind::Param, state, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
+                            let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, state, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
                             args.push(d.join(&Value::obj(poid)));
                             continue;
                         }
@@ -1762,7 +1825,7 @@ impl Analyzer {
                     };
                     args.push(match v {
                         Some(v) => v,
-                        None => Value::obj(self.unknown_source(&format!("param {}.{}", fi.qualname, a.name.id), SourceKind::Param, state, &format!("param {}", a.name.id), "", Ns::Item, vec![])),
+                        None => Value::obj(self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, state, &format!("param {}", a.name.id), "", Ns::Item, vec![])),
                     });
                 }
                 self.entry_scope = saved_scope;
@@ -1841,7 +1904,7 @@ impl Analyzer {
     }
 
     pub fn record_fact(&mut self, node: &Node, name: StrId, v: &Value, state: &State) {
-        if !self.facts_on || node.addr == 0 {
+        if !self.facts_on || node.addr == 0 || self.quiet {
             return;
         }
         let symbolic = !self.sum_stack.is_empty();
@@ -2026,7 +2089,7 @@ impl Analyzer {
 
     /// What a value is, for the golden harness's `#@value` checks: literals it may be, whether
     /// it may also be something unknown, and the (known) objects it may be.
-    pub fn value_info(&self, v: &Value) -> ValueInfo {
+    pub fn value_info(&self, v: &Value, state: &State) -> ValueInfo {
         let mut info = ValueInfo::default();
         if v.kv.is_literal() {
             info.lits = crate::domain::kv_literals(&v.kv).iter().collect();
@@ -2036,6 +2099,8 @@ impl Analyzer {
         for o in v.pts.iter() {
             match self.kind(o) {
                 Kind::Unknown | Kind::Ph | Kind::External => info.unknown = true,
+                // a tuple of known literals is that literal (as Python prints it)
+                Kind::Tuple if self.literal_tuple(o, state, 0).is_some() => info.lits.push(self.literal_tuple(o, state, 0).unwrap()),
                 _ => info.objects.push(self.obj(o).label.clone()),
             }
         }
@@ -2045,9 +2110,35 @@ impl Analyzer {
         info
     }
 
+    /// The literal a tuple object stands for: every position one known literal (nested
+    /// tuples too).
+    pub fn literal_tuple(&self, o: ObjId, state: &State, depth: u32) -> Option<KeyId> {
+        let n = self.obj(o).literal_len?;
+        if depth > 4 {
+            return None;
+        }
+        let mut items = Vec::with_capacity(n);
+        for i in 0..n {
+            let v = state.slot(o, Ns::Pos, intern::key_int(i as i64));
+            let k = match (v.pts.len(), &v.kv) {
+                (0, KeyVal::Lit(k)) => *k,
+                (1, KeyVal::Bot) => {
+                    let x = v.pts.first().unwrap();
+                    if self.kind(x) != Kind::Tuple {
+                        return None;
+                    }
+                    self.literal_tuple(x, state, depth + 1)?
+                }
+                _ => return None,
+            };
+            items.push(k);
+        }
+        Some(intern::key_tuple(items))
+    }
+
     /// Row-check support for the golden harness: after a statement at a requested line.
     pub fn after_stmt(&mut self, stmt: &ast::Stmt, state: &mut State) {
-        if self.row_check_requests.is_empty() {
+        if self.row_check_requests.is_empty() || self.quiet {
             return;
         }
         let n = frontend::node(stmt);
@@ -2079,7 +2170,7 @@ impl Analyzer {
                 continue;
             }
             let row = if rows.is_empty() { None } else { Some(must.iter().fold(crate::domain::join_rows(rows), |r, k| r.store(*k, true))) };
-            let value = self.value_info(&v);
+            let value = self.value_info(&v, state);
             let tensor = if self.torch_on {
                 // a line run several times in one analysis (a loop body): the join of its values
                 let (chain, entry) = (self.call_chain.clone(), self.entry_run.is_some());

@@ -42,6 +42,8 @@ pub struct PField {
     pub alias: Option<String>,
     /// the key `model_dump(by_alias=True)` uses (`serialization_alias`, else `alias`)
     pub ser_alias: Option<String>,
+    /// further input keys (`AliasChoices("ts", "timestamp")`: `timestamp`)
+    pub alts: Vec<String>,
     pub default: Option<&'static ast::Expr>,
     pub factory: Option<&'static ast::Expr>,
     pub required: bool,
@@ -71,6 +73,13 @@ pub struct PClass {
     pub root_post: Vec<Validator>,
     pub field_validators: Vec<Validator>,
     pub computed: Vec<String>,
+    /// private attributes (`_x: T = PrivateAttr(default=…)` / `= value`): name, default, factory
+    pub privates: Vec<(String, Option<&'static ast::Expr>, Option<&'static ast::Expr>)>,
+}
+
+/// The slot key of private attribute `name` (kept out of the attribute row: not in `vars()`).
+pub fn priv_key(name: &str) -> KeyId {
+    key_str_lit(&format!("\u{2}{}", name))
 }
 
 /// pydantic's methods and attributes on models and model classes.
@@ -79,6 +88,19 @@ pub const PYD_METHODS: &[&str] = &[
     "model_validate_json", "model_validate_strings", "model_construct", "model_extra", "model_post_init", "dict", "json", "copy", "parse_obj", "parse_raw",
     "construct", "schema", "__fields__", "__fields_set__", "validate",
 ];
+
+/// pydantic's members that are attributes (properties), not methods.
+pub const PYD_ATTRS: &[&str] = &["model_fields", "model_fields_set", "model_computed_fields", "model_extra", "__fields__", "__fields_set__"];
+
+/// The value of attribute `name` (one of `PYD_ATTRS`) on a model instance / class.
+pub fn attr_value(an: &mut Analyzer, st: &mut State, recv: ObjId, name: &str, node: &Node) -> Value {
+    let c = Call { qual: format!("pydantic.{}", name), recv: Some(Value::obj(recv)), args: vec![], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
+    if an.kind(recv) == Kind::Class {
+        m_class(an, st, &c)
+    } else {
+        m_instance(an, st, &c)
+    }
+}
 
 /// Is `cls` a pydantic model class (a `BaseModel` / `BaseSettings` / `RootModel` above it)?
 pub fn is_model(an: &Analyzer, cls: ObjId) -> bool {
@@ -139,6 +161,7 @@ impl Analyzer {
         let mut populate_by_name = false;
         let mut root = false;
         let (mut model_before, mut model_after, mut root_post, mut field_validators, mut computed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut privates: Vec<(String, Option<&'static ast::Expr>, Option<&'static ast::Expr>)> = Vec::new();
         // bases first: a subclass overrides fields, config and validators keep accumulating
         for c in self.mro(cls).into_iter().rev() {
             let Some(ci) = self.class_info_opt(c) else { continue };
@@ -176,12 +199,28 @@ impl Analyzer {
                             }
                             continue;
                         }
+                        if name.starts_with('_') && !name.starts_with("__") && !is_classvar(&a.annotation) {
+                            let (mut d, mut fac): (Option<&'static ast::Expr>, Option<&'static ast::Expr>) = (None, None);
+                            if let Some(v) = &a.value {
+                                let v: &'static ast::Expr = v;
+                                match v {
+                                    ast::Expr::Call(c) if dotted_last(&c.func) == "PrivateAttr" => {
+                                        d = c.arguments.args.first().or(kw(c, "default"));
+                                        fac = kw(c, "default_factory");
+                                    }
+                                    _ => d = Some(v),
+                                }
+                            }
+                            privates.retain(|p| p.0 != name);
+                            privates.push((name.clone(), d, fac));
+                            continue;
+                        }
                         if name.starts_with('_') || is_classvar(&a.annotation) {
                             continue;
                         }
                         let ann = self.pyd_ann(&a.annotation, ci.module, state);
                         let optional = ann_optional(&a.annotation);
-                        let mut f = PField { name: name.clone(), alias: None, ser_alias: None, default: None, factory: None, required: true, optional, ann };
+                        let mut f = PField { name: name.clone(), alias: None, ser_alias: None, alts: Vec::new(), default: None, factory: None, required: true, optional, ann };
                         if let Some(v) = &a.value {
                             let v: &'static ast::Expr = v;
                             match v {
@@ -204,6 +243,16 @@ impl Analyzer {
                                     }
                                     let alias = kw(c, "alias").and_then(str_lit);
                                     f.alias = kw(c, "validation_alias").and_then(str_lit).or_else(|| alias.clone());
+                                    // `validation_alias=AliasChoices("a", "b")`
+                                    if let Some(ast::Expr::Call(ac)) = kw(c, "validation_alias") {
+                                        if dotted_last(&ac.func) == "AliasChoices" {
+                                            let names: Vec<String> = ac.arguments.args.iter().filter_map(str_lit).collect();
+                                            if let Some((first, rest)) = names.split_first() {
+                                                f.alias = Some(first.clone());
+                                                f.alts = rest.to_vec();
+                                            }
+                                        }
+                                    }
                                     f.ser_alias = kw(c, "serialization_alias").and_then(str_lit).or(alias);
                                 }
                                 e if is_ellipsis(e) => {}
@@ -289,9 +338,9 @@ impl Analyzer {
             }
         }
         if root && !fields.iter().any(|f| f.name == "root") {
-            fields.push(PField { name: "root".into(), alias: None, ser_alias: None, default: None, factory: None, required: true, optional: false, ann: Ann::Other });
+            fields.push(PField { name: "root".into(), alias: None, ser_alias: None, alts: Vec::new(), default: None, factory: None, required: true, optional: false, ann: Ann::Other });
         }
-        let p = Rc::new(PClass { fields, extra, populate_by_name, root, model_before, model_after, root_post, field_validators, computed });
+        let p = Rc::new(PClass { fields, extra, populate_by_name, root, model_before, model_after, root_post, field_validators, computed, privates });
         self.pyd_classes.insert(cls, p.clone());
         p
     }
@@ -351,7 +400,13 @@ impl Analyzer {
             ast::Expr::Name(_) | ast::Expr::Attribute(_) => {
                 let n = type_name(e);
                 let v = state.slot_opt(module, Ns::Attr, key_str_lit(&n)).unwrap_or_default();
-                let found = v.pts.iter().find(|o| self.kind(*o) == Kind::Class && is_model(self, *o));
+                let mut found = v.pts.iter().find(|o| self.kind(*o) == Kind::Class && is_model(self, *o));
+                if found.is_none() {
+                    // by name among the program's classes (this module's first): the state at
+                    // hand may be a summary's, without the module's names
+                    let cands: Vec<ObjId> = self.user_classes.iter().copied().filter(|c| self.class_info_opt(*c).map(|ci| ci.name == n).unwrap_or(false) && is_model(self, *c)).collect();
+                    found = cands.iter().copied().find(|c| self.class_info(*c).module == module).or_else(|| cands.first().copied());
+                }
                 match found {
                     Some(c) => Ann::Model(c),
                     None => Ann::Other,
@@ -443,18 +498,40 @@ impl Analyzer {
         let recv = Value::objs(crate::domain::ObjSet::from_vec(recs.clone()));
         let other_data = data.pts.is_empty() || data.pts.iter().any(|o| !recs.contains(&o));
         let mut field_keys: Vec<KeyId> = Vec::new();
+        let (mut set_sure, mut set_maybe): (Vec<KeyId>, Vec<KeyId>) = (Vec::new(), Vec::new());
         for f in pc.fields.clone() {
             let key = f.alias.clone().unwrap_or_else(|| f.name.clone());
+            {
+                // `model_fields_set`: the fields the input gave
+                let kk0 = key_str_lit(&key);
+                let nk0 = key_str_lit(&f.name);
+                let mut ks = vec![kk0];
+                ks.extend(f.alts.iter().map(|a| key_str_lit(a)));
+                if f.alias.is_some() && pc.populate_by_name {
+                    ks.push(nk0);
+                }
+                let nsf = |an: &Analyzer, o: ObjId| if matches!(an.kind(o), Kind::Instance | Kind::Namespace) { Ns::Attr } else { Ns::Item };
+                let sure = !recs.is_empty() && !other_data && recs.iter().all(|o| ks.iter().any(|k| state.row(*o, nsf(self, *o)).definite.contains(*k)));
+                let maybe = other_data || recs.iter().any(|o| ks.iter().any(|k| state.row(*o, nsf(self, *o)).present.contains(*k)) || state.row(*o, nsf(self, *o)).open());
+                if sure || f.required {
+                    set_sure.push(nk0);
+                }
+                if maybe || sure {
+                    set_maybe.push(nk0);
+                }
+            }
             let kk = key_str_lit(&key);
             field_keys.push(kk);
             let nk = key_str_lit(&f.name);
             if f.alias.is_some() {
                 field_keys.push(nk);
             }
+            field_keys.extend(f.alts.iter().map(|a| key_str_lit(a)));
             let mut val = Value::new();
             if !recs.is_empty() {
                 // by name too when `populate_by_name` (the alias wins when both are there)
                 let mut keys = vec![kk];
+                keys.extend(f.alts.iter().map(|a| key_str_lit(a)));
                 if f.alias.is_some() && pc.populate_by_name {
                     keys.push(nk);
                 }
@@ -466,9 +543,38 @@ impl Analyzer {
                     let ns = ns_of(self, recs[0]);
                     val = self.load_item_or_attr(&recv, ns, kk, node, state);
                 } else if f.required && !definite {
-                    let any_present = recs.iter().any(|o| keys.iter().any(|k| state.row(*o, ns_of(self, *o)).present.contains(*k)));
-                    if report && !any_present && recs.iter().all(|o| !state.row(*o, ns_of(self, *o)).open()) {
-                        self.verdict(node, kk, &Classification::with_note(Tier::Missing, "pydantic field required"), recs[0], Ns::Item, None, None);
+                    // the alias or the name (`populate_by_name`): per record, missing when it
+                    // has neither; an open input needs one of them (each on some paths)
+                    if report {
+                        for &o in &recs {
+                            let row = state.row(o, ns_of(self, o));
+                            if row.definite.contains(kk) {
+                                self.verdict(node, kk, &Classification::new(Tier::Proven), o, Ns::Item, None, None);
+                            } else if !row.open() && !keys.iter().any(|k| row.present.contains(*k)) {
+                                self.verdict(node, kk, &Classification::with_note(Tier::Missing, "pydantic field required"), o, Ns::Item, None, None);
+                            }
+                        }
+                        let open: Vec<ObjId> = recs.iter().copied().filter(|o| state.row(*o, ns_of(self, *o)).open() && !keys.iter().any(|k| state.row(*o, ns_of(self, *o)).definite.contains(*k))).collect();
+                        if !open.is_empty() {
+                            let ov = Value::objs(crate::domain::ObjSet::from_vec(open.clone()));
+                            let mut branches: Vec<State> = Vec::new();
+                            for k in &keys {
+                                let mut b = state.copy();
+                                let ns = ns_of(self, open[0]);
+                                let saved = std::mem::replace(&mut self.quiet, true);
+                                self.branch_depth += 1;
+                                let x = self.load_item_or_attr(&ov, ns, *k, node, &mut b);
+                                self.branch_depth -= 1;
+                                self.quiet = saved;
+                                val = val.join(&x);
+                                branches.push(b);
+                            }
+                            let mut joined = branches.remove(0);
+                            for mut b in branches {
+                                joined = joined.join(&mut b);
+                            }
+                            state.replace_with(joined);
+                        }
                     }
                     for k in &keys {
                         val = val.join(&self.pyd_read_guarded(&recs, *k, state));
@@ -510,6 +616,12 @@ impl Analyzer {
             state.set_row(inst, Ns::Attr, r);
             state.set_slot(inst, Ns::Attr, nk, val, true);
         }
+        let entry = (KeySet::from_iter(set_sure), KeySet::from_iter(set_maybe));
+        let joined = match self.pyd_set.get(&inst) {
+            Some((s0, m0)) if !self.obj(inst).single => (s0.intersection(&entry.0), m0.union(&entry.1)),
+            _ => entry,
+        };
+        self.pyd_set.insert(inst, joined);
         // extra keys: attributes with `extra="allow"`
         if pc.extra == Extra::Allow {
             for &o in &recs {
@@ -548,11 +660,39 @@ impl Analyzer {
                 }
             }
         }
+        self.pyd_init_privates(cls, inst, state, node);
         for v in pc.model_after.clone() {
             self.call_user(v.func, Some(Value::obj(inst)), vec![], IndexMap::new(), vec![], vec![], state, node, None, false);
         }
         outs.push(Value::obj(inst));
         join_values(outs)
+    }
+
+    /// Private attributes get their defaults, then a user `model_post_init` runs.
+    fn pyd_init_privates(&mut self, cls: ObjId, inst: ObjId, state: &mut State, node: &Node) {
+        let pc = self.pyd_class(cls, state);
+        for (name, d, fac) in pc.privates.clone() {
+            let v = match (fac, d) {
+                (Some(f), _) => {
+                    let fv = self.eval(f, state);
+                    self.call_value(&fv, node, None, state, Some(vec![]))
+                }
+                (None, Some(d)) => self.eval(d, state),
+                _ => continue,
+            };
+            state.set_slot(inst, Ns::Attr, priv_key(&name), v, true);
+        }
+        if let Some(defc) = self.class_lookup(cls, "model_post_init") {
+            let fv = self.cls_slots.get(&(defc, Ns::Attr, key_str_lit("model_post_init"))).cloned().unwrap_or_default();
+            for f in fv.pts.iter().filter(|f| self.kind(*f) == Kind::Function).collect::<Vec<_>>() {
+                self.call_user(f, Some(Value::obj(inst)), vec![self.none_v.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
+            }
+        }
+    }
+
+    /// Is `name` a private attribute of model class `cls`?
+    pub fn pyd_is_private(&mut self, cls: ObjId, name: &str, state: &State) -> bool {
+        name.starts_with('_') && !name.starts_with("__") && is_model(self, cls) && self.pyd_class(cls, state).privates.iter().any(|p| p.0 == name)
     }
 
     /// A required field's read: `d[k]` on a dict / input, `o.k` on an object (verdicts and
@@ -695,6 +835,27 @@ pub struct DumpOpts {
     pub by_alias: bool,
 }
 
+/// The key of a literal default (`"light"`, `12`, `None`, `True`, `-1`).
+fn literal_key(e: &ast::Expr) -> Option<KeyId> {
+    Some(match e {
+        ast::Expr::StringLiteral(s0) => key_str_lit(s0.value.to_str()),
+        ast::Expr::NoneLiteral(_) => intern::key_none(),
+        ast::Expr::BooleanLiteral(b) => intern::key_bool(b.value),
+        ast::Expr::NumberLiteral(n) => match &n.value {
+            ast::Number::Int(i) => intern::key_int(i.as_i64()?),
+            _ => return None,
+        },
+        ast::Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::USub) => match &*u.operand {
+            ast::Expr::NumberLiteral(n) => match &n.value {
+                ast::Number::Int(i) => intern::key_int(-i.as_i64()?),
+                _ => return None,
+            },
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
 fn extra_of(e: &ast::Expr) -> Option<Extra> {
     let t = match e {
         ast::Expr::StringLiteral(s0) => s0.value.to_str().to_string(),
@@ -780,6 +941,18 @@ fn ann_optional(e: &ast::Expr) -> bool {
 impl Analyzer {
     /// `model_dump()` of a model instance (or a placeholder typed with a model class).
     pub fn pyd_dump(&mut self, oid: ObjId, opts: &DumpOpts, state: &mut State, node: &Node) -> Value {
+        if self.pyd_depth > 6 {
+            let did = self.alloc_at(Kind::Dict, node, state, &format!("model_dump@L{}", node.line), Payload::None, None, Ns::Item, None, Some("dumpdeep"));
+            state.set_row(did, Ns::Item, Row::new().data_store(crate::domain::Source::new(&format!("model_dump@L{}", node.line), crate::domain::SourceKind::Data)));
+            return Value::obj(did);
+        }
+        self.pyd_depth += 1;
+        let out = self.pyd_dump_inner(oid, opts, state, node);
+        self.pyd_depth -= 1;
+        out
+    }
+
+    fn pyd_dump_inner(&mut self, oid: ObjId, opts: &DumpOpts, state: &mut State, node: &Node) -> Value {
         let cls = match self.kind(oid) {
             Kind::Instance => self.instance_class(oid),
             Kind::Ph => self.ph_info(oid).cls.get(),
@@ -814,9 +987,54 @@ impl Analyzer {
             };
             let sub = opts.sub_include.iter().find(|(k, _)| *k == nk).map(|(_, o)| o.clone()).unwrap_or_else(|| DumpOpts { by_alias: opts.by_alias, exclude_none: opts.exclude_none, exclude_unset: opts.exclude_unset, exclude_defaults: opts.exclude_defaults, ..Default::default() });
             let dv = self.pyd_dump_value(&ann, &v, &sub, state, node);
-            let maybe_none = optional || matches!(ann, Ann::Optional(_)) || v.kv.as_lit() == Some(intern::key_none()) || matches!(&v.kv, KeyVal::Lits(ks) if ks.contains(intern::key_none()));
-            let sure = !(opts.exclude_none && maybe_none) && !((opts.exclude_unset || opts.exclude_defaults) && !required);
-            row = row.store(ok, sure);
+            // per option: Some(true) kept, Some(false) left out, None either
+            let none_lit = intern::key_none();
+            let only_none = v.pts.is_empty() && v.kv.as_lit() == Some(none_lit);
+            let kv_none = v.kv.as_lit() == Some(none_lit) || matches!(&v.kv, KeyVal::Lits(ks) if ks.contains(none_lit));
+            let unknown_part = (!v.kv.is_literal() && !v.kv.is_bot()) || v.pts.iter().any(|o| matches!(self.kind(o), Kind::Unknown | Kind::Ph | Kind::External));
+            let maybe_none = kv_none || (unknown_part && (optional || matches!(ann, Ann::Optional(_))));
+            let mut keep: Option<bool> = Some(true);
+            let mut meet = |x: Option<bool>| {
+                keep = match (keep, x) {
+                    (Some(false), _) | (_, Some(false)) => Some(false),
+                    (Some(true), Some(true)) => Some(true),
+                    _ => None,
+                }
+            };
+            if opts.exclude_none {
+                meet(if only_none { Some(false) } else if maybe_none { None } else { Some(true) });
+            }
+            if opts.exclude_unset && !pc.computed.contains(&name) {
+                meet(match self.pyd_set.get(&oid) {
+                    Some((sure, maybe)) if !ph => {
+                        if sure.contains(nk) {
+                            Some(true)
+                        } else if maybe.contains(nk) {
+                            None
+                        } else {
+                            Some(false)
+                        }
+                    }
+                    _ => if required { Some(true) } else { None },
+                });
+            }
+            if opts.exclude_defaults && !pc.computed.contains(&name) {
+                let dflt = pc.fields.iter().find(|f| f.name == name).and_then(|f| if f.factory.is_some() { None } else { f.default }).and_then(literal_key);
+                meet(if required {
+                    Some(true)
+                } else {
+                    match (dflt, v.pts.is_empty(), &v.kv) {
+                        (Some(d), true, KeyVal::Lit(k)) => Some(*k != d),
+                        (Some(d), true, KeyVal::Lits(ks)) if !ks.contains(d) => Some(true),
+                        (Some(_), false, KeyVal::Bot) => Some(true),
+                        _ => None,
+                    }
+                });
+            }
+            if keep == Some(false) {
+                continue;
+            }
+            row = row.store(ok, keep == Some(true));
             order.push(ok);
             state.set_slot(did, Ns::Item, ok, dv, true);
         }
@@ -1009,7 +1227,24 @@ pub fn m_instance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             join_values(outs)
         }
         "model_fields_set" | "__fields_set__" => {
-            Value::obj(an.alloc_simple(Kind::Set, &c.node, st, &format!("fields_set@L{}", c.line)))
+            let mut outs = Vec::new();
+            for o in recv.pts.iter() {
+                match an.pyd_set.get(&o).cloned() {
+                    Some((sure, maybe)) if sure == maybe => {
+                        let items: Vec<Value> = intern::sorted_by_str(sure.iter()).into_iter().map(Value::lit).collect();
+                        let kv = KeyVal::lits(sure.clone());
+                        let v = an.alloc_positional(Kind::Set, &c.node, Some(items), Value::new(), kv, st);
+                        outs.push(v);
+                    }
+                    Some((_, maybe)) => {
+                        let sid = an.alloc_simple(Kind::Set, &c.node, st, &format!("fields_set@L{}", c.line));
+                        st.elems.insert(sid, KeyVal::lits(maybe));
+                        outs.push(Value::obj(sid));
+                    }
+                    None => outs.push(Value::obj(an.alloc_simple(Kind::Set, &c.node, st, &format!("fields_set@L{}", c.line)))),
+                }
+            }
+            join_values(outs)
         }
         "model_fields" | "__fields__" | "model_computed_fields" | "model_json_schema" | "schema" | "model_validate" | "model_validate_json" | "parse_obj" | "parse_raw" | "model_construct" | "construct" => m_class(an, st, c),
         "model_extra" => {

@@ -4,17 +4,13 @@ small/s003_dict_comprehensions.py
 small/s004_dict_constructors.py
 small/s005_list_set_tuple.py
 small/s006_zip_strict.py
-small/s007_enumerate_start.py
 small/s008_sorted_min_max.py
-small/s009_sum_any_all.py
 small/s010_map_filter_reversed.py
 small/s011_iter_next_default.py
 small/s012_isinstance_type.py
-small/s013_getattr_literal.py
 small/s014_getattr_computed.py
 small/s015_vars.py
 small/s016_numeric_builtins.py
-small/s017_copy_deepcopy.py
 small/s018_conversions.py
 small/s019_slices.py
 small/s020_set_keys.py
@@ -24,8 +20,6 @@ small/s023_fstrings.py
 small/s024_str_methods.py
 small/s025_counter_basic.py
 small/s026_counter_arith.py
-small/s027_defaultdict.py
-small/s028_nested_defaultdict.py
 small/s029_ordereddict.py
 small/s030_chainmap.py
 small/s031_namedtuple.py
@@ -55,9 +49,7 @@ models/sm04_event_pipeline.py
 models/sm05_job_runner.py
 models/sm06_log_report.py
 small/s051_sorted_key_lambda.py
-small/s052_sorted_named_key.py
 small/s053_min_max_default.py
-small/s054_map_filter_keys.py
 small/s055_partial_positional.py
 small/s056_partial_keyword.py
 small/s057_reduce_dict_acc.py
@@ -101,6 +93,5 @@ small/s094_sqlite_row.py
 small/s095_abc_dispatch.py
 small/s096_getattr_getitem.py
 small/s097_yield_from.py
-small/s098_asyncio_gather.py
 small/s099_defaultdict_factory.py
 small/s100_callback_chain.py

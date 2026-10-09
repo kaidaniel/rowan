@@ -846,7 +846,7 @@ impl Analyzer {
                     let mut nv = v.clone();
                     nv.chain = full;
                     let dk = nv.dedupe_key();
-                    if !self.verdict_keys.contains(&dk) {
+                    if !self.verdict_keys.contains(&dk) && !self.quiet {
                         self.verdict_keys.insert(dk);
                         self.verdicts.push(nv);
                     }

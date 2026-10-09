@@ -1370,6 +1370,14 @@ impl Analyzer {
             for st in &c.body {
                 if let ast::Stmt::AnnAssign(a) = st {
                     if let ast::Expr::Name(n) = &*a.target {
+                        // a `ClassVar` is a class attribute; pydantic's `_x` are private attributes
+                        let classvar = match &*a.annotation {
+                            ast::Expr::Subscript(sb) => dotted_last(&sb.value) == "ClassVar",
+                            other => dotted_last(other) == "ClassVar",
+                        };
+                        if classvar || (pydantic && (n.id.starts_with('_') || n.id.as_str() == "model_config")) {
+                            continue;
+                        }
                         fields.push((n.id.to_string(), a.value.as_deref()));
                     }
                 }

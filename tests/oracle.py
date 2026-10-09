@@ -285,7 +285,8 @@ class Mutator:
         if src["kind"] != "param":
             return
         code = frame.f_code
-        if code.co_qualname != src["func"] and code.co_name != src["func"] and not code.co_qualname.endswith("." + src["func"]):
+        qn = code.co_qualname.replace(".<locals>", "")
+        if qn != src["func"] and code.co_name != src["func"] and not qn.endswith("." + src["func"]):
             return
         loc = frame.f_locals
         if src["arg"] in loc:

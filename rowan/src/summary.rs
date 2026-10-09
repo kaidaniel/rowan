@@ -1245,6 +1245,7 @@ impl Analyzer {
             clones: IndexMap::new(),
             collided: FxHashSet::default(),
             resolved: FxHashMap::default(),
+            born: FxHashMap::default(),
             kv_cache: FxHashMap::default(),
             erow_cache: FxHashMap::default(),
             conc_cache: FxHashMap::default(),
@@ -1455,7 +1456,7 @@ impl Analyzer {
                 add(r, vec![tg.first().unwrap()]);
             } else if sr.row.is_entry() && sr.row.refs() == intern::IdSet::one(rho(sr.oid, sr.ns)) {
                 for a in tg.iter() {
-                    let mut r0 = erow_of(&pre, state, a, sr.ns);
+                    let mut r0 = erow_of(&pre, state, &inst.born, a, sr.ns);
                     if r0.symbolic() && !in_summary {
                         r0 = inst.concretise(self, state, &pre, &r0, None);
                     }
@@ -1513,7 +1514,7 @@ impl Analyzer {
             let mut nv = v.clone();
             nv.chain = full;
             let dk = nv.dedupe_key();
-            if !self.verdict_keys.contains(&dk) {
+            if !self.verdict_keys.contains(&dk) && !self.quiet {
                 self.verdict_keys.insert(dk);
                 self.verdicts.push(nv);
             }
@@ -1542,7 +1543,10 @@ impl Analyzer {
             } else {
                 let ns = rows.first().map(|r| r.1).unwrap_or(Ns::Item);
                 let row = if rows.is_empty() { None } else { Some(ob.must.iter().fold(crate::domain::join_rows(rows.into_iter().map(|r| r.2)), |r, k| r.store(*k, true))) };
-                let value = self.value_info(&value);
+                let value = self.value_info(&value, state);
+                if self.quiet {
+                    continue;
+                }
                 self.row_checks.push(crate::interp::RowCheck { file: ob.file.clone(), line: ob.line, name: ob.name.clone(), row, ns, value, tensor: None });
             }
         }
@@ -1642,9 +1646,13 @@ impl Analyzer {
     }
 }
 
-fn erow_of(pre: &State, state: &State, a: ObjId, ns: Ns) -> Row {
+/// The entry row of `a`: before the call; an object made while instantiating (a path below
+/// an open input) has the row it was made with (`born`), not the one the call's effects gave it.
+fn erow_of(pre: &State, state: &State, born: &FxHashMap<(ObjId, Ns), Row>, a: ObjId, ns: Ns) -> Row {
     if pre.has_row(a, ns) {
         pre.row(a, ns)
+    } else if let Some(r) = born.get(&(a, ns)) {
+        r.clone()
     } else {
         state.row(a, ns)
     }
@@ -1673,8 +1681,8 @@ struct Focus {
 }
 
 impl Focus {
-    fn of_target(pre: &State, state: &State, ph: ObjId, a: ObjId) -> Focus {
-        Focus { ph, item: erow_of(pre, state, a, Ns::Item), attr: erow_of(pre, state, a, Ns::Attr) }
+    fn of_target(pre: &State, state: &State, born: &FxHashMap<(ObjId, Ns), Row>, ph: ObjId, a: ObjId) -> Focus {
+        Focus { ph, item: erow_of(pre, state, born, a, Ns::Item), attr: erow_of(pre, state, born, a, Ns::Attr) }
     }
 }
 
@@ -1696,6 +1704,8 @@ struct Inst {
     erow_cache: FxHashMap<Rho, Row>,
     conc_cache: FxHashMap<(Row, Option<Focus>), Row>,
     new_clones: FxHashSet<ObjId>,
+    /// rows of objects made while resolving paths, as made
+    born: FxHashMap<(ObjId, Ns), Row>,
 }
 
 impl Inst {
@@ -1778,7 +1788,7 @@ impl Inst {
         }
         let (oid, ns) = unrho(r);
         let targets = self.resolve(an, state, pre, oid);
-        let out = if targets.is_empty() { Row::new() } else { join_rows(targets.iter().map(|t| erow_of(pre, state, t, ns))) };
+        let out = if targets.is_empty() { Row::new() } else { join_rows(targets.iter().map(|t| erow_of(pre, state, &self.born, t, ns))) };
         self.erow_cache.insert(r, out.clone());
         out
     }
@@ -1836,7 +1846,7 @@ impl Inst {
         if an.opts.site_resolution {
             let mut groups: Vec<((Kind, String, Focus), Vec<ObjId>)> = Vec::new();
             for a in tg.iter() {
-                let f = Focus::of_target(pre, state, ph, a);
+                let f = Focus::of_target(pre, state, &self.born, ph, a);
                 let key = (an.kind(a), an.obj(a).site.clone(), f);
                 if let Some(g) = groups.iter_mut().find(|(k, _)| *k == key) {
                     g.1.push(a);
@@ -1847,15 +1857,15 @@ impl Inst {
             return groups.into_iter().map(|((_, _, f), m)| (f, m)).collect();
         }
         if tg.len() <= MAX_SYMREQ_TARGETS {
-            return tg.iter().map(|a| (Focus::of_target(pre, state, ph, a), vec![a])).collect();
+            return tg.iter().map(|a| (Focus::of_target(pre, state, &self.born, ph, a), vec![a])).collect();
         }
         let mut out = Vec::new();
         for members in group_by_site(an, tg) {
             if members.len() == 1 {
-                out.push((Focus::of_target(pre, state, ph, members[0]), members));
+                out.push((Focus::of_target(pre, state, &self.born, ph, members[0]), members));
             } else {
-                let ri = join_rows(members.iter().map(|a| erow_of(pre, state, *a, Ns::Item)));
-                let ra = join_rows(members.iter().map(|a| erow_of(pre, state, *a, Ns::Attr)));
+                let ri = join_rows(members.iter().map(|a| erow_of(pre, state, &self.born, *a, Ns::Item)));
+                let ra = join_rows(members.iter().map(|a| erow_of(pre, state, &self.born, *a, Ns::Attr)));
                 out.push((Focus { ph, item: ri, attr: ra }, members));
             }
         }
@@ -2051,6 +2061,13 @@ impl Inst {
                     v = if !an.sum_stack.is_empty() && an.is_entry_object(p) { an.path_placeholder_value(p, ph.ns, key, &Row::new(), state) } else { Value::new() };
                 } else if row.open() || an.kind(p) == Kind::Ph {
                     v = an.path_placeholder_value(p, ph.ns, key, &row, state);
+                    for o in v.pts.iter() {
+                        if !pre.has_row(o, Ns::Item) && !pre.has_row(o, Ns::Attr) {
+                            for ns in [Ns::Item, Ns::Attr] {
+                                self.born.entry((o, ns)).or_insert_with(|| state.row(o, ns));
+                            }
+                        }
+                    }
                 }
             }
             if ph.ns == Ns::Attr && an.kind(p) == Kind::Instance {

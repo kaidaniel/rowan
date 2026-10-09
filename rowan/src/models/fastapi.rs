@@ -212,7 +212,7 @@ impl Analyzer {
         let marker = meta.or_else(|| self.fa_marker(&fi, &pname));
         let ann_name = ann.map(|a| dotted_last(a)).unwrap_or_default();
         let open = |an: &mut Analyzer, st: &mut State| -> Value {
-            Value::obj(an.unknown_source(&format!("param {}.{}", fi.qualname, pname), SourceKind::Param, st, &format!("param {}", pname), "", Ns::Item, vec![]))
+            Value::obj(an.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param, st, &format!("param {}", pname), "", Ns::Item, vec![]))
         };
         // a dependency: its result
         if let Some((q, g)) = &marker {
@@ -236,7 +236,7 @@ impl Analyzer {
                     Some(j) => j,
                     None if req.is_some() => Value::data("body"),
                     None => {
-                        let src = Value::obj(self.unknown_source(&format!("param {}.{}", fi.qualname, pname), SourceKind::Param, state, &format!("{}.json()", pname), "", Ns::Item, vec![]));
+                        let src = Value::obj(self.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param, state, &format!("{}.json()", pname), "", Ns::Item, vec![]));
                         src
                     }
                 };

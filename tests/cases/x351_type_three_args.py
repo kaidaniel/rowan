@@ -9,6 +9,8 @@ C = type("C", (), {"x": 1})
 c = C()
 # Corrected on re-reading: a class attribute read gives no verdict (as for any class, see
 # `class C: x = 1; C().x`), so "none" is the precise answer; an unset attribute is missing.
-c.x                                          #@ none x
+# Corrected again (library suites): a read that finds a class attribute succeeds, so it is
+# proven ok like any other access that cannot fail (`tests/pydantic/small/y007`: ClassVar).
+c.x                                          #@ ok x
 c.x                                          #@ sound x
 c.y                                          #@ missing y
