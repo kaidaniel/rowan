@@ -1022,6 +1022,29 @@ impl Analyzer {
                 }
             }
         }
+        // a slice of a Sequential / ModuleList: one of the same kind
+        if let (Some(o), E::Slice(sl)) = (obj.single(), idx) {
+            if let Some(ty) = self.t_layer_type(o).filter(|t| t == "Sequential" || t == "ModuleList") {
+                if sl.step.is_none() {
+                    if let Some(items) = self.t_seq(obj, st) {
+                        let n = items.len() as i64;
+                        let bound = |an: &mut Analyzer, e: &'static Option<Box<E>>, d: i64, st: &mut State| -> Option<i64> {
+                            match e {
+                                None => Some(d),
+                                Some(x) => {
+                                    let v = an.eval(x, st);
+                                    an.t_int(&v).map(|i| if i < 0 { (n + i).max(0) } else { i.min(n) })
+                                }
+                            }
+                        };
+                        if let (Some(a), Some(b)) = (bound(self, &sl.lower, 0, st), bound(self, &sl.upper, n, st)) {
+                            let part: Vec<Value> = if a < b { items[a as usize..b as usize].to_vec() } else { vec![] };
+                            return Some(self.t_list_layer(&ty, Some(part), None, node, st));
+                        }
+                    }
+                }
+            }
+        }
         // an element of a result tuple of unknown length
         if let Some(o) = obj.single() {
             if matches!(&self.obj(o).payload, Payload::Str(q) if q == "torch.n" || q.starts_with("torch.n:")) {

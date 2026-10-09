@@ -2378,7 +2378,8 @@ fn m_range(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some((lo, hi, step)) = bounds.filter(|_| c.kwargs.is_empty() && !crate::interp::disabled("range")) else {
         let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("range@L{}", c.line));
         an.obj_mut(oid).literal_len = None;
-        st.elems.insert(oid, DATA);
+        // (for the tensor model: an int of unknown value)
+        st.elems.insert(oid, if an.torch_on { KeyVal::data(&crate::shape::dim_label(crate::shape::unknown())) } else { DATA });
         return Value::obj(oid);
     };
     let len = if step > 0 { (hi - lo + step - 1).max(0) / step } else { (lo - hi - step - 1).max(0) / -step };

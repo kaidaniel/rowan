@@ -2,7 +2,6 @@
 models/m01_transformer.py
 models/m02_nanogpt.py
 models/m05_vgg.py
-models/m06_alexnet.py
 models/m07_unet.py
 models/m08_vit.py
 models/m11_lstm_tagger.py
@@ -12,7 +11,6 @@ models/m14_word2vec.py
 models/m15_pointnet.py
 models/m16_bert_embeddings.py
 models/m17_tcn.py
-small/s095_sequential_attr.py
 small/s111_loops.py
 small/s114_list_stack_cat.py
 small/s115_dataclass_unknown_sources.py
