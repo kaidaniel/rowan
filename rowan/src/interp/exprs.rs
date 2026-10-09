@@ -1126,10 +1126,21 @@ impl Analyzer {
                 ast::Operator::Mult => num_binop(x, y, |p, q| p.wrapping_mul(q), |p, q| p * q),
                 ast::Operator::FloorDiv if nonzero => num_binop(x, y, |p, q| p.div_euclid(q), |p, q| (p / q).floor()),
                 ast::Operator::Mod if nonzero && !intern::key_is_str(x) => num_binop(x, y, |p, q| p.rem_euclid(q), |p, q| p - (p / q).floor() * q),
-                ast::Operator::Div if nonzero => num_binop(x, y, |p, q| p / q, |p, q| p / q).map(|r| intern::with_key(r, |k| match k {
-                    intern::Key::Int(i) => key_float(*i as f64),
-                    _ => r,
-                })),
+                // true division: a float (of the exact quotient, also for two ints)
+                ast::Operator::Div if nonzero => {
+                    let f = |k: KeyId| -> Option<f64> {
+                        match intern::key_get(k) {
+                            intern::Key::Int(i) => Some(i as f64),
+                            intern::Key::Float(b) => Some(f64::from_bits(b)),
+                            intern::Key::Bool(b) => Some(b as i64 as f64),
+                            _ => None,
+                        }
+                    };
+                    match (f(x), f(y)) {
+                        (Some(p), Some(q)) if q != 0.0 => Some(key_float(p / q)),
+                        _ => None,
+                    }
+                }
                 _ => None,
             };
             if let Some(r) = r {

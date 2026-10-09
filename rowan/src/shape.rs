@@ -1291,7 +1291,7 @@ pub fn sym_print(s: Sym) -> Option<String> {
                 continue;
             }
             let pt = sym_text(*as_);
-            if text.len() > pt.len() && text.starts_with(&pt) && text[pt.len()..].starts_with('.') && best.as_ref().map(|b| pt.len() > b.0).unwrap_or(true) {
+            if text.len() > pt.len() && text.starts_with(&pt) && (text[pt.len()..].starts_with('.') || text[pt.len()..].starts_with('[')) && best.as_ref().map(|b| pt.len() > b.0).unwrap_or(true) {
                 best = Some((pt.len(), format!("{}{}", at, &text[pt.len()..])));
             }
         }
@@ -1355,6 +1355,17 @@ fn paren(t: &str) -> String {
 pub fn dim_text(d: DimId) -> String {
     if let Some(a) = dim_alias(d) {
         return a;
+    }
+    // a multiple of an aliased dim: `3*self.inner`
+    let aliases: Vec<(DimId, String)> = CTX.with(|c| c.borrow().dim_alias.iter().map(|(k, v)| (*k, v.clone())).collect());
+    for (ad, at) in aliases {
+        if poly(ad).len() > 1 || poly(ad).iter().any(|(m, _)| m.len() > 1) {
+            if let Some(k) = div_exact(d, ad).and_then(as_lit) {
+                if k != 0 && k != 1 {
+                    return format!("{}*{}", k, at);
+                }
+            }
+        }
     }
     let p = poly(d);
     if p.is_empty() {

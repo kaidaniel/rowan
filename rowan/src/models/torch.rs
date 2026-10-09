@@ -115,7 +115,7 @@ impl Analyzer {
                 let t = intern::str_get(*l);
                 if let Some(id) = sh::parse_tensor_label(&t) {
                     add(sh::shape_get(id));
-                } else if t.starts_with(sh::DIM_PREFIX) || &*t == sh::NUM_LABEL {
+                } else if t.starts_with(sh::DIM_PREFIX) || &*t == sh::NUM_LABEL || t.starts_with(QUOT_PREFIX) {
                     add(Shape::known(vec![]));
                 } else if t.starts_with(SIZE_PREFIX) {
                 } else if let Some(sy) = expr_sym(&t) {
@@ -183,7 +183,7 @@ impl Analyzer {
                     put(d);
                 } else if let Some(sy) = expr_sym(&t) {
                     put(sh::named(sy));
-                } else if t.starts_with(sh::TENSOR_PREFIX) || t.starts_with(SIZE_PREFIX) || &*t == sh::NUM_LABEL {
+                } else if t.starts_with(sh::TENSOR_PREFIX) || t.starts_with(SIZE_PREFIX) || &*t == sh::NUM_LABEL || t.starts_with(QUOT_PREFIX) {
                     return None;
                 } else {
                     put(sh::unknown());
@@ -425,6 +425,13 @@ impl Analyzer {
                         for (k, v) in st.obj_slots(o, Ns::Attr) {
                             let Some(name) = intern::key_as_str(k) else { continue };
                             let p = format!("{}.{}", path, name);
+                            if !v.pts.is_empty() && !v.kv.is_bot() {
+                                // several possibilities: the joined dim
+                                if let Some(d) = self.t_dim(&v, st) {
+                                    ctx.dim_alias.entry(d).or_insert_with(|| p.clone());
+                                }
+                                continue;
+                            }
                             if let Some(d) = dim_of_label(&v).or_else(|| label(&v).and_then(|l| sh::dual_dim(&l))) {
                                 ctx.dim_alias.entry(d).or_insert_with(|| p.clone());
                                 continue;
@@ -459,6 +466,9 @@ impl Analyzer {
     }
 
     pub fn t_error(&mut self, node: &Node, msg: String, st: &mut State) {
+        if self.t_quiet {
+            return;
+        }
         let (chain, entry) = self.t_note_ctx();
         let n = ShapeNote { line: node.line, chain, entry, text: msg, cons: None };
         if !self.shape_errors.iter().any(|x| x.line == n.line && x.chain == n.chain && x.text == n.text) {
@@ -470,6 +480,9 @@ impl Analyzer {
     /// Check a condition: true → fine; false → shape error (the op raises, the path ends);
     /// undecided → a requirement here, a fact from here on. Returns false on an error.
     pub fn t_require(&mut self, c: Cons, node: &Node, st: &mut State, msg: impl FnOnce() -> String) -> bool {
+        if self.t_quiet {
+            return true;
+        }
         match sh::decide(&c, &st.tf) {
             Some(true) => true,
             Some(false) => {
@@ -499,6 +512,9 @@ impl Analyzer {
     /// The rank of `s` must be in `rel`. Unknown rank: a requirement on the symbol whose
     /// shape is the rest (`x.dim() …`), when expressible.
     pub fn t_require_rank(&mut self, s: &Shape, rel: RankRel, node: &Node, st: &mut State, what: &str) -> bool {
+        if self.t_quiet {
+            return true;
+        }
         let rel_text = |r: &RankRel| match r {
             RankRel::Eq(n) => format!("{} dims", n),
             RankRel::Ge(n) => format!("at least {} dims", n),
@@ -743,7 +759,7 @@ impl Analyzer {
                         if t.starts_with(sh::DIM_PREFIX) {
                             return Some(K::Int);
                         }
-                        if &*t == sh::NUM_LABEL {
+                        if &*t == sh::NUM_LABEL || t.starts_with(QUOT_PREFIX) {
                             return Some(K::Num);
                         }
                         if t.starts_with("expr:") && an.torch_on {
@@ -837,6 +853,13 @@ impl Analyzer {
             }
             if bitop {
                 return None;
+            }
+            if op == O::Div {
+                if let (Some(d), Some(k)) = (dim_of_label(a), self.t_int(b)) {
+                    if k > 0 {
+                        return Some(quotient_value(sh::norm(d, &st.tf), k));
+                    }
+                }
             }
             return Some(num_value());
         }
@@ -1008,6 +1031,12 @@ impl Analyzer {
             if self.kind(o) == Kind::Instance && self.t_is_module_instance(o) {
                 return self.t_module_attr(o, name, node, st);
             }
+            // a named module of a Sequential(OrderedDict(...))
+            if self.kind(o) == Kind::List && self.t_layer_type(o).is_some() {
+                if let Some(v) = st.slot_opt(o, Ns::Attr, key_str_lit(name)) {
+                    return Some(v);
+                }
+            }
         }
         let tensor = is_tensor(obj);
         let unknown_tensorish = !tensor && self.torch_on && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Ph | Kind::Unknown)) && (!obj.pts.is_empty() || matches!(&obj.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with("expr:")));
@@ -1031,6 +1060,10 @@ impl Analyzer {
             }
         }
         if unknown_tensorish && !TENSOR_ONLY.contains(&name) && obj.pts.iter().any(|o| self.kind(o) == Kind::Ph && self.ph_info(o).cls.get().is_some()) {
+            return None;
+        }
+        // an unknown may be an instance of a user class defining this name
+        if unknown_tensorish && self.user_classes.iter().any(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, key_str_lit(name)))) {
             return None;
         }
         let s = self.t_shape(obj, st).unwrap_or_else(Shape::any);
@@ -1122,7 +1155,7 @@ impl Analyzer {
                 return Some(obj.clone());
             }
         }
-        let tensor = is_tensor(obj);
+        let tensor = is_tensor(obj) || (tensor_shape(obj).is_some() && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Ph | Kind::Unknown)));
         let items: Vec<&'static E> = match idx {
             E::Tuple(t) => t.elts.iter().collect(),
             e => vec![e],
@@ -1697,7 +1730,9 @@ impl Analyzer {
                 return self.t_repeat(&s, &reps, &node, st);
             }
             "permute" => {
-                let ints: Option<Vec<i64>> = if args.len() == 1 { self.t_seq(&args[0], st).map(|v| v.iter().filter_map(|x| self.t_int(x)).collect()).or_else(|| self.t_int(&args[0]).map(|i| vec![i])) } else { args.iter().map(|a| self.t_int(a)).collect() };
+                let ints: Option<Vec<i64>> = if args.is_empty() {
+                    None
+                } else if args.len() == 1 { self.t_seq(&args[0], st).map(|v| v.iter().filter_map(|x| self.t_int(x)).collect()).or_else(|| self.t_int(&args[0]).map(|i| vec![i])) } else { args.iter().map(|a| self.t_int(a)).collect() };
                 let ints = ints.or_else(|| kw(c, "dims").and_then(|v| self.t_seq(v, st)).map(|v| v.iter().filter_map(|x| self.t_int(x)).collect()));
                 let Some(perm) = ints else { return tensor_value(Shape::any()) };
                 return self.t_permute(&s, &perm, &node, st);
@@ -1783,11 +1818,11 @@ impl Analyzer {
                 return self.t_kw(c, args, 1, "index").and_then(|v| self.t_shape(&v, st)).map(tensor_value).unwrap_or_else(|| tensor_value(Shape::any()));
             }
             "matmul" => {
-                let o = args.first().and_then(|a| self.t_shape(a, st)).unwrap_or_else(Shape::any);
+                let o = args.first().cloned().or_else(|| kw(c, "other").cloned()).and_then(|a| self.t_shape(&a, st)).unwrap_or_else(Shape::any);
                 return self.t_matmul(&s, &o, &node, st, "matmul");
             }
             "mm" | "bmm" | "mv" | "dot" | "outer" | "ger" | "inner" => {
-                let o = args.first().and_then(|a| self.t_shape(a, st)).unwrap_or_else(Shape::any);
+                let o = args.first().cloned().or_else(|| kw(c, "mat2").cloned()).or_else(|| kw(c, "vec").cloned()).or_else(|| kw(c, "other").cloned()).and_then(|a| self.t_shape(&a, st)).unwrap_or_else(Shape::any);
                 return self.t_mm_family(name, &s, &o, &node, st);
             }
             "new_zeros" | "new_ones" | "new_empty" | "new_full" => {
@@ -2346,6 +2381,13 @@ impl Analyzer {
             }
             let pos: Vec<Value> = if name == "full" { args.iter().take(1).cloned().collect() } else { args.clone() };
             let pos = if pos.is_empty() { kw(c, "size").cloned().into_iter().collect() } else { pos };
+            // a float size (a literal float, a true division) raises
+            let is_float = |v: &Value| quotient_of(v).is_some() || (v.pts.is_empty() && v.kv.as_lit().map(|k| matches!(intern::key_get(k), intern::Key::Float(_))).unwrap_or(false));
+            if pos.iter().any(|v| is_float(v)) {
+                let m = format!("torch.{}: sizes must be ints, got a float", name);
+                self.t_error(&node, m, st);
+                return Value::new();
+            }
             let sz = if pos.len() == c.args.len() { self.t_sizes_call(c, &pos, st) } else { self.t_sizes(&pos, &c.star_args, st) };
             return sz.map(tensor_value).unwrap_or_else(|| tensor_value(Shape::any()));
         }
@@ -2679,8 +2721,9 @@ impl Analyzer {
                             self.t_error(&node, m, st);
                             return Value::new();
                         }
-                        if sh::is_one(prev, &st.tf) == Some(true) {
-                            letters.insert(*ch, *d);
+                        // einsum broadcasts a letter's size-1 dims: the result is the larger
+                        if let Ok(b) = sh::bdim(prev, *d, &st.tf) {
+                            letters.insert(*ch, b);
                         }
                     }
                 }
@@ -2823,7 +2866,25 @@ impl Analyzer {
                 for sa in &c.star_args {
                     match self.t_seq(sa, st) {
                         Some(xs) => v.extend(xs),
-                        None => return self.t_list_layer(ty, None, Some(sa.clone()), &node, st),
+                        None => {
+                            let elem = sa.single().map(|o| self.t_list_elem(o, st));
+                            return self.t_list_layer(ty, None, elem, &node, st);
+                        }
+                    }
+                }
+                // Sequential(OrderedDict(...)): its values, in order, also as attributes
+                if v.len() == 1 && c.star_args.is_empty() {
+                    if let Some(d) = v[0].single().filter(|d| self.kind(*d) == Kind::Dict) {
+                        if let Some(keys) = st.row(d, Ns::Item).ordered_keys() {
+                            let vals: Vec<Value> = keys.iter().map(|k| st.slot(d, Ns::Item, *k)).collect();
+                            let lv = self.t_list_layer(ty, Some(vals.clone()), None, &node, st);
+                            if let Some(lo) = lv.single() {
+                                for (k, val) in keys.iter().zip(vals.iter()) {
+                                    st.set_slot(lo, Ns::Attr, *k, val.clone(), true);
+                                }
+                            }
+                            return lv;
+                        }
                     }
                 }
                 v
@@ -2959,9 +3020,14 @@ impl Analyzer {
                         cur
                     }
                     None => {
-                        // an unknown number of modules: the output of any number of them
-                        let e = st.slot(o, Ns::Elem, STAR);
-                        let once = self.t_call_module(&e, vec![cur.clone()], node, st);
+                        // an unknown number of modules: the output of any number of them (the
+                        // call of "some module" is quiet: no particular module must accept
+                        // this input, so nothing is an error, a requirement or a fact)
+                        let e = self.t_list_elem(o, st);
+                        let mut quiet_st = st.copy();
+                        let saved = std::mem::replace(&mut self.t_quiet, true);
+                        let once = self.t_call_module(&e, vec![cur.clone()], node, &mut quiet_st);
+                        self.t_quiet = saved;
                         let a = self.t_shape(&cur, st);
                         let b = self.t_shape(&once, st);
                         match (a, b) {
@@ -2972,7 +3038,12 @@ impl Analyzer {
                 }
             }
             "Linear" | "LazyLinear" => {
-                let (i, out) = (self.t_cfg_dim(o, "in_features", st), self.t_cfg_dim(o, "out_features", st));
+                // the weight's shape (it may have been replaced: weight tying)
+                let w = self.t_cfg(o, "weight", st);
+                let (i, out) = match tensor_shape(&w).and_then(|ws| sh::norm_shape(&ws, &st.tf).dims()) {
+                    Some(d) if d.len() == 2 => (d[1], d[0]),
+                    _ => (self.t_cfg_dim(o, "in_features", st), self.t_cfg_dim(o, "out_features", st)),
+                };
                 self.t_linear(&s0, i, out, node, st, &what)
             }
             "Bilinear" => {
@@ -3680,8 +3751,53 @@ impl Analyzer {
 // registry entry points
 // ---------------------------------------------------------------------------
 
+/// `*args` / `**kwargs` with known contents become ordinary arguments; Err: some cannot be
+/// seen through (the result is then not known).
+fn expand_call(an: &Analyzer, c: &Call, st: &State) -> Result<Option<Call>, ()> {
+    if c.star_args.is_empty() && c.star_kwargs.is_empty() {
+        return Ok(None);
+    }
+    let mut args = c.args.clone();
+    let mut star_left = Vec::new();
+    for sa in &c.star_args {
+        match an.t_seq(sa, st) {
+            // only when the starred part comes last (its order is then clear)
+            Some(items) if c.call_ast.map(|ca| matches!(ca.arguments.args.last(), Some(ruff_python_ast::Expr::Starred(_)))).unwrap_or(true) && c.star_args.len() == 1 => args.extend(items),
+            _ => star_left.push(sa.clone()),
+        }
+    }
+    let keep_ast = if star_left.len() == c.star_args.len() { c.call_ast } else { None };
+    if star_left.len() == c.star_args.len() && c.star_kwargs.is_empty() {
+        // nothing to expand (sizes like `*x.shape` are read in source order later)
+        return Ok(None);
+    }
+    let mut kwargs = c.kwargs.clone();
+    for sk in &c.star_kwargs {
+        let Some(d) = sk.single().filter(|d| an.kind(*d) == Kind::Dict) else { return Err(()) };
+        let row = st.row(d, Ns::Item);
+        if !row.closed() || row.present != row.definite {
+            return Err(());
+        }
+        for k in row.definite.iter() {
+            let Some(name) = intern::key_as_str(k) else { return Err(()) };
+            kwargs.insert(s(&name), st.slot(d, Ns::Item, k));
+        }
+    }
+    Ok(Some(Call { qual: c.qual.clone(), recv: c.recv.clone(), args, kwargs, star_args: star_left, star_kwargs: vec![], node: c.node, call_ast: keep_ast, site: c.site.clone(), line: c.line }))
+}
+
 /// `torch.*` (functions, `nn` constructors, `nn.functional`, `nn.init`).
 pub fn m_torch(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let expanded = match expand_call(an, c, st) {
+        Ok(e) => e,
+        Err(()) => {
+            if c.qual.starts_with("torch.nn.") && !c.qual.starts_with("torch.nn.functional.") {
+                return Value::data(&format!("L{}", c.line));
+            }
+            return tensor_value(Shape::any());
+        }
+    };
+    let c = expanded.as_ref().unwrap_or(c);
     let q = c.qual.as_str();
     if let Some(name) = q.strip_prefix("torch.nn.functional.") {
         return an.t_functional(name, c, st);
@@ -3716,6 +3832,11 @@ pub fn m_torch(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// `tensor.<method>(…)`
 pub fn m_tensor_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let expanded = match expand_call(an, c, st) {
+        Ok(e) => e,
+        Err(()) => return tensor_value(Shape::any()),
+    };
+    let c = expanded.as_ref().unwrap_or(c);
     let name = c.qual.strip_prefix("tensor.").unwrap_or("");
     let recv = c.recv.clone().unwrap_or_default();
     let args = c.args.clone();
@@ -3809,6 +3930,23 @@ impl Analyzer {
             }
         }
     }
+}
+
+pub const QUOT_PREFIX: &str = "\u{1}Q";
+
+/// `d / k` (true division of a dim by an int literal): a float, but `int()` / `math.ceil()`
+/// of it are dims again.
+pub fn quotient_value(d: DimId, k: i64) -> Value {
+    Value::data(&format!("{}{}:{}", QUOT_PREFIX, d.0, k))
+}
+
+pub fn quotient_of(v: &Value) -> Option<(DimId, i64)> {
+    if !v.pts.is_empty() {
+        return None;
+    }
+    let l = label(v)?;
+    let (d, k) = l.strip_prefix(QUOT_PREFIX)?.split_once(':')?;
+    Some((DimId(d.parse().ok()?), k.parse().ok()?))
 }
 
 pub fn dim_of_label(v: &Value) -> Option<DimId> {

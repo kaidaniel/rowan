@@ -677,6 +677,8 @@ pub struct Analyzer {
     pub t_row_values: FxHashMap<(u32, String, Vec<u32>, bool), Value>,
     /// the next hover fact is an assignment's
     pub t_fact_write: bool,
+    /// running a call that stands for "some module": no shape errors / requirements / facts
+    pub t_quiet: bool,
     /// tensor-shape requirements / definite mismatches (models/torch.rs)
     pub shape_reqs: Vec<crate::models::torch::ShapeNote>,
     pub shape_errors: Vec<crate::models::torch::ShapeNote>,
@@ -861,6 +863,7 @@ impl Analyzer {
             t_funcs_by_qual: FxHashMap::default(),
             t_row_values: FxHashMap::default(),
             t_fact_write: false,
+            t_quiet: false,
             shape_reqs: Vec::new(),
             shape_errors: Vec::new(),
             t_sym_alias: FxHashMap::default(),

@@ -63,7 +63,7 @@ impl Registry {
         r(
             &[
                 "builtins.print", "builtins.repr",
-                "builtins.id", "builtins.hash", "builtins.abs", "builtins.round",
+                "builtins.id", "builtins.hash",
                 "builtins.format", "builtins.input", "builtins.callable", "builtins.issubclass", "builtins.hex",
                 "builtins.chr", "builtins.ord", "builtins.open", "builtins.divmod", "builtins.pow",
                 "builtins.bytes", "builtins.object",
@@ -71,6 +71,7 @@ impl Registry {
             noeffect,
         );
         r(&["builtins.int", "builtins.float"], m_int);
+        r(&["builtins.round", "builtins.abs"], m_round_abs);
         r(&["builtins.super"], m_super);
         r(&["builtins.bool"], m_bool);
         r(&["builtins.type"], m_type);
@@ -194,8 +195,64 @@ impl Default for Registry {
     }
 }
 
+fn lit_num(v: &Value) -> Option<f64> {
+    if !v.pts.is_empty() {
+        return None;
+    }
+    match intern::key_get(v.kv.as_lit()?) {
+        intern::Key::Int(i) => Some(i as f64),
+        intern::Key::Float(b) => Some(f64::from_bits(b)),
+        intern::Key::Bool(b) => Some(b as i64 as f64),
+        _ => None,
+    }
+}
+
+/// `round(x)` (half to even) / `abs(x)` on known numbers; on a dim divided by an int
+/// (`round(T / p)`): unknown. Otherwise a number.
+fn m_round_abs(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let Some(a) = c.args.first() else { return Value::data(&format!("L{}", c.line)) };
+    let is_int = a.pts.is_empty() && a.kv.as_lit().map(|k| matches!(intern::key_get(k), intern::Key::Int(_) | intern::Key::Bool(_))).unwrap_or(false);
+    if let Some(x) = lit_num(a) {
+        if c.qual == "builtins.abs" {
+            return if is_int { Value::lit(intern::key_int(x.abs() as i64)) } else { Value::lit(intern::key_float(x.abs())) };
+        }
+        if c.args.len() == 1 {
+            let r = x.round();
+            let r = if (x - x.trunc()).abs() == 0.5 { 2.0 * (x / 2.0).round() } else { r };
+            return Value::lit(intern::key_int(r as i64));
+        }
+    }
+    if c.qual == "builtins.abs" && an.torch_on {
+        if let Some(d) = crate::models::torch::dim_of_label(a) {
+            // dims are not negative
+            if crate::shape::poly(d).iter().all(|(_, k)| *k > 0) {
+                return a.clone();
+            }
+        }
+    }
+    let _ = st;
+    Value::data(&format!("L{}", c.line))
+}
+
 /// `math.*`: numbers (a scalar for the tensor model)
-fn m_math(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
+fn m_math(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // ceil / floor / trunc of known numbers, of a dim divided by an int
+    if matches!(c.qual.as_str(), "math.ceil" | "math.floor" | "math.trunc") {
+        if let Some(a) = c.args.first() {
+            if let Some(x) = lit_num(a) {
+                let r = match c.qual.as_str() {
+                    "math.ceil" => x.ceil(),
+                    "math.floor" => x.floor(),
+                    _ => x.trunc(),
+                };
+                return Value::lit(intern::key_int(r as i64));
+            }
+            if let Some((d, k)) = crate::models::torch::quotient_of(a) {
+                let r = if c.qual == "math.ceil" { crate::shape::ceildiv(d, crate::shape::lit(k)) } else { crate::shape::floordiv(d, crate::shape::lit(k)) };
+                return crate::models::torch::dim_value(crate::shape::norm(r, &st.tf));
+            }
+        }
+    }
     if an.torch_on && !matches!(c.qual.as_str(), "math.floor" | "math.ceil" | "math.isclose" | "math.isnan" | "math.isinf" | "math.prod" | "math.gcd" | "math.comb" | "math.factorial") {
         return crate::models::torch::num_value();
     }
@@ -983,6 +1040,15 @@ fn m_str(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
 fn m_int(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let is_float = c.qual == "builtins.float";
     let Some(a) = c.args.first() else { return Value::lit(intern::key_int(0)) };
+    // int(d / k) of a (non-negative) dim: d // k
+    if !is_float {
+        if let Some((d, k)) = crate::models::torch::quotient_of(a) {
+            return crate::models::torch::dim_value(crate::shape::norm(crate::shape::floordiv(d, crate::shape::lit(k)), &st.tf));
+        }
+        if crate::models::torch::dim_of_label(a).is_some() {
+            return a.clone();
+        }
+    }
     if c.args.len() > 1 || !c.kwargs.is_empty() {
         an.may_raise_here("ValueError", st);
         return Value::data(&format!("L{}", c.line));
