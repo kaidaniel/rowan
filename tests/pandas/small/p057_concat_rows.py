@@ -8,7 +8,8 @@ MAR = pd.DataFrame({"day": [3], "returns": [1]})
 
 def stack(a, b):
     s = pd.concat([a, b], ignore_index=True)
-    #@row s: present={day,sales,promo,returns} definite={day} closed
+    # (first written definite={day}: every call's union also has sales, FEB and MAR included)
+    #@row s: present={day,sales,promo,returns} definite={day,sales} closed
     s["day"]                                             #@ ok day
     return s
 

@@ -84,7 +84,7 @@ const NOEFFECT_OPS: &[&str] = &[
 pub fn install(r: &mut dyn FnMut(&[&'static str], Model)) {
     r(FRAME_PRODUCERS, read_frame);
     r(&["pandas.DataFrame", "pandas.DataFrame.from_records", "pandas.DataFrame.from_dict"], pd_dataframe);
-    r(&["pandas.merge"], pd_merge);
+    r(&["pandas.merge", "pandas.merge_asof", "pandas.merge_ordered"], pd_merge);
     r(&["pandas.concat"], concat);
     r(&["pandas.json_normalize", "pandas.get_dummies", "pandas.crosstab", "pandas.pivot_table", "pandas.wide_to_long", "pandas.read_html_table"], open_frame_call);
     r(
@@ -1282,25 +1282,105 @@ fn open_frame_call(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     new_frame(an, st, c, Row::with_source(Source::new(&format!("{}@L{}", tag, c.line), SourceKind::Call)), None, None)
 }
 
+/// The columns one concatenated piece contributes: a frame's, or a Series' name (axis=1).
+fn piece_row(an: &Analyzer, st: &State, v: &Value, axis1: bool) -> Option<Row> {
+    let mut rows = Vec::new();
+    for o in v.pts.iter() {
+        if an.kind(o) == Kind::Frame {
+            rows.push(st.row(o, Ns::Item));
+        } else if is_series_obj(an, o) {
+            if axis1 {
+                let nm = series_name(an, st, o);
+                rows.push(match name_column(an, &nm) {
+                    Some(k) => Row::closed_with(KeySet::one(k)),
+                    None => return None,
+                });
+            } else {
+                // Series stacked as rows of a frame: one column named after the Series
+                let nm = series_name(an, st, o);
+                rows.push(match name_column(an, &nm) {
+                    Some(k) => Row::closed_with(KeySet::one(k)),
+                    None => return None,
+                });
+            }
+        } else {
+            return None;
+        }
+    }
+    if rows.is_empty() {
+        None
+    } else {
+        Some(join_rows(rows.into_iter()))
+    }
+}
+
 fn concat(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(objs) = c.arg(0, Some("objs")) else { return open_frame_call(an, st, c) };
-    let axis = c.kw("axis");
-    let join = c.kw("join");
-    let inner = key_is(&join, "inner");
-    let mut fs: Vec<u32> = Vec::new();
-    let it = an.iterate(&objs, &c.node, st);
-    if let Some(items) = &it.items {
-        for item in items {
-            fs.extend(frames(an, Some(item)));
+    let axis1 = axis_is_columns(&c.kw("axis"));
+    let inner = key_is(&c.kw("join"), "inner");
+    // the pieces: a list / tuple, or a dict {key: frame} (its keys are keys=)
+    let mut pieces: Vec<Value> = Vec::new();
+    let mut keys: Option<Vec<KeyId>> = c.kw("keys").and_then(|k| lit_key_seq(an, st, &k));
+    let mut known_count = true;
+    if let Some(d) = objs.single().filter(|d| an.kind(*d) == Kind::Dict && !is_series_obj(an, *d)) {
+        let r = st.row(d, Ns::Item);
+        if !(r.closed() && r.present == r.definite) {
+            return open_frame_call(an, st, c);
         }
-    } else if let Elem::One(e) = &it.elem {
-        fs.extend(frames(an, Some(e)));
+        let ks = r.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(r.present.iter()));
+        for k in &ks {
+            pieces.push(st.slot(d, Ns::Item, *k));
+        }
+        keys = keys.or(Some(ks));
+    } else {
+        let it = an.iterate(&objs, &c.node, st);
+        match (&it.items, &it.elem) {
+            (Some(items), _) => pieces = items.clone(),
+            (None, Elem::One(e)) => {
+                pieces = vec![e.clone()];
+                known_count = false;
+            }
+            _ => return open_frame_call(an, st, c),
+        }
     }
-    if fs.is_empty() {
+    let mut rows: Vec<Row> = Vec::new();
+    for p0 in &pieces {
+        match piece_row(an, st, p0, axis1) {
+            Some(r) => rows.push(r),
+            None => return open_frame_call(an, st, c),
+        }
+    }
+    if rows.is_empty() {
         return open_frame_call(an, st, c);
     }
-    let rows: Vec<Row> = fs.iter().map(|f| st.row(*f, Ns::Item)).collect();
-    if inner && (axis.is_none() || axis_is_index(&axis)) {
+    let row = if axis1 {
+        match &keys {
+            // keys= label each piece's columns: (key, column)
+            Some(ks) if ks.len() == rows.len() => {
+                let mut out = Row::new();
+                let mut open = false;
+                for (k, r) in ks.iter().zip(rows.iter()) {
+                    for col in r.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(r.present.iter())) {
+                        out = out.store(intern::key_tuple(vec![*k, col]), r.definite.contains(col));
+                    }
+                    open |= r.open();
+                }
+                if open {
+                    let mut d = out.data();
+                    d.sources = rows.iter().fold(intern::IdSet::new(), |a, r| a.union(&r.sources));
+                    out = Row::from_data(d);
+                }
+                out
+            }
+            _ => {
+                let mut out = Row::new();
+                for r in &rows {
+                    out = out.copy_from(r, true, &KeySet::new(), EMPTY_LENS);
+                }
+                out
+            }
+        }
+    } else if inner {
         let mut row = rows[0].clone();
         for r in &rows[1..] {
             row = Row::from_data(RowData {
@@ -1313,16 +1393,42 @@ fn concat(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 ..Default::default()
             });
         }
-        if it.items.is_none() {
-            row = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.clone(), mutators: row.mutators.clone(), top: row.top, ..Default::default() });
+        row
+    } else {
+        // rows stacked: the union of the columns, each NaN-filled where a piece lacks it
+        let mut out = Row::new();
+        for r in &rows {
+            let mut d = Row::new().copy_from(r, true, &KeySet::new(), EMPTY_LENS).data();
+            d.definite = d.present.clone();
+            d.likely = d.likely.union(&d.present);
+            out = out.copy_from(&Row::from_data(d), true, &KeySet::new(), EMPTY_LENS);
         }
-        return new_frame(an, st, c, row, None, None);
+        out
+    };
+    let mut row = row;
+    if !known_count {
+        // pieces of unknown count (maybe none: ValueError, maybe one)
+        let mut d = row.data();
+        d.definite = KeySet::new();
+        row = Row::from_data(d);
     }
-    let mut row = Row::new();
-    for r in &rows {
-        row = row.copy_from(r, true, &KeySet::new(), EMPTY_LENS);
+    let v = new_frame(an, st, c, row, None, None);
+    if let Some(nid) = v.single() {
+        set_labels(st, nid, None);
+        if !axis1 && keys.is_some() {
+            set_index_levels(st, nid, Some(&[None, None]));
+        }
+        if !axis1 {
+            if let Some(names) = c.kw("names").and_then(|n| lit_key_seq(an, st, &n)) {
+                let mut lv: Vec<Option<KeyId>> = names.into_iter().map(Some).collect();
+                if lv.len() < 2 && keys.is_some() {
+                    lv.push(None);
+                }
+                set_index_levels(st, nid, Some(&lv));
+            }
+        }
     }
-    new_frame(an, st, c, row, None, None)
+    v
 }
 
 /// The op reads these columns of each frame (raising for a missing one): verdicts, and the
@@ -1365,16 +1471,109 @@ fn rows_of(st: &State, fs: &[u32]) -> Row {
     }
 }
 
+/// May the row have k, does it surely?
+fn side_status(r: &Row, k: KeyId) -> (bool, bool) {
+    let may = r.present.contains(k) || (r.open() && !r.absent.contains(k));
+    (may, r.definite.contains(k))
+}
+
+/// The columns of two frames side by side (merge / join): keys once; a column both sides
+/// have gets the suffixes, a column only one side has keeps its name.
+fn combine_overlap(lrow: &Row, rrow: &Row, keys: &KeySet, lsuf: &str, rsuf: &str) -> Row {
+    let mut flags: IndexMap<KeyId, (bool, bool)> = IndexMap::new();
+    let mut gone: Vec<KeyId> = Vec::new();
+    let mut put = |k: KeyId, may: bool, def: bool| {
+        let e = flags.entry(k).or_insert((false, false));
+        e.0 |= may;
+        e.1 |= def;
+    };
+    let mut cols: Vec<KeyId> = lrow.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(lrow.present.iter()));
+    for k in rrow.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(rrow.present.iter())) {
+        if !cols.contains(&k) {
+            cols.push(k);
+        }
+    }
+    for c in cols {
+        if keys.contains(c) {
+            let def = lrow.definite.contains(c) || rrow.definite.contains(c);
+            put(c, true, def);
+            continue;
+        }
+        let (lm, ld) = side_status(lrow, c);
+        let (rm, rd) = side_status(rrow, c);
+        let (both_may, both_def) = (lm && rm, ld && rd);
+        let only_may = (lm && !rd) || (rm && !ld);
+        let only_def = (ld && !rm) || (rd && !lm);
+        let cs = intern::key_py_str(c);
+        let name = |suf: &str| if suf.is_empty() { c } else { key_str_lit(&format!("{}{}", cs, suf)) };
+        if both_may {
+            put(name(lsuf), true, both_def);
+            put(name(rsuf), true, both_def);
+        }
+        if only_may {
+            put(c, true, only_def);
+        } else if !lsuf.is_empty() && !rsuf.is_empty() {
+            gone.push(c);
+        }
+    }
+    let mut row = Row::new();
+    for (k, (may, def)) in &flags {
+        if *may {
+            row = row.store(*k, *def);
+        }
+    }
+    // a column both sides surely have is there only under its suffixed names
+    for c in gone {
+        if !flags.get(&c).map(|f| f.0).unwrap_or(false) {
+            row = row.delete(c, true);
+        }
+    }
+    if lrow.open() || rrow.open() {
+        let mut d = row.data();
+        d.sources = lrow.sources.union(&rrow.sources);
+        d.mutators = lrow.mutators.union(&rrow.mutators);
+        d.top = lrow.top || rrow.top;
+        row = Row::from_data(d);
+    }
+    row
+}
+
+fn suffix_pair(an: &Analyzer, st: &State, v: Option<Value>) -> (String, String) {
+    let mut suffixes = ("_x".to_string(), "_y".to_string());
+    if let Some(sv) = v {
+        for x in sv.pts.iter() {
+            if matches!(an.kind(x), Kind::Tuple | Kind::List) && an.obj(x).literal_len == Some(2) {
+                let a = st.slot(x, Ns::Pos, intern::key_int(0));
+                let b = st.slot(x, Ns::Pos, intern::key_int(1));
+                if let (Some(ka), Some(kb)) = (a.kv.as_lit(), b.kv.as_lit()) {
+                    let sa = intern::with_key(ka, |k| matches!(k, intern::Key::None));
+                    let sb = intern::with_key(kb, |k| matches!(k, intern::Key::None));
+                    suffixes = (if sa { String::new() } else { intern::key_py_str(ka) }, if sb { String::new() } else { intern::key_py_str(kb) });
+                }
+            }
+        }
+    }
+    suffixes
+}
+
+/// mode 0: `left.merge(right, …)`, 1: `pd.merge(left, right, …)`, 2: `pd.merge_asof`.
 fn merge_impl(an: &mut Analyzer, st: &mut State, c: &Call, left: Value, right: Value, mode: usize) -> Value {
     let lf = frames(an, Some(&left));
     let rf = frames(an, Some(&right));
     let mut on = c.kw("on");
-    if on.is_none() && c.args.len() > (if mode == 0 { 1 } else { 2 }) {
-        on = Some(c.args[if mode == 0 { 1 } else { 2 }].clone());
+    let pos_on = if mode == 0 { 2 } else { 3 };
+    if on.is_none() && mode != 2 && c.args.len() > pos_on {
+        on = Some(c.args[pos_on].clone());
     }
+    let cross = key_is(&c.kw("how"), "cross");
     let left_on = c.kw("left_on");
     let right_on = c.kw("right_on");
-    let on_keys = on.as_ref().and_then(|o| an.lit_keys(o, st));
+    let mut on_keys = on.as_ref().and_then(|o| an.lit_keys(o, st));
+    if mode == 2 {
+        if let Some(by) = c.kw("by").and_then(|b| an.lit_keys(&b, st)) {
+            on_keys = Some(on_keys.unwrap_or_default().union(&by));
+        }
+    }
     let lkeys = left_on.as_ref().and_then(|o| an.lit_keys(o, st));
     let rkeys = right_on.as_ref().and_then(|o| an.lit_keys(o, st));
     let (mut lf, mut rf) = (lf, rf);
@@ -1388,61 +1587,39 @@ fn merge_impl(an: &mut Analyzer, st: &mut State, c: &Call, left: Value, right: V
     if let Some(rk) = &rkeys {
         rf = require_cols(an, st, c, &rf, rk);
     }
-    let lrow = if lf.is_empty() { Row::top() } else { join_rows(lf.iter().map(|f| st.row(*f, Ns::Item))) };
-    let rrow = if rf.is_empty() { Row::top() } else { join_rows(rf.iter().map(|f| st.row(*f, Ns::Item))) };
-    let mut suffixes = ("_x".to_string(), "_y".to_string());
-    if let Some(sv) = c.kw("suffixes") {
-        for x in sv.pts.iter() {
-            if matches!(an.kind(x), Kind::Tuple | Kind::List) && an.obj(x).literal_len == Some(2) {
-                let a = st.slot(x, Ns::Pos, intern::key_int(0));
-                let b = st.slot(x, Ns::Pos, intern::key_int(1));
-                if let (Some(ka), Some(kb)) = (a.kv.as_lit(), b.kv.as_lit()) {
-                    let sa = intern::with_key(ka, |k| if matches!(k, intern::Key::None) { String::new() } else { intern::key_py_str(ka) });
-                    let sb = intern::with_key(kb, |k| if matches!(k, intern::Key::None) { String::new() } else { intern::key_py_str(kb) });
-                    suffixes = (sa, sb);
-                }
-            }
+    let lrow = rows_of(st, &lf);
+    let rrow = rows_of(st, &rf);
+    let (lsuf, rsuf) = suffix_pair(an, st, c.kw("suffixes"));
+    let by_index = key_is_bool(&c.kw("left_index"), true) || key_is_bool(&c.kw("right_index"), true);
+    let mut keys: KeySet = on_keys.clone().unwrap_or_default();
+    if let (Some(lk), Some(rk)) = (&lkeys, &rkeys) {
+        // a left_on / right_on pair with the same name is one column
+        keys = keys.union(&lk.intersection(rk));
+    }
+    if on_keys.is_none() && lkeys.is_none() && rkeys.is_none() && !cross && !by_index {
+        // the common columns are the keys
+        keys = lrow.present.intersection(&rrow.present);
+        if lrow.open() || rrow.open() {
+            an.note(format!("merge@L{}: join keys unknown (no on=)", c.line));
         }
     }
-    let mut keys_both: KeySet = on_keys.clone().unwrap_or_default();
-    if on_keys.is_none() && lkeys.is_none() && rkeys.is_none() {
-        keys_both = if lrow.closed() && rrow.closed() { lrow.present.intersection(&rrow.present) } else { KeySet::new() };
-    }
-    let mut row = Row::new().copy_from(&lrow, true, &KeySet::new(), EMPTY_LENS).copy_from(&rrow, true, &KeySet::new(), EMPTY_LENS);
-    let overlap = lrow.present.intersection(&rrow.present).difference(&keys_both);
-    for col in intern::sorted_by_str(overlap.iter()) {
-        let both_def = lrow.definite.contains(col) && rrow.definite.contains(col);
-        if let Some(cs) = intern::key_as_str(col) {
-            if !suffixes.0.is_empty() {
-                row = row.store(key_str_lit(&format!("{}{}", cs, suffixes.0)), both_def);
-            }
-            if !suffixes.1.is_empty() {
-                row = row.store(key_str_lit(&format!("{}{}", cs, suffixes.1)), both_def);
+    let mut row = combine_overlap(&lrow, &rrow, &keys, &lsuf, &rsuf);
+    match c.kw("indicator") {
+        Some(v) if key_is_bool(&Some(v.clone()), true) => row = row.store(mk("_merge"), true),
+        Some(v) => {
+            if let Some(k) = lit_key(&Some(v)).filter(|k| intern::key_is_str(*k)) {
+                row = row.store(k, true);
             }
         }
-        if both_def {
-            row = row.delete(col, true);
-        } else {
-            let mut d = row.data();
-            d.definite = d.definite.remove(col);
-            d.likely = d.likely.remove(col);
-            d.terms = Default::default();
-            d.dterms = Default::default();
-            d.lterms = Default::default();
-            d.pstores = Default::default();
-            row = Row::from_data(d);
-        }
-    }
-    if on_keys.is_none() && (lrow.open() || rrow.open()) && lkeys.is_none() && rkeys.is_none() {
-        an.note(format!("merge@L{}: join keys unknown (no on=)", c.line));
+        None => {}
     }
     new_frame(an, st, c, row, None, None)
 }
 
 fn pd_merge(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    let left = c.args.first().cloned().unwrap_or_default();
+    let left = c.args.first().cloned().or_else(|| c.kw("left")).unwrap_or_default();
     let right = c.args.get(1).cloned().or_else(|| c.kw("right")).unwrap_or_default();
-    merge_impl(an, st, c, left, right, 1)
+    merge_impl(an, st, c, left, right, if c.qual.ends_with("merge_asof") { 2 } else { 1 })
 }
 
 fn df_merge(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -1454,40 +1631,53 @@ fn df_merge(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn df_join(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let other = c.args.first().cloned().or_else(|| c.kw("other")).unwrap_or_default();
     let lf = frames(an, c.recv.as_ref());
-    let rf = frames(an, Some(&other));
     let on = c.kw("on");
     let on_keys = on.as_ref().and_then(|o| an.lit_keys(o, st));
     let lf = match &on_keys {
         Some(ok) => require_cols(an, st, c, &lf, ok),
         None => lf,
     };
-    let lrow = if lf.is_empty() { Row::top() } else { join_rows(lf.iter().map(|f| st.row(*f, Ns::Item))) };
-    let rrow = if rf.is_empty() { Row::top() } else { join_rows(rf.iter().map(|f| st.row(*f, Ns::Item))) };
-    let lsuf = c.kw("lsuffix").and_then(|v| v.kv.as_lit()).map(intern::key_py_str).unwrap_or_default();
-    let rsuf = c.kw("rsuffix").and_then(|v| v.kv.as_lit()).map(intern::key_py_str).unwrap_or_default();
-    let mut row = Row::new().copy_from(&lrow, true, &KeySet::new(), EMPTY_LENS).copy_from(&rrow, true, &KeySet::new(), EMPTY_LENS);
-    let overlap = lrow.present.intersection(&rrow.present).difference(&on_keys.unwrap_or_default());
-    for col in intern::sorted_by_str(overlap.iter()) {
-        let both_def = lrow.definite.contains(col) && rrow.definite.contains(col);
-        if lsuf.is_empty() && rsuf.is_empty() {
-            if both_def {
-                let target = lf.first().copied().or_else(|| rf.first().copied()).unwrap_or(0);
-                an.verdict(&c.node, col, &Classification::with_note(Tier::Missing, "join: overlapping column without suffix raises ValueError"), target, Ns::Item, None, None);
+    // the other side: frames, named Series, or a list of them
+    let mut rrows: Vec<Row> = Vec::new();
+    let mut items: Vec<Value> = vec![other.clone()];
+    if other.pts.iter().any(|o| matches!(an.kind(o), Kind::List | Kind::Tuple)) {
+        let it = an.iterate(&other, &c.node, st);
+        items = match (&it.items, &it.elem) {
+            (Some(i), _) => i.clone(),
+            (None, Elem::One(e)) => vec![e.clone()],
+            _ => vec![],
+        };
+    }
+    for item in &items {
+        for o in item.pts.iter() {
+            if an.kind(o) == Kind::Frame {
+                rrows.push(st.row(o, Ns::Item));
+            } else if is_series_obj(an, o) {
+                let nm = series_name(an, st, o);
+                rrows.push(match name_column(an, &nm) {
+                    Some(k) => Row::closed_with(KeySet::one(k)),
+                    None => Row::with_source(Source::new(&format!("join@L{}", c.line), SourceKind::Call)),
+                });
+            } else {
+                rrows.push(Row::with_source(Source::new(&format!("join@L{}", c.line), SourceKind::Call)));
             }
-            continue;
-        }
-        let cs = intern::key_py_str(col);
-        if !lsuf.is_empty() {
-            row = row.store(key_str_lit(&format!("{}{}", cs, lsuf)), both_def);
-        }
-        if !rsuf.is_empty() {
-            row = row.store(key_str_lit(&format!("{}{}", cs, rsuf)), both_def);
-        }
-        if both_def && !lsuf.is_empty() && !rsuf.is_empty() {
-            row = row.delete(col, true);
         }
     }
-    new_frame(an, st, c, row, None, None)
+    let lrow = rows_of(st, &lf);
+    let rrow = if rrows.is_empty() { Row::top() } else { join_rows(rrows.into_iter()) };
+    let lsuf = c.kw("lsuffix").and_then(|v| v.kv.as_lit()).map(intern::key_py_str).unwrap_or_default();
+    let rsuf = c.kw("rsuffix").and_then(|v| v.kv.as_lit()).map(intern::key_py_str).unwrap_or_default();
+    if lsuf.is_empty() && rsuf.is_empty() {
+        // overlapping columns without suffixes: ValueError
+        for col in intern::sorted_by_str(lrow.present.intersection(&rrow.present).iter()) {
+            if lrow.definite.contains(col) && rrow.definite.contains(col) {
+                let target = lf.first().copied().unwrap_or(0);
+                an.verdict(&c.node, col, &Classification::with_note(Tier::Missing, "join: overlapping column without suffix raises ValueError"), target, Ns::Item, None, None);
+            }
+        }
+    }
+    let row = combine_overlap(&lrow, &rrow, &KeySet::new(), &lsuf, &rsuf);
+    derived(an, st, c, row, &lf, Rows::Other, false)
 }
 
 fn rename_step(an: &mut Analyzer, st: &mut State, cols: &Value, c: &Call, fs: &[u32]) -> Option<Vec<Step>> {
@@ -3025,6 +3215,37 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
     let row = state.row(oid, Ns::Item);
     let site = an.access_site(node);
     if let (Some(k), true) = (key.kv.as_lit(), key.pts.is_empty()) {
+        // MultiIndex columns (tuple keys): a plain key selects the top level
+        let is_tuple = |x: KeyId| intern::with_key(x, |kk| matches!(kk, intern::Key::Tuple(_)));
+        if !is_tuple(k) && row.present.iter().any(is_tuple) {
+            let first = |x: KeyId| intern::with_key(x, |kk| if let intern::Key::Tuple(t) = kk { t.first().copied() } else { Some(x) });
+            let mut d = row.data();
+            d.present = KeySet::from_iter(row.present.iter().filter_map(first));
+            d.definite = KeySet::from_iter(row.definite.iter().filter_map(first));
+            d.likely = KeySet::from_iter(row.likely.iter().filter_map(first));
+            d.absent = KeySet::new();
+            d.order = Default::default();
+            let top = Row::from_data(d);
+            let cls = classify(&top, k);
+            if guarded && !crate::interp::disabled("guardedverdicts") {
+                an.verdict_guarded(node, k, &cls, oid, Ns::Item);
+            }
+            if !guarded {
+                an.verdict(node, k, &cls, oid, Ns::Item, None, None);
+            }
+            // the sub-frame: the second level of the matching columns
+            let second = |x: KeyId| intern::with_key(x, |kk| if let intern::Key::Tuple(t) = kk { if t.first() == Some(&k) { if t.len() == 2 { t.get(1).copied() } else { Some(intern::key_tuple(t[1..].to_vec())) } } else { None } } else { None });
+            let mut sd = Row::new().data();
+            sd.present = KeySet::from_iter(row.present.iter().filter_map(second));
+            sd.definite = KeySet::from_iter(row.definite.iter().filter_map(second));
+            sd.likely = sd.definite.clone();
+            if row.open() {
+                sd.sources = row.sources.clone();
+            }
+            let nid = an.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(Row::from_data(sd)), Ns::Item, None, None);
+            derive(state, oid, nid, Rows::Same, &KeySet::new());
+            return Value::obj(nid);
+        }
         let cls = classify(&row, k);
         if guarded && !crate::interp::disabled("guardedverdicts") {
             an.verdict_guarded(node, k, &cls, oid, Ns::Item);

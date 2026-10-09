@@ -9,13 +9,6 @@ small/p046_wide_to_long.py
 small/p047_json_normalize.py
 small/p048_combine_update.py
 small/p049_columns_str.py
-small/p053_merge_cross.py
-small/p054_merge_suffixes.py
-small/p055_merge_indicator.py
-small/p057_concat_rows.py
-small/p059_concat_axis1.py
-small/p060_merge_asof.py
-small/p062_groupby_agg_dict_list.py
 small/p068_groupby_filter_apply.py
 small/p070_value_counts.py
 small/p072_resample.py

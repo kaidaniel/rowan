@@ -23,7 +23,9 @@ both["year"]                                     #@ ok year
 both["spent"]                                    #@ ok spent
 both["other"]                                    #@ missing other
 m = df.merge(agg2, on="customer")
-m["spent"]                                       #@ ok spent
+# (was `ok spent`: df is an open read_csv frame; a `spent` column of the input would make the
+# merge give spent_x / spent_y instead, so this depends on the input)
+m["spent"]                                       #@ input spent
 m["total"]                                       #@ ok total
 # the frame came from read_csv: unknown columns depend on the input
 m["zzz"]                                         #@ input zzz
