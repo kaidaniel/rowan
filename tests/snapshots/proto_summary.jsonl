@@ -837,6 +837,7 @@
 ["schema", "?@L145", "'kv'", false]
 ["schema", "?@L145", "'pts'", false]
 ["schema", "?@L152", "'ph'", false]
+["schema", "ast.parse@L561", "'body'", false]
 ["schema", "call of \u03c1remap_value@L1161", "'cls'", false]
 ["schema", "call of \u03c1remap_value@L1161", "'key'", false]
 ["schema", "call of \u03c1remap_value@L1161", "'kind'", false]

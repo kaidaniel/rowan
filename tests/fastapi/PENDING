@@ -27,7 +27,6 @@ small/f022_status_jsonresponse.py
 small/f024_service_repository.py
 small/f025_nested_models.py
 small/f026_list_bodies.py
-small/f027_dict_to_model.py
 small/f028_patch_exclude_unset.py
 small/f029_query_dict.py
 small/f030_depends_user.py

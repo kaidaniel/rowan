@@ -752,6 +752,8 @@ pub struct Analyzer {
     pub pyd_depth: u32,
     /// pydantic instances: the fields their input surely / maybe gave (`model_fields_set`)
     pub pyd_set: FxHashMap<ObjId, (KeySet, KeySet)>,
+    /// pydantic instances validated from placeholders: those inputs
+    pub pyd_inputs: FxHashMap<ObjId, Vec<ObjId>>,
     /// a requirement-only entry run (`param F.x` schemas of a called function): no verdicts,
     /// row checks, facts or notes
     pub quiet: bool,
@@ -928,6 +930,7 @@ impl Analyzer {
             pyd_adapters: Vec::new(),
             pyd_depth: 0,
             pyd_set: FxHashMap::default(),
+            pyd_inputs: FxHashMap::default(),
             quiet: false,
             fa_routes: Vec::new(),
             fa_includes: Vec::new(),
@@ -1634,8 +1637,10 @@ impl Analyzer {
             // keep schema requirements discovered in entry points (a requirement-only run: those
             // of the function's own parameters)
             let own = format!("param {}.", fi.py_qualname());
+            let span = (fi.node.node().line, fi.node.node().end_line);
+            let in_main = fi.module == self.main_module;
             for (src, d) in st.reqs.items() {
-                if quiet && !crate::domain::source_label(src).starts_with(&own) {
+                if quiet && !own_source(&crate::domain::source_label(src), &own, span, in_main) {
                     continue;
                 }
                 let tgt = state.reqs.writable(&src);
@@ -2532,4 +2537,21 @@ pub fn package_root_of_file(path: &str) -> Option<String> {
         dir = dir.parent()?.to_path_buf();
     }
     Some(dir.to_string_lossy().to_string())
+}
+
+/// A requirement-only run keeps what the function itself demands: of its parameters, and of
+/// the inputs it reads on its own lines (`json.loads@L20` inside it; main module only, where
+/// a source's line is unambiguous).
+fn own_source(label: &str, own: &str, span: (u32, u32), in_main: bool) -> bool {
+    if label.starts_with(own) {
+        return true;
+    }
+    if !in_main || label.starts_with("param ") {
+        return false;
+    }
+    let site = label.split('[').next().unwrap_or("");
+    match site.rsplit_once("@L").and_then(|(_, n)| n.parse::<u32>().ok()) {
+        Some(n) => span.0 <= n && n <= span.1,
+        None => false,
+    }
 }

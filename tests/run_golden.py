@@ -203,7 +203,8 @@ def check_results(verdict_exp, row_exp_checks, schema_exp, vs, sch) -> List[str]
         if problem:
             failures.append(f"L{ln} row {name}: {problem}")
     for label, spec in schema_exp:
-        hits = {k: v for k, v in sch.items() if label in k}
+        # the source itself (a module's sources may carry a prefix), not a path below it
+        hits = {k: v for k, v in sch.items() if k == label or (k.endswith(label) and k[-len(label) - 1] in ": ")}
         if spec.get("none"):
             keys = {k for e in hits.values() for k in e}
             if keys:

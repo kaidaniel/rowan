@@ -574,6 +574,9 @@ impl Analyzer {
             self.obj_mut(oid).literal_len = None;
             state.drop_obj_ns(oid, Ns::Pos);
         }
+        if kind == Kind::Set {
+            self.normalize_set(oid, state);
+        }
         Value::obj(oid)
     }
 
@@ -993,7 +996,7 @@ impl Analyzer {
                 let row = state.row(d, Ns::Item);
                 (row.closed() && row.present == row.definite && !row.symbolic()).then(|| row.present.clone())
             }
-            (Kind::Set, _) => {
+            (Kind::Set | Kind::List | Kind::Tuple, _) => {
                 let n = self.obj(o).literal_len?;
                 let ks: Option<Vec<KeyId>> = (0..n).map(|i| {
                     let s = state.slot(o, Ns::Pos, key_int(i as i64));
@@ -1003,6 +1006,50 @@ impl Analyzer {
             }
             _ => None,
         }
+    }
+
+    /// A set keeps known positions only for distinct literal members, sorted (Python's
+    /// iteration order is not known; membership and size are): anything else forgets them.
+    pub fn normalize_set(&mut self, oid: u32, state: &mut State) {
+        if self.kind(oid) != Kind::Set || crate::interp::disabled("setmembers") {
+            return;
+        }
+        let Some(n) = self.obj(oid).literal_len else { return };
+        let mut ks: Vec<KeyId> = Vec::with_capacity(n);
+        for i in 0..n {
+            let v = state.slot(oid, Ns::Pos, key_int(i as i64));
+            match (v.pts.is_empty(), v.kv.as_lit()) {
+                (true, Some(k)) => ks.push(k),
+                _ => {
+                    self.obj_mut(oid).literal_len = None;
+                    state.drop_obj_ns(oid, Ns::Pos);
+                    return;
+                }
+            }
+        }
+        self.set_members(oid, intern::KeySet::from_iter(ks), state);
+    }
+
+    /// Set `oid`'s members to exactly `ks` (literal keys).
+    pub fn set_members(&mut self, oid: u32, ks: intern::KeySet, state: &mut State) {
+        state.drop_obj_ns(oid, Ns::Pos);
+        let sorted = intern::sorted_by_str(ks.iter());
+        for (i, k) in sorted.iter().enumerate() {
+            state.set_slot(oid, Ns::Pos, key_int(i as i64), Value::lit(*k), true);
+        }
+        self.obj_mut(oid).literal_len = Some(sorted.len());
+        state.set_slot(oid, Ns::Elem, STAR, Value::kv_only(crate::models::torch::elem_kv(&KeyVal::lits(ks.clone()))), true);
+        state.elems.insert(oid, if ks.is_empty() { KeyVal::Lits(intern::KeySet::new()) } else { KeyVal::lits(ks) });
+    }
+
+    /// A new set with exactly the literal members `ks`.
+    pub fn literal_set(&mut self, nd: &Node, ks: intern::KeySet, state: &mut State) -> Value {
+        let vals: Vec<Value> = intern::sorted_by_str(ks.iter()).into_iter().map(Value::lit).collect();
+        let v = self.alloc_positional(Kind::Set, nd, Some(vals), Value::new(), if ks.is_empty() { KeyVal::Lits(intern::KeySet::new()) } else { KeyVal::lits(ks) }, state);
+        if let Some(o) = v.single() {
+            self.normalize_set(o, state);
+        }
+        v
     }
 
     /// The known positions of a list / tuple that can be updated in place (one strong object
@@ -1167,8 +1214,7 @@ impl Analyzer {
                     ast::Operator::Sub => x.difference(&y),
                     _ => x.difference(&y).union(&y.difference(&x)),
                 };
-                let vals: Vec<Value> = intern::sorted_by_str(r.iter()).into_iter().map(Value::lit).collect();
-                return self.alloc_positional(Kind::Set, node, Some(vals), Value::new(), KeyVal::lits(r), state);
+                return self.literal_set(node, r, state);
             }
         }
         if op == ast::Operator::BitOr {
@@ -1660,7 +1706,7 @@ impl Analyzer {
         self.obj_mut(oid).literal_len = None;
         state.drop_obj_ns(oid, Ns::Pos);
         let base_depth = self.cond_depth;
-        let strong = self.obj(oid).single && matches!(kind, Kind::List | Kind::Tuple);
+        let strong = self.obj(oid).single && matches!(kind, Kind::List | Kind::Tuple | Kind::Set);
         // positions: every item known and every filter decided (straight-line iterations)
         let mut n: usize = 0;
         let mut positional = strong;
@@ -1687,6 +1733,9 @@ impl Analyzer {
         } else {
             self.obj_mut(oid).literal_len = None;
             state.drop_obj_ns(oid, Ns::Pos);
+        }
+        if kind == Kind::Set {
+            self.normalize_set(oid, state);
         }
         Value::obj(oid)
     }

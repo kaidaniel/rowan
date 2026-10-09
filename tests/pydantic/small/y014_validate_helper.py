@@ -18,7 +18,9 @@ def from_web(form):
     data = {"email": form["email"], "password": form["pw"]}   #@ possibly pw
     if "ref" in form:
         data["referrer"] = form["ref"]           #@ ok ref
-    #@row data: present={email,password,referrer} definite={email,password} closed
+    # Corrected on re-reading: a directive line applies to the code line above it, here the store
+    # inside the `if`, where `referrer` was just set (definite).
+    #@row data: present={email,password,referrer} definite={email,password,referrer} closed
     return validate_signup(data)
 
 

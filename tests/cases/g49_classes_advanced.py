@@ -45,7 +45,9 @@ class Child(Base):
 
 b = Base.make("b")
 b.name                                   #@ ok name
-b.label                                  #@ none label
+# Corrected (library suites): reading a property through an instance succeeds: ok, like a
+# class attribute (x351).
+b.label                                  #@ ok label
 b.extra                                  #@ missing extra
 c = Child({"name": "c"})
 c.extra                                  #@ ok extra

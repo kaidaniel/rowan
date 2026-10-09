@@ -1,6 +1,5 @@
 small/s001_dict_methods.py
 small/s002_dict_union.py
-small/s003_dict_comprehensions.py
 small/s004_dict_constructors.py
 small/s005_list_set_tuple.py
 small/s006_zip_strict.py

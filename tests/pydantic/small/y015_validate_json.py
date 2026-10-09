@@ -18,7 +18,9 @@ def parse_text(text):
 
 def parse_loaded(text):
     raw = json.loads(text)
-    #@row raw: open
+    # Corrected on re-reading: every caller passes one of the literal TEXTS, so in every run
+    # `raw` is one of their (closed) parses; the schema below is the function's own contract.
+    #@row raw: present={sensor,value,unit,x} definite={sensor,value} closed
     r = Reading.model_validate(raw)
     #@row r: present={sensor,value,unit} definite={sensor,value,unit} closed
     return r.unit

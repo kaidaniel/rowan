@@ -31,7 +31,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.str.", "Series.dt.", "Series.cat.", "Series.sparse.", "Series.list.", "Series.struct.", "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
+    "parser.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
 ];
 
 pub struct Registry {
@@ -98,7 +98,15 @@ impl Registry {
         r(&["dict.keys", "dict.values", "dict.items"], m_views);
         r(&["dict.copy"], m_dcopy);
         r(&["dict.*", "unknown.*", "class.*"], m_unknown_method);
-        r(&["list.append", "set.add", "list.extend", "set.update"], m_append);
+        r(
+            &[
+                "set.add", "set.update", "set.union", "set.intersection", "set.difference", "set.symmetric_difference", "set.issubset", "set.issuperset",
+                "set.isdisjoint", "set.discard", "set.remove", "set.intersection_update", "set.difference_update", "set.symmetric_difference_update", "set.copy",
+                "set.clear",
+            ],
+            m_set,
+        );
+        r(&["list.append", "list.extend"], m_append);
         r(&["list.pop", "set.pop"], m_lpop);
         r(&["list.*", "set.*", "tuple.*", "zip.*", "enumerate.*", "pair.*"], m_list_other);
         r(&["view.*"], m_view);
@@ -467,7 +475,7 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 if let Some(items) = &it.items {
                     let reversed = c.qual.as_str() == "builtins.reversed";
                     let sorted = c.qual.as_str() == "builtins.sorted";
-                    if an.obj(oid).single && items.len() <= 64 && kind != Kind::Set {
+                    if an.obj(oid).single && items.len() <= 64 {
                         an.obj_mut(oid).literal_len = Some(items.len());
                         let n = items.len();
                         // sorted: when every sort key is a known literal (or a tuple of
@@ -487,6 +495,14 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             };
                             st.set_slot(oid, Ns::Pos, intern::key_int(pos as i64), v, true);
                         }
+                        // the items of a set come in an order Python does not promise
+                        let from_set = a.pts.iter().any(|o| an.kind(o) == Kind::Set);
+                        if from_set && kind != Kind::Set && !sorted {
+                            for i in 0..n {
+                                st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), all.clone(), true);
+                            }
+                        }
+                        an.normalize_set(oid, st);
                     }
                 }
             }
@@ -1823,6 +1839,101 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     an.none_v.clone()
 }
 
+/// Set methods: decided on sets with known (literal) members, else the element model.
+fn m_set(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let name = last(&c.qual).to_string();
+    let recv = c.recv.clone().unwrap_or_default();
+    let mine = an.known_members(&recv, st);
+    let args: Vec<Option<KeySet>> = c.args.iter().map(|a| an.known_members(a, st)).collect();
+    let all_args = args.iter().all(|a| a.is_some());
+    let fold = |base: &KeySet, f: &dyn Fn(&KeySet, &KeySet) -> KeySet| -> KeySet { args.iter().flatten().fold(base.clone(), |acc, a| f(&acc, a)) };
+    let union = |a: &KeySet, b: &KeySet| a.union(b);
+    let inter = |a: &KeySet, b: &KeySet| a.intersection(b);
+    let diff = |a: &KeySet, b: &KeySet| a.difference(b);
+    let sym = |a: &KeySet, b: &KeySet| a.difference(b).union(&b.difference(a));
+    let op: Option<&dyn Fn(&KeySet, &KeySet) -> KeySet> = match name.as_str() {
+        "union" | "update" => Some(&union),
+        "intersection" | "intersection_update" => Some(&inter),
+        "difference" | "difference_update" => Some(&diff),
+        "symmetric_difference" | "symmetric_difference_update" => Some(&sym),
+        _ => None,
+    };
+    match name.as_str() {
+        "union" | "intersection" | "difference" | "symmetric_difference" | "copy" => {
+            if let (Some(m), true) = (&mine, all_args) {
+                let r = match op {
+                    Some(f) => fold(m, f),
+                    None => m.clone(),
+                };
+                return an.literal_set(&c.node, r, st);
+            }
+            // a new set: the elements it may hold
+            let mut kv = KeyVal::Bot;
+            let mut elem = Value::new();
+            let srcs: Vec<Value> = std::iter::once(recv.clone()).chain(if name == "union" { c.args.clone() } else { vec![] }).collect();
+            for v in &srcs {
+                let it = an.iterate(v, &c.node, st);
+                let e = it.elem.one_or_empty();
+                kv = kv_join(&kv, &e.kv);
+                elem = elem.join(&e);
+            }
+            an.alloc_positional(Kind::Set, &c.node, None, elem, kv, st)
+        }
+        "issubset" | "issuperset" | "isdisjoint" => {
+            if let (Some(m), Some(Some(o))) = (&mine, args.first()) {
+                let b = match name.as_str() {
+                    "issubset" => m.is_subset(o),
+                    "issuperset" => o.is_subset(m),
+                    _ => !m.intersects(o),
+                };
+                return Value::lit(intern::key_bool(b));
+            }
+            Value::data("set")
+        }
+        "add" | "discard" | "remove" | "update" | "intersection_update" | "difference_update" | "symmetric_difference_update" | "clear" => {
+            let item = c.args.first().and_then(|a| a.kv.as_lit().filter(|_| a.pts.is_empty()));
+            for oid in recv.pts.iter().filter(|o| an.kind(*o) == Kind::Set).collect::<Vec<_>>() {
+                let strong = recv.pts.len() == 1 && an.obj(oid).single;
+                let known = an.known_members(&Value::obj(oid), st);
+                let next: Option<KeySet> = match (name.as_str(), &known, item) {
+                    ("clear", _, _) if strong => Some(KeySet::new()),
+                    ("add", Some(m), Some(k)) => Some(m.insert(k)),
+                    ("discard", Some(m), Some(k)) => Some(m.remove(k)),
+                    ("remove", Some(m), Some(k)) => {
+                        if !m.contains(k) {
+                            an.raise_here("KeyError", st);
+                            return Value::new();
+                        }
+                        Some(m.remove(k))
+                    }
+                    (_, Some(m), _) if all_args && op.is_some() => Some(fold(m, op.unwrap())),
+                    _ => None,
+                };
+                match next {
+                    Some(r) if strong => an.set_members(oid, r, st),
+                    _ => {
+                        // members not known any more: the elements it may hold
+                        let mut kv = st.elems.get(&oid).unwrap_or(KeyVal::Bot);
+                        if matches!(name.as_str(), "add" | "update") {
+                            for a in &c.args {
+                                let e = if name == "add" { a.clone() } else { an.iterate(a, &c.node, st).elem.one_or_empty() };
+                                kv = kv_join(&kv, &e.kv);
+                                let cur = st.slot(oid, Ns::Elem, STAR);
+                                st.set_slot(oid, Ns::Elem, STAR, cur.join(&Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv))), true);
+                            }
+                        }
+                        st.elems.insert(oid, kv);
+                        an.obj_mut(oid).literal_len = None;
+                        st.drop_obj_ns(oid, Ns::Pos);
+                    }
+                }
+            }
+            an.none_v.clone()
+        }
+        _ => Value::data("set"),
+    }
+}
+
 fn m_lpop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let recv = c.recv.clone().unwrap_or_default();
     let mut outs = Vec::new();
@@ -2026,6 +2137,17 @@ fn m_typeadapter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if c.qual == "json.loads" {
+        // a parameter's text: decided where the caller passes a literal one
+        if let Some(a) = c.args.first() {
+            if let KeyVal::Param(p) = &a.kv {
+                an.record_event("concrete", *p);
+            }
+            for o in a.pts.iter() {
+                if an.kind(o) == Kind::Ph {
+                    an.record_event("concrete", o);
+                }
+            }
+        }
         // the text of a model's model_dump_json(): its dump
         let ms = c.args.first().map(pydantic::json_models).unwrap_or_default();
         if !ms.is_empty() {
@@ -2043,6 +2165,14 @@ fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         if let Some(text) = c.args.first().filter(|a| a.pts.is_empty()).and_then(|a| a.kv.as_lit()).and_then(intern::key_as_str) {
             if let Ok(j) = serde_json::from_str::<serde_json::Value>(&text) {
                 return json_literal(an, st, c, &j, "");
+            }
+        }
+        // one of several literal texts: the join of their structures
+        if let Some(KeyVal::Lits(ks)) = c.args.first().filter(|a| a.pts.is_empty()).map(|a| a.kv.clone()) {
+            let parsed: Option<Vec<serde_json::Value>> = ks.iter().map(|k| intern::key_as_str(k).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())).collect();
+            if let Some(js) = parsed.filter(|v| v.len() <= 16) {
+                let outs: Vec<Value> = js.iter().enumerate().map(|(i, j)| json_literal(an, st, c, j, &format!("#{}", i))).collect();
+                return join_values(outs);
             }
         }
     }

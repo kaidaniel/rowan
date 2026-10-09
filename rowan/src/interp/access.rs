@@ -732,6 +732,10 @@ impl Analyzer {
                     self.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(oid));
                     Value::obj(vid)
                 }
+                Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("fieldinfo.")) => {
+                    let Payload::Method(q, _) = self.obj(oid).payload.clone() else { unreachable!() };
+                    crate::models::pydantic::fieldinfo_attr(self, state, &q, name, node)
+                }
                 Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("typeadapter.") || q.starts_with("fastapi.")) => {
                     let Payload::Method(q, _) = self.obj(oid).payload.clone() else { unreachable!() };
                     match crate::models::fastapi::object_attr(self, oid, name, node, state) {
@@ -1129,7 +1133,8 @@ impl Analyzer {
             if let (Some(defc), false) = (self.class_lookup(c, name), is_field) {
                 let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
                 // a class attribute (not a method): the access succeeds
-                if !guarded && !cv.pts.iter().any(|f| matches!(self.kind(f), Kind::Function | Kind::Bound)) && !super::disabled("classattrverdict") {
+                let plain = !cv.pts.iter().any(|f| matches!(self.kind(f), Kind::Function | Kind::Bound) && !(self.kind(f) == Kind::Function && self.func_info(f).is_property.get()));
+                if !guarded && plain && !super::disabled("classattrverdict") {
                     self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
                 }
                 return self.bound_outs(&cv, oid, c, name, node, state);
@@ -1569,6 +1574,25 @@ impl Analyzer {
             if kind == Kind::Frame {
                 crate::models::pandas::frame_setattr(self, oid, name, v, node, state, strong);
                 continue;
+            }
+            // a frozen pydantic model: assignment raises a ValidationError; a field assigned is
+            // in `model_fields_set` from then on
+            if kind == Kind::Instance && !name.starts_with('_') {
+                if let Some(cls) = self.instance_class(oid) {
+                    if crate::models::pydantic::is_model(self, cls) && !super::disabled("pydantic") {
+                        let pc = self.pyd_class(cls, state);
+                        if pc.frozen {
+                            self.raise_here("ValidationError", state);
+                            continue;
+                        }
+                        if pc.fields.iter().any(|f| f.name == name) {
+                            if let Some((sure, maybe)) = self.pyd_set.get(&oid).cloned() {
+                                let ns = if strong { sure.insert(nk) } else { sure };
+                                self.pyd_set.insert(oid, (ns, maybe.insert(nk)));
+                            }
+                        }
+                    }
+                }
             }
             if matches!(kind, Kind::Instance | Kind::Ph) && name.starts_with('_') {
                 let cls = if kind == Kind::Ph { self.ph_info(oid).cls.get() } else { self.instance_class(oid) };
