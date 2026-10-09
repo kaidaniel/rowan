@@ -536,12 +536,14 @@ pub fn facts_json(an: &Analyzer) -> J {
             .iter()
             .map(|(oid, (item, attr))| {
                 let o = an.obj(*oid);
+                let origin = an.origins.get(oid).map(|(t, l, g)| json!({"text": t, "line": l, "given": g}));
                 json!({
                     "id": oid,
                     "label": o.label,
                     "kind": o.kind.name(),
                     "item": item.as_ref().map(row_json),
                     "attr": attr.as_ref().map(row_json),
+                    "origin": origin,
                 })
             })
             .collect();

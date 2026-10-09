@@ -1764,6 +1764,9 @@ impl Inst {
         let tsite = if tctx.is_empty() || crate::interp::disabled("clonectx") { tsite } else { format!("{}|{}", tsite, tctx) };
         let ns = if matches!(tkind, Kind::Instance | Kind::Namespace) { Ns::Attr } else { Ns::Item };
         let nid = an.alloc_in_frame(tkind, &tsite, state, &tlabel, Payload::None, None, ns, tsingle, &self.call_ctx, self.ctx_single);
+        if let Some(o) = an.origins.get(&t).cloned() {
+            an.origins.insert(nid, o);
+        }
         if let Some(f) = an.dd_factories.get(&t).cloned() {
             an.dd_factories.insert(nid, f);
         }

@@ -146,6 +146,20 @@ function rowText(row, ns) {
 }
 
 /**
+ * A source of unknown values in words: `param f.b` → whatever a caller passes as `b` to `f`;
+ * `json.loads@L9` → `json.loads(…)` on line 9; `name u` → the undefined name `u`.
+ */
+function describeSource(src) {
+  let m = /^param (.+)\.([^.]+)$/.exec(src);
+  if (m) return `whatever a caller passes as \`${m[2]}\` to \`${m[1]}\``;
+  m = /^name (.+)$/.exec(src);
+  if (m) return `the undefined name \`${m[1]}\``;
+  m = /^(.+)@L(\d+)$/.exec(src);
+  if (m) return `\`${m[1].replace(/^call of /, "")}(…)\` on line ${m[2]}`;
+  return `\`${src}\``;
+}
+
+/**
  * What the program learned about the keys (`ns` "item") or attributes ("attr") of an unknown
  * value: the ones it read or stored, in words; null when nothing.
  */
@@ -218,8 +232,15 @@ function renderHover(name, facts, verdicts) {
       const rows = [o.item, o.attr].filter(Boolean);
       // source names without the internal lens part (`json.load@L3·∖{'x'}`)
       const srcs = [...new Set(rows.flatMap((r) => (r.sources || []).map((x) => x.split("·")[0])))];
-      const from = o.kind === "ph" ? "whatever the caller passes" : srcs.length ? srcs.join(", ") : o.label;
-      out.push(`- \`?\` comes from ${from}`);
+      if (o.origin) {
+        // the result of a call rowan cannot see into
+        out.push(`- \`?\` is the result of \`${o.origin.text}\` (line ${o.origin.line})`);
+        const given = o.origin.given || [];
+        if (given.length) out.push(`  - it may also be ${given.map((g) => `\`${g}\``).join(" or ")}: unknown code can return what it was given`);
+      } else {
+        const from = o.kind === "ph" ? "whatever the caller passes" : srcs.length ? srcs.map(describeSource).join("; ") : o.label;
+        out.push(`- \`?\` comes from ${from}`);
+      }
       for (const [r, ns] of [[o.item, "item"], [o.attr, "attr"]]) {
         if (!r) continue;
         const learned = learnedAbout(r, ns);

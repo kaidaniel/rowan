@@ -634,6 +634,9 @@ pub struct Analyzer {
     pub force_tab_once: bool,
     /// `vars(obj)` dicts: stores into them are stores of obj's attributes
     pub attr_mirrors: FxHashMap<ObjId, ObjId>,
+    /// results of unknown calls: (the call as written, its line, what it was given — which
+    /// unknown code may return)
+    pub origins: FxHashMap<ObjId, (String, u32, Vec<String>)>,
     /// Enum classes: their members in definition order
     pub enum_members: FxHashMap<ObjId, Vec<(String, ObjId)>>,
     /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
@@ -781,6 +784,7 @@ impl Analyzer {
             cm_frames: Vec::new(),
             force_tab_once: false,
             attr_mirrors: FxHashMap::default(),
+            origins: FxHashMap::default(),
             enum_members: FxHashMap::default(),
             bypass_setattr: false,
             cond_depth: 0,

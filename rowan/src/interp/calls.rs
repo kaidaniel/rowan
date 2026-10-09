@@ -274,6 +274,23 @@ impl Analyzer {
         }
         let arg_recs: Vec<(u32, Ns)> = touched.iter().copied().filter(|(oid, _)| vals.iter().any(|v| v.pts.contains(*oid))).collect();
         let rid = self.alloc(Kind::Unknown, &format!("ret:{}", site), state, &format!("result of {}", site), Payload::None, None, Ns::Item, Some(true), None);
+        // for people: the call as written and what it was given (unknown code may return it)
+        {
+            let text = crate::frontend::text_at(node);
+            let mut given: Vec<String> = Vec::new();
+            for (o, _) in &arg_recs {
+                let g = match self.origins.get(o) {
+                    Some((t, _, _)) => t.clone(),
+                    None => self.obj(*o).label.trim_start_matches("param ").trim_start_matches('ρ').to_string(),
+                };
+                if !given.contains(&g) {
+                    given.push(g);
+                }
+            }
+            if !text.is_empty() {
+                self.origins.insert(rid, (text.split_whitespace().collect::<Vec<_>>().join(" "), node.line, given));
+            }
+        }
         if !arg_recs.is_empty() {
             let row = join_rows(arg_recs.iter().map(|(o, n)| state.row(*o, *n)));
             let mut d = row.data();
