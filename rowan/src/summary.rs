@@ -1283,6 +1283,20 @@ impl Analyzer {
                 }
             }
             for (a, concrete) in per_target {
+                // keys known absent before the call stay so unless the callee added them
+                let concrete = if pre.has_row(a, ns) && !crate::interp::disabled("keepabsent") {
+                    let before = pre.row(a, ns);
+                    let lost = before.absent.difference(&concrete.present).difference(&concrete.absent);
+                    if lost.is_empty() || !expr.mentions(oid) && !expr.is_entry() {
+                        concrete
+                    } else {
+                        let mut d = concrete.data();
+                        d.absent = d.absent.union(&lost);
+                        Row::from_data(d)
+                    }
+                } else {
+                    concrete
+                };
                 let strong = targets_count.get(&(a, ns)).copied().unwrap_or(0) == 1
                     && (inst.new_clones.contains(&a)
                         || (is_template && (self.strongable(a) || !expr.symbolic()))

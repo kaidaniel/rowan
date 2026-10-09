@@ -649,7 +649,8 @@ fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let sid = series_like_id(an, st, c, &ss, idx, "m");
             if !matches!(name.as_str(), "copy" | "sort_values" | "sort_index") {
                 set_vals(st, sid, vkey(), None);
-                st.set_slot(sid, Ns::Meta, dtype_key(vkey()), Value::data("dtype"), true);
+                let dt = if matches!(name.as_str(), "isna" | "isnull" | "notna" | "notnull" | "isin" | "between" | "eq" | "ne" | "lt" | "le" | "gt" | "ge") { Value::lit(mk("bool")) } else { Value::data("dtype") };
+                st.set_slot(sid, Ns::Meta, dtype_key(vkey()), dt, true);
             }
             Value::obj(sid)
         }
@@ -1053,6 +1054,16 @@ fn dtype_of_lits(ks: &KeySet) -> Option<&'static str> {
 
 /// The dtype of a column holding `v` (a list / tuple of literals or one literal), if known.
 fn dtype_of_value(an: &Analyzer, st: &State, v: &Value) -> Option<&'static str> {
+    if let Some(o) = v.single().filter(|o| is_series_obj(an, *o)) {
+        let d = st.slot_opt(o, Ns::Meta, dtype_key(vkey())).and_then(|x| x.kv.as_lit()).and_then(intern::key_as_str);
+        return match d.as_deref() {
+            Some("int") => Some("int"),
+            Some("float") => Some("float"),
+            Some("bool") => Some("bool"),
+            Some("object") => Some("object"),
+            _ => None,
+        };
+    }
     if v.pts.is_empty() {
         return if v.kv.is_literal() { dtype_of_lits(&kv_literals(&v.kv)) } else { None };
     }
@@ -1943,7 +1954,8 @@ fn rows_of(st: &State, fs: &[u32]) -> Row {
 
 /// May the row have k, does it surely?
 fn side_status(r: &Row, k: KeyId) -> (bool, bool) {
-    let may = r.present.contains(k) || (r.open() && !r.absent.contains(k));
+    // (an open row's sources may rule a key out: a prefixed input has only prefixed keys)
+    let may = r.present.contains(k) || (r.open() && !r.absent.contains(k) && classify(r, k).tier != Tier::Missing);
     (may, r.definite.contains(k))
 }
 
@@ -2105,9 +2117,19 @@ fn merge_impl(an: &mut Analyzer, st: &mut State, c: &Call, left: Value, right: V
         }
         None => {}
     }
-    let v = new_frame(an, st, c, row, None, None);
+    let v = new_frame(an, st, c, row.clone(), None, None);
     if fresh {
         fresh_index(st, &v);
+    }
+    // a column that keeps its name keeps its dtype
+    if let Some(nid) = v.single() {
+        for (side, other) in [(&lf, &rrow), (&rf, &lrow)] {
+            if let [f] = side.as_slice() {
+                let src = st.row(*f, Ns::Item);
+                let keep = KeySet::from_iter(row.present.iter().filter(|k| src.present.contains(*k) && (keys.contains(*k) || !side_status(other, *k).0)));
+                copy_dtypes(st, *f, nid, &keep);
+            }
+        }
     }
     v
 }
@@ -2321,7 +2343,8 @@ fn add_prefix(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     if let Some(k) = lit_key(&arg) {
         let r = row.rename(&Step::RenameFn(RenameFn::with_arg(fnk, k)));
-        return new_frame(an, st, c, r, None, None);
+        let fs = frames(an, c.recv.as_ref());
+        return derived(an, st, c, r, &fs, Rows::Same, false);
     }
     let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.insert((Source::new(&format!("add_{}@L{}", fnk.name(), c.line), SourceKind::Call), EMPTY_LENS)), mutators: row.mutators.clone(), ..Default::default() });
     new_frame(an, st, c, r, None, None)
@@ -3986,7 +4009,7 @@ fn get_dummies(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
     }
-    derived(an, st, c, out, &[f], Rows::Same, false)
+    derived(an, st, c, out, &[f], Rows::Same, true)
 }
 
 /// `pivot` / `pivot_table`: the values of columns= become the columns.
@@ -4604,7 +4627,13 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             "asfreq" | "align" | "reindex_like" | "combine_first" => (Rows::Other, false),
             _ => (Rows::Same, false),
         };
-        let v = derived(an, st, c, row, &fs, rows, with_vals);
+        let v = derived(an, st, c, row.clone(), &fs, rows, with_vals);
+        if name == "fillna" {
+            // (filling keeps a column's kind)
+            if let (Some(nid), [f]) = (v.single(), fs.as_slice()) {
+                copy_dtypes(st, *f, nid, &row.present);
+            }
+        }
         if matches!(name.as_str(), "head" | "tail" | "nlargest" | "nsmallest") {
             let n = c.arg(0, Some("n")).and_then(|x| x.kv.as_lit()).and_then(intern::key_as_int).or(if c.args.is_empty() && c.kw("n").is_none() { Some(5) } else { None });
             if let (Some(nid), Some(n)) = (v.single(), n) {
