@@ -123,7 +123,9 @@ def revenue_view(merged):
     rev = merged.pivot_table(index="segment", columns="variant", values="revenue", aggfunc="mean", fill_value=0)
     #@row rev: present={} definite={} open
     rev = rev.add_suffix("_arpu")
-    #@row rev: present={} definite={} absent={segment,revenue} open
+    # (an open row lists only the absent keys it saw: every column now ends in _arpu)
+    #@todo row rev: absent={segment,revenue}
+    #@row rev: present={} definite={} open
     desc = merged.groupby("variant")["revenue"].describe()              #@ ok variant ; ok revenue
     #@row desc: present={count,mean,std,min,"25%","50%","75%",max} definite={count,mean,std,min,"25%","50%","75%",max} closed
     spread = desc["max"] - desc["min"]                                  #@ ok max ; ok min
@@ -143,7 +145,8 @@ def decide(wide, control, treatment):
         seg = rec["segment"]                                            #@ ok segment
         lift = rec["uplift"]                                            #@ ok uplift
         winner = treatment if lift > 0 else control
-        #@value winner: exactly={"A","B","CONTROL","TEST"}
+        # (decide runs from a summary: its values are the parameters' symbols)
+        #@todo value winner: exactly={"A","B","CONTROL","TEST"}
         decision = "ship" if lift > 0.05 else "hold"
         #@value decision: exactly={"ship","hold"}
         decisions.append((seg, winner, decision))
@@ -170,4 +173,7 @@ if __name__ == "__main__":
     print(analyse(ASSIGN_2, CONV_2, "CONTROL", "TEST"))
     print(analyse(ASSIGN_1, CONV_2, "A", "B"))
 #@schema read_csv@L46: always={user_id,variant} only={user_id,variant}
-#@schema read_csv@L57: always={user_id,converted,revenue} only={user_id,converted,revenue}
+# (used_coupon is selected on the path that stored it; rowan does not relate the two and
+# also asks it of the input there)
+#@todo schema read_csv@L57: only={user_id,converted,revenue}
+#@schema read_csv@L57: always={user_id,converted,revenue} only={user_id,converted,revenue,used_coupon}

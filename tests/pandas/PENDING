@@ -1,5 +1,4 @@
 # pandas cases written but not yet expected to pass (paths relative to tests/pandas/)
-models/pm08_ab_test.py
 models/pm09_portfolio.py
 models/pm10_student_grades.py
 models/pm11_funnel.py

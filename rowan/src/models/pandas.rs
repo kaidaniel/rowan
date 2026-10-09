@@ -647,9 +647,30 @@ fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         "copy" | "sort_values" | "sort_index" | "astype" | "fillna" | "round" | "abs" | "clip" | "cumsum" | "cumprod" | "cummax" | "cummin" | "shift" | "diff" | "rank" | "pct_change" | "isna" | "isnull" | "notna" | "notnull" | "replace" | "where" | "mask" | "map" | "apply" | "transform" | "isin" | "between" | "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "add" | "sub" | "mul" | "div" | "truediv" | "floordiv" | "mod" | "pow" | "interpolate" | "ffill" | "bfill" | "convert_dtypes" | "infer_objects" | "explode" | "mean_" => {
             let sid = series_like_id(an, st, c, &ss, idx, "m");
-            if !matches!(name.as_str(), "copy" | "sort_values" | "sort_index") {
+            if matches!(name.as_str(), "fillna" | "ffill" | "bfill" | "where" | "mask" | "shift" | "interpolate") {
+                // the same kind of values (a shift / fill of numbers stays numeric)
                 set_vals(st, sid, vkey(), None);
-                let dt = if matches!(name.as_str(), "isna" | "isnull" | "notna" | "notnull" | "isin" | "between" | "eq" | "ne" | "lt" | "le" | "gt" | "ge") { Value::lit(mk("bool")) } else { Value::data("dtype") };
+                let d = st.slot_opt(sid, Ns::Meta, dtype_key(vkey())).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_str).map(|x| x.to_string());
+                let nd = match d.as_deref() {
+                    Some("int") | Some("float") | Some("num") => Value::lit(mk("num")),
+                    Some("object") if matches!(name.as_str(), "fillna" | "ffill" | "bfill") => Value::lit(mk("object")),
+                    _ => Value::data("dtype"),
+                };
+                st.set_slot(sid, Ns::Meta, dtype_key(vkey()), nd, true);
+            } else if !matches!(name.as_str(), "copy" | "sort_values" | "sort_index") {
+                set_vals(st, sid, vkey(), None);
+                let dt = if matches!(name.as_str(), "isna" | "isnull" | "notna" | "notnull" | "isin" | "between" | "eq" | "ne" | "lt" | "le" | "gt" | "ge") {
+                    Value::lit(mk("bool"))
+                } else if matches!(name.as_str(), "clip" | "round" | "abs" | "cumsum" | "cumprod" | "cummax" | "cummin" | "diff" | "pct_change" | "add" | "sub" | "mul" | "div" | "truediv" | "floordiv" | "mod" | "pow" | "rank" | "interpolate") {
+                    Value::lit(mk("num"))
+                } else if name == "astype" {
+                    match astype_dtype(an, &c.arg(0, Some("dtype"))) {
+                        Some(d) => Value::lit(mk(d)),
+                        None => Value::data("dtype"),
+                    }
+                } else {
+                    Value::data("dtype")
+                };
                 st.set_slot(sid, Ns::Meta, dtype_key(vkey()), dt, true);
             }
             Value::obj(sid)
@@ -667,9 +688,9 @@ fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         },
         "describe" => {
             let dt: Vec<Option<String>> = ss.iter().map(|x| st.slot_opt(*x, Ns::Meta, dtype_key(vkey())).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_str).map(|s0| s0.to_string())).collect();
-            let row = if dt.iter().all(|d| matches!(d.as_deref(), Some("int") | Some("float"))) {
+            let row = if dt.iter().all(|d| matches!(d.as_deref(), Some("int") | Some("float") | Some("num"))) {
                 describe_labels(true, false).row()
-            } else if dt.iter().all(|d| d.is_some()) && dt.iter().all(|d| !matches!(d.as_deref(), Some("int") | Some("float"))) {
+            } else if dt.iter().all(|d| d.is_some()) && dt.iter().all(|d| !matches!(d.as_deref(), Some("int") | Some("float") | Some("num"))) {
                 describe_labels(false, true).row()
             } else {
                 Row::with_source(Source::new("describe", SourceKind::Data))
@@ -680,6 +701,27 @@ fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         _ if SERIES_SCALAR_OPS.contains(&name.as_str()) => Value::data(&format!("{}@L{}", name, c.line)),
         _ => series(an),
     }
+}
+
+/// The dtype `astype(x)` gives: a builtin type or a dtype name.
+fn astype_dtype(an: &Analyzer, v: &Option<Value>) -> Option<&'static str> {
+    let v = v.as_ref()?;
+    let name: String = if let Some(k) = v.kv.as_lit().filter(|_| v.pts.is_empty()) {
+        intern::key_as_str(k)?.to_string()
+    } else {
+        let o = v.single()?;
+        if an.kind(o) != Kind::External {
+            return None;
+        }
+        last(&an.external_qual(o)).to_string()
+    };
+    Some(match name.as_str() {
+        "int" | "int64" | "int32" | "Int64" | "int8" | "int16" | "uint8" => "int",
+        "float" | "float64" | "float32" | "Float64" => "float",
+        "bool" | "boolean" => "bool",
+        "str" | "object" | "string" | "category" => "object",
+        _ => return None,
+    })
 }
 
 const SERIES_SCALAR_OPS: &[&str] = &[
@@ -1061,6 +1103,7 @@ fn dtype_of_value(an: &Analyzer, st: &State, v: &Value) -> Option<&'static str> 
             Some("float") => Some("float"),
             Some("bool") => Some("bool"),
             Some("object") => Some("object"),
+            Some("num") => Some("num"),
             _ => None,
         };
     }
@@ -2126,7 +2169,9 @@ fn merge_impl(an: &mut Analyzer, st: &mut State, c: &Call, left: Value, right: V
         for (side, other) in [(&lf, &rrow), (&rf, &lrow)] {
             if let [f] = side.as_slice() {
                 let src = st.row(*f, Ns::Item);
-                let keep = KeySet::from_iter(row.present.iter().filter(|k| src.present.contains(*k) && (keys.contains(*k) || !side_status(other, *k).0)));
+                // (a plain name when the other side may have it too exists only where the other
+                // lacks it: this side's, if this side surely has it)
+                let keep = KeySet::from_iter(row.present.iter().filter(|k| src.present.contains(*k) && (keys.contains(*k) || !side_status(other, *k).0 || src.definite.contains(*k))));
                 copy_dtypes(st, *f, nid, &keep);
             }
         }
@@ -2359,7 +2404,8 @@ fn df_drop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let ignore = key_is(&c.kw("errors"), "ignore");
     let row = recv_row(an, st, c);
     if !is_cols {
-        return new_frame(an, st, c, row, None, fs.first().copied());
+        // rows dropped: the same columns
+        return derived(an, st, c, row, &fs, Rows::Subset, true);
     }
     let target = cols.or(labels);
     let ks = target.as_ref().and_then(|t| an.lit_keys(t, st));
@@ -2378,7 +2424,7 @@ fn df_drop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     for k in ks.iter() {
         row = row.delete(k, true);
     }
-    new_frame(an, st, c, row, None, fs.first().copied())
+    derived(an, st, c, row, &fs, Rows::Same, true)
 }
 
 fn df_assign(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -3185,7 +3231,19 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         "get_group" => derived(an, st, c, base, &fs, Rows::Subset, true),
         "value_counts" => series_result(an, st, Some(mk(if key_is_bool(&c.kw("normalize"), true) { "proportion" } else { "count" })), false),
-        "describe" => new_frame(an, st, c, Row::with_source(Source::new(&format!("describe@L{}", c.line), SourceKind::Call)), None, None),
+        "describe" => {
+            // one row per group; a selected column's statistics are the columns
+            let kind = match (single_sel, fs.as_slice()) {
+                (Some(col), [f]) => dtype(st, *f, col),
+                _ => None,
+            };
+            let row = match kind.as_deref() {
+                Some("int") | Some("float") | Some("num") => describe_labels(true, false).row(),
+                Some(_) => describe_labels(false, true).row(),
+                None => Row::with_source(Source::new(&format!("describe@L{}", c.line), SourceKind::Call)),
+            };
+            frame_result(an, st, row, false)
+        }
         "rolling" | "expanding" | "ewm" | "resample" => window_of(an, st, c, fs.clone(), ks.clone(), Some(g0), &name),
         "__getitem__" => {
             let key = c.args.first().cloned().unwrap_or_default();
@@ -3421,10 +3479,13 @@ fn describe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let mut kinds: Vec<(KeyId, Option<bool>)> = Vec::new();
     for k in row.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(row.present.iter())) {
-        let numeric = dtype(st, *f, k).map(|d| matches!(d.as_str(), "int" | "float"));
+        let numeric = dtype(st, *f, k).map(|d| matches!(d.as_str(), "int" | "float" | "num"));
         kinds.push((k, numeric));
     }
     if kinds.iter().any(|(_, n)| n.is_none()) {
+        if crate::interp::debug_level() == 2 {
+            eprintln!("  describe@L{}: unknown dtypes {:?}", c.line, kinds.iter().filter(|(_, n)| n.is_none()).map(|(k, _)| intern::key_py_str(*k)).collect::<Vec<_>>());
+        }
         let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.insert((Source::new(&format!("describe@L{}", c.line), SourceKind::Call), EMPTY_LENS)), ..Default::default() });
         return new_frame(an, st, c, r, None, None);
     }
@@ -4312,7 +4373,7 @@ fn df_filter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let row = recv_row(an, st, c);
     let fs = frames(an, c.recv.as_ref());
     if axis_is_index(&c.kw("axis")) {
-        return new_frame(an, st, c, row, None, fs.first().copied());
+        return derived(an, st, c, row, &fs, Rows::Subset, true);
     }
     if let Some(items) = items {
         if let Some(ks) = an.lit_keys(&items, st) {
@@ -4406,7 +4467,9 @@ fn reindex_like(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// Does a dtype match a `select_dtypes` spec ("number", "int64", "float", "bool", "object", …)?
 fn dtype_matches(dt: &str, spec: &str) -> Option<bool> {
     Some(match spec {
-        "number" | "numeric" => matches!(dt, "int" | "float"),
+        "number" | "numeric" => matches!(dt, "int" | "float" | "num"),
+        "int" | "int64" | "integer" | "signedinteger" if dt == "num" => return None,
+        "float" | "float64" | "floating" if dt == "num" => return None,
         "int" | "int64" | "integer" | "signedinteger" => dt == "int",
         "float" | "float64" | "floating" => dt == "float",
         "bool" | "boolean" => dt == "bool",
@@ -4485,11 +4548,7 @@ fn sort_values(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     let row = rows_of(st, &fs);
-    let v = new_frame(an, st, c, row.clone(), None, fs.first().copied());
-    if let (Some(nid), [f]) = (v.single(), fs.as_slice()) {
-        copy_dtypes(st, *f, nid, &row.present);
-    }
-    v
+    derived(an, st, c, row, &fs, Rows::Same, true)
 }
 
 fn transform(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {

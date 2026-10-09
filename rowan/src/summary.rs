@@ -1180,6 +1180,10 @@ impl Analyzer {
                     if !concrete.is_empty() {
                         return Some(ev.clone());
                     }
+                    // a literal (a column name, a key) decides a model's answer too
+                    if ev.kind == "concrete" && v.pts.is_empty() && v.kv.is_literal() && !crate::interp::disabled("concretelit") {
+                        return Some(ev.clone());
+                    }
                 }
                 _ => {}
             }
