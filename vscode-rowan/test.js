@@ -43,6 +43,12 @@ const shallow = textsAt(1);
 const deep = textsAt(3);
 assert(shallow.length < deep.length, "depth 1 should render less than depth 3");
 assert(/[\[{(]…[\]})]/.test(shallow), shallow.slice(0, 400));
+// an unknown value: where it comes from, no key-set talk
+const z = path.join(root, "tests", "cases", "z419_manually_created.py");
+const zi = indexResult(JSON.parse(execFileSync(bin, [z, "--facts"], { maxBuffer: 64 * 1024 * 1024 }).toString()));
+const x1 = renderHover("x1", zi.facts.get("6:x1"), []);
+assert(x1.includes("- value: `?`") && x1.includes("`?` comes from param f.b"), x1);
+assert(!x1.includes("**?") && !x1.includes("keys possible"), x1);
 console.log("\n--- sample long value ---\n" + lines.join("\n"));
 console.log("ok");
 console.log("\n--- sample hover for r at line 8 ---\n" + r8);

@@ -145,6 +145,26 @@ function rowText(row, ns) {
   return ns === "attr" ? `obj(${parts.join(", ")})` : `{${parts.join(", ")}}`;
 }
 
+/**
+ * What the program learned about the keys (`ns` "item") or attributes ("attr") of an unknown
+ * value: the ones it read or stored, in words; null when nothing.
+ */
+function learnedAbout(row, ns) {
+  const present = row.present || [];
+  const definite = new Set(row.definite || []);
+  const absent = row.absent || [];
+  if (!present.length && !absent.length) return null;
+  const label = ns === "attr" ? "attributes" : "keys";
+  const parts = [];
+  const always = present.filter((k) => definite.has(k));
+  const some = present.filter((k) => !definite.has(k));
+  const show = (ks) => ks.map((k) => displayKey(k, ns)).join(", ");
+  if (always.length) parts.push(`${show(always)} (always)`);
+  if (some.length) parts.push(`${show(some)} (on some paths)`);
+  if (absent.length) parts.push(`not ${show(absent)}`);
+  return `${label} seen on it: ${parts.join("; ")}`;
+}
+
 function describeRow(row, ns, withText) {
   const lines = [];
   const present = row.present || [];
@@ -184,28 +204,37 @@ function renderHover(name, facts, verdicts) {
   for (const f of main) {
     if (f.symbolic) out.push("_inside a function analysed symbolically: facts are relative to its entry_");
     // the value as far as it is known (`?` for unknown)
-    const text = (f.text || "").trim();
-    const withText = text.length > 0 && text !== "?";
-    if (withText) {
-      const pretty = prettyValue(text);
-      if (pretty.length === 1) out.push(`- value: \`${text}\``);
-      else out.push("- value:", "", "```text", ...pretty, "```", "");
-      // `?` as a value (not the `"k"?:` mark): say what it means
-      if (/(^|[\s:=(\[,|*])\?($|[\s,)\]}|])/.test(text)) out.push("- `?` = a value rowan does not know");
-    }
-    else if ((f.values || []).includes("<parameter>")) out.push("- value: whatever the caller passes");
+    const text = (f.text || "").trim() || "?";
+    const pretty = prettyValue(text);
+    if (pretty.length === 1) out.push(`- value: \`${text}\``);
+    else out.push("- value:", "", "```text", ...pretty, "```", "");
+    // `?` as a value (not the `"k"?:` mark): say what it means
+    if (/(^|[\s:=(\[,|*])\?($|[\s,)\]}|])/.test(text)) out.push("- `?` = a value rowan does not know");
     const objs = f.objects || [];
-    if (objs.length > 1) out.push(`- may point to ${objs.length} objects:`);
-    for (const o of objs) {
-      const head = objs.length > 1 ? `  - **${o.label}** (${o.kind})` : `- object **${o.label}** (${o.kind})`;
+    const known = objs.filter((o) => o.kind !== "unknown" && o.kind !== "ph");
+    const unknown = objs.filter((o) => o.kind === "unknown" || o.kind === "ph");
+    // where the unknown part comes from, and what the program learned about it (if anything)
+    for (const o of unknown) {
+      const rows = [o.item, o.attr].filter(Boolean);
+      // source names without the internal lens part (`json.load@L3·∖{'x'}`)
+      const srcs = [...new Set(rows.flatMap((r) => (r.sources || []).map((x) => x.split("·")[0])))];
+      const from = o.kind === "ph" ? "whatever the caller passes" : srcs.length ? srcs.join(", ") : o.label;
+      out.push(`- \`?\` comes from ${from}`);
+      for (const [r, ns] of [[o.item, "item"], [o.attr, "attr"]]) {
+        if (!r) continue;
+        const learned = learnedAbout(r, ns);
+        if (learned) out.push(`  - ${learned}`);
+      }
+    }
+    if (known.length > 1) out.push(`- may be one of ${known.length} objects:`);
+    for (const o of known) {
+      const head = known.length > 1 ? `  - **${o.label}** (${o.kind})` : `- object **${o.label}** (${o.kind})`;
       const row = o.kind === "instance" || o.kind === "namespace" ? o.attr : o.item || o.attr;
       const ns = o.kind === "instance" || o.kind === "namespace" ? "attr" : "item";
-      if (!row) {
-        out.push(head);
-        continue;
-      }
       out.push(head);
-      for (const l of describeRow(row, ns, withText)) out.push((objs.length > 1 ? "  " : "") + l);
+      // the key / attribute details only for objects that have keys or attributes
+      if (!row || !["dict", "instance", "namespace", "frame"].includes(o.kind)) continue;
+      for (const l of describeRow(row, ns, true)) out.push((known.length > 1 ? "  " : "") + l);
     }
     const req = f.required || {};
     for (const src of Object.keys(req)) {

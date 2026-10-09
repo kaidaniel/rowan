@@ -3,9 +3,11 @@
 Hover over a variable in a Python file to see what rowan infers it holds, in Python-like
 notation: `1 | 2`, `{"id": 1, "role"?: "admin", **?}`, `Order(id=?)`, `list[?]` (`?` = a value
 rowan does not know; `"k"?:` = key set on some paths only; `"k"~:` = unless unknown code
-removed it; `**?` = other keys possible; `list[X]` = any number of elements like `X`), where
-other keys could come from, the keys this program requires of an external input, and the
-verdicts on that line.
+removed it; `**?` = other keys possible; `list[X]` = any number of elements like `X`). For an
+unknown value the hover says where it comes from (an input, a parameter, unknown code) and
+which keys or attributes the program has seen on it; for dicts and objects, where other keys
+could come from; then the keys this program requires of an external input and the verdicts
+on that line.
 Missing-key verdicts are also shown as diagnostics (✗ error, ⚠ warning, ◌ information).
 
 The extension keeps one `rowan serve` process per binary and asks it to analyse a Python
