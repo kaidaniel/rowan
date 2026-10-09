@@ -135,6 +135,8 @@ pub struct Verdict {
     pub oid: ObjId,
     /// module the access is in (empty = main file)
     pub file: String,
+    /// inside a try whose handler catches the failure: the program handles it (no diagnostic)
+    pub guarded: bool,
 }
 
 impl Verdict {
@@ -684,6 +686,8 @@ pub struct Analyzer {
     pub t_skip_user: bool,
     /// the node of the function expression of the call being evaluated
     pub t_called_attr: usize,
+    /// the verdict being recorded is on a guarded access
+    pub verdict_guarded: bool,
     /// tensor-shape requirements / definite mismatches (models/torch.rs)
     pub shape_reqs: Vec<crate::models::torch::ShapeNote>,
     pub shape_errors: Vec<crate::models::torch::ShapeNote>,
@@ -872,6 +876,7 @@ impl Analyzer {
             t_getattr_plain: false,
             t_skip_user: false,
             t_called_attr: 0,
+            verdict_guarded: false,
             shape_reqs: Vec::new(),
             shape_errors: Vec::new(),
             t_sym_alias: FxHashMap::default(),
@@ -1263,7 +1268,16 @@ impl Analyzer {
             text,
             oid,
             file: fname,
+            guarded: self.verdict_guarded,
         });
+    }
+
+    /// A verdict on an access the program guards (a try handling the failure): recorded for
+    /// the golden harness and the hover, never a diagnostic.
+    pub fn verdict_guarded(&mut self, node: &Node, key: KeyId, cls: &Classification, oid: ObjId, ns: Ns) {
+        let saved = std::mem::replace(&mut self.verdict_guarded, true);
+        self.verdict(node, key, cls, oid, ns, None, None);
+        self.verdict_guarded = saved;
     }
 
     pub fn node_text(&self, node: &Node) -> String {

@@ -13,9 +13,9 @@ use crate::state::Kind;
 
 /// One verdict per (access site, key, call chain): per-target verdicts are combined (§13).
 pub fn dedupe(verdicts: &[Verdict]) -> Vec<Verdict> {
-    let mut groups: IndexMap<(String, u32, u32, String, Vec<u32>, Ns, String), Vec<&Verdict>> = IndexMap::new();
+    let mut groups: IndexMap<(String, u32, u32, String, Vec<u32>, Ns, String, bool), Vec<&Verdict>> = IndexMap::new();
     for v in verdicts {
-        groups.entry((v.file.clone(), v.line, v.col, key_repr(v.key), v.chain.clone(), v.ns, v.text.clone())).or_default().push(v);
+        groups.entry((v.file.clone(), v.line, v.col, key_repr(v.key), v.chain.clone(), v.ns, v.text.clone(), v.guarded)).or_default().push(v);
     }
     let mut out: Vec<Verdict> = Vec::new();
     for (_, vs) in groups {
@@ -79,12 +79,13 @@ pub fn dedupe(verdicts: &[Verdict]) -> Vec<Verdict> {
             text: first.text.clone(),
             oid: first.oid,
             file: first.file.clone(),
+            guarded: first.guarded,
         });
     }
     // the same finding reached through many call chains: keep the shortest few chains
-    let mut by_finding: IndexMap<(String, u32, u32, String, Ns, String, Tier, String, String), Vec<Verdict>> = IndexMap::new();
+    let mut by_finding: IndexMap<(String, u32, u32, String, Ns, String, Tier, String, String, bool), Vec<Verdict>> = IndexMap::new();
     for v in out {
-        by_finding.entry((v.file.clone(), v.line, v.col, key_repr(v.key), v.ns, v.text.clone(), v.tier, v.obj.clone(), v.note.clone())).or_default().push(v);
+        by_finding.entry((v.file.clone(), v.line, v.col, key_repr(v.key), v.ns, v.text.clone(), v.tier, v.obj.clone(), v.note.clone(), v.guarded)).or_default().push(v);
     }
     let mut out: Vec<Verdict> = Vec::new();
     for (_, mut vs) in by_finding {
@@ -162,7 +163,7 @@ fn group_alt_keys(entry: &IndexMap<String, SchemaEntry>) -> Vec<(String, &Schema
 
 pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> String {
     let mut lines: Vec<String> = Vec::new();
-    let all = dedupe(&an.verdicts);
+    let all = reported(an);
     // an attribute read from an input is a requirement (listed with the schemas), not a
     // finding: reading attributes of objects from outside is what programs do
     let vs: Vec<&Verdict> = all.iter().filter(|v| !matches!(v.tier, Tier::Proven | Tier::Map) && !(v.tier == Tier::Input && v.ns == Ns::Attr)).collect();
@@ -291,6 +292,7 @@ pub fn verdict_json(an: &Analyzer, v: &Verdict) -> J {
         "key_str": intern::key_py_str(v.key),
         "ns": v.ns.as_str(),
         "tier": v.tier.name(),
+        "guarded": v.guarded,
         "object": v.obj,
         "chain": v.chain,
         "note": v.note,
@@ -301,7 +303,7 @@ pub fn verdict_json(an: &Analyzer, v: &Verdict) -> J {
 
 pub fn to_json(an: &Analyzer) -> Vec<J> {
     let mut out: Vec<J> = Vec::new();
-    for v in dedupe(&an.verdicts) {
+    for v in reported(an) {
         out.push(verdict_json(an, &v));
     }
     for (label, entry) in schema_rows(an) {
@@ -318,7 +320,12 @@ pub fn to_json(an: &Analyzer) -> Vec<J> {
     out
 }
 
-/// Everything the golden harness needs, as one JSON document.
+/// The verdicts that are diagnostics: not those on accesses the program guards.
+fn reported(an: &Analyzer) -> Vec<Verdict> {
+    dedupe(&an.verdicts).into_iter().filter(|v| !v.guarded).collect()
+}
+
+/// Everything the golden harness needs, as one JSON document (guarded verdicts included).
 pub fn golden_json(an: &Analyzer) -> J {
     let verdicts: Vec<J> = dedupe(&an.verdicts).iter().map(|v| verdict_json(an, v)).collect();
     let mut schemas = serde_json::Map::new();
@@ -813,7 +820,7 @@ pub fn facts_json(an: &Analyzer) -> J {
         };
         facts.push(json!({"line": line, "name": name.to_string(), "symbolic": symbolic, "values": values, "text": text, "examples": examples, "legend": f.legend.iter().filter(|(s0, d)| !(d == "?" && f.texts.iter().all(|t| t.starts_with("Tensor[")) && an.facts_sym_is_tensor(s0))).chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "required": required, "requires": requires}));
     }
-    let verdicts: Vec<J> = dedupe(&an.verdicts).iter().map(|v| verdict_json(an, v)).collect();
+    let verdicts: Vec<J> = reported(an).iter().map(|v| verdict_json(an, v)).collect();
     let mut schemas = serde_json::Map::new();
     for (label, entry) in sch {
         let keys: serde_json::Map<String, J> = entry.iter().map(|(k, e)| (k.clone(), json!({"always": e.always, "sites": e.sites}))).collect();

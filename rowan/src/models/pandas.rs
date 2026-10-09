@@ -1124,6 +1124,9 @@ pub fn frame_getitem(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, stat
     let site = an.access_site(node);
     if let (Some(k), true) = (key.kv.as_lit(), key.pts.is_empty()) {
         let cls = classify(&row, k);
+        if guarded && !crate::interp::disabled("guardedverdicts") {
+            an.verdict_guarded(node, k, &cls, oid, Ns::Item);
+        }
         if !guarded {
             an.verdict(node, k, &cls, oid, Ns::Item, None, None);
             if cls.tier == Tier::Input {

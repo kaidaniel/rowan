@@ -90,10 +90,18 @@ def row_problem(spec: Dict[str, Any], v: Any) -> Optional[str]:
 
 
 def raised_for(e: BaseException, key: Any) -> bool:
+    """Did `e` say that `key` is missing? `KeyError(key)`, AttributeError `.name`, or a message
+    naming it (pandas: `Column not found: k`, `"['k'] not in index"`, `Label(s) ['k'] do not
+    exist`; numpy: `no field of name k`)."""
     if isinstance(e, KeyError):
-        return bool(e.args) and e.args[0] == key
-    if isinstance(e, AttributeError):
-        return isinstance(key, str) and (getattr(e, "name", None) == key or f"'{key}'" in str(e))
+        if e.args and e.args[0] == key:
+            return True
+    if isinstance(e, AttributeError) and getattr(e, "name", None) == key:
+        return True
+    if isinstance(e, (KeyError, AttributeError, ValueError)) and isinstance(key, (str, int)):
+        msg = str(e)
+        k = re.escape(str(key))
+        return bool(re.search(rf"'{k}'|\"{k}\"|Column not found: {k}\b|no field of name {k}\b|has no attribute '?{k}\b", msg))
     return False
 
 
@@ -104,11 +112,28 @@ class Run:
         self.path, self.verdicts, self.rows, self.values, self.drop = path, verdicts, rows, values, drop
         self.ran: Set[int] = set()  # lines run
         self.line_runs: Dict[int, int] = {}
-        self.line_raises: Dict[Tuple[int, Any], Set[int]] = {}  # (line, key) -> ids of exceptions
+        # (line, key) -> the exceptions themselves (kept alive: ids of collected ones get reused)
+        self.line_raises: Dict[Tuple[int, Any], List[BaseException]] = {}
         self.raised_keys: Set[Any] = set()  # keys of KeyErrors / AttributeErrors raised anywhere
         self.fails: List[str] = []
         self.crash: Optional[str] = None
         self.lines_with = set(verdicts) | set(rows) | set(values)
+
+    def note_missing(self, e: BaseException) -> None:
+        """The column / key names an exception says are missing (schema mutation checks):
+        `KeyError(k)`, AttributeError .name, and pandas' messages naming columns
+        (`Column not found: x`, `"['x'] not in index"`, `Label(s) ['x'] do not exist`)."""
+        if isinstance(e, KeyError) and e.args and isinstance(e.args[0], (str, int, float, bool, tuple)):
+            self.raised_keys.add(e.args[0])
+        if isinstance(e, AttributeError) and getattr(e, "name", None):
+            self.raised_keys.add(e.name)
+        if isinstance(e, (KeyError, ValueError, AttributeError)):
+            msg = str(e)
+            for m in re.finditer(r"'([^']+)'", msg):
+                self.raised_keys.add(m.group(1))
+            m = re.search(r"Column not found: (\S+)", msg)
+            if m:
+                self.raised_keys.add(m.group(1).strip("'\""))
 
     def check_after(self, frame, line: int) -> None:
         loc = frame.f_locals
@@ -150,11 +175,10 @@ class Run:
                 ln = frame.f_lineno
                 for tier, key in self.verdicts.get(ln, []):
                     if raised_for(e, key):
-                        self.line_raises.setdefault((ln, key), set()).add(id(e))
-                if isinstance(e, KeyError) and e.args:
-                    self.raised_keys.add(e.args[0])
-                if isinstance(e, AttributeError) and getattr(e, "name", None):
-                    self.raised_keys.add(e.name)
+                        seen = self.line_raises.setdefault((ln, key), [])
+                        if not any(x is e for x in seen):
+                            seen.append(e)
+                self.note_missing(e)
                 # a line whose statement raised does not run its "after" check
                 last.pop(fid, None)
             return local
@@ -184,10 +208,7 @@ class Run:
         except SystemExit:
             pass
         except BaseException as e:  # noqa: BLE001
-            if isinstance(e, KeyError) and e.args:
-                self.raised_keys.add(e.args[0])
-            if isinstance(e, AttributeError) and getattr(e, "name", None):
-                self.raised_keys.add(e.name)
+            self.note_missing(e)
             self.crash = f"{type(e).__name__}: {str(e)[:200]}"
         finally:
             sys.settrace(None)
@@ -239,7 +260,11 @@ def run_one(path: str, strict: bool) -> Dict[str, Any]:
                 continue
             line = int(m.group(1))
             total += 1
+            # errors the unmutated program already raises (deliberate misses) say nothing
+            baseline = set(run_child(path, ["--drop", str(line), json.dumps("\x00none")]).get("raised_keys", []))
             for col in spec.get("always", set()):
+                if col in baseline:
+                    continue
                 rr = run_child(path, ["--drop", str(line), json.dumps(col)])
                 if col not in rr.get("raised_keys", []):
                     fails.append(f"schema {label}: dropping always-column {col!r} raised nothing for it")
@@ -248,6 +273,8 @@ def run_one(path: str, strict: bool) -> Dict[str, Any]:
                 cols = run_child(path, ["--columns", str(line)]).get("columns", [])
                 for col in cols:
                     if col in allowed:
+                        continue
+                    if col in baseline:
                         continue
                     rr = run_child(path, ["--drop", str(line), json.dumps(col)])
                     if col in rr.get("raised_keys", []):

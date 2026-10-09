@@ -375,6 +375,9 @@ impl Analyzer {
                         state.set_row(oid, ns, row.clone());
                     }
                 }
+                if guarded && cls.tier != Tier::Sym && !crate::interp::disabled("guardedverdicts") {
+                    self.verdict_guarded(node, k, &cls, oid, ns);
+                }
                 if !guarded && cls.tier != Tier::Sym {
                     self.verdict(node, k, &cls, oid, ns, None, None);
                     if cls.tier == Tier::Input {
@@ -1403,6 +1406,9 @@ impl Analyzer {
             return v;
         }
         let cls = classify(&row, nk);
+        if guarded && cls.tier != Tier::Map && !crate::interp::disabled("guardedverdicts") {
+            self.verdict_guarded(node, nk, &cls, oid, Ns::Attr);
+        }
         if !guarded && cls.tier != Tier::Map {
             self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
             if cls.tier == Tier::Input {

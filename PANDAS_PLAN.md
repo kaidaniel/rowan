@@ -61,3 +61,6 @@ claims the oracle does not check.
   uncalled functions, missing input files, runs ending at a deliberate failure). A line with
   several tiers for one key (`#@ ok k ; missing k`, verdicts per call) is checked as "each
   holds in some run".
+* Found while writing cases: `tests/cases/g55_pandas_more.py` claims `flags["flag"]` ok after
+  `df.apply(flag, axis=1)` with `flag` returning a dict — pandas gives a Series of dicts, not a
+  frame (the case never ran: its input file does not exist). Engine bug + wrong expectation.

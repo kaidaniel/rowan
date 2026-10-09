@@ -66,7 +66,20 @@ def parse_set(s: str) -> set:
     s = s.strip()
     if s.startswith("{") and s.endswith("}"):
         s = s[1:-1]
-    return {parse_key(t) for t in s.split(",") if t.strip()}
+    # top-level commas only: tuple keys (`("y", "max")`, MultiIndex columns) stay whole
+    parts, depth, cur = [], 0, ""
+    for ch in s:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    return {parse_key(t) for t in parts if t.strip()}
 
 
 def collect_expectations(src: str):
@@ -151,12 +164,14 @@ def check_results(verdict_exp, row_exp_checks, schema_exp, vs, sch) -> List[str]
         here = [v for v in vs if v["line"] == ln or ln in v["chain"]]
         for tier, key in exps:
             if tier == "none" and key is None:
-                bad = [v for v in here if v["tier"] not in ("proven",)]
+                bad = [v for v in here if v["tier"] not in ("proven",) and not v.get("guarded")]
                 if bad:
                     failures.append(f"L{ln}: expected no diagnostics, got " + ", ".join(f"{v['tier']} {v['key']}" for v in bad))
                 continue
             matches = [v for v in here if v["key"] == key_str(key) or (isinstance(key, str) and v["key_str"].startswith(key))]
             if tier == "none":
+                # `none` = no diagnostic: a verdict on an access the program guards is none
+                matches = [v for v in matches if not v.get("guarded")]
                 if matches:
                     failures.append(f"L{ln}: expected no verdict for {key!r}, got " + ", ".join(v["tier"] for v in matches))
                 continue
@@ -168,6 +183,10 @@ def check_results(verdict_exp, row_exp_checks, schema_exp, vs, sch) -> List[str]
             if tier == "any":
                 if not matches:
                     failures.append(f"L{ln}: expected some verdict for {key!r}, got none")
+                continue
+            # `possibly` over several calls: per-call verdicts that differ (missing in one call,
+            # present in another) say the same, more precisely
+            if tier == "possibly" and any(v["tier"] in ("missing", "likely-missing") for v in matches) and any(v["tier"] in ("proven", "likely", "input") for v in matches):
                 continue
             if not matches:
                 got = ", ".join(f"{v['tier']} {v['key']}" for v in here) or "nothing"
