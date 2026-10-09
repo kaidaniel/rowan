@@ -1384,6 +1384,20 @@ impl Analyzer {
                 self.obj_mut(a).literal_len = None;
             }
         }
+        // 3c. the elements the body appended last
+        if !summary.exit.lasts.is_empty() && !crate::interp::disabled("lastelem") {
+            for (oid, v) in summary.exit.lasts.iter() {
+                let tg = inst.resolve(self, state, &pre, *oid);
+                if tg.len() != 1 {
+                    continue;
+                }
+                let a = tg.first().unwrap();
+                if self.kind(a) == Kind::List && self.obj(a).single {
+                    let nv = inst.remap_value(self, state, &pre, v);
+                    state.set_last(a, nv);
+                }
+            }
+        }
         // 4. elems
         for (oid, kv) in &summary.elems_fp {
             let tg = inst.resolve(self, state, &pre, *oid);

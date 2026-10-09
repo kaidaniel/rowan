@@ -447,7 +447,10 @@ impl Analyzer {
             self.bind_target(t, &v, state);
         }
         self.cm_frames.push((self.frames.len() + 1, callee_env.clone()));
-        self.exec_block(h.body, state);
+        match h.then.take() {
+            Some(f) => f(self, v, state),
+            None => self.exec_block(h.body, state),
+        }
         self.cm_frames.pop();
         let after = std::mem::replace(&mut state.env, callee_env);
         if let Some(top) = self.env_stack.last_mut() {

@@ -125,7 +125,7 @@ impl Analyzer {
                 let caught = self.guards.iter().any(|g| {
                     g.contains("*") || g.contains("Exception") || g.contains("BaseException") || names.iter().any(|n| g.contains(n) || n == "*" && !g.is_empty())
                 });
-                self.cur_exc = exc_v.filter(|v| v.pts.iter().any(|o| self.kind(o) == Kind::Instance));
+                self.cur_exc = exc_v.filter(|v| v.pts.iter().any(|o| self.kind(o) == Kind::Instance || matches!(&self.obj(o).payload, Payload::Method(q, _) if q == "fastapi.httpexc")));
                 let recorded = state.reachable && !crate::interp::disabled("raisestate") && self.record_raise_state(state);
                 self.cur_exc = None;
                 if !caught {
@@ -362,7 +362,7 @@ impl Analyzer {
         if self.kind(f) != Kind::Function || !self.func_info(f).is_contextmanager.get() {
             return false;
         }
-        let prev = self.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.frames.len(), env_after: None, ran: false });
+        let prev = self.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.frames.len(), env_after: None, ran: false, then: None });
         self.force_tab_once = true;
         let n = frontend::node(&item.context_expr);
         let fv = self.eval(&call.func, state);

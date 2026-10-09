@@ -456,6 +456,71 @@ impl Analyzer {
         v
     }
 
+    /// The handler's `Depends(g)` parameters whose `g` is a generator function (`yield` dependencies).
+    pub fn fa_yield_deps(&mut self, func: ObjId, state: &mut State) -> Vec<ObjId> {
+        if crate::interp::disabled("yielddeps") {
+            return vec![];
+        }
+        let fi = self.func_info(func);
+        let FuncNode::Def(f) = &fi.node else { return vec![] };
+        let mut out = Vec::new();
+        for p in f.parameters.posonlyargs.iter().chain(f.parameters.args.iter()).chain(f.parameters.kwonlyargs.iter()) {
+            let pname = p.parameter.name.id.to_string();
+            let meta = match &p.parameter.annotation {
+                Some(a) => self.fa_annotated(&fi, a, state).0,
+                None => None,
+            };
+            if let Some((q, g)) = meta.or_else(|| self.fa_marker(&fi, &pname)) {
+                if q != "fastapi.depends" {
+                    continue;
+                }
+                if let Some(o) = g.single().filter(|o| self.kind(*o) == Kind::Function) {
+                    let gi = self.func_info(o);
+                    if matches!(&gi.node, FuncNode::Def(d) if crate::interp::is_generator(&d.body)) && !out.contains(&o) {
+                        out.push(o);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The handler called inside its yield dependencies: each runs to its `yield`, the rest of
+    /// the request (the next one, finally the handler) runs there, then its code after `yield`.
+    pub fn fa_run_handler(&mut self, func: ObjId, mut gens: Vec<ObjId>, req: Option<Req>, entry: bool, state: &mut State, node: &Node) -> Value {
+        if gens.is_empty() {
+            let kwargs = self.fa_bind(func, req.as_ref(), state, node, 0);
+            return self.call_user(func, None, vec![], kwargs, vec![], vec![], state, node, None, entry);
+        }
+        let g = gens.remove(0);
+        let kwargs = self.fa_bind(g, req.as_ref(), state, node, 1);
+        let nd = *node;
+        let then: Box<dyn FnOnce(&mut Analyzer, Value, &mut State)> = Box::new(move |an: &mut Analyzer, v: Value, st: &mut State| {
+            if let Some(c) = an.fa_dep_cache.last_mut() {
+                c.insert(g, v);
+            }
+            let r = an.fa_run_handler(func, gens, req, entry, st, &nd);
+            an.fa_gen_ret = Some(an.fa_gen_ret.take().unwrap_or_default().join(&r));
+        });
+        let prev = self.cm_hook.replace(crate::interp::CmHook { body: &[], target: None, depth: self.frames.len(), env_after: None, ran: false, then: Some(then) });
+        let outer = self.fa_gen_ret.take();
+        self.force_tab_once = true;
+        self.call_user(g, None, vec![], kwargs, vec![], vec![], state, node, None, false);
+        self.force_tab_once = false;
+        let h = std::mem::replace(&mut self.cm_hook, prev);
+        let ret = std::mem::replace(&mut self.fa_gen_ret, outer).unwrap_or_default();
+        match h {
+            Some(h) if h.ran => {
+                if let Some(env) = h.env_after {
+                    state.env = env;
+                }
+                ret
+            }
+            // the dependency never reached its yield: no handler
+            _ => Value::new(),
+        }
+    }
+
     /// The entry run of a handler when middlewares are registered: any request, through the
     /// first middleware (its `call_next` runs the handler). None without middlewares.
     pub fn fa_entry_through_middleware(&mut self, func: ObjId, state: &mut State, node: &Node) -> Option<()> {
@@ -535,8 +600,8 @@ impl Analyzer {
         self.try_sum_depth.push(self.sum_stack.len());
         self.fa_dep_cache.push(rustc_hash::FxHashMap::default());
         self.fa_route_deps(route, Some(req), state, node);
-        let kwargs = self.fa_bind(func, Some(req), state, node, 0);
-        let ret = self.call_user(func, None, vec![], kwargs, vec![], vec![], state, node, None, false);
+        let gens = self.fa_yield_deps(func, state);
+        let ret = self.fa_run_handler(func, gens, Some(req.clone()), false, state, node);
         self.fa_dep_cache.pop();
         self.guards.pop();
         self.try_marks.pop();
@@ -559,9 +624,10 @@ impl Analyzer {
             let mut rest: Vec<ObjId> = Vec::new();
             for o in raised_v.pts.iter() {
                 let cls = if self.kind(o) == Kind::Instance { self.instance_class(o) } else { None };
+                let httpexc = payload_of(self, o).map(|(q, _)| q == "fastapi.httpexc").unwrap_or(false);
                 let hit = hooks.iter().find(|(n, hv, _)| match cls {
                     Some(c) => hv.pts.iter().any(|h| self.kind(h) == Kind::Class && self.mro(c).contains(&h)) || self.mro(c).iter().any(|m| self.class_info_opt(*m).map(|ci| ci.name == *n).unwrap_or(false)),
-                    None => n == "KeyError" && self.obj(o).label.starts_with("KeyError") || n == "Exception",
+                    None => n == "KeyError" && self.obj(o).label.starts_with("KeyError") || n == "Exception" || httpexc && n == "HTTPException",
                 }).cloned();
                 match hit {
                     Some((_, _, hf)) => {
@@ -584,10 +650,22 @@ impl Analyzer {
                 unmatched = true;
             }
             if unmatched {
+                // the detail of a raised HTTPException
+                let mut detail = Value::new();
+                let mut other = raised_v.pts.is_empty() || !raised_v.kv.is_bot();
+                for o in &rest {
+                    match payload_of(self, *o) {
+                        Some((q, _)) if q == "fastapi.httpexc" => detail = detail.join(&rs.slot(*o, Ns::Attr, key_str_lit("detail"))),
+                        _ => other = true,
+                    }
+                }
+                if other || detail.empty() {
+                    detail = detail.join(&Value::data("detail"));
+                }
                 let did = self.alloc_at(Kind::Dict, node, state, &format!("error@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some("faerr"));
                 let dk = key_str_lit("detail");
                 rs.set_row(did, Ns::Item, Row::new().store(dk, true));
-                rs.set_slot(did, Ns::Item, dk, Value::data("detail"), true);
+                rs.set_slot(did, Ns::Item, dk, detail, true);
                 out = out.join(&Value::obj(did));
             }
             let after = if state.reachable { state.copy().join(&mut rs) } else { rs };
@@ -837,6 +915,24 @@ pub fn m_fastapi(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "TestClient" => {
             let app = c.arg(0, Some("app")).unwrap_or_default();
             fa_obj(an, st, &c.node, "fastapi.client", app, "faclient")
+        }
+        // `HTTPException(status_code, detail=None, headers=None)`: raised, it becomes the
+        // response `{"detail": detail}`
+        "HTTPException" if !crate::interp::disabled("httpexc") => {
+            let code = c.arg(0, Some("status_code")).unwrap_or_default();
+            let detail = c.arg(1, Some("detail")).unwrap_or_else(|| Value::data("detail"));
+            let headers = c.arg(2, Some("headers")).unwrap_or_else(|| an.none_v.clone());
+            let v = fa_obj(an, st, &c.node, "fastapi.httpexc", detail.clone(), &format!("hx{}", c.site));
+            if let Some(o) = v.single() {
+                let mut row = Row::new();
+                for (k, val) in [("status_code", code), ("detail", detail), ("headers", headers)] {
+                    let kk = key_str_lit(k);
+                    row = row.store(kk, true);
+                    st.set_slot(o, Ns::Attr, kk, val, true);
+                }
+                st.set_row(o, Ns::Attr, row);
+            }
+            v
         }
         "JSONResponse" | "ORJSONResponse" | "UJSONResponse" => {
             let content = c.arg(0, Some("content")).unwrap_or_else(|| an.none_v.clone());

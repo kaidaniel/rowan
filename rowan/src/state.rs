@@ -118,6 +118,9 @@ pub struct State {
     /// (name, key): the object the name is bound to has the key, whichever of its possible
     /// objects that is (a store or setdefault through the name)
     pub name_keys: Arc<Vec<(StrId, KeyId)>>,
+    /// lists whose last element is known on this path (an `append` since any other change of
+    /// their elements): `lst[-1]` after appends of unknown count
+    pub lasts: Arc<Vec<(ObjId, Value)>>,
     /// tensor-shape facts on this path: ranks and dim equalities (shape.rs)
     pub tf: Arc<crate::shape::TFacts>,
 }
@@ -185,6 +188,7 @@ impl State {
             symbolic: false,
             facts: Arc::new(Vec::new()),
             name_keys: Arc::new(Vec::new()),
+            lasts: Arc::new(Vec::new()),
             tf: Arc::new(crate::shape::TFacts::default()),
         }
     }
@@ -211,6 +215,7 @@ impl State {
             symbolic: self.symbolic,
             facts: self.facts.clone(),
             name_keys: self.name_keys.clone(),
+            lasts: self.lasts.clone(),
             tf: self.tf.clone(),
         }
     }
@@ -229,6 +234,7 @@ impl State {
             symbolic: self.symbolic,
             facts: self.facts.clone(),
             name_keys: self.name_keys.clone(),
+            lasts: self.lasts.clone(),
             tf: self.tf.clone(),
         }
     }
@@ -259,7 +265,24 @@ impl State {
         self.symbolic = o.symbolic;
         self.facts = o.facts.clone();
         self.name_keys = o.name_keys.clone();
+        self.lasts = o.lasts.clone();
         self.tf = o.tf.clone();
+    }
+
+    pub fn clear_last(&mut self, oid: ObjId) {
+        if self.lasts.iter().any(|(o, _)| *o == oid) {
+            self.lasts = Arc::new(self.lasts.iter().filter(|(o, _)| *o != oid).cloned().collect());
+        }
+    }
+
+    pub fn set_last(&mut self, oid: ObjId, v: Value) {
+        let mut l: Vec<(ObjId, Value)> = self.lasts.iter().filter(|(o, _)| *o != oid).cloned().collect();
+        l.push((oid, v));
+        self.lasts = Arc::new(l);
+    }
+
+    pub fn last_of(&self, oid: ObjId) -> Option<Value> {
+        self.lasts.iter().find(|(o, _)| *o == oid).map(|(_, v)| v.clone())
     }
 
     pub fn replace_with(&mut self, mut o: State) {
@@ -309,6 +332,7 @@ impl State {
         s.facts = Arc::new(facts);
         s.tf = if Arc::ptr_eq(&self.tf, &o.tf) || self.tf == o.tf { self.tf.clone() } else { Arc::new(self.tf.join(&o.tf)) };
         s.name_keys = if Arc::ptr_eq(&self.name_keys, &o.name_keys) { self.name_keys.clone() } else { Arc::new(self.name_keys.iter().filter(|x| o.name_keys.contains(x)).copied().collect()) };
+        s.lasts = join_lasts(&self.lasts, &o.lasts);
         s
     }
 
@@ -334,6 +358,7 @@ impl State {
         self.slots = self.slots.join(&mut o.slots, &mut |a, b| a.join(b));
         self.elems = self.elems.join(&o.elems, &mut |a, b| kv_join(a, b));
         self.reqs = self.reqs.join_with(&mut o.reqs, &mut |a, b| a.join(b), &mut |a| a.demote());
+        self.lasts = join_lasts(&self.lasts, &o.lasts);
     }
 
     /// Join the heap facts of `o` restricted to a footprint (the objects a callee touched).
@@ -353,6 +378,9 @@ impl State {
             }
         }
         for (oid, sk) in &fp.slots {
+            if matches!(sk.0, Ns::Pos | Ns::Elem) {
+                self.clear_last(*oid);
+            }
             let Some(v) = o.slots.get(oid, sk) else { continue };
             match self.slots.get(oid, sk) {
                 None => self.slots.set(oid, *sk, v),
@@ -445,6 +473,9 @@ impl State {
     }
 
     pub fn set_slot(&mut self, oid: ObjId, ns: Ns, key: KeyId, v: Value, strong: bool) {
+        if matches!(ns, Ns::Pos | Ns::Elem) {
+            self.clear_last(oid);
+        }
         if strong {
             self.slots.set(&oid, (ns, key), v);
         } else {
@@ -454,6 +485,9 @@ impl State {
     }
 
     pub fn pop_slot(&mut self, oid: ObjId, ns: Ns, key: KeyId) -> Option<Value> {
+        if matches!(ns, Ns::Pos | Ns::Elem) {
+            self.clear_last(oid);
+        }
         self.slots.remove(&oid, &(ns, key))
     }
 
@@ -490,6 +524,9 @@ impl State {
     }
 
     pub fn drop_obj_ns(&mut self, oid: ObjId, ns: Ns) {
+        if matches!(ns, Ns::Pos | Ns::Elem) {
+            self.clear_last(oid);
+        }
         self.slots.drop_where(&oid, |(n, _)| *n == ns);
     }
 
@@ -610,4 +647,12 @@ mod tests2 {
         ks.sort();
         assert_eq!(ks, vec!["'chain'", "'ns'", "'objs'"]);
     }
+}
+
+/// Lists whose last element is known on both paths (the join of the two values).
+fn join_lasts(a: &Arc<Vec<(ObjId, Value)>>, b: &Arc<Vec<(ObjId, Value)>>) -> Arc<Vec<(ObjId, Value)>> {
+    if Arc::ptr_eq(a, b) || (a.is_empty() && b.is_empty()) {
+        return a.clone();
+    }
+    Arc::new(a.iter().filter_map(|(o, v)| b.iter().find(|(p, _)| p == o).map(|(_, w)| (*o, v.join(w)))).collect())
 }

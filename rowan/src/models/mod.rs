@@ -1994,6 +1994,14 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         an.obj_mut(oid).literal_len = None;
     }
+    // the last element after an append (whatever the length)
+    if name == "append" && !crate::interp::disabled("lastelem") {
+        if let (Some(oid), Some(x)) = (recv.single(), c.args.last()) {
+            if (an.kind(oid) == Kind::List && an.obj(oid).single) || an.kind(oid) == Kind::Ph {
+                st.set_last(oid, x.clone());
+            }
+        }
+    }
     an.none_v.clone()
 }
 

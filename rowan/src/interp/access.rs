@@ -320,6 +320,22 @@ impl Analyzer {
         } else {
             None
         };
+        // `lst[-1]` right after `lst.append(x)`: x
+        if ns == Ns::Item && !state.lasts.is_empty() && key.pts.is_empty() && key.kv.as_lit() == Some(intern::key_int(-1)) && !obj.pts.is_empty() && (obj.kv.is_bot() || obj.kv.as_param().map(|p| obj.pts.contains(p)).unwrap_or(false)) {
+            let vs: Option<Vec<Value>> = obj.pts.iter().map(|o| state.last_of(o)).collect();
+            if let Some(vs) = vs {
+                return join_values(vs);
+            }
+        }
+        // a summary reading the last element of a module list (that functions append to): the
+        // call site may know it
+        if ns == Ns::Item && !self.sum_stack.is_empty() && key.pts.is_empty() && key.kv.as_lit() == Some(intern::key_int(-1)) && !super::disabled("lastelem") {
+            for o in obj.pts.iter() {
+                if self.kind(o) == Kind::Ph && state.last_of(o).is_none() && self.ph_info(o).parent.map(|p| self.has_obj(p) && self.kind(p) == Kind::Module).unwrap_or(false) {
+                    self.record_event("concrete", o);
+                }
+            }
+        }
         // `Color["RED"]`: an Enum's member by name
         if ns == Ns::Item && !obj.pts.is_empty() && obj.pts.iter().all(|o| self.enum_members.contains_key(&o)) && !super::disabled("enumitem") {
             let mut out = Value::new();
@@ -486,6 +502,11 @@ impl Analyzer {
                     }
                     let ll = self.obj(oid).literal_len;
                     let idx = key.kv.as_lit().and_then(|k| intern::with_key(k, |kk| if let intern::Key::Int(i) = kk { Some(*i) } else { None }));
+                    // the element appended last
+                    if let (Some(-1), None, Some(v)) = (idx, ll, state.last_of(oid)) {
+                        acc = acc.join(&v);
+                        continue;
+                    }
                     // positions below a known prefix stay valid after appends of unknown count
                     if let (Some(i), None, Some(p)) = (idx, ll, self.obj(oid).known_prefix) {
                         if 0 <= i && (i as usize) < p {

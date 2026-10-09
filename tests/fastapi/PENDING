@@ -3,9 +3,6 @@ models/fm02_checkout.py
 models/fm03_profiles_auth.py
 models/fm04_analytics_pandas.py
 models/fm05_inventory_webhooks.py
-small/f012_yield_depends.py
-small/f013_route_dependencies.py
-small/f018_http_exceptions.py
 small/f020_background_tasks.py
 small/f021_middleware.py
 small/f022_status_jsonresponse.py
