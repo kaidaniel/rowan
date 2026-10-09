@@ -1059,6 +1059,10 @@ impl Analyzer {
         if !tensor_attr {
             return if tensor { Some(Value::data(&format!("L{}", node.line))) } else { None };
         }
+        // a method name read without a call on an unknown: a plain attribute (`args.dim`)
+        if !tensor && !TENSOR_ATTRS.contains(&name) && self.t_called_attr != node.addr {
+            return None;
+        }
         // an unknown that may be a str / list / dict: names those have keep their meaning
         // (`line.split(",")`, `xs.sort()`); only a known tensor gets the tensor method
         if !tensor && (crate::interp::STR_METHOD_NAMES.contains(&name) || crate::interp::LIST_METHOD_NAMES.contains(&name) || crate::interp::DICT_METHOD_NAMES.contains(&name) || crate::interp::SCALAR_EXTRA_NAMES.contains(&name)) {

@@ -682,6 +682,8 @@ pub struct Analyzer {
     /// reading an attribute without the tensor model / without the user-class check
     pub t_getattr_plain: bool,
     pub t_skip_user: bool,
+    /// the node of the function expression of the call being evaluated
+    pub t_called_attr: usize,
     /// tensor-shape requirements / definite mismatches (models/torch.rs)
     pub shape_reqs: Vec<crate::models::torch::ShapeNote>,
     pub shape_errors: Vec<crate::models::torch::ShapeNote>,
@@ -869,6 +871,7 @@ impl Analyzer {
             t_quiet: false,
             t_getattr_plain: false,
             t_skip_user: false,
+            t_called_attr: 0,
             shape_reqs: Vec::new(),
             shape_errors: Vec::new(),
             t_sym_alias: FxHashMap::default(),

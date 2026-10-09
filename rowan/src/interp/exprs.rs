@@ -76,6 +76,8 @@ impl Analyzer {
                 self.load_item(&obj, Ns::Item, &key, &nd, state, true)
             }
             ast::Expr::Call(c) => {
+                // (the tensor model reads `x.dim` as a method only when it is called)
+                self.t_called_attr = frontend::node(&*c.func).addr;
                 let fv = self.eval(&c.func, state);
                 if !self.may_raise.is_empty() {
                     let all_safe = fv.pts.iter().all(|o| match &self.obj(o).payload {
