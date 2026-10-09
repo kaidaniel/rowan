@@ -89,6 +89,9 @@ impl Analyzer {
                     g.contains("*") || g.contains("Exception") || g.contains("BaseException") || name.as_ref().map(|n| g.contains(n)).unwrap_or(false)
                 });
                 if !caught {
+                    if crate::interp::debug_level() == 2 {
+                        eprintln!("  raise statement at L{} in {}", frontend::node(r).line, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
+                    }
                     if let Some(t) = self.raise_stack.last_mut() {
                         *t = true;
                     }
@@ -201,7 +204,32 @@ impl Analyzer {
                     }
                     managers.push((v, n));
                 }
-                self.exec_block(&w.body, state);
+                // a manager whose `__exit__` returns True swallows the body's exception: the
+                // body is a try whose catch-all handler continues after the with
+                let swallows = managers.iter().any(|(v, _)| self.exit_swallows(v, state));
+                if swallows {
+                    let mut pre = state.copy();
+                    self.guards.push(FxHashSet::from_iter(["*".to_string()]));
+                    self.may_raise.push(false);
+                    self.raise_states.push(None);
+                    let exits_before = self.exit_count;
+                    self.exec_block(&w.body, state);
+                    self.guards.pop();
+                    let flagged = self.may_raise.pop().unwrap_or(false);
+                    let raised_at = self.raise_states.pop().flatten();
+                    let died = !state.reachable && self.exit_count == exits_before;
+                    let generic = flagged || (died && raised_at.is_none());
+                    let mut after = state.copy();
+                    if generic {
+                        after = pre.join(&mut after);
+                    }
+                    if let Some(mut r) = raised_at {
+                        after = if after.reachable { after.join(&mut r) } else { r };
+                    }
+                    state.replace_with(after);
+                } else {
+                    self.exec_block(&w.body, state);
+                }
                 // the managers' __exit__ runs on the way out (innermost first)
                 if state.reachable {
                     for (v, n) in managers.iter().rev() {
@@ -505,6 +533,33 @@ impl Analyzer {
         state.replace_with(exit_s);
     }
 
+    /// Does the manager's class define `__exit__` as returning True (a known literal)?
+    fn exit_swallows(&mut self, v: &Value, state: &mut State) -> bool {
+        for oid in v.pts.iter() {
+            if self.kind(oid) != Kind::Instance {
+                continue;
+            }
+            let Some(cls) = self.instance_class(oid) else { continue };
+            let Some(m) = self.class_lookup(cls, "__exit__") else { continue };
+            let fv = self.cls_slots.get(&(m, Ns::Attr, key_str_lit("__exit__"))).cloned().unwrap_or_default();
+            for f in fv.pts.iter() {
+                if self.kind(f) != Kind::Function {
+                    continue;
+                }
+                if let Some(summ) = self.summarise(f, state) {
+                    if summ.ret.pts.is_empty() {
+                        if let Some(k) = summ.ret.kv.as_lit() {
+                            if intern::with_key(k, |kk| matches!(kk, intern::Key::Bool(true))) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn stmt_try(&mut self, t: &'static ast::StmtTry, state: &mut State) {
         let mut caught: FxHashSet<String> = FxHashSet::default();
         for h in &t.handlers {
@@ -527,15 +582,33 @@ impl Analyzer {
         let mut pre = state.copy();
         self.guards.push(caught);
         self.may_raise.push(false);
+        self.raise_states.push(None);
         self.cond_depth += 1;
         self.branch_depth += 1;
         let exits_before = self.exit_count;
         self.exec_block(&t.body, state);
         self.guards.pop();
         // a body that ended because it returned (or broke out) did not raise
-        let body_may_raise = self.may_raise.pop().unwrap_or(false) || (!state.reachable && self.exit_count == exits_before);
+        let flagged = self.may_raise.pop().unwrap_or(false);
+        let raised_at = self.raise_states.pop().flatten();
+        let died = !state.reachable && self.exit_count == exits_before;
+        let generic = flagged || (died && raised_at.is_none());
+        let body_may_raise = generic || raised_at.is_some();
+        if crate::interp::debug_level() == 2 {
+            eprintln!("  try at L{}: may_raise={} at_access={} reachable={} exited={}", frontend::node(t).line, flagged, raised_at.is_some(), state.reachable, self.exit_count != exits_before);
+        }
         let mut body_end = state.copy();
-        let mut handler_entry: Option<State> = if !t.handlers.is_empty() { Some(pre.join(&mut body_end)) } else { None };
+        // the handler starts from the states at the accesses that may raise; anything else
+        // that may raise (unknown calls, raise statements, callees) can happen anywhere
+        let mut handler_entry: Option<State> = if !t.handlers.is_empty() {
+            let mut e = if generic { pre.join(&mut body_end) } else { State::bottom() };
+            if let Some(mut r) = raised_at {
+                e = if e.reachable { e.join(&mut r) } else { r };
+            }
+            Some(e)
+        } else {
+            None
+        };
         if !body_may_raise && !t.handlers.is_empty() {
             handler_entry = Some(State::bottom());
         }

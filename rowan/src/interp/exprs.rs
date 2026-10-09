@@ -65,6 +65,8 @@ impl Analyzer {
                     let all_safe = fv.pts.iter().all(|o| match &self.obj(o).payload {
                         Payload::Method(q, _) if self.kind(o) == Kind::Method => SAFE_METHODS.contains(&q.as_str()),
                         // user code: whether it raises is reported by its own analysis
+                        // builtins that raise only on wrong types (len, str, sorted, …)
+                        Payload::Str(q) if self.kind(o) == Kind::External => q.strip_prefix("builtins.").map(|n| SAFE_BUILTINS.contains(&n)).unwrap_or(false),
                         _ => matches!(self.kind(o), Kind::Function | Kind::Bound | Kind::Class | Kind::Partial),
                     });
                     if !all_safe {
@@ -209,12 +211,15 @@ impl Analyzer {
         let ctx = self.frame().ctx.clone();
         let label = format!("generator {}", self.frame().label);
         let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &label, Payload::None);
+        // a fresh generator list (no yield yet in this activation) starts empty
+        let fresh = !state.has_slot(gid, Ns::Elem, STAR);
         state.set_slot(gid, Ns::Elem, STAR, v.clone(), false);
         let cur = state.elems.get(&gid).unwrap_or_else(|| v.kv.clone());
         state.elems.insert(gid, kv_join(&cur, &v.kv));
         // straight-line yields keep their order
         let positional = self.frame().single && self.frame().loop_depth == 0 && self.cond_depth == 0 && self.obj(gid).single;
-        match (positional, self.obj(gid).literal_len) {
+        let ll = if fresh { Some(0) } else { self.obj(gid).literal_len };
+        match (positional, ll) {
             (true, Some(n)) if n < 16 => {
                 state.set_slot(gid, Ns::Pos, key_int(n as i64), v, true);
                 self.obj_mut(gid).literal_len = Some(n + 1);
@@ -834,8 +839,29 @@ impl Analyzer {
                         match el {
                             ast::InterpolatedStringElement::Literal(l) => parts.push(Part::Lit(l.value.to_string())),
                             ast::InterpolatedStringElement::Interpolation(i) => {
-                                if i.format_spec.is_some() || i.conversion != ast::ConversionFlag::None {
+                                if i.conversion != ast::ConversionFlag::None {
                                     parts.push(Part::Opaque);
+                                } else if let Some(spec) = &i.format_spec {
+                                    // a literal spec applied to a known value (`{n:03d}`)
+                                    let mut spec_text = String::new();
+                                    let mut literal_spec = true;
+                                    for se in spec.elements.iter() {
+                                        match se {
+                                            ast::InterpolatedStringElement::Literal(l) => spec_text.push_str(&l.value),
+                                            _ => literal_spec = false,
+                                        }
+                                    }
+                                    let v = self.eval(&i.expression, state);
+                                    if let Some(ph) = v.kv.as_param() {
+                                        self.record_event("narrow", ph);
+                                    }
+                                    match (literal_spec, v.kv.as_lit().filter(|_| v.pts.is_empty())) {
+                                        (true, Some(k)) => match format_spec_literal(k, &spec_text) {
+                                            Some(s) => parts.push(Part::Lit(s)),
+                                            None => parts.push(Part::Opaque),
+                                        },
+                                        _ => parts.push(Part::Opaque),
+                                    }
                                 } else {
                                     let v = self.eval(&i.expression, state);
                                     parts.push(Part::Hole(v));
@@ -870,6 +896,28 @@ impl Analyzer {
                 }
                 return Value::kv_only(kv);
             }
+        }
+        // several holes: known literals concatenate; a parameter among them is decided per
+        // call site
+        let mut text = String::new();
+        let mut all_lit = true;
+        for p in &parts {
+            match p {
+                Part::Lit(l) => text.push_str(l),
+                Part::Hole(v) => {
+                    if let Some(ph) = v.kv.as_param() {
+                        self.record_event("narrow", ph);
+                    }
+                    match v.kv.as_lit().filter(|_| v.pts.is_empty()) {
+                        Some(k) => text.push_str(&intern::key_py_str(k)),
+                        None => all_lit = false,
+                    }
+                }
+                Part::Opaque => all_lit = false,
+            }
+        }
+        if all_lit {
+            return Value::lit(key_str_lit(&text));
         }
         let nd = frontend::node(node);
         Value::data(&format!("fstring@L{}", nd.line))
@@ -1215,4 +1263,83 @@ fn format_percent_literal(fmt: &str, b: &Value, state: &State, an: &Analyzer) ->
     }
     out.push_str(&bytes[pos..].iter().collect::<String>().replace("%%", "%"));
     Some(out)
+}
+
+/// builtins whose calls do not raise for the values this analysis sees
+const SAFE_BUILTINS: &[&str] = &["len", "str", "repr", "bool", "int", "float", "sorted", "reversed", "list", "dict", "set", "tuple", "frozenset", "min", "max", "sum", "abs", "round", "isinstance", "issubclass", "hasattr", "enumerate", "zip", "range", "print", "id", "hash", "type", "callable", "any", "all", "map", "filter", "format", "iter"];
+
+/// `format(value, spec)` for a known literal and a plain spec: `[[fill]align][0][width][.prec][type]`.
+fn format_spec_literal(k: KeyId, spec: &str) -> Option<String> {
+    let chars: Vec<char> = spec.chars().collect();
+    let mut i = 0;
+    let mut fill = ' ';
+    let mut align: Option<char> = None;
+    if chars.len() >= 2 && matches!(chars[1], '<' | '>' | '^') {
+        fill = chars[0];
+        align = Some(chars[1]);
+        i = 2;
+    } else if !chars.is_empty() && matches!(chars[0], '<' | '>' | '^') {
+        align = Some(chars[0]);
+        i = 1;
+    }
+    let mut zero = false;
+    if i < chars.len() && chars[i] == '0' {
+        zero = true;
+        i += 1;
+    }
+    let mut width = 0usize;
+    while i < chars.len() && chars[i].is_ascii_digit() {
+        width = width * 10 + chars[i].to_digit(10).unwrap() as usize;
+        i += 1;
+    }
+    let mut prec: Option<usize> = None;
+    if i < chars.len() && chars[i] == '.' {
+        i += 1;
+        let mut p = 0usize;
+        let mut any = false;
+        while i < chars.len() && chars[i].is_ascii_digit() {
+            p = p * 10 + chars[i].to_digit(10).unwrap() as usize;
+            i += 1;
+            any = true;
+        }
+        if !any {
+            return None;
+        }
+        prec = Some(p);
+    }
+    let ty = if i < chars.len() { chars[i] } else { ' ' };
+    if i + 1 < chars.len() {
+        return None;
+    }
+    let text = intern::with_key(k, |kk| match (ty, kk) {
+        (' ' | 's', intern::Key::Str(s)) => Some(match prec {
+            Some(p) => s.chars().take(p).collect(),
+            None => s.to_string(),
+        }),
+        (' ' | 'd', intern::Key::Int(v)) => Some(v.to_string()),
+        ('d', intern::Key::Bool(b)) => Some((*b as i64).to_string()),
+        (' ' | 'f', intern::Key::Float(b)) => Some(format!("{:.*}", prec.unwrap_or(6), f64::from_bits(*b))),
+        ('f', intern::Key::Int(v)) => Some(format!("{:.*}", prec.unwrap_or(6), *v as f64)),
+        ('x', intern::Key::Int(v)) => Some(format!("{:x}", v)),
+        (' ', intern::Key::Bool(b)) => Some(if *b { "True".into() } else { "False".into() }),
+        _ => None,
+    })?;
+    let numeric = intern::with_key(k, |kk| matches!(kk, intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_)));
+    let n = text.chars().count();
+    if n >= width {
+        return Some(text);
+    }
+    let pad = width - n;
+    Some(match align {
+        Some('<') => format!("{}{}", text, fill.to_string().repeat(pad)),
+        Some('^') => format!("{}{}{}", fill.to_string().repeat(pad / 2), text, fill.to_string().repeat(pad - pad / 2)),
+        Some('>') => format!("{}{}", fill.to_string().repeat(pad), text),
+        None if zero && numeric => {
+            let neg = text.starts_with('-');
+            format!("{}{}{}", if neg { "-" } else { "" }, "0".repeat(pad), text.trim_start_matches('-'))
+        }
+        None if numeric => format!("{}{}", " ".repeat(pad), text),
+        None => format!("{}{}", text, " ".repeat(pad)),
+        Some(_) => return None,
+    })
 }

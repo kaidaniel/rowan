@@ -267,8 +267,23 @@ impl Analyzer {
                         state.set_row(oid, ns, row.clone());
                     }
                 } else if guarded && cls.tier != Tier::Proven {
-                    if let Some(m) = self.may_raise.last_mut() {
-                        *m = true;
+                    if crate::interp::debug_level() == 2 {
+                        eprintln!("  guarded access may raise: {:?} tier {:?} at L{}", intern::key_repr(k), cls.tier, node.line);
+                    }
+                    // the handler sees the state as it is here
+                    match self.raise_states.last_mut() {
+                        Some(slot) => {
+                            let mut here = state.copy();
+                            *slot = Some(match slot.take() {
+                                None => here,
+                                Some(mut prev) => prev.join(&mut here),
+                            });
+                        }
+                        None => {
+                            if let Some(m) = self.may_raise.last_mut() {
+                                *m = true;
+                            }
+                        }
                     }
                     if try_guard && cls.tier == Tier::Missing && is_lit && single_target && !row.symbolic() {
                         // the access raises here: the rest of the try body is unreachable

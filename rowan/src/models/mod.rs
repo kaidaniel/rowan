@@ -449,6 +449,18 @@ fn m_enumerate(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first() else { return Value::data("next") };
+    // a generator with known yields: the item at the cursor, which moves on
+    if let Some(g) = a.single() {
+        if matches!(an.kind(g), Kind::List) && an.obj(g).single {
+            if let Some(n) = an.obj(g).literal_len {
+                let cur = st.slot_opt(g, Ns::Attr, key_str_lit("__cursor")).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_int).unwrap_or(0);
+                if cur >= 0 && (cur as usize) < n {
+                    st.set_slot(g, Ns::Attr, key_str_lit("__cursor"), Value::lit(intern::key_int(cur + 1)), true);
+                    return st.slot(g, Ns::Pos, intern::key_int(cur));
+                }
+            }
+        }
+    }
     let it = an.iterate(a, &c.node, st);
     match it.elem {
         Elem::Pair(k, v) => {
@@ -582,6 +594,17 @@ fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "upper" | "lower" | "strip" | "title" => Value::kv_only(an.rename_kv(&kv, &RenameFn::new(FnKind::from_name(name).unwrap()))),
         "lstrip" | "rstrip" => Value::kv_only(an.rename_kv(&kv, &RenameFn::new(FnKind::Strip))),
         "capitalize" | "casefold" | "swapcase" => Value::data("str"),
+        "startswith" | "endswith" if c.args.len() == 1 && kv.as_lit().and_then(intern::key_as_str).is_some() && c.args[0].kv.as_lit().and_then(intern::key_as_str).is_some() => {
+            let s = intern::key_as_str(kv.as_lit().unwrap()).unwrap();
+            let p = intern::key_as_str(c.args[0].kv.as_lit().unwrap()).unwrap();
+            Value::lit(intern::key_bool(if name == "startswith" { s.starts_with(&*p) } else { s.ends_with(&*p) }))
+        }
+        "startswith" | "endswith" if c.args.len() == 1 => {
+            if let Some(ph) = kv.as_param() {
+                an.record_event("narrow", ph);
+            }
+            Value::data("bool")
+        }
         "partition" | "rpartition" if c.args.len() == 1 && kv.as_lit().and_then(intern::key_as_str).is_some() && c.args[0].kv.as_lit().and_then(intern::key_as_str).is_some() => {
             let s = intern::key_as_str(kv.as_lit().unwrap()).unwrap();
             let sep = intern::key_as_str(c.args[0].kv.as_lit().unwrap()).unwrap();

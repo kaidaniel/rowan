@@ -38,13 +38,14 @@ def counter():
 
 
 rows = list(enrich(only_kind(source(), "a")))
-# Every yielded record has the same shape; "big" depends on an open comparison.
-r0 = rows[0]                              #@row r0: present={id,kind,v,seq,big} definite={id,kind,v,seq} closed
-by_id = {r["id"]: r for r in rows}        #@row by_id: present={1,2,3} definite={} closed
+# The chain keeps positions: only records 1 and 3 have kind "a"; the first has v=10, so
+# 10 > 15 is decided and it gets no "big".
+r0 = rows[0]                              #@row r0: present={id,kind,v,seq} definite={id,kind,v,seq} closed
+by_id = {r["id"]: r for r in rows}        #@row by_id: present={1,3} definite={1,3} closed
 raw = next(source())                      #@row raw: present={id,kind,v} definite={id,kind,v} closed
 bump = counter()
 state = bump()                            #@row state: present={n} definite={n} closed
 state2 = bump()                           #@row state2: present={n} definite={n} closed
 r0["seq"]                                 #@ ok seq
-r0["big"]                                 #@ possibly big
+r0["big"]                                 #@ missing big
 raw["seq"]                                #@ missing seq

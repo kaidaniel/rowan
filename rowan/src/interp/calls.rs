@@ -1019,6 +1019,34 @@ impl Analyzer {
                 args.insert(0, sv.clone());
             }
         }
+        // `f(*xs)` with known items: they are positional arguments; a placeholder `*args`
+        // forwarded from a summary is decided per call site
+        let mut star_args: Vec<Value> = star_args.to_vec();
+        let mut expanded: Vec<Value> = Vec::new();
+        star_args.retain(|sa| {
+            for o in sa.pts.iter() {
+                if self.kind(o) == Kind::Ph {
+                    self.record_event("iter", o);
+                }
+            }
+            let it = self.iterate(sa, node, state);
+            match it.items {
+                Some(items) if sa.pts.len() == 1 => {
+                    expanded.extend(items);
+                    false
+                }
+                _ => true,
+            }
+        });
+        args.extend(expanded);
+        let star_args = &star_args[..];
+        for sk in star_kwargs {
+            for o in sk.pts.iter() {
+                if self.kind(o) == Kind::Ph {
+                    self.record_event("iter", o);
+                }
+            }
+        }
         let extra = if !star_args.is_empty() { join_values(star_args.iter().map(|sa| self.elem_of(sa, node, state))) } else { Value::new() };
         for (i, name) in positional.iter().enumerate() {
             if i < args.len() {
@@ -1038,14 +1066,21 @@ impl Analyzer {
             if bound.contains_key(name) {
                 continue;
             }
-            if let Some(d) = fi.defaults.get(name) {
+            // `**kwargs` holding the name wins over the default (joined with it when the key
+            // is only possibly there)
+            let nk = intern::key(intern::Key::Str(intern::str_get(*name)));
+            let kw_present = star_kwargs.iter().any(|sk| sk.pts.iter().any(|x| state.row(x, Ns::Item).present.contains(nk)));
+            let kw_definite = !star_kwargs.is_empty() && star_kwargs.iter().all(|sk| sk.pts.iter().all(|x| state.row(x, Ns::Item).definite.contains(nk)));
+            if let (Some(d), false) = (fi.defaults.get(name), kw_present) {
                 bound.insert(*name, d.clone());
             } else if !star_kwargs.is_empty() {
-                let nk = intern::key(intern::Key::Str(intern::str_get(*name)));
                 let vals: Vec<Value> = star_kwargs.iter().flat_map(|sk| sk.pts.iter().map(|x| state.slot(x, Ns::Item, nk)).collect::<Vec<_>>()).collect();
                 let mut v = if vals.is_empty() { Value::data("kw") } else { join_values(vals) };
-                if !star_kwargs.iter().any(|sk| sk.pts.iter().any(|x| state.row(x, Ns::Item).present.contains(nk))) {
-                    v = v.join(&Value::data("kw"));
+                if !kw_definite {
+                    v = match fi.defaults.get(name) {
+                        Some(d) => v.join(d),
+                        None => v.join(&Value::data("kw")),
+                    };
                 }
                 bound.insert(*name, v);
             } else {

@@ -562,6 +562,9 @@ pub struct Analyzer {
     pub loop_stack: Vec<LoopCtx>,
     pub guards: Vec<FxHashSet<String>>,
     pub may_raise: Vec<bool>,
+    /// per enclosing try (or swallowing with): the joined state at the guarded accesses
+    /// that may raise inside it (the handler's entry, precisely)
+    pub raise_states: Vec<Option<State>>,
     pub cond_depth: i32,
     /// like `cond_depth` without loops: a requirement recorded under an `if`/`try`/boolean
     /// operator is "sometimes"; one inside a loop body is per element (always)
@@ -688,6 +691,7 @@ impl Analyzer {
             loop_stack: Vec::new(),
             guards: Vec::new(),
             may_raise: Vec::new(),
+            raise_states: Vec::new(),
             cond_depth: 0,
             branch_depth: 0,
             call_chain: Vec::new(),

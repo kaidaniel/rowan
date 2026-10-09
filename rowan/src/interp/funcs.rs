@@ -461,9 +461,11 @@ impl Analyzer {
             match kind {
                 Kind::List | Kind::Tuple | Kind::Set => {
                     let ll = self.obj(oid).literal_len;
+                    // a generator partly consumed by next(): iteration starts at its cursor
+                    let cursor = state.slot_opt(oid, Ns::Attr, key_str_lit("__cursor")).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_int).unwrap_or(0).max(0) as usize;
                     match (ll, items.as_mut()) {
                         (Some(n), Some(its)) => {
-                            for i in 0..n {
+                            for i in cursor.min(n)..n {
                                 its.push(state.slot(oid, Ns::Pos, key_int(i as i64)));
                             }
                         }
@@ -793,7 +795,8 @@ impl Analyzer {
         let tag = if deep { "deep" } else { "copy" };
         let label = format!("{} of {}@L{}", tag, self.obj(oid).label, node.line);
         let payload = self.obj(oid).payload.clone();
-        let nid = self.alloc(kind, &format!("{}:{}:{}", tag, self.site_of(node), kind.name()), state, &label, payload, None, if kind == Kind::Instance { Ns::Attr } else { Ns::Item }, None, None);
+        // (the original's id in the site: a deep copy's nested copies are distinct objects)
+        let nid = self.alloc(kind, &format!("{}:{}:{}:{}", tag, self.site_of(node), kind.name(), oid), state, &label, payload, None, if kind == Kind::Instance { Ns::Attr } else { Ns::Item }, None, None);
         seen.insert(oid, nid);
         if self.is_entry_object(oid) {
             self.obj_mut(nid).copied_from = Some(oid);
