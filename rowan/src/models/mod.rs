@@ -6,6 +6,7 @@ pub mod minire;
 pub mod pandas;
 pub mod pydantic;
 pub mod fastapi;
+pub mod counter;
 pub mod torch;
 
 use indexmap::IndexMap;
@@ -31,7 +32,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.str.", "Series.dt.", "Series.cat.", "Series.sparse.", "Series.list.", "Series.struct.", "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
+    "parser.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
 ];
 
 pub struct Registry {
@@ -154,6 +155,8 @@ impl Registry {
         pandas::install(&mut r);
         pydantic::install(&mut r);
         fastapi::install(&mut r);
+        r(&["counter.*"], counter::m_counter);
+        r(&["chainmap.*"], m_chainmap);
         r(&["typeadapter.*"], m_typeadapter);
         r(&["torch.*"], torch::m_torch);
         r(&["numpy.*", "np.*"], torch::m_numpy);
@@ -1815,6 +1818,19 @@ fn m_popitem(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// `od.move_to_end(k, last=True)` on one closed dict with a known order.
 fn m_move_to_end(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let recs = dict_recv(an, c);
+    // the key is looked up: an access (KeyError when it is not there)
+    if let (Some(kv), Some(recv)) = (c.args.first(), c.recv.clone()) {
+        if !crate::interp::disabled("mtaccess") {
+            let row0 = recs.first().map(|o| st.row(*o, Ns::Item));
+            an.load_item(&recv, Ns::Item, kv, &c.node, st, true);
+            if let (Some(k), Some(r0)) = (kv.kv.as_lit().filter(|_| kv.pts.is_empty()), row0) {
+                if recs.len() == 1 && r0.closed() && !r0.present.contains(k) {
+                    an.raise_here("KeyError", st);
+                    return Value::new();
+                }
+            }
+        }
+    }
     let k = c.args.first().and_then(|a| a.kv.as_lit().filter(|_| a.pts.is_empty()));
     let to_front = c.kw("last").or_else(|| c.args.get(1).cloned()).map(|v| v.kv.as_lit() == Some(intern::key_bool(false))).unwrap_or(false);
     if let ([oid], Some(k)) = (&recs[..], k) {
@@ -2043,6 +2059,36 @@ fn m_set(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             an.none_v.clone()
         }
         _ => Value::data("set"),
+    }
+}
+
+/// `ChainMap` attributes and methods: `maps`, `parents`, `new_child(m)`.
+fn m_chainmap(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let name = last(&c.qual).to_string();
+    let Some(oid) = c.recv.as_ref().and_then(|r| r.single()) else { return Value::data("chainmap") };
+    let maps = an.chainmaps.get(&oid).cloned().unwrap_or_default();
+    match name.as_str() {
+        "maps" => an.alloc_positional(Kind::List, &c.node, Some(maps), Value::new(), DATA, st),
+        "parents" | "new_child" => {
+            let mut ms: Vec<Value> = if name == "parents" { maps.iter().skip(1).cloned().collect() } else { maps.clone() };
+            if name == "new_child" {
+                let first = match c.arg(0, Some("m")) {
+                    Some(m) => m,
+                    None => {
+                        let d = an.alloc_at(Kind::Dict, &c.node, st, &format!("dict@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, Some("chainchild"));
+                        st.set_row(d, Ns::Item, Row::new());
+                        Value::obj(d)
+                    }
+                };
+                ms.insert(0, first);
+            }
+            let call = Call { qual: "collections.ChainMap".into(), recv: None, args: ms, kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: c.node, call_ast: None, site: format!("{}:{}", c.site, name), line: c.line };
+            an.frame_mut().unroll.push(7000);
+            let v = m_defaultdict(an, st, &call);
+            an.frame_mut().unroll.pop();
+            v
+        }
+        _ => Value::data("chainmap"),
     }
 }
 
@@ -2370,24 +2416,32 @@ fn m_namedtuple(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         })
     };
     let Some(fields) = fields.filter(|fs| !fs.is_empty() && fs.iter().all(|f| ident(f)) && ident(&tname)) else { return fallback(an, st, c) };
-    let ndefaults = c.kw("defaults").and_then(|d| d.single()).and_then(|o| an.obj(o).literal_len).unwrap_or(0);
+    // the defaults (of the last fields), as module globals the generated class refers to
+    let dvals: Vec<Value> = c.kw("defaults").map(|d| an.iterate(&d, &c.node, st).items.unwrap_or_default()).unwrap_or_default();
+    let ndefaults = dvals.len();
     let modname = format!("<namedtuple {} {}>", tname, c.site);
     if let Some(&moid) = an.modules.get(&modname) {
         return st.slot(moid, Ns::Attr, key_str_lit(&tname));
     }
     let mut src = format!("from typing import NamedTuple\n\n\nclass {}(NamedTuple):\n", tname);
+    let first_default = fields.len().saturating_sub(ndefaults);
     for (i, f) in fields.iter().enumerate() {
-        let dflt = if i + ndefaults >= fields.len() { " = None" } else { "" };
-        src.push_str(&format!("    {}: object{}\n", f, dflt));
+        let dflt = if i >= first_default { format!(" = _rowan_default_{}", i - first_default) } else { String::new() };
+        src.push_str(&format!("    {}: \"_field\"{}\n", f, dflt));
     }
     let tuple_src = fields.iter().map(|f| format!("{:?}", f)).collect::<Vec<_>>().join(", ");
-    src.push_str(&format!("    _fields = ({},)\n\n", tuple_src));
+    src.push_str(&format!("    _fields = ({},)\n", tuple_src));
+    let fd = fields.iter().enumerate().filter(|(i, _)| *i >= first_default).map(|(i, f)| format!("{:?}: _rowan_default_{}", f, i - first_default)).collect::<Vec<_>>().join(", ");
+    src.push_str(&format!("    _field_defaults = {{{}}}\n\n", fd));
     let items = fields.iter().map(|f| format!("{:?}: self.{}", f, f)).collect::<Vec<_>>().join(", ");
     src.push_str(&format!("    def _asdict(self):\n        return {{{}}}\n\n", items));
     let args = fields.iter().map(|f| format!("kw.get({:?}, self.{})", f, f)).collect::<Vec<_>>().join(", ");
-    src.push_str(&format!("    def _replace(self, **kw):\n        return {}({})\n", tname, args));
+    src.push_str(&format!("    def _replace(self, **kw):\n        for k in kw:\n            if k not in {:?}:\n                raise ValueError(k)\n        return {}({})\n", fields, tname, args).replace("[", "(").replace("]", ",)"));
     let Ok((idx, tree)) = crate::frontend::parse(&modname, None, src) else { return fallback(an, st, c) };
     let moid = an.make_module_pub(&modname, None, idx, tree);
+    for (i, v) in dvals.iter().enumerate() {
+        st.set_slot(moid, Ns::Attr, key_str_lit(&format!("_rowan_default_{}", i)), v.clone(), true);
+    }
     an.run_module(moid, st);
     st.slot(moid, Ns::Attr, key_str_lit(&tname))
 }
@@ -2593,6 +2647,9 @@ fn m_passthrough(_an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
 
 fn m_defaultdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual).to_string();
+    if name == "Counter" && !crate::interp::disabled("counter") {
+        return counter::construct(an, st, c);
+    }
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("{}@L{}", name, c.line));
     let src_arg: Option<Value>;
     if name == "defaultdict" || name == "Counter" {
@@ -2634,8 +2691,17 @@ fn m_defaultdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         src_arg = if name == "defaultdict" { c.args.get(1).cloned() } else { c.args.first().cloned() };
     } else if name == "ChainMap" {
+        // the maps it looks through (writes go to the first; `.maps`, `new_child`)
+        let maps: Vec<Value> = if c.args.is_empty() {
+            let d = an.alloc_at(Kind::Dict, &c.node, st, &format!("dict@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, Some("chainmap0"));
+            st.set_row(d, Ns::Item, Row::new());
+            vec![Value::obj(d)]
+        } else {
+            c.args.clone()
+        };
+        an.chainmaps.insert(oid, maps.clone());
         // every map, the first one winning: copied from the last to the first
-        for sa in c.args.iter().rev() {
+        for sa in maps.iter().rev() {
             if !an.record_objects(sa).is_empty() {
                 an.copy_into(oid, Ns::Item, sa, st, true, &KeySet::new());
             } else {

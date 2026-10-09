@@ -116,6 +116,24 @@ impl Analyzer {
     }
 
     pub fn load_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
+        // in a summary: a value read from a dict copied from a parameter's record (its slot not
+        // set here) is known only at the call site: decided there
+        if !self.sum_stack.is_empty() && !super::disabled("copyread") {
+            if let Some(k) = key.kv.as_lit().filter(|_| key.pts.is_empty()) {
+                for o in obj.pts.iter() {
+                    if self.kind(o) != Kind::Dict || state.has_slot(o, ns, k) {
+                        continue;
+                    }
+                    let refs = state.row(o, ns).refs();
+                    for r in refs.iter() {
+                        let (p, _) = crate::domain::unrho(r);
+                        if self.has_obj(p) && self.kind(p) == Kind::Ph {
+                            self.record_event("concrete", p);
+                        }
+                    }
+                }
+            }
+        }
         let mut acc = Value::new();
         let guarded = self.is_guarded(ns) || !report;
         // a real try/except guard (as opposed to a model's unreported load): no exception
@@ -548,6 +566,16 @@ impl Analyzer {
                     }
                     continue;
                 }
+                Kind::Dict if self.chainmaps.contains_key(&oid) && !crate::interp::disabled("chainwrite") => {
+                    // a ChainMap: the write lands in its first map too
+                    let first = self.chainmaps[&oid].first().cloned().unwrap_or_default();
+                    for m in self.record_objects(&first) {
+                        let s1 = strong && first.pts.len() == 1 && self.strongable(m);
+                        self.store_key(m, Ns::Item, &key.kv, v, s1, node, state);
+                    }
+                    let s1 = strong && self.strongable(oid);
+                    self.store_key(oid, Ns::Item, &key.kv, v, s1, node, state);
+                }
                 Kind::Dict if self.attr_mirrors.contains_key(&oid) => {
                     // a `vars(obj)` dict: obj's attributes change with it
                     let inst = self.attr_mirrors[&oid];
@@ -797,6 +825,15 @@ impl Analyzer {
                     }
                 }
                 Kind::Dict if crate::models::pandas::is_series_obj(self, oid) => crate::models::pandas::series_getattr(self, oid, name, node, state),
+                Kind::Dict if self.counters.contains(&oid) && crate::models::counter::COUNTER_METHODS.contains(&name) => self.method_value(&format!("counter.{}", name), &Value::obj(oid)),
+                Kind::Dict if self.chainmaps.contains_key(&oid) && matches!(name, "maps" | "parents") => {
+                    let c = super::Call { qual: format!("chainmap.{}", name), recv: Some(Value::obj(oid)), args: vec![], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
+                    match self.models.lookup(&c.qual) {
+                        Some(m) => m(self, state, &c),
+                        None => Value::data("chainmap"),
+                    }
+                }
+                Kind::Dict if self.chainmaps.contains_key(&oid) && name == "new_child" => self.method_value("chainmap.new_child", &Value::obj(oid)),
                 Kind::Dict => self.method_value(&format!("dict.{}", name), &Value::obj(oid)),
                 Kind::List | Kind::Tuple | Kind::Set => self.method_value(&format!("{}.{}", k.name(), name), &Value::obj(oid)),
                 Kind::Frame => crate::models::pandas::frame_getattr(self, oid, name, node, state, guarded),

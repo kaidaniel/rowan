@@ -10,11 +10,6 @@ small/s021_str_format.py
 small/s022_percent_format.py
 small/s023_fstrings.py
 small/s024_str_methods.py
-small/s025_counter_basic.py
-small/s026_counter_arith.py
-small/s029_ordereddict.py
-small/s030_chainmap.py
-small/s031_namedtuple.py
 small/s032_deque_userdict.py
 small/s033_dataclass_asdict.py
 small/s034_dataclass_replace_fields.py
@@ -81,4 +76,3 @@ small/s094_sqlite_row.py
 small/s095_abc_dispatch.py
 small/s096_getattr_getitem.py
 small/s097_yield_from.py
-small/s099_defaultdict_factory.py

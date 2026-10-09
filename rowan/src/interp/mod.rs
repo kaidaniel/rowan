@@ -783,6 +783,10 @@ pub struct Analyzer {
     pub fa_app_deps: FxHashMap<ObjId, Vec<Value>>,
     /// zip objects made with `strict=True`
     pub zip_strict: FxHashSet<ObjId>,
+    /// dicts that are `collections.Counter`s
+    pub counters: FxHashSet<ObjId>,
+    /// ChainMaps: the maps they look through (the first takes the writes)
+    pub chainmaps: FxHashMap<ObjId, Vec<Value>>,
     /// per module: global names a function body mutates (`mutated_in_functions`)
     pub mutated_globals: std::cell::RefCell<FxHashMap<u32, FxHashSet<String>>>,
     /// per summary being built: its row-check observations
@@ -970,6 +974,8 @@ impl Analyzer {
             fa_dep_cache: Vec::new(),
             fa_app_deps: FxHashMap::default(),
             zip_strict: FxHashSet::default(),
+            counters: FxHashSet::default(),
+            chainmaps: FxHashMap::default(),
             mutated_globals: Default::default(),
             sum_obs: Vec::new(),
             sum_fact_obs: Vec::new(),

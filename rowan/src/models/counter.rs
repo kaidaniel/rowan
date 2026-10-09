@@ -1,0 +1,358 @@
+//! `collections.Counter`: a dict whose values are counts. Counted from literal items (and
+//! mappings / keywords), the counts are known; `most_common`, `total`, `elements`, `update`,
+//! `subtract` and the operators `+ - & |` (and unary `+` / `-`) follow Counter's rules (the
+//! binary operators and unary ones keep only positive counts). Unknown counts keep sound key
+//! sets: what may be there, nothing claimed definite that is not.
+
+use indexmap::IndexMap;
+
+use crate::domain::{join_values, KeyVal, Ns, ObjId, Row, Source, SourceKind, Value};
+use crate::frontend::Node;
+use crate::intern::{self, KeyId};
+use crate::interp::{Analyzer, Call, Payload};
+use crate::state::{Kind, State};
+
+/// Counter methods (attribute loads on a Counter route here; the rest is the dict model).
+pub const COUNTER_METHODS: &[&str] = &["most_common", "total", "elements", "update", "subtract", "copy"];
+
+/// Known counts of a Counter: every key known and definite, every count a literal int.
+pub fn counts(an: &Analyzer, oid: ObjId, st: &State) -> Option<Vec<(KeyId, i64)>> {
+    let row = st.row(oid, Ns::Item);
+    if row.open() || row.present != row.definite {
+        return None;
+    }
+    let keys = row.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(row.present.iter()));
+    let _ = an;
+    keys.into_iter()
+        .map(|k| {
+            let v = st.slot(oid, Ns::Item, k);
+            let n = v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_int)?;
+            Some((k, n))
+        })
+        .collect()
+}
+
+/// A new Counter with exactly these counts (in this order).
+pub fn make(an: &mut Analyzer, st: &mut State, node: &Node, entries: &[(KeyId, i64)], ctx: &str) -> Value {
+    let oid = an.alloc_at(Kind::Dict, node, st, &format!("Counter@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(ctx));
+    let mut row = Row::new();
+    let mut order = Vec::new();
+    for (k, n) in entries {
+        row = row.store(*k, true);
+        order.push(*k);
+        st.set_slot(oid, Ns::Item, *k, Value::lit(intern::key_int(*n)), true);
+    }
+    st.set_slot(oid, Ns::Item, intern::STAR, Value::lit(intern::key_int(0)), false);
+    st.set_row(oid, Ns::Item, row.with_order(order));
+    an.counters.insert(oid);
+    Value::obj(oid)
+}
+
+/// A Counter whose counts are not known: keys `present` (none definite unless `definite`).
+fn make_unknown(an: &mut Analyzer, st: &mut State, node: &Node, present: &[KeyId], definite: &[KeyId], open: bool, ctx: &str) -> Value {
+    let oid = an.alloc_at(Kind::Dict, node, st, &format!("Counter@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(ctx));
+    let mut row = Row::new();
+    for k in present {
+        row = row.store(*k, definite.contains(k));
+        st.set_slot(oid, Ns::Item, *k, Value::data("count"), true);
+    }
+    if open {
+        row = row.data_store(Source::new(&format!("Counter@L{}", node.line), SourceKind::Data));
+    }
+    st.set_slot(oid, Ns::Item, intern::STAR, Value::lit(intern::key_int(0)), false);
+    st.set_row(oid, Ns::Item, row);
+    an.counters.insert(oid);
+    Value::obj(oid)
+}
+
+/// What a Counter / mapping / iterable contributes: known counts, or None.
+fn contribution(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) -> Option<Vec<(KeyId, i64)>> {
+    let o = v.single();
+    if let Some(o) = o {
+        if an.kind(o) == Kind::Dict {
+            if an.counters.contains(&o) {
+                return counts(an, o, st);
+            }
+            // a mapping: its values are the counts
+            let row = st.row(o, Ns::Item);
+            if row.open() || row.present != row.definite {
+                return None;
+            }
+            let keys = row.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(row.present.iter()));
+            return keys
+                .into_iter()
+                .map(|k| {
+                    let x = st.slot(o, Ns::Item, k);
+                    Some((k, x.kv.as_lit().filter(|_| x.pts.is_empty()).and_then(intern::key_as_int)?))
+                })
+                .collect();
+        }
+    }
+    // an iterable of literal items: occurrences
+    let it = an.iterate(v, node, st);
+    let items = it.items?;
+    let mut out: Vec<(KeyId, i64)> = Vec::new();
+    for x in items {
+        let k = x.kv.as_lit().filter(|_| x.pts.is_empty())?;
+        match out.iter_mut().find(|(kk, _)| *kk == k) {
+            Some(e) => e.1 += 1,
+            None => out.push((k, 1)),
+        }
+    }
+    Some(out)
+}
+
+/// The keys a value may contribute (for unknown counts), and whether others may come.
+fn maybe_keys(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) -> (Vec<KeyId>, bool) {
+    let mut ks: Vec<KeyId> = Vec::new();
+    let mut open = false;
+    for o in v.pts.iter() {
+        if an.kind(o) == Kind::Dict {
+            let row = st.row(o, Ns::Item);
+            ks.extend(row.present.iter());
+            open |= row.open();
+        } else {
+            let it = an.iterate(&Value::obj(o), node, st);
+            let e = it.elem.one_or_empty();
+            match &e.kv {
+                kv if kv.is_literal() && e.pts.is_empty() => ks.extend(crate::domain::kv_literals(kv).iter()),
+                _ => open = true,
+            }
+        }
+    }
+    if v.pts.is_empty() {
+        open = true;
+    }
+    ks.sort();
+    ks.dedup();
+    (ks, open)
+}
+
+/// `Counter(x)`: counted.
+pub fn construct(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let mut entries: Vec<(KeyId, i64)> = Vec::new();
+    let mut known = true;
+    if let Some(a) = c.args.first() {
+        match contribution(an, st, a, &c.node) {
+            Some(e) => entries = e,
+            None => known = false,
+        }
+    }
+    for (k, v) in c.kwargs.iter() {
+        let kk = intern::key_str_lit(&intern::str_get(*k));
+        match v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_int) {
+            Some(n) => match entries.iter_mut().find(|(x, _)| *x == kk) {
+                Some(e) => e.1 += n,
+                None => entries.push((kk, n)),
+            },
+            None => known = false,
+        }
+    }
+    if known {
+        return make(an, st, &c.node, &entries, "counter");
+    }
+    // counts not known: the keys that may be there
+    let mut present: Vec<KeyId> = Vec::new();
+    let mut open = false;
+    if let Some(a) = c.args.first() {
+        let (ks, o) = maybe_keys(an, st, a, &c.node);
+        present.extend(ks);
+        open |= o;
+    }
+    let kw: Vec<KeyId> = c.kwargs.keys().map(|k| intern::key_str_lit(&intern::str_get(*k))).collect();
+    present.extend(kw.iter().copied());
+    make_unknown(an, st, &c.node, &present, &kw, open, "counter")
+}
+
+fn combine(op: char, a: &[(KeyId, i64)], b: &[(KeyId, i64)]) -> Vec<(KeyId, i64)> {
+    let mut keys: Vec<KeyId> = a.iter().map(|x| x.0).collect();
+    for (k, _) in b {
+        if !keys.contains(k) {
+            keys.push(*k);
+        }
+    }
+    let get = |s: &[(KeyId, i64)], k: KeyId| s.iter().find(|x| x.0 == k).map(|x| x.1).unwrap_or(0);
+    keys.into_iter()
+        .map(|k| {
+            let (x, y) = (get(a, k), get(b, k));
+            (k, match op {
+                '+' => x + y,
+                '-' => x - y,
+                '&' => x.min(y),
+                _ => x.max(y),
+            })
+        })
+        .filter(|(_, n)| *n > 0)
+        .collect()
+}
+
+/// `a + b`, `a - b`, `a & b`, `a | b` with a Counter operand: Some(result).
+pub fn binop(an: &mut Analyzer, st: &mut State, op: char, a: &Value, b: &Value, node: &Node) -> Option<Value> {
+    let is_counter = |an: &Analyzer, v: &Value| !v.pts.is_empty() && v.pts.iter().all(|o| an.counters.contains(&o));
+    if !(is_counter(an, a) && is_counter(an, b)) {
+        return None;
+    }
+    let ca = a.single().and_then(|o| counts(an, o, st));
+    let cb = b.single().and_then(|o| counts(an, o, st));
+    if let (Some(x), Some(y)) = (ca, cb) {
+        return Some(make(an, st, node, &combine(op, &x, &y), &format!("counterop{}", op)));
+    }
+    // unknown counts: the keys that may be there (a `-` / `&` result's keys are a's)
+    let (ka, oa) = maybe_keys(an, st, a, node);
+    let (kb, ob) = maybe_keys(an, st, b, node);
+    let (present, open) = match op {
+        '-' | '&' => (ka, oa),
+        _ => {
+            let mut k = ka;
+            k.extend(kb);
+            k.sort();
+            k.dedup();
+            (k, oa || ob)
+        }
+    };
+    Some(make_unknown(an, st, node, &present, &[], open, &format!("counterop{}", op)))
+}
+
+/// Unary `+c` / `-c`: the positive counts (of c / of -c).
+pub fn unary(an: &mut Analyzer, st: &mut State, neg: bool, v: &Value, node: &Node) -> Option<Value> {
+    let o = v.single().filter(|o| an.counters.contains(o))?;
+    match counts(an, o, st) {
+        Some(cs) => {
+            let r: Vec<(KeyId, i64)> = cs.into_iter().map(|(k, n)| (k, if neg { -n } else { n })).filter(|(_, n)| *n > 0).collect();
+            Some(make(an, st, node, &r, if neg { "counterneg" } else { "counterpos" }))
+        }
+        None => {
+            let (k, open) = maybe_keys(an, st, v, node);
+            Some(make_unknown(an, st, node, &k, &[], open, "counterpos"))
+        }
+    }
+}
+
+/// Counter methods: `counter.<name>` (receiver: the Counter).
+pub fn m_counter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
+    let recv = c.recv.clone().unwrap_or_default();
+    let Some(oid) = recv.single() else { return Value::data("counter") };
+    match name.as_str() {
+        "most_common" => {
+            let n = c.arg(0, Some("n")).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_int);
+            match counts(an, oid, st) {
+                Some(mut cs) => {
+                    // by count, ties in insertion order (a stable sort)
+                    cs.sort_by(|a, b| b.1.cmp(&a.1));
+                    if let Some(n) = n {
+                        cs.truncate(n.max(0) as usize);
+                    }
+                    let items: Vec<Value> = cs.iter().map(|(k, n)| an.alloc_positional(Kind::Tuple, &c.node, Some(vec![Value::lit(*k), Value::lit(intern::key_int(*n))]), Value::new(), crate::domain::DATA, st)).collect();
+                    an.alloc_positional(Kind::List, &c.node, Some(items), Value::new(), crate::domain::DATA, st)
+                }
+                None => {
+                    let row = st.row(oid, Ns::Item);
+                    let kv = if row.open() { crate::domain::DATA } else { KeyVal::lits(row.present.clone()) };
+                    let t = an.alloc_positional(Kind::Tuple, &c.node, Some(vec![Value::kv_only(kv), Value::data("count")]), Value::new(), crate::domain::DATA, st);
+                    an.alloc_positional(Kind::List, &c.node, None, t, crate::domain::DATA, st)
+                }
+            }
+        }
+        "total" => match counts(an, oid, st) {
+            Some(cs) => Value::lit(intern::key_int(cs.iter().map(|x| x.1).sum())),
+            None => Value::data("total"),
+        },
+        "elements" => match counts(an, oid, st) {
+            Some(cs) => {
+                let items: Vec<Value> = cs.iter().flat_map(|(k, n)| std::iter::repeat(Value::lit(*k)).take((*n).max(0) as usize)).collect();
+                if items.len() <= crate::interp::UNROLL_MAX {
+                    an.alloc_positional(Kind::List, &c.node, Some(items), Value::new(), crate::domain::DATA, st)
+                } else {
+                    let ks = intern::KeySet::from_iter(cs.iter().map(|x| x.0));
+                    an.alloc_positional(Kind::List, &c.node, None, Value::kv_only(KeyVal::lits(ks)), crate::domain::DATA, st)
+                }
+            }
+            None => {
+                let row = st.row(oid, Ns::Item);
+                let kv = if row.open() { crate::domain::DATA } else { KeyVal::lits(row.present.clone()) };
+                an.alloc_positional(Kind::List, &c.node, None, Value::kv_only(kv), crate::domain::DATA, st)
+            }
+        },
+        "copy" => match counts(an, oid, st) {
+            Some(cs) => make(an, st, &c.node, &cs, "countercopy"),
+            None => {
+                let v = Value::obj(an.copy_object(oid, &c.node, st, false, &mut IndexMap::new()));
+                for o in v.pts.iter() {
+                    an.counters.insert(o);
+                }
+                v
+            }
+        },
+        "update" | "subtract" => {
+            let strong = an.obj(oid).single;
+            let mut add: Option<Vec<(KeyId, i64)>> = Some(Vec::new());
+            for a in c.args.iter() {
+                match (contribution(an, st, a, &c.node), add.as_mut()) {
+                    (Some(e), Some(acc)) => acc.extend(e),
+                    _ => add = None,
+                }
+            }
+            for (k, v) in c.kwargs.iter() {
+                let kk = intern::key_str_lit(&intern::str_get(*k));
+                match (v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_int), add.as_mut()) {
+                    (Some(n), Some(acc)) => acc.push((kk, n)),
+                    _ => add = None,
+                }
+            }
+            let sign = if name == "subtract" { -1 } else { 1 };
+            match (counts(an, oid, st), add) {
+                (Some(mut cur), Some(add)) if strong => {
+                    for (k, n) in add {
+                        match cur.iter_mut().find(|x| x.0 == k) {
+                            Some(e) => e.1 += sign * n,
+                            None => cur.push((k, sign * n)),
+                        }
+                    }
+                    let mut row = st.row(oid, Ns::Item);
+                    let mut order: Vec<KeyId> = Vec::new();
+                    for (k, n) in &cur {
+                        row = row.store(*k, true);
+                        order.push(*k);
+                        st.set_slot(oid, Ns::Item, *k, Value::lit(intern::key_int(*n)), true);
+                    }
+                    st.set_row(oid, Ns::Item, row.with_order(order));
+                }
+                (_, add) => {
+                    // counts not known: the keys that may be added, the counts unknown
+                    let mut row = st.row(oid, Ns::Item);
+                    let present: Vec<KeyId> = row.present.iter().collect();
+                    for k in present {
+                        st.set_slot(oid, Ns::Item, k, Value::data("count"), strong);
+                    }
+                    match add {
+                        Some(add) => {
+                            for (k, _) in add {
+                                row = row.store(k, strong);
+                                st.set_slot(oid, Ns::Item, k, Value::data("count"), strong);
+                            }
+                        }
+                        None => {
+                            for a in c.args.iter() {
+                                let (ks, open) = maybe_keys(an, st, a, &c.node);
+                                for k in ks {
+                                    row = row.store(k, false);
+                                    st.set_slot(oid, Ns::Item, k, Value::data("count"), false);
+                                }
+                                if open {
+                                    row = row.data_store(Source::new(&format!("Counter.{}@L{}", name, c.line), SourceKind::Data));
+                                }
+                            }
+                        }
+                    }
+                    st.set_row(oid, Ns::Item, row);
+                }
+            }
+            an.none_v.clone()
+        }
+        _ => {
+            let _ = join_values(Vec::<Value>::new());
+            Value::data("counter")
+        }
+    }
+}

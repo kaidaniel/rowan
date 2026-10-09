@@ -486,6 +486,16 @@ impl Analyzer {
                     // open input)
                     let present = star_kwargs.iter().any(|sk| sk.pts.iter().any(|x| state.row(x, Ns::Item).present.contains(fk)));
                     let definite = star_kwargs.iter().all(|sk| !sk.pts.is_empty() && sk.pts.iter().all(|x| state.row(x, Ns::Item).definite.contains(fk)));
+                    // a parameter's mapping: whether it has the key is known at the call site
+                    if !definite && !super::disabled("dcstar") {
+                        for sk in star_kwargs {
+                            for x in sk.pts.iter() {
+                                if self.kind(x) == Kind::Ph {
+                                    self.record_event("concrete", x);
+                                }
+                            }
+                        }
+                    }
                     let mut acc = join_values(star_kwargs.iter().flat_map(|sk| sk.pts.iter().map(|x| state.slot(x, Ns::Item, fk)).collect::<Vec<_>>()));
                     match default {
                         Some(d) if !definite => {
@@ -573,6 +583,24 @@ impl Analyzer {
     /// The default of a dataclass field: `field(default_factory=f)` calls `f` (a fresh
     /// container per construction site), `field(default=x)` and plain defaults evaluate.
     pub fn dataclass_default(&mut self, d: &'static ast::Expr, node: &Node, state: &mut State) -> Value {
+        // the default's names are the defining module's (a class from another module, a
+        // generated namedtuple): evaluated there
+        let here = self.module_info(self.frame().module).idx;
+        let owner = crate::frontend::module_of_addr(d as *const ast::Expr as usize);
+        if let Some(idx) = owner.filter(|i| *i != here && !super::disabled("defaultmodule")) {
+            if let Some(moid) = self.modules.values().copied().find(|m| self.module_info(*m).idx == idx) {
+                let mi = self.module_info(moid);
+                let (ctx, single) = (self.frame().ctx.clone(), self.frame().single);
+                self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), moid, &ctx, single, "<default>"));
+                let v = self.dataclass_default_here(d, node, state);
+                self.frames.pop();
+                return v;
+            }
+        }
+        self.dataclass_default_here(d, node, state)
+    }
+
+    fn dataclass_default_here(&mut self, d: &'static ast::Expr, node: &Node, state: &mut State) -> Value {
         if let ast::Expr::Call(c) = d {
             if super::dotted_last(&c.func) == "field" {
                 for kw in c.arguments.keywords.iter() {

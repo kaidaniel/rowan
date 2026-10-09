@@ -1092,7 +1092,8 @@ impl Analyzer {
             return false;
         }
         match self.instance_class(oid) {
-            Some(c) => self.class_lookup(c, name).is_some(),
+            // (a field's class-level default is shadowed by the instance's attribute)
+            Some(c) => self.class_lookup(c, name).is_some() && !self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name),
             None => false,
         }
     }

@@ -249,6 +249,12 @@ impl Analyzer {
             ast::Expr::BoolOp(b) => self.expr_boolop(b, state),
             ast::Expr::UnaryOp(u) => {
                 let v = self.eval(&u.operand, state);
+                if matches!(u.op, ast::UnaryOp::UAdd | ast::UnaryOp::USub) {
+                    let nd = frontend::node(node);
+                    if let Some(r) = crate::models::counter::unary(self, state, u.op == ast::UnaryOp::USub, &v, &nd) {
+                        return r;
+                    }
+                }
                 if u.op != ast::UnaryOp::Not {
                     if crate::models::torch::is_tensor(&v) {
                         return v;
@@ -1213,6 +1219,18 @@ impl Analyzer {
         }
         if let Some(v) = self.t_binop(op, a, b, node, state) {
             return v;
+        }
+        // Counter arithmetic
+        if let Some(ch) = match op {
+            ast::Operator::Add => Some('+'),
+            ast::Operator::Sub => Some('-'),
+            ast::Operator::BitAnd => Some('&'),
+            ast::Operator::BitOr => Some('|'),
+            _ => None,
+        } {
+            if let Some(v) = crate::models::counter::binop(self, state, ch, a, b, node) {
+                return v;
+            }
         }
         let both = a.pts.union(&b.pts);
         // arithmetic on a parameter (or a field of one): the result is decided per call site
