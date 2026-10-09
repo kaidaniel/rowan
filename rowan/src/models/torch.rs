@@ -1018,6 +1018,18 @@ impl Analyzer {
         if !tensor_attr {
             return if tensor { Some(Value::data(&format!("L{}", node.line))) } else { None };
         }
+        // an unknown that may be a str / list / dict: names those have keep their meaning
+        // (`line.split(",")`, `xs.sort()`); only a known tensor gets the tensor method
+        if !tensor && (crate::interp::STR_METHOD_NAMES.contains(&name) || crate::interp::LIST_METHOD_NAMES.contains(&name) || crate::interp::DICT_METHOD_NAMES.contains(&name) || crate::interp::SCALAR_EXTRA_NAMES.contains(&name)) {
+            // known to be a tensor (shape facts): the tensor method
+            if self.t_known_param_shape(obj, st).is_none() {
+                if matches!(name, "split" | "sort") {
+                    // decided by the arguments at the call
+                    return Some(self.method_value(&format!("tensorq.{}", name), obj));
+                }
+                return None;
+            }
+        }
         if unknown_tensorish && !TENSOR_ONLY.contains(&name) && obj.pts.iter().any(|o| self.kind(o) == Kind::Ph && self.ph_info(o).cls.get().is_some()) {
             return None;
         }
@@ -4272,4 +4284,26 @@ impl Analyzer {
     pub fn facts_sym_is_tensor(&self, _sym: &str) -> bool {
         true
     }
+}
+
+/// `x.split(…)` / `x.sort(…)` on an unknown: a string separator / list sort keywords make it
+/// the str / list method, sizes or `dim=` the tensor one.
+pub fn m_tensor_or_builtin(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let name = c.qual.strip_prefix("tensorq.").unwrap_or("");
+    let recv = c.recv.clone().unwrap_or_default();
+    let has_dim = kw(c, "dim").is_some() || kw(c, "descending").is_some();
+    let builtin = match name {
+        "split" => !has_dim && (c.args.is_empty() || c.args.first().map(|a| an.t_str(a).is_some()).unwrap_or(false)) || kw(c, "sep").is_some() || kw(c, "maxsplit").is_some(),
+        _ => !has_dim && (kw(c, "key").is_some() || kw(c, "reverse").is_some() || c.args.is_empty() && c.kwargs.is_empty()),
+    };
+    if builtin {
+        let q = if name == "split" { "str.split" } else { "list.sort" };
+        let call = Call { qual: q.to_string(), recv: c.recv.clone(), args: c.args.clone(), kwargs: c.kwargs.clone(), star_args: c.star_args.clone(), star_kwargs: c.star_kwargs.clone(), node: c.node, call_ast: c.call_ast, site: c.site.clone(), line: c.line };
+        if let Some(m) = an.models.lookup(q) {
+            return m(an, st, &call);
+        }
+        return Value::data(&format!("L{}", c.line));
+    }
+    let args = c.args.clone();
+    an.t_method(name, &recv, &args, c, st)
 }

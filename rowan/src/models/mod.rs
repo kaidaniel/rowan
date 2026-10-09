@@ -28,7 +28,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "partial.", "response.", "torch.", "tensor.", "nnmodule.", "math.",
+    "parser.", "partial.", "response.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.",
 ];
 
 pub struct Registry {
@@ -143,6 +143,7 @@ impl Registry {
         r(&["torch.*"], torch::m_torch);
         r(&["math.*"], m_math);
         r(&["tensor.*"], torch::m_tensor_method);
+        r(&["tensorq.*"], torch::m_tensor_or_builtin);
         r(&["nnmodule.*"], torch::m_nnmodule);
         Registry { table: t }
     }
