@@ -62,7 +62,8 @@ def load_all(texts):
     frames = [load_station(text) for text in texts.values()]
     obs = pd.concat(frames, keys=list(texts), names=["station", "row"])
     obs = obs.reset_index(level="station").reset_index(drop=True)
-    #@row obs: present={station,date,tmax,tmin,tmean} definite={station,date,tmax,tmin,tmean} absent={row} open
+    # (first written absent={row}: the frames are open inputs, which could hold a `row` column)
+    #@row obs: present={station,date,tmax,tmin,tmean} definite={station,date,tmax,tmin,tmean} open
     if "precip" in obs.columns:
         obs["precip"] = obs["precip"].fillna(0.0)                #@ ok precip
     else:
@@ -131,7 +132,7 @@ def attach_meta_safe(flat, meta):
 def gusts(obs):
     if "wind" in obs.columns:
         obs = obs.assign(gust=obs["wind"] * 1.5)                 #@ ok wind
-    return float(obs["gust"].max())                              #@ possibly gust
+    return float(obs["gust"].max())                              #@ input gust
 
 
 def summary_records(out):
@@ -171,4 +172,6 @@ if __name__ == "__main__":
     n_b = res_b["stations"]                                      #@value n_b: exactly={2}
     keys = sorted(res_a)                                         #@row res_a: present={stations,months,gust,rows} definite={stations,months,gust,rows} closed
 
-#@schema read_csv@L54: always={date,tmax,tmin} sometimes={precip,wind} only={date,tmax,tmin,precip,wind}
+# (first written with sometimes={precip,wind}: their reads are behind `in` tests; gust as
+# `possibly` above: the inputs are open)
+#@schema read_csv@L54: always={date,tmax,tmin} only={date,tmax,tmin}

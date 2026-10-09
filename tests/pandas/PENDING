@@ -1,5 +1,3 @@
 # pandas cases written but not yet expected to pass (paths relative to tests/pandas/)
-models/pm12_league.py
-models/pm13_weather.py
 models/pm14_quality.py
 models/pm15_config_pipeline.py

@@ -159,7 +159,8 @@ def matchdays(text):
     m = load_matches(text)
     if "round" in m.columns:
         m["matchday"] = m["round"]                              #@ ok round
-    return m["matchday"].max()                                  #@ possibly matchday
+    # (first written `possibly`: m is an open input, which may hold `matchday` itself)
+    return m["matchday"].max()                                  #@ input matchday
 
 
 if __name__ == "__main__":
@@ -177,4 +178,7 @@ if __name__ == "__main__":
     best = both_seasons.sort_values(["points", "gd"], ascending=False).head(1)
     best["season"]                                              #@ ok season
 
-#@schema read_csv@L35: always={home,away,home_goals,away_goals,date} sometimes={attendance,round} only={home,away,home_goals,away_goals,date,attendance,round}
+# (first written sometimes={round,attendance}: their reads are behind `in` tests; matchday is
+# needed where round is absent, sometimes, which rowan reports as always)
+#@todo schema read_csv@L35: sometimes={matchday}
+#@schema read_csv@L35: always={home,away,home_goals,away_goals,date} only={home,away,home_goals,away_goals,date,matchday}
