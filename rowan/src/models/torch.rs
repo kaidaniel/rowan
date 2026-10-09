@@ -662,6 +662,15 @@ impl Analyzer {
             Named,
         }
         let classify = |an: &Analyzer, v: &Value| -> Option<K> {
+            // a join of a named unknown and a tensor (a loop variable): the tensor counts
+            if !v.pts.is_empty() {
+                if let KeyVal::Data(l) = &v.kv {
+                    let t = intern::str_get(*l);
+                    if t.starts_with(sh::TENSOR_PREFIX) && v.pts.iter().all(|o| an.t_sym_of_obj(o).is_some()) {
+                        return Some(if sh::dual_dim(&t).is_some() { K::Dual } else { K::Tensor });
+                    }
+                }
+            }
             if v.pts.is_empty() {
                 match &v.kv {
                     KeyVal::Data(l) => {

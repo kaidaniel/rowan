@@ -814,6 +814,26 @@ pub fn broadcast(a: &Shape, b: &Shape, f: &TFacts) -> Result<Shape, (DimId, DimI
         s.assume = assume;
         return Ok(s);
     }
+    // one side of known rank no longer than the other's known tail: the other's shape with
+    // its last dims broadcast (the known side cannot add dims)
+    for (x, y, swap) in [(&a, &b, false), (&b, &a, true)] {
+        if let (Some(_), Some(dy)) = (&x.rest, y.dims()) {
+            if dy.len() <= x.suffix.len() {
+                let k = x.suffix.len() - dy.len();
+                let mut tail = x.suffix[..k].to_vec();
+                for (p, q) in x.suffix[k..].iter().zip(dy.iter()) {
+                    tail.push(if swap { bdim(*q, *p, f)? } else { bdim(*p, *q, f)? });
+                }
+                let mut assume = a.assume.clone();
+                for c in &b.assume {
+                    if !assume.contains(c) {
+                        assume.push(c.clone());
+                    }
+                }
+                return Ok(Shape { prefix: x.prefix.clone(), rest: x.rest.clone(), suffix: tail, assume });
+            }
+        }
+    }
     // rests over the same symbol: spell out the same number of trailing dims on both
     // sides (they come from one tensor, so it has them)
     let (a, b) = match (&a.rest, &b.rest) {

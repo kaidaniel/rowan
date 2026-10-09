@@ -214,13 +214,17 @@ impl Analyzer {
                     }
                     // a named unknown against a number / tensor (simple right operands only:
                     // the interpreter evaluates them again otherwise)
-                    let simple = matches!(&c.comparators[0], ast::Expr::NumberLiteral(_) | ast::Expr::Name(_) | ast::Expr::Attribute(_) | ast::Expr::UnaryOp(_));
-                    if self.torch_on && simple && a.kv.is_bot() && a.pts.len() == 1 && a.pts.iter().all(|o| matches!(self.kind(o), crate::state::Kind::Ph | crate::state::Kind::Unknown)) {
+                    if self.torch_on && a.kv.is_bot() && a.pts.len() == 1 && a.pts.iter().all(|o| matches!(self.kind(o), crate::state::Kind::Ph | crate::state::Kind::Unknown)) {
+                        // (the right operand is evaluated once here)
                         let b = self.eval(&c.comparators[0], state);
                         let nd = frontend::node(node);
                         if let Some(r) = self.t_compare_named(&a, &b, &nd, state) {
                             return r;
                         }
+                        if let Some(r) = self.compare_values(c.ops[0], &a, &b, &c.comparators[0], state) {
+                            return Value::lit(intern::key_bool(r));
+                        }
+                        return Value::data("bool");
                     }
                 }
                 if c.ops.len() == 1 {
