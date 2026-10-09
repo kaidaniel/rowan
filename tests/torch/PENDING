@@ -1,7 +1,4 @@
 # torch cases written but not yet expected to pass (paths relative to tests/torch/)
-small/s116_rank_branches.py
-small/s117_inequality_tests.py
-small/s118_python_values.py
 small/s119_numpy_mix.py
 small/s120_index_stores.py
 small/s121_comprehension_heads.py

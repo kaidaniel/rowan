@@ -508,6 +508,8 @@ pub fn ceildiv(a: DimId, b: DimId) -> DimId {
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct TFacts {
+    /// unknowns used as tensors on this path (`x.size(0)` ran: x is a tensor)
+    pub tensors: std::collections::BTreeSet<Sym>,
     pub rank: BTreeMap<Sym, RankRel>,
     /// atom := dim (oriented: a literal wins, then a named int, then the older atom)
     pub subst: BTreeMap<AtomId, DimId>,
@@ -515,7 +517,7 @@ pub struct TFacts {
 
 impl TFacts {
     pub fn is_empty(&self) -> bool {
-        self.rank.is_empty() && self.subst.is_empty()
+        self.rank.is_empty() && self.subst.is_empty() && self.tensors.is_empty()
     }
     pub fn join(&self, o: &TFacts) -> TFacts {
         let mut rank = BTreeMap::new();
@@ -527,7 +529,8 @@ impl TFacts {
             }
         }
         let subst = self.subst.iter().filter(|(a, d)| o.subst.get(a) == Some(d)).map(|(a, d)| (*a, *d)).collect();
-        TFacts { rank, subst }
+        let tensors = self.tensors.intersection(&o.tensors).copied().collect();
+        TFacts { tensors, rank, subst }
     }
     pub fn rank_of(&self, s: Sym) -> Option<u32> {
         match self.rank.get(&s) {

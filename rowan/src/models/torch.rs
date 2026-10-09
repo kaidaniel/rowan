@@ -1067,6 +1067,15 @@ impl Analyzer {
             return None;
         }
         let s = self.t_shape(obj, st).unwrap_or_else(Shape::any);
+        // from here on (this path) the name is a tensor
+        if unknown_tensorish && TENSOR_ONLY.contains(&name) {
+            let syms: Vec<sh::Sym> = obj.pts.iter().filter_map(|o| self.t_sym_of_obj(o)).collect();
+            if !syms.is_empty() {
+                let mut f = (*st.tf).clone();
+                f.tensors.extend(syms);
+                st.tf = std::sync::Arc::new(f);
+            }
+        }
         match name {
             "shape" => return Some(self.t_size_value(&s, node, st)),
             "ndim" => return Some(self.t_rank_value(&s)),
@@ -1176,7 +1185,8 @@ impl Analyzer {
             });
         }
         if named {
-            let tensorish = matches!(idx, E::Tuple(_)) || items.iter().any(|e| matches!(e, E::NoneLiteral(_) | E::EllipsisLiteral(_)));
+            let known_tensor = obj.pts.iter().all(|o| self.t_sym_of_obj(o).map(|sy| st.tf.tensors.contains(&sy)).unwrap_or(false));
+            let tensorish = known_tensor || matches!(idx, E::Tuple(_)) || items.iter().any(|e| matches!(e, E::NoneLiteral(_) | E::EllipsisLiteral(_)));
             if !tensorish {
                 // one index: an int or an index tensor makes it tensor indexing; a slice or
                 // anything else may be a list's / dict's
@@ -3989,8 +3999,10 @@ impl Analyzer {
         } else if tensor_shape(v).is_some() {
             self.t_shape(v, st)
         } else if !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::Ph | Kind::Unknown)) {
-            // an unknown: a shape only once facts say something about it
-            self.t_shape(v, st).filter(|s| !(s.prefix.is_empty() && s.suffix.is_empty() && matches!(s.rest, Some(Rest::Slice(_, 0, 0)) | Some(Rest::Any))))
+            // a parameter / read: its shape; an unknown call's result: only once facts say
+            // something about it
+            let call_result = v.pts.iter().any(|o| self.origins.contains_key(&o) || self.symbols.get(&o).map(|t| t.contains('(')).unwrap_or(false));
+            self.t_shape(v, st).filter(|s| !call_result || !(s.prefix.is_empty() && s.suffix.is_empty() && matches!(s.rest, Some(Rest::Slice(_, 0, 0)) | Some(Rest::Any))))
         } else {
             None
         };
@@ -4103,6 +4115,27 @@ impl Analyzer {
         use ruff_python_ast::{CmpOp, Expr as E};
         let E::Compare(c) = test else { return };
         if c.ops.len() != 1 {
+            return;
+        }
+        // `x.dim() >= n` / `> n` held: a lower bound on the rank
+        if (matches!(c.ops[0], CmpOp::GtE | CmpOp::Gt) && truth) || (matches!(c.ops[0], CmpOp::Lt | CmpOp::LtE) && !truth) {
+            if let Some(x) = Self::t_rank_operand(&c.left) {
+                let nv = self.eval(&c.comparators[0], st);
+                if let Some(n) = self.t_int(&nv) {
+                    let bound = if matches!(c.ops[0], CmpOp::Gt | CmpOp::LtE) { n + 1 } else { n };
+                    let xv = self.eval(x, st);
+                    if let Some(s) = self.t_shape(&xv, st) {
+                        if let Some(Rest::Slice(sym, from, back)) = &s.rest {
+                            let k = bound - (s.prefix.len() + s.suffix.len()) as i64 + (*from + *back) as i64;
+                            if k > 0 {
+                                let mut f = (*st.tf).clone();
+                                sh::learn_rank(&mut f, *sym, RankRel::Ge(k as u32));
+                                st.tf = std::sync::Arc::new(f);
+                            }
+                        }
+                    }
+                }
+            }
             return;
         }
         let eq = match c.ops[0] {

@@ -1191,6 +1191,30 @@ fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     match name {
         "upper" | "lower" | "strip" | "title" => Value::kv_only(an.rename_kv(&kv, &RenameFn::new(FnKind::from_name(name).unwrap()))),
         "lstrip" | "rstrip" => Value::kv_only(an.rename_kv(&kv, &RenameFn::new(FnKind::Strip))),
+        // positions / counts of a known substring in a known string
+        "find" | "index" | "rfind" | "rindex" | "count" if c.args.len() == 1 => {
+            let recv_s = kv.as_lit().and_then(intern::key_as_str);
+            let arg_s = c.args[0].kv.as_lit().filter(|_| c.args[0].pts.is_empty()).and_then(intern::key_as_str);
+            match (recv_s, arg_s) {
+                (Some(h), Some(n)) => {
+                    let pos = |p: Option<usize>| p.map(|b| h[..b].chars().count() as i64);
+                    let r = match name {
+                        "find" | "index" => pos(h.find(&*n)),
+                        "rfind" | "rindex" => pos(h.rfind(&*n)),
+                        _ => Some(if n.is_empty() { h.chars().count() as i64 + 1 } else { h.matches(&*n).count() as i64 }),
+                    };
+                    match r {
+                        Some(i) => Value::lit(intern::key_int(i)),
+                        None if name.ends_with("index") => {
+                            an.raise_here("ValueError", st);
+                            Value::new()
+                        }
+                        None => Value::lit(intern::key_int(-1)),
+                    }
+                }
+                _ => Value::data(&format!("L{}", c.line)),
+            }
+        }
         "capitalize" | "casefold" | "swapcase" | "removeprefix" | "removesuffix" | "zfill" | "center" | "ljust" | "rjust" => {
             // on known strings (and known arguments) the result is known
             let arg_s = c.args.first().and_then(|a| a.kv.as_lit().filter(|_| a.pts.is_empty())).and_then(intern::key_as_str);
