@@ -30,7 +30,9 @@ named["amount"]                                  #@ ok amount
 renamed = pd.read_csv(io.StringIO(SALES), header=0, names=["r", "a", "p", "y"])
 #@row renamed: present={r,a,p,y} definite={r,a,p,y} absent={region} closed
 renamed["y"]                                     #@ ok y
-#@schema read_csv@L23: always={rep} only={rep}
+# (written as L23 at first: the read of `full` is on line 24; the oracle did not check yet
+# that a schema line holds a read)
+#@schema read_csv@L24: always={rep} only={rep}
 #@schema read_csv@L11: always={amount} only={amount,region}
 
 if __name__ == "__main__":

@@ -661,6 +661,8 @@ pub struct Analyzer {
     pub entry_scope: Option<u32>,
     /// some module imported torch: tensor semantics for `@`, tensor methods on unknowns, …
     pub torch_on: bool,
+    /// pandas is imported: frame-style accesses on placeholders are decided per call site
+    pub pandas_on: bool,
     /// modules that import torch (their functions all get entry runs and are tabulated)
     pub torch_modules: FxHashSet<ObjId>,
     /// the function an entry run (open parameters) is analysing
@@ -863,6 +865,7 @@ impl Analyzer {
             call_cache: FxHashMap::default(),
             entry_instances: FxHashMap::default(),
             torch_on: false,
+            pandas_on: false,
             torch_modules: FxHashSet::default(),
             entry_run: None,
             entry_done: FxHashSet::default(),

@@ -2610,7 +2610,7 @@ fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if let Some(o) = v.single() {
         // a view of one dict: the dict's length
         if let Payload::View(ViewKind::Keys | ViewKind::Values | ViewKind::Items, inner) = an.obj(o).payload.clone() {
-            if let Some(d) = inner.single().filter(|d| an.kind(*d) == Kind::Dict) {
+            if let Some(d) = inner.single().filter(|d| matches!(an.kind(*d), Kind::Dict | Kind::Frame)) {
                 let row = st.row(d, Ns::Item);
                 if row.closed() && row.present == row.definite && !row.symbolic() {
                     return Value::lit(intern::key_int(row.definite.len() as i64));

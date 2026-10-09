@@ -188,6 +188,12 @@ def check_results(verdict_exp, row_exp_checks, schema_exp, vs, sch) -> List[str]
             # present in another) say the same, more precisely
             if tier == "possibly" and any(v["tier"] in ("missing", "likely-missing") for v in matches) and any(v["tier"] in ("proven", "likely", "input") for v in matches):
                 continue
+            # and the converse: per-run tiers that differ (`ok k ; missing k`) joined into one
+            # verdict over the runs are `possibly`
+            if tier != "possibly" and any(v["tier"] == "possibly" for v in matches):
+                tiers_here = {t for t, k in exps if k == key}
+                if tiers_here & {"missing", "likely-missing"} and tiers_here & {"proven", "ok", "likely", "input", "possibly"}:
+                    continue
             if not matches:
                 got = ", ".join(f"{v['tier']} {v['key']}" for v in here) or "nothing"
                 failures.append(f"L{ln}: expected {tier} {key!r}; got {got}")
@@ -236,6 +242,9 @@ def row_problems(row: Dict[str, Any], spec: Dict[str, Any]) -> str:
         problems.append(f"present={sorted(present)} want {sorted(key_str(k) for k in spec['present'])}")
     if "definite" in spec and definite != {key_str(k) for k in spec["definite"]}:
         problems.append(f"definite={sorted(definite)} want {sorted(key_str(k) for k in spec['definite'])}")
+    if row["closed"]:
+        # a closed row has nothing outside `present`
+        absent |= {key_str(k) for k in spec.get("absent", ())} - present
     if "absent" in spec and not {key_str(k) for k in spec["absent"]} <= absent:
         problems.append(f"absent={sorted(absent)} want ⊇ {sorted(key_str(k) for k in spec['absent'])}")
     if "possible" in spec and row["closed"]:

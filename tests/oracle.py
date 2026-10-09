@@ -262,6 +262,10 @@ def run_one(path: str, strict: bool) -> Dict[str, Any]:
             total += 1
             # errors the unmutated program already raises (deliberate misses) say nothing
             baseline = set(run_child(path, ["--drop", str(line), json.dumps("\x00none")]).get("raised_keys", []))
+            cols = run_child(path, ["--columns", str(line)]).get("columns", [])
+            if not cols:
+                fails.append(f"schema {label}: no read_csv at line {line} returned columns")
+                continue
             for col in spec.get("always", set()):
                 if col in baseline:
                     continue
@@ -270,7 +274,6 @@ def run_one(path: str, strict: bool) -> Dict[str, Any]:
                     fails.append(f"schema {label}: dropping always-column {col!r} raised nothing for it")
             if "only" in spec:
                 allowed = spec["only"] | spec.get("sometimes", set()) | spec.get("always", set())
-                cols = run_child(path, ["--columns", str(line)]).get("columns", [])
                 for col in cols:
                     if col in allowed:
                         continue

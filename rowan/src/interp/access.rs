@@ -114,6 +114,10 @@ impl Analyzer {
             // a Counter reads a missing key as 0 without inserting it: the row is put back
             // after the (never failing) access
             let mut counter_restore: Option<Row> = None;
+            if kind == Kind::Ph && ns == Ns::Item && self.pandas_on && !key.pts.is_empty() {
+                // `df[[...]]`, `df[mask]`: a frame selection, decided per call site
+                self.record_event("concrete", oid);
+            }
             if kind == Kind::Ph && ns == Ns::Item {
                 // a placeholder declared as a defaultdict: insertion is decided per call site
                 if let Payload::Ph(p) = &self.obj(oid).payload {
@@ -1087,6 +1091,10 @@ impl Analyzer {
         if let Some(v) = state.slot_opt(oid, Ns::Attr, nk) {
             return v;
         }
+        if self.pandas_on && crate::models::pandas::FRAME_ONLY_ATTRS.contains(&name) {
+            // a frame's indexers / columns: decided per call site
+            self.record_event("concrete", oid);
+        }
         // declared class (annotation / self): resolve methods and class attributes (a
         // dataclass field's default is instance data, not a class attribute)
         let is_field = !super::disabled("dcfield") && ph.cls.get().map(|c| self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name)).unwrap_or(false);
@@ -1170,6 +1178,10 @@ impl Analyzer {
             return self.method_value(&q, &Value::kv_only(KeyVal::Param(oid)));
         }
         let row = state.row(oid, Ns::Attr);
+        if self.pandas_on && ph.cls.get().is_none() {
+            // a frame's attributes are its columns: decided where the argument is known
+            self.record_event("concrete", oid);
+        }
         if !guarded {
             self.record_symreq(node, KeyVal::Lit(nk), &row, oid, Ns::Attr, guarded, "attr");
         }
@@ -1436,6 +1448,9 @@ impl Analyzer {
         for &oid in &targets {
             let kind = self.kind(oid);
             let strong = targets.len() == 1 && self.obj(oid).single;
+            if kind == Kind::Ph && self.pandas_on && crate::models::pandas::FRAME_ONLY_ATTRS.contains(&name) {
+                self.record_event("concrete", oid);
+            }
             if kind == Kind::Frame {
                 crate::models::pandas::frame_setattr(self, oid, name, v, node, state, strong);
                 continue;

@@ -184,6 +184,12 @@ impl Analyzer {
                 let qual = self.external_qual(oid);
                 let call = Call { qual: qual.clone(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
                 if let Some(m) = self.models.lookup(&qual) {
+                    if qual.starts_with("pandas.") && !self.sum_stack.is_empty() {
+                        // a frame built from a parameter's contents: decided per call site
+                        for v in args.iter().chain(kwargs.values()) {
+                            self.concrete_events(v, state, 2);
+                        }
+                    }
                     return m(self, state, &call);
                 }
                 self.unknown_call(&qual, None, args, kwargs, star_args, star_kwargs, state, node)

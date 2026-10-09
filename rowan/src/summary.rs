@@ -389,6 +389,23 @@ impl Analyzer {
         }
     }
 
+    /// A "concrete" event on every placeholder in `v` and in the containers it holds (to
+    /// `depth` levels): a model whose result depends on their contents.
+    pub fn concrete_events(&mut self, v: &Value, state: &State, depth: usize) {
+        for oid in v.pts.iter() {
+            if self.kind(oid) == Kind::Ph {
+                self.record_event("concrete", oid);
+            } else if depth > 0 && matches!(self.kind(oid), Kind::List | Kind::Tuple | Kind::Dict | Kind::Set) && !self.is_entry_object(oid) {
+                for (_, x) in state.slots_of(oid) {
+                    self.concrete_events(&x, state, depth - 1);
+                }
+                if let Some(e) = state.elems.get(&oid) {
+                    let _ = e;
+                }
+            }
+        }
+    }
+
     /// Record a deferred access; the same access seen again is merged by joining its rows.
     pub fn defer(&mut self, mut sr: SymReq) {
         if sr.rel_chain.len() > MAX_REL_CHAIN {
@@ -1531,6 +1548,11 @@ impl Analyzer {
                 let cls = classify(row, k);
                 out.push((k, cls.tier));
                 if guarded {
+                    if !crate::interp::disabled("guardedverdicts") {
+                        let saved = std::mem::replace(&mut self.verdict_guarded, true);
+                        self.verdict(node, k, &cls, oid, ns, Some(file), Some(text));
+                        self.verdict_guarded = saved;
+                    }
                     continue;
                 }
                 self.verdict(node, k, &cls, oid, ns, Some(file), Some(text));

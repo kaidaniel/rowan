@@ -1464,6 +1464,9 @@ impl Analyzer {
             }
         }
         let _ = node;
+        if name == "pandas" || name.starts_with("pandas.") {
+            self.pandas_on = true;
+        }
         if name == "torch" || name.starts_with("torch.") {
             self.torch_on = true;
             let m = self.frame().module;

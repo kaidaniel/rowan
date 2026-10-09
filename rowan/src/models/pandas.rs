@@ -28,6 +28,9 @@ pub const DF_METHODS: &[&str] = &[
 ];
 pub const DF_ATTRS: &[&str] = &["columns", "index", "shape", "values", "dtypes", "T", "empty", "size", "ndim", "axes", "style", "plot", "iloc", "loc", "at", "iat", "str", "dt", "cat", "attrs", "flags"];
 
+/// Attributes that make a placeholder a frame for the summary (tabulated where it is one).
+pub const FRAME_ONLY_ATTRS: &[&str] = &["loc", "iloc", "at", "iat", "columns", "shape", "dtypes", "T", "empty", "ndim", "axes"];
+
 pub fn frame_producer(q: &str) -> Option<&'static str> {
     Some(match q {
         "pandas.read_csv" => "read_csv",
@@ -170,6 +173,85 @@ fn lit_key(v: &Option<Value>) -> Option<KeyId> {
     v.as_ref().and_then(|x| x.kv.as_lit())
 }
 
+/// The literal keys of a single list / tuple in order (`["b", "a"]`), or None.
+pub fn lit_key_seq(an: &Analyzer, st: &State, v: &Value) -> Option<Vec<KeyId>> {
+    let o = v.single()?;
+    if !matches!(an.kind(o), Kind::List | Kind::Tuple) {
+        return None;
+    }
+    let n = an.obj(o).literal_len?;
+    (0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64)).kv.as_lit().filter(|_| true)).collect()
+}
+
+/// A closed row with exactly `ks`, in this column order.
+fn closed_ordered(ks: &[KeyId]) -> Row {
+    Row::closed_with(KeySet::from_iter(ks.iter().copied())).with_order(ks.to_vec())
+}
+
+/// Known bounds of a slice value (`slice[lo:hi:step]@L…`); None = unknown.
+fn slice_bounds(v: &Value) -> Option<(Option<i64>, Option<i64>, Option<i64>)> {
+    let KeyVal::Data(s) = &v.kv else { return None };
+    if !v.pts.is_empty() {
+        return None;
+    }
+    let s = intern::str_get(*s);
+    let inner = s.strip_prefix("slice[")?.split(']').next()?.to_string();
+    let parts: Vec<&str> = inner.split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let p = |x: &str| -> Option<Option<i64>> { if x.is_empty() { Some(None) } else { x.parse().ok().map(Some) } };
+    Some((p(parts[0])?, p(parts[1])?, p(parts[2])?))
+}
+
+fn is_slice(v: &Value) -> bool {
+    matches!(&v.kv, KeyVal::Data(s) if v.pts.is_empty() && intern::str_get(*s).starts_with("slice"))
+}
+
+/// Python's slice of n positions.
+fn slice_positions(n: usize, (lo, hi, step): (Option<i64>, Option<i64>, Option<i64>)) -> Option<Vec<usize>> {
+    let n = n as i64;
+    let step = step.unwrap_or(1);
+    if step == 0 {
+        return None;
+    }
+    let norm = |x: i64| if x < 0 { x + n } else { x };
+    let mut out = Vec::new();
+    if step > 0 {
+        let lo = lo.map(norm).unwrap_or(0).clamp(0, n);
+        let hi = hi.map(norm).unwrap_or(n).clamp(0, n);
+        let mut i = lo;
+        while i < hi {
+            out.push(i as usize);
+            i += step;
+        }
+    } else {
+        let lo = lo.map(norm).unwrap_or(n - 1).clamp(-1, n - 1);
+        let hi = hi.map(norm).unwrap_or(-1).clamp(-1, n - 1);
+        let mut i = lo;
+        while i > hi {
+            out.push(i as usize);
+            i += step;
+        }
+    }
+    Some(out)
+}
+
+/// The columns at known positions of a row: exact when the column order is known; else the
+/// row's columns, none definite.
+fn select_positions(row: &Row, pick: &dyn Fn(usize) -> Option<Vec<usize>>) -> Row {
+    if let Some(order) = row.ordered_keys().filter(|_| row.closed()) {
+        if let Some(pos) = pick(order.len()) {
+            let ks: Vec<KeyId> = pos.iter().map(|i| order[*i]).collect();
+            return closed_ordered(&ks);
+        }
+    }
+    let mut d = Row::new().copy_from(row, false, &KeySet::new(), EMPTY_LENS).data();
+    d.sources = row.sources.clone();
+    d.top = row.top;
+    Row::from_data(d)
+}
+
 fn key_is(v: &Option<Value>, s: &str) -> bool {
     lit_key(v).and_then(intern::key_as_str).map(|k| &*k == s).unwrap_or(false)
 }
@@ -189,65 +271,178 @@ fn axis_is_index(v: &Option<Value>) -> bool {
 
 fn read_frame(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let tag = frame_producer(&c.qual).unwrap_or_else(|| last(&c.qual)).to_string();
-    let mut ks: Option<KeySet> = None;
-    if let Some(u) = c.kw("usecols") {
-        ks = an.lit_keys(&u, st);
+    let src = Source::new(&format!("{}@L{}", tag, c.line), SourceKind::External);
+    let site = intern::s(&an.access_site(&c.node));
+    let mut row = Row::with_source(src);
+    if let Some(ks) = c.kw("usecols").and_then(|u| an.lit_keys(&u, st)) {
+        // the file must have every listed column (ValueError otherwise)
+        for k in intern::sorted_by_str(ks.iter()) {
+            st.require(src, k, site, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
+        }
+        row = Row::closed_with(ks);
     }
     if let Some(n) = c.kw("names") {
-        ks = an.lit_keys(&n, st);
+        if let Some(seq) = lit_key_seq(an, st, &n) {
+            row = closed_ordered(&seq);
+        } else if let Some(ks) = an.lit_keys(&n, st) {
+            row = Row::closed_with(ks);
+        }
     }
-    let row = match ks {
-        Some(ks) => Row::closed_with(ks),
-        None => Row::with_source(Source::new(&format!("{}@L{}", tag, c.line), SourceKind::External)),
-    };
-    new_frame(an, st, c, row, Some(&format!("{}@L{}", tag, c.line)), None)
+    let mut index: Option<KeySet> = None;
+    if let Some(ic) = c.kw("index_col") {
+        match an.lit_keys(&ic, st) {
+            Some(ks) if ks.iter().all(intern::key_is_str) => {
+                for k in intern::sorted_by_str(ks.iter()) {
+                    if row.open() {
+                        st.require(src, k, site, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
+                    }
+                    row = row.delete(k, true);
+                }
+                index = Some(ks);
+            }
+            _ => {
+                if !key_is_bool(&Some(ic.clone()), false) && ic.kv != an.none_v.kv {
+                    // a column by position leaves: which one is not known
+                    let mut d = row.data();
+                    d.definite = KeySet::new();
+                    d.likely = d.likely.union(&d.present);
+                    row = Row::from_data(d);
+                }
+            }
+        }
+    }
+    let v = new_frame(an, st, c, row, Some(&format!("{}@L{}", tag, c.line)), None);
+    if let (Some(ks), Some(nid)) = (index, v.pts.first()) {
+        st.set_slot(nid, Ns::Meta, key_str_lit("index"), Value::kv_only(KeyVal::lits(ks)), true);
+    }
+    v
+}
+
+/// The columns a frame built from one row-like item gets: a dict's keys, a frame's columns
+/// (row = Some), a sequence of known length n: 0..n-1 (Err(n)); None = unknown.
+fn item_columns(an: &Analyzer, st: &State, v: &Value) -> Option<Vec<Result<Row, usize>>> {
+    if v.pts.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for x in v.pts.iter() {
+        match an.kind(x) {
+            Kind::Dict | Kind::Frame => out.push(Ok(st.row(x, Ns::Item))),
+            Kind::List | Kind::Tuple => out.push(Err(an.obj(x).literal_len?)),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// The columns of a frame made from a sequence of rows: dicts give the union of their keys
+/// (missing cells are NaN), sequences 0..max-1.
+fn rows_frame(rows: &[Result<Row, usize>]) -> Row {
+    let mut row = Row::new();
+    let mut lens: Vec<usize> = Vec::new();
+    for r in rows {
+        match r {
+            Ok(r) => {
+                let mut d = Row::new().copy_from(r, true, &KeySet::new(), EMPTY_LENS).data();
+                // a key some record has is a column of the frame
+                d.definite = d.present.clone();
+                d.likely = d.likely.union(&d.present);
+                row = row.copy_from(&Row::from_data(d), true, &KeySet::new(), EMPTY_LENS);
+            }
+            Err(n) => lens.push(*n),
+        }
+    }
+    if let Some(m) = lens.iter().max() {
+        for i in 0..*m {
+            row = row.store(intern::key_int(i as i64), true);
+        }
+    }
+    row
 }
 
 fn pd_dataframe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let data = c.arg(0, Some("data"));
-    if let Some(cols) = c.kw("columns") {
-        if let Some(ks) = an.lit_keys(&cols, st) {
-            return new_frame(an, st, c, Row::closed_with(ks), None, None);
+    let from_dict = c.qual.ends_with("from_dict");
+    let index_orient = from_dict && key_is(&c.kw("orient").or_else(|| c.arg(1, None)), "index");
+    let cols = c.kw("columns").and_then(|v| an.lit_keys(&v, st));
+    let col_seq = c.kw("columns").and_then(|v| lit_key_seq(an, st, &v));
+    let exclude = c.kw("exclude").and_then(|v| an.lit_keys(&v, st)).unwrap_or_default();
+    let open = |an: &mut Analyzer, st: &mut State| new_frame(an, st, c, Row::with_source(Source::new(&format!("DataFrame@L{}", c.line), SourceKind::Call)), None, None);
+    let finish = |an: &mut Analyzer, st: &mut State, mut row: Row| {
+        for k in exclude.iter() {
+            row = row.delete(k, true);
+        }
+        new_frame(an, st, c, row, None, None)
+    };
+    // `columns=` names (sequences) or selects (dicts, frames): the frame has exactly those
+    if let Some(ks) = &cols {
+        if c.kw("columns").map(|v| v.pts.iter().all(|x| an.kind(x) != Kind::Ph)).unwrap_or(true) {
+            return finish(an, st, match &col_seq {
+                Some(seq) => closed_ordered(seq),
+                None => Row::closed_with(ks.clone()),
+            });
         }
     }
-    let Some(data) = data else { return new_frame(an, st, c, Row::new(), None, None) };
-    let recs = an.record_objects(&data);
-    if !recs.is_empty() {
-        let mut row = Row::new();
-        for x in recs {
-            row = row.copy_from(&st.row(x, Ns::Item), true, &KeySet::new(), EMPTY_LENS);
-        }
-        return new_frame(an, st, c, row, None, None);
+    let Some(data) = data else { return finish(an, st, Row::new()) };
+    if data.pts.is_empty() {
+        return if data.kv == an.none_v.kv { finish(an, st, Row::new()) } else { open(an, st) };
     }
+    let mut row: Option<Row> = None;
+    let add = |row: &mut Option<Row>, r: Row| {
+        *row = Some(match row.take() {
+            None => r,
+            Some(p) => p.join(&r),
+        });
+    };
     for x in data.pts.iter() {
-        if matches!(an.kind(x), Kind::List | Kind::Tuple) {
-            let it = an.iterate(&data, &c.node, st);
-            if let Some(items) = &it.items {
-                let mut rows: Vec<Row> = Vec::new();
-                for item in items {
-                    let rs = an.record_objects(item);
-                    rows.push(if rs.is_empty() { Row::top() } else { join_rows(rs.iter().map(|y| st.row(*y, Ns::Item))) });
+        match an.kind(x) {
+            Kind::Dict if index_orient => {
+                // {label: {col: v}} / {label: [v, …]}: the inner rows are the frame's rows
+                let r = st.row(x, Ns::Item);
+                if r.open() {
+                    return open(an, st);
                 }
-                let mut row = Row::new();
-                for rr in &rows {
-                    row = row.copy_from(rr, true, &KeySet::new(), EMPTY_LENS);
+                let mut items = Vec::new();
+                for k in r.present.iter() {
+                    match item_columns(an, st, &st.slot(x, Ns::Item, k)) {
+                        Some(cs) => items.extend(cs),
+                        None => return open(an, st),
+                    }
                 }
-                return new_frame(an, st, c, row, None, None);
+                add(&mut row, rows_frame(&items));
             }
-            let rs = match &it.elem {
-                Elem::One(e) => an.record_objects(e),
-                Elem::Pair(..) => Vec::new(),
-            };
-            if !rs.is_empty() {
-                let mut row = Row::new();
-                for y in rs {
-                    row = row.copy_from(&st.row(y, Ns::Item), true, &KeySet::new(), EMPTY_LENS);
+            Kind::Dict | Kind::Frame => add(&mut row, Row::new().copy_from(&st.row(x, Ns::Item), true, &KeySet::new(), EMPTY_LENS)),
+            Kind::List | Kind::Tuple => {
+                let it = an.iterate(&Value::obj(x), &c.node, st);
+                let items: Vec<Value> = match (&it.items, &it.elem) {
+                    (Some(items), _) => items.clone(),
+                    (None, Elem::One(e)) => vec![e.clone()],
+                    _ => return open(an, st),
+                };
+                let mut rows = Vec::new();
+                for item in &items {
+                    match item_columns(an, st, item) {
+                        Some(cs) => rows.extend(cs),
+                        None => return open(an, st),
+                    }
                 }
-                return new_frame(an, st, c, row, None, None);
+                let mut r = rows_frame(&rows);
+                if it.items.is_none() {
+                    // rows of unknown count: a key of one row may be no column (no rows)
+                    let mut d = r.data();
+                    d.definite = KeySet::new();
+                    d.likely = d.present.clone();
+                    r = Row::from_data(d);
+                }
+                add(&mut row, r);
             }
+            _ => return open(an, st),
         }
     }
-    new_frame(an, st, c, Row::with_source(Source::new(&format!("DataFrame@L{}", c.line), SourceKind::Call)), None, None)
+    match row {
+        Some(r) => finish(an, st, r),
+        None => open(an, st),
+    }
 }
 
 fn open_frame_call(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -932,6 +1127,9 @@ fn df_filter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn reindex(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let row = recv_row(an, st, c);
     if let Some(cols) = c.kw("columns") {
+        if let Some(seq) = lit_key_seq(an, st, &cols) {
+            return new_frame(an, st, c, closed_ordered(&seq), None, None);
+        }
         if let Some(ks) = an.lit_keys(&cols, st) {
             return new_frame(an, st, c, row.project(&ks), None, None);
         }
@@ -980,6 +1178,9 @@ fn set_axis(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let row = recv_row(an, st, c);
     if axis_is_columns(&axis) {
         if let Some(l) = labels {
+            if let Some(seq) = lit_key_seq(an, st, &l) {
+                return new_frame(an, st, c, closed_ordered(&seq), None, None);
+            }
             if let Some(ks) = an.lit_keys(&l, st) {
                 return new_frame(an, st, c, row.project(&ks), None, None);
             }
@@ -1072,6 +1273,10 @@ pub fn frame_getattr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, state
 pub fn frame_setattr(an: &mut Analyzer, oid: u32, name: &str, v: &Value, node: &Node, state: &mut State, strong: bool) {
     if name == "columns" {
         let row = state.row(oid, Ns::Item);
+        if let Some(seq) = lit_key_seq(an, state, v) {
+            state.set_row(oid, Ns::Item, closed_ordered(&seq));
+            return;
+        }
         if let Some(ks) = an.lit_keys(v, state) {
             state.set_row(oid, Ns::Item, row.project(&ks));
             return;
@@ -1113,10 +1318,9 @@ pub fn frame_setattr(an: &mut Analyzer, oid: u32, name: &str, v: &Value, node: &
         an.note(format!("df.columns assigned from an unknown value at L{}", node.line));
         return;
     }
-    if DF_ATTRS.contains(&name) {
-        return;
-    }
-    frame_setitem(an, oid, &Value::lit_str(name), v, node, state, strong);
+    // `df.x = v` sets column x when the frame has it, else an instance attribute (a pandas
+    // UserWarning): the columns do not change either way
+    let _ = (v, strong);
 }
 
 pub fn frame_getitem(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, state: &mut State, guarded: bool) -> Value {
@@ -1150,8 +1354,11 @@ pub fn frame_getitem(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, stat
             for k in intern::sorted_by_str(ks.iter()) {
                 frame_getitem(an, oid, &Value::lit(k), node, state, guarded);
             }
-            let row = state.row(oid, Ns::Item);
-            let nid = an.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(row.project(&ks)), Ns::Item, None, None);
+            let r = match lit_key_seq(an, state, key) {
+                Some(seq) => closed_ordered(&seq),
+                None => Row::closed_with(ks.clone()),
+            };
+            let nid = an.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(r), Ns::Item, None, None);
             return Value::obj(nid);
         }
     }
@@ -1221,35 +1428,98 @@ pub fn frame_delitem(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, stat
     state.set_row(oid, Ns::Item, row);
 }
 
+/// A frame's row as a Series (`df.iloc[0]`, `df.loc[label]`): its index is the columns.
+fn row_series(an: &mut Analyzer, foid: u32, node: &Node, state: &mut State) -> Value {
+    let base = state.row(foid, Ns::Item);
+    let vrow = an.alloc_at(Kind::Dict, node, state, &format!("row@L{}", node.line), Payload::None, Some(base.clone()), Ns::Item, Some(false), None);
+    mark_view(an, vrow, &[foid]);
+    for k in base.present.iter() {
+        state.set_slot(vrow, Ns::Item, k, Value::data(&format!("cell {}", intern::key_py_str(k))), false);
+    }
+    Value::obj(vrow)
+}
+
+fn frame_with(an: &mut Analyzer, foid: u32, node: &Node, state: &mut State, row: Row) -> Value {
+    let nid = an.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(row), Ns::Item, None, None);
+    copy_meta(foid, nid, state);
+    Value::obj(nid)
+}
+
 pub fn loc_get(an: &mut Analyzer, lo: u32, key: &Value, node: &Node, state: &mut State) -> Value {
     let Payload::Locidx(name, foid) = an.obj(lo).payload.clone() else { return Value::new() };
     let row = state.row(foid, Ns::Item);
+    let positional = name == "iloc" || name == "iat";
     let mut parts: Option<(Value, Value)> = None;
     for x in key.pts.iter() {
         if an.kind(x) == Kind::Tuple && an.obj(x).literal_len == Some(2) {
             parts = Some((state.slot(x, Ns::Pos, intern::key_int(0)), state.slot(x, Ns::Pos, intern::key_int(1))));
         }
     }
-    let Some((_, cols)) = parts else {
-        let nid = an.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(row), Ns::Item, None, None);
-        return Value::obj(nid);
+    if parts.is_none() {
+        if let Some(k) = key.kv.as_lit().filter(|_| key.pts.is_empty()) {
+            // a literal tuple key `(rows, "col")` folded into one literal
+            if let Some(items) = intern::with_key(k, |kk| if let intern::Key::Tuple(t) = kk { Some(t.clone()) } else { None }) {
+                if items.len() == 2 {
+                    parts = Some((Value::lit(items[0]), Value::lit(items[1])));
+                }
+            }
+        }
+    }
+    let Some((rows, cols)) = parts else {
+        // one key: rows. A scalar label / position is one row (a Series over the columns)
+        if key.pts.is_empty() && key.kv.as_lit().is_some() && (positional || name == "loc" || name == "at") {
+            return row_series(an, foid, node, state);
+        }
+        return frame_with(an, foid, node, state, row);
     };
-    if name == "iloc" || name == "iat" {
-        return series(an);
+    let one_row = rows.pts.is_empty() && rows.kv.as_lit().is_some();
+    if positional {
+        if let Some(i) = cols.kv.as_lit().filter(|_| cols.pts.is_empty()).and_then(intern::key_as_int) {
+            if one_row {
+                return Value::data(&format!("cell@L{}", node.line));
+            }
+            let _ = i;
+            return series(an);
+        }
+        let picked = if is_slice(&cols) {
+            let b = slice_bounds(&cols);
+            select_positions(&row, &|n| b.and_then(|b| slice_positions(n, b)))
+        } else if let Some(seq) = lit_key_seq(an, state, &cols) {
+            let idx: Option<Vec<i64>> = seq.iter().map(|k| intern::key_as_int(*k)).collect();
+            select_positions(&row, &|n| idx.as_ref().and_then(|ix| ix.iter().map(|i| { let j = if *i < 0 { i + n as i64 } else { *i }; (0..n as i64).contains(&j).then_some(j as usize) }).collect()))
+        } else {
+            select_positions(&row, &|_| None)
+        };
+        if one_row {
+            return series(an);
+        }
+        return frame_with(an, foid, node, state, picked);
     }
     if cols.kv.as_lit().is_some() && cols.pts.is_empty() {
         let g = an.is_guarded(Ns::Item);
         return frame_getitem(an, foid, &cols, node, state, g);
     }
+    if let Some(seq) = lit_key_seq(an, state, &cols) {
+        let g = an.is_guarded(Ns::Item);
+        for k in intern::sorted_by_str(seq.iter().copied()) {
+            frame_getitem(an, foid, &Value::lit(k), node, state, g);
+        }
+        if one_row {
+            return series(an);
+        }
+        return frame_with(an, foid, node, state, closed_ordered(&seq));
+    }
     if let Some(ks) = an.lit_keys(&cols, state) {
         let g = an.is_guarded(Ns::Item);
         return frame_getitem(an, foid, &Value::with_kv(cols.pts.clone(), KeyVal::Lits(ks)), node, state, g);
     }
-    if let KeyVal::Data(s) = &cols.kv {
-        if cols.pts.is_empty() && intern::str_get(*s).starts_with("slice") {
-            let nid = an.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(row), Ns::Item, None, None);
-            return Value::obj(nid);
+    if is_slice(&cols) {
+        if slice_bounds(&cols) == Some((None, None, None)) {
+            return if one_row { row_series(an, foid, node, state) } else { frame_with(an, foid, node, state, row) };
         }
+        // a label slice: some of the columns
+        let r = select_positions(&row, &|_| None);
+        return frame_with(an, foid, node, state, r);
     }
     series(an)
 }

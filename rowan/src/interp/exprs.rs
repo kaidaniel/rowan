@@ -312,7 +312,7 @@ impl Analyzer {
                 }
                 Value::data("yield")
             }
-            ast::Expr::Slice(_) => Value::data("slice"),
+            ast::Expr::Slice(_) => self.eval_key(node, state),
             ast::Expr::DictComp(dc) => self.expr_dictcomp(dc, node, state),
             ast::Expr::ListComp(lc) => self.seq_comp(node, Kind::List, &lc.elt, &lc.generators, state),
             ast::Expr::SetComp(sc) => self.seq_comp(node, Kind::Set, &sc.elt, &sc.generators, state),
@@ -402,9 +402,20 @@ impl Analyzer {
                 }
                 Value::obj(tid)
             }
-            ast::Expr::Slice(_) => {
+            ast::Expr::Slice(sl) => {
                 let nd = frontend::node(node);
-                Value::data(&format!("slice@L{}", nd.line))
+                // known bounds are kept in the label (`slice[1:3:1]@L5`; a missing bound is empty)
+                let mut b: Vec<String> = Vec::new();
+                for e in [&sl.lower, &sl.upper, &sl.step] {
+                    match e.as_deref() {
+                        None => b.push(String::new()),
+                        Some(e) => match self.int_value(e, state) {
+                            Some(i) => b.push(i.to_string()),
+                            None => return Value::data(&format!("slice@L{}", nd.line)),
+                        },
+                    }
+                }
+                Value::data(&format!("slice[{}]@L{}", b.join(":"), nd.line))
             }
             _ => self.eval(node, state),
         }
@@ -523,7 +534,7 @@ impl Analyzer {
     /// `xs[lo:hi]` with constant bounds on one list/tuple with known positions: a container
     /// with the selected positions.
     /// The single known int an expression evaluates to.
-    fn int_value(&mut self, e: &'static ast::Expr, state: &mut State) -> Option<i64> {
+    pub fn int_value(&mut self, e: &'static ast::Expr, state: &mut State) -> Option<i64> {
         let v = self.eval(e, state);
         if !v.pts.is_empty() {
             return None;
