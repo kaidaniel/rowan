@@ -140,6 +140,21 @@ impl Analyzer {
             }
             Kind::Method => {
                 let Payload::Method(qual, recv) = self.obj(oid).payload.clone() else { return Value::new() };
+                // `super().__init__(…)` / `Base.__init__(self, …)` reaching a dataclass base
+                if let Some(rest) = qual.strip_prefix("dcinit.") {
+                    let (cls, self_v, args): (u32, Value, Vec<Value>) = match rest.strip_prefix("class.") {
+                        Some(c) => (c.parse().unwrap_or(0), args.first().cloned().unwrap_or_default(), args.iter().skip(1).cloned().collect()),
+                        None => (rest.parse().unwrap_or(0), recv.clone(), args.to_vec()),
+                    };
+                    if cls != 0 {
+                        for o in self_v.pts.iter() {
+                            if matches!(self.kind(o), Kind::Instance | Kind::Ph) {
+                                self.dataclass_init(cls, o, &args, kwargs, star_kwargs, state, node);
+                            }
+                        }
+                    }
+                    return self.none_v.clone();
+                }
                 let call = Call { qual: qual.clone(), recv: Some(recv.clone()), args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
                 if let Some(m) = self.models.lookup(&qual) {
                     return m(self, state, &call);
@@ -278,7 +293,46 @@ impl Analyzer {
         if ci.typed_dict {
             state.set_row(inst, Ns::Item, Row::new());
         }
-        if ci.has_fields() {
+        // the generated `__init__` of a dataclass base applies to a subclass without its own
+        let dc_init = ci.has_fields() || {
+            let mut owner: Option<bool> = None;
+            for c in self.mro(cls) {
+                if self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) {
+                    owner = Some(false);
+                    break;
+                }
+                if self.class_info_opt(c).map(|x| x.has_fields()).unwrap_or(false) {
+                    owner = Some(true);
+                    break;
+                }
+            }
+            owner == Some(true)
+        };
+        if dc_init {
+            self.dataclass_init(cls, inst, args, kwargs, star_kwargs, state, node);
+            return Value::obj(inst);
+        }
+        if let Some(init) = self.class_lookup(cls, "__init__") {
+            let fv = self.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
+            self.fresh_init.insert(inst);
+            for f in fv.pts.iter() {
+                if self.kind(f) == Kind::Function {
+                    self.note_ctor_field_classes(init, f, args, kwargs);
+                    self.call_user(f, Some(Value::obj(inst)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, None, false);
+                }
+            }
+            self.fresh_init.remove(&inst);
+        }
+        Value::obj(inst)
+    }
+
+    /// The generated `__init__` of a dataclass / TypedDict / NamedTuple `cls` run on `inst`
+    /// (a fresh instance, or `self` when called explicitly as `Base.__init__(self, …)` /
+    /// `super().__init__(…)` from a subclass).
+    pub fn dataclass_init(&mut self, cls: u32, inst: ObjId, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_kwargs: &[Value], state: &mut State, node: &Node) {
+        let ci = self.class_info(cls);
+        let ns = if ci.typed_dict { Ns::Item } else { Ns::Attr };
+        {
             let fields = self.dataclass_fields_mro(cls);
             for (i, (fname, default)) in fields.iter().enumerate() {
                 let fk = key_str_lit(fname);
@@ -308,20 +362,7 @@ impl Analyzer {
                     self.copy_into(inst, Ns::Item, sk, state, true, &KeySet::new());
                 }
             }
-            return Value::obj(inst);
         }
-        if let Some(init) = self.class_lookup(cls, "__init__") {
-            let fv = self.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
-            self.fresh_init.insert(inst);
-            for f in fv.pts.iter() {
-                if self.kind(f) == Kind::Function {
-                    self.note_ctor_field_classes(init, f, args, kwargs);
-                    self.call_user(f, Some(Value::obj(inst)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, None, false);
-                }
-            }
-            self.fresh_init.remove(&inst);
-        }
-        Value::obj(inst)
     }
 
     /// `self.f = p` statements of `__init__` whose `p` is a parameter: record the classes of
@@ -465,7 +506,7 @@ impl Analyzer {
                 }
                 cls
             };
-            if super::enabled("sigsum") {
+            if !super::disabled("sigsum") {
                 if let Some(sv) = &self_v {
                     if let Some(c) = one_class(self, sv) {
                         if let Some(FuncNode::Def(f)) = Some(fi.node) {

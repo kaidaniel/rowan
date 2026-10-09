@@ -61,6 +61,9 @@ pub struct PH {
     pub key: Option<KeyId>,
     /// declared class (annotation), when known
     pub cls: Cell<Option<ObjId>>,
+    /// `cls` is the exact class (from the call site's argument signature), not a bound: no
+    /// subclass may override the methods resolved through it
+    pub exact: Cell<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -256,6 +259,14 @@ impl Summary {
 
 impl Analyzer {
     // ------------------------------------------------------------ placeholders
+    /// the allocation context of the summary of `func` being computed (or its plain one)
+    pub fn sum_ctx(&self, func: ObjId) -> String {
+        match self.sum_stack.iter().rposition(|f| *f == func) {
+            Some(i) => self.sum_ctxs[i].clone(),
+            None => format!("sum{}", func),
+        }
+    }
+
     pub fn new_placeholder(&mut self, kind: PhKind, func: ObjId, name: &str, parent: Option<ObjId>, ns: Ns, key: Option<KeyId>, cls: Option<ObjId>, tag: &str) -> ObjId {
         let site = if kind == PhKind::Path {
             format!("ph:path:{}:{}:{}:{}{}", func, parent.map(|p| p.to_string()).unwrap_or_else(|| "None".into()), ns, key.map(intern::key_repr).unwrap_or_else(|| "None".into()), tag)
@@ -263,8 +274,9 @@ impl Analyzer {
             format!("ph:{}:{}:{}", kind.name(), func, name)
         };
         let label = if name.is_empty() { format!("ρ{}", key.map(intern::key_repr).unwrap_or_else(|| "None".into())) } else { format!("ρ{}", name) };
-        let payload = Payload::Ph(Rc::new(PH { kind, func, name: name.to_string(), parent, ns, key, cls: Cell::new(cls) }));
-        let oid = self.alloc_raw(Kind::Ph, &site, &format!("sum{}", func), true, &label, payload.clone());
+        let payload = Payload::Ph(Rc::new(PH { kind, func, name: name.to_string(), parent, ns, key, cls: Cell::new(cls), exact: Cell::new(false) }));
+        let pctx = self.sum_ctx(func);
+        let oid = self.alloc_raw(Kind::Ph, &site, &pctx, true, &label, payload.clone());
         self.obj_mut(oid).payload = payload;
         if kind == PhKind::Path {
             let d = parent.map(|p| self.obj(p).depth + 1).unwrap_or(1);
@@ -279,8 +291,9 @@ impl Analyzer {
         let func = *self.sum_stack.last().unwrap();
         let site = format!("ph:narrow:{}:{}:{}", func, parent, cls);
         let label = format!("{}:{}", self.obj(parent).label, self.obj(cls).label);
-        let payload = Payload::Ph(Rc::new(PH { kind: PhKind::Narrow, func, name: String::new(), parent: Some(parent), ns: Ns::Item, key: None, cls: Cell::new(Some(cls)) }));
-        let oid = self.alloc_raw(Kind::Ph, &site, &format!("sum{}", func), true, &label, payload.clone());
+        let payload = Payload::Ph(Rc::new(PH { kind: PhKind::Narrow, func, name: String::new(), parent: Some(parent), ns: Ns::Item, key: None, cls: Cell::new(Some(cls)), exact: Cell::new(false) }));
+        let pctx = self.sum_ctx(func);
+        let oid = self.alloc_raw(Kind::Ph, &site, &pctx, true, &label, payload.clone());
         self.obj_mut(oid).payload = payload;
         let d = self.obj(parent).depth;
         self.obj_mut(oid).depth = d;
@@ -360,19 +373,22 @@ impl Analyzer {
     /// `sig`: parameter name -> class, for parameters bound to instances of one class at the
     /// call site; the placeholders carry those classes so methods resolve by class.
     pub fn summarise_sig(&mut self, foid: ObjId, state: &mut State, sig: Vec<(String, ObjId)>) -> Option<Rc<Summary>> {
-        let sig = {
+        let (sig, sig_idx) = {
             let n = self.sig_count.entry(foid).or_default();
             if sig.is_empty() {
-                sig
-            } else if n.contains(&sig) {
-                sig
+                (sig, 0)
+            } else if let Some(i) = n.iter().position(|x| *x == sig) {
+                (sig, i + 1)
             } else if n.len() < MAX_SIGNATURES {
                 n.push(sig.clone());
-                sig
+                (sig, n.len())
             } else {
-                Vec::new()
+                (Vec::new(), 0)
             }
         };
+        // placeholders and the objects a summary allocates are keyed by this context: one per
+        // signature, so summaries of one function for different classes share nothing
+        let ctx = if sig_idx == 0 { format!("sum{}", foid) } else { format!("sum{}s{}", foid, sig_idx) };
         let fi = self.func_info(foid);
         let fnode = fi.node;
         let mut code_cells: IndexMap<ObjId, Value> = IndexMap::new();
@@ -469,6 +485,7 @@ impl Analyzer {
         }
         self.cond_depth = 0;
         self.sum_stack.push(foid);
+        self.sum_ctxs.push(ctx.clone());
         self.sum_reqs.push(IndexMap::new());
         self.sum_events.push(IndexMap::new());
         self.raise_stack.push(false);
@@ -477,7 +494,6 @@ impl Analyzer {
         let verdict_mark = self.verdicts.len();
         let notes_mark = self.notes.len();
         let mut summary: Option<Rc<Summary>> = None;
-        let ctx = format!("sum{}", foid);
         for rnd in 0..MAX_SUMMARY_ROUNDS {
             if rnd >= 1 && self.opts.scc {
                 // callees summarised against the previous round's partial summary are redone
@@ -548,8 +564,12 @@ impl Analyzer {
             let mut self_ph: Option<ObjId> = None;
             let sig_cls = |name: &str| -> Option<ObjId> { sig.iter().find(|(n, _)| n == name).map(|(_, c)| *c) };
             if fi.cls.is_some() && !fi.is_static.get() && !positional.is_empty() {
-                let self_cls = sig_cls(positional[0].name.id.as_str()).or(fi.cls);
+                let sigc = sig_cls(positional[0].name.id.as_str());
+                let self_cls = sigc.or(fi.cls);
                 let sp = self.new_placeholder(PhKind::SelfPh, foid, positional[0].name.id.as_str(), None, Ns::Item, None, self_cls, "");
+                if sigc.is_some() {
+                    self.ph_info(sp).exact.set(true);
+                }
                 self_ph = Some(sp);
                 ph_by_name.insert(s(positional[0].name.id.as_str()), sp);
                 positional.remove(0);
@@ -561,6 +581,9 @@ impl Analyzer {
                     None => sig_cls(p.name.id.as_str()),
                 };
                 let ph = self.new_placeholder(PhKind::Param, foid, p.name.id.as_str(), None, Ns::Item, None, cls, "");
+                if p.annotation.is_none() && cls.is_some() {
+                    self.ph_info(ph).exact.set(true);
+                }
                 ph_by_name.insert(s(p.name.id.as_str()), ph);
                 args.push(Value::with_kv(ObjSet::one(ph), KeyVal::Param(ph)));
             }
@@ -571,6 +594,9 @@ impl Analyzer {
                     None => sig_cls(p.name.id.as_str()),
                 };
                 let ph = self.new_placeholder(PhKind::Param, foid, p.name.id.as_str(), None, Ns::Item, None, cls, "");
+                if p.annotation.is_none() && cls.is_some() {
+                    self.ph_info(ph).exact.set(true);
+                }
                 ph_by_name.insert(s(p.name.id.as_str()), ph);
                 kwargs.insert(s(p.name.id.as_str()), Value::with_kv(ObjSet::one(ph), KeyVal::Param(ph)));
             }
@@ -726,6 +752,7 @@ impl Analyzer {
             }
         }
         self.sum_stack.pop();
+        self.sum_ctxs.pop();
         self.sum_reqs.pop();
         self.sum_events.pop();
         self.raise_stack.pop();

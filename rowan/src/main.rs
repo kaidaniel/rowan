@@ -66,8 +66,10 @@ fn run(file: &str, json: bool, golden: bool, facts: bool, show_rows: bool, show_
     if golden {
         // `#@row NAME:` expectations are evaluated at the statement on that line
         for (i, line) in src.lines().enumerate() {
-            if let Some(pos) = line.find("#@row") {
-                let rest = &line[pos + 5..];
+            // (`#@todo row NAME:` too: the harness checks those with ROWAN_TODO=check)
+            let hit = line.find("#@row").map(|p| p + 5).or_else(|| line.find("#@todo row").map(|p| p + 10));
+            if let Some(pos) = hit {
+                let rest = &line[pos..];
                 let name: String = rest.trim_start().chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
                 if !name.is_empty() {
                     an.row_check_requests.push((i as u32 + 1, name));

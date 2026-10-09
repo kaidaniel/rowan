@@ -553,6 +553,9 @@ impl Analyzer {
                 Kind::Class => {
                     if self.class_lookup(oid, name).is_some() {
                         self.class_attr_value(oid, name)
+                    } else if name == "__init__" && self.dataclass_init_owner(oid).is_some() {
+                        let dc = self.dataclass_init_owner(oid).unwrap();
+                        Value::obj(self.alloc_raw(Kind::Method, &format!("dcinit:{}", oid), "", true, &format!("{}.__init__", self.obj(oid).label), Payload::Method(format!("dcinit.class.{}", dc), Value::obj(oid))))
                     } else {
                         let label = format!("{}.{}", self.obj(oid).label, name);
                         Value::obj(self.alloc_raw(Kind::Method, &format!("classattr:{}.{}", oid, name), "", true, &label, Payload::Method(format!("class.{}", name), Value::obj(oid))))
@@ -604,6 +607,11 @@ impl Analyzer {
                                 }
                             }
                             out
+                        }
+                        None if name == "__init__" && ci.bases.iter().any(|b| self.dataclass_init_owner(*b).is_some()) => {
+                            let dc = ci.bases.iter().find_map(|b| self.dataclass_init_owner(*b)).unwrap();
+                            let ids: Vec<String> = self_v.pts.iter().map(|x| x.to_string()).collect();
+                            Value::obj(self.alloc_raw(Kind::Method, &format!("dcinit:{}:{}", dc, ids.join(",")), "", true, "dataclass __init__ via super", Payload::Method(format!("dcinit.{}", dc), self_v.clone())))
                         }
                         None => Value::data("super"),
                     }
@@ -662,6 +670,20 @@ impl Analyzer {
             }
             if let Some(ci) = self.class_info_opt(c) {
                 order.extend(ci.bases.iter().copied());
+            }
+        }
+        None
+    }
+
+    /// The dataclass whose generated `__init__` `cls` inherits (none when a user `__init__`
+    /// comes first in the MRO).
+    pub fn dataclass_init_owner(&self, cls: u32) -> Option<u32> {
+        for c in self.mro(cls) {
+            if self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) {
+                return None;
+            }
+            if self.class_info_opt(c).map(|x| x.has_fields()).unwrap_or(false) {
+                return Some(c);
             }
         }
         None
@@ -773,12 +795,12 @@ impl Analyzer {
             if let Some(c) = self.class_lookup(pcls, name) {
                 let cv = self.cls_slots.get(&(c, Ns::Attr, nk)).cloned().unwrap_or_default();
                 let out = self.bound_outs(&cv, oid, pcls, node, state);
-                if self.subclass_overrides(pcls, Some(c), name) {
+                if !ph.exact.get() && self.subclass_overrides(pcls, Some(c), name) {
                     self.record_event("dispatch", oid);
                 }
                 return out;
             }
-            if self.subclass_overrides(pcls, Some(pcls), name) {
+            if !ph.exact.get() && self.subclass_overrides(pcls, Some(pcls), name) {
                 self.record_event("dispatch", oid);
             }
         }
@@ -933,35 +955,15 @@ impl Analyzer {
         None
     }
 
-    fn infer_field_classes(&self, ci: &ClassInfo, state: &State) -> FxHashMap<String, Vec<u32>> {
-        let mut out: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let class_of = |an: &Analyzer, expr: Option<&'static ast::Expr>| -> Option<u32> {
-            let expr = expr?;
-            let mut e = Analyzer::strip_annotation(expr)?;
-            if let ast::Expr::Call(c) = e {
-                e = &c.func;
-            }
-            let v = match e {
-                ast::Expr::Name(n) => state.slot(ci.module, Ns::Attr, key_str_lit(n.id.as_str())),
-                ast::Expr::Attribute(a) => an.static_attr_value(a, ci.module, state),
-                _ => return None,
-            };
-            let found = v.pts.iter().find(|o| an.kind(*o) == Kind::Class);
-            found
-        };
-        let mut note = |an: &Analyzer, name: &str, expr: Option<&'static ast::Expr>| {
-            if let Some(c) = class_of(an, expr) {
-                let e = out.entry(name.to_string()).or_default();
-                if !e.contains(&c) {
-                    e.push(c);
-                }
-            }
-        };
+    fn infer_field_classes(&mut self, ci: &ClassInfo, state: &State) -> FxHashMap<String, Vec<u32>> {
+        // (field, expression it is declared or assigned with) pairs from the class body and
+        // its methods' `self.f = …` / `self.f: T = …` statements
+        let mut pairs: Vec<(String, &'static ast::Expr)> = Vec::new();
         for st in &ci.node.body {
             match st {
                 ast::Stmt::AnnAssign(a) => {
                     if let ast::Expr::Name(t) = &*a.target {
-                        note(self, t.id.as_str(), Some(&a.annotation));
+                        pairs.push((t.id.to_string(), &a.annotation));
                     }
                 }
                 ast::Stmt::FunctionDef(f) if !f.parameters.args.is_empty() => {
@@ -973,7 +975,7 @@ impl Analyzer {
                                     if let ast::Expr::Attribute(ta) = t {
                                         if let ast::Expr::Name(bn) = &*ta.value {
                                             if bn.id.as_str() == me {
-                                                note(self, ta.attr.id.as_str(), Some(&asg.value));
+                                                pairs.push((ta.attr.id.to_string(), &asg.value));
                                             }
                                         }
                                     }
@@ -983,8 +985,10 @@ impl Analyzer {
                                 if let ast::Expr::Attribute(ta) = &*aa.target {
                                     if let ast::Expr::Name(bn) = &*ta.value {
                                         if bn.id.as_str() == me {
-                                            note(self, ta.attr.id.as_str(), Some(&aa.annotation));
-                                            note(self, ta.attr.id.as_str(), aa.value.as_deref());
+                                            pairs.push((ta.attr.id.to_string(), &aa.annotation));
+                                            if let Some(v) = aa.value.as_deref() {
+                                                pairs.push((ta.attr.id.to_string(), v));
+                                            }
                                         }
                                     }
                                 }
@@ -996,7 +1000,51 @@ impl Analyzer {
                 _ => {}
             }
         }
+        let mut out: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        for (name, expr) in pairs {
+            if let Some(c) = self.field_class_of_expr(expr, ci.module, state) {
+                let e = out.entry(name).or_default();
+                if !e.contains(&c) {
+                    e.push(c);
+                }
+            }
+        }
         out
+    }
+
+    /// The class an annotation / assigned expression declares for a field: a user class
+    /// (`x: Cls`, `self.x = Cls(…)`) or a builtin container class (`self.x = {}`,
+    /// `self.x = defaultdict(list)`, `x: dict`), which selects a model family.
+    fn field_class_of_expr(&mut self, expr: &'static ast::Expr, module: u32, state: &State) -> Option<u32> {
+        let mut e = Analyzer::strip_annotation(expr)?;
+        if let ast::Expr::Call(c) = e {
+            e = &c.func;
+        }
+        let v = match e {
+            ast::Expr::List(_) | ast::Expr::ListComp(_) => return Some(self.builtin_class_obj("list")),
+            ast::Expr::Dict(_) | ast::Expr::DictComp(_) => return Some(self.builtin_class_obj("dict")),
+            ast::Expr::Set(_) | ast::Expr::SetComp(_) => return Some(self.builtin_class_obj("set")),
+            ast::Expr::Name(n) => state.slot(module, Ns::Attr, key_str_lit(n.id.as_str())),
+            ast::Expr::Attribute(a) => self.static_attr_value(a, module, state),
+            _ => return None,
+        };
+        if let Some(c) = v.pts.iter().find(|o| self.kind(*o) == Kind::Class) {
+            return Some(c);
+        }
+        if let Some(b) = v.pts.iter().find(|o| self.kind(*o) == Kind::External && BUILTIN_CONTAINER_CLASSES.contains(&self.external_qual(*o).rsplit('.').next().unwrap_or(""))) {
+            return Some(b);
+        }
+        if let ast::Expr::Name(n) = e {
+            if v.pts.is_empty() && BUILTIN_CONTAINER_CLASSES.contains(&n.id.as_str()) {
+                return Some(self.builtin_class_obj(n.id.as_str()));
+            }
+        }
+        None
+    }
+
+    /// The external object standing for a builtin class (`list`, `dict`, …).
+    pub fn builtin_class_obj(&mut self, nm: &str) -> u32 {
+        self.alloc_raw(Kind::External, &format!("ext:builtins.{}", nm), "", true, nm, Payload::Str(format!("builtins.{}", nm)))
     }
 
     fn static_attr_value(&self, e: &ast::ExprAttribute, module: u32, state: &State) -> Value {
@@ -1100,6 +1148,9 @@ impl Analyzer {
 }
 
 /// All statements nested in a body (ast.walk restricted to statements).
+/// builtin container classes a field may be declared with (they select a model family)
+pub const BUILTIN_CONTAINER_CLASSES: &[&str] = &["dict", "defaultdict", "OrderedDict", "Counter", "list", "set", "frozenset", "deque", "tuple"];
+
 pub fn walk_stmts(body: &'static [ast::Stmt]) -> Vec<&'static ast::Stmt> {
     let mut out: Vec<&'static ast::Stmt> = Vec::new();
     fn go(s: &'static ast::Stmt, out: &mut Vec<&'static ast::Stmt>) {

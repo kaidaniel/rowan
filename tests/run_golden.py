@@ -61,7 +61,12 @@ def collect_expectations(src: str):
     for i, line in enumerate(src.splitlines(), 1):
         if "#@todo" in line:
             TODO_COUNT[0] += 1
-            continue
+            if os.environ.get("ROWAN_TODO") != "check":
+                continue
+            # ROWAN_TODO=check: the open expectations are checked like the others
+            line = re.sub(r"#@todo\s+row\b", "#@row", line)
+            line = re.sub(r"#@todo\s+schema\b", "#@schema", line)
+            line = re.sub(r"#@todo\s+", "#@ ", line)
         m = re.search(r"#@row\s+(\w+)\s*:\s*(.*)$", line)
         if m:
             spec: Dict[str, Any] = {}
@@ -226,7 +231,7 @@ def main(argv: List[str]) -> int:
             return True
         prefix = d.split("_")[0]
         return os.path.basename(p).startswith(prefix + "_")
-    paths = [p for p in paths if is_case(p)]
+    paths = [p for p in paths if args or is_case(p)]  # explicit paths are always cases
     ok_all = True
     results = []
     for p in paths:

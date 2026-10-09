@@ -509,6 +509,8 @@ pub struct Analyzer {
     pub fresh_init: FxHashSet<ObjId>,
     pub cell_classes: FxHashMap<ObjId, ObjId>,
     pub sum_stack: Vec<ObjId>,
+    /// allocation context of each summary on `sum_stack` (per argument signature)
+    pub sum_ctxs: Vec<String>,
     pub sum_reqs: Vec<IndexMap<crate::summary::SymKey, SymReq>>,
     pub sum_events: Vec<IndexMap<(&'static str, ObjId), Event>>,
     pub sum_hit: FxHashSet<ObjId>,
@@ -603,6 +605,7 @@ impl Analyzer {
             fresh_init: FxHashSet::default(),
             cell_classes: FxHashMap::default(),
             sum_stack: Vec::new(),
+            sum_ctxs: Vec::new(),
             sum_reqs: Vec::new(),
             sum_events: Vec::new(),
             sum_hit: FxHashSet::default(),
