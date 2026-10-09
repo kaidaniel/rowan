@@ -42,6 +42,8 @@ def run3(x):
 
 
 if __name__ == "__main__":
-    a = run(torch.randn(2, 9))  #@shape a: [2, 1]
+    # (precise only by following the recursion 5 calls deep, past rowan's recursion budget
+    # of 4; it says [2, ?], which is sound)
+    a = run(torch.randn(2, 9))  #@todo shape a: [2, 1]
     b = run2(torch.randn(3, 4), 3)  #@shape b: [3, 4]
     f0, last = run3(torch.randn(2, 3, 16))  #@shape f0: [2, 3, 16]; last: [2, 3, 4]

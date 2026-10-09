@@ -1487,7 +1487,7 @@ pub const TENSOR_ATTRS: &[&str] = &["shape", "ndim", "T", "mT", "mH", "data", "r
 /// names that only tensors have (an unknown with a declared class still counts)
 pub const TENSOR_ONLY: &[&str] = &["shape", "view", "view_as", "unsqueeze", "squeeze", "permute", "transpose", "contiguous", "masked_fill", "masked_fill_", "softmax", "log_softmax", "numel", "ndim", "mT", "T", "reshape", "flatten", "unflatten", "expand", "expand_as", "chunk", "unbind", "dim", "size"];
 pub const TENSOR_METHODS: &[&str] = &[
-    "view", "reshape", "view_as", "reshape_as", "expand", "expand_as", "repeat", "repeat_interleave", "permute", "transpose", "swapaxes", "swapdims", "t", "unsqueeze",
+    "view", "reshape", "view_as", "reshape_as", "expand", "expand_as", "repeat", "repeat_interleave", "permute", "transpose", "swapaxes", "swapdims", "t", "unsqueeze", "copy", "astype",
     "squeeze", "flatten", "unflatten", "chunk", "split", "tensor_split", "unbind", "narrow", "select", "index_select", "gather", "scatter", "scatter_", "scatter_add", "size", "dim",
     "ndimension", "numel", "nelement", "item", "tolist", "numpy", "contiguous", "clone", "detach", "detach_", "float", "double", "half", "bfloat16", "long", "int", "short", "bool",
     "byte", "char", "to", "cpu", "cuda", "type", "type_as", "requires_grad_", "retain_grad", "pin_memory", "relu", "relu_", "gelu", "sigmoid", "sigmoid_", "tanh", "tanh_", "exp",
@@ -1507,7 +1507,7 @@ pub const TENSOR_METHODS: &[&str] = &[
 // ---------------------------------------------------------------------------
 
 const IDENTITY: &[&str] = &[
-    "contiguous", "clone", "detach", "detach_", "float", "double", "half", "bfloat16", "long", "int", "short", "byte", "char", "to", "cpu", "cuda", "type", "requires_grad_",
+    "numpy", "copy", "astype", "contiguous", "clone", "detach", "detach_", "float", "double", "half", "bfloat16", "long", "int", "short", "byte", "char", "to", "cpu", "cuda", "type", "requires_grad_",
     "retain_grad", "pin_memory", "relu", "relu_", "gelu", "sigmoid", "sigmoid_", "tanh", "tanh_", "exp", "exp_", "log", "log_", "log1p", "expm1", "sqrt", "rsqrt", "abs", "abs_",
     "neg", "neg_", "sin", "cos", "tan", "clamp", "clamp_", "clamp_min", "clamp_max", "clip", "sign", "sign_", "floor", "ceil", "round", "trunc", "frac", "square", "reciprocal",
     "erf", "fill_", "zero_", "copy_", "normal_", "uniform_", "bernoulli", "bernoulli_", "exponential_", "random_", "nan_to_num", "flip", "roll", "softplus", "silu", "elu",
@@ -1549,7 +1549,7 @@ impl Analyzer {
     pub fn t_method(&mut self, name: &str, recv: &Value, args: &[Value], c: &Call, st: &mut State) -> Value {
         let node = c.node;
         let s = self.t_shape(recv, st).unwrap_or_else(Shape::any);
-        let a0 = self.t_kw(c, args, 0, "dim");
+        let a0 = self.t_kw(c, args, 0, "dim").or_else(|| kw(c, "axis").cloned());
         let keepdim = kw(c, "keepdim").and_then(|v| self.t_bool(v)).unwrap_or(false);
         if IDENTITY.contains(&name) {
             return tensor_value(s);
@@ -1637,7 +1637,7 @@ impl Analyzer {
                 }
             }
             "item" => return num_value(),
-            "tolist" | "numpy" | "data_ptr" | "storage" | "backward" | "register_hook" => return Value::data(&format!("L{}", node.line)),
+            "tolist" | "data_ptr" | "storage" | "backward" | "register_hook" => return Value::data(&format!("L{}", node.line)),
             "softmax" | "log_softmax" | "cumsum" | "cumprod" | "softmin" | "logcumsumexp" | "normalize" => {
                 if let Ok(Some(ds)) = self.t_dims_arg(a0, st) {
                     for d in ds {
@@ -2448,8 +2448,11 @@ impl Analyzer {
             return sz.map(tensor_value).unwrap_or_else(|| tensor_value(Shape::any()));
         }
         match name {
-            "tensor" | "as_tensor" | "Tensor" | "FloatTensor" | "LongTensor" => return self.t_literal_tensor(args.first(), st),
-            "from_numpy" | "load" | "frombuffer" => return tensor_value(Shape::any()),
+            "tensor" | "Tensor" | "FloatTensor" | "LongTensor" => return self.t_literal_tensor(args.first(), st),
+            "from_numpy" | "as_tensor" | "asarray" => {
+                return args.first().filter(|a| is_tensor(a)).and_then(|a| self.t_shape(a, st)).map(tensor_value).unwrap_or_else(|| self.t_literal_tensor(args.first(), st));
+            }
+            "load" | "frombuffer" => return tensor_value(Shape::any()),
             "arange" => {
                 let get = |an: &Analyzer, v: &Value| -> Option<(Option<f64>, Option<DimId>)> {
                     if let Some(k) = v.kv.as_lit().filter(|_| v.pts.is_empty()) {
@@ -4559,4 +4562,61 @@ impl Analyzer {
             st.tf = std::sync::Arc::new(f);
         }
     }
+}
+
+/// numpy arrays share the tensor model (shapes, the same methods; `axis=` is `dim=`).
+pub fn m_numpy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    if !an.torch_on {
+        return Value::data(&format!("L{}", c.line));
+    }
+    let q = c.qual.strip_prefix("numpy.").or_else(|| c.qual.strip_prefix("np.")).unwrap_or("");
+    let node = c.node;
+    let shape_arg = |an: &Analyzer, st: &State, v: Option<Value>| -> Option<Shape> { v.and_then(|v| an.t_shape_arg(&v, st)) };
+    match q {
+        "zeros" | "ones" | "empty" | "full" | "random.rand" | "random.randn" | "random.random" | "random.normal" | "random.uniform" | "random.randint" => {
+            let s = match q {
+                "random.rand" | "random.randn" => an.t_sizes(&c.args, &c.star_args, st),
+                "random.normal" | "random.uniform" => shape_arg(an, st, c.arg(2, Some("size"))),
+                "random.randint" => shape_arg(an, st, c.arg(2, Some("size"))),
+                "random.random" => shape_arg(an, st, c.arg(0, Some("size"))),
+                _ => shape_arg(an, st, c.arg(0, Some("shape"))),
+            };
+            s.map(tensor_value).unwrap_or_else(|| tensor_value(Shape::any()))
+        }
+        "zeros_like" | "ones_like" | "empty_like" | "full_like" | "asarray" | "ascontiguousarray" | "copy" => {
+            c.args.first().and_then(|a| an.t_shape(a, st)).map(tensor_value).unwrap_or_else(|| tensor_value(Shape::any()))
+        }
+        "array" => {
+            let a = c.args.first().cloned();
+            match a.as_ref().and_then(|v| an.t_shape(v, st).filter(|_| is_tensor(v))) {
+                Some(s) => tensor_value(s),
+                None => {
+                    // a literal nested list
+                    let v = an.t_torch_fn("tensor", c, st);
+                    v
+                }
+            }
+        }
+        "eye" | "arange" | "linspace" | "concatenate" | "stack" | "matmul" | "dot" | "transpose" | "expand_dims" | "squeeze" | "reshape" => {
+            let name = match q {
+                "concatenate" => "cat",
+                "expand_dims" => "unsqueeze",
+                "dot" => "matmul",
+                other => other,
+            };
+            if matches!(name, "eye" | "arange" | "linspace" | "cat" | "stack" | "matmul") {
+                let call = Call { qual: format!("torch.{}", name), recv: None, args: c.args.clone(), kwargs: rename_axis(&c.kwargs), star_args: c.star_args.clone(), star_kwargs: c.star_kwargs.clone(), node, call_ast: c.call_ast, site: c.site.clone(), line: c.line };
+                return an.t_torch_fn(name, &call, st);
+            }
+            let Some(recv) = c.args.first().cloned() else { return tensor_value(Shape::any()) };
+            let rest: Vec<Value> = c.args[1..].to_vec();
+            let call = Call { qual: format!("tensor.{}", name), recv: Some(recv.clone()), args: rest.clone(), kwargs: rename_axis(&c.kwargs), star_args: vec![], star_kwargs: vec![], node, call_ast: None, site: c.site.clone(), line: c.line };
+            an.t_method(name, &recv, &rest, &call, st)
+        }
+        _ => Value::data(&format!("L{}", c.line)),
+    }
+}
+
+fn rename_axis(kwargs: &IndexMap<StrId, Value>) -> IndexMap<StrId, Value> {
+    kwargs.iter().map(|(k, v)| (if &*intern::str_get(*k) == "axis" { s("dim") } else { *k }, v.clone())).collect()
 }
