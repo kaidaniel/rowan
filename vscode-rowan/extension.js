@@ -423,7 +423,8 @@ function activate(context) {
     status.text = "$(sync~spin) rowan";
     status.show();
     try {
-      const extraArgs = config.get("extraArgs") || [];
+      const depth = config.get("valueDepth");
+      const extraArgs = [...(config.get("extraArgs") || []), ...(Number.isInteger(depth) && depth >= 0 ? ["--value-depth", String(depth)] : [])];
       const timeoutSeconds = config.get("timeoutSeconds") || 60;
       let res;
       if (config.get("useServer") !== false) {

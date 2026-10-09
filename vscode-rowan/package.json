@@ -27,6 +27,12 @@
           "default": [],
           "description": "Extra arguments for rowan (e.g. [\"--no-entry\"])."
         },
+        "rowan.valueDepth": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 0,
+          "description": "How many levels of nested containers the hover's value shows before cutting them to […] / {…} / Name(…)."
+        },
         "rowan.useServer": {
           "type": "boolean",
           "default": true,

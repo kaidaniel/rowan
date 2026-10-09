@@ -1,4 +1,4 @@
-//! CLI: rowan FILE.py [--json] [--golden] [--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports] [--search-path DIR]… [--follow PKG]… [--site-packages DIR]… | rowan serve
+//! CLI: rowan FILE.py [--json] [--golden] [--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports] [--value-depth N] [--search-path DIR]… [--follow PKG]… [--site-packages DIR]… | rowan serve
 use std::io::Write;
 
 use rowan::interp::Analyzer;
@@ -43,6 +43,13 @@ fn main() {
                     std::process::exit(2);
                 }
             },
+            "--value-depth" => match it.next().and_then(|n| n.parse::<u32>().ok()) {
+                Some(n) => rowan::report::VALUE_DEPTH.store(n, std::sync::atomic::Ordering::Relaxed),
+                None => {
+                    eprintln!("--value-depth needs a number");
+                    std::process::exit(2);
+                }
+            },
             "--json" => json = true,
             "--golden" => golden = true,
             "--facts" => facts = true,
@@ -72,7 +79,7 @@ fn main() {
         return;
     }
     let Some(file) = file else {
-        eprintln!("usage: rowan FILE.py [--json|--golden|--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports] [--search-path DIR]... [--follow PKG]... [--site-packages DIR]...  |  rowan serve [options]");
+        eprintln!("usage: rowan FILE.py [--json|--golden|--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports] [--value-depth N] [--search-path DIR]... [--follow PKG]... [--site-packages DIR]...  |  rowan serve [options]");
         std::process::exit(2);
     };
     let out = std::thread::Builder::new()

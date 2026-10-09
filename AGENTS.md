@@ -27,7 +27,7 @@ is for whoever picks the work up. Everything here was true at the last commit.
 
 ```
 cd rowan && cargo build --release && cargo test --release --lib && cd ..
-rowan/target/release/rowan FILE.py [--json|--golden|--facts] [--no-rows --no-summaries --no-entry --no-imports]
+rowan/target/release/rowan FILE.py [--json|--golden|--facts] [--no-rows --no-summaries --no-entry --no-imports] [--value-depth N]
                                    [--search-path DIR]… [--follow PKG]… [--site-packages DIR]…
 rowan/target/release/rowan serve                    # JSON lines over stdio (README has the protocol)
 uv run --no-project python tests/run_golden.py      # 313/313 in ~1.1 s; paths select cases; -v shows reports

@@ -29,7 +29,8 @@ the file and every module it loaded are unchanged (content hashes), `{"cmd":"cha
 Parsed modules are kept per (path, content hash). The VS Code extension uses it by default
 (`rowan.useServer`).
 
-Options: `--no-rows`, `--no-summaries`, `--no-entry`, `--no-imports`, `--search-path DIR`
+Options: `--no-rows`, `--no-summaries`, `--no-entry`, `--no-imports`, `--value-depth N`
+(nesting depth of rendered values, default 3), `--search-path DIR`
 (repeatable; the file's directory and the directory above its outermost package are
 searched first), `--follow PKG` (repeatable or comma-separated, also `ROWAN_FOLLOW`): analyse
 that installed package's source from site-packages (`--site-packages DIR`, else

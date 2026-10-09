@@ -349,6 +349,10 @@ fn row_json(r: &crate::domain::Row) -> J {
 /// / tuples by position when known (`[1, 2]`, else `[int, ...]`), instances as
 /// `Cls(a=1, **)`, functions / classes by name, `...` for anything unknown.  Depth and width
 /// are limited and cycles stop at `...`.
+/// How deep rendered values go before nested containers are cut to `[…]` / `{…}` / `Name(…)`
+/// (`--value-depth N`; default 3).
+pub static VALUE_DEPTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(3);
+
 pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &mut Vec<ObjId>) -> String {
     let mut parts: Vec<String> = Vec::new();
     // literals
@@ -373,7 +377,7 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
 }
 
 fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut Vec<ObjId>) -> String {
-    const MAX_DEPTH: u32 = 3;
+    let max_depth: u32 = VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed);
     const MAX_ITEMS: usize = 8;
     if !an.has_obj(o) {
         return "...".into();
@@ -395,7 +399,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
     match kind {
         Kind::Dict | Kind::Frame | Kind::Namespace => {
             let row = state.row(o, Ns::Item);
-            if depth >= MAX_DEPTH {
+            if depth >= max_depth {
                 return if row.present.is_empty() && row.closed() { "{}".into() } else { "{…}".into() };
             }
             seen.push(o);
@@ -423,7 +427,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
                 Kind::Tuple => ("(", ")"),
                 _ => ("{", "}"),
             };
-            if depth >= MAX_DEPTH {
+            if depth >= max_depth {
                 return format!("{}…{}", open, close);
             }
             seen.push(o);
@@ -463,7 +467,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         Kind::Instance => {
             let name = an.instance_class(o).and_then(|c| an.class_info_opt(c)).map(|ci| ci.name.clone()).unwrap_or_else(|| "object".into());
             let row = state.row(o, Ns::Attr);
-            if depth >= MAX_DEPTH {
+            if depth >= max_depth {
                 return format!("{}(…)", name);
             }
             seen.push(o);

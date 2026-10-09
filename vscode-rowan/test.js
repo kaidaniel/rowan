@@ -36,6 +36,13 @@ assert(lines.includes('  name="customers"'), lines.join("\n"));
 assert(lines.includes('    {"key": 1, "op": "add"},'), lines.join("\n"));
 assert.deepStrictEqual(prettyValue("[1, 2, 3]"), ["[1, 2, 3]"]);
 assert.strictEqual(lines.join("").replace(/\s+/g, ""), repo.replace(/\s+/g, ""));
+// `--value-depth N` (the `rowan.valueDepth` setting) cuts nested containers at depth N
+const nested = path.join(root, "tests", "cases", "q118_recursive_nesting.py");
+const textsAt = (n) => JSON.parse(execFileSync(bin, [nested, "--facts", "--value-depth", String(n)], { maxBuffer: 64 * 1024 * 1024 }).toString()).facts.map((f) => f.text || "").join("\n");
+const shallow = textsAt(1);
+const deep = textsAt(3);
+assert(shallow.length < deep.length, "depth 1 should render less than depth 3");
+assert(/[\[{(]…[\]})]/.test(shallow), shallow.slice(0, 400));
 console.log("\n--- sample long value ---\n" + lines.join("\n"));
 console.log("ok");
 console.log("\n--- sample hover for r at line 8 ---\n" + r8);
