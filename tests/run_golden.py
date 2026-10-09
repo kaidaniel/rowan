@@ -331,9 +331,20 @@ def check_file(src: str, rel: str, res: Dict[str, Any]) -> List[str]:
             if j is None:
                 joined[key] = dict(r)
                 continue
+            # (a closed row lacks every key outside its present ones: absent there too)
+            ja = set(j["absent"]) if not j["closed"] else None
+            ra = set(r["absent"]) if not r["closed"] else None
+            if ja is None and ra is None:
+                absent = set(j["absent"]) & set(r["absent"])
+            elif ja is None:
+                absent = ra - set(j["present"])
+            elif ra is None:
+                absent = ja - set(r["present"])
+            else:
+                absent = ja & ra
             j["present"] = sorted(set(j["present"]) | set(r["present"]))
             j["definite"] = sorted(set(j["definite"]) & set(r["definite"]))
-            j["absent"] = sorted(set(j["absent"]) & set(r["absent"]))
+            j["absent"] = sorted(absent)
             j["closed"] = j["closed"] and r["closed"]
             if r["text"] != j["text"]:
                 j["text"] = j["text"] + " | " + r["text"]

@@ -697,12 +697,16 @@ impl Row {
         } else {
             cap_sources(self.sources.union(&o.sources))
         };
+        // (a closed row lacks every key it does not have: absent there too)
+        let implicit = !crate::interp::disabled("closedabsent");
+        let absent_in = |x: &Row, y: &KeySet| -> KeySet { if implicit && x.closed() { x.absent.union(&y.difference(&x.present)) } else { x.absent.clone() } };
+        let absent_l_in = |x: &Row, y: &KeySet| -> KeySet { if implicit && x.closed() { x.absent_likely.union(&y.difference(&x.present)) } else { x.absent_likely.clone() } };
         Row::from_data(RowData {
             present: self.present.union(&o.present),
             definite: self.definite.intersection(&o.definite),
             likely: self.likely.intersection(&o.likely),
-            absent: self.absent.intersection(&o.absent),
-            absent_likely: self.absent_likely.intersection(&o.absent_likely),
+            absent: absent_in(self, &o.absent).intersection(&absent_in(o, &self.absent)),
+            absent_likely: absent_l_in(self, &o.absent_likely).intersection(&absent_l_in(o, &self.absent_likely)),
             sources,
             mutators: self.mutators.union(&o.mutators),
             top: self.top || o.top,

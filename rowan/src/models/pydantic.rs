@@ -1203,10 +1203,17 @@ impl Analyzer {
     /// A required field's read: `d[k]` on a dict / input, `o.k` on an object (verdicts and
     /// requirements as for the program's own reads).
     fn load_item_or_attr(&mut self, recv: &Value, ns: Ns, k: KeyId, node: &Node, state: &mut State) -> Value {
-        if ns == Ns::Attr {
-            return self.load_attr(recv, &intern::key_py_str(k), node, state, true);
-        }
-        self.load_item(recv, Ns::Item, &Value::lit(k), node, state, true)
+        // a ValidationError the program (or FastAPI: a 422) handles: no diagnostic
+        let saved = self.verdict_guarded;
+        self.verdict_guarded |= self.validation_caught();
+        let v = if ns == Ns::Attr { self.load_attr(recv, &intern::key_py_str(k), node, state, true) } else { self.load_item(recv, Ns::Item, &Value::lit(k), node, state, true) };
+        self.verdict_guarded = saved;
+        v
+    }
+
+    /// A try around here catches a ValidationError.
+    pub fn validation_caught(&self) -> bool {
+        !crate::interp::disabled("valguard") && self.guards.iter().any(|g| g.iter().any(|x| matches!(x.as_str(), "ValidationError" | "ValueError" | "Exception" | "BaseException" | "*")))
     }
 
     /// A guarded read of `k` from the records (no verdict, no requirement): the values there.
@@ -1419,7 +1426,11 @@ impl Analyzer {
                     let definite = recs.iter().all(|o| state.row(*o, Ns::Item).definite.contains(k));
                     let maybe = recs.iter().any(|o| state.row(*o, Ns::Item).present.contains(k) || state.row(*o, Ns::Item).open());
                     let v = if required && !definite {
-                        self.load_item(&recv, Ns::Item, &Value::lit(k), node, state, true)
+                        let saved = self.verdict_guarded;
+                        self.verdict_guarded |= self.validation_caught();
+                        let v = self.load_item(&recv, Ns::Item, &Value::lit(k), node, state, true);
+                        self.verdict_guarded = saved;
+                        v
                     } else if maybe {
                         self.pyd_read_guarded(&recs, k, state)
                     } else {

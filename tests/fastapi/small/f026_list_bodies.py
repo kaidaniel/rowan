@@ -13,9 +13,9 @@ class Reading(BaseModel):
     value: float
 
 
-def line_total(it):
+def line_total(it):  # (its only caller read it["sku"] first: sku is definite here too; was definite={qty,price})
     total = it["qty"] * it["price"]                  #@ input qty ; input price
-    #@row it: definite={qty,price} open
+    #@row it: definite={sku,qty,price} open
     return total
 
 
