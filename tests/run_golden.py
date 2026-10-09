@@ -226,7 +226,8 @@ def check_results(verdict_exp, row_exp_checks, schema_exp, vs, sch) -> List[str]
             elif key_str(k) in always:
                 failures.append(f"schema {label}: {k!r} should be sometimes, got always")
         if "only" in spec:
-            extra = allk - {key_str(k) for k in spec["only"]}
+            allowed = set(spec["only"]) | set(spec.get("sometimes", set())) | set(spec.get("always", set()))
+            extra = allk - {key_str(k) for k in allowed}
             if extra:
                 failures.append(f"schema {label}: unexpected keys {sorted(extra)}")
     return failures

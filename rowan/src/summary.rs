@@ -1224,7 +1224,7 @@ impl Analyzer {
     }
 
     fn instantiate_inner(&mut self, summary: &Rc<Summary>, bind: &IndexMap<ObjId, Value>, state: &mut State, node: &Node, call_ctx: &str, ctx_single: bool) -> Value {
-        let pre = state.copy();
+        let mut pre = state.copy();
         let mut chain = self.call_chain.clone();
         if summary.partial.get() && !chain.is_empty() {
             chain.pop();
@@ -1459,6 +1459,12 @@ impl Analyzer {
                             failed.push((*a, sr.ns, k));
                         }
                     }
+                    // an access of the callee that may fail here: the call may raise (a try
+                    // around it reaches its handler)
+                    if !sr.guarded && !in_summary && matches!(tier, Tier::Missing | Tier::Possibly | Tier::Input | Tier::LikelyMissing) && !crate::interp::disabled("symreqraise") {
+                        let exc = if sr.ns == Ns::Attr { "AttributeError" } else { "KeyError" };
+                        self.may_raise_here(exc, &mut pre.copy());
+                    }
                 }
             }
         }
@@ -1560,6 +1566,14 @@ impl Analyzer {
         let conditional = conditional || self.branch_depth > 0;
         if row.symbolic() {
             if !self.sum_stack.is_empty() {
+                // a callee's access deferred again, now under a try of this function: it may
+                // raise into the handler; decided where the record is known
+                let guarded = guarded || (self.is_guarded(ns) && !crate::interp::disabled("symreqraise"));
+                if guarded && !crate::interp::disabled("symreqraise") && self.is_guarded(ns) {
+                    let exc = if ns == Ns::Attr { "AttributeError" } else { "KeyError" };
+                    self.may_raise_here(exc, state);
+                    self.record_event("guarded", oid);
+                }
                 self.defer(SymReq { node: *node, key_kv: kv.clone(), row: row.clone(), oid, ns, guarded, rel_chain: chain.clone(), kind: "load", file: file.to_string(), text: text.to_string(), cls: guard_cls, conditional });
             }
             return out;

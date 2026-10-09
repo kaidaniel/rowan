@@ -55,7 +55,8 @@ PRODUCTS_B = """product_id,name,category,list_price,supplier
 def load_orders(text):
     raw = pd.read_csv(io.StringIO(text))
     has_discount = "discount" in raw.columns
-    #@value has_discount: exactly={True, False}
+    # (first written exactly={True, False}: a test rowan cannot decide is written `unknown`)
+    #@value has_discount: unknown
     return raw
 
 
@@ -230,5 +231,5 @@ if __name__ == "__main__":
     run(ORDERS_C, CUSTOMERS_A, PRODUCTS)
 
 #@schema read_csv@L56: always={order_id,customer_id,product_id,status,order_date,qty,unit_price} only={order_id,customer_id,product_id,status,order_date,qty,unit_price}
-#@schema read_csv@L86: always={customer_id,name,region,signup_date} sometimes={segment} only={customer_id,name,region,signup_date}
-#@schema read_csv@L100: always={product_id,name,category,list_price} only={product_id,name,category,list_price}
+#@schema read_csv@L87: always={customer_id,name,region,signup_date} sometimes={segment} only={customer_id,name,region,signup_date}
+#@schema read_csv@L101: always={product_id,name,category,list_price} only={product_id,name,category,list_price}

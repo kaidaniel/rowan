@@ -1971,18 +1971,33 @@ fn combine_overlap(lrow: &Row, rrow: &Row, keys: &KeySet, lsuf: &str, rsuf: &str
         }
         let (lm, ld) = side_status(lrow, c);
         let (rm, rd) = side_status(rrow, c);
-        let (both_may, both_def) = (lm && rm, ld && rd);
-        let only_may = (lm && !rd) || (rm && !ld);
-        let only_def = (ld && !rm) || (rd && !lm);
         let cs = intern::key_py_str(c);
         let name = |suf: &str| if suf.is_empty() { c } else { key_str_lit(&format!("{}{}", cs, suf)) };
-        if both_may {
-            put(name(lsuf), true, both_def);
-            put(name(rsuf), true, both_def);
+        // every case of which side has the column: the names it gives
+        let opts = |m: bool, d: bool| -> Vec<bool> { if d { vec![true] } else if m { vec![true, false] } else { vec![false] } };
+        let mut cases: Vec<Vec<KeyId>> = Vec::new();
+        for a in opts(lm, ld) {
+            for b in opts(rm, rd) {
+                cases.push(match (a, b) {
+                    (true, true) => vec![name(lsuf), name(rsuf)],
+                    (true, false) | (false, true) => vec![c],
+                    (false, false) => vec![],
+                });
+            }
         }
-        if only_may {
-            put(c, true, only_def);
-        } else if !lsuf.is_empty() && !rsuf.is_empty() {
+        let mut names: Vec<KeyId> = Vec::new();
+        for cs0 in &cases {
+            for n0 in cs0 {
+                if !names.contains(n0) {
+                    names.push(*n0);
+                }
+            }
+        }
+        for n0 in &names {
+            let def = cases.iter().all(|cs0| cs0.contains(n0));
+            put(*n0, true, def);
+        }
+        if !names.contains(&c) && !lsuf.is_empty() && !rsuf.is_empty() {
             gone.push(c);
         }
     }
@@ -2191,6 +2206,24 @@ fn rename_step(an: &mut Analyzer, st: &mut State, cols: &Value, c: &Call, fs: &[
                     if ko.objs == ObjSet::from_vec(fs.to_vec()) && ko.exclude.is_empty() {
                         return Some(intern::lens_get(ko.chain).steps);
                     }
+                }
+                // the function on each known column: a literal mapping (columns of an open frame
+                // beyond these stay unknown)
+                let row = rows_of(st, fs);
+                if !row.present.is_empty() && !fs.is_empty() {
+                    let mut pairs: Vec<(KeyId, KeyId)> = Vec::new();
+                    for k in intern::sorted_by_str(row.present.iter()) {
+                        let r = an.call_value(&Value::obj(x), &c.node, None, st, Some(vec![Value::lit(k)]));
+                        match r.kv.as_lit().filter(|_| r.pts.is_empty()) {
+                            Some(nk) => {
+                                if nk != k {
+                                    pairs.push((k, nk));
+                                }
+                            }
+                            None => return None,
+                        }
+                    }
+                    return Some(vec![Step::RenameMap(std::sync::Arc::new(pairs))]);
                 }
             }
             _ => {}
@@ -4867,8 +4900,23 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
     };
     if let Some(ks) = ks {
         if !key.pts.is_empty() || matches!(key.kv, KeyVal::Lits(_)) {
+            let sure_keys = list_keys_split(an, state, key).map(|(_, s0)| s0).unwrap_or_else(|| ks.clone());
             for k in intern::sorted_by_str(ks.iter()) {
-                frame_getitem_n(an, oid, &Value::lit(k), node, state, guarded, narrow);
+                if sure_keys.contains(k) {
+                    frame_getitem_n(an, oid, &Value::lit(k), node, state, guarded, narrow);
+                    continue;
+                }
+                // in the list on some paths only: read (and needed of an input) on those only
+                let before: Vec<(crate::domain::SourceId, bool)> = classify(&state.row(oid, Ns::Item), k).providers.iter().map(|(src, _)| (*src, state.reqs.inner(src).map(|d| d.contains_key(&k)).unwrap_or(false))).collect();
+                frame_getitem_n(an, oid, &Value::lit(k), node, state, guarded, false);
+                for (src, had) in before {
+                    if !had {
+                        let tgt = state.reqs.writable(&src);
+                        if let Some(cur) = tgt.get(&k).cloned() {
+                            tgt.insert(k, crate::domain::ReqInfo { always: false, ..cur });
+                        }
+                    }
+                }
             }
             let mut r = match lit_key_seq(an, state, key) {
                 Some(seq) => closed_ordered(&seq),
