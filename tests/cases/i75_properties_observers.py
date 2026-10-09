@@ -67,9 +67,9 @@ last = log.last                           #@row last: present={kind,old,new} def
 # The target event never triggers the alarm: its kind is known.
 _ = 0                                     #@row alarm: present={triggered} definite={triggered} closed
 t.record(25)
-# 25 > 22 is not evaluated: the "over" event is possible, and only it sets the detail.
-_ = 0                                     #@row alarm: present={triggered,detail} definite={triggered} closed
-last2 = log.last                          #@row last2: present={kind,old,new,temp,by} definite={kind} closed
+# 25 > 22 is decided: the "over" event fires and sets the detail; it is the last event.
+_ = 0                                     #@row alarm: present={triggered,detail} definite={triggered,detail} closed
+last2 = log.last                          #@row last2: present={kind,temp,by} definite={kind,temp,by} closed
 s = t.summary                             #@row s: present={target,n} definite={target,n} closed
 reading = t.readings[0]                   #@row reading: present={temp} definite={temp} closed
 _ = 0                                     #@row t: present={_target,_observers,readings} definite={_target,_observers,readings} closed

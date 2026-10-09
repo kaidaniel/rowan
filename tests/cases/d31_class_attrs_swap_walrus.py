@@ -28,5 +28,7 @@ a["a"]                               #@ missing a
 
 items = [{"n": 1, "tag": "x"}, {"n": 2}]
 tagged = [it for it in items if (t := it.get("tag"))]
+# The filter is decided per item (only the first has a tag), so the comprehension keeps
+# positions: tagged[0] is the tagged item.
 tagged[0]["n"]                       #@ ok n
-tagged[0]["tag"]                     #@ possibly tag
+tagged[0]["tag"]                     #@ ok tag

@@ -207,6 +207,11 @@ impl Analyzer {
     }
 
     pub fn call_method_if_defined(&mut self, v: &Value, name: &str, node: &Node, state: &mut State) -> Option<Value> {
+        self.call_method_with(v, name, Vec::new(), node, state)
+    }
+
+    /// `call_method_if_defined` with positional arguments.
+    pub fn call_method_with(&mut self, v: &Value, name: &str, args: Vec<Value>, node: &Node, state: &mut State) -> Option<Value> {
         let mut outs: Vec<Value> = Vec::new();
         for oid in v.pts.iter() {
             if self.kind(oid) == Kind::Instance {
@@ -215,7 +220,7 @@ impl Analyzer {
                         let fv = self.cls_slots.get(&(m, Ns::Attr, key_str_lit(name))).cloned().unwrap_or_default();
                         for f in fv.pts.iter() {
                             if self.kind(f) == Kind::Function {
-                                outs.push(self.call_user(f, Some(Value::obj(oid)), vec![], IndexMap::new(), vec![], vec![], state, node, None, false));
+                                outs.push(self.call_user(f, Some(Value::obj(oid)), args.clone(), IndexMap::new(), vec![], vec![], state, node, None, false));
                             }
                         }
                     }

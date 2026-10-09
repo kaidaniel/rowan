@@ -351,6 +351,19 @@ impl Analyzer {
 
     /// `xs[lo:hi]` with constant bounds on one list/tuple with known positions: a container
     /// with the selected positions.
+    /// The single known int an expression evaluates to.
+    fn int_value(&mut self, e: &'static ast::Expr, state: &mut State) -> Option<i64> {
+        let v = self.eval(e, state);
+        if !v.pts.is_empty() {
+            return None;
+        }
+        let k = v.kv.as_lit()?;
+        intern::with_key(k, |kk| match kk {
+            intern::Key::Int(i) => Some(*i),
+            _ => None,
+        })
+    }
+
     fn slice_positional(&mut self, obj: &Value, sl: &'static ast::ExprSlice, node: &'static ast::Expr, state: &mut State) -> Option<Value> {
         if sl.step.is_some() {
             return None;
@@ -374,8 +387,15 @@ impl Analyzer {
                 },
             }
         }
-        let lo = bound(&sl.lower)?;
-        let hi = bound(&sl.upper)?;
+        // a bound that is not written as a number may still hold one known value
+        let lo = match bound(&sl.lower) {
+            Some(b) => b,
+            None => Some(self.int_value(sl.lower.as_deref()?, state)?),
+        };
+        let hi = match bound(&sl.upper) {
+            Some(b) => b,
+            None => Some(self.int_value(sl.upper.as_deref()?, state)?),
+        };
         let oid = obj.single()?;
         let kind = self.kind(oid);
         if !matches!(kind, Kind::List | Kind::Tuple) {
@@ -454,6 +474,29 @@ impl Analyzer {
                             self.record_event("narrow", src);
                         }
                     }
+                    // a positional container of known literals: membership is decided
+                    if let Some(o) = b.single() {
+                        if matches!(self.kind(o), Kind::List | Kind::Tuple | Kind::Set) {
+                            if let Some(n) = self.obj(o).literal_len {
+                                let mut all_lit = true;
+                                let mut found = false;
+                                for i in 0..n {
+                                    let sv = state.slot(o, Ns::Pos, key_int(i as i64));
+                                    match sv.kv.as_lit().filter(|_| sv.pts.is_empty()) {
+                                        Some(x) if x == k => found = true,
+                                        Some(_) => {}
+                                        None => {
+                                            all_lit = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if all_lit {
+                                    return Some(if op == ast::CmpOp::In { found } else { !found });
+                                }
+                            }
+                        }
+                    }
                     let recs = self.record_objects(&b);
                     if !b.pts.is_empty() && recs.len() == b.pts.len() && recs.iter().all(|o| matches!(self.kind(*o), Kind::Dict)) {
                         let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
@@ -487,6 +530,34 @@ impl Analyzer {
                 }
                 let eq = lits == bl;
                 Some(if op == ast::CmpOp::Eq { eq } else { !eq })
+            }
+            ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE => {
+                // two single literals of one kind (numbers, or strings) are ordered here;
+                // anything else is decided per call site when it is concrete there
+                let b = self.eval(right, state);
+                let bl = crate::domain::kv_literals(&b.kv);
+                if !a.pts.is_empty() || !b.pts.is_empty() || !a.kv.is_literal() || !b.kv.is_literal() || lits.len() != 1 || bl.len() != 1 {
+                    for v in [&a, &b] {
+                        for o in v.pts.iter() {
+                            if self.kind(o) == Kind::Ph {
+                                self.record_event("truth", o);
+                            }
+                        }
+                        if let Some(ph) = v.kv.as_param() {
+                            self.record_event("truth", ph);
+                        }
+                    }
+                    return None;
+                }
+                let x = lits.iter().next().unwrap();
+                let y = bl.iter().next().unwrap();
+                let ord = literal_order(x, y)?;
+                Some(match op {
+                    ast::CmpOp::Lt => ord == std::cmp::Ordering::Less,
+                    ast::CmpOp::LtE => ord != std::cmp::Ordering::Greater,
+                    ast::CmpOp::Gt => ord == std::cmp::Ordering::Greater,
+                    _ => ord != std::cmp::Ordering::Less,
+                })
             }
             _ => None,
         }
@@ -532,6 +603,9 @@ impl Analyzer {
                     self.record_event("truth", oid);
                     return None;
                 }
+                Kind::List | Kind::Tuple | Kind::Set if self.obj(oid).literal_len.is_some() => {
+                    verdicts.push(self.obj(oid).literal_len.unwrap() > 0);
+                }
                 Kind::Dict => {
                     let row = state.row(oid, Ns::Item);
                     if !row.definite.is_empty() {
@@ -560,6 +634,14 @@ impl Analyzer {
 
     pub fn binop(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Value {
         let both = a.pts.union(&b.pts);
+        // arithmetic on a parameter (or a field of one): the result is decided per call site
+        if matches!(op, ast::Operator::Add | ast::Operator::Sub | ast::Operator::Mult | ast::Operator::FloorDiv | ast::Operator::Div | ast::Operator::Mod) {
+            for v in [a, b] {
+                if let Some(ph) = v.kv.as_param() {
+                    self.record_event("narrow", ph);
+                }
+            }
+        }
         if op == ast::Operator::BitOr {
             let recs: Vec<u32> = both.iter().filter(|o| self.kind(*o) == Kind::Dict).collect();
             if !recs.is_empty() {
@@ -617,11 +699,31 @@ impl Analyzer {
                 }
             }
         }
+        if let (Some(x), Some(y)) = (a.kv.as_lit(), b.kv.as_lit()) {
+            let nonzero = intern::with_key(y, |k| !matches!(k, intern::Key::Int(0)));
+            let r = match op {
+                ast::Operator::Mult => num_binop(x, y, |p, q| p.wrapping_mul(q), |p, q| p * q),
+                ast::Operator::FloorDiv if nonzero => num_binop(x, y, |p, q| p.div_euclid(q), |p, q| (p / q).floor()),
+                ast::Operator::Mod if nonzero && !intern::key_is_str(x) => num_binop(x, y, |p, q| p.rem_euclid(q), |p, q| p - (p / q).floor() * q),
+                ast::Operator::Div if nonzero => num_binop(x, y, |p, q| p / q, |p, q| p / q).map(|r| intern::with_key(r, |k| match k {
+                    intern::Key::Int(i) => key_float(*i as f64),
+                    _ => r,
+                })),
+                _ => None,
+            };
+            if let Some(r) = r {
+                return Value::lit(r);
+            }
+        }
         if op == ast::Operator::Mod {
             if let Some(x) = a.kv.as_lit() {
                 if let Some(sx) = intern::key_as_str(x) {
                     // "%s ... %d" with the arguments: literal segments around at most one
-                    // non-literal argument (a parameter: decided per call site)
+                    // non-literal argument (a parameter: decided per call site); width and
+                    // precision specs are applied when every argument is a literal
+                    if let Some(r) = format_percent_literal(&sx, b, state, self) {
+                        return Value::lit(key_str_lit(&r));
+                    }
                     let sx2 = sx.replace("%d", "%s");
                     let n = sx2.matches("%s").count();
                     if n >= 1 && !sx2.replace("%s", "").contains('%') {
@@ -777,18 +879,19 @@ impl Analyzer {
         let understood = g.ifs.iter().all(|c| cond_is_exclusion(c, &g.target));
         if let Some(items) = &it.items {
             if items.len() <= UNROLL_MAX {
-                if !understood {
-                    self.cond_depth += 1;
-                }
+                // known items: each is its own straight-line iteration; a filter decided
+                // for the item keeps it straight-line (positions survive), an undecided one
+                // makes the iteration conditional
+                self.comp_known.push(true);
                 for (idx, item) in items.iter().enumerate() {
                     let mut s2 = state.copy();
                     self.frame_mut().overlays.push(IndexMap::new());
                     self.frame_mut().unroll.push(idx);
-                    self.comp_run_one(g, gens, i, &Elem::One(item.clone()), &mut s2, body);
+                    let decided = self.comp_run_one(g, gens, i, &Elem::One(item.clone()), &mut s2, body, understood);
                     self.frame_mut().unroll.pop();
                     self.frame_mut().overlays.pop();
                     if s2.reachable {
-                        if understood {
+                        if understood || decided {
                             state.replace_with(s2);
                         } else {
                             let j = state.join(&mut s2);
@@ -796,12 +899,11 @@ impl Analyzer {
                         }
                     }
                 }
-                if !understood {
-                    self.cond_depth -= 1;
-                }
+                self.comp_known.pop();
                 return;
             }
         }
+        self.comp_known.push(false);
         let depth = self.cond_depth;
         let mut elem = it.elem.clone();
         if it.exhaustive && understood {
@@ -820,14 +922,9 @@ impl Analyzer {
         }
         let mut s2 = state.copy();
         self.frame_mut().overlays.push(IndexMap::new());
-        if !understood {
-            self.cond_depth += 1;
-        }
-        self.comp_run_one(g, gens, i, &elem, &mut s2, body);
-        if !understood {
-            self.cond_depth -= 1;
-        }
+        self.comp_run_one(g, gens, i, &elem, &mut s2, body, understood);
         self.frame_mut().overlays.pop();
+        self.comp_known.pop();
         if it.exhaustive && understood && s2.reachable {
             state.replace_with(s2);
         } else {
@@ -838,16 +935,37 @@ impl Analyzer {
         }
     }
 
-    fn comp_run_one(&mut self, g: &'static ast::Comprehension, gens: &'static [ast::Comprehension], i: usize, it: &Elem, st: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State)) {
+    /// Runs one iteration of generator `i`; returns whether every filter was decided (then
+    /// the iteration was straight-line code).
+    fn comp_run_one(&mut self, g: &'static ast::Comprehension, gens: &'static [ast::Comprehension], i: usize, it: &Elem, st: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool) -> bool {
         self.comp_bind(&g.target, it, st);
+        let mut decided = true;
         for cond in &g.ifs {
-            self.eval(cond, st);
-            self.narrow(cond, true, st);
-            if !st.reachable {
-                return;
+            let cv = self.eval(cond, st);
+            match self.truthiness(&cv, st) {
+                Some(true) => {}
+                Some(false) => {
+                    st.reachable = false;
+                    return decided;
+                }
+                None => {
+                    decided = false;
+                    self.narrow(cond, true, st);
+                    if !st.reachable {
+                        return decided;
+                    }
+                }
             }
         }
+        let conditional = !decided && !understood;
+        if conditional {
+            self.cond_depth += 1;
+        }
         self.comp_gen(gens, i + 1, st, body);
+        if conditional {
+            self.cond_depth -= 1;
+        }
+        decided
     }
 
     fn comp_bind(&mut self, target: &'static ast::Expr, it: &Elem, state: &mut State) {
@@ -881,19 +999,54 @@ impl Analyzer {
         let nd = frontend::node(node);
         let oid = self.alloc_at(kind, &nd, state, &format!("{}comp@L{}", kind.name(), nd.line), Payload::None, None, Ns::Item, None, None);
         self.obj_mut(oid).literal_len = None;
+        state.drop_obj_ns(oid, Ns::Pos);
+        let base_depth = self.cond_depth;
+        let strong = self.obj(oid).single && matches!(kind, Kind::List | Kind::Tuple);
+        // positions: every item known and every filter decided (straight-line iterations)
+        let mut n: usize = 0;
+        let mut positional = strong;
         let mut body = |an: &mut Analyzer, st: &mut State| {
             let v = an.eval(elt, st);
+            if positional && an.comp_known.iter().all(|k| *k) && an.cond_depth == base_depth && n < UNROLL_MAX {
+                st.set_slot(oid, Ns::Pos, key_int(n as i64), v.clone(), true);
+                n += 1;
+            } else {
+                positional = false;
+            }
             st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), DATA), false);
             let cur = st.elems.get(&oid).unwrap_or_else(|| v.kv.clone());
             st.elems.insert(oid, kv_join(&cur, &v.kv));
-            let _ = an;
         };
         if state.elems.get(&oid).is_none() {
             state.elems.insert(oid, BOT);
         }
+        let mark = self.comp_known.len();
         self.comp(gens, state, &mut body);
+        self.comp_known.truncate(mark);
+        if positional {
+            self.obj_mut(oid).literal_len = Some(n);
+        } else {
+            self.obj_mut(oid).literal_len = None;
+            state.drop_obj_ns(oid, Ns::Pos);
+        }
         Value::obj(oid)
     }
+}
+
+/// Ordering of two literals of one kind: numbers (ints, floats, bools) or strings.
+pub fn literal_order(x: KeyId, y: KeyId) -> Option<std::cmp::Ordering> {
+    let nx = intern::with_key(x, num_of);
+    let ny = intern::with_key(y, num_of);
+    if let (Some(a), Some(b)) = (nx, ny) {
+        return match (a, b) {
+            (Num::I(p), Num::I(q)) => Some(p.cmp(&q)),
+            (p, q) => p.f().partial_cmp(&q.f()),
+        };
+    }
+    if let (Some(a), Some(b)) = (intern::key_as_str(x), intern::key_as_str(y)) {
+        return Some(a.cmp(&b));
+    }
+    None
 }
 
 fn num_binop(x: KeyId, y: KeyId, fi: impl Fn(i64, i64) -> i64, ff: impl Fn(f64, f64) -> f64) -> Option<KeyId> {
@@ -957,4 +1110,94 @@ pub fn cond_is_exclusion(cond: &ast::Expr, target: &ast::Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// `"%03d-%s|%.2f" % args` with literal arguments only: the formatted string.
+fn format_percent_literal(fmt: &str, b: &Value, state: &State, an: &Analyzer) -> Option<String> {
+    // collect the conversion specs
+    let bytes: Vec<char> = fmt.chars().collect();
+    let mut specs: Vec<(usize, usize, String, char)> = Vec::new(); // (start, end, flags+width+prec, conv)
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == '%' {
+            let start = i;
+            i += 1;
+            if i < bytes.len() && bytes[i] == '%' {
+                i += 1;
+                continue;
+            }
+            let mut spec = String::new();
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || matches!(bytes[i], '-' | '+' | ' ' | '0' | '.' | '#')) {
+                spec.push(bytes[i]);
+                i += 1;
+            }
+            if i >= bytes.len() {
+                return None;
+            }
+            let conv = bytes[i];
+            if !matches!(conv, 'd' | 'i' | 's' | 'f' | 'r' | 'x') {
+                return None;
+            }
+            specs.push((start, i + 1, spec, conv));
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    if specs.is_empty() || specs.iter().all(|s| s.2.is_empty()) {
+        return None; // the plain path handles these (it also records events)
+    }
+    let n = specs.len();
+    let args: Vec<KeyId> = if n == 1 {
+        vec![b.kv.as_lit().filter(|_| b.pts.is_empty())?]
+    } else {
+        let t = b.single()?;
+        if !matches!(an.kind(t), Kind::Tuple) || an.obj(t).literal_len != Some(n) {
+            return None;
+        }
+        let mut v = Vec::new();
+        for i in 0..n {
+            let s = state.slot(t, Ns::Pos, key_int(i as i64));
+            v.push(s.kv.as_lit().filter(|_| s.pts.is_empty())?);
+        }
+        v
+    };
+    let mut out = String::new();
+    let mut pos = 0;
+    for (k, (start, end, spec, conv)) in specs.iter().enumerate() {
+        out.push_str(&bytes[pos..*start].iter().collect::<String>().replace("%%", "%"));
+        let zero = spec.starts_with('0');
+        let left = spec.starts_with('-');
+        let (wpart, prec) = match spec.split_once('.') {
+            Some((w, p)) => (w.trim_start_matches(['-', '0', '+', ' ', '#']).to_string(), p.parse::<usize>().ok()),
+            None => (spec.trim_start_matches(['-', '0', '+', ' ', '#']).to_string(), None),
+        };
+        let width: usize = wpart.parse().unwrap_or(0);
+        let text = intern::with_key(args[k], |kk| match (conv, kk) {
+            ('d' | 'i', intern::Key::Int(v)) => Some(v.to_string()),
+            ('d' | 'i', intern::Key::Bool(v)) => Some((*v as i64).to_string()),
+            ('d' | 'i', intern::Key::Float(v)) => Some((f64::from_bits(*v).trunc() as i64).to_string()),
+            ('f', intern::Key::Int(v)) => Some(format!("{:.*}", prec.unwrap_or(6), *v as f64)),
+            ('f', intern::Key::Float(v)) => Some(format!("{:.*}", prec.unwrap_or(6), f64::from_bits(*v))),
+            ('x', intern::Key::Int(v)) => Some(format!("{:x}", v)),
+            ('s' | 'r', _) => Some(intern::key_py_str(args[k])),
+            _ => None,
+        })?;
+        let padded = if text.chars().count() >= width {
+            text
+        } else if left {
+            format!("{:<w$}", text, w = width)
+        } else if zero && matches!(conv, 'd' | 'i' | 'f' | 'x') {
+            let neg = text.starts_with('-');
+            let body = text.trim_start_matches('-');
+            let fill = width - text.chars().count();
+            format!("{}{}{}", if neg { "-" } else { "" }, "0".repeat(fill), body)
+        } else {
+            format!("{:>w$}", text, w = width)
+        };
+        out.push_str(&padded);
+        pos = *end;
+    }
+    out.push_str(&bytes[pos..].iter().collect::<String>().replace("%%", "%"));
+    Some(out)
 }

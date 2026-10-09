@@ -68,4 +68,5 @@ copy_rows[0]["id"]                       #@ ok id
 copy_rows[0]["zz"]                       #@ missing zz
 s = sorted(rows, key=lambda rr: rr["id"])  #@ ok id
 s[0]["id"]                               #@ ok id
-s[0]["name"]                             #@ possibly name
+# The sort keys are known (1, 2): the first row sorted is the one with the name.
+s[0]["name"]                             #@ ok name

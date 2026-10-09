@@ -94,7 +94,7 @@ impl Analyzer {
                     }
                 }
             }
-            if kind == Kind::Dict && ns == Ns::Item && self.obj(oid).label.starts_with("defaultdict@") {
+            if kind == Kind::Dict && ns == Ns::Item && (self.obj(oid).label.starts_with("defaultdict@") || self.obj(oid).label.starts_with("Counter@")) {
                 // `dd[k]` inserts the factory's value when `k` is absent (a fresh one per key)
                 let row = state.row(oid, ns);
                 if key.kv.is_literal() {
@@ -175,6 +175,13 @@ impl Analyzer {
                     }
                     let ll = self.obj(oid).literal_len;
                     let idx = key.kv.as_lit().and_then(|k| intern::with_key(k, |kk| if let intern::Key::Int(i) = kk { Some(*i) } else { None }));
+                    // positions below a known prefix stay valid after appends of unknown count
+                    if let (Some(i), None, Some(p)) = (idx, ll, self.obj(oid).known_prefix) {
+                        if 0 <= i && (i as usize) < p {
+                            acc = acc.join(&state.slot(oid, Ns::Pos, intern::key_int(i)));
+                            continue;
+                        }
+                    }
                     match (idx, ll) {
                         (Some(i), Some(n)) => {
                             let n = n as i64;
@@ -819,14 +826,22 @@ impl Analyzer {
         } else {
             None
         };
-        if model.is_some() && super::disabled("usermodel") {
-            return model.unwrap();
+        if let Some(m) = &model {
+            // a dict / list method name on a class-less placeholder: the model, with a dispatch
+            // event so a call site whose receiver turns out to be a user instance tabulates
+            // (user classes defining the same name are not run here: that spread `Config.get`
+            // over every `row.get` in a multi-module program and made it recurse)
+            if !super::disabled("usermodel") && self.user_classes.iter().any(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, nk))) {
+                self.record_event("dispatch", oid);
+            }
+            return m.clone();
         }
         if model.is_none() && is_scalar_method(name) && !has_cls {
             let q = if STR_METHOD_NAMES.contains(&name) { format!("str.{}", name) } else { format!("unknown.{}", name) };
             return self.method_value(&q, &Value::kv_only(KeyVal::Param(oid)));
         }
-        if !has_cls {
+        // (a declared builtin container is that container: no user-class candidates)
+        if !has_cls && builtin_cls.is_none() {
             let cands: Vec<u32> = self.user_classes.iter().copied().filter(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, nk))).collect();
             if !cands.is_empty() {
                 let mut outs: Vec<Value> = Vec::new();
@@ -1016,14 +1031,18 @@ impl Analyzer {
     /// (`x: Cls`, `self.x = Cls(…)`) or a builtin container class (`self.x = {}`,
     /// `self.x = defaultdict(list)`, `x: dict`), which selects a model family.
     fn field_class_of_expr(&mut self, expr: &'static ast::Expr, module: u32, state: &State) -> Option<u32> {
+        // literal containers first (they are not annotations)
+        match expr {
+            ast::Expr::List(_) | ast::Expr::ListComp(_) => return Some(self.builtin_class_obj("list")),
+            ast::Expr::Dict(_) | ast::Expr::DictComp(_) => return Some(self.builtin_class_obj("dict")),
+            ast::Expr::Set(_) | ast::Expr::SetComp(_) => return Some(self.builtin_class_obj("set")),
+            _ => {}
+        }
         let mut e = Analyzer::strip_annotation(expr)?;
         if let ast::Expr::Call(c) = e {
             e = &c.func;
         }
         let v = match e {
-            ast::Expr::List(_) | ast::Expr::ListComp(_) => return Some(self.builtin_class_obj("list")),
-            ast::Expr::Dict(_) | ast::Expr::DictComp(_) => return Some(self.builtin_class_obj("dict")),
-            ast::Expr::Set(_) | ast::Expr::SetComp(_) => return Some(self.builtin_class_obj("set")),
             ast::Expr::Name(n) => state.slot(module, Ns::Attr, key_str_lit(n.id.as_str())),
             ast::Expr::Attribute(a) => self.static_attr_value(a, module, state),
             _ => return None,

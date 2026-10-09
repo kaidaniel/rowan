@@ -77,8 +77,8 @@ pub fn limit(name: &str, default: usize) -> usize {
 }
 
 pub fn debug_enabled() -> bool {
-    match std::env::var("ROWAN_DEBUG") {
-        Ok(v) => !(v.is_empty() || v == "0"),
+    match Ok::<u8, ()>(debug_level()) {
+        Ok(v) => v > 0,
         Err(_) => false,
     }
 }
@@ -423,6 +423,8 @@ pub struct Obj {
     pub payload: Payload,
     /// containers built from a literal: positional slots are valid
     pub literal_len: Option<usize>,
+    /// after appends of unknown count: positions below this are still valid
+    pub known_prefix: Option<usize>,
     /// summary object standing for "the current element" of a loop
     pub iter_elem: bool,
     /// record this object is a view of (virtual row -> frame)
@@ -521,6 +523,8 @@ pub struct Analyzer {
     pub sum_stack: Vec<ObjId>,
     /// allocation context of each summary on `sum_stack` (per argument signature)
     pub sum_ctxs: Vec<String>,
+    /// per comprehension generator level: whether its items are known (unrolled)
+    pub comp_known: Vec<bool>,
     pub sum_reqs: Vec<IndexMap<crate::summary::SymKey, SymReq>>,
     pub sum_events: Vec<IndexMap<(&'static str, ObjId), Event>>,
     pub sum_hit: FxHashSet<ObjId>,
@@ -601,14 +605,25 @@ pub struct Analyzer {
     pub opts: Options,
 }
 
+/// `ROWAN_DEBUG` as a number (0 when unset), read once.
+pub fn debug_level() -> u8 {
+    static LEVEL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *LEVEL.get_or_init(|| match std::env::var("ROWAN_DEBUG") {
+        Ok(v) if v == "2" => 2,
+        Ok(v) if !v.is_empty() && v != "0" => 1,
+        _ => 0,
+    })
+}
+
 pub fn site_string(n: &Node) -> String {
-    format!("L{}:{}-{}", n.line, n.col, n.end_col)
+    format!("{}L{}:{}-{}", frontend::site_prefix(n.module), n.line, n.col, n.end_col)
 }
 
 impl Analyzer {
     pub fn new(source: String, filename: &str, search_paths: Vec<String>, analyse_entry_points: bool, follow_imports: bool, use_summaries: Option<bool>) -> Result<Analyzer, String> {
         let use_summaries = use_summaries.unwrap_or_else(|| std::env::var("ROWAN_SUMMARIES").map(|v| v != "0").unwrap_or(true));
         let (idx, tree) = frontend::parse("__main__", Some(filename), source)?;
+        frontend::set_main(idx);
         let mut an = Analyzer {
             filename: filename.to_string(),
             use_summaries,
@@ -621,6 +636,7 @@ impl Analyzer {
             cell_classes: FxHashMap::default(),
             sum_stack: Vec::new(),
             sum_ctxs: Vec::new(),
+            comp_known: Vec::new(),
             sum_reqs: Vec::new(),
             sum_events: Vec::new(),
             sum_hit: FxHashSet::default(),
@@ -641,6 +657,7 @@ impl Analyzer {
                 label: "<none>".into(),
                 payload: Payload::None,
                 literal_len: None,
+            known_prefix: None,
                 iter_elem: false,
                 derived_from: None,
                 copied_from: None,
@@ -833,6 +850,7 @@ impl Analyzer {
             label: label.to_string(),
             payload,
             literal_len: None,
+            known_prefix: None,
             iter_elem: false,
             derived_from: None,
             copied_from: None,

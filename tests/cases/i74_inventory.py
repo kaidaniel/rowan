@@ -53,8 +53,8 @@ w.restock("a", 5)
 _ = 0                                     #@row a: present={sku,qty,price,reserved,last_restock} definite={sku,qty,price,reserved,last_restock} closed
 _ = 0                                     #@row b: present={sku,qty,price,reserved} definite={sku,qty,price,reserved} closed
 ok = a.reserve(3)
-# The comparison is open: the shortfall attribute exists on one path only.
-_ = 0                                     #@row a: present={sku,qty,price,reserved,last_restock,shortfall} definite={sku,qty,price,reserved,last_restock} closed
+# 3 > 15 - 0 is decided (comparisons between known numbers are evaluated): no shortfall.
+_ = 0                                     #@row a: present={sku,qty,price,reserved,last_restock} definite={sku,qty,price,reserved,last_restock} closed
 rep = w.report()                          #@row rep: present={value,low,count} definite={value,low,count} closed
 entry = w.log[0]                          #@row entry: present={op,sku,n} definite={op,sku,n} closed
 low0 = rep["low"][0]                      #@row low0: present={sku,qty} definite={sku,qty} closed

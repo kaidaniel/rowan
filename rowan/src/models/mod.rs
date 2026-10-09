@@ -11,7 +11,7 @@ use crate::domain::{join_values, kv_join, FnKind, KeyVal, Ns, RenameFn, Row, Row
 use crate::interp::access::append_slot_key;
 use crate::interp::funcs::Elem;
 use crate::interp::{Analyzer, Call, Payload, ViewKind};
-use crate::intern::{self, key_str_lit, s, KeySet, STAR};
+use crate::intern::{KeyId, self, key_str_lit, s, KeySet, STAR};
 use crate::state::{Kind, State};
 
 pub type Model = fn(&mut Analyzer, &mut State, &Call) -> Value;
@@ -55,8 +55,8 @@ impl Registry {
         r(&["builtins.str"], m_str);
         r(
             &[
-                "builtins.int", "builtins.float", "builtins.len", "builtins.print", "builtins.repr", 
-                "builtins.type", "builtins.id", "builtins.hash", "builtins.abs", "builtins.round",  "builtins.sum",
+                "builtins.int", "builtins.float", "builtins.print", "builtins.repr", 
+                "builtins.type", "builtins.id", "builtins.hash", "builtins.abs", "builtins.round",
                 "builtins.any", "builtins.all", "builtins.format", "builtins.input", "builtins.callable", "builtins.issubclass", "builtins.hex",
                 "builtins.chr", "builtins.ord", "builtins.range", "builtins.open", "builtins.hasattr", "builtins.divmod", "builtins.pow",
                 "builtins.bytes", "builtins.object",
@@ -65,6 +65,8 @@ impl Registry {
         );
         r(&["builtins.super"], m_super);
         r(&["builtins.bool"], m_bool);
+        r(&["builtins.len"], m_len);
+        r(&["builtins.sum"], m_sum);
         r(
             &["builtins.str.upper", "builtins.str.lower", "builtins.str.strip", "builtins.str.title", "builtins.str.capitalize", "builtins.str.casefold", "builtins.str.lstrip", "builtins.str.rstrip"],
             m_str_fn,
@@ -293,14 +295,23 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     let reversed = c.qual.as_str() == "builtins.reversed";
                     let sorted = c.qual.as_str() == "builtins.sorted";
                     if an.obj(oid).single && items.len() <= 64 && kind != Kind::Set {
-                        // the count is known even when the order is not (sorted: every
-                        // position may hold any item)
                         an.obj_mut(oid).literal_len = Some(items.len());
                         let n = items.len();
+                        // sorted: when every sort key is a known literal (or a tuple of
+                        // them) the order is known (stable sort); otherwise the count is
+                        // known and every position may hold any item
+                        let order: Option<Vec<usize>> = if sorted { literal_sort_order(an, st, c, items) } else { None };
                         let all = join_values(items.clone());
                         for (i, item) in items.iter().enumerate() {
                             let pos = if reversed { n - 1 - i } else { i };
-                            let v = if sorted { all.clone() } else { item.clone() };
+                            let v = if sorted {
+                                match &order {
+                                    Some(ord) => items[ord[i]].clone(),
+                                    None => all.clone(),
+                                }
+                            } else {
+                                item.clone()
+                            };
                             st.set_slot(oid, Ns::Pos, intern::key_int(pos as i64), v, true);
                         }
                     }
@@ -561,6 +572,30 @@ fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "upper" | "lower" | "strip" | "title" => Value::kv_only(an.rename_kv(&kv, &RenameFn::new(FnKind::from_name(name).unwrap()))),
         "lstrip" | "rstrip" => Value::kv_only(an.rename_kv(&kv, &RenameFn::new(FnKind::Strip))),
         "capitalize" | "casefold" | "swapcase" => Value::data("str"),
+        "partition" | "rpartition" if c.args.len() == 1 && kv.as_lit().and_then(intern::key_as_str).is_some() && c.args[0].kv.as_lit().and_then(intern::key_as_str).is_some() => {
+            let s = intern::key_as_str(kv.as_lit().unwrap()).unwrap();
+            let sep = intern::key_as_str(c.args[0].kv.as_lit().unwrap()).unwrap();
+            let parts: [String; 3] = if name == "partition" {
+                match s.split_once(&*sep) {
+                    Some((a, b)) => [a.to_string(), sep.to_string(), b.to_string()],
+                    None => [s.to_string(), String::new(), String::new()],
+                }
+            } else {
+                match s.rsplit_once(&*sep) {
+                    Some((a, b)) => [a.to_string(), sep.to_string(), b.to_string()],
+                    None => [String::new(), String::new(), s.to_string()],
+                }
+            };
+            let oid = an.alloc_simple(Kind::Tuple, &c.node, st, &format!("tuple@L{}", c.line));
+            let vals: Vec<Value> = parts.iter().map(|x| Value::lit(key_str_lit(x))).collect();
+            for (i, v) in vals.iter().enumerate() {
+                st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
+            }
+            st.set_slot(oid, Ns::Elem, STAR, Value::new(), true);
+            st.elems.insert(oid, join_values(vals.clone()).kv);
+            an.obj_mut(oid).literal_len = Some(3);
+            Value::obj(oid)
+        }
         "replace" if c.args.len() >= 2 && c.args[0].kv.as_lit().is_some() && c.args[1].kv.as_lit().is_some() => {
             let arg = intern::key_tuple(vec![c.args[0].kv.as_lit().unwrap(), c.args[1].kv.as_lit().unwrap()]);
             Value::kv_only(an.rename_kv(&kv, &RenameFn::with_arg(FnKind::Replace, arg)))
@@ -873,12 +908,35 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         if !matches!(an.kind(oid), Kind::List | Kind::Set | Kind::Tuple | Kind::Ph) {
             continue;
         }
+        let mut ext_items: Option<Vec<Value>> = None;
         let elem = if (name == "extend" || name == "update") && !c.args.is_empty() {
             let it = an.iterate(&c.args[0], &c.node, st);
+            if name == "extend" {
+                ext_items = it.items.clone();
+            }
             it.elem.one_or_empty()
         } else {
             c.args.last().cloned().unwrap_or_default()
         };
+        // extend by known items in straight-line code: each item gets its position
+        if let (Some(items), Kind::List) = (&ext_items, an.kind(oid)) {
+            let ll = an.obj(oid).literal_len;
+            if let Some(n) = ll {
+                if an.obj(oid).single && an.frame().loop_depth == 0 && an.cond_depth == 0 && n + items.len() <= 16 {
+                    for (i, item) in items.iter().enumerate() {
+                        st.set_slot(oid, Ns::Pos, intern::key_int((n + i) as i64), item.clone(), true);
+                        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(item.pts.clone(), DATA), false);
+                        let nk = match st.elems.get(&oid) {
+                            Some(cur) => kv_join(&cur, &item.kv),
+                            None => item.kv.clone(),
+                        };
+                        st.elems.insert(oid, nk);
+                    }
+                    an.obj_mut(oid).literal_len = Some(n + items.len());
+                    continue;
+                }
+            }
+        }
         st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(elem.pts.clone(), DATA), false);
         let nk = match st.elems.get(&oid) {
             Some(cur) => kv_join(&cur, &elem.kv),
@@ -900,7 +958,12 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 an.obj_mut(oid).literal_len = Some(n + 1);
                 continue;
             }
-            st.drop_obj_ns(oid, Ns::Pos);
+            // appends of unknown count: the positions so far stay valid
+            if name == "append" || name == "extend" {
+                an.obj_mut(oid).known_prefix = Some(n);
+            } else {
+                st.drop_obj_ns(oid, Ns::Pos);
+            }
         }
         an.obj_mut(oid).literal_len = None;
     }
@@ -929,9 +992,11 @@ fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let recv = c.recv.clone().unwrap_or_default();
     match name {
         "copy" => join_values(recv.pts.iter().map(|o| Value::obj(an.copy_object(o, &c.node, st, false, &mut IndexMap::new()))).collect::<Vec<_>>()),
-        "remove" | "discard" | "clear" | "sort" | "reverse" => {
+        "remove" | "discard" | "clear" | "sort" | "reverse" | "insert" => {
             for oid in recv.pts.iter() {
                 an.obj_mut(oid).literal_len = None;
+                an.obj_mut(oid).known_prefix = None;
+                st.drop_obj_ns(oid, Ns::Pos);
             }
             an.none_v.clone()
         }
@@ -1042,8 +1107,13 @@ fn m_defaultdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let src_arg: Option<Value>;
     if name == "defaultdict" || name == "Counter" {
         if name == "Counter" {
-            let r = st.row(oid, Ns::Item).data_store(Source::new(&format!("{}@L{}", name, c.line), SourceKind::Data));
-            st.set_row(oid, Ns::Item, r);
+            if c.args.is_empty() {
+                // an empty Counter is a closed dict whose missing keys read as 0
+                st.set_slot(oid, Ns::Item, STAR, Value::lit(intern::key_int(0)), false);
+            } else {
+                let r = st.row(oid, Ns::Item).data_store(Source::new(&format!("{}@L{}", name, c.line), SourceKind::Data));
+                st.set_row(oid, Ns::Item, r);
+            }
         }
         if name == "defaultdict" && !c.args.is_empty() {
             if !c.args[0].pts.is_empty() && !crate::interp::disabled("ddfactory") {
@@ -1234,4 +1304,136 @@ fn m_bool(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         Some(b) => Value::lit(intern::key(intern::Key::Bool(b))),
         None => Value::data("bool"),
     }
+}
+
+/// `len(x)`: the count when it is known (a literal string, a container with a known
+/// length, a closed record whose keys are all definite), else unknown data.
+fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let Some(v) = c.args.first() else { return Value::data("len") };
+    if v.pts.is_empty() {
+        if let Some(k) = v.kv.as_lit() {
+            if let Some(s) = intern::key_as_str(k) {
+                return Value::lit(intern::key_int(s.chars().count() as i64));
+            }
+        }
+        return Value::data("len");
+    }
+    if let Some(o) = v.single() {
+        if let Some(n) = an.obj(o).literal_len {
+            return Value::lit(intern::key_int(n as i64));
+        }
+        if matches!(an.kind(o), Kind::Dict) {
+            let row = st.row(o, Ns::Item);
+            if row.closed() && row.present == row.definite && !row.symbolic() {
+                return Value::lit(intern::key_int(row.definite.len() as i64));
+            }
+        }
+    }
+    Value::data("len")
+}
+
+/// `sum(xs)`: the literal sum when every item is a known number, else unknown data.
+fn m_sum(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let Some(v) = c.args.first() else { return Value::data("sum") };
+    let it = an.iterate(v, &c.node, st);
+    if let Some(items) = it.items {
+        let mut acc_i: i64 = 0;
+        let mut acc_f: f64 = 0.0;
+        let mut float = false;
+        for item in &items {
+            let Some(k) = item.kv.as_lit().filter(|_| item.pts.is_empty()) else { return Value::data("sum") };
+            match intern::with_key(k, |kk| match kk {
+                intern::Key::Int(i) => Some((*i as f64, false, *i)),
+                intern::Key::Bool(b) => Some((if *b { 1.0 } else { 0.0 }, false, *b as i64)),
+                intern::Key::Float(b) => Some((f64::from_bits(*b), true, 0)),
+                _ => None,
+            }) {
+                Some((f, is_f, i)) => {
+                    acc_f += f;
+                    if is_f {
+                        float = true;
+                    } else {
+                        acc_i = acc_i.wrapping_add(i);
+                    }
+                }
+                None => return Value::data("sum"),
+            }
+        }
+        if let Some(start) = c.args.get(1) {
+            match start.kv.as_lit().filter(|_| start.pts.is_empty()).and_then(|k| intern::with_key(k, |kk| match kk {
+                intern::Key::Int(i) => Some((*i as f64, false, *i)),
+                intern::Key::Float(b) => Some((f64::from_bits(*b), true, 0)),
+                _ => None,
+            })) {
+                Some((f, is_f, i)) => {
+                    acc_f += f;
+                    if is_f {
+                        float = true;
+                    } else {
+                        acc_i = acc_i.wrapping_add(i);
+                    }
+                }
+                None => return Value::data("sum"),
+            }
+        }
+        return if float { Value::lit(intern::key_float(acc_f)) } else { Value::lit(intern::key_int(acc_i)) };
+    }
+    Value::data("sum")
+}
+
+/// The sort key of one item as literals: the item itself, or `key(item)`, when it is a
+/// single literal or a tuple of single literals.
+fn literal_sort_key(an: &mut Analyzer, st: &mut State, c: &Call, item: &Value) -> Option<Vec<KeyId>> {
+    let v = match c.kw("key") {
+        Some(kf) if !kf.pts.is_empty() => an.call_value(&kf, &c.node, None, st, Some(vec![item.clone()])),
+        Some(_) => return None,
+        None => item.clone(),
+    };
+    if v.pts.is_empty() {
+        return v.kv.as_lit().map(|k| vec![k]);
+    }
+    let o = v.single()?;
+    if an.kind(o) != Kind::Tuple {
+        return None;
+    }
+    let n = an.obj(o).literal_len?;
+    let mut ks = Vec::new();
+    for i in 0..n {
+        let s = st.slot(o, Ns::Pos, intern::key_int(i as i64));
+        if !s.pts.is_empty() {
+            return None;
+        }
+        ks.push(s.kv.as_lit()?);
+    }
+    Some(ks)
+}
+
+/// The permutation `sorted` applies when every key is known (stable), else None.
+fn literal_sort_order(an: &mut Analyzer, st: &mut State, c: &Call, items: &[Value]) -> Option<Vec<usize>> {
+    let mut keys: Vec<Vec<KeyId>> = Vec::new();
+    for item in items {
+        keys.push(literal_sort_key(an, st, c, item)?);
+    }
+    let reverse = c.kw("reverse").map(|r| matches!(r.kv.as_lit().map(|k| intern::with_key(k, |kk| matches!(kk, intern::Key::Bool(true)))), Some(true))).unwrap_or(false);
+    let cmp = |a: &Vec<KeyId>, b: &Vec<KeyId>| -> Option<std::cmp::Ordering> {
+        for (x, y) in a.iter().zip(b.iter()) {
+            match crate::interp::exprs::literal_order(*x, *y)? {
+                std::cmp::Ordering::Equal => continue,
+                o => return Some(o),
+            }
+        }
+        Some(a.len().cmp(&b.len()))
+    };
+    // every pair must be comparable
+    for i in 0..keys.len() {
+        for j in (i + 1)..keys.len() {
+            cmp(&keys[i], &keys[j])?;
+        }
+    }
+    let mut idx: Vec<usize> = (0..items.len()).collect();
+    idx.sort_by(|&a, &b| {
+        let o = cmp(&keys[a], &keys[b]).unwrap_or(std::cmp::Ordering::Equal);
+        if reverse { o.reverse() } else { o }
+    });
+    Some(idx)
 }

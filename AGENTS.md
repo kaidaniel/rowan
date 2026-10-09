@@ -28,7 +28,7 @@ semantic fixes that the prototype did not have, so the prototype is history, not
 | `rowan/src/report.rs` | dedupe, schema table, text, JSON lines, `--golden` and `--facts` documents. |
 | `rowan/src/main.rs` | CLI; runs the analysis on a thread with a 1 GiB stack. |
 | `rowan/py/` | PyO3 binding (`rowan.analyse(source, …)` / `analyse_file(path)` → `--golden` JSON string). Builds with maturin; see known problems. |
-| `tests/run_golden.py`, `tests/cases/` | golden harness, 93 cases: `a01`–`e36` from the original design (Appendix A and the prototype era), `f37` (recency), `g40`–`g65` (AST node coverage, closures taking closures returning lambdas, reassignment, control flow, inputs indexing results of input functions, classes, string keys, containers, guards, modules, generators, recursion, kwargs forwarding, configs, pandas, annotations, mutation through layers, comprehensions, dispatch, a CLI script, dict methods, a larger mixed program), `h66`–`h72` (larger programs passing objects around: an event bus with closures / bound methods / partials in per-topic lists, a fluent builder and a stage pipeline, a plugin registry with a class decorator and a recursive visitor, a dependency-injection container resolving services in constructors, an order state machine with a nested transition table, a dataclass graph with a stack walk and a defaultdict grouping, a middleware chain of closures over closures), `i73`–`i92` (layered config, an inventory of objects, properties with setters and observers, a tree built from a flat list, command objects with undo, a record pipeline with map / filter / sorted / setdefault, a memoising decorator, context managers, generator chains, exception paths, an inheritance chain with a mixin, NamedTuple / TypedDict, computed string keys, kwargs forwarding, a task queue, a JSON round trip, ranking with enumerate / zip, nested path helpers, feature flags, accumulators), `j93` (one 800-line order-management program: layered settings, dataclass entities, repositories keyed by functions, an event bus, a rule-chain pricer, a guarded state machine, a middleware router, reporting with plugins, a recursive org tree, three scenario runs; all 86 checks pass), `k94_pkg` (three flat modules importing each other), `l95_pkg` (a real package with `__init__.py` re-exports, a subpackage and relative imports). The `h`, `i` and `j` cases were written as value-analysis specifications *before* running the engine; the engine was fixed until it produced them, and the few expectations that turned out wrong on re-reading carry a comment saying why. `#@todo` directives mark expectations the engine does not meet yet: the harness counts them and does not check them unless `ROWAN_TODO=check` is set (none at present). | Directives: `#@ tier key [; …]`, `#@row`, `#@schema`; a `#@` directive must be the last thing on its line. |
+| `tests/run_golden.py`, `tests/cases/` | golden harness, 94 cases: `a01`–`e36` from the original design (Appendix A and the prototype era), `f37` (recency), `g40`–`g65` (AST node coverage, closures taking closures returning lambdas, reassignment, control flow, inputs indexing results of input functions, classes, string keys, containers, guards, modules, generators, recursion, kwargs forwarding, configs, pandas, annotations, mutation through layers, comprehensions, dispatch, a CLI script, dict methods, a larger mixed program), `h66`–`h72` (larger programs passing objects around: an event bus with closures / bound methods / partials in per-topic lists, a fluent builder and a stage pipeline, a plugin registry with a class decorator and a recursive visitor, a dependency-injection container resolving services in constructors, an order state machine with a nested transition table, a dataclass graph with a stack walk and a defaultdict grouping, a middleware chain of closures over closures), `i73`–`i92` (layered config, an inventory of objects, properties with setters and observers, a tree built from a flat list, command objects with undo, a record pipeline with map / filter / sorted / setdefault, a memoising decorator, context managers, generator chains, exception paths, an inheritance chain with a mixin, NamedTuple / TypedDict, computed string keys, kwargs forwarding, a task queue, a JSON round trip, ranking with enumerate / zip, nested path helpers, feature flags, accumulators), `j93` (one 800-line order-management program: layered settings, dataclass entities, repositories keyed by functions, an event bus, a rule-chain pricer, a guarded state machine, a middleware router, reporting with plugins, a recursive org tree, three scenario runs; all 86 checks pass), `k94_pkg` (three flat modules importing each other), `l95_pkg` (a real package with `__init__.py` re-exports, a subpackage and relative imports), `m96_pkg` (a 1,700-line warehouse system as a package of twelve modules: layered config with profiles, dataclass entities with a dataclass subclass and `__post_init__`, an inventory with FIFO lot consumption and function-keyed indexes, receipts validated by a rule chain, an order book with a repository, pick planning with decorator-registered strategies and box packing, shipping with rate rules and a guarded state machine, an event bus, reports with plugins, a scheduler with generators and a context manager, labels, cycle counts; three scenarios, 155 checks). The `h`, `i` and `j` cases were written as value-analysis specifications *before* running the engine; the engine was fixed until it produced them, and the few expectations that turned out wrong on re-reading carry a comment saying why. `#@todo` directives mark expectations the engine does not meet yet: the harness counts them and does not check them unless `ROWAN_TODO=check` is set (none at present). | Directives: `#@ tier key [; …]`, `#@row`, `#@schema`; a `#@` directive must be the last thing on its line. |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | `--json` output snapshots on `examples/etl_report.py` and three large fixtures (modules of the old prototype kept as analysis *inputs* only). The regression guard for refactors of the internals; `--update` after reviewing a diff. |
 | `vscode-rowan/` | VS Code extension (plain JS): runs `rowan FILE --facts` on open/save, hover = facts for (line, name), verdicts as diagnostics; `node test.js` checks the rendering. |
 
@@ -173,6 +173,27 @@ harness on row-check failures). Facts record the rendered text at recording time
   subclasses, through `super().__init__` and `Base.__init__(self, …)`. Fields assigned
   builtin containers (`self.x = {}` / `[]` / `defaultdict(list)`) carry that builtin class in
   summaries (`infer_field_classes`), so e.g. defaultdict insertion is decided per call site.
+* From the `m96` package (what a 1,700-line multi-module program needed): allocation and
+  call sites carry the module (`M3:L12:4`; the main module's stay `L12:4`), since two
+  modules allocating at the same line and column collided into one object; comparisons
+  between known numbers or strings (`<`, `<=`, `>`, `>=`) and arithmetic on known numbers
+  (`* // / %` as well as `+ -`) are evaluated, with a truth / narrow event when a side is a
+  parameter so the call site decides; `len()` of a known-length container, a literal string
+  or a closed record with only definite keys, `sum()` of known numbers (also over a
+  generator expression), `bool()`, `"%03d|%.2f" %` with width and precision, and
+  `str.partition` are evaluated; a decided `if` test leaves straight-line code (appends stay
+  positional, requirements stay "always"); list comprehensions keep positions when their
+  items are known and every filter is decided; `sorted(xs, key=…)` keeps the order when every
+  key is a known literal or a tuple of them (stable; `reverse=`); appends of unknown count
+  keep the positions below them valid (`Obj::known_prefix`); `extend` with known items is
+  positional; the generated dataclass `__init__` calls `__post_init__`; `with` calls
+  `__exit__(None, None, None)`; an empty `Counter()` is a closed dict whose missing keys read
+  as 0; a membership test against a positional container of known literals is decided; a
+  dict / list method name on a class-less placeholder uses the container model alone (plus a
+  dispatch event) instead of also running every user class defining that name, which had
+  spread `Config.get` over every `row.get` and made it recurse; `if x.get("k"):` no longer
+  narrows a user instance (its `get` is its own method; narrowing its closed item row made
+  the branch infeasible).
 * Budgets: `MAX_MS = 2000` is the soft limit — past it the analysis degrades (summaries
   instead of tabulations, no new clones) and the output is still deterministic for a given
   machine speed, only less precise on inputs that take longer; the hard caps are
@@ -206,7 +227,8 @@ harness on row-check failures). Facts record the rendered text at recording time
 | input | time | notes |
 | --- | --- | --- |
 | golden suite (92 cases) | 0.5 s | one process per case |
-| `tests/cases/j93_order_system.py` (830 lines, deep call graph) | 0.08 s | all 86 checks pass |
+| `tests/cases/j93_order_system.py` (830 lines, deep call graph) | 0.09 s | all 86 checks pass |
+| `tests/cases/m96_pkg/` (1,716 lines, twelve modules) | 0.10 s | all 155 checks pass |
 | `tests/fixtures/proto_summary.py` (1.2k lines) | 2.5 s (hits the 2 s soft limit) | 1 ✗ (L534, see known problems), 11 ⚠ |
 | old prototype `models.py` (1.7k lines, reaches a whole interpreter via a typed field) | 41 s | 165 ✗ (false positives, see below) |
 | old prototype `interp.py` (3.4k lines) | 69 s | 961 ✗ |
@@ -274,7 +296,10 @@ harness on row-check failures). Facts record the rendered text at recording time
    (`l95_real.py` next to a `shop` package with a `util` subpackage). Site-packages are
    still not searched.
 5. **A ~2,000-line example as a package of several modules**, specified by hand first (as
-   `h`/`i`/`j`), exercising steps 3–4; fix what it uncovers.
+   `h`/`i`/`j`), exercising steps 3–4; fix what it uncovers. Done as `m96_pkg` (1,716 lines
+   with the entry); the fixes it needed are listed under "From the `m96` package" above.
+   Five earlier expectations that said "the comparison is not evaluated" now follow the
+   program (`g47`, `g51`, `g56`, `i74`, `i75`, `i78`, `d31`, `j93`'s free shipping).
 6. **Incremental analysis.** Cache per module: parsed AST + module-level facts + the
    summaries of its functions (signature-keyed after step 3), keyed by the file's content
    hash and the hashes of the modules it imports; reuse when unchanged. Then a server mode
@@ -294,7 +319,7 @@ harness on row-check failures). Facts record the rendered text at recording time
    self-referential lines 69 s); a budget hit costs precision, not time.
 8. **More examples** (as time allows), each specified before running.
 
-Status: steps 1–4 done (commits `ea08dab`, `639ca1a`, `ecd773b`, `e95115d` and the
+Status: steps 1–5 done (commits `ea08dab`, `639ca1a`, `ecd773b`, `e95115d` and the
 budget / context commit after it); no `#@todo` expectations remain — `ROWAN_TODO=check` makes
 the harness check any that are added later.
 

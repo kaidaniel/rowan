@@ -66,9 +66,9 @@ def early(d):
 
 
 e1 = early({"a": 1})
-# d["a"] < 0 is not evaluated: both returns are possible
-e1["ok"]                                 #@ possibly ok
-e1["err"]                                #@ possibly err
+# 1 < 0 is decided (comparisons between known numbers are evaluated): only the ok return.
+e1["ok"]                                 #@ ok ok
+e1["err"]                                #@ missing err
 e2 = early({})
 e2["err"]                                #@ ok err
 e2["ok"]                                 #@ missing ok

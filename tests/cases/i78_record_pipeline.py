@@ -31,12 +31,14 @@ second = taxed[1]                         #@row second: present={id,cust,total,t
 large = list(filter(big, taxed))
 # Which orders pass the filter is open: the element is the join of all three.
 any_large = large[0]                      #@row any_large: present={id,cust,total,rush,tax} definite={id,cust,total,tax} closed
+# The sort keys are known numbers (30, 5, 12), so the order is known: the top order is the
+# first one, which has the rush flag.
 ranked = sorted(taxed, key=lambda o: o["total"], reverse=True)
-top = ranked[0]                           #@row top: present={id,cust,total,rush,tax} definite={id,cust,total,tax} closed
+top = ranked[0]                           #@row top: present={id,cust,total,rush,tax} definite={id,cust,total,rush,tax} closed
 groups = by_customer(ORDERS)              #@row groups: present={ann,bob} definite={ann,bob} closed
 ann = groups["ann"][0]                    #@row ann: present={id,cust,total,rush} definite={id,cust,total,rush} closed
 totals = {o["cust"]: o["total"] for o in ORDERS}  #@row totals: present={ann,bob} definite={ann,bob} closed
 ids = [o["id"] for o in ORDERS if o.get("rush")]
 summary = {"n": len(ORDERS), "customers": sorted(groups), "rush_ids": ids}  #@row summary: present={n,customers,rush_ids} definite={n,customers,rush_ids} closed
-top["rush"]                               #@ possibly rush
+top["rush"]                               #@ ok rush
 second["rush"]                            #@ missing rush

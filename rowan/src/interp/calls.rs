@@ -203,6 +203,9 @@ impl Analyzer {
     pub fn unknown_call(&mut self, qual: &str, recv: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
         let site = format!("{}@L{}", qual, node.line);
         // unknown code may raise
+        if crate::interp::debug_level() == 2 {
+            eprintln!("  unknown call {} in {} (may raise)", site, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
+        }
         if let Some(t) = self.raise_stack.last_mut() {
             *t = true;
         }
@@ -362,6 +365,15 @@ impl Analyzer {
                 }
             }
         }
+        // the generated __init__ ends by calling __post_init__ when the class defines one
+        if let Some(pc) = self.class_lookup(cls, "__post_init__") {
+            let fv = self.cls_slots.get(&(pc, Ns::Attr, key_str_lit("__post_init__"))).cloned().unwrap_or_default();
+            for f in fv.pts.iter() {
+                if self.kind(f) == Kind::Function {
+                    self.call_user(f, Some(Value::obj(inst)), Vec::new(), IndexMap::new(), Vec::new(), Vec::new(), state, node, None, false);
+                }
+            }
+        }
     }
 
     /// `self.f = p` statements of `__init__` whose `p` is a parameter: record the classes of
@@ -467,7 +479,7 @@ impl Analyzer {
         let fnode = fi.node;
         // the call context: per call site (line and column) with `fixes`; the prototype used
         // the line only, so two calls on one line shared their clones
-        let site = if node.addr != 0 { format!("L{}:{}", node.line, node.col) } else { format!("L{}", node.line) };
+        let site = if node.addr != 0 { format!("{}L{}:{}", crate::frontend::site_prefix(node.module), node.line, node.col) } else { format!("{}L{}", crate::frontend::site_prefix(node.module), node.line) };
         // inside a tabulated frame the context is chained to the frame's, so two activations
         // of the caller give distinct objects (bounded depth; beyond it the site alone)
         let site = {
@@ -568,6 +580,9 @@ impl Analyzer {
                 let saved_chain = std::mem::take(&mut self.call_chain);
                 self.call_chain = chain_extend(&saved_chain, &[node.line]);
                 if summ.raises {
+                    if crate::interp::debug_level() == 2 {
+                        eprintln!("  summary of {} raises (instantiated at L{} in {})", fi.qualname, node.line, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
+                    }
                     self.note_raise();
                 }
                 let r = self.instantiate(&summ, &bind, state, node, &call_ctx, ctx_single);
@@ -757,6 +772,9 @@ impl Analyzer {
             }
             // no normal completion (every path raises): the caller is unreachable after the call
             let completed = st.reachable || st.exits.is_some();
+            if !completed && crate::interp::debug_level() == 2 {
+                eprintln!("  callee {} did not complete (called at L{})", fi.qualname, node.line);
+            }
             if let Some(ex) = st.exits.take() {
                 let mut exs = ex.copy_ref();
                 st = if st.reachable { st.join(&mut exs) } else { exs };
@@ -865,6 +883,9 @@ impl Analyzer {
         self.env_stack.pop();
         let raised = self.raise_stack.pop().unwrap_or(false);
         if raised {
+            if crate::interp::debug_level() == 2 {
+                eprintln!("  callee {} raised (tabulated at L{})", fi.qualname, node.line);
+            }
             self.note_raise();
         }
         state.env = saved_env;
@@ -874,6 +895,9 @@ impl Analyzer {
 
     /// The call that just completed may raise: the enclosing call and try body learn it.
     pub fn note_raise(&mut self) {
+        if crate::interp::debug_level() == 2 {
+            eprintln!("  raise noted in {} (chain {:?})", self.frames.last().map(|f| f.label.clone()).unwrap_or_default(), self.call_chain);
+        }
         if let Some(t) = self.raise_stack.last_mut() {
             *t = true;
         }

@@ -755,19 +755,21 @@ orders = S1["w"]["svc"].orders               #@row orders: present={1,2,3} defin
 
 # ---------------------------------------------------------------- checks: quotes
 
-# Scenario 1: gold customer, valid coupon, shipping applies (the amount comparison is open).
-q1 = S1["q1"]                                #@row q1: present={subtotal,currency,tax,shipping,free_shipping,discount,loyalty,coupon,total} definite={subtotal,currency,tax,shipping,discount,loyalty,coupon,total} closed
+# Scenario 1: gold customer, valid coupon, shipping applies; the subtotal (2 x 10.0 + 25.0 =
+# 45.0) is below the free-shipping threshold (100), and the amounts are computed, so
+# free_shipping is absent.
+q1 = S1["q1"]                                #@row q1: present={subtotal,currency,tax,shipping,discount,loyalty,coupon,total} definite={subtotal,currency,tax,shipping,discount,loyalty,coupon,total} closed
 q1_coupon = q1["coupon"]                     #@row q1_coupon: present={code,off} definite={code,off} closed
 q1_loyalty = q1["loyalty"]                   #@row q1_loyalty: present={tier,pct} definite={tier,pct} closed
 # Scenario 1, order 2: basic customer, no coupon.
-q2 = S1["q2"]                                #@row q2: present={subtotal,currency,tax,shipping,free_shipping,total} definite={subtotal,currency,tax,shipping,total} closed
+q2 = S1["q2"]                                #@row q2: present={subtotal,currency,tax,shipping,total} definite={subtotal,currency,tax,shipping,total} closed
 # Scenario 2: pickup, so no shipping rule; loyalty still applies; no coupon.
 q1_s2 = S2["q1"]                             #@row q1_s2: present={subtotal,currency,tax,discount,loyalty,total} definite={subtotal,currency,tax,discount,loyalty,total} closed
 # Scenario 3: loyalty off, unknown coupon code.
-q1_s3 = S3["q1"]                             #@row q1_s3: present={subtotal,currency,tax,shipping,free_shipping,coupon_error,total} definite={subtotal,currency,tax,shipping,coupon_error,total} closed
+q1_s3 = S3["q1"]                             #@row q1_s3: present={subtotal,currency,tax,shipping,coupon_error,total} definite={subtotal,currency,tax,shipping,coupon_error,total} closed
 q1["tax_included"]                           #@ missing tax_included
 q1_s3["discount"]                            #@ missing discount
-q1["free_shipping"]                          #@ possibly free_shipping
+q1["free_shipping"]                          #@ missing free_shipping
 trace0 = S1["w"]["pricer"].trace[0]          #@row trace0: present={rule,keys} definite={rule,keys} closed
 
 # ---------------------------------------------------------------- checks: bus and stats
@@ -827,5 +829,5 @@ ops = paths["root/ops"]                      #@row ops: present={name,children,a
 payload = json.loads(json.dumps(o1.to_dict()))  #@row payload: present={} definite={} open
 payload["id"]                                #@ input id
 payload["customer"]["tier"]                  #@ input tier
-#@schema json.loads@L827: always={id,customer}
-#@schema json.loads@L827['customer']: always={tier}
+#@schema json.loads@L829: always={id,customer}
+#@schema json.loads@L829['customer']: always={tier}

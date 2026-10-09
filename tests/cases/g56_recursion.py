@@ -10,7 +10,8 @@ def build(depth):
 
 t = build(2)
 t["depth"]                               #@ ok depth
-t["child"]                               #@ possibly child
+# 2 > 0 is decided: the top node has a child (the recursion bottoms out at depth 0).
+t["child"]                               #@ ok child
 t["child"]["depth"]                      #@ ok depth
 t["parent"]                              #@ missing parent
 

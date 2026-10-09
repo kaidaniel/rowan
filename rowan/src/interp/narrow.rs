@@ -345,6 +345,10 @@ impl Analyzer {
                     let kv = self.eval(&c.arguments.args[0], state);
                     if let Some(k) = kv.kv.as_lit() {
                         let rec = self.eval(&a.value, state);
+                        // only a dict-like receiver: a user instance's `get` is its own method
+                        if rec.pts.iter().any(|o| matches!(self.kind(o), Kind::Instance | Kind::Namespace)) {
+                            return;
+                        }
                         self.narrow_record(&rec, Ns::Item, k, true, state);
                     }
                 }

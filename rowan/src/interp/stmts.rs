@@ -24,6 +24,16 @@ impl Analyzer {
 
     pub fn exec_stmt(&mut self, node: &'static ast::Stmt, state: &mut State) {
         self.work += 1;
+        let dbg2 = crate::interp::debug_level() == 2;
+        let was = state.reachable;
+        self.exec_stmt_inner(node, state);
+        if dbg2 && was && !state.reachable && !matches!(node, ast::Stmt::Return(_) | ast::Stmt::Raise(_) | ast::Stmt::Break(_) | ast::Stmt::Continue(_)) {
+            let n = frontend::node(node);
+            eprintln!("  unreachable after M{}:L{} in {}", n.module, n.line, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
+        }
+    }
+
+    fn exec_stmt_inner(&mut self, node: &'static ast::Stmt, state: &mut State) {
         match node {
             ast::Stmt::Expr(e) => {
                 self.eval(&e.value, state);
@@ -187,7 +197,9 @@ impl Analyzer {
                 // the managers' __exit__ runs on the way out (innermost first)
                 if state.reachable {
                     for (v, n) in managers.iter().rev() {
-                        self.call_method_if_defined(v, "__exit__", n, state);
+                        // the body is analysed as not raising: __exit__(None, None, None)
+                        let none = self.none_v.clone();
+                        self.call_method_with(v, "__exit__", vec![none.clone(), none.clone(), none], n, state);
                     }
                 }
             }
@@ -253,23 +265,31 @@ impl Analyzer {
         let tv = self.eval(test, state);
         let mut then_s = state.copy();
         let mut else_s = state.copy();
-        match self.truthiness(&tv, state) {
+        let decided = self.truthiness(&tv, state);
+        match decided {
             Some(true) => else_s.reachable = false,
             Some(false) => then_s.reachable = false,
             None => {}
         }
         self.narrow(test, true, &mut then_s);
         self.narrow(test, false, &mut else_s);
-        self.cond_depth += 1;
-        self.branch_depth += 1;
+        // a decided test leaves one branch: straight-line code, not a conditional (appends
+        // stay positional, requirements stay "always")
+        let conditional = decided.is_none();
+        if conditional {
+            self.cond_depth += 1;
+            self.branch_depth += 1;
+        }
         if then_s.reachable {
             self.exec_block(body, &mut then_s);
         }
         if else_s.reachable {
             self.exec_orelse(rest, &mut else_s);
         }
-        self.branch_depth -= 1;
-        self.cond_depth -= 1;
+        if conditional {
+            self.branch_depth -= 1;
+            self.cond_depth -= 1;
+        }
         let j = then_s.join(&mut else_s);
         state.replace_with(j);
     }

@@ -27,6 +27,25 @@ thread_local! {
     static REG: RefCell<Registry> = RefCell::new(Registry { modules: Vec::new(), nodes: FxHashMap::default() });
 }
 
+thread_local! {
+    static MAIN_IDX: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// The module index of the analysed file: its sites carry no module prefix.
+pub fn set_main(idx: u32) {
+    MAIN_IDX.with(|m| m.set(idx));
+}
+
+/// Prefix that keeps allocation and call sites of different modules apart (`M2:L5:3`);
+/// empty for the main module so its site names stay `L5:3`.
+pub fn site_prefix(module: u32) -> String {
+    if MAIN_IDX.with(|m| m.get()) == module {
+        String::new()
+    } else {
+        format!("M{}:", module)
+    }
+}
+
 /// A located AST node: identity (address, 0 for synthetic nodes), module and position.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Node {

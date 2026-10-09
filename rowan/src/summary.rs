@@ -330,7 +330,7 @@ impl Analyzer {
     /// The symbolic analysis just lost information about entry object `ph`.
     pub fn record_event(&mut self, kind: &'static str, ph: ObjId) {
         if !self.sum_stack.is_empty() && (self.kind(ph) == Kind::Ph || self.is_entry_object(ph)) {
-            if std::env::var("ROWAN_DEBUG").map(|v| v == "2").unwrap_or(false) {
+            if crate::interp::debug_level() == 2 {
                 let top = *self.sum_stack.last().unwrap();
                 let par = if self.kind(ph) == Kind::Ph { self.ph_info(ph).parent.map(|p| self.obj(p).label.clone()).unwrap_or_default() } else { String::new() };
                 eprintln!("  event {} on {} (parent {}) in {} [{}]", kind, self.obj(ph).label, par, self.func_info(top).qualname, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
