@@ -270,6 +270,10 @@ impl Analyzer {
                     if let Some(m) = self.may_raise.last_mut() {
                         *m = true;
                     }
+                    if try_guard && cls.tier == Tier::Missing && is_lit && single_target && !row.symbolic() {
+                        // the access raises here: the rest of the try body is unreachable
+                        state.reachable = false;
+                    }
                     if try_guard && cls.tier != Tier::Missing && is_lit && single_target && self.strongable(oid) {
                         // no exception raised: the key is present from here on
                         row = row.narrow_in(k, true);
@@ -559,7 +563,21 @@ impl Analyzer {
                 Kind::Namespace | Kind::Instance => self.load_instance_attr(oid, name, node, state, guarded, single),
                 Kind::Class => {
                     if self.class_lookup(oid, name).is_some() {
-                        self.class_attr_value(oid, name)
+                        // a classmethod reached through a class binds that class (not the
+                        // class that defines it): `Sub.make()` constructs `Sub`
+                        let v = self.class_attr_value(oid, name);
+                        let mut out = Value::new();
+                        let mut changed = false;
+                        for f in v.pts.iter() {
+                            if self.kind(f) == Kind::Function && self.func_info(f).is_classmethod.get() {
+                                let label = format!("{} bound", self.obj(f).label);
+                                out = out.join(&Value::obj(self.alloc_raw(Kind::Bound, &format!("bound:{}:cls{}", f, oid), "", true, &label, Payload::Bound(f, Value::obj(oid)))));
+                                changed = true;
+                            } else {
+                                out = out.join(&Value::obj(f));
+                            }
+                        }
+                        if changed { Value::with_kv(out.pts, v.kv.clone()) } else { v }
                     } else if name == "__init__" && self.dataclass_init_owner(oid).is_some() {
                         let dc = self.dataclass_init_owner(oid).unwrap();
                         Value::obj(self.alloc_raw(Kind::Method, &format!("dcinit:{}", oid), "", true, &format!("{}.__init__", self.obj(oid).label), Payload::Method(format!("dcinit.class.{}", dc), Value::obj(oid))))

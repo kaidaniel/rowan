@@ -63,12 +63,18 @@ impl Analyzer {
                     Some(e) => self.eval(e, state),
                     None => self.none_v.clone(),
                 };
+                if !state.reachable {
+                    // the value's evaluation raised on every path (a guarded access that is
+                    // definitely missing): no normal exit from here
+                    return;
+                }
                 state.ret = Some(match &state.ret {
                     None => v,
                     Some(cur) => cur.join(&v),
                 });
                 state.record_exit();
                 state.reachable = false;
+                self.exit_count += 1;
             }
             ast::Stmt::Raise(r) => {
                 if let Some(e) = &r.exc {
@@ -159,6 +165,7 @@ impl Analyzer {
             ast::Stmt::While(w) => self.stmt_while(w, state),
             ast::Stmt::For(f) => self.stmt_for(f, state),
             ast::Stmt::Break(_) => {
+                self.exit_count += 1;
                 if let Some(ctx) = self.loop_stack.last_mut() {
                     let mut st = state.copy();
                     ctx.breaks = Some(match ctx.breaks.take() {
@@ -169,6 +176,7 @@ impl Analyzer {
                 state.reachable = false;
             }
             ast::Stmt::Continue(_) => {
+                self.exit_count += 1;
                 if let Some(ctx) = self.loop_stack.last_mut() {
                     let mut st = state.copy();
                     ctx.continues = Some(match ctx.continues.take() {
@@ -512,9 +520,11 @@ impl Analyzer {
         self.may_raise.push(false);
         self.cond_depth += 1;
         self.branch_depth += 1;
+        let exits_before = self.exit_count;
         self.exec_block(&t.body, state);
         self.guards.pop();
-        let body_may_raise = self.may_raise.pop().unwrap_or(false) || !state.reachable;
+        // a body that ended because it returned (or broke out) did not raise
+        let body_may_raise = self.may_raise.pop().unwrap_or(false) || (!state.reachable && self.exit_count == exits_before);
         let mut body_end = state.copy();
         let mut handler_entry: Option<State> = if !t.handlers.is_empty() { Some(pre.join(&mut body_end)) } else { None };
         if !body_may_raise && !t.handlers.is_empty() {

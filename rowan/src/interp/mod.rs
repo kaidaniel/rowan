@@ -577,6 +577,8 @@ pub struct Analyzer {
     pub site_clones: FxHashMap<String, usize>,
     /// statements executed plus objects instantiated (debug output)
     pub work: usize,
+    /// return / break / continue statements executed (a try body that ends with one did not raise)
+    pub exit_count: usize,
     /// when the analysis started (see `MAX_MS`)
     pub started: std::time::Instant,
     pub call_cache: FxHashMap<calls::Sig, Rc<calls::CacheHit>>,
@@ -697,6 +699,7 @@ impl Analyzer {
             cls_slots: FxHashMap::default(),
             site_clones: FxHashMap::default(),
             work: 0,
+            exit_count: 0,
             started: std::time::Instant::now(),
             call_cache: FxHashMap::default(),
             entry_instances: FxHashMap::default(),

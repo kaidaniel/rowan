@@ -635,7 +635,32 @@ fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             Value::data(&format!("L{}", c.line))
         }
-        "join" => Value::data(&format!("L{}", c.line)),
+        "join" => {
+            // a known separator joining known strings
+            if let (Some(sep), Some(arg)) = (kv.as_lit().and_then(intern::key_as_str), c.args.first()) {
+                let it = an.iterate(arg, &c.node, st);
+                if let Some(items) = it.items {
+                    let mut parts: Vec<String> = Vec::new();
+                    let mut ok = true;
+                    for item in &items {
+                        match item.kv.as_lit().filter(|_| item.pts.is_empty()).and_then(intern::key_as_str) {
+                            Some(s) => parts.push(s.to_string()),
+                            None => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok {
+                        return Value::lit(key_str_lit(&parts.join(&*sep)));
+                    }
+                }
+                if let Some(ph) = arg.kv.as_param() {
+                    an.record_event("narrow", ph);
+                }
+            }
+            Value::data(&format!("L{}", c.line))
+        }
         "split" | "splitlines" | "partition" | "rsplit" => {
             let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("split@L{}", c.line));
             an.obj_mut(oid).literal_len = None;

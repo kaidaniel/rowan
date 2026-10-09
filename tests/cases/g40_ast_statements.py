@@ -88,8 +88,9 @@ else:
 finally:
     t["always"] = True
 t["always"]                          #@ ok always
-t["fallback"]                        #@ possibly fallback
-t["ok"]                              #@ possibly ok
+# t["missing"] definitely raises (closed record): the except branch runs, the else does not.
+t["fallback"]                        #@ ok fallback
+t["ok"]                              #@ missing ok
 
 # Raise inside a branch: the rest of that path is dead
 r = {"a": 1}
@@ -103,7 +104,7 @@ r["b"]                               #@ ok b
 with open("f") as fh:
     cfg2 = json.load(fh)
 cfg2["key"]                          #@ input key
-#@schema json.load@L104: always={key}
+#@schema json.load@L105: always={key}
 
 # Global / Nonlocal
 G = {"g": 1}

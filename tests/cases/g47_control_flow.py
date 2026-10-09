@@ -92,7 +92,8 @@ def retry(fn):
 rr = retry(lambda: 1)
 rr["attempts"]                           #@ ok attempts
 rr["value"]                              #@ possibly value
-rr["error"]                              #@ possibly error
+# The lambda never raises, so the except branch is dead (the callee reported no raise).
+rr["error"]                              #@ missing error
 rr["other"]                              #@ missing other
 
 state = {"phase": 0}

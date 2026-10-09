@@ -718,6 +718,21 @@ impl Analyzer {
         if op == ast::Operator::Mod {
             if let Some(x) = a.kv.as_lit() {
                 if let Some(sx) = intern::key_as_str(x) {
+                    // the formatted text depends on the arguments: a parameter among them is
+                    // decided per call site
+                    let mut arg_kvs: Vec<KeyVal> = vec![b.kv.clone()];
+                    if let Some(tp) = b.single() {
+                        if matches!(self.kind(tp), Kind::Tuple) {
+                            if let Some(n) = self.obj(tp).literal_len {
+                                arg_kvs = (0..n).map(|i| state.slot(tp, Ns::Pos, key_int(i as i64)).kv).collect();
+                            }
+                        }
+                    }
+                    for kv in &arg_kvs {
+                        if let Some(ph) = kv.as_param() {
+                            self.record_event("narrow", ph);
+                        }
+                    }
                     // "%s ... %d" with the arguments: literal segments around at most one
                     // non-literal argument (a parameter: decided per call site); width and
                     // precision specs are applied when every argument is a literal
