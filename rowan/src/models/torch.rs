@@ -317,10 +317,31 @@ impl Analyzer {
         Value::obj(oid)
     }
 
-    /// A tuple of unknown length whose elements are like `elem`.
+    /// A tuple of unknown length whose elements are like `elem` (`count`: its length as a dim).
     pub fn t_tuple_n(&mut self, elem: Value, node: &Node, st: &mut State) -> Value {
-        let kv = elem.kv.clone();
-        self.alloc_positional(Kind::Tuple, node, None, elem, kv, st)
+        self.t_tuple_count(elem, None, node, st)
+    }
+
+    pub fn t_tuple_count(&mut self, elem: Value, count: Option<DimId>, node: &Node, st: &mut State) -> Value {
+        let site = format!("{}#n", crate::interp::site_string(node));
+        let oid = self.alloc(Kind::Tuple, &site, st, &format!("tuple@L{}", node.line), Payload::None, None, Ns::Item, None, None);
+        let single = self.obj(oid).single;
+        st.set_slot(oid, Ns::Elem, STAR, elem.clone(), single);
+        st.elems.insert(oid, elem.kv.clone());
+        self.obj_mut(oid).literal_len = None;
+        if let Some(d) = count {
+            self.obj_mut(oid).payload = Payload::Str(format!("torch.n:{}", d.0));
+        }
+        Value::obj(oid)
+    }
+
+    /// The length of a tuple made by `unbind` / `chunk` with a symbolic count.
+    pub fn t_tuple_len(&self, v: &Value) -> Option<DimId> {
+        let o = v.single()?;
+        match &self.obj(o).payload {
+            Payload::Str(q) => q.strip_prefix("torch.n:").and_then(|d| d.parse().ok()).map(DimId),
+            _ => None,
+        }
     }
 
     // ---------------------------------------------------------------- notes
@@ -1332,6 +1353,9 @@ impl Analyzer {
         if IDENTITY.contains(&name) {
             return tensor_value(s);
         }
+        if name == "bool" {
+            return bool_tensor_value(s);
+        }
         if BOOL_OPS.contains(&name) {
             return match args.first().and_then(|a| self.t_shape(a, st)) {
                 Some(o) => match sh::broadcast(&s, &o, &st.tf) {
@@ -2114,7 +2138,7 @@ impl Analyzer {
                 let vals = vec![elem; n as usize];
                 self.t_tuple(vals, node, st, None)
             }
-            _ => self.t_tuple_n(elem, node, st),
+            _ => self.t_tuple_count(elem, Some(x), node, st),
         }
     }
 
@@ -2406,7 +2430,7 @@ impl Analyzer {
                 self.t_error(node, m, st);
                 return Value::new();
             }
-            None => (sh::unknown(), elem.unwrap_or_else(Shape::any)),
+            None => (self.t_tuple_len(list).unwrap_or_else(sh::unknown), elem.unwrap_or_else(Shape::any)),
         };
         let mut nv = vec![n];
         nv.truncate(1);
@@ -3689,6 +3713,9 @@ impl Analyzer {
 
     /// `len(t)` (dim 0) / `len(x.shape)` (the rank).
     pub fn t_len(&mut self, v: &Value, node: &Node, st: &mut State) -> Option<Value> {
+        if let Some(d) = self.t_tuple_len(v) {
+            return Some(dim_value(d));
+        }
         if let Some(s) = size_shape(v) {
             return Some(self.t_rank_value(&sh::norm_shape(&s, &st.tf)));
         }

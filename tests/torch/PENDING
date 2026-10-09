@@ -12,17 +12,14 @@ models/m14_word2vec.py
 models/m15_pointnet.py
 models/m16_bert_embeddings.py
 models/m17_tcn.py
-small/s024_where_masked_fill.py
 small/s026_inplace.py
 small/s028_loops.py
-small/s043_identity_chain.py
 small/s045_unbind.py
 small/s080_transformer_encoder.py
 small/s088_module_init_names.py
 small/s090_module_driver_calls.py
 small/s095_sequential_attr.py
 small/s096_method_calls_method.py
-small/s101_mask_helpers.py
 small/s106_closures.py
 small/s111_loops.py
 small/s114_list_stack_cat.py
