@@ -141,8 +141,12 @@ impl Analyzer {
         let oid = self.alloc_at(Kind::Function, &n, state, &format!("def {}", qual), Payload::Func(Rc::new(info)), None, Ns::Item, None, None);
         // a closure made inside a concrete call (not an entry run): its own analysis with
         // open parameters comes from the closure the factory's entry run makes
-        if self.torch_on && has_closure && self.entry_run.is_none() && self.frames.iter().any(|f| f.func.is_some()) {
+        let creator = self.frames.iter().rev().find_map(|f| f.func);
+        if self.torch_on && has_closure && creator.is_some() && self.entry_run != creator {
             self.t_concrete_closures.insert(oid);
+        }
+        if self.torch_on {
+            self.t_funcs_by_qual.entry(qual.clone()).or_default().push(oid);
         }
         Value::obj(oid)
     }

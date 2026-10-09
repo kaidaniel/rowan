@@ -662,6 +662,10 @@ pub struct Analyzer {
     pub t_var_names: FxHashMap<ObjId, crate::shape::Sym>,
     /// closures made inside concrete calls in torch modules (no entry run of their own)
     pub t_concrete_closures: FxHashSet<ObjId>,
+    /// the state a factory's entry run ended in, for the closures it made
+    pub t_closure_states: FxHashMap<ObjId, std::rc::Rc<State>>,
+    /// function objects by qualname (a closure's printing sees its factory's symbols)
+    pub t_funcs_by_qual: FxHashMap<String, Vec<ObjId>>,
     /// tensor-shape requirements / definite mismatches (models/torch.rs)
     pub shape_reqs: Vec<crate::models::torch::ShapeNote>,
     pub shape_errors: Vec<crate::models::torch::ShapeNote>,
@@ -842,6 +846,8 @@ impl Analyzer {
             entry_done: FxHashSet::default(),
             t_var_names: FxHashMap::default(),
             t_concrete_closures: FxHashSet::default(),
+            t_closure_states: FxHashMap::default(),
+            t_funcs_by_qual: FxHashMap::default(),
             shape_reqs: Vec::new(),
             shape_errors: Vec::new(),
             t_sym_alias: FxHashMap::default(),
@@ -1348,7 +1354,16 @@ impl Analyzer {
                     self.verdicts.len()
                 );
             }
-            let mut st = state.copy();
+            // a closure made by a factory's entry run starts from that run's state (its cells)
+            let mut st = match self.t_closure_states.get(&oid) {
+                Some(cs) => {
+                    let mut c = cs.copy_ref();
+                    c.reachable = true;
+                    c.exits = None;
+                    c
+                }
+                None => state.copy(),
+            };
             st.ret = None;
             let mut args: Vec<Value> = Vec::new();
             let mi = self.module_info(fi.module);
@@ -1422,8 +1437,19 @@ impl Analyzer {
             self.entry_scope = None;
             let fake = Node::synthetic(mi.idx, fi.node.node().line);
             let saved_entry = self.entry_run.replace(oid);
+            let before = self.objects.len() as ObjId;
             self.call_user(oid, self_val, args, IndexMap::new(), star_args, star_kwargs, &mut st, &fake, None, true);
             self.entry_run = saved_entry;
+            if self.torch_modules.contains(&fi.module) {
+                let after = self.objects.len() as ObjId;
+                let made: Vec<ObjId> = (before..after).filter(|o| self.kind(*o) == Kind::Function && !self.func_info(*o).closure.is_empty()).collect();
+                if !made.is_empty() {
+                    let snap = std::rc::Rc::new(st.copy());
+                    for o in made {
+                        self.t_closure_states.insert(o, snap.clone());
+                    }
+                }
+            }
             self.frames.pop();
             // keep schema requirements discovered in entry points
             for (src, d) in st.reqs.items() {

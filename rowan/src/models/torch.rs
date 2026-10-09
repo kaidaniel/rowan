@@ -366,6 +366,14 @@ impl Analyzer {
         let scope = self.frames.iter().rev().find_map(|fr| fr.func).unwrap_or(0);
         let mut ctx = sh::PrintCtx { all: false, scope, ..Default::default() };
         if scope != 0 && self.has_obj(scope) && self.kind(scope) == Kind::Function {
+            // a closure sees the names of the functions around it
+            let mut q = self.func_info(scope).qualname.clone();
+            while let Some(i) = q.rfind('.') {
+                q.truncate(i);
+                if let Some(fs) = self.t_funcs_by_qual.get(&q) {
+                    ctx.extra.extend(fs.iter().copied());
+                }
+            }
             if let Some(cls) = self.func_info(scope).cls {
                 for c in self.mro(cls) {
                     if let Some(v) = self.cls_slots.get(&(c, Ns::Attr, key_str_lit("__init__"))) {
