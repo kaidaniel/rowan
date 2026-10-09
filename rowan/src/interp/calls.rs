@@ -274,15 +274,16 @@ impl Analyzer {
         }
         let arg_recs: Vec<(u32, Ns)> = touched.iter().copied().filter(|(oid, _)| vals.iter().any(|v| v.pts.contains(*oid))).collect();
         let rid = self.alloc(Kind::Unknown, &format!("ret:{}", site), state, &format!("result of {}", site), Payload::None, None, Ns::Item, Some(true), None);
-        // for people: the call as written and what it was given (unknown code may return it)
+        // for people: the call as written and the known objects it was given (unknown code may
+        // return one of them; given unknowns add nothing to `?`)
         {
             let text = crate::frontend::text_at(node);
             let mut given: Vec<String> = Vec::new();
             for (o, _) in &arg_recs {
-                let g = match self.origins.get(o) {
-                    Some((t, _, _)) => t.clone(),
-                    None => self.obj(*o).label.trim_start_matches("param ").trim_start_matches('ρ').to_string(),
-                };
+                if matches!(self.kind(*o), Kind::Unknown | Kind::Ph) {
+                    continue;
+                }
+                let g = self.obj(*o).label.clone();
                 if !given.contains(&g) {
                     given.push(g);
                 }

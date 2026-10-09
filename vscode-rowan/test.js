@@ -49,7 +49,7 @@ const zi = indexResult(JSON.parse(execFileSync(bin, [z, "--facts"], { maxBuffer:
 const x1 = renderHover("x1", zi.facts.get("6:x1"), []);
 assert(x1.includes("- value: `?`") && x1.includes("whatever a caller passes as `b` to `f`"), x1);
 const u8 = renderHover("_", zi.facts.get("8:_"), []);
-assert(u8.includes("is the result of `a(b)(a)` (line 8)") && u8.includes("`a(b)` or `a`"), u8);
+assert(u8.includes("is the result of `a(b)(a)` (line 8)") && !u8.includes("may also be"), u8);
 assert(!x1.includes("**?") && !x1.includes("keys possible"), x1);
 console.log("\n--- sample long value ---\n" + lines.join("\n"));
 console.log("ok");

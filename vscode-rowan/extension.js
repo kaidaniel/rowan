@@ -163,7 +163,7 @@ function describeSource(src) {
  * What the program learned about the keys (`ns` "item") or attributes ("attr") of an unknown
  * value: the ones it read or stored, in words; null when nothing.
  */
-function learnedAbout(row, ns) {
+function learnedAbout(row, ns, viaGiven) {
   const present = row.present || [];
   const definite = new Set(row.definite || []);
   const absent = row.absent || [];
@@ -176,7 +176,8 @@ function learnedAbout(row, ns) {
   if (always.length) parts.push(`${show(always)} (always)`);
   if (some.length) parts.push(`${show(some)} (on some paths)`);
   if (absent.length) parts.push(`not ${show(absent)}`);
-  return `${label} seen on it: ${parts.join("; ")}`;
+  // keys of an object it may be (an argument returned by unknown code) are not keys seen on it
+  return viaGiven ? `${label} it may have: ${parts.join("; ")}` : `${label} seen on it: ${parts.join("; ")}`;
 }
 
 function describeRow(row, ns, withText) {
@@ -236,14 +237,14 @@ function renderHover(name, facts, verdicts) {
         // the result of a call rowan cannot see into
         out.push(`- \`?\` is the result of \`${o.origin.text}\` (line ${o.origin.line})`);
         const given = o.origin.given || [];
-        if (given.length) out.push(`  - it may also be ${given.map((g) => `\`${g}\``).join(" or ")}: unknown code can return what it was given`);
+        if (given.length) out.push(`  - it may also be ${given.map((g) => `**${g}**`).join(" or ")}, which it was given (unknown code can return it)`);
       } else {
         const from = o.kind === "ph" ? "whatever the caller passes" : srcs.length ? srcs.map(describeSource).join("; ") : o.label;
         out.push(`- \`?\` comes from ${from}`);
       }
       for (const [r, ns] of [[o.item, "item"], [o.attr, "attr"]]) {
         if (!r) continue;
-        const learned = learnedAbout(r, ns);
+        const learned = learnedAbout(r, ns, !!(o.origin && (o.origin.given || []).length));
         if (learned) out.push(`  - ${learned}`);
       }
     }
