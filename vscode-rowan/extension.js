@@ -42,6 +42,96 @@ function displayKey(k, ns) {
  * `?`, keys unknown code may have removed with `~`, `**` when other keys are possible (the
  * record is open).  Attribute rows: `obj(a=..., b?=..., **)`.
  */
+const VALUE_WIDTH = 40;
+const CLOSE_OF = { "{": "}", "[": "]", "(": ")" };
+
+/**
+ * Parse a rendered value (`Repo(items={1: …}, name="x")`) into items: each item is a list
+ * of parts, a part is text or a bracketed node `{open, close, items}`.
+ */
+function parseValue(s) {
+  let i = 0;
+  function items(close) {
+    const out = [];
+    let parts = [];
+    let buf = "";
+    const flush = () => {
+      if (buf) parts.push(buf);
+      buf = "";
+    };
+    const endItem = () => {
+      flush();
+      if (parts.length) out.push(parts);
+      parts = [];
+    };
+    while (i < s.length) {
+      const c = s[i];
+      if (c === '"' || c === "'") {
+        let j = i + 1;
+        while (j < s.length && s[j] !== c) j += s[j] === "\\" ? 2 : 1;
+        buf += s.slice(i, j + 1);
+        i = j + 1;
+      } else if (CLOSE_OF[c]) {
+        flush();
+        i++;
+        parts.push({ open: c, close: CLOSE_OF[c], items: items(CLOSE_OF[c]) });
+      } else if (c === close) {
+        i++;
+        endItem();
+        return out;
+      } else if (c === "," && close !== null) {
+        i++;
+        while (s[i] === " ") i++;
+        endItem();
+      } else {
+        buf += c;
+        i++;
+      }
+    }
+    endItem();
+    return out;
+  }
+  return items(null);
+}
+
+function flatParts(parts) {
+  return parts.map((p) => (typeof p === "string" ? p : p.open + p.items.map(flatParts).join(", ") + p.close)).join("");
+}
+
+/**
+ * Lines of a value no wider than `width` where possible: a structure that fits stays on one
+ * line, a larger one has one item per line, indented two spaces per level.
+ */
+function prettyValue(text, width = VALUE_WIDTH) {
+  const lines = [];
+  function emit(parts, indent, cur) {
+    // `cur`: the line being built (already indented); returns the line still open
+    for (const p of parts) {
+      if (typeof p === "string") {
+        cur += p;
+        continue;
+      }
+      const flat = flatParts([p]);
+      if (cur.length + flat.length <= width || p.items.length === 0) {
+        cur += flat;
+        continue;
+      }
+      lines.push(cur + p.open);
+      const pad = " ".repeat(indent + 2);
+      p.items.forEach((item, k) => {
+        const last = emit(item, indent + 2, pad);
+        lines.push(last + (k < p.items.length - 1 ? "," : ""));
+      });
+      cur = " ".repeat(indent) + p.close;
+    }
+    return cur;
+  }
+  const top = parseValue(text);
+  const last = emit(top.length === 1 ? top[0] : [top.map(flatParts).join(", ")], 0, "");
+  lines.push(last);
+  return lines;
+}
+
 function rowText(row, ns) {
   const present = row.present || [];
   const definite = new Set(row.definite || []);
@@ -94,7 +184,11 @@ function renderHover(name, facts, verdicts) {
     // the value as far as it is known: literals, records with their values, `...` for unknown
     const text = (f.text || "").trim();
     const withText = text.length > 0 && text !== "...";
-    if (withText) out.push(`- value: \`${text}\``);
+    if (withText) {
+      const pretty = prettyValue(text);
+      if (pretty.length === 1) out.push(`- value: \`${text}\``);
+      else out.push("- value:", "", "```text", ...pretty, "```", "");
+    }
     else if ((f.values || []).includes("<parameter>")) out.push("- value: whatever the caller passes");
     const objs = f.objects || [];
     if (objs.length > 1) out.push(`- may point to ${objs.length} objects:`);
@@ -413,4 +507,4 @@ function deactivate() {
   stopServers();
 }
 
-module.exports = { activate, deactivate, renderHover, describeRow, indexResult, severityFor, findBinary };
+module.exports = { activate, deactivate, renderHover, prettyValue, describeRow, indexResult, severityFor, findBinary };

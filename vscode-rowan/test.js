@@ -3,7 +3,7 @@
 const assert = require("assert");
 const { execFileSync } = require("child_process");
 const path = require("path");
-const { renderHover, indexResult } = require("./extension.js");
+const { renderHover, indexResult, prettyValue } = require("./extension.js");
 
 const root = path.join(__dirname, "..");
 const bin = process.env.ROWAN_BIN || path.join(root, "rowan", "target", "release", "rowan");
@@ -25,6 +25,18 @@ const d = renderHover("d", idx.facts.get("2:d"), []);
 assert(d.includes("relative to its entry") || d.includes("object"), d);
 
 assert.strictEqual(renderHover("zzz", [], []), null);
+
+// long values break over lines of at most 40 columns, indented by level; small ones stay flat
+const repo = 'Repo(events=[{"key": 1, "op": "add"}, {"key": 2, "op": "add"}, {"key": 3, "op": "add"}], index_fns={"tier": build_world.lambda@L43}, indexes={"tier": {"basic": […], "gold": […], "silver": […]}}, items={1: Customer(address={…}, cid=1, name="Ann", orders=[…], tier="gold"), 2: Customer(address={…}, cid=2, name="Bob", orders=[…], tier="basic"), 3: Customer(address={…}, cid=3, name="Cy", orders=[…], tier="silver")}, key_fn=build_world.lambda@L43, name="customers")';
+const lines = prettyValue(repo);
+assert(lines.length > 10, lines.join("\n"));
+for (const l of lines) assert(l.length <= 40, `too wide: ${JSON.stringify(l)}`);
+assert.strictEqual(lines[0], "Repo(");
+assert(lines.includes('  name="customers"'), lines.join("\n"));
+assert(lines.includes('    {"key": 1, "op": "add"},'), lines.join("\n"));
+assert.deepStrictEqual(prettyValue("[1, 2, 3]"), ["[1, 2, 3]"]);
+assert.strictEqual(lines.join("").replace(/\s+/g, ""), repo.replace(/\s+/g, ""));
+console.log("\n--- sample long value ---\n" + lines.join("\n"));
 console.log("ok");
 console.log("\n--- sample hover for r at line 8 ---\n" + r8);
 console.log("\n--- sample hover for d inside build (line 2) ---\n" + d);
