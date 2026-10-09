@@ -317,6 +317,13 @@ fn m_fromkeys(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    if an.torch_on && matches!(c.qual.as_str(), "builtins.tuple" | "builtins.list") {
+        if let Some(a) = c.args.first() {
+            if crate::models::torch::size_shape(a).is_some() {
+                return a.clone();
+            }
+        }
+    }
     let kind = match c.qual.as_str() {
         "builtins.tuple" => Kind::Tuple,
         "builtins.set" | "builtins.frozenset" => Kind::Set,
@@ -2397,6 +2404,11 @@ fn m_any_all(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// length, a closed record whose keys are all definite), else unknown data.
 fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(v) = c.args.first() else { return Value::data("len") };
+    if an.torch_on {
+        if let Some(r) = an.t_len(v, &c.node, st) {
+            return r;
+        }
+    }
     // the length of a placeholder: decided per call site where it is a known container
     for o in v.pts.iter() {
         if an.kind(o) == Kind::Ph {

@@ -239,8 +239,19 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
         an.site_paths = site_packages_for(file, &site);
     }
     if golden {
-        // `#@row NAME:` expectations are evaluated at the statement on that line
-        for (i, line) in src.lines().enumerate() {
+        // `#@row NAME:` expectations are evaluated at the statement on that line (a line
+        // holding only a directive comment applies to the code line above it)
+        let mut last_code = 0usize;
+        for (i0, line) in src.lines().enumerate() {
+            let st = line.trim();
+            let i = if st.starts_with("#@") && last_code > 0 {
+                last_code - 1
+            } else {
+                if !st.is_empty() && !st.starts_with('#') {
+                    last_code = i0 + 1;
+                }
+                i0
+            };
             // (`#@todo row NAME:` too: the harness checks those with ROWAN_TODO=check)
             let hit = line.find("#@row").map(|p| p + 5).or_else(|| line.find("#@todo row").map(|p| p + 10));
             if let Some(pos) = hit {

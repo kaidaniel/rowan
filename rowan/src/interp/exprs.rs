@@ -389,15 +389,29 @@ impl Analyzer {
         let single = self.obj(oid).single;
         let mut vals: Vec<Value> = Vec::new();
         let mut literal = true;
+        let mut size_parts: Option<Vec<Result<Value, Value>>> = if self.torch_on && elts.iter().any(|e| matches!(e, ast::Expr::Starred(_))) { Some(Vec::new()) } else { None };
         for e in elts {
             if let ast::Expr::Starred(st) = e {
                 literal = false;
                 let inner = self.eval(&st.value, state);
+                if let Some(p) = size_parts.as_mut() {
+                    p.push(Err(inner.clone()));
+                }
                 let en = frontend::node(e);
                 let it = self.iterate(&inner, &en, state);
                 vals.push(it.elem.one_or_empty());
             } else {
-                vals.push(self.eval(e, state));
+                let v = self.eval(e, state);
+                if let Some(p) = size_parts.as_mut() {
+                    p.push(Ok(v.clone()));
+                }
+                vals.push(v);
+            }
+        }
+        // `(*x.shape[:-1], n)`: a size
+        if let Some(parts) = size_parts {
+            if let Some(v) = self.t_size_from_parts(&parts, &nd, state) {
+                return v;
             }
         }
         let mut acc = Value::new();

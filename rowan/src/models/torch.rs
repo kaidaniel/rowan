@@ -168,6 +168,8 @@ impl Analyzer {
                 let t = intern::str_get(*l);
                 if let Some(d) = sh::parse_dim_label(&t) {
                     put(d);
+                } else if let Some(d) = sh::dual_dim(&t) {
+                    put(d);
                 } else if let Some(sy) = expr_sym(&t) {
                     put(sh::named(sy));
                 } else if t.starts_with(sh::TENSOR_PREFIX) || t.starts_with(SIZE_PREFIX) || &*t == sh::NUM_LABEL {
@@ -606,54 +608,141 @@ impl Analyzer {
     /// `a op b` where tensors or symbolic dims are involved (None: not ours).
     pub fn t_binop(&mut self, op: ruff_python_ast::Operator, a: &Value, b: &Value, node: &Node, st: &mut State) -> Option<Value> {
         use ruff_python_ast::Operator as O;
-        let ta = is_tensor(a);
-        let tb = is_tensor(b);
         if op == O::MatMult {
             let sa = self.t_shape(a, st).unwrap_or_else(Shape::any);
             let sb = self.t_shape(b, st).unwrap_or_else(Shape::any);
             return Some(self.t_matmul(&sa, &sb, node, st, "matmul"));
         }
-        if ta || tb {
-            // elementwise with broadcasting
-            let sa = self.t_shape(a, st);
-            let sb = self.t_shape(b, st);
-            let (Some(sa), Some(sb)) = (sa, sb) else {
-                return Some(tensor_value(Shape::any()));
+        // sizes: `x.shape[:-1] + (n,)`
+        if op == O::Add {
+            let size_of = |an: &Analyzer, v: &Value| -> Option<Shape> {
+                if let Some(s) = size_shape(v) {
+                    return Some(s);
+                }
+                let o = v.single()?;
+                if matches!(an.kind(o), Kind::Tuple) {
+                    return an.t_shape_arg(v, st);
+                }
+                None
             };
-            return Some(self.t_broadcast(&sa, &sb, node, st, "elementwise op"));
+            let is_size = |an: &Analyzer, v: &Value| size_shape(v).is_some() || v.single().map(|o| matches!(&an.obj(o).payload, Payload::Str(q) if q == "torch.Size")).unwrap_or(false);
+            if (is_size(self, a) || is_size(self, b)) && self.torch_on {
+                if let (Some(x), Some(y)) = (size_of(self, a), size_of(self, b)) {
+                    let r = concat(&x, &y);
+                    return Some(self.t_size_value(&r, node, st));
+                }
+            }
         }
-        // dims: + - * // % on ints where one side is symbolic
-        let da = is_int_like(self, a) || matches!(&a.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with(sh::DIM_PREFIX));
-        let db = is_int_like(self, b);
-        let sym_a = matches!(&a.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with(sh::DIM_PREFIX));
-        let sym_b = matches!(&b.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with(sh::DIM_PREFIX));
-        let named = |an: &Analyzer, v: &Value| -> bool {
-            v.kv.is_bot() && v.pts.len() == 1 && v.pts.iter().all(|o| an.t_sym_of_obj(o).is_some()) || matches!(&v.kv, KeyVal::Param(_)) && v.pts.is_empty()
+        if !matches!(op, O::Add | O::Sub | O::Mult | O::FloorDiv | O::Mod | O::Div | O::Pow | O::BitAnd | O::BitOr | O::BitXor) {
+            return None;
+        }
+        #[derive(PartialEq)]
+        enum K {
+            Tensor,
+            Dual,
+            Int,
+            Num,
+            Named,
+        }
+        let classify = |an: &Analyzer, v: &Value| -> Option<K> {
+            if v.pts.is_empty() {
+                match &v.kv {
+                    KeyVal::Data(l) => {
+                        let t = intern::str_get(*l);
+                        if t.starts_with(sh::TENSOR_PREFIX) {
+                            return Some(if sh::dual_dim(&t).is_some() { K::Dual } else { K::Tensor });
+                        }
+                        if t.starts_with(sh::DIM_PREFIX) {
+                            return Some(K::Int);
+                        }
+                        if &*t == sh::NUM_LABEL {
+                            return Some(K::Num);
+                        }
+                        if t.starts_with("expr:") && an.torch_on {
+                            return Some(K::Named);
+                        }
+                        None
+                    }
+                    KeyVal::Lit(k) => match intern::key_get(*k) {
+                        intern::Key::Int(_) | intern::Key::Bool(_) => Some(K::Int),
+                        intern::Key::Float(_) => Some(K::Num),
+                        _ => None,
+                    },
+                    KeyVal::Param(p) if an.torch_on && an.t_sym_of_obj(*p).is_some() => Some(K::Named),
+                    _ => None,
+                }
+            } else if an.torch_on && v.kv.is_bot() && v.pts.len() == 1 && an.t_sym_of_obj(v.pts.first().unwrap()).is_some() {
+                Some(K::Named)
+            } else {
+                None
+            }
         };
-        let a_ok = da || named(self, a);
-        let b_ok = db || named(self, b);
-        if (sym_a || sym_b) && a_ok && b_ok || (sym_a && b_ok) || (sym_b && a_ok) || (a_ok && b_ok && (named(self, a) || named(self, b)) && (da || db) && self.torch_on) {
-            if matches!(op, O::Add | O::Sub | O::Mult | O::FloorDiv | O::Mod) {
-                let (x, y) = (self.t_dim(a, st)?, self.t_dim(b, st)?);
-                let r = match op {
+        let (ka, kb) = (classify(self, a)?, classify(self, b)?);
+        let bitop = matches!(op, O::BitAnd | O::BitOr | O::BitXor);
+        if ka == K::Tensor || kb == K::Tensor {
+            let sa = self.t_shape(a, st).unwrap_or_else(Shape::any);
+            let sb = self.t_shape(b, st).unwrap_or_else(Shape::any);
+            let r = self.t_broadcast(&sa, &sb, node, st, "elementwise op");
+            if bitop {
+                let both_bool = [a, b].iter().all(|v| label(v).map(|l| sh::is_bool_label(&l)).unwrap_or(true));
+                if both_bool {
+                    if let Some(s) = tensor_shape(&r) {
+                        return Some(bool_tensor_value(s));
+                    }
+                }
+            }
+            return Some(r);
+        }
+        let int_op = matches!(op, O::Add | O::Sub | O::Mult | O::FloorDiv | O::Mod);
+        let dims = |an: &Analyzer| -> Option<DimId> {
+            let (x, y) = (an.t_dim(a, st)?, an.t_dim(b, st)?);
+            Some(sh::norm(
+                match op {
                     O::Add => sh::add(x, y),
                     O::Sub => sh::sub(x, y),
                     O::Mult => sh::mul(x, y),
                     O::FloorDiv => sh::floordiv(x, y),
                     _ => sh::modulo(x, y),
-                };
-                return Some(dim_value(sh::norm(r, &st.tf)));
+                },
+                &st.tf,
+            ))
+        };
+        if ka == K::Int && kb == K::Int {
+            // literal ints are the interpreter's; a symbolic one makes a symbolic dim
+            if a.kv.as_lit().is_some() && b.kv.as_lit().is_some() {
+                return None;
             }
-            if matches!(op, O::Div | O::Pow) {
-                return Some(num_value());
+            if int_op {
+                return Some(dim_value(dims(self)?));
+            }
+            if bitop {
+                return None;
+            }
+            return Some(num_value());
+        }
+        if matches!((&ka, &kb), (K::Int | K::Num, K::Int | K::Num)) {
+            if a.kv.as_lit().is_some() && b.kv.as_lit().is_some() {
+                return None;
+            }
+            return Some(num_value());
+        }
+        if bitop {
+            return None;
+        }
+        // a named unknown / dual: a tensor (broadcast) or, for ints, the dim
+        let sa = self.t_shape(a, st).unwrap_or_else(Shape::any);
+        let sb = self.t_shape(b, st).unwrap_or_else(Shape::any);
+        let shape = match sh::broadcast(&sa, &sb, &st.tf) {
+            Ok(s) => s,
+            Err(_) => return Some(self.t_broadcast(&sa, &sb, node, st, "elementwise op")),
+        };
+        let sid = sh::shape_id(sh::tidy(shape));
+        if int_op && ka != K::Num && kb != K::Num {
+            if let Some(d) = dims(self) {
+                return Some(Value::data(&sh::dual_label(sid, d)));
             }
         }
-        if (is_scalar(a) || is_scalar(b)) && (sym_a || sym_b || matches!(&a.kv, KeyVal::Data(l) if &*intern::str_get(*l) == sh::NUM_LABEL) || matches!(&b.kv, KeyVal::Data(l) if &*intern::str_get(*l) == sh::NUM_LABEL)) {
-            if is_scalar(a) && is_scalar(b) {
-                return Some(num_value());
-            }
-        }
-        None
+        Some(Value::data(&sh::tensor_label(sid)))
     }
 
     pub fn t_broadcast(&mut self, a: &Shape, b: &Shape, node: &Node, st: &mut State, what: &str) -> Value {
@@ -841,6 +930,13 @@ impl Analyzer {
         if let Some(s) = size_shape(obj).map(|s| sh::norm_shape(&s, &st.tf)) {
             return Some(self.t_size_index(&s, idx, node, st));
         }
+        if let Some(o) = obj.single() {
+            if matches!(&self.obj(o).payload, Payload::Str(q) if q == "torch.Size") && matches!(idx, E::Slice(_)) {
+                if let Some(s) = self.t_shape_arg(obj, st) {
+                    return Some(self.t_size_index(&s, idx, node, st));
+                }
+            }
+        }
         let tensor = is_tensor(obj);
         let items: Vec<&'static E> = match idx {
             E::Tuple(t) => t.elts.iter().collect(),
@@ -875,6 +971,17 @@ impl Analyzer {
                 return Value::data("size");
             }
             let Some(lo) = lo else { return Value::data("size") };
+            if s.rank().is_none() {
+                let need = match hi {
+                    Some(h) if h > 0 => h as u32,
+                    _ if lo < 0 => (-lo) as u32,
+                    _ => 0,
+                };
+                if need >= 2 && !self.t_require_rank(s, RankRel::Ge(need), node, st, "shape slice") {
+                    return Value::new();
+                }
+            }
+            let s = &sh::norm_shape(s, &st.tf);
             let r = slice_shape(s, lo, hi);
             return self.t_size_value(&r, node, st);
         }
@@ -1365,7 +1472,8 @@ impl Analyzer {
                         pos.push(v.clone());
                     }
                 }
-                let Some(target) = self.t_sizes(&pos, &c.star_args, st) else { return tensor_value(Shape::any()) };
+                let target = if pos.len() == args.len() { self.t_sizes_call(c, &pos, st) } else { self.t_sizes(&pos, &c.star_args, st) };
+                let Some(target) = target else { return tensor_value(Shape::any()) };
                 return self.t_view(&s, &target, &node, st, name);
             }
             "view_as" | "reshape_as" | "expand_as" | "type_as" => {
@@ -1379,11 +1487,11 @@ impl Analyzer {
                 return self.t_view(&s, &o, &node, st, name);
             }
             "expand" | "broadcast_to" => {
-                let Some(target) = self.t_sizes(args, &c.star_args, st) else { return tensor_value(Shape::any()) };
+                let Some(target) = self.t_sizes_call(c, args, st) else { return tensor_value(Shape::any()) };
                 return self.t_expand(&s, &target, &node, st);
             }
             "repeat" | "tile" => {
-                let Some(reps) = self.t_sizes(args, &c.star_args, st) else { return tensor_value(Shape::any()) };
+                let Some(reps) = self.t_sizes_call(c, args, st) else { return tensor_value(Shape::any()) };
                 return self.t_repeat(&s, &reps, &node, st);
             }
             "permute" => {
@@ -2033,7 +2141,8 @@ impl Analyzer {
             }
             let pos: Vec<Value> = if name == "full" { args.iter().take(1).cloned().collect() } else { args.clone() };
             let pos = if pos.is_empty() { kw(c, "size").cloned().into_iter().collect() } else { pos };
-            return self.t_sizes(&pos, &c.star_args, st).map(tensor_value).unwrap_or_else(|| tensor_value(Shape::any()));
+            let sz = if pos.len() == c.args.len() { self.t_sizes_call(c, &pos, st) } else { self.t_sizes(&pos, &c.star_args, st) };
+            return sz.map(tensor_value).unwrap_or_else(|| tensor_value(Shape::any()));
         }
         match name {
             "tensor" | "as_tensor" | "Tensor" | "FloatTensor" | "LongTensor" => return self.t_literal_tensor(args.first(), st),
@@ -2869,7 +2978,9 @@ impl Analyzer {
             return Value::new();
         }
         let s = sh::norm_shape(s, &st.tf);
-        let Some((e, pc)) = self.t_locate(&s, -(n as i64 + 1), node, st, what) else { return Value::new() };
+        // convolutions look at the channel dim too; pools only at the spatial ones
+        let first = if cin.is_some() { n as i64 + 1 } else { n as i64 };
+        let Some((e, pc)) = self.t_locate(&s, -first, node, st, what) else { return Value::new() };
         if let Some(ci) = cin {
             let got = get_at(&e, pc);
             let w = what.to_string();
@@ -2879,7 +2990,9 @@ impl Analyzer {
         }
         let e = sh::norm_shape(&e, &st.tf);
         let mut out: Vec<DimId> = Vec::new();
-        out.push(cout.unwrap_or_else(|| get_at(&e, pc)));
+        if cin.is_some() {
+            out.push(cout.unwrap_or_else(|| get_at(&e, pc)));
+        }
         for j in 0..n {
             let h = sh::dim_at(&e, -((n - j) as i64)).unwrap_or_else(sh::unknown);
             let o = match (out_pad, pad) {
@@ -3454,6 +3567,11 @@ pub fn dim_of_label(v: &Value) -> Option<DimId> {
     sh::parse_dim_label(&label(v)?)
 }
 
+/// A tensor for sure (not a tensor-or-int value)
+pub fn is_definite_tensor(v: &Value) -> bool {
+    is_tensor(v) && label(v).map(|l| sh::dual_dim(&l).is_none()).unwrap_or(false)
+}
+
 impl Analyzer {
     pub fn t_compare(&mut self, a: &Value, b: &Value, node: &Node, st: &mut State) -> Value {
         let sa = self.t_shape(a, st).unwrap_or_else(Shape::any);
@@ -3513,12 +3631,79 @@ impl Analyzer {
         } else {
             None
         };
-        let dim = if dim_of_label(v).is_some() || self.t_int(v).is_some() || (!v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::Ph | Kind::Unknown))) {
+        let dual = label(v).map(|l| sh::dual_dim(&l).is_some()).unwrap_or(false);
+        let dim = if dim_of_label(v).is_some() || dual || self.t_int(v).is_some() || (!v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::Ph | Kind::Unknown))) {
             self.t_dim(v, st).map(|d| self.t_print(|| sh::dim_text(d)))
         } else {
             None
         };
         let shape_json = shape.map(|s| self.t_print(|| sh::shape_json(&s)));
         serde_json::json!({"shape": shape_json, "dim": dim, "chain": chain, "entry": entry})
+    }
+}
+
+impl Analyzer {
+    /// `(*x.shape[:-1], n)`: Ok = one dim, Err = a starred sequence. None: not a size.
+    pub fn t_size_from_parts(&mut self, parts: &[Result<Value, Value>], node: &Node, st: &mut State) -> Option<Value> {
+        let mut s = Shape::known(vec![]);
+        let mut any_size = false;
+        for p in parts {
+            match p {
+                Ok(v) => {
+                    let d = self.t_dim(v, st)?;
+                    s = append_dims(&s, &[d]);
+                }
+                Err(v) => {
+                    if size_shape(v).is_some() || v.single().map(|o| matches!(&self.obj(o).payload, Payload::Str(q) if q == "torch.Size")).unwrap_or(false) {
+                        any_size = true;
+                    }
+                    let part = self.t_shape_arg(v, st)?;
+                    s = concat(&s, &part);
+                }
+            }
+        }
+        if !any_size {
+            return None;
+        }
+        Some(self.t_size_value(&s, node, st))
+    }
+
+    /// `len(t)` (dim 0) / `len(x.shape)` (the rank).
+    pub fn t_len(&mut self, v: &Value, node: &Node, st: &mut State) -> Option<Value> {
+        if let Some(s) = size_shape(v) {
+            return Some(self.t_rank_value(&sh::norm_shape(&s, &st.tf)));
+        }
+        if is_tensor(v) || (self.torch_on && !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::Ph | Kind::Unknown)) && false) {
+            let s = self.t_shape(v, st)?;
+            let (e, p) = self.t_locate(&s, 0, node, st, "len")?;
+            return Some(dim_value(get_at(&e, p)));
+        }
+        None
+    }
+
+    /// Positional args in source order with starred ones expanded as sizes: for sizes
+    /// given as `zeros(*x.shape[:-1], 5)`.
+    pub fn t_sizes_call(&self, c: &Call, args: &[Value], st: &State) -> Option<Shape> {
+        if c.star_args.is_empty() || args.len() != c.args.len() {
+            return self.t_sizes(args, &c.star_args, st);
+        }
+        let ca = c.call_ast?;
+        let mut pi = 0;
+        let mut si = 0;
+        let mut s = Shape::known(vec![]);
+        for a in ca.arguments.args.iter() {
+            if matches!(a, ruff_python_ast::Expr::Starred(_)) {
+                let v = c.star_args.get(si)?;
+                si += 1;
+                let part = self.t_shape_arg(v, st).unwrap_or_else(Shape::any);
+                s = concat(&s, &part);
+            } else {
+                let v = args.get(pi)?;
+                pi += 1;
+                let d = self.t_dim(v, st)?;
+                s = append_dims(&s, &[d]);
+            }
+        }
+        Some(s)
     }
 }

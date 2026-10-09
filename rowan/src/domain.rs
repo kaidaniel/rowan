@@ -1491,8 +1491,29 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
             return KeyVal::KeysOf(KeysOf { objs: x.objs.union(&y.objs), ns: x.ns, exclude: x.exclude.clone(), chain: x.chain, exhaustive_depth: -1 });
         }
     }
-    if let (KeyVal::Data(_), KeyVal::Data(_)) = (a, b) {
+    if let (KeyVal::Data(x), KeyVal::Data(y)) = (a, b) {
+        if let Some(j) = crate::shape::join_labels(&crate::intern::str_get(*x), &crate::intern::str_get(*y)) {
+            return KeyVal::data(&j);
+        }
         return DATA;
+    }
+    // a symbolic dim joined with a literal: an unknown dim (not "anything": the literal stays
+    // possible); a tensor joined with a number: rank 0 possible
+    for (d, l) in [(a, b), (b, a)] {
+        if let (KeyVal::Data(x), true) = (d, l.is_literal()) {
+            let t = crate::intern::str_get(*x);
+            if crate::shape::parse_dim_label(&t).is_some() {
+                let lits = kv_literals(l);
+                let same = crate::shape::parse_dim_label(&t).and_then(crate::shape::as_lit).map(|n| lits.iter().all(|k| crate::intern::key_as_int(k) == Some(n))).unwrap_or(false);
+                return if same { d.clone() } else { KeyVal::data(&crate::shape::dim_label(crate::shape::unknown())) };
+            }
+            if let Some(sid) = crate::shape::parse_tensor_label(&t) {
+                if kv_literals(l).iter().any(crate::intern::key_is_number) {
+                    let s = crate::shape::join_shapes(&crate::shape::shape_get(sid), &crate::shape::Shape::known(vec![]));
+                    return KeyVal::data(&crate::shape::tensor_label(crate::shape::shape_id(s)));
+                }
+            }
+        }
     }
     if let KeyVal::Data(_) = a {
         return a.clone();

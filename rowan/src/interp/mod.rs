@@ -1597,7 +1597,7 @@ impl Analyzer {
                     });
                 }
                 self.entry_scope = saved_scope;
-                let fake = Node::synthetic(fi.node.node().module, fi.node.node().line);
+                let fake = if self.torch_modules.contains(&fi.module) { Node::synthetic(fi.node.node().module, frontend::node(ci.node).line) } else { Node::synthetic(fi.node.node().module, fi.node.node().line) };
                 self.call_user(init, Some(Value::obj(inst)), args, IndexMap::new(), vec![], vec![], state, &fake, None, true);
             }
         }

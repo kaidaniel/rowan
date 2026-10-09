@@ -1218,7 +1218,35 @@ pub fn dim_label(d: DimId) -> String {
 }
 pub fn parse_tensor_label(l: &str) -> Option<ShapeId> {
     let r = l.strip_prefix(TENSOR_PREFIX)?;
-    r.strip_prefix('B').unwrap_or(r).parse().ok().map(ShapeId)
+    let r = r.strip_prefix('B').unwrap_or(r);
+    let r = r.split('~').next().unwrap_or(r);
+    r.parse().ok().map(ShapeId)
+}
+/// A value that is a tensor of this shape, or (if the operands were ints) this dim: the
+/// result of arithmetic on unknown values in a torch module (`x * 2`, `n + m`).
+pub fn dual_label(s: ShapeId, d: DimId) -> String {
+    format!("{}{}~{}", TENSOR_PREFIX, s.0, d.0)
+}
+pub fn dual_dim(l: &str) -> Option<DimId> {
+    let r = l.strip_prefix(TENSOR_PREFIX)?;
+    r.split_once('~').and_then(|(_, d)| d.parse().ok()).map(DimId)
+}
+
+/// Join of two labelled data values (tensors, dims); None: not both ours.
+pub fn join_labels(a: &str, b: &str) -> Option<String> {
+    if let (Some(x), Some(y)) = (parse_tensor_label(a), parse_tensor_label(b)) {
+        let s = shape_id(join_shapes(&shape_get(x), &shape_get(y)));
+        let both_bool = is_bool_label(a) && is_bool_label(b);
+        return Some(match (dual_dim(a), dual_dim(b)) {
+            (Some(p), Some(q)) => dual_label(s, if p == q { p } else { unknown() }),
+            _ if both_bool => bool_tensor_label(s),
+            _ => tensor_label(s),
+        });
+    }
+    if let (Some(x), Some(y)) = (parse_dim_label(a), parse_dim_label(b)) {
+        return Some(dim_label(if x == y { x } else { unknown() }));
+    }
+    None
 }
 /// a bool tensor (comparisons, masks): indexing with it selects
 pub fn bool_tensor_label(s: ShapeId) -> String {
