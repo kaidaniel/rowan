@@ -21,7 +21,7 @@ definite mismatch (`Linear(512 -> 10) given last dim 256`, an RNN given 4 dims) 
 an undecided one (`x.shape[-1] == self.n_embd`) is a *requirement* shown at the line and
 listed under `== tensor shapes ==`, and holds from there on. The hover names dims by the
 locals that hold them (`B, T, C = x.shape` → `Tensor[B, T, 3*self.n_embd]`). The design is in
-`SPECIFICATION.md` §2.3 and `TORCH_PLAN.md`; the 132 torch test programs (115 small, 17
+`SPECIFICATION.md` §2.3 and `TORCH_PLAN.md`; the 162 torch test programs (145 small, 17
 well-known models from a from-scratch transformer to nanoGPT, ResNet, U-Net, ViT, BERT) are
 in `tests/torch/`, each checked against real PyTorch by `tests/torch_oracle.py`.
 
@@ -35,7 +35,7 @@ rowan/target/release/rowan prog.py                # text report
 rowan/target/release/rowan prog.py --json         # JSON lines (verdicts, schemas, summaries)
 rowan/target/release/rowan prog.py --facts        # per-name facts for editor integration
 rowan/target/release/rowan lib.py --no-entry      # only what the module itself runs (no entry-point pass)
-uv run --no-project python tests/run_golden.py    # golden suite (417 cases + 132 torch cases)
+uv run --no-project python tests/run_golden.py    # golden suite (417 cases + 162 torch cases)
 uv run --no-project python tests/run_snapshots.py # output snapshots on larger inputs
 ```
 
@@ -138,7 +138,7 @@ known.
 | `rowan/src/shape.rs` | tensor shapes: symbolic dims, shapes, facts, printing |
 | `rowan/src/report.rs` | per-access verdict combination, schema table, text / JSON / facts output |
 | `tests/run_golden.py`, `tests/cases/` | golden harness: expectations are `#@` comments in the case files (417 cases, each written before running the engine) |
-| `tests/torch/`, `tests/torch_oracle.py` | 132 torch cases (`CONVENTIONS.md`); the oracle runs them under real PyTorch |
+| `tests/torch/`, `tests/torch_oracle.py` | 162 torch cases (`CONVENTIONS.md`); the oracle runs them under real PyTorch |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | output snapshots on the example and three large fixture programs |
 | `examples/etl_report.py` | a realistic script with planted bugs (all found; also golden case e34) |
 | `vscode-rowan/`, `rowan/py/` | VS Code extension (uses `rowan serve`); PyO3 binding (does not load on the current macOS toolchain) |
@@ -179,7 +179,7 @@ known.
 
 ## Performance
 
-Release build, Apple M-series: the 549-case golden suite runs in 2 s (one process per
+Release build, Apple M-series: the 579-case golden suite runs in 2 s (one process per
 case; each torch model in about 0.02 s); an 830-line program and a 1,700-line twelve-module package analyse in 0.1 s each;
 a 1.2k-line self-referential module hits the 2 s soft deadline and finishes in 2.5 s with
 reduced precision. 137 scripts from local projects analysed in 0.8 s total without

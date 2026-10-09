@@ -190,12 +190,19 @@ pass). Agreed with the owner on 2026-10-09:
    layers, `einsum`, `chunk`/`split`/`cat`/`stack`, `scaled_dot_product_attention`.
 7. [x] Cross-function precision (tabulation on tensor events; measure; substitution if
    needed).
-8. [ ] Hover rendering (letters + legend + requirements) in `extension.js` and
+8. [x] Hover rendering (letters + legend + requirements) in `extension.js` and
    `test.js`; rebuild the vsix.
-9. [ ] Iterate: run everything, fix every surfaced bug, move cases out of `PENDING`,
+9. [x] Iterate: run everything, fix every surfaced bug, move cases out of `PENDING`,
    until `PENDING` is empty. Then write more hypothesis cases for weak spots.
-10. [ ] Docs: README (notation for tensors), SPECIFICATION (§ tensor shapes), AGENTS.md
+10. [x] Docs: README (notation for tensors), SPECIFICATION (§ tensor shapes), AGENTS.md
     (≤ 200 lines); delete this plan, or fold what remains into AGENTS.md.
+
+## Status
+
+All steps done. 162 cases pass (115 + 30 hypothesis small programs, 17 models); one
+`#@todo` (s124: recursion deeper than the budget). The hypothesis round found real bugs:
+a crash on literal true division, `x.mean(**kw)` reported as `[]`, user `__matmul__` and
+user method names taken for tensor ops, `OrderedDict` read as empty.
 
 ## Notes / decisions log
 
