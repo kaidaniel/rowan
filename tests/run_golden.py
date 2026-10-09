@@ -187,8 +187,14 @@ def run_case(path: str, verbose: bool = False) -> Tuple[bool, List[str]]:
     with open(path, encoding="utf-8") as f:
         src = f.read()
     verdict_exp, row_exp, schema_exp = collect_expectations(src)
+    # `#@argv ...`: extra engine arguments for this case (relative paths against its dir)
+    argv: List[str] = []
+    m = re.search(r"^#@argv\s+(.*)$", src, re.M)
+    if m:
+        for a in m.group(1).split():
+            argv.append(os.path.join(os.path.dirname(path), a) if (a.startswith(".") or a.startswith("site")) and not a.startswith("--") else a)
     try:
-        out = subprocess.run([RUST_BIN, path, "--golden"], capture_output=True, text=True, timeout=600)
+        out = subprocess.run([RUST_BIN, path, "--golden", *argv], capture_output=True, text=True, timeout=600)
     except Exception as e:  # noqa: BLE001
         return False, [f"could not run {RUST_BIN} (build it with `cargo build --release` in rowan/): {e}"]
     if out.returncode != 0:

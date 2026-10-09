@@ -1,4 +1,4 @@
-//! CLI: rowan FILE.py [--json] [--golden] [--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports] [--search-path DIR]…
+//! CLI: rowan FILE.py [--json] [--golden] [--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports] [--search-path DIR]… [--follow PKG]… [--site-packages DIR]… | rowan serve
 use std::io::Write;
 
 use rowan::interp::Analyzer;
@@ -15,11 +15,27 @@ fn main() {
     let mut entry = true;
     let mut imports = true;
     let mut search: Vec<String> = Vec::new();
+    let mut follow: Vec<String> = std::env::var("ROWAN_FOLLOW").ok().map(|v| v.split(',').filter(|s| !s.is_empty()).map(|s| s.trim().to_string()).collect()).unwrap_or_default();
+    let mut site: Vec<String> = Vec::new();
     let mut serve = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "serve" => serve = true,
+            "--follow" => match it.next() {
+                Some(n) => follow.extend(n.split(',').filter(|s| !s.is_empty()).map(|s| s.trim().to_string())),
+                None => {
+                    eprintln!("--follow needs a package name");
+                    std::process::exit(2);
+                }
+            },
+            "--site-packages" => match it.next() {
+                Some(d) => site.push(d.clone()),
+                None => {
+                    eprintln!("--site-packages needs a directory");
+                    std::process::exit(2);
+                }
+            },
             "--search-path" => match it.next() {
                 Some(d) => search.push(d.clone()),
                 None => {
@@ -43,9 +59,10 @@ fn main() {
     }
     if serve {
         let search2 = search.clone();
+        let opts = Opts { search: search2, follow: follow.clone(), site: site.clone(), entry, imports };
         let out = std::thread::Builder::new()
             .stack_size(1 << 30)
-            .spawn(move || serve_loop(search2, entry, imports))
+            .spawn(move || serve_loop(opts))
             .unwrap()
             .join();
         if out.is_err() {
@@ -55,12 +72,12 @@ fn main() {
         return;
     }
     let Some(file) = file else {
-        eprintln!("usage: rowan FILE.py [--json|--golden|--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports] [--search-path DIR]...");
+        eprintln!("usage: rowan FILE.py [--json|--golden|--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports] [--search-path DIR]... [--follow PKG]... [--site-packages DIR]...  |  rowan serve [options]");
         std::process::exit(2);
     };
     let out = std::thread::Builder::new()
         .stack_size(1 << 30)
-        .spawn(move || run(&file, search, json, golden, facts, show_rows, show_summaries, entry, imports))
+        .spawn(move || run(&file, Opts { search, follow, site, entry, imports }, json, golden, facts, show_rows, show_summaries))
         .unwrap()
         .join();
     match out {
@@ -86,7 +103,49 @@ fn main() {
 /// cached results that depend on those files; `{"cmd":"shutdown"}` exits. Every response
 /// echoes the request's `id` and carries `ok`; a result has `cached`, `ms`, `deps` and
 /// `result`. Parsed trees are cached per (path, content hash) in the process.
-fn serve_loop(search: Vec<String>, entry: bool, imports: bool) {
+/// Import options shared by the CLI and the server.
+#[derive(Clone)]
+struct Opts {
+    search: Vec<String>,
+    follow: Vec<String>,
+    site: Vec<String>,
+    entry: bool,
+    imports: bool,
+}
+
+/// site-packages directories for `file`: the ones given, `$VIRTUAL_ENV`, and a `.venv`
+/// under the file's directory or an ancestor (no Python interpreter is consulted).
+fn site_packages_for(file: &str, given: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = given.to_vec();
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(v) = std::env::var("VIRTUAL_ENV") {
+        candidates.push(std::path::PathBuf::from(v));
+    }
+    let mut dir = std::path::Path::new(file).parent().map(|p| p.to_path_buf());
+    for _ in 0..10 {
+        let Some(d) = dir.clone() else { break };
+        candidates.push(d.join(".venv"));
+        candidates.push(d.join("venv"));
+        dir = d.parent().map(|p| p.to_path_buf());
+    }
+    for venv in candidates {
+        let lib = venv.join("lib");
+        if let Ok(rd) = std::fs::read_dir(&lib) {
+            for e in rd.flatten() {
+                let p = e.path().join("site-packages");
+                if e.file_name().to_string_lossy().starts_with("python") && p.is_dir() {
+                    let s = p.to_string_lossy().to_string();
+                    if !out.contains(&s) {
+                        out.push(s);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn serve_loop(opts: Opts) {
     use std::io::{BufRead, Write};
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
@@ -117,7 +176,7 @@ fn serve_loop(search: Vec<String>, entry: bool, imports: bool) {
                         let dep_paths: Vec<&str> = deps.iter().map(|(p, _)| p.as_str()).collect();
                         format!("{{\"id\":{},\"ok\":true,\"path\":{},\"cached\":true,\"ms\":{},\"deps\":{},\"result\":{}}}", id, serde_json::json!(path), t0.elapsed().as_millis(), serde_json::json!(dep_paths), result)
                     }
-                    None => match run_with_deps(&path, search.clone(), false, false, true, true, true, entry, imports) {
+                    None => match run_with_deps(&path, opts.clone(), false, false, true, true, true) {
                         Ok((result, deps)) => {
                             let hashed: Vec<(String, u64)> = deps.iter().map(|p| (p.clone(), file_hash(p).unwrap_or(0))).collect();
                             cache.insert(path.clone(), (hashed, result.clone()));
@@ -146,13 +205,14 @@ fn serve_loop(search: Vec<String>, entry: bool, imports: bool) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run(file: &str, search: Vec<String>, json: bool, golden: bool, facts: bool, show_rows: bool, show_summaries: bool, entry: bool, imports: bool) -> Result<String, String> {
-    run_with_deps(file, search, json, golden, facts, show_rows, show_summaries, entry, imports).map(|(s, _)| s)
+fn run(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, show_rows: bool, show_summaries: bool) -> Result<String, String> {
+    run_with_deps(file, opts, json, golden, facts, show_rows, show_summaries).map(|(s, _)| s)
 }
 
 /// `run`, also returning the paths of every module the analysis loaded (the entry first).
 #[allow(clippy::too_many_arguments)]
-fn run_with_deps(file: &str, search: Vec<String>, json: bool, golden: bool, facts: bool, show_rows: bool, show_summaries: bool, entry: bool, imports: bool) -> Result<(String, Vec<String>), String> {
+fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, show_rows: bool, show_summaries: bool) -> Result<(String, Vec<String>), String> {
+    let Opts { search, follow, site, entry, imports } = opts;
     let src = std::fs::read_to_string(file).map_err(|e| format!("{}: {}", file, e))?;
     let dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".into());
     let dir = std::fs::canonicalize(&dir).map(|p| p.to_string_lossy().to_string()).unwrap_or(dir);
@@ -167,6 +227,10 @@ fn run_with_deps(file: &str, search: Vec<String>, json: bool, golden: bool, fact
     roots.extend(search);
     let mut an = Analyzer::new(src.clone(), file, roots, entry, imports, None)?;
     an.facts_on = facts;
+    an.follow = follow;
+    if !an.follow.is_empty() {
+        an.site_paths = site_packages_for(file, &site);
+    }
     if golden {
         // `#@row NAME:` expectations are evaluated at the statement on that line
         for (i, line) in src.lines().enumerate() {

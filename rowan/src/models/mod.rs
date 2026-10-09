@@ -151,6 +151,16 @@ impl Registry {
     }
 }
 
+/// Is there a model for anything in module `name` (so following its source is not wanted)?
+pub fn has_module_models(name: &str) -> bool {
+    let dotted = format!("{}.", name);
+    if PREFIXES.iter().any(|p| p.starts_with(&dotted) || *p == dotted) || ALLOWLIST_PREFIXES.iter().any(|p| p.starts_with(&dotted) || *p == dotted) {
+        return true;
+    }
+    let reg = Registry::new();
+    reg.table.keys().any(|k| k.starts_with(&dotted))
+}
+
 impl Default for Registry {
     fn default() -> Self {
         Registry::new()

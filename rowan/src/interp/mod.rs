@@ -539,6 +539,10 @@ pub struct Analyzer {
     pub summary_provisional: FxHashMap<crate::summary::SummaryKey, (Rc<Summary>, FxHashSet<ObjId>)>,
     pub model_call: u32,
     pub search_paths: Vec<String>,
+    /// installed packages to follow into site-packages (top-level names; `*` for all)
+    pub follow: Vec<String>,
+    /// site-packages directories searched for followed packages
+    pub site_paths: Vec<String>,
     pub analyse_entry_points: bool,
     pub objects: Vec<Obj>,
     pub obj_index: FxHashMap<(Kind, String, String), ObjId>,
@@ -647,6 +651,8 @@ impl Analyzer {
             summary_provisional: FxHashMap::default(),
             model_call: 0,
             search_paths: if follow_imports { search_paths } else { Vec::new() },
+            follow: Vec::new(),
+            site_paths: Vec::new(),
             analyse_entry_points,
             objects: vec![Obj {
                 id: 0,

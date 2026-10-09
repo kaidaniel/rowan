@@ -31,8 +31,12 @@ Parsed modules are kept per (path, content hash). The VS Code extension uses it 
 
 Options: `--no-rows`, `--no-summaries`, `--no-entry`, `--no-imports`, `--search-path DIR`
 (repeatable; the file's directory and the directory above its outermost package are
-searched first). Imports are followed into local modules and packages (`pkg/__init__.py`,
-`import a.b.c`, relative imports); installed packages are modelled, not analysed. Environment:
+searched first), `--follow PKG` (repeatable or comma-separated, also `ROWAN_FOLLOW`): analyse
+that installed package's source from site-packages (`--site-packages DIR`, else
+`$VIRTUAL_ENV` or a `.venv` / `venv` next to the file or an ancestor; no interpreter is
+run); a package with a registered model (pandas, numpy, …) keeps the model. Imports are
+followed into local modules and packages (`pkg/__init__.py`, `import a.b.c`, relative
+imports); other installed packages are modelled or unknown. Environment:
 `ROWAN_SUMMARIES=0` (older per-call-site engine), `ROWAN_DEBUG=1` (progress, which event
 makes a call site re-analyse, slow instantiations on stderr), `ROWAN_NO=…` (switch one
 analysis refinement off, for bisecting; names in `AGENTS.md`),

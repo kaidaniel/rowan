@@ -683,6 +683,17 @@ impl Analyzer {
                     return v;
                 }
             }
+            // an installed package on the allowlist is analysed from site-packages, unless a
+            // model covers it (the model knows more than its source would yield)
+            let followed = self.follow.iter().any(|f| f == name || f == "*");
+            if followed && !crate::models::has_module_models(name) {
+                for base in self.site_paths.clone() {
+                    let dir = std::path::PathBuf::from(&base);
+                    if let Some(v) = self.load_module_file(name, &dir, name, state) {
+                        return v;
+                    }
+                }
+            }
         }
         let _ = node;
         let oid = self.alloc_raw(Kind::External, &format!("ext:{}", name), "", true, name, Payload::Str(name.to_string()));
