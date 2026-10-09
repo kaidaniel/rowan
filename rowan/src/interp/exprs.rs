@@ -206,6 +206,10 @@ impl Analyzer {
             }
             ast::Expr::Compare(c) => {
                 let a = self.eval(&c.left, state);
+                // a tensor is never None
+                if c.ops.len() == 1 && matches!(c.ops[0], ast::CmpOp::Is | ast::CmpOp::IsNot) && matches!(c.comparators[0], ast::Expr::NoneLiteral(_)) && crate::models::torch::is_tensor(&a) && a.pts.is_empty() {
+                    return Value::lit(intern::key_bool(c.ops[0] == ast::CmpOp::IsNot));
+                }
                 if c.ops.len() == 1 && matches!(c.ops[0], ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE | ast::CmpOp::Eq | ast::CmpOp::NotEq) {
                     if crate::models::torch::is_tensor(&a) {
                         let b = self.eval(&c.comparators[0], state);

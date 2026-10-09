@@ -40,6 +40,9 @@ pub enum Atom {
     Min(DimId, DimId),
     /// an unknown dim: never known equal to anything
     Unknown,
+    /// one of these dims (a join; sorted, flat): prints as `?`, but stays one atom across
+    /// loop iterations, so a requirement on it becomes a fact
+    Join(Vec<DimId>),
 }
 
 /// monomial: sorted (atom, power); polynomial: sorted (monomial, coefficient), no zeros
@@ -231,6 +234,33 @@ pub fn named(s: Sym) -> DimId {
 pub fn unknown() -> DimId {
     of_atom(Atom::Unknown)
 }
+
+/// The join of two dims that differ.
+pub fn join_dim(a: DimId, b: DimId) -> DimId {
+    if a == b {
+        return a;
+    }
+    if has_unknown(a) || has_unknown(b) {
+        return unknown();
+    }
+    let mut alts: Vec<DimId> = Vec::new();
+    for d in [a, b] {
+        let p = poly(d);
+        match &p[..] {
+            [(m, 1)] if m.len() == 1 && m[0].1 == 1 => match atom_get(m[0].0) {
+                Atom::Join(v) => alts.extend(v),
+                _ => alts.push(d),
+            },
+            _ => alts.push(d),
+        }
+    }
+    alts.sort();
+    alts.dedup();
+    if alts.len() > 8 {
+        return unknown();
+    }
+    of_atom(Atom::Join(alts))
+}
 pub fn as_lit(d: DimId) -> Option<i64> {
     let p = poly(d);
     match &p[..] {
@@ -248,6 +278,11 @@ fn atom_has_unknown(a: AtomId) -> bool {
         Atom::FloorDiv(x, y) | Atom::Mod(x, y) | Atom::Max(x, y) | Atom::Min(x, y) => has_unknown(x) || has_unknown(y),
         _ => false,
     }
+}
+
+/// Unknown in the sense of "prints as `?`" (unknown or a join).
+pub fn is_vague(d: DimId) -> bool {
+    has_unknown(d) || poly(d).iter().any(|(m, _)| m.iter().any(|(a, _)| matches!(atom_get(*a), Atom::Join(_))))
 }
 
 fn norm_poly(mut terms: Vec<(Mono, i64)>) -> Poly {
@@ -523,6 +558,15 @@ fn norm_atom(a: AtomId, f: &TFacts) -> DimId {
         return *d;
     }
     match atom_get(a2) {
+        Atom::Join(v) => {
+            // a join whose alternatives became equal is that dim
+            let n: Vec<DimId> = v.iter().map(|d| norm(*d, f)).collect();
+            if n.iter().all(|d| *d == n[0]) {
+                n[0]
+            } else {
+                poly_id(vec![(vec![(a2, 1)], 1)])
+            }
+        }
         Atom::FloorDiv(x, y) => floordiv(norm(x, f), norm(y, f)),
         Atom::Mod(x, y) => modulo(norm(x, f), norm(y, f)),
         Atom::Max(x, y) => max(norm(x, f), norm(y, f)),
@@ -1028,12 +1072,12 @@ pub fn join_shapes(a: &Shape, b: &Shape) -> Shape {
     }
     if let (Some(x), Some(y)) = (a.dims(), b.dims()) {
         if x.len() == y.len() {
-            let d = x.iter().zip(y.iter()).map(|(p, q)| if p == q { *p } else { unknown() }).collect();
+            let d = x.iter().zip(y.iter()).map(|(p, q)| join_dim(*p, *q)).collect();
             return Shape { prefix: d, rest: None, suffix: vec![], assume };
         }
     }
     if a.rest == b.rest && a.prefix.len() == b.prefix.len() && a.suffix.len() == b.suffix.len() {
-        let pj = |x: &[DimId], y: &[DimId]| -> Vec<DimId> { x.iter().zip(y.iter()).map(|(p, q)| if p == q { *p } else { unknown() }).collect() };
+        let pj = |x: &[DimId], y: &[DimId]| -> Vec<DimId> { x.iter().zip(y.iter()).map(|(p, q)| join_dim(*p, *q)).collect() };
         return Shape { prefix: pj(&a.prefix, &b.prefix), rest: a.rest.clone(), suffix: pj(&a.suffix, &b.suffix), assume };
     }
     // the common trailing dims (up to the first that differs); the rest unknown
@@ -1041,11 +1085,7 @@ pub fn join_shapes(a: &Shape, b: &Shape) -> Shape {
     let tb: Vec<DimId> = if b.rest.is_none() { b.prefix.clone() } else { b.suffix.clone() };
     let n = ta.len().min(tb.len());
     // the trailing positions both have (dims that differ: unknown); the rest unknown
-    let tail: Vec<DimId> = (0..n).map(|i| {
-        let p = ta[ta.len() - n + i];
-        let q = tb[tb.len() - n + i];
-        if p == q { p } else { unknown() }
-    }).collect();
+    let tail: Vec<DimId> = (0..n).map(|i| join_dim(ta[ta.len() - n + i], tb[tb.len() - n + i])).collect();
     Shape { prefix: vec![], rest: Some(Rest::Any), suffix: tail, assume }
 }
 
@@ -1157,7 +1197,7 @@ pub fn atom_text(a: AtomId) -> String {
         Atom::Mod(x, y) => format!("{} % {}", paren(&dim_text(x)), paren(&dim_text(y))),
         Atom::Max(x, y) => format!("max({}, {})", dim_text(x), dim_text(y)),
         Atom::Min(x, y) => format!("min({}, {})", dim_text(x), dim_text(y)),
-        Atom::Unknown => "?".into(),
+        Atom::Unknown | Atom::Join(_) => "?".into(),
     }
 }
 
@@ -1333,13 +1373,13 @@ pub fn join_labels(a: &str, b: &str) -> Option<String> {
         let s = shape_id(join_shapes(&shape_get(x), &shape_get(y)));
         let both_bool = is_bool_label(a) && is_bool_label(b);
         return Some(match (dual_dim(a), dual_dim(b)) {
-            (Some(p), Some(q)) => dual_label(s, if p == q { p } else { unknown() }),
+            (Some(p), Some(q)) => dual_label(s, join_dim(p, q)),
             _ if both_bool => bool_tensor_label(s),
             _ => tensor_label(s),
         });
     }
     if let (Some(x), Some(y)) = (parse_dim_label(a), parse_dim_label(b)) {
-        return Some(dim_label(if x == y { x } else { unknown() }));
+        return Some(dim_label(join_dim(x, y)));
     }
     None
 }

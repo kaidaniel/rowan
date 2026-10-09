@@ -150,8 +150,7 @@ impl Analyzer {
         let mut put = |d: DimId| {
             out = Some(match out {
                 None => d,
-                Some(x) if x == d => x,
-                Some(_) => sh::unknown(),
+                Some(x) => sh::join_dim(x, d),
             })
         };
         match &v.kv {
@@ -3120,7 +3119,23 @@ impl Analyzer {
                 return Value::new();
             }
         }
-        tensor_value(sh::norm_shape(s, &st.tf))
+        // the output has the normalised trailing dims (what the input's were required to be)
+        let r = sh::norm_shape(s, &st.tf);
+        let r = match r.dims() {
+            Some(mut v) => {
+                let n = v.len();
+                v.splice(n - k.., d.iter().copied());
+                Shape::known(v)
+            }
+            None => {
+                let e = sh::expose(&r, 0, k);
+                let mut e = e;
+                let n = e.suffix.len();
+                e.suffix.splice(n - k.., d.iter().copied());
+                e
+            }
+        };
+        tensor_value(sh::norm_shape(&r, &st.tf))
     }
 
     /// Convolution / pooling over the last `n` dims; `cin`/`cout` None: channels kept (pools).
