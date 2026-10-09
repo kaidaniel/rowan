@@ -28,7 +28,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "partial.", "response.", "torch.", "tensor.", "nnmodule.",
+    "parser.", "partial.", "response.", "torch.", "tensor.", "nnmodule.", "math.",
 ];
 
 pub struct Registry {
@@ -141,6 +141,7 @@ impl Registry {
         r(&["os.getenv", "os.environ.get"], m_getenv);
         pandas::install(&mut r);
         r(&["torch.*"], torch::m_torch);
+        r(&["math.*"], m_math);
         r(&["tensor.*"], torch::m_tensor_method);
         r(&["nnmodule.*"], torch::m_nnmodule);
         Registry { table: t }
@@ -190,6 +191,14 @@ impl Default for Registry {
     fn default() -> Self {
         Registry::new()
     }
+}
+
+/// `math.*`: numbers (a scalar for the tensor model)
+fn m_math(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
+    if an.torch_on && !matches!(c.qual.as_str(), "math.floor" | "math.ceil" | "math.isclose" | "math.isnan" | "math.isinf" | "math.prod" | "math.gcd" | "math.comb" | "math.factorial") {
+        return crate::models::torch::num_value();
+    }
+    Value::data(&format!("L{}", c.line))
 }
 
 pub fn noeffect(_an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
@@ -498,6 +507,11 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// `max(xs, key=f)` / `min(xs)`: an element of the container (the key function runs on it);
 /// with several arguments, any of them.
 fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    if an.torch_on {
+        if let Some(v) = an.t_minmax(c.qual.ends_with("max"), &c.args, st) {
+            return v;
+        }
+    }
     let is_max = c.qual.ends_with("max");
     // known items (or several arguments) whose keys are known literals: the first extreme one
     let cands: Option<Vec<Value>> = if c.args.len() == 1 { an.iterate(&c.args[0], &c.node, st).items } else { Some(c.args.clone()) };

@@ -668,6 +668,13 @@ impl Analyzer {
                         if t.starts_with("expr:") && an.torch_on {
                             return Some(K::Named);
                         }
+                        if t.starts_with(SIZE_PREFIX) {
+                            return None;
+                        }
+                        // an unnamed unknown number (a loop counter, `float(...)`)
+                        if an.torch_on {
+                            return Some(K::Int);
+                        }
                         None
                     }
                     KeyVal::Lit(k) => match intern::key_get(*k) {
@@ -715,8 +722,8 @@ impl Analyzer {
             ))
         };
         if ka == K::Int && kb == K::Int {
-            // literal ints are the interpreter's; a symbolic one makes a symbolic dim
-            if a.kv.as_lit().is_some() && b.kv.as_lit().is_some() {
+            // plain ints are the interpreter's; a symbolic one makes a symbolic dim
+            if dim_of_label(a).is_none() && dim_of_label(b).is_none() {
                 return None;
             }
             if int_op {
@@ -728,7 +735,8 @@ impl Analyzer {
             return Some(num_value());
         }
         if matches!((&ka, &kb), (K::Int | K::Num, K::Int | K::Num)) {
-            if a.kv.as_lit().is_some() && b.kv.as_lit().is_some() {
+            let special = |v: &Value| label(v).map(|l| l.starts_with('\u{1}')).unwrap_or(false);
+            if !special(a) && !special(b) {
                 return None;
             }
             return Some(num_value());
@@ -2038,7 +2046,6 @@ impl Analyzer {
         let Some(a) = a else { return tensor_value(Shape::any()) };
         if let Some(items) = self.t_seq(&a, st) {
             let sizes: Vec<DimId> = items.iter().map(|v| self.t_dim(v, st).unwrap_or_else(sh::unknown)).collect();
-            if !self.t_require_eq(x, sh::product(&[]).max(sh::lit(0)).max(sh::lit(0)), node, st, "split").then_some(()).is_some() {}
             let total = sizes.iter().fold(sh::lit(0), |acc, z| sh::add(acc, *z));
             if !self.t_require_eq(x, total, node, st, "split sizes") {
                 return Value::new();
@@ -3602,7 +3609,7 @@ impl Analyzer {
         let (chain, entry) = self.t_note_ctx();
         let shape = if let Some(s) = size_shape(v) {
             Some(sh::norm_shape(&s, &st.tf))
-        } else if let Some(o) = v.single().filter(|o| matches!(&self.obj(*o).payload, Payload::Str(q) if q == "torch.Size")) {
+        } else if let Some(o) = v.single().filter(|o| matches!(&self.obj(*o).payload, Payload::Str(q) if q == "torch.Size") || (self.kind(*o) == Kind::Tuple && self.obj(*o).literal_len.is_some())) {
             self.t_shape_arg(&Value::obj(o), st)
         } else if tensor_shape(v).is_some() || (!v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::Ph | Kind::Unknown))) || matches!(&v.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with("expr:") || *l == intern::EMPTY_STR || intern::str_get(*l).starts_with('L')) && v.pts.is_empty() {
             if self.t_dim(v, st).is_some() && dim_of_label(v).is_some() { None } else { self.t_shape(v, st) }
@@ -3651,7 +3658,7 @@ impl Analyzer {
         if let Some(s) = size_shape(v) {
             return Some(self.t_rank_value(&sh::norm_shape(&s, &st.tf)));
         }
-        if is_tensor(v) || (self.torch_on && !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::Ph | Kind::Unknown)) && false) {
+        if is_tensor(v) || (self.torch_on && !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::Ph | Kind::Unknown) && self.t_sym_of_obj(o).is_some())) {
             let s = self.t_shape(v, st)?;
             let (e, p) = self.t_locate(&s, 0, node, st, "len")?;
             return Some(dim_value(get_at(&e, p)));
@@ -3781,5 +3788,45 @@ impl Analyzer {
                 }
             }
         }
+    }
+}
+
+impl Analyzer {
+    /// `max(a, b)` / `min(a, b)` on dims (None: not ours).
+    pub fn t_minmax(&mut self, is_max: bool, args: &[Value], st: &State) -> Option<Value> {
+        if args.len() < 2 || !args.iter().any(|a| dim_of_label(a).is_some() || label(a).map(|l| sh::dual_dim(&l).is_some()).unwrap_or(false)) {
+            return None;
+        }
+        let mut acc = self.t_dim(&args[0], st)?;
+        for a in &args[1..] {
+            let d = self.t_dim(a, st)?;
+            acc = if is_max { sh::max(acc, d) } else { sh::min(acc, d) };
+        }
+        Some(dim_value(acc))
+    }
+
+    /// Unary minus on a named unknown (tensor or int).
+    pub fn t_neg_named(&self, v: &Value, st: &State) -> Option<Value> {
+        if !self.torch_on || !(v.kv.is_bot() && v.pts.len() == 1) {
+            return None;
+        }
+        let o = v.pts.first()?;
+        let sy = self.t_sym_of_obj(o)?;
+        let s = sh::shape_id(Shape::of_sym(sy));
+        let _ = st;
+        Some(Value::data(&sh::dual_label(s, sh::scale(sh::named(sy), -1))))
+    }
+
+    /// `a < b` & co. where `a` is a named unknown in a torch module: a bool tensor (or bool).
+    pub fn t_compare_named(&mut self, a: &Value, b: &Value, node: &Node, st: &mut State) -> Option<Value> {
+        if !self.torch_on || !(a.kv.is_bot() && a.pts.len() == 1 && self.t_sym_of_obj(a.pts.first()?).is_some()) {
+            return None;
+        }
+        let numeric = |v: &Value| v.pts.is_empty() && (matches!(&v.kv, KeyVal::Lit(k) if intern::key_is_number(*k)) || tensor_shape(v).is_some() || dim_of_label(v).is_some());
+        let named = |an: &Analyzer, v: &Value| v.kv.is_bot() && v.pts.len() == 1 && an.t_sym_of_obj(v.pts.first().unwrap()).is_some();
+        if !numeric(b) && !named(self, b) {
+            return None;
+        }
+        Some(self.t_compare(a, b, node, st))
     }
 }

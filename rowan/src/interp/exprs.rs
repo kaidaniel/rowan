@@ -161,6 +161,11 @@ impl Analyzer {
                     if let Some(d) = crate::models::torch::dim_of_label(&v) {
                         return crate::models::torch::dim_value(if u.op == ast::UnaryOp::USub { crate::shape::scale(d, -1) } else { d });
                     }
+                    if u.op == ast::UnaryOp::USub {
+                        if let Some(r) = self.t_neg_named(&v, state) {
+                            return r;
+                        }
+                    }
                 }
                 match u.op {
                     ast::UnaryOp::Not => match self.truth_of(&v, state, &frontend::node(node)) {
@@ -201,10 +206,22 @@ impl Analyzer {
             }
             ast::Expr::Compare(c) => {
                 let a = self.eval(&c.left, state);
-                if c.ops.len() == 1 && crate::models::torch::is_tensor(&a) && matches!(c.ops[0], ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE | ast::CmpOp::Eq | ast::CmpOp::NotEq) {
-                    let b = self.eval(&c.comparators[0], state);
-                    let nd = frontend::node(node);
-                    return self.t_compare(&a, &b, &nd, state);
+                if c.ops.len() == 1 && matches!(c.ops[0], ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE | ast::CmpOp::Eq | ast::CmpOp::NotEq) {
+                    if crate::models::torch::is_tensor(&a) {
+                        let b = self.eval(&c.comparators[0], state);
+                        let nd = frontend::node(node);
+                        return self.t_compare(&a, &b, &nd, state);
+                    }
+                    // a named unknown against a number / tensor (simple right operands only:
+                    // the interpreter evaluates them again otherwise)
+                    let simple = matches!(&c.comparators[0], ast::Expr::NumberLiteral(_) | ast::Expr::Name(_) | ast::Expr::Attribute(_) | ast::Expr::UnaryOp(_));
+                    if self.torch_on && simple && a.kv.is_bot() && a.pts.len() == 1 && a.pts.iter().all(|o| matches!(self.kind(o), crate::state::Kind::Ph | crate::state::Kind::Unknown)) {
+                        let b = self.eval(&c.comparators[0], state);
+                        let nd = frontend::node(node);
+                        if let Some(r) = self.t_compare_named(&a, &b, &nd, state) {
+                            return r;
+                        }
+                    }
                 }
                 if c.ops.len() == 1 {
                     if let Some(b) = self.compare_const(c.ops[0], &a, &c.comparators[0], state) {

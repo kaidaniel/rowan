@@ -976,15 +976,18 @@ pub fn join_shapes(a: &Shape, b: &Shape) -> Shape {
         let pj = |x: &[DimId], y: &[DimId]| -> Vec<DimId> { x.iter().zip(y.iter()).map(|(p, q)| if p == q { *p } else { unknown() }).collect() };
         return Shape { prefix: pj(&a.prefix, &b.prefix), rest: a.rest.clone(), suffix: pj(&a.suffix, &b.suffix), assume };
     }
-    // common trailing dims
+    // the common trailing dims (up to the first that differs); the rest unknown
     let ta: Vec<DimId> = if a.rest.is_none() { a.prefix.clone() } else { a.suffix.clone() };
     let tb: Vec<DimId> = if b.rest.is_none() { b.prefix.clone() } else { b.suffix.clone() };
     let n = ta.len().min(tb.len());
-    let tail: Vec<DimId> = (0..n).map(|i| {
-        let p = ta[ta.len() - n + i];
-        let q = tb[tb.len() - n + i];
-        if p == q { p } else { unknown() }
-    }).collect();
+    let mut tail: Vec<DimId> = Vec::new();
+    for i in 1..=n {
+        let (p, q) = (ta[ta.len() - i], tb[tb.len() - i]);
+        if p != q {
+            break;
+        }
+        tail.insert(0, p);
+    }
     Shape { prefix: vec![], rest: Some(Rest::Any), suffix: tail, assume }
 }
 
