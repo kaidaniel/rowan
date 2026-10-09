@@ -7,7 +7,21 @@ inputs. Design: `SPECIFICATION.md` (17 sections + Appendix A; §9.8 and §16 not
 engine went further). User-facing: `README.md` (notation, CLI, server, report). This file
 is for whoever picks the work up. Everything here was true at the last commit.
 
-## Commands (Python only via `uv`; `.python-version` pins 3.14; never the system python)
+## Working conventions (the owner's standing instructions)
+
+* Python runs only through `uv run --no-project python` (`.python-version` pins 3.14); never
+  the system or a local interpreter. The Python side is only the test harnesses.
+* New test cases are *specifications*: write the expected rows and verdicts by hand from
+  the program text first, then make the engine produce them. Never derive an expectation
+  from engine output; when one turns out wrong on re-reading, fix it with a comment saying
+  why. Value analysis (which keys, which columns) matters more than bug-finding verdicts.
+* Commit when asked, one commit per step of a plan, so any step can be reverted; commit
+  messages end with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
+* Work the plan in order, with a written plan first when a request mixes several things;
+  if time remains, write more example programs that probe specific hypotheses about bugs.
+* Keep this file under 200 lines and up to date with every change.
+
+## Commands
 
 ```
 cd rowan && cargo build --release && cargo test --release --lib && cd ..
