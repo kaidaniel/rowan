@@ -27,7 +27,7 @@ analysed until you save.
 Settings: `rowan.binaryPath`, `rowan.extraArgs` (e.g. `["--no-entry"]` to skip the
 entry-point pass on large files, or `["--follow", "mylib"]` to analyse an installed
 package), `rowan.valueDepth` (levels of nested containers shown in the hover's value before they are
-cut to `[…]` / `{…}` / `Name(…)`; default 2), `rowan.useServer`, `rowan.analyseOnSave`,
+cut to `[…]` / `{…}` / `Name(…)`; default 1), `rowan.useServer`, `rowan.analyseOnSave`,
 `rowan.timeoutSeconds`.
 
 `node test.js` checks the hover rendering against the engine's output.

@@ -29,7 +29,7 @@
         },
         "rowan.valueDepth": {
           "type": "integer",
-          "default": 2,
+          "default": 1,
           "minimum": 0,
           "description": "How many levels of nested containers the hover's value shows before cutting them to […] / {…} / Name(…)."
         },
