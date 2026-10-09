@@ -12,7 +12,6 @@ models/m14_word2vec.py
 models/m15_pointnet.py
 models/m16_bert_embeddings.py
 models/m17_tcn.py
-small/s088_module_init_names.py
 small/s095_sequential_attr.py
 small/s111_loops.py
 small/s114_list_stack_cat.py

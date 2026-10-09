@@ -740,6 +740,26 @@ impl Analyzer {
                 None
             }
         };
+        // `32 ** -0.5`: folded
+        if op == O::Pow {
+            let num = |v: &Value| -> Option<f64> {
+                if !v.pts.is_empty() {
+                    return None;
+                }
+                match intern::key_get(v.kv.as_lit()?) {
+                    intern::Key::Int(i) => Some(i as f64),
+                    intern::Key::Float(b) => Some(f64::from_bits(b)),
+                    _ => None,
+                }
+            };
+            if let (Some(x), Some(y)) = (num(a), num(b)) {
+                let r = x.powf(y);
+                let both_int = matches!(intern::key_get(a.kv.as_lit().unwrap()), intern::Key::Int(_)) && matches!(intern::key_get(b.kv.as_lit().unwrap()), intern::Key::Int(_)) && y >= 0.0;
+                if r.is_finite() {
+                    return Some(if both_int && r.abs() < 9.0e15 { Value::lit(key_int(r as i64)) } else { Value::lit(intern::key_float(r)) });
+                }
+            }
+        }
         let (ka, kb) = (classify(self, a)?, classify(self, b)?);
         let bitop = matches!(op, O::BitAnd | O::BitOr | O::BitXor);
         if ka == K::Tensor || kb == K::Tensor {
