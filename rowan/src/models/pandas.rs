@@ -2007,6 +2007,12 @@ fn combine_overlap(lrow: &Row, rrow: &Row, keys: &KeySet, lsuf: &str, rsuf: &str
             row = row.store(*k, *def);
         }
     }
+    // a column neither side may have is not there
+    for k in lrow.absent.union(&rrow.absent).iter() {
+        if !flags.get(&k).map(|f| f.0).unwrap_or(false) && !side_status(lrow, k).0 && !side_status(rrow, k).0 {
+            gone.push(k);
+        }
+    }
     // a column both sides surely have is there only under its suffixed names
     for c in gone {
         if !flags.get(&c).map(|f| f.0).unwrap_or(false) {
@@ -2426,11 +2432,11 @@ fn reset_index(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     // the new columns come first
-    let mut out = Row::new();
+    let mut out = row.clone();
     for k in &new_cols {
         out = out.store(*k, true);
     }
-    let mut d = out.copy_from(&row, true, &KeySet::new(), EMPTY_LENS).data();
+    let mut d = out.data();
     if let Some(o) = row.ordered_keys() {
         let mut ord = new_cols.clone();
         ord.extend(o.into_iter().filter(|k| !new_cols.contains(k)));
@@ -3748,6 +3754,8 @@ fn melt(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 })
             }
         };
+        // each name occurs only if the frame has rows
+        let folded = if nrows(st, *f).map(|n| n > 0).unwrap_or(false) { folded } else { folded.map(|k| k.subset()) };
         set_vals(st, nid, k, folded.as_ref());
         for i in &ids {
             let vv2 = vals(st, *f, *i).map(|x| x.subset());
@@ -4713,6 +4721,24 @@ pub fn frame_getattr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, state
         if DF_ATTRS.contains(&name) && name != "columns" {
             if name == "T" {
                 return transpose_of(an, state, node, &[oid]);
+            }
+            if name == "shape" {
+                // (rows, columns): the column count when the columns are known
+                let row = state.row(oid, Ns::Item);
+                let tid = an.alloc_at(Kind::Tuple, node, state, "tuple", Payload::None, None, Ns::Item, None, None);
+                an.obj_mut(tid).literal_len = Some(2);
+                let n = match nrows(state, oid) {
+                    Some(n) => Value::lit(intern::key_int(n)),
+                    None => Value::data("rows"),
+                };
+                let ncols = if row.closed() && !row.symbolic() && row.present.len() - row.definite.len() <= 8 {
+                    Value::kv_only(KeyVal::lits(KeySet::from_iter((row.definite.len()..=row.present.len()).map(|x| intern::key_int(x as i64)))))
+                } else {
+                    Value::data("columns")
+                };
+                state.set_slot(tid, Ns::Pos, intern::key_int(0), n, true);
+                state.set_slot(tid, Ns::Pos, intern::key_int(1), ncols, true);
+                return Value::obj(tid);
             }
             return Value::data(name);
         }

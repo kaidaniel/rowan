@@ -184,7 +184,7 @@ impl Analyzer {
                 let qual = self.external_qual(oid);
                 let call = Call { qual: qual.clone(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
                 if let Some(m) = self.models.lookup(&qual) {
-                    if qual.starts_with("pandas.") && !self.sum_stack.is_empty() {
+                    if qual.starts_with("pandas.") && !self.sum_stack.is_empty() && crate::models::pandas::frame_producer(&qual).is_none() {
                         // a frame built from a parameter's contents: decided per call site
                         for v in args.iter().chain(kwargs.values()) {
                             self.concrete_events(v, state, 2);
@@ -1048,6 +1048,11 @@ impl Analyzer {
     /// from this state (with the try frame's locals when the raise is inside a callee).
     pub fn record_raise_state(&mut self, state: &mut State) -> bool {
         let Some((fl, el, pre)) = self.try_marks.last() else { return false };
+        if self.try_sum_depth.last().map(|d| self.sum_stack.len() > *d).unwrap_or(false) && !crate::interp::disabled("sumraise") {
+            // inside a callee's summary: its rows are relative to that summary; the call's
+            // instantiation decides whether it raises here
+            return false;
+        }
         let mut here = state.copy();
         if self.frames.len() < *fl {
             // the try is in a `@contextmanager` generator whose with body is running

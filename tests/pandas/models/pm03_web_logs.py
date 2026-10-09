@@ -66,7 +66,8 @@ def sessionise(df, gap_minutes=30):
     df["session_id"] = df["new_session"].cumsum()                                 #@ ok new_session
     df["prev_path"] = df.groupby("user")["path"].shift(1)                         #@ ok path
     df["step"] = df.groupby("session_id").cumcount() + 1
-    return df  #@row df: definite={ts,user,method,path,status,bytes,is_error,gap,new_session,session_id,prev_path,step} absent={line,index} open
+    # (first written absent={line,index}: the frame is open, the input may hold an `index` column)
+    return df  #@row df: definite={ts,user,method,path,status,bytes,is_error,gap,new_session,session_id,prev_path,step} absent={line} open
 
 
 def sessions_table(df):
@@ -122,7 +123,8 @@ def about_hits(f):
 
 
 def external_share(df):
-    return df["referrer"].notna().mean()                                          #@ possibly referrer
+    # (first written `possibly`: df comes from an open read_csv frame, so this depends on the input)
+    return df["referrer"].notna().mean()                                          #@ input referrer
 
 
 def landing_sources(df):
@@ -166,4 +168,5 @@ if __name__ == "__main__":
     for text in (LOGS_A, LOGS_B, LOGS_C):
         run(text)
 
-#@schema read_csv@L37: always={ts,line} sometimes={referrer} only={ts,line}
+# (first written sometimes={referrer}: every read of referrer is behind an `in` test or a try)
+#@schema read_csv@L37: always={ts,line} only={ts,line}

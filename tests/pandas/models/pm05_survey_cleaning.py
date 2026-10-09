@@ -43,7 +43,8 @@ def rename_questions(raw):
     df = raw.rename(columns=RENAME)
     #@row df: definite={respondent_id,age,gender,satisfaction,recommend} absent={Q1_age,Q2_gender,Q3_satisfaction,Q4_recommend,Q5_comments,Q6_income} open
     has_income = "income" in df.columns
-    #@value has_income: exactly={True, False}
+    # (first written exactly={True, False}: a test rowan cannot decide is written `unknown`)
+    #@value has_income: unknown
     return df
 
 
@@ -69,16 +70,18 @@ def recode(df):
     return df  #@row df: definite={respondent_id,age,gender,satisfaction,recommend,age_band,has_comment} absent={Q1_age,Q2_gender,Q3_satisfaction,Q4_recommend,Q5_comments,Q6_income} open
 
 
+# (the three probes were written `possibly`: df comes from an open read_csv frame, so each
+# depends on the input)
 def income_median(df):
-    return df["income"].median()                                              #@ possibly income
+    return df["income"].median()                                              #@ input income
 
 
 def comment_lengths(df):
-    return df["comments"].str.len()                                           #@ possibly comments
+    return df["comments"].str.len()                                           #@ input comments
 
 
 def income_bands(df):
-    return df["income_band"].value_counts()                                   #@ possibly income_band
+    return df["income_band"].value_counts()                                   #@ input income_band
 
 
 def encode(df):
@@ -111,12 +114,15 @@ def summarise(long):
     #@row per_q: present={question,mean,count} definite={question,mean,count} absent={score} closed
     per_q["reliable"] = per_q["count"] >= 3                                   #@ ok count
     by_band = long.pivot_table(index="age_band", columns="question", values="score", aggfunc="mean")
-    #@row by_band: open
+    # (first written `open`: the question values are the literal value_vars of the melt; each
+    # is a column when there are rows)
+    #@row by_band: present={satisfaction,recommend_score} definite={} closed
     by_band = by_band.reindex(columns=["satisfaction", "recommend_score"])
     #@row by_band: present={satisfaction,recommend_score} definite={satisfaction,recommend_score} closed
     by_band["gap"] = by_band["recommend_score"] / 2 - by_band["satisfaction"]  #@ ok recommend_score ; ok satisfaction
     wide = long.pivot(index="respondent_id", columns="question", values="score").reset_index()
-    #@row wide: definite={respondent_id} open
+    # (first written `definite={respondent_id} open`: as above, the columns are known)
+    #@row wide: present={respondent_id,satisfaction,recommend_score} definite={respondent_id} closed
     wide["satisfaction"]                                                      #@ sound satisfaction
     return per_q  #@row per_q: present={question,mean,count,reliable} definite={question,mean,count,reliable} closed
 
@@ -187,4 +193,6 @@ if __name__ == "__main__":
     for text in (SURVEY_A, SURVEY_B, SURVEY_C):
         run(text)
 
-#@schema read_csv@L34: always={respondent_id,Q1_age,Q2_gender,Q3_satisfaction,Q4_recommend} sometimes={Q5_comments,Q6_income} only={respondent_id,Q1_age,Q2_gender,Q3_satisfaction,Q4_recommend}
+# (first written sometimes={Q5_comments,Q6_income}: their reads are all behind `in` tests or
+# tries, so no input needs them)
+#@schema read_csv@L34: always={respondent_id,Q1_age,Q2_gender,Q3_satisfaction,Q4_recommend} only={respondent_id,Q1_age,Q2_gender,Q3_satisfaction,Q4_recommend}

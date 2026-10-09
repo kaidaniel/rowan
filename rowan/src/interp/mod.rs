@@ -626,6 +626,8 @@ pub struct Analyzer {
     /// it runs in and the state before it, so a raise inside a callee hands the handler the
     /// try frame's locals
     pub try_marks: Vec<(usize, usize, State)>,
+    /// summary depth at each try (a raise inside a callee's summary is not this try's)
+    pub try_sum_depth: Vec<usize>,
     /// per enclosing try (parallel to `raise_states`): the exceptions raised at those points
     /// (what the handler's `as` name holds)
     pub raise_values: Vec<Option<Value>>,
@@ -834,6 +836,7 @@ impl Analyzer {
             may_raise: Vec::new(),
             raise_states: Vec::new(),
             try_marks: Vec::new(),
+            try_sum_depth: Vec::new(),
             raise_values: Vec::new(),
             cur_exc: None,
             handling: Vec::new(),

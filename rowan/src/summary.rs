@@ -1461,7 +1461,7 @@ impl Analyzer {
                     }
                     // an access of the callee that may fail here: the call may raise (a try
                     // around it reaches its handler)
-                    if !sr.guarded && !in_summary && matches!(tier, Tier::Missing | Tier::Possibly | Tier::Input | Tier::LikelyMissing) && !crate::interp::disabled("symreqraise") {
+                    if !sr.guarded && matches!(tier, Tier::Missing | Tier::Possibly | Tier::Input | Tier::LikelyMissing) && !crate::interp::disabled("symreqraise") {
                         let exc = if sr.ns == Ns::Attr { "AttributeError" } else { "KeyError" };
                         self.may_raise_here(exc, &mut pre.copy());
                     }
@@ -1479,6 +1479,10 @@ impl Analyzer {
                 d.present = d.present.remove(k);
                 d.definite = d.definite.remove(k);
                 d.likely = d.likely.remove(k);
+                // (what was known absent stays so)
+                if pre.row(a, ns).absent.contains(k) {
+                    d.absent = d.absent.insert(k);
+                }
                 state.set_row(a, ns, Row::from_data(d));
             }
         }

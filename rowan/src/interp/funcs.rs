@@ -908,7 +908,12 @@ impl Analyzer {
                 }
                 Kind::List | Kind::Tuple | Kind::Set => match state.elems.get(&oid) {
                     Some(kv) if kv.is_literal() => out = out.union(&crate::domain::kv_literals(&kv)),
-                    _ => return None,
+                    _ => {
+                        if self.is_entry_object(oid) && !crate::interp::disabled("entrymapping") {
+                            self.record_event("concrete", oid);
+                        }
+                        return None;
+                    }
                 },
                 Kind::Dict => {
                     let row = state.row(oid, Ns::Item);
@@ -939,6 +944,11 @@ impl Analyzer {
                 return None;
             }
             let row = state.row(oid, Ns::Item);
+            if row.symbolic() && self.is_entry_object(oid) && !crate::interp::disabled("entrymapping") {
+                // a dict from before the call (a module constant): known at the call site
+                self.record_event("concrete", oid);
+                return None;
+            }
             if row.open() || row.present != row.definite {
                 return None;
             }

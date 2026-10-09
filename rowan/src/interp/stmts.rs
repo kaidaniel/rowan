@@ -239,10 +239,12 @@ impl Analyzer {
                     self.raise_states.push(None);
                     self.raise_values.push(None);
                     self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
+                    self.try_sum_depth.push(self.sum_stack.len());
                     let exits_before = self.exit_count;
                     self.exec_block(&w.body, state);
                     self.guards.pop();
                     self.try_marks.pop();
+                    self.try_sum_depth.pop();
                     let flagged = self.may_raise.pop().unwrap_or(false);
                     let raised_at = self.raise_states.pop().flatten();
                     self.raise_values.pop();
@@ -603,6 +605,10 @@ impl Analyzer {
             self.branch_depth -= 1;
             self.cond_depth -= 1;
         }
+        // `if k not in d: raise …`: the input must hold k (else the program raises)
+        if conditional && !crate::interp::disabled("raiserequire") {
+            self.require_by_raise(test, body, rest, state, &mut then_s, &mut else_s);
+        }
         let mut j = then_s.join(&mut else_s);
         if then_s.reachable && else_s.reachable && conditional && !crate::interp::disabled("condfacts") {
             let mut new: Vec<std::sync::Arc<crate::state::CondFact>> = Vec::new();
@@ -629,6 +635,49 @@ impl Analyzer {
             add_facts(&mut j, new);
         }
         state.replace_with(j);
+    }
+
+    /// `if k not in d: raise …` / `if k in d: … else: raise …`: the branch where the key is
+    /// missing raises, so the key is required of the inputs that may provide it.
+    fn require_by_raise(&mut self, test: &'static ast::Expr, body: &'static [ast::Stmt], rest: &'static [ast::ElifElseClause], pre: &mut State, then_s: &mut State, else_s: &mut State) {
+        let ast::Expr::Compare(c) = test else { return };
+        if c.ops.len() != 1 {
+            return;
+        }
+        let missing_branch: &[ast::Stmt] = match c.ops[0] {
+            ast::CmpOp::NotIn => body,
+            ast::CmpOp::In => match rest.first() {
+                Some(cl) if cl.test.is_none() => &cl.body,
+                _ => return,
+            },
+            _ => return,
+        };
+        if !matches!(missing_branch.last(), Some(ast::Stmt::Raise(_))) {
+            return;
+        }
+        let kv = self.eval(&c.left, pre);
+        let Some(k) = kv.kv.as_lit().filter(|_| kv.pts.is_empty()) else { return };
+        let target = self.eval(&c.comparators[0], pre);
+        let mut recs: Vec<u32> = Vec::new();
+        for o in target.pts.iter() {
+            match &self.obj(o).payload {
+                Payload::View(super::ViewKind::Keys, inner) => recs.extend(inner.pts.iter().filter(|x| matches!(self.kind(*x), Kind::Dict | Kind::Frame | Kind::Unknown))),
+                _ if matches!(self.kind(o), Kind::Dict | Kind::Frame | Kind::Unknown) => recs.push(o),
+                _ => {}
+            }
+        }
+        let site = format!("L{}", frontend::node(test).line);
+        for o in recs {
+            let row = pre.row(o, Ns::Item);
+            let cls = crate::domain::classify(&row, k);
+            if cls.tier == crate::domain::Tier::Input {
+                for st in [&mut *then_s, &mut *else_s] {
+                    if st.reachable {
+                        self.require_providers(&cls, &row, &site, true, st);
+                    }
+                }
+            }
+        }
     }
 
     /// The canonical text of a pure test (names, literals, comparisons, `in`, `is`, `not`,
@@ -1050,12 +1099,14 @@ impl Analyzer {
         self.raise_states.push(None);
         self.raise_values.push(None);
         self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
+        self.try_sum_depth.push(self.sum_stack.len());
         self.cond_depth += 1;
         self.branch_depth += 1;
         let exits_before = self.exit_count;
         self.exec_block(&t.body, state);
         self.guards.pop();
         self.try_marks.pop();
+        self.try_sum_depth.pop();
         // a body that ended because it returned (or broke out) did not raise
         let flagged = self.may_raise.pop().unwrap_or(false);
         let mut raised_at = self.raise_states.pop().flatten();

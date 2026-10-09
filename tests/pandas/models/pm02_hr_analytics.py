@@ -236,6 +236,8 @@ if __name__ == "__main__":
     run(EMPLOYEES_B, DEPARTMENTS_B, SALARIES_B)
     run(EMPLOYEES_C, DEPARTMENTS_A, SALARIES_C)
 
-#@schema read_csv@L66: always={emp_id,dept_id,first,last,hire_date} sometimes={manager_id} only={emp_id,dept_id,first,last,hire_date}
+# (first written sometimes={manager_id}: every read of manager_id is behind an `in` test or a
+# try, so no input needs it)
+#@schema read_csv@L66: always={emp_id,dept_id,first,last,hire_date} only={emp_id,dept_id,first,last,hire_date}
 #@schema read_csv@L83: always={dept_id,dept_name,location} only={dept_id,dept_name,location}
 #@schema read_csv@L92: always={emp_id,effective_date,salary} only={emp_id,effective_date,salary}
