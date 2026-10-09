@@ -367,6 +367,31 @@ impl Analyzer {
 
     pub fn t_print_ctx(&self, st: &State) -> sh::PrintCtx {
         let scope = self.frames.iter().rev().find_map(|fr| fr.func).unwrap_or(0);
+        self.t_print_ctx_at(scope, &st.env, st)
+    }
+
+    /// The printing context of the run's outermost function (an entry run's function): a
+    /// requirement found in a callee is stated in the caller's terms at the call line.
+    pub fn t_outer_print_ctx(&self, st: &State) -> sh::PrintCtx {
+        let funcs: Vec<u32> = self.frames.iter().filter(|f| f.kind == crate::interp::FrameKind::Function).filter_map(|f| f.func).collect();
+        let target = match self.entry_run {
+            Some(e) => funcs.iter().position(|f| *f == e),
+            None => if funcs.is_empty() { None } else { Some(0) },
+        };
+        let Some(j) = target else { return self.t_print_ctx(st) };
+        let total = funcs.len();
+        if j + 1 == total {
+            return self.t_print_ctx(st);
+        }
+        let back = total - 1 - j;
+        if back > self.env_stack.len() {
+            return self.t_print_ctx(st);
+        }
+        let env = &self.env_stack[self.env_stack.len() - back];
+        self.t_print_ctx_at(funcs[j], env, st)
+    }
+
+    pub fn t_print_ctx_at(&self, scope: u32, env: &IndexMap<StrId, Value>, st: &State) -> sh::PrintCtx {
         let mut ctx = sh::PrintCtx { all: false, scope, ..Default::default() };
         if scope != 0 && self.has_obj(scope) && self.kind(scope) == Kind::Function {
             // a closure sees the names of the functions around it
@@ -387,7 +412,7 @@ impl Analyzer {
                 }
                 // aliases: the shortest attribute path from self (through instances, not
                 // layer configs) holding an `__init__` value
-                if let Some(selfv) = st.env.get(&s("self")) {
+                if let Some(selfv) = env.get(&s("self")) {
                     let mut queue: std::collections::VecDeque<(u32, String, u32)> = selfv.pts.iter().filter(|o| self.kind(*o) == Kind::Instance).map(|o| (o, "self".to_string(), 0)).collect();
                     let mut seen: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
                     while let Some((o, path, depth)) = queue.pop_front() {
@@ -450,7 +475,8 @@ impl Analyzer {
                 false
             }
             None => {
-                let text = self.t_print(st, || sh::cons_text(&c));
+                let ctx = self.t_outer_print_ctx(st);
+                let text = sh::with_ctx(ctx, || sh::cons_text(&c));
                 if !text.contains('?') {
                     self.t_require_note(node, text);
                 }
@@ -782,7 +808,8 @@ impl Analyzer {
             }
             return Some(r);
         }
-        let int_op = matches!(op, O::Add | O::Sub | O::Mult | O::FloorDiv | O::Mod);
+        let small_pow = op == O::Pow && self.t_int(b).map(|k| (0..=8).contains(&k)).unwrap_or(false);
+        let int_op = matches!(op, O::Add | O::Sub | O::Mult | O::FloorDiv | O::Mod) || small_pow;
         let dims = |an: &Analyzer| -> Option<DimId> {
             let (x, y) = (an.t_dim(a, st)?, an.t_dim(b, st)?);
             Some(sh::norm(
@@ -791,6 +818,7 @@ impl Analyzer {
                     O::Sub => sh::sub(x, y),
                     O::Mult => sh::mul(x, y),
                     O::FloorDiv => sh::floordiv(x, y),
+                    O::Pow => (0..sh::as_lit(y).unwrap_or(0)).fold(sh::lit(1), |acc, _| sh::mul(acc, x)),
                     _ => sh::modulo(x, y),
                 },
                 &st.tf,
