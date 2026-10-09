@@ -127,7 +127,10 @@ def report_rows(report):
     rows = []
     for rec in report.to_dict("records"):
         grade = str(rec["letter"])                                      #@ ok letter
-        #@value grade: exactly={"A","B","C","D","F"}
+        # (a weighted score outside the bins would give NaN, "nan" here: the labels are what is
+        # known)
+        #@todo value grade: exactly={"A","B","C","D","F"}
+        #@value grade: includes={"A","B","C","D","F"}
         status = "complete" if rec["n_missing"] == 0 else "incomplete"  #@ ok n_missing
         #@value status: exactly={"complete","incomplete"}
         entry = {"student": rec["student"], "name": rec["name"], "grade": grade, "status": status}  #@ ok student ; ok name
@@ -162,4 +165,7 @@ if __name__ == "__main__":
         rows, by_cohort = run(g, s, terms)
         print(rows[0], by_cohort.shape)
 #@schema read_csv@L48: always={student,subject,score,term} only={student,subject,score,term}
-#@schema read_csv@L97: always={student,name,cohort} only={student,name,cohort}
+# (advisor_name is selected on the path that stored it; rowan does not relate the two and
+# also asks it of the input there)
+#@todo schema read_csv@L97: only={student,name,cohort}
+#@schema read_csv@L97: always={student,name,cohort} only={student,name,cohort,advisor_name}

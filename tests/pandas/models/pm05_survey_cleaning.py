@@ -135,7 +135,9 @@ def crosstab_summary(df):
     #@row ct: present={promoter,detractor} definite={promoter,detractor} absent={True,False} closed
     ct["nps"] = (ct["promoter"] - ct["detractor"]) * 100                      #@ ok promoter ; ok detractor
     by_gender = pd.crosstab(df["gender"], df["age_band"], margins=True)
-    #@row by_gender: definite={All} open
+    # (first written `definite={All} open`: age_band holds the cut labels as strings, "nan" for
+    # an age outside the bins)
+    #@row by_gender: present={"16-30","31-50","51+","nan",All} definite={All} closed
     total = by_gender["All"].iloc[-1]                                         #@ ok All
     return ct
 

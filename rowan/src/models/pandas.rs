@@ -95,8 +95,7 @@ pub fn install(r: &mut dyn FnMut(&[&'static str], Model)) {
     r(&["pandas.melt"], melt);
     r(
         &[
-            "pandas.to_datetime", "pandas.to_numeric", "pandas.isna", "pandas.notna", "pandas.isnull", "pandas.notnull", "pandas.cut",
-            "pandas.qcut", "pandas.date_range", "pandas.Timestamp", "pandas.Timedelta", "pandas.to_timedelta", "pandas.factorize", "pandas.unique",
+            "pandas.to_datetime", "pandas.to_numeric", "pandas.isna", "pandas.notna", "pandas.isnull", "pandas.notnull", "pandas.date_range", "pandas.Timestamp", "pandas.Timedelta", "pandas.to_timedelta", "pandas.factorize", "pandas.unique",
             "pandas.array", "pandas.Categorical", "pandas.Index", "pandas.MultiIndex", "pandas.Grouper", "pandas.set_option",
             "pandas.option_context", "pandas.testing.assert_frame_equal", "pandas.ExcelWriter", "pandas.eval",
         ],
@@ -106,6 +105,7 @@ pub fn install(r: &mut dyn FnMut(&[&'static str], Model)) {
     r(&["io.StringIO", "io.BytesIO"], string_io);
     r(&["pandas.Series"], series_ctor);
     r(&["pandas.NamedAgg"], named_agg);
+    r(&["pandas.cut", "pandas.qcut"], cut);
     r(&["Series.str.*", "Series.dt.*", "Series.cat.*", "Series.sparse.*", "Series.list.*", "Series.struct.*"], accessor_method);
     r(&["DataFrame.*"], df_dispatch);
     r(&["groupby.*"], groupby_method);
@@ -382,6 +382,23 @@ fn series_like_id(an: &mut Analyzer, st: &mut State, c: &Call, ss: &[u32], idx: 
 }
 
 /// `pd.Series(data, index=, name=)`: a dict's keys (or the positions, or index=) are the index.
+/// `pd.cut(x, bins, labels=[…])` / `pd.qcut`: x's index; the values are among the labels.
+fn cut(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let x = c.arg(0, Some("x")).unwrap_or_default();
+    let ss: Vec<u32> = x.pts.iter().filter(|o| is_series_obj(an, *o)).collect();
+    if ss.is_empty() {
+        return series(an);
+    }
+    let idx = join_rows(ss.iter().map(|o| st.row(*o, Ns::Item)));
+    let sid = series_like_id(an, st, c, &ss, idx, "cut");
+    let labels = c.kw("labels").and_then(|v| lit_key_seq(an, st, &v));
+    // (a value outside the bins is NaN)
+    let k = labels.map(|l| Known { may: KeySet::from_iter(l).insert(none_key()), sure: KeySet::new() });
+    set_vals(st, sid, vkey(), k.as_ref());
+    st.set_slot(sid, Ns::Meta, dtype_key(vkey()), Value::lit(mk("object")), true);
+    Value::obj(sid)
+}
+
 /// `pd.NamedAgg(column=, aggfunc=)`: the (column, function) pair.
 fn named_agg(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let col = c.arg(0, Some("column")).unwrap_or_default();
@@ -664,6 +681,16 @@ fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 } else if matches!(name.as_str(), "clip" | "round" | "abs" | "cumsum" | "cumprod" | "cummax" | "cummin" | "diff" | "pct_change" | "add" | "sub" | "mul" | "div" | "truediv" | "floordiv" | "mod" | "pow" | "rank" | "interpolate") {
                     Value::lit(mk("num"))
                 } else if name == "astype" {
+                    // (strings stay the same strings)
+                    if astype_dtype(an, &c.arg(0, Some("dtype"))) == Some("object") {
+                        if let [one] = ss.as_slice() {
+                            if let Some(v) = vals(st, *one, vkey()).filter(|v| v.may.iter().all(|k| intern::key_is_str(k) || k == none_key())) {
+                                // (NaN becomes "nan")
+                                let fix = |ks: &KeySet| KeySet::from_iter(ks.iter().map(|k| if k == none_key() { mk("nan") } else { k }));
+                                set_vals(st, sid, vkey(), Some(&Known { may: fix(&v.may), sure: fix(&v.sure) }));
+                            }
+                        }
+                    }
                     match astype_dtype(an, &c.arg(0, Some("dtype"))) {
                         Some(d) => Value::lit(mk(d)),
                         None => Value::data("dtype"),
@@ -2173,6 +2200,13 @@ fn merge_impl(an: &mut Analyzer, st: &mut State, c: &Call, left: Value, right: V
                 // lacks it: this side's, if this side surely has it)
                 let keep = KeySet::from_iter(row.present.iter().filter(|k| src.present.contains(*k) && (keys.contains(*k) || !side_status(other, *k).0 || src.definite.contains(*k))));
                 copy_dtypes(st, *f, nid, &keep);
+                // values: some of this side's (a row without a match gets NaN)
+                for k in keep.iter() {
+                    if let Some(v) = vals(st, *f, k) {
+                        let v = Known { may: v.may.insert(none_key()), sure: KeySet::new() };
+                        set_vals(st, nid, k, Some(&v));
+                    }
+                }
             }
         }
     }
@@ -2240,7 +2274,17 @@ fn df_join(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     let row = combine_overlap(&lrow, &rrow, &KeySet::new(), &lsuf, &rsuf);
-    let v = derived(an, st, c, row, &lf, Rows::Other, false);
+    let v = derived(an, st, c, row.clone(), &lf, Rows::Other, false);
+    // the left frame's columns that keep their names keep their values and dtypes
+    if let (Some(nid), [f]) = (v.single(), lf.as_slice()) {
+        let keep = KeySet::from_iter(row.present.iter().filter(|k| lrow.present.contains(*k) && !side_status(&rrow, *k).0));
+        copy_dtypes(st, *f, nid, &keep);
+        for k in keep.iter() {
+            if let Some(vv) = vals(st, *f, k) {
+                set_vals(st, nid, k, Some(&vv.subset()));
+            }
+        }
+    }
     // the result keeps the left frame's index (its rows, for how="left" / "inner")
     if let Some(nid) = v.single() {
         let lv = levels_of(st, &lf);
@@ -3647,7 +3691,11 @@ fn to_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let tag = |t: &str| format!("{}{}", t, j);
         let v = match o.as_str() {
             "records" => {
-                let vrow = dict_with(an, st, &c.node, &tag("rec"), base.clone(), &|k| Value::data(&format!("cell {}", intern::key_py_str(k))));
+                let fv: Vec<(KeyId, Option<Known>)> = base.present.iter().map(|k| (k, vals(st, *f, k))).collect();
+                let vrow = dict_with(an, st, &c.node, &tag("rec"), base.clone(), &|k| match fv.iter().find(|(x, _)| *x == k).and_then(|(_, v)| v.clone()) {
+                    Some(v) if !v.may.is_empty() => Value::kv_only(KeyVal::lits(v.may.clone())),
+                    _ => Value::data(&format!("cell {}", intern::key_py_str(k))),
+                });
                 mark_view(an, vrow, &[*f]);
                 let site = format!("{}:{}", crate::interp::site_string(&c.node), tag("recs"));
                 let lid = an.alloc(Kind::List, &site, st, &format!("records@L{}", c.line), Payload::None, None, Ns::Item, None, None);
@@ -5095,6 +5143,16 @@ pub fn frame_setitem(an: &mut Analyzer, oid: u32, key: &Value, v: &Value, node: 
         state.set_row(oid, Ns::Item, row.store(k, strong));
         let dt = dtype_of_value(an, state, v);
         set_dtype(state, oid, k, dt, strong);
+        // the column's values: a tracked Series' (a scalar: itself)
+        let kv = match v.single().filter(|o| is_series_obj(an, *o)) {
+            Some(o) => vals(state, o, vkey()),
+            None => cell_lit(v).map(|l| Known::exact(KeySet::one(l))),
+        };
+        if strong {
+            set_vals(state, oid, k, kv.as_ref());
+        } else {
+            set_vals(state, oid, k, None);
+        }
         return;
     }
     let ks2 = match (&ks, &key.kv) {
