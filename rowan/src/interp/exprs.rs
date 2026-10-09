@@ -1008,6 +1008,9 @@ impl Analyzer {
     }
 
     pub fn binop(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Value {
+        if let Some(v) = self.binop_dunder(op, a, b, node, state) {
+            return v;
+        }
         if let Some(v) = self.t_binop(op, a, b, node, state) {
             return v;
         }
@@ -1805,4 +1808,58 @@ pub(crate) fn format_spec_literal(k: KeyId, spec: &str) -> Option<String> {
         None => format!("{}{}", text, " ".repeat(pad)),
         Some(_) => return None,
     })
+}
+
+impl Analyzer {
+    /// `a op b` where every object `a` (or else `b`) may be is an instance of a class defining
+    /// `__op__` (`__rop__`): that method's result. None: not decided this way.
+    pub fn binop_dunder(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Option<Value> {
+        use ast::Operator as O;
+        if crate::interp::disabled("dunderops") {
+            return None;
+        }
+        let name = match op {
+            O::Add => "add",
+            O::Sub => "sub",
+            O::Mult => "mul",
+            O::MatMult => "matmul",
+            O::Div => "truediv",
+            O::FloorDiv => "floordiv",
+            O::Mod => "mod",
+            O::Pow => "pow",
+            O::BitAnd => "and",
+            O::BitOr => "or",
+            O::BitXor => "xor",
+            O::LShift => "lshift",
+            O::RShift => "rshift",
+        };
+        let methods = |an: &Analyzer, v: &Value, dunder: &str| -> Option<Vec<(u32, u32)>> {
+            if v.pts.is_empty() || !v.kv.is_bot() {
+                return None;
+            }
+            let mut out = Vec::new();
+            for o in v.pts.iter() {
+                if an.kind(o) != Kind::Instance {
+                    return None;
+                }
+                let cls = an.instance_class(o)?;
+                let owner = an.class_lookup(cls, dunder)?;
+                let f = an.cls_slots.get(&(owner, Ns::Attr, key_str_lit(dunder)))?.single()?;
+                if an.kind(f) != Kind::Function {
+                    return None;
+                }
+                out.push((o, f));
+            }
+            Some(out)
+        };
+        let (calls, other) = match methods(self, a, &format!("__{}__", name)) {
+            Some(m) => (m, b.clone()),
+            None => (methods(self, b, &format!("__r{}__", name))?, a.clone()),
+        };
+        let mut outs = Vec::new();
+        for (o, f) in calls {
+            outs.push(self.call_user(f, Some(Value::obj(o)), vec![other.clone()], IndexMap::new(), vec![], vec![], state, node, None, false));
+        }
+        Some(crate::domain::join_values(outs))
+    }
 }

@@ -129,7 +129,8 @@ impl Registry {
         r(&["types.SimpleNamespace", "argparse.Namespace"], m_simplenamespace);
         r(&["collections.namedtuple", "typing.NamedTuple"], m_namedtuple);
         r(&["dataclasses.field", "typing.cast", "typing.TypeVar", "typing.NewType"], m_passthrough);
-        r(&["collections.defaultdict", "collections.Counter", "collections.OrderedDict", "collections.ChainMap"], m_defaultdict);
+        r(&["collections.defaultdict", "collections.Counter", "collections.ChainMap"], m_defaultdict);
+        r(&["collections.OrderedDict"], m_ordered_dict);
         r(&["csv.DictReader"], m_dictreader);
         r(&["csv.DictWriter"], noeffect);
         r(&["argparse.ArgumentParser"], m_argparser);
@@ -257,6 +258,16 @@ fn m_math(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         return crate::models::torch::num_value();
     }
     Value::data(&format!("L{}", c.line))
+}
+
+/// `OrderedDict(pairs)` / `OrderedDict(mapping)` is `dict(...)` (ordered, like every dict);
+/// `OrderedDict()` the empty one.
+fn m_ordered_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    if c.args.is_empty() && c.kwargs.is_empty() && c.star_args.is_empty() && c.star_kwargs.is_empty() {
+        return m_defaultdict(an, st, c);
+    }
+    let call = Call { qual: "builtins.dict".into(), recv: c.recv.clone(), args: c.args.clone(), kwargs: c.kwargs.clone(), star_args: c.star_args.clone(), star_kwargs: c.star_kwargs.clone(), node: c.node, call_ast: c.call_ast, site: c.site.clone(), line: c.line };
+    m_dict(an, st, &call)
 }
 
 pub fn noeffect(_an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {

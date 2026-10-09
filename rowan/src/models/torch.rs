@@ -704,6 +704,10 @@ impl Analyzer {
     pub fn t_binop(&mut self, op: ruff_python_ast::Operator, a: &Value, b: &Value, node: &Node, st: &mut State) -> Option<Value> {
         use ruff_python_ast::Operator as O;
         if op == O::MatMult {
+            // a user object's `__matmul__` / `__rmatmul__` decides
+            if a.pts.iter().chain(b.pts.iter()).any(|o| matches!(self.kind(o), Kind::Instance | Kind::Class | Kind::Namespace | Kind::Dict | Kind::List | Kind::Tuple)) {
+                return None;
+            }
             let sa = self.t_shape(a, st).unwrap_or_else(Shape::any);
             let sb = self.t_shape(b, st).unwrap_or_else(Shape::any);
             return Some(self.t_matmul(&sa, &sb, node, st, "matmul"));
@@ -1013,6 +1017,9 @@ impl Analyzer {
 
     /// Attribute of a tensor (or of an unknown used as one); None: not ours.
     pub fn t_getattr(&mut self, obj: &Value, name: &str, node: &Node, st: &mut State) -> Option<Value> {
+        if self.t_getattr_plain {
+            return None;
+        }
         // `torch.finfo(dt).min` & co.: numbers
         if obj.pts.is_empty() && matches!(&obj.kv, KeyVal::Data(l) if &*intern::str_get(*l) == sh::NUM_LABEL) {
             return Some(num_value());
@@ -1067,9 +1074,19 @@ impl Analyzer {
         if unknown_tensorish && !TENSOR_ONLY.contains(&name) && obj.pts.iter().any(|o| self.kind(o) == Kind::Ph && self.ph_info(o).cls.get().is_some()) {
             return None;
         }
-        // an unknown may be an instance of a user class defining this name
-        if unknown_tensorish && self.user_classes.iter().any(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, key_str_lit(name)))) {
-            return None;
+        // an unknown may be an instance of a user class defining this name, or a tensor:
+        // both readings
+        if unknown_tensorish && !self.t_skip_user && self.user_classes.iter().any(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, key_str_lit(name)))) {
+            self.t_getattr_plain = true;
+            let plain = self.load_attr(obj, name, node, st, false);
+            self.t_getattr_plain = false;
+            self.t_skip_user = true;
+            let tens = self.t_getattr(obj, name, node, st);
+            self.t_skip_user = false;
+            return Some(match tens {
+                Some(t) => plain.join(&t),
+                None => plain,
+            });
         }
         let s = self.t_shape(obj, st).unwrap_or_else(Shape::any);
         // from here on (this path) the name is a tensor
@@ -2910,7 +2927,8 @@ impl Analyzer {
                 // Sequential(OrderedDict(...)): its values, in order, also as attributes
                 if v.len() == 1 && c.star_args.is_empty() {
                     if let Some(d) = v[0].single().filter(|d| self.kind(*d) == Kind::Dict) {
-                        if let Some(keys) = st.row(d, Ns::Item).ordered_keys() {
+                        let row = st.row(d, Ns::Item);
+                        if let Some(keys) = row.ordered_keys().filter(|_| row.closed() && row.present == row.definite) {
                             let vals: Vec<Value> = keys.iter().map(|k| st.slot(d, Ns::Item, *k)).collect();
                             let lv = self.t_list_layer(ty, Some(vals.clone()), None, &node, st);
                             if let Some(lo) = lv.single() {
@@ -4030,10 +4048,15 @@ impl Analyzer {
         let (chain, entry) = self.t_note_ctx();
         let shape = if let Some(s) = size_shape(v) {
             Some(sh::norm_shape(&s, &st.tf))
-        } else if let Some(o) = v.single().filter(|o| matches!(&self.obj(*o).payload, Payload::Str(q) if q == "torch.Size") || (self.kind(*o) == Kind::Tuple && self.obj(*o).literal_len.is_some())) {
+        } else if let Some(o) = v.single().filter(|o| v.kv.is_bot() && (matches!(&self.obj(*o).payload, Payload::Str(q) if q == "torch.Size") || (self.kind(*o) == Kind::Tuple && self.obj(*o).literal_len.is_some()))) {
             self.t_shape_arg(&Value::obj(o), st)
         } else if tensor_shape(v).is_some() {
-            self.t_shape(v, st)
+            // a tensor or some other object (a user method's result): no shape claimed
+            if v.pts.iter().any(|o| !matches!(self.kind(o), Kind::Ph | Kind::Unknown)) {
+                None
+            } else {
+                self.t_shape(v, st)
+            }
         } else if !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::Ph | Kind::Unknown)) {
             // a parameter / read: its shape; an unknown call's result: only once facts say
             // something about it
