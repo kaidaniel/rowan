@@ -3,14 +3,10 @@ small/s004_dict_constructors.py
 small/s005_list_set_tuple.py
 small/s006_zip_strict.py
 small/s016_numeric_builtins.py
-small/s018_conversions.py
 small/s019_slices.py
 small/s020_set_keys.py
 small/s021_str_format.py
-small/s022_percent_format.py
 small/s023_fstrings.py
-small/s024_str_methods.py
-small/s032_deque_userdict.py
 small/s033_dataclass_asdict.py
 small/s034_dataclass_replace_fields.py
 small/s035_dataclass_initvar_frozen.py

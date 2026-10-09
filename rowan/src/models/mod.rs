@@ -7,6 +7,8 @@ pub mod pandas;
 pub mod pydantic;
 pub mod fastapi;
 pub mod counter;
+pub mod pyvalues;
+pub mod pure;
 pub mod torch;
 
 use indexmap::IndexMap;
@@ -32,7 +34,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.str.", "Series.dt.", "Series.cat.", "Series.sparse.", "Series.list.", "Series.struct.", "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
+    "parser.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
 ];
 
 pub struct Registry {
@@ -157,6 +159,8 @@ impl Registry {
         fastapi::install(&mut r);
         r(&["counter.*"], counter::m_counter);
         r(&["chainmap.*"], m_chainmap);
+        r(&["deque.*"], counter::m_deque);
+        r(&["collections.deque"], counter::deque_new);
         r(&["typeadapter.*"], m_typeadapter);
         r(&["torch.*"], torch::m_torch);
         r(&["numpy.*", "np.*"], torch::m_numpy);
@@ -2091,6 +2095,92 @@ fn m_chainmap(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         _ => Value::data("chainmap"),
     }
 }
+
+/// Library classes written in Python that are analysed as such (generated once): their
+/// methods run as user code (`collections.UserDict`: `self.data`, `__missing__`, …).
+pub fn generated_class(an: &mut Analyzer, st: &mut State, qual: &str) -> Option<Value> {
+    let (modname, cname, src) = match qual {
+        "collections.UserDict" => ("<collections.UserDict>", "UserDict", USERDICT_SRC),
+        _ => return None,
+    };
+    let moid = match an.modules.get(modname) {
+        Some(&m) => m,
+        None => {
+            let (idx, tree) = crate::frontend::parse(modname, None, src.to_string()).ok()?;
+            let m = an.make_module_pub(modname, None, idx, tree);
+            an.run_module(m, st);
+            m
+        }
+    };
+    let v = st.slot(moid, Ns::Attr, key_str_lit(cname));
+    if let Some(c) = v.single() {
+        an.userdict_classes.insert(c);
+    }
+    Some(v)
+}
+
+const USERDICT_SRC: &str = r#"
+class UserDict:
+    def __init__(self, dict=None, /, **kwargs):
+        self.data = {}
+        if dict is not None:
+            self.update(dict)
+        if kwargs:
+            self.update(kwargs)
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, key):
+        if key in self.data:
+            return self.data[key]
+        if hasattr(self.__class__, "__missing__"):
+            return self.__class__.__missing__(self, key)
+        raise KeyError(key)
+
+    def __setitem__(self, key, item):
+        self.data[key] = item
+
+    def __delitem__(self, key):
+        del self.data[key]
+
+    def __iter__(self):
+        return iter(self.data)
+
+    def __contains__(self, key):
+        return key in self.data
+
+    def update(self, other=(), /, **kwds):
+        for key in other:
+            self[key] = other[key]
+        for key in kwds:
+            self[key] = kwds[key]
+
+    def get(self, key, default=None):
+        if key in self:
+            return self[key]
+        return default
+
+    def keys(self):
+        return self.data.keys()
+
+    def values(self):
+        return self.data.values()
+
+    def items(self):
+        return self.data.items()
+
+    def pop(self, key, *default):
+        return self.data.pop(key, *default)
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+    def copy(self):
+        return dict(self.data)
+"#;
 
 fn m_lpop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let recv = c.recv.clone().unwrap_or_default();

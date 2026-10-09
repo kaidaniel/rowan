@@ -187,6 +187,9 @@ impl Analyzer {
             Kind::External => {
                 let qual = self.external_qual(oid);
                 let call = Call { qual: qual.clone(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
+                if let Some(v) = crate::models::pure::try_pure(self, state, &call) {
+                    return v;
+                }
                 if let Some(m) = self.models.lookup(&qual) {
                     if qual.starts_with("pandas.") && !self.sum_stack.is_empty() && crate::models::pandas::frame_producer(&qual).is_none() {
                         // a frame built from a parameter's contents: decided per call site
@@ -218,6 +221,11 @@ impl Analyzer {
                     return self.none_v.clone();
                 }
                 let call = Call { qual: qual.clone(), recv: Some(recv.clone()), args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
+                if qual.starts_with("str.") {
+                    if let Some(v) = crate::models::pure::try_pure(self, state, &call) {
+                        return v;
+                    }
+                }
                 if let Some(m) = self.models.lookup(&qual) {
                     return m(self, state, &call);
                 }

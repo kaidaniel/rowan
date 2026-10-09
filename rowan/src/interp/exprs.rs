@@ -1339,6 +1339,32 @@ impl Analyzer {
                 }
             }
         }
+        // two literals: exactly as Python computes it
+        if let (Some(x), Some(y), true, true) = (a.kv.as_lit(), b.kv.as_lit(), a.pts.is_empty(), b.pts.is_empty()) {
+            let name = match op {
+                ast::Operator::Add => "add",
+                ast::Operator::Sub => "sub",
+                ast::Operator::Mult => "mul",
+                ast::Operator::Div => "truediv",
+                ast::Operator::FloorDiv => "floordiv",
+                ast::Operator::Mod => "mod",
+                ast::Operator::Pow => "pow",
+                ast::Operator::LShift => "lshift",
+                ast::Operator::RShift => "rshift",
+                ast::Operator::BitOr => "or_",
+                ast::Operator::BitXor => "xor",
+                ast::Operator::BitAnd => "and_",
+                _ => "",
+            };
+            if !name.is_empty() && !super::disabled("pure") && !self.torch_on {
+                if let Some(r) = crate::models::pyvalues::operator_call(name, &[x, y]) {
+                    let is_tuple = intern::with_key(r, |k| matches!(k, intern::Key::Tuple(_)));
+                    if !is_tuple {
+                        return Value::lit(r);
+                    }
+                }
+            }
+        }
         if op == ast::Operator::Sub {
             if let (Some(x), Some(y)) = (a.kv.as_lit(), b.kv.as_lit()) {
                 if let Some(r) = num_binop(x, y, |p, q| p - q, |p, q| p - q) {
@@ -1385,6 +1411,21 @@ impl Analyzer {
                         let name = after[..j].to_string();
                         self.load_item(b, Ns::Item, &Value::lit(key_str_lit(&name)), node, state, true);
                         rest = &after[j..];
+                    }
+                    // a closed mapping of literals: the text
+                    if let ([m], false) = (&recs[..], super::disabled("pure")) {
+                        let row = state.row(*m, Ns::Item);
+                        if !row.open() && row.present == row.definite {
+                            let entries: Option<Vec<(String, KeyId)>> = row.present.iter().map(|k| {
+                                let v = state.slot(*m, Ns::Item, k);
+                                Some((intern::key_as_str(k)?.to_string(), v.kv.as_lit().filter(|_| v.pts.is_empty())?))
+                            }).collect();
+                            if let Some(es) = entries {
+                                if let Some(s0) = crate::models::pyvalues::percent_format(&sx, crate::models::pyvalues::PercentArgs::Mapping(&es)) {
+                                    return Value::lit(key_str_lit(&s0));
+                                }
+                            }
+                        }
                     }
                     return Value::data(&format!("fmt@L{}", node.line));
                 }
@@ -1864,6 +1905,25 @@ pub fn cond_is_exclusion(cond: &ast::Expr, target: &ast::Expr) -> bool {
 
 /// `"%03d-%s|%.2f" % args` with literal arguments only: the formatted string.
 fn format_percent_literal(fmt: &str, b: &Value, state: &State, an: &Analyzer) -> Option<String> {
+    // every argument a literal: exactly as Python formats it
+    if !super::disabled("pure") {
+        let args: Option<Vec<KeyId>> = if b.pts.is_empty() {
+            b.kv.as_lit().map(|k| vec![k])
+        } else {
+            b.single().filter(|o| an.kind(*o) == Kind::Tuple).and_then(|o| {
+                let n = an.obj(o).literal_len?;
+                (0..n).map(|i| {
+                    let x = state.slot(o, Ns::Pos, key_int(i as i64));
+                    x.kv.as_lit().filter(|_| x.pts.is_empty())
+                }).collect()
+            })
+        };
+        if let Some(args) = args {
+            if let Some(s0) = crate::models::pyvalues::percent_format(fmt, crate::models::pyvalues::PercentArgs::Positional(&args)) {
+                return Some(s0);
+            }
+        }
+    }
     // collect the conversion specs
     let bytes: Vec<char> = fmt.chars().collect();
     let mut specs: Vec<(usize, usize, String, char)> = Vec::new(); // (start, end, flags+width+prec, conv)
@@ -1962,6 +2022,15 @@ const SAFE_BUILTINS: &[&str] = &["len", "str", "repr", "bool", "int", "float", "
 
 /// `format(value, spec)` for a known literal and a plain spec: `[[fill]align][0][width][.prec][type]`.
 pub(crate) fn format_spec_literal(k: KeyId, spec: &str) -> Option<String> {
+    if !super::disabled("pure") {
+        if let Some(s0) = crate::models::pyvalues::format_value(k, spec) {
+            return Some(s0);
+        }
+    }
+    format_spec_literal_old(k, spec)
+}
+
+fn format_spec_literal_old(k: KeyId, spec: &str) -> Option<String> {
     let chars: Vec<char> = spec.chars().collect();
     let mut i = 0;
     let mut fill = ' ';

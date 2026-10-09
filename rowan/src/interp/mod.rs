@@ -787,6 +787,10 @@ pub struct Analyzer {
     pub counters: FxHashSet<ObjId>,
     /// ChainMaps: the maps they look through (the first takes the writes)
     pub chainmaps: FxHashMap<ObjId, Vec<Value>>,
+    /// deques and their maxlen
+    pub deques: FxHashMap<ObjId, Option<i64>>,
+    /// the generated `UserDict` classes (their instances' keys are `self.data`'s)
+    pub userdict_classes: FxHashSet<ObjId>,
     /// per module: global names a function body mutates (`mutated_in_functions`)
     pub mutated_globals: std::cell::RefCell<FxHashMap<u32, FxHashSet<String>>>,
     /// per summary being built: its row-check observations
@@ -976,6 +980,8 @@ impl Analyzer {
             zip_strict: FxHashSet::default(),
             counters: FxHashSet::default(),
             chainmaps: FxHashMap::default(),
+            deques: FxHashMap::default(),
+            userdict_classes: FxHashSet::default(),
             mutated_globals: Default::default(),
             sum_obs: Vec::new(),
             sum_fact_obs: Vec::new(),
@@ -2251,6 +2257,16 @@ impl Analyzer {
             let mut ns_used = Ns::Item;
             let mut obs_rows: Vec<(ObjId, Ns, Row)> = Vec::new();
             for oid in v.pts.iter() {
+                // a UserDict's keys are those of its `data`
+                if self.kind(oid) == Kind::Instance && self.instance_class(oid).map(|c| self.mro(c).iter().any(|m| self.userdict_classes.contains(m))).unwrap_or(false) {
+                    let d = state.slot(oid, Ns::Attr, key_str_lit("data"));
+                    if let Some(dd) = d.single().filter(|x| self.kind(*x) == Kind::Dict) {
+                        ns_used = Ns::Item;
+                        rows.push(state.row(dd, Ns::Item));
+                        obs_rows.push((dd, Ns::Item, state.row(dd, Ns::Item)));
+                        continue;
+                    }
+                }
                 let typed = self.kind(oid) == Kind::Ph && self.ph_info(oid).cls.get().map(|c| self.class_info_opt(c).is_some()).unwrap_or(false);
                 let ns = if matches!(self.kind(oid), Kind::Instance | Kind::Namespace) || typed { Ns::Attr } else { Ns::Item };
                 ns_used = ns;

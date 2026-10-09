@@ -356,3 +356,167 @@ pub fn m_counter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
 }
+
+// ------------------------------------------------------------------ collections.deque
+
+/// deque methods (attribute loads on a deque route here; the rest is the list model).
+pub const DEQUE_METHODS: &[&str] = &["append", "appendleft", "pop", "popleft", "extend", "extendleft", "rotate", "clear", "maxlen", "copy"];
+
+/// The known items of a list-like object (positions of a single object), or None.
+fn known_items(an: &Analyzer, o: ObjId, st: &State) -> Option<Vec<Value>> {
+    let n = an.obj(o).literal_len?;
+    Some((0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect())
+}
+
+fn set_items(an: &mut Analyzer, o: ObjId, items: Vec<Value>, st: &mut State) {
+    st.drop_obj_ns(o, Ns::Pos);
+    let all = join_values(items.clone());
+    for (i, v) in items.iter().enumerate() {
+        st.set_slot(o, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
+    }
+    an.obj_mut(o).literal_len = Some(items.len());
+    st.set_slot(o, Ns::Elem, intern::STAR, Value::with_kv(all.pts.clone(), crate::models::torch::elem_kv(&all.kv)), true);
+    st.elems.insert(o, if items.is_empty() { KeyVal::Lits(intern::KeySet::new()) } else { all.kv.clone() });
+}
+
+/// `deque(iterable=(), maxlen=None)`.
+pub fn deque_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let maxlen = c.arg(1, Some("maxlen")).and_then(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).and_then(intern::key_as_int);
+    let oid = an.alloc_at(Kind::List, &c.node, st, &format!("deque@L{}", c.line), Payload::None, None, Ns::Item, None, None);
+    an.deques.insert(oid, maxlen);
+    let items = match c.arg(0, Some("iterable")) {
+        Some(it) => an.iterate(&it, &c.node, st).items,
+        None => Some(Vec::new()),
+    };
+    match items {
+        Some(mut items) if an.obj(oid).single => {
+            if let Some(m) = maxlen {
+                let m = m.max(0) as usize;
+                if items.len() > m {
+                    items = items.split_off(items.len() - m);
+                }
+            }
+            set_items(an, oid, items, st);
+        }
+        _ => {
+            let e = c.arg(0, Some("iterable")).map(|it| an.iterate(&it, &c.node, st).elem.one_or_empty()).unwrap_or_default();
+            st.set_slot(oid, Ns::Elem, intern::STAR, Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv)), false);
+            st.elems.insert(oid, e.kv.clone());
+            an.obj_mut(oid).literal_len = None;
+        }
+    }
+    Value::obj(oid)
+}
+
+/// deque methods: `deque.<name>`.
+pub fn m_deque(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
+    let Some(oid) = c.recv.as_ref().and_then(|r| r.single()) else { return Value::data("deque") };
+    let maxlen = an.deques.get(&oid).copied().flatten();
+    let strong = an.obj(oid).single && an.frame().loop_depth == 0 && an.cond_depth == 0;
+    let cur = known_items(an, oid, st).filter(|_| strong);
+    let arg = c.args.first().cloned().unwrap_or_default();
+    let fit = |mut items: Vec<Value>, left: bool| -> Vec<Value> {
+        if let Some(m) = maxlen {
+            let m = m.max(0) as usize;
+            while items.len() > m {
+                if left {
+                    items.pop();
+                } else {
+                    items.remove(0);
+                }
+            }
+        }
+        items
+    };
+    match (name.as_str(), cur) {
+        ("maxlen", _) => match maxlen {
+            Some(m) => Value::lit(intern::key_int(m)),
+            None => an.none_v.clone(),
+        },
+        ("append", Some(mut items)) => {
+            items.push(arg);
+            let items = fit(items, false);
+            set_items(an, oid, items, st);
+            an.none_v.clone()
+        }
+        ("appendleft", Some(mut items)) => {
+            items.insert(0, arg);
+            let items = fit(items, true);
+            set_items(an, oid, items, st);
+            an.none_v.clone()
+        }
+        ("extend" | "extendleft", Some(mut items)) => {
+            match an.iterate(&arg, &c.node, st).items {
+                Some(new) => {
+                    if name == "extend" {
+                        items.extend(new);
+                        items = fit(items, false);
+                    } else {
+                        for x in new {
+                            items.insert(0, x);
+                        }
+                        items = fit(items, true);
+                    }
+                    set_items(an, oid, items, st);
+                }
+                None => forget(an, oid, &arg, c, st),
+            }
+            an.none_v.clone()
+        }
+        ("pop" | "popleft", Some(mut items)) => {
+            if items.is_empty() {
+                an.raise_here("IndexError", st);
+                return Value::new();
+            }
+            let v = if name == "pop" { items.pop().unwrap() } else { items.remove(0) };
+            set_items(an, oid, items, st);
+            v
+        }
+        ("rotate", Some(items)) => {
+            let n = c.args.first().and_then(|v| v.kv.as_lit()).and_then(intern::key_as_int).unwrap_or(1);
+            if !items.is_empty() {
+                let len = items.len() as i64;
+                let k = ((n % len) + len) % len;
+                let mut r = items.clone();
+                r.rotate_right(k as usize);
+                set_items(an, oid, r, st);
+            }
+            an.none_v.clone()
+        }
+        ("clear", _) => {
+            set_items(an, oid, Vec::new(), st);
+            an.none_v.clone()
+        }
+        ("copy", Some(items)) => {
+            let nid = an.alloc_at(Kind::List, &c.node, st, &format!("deque@L{}", c.line), Payload::None, None, Ns::Item, None, Some("dequecopy"));
+            an.deques.insert(nid, maxlen);
+            set_items(an, nid, items, st);
+            Value::obj(nid)
+        }
+        ("pop" | "popleft", None) => {
+            an.may_raise_here("IndexError", st);
+            let e = st.slot(oid, Ns::Elem, intern::STAR);
+            an.obj_mut(oid).literal_len = None;
+            st.drop_obj_ns(oid, Ns::Pos);
+            e
+        }
+        (_, None) => {
+            forget(an, oid, &arg, c, st);
+            an.none_v.clone()
+        }
+        _ => Value::data("deque"),
+    }
+}
+
+/// Positions no longer known: the elements it may hold.
+fn forget(an: &mut Analyzer, oid: ObjId, arg: &Value, c: &Call, st: &mut State) {
+    let name = c.qual.rsplit('.').next().unwrap_or("");
+    let e = if matches!(name, "extend" | "extendleft") { an.iterate(arg, &c.node, st).elem.one_or_empty() } else { arg.clone() };
+    let cur = st.slot(oid, Ns::Elem, intern::STAR);
+    st.set_slot(oid, Ns::Elem, intern::STAR, cur.join(&Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv))), false);
+    let kv = crate::domain::kv_join(&st.elems.get(&oid).unwrap_or(KeyVal::Bot), &e.kv);
+    st.elems.insert(oid, kv);
+    an.obj_mut(oid).literal_len = None;
+    st.drop_obj_ns(oid, Ns::Pos);
+}

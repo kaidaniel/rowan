@@ -756,6 +756,10 @@ impl Analyzer {
                 }
                 Kind::External => {
                     let q = format!("{}.{}", self.external_qual(oid), name);
+                    if let Some(v) = crate::models::generated_class(self, state, &q) {
+                        acc = acc.join(&v);
+                        continue;
+                    }
                     match crate::models::external_record(self, &q, state) {
                         Some(rec) => Value::obj(rec),
                         None => Value::obj(self.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, &q, Payload::Str(q.clone()))),
@@ -835,6 +839,16 @@ impl Analyzer {
                 }
                 Kind::Dict if self.chainmaps.contains_key(&oid) && name == "new_child" => self.method_value("chainmap.new_child", &Value::obj(oid)),
                 Kind::Dict => self.method_value(&format!("dict.{}", name), &Value::obj(oid)),
+                Kind::List if self.deques.contains_key(&oid) && crate::models::counter::DEQUE_METHODS.contains(&name) => {
+                    if name == "maxlen" {
+                        match self.deques[&oid] {
+                            Some(m) => Value::lit(intern::key_int(m)),
+                            None => self.none_v.clone(),
+                        }
+                    } else {
+                        self.method_value(&format!("deque.{}", name), &Value::obj(oid))
+                    }
+                }
                 Kind::List | Kind::Tuple | Kind::Set => self.method_value(&format!("{}.{}", k.name(), name), &Value::obj(oid)),
                 Kind::Frame => crate::models::pandas::frame_getattr(self, oid, name, node, state, guarded),
                 Kind::Series => crate::models::pandas::series_getattr(self, oid, name, node, state),
