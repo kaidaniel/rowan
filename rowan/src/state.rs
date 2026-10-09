@@ -115,6 +115,9 @@ pub struct State {
     pub symbolic: bool,
     /// what a test that was joined over said about rows (see `CondFact`)
     pub facts: Arc<Vec<Arc<CondFact>>>,
+    /// (name, key): the object the name is bound to has the key, whichever of its possible
+    /// objects that is (a store or setdefault through the name)
+    pub name_keys: Arc<Vec<(StrId, KeyId)>>,
 }
 
 /// At the join of a branch on a pure test: when `cond` (a canonical test text) is `truth`,
@@ -139,6 +142,33 @@ impl Default for State {
 }
 
 impl State {
+    /// The name's object has `k` from here on.
+    pub fn add_name_key(&mut self, n: StrId, k: KeyId) {
+        if !self.name_keys.contains(&(n, k)) {
+            let mut v: Vec<(StrId, KeyId)> = self.name_keys.iter().copied().collect();
+            v.push((n, k));
+            if v.len() > 64 {
+                v.remove(0);
+            }
+            self.name_keys = Arc::new(v);
+        }
+    }
+
+    pub fn name_has_key(&self, n: StrId, k: KeyId) -> bool {
+        self.name_keys.contains(&(n, k))
+    }
+
+    /// Forget name facts (all of them, or those of one name).
+    pub fn drop_name_keys(&mut self, n: Option<StrId>) {
+        if self.name_keys.is_empty() {
+            return;
+        }
+        self.name_keys = Arc::new(match n {
+            None => Vec::new(),
+            Some(n) => self.name_keys.iter().filter(|(m, _)| *m != n).copied().collect(),
+        });
+    }
+
     pub fn new() -> State {
         State {
             env: IndexMap::new(),
@@ -152,6 +182,7 @@ impl State {
             exits: None,
             symbolic: false,
             facts: Arc::new(Vec::new()),
+            name_keys: Arc::new(Vec::new()),
         }
     }
 
@@ -176,6 +207,7 @@ impl State {
             exits: self.exits.clone(),
             symbolic: self.symbolic,
             facts: self.facts.clone(),
+            name_keys: self.name_keys.clone(),
         }
     }
 
@@ -192,6 +224,7 @@ impl State {
             exits: self.exits.clone(),
             symbolic: self.symbolic,
             facts: self.facts.clone(),
+            name_keys: self.name_keys.clone(),
         }
     }
 
@@ -220,6 +253,7 @@ impl State {
         self.exits = o.exits.clone();
         self.symbolic = o.symbolic;
         self.facts = o.facts.clone();
+        self.name_keys = o.name_keys.clone();
     }
 
     pub fn replace_with(&mut self, mut o: State) {
@@ -267,6 +301,7 @@ impl State {
         s.reachable = true;
         s.symbolic = self.symbolic || o.symbolic;
         s.facts = Arc::new(facts);
+        s.name_keys = if Arc::ptr_eq(&self.name_keys, &o.name_keys) { self.name_keys.clone() } else { Arc::new(self.name_keys.iter().filter(|x| o.name_keys.contains(x)).copied().collect()) };
         s
     }
 

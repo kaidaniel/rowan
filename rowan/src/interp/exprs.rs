@@ -57,6 +57,16 @@ impl Analyzer {
                 }
                 let key = self.eval_key(&sub.slice, state);
                 let nd = frontend::node(node);
+                // a key the name's object surely has (stored through the name): no failure
+                if let (ast::Expr::Name(nm), Some(k)) = (&*sub.value, key.kv.as_lit().filter(|_| key.pts.is_empty())) {
+                    if state.name_has_key(s(nm.id.as_str()), k) {
+                        let v = self.load_item(&obj, Ns::Item, &key, &nd, state, false);
+                        if let Some(o) = obj.pts.first() {
+                            self.verdict(&nd, k, &crate::domain::Classification::with_note(crate::domain::Tier::Proven, "stored through this name"), o, Ns::Item, None, None);
+                        }
+                        return v;
+                    }
+                }
                 self.load_item(&obj, Ns::Item, &key, &nd, state, true)
             }
             ast::Expr::Call(c) => {
@@ -74,7 +84,18 @@ impl Analyzer {
                     }
                 }
                 let nd = frontend::node(node);
-                self.call_value(&fv, &nd, Some(c), state, None)
+                let r = self.call_value(&fv, &nd, Some(c), state, None);
+                // `t.setdefault(k, …)` through a name: whichever object `t` is has k now
+                if let ast::Expr::Attribute(a) = &*c.func {
+                    if let (ast::Expr::Name(nm), "setdefault", Some(first)) = (&*a.value, a.attr.id.as_str(), c.arguments.args.first()) {
+                        if let ast::Expr::StringLiteral(sl) = first {
+                            if !super::disabled("namekeys") {
+                                state.add_name_key(s(nm.id.as_str()), key_str_lit(sl.value.to_str()));
+                            }
+                        }
+                    }
+                }
+                r
             }
             ast::Expr::Dict(d) => {
                 let nd = frontend::node(node);

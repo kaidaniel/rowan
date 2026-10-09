@@ -1449,6 +1449,7 @@ fn list_pop_one(an: &mut Analyzer, st: &mut State, oid: u32, c: &Call) -> Value 
 }
 
 fn m_pop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    st.drop_name_keys(None);
     let recv = c.recv.clone().unwrap_or_default();
     let int_key = c.args.first().and_then(|a| a.kv.as_lit()).map(|k| intern::key_as_int(k).is_some()).unwrap_or(false);
     let listy = recv.pts.iter().all(|o| matches!(an.kind(o), Kind::Ph | Kind::List | Kind::Tuple));
@@ -1500,6 +1501,7 @@ fn m_pop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 fn m_popitem(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    st.drop_name_keys(None);
     let recs = dict_recv(an, c);
     // one closed dict whose insertion order is known: the last key is removed (the first
     // with `last=False`)
@@ -1553,6 +1555,7 @@ fn m_move_to_end(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 fn m_clear(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    st.drop_name_keys(None);
     let recs = dict_recv(an, c);
     for &oid in &recs {
         let strong = an.obj(oid).single && recs.len() == 1;

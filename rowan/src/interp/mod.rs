@@ -657,6 +657,10 @@ pub struct Analyzer {
     pub none_v: Value,
     /// `#@row NAME:` checks requested by the golden harness: (line, name)
     pub row_check_requests: Vec<(u32, String)>,
+    /// per summary being built: its row-check observations
+    pub sum_obs: Vec<Vec<crate::summary::Obs>>,
+    /// per summary being built: the hover facts recorded in its body (resolved per call)
+    pub sum_fact_obs: Vec<Vec<crate::summary::FactObs>>,
     /// locals of the callers of the running call (innermost last), for liveness
     pub env_stack: Vec<IndexMap<StrId, Value>>,
     /// `@name.setter` functions by (defining class, attribute)
@@ -791,6 +795,8 @@ impl Analyzer {
             series: 0,
             none_v: Value::lit(intern::key_none()),
             row_check_requests: Vec::new(),
+            sum_obs: Vec::new(),
+            sum_fact_obs: Vec::new(),
             env_stack: Vec::new(),
             prop_setters: FxHashMap::default(),
             dd_factories: FxHashMap::default(),
@@ -1182,24 +1188,54 @@ impl Analyzer {
 
     /// Entry-point rule (§6.4): functions never called get analysed with open parameters.
     fn analyse_uncalled(&mut self, state: &mut State) {
-        let n = self.objects.len();
-        for oid in 1..n as ObjId {
+        // entry runs can make functions (closures, lambdas, inner defs) nobody calls either:
+        // a few rounds, each over the functions made so far
+        let mut start: ObjId = 1;
+        for _round in 0..4 {
+            let n = self.objects.len() as ObjId;
+            if start >= n {
+                break;
+            }
+            self.analyse_uncalled_range(start, n, state);
+            start = n;
+        }
+    }
+
+    fn analyse_uncalled_range(&mut self, from: ObjId, n: ObjId, state: &mut State) {
+        for oid in from..n {
             if self.kind(oid) != Kind::Function || self.analysed_funcs.contains(&oid) {
                 continue;
             }
             let fi = self.func_info(oid);
-            if !fi.closure.is_empty() {
-                continue; // inner closures are reached through their factory
+            // closures made inside a summary run stand for every call's closure (their cells
+            // are relative): they are reached through the real calls
+            if !fi.closure.is_empty() && (self.obj(oid).ctx.contains("sum") || disabled("entryclosures")) {
+                continue;
+            }
+            if matches!(fi.node, FuncNode::Lambda(_)) && disabled("entryclosures") {
+                continue;
             }
             if fi.module != self.main_module {
                 continue;
             }
-            let FuncNode::Def(fnode) = fi.node else { continue };
+            let Some(fparams) = fi.node.params().or_else(|| None) else {
+                // a lambda without parameters
+                if let FuncNode::Lambda(_) = fi.node {
+                    let mut st = state.copy();
+                    st.ret = None;
+                    let mi = self.module_info(fi.module);
+                    self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
+                    let fake = Node::synthetic(mi.idx, fi.node.node().line);
+                    self.call_user(oid, None, vec![], IndexMap::new(), vec![], vec![], &mut st, &fake, None, true);
+                    self.frames.pop();
+                }
+                continue;
+            };
             if debug_enabled() {
                 eprintln!(
                     "[rowan] entry {} L{} t={:.1}s objs={} summaries={} verdicts={}",
                     fi.qualname,
-                    frontend::node(fnode).line,
+                    fi.node.node().line,
                     self.now(),
                     self.objects.len(),
                     self.summary_table.len(),
@@ -1211,7 +1247,7 @@ impl Analyzer {
             let mut args: Vec<Value> = Vec::new();
             let mi = self.module_info(fi.module);
             self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
-            let mut params = scopemod::all_params(&fnode.parameters);
+            let mut params = scopemod::all_params(fparams);
             let mut self_val: Option<Value> = None;
             if let Some(cls) = fi.cls {
                 if !fi.is_static.get() {
@@ -1232,15 +1268,32 @@ impl Analyzer {
                     }
                 }
             }
+            let mut star_args: Vec<Value> = Vec::new();
+            let mut star_kwargs: Vec<Value> = Vec::new();
             for a in params {
-                let is_var = fnode.parameters.vararg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false)
-                    || fnode.parameters.kwarg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);
-                if is_var {
+                let is_vararg = fparams.vararg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);
+                let is_kwarg = fparams.kwarg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);
+                if is_vararg || is_kwarg {
+                    // a caller may pass any arguments here
+                    if !disabled("entrystar") {
+                        let poid = self.unknown_source(&format!("param {}.{}", fi.qualname, a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
+                        if is_vararg {
+                            star_args.push(Value::obj(poid));
+                        } else {
+                            star_kwargs.push(Value::obj(poid));
+                        }
+                    }
                     continue;
                 }
                 let pname = s(a.name.id.as_str());
                 if let Some(d) = fi.defaults.get(&pname) {
-                    args.push(d.clone());
+                    // the default, or whatever a caller passes
+                    if disabled("entrydefaults") {
+                        args.push(d.clone());
+                        continue;
+                    }
+                    let poid = self.unknown_source(&format!("param {}.{}", fi.qualname, a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
+                    args.push(d.join(&Value::obj(poid)));
                     continue;
                 }
                 let mut v = match &a.annotation {
@@ -1253,8 +1306,8 @@ impl Analyzer {
                 }
                 args.push(v.unwrap());
             }
-            let fake = Node::synthetic(mi.idx, frontend::node(fnode).line);
-            self.call_user(oid, self_val, args, IndexMap::new(), vec![], vec![], &mut st, &fake, None, true);
+            let fake = Node::synthetic(mi.idx, fi.node.node().line);
+            self.call_user(oid, self_val, args, IndexMap::new(), star_args, star_kwargs, &mut st, &fake, None, true);
             self.frames.pop();
             // keep schema requirements discovered in entry points
             for (src, d) in st.reqs.items() {
@@ -1444,6 +1497,46 @@ impl Analyzer {
 
     /// Hover facts: a name was read or written at `node` holding `v` (concrete analyses only;
     /// the symbolic rows of a summary body are not meaningful to a reader).
+    /// A concrete hover fact for a line inside a function whose summary was instantiated:
+    /// `rows` are the rows resolved for this call; the text shows them with values unknown
+    /// (the caller's state after the call does not tell what the slots held at that line).
+    pub fn record_resolved_fact(&mut self, line: u32, name: StrId, v: &Value, rows: Vec<(ObjId, Option<Row>, Option<Row>)>, state: &State) {
+        let mut scratch = state.copy_ref();
+        for (o, item, attr) in &rows {
+            scratch.drop_obj(*o);
+            if let Some(r) = item {
+                scratch.set_row(*o, Ns::Item, r.clone());
+            }
+            if let Some(r) = attr {
+                scratch.set_row(*o, Ns::Attr, r.clone());
+            }
+        }
+        let text = crate::report::render_value(self, &scratch, v, 0, &mut Vec::new());
+        let e = self.facts.entry((line, name, false)).or_insert_with(|| Fact { symbolic: false, value: Value::new(), rows: IndexMap::new(), texts: Vec::new() });
+        e.value = e.value.join(v);
+        if !e.texts.contains(&text) && e.texts.len() < 4 {
+            e.texts.push(text);
+        }
+        let join_opt = |a: &Option<Row>, b: &Option<Row>| -> Option<Row> {
+            match (a, b) {
+                (Some(x), Some(y)) => Some(x.join(y)),
+                (Some(x), None) | (None, Some(x)) => Some(x.clone()),
+                _ => None,
+            }
+        };
+        for (oid, item, attr) in rows {
+            match e.rows.get_mut(&oid) {
+                Some((ci, ca)) => {
+                    *ci = join_opt(ci, &item);
+                    *ca = join_opt(ca, &attr);
+                }
+                None => {
+                    e.rows.insert(oid, (item, attr));
+                }
+            }
+        }
+    }
+
     pub fn record_fact(&mut self, node: &Node, name: StrId, v: &Value, state: &State) {
         if !self.facts_on || node.addr == 0 {
             return;
@@ -1466,6 +1559,13 @@ impl Analyzer {
                 _ => None,
             }
         };
+        if symbolic && !disabled("factobs") {
+            if let Some(top) = self.sum_fact_obs.last_mut() {
+                if top.len() < 4096 {
+                    top.push(crate::summary::FactObs { line: node.line, name, value: v.clone(), rows: rows.clone() });
+                }
+            }
+        }
         let text = crate::report::render_value(self, state, v, 0, &mut Vec::new());
         let e = self.facts.entry((node.line, name, symbolic)).or_insert_with(|| Fact { symbolic, value: Value::new(), rows: IndexMap::new(), texts: Vec::new() });
         e.value = e.value.join(v);
@@ -1582,12 +1682,24 @@ impl Analyzer {
             let v = self.load_name(s(&name), &n, state);
             let mut rows: Vec<Row> = Vec::new();
             let mut ns_used = Ns::Item;
+            let mut obs_rows: Vec<(ObjId, Ns, Row)> = Vec::new();
             for oid in v.pts.iter() {
-                let ns = if matches!(self.kind(oid), Kind::Instance | Kind::Namespace) { Ns::Attr } else { Ns::Item };
+                let typed = self.kind(oid) == Kind::Ph && self.ph_info(oid).cls.get().map(|c| self.class_info_opt(c).is_some()).unwrap_or(false);
+                let ns = if matches!(self.kind(oid), Kind::Instance | Kind::Namespace) || typed { Ns::Attr } else { Ns::Item };
                 ns_used = ns;
                 rows.push(state.row(oid, ns));
+                obs_rows.push((oid, ns, state.row(oid, ns)));
             }
-            let row = if rows.is_empty() { None } else { Some(crate::domain::join_rows(rows)) };
+            let must: Vec<KeyId> = state.name_keys.iter().filter(|(n, _)| *intern::str_get(*n) == *name).map(|(_, k)| *k).collect();
+            // inside a summary the rows are relative to its entry: kept with the summary and
+            // resolved per call
+            if !self.sum_stack.is_empty() && !disabled("obs") {
+                if let Some(top) = self.sum_obs.last_mut() {
+                    top.push(crate::summary::Obs { line: ln, name, rows: obs_rows, must });
+                }
+                continue;
+            }
+            let row = if rows.is_empty() { None } else { Some(must.iter().fold(crate::domain::join_rows(rows), |r, k| r.store(*k, true))) };
             self.row_checks.push(RowCheck { line: ln, name, row, ns: ns_used });
         }
     }

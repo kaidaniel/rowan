@@ -99,8 +99,32 @@ pub type SummaryKey = (ObjId, Vec<(ObjId, Vec<ObjId>)>, Vec<(ObjId, ObjId)>, Vec
 /// that the unspecialised summary is used.
 pub const MAX_SIGNATURES: usize = 8;
 
+/// What a row check inside a function body saw during the summary run (relative to the
+/// summary's entry); resolved at every instantiation.
+#[derive(Clone, Debug)]
+pub struct Obs {
+    pub line: u32,
+    pub name: String,
+    pub rows: Vec<(ObjId, Ns, Row)>,
+    /// keys the name's object surely has (stored through the name)
+    pub must: Vec<KeyId>,
+}
+
+/// A hover fact recorded in a summary body (relative to its entry); resolved per call.
+#[derive(Clone, Debug)]
+pub struct FactObs {
+    pub line: u32,
+    pub name: StrId,
+    pub value: Value,
+    pub rows: Vec<(ObjId, Option<Row>, Option<Row>)>,
+}
+
 pub struct Summary {
     pub foid: ObjId,
+    /// hover facts inside the body (--facts)
+    pub fact_obs: Vec<FactObs>,
+    /// row checks inside the body (golden harness)
+    pub obs: Vec<Obs>,
     /// debug: the summary's context and its key (typed / code cells, signature)
     pub desc: String,
     pub ph_by_name: IndexMap<StrId, ObjId>,
@@ -508,6 +532,8 @@ impl Analyzer {
         self.sum_ctxs.push(ctx.clone());
         self.sum_reqs.push(IndexMap::new());
         self.sum_events.push(IndexMap::new());
+        self.sum_obs.push(Vec::new());
+        self.sum_fact_obs.push(Vec::new());
         self.raise_stack.push(false);
         self.sum_obj_mark.push(self.objects.len() as ObjId);
         self.sum_deps.push(FxHashSet::default());
@@ -528,6 +554,8 @@ impl Analyzer {
             }
             self.notes.truncate(notes_mark);
             *self.sum_reqs.last_mut().unwrap() = IndexMap::new();
+            *self.sum_obs.last_mut().unwrap() = Vec::new();
+            *self.sum_fact_obs.last_mut().unwrap() = Vec::new();
             *self.sum_events.last_mut().unwrap() = IndexMap::new();
             *self.raise_stack.last_mut().unwrap() = false;
             let obj_mark = *self.sum_obj_mark.last().unwrap();
@@ -736,6 +764,8 @@ impl Analyzer {
                 ret,
                 symreqs,
                 rel_verdicts: rel_list,
+                obs: self.sum_obs.last().cloned().unwrap_or_default(),
+                fact_obs: self.sum_fact_obs.last().cloned().unwrap_or_default(),
                 notes: body_notes,
                 templates,
                 events,
@@ -788,6 +818,8 @@ impl Analyzer {
         self.sum_stack.pop();
         self.sum_ctxs.pop();
         self.sum_reqs.pop();
+        self.sum_obs.pop();
+        self.sum_fact_obs.pop();
         self.sum_events.pop();
         self.raise_stack.pop();
         self.sum_obj_mark.pop();
@@ -1391,6 +1423,49 @@ impl Analyzer {
         }
         for n in &summary.notes {
             self.note(n.clone());
+        }
+        // 8. row checks inside the body: resolved for this call (inside another summary they
+        // become that summary's, relative to its entry)
+        for ob in &summary.obs {
+            let mut rows: Vec<(ObjId, Ns, Row)> = Vec::new();
+            for (o, ns, expr) in &ob.rows {
+                let tg = inst.resolve(self, state, &pre, *o);
+                let c = inst.concretise(self, state, &pre, expr, None);
+                for a in tg.iter() {
+                    let ns2 = if matches!(self.kind(a), Kind::Instance | Kind::Namespace) { Ns::Attr } else { *ns };
+                    let row = if ns2 == *ns { c.clone() } else { state.row(a, ns2) };
+                    rows.push((a, ns2, row));
+                }
+            }
+            if in_summary {
+                if let Some(top) = self.sum_obs.last_mut() {
+                    top.push(Obs { line: ob.line, name: ob.name.clone(), rows, must: ob.must.clone() });
+                }
+            } else {
+                let ns = rows.first().map(|r| r.1).unwrap_or(Ns::Item);
+                let row = if rows.is_empty() { None } else { Some(ob.must.iter().fold(crate::domain::join_rows(rows.into_iter().map(|r| r.2)), |r, k| r.store(*k, true))) };
+                self.row_checks.push(crate::interp::RowCheck { line: ob.line, name: ob.name.clone(), row, ns });
+            }
+        }
+        // hover facts inside the body, for this call
+        for fo in &summary.fact_obs {
+            let v = inst.remap_value(self, state, &pre, &fo.value);
+            let mut rows: Vec<(ObjId, Option<Row>, Option<Row>)> = Vec::new();
+            for (o, item, attr) in &fo.rows {
+                let tg = inst.resolve(self, state, &pre, *o);
+                let ci = item.as_ref().map(|r| inst.concretise(self, state, &pre, r, None));
+                let ca = attr.as_ref().map(|r| inst.concretise(self, state, &pre, r, None));
+                for a in tg.iter() {
+                    rows.push((a, ci.clone(), ca.clone()));
+                }
+            }
+            if in_summary {
+                if let Some(top) = self.sum_fact_obs.last_mut() {
+                    top.push(FactObs { line: fo.line, name: fo.name, value: v, rows });
+                }
+            } else {
+                self.record_resolved_fact(fo.line, fo.name, &v, rows, state);
+            }
         }
         let ret = inst.remap_value(self, state, &pre, &summary.ret);
         if !in_summary {

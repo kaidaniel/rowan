@@ -221,16 +221,36 @@ def run_case(path: str, verbose: bool = False) -> Tuple[bool, List[str]]:
         res = json.loads(out.stdout)
     except json.JSONDecodeError as e:
         return False, [f"bad JSON from rowan: {e}: {out.stdout[:200]}"]
-    row_checks = []
+    # a line can run several times (a function called from several places, or analysed as an
+    # entry point with open parameters): its row is the join over the runs
+    joined: Dict[Tuple[int, str], Any] = {}
     for rc in res["rows"]:
-        for name, spec in row_exp.get(rc["line"], []):
-            if name != rc["name"]:
+        key = (rc["line"], rc["name"])
+        r = rc["row"]
+        if key not in joined:
+            joined[key] = None if r is None else dict(r, present=list(r["present"]), definite=list(r["definite"]), absent=list(r["absent"]))
+        elif r is not None:
+            j = joined[key]
+            if j is None:
+                joined[key] = dict(r)
                 continue
-            if rc["row"] is None:
-                row_checks.append((rc["line"], name, spec, "no record object"))
+            j["present"] = sorted(set(j["present"]) | set(r["present"]))
+            j["definite"] = sorted(set(j["definite"]) & set(r["definite"]))
+            j["absent"] = sorted(set(j["absent"]) & set(r["absent"]))
+            j["closed"] = j["closed"] and r["closed"]
+            if r["text"] != j["text"]:
+                j["text"] = j["text"] + " | " + r["text"]
+                j["details"] = j.get("details", "") + " | " + r.get("details", "")
+    row_checks = []
+    for (line, rname), row in joined.items():
+        for name, spec in row_exp.get(line, []):
+            if name != rname:
+                continue
+            if row is None:
+                row_checks.append((line, name, spec, "no record object"))
             else:
-                row_checks.append((rc["line"], name, spec, row_problems(rc["row"], spec)))
-    seen_rows = {(rc["line"], rc["name"]) for rc in res["rows"]}
+                row_checks.append((line, name, spec, row_problems(row, spec)))
+    seen_rows = set(joined)
     for ln, specs in row_exp.items():
         for name, spec in specs:
             if (ln, name) not in seen_rows:

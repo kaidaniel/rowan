@@ -242,6 +242,8 @@ impl Analyzer {
         if let Some(m) = self.may_raise.last_mut() {
             *m = true;
         }
+        // unknown code may remove keys stored through names
+        state.drop_name_keys(None);
         // unknown code may change what an earlier test read: facts about it no longer hold
         if !state.facts.is_empty() {
             let mut objs: Vec<u32> = recv.map(|r| r.pts.to_vec()).unwrap_or_default();
@@ -1210,7 +1212,8 @@ impl Analyzer {
                 }
             }
         }
-        let extra = if !star_args.is_empty() { join_values(star_args.iter().map(|sa| self.elem_of(sa, node, state))) } else { Value::new() };
+        // the elements of `*xs` (an unknown iterable's are unknown, not none)
+        let extra = if !star_args.is_empty() { join_values(star_args.iter().map(|sa| self.iterate(sa, node, state).elem.flat()).collect::<Vec<_>>()) } else { Value::new() };
         for (i, name) in positional.iter().enumerate() {
             if i < args.len() {
                 bound.insert(*name, args[i].clone());

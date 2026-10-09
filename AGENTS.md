@@ -30,7 +30,7 @@ cd rowan && cargo build --release && cargo test --release --lib && cd ..
 rowan/target/release/rowan FILE.py [--json|--golden|--facts] [--no-rows --no-summaries --no-entry --no-imports] [--value-depth N]
                                    [--search-path DIR]… [--follow PKG]… [--site-packages DIR]…
 rowan/target/release/rowan serve                    # JSON lines over stdio (README has the protocol)
-uv run --no-project python tests/run_golden.py      # 366/366 in ~1.2 s; paths select cases; -v shows reports
+uv run --no-project python tests/run_golden.py      # 416/416 in ~1.3 s; paths select cases; -v shows reports
 uv run --no-project python tests/run_snapshots.py   # SAME on 4 snapshots (fixed caps, no deadline); --update after review
 cd vscode-rowan && node test.js && npm run package  # hover rendering check; rebuilds rowan-0.1.0.vsix
 ```
@@ -59,7 +59,7 @@ only), `ROWAN_TODO=check` (the harness checks `#@todo` expectations too).
 | `report.rs` | dedupe, schema table, text / JSON lines / `--golden` / `--facts` (`text` = rendered value). |
 | `main.rs` | CLI, `serve_loop`, `run_with_deps`, site-packages discovery; analysis on a 1 GiB-stack thread. |
 | `rowan/py/` | PyO3 binding; the wheel does not load on this machine (see problems). |
-| `tests/run_golden.py`, `tests/cases/` | 366 golden cases. Directives: `#@ tier key [; …]` (verdict on that line's access; tier `sound` = anything but `missing`), `#@row NAME: present={..} definite={..} closed|open` (row of NAME on that line), `#@schema src@L<n>: always={..} sometimes={..} only={..}`, row floors `possible={..}` / `definite_within={..}`, `#@todo …` (reported, not checked), `#@argv …` (per-case flags, relative paths against the case dir). A package case is a directory whose entry shares its prefix (`k94_pkg/k94_modules.py`); other files there are modules. |
+| `tests/run_golden.py`, `tests/cases/` | 416 golden cases. Directives: `#@ tier key [; …]` (verdict on that line's access; tier `sound` = anything but `missing`), `#@row NAME: present={..} definite={..} closed|open` (row of NAME on that line), `#@schema src@L<n>: always={..} sometimes={..} only={..}`, row floors `possible={..}` / `definite_within={..}`; a row on a line run several times (calls, entry runs) is the join of the runs, `#@todo …` (reported, not checked), `#@argv …` (per-case flags, relative paths against the case dir). A package case is a directory whose entry shares its prefix (`k94_pkg/k94_modules.py`); other files there are modules. |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | `--json` snapshots on the example and three old-prototype modules (inputs only); the regression guard for internals. |
 | `vscode-rowan/` | extension: talks to `rowan serve` (falls back to the CLI), hover = facts for (line, name), verdicts as diagnostics. |
 
@@ -69,8 +69,8 @@ modules, `l95_pkg` a real package, `m96_pkg` a 1,700-line twelve-module warehous
 checks), `n97_pkg` site-packages, `o98`–`o103`, `p104`–`p105`, `q106`–`q135` and six rounds
 of 30 more (`r136`–`r165`, `s166`–`s195`, `t196`–`t225`, `u226`–`u255`, `v256`–`v285`,
 `w286`–`w315`, the last on input schemas) one-hypothesis cases, and `x316`–`x368` on known
-weaknesses: each has the precise answer (a `#@todo` where out of reach) and a checked
-soundness floor. Every `h`+ case was written as a value specification *before* running the engine;
+weaknesses (precise answer, `#@todo` where out of reach, and a checked soundness floor);
+`y369`–`y418` assert inside functions: called, uncalled, closures, higher-order. Every `h`+ case was written as a value specification *before* running the engine;
 expectations that turned out wrong carry a comment saying why. Convention: a comparison or
 arithmetic on known numbers / strings is decided; anything involving an unknown value keeps
 both paths and is written as `?`; `json.loads` results are open by design.
@@ -117,7 +117,13 @@ both paths and is written as `?`; `json.loads` results are open by design.
   comparisons, `in`, `is`, `not`), of a try whose two exits set a flag differently, and of a
   `for` over a name / `range(name)` records each side's rows; a later identical test restores
   them while the test's names, the objects it reads (`guards`) and the rows are unchanged
-  (rebinding, unknown calls and deletes drop facts; tests on lists / sets give none). A summary reads a module
+  (rebinding, unknown calls and deletes drop facts; tests on lists / sets give none).
+  `State.name_keys`: a store / `setdefault` through a name makes the key definite for that
+  name's object, whichever it is. Row checks and hover facts inside a summary body are
+  `Obs` / `FactObs` kept with the summary and resolved at every instantiation (hover values
+  there show as `...`). Entry runs (functions nobody calls, also closures and lambdas made but
+  not called, up to 4 rounds) get open parameters: defaults are `default | anything`, `*args`
+  / `**kw` unknown. A summary reads a module
   name that is rebound anywhere (`Scopes::rebound`) as a deferred load per call site.
 * **Classes.** Dataclass `__init__` (also for subclasses, `super().__init__`,
   `Base.__init__(self,…)`, `__post_init__`), properties with setters, classmethods bound to
@@ -178,23 +184,15 @@ both paths and is written as `?`; `json.loads` results are open by design.
 * Mutual recursion widens after 3 rounds; `while` loops with unknown conditions join;
   comparisons on unknown values keep both branches; `match` class / sequence patterns stay
   undecided; `getattr` needs a known name; pandas columns from data stay open.
-* `dict(zip(keys, row))` with a row of unknown length makes every key definite (design
-  case `d30`); with both lengths known zip stops at the shorter. A `for` over a one-shot
-  iterator exhausts it even when the loop breaks. `ChainMap` is a merged copy (stores do
-  not reach the first map). `lru_cache` results are flow-insensitive.
-* Recency's flow-insensitive side tables other than `cls_slots` are not renamed (stale
-  cache entries only waste memory). `Row::concretise` resolves referenced entry rows
-  transitively. ASTs are leaked per file version.
-* Snapshots on the big fixture depend on the fixed caps the snapshot harness pins
-  (`ROWAN_LIMITS=ms=100000000,tab=24,call=32,clones=8`); the default run of that fixture
-  degrades after 2 s.
+* `dict(zip(keys, row))` with a row of unknown length makes every key definite (`d30`); a
+  `for` over a one-shot iterator exhausts it even on break; `ChainMap` is a merged copy.
+* Recency's side tables other than `cls_slots` are not renamed; ASTs are leaked per file
+  version. Snapshots depend on the caps the snapshot harness pins (`ROWAN_LIMITS=…`).
 
 ## Where to go next
 
-The agreed plan (values in notation, cross-module, specialisation, packages, the 2,000-line
-example, server, site-packages, more examples) is complete; each step was one commit. Open
-items, in the order they seem worth doing: (1) summary reuse across runs in the server;
-(2) the weak store through several objects (path-sensitive ownership or a narrowed row on
-the name); (3) precision on self-referential programs and a runtime oracle on real repos;
+Open items, in the order they seem worth doing: (1) summary reuse across runs in the server;
+(2) the weak store through several objects when the name read differs from the one stored
+through (`x346`, `x347`); hover values in resolved function facts; (3) precision on self-referential programs and a runtime oracle on real repos;
 (4) more cases written before running the engine (rounds r–w found 75 bugs, mostly in
 models; x found 5 wrong answers). Keep this file under 200 lines.

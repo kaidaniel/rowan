@@ -326,6 +326,7 @@ impl Analyzer {
     }
 
     pub fn store_name(&mut self, name: StrId, v: Value, state: &mut State) {
+        state.drop_name_keys(Some(name));
         // a fact about a test reading this name no longer holds once it is rebound
         if !state.facts.is_empty() && state.facts.iter().any(|f| f.deps.iter().any(|(n, _)| *n == name)) {
             let kept: Vec<_> = state.facts.iter().filter(|f| !f.deps.iter().any(|(n, _)| *n == name)).cloned().collect();
@@ -408,6 +409,12 @@ impl Analyzer {
                 let key = self.eval_key(&sub.slice, state);
                 let n = frontend::node(t);
                 self.store_item(&obj, Ns::Item, &key, v, &n, state);
+                // `t[k] = v`: whichever object `t` is has k now
+                if let (ast::Expr::Name(nm), Some(k)) = (&*sub.value, key.kv.as_lit().filter(|_| key.pts.is_empty())) {
+                    if obj.pts.len() > 1 && obj.pts.iter().all(|o| self.kind(o) == Kind::Dict) && !crate::interp::disabled("namekeys") {
+                        state.add_name_key(s(nm.id.as_str()), k);
+                    }
+                }
             }
             ast::Expr::Tuple(ast::ExprTuple { elts, .. }) | ast::Expr::List(ast::ExprList { elts, .. })
                 if elts.iter().any(|e| matches!(e, ast::Expr::Starred(_))) =>

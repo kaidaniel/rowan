@@ -342,7 +342,10 @@ impl Analyzer {
                     } else {
                         self.record_symreq(node, KeyVal::Lit(k), &row, oid, ns, guarded, "load");
                     }
-                    if is_lit && single_target && self.strongable(oid) {
+                    // the element placeholder of a loop stands for every element: what one
+                    // iteration's access proved is not known of the next one
+                    let elem_ph = self.kind(oid) == Kind::Ph && self.ph_info(oid).key == Some(STAR) && self.frame().loop_depth > 0 && !super::disabled("elemnarrow");
+                    if is_lit && single_target && self.strongable(oid) && !elem_ph {
                         row = row.narrow_in(k, true);
                         state.set_row(oid, ns, row.clone());
                     }
@@ -605,6 +608,7 @@ impl Analyzer {
     pub fn delete_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) {
         let objs: Vec<u32> = obj.pts.iter().collect();
         self.kill_facts_on(&objs, state);
+        state.drop_name_keys(None);
         let targets = self.record_objects(obj);
         for &oid in &targets {
             let kind = self.kind(oid);
