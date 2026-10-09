@@ -736,6 +736,8 @@ pub struct Analyzer {
     /// members and Flag combinations ↔ their keys (`Key::Member`)
     pub member_key: FxHashMap<ObjId, intern::KeyId>,
     pub key_member: FxHashMap<intern::KeyId, ObjId>,
+    /// dicts with case-insensitive str keys (request headers): keys are lower-cased
+    pub ci_dicts: FxHashSet<ObjId>,
     /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
     pub bypass_setattr: bool,
     pub cond_depth: i32,
@@ -798,6 +800,10 @@ pub struct Analyzer {
     /// call_next dispatches (route, request)
     pub fa_hooks: Vec<(ObjId, String, Value, Option<ObjId>)>,
     pub fa_pending: Vec<(usize, crate::models::fastapi::Req)>,
+    /// the status code of the last dispatched request; the injected `Response` objects of the
+    /// requests being dispatched
+    pub fa_status: Value,
+    pub fa_out_resp: Vec<Vec<ObjId>>,
     /// per request being dispatched: the dependencies' values (each runs once)
     /// the handler's return value from inside yield dependencies
     pub fa_gen_ret: Option<Value>,
@@ -940,6 +946,7 @@ impl Analyzer {
             enum_kind: FxHashMap::default(),
             member_key: FxHashMap::default(),
             key_member: FxHashMap::default(),
+            ci_dicts: FxHashSet::default(),
             bypass_setattr: false,
             cond_depth: 0,
             branch_depth: 0,
@@ -1001,6 +1008,8 @@ impl Analyzer {
             fa_handlers: FxHashSet::default(),
             fa_hooks: Vec::new(),
             fa_pending: Vec::new(),
+            fa_status: Value::new(),
+            fa_out_resp: Vec::new(),
             fa_gen_ret: None,
             fa_dep_cache: Vec::new(),
             fa_app_deps: FxHashMap::default(),
@@ -1496,10 +1505,39 @@ impl Analyzer {
         let idx = self.module_info(m).idx;
         if !self.mutated_globals.borrow().contains_key(&idx) {
             let mut set: FxHashSet<String> = FxHashSet::default();
-            const MUT: &[&str] = &["append", "extend", "insert", "add", "update", "pop", "remove", "discard", "clear", "appendleft", "popleft", "extendleft", "sort", "reverse"];
+            const MUT: &[&str] = &["append", "extend", "insert", "add", "update", "pop", "remove", "discard", "clear", "appendleft", "popleft", "extendleft", "sort", "reverse", "setdefault", "popitem", "move_to_end"];
             for line in frontend::module_source_lines(idx) {
                 if !line.starts_with(' ') && !line.starts_with('\t') {
                     continue;
+                }
+                // `NAME[k] = v` / `NAME[k] += v` / `del NAME[k]` in a function body
+                let t = line.trim_start();
+                let t2 = t.strip_prefix("del ").unwrap_or(t);
+                let name: String = t2.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                if !name.is_empty() && t2[name.len()..].starts_with('[') {
+                    let rest = &t2[name.len()..];
+                    let mut depth = 0i32;
+                    let mut end = None;
+                    for (j, ch) in rest.char_indices() {
+                        match ch {
+                            '[' | '(' | '{' => depth += 1,
+                            ']' | ')' | '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end = Some(j);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(e) = end {
+                        let after = rest[e + 1..].trim_start();
+                        let assign = after.starts_with('=') && !after.starts_with("==") || ["+=", "-=", "*=", "/=", "|=", "&=", "//=", "%="].iter().any(|op| after.starts_with(op));
+                        if assign || t.starts_with("del ") {
+                            set.insert(name.clone());
+                        }
+                    }
                 }
                 let b = line.as_bytes();
                 let mut i = 0;

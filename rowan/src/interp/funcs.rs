@@ -353,7 +353,7 @@ impl Analyzer {
             return false;
         }
         let data_only = v.pts.iter().all(|o| matches!(self.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance));
-        let mutable_seq = !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::List | Kind::Set)) && !crate::interp::disabled("globalseq") && self.mutated_in_functions(module, name);
+        let mutable_seq = !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::List | Kind::Set) || (self.kind(o) == Kind::Dict && !crate::interp::disabled("globaldict"))) && !crate::interp::disabled("globalseq") && self.mutated_in_functions(module, name);
         data_only && (mutable_seq || self.module_info(module).scopes.rebound.contains(name))
     }
 

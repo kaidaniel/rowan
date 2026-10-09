@@ -53,6 +53,7 @@ fn fa_obj(an: &mut Analyzer, st: &mut State, node: &Node, qual: &str, v: Value, 
         "fastapi.request" => &["query_params", "headers", "cookies", "path_params", "method", "url", "client", "state", "scope", "app", "json", "body", "form"],
         "fastapi.response" => &["json", "status_code", "headers", "text", "content", "raise_for_status"],
         "fastapi.bg" => &["add_task"],
+        "fastapi.outresp" => &["status_code", "headers", "set_cookie", "delete_cookie", "media_type", "body", "background"],
         _ => &[],
     };
     if !attrs.is_empty() {
@@ -75,6 +76,12 @@ fn payload_of(an: &Analyzer, oid: ObjId) -> Option<(String, Value)> {
     match &an.obj(oid).payload {
         Payload::Method(q, v) if q.starts_with("fastapi.") && an.kind(oid) == Kind::Namespace => Some((q.clone(), v.clone())),
         _ => None,
+    }
+}
+
+fn set_status(st: &mut State, resp: &Value, status: Value) {
+    if let Some(o) = resp.single() {
+        st.set_slot(o, Ns::Attr, key_str_lit("status_code"), status, true);
     }
 }
 
@@ -286,6 +293,13 @@ impl Analyzer {
                 return fa_obj(self, state, node, "fastapi.request", body, &format!("req{}", func));
             }
             "BackgroundTasks" => return fa_obj(self, state, node, "fastapi.bg", Value::new(), &format!("bg{}", func)),
+            "Response" if !crate::interp::disabled("fastatus") => {
+                let v = fa_obj(self, state, node, "fastapi.outresp", Value::new(), &format!("resp{}", func));
+                if let (Some(o), Some(top)) = (v.single(), self.fa_out_resp.last_mut()) {
+                    top.push(o);
+                }
+                return v;
+            }
             "Response" => return Value::data("Response"),
             _ => {}
         }
@@ -599,9 +613,11 @@ impl Analyzer {
         self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
         self.try_sum_depth.push(self.sum_stack.len());
         self.fa_dep_cache.push(rustc_hash::FxHashMap::default());
+        self.fa_out_resp.push(Vec::new());
         self.fa_route_deps(route, Some(req), state, node);
         let gens = self.fa_yield_deps(func, state);
         let ret = self.fa_run_handler(func, gens, Some(req.clone()), false, state, node);
+        let out_resps = self.fa_out_resp.pop().unwrap_or_default();
         self.fa_dep_cache.pop();
         self.guards.pop();
         self.try_marks.pop();
@@ -620,6 +636,43 @@ impl Analyzer {
             }
         }
         let mut out = if state.reachable { self.fa_response_value(&r, func, &ret, state, node) } else { Value::new() };
+        // the status: a returned JSONResponse's, else one the handler set on its Response, else
+        // the route's
+        let sk = key_str_lit("status_code");
+        let mut status = Value::new();
+        if state.reachable {
+            let mut plain = !ret.kv.is_bot();
+            for o in ret.pts.iter() {
+                match payload_of(self, o) {
+                    Some((q, _)) if q == "fastapi.jsonresponse" => status = status.join(&state.slot(o, Ns::Attr, sk)),
+                    _ => plain = true,
+                }
+            }
+            if ret.empty() {
+                plain = true;
+            }
+            if plain {
+                let set: Vec<Value> = out_resps.iter().map(|o| state.slot(*o, Ns::Attr, sk)).collect();
+                let unset = |v: &Value| v.empty() || matches!(&v.kv, KeyVal::Data(d) if intern::str_get(*d).contains("unset_status"));
+                let mut route_default = set.is_empty();
+                for v in &set {
+                    if unset(v) {
+                        route_default = true;
+                    } else {
+                        // (a value set on some paths only: joined with the unset marker)
+                        if let KeyVal::Lits(_) | KeyVal::Lit(_) = v.kv {
+                            status = status.join(v);
+                        } else {
+                            status = status.join(&Value::data("status_code"));
+                            route_default = true;
+                        }
+                    }
+                }
+                if route_default {
+                    status = status.join(&self.fa_route_status(&r, state));
+                }
+            }
+        }
         if let Some(mut rs) = raised_at {
             // the raised exceptions: a registered handler's response, else (an HTTPException, a
             // validation error) the error response {"detail": …}
@@ -641,6 +694,7 @@ impl Analyzer {
                             if let Some((q, v)) = payload_of(self, x) {
                                 if q == "fastapi.jsonresponse" {
                                     rv.push(v);
+                                    status = status.join(&rs.slot(x, Ns::Attr, sk));
                                 }
                             }
                         }
@@ -658,9 +712,16 @@ impl Analyzer {
                 let mut other = raised_v.pts.is_empty() || !raised_v.kv.is_bot();
                 for o in &rest {
                     match payload_of(self, *o) {
-                        Some((q, _)) if q == "fastapi.httpexc" => detail = detail.join(&rs.slot(*o, Ns::Attr, key_str_lit("detail"))),
+                        Some((q, _)) if q == "fastapi.httpexc" => {
+                            detail = detail.join(&rs.slot(*o, Ns::Attr, key_str_lit("detail")));
+                            status = status.join(&rs.slot(*o, Ns::Attr, sk));
+                        }
                         _ => other = true,
                     }
+                }
+                // (a validation error: 422)
+                if other {
+                    status = status.join(&Value::lit(intern::key_int(422)));
                 }
                 if other || detail.empty() {
                     detail = detail.join(&Value::data("detail"));
@@ -674,7 +735,26 @@ impl Analyzer {
             let after = if state.reachable { state.copy().join(&mut rs) } else { rs };
             state.replace_with(after);
         }
+        self.fa_status = if status.empty() { Value::data("status_code") } else { status };
         out
+    }
+
+    /// A route's `status_code=` (a literal or `status.HTTP_201_CREATED`), else 200.
+    fn fa_route_status(&mut self, r: &FaRoute, state: &mut State) -> Value {
+        let Some(e) = r.call.and_then(|c| kw(c, "status_code")) else { return Value::lit(intern::key_int(200)) };
+        if let ast::Expr::Attribute(at) = e {
+            let n = at.attr.as_str();
+            if let Some(code) = n.strip_prefix("HTTP_").and_then(|x| x.get(..3)).and_then(|x| x.parse::<i64>().ok()) {
+                return Value::lit(intern::key_int(code));
+            }
+        }
+        let e: &'static ast::Expr = e;
+        let v = self.eval_in_module(r.module, e, state);
+        if v.pts.is_empty() && v.kv.as_lit().and_then(intern::key_as_int).is_some() {
+            v
+        } else {
+            Value::data("status_code")
+        }
     }
 
     /// The JSON FastAPI sends for a handler's return value.
@@ -749,6 +829,77 @@ impl Analyzer {
         join_values(vals)
     }
 
+    /// The request object of a `TestClient` call: its method, headers (case-insensitive keys,
+    /// with the client's own), query and path parameters as the call gives them.
+    fn fa_fill_request(&mut self, robj: &Value, rq: &Req, method: &str, state: &mut State, node: &Node) {
+        if crate::interp::disabled("fareq") {
+            return;
+        }
+        let Some(o) = robj.single() else { return };
+        let mut lit_dict = |an: &mut Analyzer, st: &mut State, name: &str, items: Vec<(String, Value)>, ci: bool| -> Option<Value> {
+            let d = an.alloc_at(Kind::Dict, node, st, &format!("request.{}", name), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("rq{}{}", o, name)));
+            let mut row = Row::new();
+            for (k, v) in items {
+                let kk = key_str_lit(&if ci { k.to_lowercase() } else { k });
+                row = row.store(kk, true);
+                st.set_slot(d, Ns::Item, kk, v, true);
+            }
+            st.set_row(d, Ns::Item, row);
+            if ci {
+                an.ci_dicts.insert(d);
+            }
+            Some(Value::obj(d))
+        };
+        // the items of a literal dict argument (None: not known)
+        let items_of = |an: &Analyzer, st: &State, v: &Option<Value>| -> Option<Vec<(String, Value)>> {
+            let Some(v) = v else { return Some(vec![]) };
+            let d = v.single().filter(|d| an.kind(*d) == Kind::Dict)?;
+            let row = st.row(d, Ns::Item);
+            if !row.closed() || row.present != row.definite {
+                return None;
+            }
+            Some(row.present.iter().filter_map(|k| intern::key_as_str(k).map(|x| (x.to_string(), st.slot(d, Ns::Item, k)))).collect())
+        };
+        if let Some(mut hs) = items_of(self, state, &rq.headers) {
+            // httpx's own headers
+            for (k, v) in [("host", "testserver"), ("accept", "*/*"), ("accept-encoding", "gzip, deflate"), ("connection", "keep-alive"), ("user-agent", "testclient")] {
+                if !hs.iter().any(|(h, _)| h.to_lowercase() == k) {
+                    hs.push((k.to_string(), Value::lit_str(v)));
+                }
+            }
+            if rq.json.is_some() {
+                hs.push(("content-length".into(), Value::data("content-length")));
+                hs.push(("content-type".into(), Value::lit_str("application/json")));
+            }
+            if let Some(v) = lit_dict(self, state, "headers", hs, true) {
+                state.set_slot(o, Ns::Attr, key_str_lit("headers"), v, true);
+            }
+        }
+        if let Some(mut qs) = items_of(self, state, &rq.query) {
+            // (query values are strings)
+            for q in qs.iter_mut() {
+                if let Some(k) = q.1.kv.as_lit().filter(|_| q.1.pts.is_empty()) {
+                    q.1 = Value::lit_str(&intern::key_py_str(k));
+                } else {
+                    q.1 = Value::data("query");
+                }
+            }
+            for (k, v) in &rq.url_query {
+                qs.push((k.clone(), Value::lit_str(v)));
+            }
+            if let Some(v) = lit_dict(self, state, "query_params", qs, false) {
+                state.set_slot(o, Ns::Attr, key_str_lit("query_params"), v, true);
+            }
+        }
+        let ps: Vec<(String, Value)> = rq.path.iter().map(|(k, v)| (k.clone(), Value::lit_str(v))).collect();
+        if let Some(v) = lit_dict(self, state, "path_params", ps, false) {
+            state.set_slot(o, Ns::Attr, key_str_lit("path_params"), v, true);
+        }
+        if method != "*" {
+            state.set_slot(o, Ns::Attr, key_str_lit("method"), Value::lit_str(&method.to_uppercase()), true);
+        }
+    }
+
     /// `client.post(url, json=…, params=…, headers=…)`.
     fn fa_client_call(&mut self, app: &Value, method: &str, c: &Call, state: &mut State) -> Value {
         let url = c.arg(0, Some("url")).and_then(|u| str_of(&u));
@@ -766,6 +917,7 @@ impl Analyzer {
         }
         let mut outs: Vec<Value> = Vec::new();
         let mut states: Vec<State> = Vec::new();
+        let mut statuses: Vec<Value> = Vec::new();
         let mut pre = state.copy();
         for a in app.pts.iter() {
             for (full, idx) in self.fa_routes_of(a) {
@@ -786,10 +938,13 @@ impl Analyzer {
                 // one request object for the middlewares and the handler
                 let body = rq.json.clone().unwrap_or_else(|| Value::data("concrete"));
                 let robj = fa_obj(self, &mut st, &c.node, "fastapi.request", body, &format!("req{}", c.line));
+                self.fa_fill_request(&robj, &rq, method, &mut st, &c.node);
                 rq.obj = Some(robj.clone());
                 let mws: Vec<ObjId> = self.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
                 let v = if mws.is_empty() {
-                    self.fa_dispatch(idx, &rq, &mut st, &c.node)
+                    let b = self.fa_dispatch(idx, &rq, &mut st, &c.node);
+                    statuses.push(self.fa_status.clone());
+                    b
                 } else {
                     // the (first) middleware runs with call_next dispatching the route
                     let n = self.fa_pending.len();
@@ -797,13 +952,16 @@ impl Analyzer {
                     let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
                     let resp = self.call_user(mws[0], None, vec![robj.clone(), Value::obj(cn)], IndexMap::new(), vec![], vec![], &mut st, &c.node, None, false);
                     let mut bodies: Vec<Value> = Vec::new();
+                    let mut stv = Value::new();
                     for x in resp.pts.iter() {
                         if let Some((q, v)) = payload_of(self, x) {
                             if q == "fastapi.response" || q == "fastapi.jsonresponse" {
                                 bodies.push(v);
+                                stv = stv.join(&st.slot(x, Ns::Attr, key_str_lit("status_code")));
                             }
                         }
                     }
+                    statuses.push(if stv.empty() || resp.pts.len() != bodies.len() { Value::data("status_code") } else { stv });
                     join_values(bodies)
                 };
                 outs.push(v);
@@ -816,6 +974,13 @@ impl Analyzer {
         }
         if states.is_empty() {
             // no route: a 404 / 405 response (through the middlewares, which run for it too)
+            let path_known = path.is_some();
+            let other_method = app.pts.iter().any(|a| self.fa_routes_of(a).iter().any(|(full, _)| match (full, &path) {
+                (Some(t), Some(p)) => match_path(t, p).is_some(),
+                _ => false,
+            }));
+            let code = if !path_known { Value::data("status_code") } else { Value::lit(intern::key_int(if other_method { 405 } else { 404 })) };
+            self.fa_status = code.clone();
             let did = self.alloc_at(Kind::Dict, &c.node, state, &format!("error@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, Some("fa404"));
             let dk = key_str_lit("detail");
             state.set_row(did, Ns::Item, Row::new().store(dk, true));
@@ -824,12 +989,15 @@ impl Analyzer {
             if let Some(first) = mws.first().copied() {
                 let body = req.json.clone().unwrap_or_else(|| Value::data("concrete"));
                 let robj = fa_obj(self, state, &c.node, "fastapi.request", body, &format!("req{}", c.line));
+                self.fa_fill_request(&robj, &req, method, state, &c.node);
                 let n = self.fa_pending.len();
                 self.fa_pending.push((usize::MAX, Req { obj: Some(robj.clone()), json: Some(Value::obj(did)), ..Default::default() }));
                 let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
                 self.call_user(first, None, vec![robj, Value::obj(cn)], IndexMap::new(), vec![], vec![], state, &c.node, None, false);
             }
-            return fa_obj(self, state, &c.node, "fastapi.response", Value::obj(did), "faresp");
+            let v = fa_obj(self, state, &c.node, "fastapi.response", Value::obj(did), "faresp");
+            set_status(state, &v, code);
+            return v;
         }
         let mut out = states.remove(0);
         for mut st in states {
@@ -837,7 +1005,11 @@ impl Analyzer {
         }
         state.replace_with(out);
         let body = join_values(outs);
-        fa_obj(self, state, &c.node, "fastapi.response", body, "faresp")
+        let v = fa_obj(self, state, &c.node, "fastapi.response", body, "faresp");
+        if !crate::interp::disabled("fastatus") {
+            set_status(state, &v, join_values(statuses));
+        }
+        v
     }
 }
 
@@ -877,8 +1049,10 @@ pub fn m_fastapi(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if let Some(n) = q.strip_prefix("fastapi.callnext.").and_then(|x| x.parse::<usize>().ok()) {
         let Some((idx, rq)) = an.fa_pending.get(n).cloned() else { return Value::data("response") };
         // (no route: the 404 body)
-        let body = if idx == usize::MAX { rq.json.clone().unwrap_or_default() } else { an.fa_dispatch(idx, &rq, st, &c.node) };
-        return fa_obj(an, st, &c.node, "fastapi.response", body, &format!("mwresp{}", n));
+        let (body, status) = if idx == usize::MAX { (rq.json.clone().unwrap_or_default(), an.fa_status.clone()) } else { (an.fa_dispatch(idx, &rq, st, &c.node), an.fa_status.clone()) };
+        let v = fa_obj(an, st, &c.node, "fastapi.response", body, &format!("mwresp{}", n));
+        set_status(st, &v, status);
+        return v;
     }
     // methods on our objects: `fastapi.<kind>.<method>`
     if let Some(recv) = c.recv.clone() {
@@ -939,7 +1113,14 @@ pub fn m_fastapi(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         "JSONResponse" | "ORJSONResponse" | "UJSONResponse" => {
             let content = c.arg(0, Some("content")).unwrap_or_else(|| an.none_v.clone());
-            fa_obj(an, st, &c.node, "fastapi.jsonresponse", content, &format!("jr{}", c.site))
+            let code = c.arg(1, Some("status_code")).unwrap_or_else(|| Value::lit(intern::key_int(200)));
+            let v = fa_obj(an, st, &c.node, "fastapi.jsonresponse", content, &format!("jr{}", c.site));
+            if let Some(o) = v.single() {
+                let k = key_str_lit("status_code");
+                st.set_slot(o, Ns::Attr, k, code, true);
+                st.set_row(o, Ns::Attr, st.row(o, Ns::Attr).store(k, true));
+            }
+            v
         }
         "jsonable_encoder" => {
             let v = c.arg(0, Some("obj")).unwrap_or_default();
@@ -1063,6 +1244,13 @@ pub fn object_attr(an: &mut Analyzer, oid: ObjId, name: &str, node: &Node, state
     let (kind, pv) = payload_of(an, oid)?;
     match (kind.as_str(), name) {
         ("fastapi.response", "status_code") => Some(Value::data("status_code")),
+        // (not set by the handler: the route's status)
+        ("fastapi.outresp", "status_code") => Some(Value::data("unset_status")),
+        ("fastapi.outresp", "headers") => {
+            let d = an.alloc_at(Kind::Dict, node, state, "response.headers", Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("orh{}", oid)));
+            Some(Value::obj(d))
+        }
+        ("fastapi.outresp", "media_type" | "body" | "background") => Some(Value::data(name)),
         ("fastapi.response", "text" | "content" | "reason_phrase" | "url") => Some(Value::data(name)),
         ("fastapi.response", "headers") | ("fastapi.request", "query_params" | "headers" | "cookies" | "path_params") => {
             let c = Call { qual: format!("{}.{}", kind, name), recv: Some(Value::obj(oid)), args: vec![], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };

@@ -92,6 +92,11 @@ impl Analyzer {
     /// has (or may have) is that key.
     /// A mixed-in Enum member (`StrEnum`, `IntEnum`) and its value are one key too.
     pub fn canon_key(&self, oid: u32, ns: Ns, k: KeyId, state: &State) -> KeyId {
+        if !self.ci_dicts.is_empty() && self.ci_dicts.contains(&oid) {
+            if let Some(s) = intern::key_as_str(k) {
+                return key_str_lit(&s.to_lowercase());
+            }
+        }
         let members = !self.member_key.is_empty() && !super::disabled("memberkey");
         let base = |k: KeyId| if members { intern::key_member_value(k).unwrap_or(k) } else { k };
         let kb = base(k);

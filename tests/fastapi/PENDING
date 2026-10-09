@@ -3,8 +3,6 @@ models/fm02_checkout.py
 models/fm03_profiles_auth.py
 models/fm04_analytics_pandas.py
 models/fm05_inventory_webhooks.py
-small/f021_middleware.py
-small/f022_status_jsonresponse.py
 small/f026_list_bodies.py
 small/f029_query_dict.py
 small/f031_enum_literal.py
