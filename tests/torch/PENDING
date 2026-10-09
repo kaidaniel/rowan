@@ -14,7 +14,6 @@ models/m16_bert_embeddings.py
 models/m17_tcn.py
 small/s088_module_init_names.py
 small/s095_sequential_attr.py
-small/s096_method_calls_method.py
 small/s106_closures.py
 small/s111_loops.py
 small/s114_list_stack_cat.py

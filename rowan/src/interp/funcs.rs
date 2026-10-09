@@ -137,7 +137,13 @@ impl Analyzer {
             generator: std::cell::Cell::new(None),
         };
         let n = node.node();
+        let has_closure = !info.closure.is_empty();
         let oid = self.alloc_at(Kind::Function, &n, state, &format!("def {}", qual), Payload::Func(Rc::new(info)), None, Ns::Item, None, None);
+        // a closure made inside a concrete call (not an entry run): its own analysis with
+        // open parameters comes from the closure the factory's entry run makes
+        if self.torch_on && has_closure && self.entry_run.is_none() && self.frames.iter().any(|f| f.func.is_some()) {
+            self.t_concrete_closures.insert(oid);
+        }
         Value::obj(oid)
     }
 

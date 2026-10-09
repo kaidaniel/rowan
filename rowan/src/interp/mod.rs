@@ -660,6 +660,8 @@ pub struct Analyzer {
     pub entry_done: FxHashSet<ObjId>,
     /// unknown call results named by the variable they were bound to (tensor dims)
     pub t_var_names: FxHashMap<ObjId, crate::shape::Sym>,
+    /// closures made inside concrete calls in torch modules (no entry run of their own)
+    pub t_concrete_closures: FxHashSet<ObjId>,
     /// tensor-shape requirements / definite mismatches (models/torch.rs)
     pub shape_reqs: Vec<crate::models::torch::ShapeNote>,
     pub shape_errors: Vec<crate::models::torch::ShapeNote>,
@@ -839,6 +841,7 @@ impl Analyzer {
             entry_run: None,
             entry_done: FxHashSet::default(),
             t_var_names: FxHashMap::default(),
+            t_concrete_closures: FxHashSet::default(),
             shape_reqs: Vec::new(),
             shape_errors: Vec::new(),
             t_sym_alias: FxHashMap::default(),
@@ -1306,7 +1309,7 @@ impl Analyzer {
             let fi = self.func_info(oid);
             // functions of torch modules get their own run even when called (the shapes
             // inside, in terms of their own parameters)
-            if self.analysed_funcs.contains(&oid) && !self.torch_modules.contains(&fi.module) {
+            if self.analysed_funcs.contains(&oid) && !self.torch_modules.contains(&fi.module) || self.t_concrete_closures.contains(&oid) {
                 continue;
             }
             self.entry_done.insert(oid);

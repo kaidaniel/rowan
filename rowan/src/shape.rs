@@ -1126,6 +1126,12 @@ fn needs_parens(t: &str) -> bool {
 }
 
 pub fn atom_text(a: AtomId) -> String {
+    // a compound atom that a self attribute holds prints as that attribute
+    if !matches!(atom_get(a), Atom::Dim(..) | Atom::Named(_) | Atom::Unknown) {
+        if let Some(al) = dim_alias(poly_id(vec![(vec![(a, 1)], 1)])) {
+            return al;
+        }
+    }
     match atom_get(a) {
         Atom::Dim(s, i) => {
             let Some(t) = sym_print(s) else { return "?".into() };
