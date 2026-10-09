@@ -12,7 +12,7 @@ use ruff_python_ast as ast;
 
 use crate::domain::{join_values, KeyVal, Ns, ObjId, Row, Source, SourceKind, Value};
 use crate::frontend::Node;
-use crate::intern::{self, key_str_lit, s, StrId};
+use crate::intern::{self, key_str_lit, s, KeyId, StrId};
 use crate::interp::{dotted_last, Analyzer, Call, Frame, FrameKind, FuncNode, Payload};
 use crate::models::pydantic::{Ann, DumpOpts};
 use crate::state::{Kind, State};
@@ -353,9 +353,12 @@ impl Analyzer {
         }
         // a path / query / header / cookie value
         let mut v = Value::new();
+        // (an Enum / Literal annotation validates the text itself)
+        let restrictable = ann.map(|a| self.fa_restrictable(&fi, a, state)).unwrap_or(false);
+        let conv = |ann_name: &str, text: &str| if restrictable { Value::lit_str(text) } else { conv_scalar(ann_name, text) };
         if let Some(r) = req {
             if let Some((_, val)) = route_path.iter().find(|(n, _)| *n == pname) {
-                v = conv_scalar(&ann_name, val);
+                v = conv(&ann_name, val);
             } else if matches!(&marker, Some((q, _)) if q.starts_with("fastapi.param.Header")) {
                 let hk = pname.replace('_', "-");
                 if let Some(h) = &r.headers {
@@ -377,7 +380,7 @@ impl Analyzer {
                     _ => pname.clone(),
                 };
                 if let Some((_, val)) = r.url_query.iter().find(|(n, _)| *n == alias) {
-                    v = conv_scalar(&ann_name, val);
+                    v = conv(&ann_name, val);
                 } else if let Some(qd) = &r.query {
                     let k = key_str_lit(&alias);
                     let mut found = false;
@@ -387,7 +390,7 @@ impl Analyzer {
                             found = true;
                             let x = state.slot(o, Ns::Item, k);
                             v = v.join(&match str_of(&x) {
-                                Some(t) => conv_scalar(&ann_name, &t),
+                                Some(t) => conv(&ann_name, &t),
                                 None => x,
                             });
                             if !row.definite.contains(k) {
@@ -405,13 +408,97 @@ impl Analyzer {
                     v = default.clone().unwrap_or_else(|| Value::data("query"));
                 }
             }
+            if let Some(a) = ann {
+                v = self.fa_restrict(&fi, a, v, default.as_ref(), state);
+            }
             return v;
         }
         // an entry run: anything the client sends, or the default
-        let ov = open(self, state);
+        let mut ov = open(self, state);
+        if let Some(a) = ann {
+            ov = self.fa_restrict(&fi, a, ov, None, state);
+        }
         match default {
             Some(d) => d.join(&ov),
             None => ov,
+        }
+    }
+
+    fn fa_restrictable(&mut self, fi: &crate::interp::FuncInfo, ann: &'static ast::Expr, state: &mut State) -> bool {
+        match ann {
+            ast::Expr::Subscript(sb) => dotted_last(&sb.value) == "Literal",
+            ast::Expr::Name(_) | ast::Expr::Attribute(_) => {
+                let cv = self.eval_in_module(fi.module, ann, state);
+                cv.single().map(|c| self.kind(c) == Kind::Class && self.enum_members.contains_key(&c)).unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+
+    /// A path / query value validated by its annotation: an Enum class makes it the member with
+    /// that value, `Literal[...]` one of the literals; anything else is a 422 (raised here).
+    fn fa_restrict(&mut self, fi: &crate::interp::FuncInfo, ann: &'static ast::Expr, v: Value, default: Option<&Value>, state: &mut State) -> Value {
+        if crate::interp::disabled("farestrict") {
+            return v;
+        }
+        // (the default is not validated)
+        if let Some(d) = default {
+            if v == *d {
+                return v;
+            }
+        }
+        let allowed: Vec<(Value, Option<KeyId>)> = if let ast::Expr::Subscript(sb) = ann {
+            if dotted_last(&sb.value) != "Literal" {
+                return v;
+            }
+            let elts: Vec<&'static ast::Expr> = match &*sb.slice {
+                ast::Expr::Tuple(t) => t.elts.iter().collect(),
+                e => vec![e],
+            };
+            let mut out = Vec::new();
+            for e in elts {
+                let lv = self.eval_in_module(fi.module, e, state);
+                match lv.kv.as_lit().filter(|_| lv.pts.is_empty()) {
+                    Some(k) => out.push((lv.clone(), Some(k))),
+                    None => return v,
+                }
+            }
+            out
+        } else {
+            let cv = self.eval_in_module(fi.module, ann, state);
+            let Some(cls) = cv.single().filter(|c| self.kind(*c) == Kind::Class && self.enum_members.contains_key(c)) else { return v };
+            let vk = key_str_lit("value");
+            self.enum_members[&cls].clone().iter().map(|(_, m)| (Value::obj(*m), state.slot(*m, Ns::Attr, vk).kv.as_lit())).collect()
+        };
+        if allowed.is_empty() {
+            return v;
+        }
+        // the text the client sent: compared with each allowed value's str()
+        let given = if v.pts.is_empty() && v.kv.is_literal() { Some(crate::domain::kv_literals(&v.kv)) } else { None };
+        match given {
+            Some(ks) => {
+                let mut out = Value::new();
+                let mut miss = false;
+                for k in ks.iter() {
+                    let text = intern::key_py_str(k);
+                    match allowed.iter().find(|(_, a)| a.map(|a| a == k || intern::key_py_str(a) == text).unwrap_or(false)) {
+                        Some((av, _)) => out = out.join(av),
+                        None => miss = true,
+                    }
+                }
+                if out.empty() {
+                    self.raise_here("RequestValidationError", state);
+                    return Value::new();
+                }
+                if miss {
+                    self.may_raise_here("RequestValidationError", state);
+                }
+                out
+            }
+            None => {
+                self.may_raise_here("RequestValidationError", state);
+                join_values(allowed.into_iter().map(|(a, _)| a))
+            }
         }
     }
 

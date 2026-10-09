@@ -1895,7 +1895,7 @@ impl Analyzer {
             state.set_slot(did, Ns::Item, ok, dv, true);
         }
         // extra attributes (`extra="allow"`)
-        if pc.extra == Extra::Allow && !ph {
+        if pc.extra == Extra::Allow && (!ph || !crate::interp::disabled("phextra")) {
             let ir = state.row(oid, Ns::Attr);
             let fieldset: KeySet = KeySet::from_iter(pc.fields.iter().map(|f| key_str_lit(&f.name)));
             for k in ir.present.iter() {

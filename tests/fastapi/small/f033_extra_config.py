@@ -18,9 +18,9 @@ class Strict(BaseModel):
     size: int = 1
 
 
-def flatten(ev):
+def flatten(ev):  # (the second request sends source and page: they may be keys of d; was present={kind,ts})
     d = ev.model_dump()
-    #@row d: present={kind,ts} definite={kind,ts} open
+    #@row d: present={kind,ts,source,page} definite={kind,ts} open
     extras = ev.model_extra
     #@row extras: open
     d["n_extra"] = len(extras)
