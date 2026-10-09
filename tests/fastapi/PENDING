@@ -11,7 +11,6 @@ small/f021_middleware.py
 small/f022_status_jsonresponse.py
 small/f026_list_bodies.py
 small/f029_query_dict.py
-small/f030_depends_user.py
 small/f031_enum_literal.py
 small/f033_extra_config.py
 small/f034_collections_json.py

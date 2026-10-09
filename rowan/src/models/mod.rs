@@ -12,6 +12,7 @@ pub mod pure;
 pub mod torch;
 
 use indexmap::IndexMap;
+use ruff_python_ast as ast;
 use rustc_hash::FxHashMap;
 
 use crate::domain::{join_values, kv_join, FnKind, KeyVal, Ns, RenameFn, Row, RowData, Source, SourceKind, Value, DATA};
@@ -131,6 +132,8 @@ impl Registry {
         r(&["json.dump", "json.dumps", "yaml.dump", "yaml.safe_dump", "pickle.dump", "pickle.dumps", "pprint.pprint", "pprint.pformat", "orjson.dumps"], noeffect);
         r(&["copy.copy", "copy.deepcopy"], m_copy);
         r(&["dataclasses.replace"], m_dc_replace);
+        r(&["dataclasses.astuple"], m_astuple);
+        r(&["dataclasses.make_dataclass"], m_make_dataclass);
         r(&["namedtuple._asdict", "namedtuple._replace"], m_nt_method);
         r(&["operator.itemgetter", "operator.attrgetter"], m_getter);
         // a coroutine is analysed as its result: running / awaiting it is that value
@@ -903,12 +906,29 @@ fn m_asdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     fn conv(an: &mut Analyzer, st: &mut State, c: &Call, v: &Value, depth: u32) -> Value {
         let mut out = Value::with_kv(crate::domain::ObjSet::new(), v.kv.clone());
         for o in v.pts.iter() {
-            let is_dc = an.kind(o) == Kind::Instance && an.instance_class(o).map(|cl| !an.dataclass_fields_mro(cl).is_empty()).unwrap_or(false);
+            let cls_of = match an.kind(o) {
+                Kind::Instance => an.instance_class(o),
+                Kind::Ph => an.ph_info(o).cls.get(),
+                _ => None,
+            };
+            let is_dc = cls_of.map(|cl| !an.dataclass_fields_mro(cl).is_empty()).unwrap_or(false);
             if !is_dc || depth > 4 {
                 out = out.join(&Value::obj(o));
                 continue;
             }
-            let cls = an.instance_class(o).unwrap();
+            let cls = cls_of.unwrap();
+            if an.kind(o) == Kind::Ph {
+                // a placeholder typed with a dataclass: its fields read through it
+                let d = an.alloc_at(Kind::Dict, &c.node, st, &format!("asdict@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("asdict{}:{}", depth, o)));
+                st.set_row(d, Ns::Item, Row::new());
+                for (f, _) in an.dataclass_fields_mro(cls) {
+                    let fv = an.load_attr(&Value::obj(o), &f, &c.node, st, false);
+                    let cv = conv(an, st, c, &fv, depth + 1);
+                    an.store_key(d, Ns::Item, &KeyVal::Lit(key_str_lit(&f)), &cv, true, &c.node, st);
+                }
+                out = out.join(&Value::obj(d));
+                continue;
+            }
             // one dict per converted instance (siblings at one depth must not share it)
             let d = an.alloc_at(Kind::Dict, &c.node, st, &format!("asdict@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("asdict{}:{}", depth, o)));
             st.set_row(d, Ns::Item, Row::new());
@@ -927,6 +947,9 @@ fn m_asdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         out
     }
     if a.pts.iter().all(|o| an.kind(o) == Kind::Instance && an.instance_class(o).map(|cl| !an.dataclass_fields_mro(cl).is_empty()).unwrap_or(false)) && !a.pts.is_empty() {
+        return conv(an, st, c, &a, 0);
+    }
+    if a.pts.iter().all(|o| an.kind(o) == Kind::Ph && an.ph_info(o).cls.get().map(|cl| !an.dataclass_fields_mro(cl).is_empty()).unwrap_or(false)) && !a.pts.is_empty() {
         return conv(an, st, c, &a, 0);
     }
     m_vars(an, st, c)
@@ -2705,10 +2728,116 @@ fn m_nt_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     join_values(outs)
 }
 
+/// `dataclasses.astuple(obj)`: the fields' values in order (nested dataclasses as tuples).
+fn m_astuple(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    fn conv(an: &mut Analyzer, st: &mut State, c: &Call, v: &Value, depth: u32) -> Value {
+        let mut out = Value::with_kv(crate::domain::ObjSet::new(), v.kv.clone());
+        for o in v.pts.iter() {
+            let cls = match an.kind(o) {
+                Kind::Instance => an.instance_class(o),
+                Kind::Ph => an.ph_info(o).cls.get(),
+                _ => None,
+            };
+            let Some(cls) = cls.filter(|cl| !an.dataclass_fields_mro(*cl).is_empty()).filter(|_| depth < 4) else {
+                out = out.join(&Value::obj(o));
+                continue;
+            };
+            let fields: Vec<String> = an.dataclass_fields_mro(cls).into_iter().map(|(f, _)| f).collect();
+            let mut vals = Vec::new();
+            for f in fields {
+                let x = if an.kind(o) == Kind::Ph { an.load_attr(&Value::obj(o), &f, &c.node, st, false) } else { st.slot(o, Ns::Attr, key_str_lit(&f)) };
+                vals.push(conv(an, st, c, &x, depth + 1));
+            }
+            an.frame_mut().unroll.push(9200 + depth as usize);
+            let t = an.alloc_positional(Kind::Tuple, &c.node, Some(vals), Value::new(), DATA, st);
+            an.frame_mut().unroll.pop();
+            out = out.join(&t);
+        }
+        out
+    }
+    let Some(a) = c.args.first().cloned() else { return Value::data("astuple") };
+    conv(an, st, c, &a, 0)
+}
+
+/// `make_dataclass(name, fields)`: a generated `@dataclass` class (`name`, `(name, type)`,
+/// `(name, type, field(default=…))` with literal defaults read from the call's text).
+fn m_make_dataclass(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let fallback = |an: &mut Analyzer, st: &mut State, c: &Call| an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+    let Some(tname) = c.args.first().and_then(|a| a.kv.as_lit()).and_then(intern::key_as_str) else { return fallback(an, st, c) };
+    let Some(ast_call) = c.call_ast else { return fallback(an, st, c) };
+    let mut fields: Vec<(String, Option<&'static ast::Expr>)> = Vec::new();
+    let elts: &'static [ast::Expr] = match &ast_call.arguments.args[1] {
+        ast::Expr::List(l) => &l.elts,
+        _ => return fallback(an, st, c),
+    };
+    for e in elts {
+        match e {
+            ast::Expr::StringLiteral(s0) => fields.push((s0.value.to_str().to_string(), None)),
+            ast::Expr::Tuple(t) => {
+                let Some(ast::Expr::StringLiteral(n)) = t.elts.first() else { return fallback(an, st, c) };
+                let d: Option<&'static ast::Expr> = match t.elts.get(2) {
+                    Some(ast::Expr::Call(fc)) if crate::interp::dotted_last(&fc.func) == "field" => fc.arguments.keywords.iter().find(|k| k.arg.as_ref().map(|x| x.as_str() == "default").unwrap_or(false)).map(|k| &k.value),
+                    Some(other) => Some(other),
+                    None => None,
+                };
+                fields.push((n.value.to_str().to_string(), d));
+            }
+            _ => return fallback(an, st, c),
+        }
+    }
+    let modname = format!("<make_dataclass {} {}>", tname, c.site);
+    if let Some(&moid) = an.modules.get(&modname) {
+        return st.slot(moid, Ns::Attr, key_str_lit(&tname));
+    }
+    let mut src = format!("from dataclasses import dataclass\n\n\n@dataclass\nclass {}:\n", tname);
+    let mut dvals: Vec<Value> = Vec::new();
+    for (f, d) in &fields {
+        match d {
+            Some(e) => {
+                src.push_str(&format!("    {}: \"_field\" = _rowan_default_{}\n", f, dvals.len()));
+                dvals.push(an.eval(e, st));
+            }
+            None => src.push_str(&format!("    {}: \"_field\"\n", f)),
+        }
+    }
+    if fields.is_empty() {
+        src.push_str("    pass\n");
+    }
+    let Ok((idx, tree)) = crate::frontend::parse(&modname, None, src) else { return fallback(an, st, c) };
+    let moid = an.make_module_pub(&modname, None, idx, tree);
+    for (i, v) in dvals.iter().enumerate() {
+        st.set_slot(moid, Ns::Attr, key_str_lit(&format!("_rowan_default_{}", i)), v.clone(), true);
+    }
+    an.run_module(moid, st);
+    st.slot(moid, Ns::Attr, key_str_lit(&tname))
+}
+
 fn m_dc_replace(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first() else { return Value::data("replace") };
     let mut outs = Vec::new();
     for o in a.pts.iter() {
+        // a new instance through `__init__`: the init fields from the object (the changes
+        // win); non-init fields and attributes added later are not carried over
+        let cls = match an.kind(o) {
+            Kind::Instance => an.instance_class(o),
+            Kind::Ph => an.ph_info(o).cls.get(),
+            _ => None,
+        };
+        if let Some(cls) = cls.filter(|cl| an.class_info_opt(*cl).map(|ci| ci.has_fields() && !ci.named_tuple).unwrap_or(false) && !crate::interp::disabled("dcreplace")) {
+            let specs = an.dc_specs(cls);
+            let mut kw: IndexMap<intern::StrId, Value> = IndexMap::new();
+            for sp in specs.iter().filter(|sp| sp.init && !sp.initvar) {
+                let v = if an.kind(o) == Kind::Ph { an.load_attr(&Value::obj(o), &sp.name, &c.node, st, false) } else { st.slot(o, Ns::Attr, key_str_lit(&sp.name)) };
+                kw.insert(intern::s(&sp.name), v);
+            }
+            for (k, v) in c.kwargs.iter() {
+                kw.insert(*k, v.clone());
+            }
+            an.frame_mut().unroll.push(9100);
+            outs.push(an.construct(cls, &[], &kw, &[], &[], st, &c.node));
+            an.frame_mut().unroll.pop();
+            continue;
+        }
         if an.kind(o) == Kind::Instance {
             let nid = an.copy_object(o, &c.node, st, false, &mut IndexMap::new());
             for (k, v) in c.kwargs.iter() {

@@ -265,6 +265,9 @@ pub struct ClassInfo {
     pub pydantic: bool,
     /// decorated with `pydantic.dataclasses.dataclass`: validated like a model, no model API
     pub pyd_dataclass: std::cell::Cell<bool>,
+    /// `@dataclass(frozen=True)` / `@dataclass(kw_only=True)`
+    pub dc_frozen: std::cell::Cell<bool>,
+    pub dc_kw_only: std::cell::Cell<bool>,
     /// subclasses something in `torch.nn` (`nn.Module`): calling an instance runs `forward`
     pub nn_module: bool,
     /// attr → classes assigned to self.attr (lazy)

@@ -1372,6 +1372,8 @@ impl Analyzer {
             dict_base,
             pydantic,
             pyd_dataclass: std::cell::Cell::new(false),
+            dc_frozen: std::cell::Cell::new(false),
+            dc_kw_only: std::cell::Cell::new(false),
             nn_module,
             field_classes: std::cell::RefCell::new(None),
             any_fields: std::cell::RefCell::new(None),
@@ -1388,6 +1390,15 @@ impl Analyzer {
                     if q.starts_with("pydantic") {
                         info.pyd_dataclass.set(true);
                     }
+                    if let ast::Expr::Call(dc) = &d.expression {
+                        for k in dc.arguments.keywords.iter() {
+                            match (k.arg.as_ref().map(|x| x.as_str()), &k.value) {
+                                (Some("frozen"), ast::Expr::BooleanLiteral(b)) => info.dc_frozen.set(b.value),
+                                (Some("kw_only"), ast::Expr::BooleanLiteral(b)) => info.dc_kw_only.set(b.value),
+                                _ => {}
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1401,7 +1412,11 @@ impl Analyzer {
                             ast::Expr::Subscript(sb) => dotted_last(&sb.value) == "ClassVar",
                             other => dotted_last(other) == "ClassVar",
                         };
-                        if classvar || (pydantic && (n.id.starts_with('_') || n.id.as_str() == "model_config")) {
+                        let pseudo = match &*a.annotation {
+                            ast::Expr::Subscript(sb) => dotted_last(&sb.value) == "InitVar",
+                            other => dotted_last(other) == "KW_ONLY",
+                        };
+                        if classvar || pseudo || (pydantic && (n.id.starts_with('_') || n.id.as_str() == "model_config")) {
                             continue;
                         }
                         fields.push((n.id.to_string(), a.value.as_deref()));
@@ -1761,6 +1776,7 @@ pub fn expand_caught(mut caught: FxHashSet<String>) -> FxHashSet<String> {
         ("EnvironmentError", &["FileNotFoundError", "PermissionError"]),
         ("RuntimeError", &["NotImplementedError", "RecursionError"]),
         ("ImportError", &["ModuleNotFoundError"]),
+        ("AttributeError", &["FrozenInstanceError"]),
     ];
     let mut more: Vec<String> = Vec::new();
     for (p, subs) in SUBS {

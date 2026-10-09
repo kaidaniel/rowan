@@ -15,6 +15,16 @@ use crate::domain::ObjId;
 use super::funcs::cell_key;
 use super::{is_generator, Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, Payload, Verdict, MAX_ACTIVE, MAX_CLONES, MAX_MUTATED, NOEFFECT_METHOD_NAMES, REC_MAX_ITER};
 
+/// A dataclass field as `__init__` takes it (`dc_specs`).
+#[derive(Clone, Debug)]
+pub struct DcSpec {
+    pub name: String,
+    pub default: Option<&'static ast::Expr>,
+    pub init: bool,
+    pub initvar: bool,
+    pub kw_only: bool,
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Sig {
     foid: u32,
@@ -479,13 +489,36 @@ impl Analyzer {
     pub fn dataclass_init(&mut self, cls: u32, inst: ObjId, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_kwargs: &[Value], state: &mut State, node: &Node) {
         let ci = self.class_info(cls);
         let ns = if ci.typed_dict { Ns::Item } else { Ns::Attr };
+        let mut initvars: Vec<Value> = Vec::new();
         {
-            let fields = self.dataclass_fields_mro(cls);
-            for (i, (fname, default)) in fields.iter().enumerate() {
+            let specs = self.dc_specs(cls);
+            let mut pos = 0usize;
+            let n_positional = specs.iter().filter(|f| f.init && !f.kw_only).count();
+            if args.len() > n_positional && !super::disabled("dcspecs") {
+                // more positional arguments than the __init__ takes
+                self.raise_here("TypeError", state);
+                return;
+            }
+            for spec in specs.iter() {
+                let (fname, default) = (&spec.name, spec.default);
                 let fk = key_str_lit(fname);
                 let mut v: Option<Value> = None;
-                if i < args.len() {
-                    v = Some(args[i].clone());
+                if !spec.init {
+                    // `field(init=False)`: its default
+                    let d = default.map(|d| self.dataclass_default(d, node, state)).unwrap_or_default();
+                    if !d.empty() {
+                        let r = state.row(inst, ns).store(fk, true);
+                        state.set_row(inst, ns, r);
+                        state.set_slot(inst, ns, fk, d, true);
+                    }
+                    continue;
+                }
+                let positional = !spec.kw_only && pos < args.len();
+                if !spec.kw_only {
+                    pos += 1;
+                }
+                if positional {
+                    v = Some(args[pos - 1].clone());
                 } else if let Some(kv) = kwargs.get(&s(fname)) {
                     v = Some(kv.clone());
                 } else if !star_kwargs.is_empty() {
@@ -532,9 +565,14 @@ impl Analyzer {
                     }
                     continue;
                 }
+                let v = v.filter(|x| !x.empty()).unwrap_or_else(|| Value::data("field"));
+                if spec.initvar {
+                    // an InitVar: an argument of __post_init__, no attribute
+                    initvars.push(v);
+                    continue;
+                }
                 let r = state.row(inst, ns).store(fk, true);
                 state.set_row(inst, ns, r);
-                let v = v.filter(|x| !x.empty()).unwrap_or_else(|| Value::data("field"));
                 state.set_slot(inst, ns, fk, v, true);
             }
             if ci.typed_dict {
@@ -548,10 +586,66 @@ impl Analyzer {
             let fv = self.cls_slots.get(&(pc, Ns::Attr, key_str_lit("__post_init__"))).cloned().unwrap_or_default();
             for f in fv.pts.iter() {
                 if self.kind(f) == Kind::Function {
-                    self.call_user(f, Some(Value::obj(inst)), Vec::new(), IndexMap::new(), Vec::new(), Vec::new(), state, node, None, false);
+                    self.call_user(f, Some(Value::obj(inst)), initvars.clone(), IndexMap::new(), Vec::new(), Vec::new(), state, node, None, false);
                 }
             }
         }
+    }
+
+    /// The fields of a dataclass (TypedDict / NamedTuple) as its `__init__` takes them: bases
+    /// first; `InitVar`s (init-only), `field(init=False)`, keyword-only ones (after `_: KW_ONLY`,
+    /// `field(kw_only=True)`, `@dataclass(kw_only=True)`).
+    pub fn dc_specs(&self, cls: u32) -> Vec<DcSpec> {
+        let mut out: Vec<DcSpec> = Vec::new();
+        for c in self.mro(cls).into_iter().rev() {
+            let Some(ci) = self.class_info_opt(c) else { continue };
+            if !ci.has_fields() {
+                continue;
+            }
+            let attrs: Vec<(String, Option<&'static ast::Expr>)> = ci.fields();
+            let mut kw_only = ci.dc_kw_only.get();
+            for st in &ci.node.body {
+                let ast::Stmt::AnnAssign(a) = st else { continue };
+                let ast::Expr::Name(n) = &*a.target else { continue };
+                let ann_name = match &*a.annotation {
+                    ast::Expr::Subscript(sb) => super::dotted_last(&sb.value),
+                    other => super::dotted_last(other),
+                };
+                if ann_name == "KW_ONLY" {
+                    kw_only = true;
+                    continue;
+                }
+                let initvar = ann_name == "InitVar";
+                let name = n.id.to_string();
+                if !initvar && !attrs.iter().any(|(f, _)| *f == name) {
+                    continue;
+                }
+                let default: Option<&'static ast::Expr> = a.value.as_deref();
+                let mut init = true;
+                let mut fkw = kw_only;
+                if let Some(ast::Expr::Call(fc)) = default {
+                    if super::dotted_last(&fc.func) == "field" {
+                        for k in fc.arguments.keywords.iter() {
+                            match (k.arg.as_ref().map(|x| x.as_str()), &k.value) {
+                                (Some("init"), ast::Expr::BooleanLiteral(b)) => init = b.value,
+                                (Some("kw_only"), ast::Expr::BooleanLiteral(b)) => fkw = b.value,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                let spec = DcSpec { name: name.clone(), default, init, initvar, kw_only: fkw };
+                match out.iter_mut().find(|x| x.name == name) {
+                    Some(e) => *e = spec,
+                    None => out.push(spec),
+                }
+            }
+        }
+        // classes whose fields are not from a class body (generated / NamedTuple): all plain
+        if out.is_empty() {
+            out = self.dataclass_fields_mro(cls).into_iter().map(|(name, default)| DcSpec { name, default, init: true, initvar: false, kw_only: false }).collect();
+        }
+        out
     }
 
     /// `self.f = p` statements of `__init__` whose `p` is a parameter: record the classes of

@@ -7,10 +7,7 @@ small/s019_slices.py
 small/s020_set_keys.py
 small/s021_str_format.py
 small/s023_fstrings.py
-small/s033_dataclass_asdict.py
-small/s034_dataclass_replace_fields.py
 small/s035_dataclass_initvar_frozen.py
-small/s036_make_dataclass_kwonly.py
 small/s037_enum_basic.py
 small/s038_enum_flag_strenum.py
 small/s039_typeddict.py

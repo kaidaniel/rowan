@@ -1649,6 +1649,15 @@ impl Analyzer {
                 crate::models::pandas::frame_setattr(self, oid, name, v, node, state, strong);
                 continue;
             }
+            // a frozen dataclass: assignment raises FrozenInstanceError (an AttributeError)
+            if kind == Kind::Instance {
+                if let Some(cls) = self.instance_class(oid) {
+                    if self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|ci| ci.dc_frozen.get()).unwrap_or(false)) && !self.fresh_init.contains(&oid) {
+                        self.raise_here("FrozenInstanceError", state);
+                        continue;
+                    }
+                }
+            }
             // a frozen pydantic model: assignment raises a ValidationError; a field assigned is
             // in `model_fields_set` from then on
             if kind == Kind::Instance && !name.starts_with('_') {
