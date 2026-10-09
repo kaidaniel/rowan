@@ -13,8 +13,6 @@ models/m15_pointnet.py
 models/m16_bert_embeddings.py
 models/m17_tcn.py
 small/s026_inplace.py
-small/s028_loops.py
-small/s045_unbind.py
 small/s080_transformer_encoder.py
 small/s088_module_init_names.py
 small/s090_module_driver_calls.py

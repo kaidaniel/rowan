@@ -329,9 +329,10 @@ impl Analyzer {
         st.set_slot(oid, Ns::Elem, STAR, elem.clone(), single);
         st.elems.insert(oid, elem.kv.clone());
         self.obj_mut(oid).literal_len = None;
-        if let Some(d) = count {
-            self.obj_mut(oid).payload = Payload::Str(format!("torch.n:{}", d.0));
-        }
+        self.obj_mut(oid).payload = Payload::Str(match count {
+            Some(d) => format!("torch.n:{}", d.0),
+            None => "torch.n".into(),
+        });
         Value::obj(oid)
     }
 
@@ -734,8 +735,8 @@ impl Analyzer {
         let (ka, kb) = (classify(self, a)?, classify(self, b)?);
         let bitop = matches!(op, O::BitAnd | O::BitOr | O::BitXor);
         if ka == K::Tensor || kb == K::Tensor {
-            let sa = self.t_shape(a, st).unwrap_or_else(Shape::any);
-            let sb = self.t_shape(b, st).unwrap_or_else(Shape::any);
+            let sa = if matches!(ka, K::Int | K::Num) { Shape::known(vec![]) } else { self.t_shape(a, st).unwrap_or_else(Shape::any) };
+            let sb = if matches!(kb, K::Int | K::Num) { Shape::known(vec![]) } else { self.t_shape(b, st).unwrap_or_else(Shape::any) };
             let r = self.t_broadcast(&sa, &sb, node, st, "elementwise op");
             if bitop {
                 let both_bool = [a, b].iter().all(|v| label(v).map(|l| sh::is_bool_label(&l)).unwrap_or(true));
@@ -785,8 +786,9 @@ impl Analyzer {
             return None;
         }
         // a named unknown / dual: a tensor (broadcast) or, for ints, the dim
-        let sa = self.t_shape(a, st).unwrap_or_else(Shape::any);
-        let sb = self.t_shape(b, st).unwrap_or_else(Shape::any);
+        let scalar = |k: &K| matches!(k, K::Int | K::Num);
+        let sa = if scalar(&ka) { Shape::known(vec![]) } else { self.t_shape(a, st).unwrap_or_else(Shape::any) };
+        let sb = if scalar(&kb) { Shape::known(vec![]) } else { self.t_shape(b, st).unwrap_or_else(Shape::any) };
         let shape = match sh::broadcast(&sa, &sb, &st.tf) {
             Ok(s) => s,
             Err(_) => return Some(self.t_broadcast(&sa, &sb, node, st, "elementwise op")),
@@ -990,6 +992,16 @@ impl Analyzer {
                 if let Some(s) = self.t_shape_arg(obj, st) {
                     return Some(self.t_size_index(&s, idx, node, st));
                 }
+            }
+        }
+        // an element of a result tuple of unknown length
+        if let Some(o) = obj.single() {
+            if matches!(&self.obj(o).payload, Payload::Str(q) if q == "torch.n" || q.starts_with("torch.n:")) {
+                if !matches!(idx, E::Slice(_)) {
+                    let _ = self.eval(idx, st);
+                    return Some(st.slot(o, Ns::Elem, STAR));
+                }
+                return Some(obj.clone());
             }
         }
         let tensor = is_tensor(obj);
