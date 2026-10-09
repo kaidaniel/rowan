@@ -30,7 +30,7 @@ cd rowan && cargo build --release && cargo test --release --lib && cd ..
 rowan/target/release/rowan FILE.py [--json|--golden|--facts] [--no-rows --no-summaries --no-entry --no-imports] [--value-depth N]
                                    [--search-path DIR]… [--follow PKG]… [--site-packages DIR]…
 rowan/target/release/rowan serve                    # JSON lines over stdio (README has the protocol)
-uv run --no-project python tests/run_golden.py      # 694/694 in ~2.5 s (417 + 162 torch + 115 pandas); paths select; -v
+uv run --no-project python tests/run_golden.py      # 714/714 in ~2.5 s (417 + 162 torch + 135 pandas); paths select; -v
 uv run --no-project python tests/run_golden.py --pending [--prune]   # cases in tests/{torch,pandas}/PENDING (empty)
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py  # torch expectations vs real PyTorch
 uv run --no-project --with pandas python tests/oracle.py [--strict|--lenient] [-v] [case…]  # rows / values / verdicts / schemas vs a real run
@@ -62,7 +62,7 @@ only), `ROWAN_TODO=check` (the harness checks `#@todo` expectations too).
 | `main.rs` | CLI, `serve_loop`, `run_with_deps`, site-packages discovery; analysis on a 1 GiB-stack thread. |
 | `rowan/py/` | PyO3 binding; the wheel does not load on this machine (see problems). |
 | `tests/torch/`, `tests/shapes.py`, `tests/torch_oracle.py` | 145 small torch programs + 17 models (`CONVENTIONS.md`: directives `#@shape`, `#@dim`, `#@requires`, `#@shape-error`, canonical forms); `PENDING` lists cases not passing yet (empty); the oracle runs each case under real PyTorch. |
-| `tests/pandas/`, `tests/oracle.py` | 100 small pandas programs + 15 pipelines (`CONVENTIONS.md`); the oracle traces each case under real pandas / Python: rows, values, verdicts (`possibly` must show both in strict mode), schemas by dropping one `read_csv` column; strict on `tests/pandas`, lenient (checks what runs) on `tests/cases`. |
+| `tests/pandas/`, `tests/oracle.py` | 120 small pandas programs + 15 pipelines (`CONVENTIONS.md`); the oracle traces each case under real pandas / Python: rows, values, verdicts (`possibly` must show both in strict mode), schemas by dropping one `read_csv` column; strict on `tests/pandas`, lenient (checks what runs) on `tests/cases`. |
 | `tests/run_golden.py`, `tests/cases/` | 417 golden cases. Directives: `#@ tier key [; …]` (verdict on that line's access; tier `sound` = anything but `missing`), `#@row NAME: present={..} definite={..} closed|open` (row of NAME on that line), `#@value NAME: exactly={..}|unknown|includes={..} [; NAME2: …]` (the name's value), `#@schema src@L<n>: always={..} sometimes={..} only={..}`, row floors `possible={..}` / `definite_within={..}`; a row on a line run several times (calls, entry runs) is the join of the runs, `#@todo …` (reported, not checked), `#@argv …` (per-case flags, relative paths against the case dir). A package case is a directory whose entry shares its prefix (`k94_pkg/k94_modules.py`); other files there are modules. |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | `--json` snapshots on the example and three old-prototype modules (inputs only); the regression guard for internals. |
 | `vscode-rowan/` | extension: talks to `rowan serve` (falls back to the CLI), hover = facts for (line, name), verdicts as diagnostics. |
@@ -100,7 +100,8 @@ running the engine; wrong expectations carry a comment saying why. Decided on kn
   / mapping patterns; `__bool__`/`__len__` decide truth (`truth_of`). Branch facts
   (`CondFact`): the join of an `if` on a pure test, of a try setting a flag, of a `for` over a
   name records each side's rows, restored by a later identical test while its names, guards
-  and rows are unchanged. `State.name_keys`: a store / `setdefault` / an `in` test through a
+  and rows are unchanged. `Row.stored`: keys the program stored (a read of one on an open record is a sometimes
+  requirement). `State.name_keys`: a store / `setdefault` / an `in` test through a
   name holding several objects makes the key definite for that name. Row checks and hover
   facts in summaries are `Obs` / `FactObs` resolved per instantiation (and skipped after a
   statement that raised). Unknowns print as *symbols* (`symbol_scope`, `report::in_scope`,
@@ -165,7 +166,7 @@ running the engine; wrong expectations carry a comment saying why. Decided on kn
 
 | input | time | notes |
 | --- | --- | --- |
-| golden suite (417 + 162 torch + 115 pandas) | 2.5 s | one process per case; oracle on all 532 cases ~3 min |
+| golden suite (417 + 162 torch + 135 pandas) | 2.5 s | one process per case; oracle on all 552 cases ~3 min |
 | `j93` (830 lines) / `m96_pkg` (1,716 lines) / `proto_summary.py` (1.2k, self-referential) | 0.09 s / 0.10 s / 2.6 s (deadline) | all pass / all pass / 0 ✗, 28 ⚠ |
 
 ## Known problems and limits
@@ -178,8 +179,7 @@ running the engine; wrong expectations carry a comment saying why. Decided on kn
 * Mutual recursion widens after 3 rounds; `while` loops with unknown conditions join;
   comparisons on unknown values keep both branches; `match` class / sequence patterns stay
   undecided; `getattr` needs a known name.
-* pandas: a column stored on one branch of an open frame is an `always` requirement (rows do
-  not tell a store from a narrowing); no relations between columns (`note` absent ⇒ `note_y`);
+* pandas: no relations between columns (`note` absent ⇒ `note_y`);
   absent keys of open frames are listed only when seen (lenses rule out more); a read_csv index
   is not known to be a RangeIndex; names holding several frames narrow only by name.
 * `dict(zip(keys, row))` with an unknown-length row makes every key definite (`d30`); a
@@ -190,8 +190,7 @@ running the engine; wrong expectations carry a comment saying why. Decided on kn
 
 ## Where to go next
 
-Open items, in the order they seem worth doing: (00) pandas: stored-vs-narrowed keys in rows
-(sometimes requirements), the `#@todo`s in `tests/pandas`; (0) torch: shape facts from `<`/`!=`,
+Open items, in the order they seem worth doing: (00) pandas: the `#@todo`s in `tests/pandas`; (0) torch: shape facts from `<`/`!=`,
 dtype tracking, substitution-based instantiation if tabulation gets slow on big models;
 (1) summary reuse across runs in the server;
 (2) the weak store through several objects when the name read differs from the one stored

@@ -174,6 +174,7 @@ fn df_dispatch(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "transform" => transform,
         "update" => df_update,
         "describe" => describe,
+        "droplevel" | "swaplevel" => levels_op,
         "agg" | "aggregate" => df_agg,
         "corr" | "cov" => df_corr,
         "combine_first" | "combine" => df_combine,
@@ -393,8 +394,12 @@ fn cut(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let sid = series_like_id(an, st, c, &ss, idx, "cut");
     let labels = c.kw("labels").and_then(|v| lit_key_seq(an, st, &v));
     // (a value outside the bins is NaN)
-    let k = labels.map(|l| Known { may: KeySet::from_iter(l).insert(none_key()), sure: KeySet::new() });
+    let k = labels.clone().map(|l| Known { may: KeySet::from_iter(l).insert(none_key()), sure: KeySet::new() });
     set_vals(st, sid, vkey(), k.as_ref());
+    // a categorical: its categories are the labels
+    if let Some(l) = labels {
+        st.set_slot(sid, Ns::Meta, mk("cats"), Value::kv_only(KeyVal::Lits(KeySet::from_iter(l))), true);
+    }
     st.set_slot(sid, Ns::Meta, dtype_key(vkey()), Value::lit(mk("object")), true);
     Value::obj(sid)
 }
@@ -615,7 +620,10 @@ fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         "value_counts" => {
             let vs = ss.iter().map(|x| vals(st, *x, vkey())).collect::<Option<Vec<Known>>>();
+            let cats: Option<KeySet> = (ss.len() == 1).then(|| st.slot_opt(ss[0], Ns::Meta, mk("cats"))).flatten().filter(|v| v.pts.is_empty() && v.kv.is_literal()).map(|v| kv_literals(&v.kv));
             let row = match vs {
+                // a categorical counts every category (zero counts too)
+                _ if cats.is_some() => Known::exact(cats.clone().unwrap()).row(),
                 Some(v) if !v.is_empty() => {
                     let k = v[1..].iter().fold(v[0].clone(), |a, b| a.join(b));
                     if key_is_bool(&c.kw("dropna"), false) { k.row() } else { k.row() }
@@ -1866,7 +1874,18 @@ fn concat(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let mut rows: Vec<Row> = Vec::new();
     let all_series = pieces.iter().all(|p0| !p0.pts.is_empty() && p0.pts.iter().all(|o| is_series_obj(an, o)));
+    let mut unnamed = 0i64;
     for (i, p0) in pieces.iter().enumerate() {
+        // mixed with frames: an unnamed Series is numbered among the unnamed ones
+        let is_ser = !p0.pts.is_empty() && p0.pts.iter().all(|o| is_series_obj(an, o));
+        if axis1 && !all_series && is_ser {
+            let nm = join_values(p0.pts.iter().map(|o| series_name(an, st, o)));
+            if nm.pts.is_empty() && nm.kv == an.none_v.kv {
+                rows.push(Row::closed_with(KeySet::one(intern::key_int(unnamed))));
+                unnamed += 1;
+                continue;
+            }
+        }
         // Series side by side: keys= name them, else their names, unnamed ones their position
         let pos = if axis1 && all_series {
             match &keys {
@@ -2943,15 +2962,14 @@ fn agg_names(an: &mut Analyzer, st: &State, v: &Value) -> Option<(Vec<KeyId>, bo
         return Some((seq, true));
     }
     let o = v.single()?;
+    // a function's __name__ (lambdas: "<lambda>"; numbered "<lambda_i>" in a list)
+    let is_lambda = |an: &Analyzer, o: u32| an.kind(o) == Kind::Function && matches!(an.func_info(o).node, crate::interp::FuncNode::Lambda(_));
     let fname = |an: &Analyzer, o: u32| -> Option<KeyId> {
         match an.kind(o) {
+            Kind::Function if is_lambda(an, o) => Some(mk("<lambda>")),
             Kind::Function => {
-                let l = an.obj(o).label.clone();
-                if l.starts_with("lambda") || l.contains("<lambda>") {
-                    Some(mk("<lambda>"))
-                } else {
-                    Some(mk(l.rsplit('.').next().unwrap_or(&l)))
-                }
+                let q = an.func_info(o).qualname.clone();
+                Some(mk(q.rsplit('.').next().unwrap_or(&q)))
             }
             Kind::External => Some(mk(last(&an.external_qual(o)))),
             _ => None,
@@ -2960,10 +2978,15 @@ fn agg_names(an: &mut Analyzer, st: &State, v: &Value) -> Option<(Vec<KeyId>, bo
     if matches!(an.kind(o), Kind::List | Kind::Tuple) {
         let n = an.obj(o).literal_len?;
         let mut out = Vec::new();
+        let mut lambdas = 0;
         for i in 0..n {
             let x = st.slot(o, Ns::Pos, intern::key_int(i as i64));
             match (x.kv.as_lit(), x.single()) {
                 (Some(k), _) if x.pts.is_empty() => out.push(k),
+                (_, Some(f)) if is_lambda(an, f) => {
+                    out.push(mk(&format!("<lambda_{}>", lambdas)));
+                    lambdas += 1;
+                }
                 (_, Some(f)) => out.push(fname(an, f)?),
                 _ => return None,
             }
@@ -3500,6 +3523,74 @@ fn df_corr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if let Some(nid) = v.single() {
         set_index_levels(st, nid, Some(&[None]));
         set_labels(st, nid, Some(&lab));
+    }
+    v
+}
+
+/// `droplevel(level, axis=)` / `swaplevel(i=-2, j=-1, axis=)`: on MultiIndex columns (tuple
+/// keys) with axis=1, else on the index levels.
+fn levels_op(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let fs = frames(an, c.recv.as_ref());
+    let row = recv_row(an, st, c);
+    let swap = c.qual.ends_with("swaplevel");
+    let on_cols = axis_is_columns(&c.kw("axis").or_else(|| if swap { c.arg(2, None) } else { c.arg(1, None) }));
+    let int_of = |v: Option<Value>, d: i64| v.and_then(|x| x.kv.as_lit()).and_then(intern::key_as_int).unwrap_or(d);
+    let tuple_of = |k: KeyId| intern::with_key(k, |kk| if let intern::Key::Tuple(t) = kk { Some(t.clone()) } else { None });
+    if on_cols {
+        let n = row.present.iter().filter_map(tuple_of).map(|t| t.len()).max().unwrap_or(0) as i64;
+        if n < 2 || row.present.iter().any(|k| tuple_of(k).map(|t| t.len() as i64 != n).unwrap_or(true)) {
+            return open_frame_call(an, st, c);
+        }
+        let norm = |i: i64| if i < 0 { i + n } else { i };
+        let map: Box<dyn Fn(&[KeyId]) -> Vec<KeyId>> = if swap {
+            let (i, j) = (norm(int_of(c.arg(0, Some("i")), -2)) as usize, norm(int_of(c.arg(1, Some("j")), -1)) as usize);
+            Box::new(move |t: &[KeyId]| {
+                let mut v = t.to_vec();
+                v.swap(i, j);
+                v
+            })
+        } else {
+            let l = norm(int_of(c.arg(0, Some("level")), 0)) as usize;
+            Box::new(move |t: &[KeyId]| t.iter().enumerate().filter(|(i, _)| *i != l).map(|(_, k)| *k).collect())
+        };
+        let conv = |k: KeyId| -> KeyId {
+            let parts = map(&tuple_of(k).unwrap());
+            if parts.len() == 1 { parts[0] } else { intern::key_tuple(parts) }
+        };
+        let mut out = Row::new();
+        for k in row.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(row.present.iter())) {
+            out = out.store(conv(k), false);
+        }
+        for k in row.definite.iter() {
+            out = out.store(conv(k), true);
+        }
+        if row.open() {
+            let mut d = out.data();
+            d.sources = intern::IdSet::one((Source::new(&format!("{}@L{}", last(&c.qual), c.line), SourceKind::Call), EMPTY_LENS));
+            out = Row::from_data(d);
+        }
+        return derived(an, st, c, out, &fs, Rows::Same, false);
+    }
+    let v = derived(an, st, c, row, &fs, Rows::Same, true);
+    if let Some(nid) = v.single() {
+        let lv = levels_of(st, &fs).map(|mut l| {
+            let n = l.len() as i64;
+            let norm = |i: i64| (if i < 0 { i + n } else { i }) as usize;
+            if swap {
+                let (i, j) = (norm(int_of(c.arg(0, Some("i")), -2)), norm(int_of(c.arg(1, Some("j")), -1)));
+                if i < l.len() && j < l.len() {
+                    l.swap(i, j);
+                }
+            } else if let Some(k) = c.arg(0, Some("level")).and_then(|x| x.kv.as_lit()) {
+                let pos = if intern::key_is_str(k) { l.iter().position(|x| *x == Some(k)) } else { intern::key_as_int(k).map(norm) };
+                if let Some(p0) = pos.filter(|p0| *p0 < l.len()) {
+                    l.remove(p0);
+                }
+            }
+            l
+        });
+        set_index_levels(st, nid, lv.as_deref());
+        set_labels(st, nid, None);
     }
     v
 }
@@ -4238,7 +4329,13 @@ fn crosstab(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let css: Vec<u32> = cols.pts.iter().filter(|o| is_series_obj(an, *o)).collect();
     let is_ = iss.first().copied();
     let cs_ = css.first().copied();
-    let colvals = if css.is_empty() { None } else { vals_join(st, &css, vkey()) };
+    let cats_of = |st: &State, o: u32| st.slot_opt(o, Ns::Meta, mk("cats")).filter(|v| v.pts.is_empty() && v.kv.is_literal()).map(|v| Known::exact(kv_literals(&v.kv)));
+    let colvals = match (css.as_slice(), key_is_bool(&c.kw("dropna"), false)) {
+        // dropna=False keeps every category of a categorical
+        ([one], true) if cats_of(st, *one).is_some() => cats_of(st, *one),
+        _ if css.is_empty() => None,
+        _ => vals_join(st, &css, vkey()).map(|k| Known { may: k.may.remove(none_key()), sure: k.sure.remove(none_key()) }),
+    };
     let mut row = known_or_open(colvals, &Row::new(), c.line, "crosstab");
     if margins {
         row = row.store(mname, true);
@@ -4746,6 +4843,41 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             _ => (Rows::Same, false),
         };
         let v = derived(an, st, c, row.clone(), &fs, rows, with_vals);
+        if let Some(nid) = v.single() {
+            match name.as_str() {
+                // every column becomes bool
+                "isna" | "isnull" | "notna" | "notnull" | "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "isin" => {
+                    for k in row.present.iter() {
+                        set_dtype(st, nid, k, Some("bool"), true);
+                    }
+                }
+                // astype(t) / astype({col: t})
+                "astype" => {
+                    if let [f] = fs.as_slice() {
+                        copy_dtypes(st, *f, nid, &row.present);
+                    }
+                    let arg = c.arg(0, Some("dtype"));
+                    let pairs: Option<Vec<(KeyId, Option<&'static str>)>> = arg.as_ref().and_then(|a| a.single()).filter(|o| an.kind(*o) == Kind::Dict).map(|o| {
+                        let r = st.row(o, Ns::Item);
+                        r.present.iter().map(|k| (k, astype_dtype(an, &Some(st.slot(o, Ns::Item, k))))).collect()
+                    });
+                    match pairs {
+                        Some(ps) => {
+                            for (k, d) in ps {
+                                set_dtype(st, nid, k, d, true);
+                            }
+                        }
+                        None => {
+                            let d = astype_dtype(an, &arg);
+                            for k in row.present.iter() {
+                                set_dtype(st, nid, k, d, true);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         if name == "fillna" {
             // (filling keeps a column's kind)
             if let (Some(nid), [f]) = (v.single(), fs.as_slice()) {

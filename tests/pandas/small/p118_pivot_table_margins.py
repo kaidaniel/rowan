@@ -13,7 +13,8 @@ def pivot(df):
     flat = p.reset_index()
     #@row flat: present={k,x,y} definite={k,x,y} closed
     q = df.pivot_table(index="k", columns="c", values="x", aggfunc="sum", margins=True, margins_name="Total")
-    #@row q: definite={Total} open
+    # (first written `definite={Total} open`: the values of c are literal, so are the columns)
+    #@row q: present={u,w,Total} definite={u,Total} closed
     q["Total"]                                   #@ ok Total
     return p
 

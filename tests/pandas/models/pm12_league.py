@@ -179,6 +179,5 @@ if __name__ == "__main__":
     best["season"]                                              #@ ok season
 
 # (first written sometimes={round,attendance}: their reads are behind `in` tests; matchday is
-# needed where round is absent, sometimes, which rowan reports as always)
-#@todo schema read_csv@L35: sometimes={matchday}
-#@schema read_csv@L35: always={home,away,home_goals,away_goals,date} only={home,away,home_goals,away_goals,date,matchday}
+# needed where round is absent)
+#@schema read_csv@L35: always={home,away,home_goals,away_goals,date} sometimes={matchday} only={home,away,home_goals,away_goals,date,matchday}

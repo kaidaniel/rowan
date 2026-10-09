@@ -31,10 +31,8 @@ try:
     view["qty"]                                  #@ missing qty
 except KeyError:
     pass
-# `value` is needed of the input only where the program did not store it (sometimes);
-# rowan does not tell a stored key from a narrowed one in a row and says always
-#@todo schema read_csv@L10: always={qty,sku} sometimes={price,value}
-#@schema read_csv@L10: always={qty,sku} sometimes={price} only={qty,sku,price,value}
+# `value` is needed of the input only where the program did not store it (sometimes)
+#@schema read_csv@L10: always={qty,sku} sometimes={price,value} only={qty,sku,price,value}
 #@schema read_csv@L25: always={sku,qty,price} only={sku,qty,price}
 
 if __name__ == "__main__":

@@ -18,14 +18,16 @@ def scan(text):
     return total
 
 
-#@schema read_csv@L11: always={qty} sometimes={note} only={qty,note}
+# (first written sometimes={note}: a read in a loop over the rows is what every row needs,
+# always, as for csv.DictReader rows, though a file without rows needs nothing)
+#@schema read_csv@L11: always={qty,note} only={qty,note}
 
 
 def mark(df):
     for i, row in df.iterrows():
         df.loc[i, "seen"] = 1                    # adds the column only when a row exists
-    #@row df: present={id,seen} definite={id} closed
-    return df
+    # (the row directive stood on its own line under the loop body, which checks the body)
+    return df  #@row df: present={id,seen} definite={id} closed
 
 
 def seen(df):

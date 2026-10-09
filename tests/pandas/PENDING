@@ -1,12 +1,1 @@
 # pandas cases written but not yet expected to pass (paths relative to tests/pandas/)
-small/p105_iterrows_zero_rows.py
-small/p106_add_prefix_open.py
-small/p107_agg_list_flatten.py
-small/p108_droplevel_swaplevel.py
-small/p110_cut_labels_counts.py
-small/p111_select_dtypes.py
-small/p112_merge_open_suffix.py
-small/p117_agg_lambda_named.py
-small/p118_pivot_table_margins.py
-small/p119_concat_inner_axis1.py
-small/p120_rename_callable.py

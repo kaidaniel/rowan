@@ -1396,6 +1396,20 @@ fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "join" => {
             // a known separator joining known strings
             if let (Some(sep), Some(arg)) = (kv.as_lit().and_then(intern::key_as_str), c.args.first()) {
+                // a literal tuple key's parts; a column key (`for c in df.columns`): the key renamed
+                if arg.pts.is_empty() {
+                    let step = crate::domain::Step::RenameFn(crate::domain::RenameFn::with_arg(crate::domain::FnKind::Join, key_str_lit(&sep)));
+                    if let crate::domain::KeyVal::KeysOf(ko) = &arg.kv {
+                        let mut ko = ko.clone();
+                        ko.chain = crate::domain::lens_push(ko.chain, step);
+                        return Value::kv_only(crate::domain::KeyVal::KeysOf(ko));
+                    }
+                    let ks = crate::domain::kv_literals(&arg.kv);
+                    if !ks.is_empty() && ks.iter().all(|k| intern::with_key(k, |kk| matches!(kk, intern::Key::Tuple(_)))) {
+                        let out = intern::KeySet::from_iter(ks.iter().map(|k| step.apply(k)));
+                        return Value::kv_only(crate::domain::KeyVal::lits(out));
+                    }
+                }
                 let it = an.iterate(arg, &c.node, st);
                 if let Some(items) = it.items {
                     let mut parts: Vec<String> = Vec::new();

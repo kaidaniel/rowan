@@ -11,8 +11,10 @@ WITHOUT = "cust,amount\n10,5.0\n11,1.0\n"
 def join(text):
     orders = pd.read_csv(io.StringIO(text))
     m = orders.merge(LOOKUP, on="cust")          #@ input cust
-    #@row m: definite={cust,region} open
-    m["region"]                                  #@ ok region
+    # (first written definite={cust,region} / ok region: the file is open, and a region column
+    # of its own would make region_x / region_y; no input here has one, so `sound`)
+    #@row m: definite={cust} open
+    m["region"]                                  #@ sound region
     m["amount"]                                  #@ input amount
     return m
 
@@ -25,7 +27,8 @@ def plain(m):
 
 
 def suffixed(m):
-    return m["name_y"]                           #@ possibly name_y
+    # (first written `possibly`: the open file may hold a name_y column itself)
+    return m["name_y"]                           #@ input name_y
 
 
 kept = []  # caught failures stay alive: the oracle tells exceptions apart by id()

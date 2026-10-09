@@ -73,6 +73,8 @@ pub enum FnKind {
     Suffix,
     Str,
     Replace,
+    /// `sep.join(key)`: a tuple key's parts (a string's characters) joined by the arg
+    Join,
 }
 
 impl FnKind {
@@ -86,6 +88,7 @@ impl FnKind {
             FnKind::Suffix => "suffix",
             FnKind::Str => "str",
             FnKind::Replace => "replace",
+            FnKind::Join => "join",
         }
     }
     pub fn from_name(n: &str) -> Option<FnKind> {
@@ -131,6 +134,19 @@ impl RenameFn {
     }
 
     pub fn apply(&self, k: KeyId) -> KeyId {
+        if self.fn_ == FnKind::Join {
+            let sep = self.arg_str();
+            let parts: Option<Vec<String>> = intern::with_key(k, |kk| match kk {
+                intern::Key::Tuple(items) => Some(items.clone()),
+                _ => None,
+            })
+            .and_then(|items| items.into_iter().map(|x| key_as_str(x).map(|s| s.to_string())).collect())
+            .or_else(|| key_as_str(k).map(|s| s.chars().map(|c| c.to_string()).collect()));
+            return match parts {
+                Some(p) => intern::key_str_lit(&p.join(&sep)),
+                None => k,
+            };
+        }
         if self.fn_ == FnKind::Str {
             return if key_is_str(k) { k } else { intern::key_str_lit(&key_py_str(k)) };
         }
@@ -146,7 +162,7 @@ impl RenameFn {
                 Some((a, b)) => s.replace(&a, &b),
                 None => return k,
             },
-            FnKind::Str => unreachable!(),
+            FnKind::Str | FnKind::Join => unreachable!(),
         };
         intern::key_str_lit(&out)
     }
@@ -200,6 +216,7 @@ impl RenameFn {
                 }
                 KeySet::from_vec(out)
             }
+            FnKind::Join => KeySet::one(intern::key_inv(name, k)),
             FnKind::Replace => {
                 let Some((a, b)) = self.replace_pair() else { return KeySet::one(intern::key_inv(name, k)) };
                 let Some(s) = sk else { return KeySet::one(k) };

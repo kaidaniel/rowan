@@ -545,7 +545,7 @@ Programs with hand-written expectations, checked against the real library by a r
 every line, and refutes a row (`definite ⊆ K`, `absent ∩ K = ∅`, `K ⊆ present` when closed), a
 value, a verdict (`ok` never raised, `missing` always, `possibly` both — strict) or a schema (a
 `read_csv` returning the frame minus one column must raise for an `always` column and must not for
-a column outside `only`). `tests/pandas/` (115 programs) runs strict; `tests/cases/` lenient.
+a column outside `only`). `tests/pandas/` (135 programs) runs strict; `tests/cases/` lenient.
 
 ---
 
