@@ -527,6 +527,8 @@ pub struct RowData {
     /// insertion order of the keys stored strongly (a dict iterates in this order); it
     /// describes the row only when it holds exactly the present keys (`ordered_keys`)
     pub order: Arc<[KeyId]>,
+    /// keys the program stored (on some path): an input need not provide them where it did
+    pub stored: KeySet,
 }
 
 /// Provision facts for one (object, namespace) at one program point; immutable, shared,
@@ -692,6 +694,7 @@ impl Row {
             lterms: join_dterms(&self.lterms, &o.lterms),
             pstores: join_pstores(&self.pstores, &o.pstores),
             order: join_order(&self.order, &o.order),
+            stored: self.stored.union(&o.stored),
         })
     }
 
@@ -726,6 +729,7 @@ impl Row {
         }
         d.absent = d.absent.remove(k);
         d.absent_likely = d.absent_likely.remove(k);
+        d.stored = d.stored.insert(k);
         Row::from_data(d)
     }
 
@@ -756,6 +760,7 @@ impl Row {
             d.likely = d.likely.remove(k);
             d.absent = d.absent.insert(k);
             d.absent_likely = d.absent_likely.insert(k);
+            d.stored = d.stored.remove(k);
             d.sources = d.sources.map(|(s, l)| (s, lens_add_kill(l, k)));
             d.terms = d.terms.map(|(r, l)| (r, lens_add_kill(l, k)));
             d.dterms = d.dterms.map(|(r, l)| (r, lens_add_kill(l, k)));
@@ -795,6 +800,7 @@ impl Row {
             lterms: self.lterms.map(|(r, l)| (r, push(l))),
             pstores: self.pstores.map(|(r, st, l)| (r, st, push(l))),
             order: self.order.iter().map(|k| step.apply(*k)).collect::<Vec<_>>().into(),
+            stored: f(&self.stored),
         })
     }
 
@@ -848,6 +854,7 @@ impl Row {
                 }
                 ord.into()
             },
+            stored: self.stored.union(&img(&o.stored)),
         })
     }
 
@@ -865,7 +872,15 @@ impl Row {
     }
 
     pub fn narrow_in(&self, k: KeyId, strong: bool) -> Row {
-        self.store(k, strong)
+        // (the key was there: the program did not store it)
+        let was = self.stored.contains(k);
+        let r = self.store(k, strong);
+        if was {
+            return r;
+        }
+        let mut d = r.data();
+        d.stored = d.stored.remove(k);
+        Row::from_data(d)
     }
 
     pub fn narrow_out(&self, k: KeyId) -> Row {
@@ -967,6 +982,7 @@ impl Row {
             lterms: TermSet::from_vec(lterms),
             pstores: PStoreSet::new(),
             order: self.order.clone(),
+            stored: self.stored.clone(),
         });
         let mut remaining: Vec<(Rho, bool, LensId)> = Vec::new();
         for (r, strong, l) in self.pstores.union(&PStoreSet::from_vec(pstores)).iter() {

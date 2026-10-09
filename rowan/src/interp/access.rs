@@ -60,15 +60,29 @@ impl Analyzer {
     }
 
     pub fn require_providers(&mut self, cls: &Classification, row: &Row, site: &str, with_alts: bool, state: &mut State) {
+        self.require_providers_k(cls, row, site, with_alts, state, None)
+    }
+
+    /// The access of `key` needs it of the inputs that may provide it; a key the program
+    /// stored on some path is needed only on the others (sometimes).
+    pub fn require_providers_k(&mut self, cls: &Classification, row: &Row, site: &str, with_alts: bool, state: &mut State, key: Option<KeyId>) {
         let site_id = s(site);
         let srcs: Vec<crate::domain::SourceId> = cls.providers.iter().map(|(s, _)| *s).collect();
+        let sometimes = key.map(|k| row.stored.contains(k)).unwrap_or(false) && !super::disabled("storedsometimes");
         for (src, terms) in &cls.providers {
             for t in terms.iter() {
+                let fresh = !state.reqs.inner(src).map(|d| d.contains_key(&t)).unwrap_or(false);
                 if with_alts {
                     let alts = intern::IdSet::from_iter(srcs.iter().copied().filter(|x| x != src));
                     state.require(*src, t, site_id, alts, row.mutators.clone(), terms.clone());
                 } else {
                     state.require(*src, t, site_id, intern::IdSet::new(), row.mutators.clone(), intern::IdSet::new());
+                }
+                if sometimes && fresh {
+                    let tgt = state.reqs.writable(src);
+                    if let Some(cur) = tgt.get(&t).cloned() {
+                        tgt.insert(t, crate::domain::ReqInfo { always: false, ..cur });
+                    }
                 }
             }
         }
@@ -398,7 +412,7 @@ impl Analyzer {
                 if !guarded && cls.tier != Tier::Sym {
                     self.verdict(node, k, &cls, oid, ns, None, None);
                     if cls.tier == Tier::Input {
-                        self.require_providers(&cls, &row, &site, true, state);
+                        self.require_providers_k(&cls, &row, &site, true, state, Some(k));
                     }
                     if cls.tier != Tier::Missing && is_lit && single_target && self.strongable(oid) {
                         row = row.narrow_in(k, true);
@@ -670,7 +684,7 @@ impl Analyzer {
                     self.verdict(node, k, &cls, oid, ns, None, None);
                     if cls.tier == Tier::Input {
                         let site = self.access_site(node);
-                        self.require_providers(&cls, &row, &site, false, state);
+                        self.require_providers_k(&cls, &row, &site, false, state, Some(k));
                     }
                 }
                 row = row.delete(k, strong && is_lit);
@@ -1095,7 +1109,7 @@ impl Analyzer {
             self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
             if cls.tier == Tier::Input {
                 let site = self.access_site(node);
-                self.require_providers(&cls, &row, &site, false, state);
+                self.require_providers_k(&cls, &row, &site, false, state, Some(nk));
             }
             if cls.tier != Tier::Missing && single_target && self.strongable(oid) {
                 state.set_row(oid, Ns::Attr, row.narrow_in(nk, true));
@@ -1464,7 +1478,7 @@ impl Analyzer {
             self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
             if cls.tier == Tier::Input {
                 let site = self.access_site(node);
-                self.require_providers(&cls, &row, &site, false, state);
+                self.require_providers_k(&cls, &row, &site, false, state, Some(nk));
             }
         }
         let ph = self.path_placeholder_value(oid, Ns::Attr, nk, &row, state);

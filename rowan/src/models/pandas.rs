@@ -5080,7 +5080,7 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
         if !guarded {
             an.verdict(node, k, &cls, oid, Ns::Item, None, None);
             if cls.tier == Tier::Input {
-                an.require_providers(&cls, &row, &site, true, state);
+                an.require_providers_k(&cls, &row, &site, true, state, Some(k));
             }
         }
         // the program went on: the column was there (also under a try that handles the miss)

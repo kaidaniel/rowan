@@ -1618,7 +1618,7 @@ impl Analyzer {
                 }
                 self.verdict(node, k, &cls, oid, ns, Some(file), Some(text));
                 if cls.tier == Tier::Input {
-                    self.require_providers(&cls, row, &site, true, state);
+                    self.require_providers_k(&cls, row, &site, true, state, Some(k));
                     if conditional {
                         for (src, terms) in &cls.providers {
                             let tgt = state.reqs.writable(src);
