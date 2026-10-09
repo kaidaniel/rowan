@@ -755,7 +755,15 @@ impl Analyzer {
                 Kind::Series => crate::models::pandas::series_getattr(self, oid, name, node, state),
                 Kind::Locidx if matches!(&self.obj(oid).payload, Payload::Locidx(a, _) if matches!(a.as_str(), "str" | "dt" | "cat" | "sparse" | "list" | "struct")) => {
                     let Payload::Locidx(a, recv) = self.obj(oid).payload.clone() else { unreachable!() };
-                    self.method_value(&format!("Series.{}.{}", a, name), &Value::obj(recv))
+                    if a == "dt" && name == "components" {
+                        // a property: the timedelta parts as columns
+                        let ks: Vec<KeyId> = ["days", "hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds"].iter().map(|x| key_str_lit(x)).collect();
+                        let row = Row::closed_with(crate::intern::KeySet::from_iter(ks.iter().copied())).with_order(ks);
+                        let nid = self.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(row), Ns::Item, None, None);
+                        Value::obj(nid)
+                    } else {
+                        self.method_value(&format!("Series.{}.{}", a, name), &Value::obj(recv))
+                    }
                 }
                 Kind::Unknown => self.load_unknown_attr(oid, name, node, state, guarded),
                 Kind::Ph => self.load_ph_attr(oid, name, node, state, guarded, single),
@@ -1122,9 +1130,9 @@ impl Analyzer {
         if let Some(v) = state.slot_opt(oid, Ns::Attr, nk) {
             return v;
         }
-        if self.pandas_on && (crate::models::pandas::FRAME_ONLY_ATTRS.contains(&name) || crate::models::pandas::DF_METHODS.contains(&name)) {
-            // a frame's indexers / columns: decided per call site
-            self.record_event("concrete", oid);
+        if self.pandas_on && (crate::models::pandas::FRAME_ONLY_ATTRS.contains(&name) || crate::models::pandas::DF_METHODS.contains(&name) || matches!(name, "str" | "dt" | "cat")) {
+            // a frame's indexers / columns / a Series accessor: decided per call site
+            self.concrete_root(oid);
         }
         // declared class (annotation / self): resolve methods and class attributes (a
         // dataclass field's default is instance data, not a class attribute)
@@ -1211,7 +1219,7 @@ impl Analyzer {
         let row = state.row(oid, Ns::Attr);
         if self.pandas_on && ph.cls.get().is_none() {
             // a frame's attributes are its columns: decided where the argument is known
-            self.record_event("concrete", oid);
+            self.concrete_root(oid);
         }
         if !guarded {
             self.record_symreq(node, KeyVal::Lit(nk), &row, oid, Ns::Attr, guarded, "attr");

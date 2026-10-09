@@ -2000,6 +2000,15 @@ fn json_literal(an: &mut Analyzer, st: &mut State, c: &Call, j: &serde_json::Val
 
 fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if c.qual == "json.loads" {
+        // the text of a frame's to_json: its structure
+        let texts = c.args.first().map(pandas::json_texts).unwrap_or_default();
+        if !texts.is_empty() {
+            let mut out = Value::new();
+            for (f, orient) in texts {
+                out = out.join(&pandas::json_of_frame(an, st, c, f, &orient));
+            }
+            return out;
+        }
         if let Some(text) = c.args.first().filter(|a| a.pts.is_empty()).and_then(|a| a.kv.as_lit()).and_then(intern::key_as_str) {
             if let Ok(j) = serde_json::from_str::<serde_json::Value>(&text) {
                 return json_literal(an, st, c, &j, "");

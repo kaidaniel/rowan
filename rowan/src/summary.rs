@@ -389,6 +389,21 @@ impl Analyzer {
         }
     }
 
+    /// A "concrete" event on a placeholder and on the parameters it hangs below.
+    pub fn concrete_root(&mut self, oid: ObjId) {
+        self.record_event("concrete", oid);
+        let mut p = if self.kind(oid) == Kind::Ph { self.ph_info(oid).parent } else { None };
+        let mut n = 0;
+        while let Some(par) = p {
+            if self.kind(par) != Kind::Ph || n > 4 {
+                break;
+            }
+            self.record_event("concrete", par);
+            p = self.ph_info(par).parent;
+            n += 1;
+        }
+    }
+
     /// A "concrete" event on every placeholder in `v` and in the containers it holds (to
     /// `depth` levels): a model whose result depends on their contents.
     pub fn concrete_events(&mut self, v: &Value, state: &State, depth: usize) {

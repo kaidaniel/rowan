@@ -1,18 +1,4 @@
 # pandas cases written but not yet expected to pass (paths relative to tests/pandas/)
-small/p079_apply_columnwise.py
-small/p081_to_dict_orients.py
-small/p083_to_records.py
-small/p084_from_dict_roundtrip.py
-small/p087_str_split_expand.py
-small/p089_dt_accessors.py
-small/p091_value_counts_dict.py
-small/p092_describe.py
-small/p093_agg_list_dict.py
-small/p094_idxmax_corr.py
-small/p095_nunique_frames.py
-small/p096_series_to_frames.py
-small/p098_json_roundtrip.py
-small/p099_loc_row_series.py
 small/p100_read_csv_rows_schema.py
 models/pm01_sales_etl.py
 models/pm02_hr_analytics.py

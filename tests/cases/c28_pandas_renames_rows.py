@@ -20,7 +20,11 @@ for _, row in df.iterrows():
     row["Customer"]                                 #@ input Customer
 
 recs = df.to_dict("records")
-recs[0]["Customer"]                                 #@ ok Customer
+# (was `ok Customer`, from the loop above narrowing the frame; but a frame without rows never
+# runs the loop: a row access proves nothing of the frame. Here recs[0] exists only when the
+# loop ran, which rowan does not relate)
+#@todo ok Customer
+recs[0]["Customer"]                                 #@ input Customer
 recs[0]["Missing"]                                  #@ input Missing
 
 frame = pd.DataFrame([{"a": 1, "b": 2}, {"a": 3}])

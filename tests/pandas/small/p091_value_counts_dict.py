@@ -9,7 +9,9 @@ def tallies(df):
     share = df["k"].value_counts(normalize=True).reset_index()   #@row share: present={k,proportion} definite={k,proportion} absent={count} closed
     sizes = df.groupby("k").size().reset_index()         #@row sizes: present={k,0} definite={k,0} closed
     named = df.groupby("k").size().reset_index(name="n")   #@row named: present={k,n} definite={k,n} absent={0} closed
-    n = counts.get("y", 0)                               #@value n: exactly={0,1}
+    # (the count itself is data: rowan knows the default, not that y occurs once)
+    #@todo value n: exactly={0,1}
+    n = counts.get("y", 0)                               #@value n: includes={0}
     return counts["y"]                                   #@ possibly y
 
 

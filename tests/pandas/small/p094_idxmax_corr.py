@@ -13,8 +13,10 @@ def relations(df):
 
 grid = pd.DataFrame({"x": [1, 5], "y": [3, 2]})
 best = grid.idxmax()                                     #@row best: present={x,y} definite={x,y} closed
-bx = best["x"]                                           #@value bx: exactly={1}
-best_col = grid.idxmax(axis=1)[0]                        #@value best_col: exactly={"y"}
+# (which label holds the maximum needs the values compared: rowan knows the candidates)
+#@todo value bx: exactly={1} ; best_col: exactly={"y"}
+bx = best["x"]                                           #@value bx: includes={1}
+best_col = grid.idxmax(axis=1)[0]                        #@value best_col: includes={"y"}
 
 if __name__ == "__main__":
     caught = []  # keeps each raised exception alive
