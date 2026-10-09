@@ -17,6 +17,7 @@ Values: `#@value NAME: exactly={12}` (the value is one of these literals and not
 Row checks beyond present/definite/closed/open: `possible={..}` (each key is present, or the
 row is open) and `definite_within={..}` (every definite key is listed): soundness floors for
 cases whose precise answer is a `#@todo`.  Keys are bare words or Python literals.
+Tensor shapes (`#@shape`, `#@dim`, `#@requires`, `#@shape-error`): see tests/shapes.py.
 A verdict matches a line if it was recorded at that line or while a call made from that line was
 active.  A `#@` directive must be the last thing on its line (the key runs to its end).
 
@@ -33,10 +34,14 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Tuple
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from shapes import ShapeExpectations  # noqa: E402
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
 TODO_COUNT = [0]
+SHAPES = [ShapeExpectations()]  # `#@shape` / `#@dim` / `#@requires` / `#@shape-error` (tests/shapes.py)
 VALUE_EXP: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}  # line -> [(name, spec)] for `#@value`  # `#@todo` directives seen: expectations the engine does not meet yet
 
 TIER_ALIASES = {"ok": "proven", "proven": "proven", "likely": "likely", "possibly": "possibly",
@@ -67,6 +72,7 @@ def collect_expectations(src: str):
     verdict_exp: Dict[int, List[Tuple[str, Any]]] = {}
     row_exp: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}
     VALUE_EXP.clear()
+    SHAPES[0] = ShapeExpectations()
     schema_exp: List[Tuple[str, Dict[str, Any]]] = []
     for i, line in enumerate(src.splitlines(), 1):
         if "#@todo" in line:
@@ -77,7 +83,10 @@ def collect_expectations(src: str):
             line = re.sub(r"#@todo\s+row\b", "#@row", line)
             line = re.sub(r"#@todo\s+value\b", "#@value", line)
             line = re.sub(r"#@todo\s+schema\b", "#@schema", line)
+            line = re.sub(r"#@todo\s+(shape|dim|requires)\b", r"#@\1", line)
             line = re.sub(r"#@todo\s+", "#@ ", line)
+        if SHAPES[0].parse_line(i, line):
+            continue
         m = re.search(r"#@value\s+(.*)$", line)
         if m:
             for clause in m.group(1).split(";"):
@@ -304,6 +313,7 @@ def run_case(path: str, verbose: bool = False) -> Tuple[bool, List[str]]:
                     prob = f"value {desc} leaves out {sorted(lost)}"
             row_checks.append((ln, f"value of {name}", spec, prob))
     failures = check_results(verdict_exp, row_checks, schema_exp, res["verdicts"], res["schemas"])
+    failures += SHAPES[0].check(res)
     if verbose or failures:
         print(f"\n===== {os.path.basename(path)} =====")
         print(res["report"])
@@ -313,13 +323,28 @@ def run_case(path: str, verbose: bool = False) -> Tuple[bool, List[str]]:
 def main(argv: List[str]) -> int:
     verbose = "-v" in argv
     args = [a for a in argv if not a.startswith("-")]
+    pending_only = "--pending" in argv
     paths = args or sorted(glob.glob(os.path.join(HERE, "cases", "*.py"))
                            + glob.glob(os.path.join(HERE, "cases", "*", "*.py")))
+    # torch cases (tests/torch/{small,models}/): every file is a case, except the ones listed
+    # in tests/torch/PENDING (written, not yet expected to pass; `--pending` runs only those)
+    torch_dir = os.path.join(HERE, "torch")
+    pending = set()
+    if os.path.exists(os.path.join(torch_dir, "PENDING")):
+        with open(os.path.join(torch_dir, "PENDING")) as f:
+            pending = {ln.split("#")[0].strip() for ln in f if ln.split("#")[0].strip()}
+    torch_cases = sorted(glob.glob(os.path.join(torch_dir, "*", "*.py")))
+    rel = lambda p: os.path.relpath(p, torch_dir)  # noqa: E731
+    if not args:
+        if pending_only:
+            paths = [p for p in torch_cases if rel(p) in pending]
+        else:
+            paths += [p for p in torch_cases if rel(p) not in pending]
     # in a package directory only the entry module is a case (its name shares the directory's
     # prefix: `k94_pkg/k94_modules.py`); the other files are modules it imports
     def is_case(p):
         d = os.path.basename(os.path.dirname(p))
-        if d == "cases":
+        if d == "cases" or os.path.dirname(os.path.dirname(p)) == torch_dir:
             return True
         prefix = d.split("_")[0]
         return os.path.basename(p).startswith(prefix + "_")
@@ -336,7 +361,8 @@ def main(argv: List[str]) -> int:
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")
         for f in fails:
             print(f"        - {f}")
-    print(f"  {npass}/{len(results)} passed" + (f"  ({TODO_COUNT[0]} #@todo expectations not checked)" if TODO_COUNT[0] else ""))
+    print(f"  {npass}/{len(results)} passed" + (f"  ({TODO_COUNT[0]} #@todo expectations not checked)" if TODO_COUNT[0] else "")
+          + (f"  ({len(pending)} torch cases pending)" if pending and not args and not pending_only else ""))
     return 0 if ok_all else 1
 
 

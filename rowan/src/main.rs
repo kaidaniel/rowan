@@ -250,8 +250,19 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
                     an.row_check_requests.push((i as u32 + 1, name));
                 }
             }
-            // `#@value NAME: …; NAME2: …` (also under `#@todo value`)
-            let vhit = line.find("#@value").map(|p| p + 7).or_else(|| line.find("#@todo value").map(|p| p + 12));
+            // `#@value NAME: …; NAME2: …` (also under `#@todo value`), `#@shape[@Ln] NAME: …`,
+            // `#@dim[@Ln] NAME: …`
+            let shape_hit = ["#@shape", "#@dim", "#@todo shape", "#@todo dim"].iter().find_map(|d| {
+                let p = line.find(d)? + d.len();
+                let rest = &line[p..];
+                if rest.starts_with('-') {
+                    return None;
+                }
+                // skip an `@L<n>` context filter
+                let skip = if rest.starts_with("@L") { rest.find(char::is_whitespace).unwrap_or(rest.len()) } else { 0 };
+                Some(p + skip)
+            });
+            let vhit = line.find("#@value").map(|p| p + 7).or_else(|| line.find("#@todo value").map(|p| p + 12)).or(shape_hit);
             if let Some(pos) = vhit {
                 for clause in line[pos..].split(';') {
                     let name: String = clause.trim_start().chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
