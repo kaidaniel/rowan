@@ -814,6 +814,15 @@ pub fn broadcast(a: &Shape, b: &Shape, f: &TFacts) -> Result<Shape, (DimId, DimI
         s.assume = assume;
         return Ok(s);
     }
+    // rests over the same symbol: spell out the same number of trailing dims on both
+    // sides (they come from one tensor, so it has them)
+    let (a, b) = match (&a.rest, &b.rest) {
+        (Some(Rest::Slice(x, _, _)), Some(Rest::Slice(y, _, _))) if x == y && a.suffix.len() != b.suffix.len() => {
+            let k = a.suffix.len().max(b.suffix.len());
+            (expose(&a, 0, k), expose(&b, 0, k))
+        }
+        _ => (a, b),
+    };
     // trailing dims known on both sides: broadcast them, the rest broadcasts symbolically
     let (sa, sb) = (&a.suffix, &b.suffix);
     let (ka, kb) = (if a.rest.is_none() { a.prefix.len() } else { sa.len() }, if b.rest.is_none() { b.prefix.len() } else { sb.len() });
@@ -871,6 +880,24 @@ fn bcast_rests(parts: Vec<Rest>) -> Rest {
         1 => flat.pop().unwrap(),
         _ => Rest::Bcast(flat),
     }
+}
+
+/// Canonical form of a value's shape: known dims that continue a slice rest are folded into
+/// it (`[x0, *x.shape[1:]]` → `[*x.shape]`).
+pub fn canon(s: Shape) -> Shape {
+    let mut s = tidy(s);
+    if let Some(Rest::Slice(sym, mut from, mut back)) = s.rest.clone() {
+        while from > 0 && s.prefix.last() == Some(&sdim(sym, from as i32 - 1)) {
+            s.prefix.pop();
+            from -= 1;
+        }
+        while back > 0 && s.suffix.first() == Some(&sdim(sym, -(back as i32))) {
+            s.suffix.remove(0);
+            back -= 1;
+        }
+        s.rest = Some(Rest::Slice(sym, from, back));
+    }
+    s
 }
 
 /// Clean up a shape whose rest is an empty `Dims` or known `Dims` (splice it in).

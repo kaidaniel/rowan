@@ -393,6 +393,9 @@ impl Analyzer {
         match t {
             ast::Expr::Name(n) => {
                 let name = s(n.id.as_str());
+                if self.torch_on {
+                    self.t_name_result(name, v);
+                }
                 self.store_name(name, v.clone(), state);
                 if self.facts_on {
                     let nd = frontend::node(t);

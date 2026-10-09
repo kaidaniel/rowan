@@ -34,11 +34,11 @@ fn label(v: &Value) -> Option<std::sync::Arc<str>> {
 }
 
 pub fn tensor_value(s: Shape) -> Value {
-    Value::data(&sh::tensor_label(sh::shape_id(sh::tidy(s))))
+    Value::data(&sh::tensor_label(sh::shape_id(sh::canon(s))))
 }
 
 pub fn bool_tensor_value(s: Shape) -> Value {
-    Value::data(&sh::bool_tensor_label(sh::shape_id(sh::tidy(s))))
+    Value::data(&sh::bool_tensor_label(sh::shape_id(sh::canon(s))))
 }
 
 pub fn dim_value(d: DimId) -> Value {
@@ -83,6 +83,9 @@ impl Analyzer {
         if !matches!(self.kind(o), Kind::Ph | Kind::Unknown) {
             return None;
         }
+        if let Some(sy) = self.t_var_names.get(&o) {
+            return Some(*sy);
+        }
         let text = self.symbols.get(&o)?;
         let scope = self.symbol_scope.get(&o).copied().unwrap_or(0);
         Some(sh::sym(scope, text))
@@ -92,7 +95,9 @@ impl Analyzer {
     /// symbol of a named unknown, `[*]` for an unnamed unknown. None: surely not a tensor.
     pub fn t_shape(&self, v: &Value, st: &State) -> Option<Shape> {
         let mut acc: Option<Shape> = None;
+        let tf = st.tf.clone();
         let mut add = |s: Shape| {
+            let s = sh::canon(sh::norm_shape(&s, &tf));
             acc = Some(match acc.take() {
                 None => s,
                 Some(a) => sh::join_shapes(&a, &s),
@@ -287,16 +292,35 @@ impl Analyzer {
     }
 
     pub fn t_tuple(&mut self, vals: Vec<Value>, node: &Node, st: &mut State, marker: Option<&str>) -> Value {
-        let v = self.alloc_positional(Kind::Tuple, node, Some(vals), Value::new(), DATA, st);
-        if let (Some(o), Some(m)) = (v.single(), marker) {
-            self.obj_mut(o).payload = Payload::Str(m.into());
+        self.t_tuple_role(vals, node, st, marker, "t")
+    }
+
+    /// A result tuple; `role` keeps tuples made at one call distinct (`out, (h, c)`).
+    pub fn t_tuple_role(&mut self, vals: Vec<Value>, node: &Node, st: &mut State, marker: Option<&str>, role: &str) -> Value {
+        let site = format!("{}#{}", crate::interp::site_string(node), role);
+        let oid = self.alloc(Kind::Tuple, &site, st, &format!("tuple@L{}", node.line), Payload::None, None, Ns::Item, None, None);
+        let single = self.obj(oid).single;
+        let acc = join_values(vals.clone());
+        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), DATA), single);
+        st.elems.insert(oid, acc.kv.clone());
+        if single {
+            self.obj_mut(oid).literal_len = Some(vals.len());
+            for (i, v) in vals.iter().enumerate() {
+                st.set_slot(oid, Ns::Pos, key_int(i as i64), v.clone(), true);
+            }
+        } else {
+            self.obj_mut(oid).literal_len = None;
         }
-        v
+        if let Some(m) = marker {
+            self.obj_mut(oid).payload = Payload::Str(m.into());
+        }
+        Value::obj(oid)
     }
 
     /// A tuple of unknown length whose elements are like `elem`.
     pub fn t_tuple_n(&mut self, elem: Value, node: &Node, st: &mut State) -> Value {
-        self.alloc_positional(Kind::Tuple, node, None, elem, DATA, st)
+        let kv = elem.kv.clone();
+        self.alloc_positional(Kind::Tuple, node, None, elem, kv, st)
     }
 
     // ---------------------------------------------------------------- notes
@@ -596,20 +620,6 @@ fn unused(_: StrId, _: KeyId, _: IndexMap<u8, u8>, _: Vec<Value>) {
 // ---------------------------------------------------------------------------
 // operators, attributes, indexing
 // ---------------------------------------------------------------------------
-
-fn is_int_like(an: &Analyzer, v: &Value) -> bool {
-    if !v.pts.is_empty() {
-        return false;
-    }
-    match &v.kv {
-        KeyVal::Lit(k) => matches!(intern::key_get(*k), intern::Key::Int(_)),
-        KeyVal::Data(l) => intern::str_get(*l).starts_with(sh::DIM_PREFIX),
-        _ => {
-            let _ = an;
-            false
-        }
-    }
-}
 
 impl Analyzer {
     /// `a op b` where tensors or symbolic dims are involved (None: not ours).
@@ -957,13 +967,37 @@ impl Analyzer {
             E::Tuple(t) => t.elts.iter().collect(),
             e => vec![e],
         };
-        let tensorish_index = matches!(idx, E::Tuple(_)) || items.iter().any(|e| matches!(e, E::NoneLiteral(_) | E::EllipsisLiteral(_)));
-        let unknown = !tensor && self.torch_on && !obj.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Ph | Kind::Unknown)) && tensorish_index;
-        if !tensor && !unknown {
+        let named = !tensor && self.torch_on && obj.kv.is_bot() && obj.pts.len() == 1 && obj.pts.iter().all(|o| self.t_sym_of_obj(o).is_some());
+        if !tensor && !named {
             return None;
         }
+        let simple = |e: &E| matches!(e, E::NumberLiteral(_) | E::Name(_) | E::Attribute(_) | E::NoneLiteral(_) | E::EllipsisLiteral(_) | E::Slice(_) | E::UnaryOp(_) | E::List(_));
+        if named && !items.iter().all(|e| simple(e)) {
+            return None;
+        }
+        let mut vals: Vec<Option<Value>> = Vec::new();
+        for e in &items {
+            vals.push(match e {
+                E::Slice(_) | E::NoneLiteral(_) | E::EllipsisLiteral(_) | E::List(_) => None,
+                _ => Some(self.eval(e, st)),
+            });
+        }
+        if named {
+            let tensorish = matches!(idx, E::Tuple(_)) || items.iter().any(|e| matches!(e, E::NoneLiteral(_) | E::EllipsisLiteral(_)));
+            if !tensorish {
+                // one index: an int or an index tensor makes it tensor indexing; a slice or
+                // anything else may be a list's / dict's
+                let ok = match &vals[0] {
+                    Some(v) => self.t_int(v).is_some() || is_tensor(v) || dim_of_label(v).is_some(),
+                    None => false,
+                };
+                if !ok {
+                    return None;
+                }
+            }
+        }
         let s = self.t_shape(obj, st).unwrap_or_else(Shape::any);
-        Some(self.t_index(&s, &items, node, st))
+        Some(self.t_index(&s, &items, &vals, node, st))
     }
 
     fn t_size_index(&mut self, s: &Shape, idx: &'static ruff_python_ast::Expr, node: &Node, st: &mut State) -> Value {
@@ -1008,19 +1042,37 @@ impl Analyzer {
         }
     }
 
-    fn t_index(&mut self, s: &Shape, items: &[&'static ruff_python_ast::Expr], node: &Node, st: &mut State) -> Value {
+    fn t_index(&mut self, s: &Shape, items: &[&'static ruff_python_ast::Expr], vals: &[Option<Value>], node: &Node, st: &mut State) -> Value {
         use ruff_python_ast::Expr as E;
-        // expand the ellipsis: items before it index from the front, after it from the back
-        let ell = items.iter().position(|e| matches!(e, E::EllipsisLiteral(_)));
-        let consumes = |e: &E| !matches!(e, E::NoneLiteral(_) | E::EllipsisLiteral(_));
-        let (front, back): (Vec<&'static E>, Vec<&'static E>) = match ell {
-            Some(p) => (items[..p].to_vec(), items[p + 1..].to_vec()),
-            None => (items.to_vec(), vec![]),
-        };
-        let nf = front.iter().filter(|e| consumes(e)).count();
-        let nb = back.iter().filter(|e| consumes(e)).count();
-        // rank check / expose
         let s = sh::norm_shape(s, &st.tf);
+        // how many dims each item consumes (None: a bool mask of unknown rank)
+        let mut cons: Vec<Option<usize>> = Vec::new();
+        for (e, v) in items.iter().zip(vals.iter()) {
+            cons.push(match e {
+                E::NoneLiteral(_) | E::EllipsisLiteral(_) => Some(0),
+                _ => match v {
+                    Some(v) if self.t_bool_tensor(v) => {
+                        let ms = self.t_shape(v, st).unwrap_or_else(Shape::any);
+                        if items.len() == 1 && ms == s {
+                            // a mask over the whole tensor: the selected elements
+                            return tensor_value(Shape::known(vec![sh::unknown()]));
+                        }
+                        ms.rank()
+                    }
+                    _ => Some(1),
+                },
+            });
+        }
+        if cons.iter().any(|c| c.is_none()) {
+            return tensor_value(Shape::any());
+        }
+        let ell = items.iter().position(|e| matches!(e, E::EllipsisLiteral(_)));
+        let (fi, bi): (Vec<usize>, Vec<usize>) = match ell {
+            Some(p) => ((0..p).collect(), (p + 1..items.len()).collect()),
+            None => ((0..items.len()).collect(), vec![]),
+        };
+        let nf: usize = fi.iter().map(|i| cons[*i].unwrap()).sum();
+        let nb: usize = bi.iter().map(|i| cons[*i].unwrap()).sum();
         if let Some(r) = s.rank() {
             if nf + nb > r {
                 let m = format!("too many indices ({}) for a tensor of {} dims", nf + nb, r);
@@ -1035,77 +1087,49 @@ impl Analyzer {
         let (pre, rest, suf) = match e.dims() {
             Some(d) => {
                 let n = d.len();
-                (d[..nf].to_vec(), Some(Rest::Dims(d[nf..n - nb].to_vec())), d[n - nb..].to_vec())
+                (d[..nf].to_vec(), Rest::Dims(d[nf..n - nb].to_vec()), d[n - nb..].to_vec())
             }
             None => {
                 let n = e.suffix.len();
-                (e.prefix[..nf].to_vec(), Some(sh::merge_rest(&e.prefix[nf..], e.rest.as_ref().unwrap(), &e.suffix[..n - nb])), e.suffix[n - nb..].to_vec())
+                (e.prefix[..nf].to_vec(), sh::merge_rest(&e.prefix[nf..], e.rest.as_ref().unwrap(), &e.suffix[..n - nb]), e.suffix[n - nb..].to_vec())
             }
         };
-        let mut out_front: Vec<DimId> = Vec::new();
-        let mut adv: Vec<Shape> = Vec::new();
-        let mut i = 0;
-        for it in &front {
-            match self.t_index_one(it, if consumes(it) { Some(pre[i]) } else { None }, st, &mut adv) {
-                Some(d) => out_front.extend(d),
-                None => return tensor_value(Shape::any()),
-            }
-            if consumes(it) {
-                i += 1;
-            }
-        }
-        let mut out_back: Vec<DimId> = Vec::new();
+        let mut adv = 0usize;
+        let mut front: Vec<DimId> = Vec::new();
         let mut j = 0;
-        for it in &back {
-            match self.t_index_one(it, if consumes(it) { Some(suf[j]) } else { None }, st, &mut adv) {
-                Some(d) => out_back.extend(d),
+        for &i in &fi {
+            let c = cons[i].unwrap();
+            let d: Vec<DimId> = pre[j..j + c].to_vec();
+            j += c;
+            match self.t_index_one(items[i], vals[i].as_ref(), &d, st, &mut adv) {
+                Some(x) => front.extend(x),
                 None => return tensor_value(Shape::any()),
             }
-            if consumes(it) {
-                j += 1;
+        }
+        let mut back: Vec<DimId> = Vec::new();
+        let mut j = 0;
+        for &i in &bi {
+            let c = cons[i].unwrap();
+            let d: Vec<DimId> = suf[j..j + c].to_vec();
+            j += c;
+            match self.t_index_one(items[i], vals[i].as_ref(), &d, st, &mut adv) {
+                Some(x) => back.extend(x),
+                None => return tensor_value(Shape::any()),
             }
         }
-        if ell.is_none() {
-            // the unindexed trailing dims
-            let mut r = Shape { prefix: out_front.clone(), rest: rest.clone(), suffix: vec![], assume: vec![] };
-            r = sh::tidy(r);
-            if !adv.is_empty() {
-                return self.t_adv(r, &adv, node, st);
-            }
-            return tensor_value(r);
-        }
-        let r = sh::tidy(Shape { prefix: out_front, rest, suffix: out_back, assume: vec![] });
-        if !adv.is_empty() {
-            return self.t_adv(r, &adv, node, st);
-        }
-        tensor_value(r)
-    }
-
-    /// Advanced indexing: index tensors broadcast together and go first (a simplification
-    /// that holds for a single index tensor, the common case).
-    fn t_adv(&mut self, r: Shape, adv: &[Shape], node: &Node, st: &mut State) -> Value {
-        let mut b = adv[0].clone();
-        for a in &adv[1..] {
-            match sh::broadcast(&b, a, &st.tf) {
-                Ok(x) => b = x,
-                Err(_) => {
-                    let m = "index tensors do not broadcast".to_string();
-                    self.t_error(node, m, st);
-                    return Value::new();
-                }
-            }
-        }
-        if adv.len() > 1 {
+        if adv > 1 {
             return tensor_value(Shape::any());
         }
-        tensor_value(concat(&b, &r))
+        tensor_value(sh::tidy(Shape { prefix: front, rest: Some(rest), suffix: back, assume: vec![] }))
     }
 
-    /// One index item against dim `d`: the dims it produces (None: unknown).
-    fn t_index_one(&mut self, e: &'static ruff_python_ast::Expr, d: Option<DimId>, st: &mut State, adv: &mut Vec<Shape>) -> Option<Vec<DimId>> {
+    /// One index item over the dims it consumes: the dims it produces (None: unknown).
+    fn t_index_one(&mut self, e: &'static ruff_python_ast::Expr, v: Option<&Value>, dims: &[DimId], st: &mut State, adv: &mut usize) -> Option<Vec<DimId>> {
         use ruff_python_ast::Expr as E;
+        let d = dims.first().copied();
         match e {
             E::NoneLiteral(_) => Some(vec![sh::lit(1)]),
+            E::EllipsisLiteral(_) => Some(vec![]),
             E::Slice(sl) => {
                 let d = d?;
                 if sl.step.is_some() {
@@ -1125,7 +1149,6 @@ impl Analyzer {
                 let hi_i = hi.as_ref().map(|v| self.t_int(v));
                 Some(vec![match (lo_i, hi_i) {
                     (None, None) => d,
-                    // [:T]
                     (None, Some(None)) => match self.t_dim(hi.as_ref().unwrap(), st) {
                         Some(t) if !sh::has_unknown(t) => sh::min(t, d),
                         _ => sh::unknown(),
@@ -1140,7 +1163,6 @@ impl Analyzer {
                             }
                         }
                     }
-                    // [a:]
                     (Some(Some(l)), None) => {
                         if l >= 0 {
                             match sh::as_lit(d) {
@@ -1169,31 +1191,31 @@ impl Analyzer {
                 }])
             }
             E::List(_) => {
-                let v = self.eval(e, st);
-                match self.t_seq(&v, st) {
+                let lv = self.eval(e, st);
+                *adv += 1;
+                match self.t_seq(&lv, st) {
                     Some(items) => Some(vec![sh::lit(items.len() as i64)]),
                     None => Some(vec![sh::unknown()]),
                 }
             }
             _ => {
-                let v = self.eval(e, st);
-                if let Some(ts) = tensor_shape(&v) {
-                    let ts = sh::norm_shape(&ts, &st.tf);
-                    // a bool mask over this dim: an unknown count; an index tensor: its shape
-                    if self.t_bool_tensor(&v) {
-                        adv.push(Shape::known(vec![sh::unknown()]));
-                    } else {
-                        adv.push(ts);
+                let v = v?;
+                if let Some(ts) = tensor_shape(v) {
+                    *adv += 1;
+                    if self.t_bool_tensor(v) {
+                        // the mask's dims become one dim: the selected elements
+                        return Some(vec![sh::unknown()]);
                     }
-                    return Some(vec![]);
+                    let ts = sh::norm_shape(&ts, &st.tf);
+                    return ts.dims();
                 }
-                if self.t_int(&v).is_some() || is_int_like(self, &v) {
+                if self.t_int(v).is_some() || dim_of_label(v).is_some() {
                     return Some(vec![]);
                 }
                 if v.pts.iter().any(|o| matches!(self.kind(o), Kind::List | Kind::Tuple)) {
+                    *adv += 1;
                     return Some(vec![sh::unknown()]);
                 }
-                // an unknown index: an int (dim gone) or an index tensor (unknown)
                 None
             }
         }
@@ -3172,7 +3194,7 @@ impl Analyzer {
         };
         let hn = tensor_value(hn_shape);
         if ty == "LSTM" {
-            let pair = self.t_tuple(vec![hn.clone(), hn], node, st, None);
+            let pair = self.t_tuple_role(vec![hn.clone(), hn], node, st, None, "hc");
             return self.t_tuple(vec![out, pair], node, st, None);
         }
         self.t_tuple(vec![out, hn], node, st, None)
@@ -3611,8 +3633,11 @@ impl Analyzer {
             Some(sh::norm_shape(&s, &st.tf))
         } else if let Some(o) = v.single().filter(|o| matches!(&self.obj(*o).payload, Payload::Str(q) if q == "torch.Size") || (self.kind(*o) == Kind::Tuple && self.obj(*o).literal_len.is_some())) {
             self.t_shape_arg(&Value::obj(o), st)
-        } else if tensor_shape(v).is_some() || (!v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::Ph | Kind::Unknown))) || matches!(&v.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with("expr:") || *l == intern::EMPTY_STR || intern::str_get(*l).starts_with('L')) && v.pts.is_empty() {
-            if self.t_dim(v, st).is_some() && dim_of_label(v).is_some() { None } else { self.t_shape(v, st) }
+        } else if tensor_shape(v).is_some() {
+            self.t_shape(v, st)
+        } else if !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::Ph | Kind::Unknown)) {
+            // an unknown: a shape only once facts say something about it
+            self.t_shape(v, st).filter(|s| !(s.prefix.is_empty() && s.suffix.is_empty() && matches!(s.rest, Some(Rest::Slice(_, 0, 0)) | Some(Rest::Any))))
         } else {
             None
         };
@@ -3828,5 +3853,21 @@ impl Analyzer {
             return None;
         }
         Some(self.t_compare(a, b, node, st))
+    }
+}
+
+impl Analyzer {
+    /// `w = load(...)`: an unknown call's result is named by the variable it is bound to
+    /// (its dims print as `w.shape[0]`).
+    pub fn t_name_result(&mut self, name: StrId, v: &Value) {
+        if v.pts.len() != 1 || !v.kv.is_bot() {
+            return;
+        }
+        let o = v.pts.first().unwrap();
+        if self.kind(o) != Kind::Unknown || !self.origins.contains_key(&o) || self.t_var_names.contains_key(&o) {
+            return;
+        }
+        let scope = self.frames.iter().rev().find_map(|fr| fr.func).unwrap_or(0);
+        self.t_var_names.insert(o, sh::sym(scope, &intern::str_get(name)));
     }
 }

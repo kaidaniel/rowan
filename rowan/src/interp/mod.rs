@@ -658,6 +658,8 @@ pub struct Analyzer {
     pub entry_run: Option<ObjId>,
     /// functions that had their entry run
     pub entry_done: FxHashSet<ObjId>,
+    /// unknown call results named by the variable they were bound to (tensor dims)
+    pub t_var_names: FxHashMap<ObjId, crate::shape::Sym>,
     /// tensor-shape requirements / definite mismatches (models/torch.rs)
     pub shape_reqs: Vec<crate::models::torch::ShapeNote>,
     pub shape_errors: Vec<crate::models::torch::ShapeNote>,
@@ -836,6 +838,7 @@ impl Analyzer {
             torch_modules: FxHashSet::default(),
             entry_run: None,
             entry_done: FxHashSet::default(),
+            t_var_names: FxHashMap::default(),
             shape_reqs: Vec::new(),
             shape_errors: Vec::new(),
             t_sym_alias: FxHashMap::default(),

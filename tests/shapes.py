@@ -290,8 +290,72 @@ def shape_text(sh: Optional[Dict[str, Any]]) -> str:
     return "[" + ", ".join(parts) + "]"
 
 
+_SLICE = re.compile(r"^(.*)\.shape(?:\[(-?\d*):(-?\d*)\])?$")
+
+
+def _slice_parts(rest: Optional[str]):
+    """`x.shape[1:-2]` → ("x", 1, 2) (from the start, from the end); None if not a slice."""
+    if rest is None or rest in ("*", "_"):
+        return None
+    m = _SLICE.match(rest)
+    if not m:
+        return None
+    base, a, b = m.group(1), m.group(2) or "", m.group(3) or ""
+    if (a and a.startswith("-")) or (b and not b.startswith("-")):
+        return None
+    return base, int(a) if a else 0, -int(b) if b else 0
+
+
+def _slice_text(base: str, a: int, b: int) -> str:
+    if a == 0 and b == 0:
+        return f"{base}.shape"
+    return f"{base}.shape[{a if a else ''}:{-b if b else ''}]"
+
+
+def _dim(base: str, i: int) -> str:
+    return norm_dim(f"{base}.shape[{i}]", {})
+
+
+def fold(sh: Dict[str, Any]) -> Dict[str, Any]:
+    """Fold known dims that continue a slice rest into it (`[x0, *x.shape[1:]]` → `[*x.shape]`)."""
+    sp = _slice_parts(sh.get("rest"))
+    if sp is None:
+        return sh
+    base, a, b = sp
+    pre, suf = list(sh["prefix"]), list(sh["suffix"])
+    while a > 0 and pre and pre[-1] == _dim(base, a - 1):
+        pre.pop()
+        a -= 1
+    while b > 0 and suf and suf[0] == _dim(base, -b):
+        suf.pop(0)
+        b -= 1
+    return dict(sh, prefix=pre, suffix=suf, rest=_slice_text(base, a, b))
+
+
+def unfold(sh: Dict[str, Any], n_pre: int, n_suf: int) -> Dict[str, Any]:
+    """Spell out dims of a slice rest until there are n_pre / n_suf known dims."""
+    sp = _slice_parts(sh.get("rest"))
+    if sp is None:
+        return sh
+    base, a, b = sp
+    pre, suf = list(sh["prefix"]), list(sh["suffix"])
+    while len(suf) < n_suf:
+        b += 1
+        suf.insert(0, _dim(base, -b))
+    while len(pre) < n_pre and not sh["suffix"]:
+        pre.append(_dim(base, a))
+        a += 1
+    return dict(sh, prefix=pre, suffix=suf, rest=_slice_text(base, a, b))
+
+
 def shape_problem(spec: Dict[str, Any], got: Optional[Dict[str, Any]]) -> str:
     e = engine_shape(got)
+    if e is not None and e["rest"] is not None and spec.get("kind") == "shape" and spec["rest"] is not None:
+        if spec["rest"] == "_":
+            e = unfold(e, len(spec["prefix"]), len(spec["suffix"]))
+        else:
+            e = fold(e)
+            spec = fold(spec)
     if spec["kind"] == "unknown":
         if e is None or (e["rest"] == "*" and not e["prefix"] and not e["suffix"]):
             return ""
