@@ -11,6 +11,35 @@ use crate::state::{Kind, State};
 use super::funcs::Elem;
 use super::{is_constant, names_in, Analyzer, Payload, ViewKind, SAFE_METHODS, UNROLL_MAX};
 
+/// Python's `s[lo:hi:step]` on characters.
+fn py_slice(cs: &[char], lo: Option<i64>, hi: Option<i64>, step: Option<i64>) -> Option<String> {
+    let n = cs.len() as i64;
+    let step = step.unwrap_or(1);
+    if step == 0 {
+        return None;
+    }
+    let norm = |x: i64| if x < 0 { x + n } else { x };
+    let mut out = String::new();
+    if step > 0 {
+        let lo = lo.map(norm).unwrap_or(0).clamp(0, n);
+        let hi = hi.map(norm).unwrap_or(n).clamp(0, n);
+        let mut i = lo;
+        while i < hi {
+            out.push(cs[i as usize]);
+            i += step;
+        }
+    } else {
+        let lo = lo.map(norm).unwrap_or(n - 1).clamp(-1, n - 1);
+        let hi = hi.map(norm).unwrap_or(-1).clamp(-1, n - 1);
+        let mut i = lo;
+        while i > hi {
+            out.push(cs[i as usize]);
+            i += step;
+        }
+    }
+    Some(out)
+}
+
 impl Analyzer {
     pub fn eval(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {
         match node {
@@ -59,6 +88,64 @@ impl Analyzer {
                 if let ast::Expr::Slice(sl) = &*sub.slice {
                     if let Some(v) = self.slice_positional(&obj, sl, node, state) {
                         return v;
+                    }
+                }
+                // a known string sliced / indexed by known numbers
+                if obj.pts.is_empty() && obj.kv.is_literal() && !super::disabled("strslice") {
+                    let strs: Option<Vec<std::sync::Arc<str>>> = crate::domain::kv_literals(&obj.kv).iter().map(intern::key_as_str).collect();
+                    if let Some(strs) = strs.filter(|v| !v.is_empty()) {
+                        let mut out: Option<intern::KeySet> = Some(intern::KeySet::new());
+                        match &*sub.slice {
+                            ast::Expr::Slice(sl) => {
+                                let mut b: Vec<Option<i64>> = Vec::new();
+                                for e in [&sl.lower, &sl.upper, &sl.step] {
+                                    match e.as_deref() {
+                                        None => b.push(None),
+                                        Some(e) => match self.int_value(e, state) {
+                                            Some(i) => b.push(Some(i)),
+                                            None => {
+                                                out = None;
+                                                break;
+                                            }
+                                        },
+                                    }
+                                }
+                                if let Some(o) = out.as_mut() {
+                                    for st0 in &strs {
+                                        let cs: Vec<char> = st0.chars().collect();
+                                        match py_slice(&cs, b[0], b[1], b[2]) {
+                                            Some(t) => *o = o.insert(key_str_lit(&t)),
+                                            None => {
+                                                out = None;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            idx => {
+                                let iv = self.eval(idx, state);
+                                match iv.kv.as_lit().filter(|_| iv.pts.is_empty()).and_then(intern::key_as_int) {
+                                    Some(i) => {
+                                        for st0 in &strs {
+                                            let cs: Vec<char> = st0.chars().collect();
+                                            let j = if i < 0 { i + cs.len() as i64 } else { i };
+                                            if j < 0 || j as usize >= cs.len() {
+                                                out = None;
+                                                break;
+                                            }
+                                            if let Some(o) = out.as_mut() {
+                                                *o = o.insert(key_str_lit(&cs[j as usize].to_string()));
+                                            }
+                                        }
+                                    }
+                                    None => out = None,
+                                }
+                            }
+                        }
+                        if let Some(o) = out {
+                            return Value::kv_only(KeyVal::lits(o));
+                        }
                     }
                 }
                 let key = self.eval_key(&sub.slice, state);
@@ -698,6 +785,31 @@ impl Analyzer {
                 };
                 Some(if op == ast::CmpOp::Is { is_none } else { !is_none })
             }
+            // identity of objects: distinct abstract objects are distinct objects; one strong
+            // object is itself
+            ast::CmpOp::Is | ast::CmpOp::IsNot if !super::disabled("objis") && !a.pts.is_empty() && a.kv.is_bot() => {
+                let b = self.eval_right(right, state);
+                if b.pts.is_empty() || !b.kv.is_bot() {
+                    return None;
+                }
+                let opaque = |an: &Analyzer, v: &Value| v.pts.iter().any(|o| matches!(an.kind(o), Kind::Ph | Kind::Unknown | Kind::External | Kind::Class | Kind::Module | Kind::Function));
+                if opaque(self, &a) || opaque(self, &b) {
+                    for o in a.pts.iter().chain(b.pts.iter()) {
+                        if self.kind(o) == Kind::Ph {
+                            self.record_event("truth", o);
+                        }
+                    }
+                    return None;
+                }
+                let same = if a.pts.intersection(&b.pts).is_empty() {
+                    false
+                } else if a.pts.len() == 1 && a.pts == b.pts && self.obj(a.pts.first().unwrap()).single {
+                    true
+                } else {
+                    return None;
+                };
+                Some(if op == ast::CmpOp::Is { same } else { !same })
+            }
             ast::CmpOp::In | ast::CmpOp::NotIn => {
                 if let Some(ph) = a.kv.as_param() {
                     self.record_event("narrow", ph);
@@ -816,6 +928,12 @@ impl Analyzer {
             ast::CmpOp::Eq | ast::CmpOp::NotEq => {
                 let b = self.eval_right(right, state);
                 let bl = crate::domain::kv_literals(&b.kv);
+                // a builtin dict / list / tuple / set never equals a str / number / bool / None
+                let container = |an: &Analyzer, v: &Value| !v.pts.is_empty() && v.pts.iter().all(|o| matches!(an.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set) && !crate::models::pandas::is_series_obj(an, o)) && matches!(v.kv, KeyVal::Bot);
+                let scalar = |v: &Value| v.pts.is_empty() && v.kv.is_literal() && !crate::domain::kv_literals(&v.kv).iter().any(|k| intern::with_key(k, |kk| matches!(kk, intern::Key::Tuple(_))));
+                if !crate::interp::disabled("containereq") && ((container(self, &a) && scalar(&b)) || (container(self, &b) && scalar(&a))) {
+                    return Some(op == ast::CmpOp::NotEq);
+                }
                 if !a.pts.is_empty() || !b.pts.is_empty() || !a.kv.is_literal() || !b.kv.is_literal() || lits.len() != 1 || bl.len() != 1 {
                     for v in [&a, &b] {
                         for o in v.pts.iter() {

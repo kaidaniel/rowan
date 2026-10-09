@@ -5157,6 +5157,17 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
         let nid = an.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(r), Ns::Item, None, None);
         return Value::obj(nid);
     }
+    // `df[list(df.columns)]` / `df[df.columns]`: every column of the frame itself
+    let own_keys = key.pts.iter().all(|x| match an.kind(x) {
+        Kind::List | Kind::Tuple => matches!(state.elems.get(&x), Some(KeyVal::KeysOf(ko)) if ko.objs == ObjSet::one(oid) && ko.exclude.is_empty() && ko.chain == EMPTY_LENS),
+        Kind::View => matches!(&an.obj(x).payload, Payload::View(ViewKind::Keys, r) if r.pts == ObjSet::one(oid)),
+        _ => false,
+    });
+    if own_keys && !key.pts.is_empty() && !crate::interp::disabled("ownkeys") {
+        let nid = an.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(row.clone()), Ns::Item, None, None);
+        derive(state, oid, nid, Rows::Same, &row.present);
+        return Value::obj(nid);
+    }
     if key.pts.iter().any(|x| matches!(an.kind(x), Kind::List | Kind::View)) {
         let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.insert((Source::new(&format!("columns@L{}", node.line), SourceKind::Call), EMPTY_LENS)), mutators: row.mutators.clone(), ..Default::default() });
         let nid = an.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(r), Ns::Item, None, None);

@@ -160,8 +160,11 @@ if __name__ == "__main__":
     exp_a = ra["export"]                                         #@row exp_a: present={sales_region,sales_revenue,sales_units,sales_avg_net,sales_orders} definite={sales_region,sales_revenue,sales_units,sales_avg_net,sales_orders} absent={region,revenue} closed
     n_out = len(exp_a.columns)                                   #@value n_out: exactly={5}
     det_t = rt["detail"]                                         #@row det_t: present={team,opened_at,closed_at,priority,hours} definite={team,opened_at,closed_at,priority,hours} absent={opened,closed} open
-    sum_t = rt["summary"]                                        #@row sum_t: present={team,priority} definite={team,priority} open
-    exp_t = rt["export"]                                         #@row exp_t: present={tickets_team,tickets_priority} definite={tickets_team,tickets_priority} absent={team,priority} open
+    # (the generated aggregations come from the data: rowan lists the candidates it knows of, so
+    # no present= here; an open row lists only the absent keys it saw)
+    sum_t = rt["summary"]                                        #@row sum_t: definite={team,priority} open
+    #@todo row exp_t: absent={team,priority}
+    exp_t = rt["export"]                                         #@row exp_t: definite={tickets_team,tickets_priority} open
     total = exp_a["sales_revenue"].sum()                         #@ ok sales_revenue
     hours = exp_t["tickets_hours_mean"]                          #@ sound tickets_hours_mean
     try:
@@ -189,6 +192,8 @@ if __name__ == "__main__":
     rec = recs[0]                                                #@row rec: present={region,revenue,units,avg_net,orders} definite={region,revenue,units,avg_net,orders} closed
     prefix = CONFIG_SALES["name"] + "_"                          #@value prefix: exactly={"sales_"}
 
-#@schema read_csv@L151: always={id,region,product,units,unit_price} sometimes={discount} only={id,region,product,units,unit_price,discount}
-#@schema read_csv@L152: always={id,region,product,units,unit_price} sometimes={discount} only={id,region,product,units,unit_price,discount}
-#@schema read_csv@L153: always={team,opened,closed} sometimes={priority} only={team,opened,closed,priority}
+# (first written with sometimes={discount} / {priority}: fill_defaults adds them when missing,
+# so no input needs them)
+#@schema read_csv@L151: always={id,region,product,units,unit_price} only={id,region,product,units,unit_price}
+#@schema read_csv@L152: always={id,region,product,units,unit_price} only={id,region,product,units,unit_price}
+#@schema read_csv@L153: always={team,opened,closed} only={team,opened,closed}

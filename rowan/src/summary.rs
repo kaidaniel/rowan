@@ -1469,8 +1469,10 @@ impl Analyzer {
                     add(r, members);
                 }
             }
+            // (an access of the callee raises into a try around this call)
+            let sr_guarded = sr.guarded || (self.is_guarded(sr.ns) && !crate::interp::disabled("callguard"));
             for (row_c, members) in groups {
-                let tiers = self.emit_access(&sr.node, &kv, &row_c, members[0], sr.ns, sr.guarded, &sr_chain, &sr.file, state, &sr.text, sr.cls, sr.conditional);
+                let tiers = self.emit_access(&sr.node, &kv, &row_c, members[0], sr.ns, sr_guarded, &sr_chain, &sr.file, state, &sr.text, sr.cls, sr.conditional);
                 for (k, tier) in tiers {
                     if tier == Tier::Missing {
                         for a in &members {
