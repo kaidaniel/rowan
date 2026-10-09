@@ -35,7 +35,7 @@ import sys
 from typing import Any, Dict, List, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from shapes import ShapeExpectations  # noqa: E402
+from shapes import ShapeExpectations, directive_lines  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -73,6 +73,7 @@ def collect_expectations(src: str):
     row_exp: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}
     VALUE_EXP.clear()
     SHAPES[0] = ShapeExpectations()
+    SHAPES[0].eff = directive_lines(src)
     schema_exp: List[Tuple[str, Dict[str, Any]]] = []
     for i, line in enumerate(src.splitlines(), 1):
         if "#@todo" in line:

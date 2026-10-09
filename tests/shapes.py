@@ -9,10 +9,13 @@
 Shapes: `[d, …]` with at most one rest `*NAME` (`*` = unknown leading/middle dims, `*_` = any
 rest); dims are integer expressions compared as polynomials (`4*C` == `C*4`, `T*C` after
 `view(B, -1)`); `?` is an unknown dim (the engine must say unknown), `_` accepts anything.
+`[…] if C1, C2` is a shape that holds under assumptions (`x @ y` with ranks unknown: `if
+x.dim() >= 2, y.dim() >= 2`); a shape without `if` must carry no assumptions.
 `#@shape NAME: ?` accepts a value with no known shape (not a tensor, or `[*]`); `none` demands
 that NAME is not a tensor.  `where A=…, B=…` substitutes names before comparing.
 Without `@L`, a check applies to the runs in the function's own (entry/symbolic) analysis if it
 has one, else to every run; each selected run must match.
+A line holding only a directive comment applies to the code line above it.
 `#@requires C1; C2` lists exactly the requirements recorded at that line (`none`: no
 requirement).  `#@shape-error [text]`: a definite mismatch at that line (whose message contains
 text); a shape error on a line without one fails the case.
@@ -114,6 +117,8 @@ def poly(node: ast.AST) -> Poly:
         if isinstance(node.op, (ast.FloorDiv, ast.Mod, ast.Div)):
             op = {ast.FloorDiv: "//", ast.Mod: "%", ast.Div: "/"}[type(node.op)]
             left, right = poly(node.left), poly(node.right)
+            if op == "//":
+                return floordiv(left, right)
             # constant folding
             if all(m == () for m in left) and all(m == () for m in right) and right.get((), 0):
                 lv, rv = left.get((), 0), right[()]
@@ -126,6 +131,61 @@ def poly(node: ast.AST) -> Poly:
         args = sorted(pstr(poly(a)) for a in node.args)
         return _atom(f"{node.func.id}({', '.join(args)})")
     return _atom(ast.unparse(node).replace(" ", ""))
+
+
+FLOORS: Dict[str, Tuple[Poly, Poly]] = {}  # atom text -> (numerator, divisor)
+
+
+def _mono_div(m: Tuple[Tuple[str, int], ...], d: Tuple[Tuple[str, int], ...]):
+    dm = dict(m)
+    for a, e in d:
+        if dm.get(a, 0) < e:
+            return None
+        dm[a] -= e
+        if dm[a] == 0:
+            del dm[a]
+    return tuple(sorted(dm.items()))
+
+
+def floordiv(num: Poly, den: Poly) -> Poly:
+    """Normal form of num // den (dims are non-negative ints): terms that are whole multiples
+    of a monomial divisor leave the floor ((H - 2)//2 + 1 == H//2), nested floors with
+    literal divisors merge (H//2//2 == H//4), constants fold."""
+    if len(den) == 1:
+        (dm, dc), = den.items()
+        if dc > 0:
+            out: Poly = {}
+            rest: Poly = {}
+            for m, c in num.items():
+                q = _mono_div(m, dm)
+                if q is not None and (c % dc == 0 or (m == () and dm == ())):
+                    if m == () and dm == ():
+                        qq, rr = c // dc, c % dc
+                        if qq:
+                            out = _padd(out, {(): qq})
+                        if rr:
+                            rest = _padd(rest, {(): rr})
+                        continue
+                    out = _padd(out, {q: c // dc})
+                else:
+                    rest = _padd(rest, {m: c})
+            if not rest:
+                return out
+            # (Y // k1) // k2 == Y // (k1*k2)
+            if len(rest) == 1 and dm == ():
+                (rm, rc), = rest.items()
+                if rc == 1 and len(rm) == 1 and rm[0][1] == 1 and rm[0][0] in FLOORS:
+                    inum, iden = FLOORS[rm[0][0]]
+                    if len(iden) == 1 and list(iden)[0] == ():
+                        return _padd(out, floordiv(inum, {(): iden[()] * dc}))
+            if dm == () and all(m == () for m in rest):
+                return _padd(out, {(): sum(rest.values()) // dc} if sum(rest.values()) // dc else {})
+            key = f"({pstr(rest)})//({pstr(den)})"
+            FLOORS[key] = (rest, den)
+            return _padd(out, _atom(key))
+    key = f"({pstr(num)})//({pstr(den)})"
+    FLOORS[key] = (num, den)
+    return _atom(key)
 
 
 def pstr(p: Poly) -> str:
@@ -153,7 +213,11 @@ def norm_rest(text: str, where: Dict[str, str]) -> str:
         return "_"
     if text in where:
         text = where[text]
-    return text.replace(" ", "")
+    text = text.replace(" ", "")
+    m = re.match(r"^broadcast\((.*)\)$", text)
+    if m:  # argument order does not matter
+        text = "broadcast(" + ",".join(sorted(_split_top(m.group(1)))) + ")"
+    return text
 
 
 def parse_where(s: str) -> Tuple[str, Dict[str, str]]:
@@ -170,6 +234,8 @@ def parse_where(s: str) -> Tuple[str, Dict[str, str]]:
 def parse_shape_spec(spec: str) -> Dict[str, Any]:
     """`[A, *R, 10] where …` → {"kind": "shape", "prefix": [...], "rest": str|None, "suffix": [...]}."""
     body, where = parse_where(spec)
+    body, assume = split_if(body)
+    assume_n = sorted(norm_constraint(a, where) for a in assume)
     if body == "?":
         return {"kind": "unknown"}
     if body == "none":
@@ -187,7 +253,21 @@ def parse_shape_spec(spec: str) -> Dict[str, Any]:
             prefix.append(norm_dim(it, where))
         else:
             suffix.append(norm_dim(it, where))
-    return {"kind": "shape", "prefix": prefix, "rest": rest, "suffix": suffix, "text": body}
+    return {"kind": "shape", "prefix": prefix, "rest": rest, "suffix": suffix, "text": body, "assume": assume_n}
+
+
+def split_if(body: str) -> Tuple[str, List[str]]:
+    """`[…] if x.dim() >= 2, y.dim() >= 2`: the shape holds under these assumptions."""
+    depth = 0
+    for i in range(len(body)):
+        ch = body[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and body.startswith(" if ", i):
+            return body[:i].strip(), _split_top(body[i + 4:])
+    return body.strip(), []
 
 
 def engine_shape(sh: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -227,12 +307,33 @@ def shape_problem(spec: Dict[str, Any], got: Optional[Dict[str, Any]]) -> str:
             return f"shape {shape_text(got)}, want {spec['text']} ({g} is not {w})"
     if spec["rest"] not in (None, "_") and spec["rest"] != e["rest"]:
         return f"shape {shape_text(got)}, want {spec['text']} (rest {e['rest']} is not {spec['rest']})"
+    got_assume = sorted(norm_constraint(a) for a in got.get("assume", []))
+    if got_assume != spec["assume"]:
+        return f"shape {shape_text(got)} assumes {got.get('assume', [])}, want {spec['assume'] or 'no assumptions'}"
     return ""
 
 
+def directive_lines(src: str) -> List[int]:
+    """Effective line of each source line (1-based list index i -> line): a line holding only a
+    `#@` comment applies to the nearest code line above it."""
+    eff: List[int] = [0]
+    last_code = 0
+    for i, line in enumerate(src.splitlines(), 1):
+        st = line.strip()
+        if st.startswith("#@") and last_code:
+            eff.append(last_code)
+        else:
+            if st and not st.startswith("#"):
+                last_code = i
+            eff.append(i)
+    return eff
+
+
 def norm_constraint(text: str, where: Optional[Dict[str, str]] = None) -> str:
-    text = text.strip()
+    text, conds = split_if(text.strip())
     where = where or {}
+    if conds:
+        return norm_constraint(text, where) + " if " + ", ".join(sorted(norm_constraint(c, where) for c in conds))
     m = re.match(r"^(.*?)\s*==\s*(.*)$", text)
     if m and " in " not in text:
         try:
@@ -252,11 +353,14 @@ class ShapeExpectations:
         self.dims: List[Tuple[int, Optional[int], str, str]] = []
         self.requires: Dict[int, List[str]] = {}
         self.errors: Dict[int, str] = {}
+        self.eff: Optional[List[int]] = None
 
     def any(self) -> bool:
         return bool(self.shapes or self.dims or self.requires or self.errors)
 
     def parse_line(self, i: int, line: str) -> bool:
+        if self.eff is not None and i < len(self.eff):
+            i = self.eff[i]
         m = re.search(r"#@(shape|dim)(?:@L(\d+))?\s+(.*)$", line)
         if m and not line[m.start():].startswith("#@shape-error"):
             at = int(m.group(2)) if m.group(2) else None
@@ -273,7 +377,8 @@ class ShapeExpectations:
         m = re.search(r"#@requires\s+(.*)$", line)
         if m:
             body, where = parse_where(m.group(1))
-            self.requires[i] = [] if body.strip() == "none" else [norm_constraint(c, where) for c in _split_top(body, ";")]
+            new = [] if body.strip() == "none" else [norm_constraint(c, where) for c in _split_top(body, ";")]
+            self.requires[i] = self.requires.get(i, []) + new
             return True
         m = re.search(r"#@shape-error\b\s*(.*)$", line)
         if m:
