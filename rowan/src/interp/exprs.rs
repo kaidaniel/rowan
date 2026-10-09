@@ -185,8 +185,12 @@ impl Analyzer {
                                 return Value::lit(key_float(-f));
                             }
                         }
+                        if crate::models::pandas::is_seriesish(self, &v) {
+                            return Value::with_kv(ObjSet::one(self.series), DATA);
+                        }
                         Value::with_kv(v.pts.filter(|o| o == self.series), DATA)
                     }
+                    _ if crate::models::pandas::is_seriesish(self, &v) => Value::with_kv(ObjSet::one(self.series), DATA),
                     _ => Value::with_kv(v.pts.filter(|o| o == self.series), DATA),
                 }
             }
@@ -257,7 +261,7 @@ impl Analyzer {
                 }
                 for cmp in c.comparators.iter() {
                     let b = self.eval(cmp, state);
-                    if a.pts.contains(self.series) || b.pts.contains(self.series) {
+                    if crate::models::pandas::is_seriesish(self, &a) || crate::models::pandas::is_seriesish(self, &b) {
                         return Value::with_kv(ObjSet::one(self.series), DATA);
                     }
                     let both = a.pts.union(&b.pts);
@@ -1271,7 +1275,7 @@ impl Analyzer {
                 }
             }
         }
-        if a.pts.contains(self.series) || b.pts.contains(self.series) {
+        if crate::models::pandas::is_seriesish(self, &a) || crate::models::pandas::is_seriesish(self, &b) {
             return Value::with_kv(ObjSet::one(self.series), DATA);
         }
         let frames = both.filter(|o| self.kind(o) == Kind::Frame);

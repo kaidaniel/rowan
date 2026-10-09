@@ -748,12 +748,14 @@ impl Analyzer {
                         Value::obj(self.alloc_raw(Kind::Method, &format!("classattr:{}.{}", oid, name), "", true, &label, Payload::Method(format!("class.{}", name), Value::obj(oid))))
                     }
                 }
+                Kind::Dict if crate::models::pandas::is_series_obj(self, oid) => crate::models::pandas::series_getattr(self, oid, name, node, state),
                 Kind::Dict => self.method_value(&format!("dict.{}", name), &Value::obj(oid)),
                 Kind::List | Kind::Tuple | Kind::Set => self.method_value(&format!("{}.{}", k.name(), name), &Value::obj(oid)),
                 Kind::Frame => crate::models::pandas::frame_getattr(self, oid, name, node, state, guarded),
-                Kind::Series => {
-                    let q = format!("Series.{}", name);
-                    Value::obj(self.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, &q, Payload::Str(q.clone())))
+                Kind::Series => crate::models::pandas::series_getattr(self, oid, name, node, state),
+                Kind::Locidx if matches!(&self.obj(oid).payload, Payload::Locidx(a, _) if matches!(a.as_str(), "str" | "dt" | "cat" | "sparse" | "list" | "struct")) => {
+                    let Payload::Locidx(a, recv) = self.obj(oid).payload.clone() else { unreachable!() };
+                    self.method_value(&format!("Series.{}.{}", a, name), &Value::obj(recv))
                 }
                 Kind::Unknown => self.load_unknown_attr(oid, name, node, state, guarded),
                 Kind::Ph => self.load_ph_attr(oid, name, node, state, guarded, single),
