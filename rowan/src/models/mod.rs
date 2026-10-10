@@ -10,6 +10,7 @@ pub mod counter;
 pub mod csvio;
 pub mod argparse;
 pub mod concurrency;
+pub mod itertools;
 pub mod pyvalues;
 pub mod pure;
 pub mod torch;
@@ -174,6 +175,7 @@ impl Registry {
         csvio::register(&mut r);
         argparse::register(&mut r);
         concurrency::register(&mut r);
+        itertools::register(&mut r);
         r(&["typeadapter.*"], m_typeadapter);
         r(&["torch.*"], torch::m_torch);
         r(&["numpy.*", "np.*"], torch::m_numpy);
@@ -1162,6 +1164,10 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         m
                     }
                 };
+                // (made in another state: run it in this one too)
+                if st.slot_opt(moid, Ns::Attr, key_str_lit(&name)).is_none() {
+                    an.run_module(moid, st);
+                }
                 let cv = st.slot(moid, Ns::Attr, key_str_lit(&name));
                 if let Some(cls) = cv.single() {
                     for k in row.present.iter() {
@@ -2240,6 +2246,9 @@ pub fn generated_class(an: &mut Analyzer, st: &mut State, qual: &str) -> Option<
             m
         }
     };
+    if st.slot_opt(moid, Ns::Attr, key_str_lit(cname)).is_none() {
+        an.run_module(moid, st);
+    }
     let v = st.slot(moid, Ns::Attr, key_str_lit(cname));
     if let Some(c) = v.single() {
         an.userdict_classes.insert(c);
@@ -2994,6 +3003,10 @@ fn m_getter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             m
         }
     };
+    // (made in another state — a summary's —: its function is bound in this one too)
+    if st.slot_opt(moid, Ns::Attr, key_str_lit("getter")).is_none() {
+        an.run_module(moid, st);
+    }
     st.slot(moid, Ns::Attr, key_str_lit("getter"))
 }
 
@@ -3079,6 +3092,9 @@ fn m_re_match(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             m
         }
     };
+    if st.slot_opt(moid, Ns::Attr, key_str_lit("matched")).is_none() {
+        an.run_module(moid, st);
+    }
     let f = st.slot(moid, Ns::Attr, key_str_lit("matched"));
     let m = an.call_value(&f, &c.node, None, st, Some(vec![]));
     m.join(&an.none_v.clone())

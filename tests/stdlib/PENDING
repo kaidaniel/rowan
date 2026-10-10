@@ -23,17 +23,6 @@ small/s058_wraps_decorator.py
 small/s059_lru_cache.py
 small/s060_cached_property.py
 small/s062_total_ordering.py
-small/s063_groupby_key.py
-small/s064_chain.py
-small/s065_product_perm_comb.py
-small/s066_islice_count_cycle.py
-small/s067_accumulate_func.py
-small/s068_starmap.py
-small/s069_zip_longest.py
-small/s070_takewhile_dropwhile.py
-small/s071_tee_pairwise.py
-small/s072_batched.py
-small/s073_itemgetter.py
 small/s074_attrgetter_methodcaller.py
 small/s075_operator_reduce.py
 small/s084_heapq.py

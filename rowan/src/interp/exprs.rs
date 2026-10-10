@@ -2194,7 +2194,10 @@ impl Analyzer {
 /// Library constructors whose models report their raises.
 const SELF_REPORTING_EXTERNALS: &[&str] = &[
     "io.StringIO", "csv.writer", "csv.DictWriter", "csv.reader", "csv.DictReader", "argparse.ArgumentParser", "threading.Thread",
-    "concurrent.futures.ThreadPoolExecutor", "concurrent.futures.ProcessPoolExecutor", "concurrent.futures.as_completed", "builtins.slice", "contextlib.ExitStack", "contextlib.redirect_stdout", "contextlib.redirect_stderr", "contextlib.closing", "contextlib.nullcontext",
+    "concurrent.futures.ThreadPoolExecutor", "concurrent.futures.ProcessPoolExecutor", "concurrent.futures.as_completed", "builtins.slice", "contextlib.ExitStack", "contextlib.redirect_stdout", "contextlib.redirect_stderr", "contextlib.closing", "contextlib.nullcontext", "itertools.count", "itertools.cycle", "itertools.repeat",
+    "itertools.islice", "itertools.chain", "itertools.chain.from_iterable", "itertools.product", "itertools.permutations",
+    "itertools.combinations", "itertools.combinations_with_replacement", "itertools.zip_longest", "itertools.tee", "itertools.pairwise",
+    "itertools.batched", "itertools.compress",
 ];
 
 const SELF_REPORTING: &[&str] = &["pydantic.", "fieldinfo.", "pydverr.", "typeadapter.", "fastapi.client.", "fastapi.response.", "fastapi.request.", "stdobj.", "fastapi.bg.", "fastapi.app.", "fastapi.router.", "fastapi.state."];

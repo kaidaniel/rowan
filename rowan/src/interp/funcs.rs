@@ -705,10 +705,24 @@ impl Analyzer {
                         }
                     }
                 }
+                // itertools.count / cycle / repeat: no end
+                Kind::Namespace if self.infinites.contains_key(&oid) => {
+                    items = None;
+                    exhaustive = false;
+                    let inf = self.infinites[&oid].clone();
+                    elems.push(self.infinite_elem(&inf));
+                }
                 Kind::Zip => {
                     let Payload::Zip(ks, vs) = self.obj(oid).payload.clone() else { continue };
-                    let ki = self.iterate(&ks, node, state);
-                    let vi = self.iterate(&vs, node, state);
+                    let mut ki = self.iterate(&ks, node, state);
+                    let mut vi = self.iterate(&vs, node, state);
+                    // an infinite side yields as many items as the other has
+                    if let (Some(inf), Some(n)) = (self.infinite_of(&ks), vi.items.as_ref().map(|x| x.len())) {
+                        ki.items = self.infinite_take(&inf, n);
+                    }
+                    if let (Some(inf), Some(n)) = (self.infinite_of(&vs), ki.items.as_ref().map(|x| x.len())) {
+                        vi.items = self.infinite_take(&inf, n);
+                    }
                     // a strict zip that did not raise: both sides as long as the known one
                     let strict = self.zip_strict.contains(&oid);
                     let (ki_items, vi_items) = match (ki.items.clone(), vi.items.clone()) {

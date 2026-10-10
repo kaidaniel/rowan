@@ -784,6 +784,8 @@ pub struct Analyzer {
     pub exit_callbacks: FxHashMap<ObjId, Vec<(Value, Vec<Value>, IndexMap<StrId, Value>)>>,
     /// TestClient cookie jars (dicts with `set`)
     pub cookie_jars: FxHashSet<ObjId>,
+    /// itertools.count / cycle / repeat(x) objects
+    pub infinites: FxHashMap<ObjId, crate::models::itertools::Infinite>,
     /// the requirements known when a try context was first flagged as raising anywhere
     /// (`may_raise` depth, requirements): its handler needs no less
     pub flag_reqs: Vec<(usize, crate::layered::TwoLevel<crate::intern::SourceId, KeyId, crate::domain::ReqInfo>)>,
@@ -1011,6 +1013,7 @@ impl Analyzer {
             stdout_redirect: Vec::new(),
             exit_callbacks: FxHashMap::default(),
             cookie_jars: FxHashSet::default(),
+            infinites: FxHashMap::default(),
             flag_reqs: Vec::new(),
             identity_objs: RefCell::new(FxHashMap::default()),
             bypass_setattr: false,
