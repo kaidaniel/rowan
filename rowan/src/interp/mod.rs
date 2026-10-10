@@ -790,6 +790,9 @@ pub struct Analyzer {
     /// entry parameters annotated with a TypedDict: the declared row's reads are still the
     /// input's schema (the parameter's source)
     pub td_param_src: FxHashMap<ObjId, crate::domain::SourceId>,
+    /// configparser parsers and their sections (models::configparser)
+    pub cfg_parsers: FxHashMap<ObjId, crate::models::configparser::CfgSpec>,
+    pub cfg_sections: FxHashMap<ObjId, (crate::models::configparser::CfgSpec, String)>,
     /// itertools.count / cycle / repeat(x) objects
     pub infinites: FxHashMap<ObjId, crate::models::itertools::Infinite>,
     /// partials' bound `**mapping`s of unknown keys
@@ -1026,6 +1029,8 @@ impl Analyzer {
             exit_callbacks: FxHashMap::default(),
             cookie_jars: FxHashSet::default(),
             td_param_src: FxHashMap::default(),
+            cfg_parsers: FxHashMap::default(),
+            cfg_sections: FxHashMap::default(),
             infinites: FxHashMap::default(),
             partial_star: FxHashMap::default(),
             wrapped: FxHashMap::default(),
@@ -1295,6 +1300,12 @@ impl Analyzer {
         }
         if let Some(w) = self.wrapped.get(&t).cloned() {
             self.wrapped.insert(nid, w);
+        }
+        if let Some(c) = self.cfg_parsers.get(&t).cloned() {
+            self.cfg_parsers.insert(nid, c);
+        }
+        if let Some(c) = self.cfg_sections.get(&t).cloned() {
+            self.cfg_sections.insert(nid, c);
         }
     }
 

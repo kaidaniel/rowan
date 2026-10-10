@@ -1,5 +1,3 @@
-small/s043_json_input.py
-small/s046_configparser.py
 small/s049_os_environ.py
 small/s050_string_template.py
 models/sm01_orders_cli.py

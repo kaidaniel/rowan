@@ -1434,6 +1434,9 @@ impl Analyzer {
                     }
                 }
                 Kind::Dict if crate::models::pandas::is_series_obj(self, oid) => crate::models::pandas::series_getattr(self, oid, name, node, state),
+                Kind::Dict if self.cfg_parsers.contains_key(&oid) && crate::models::configparser::PARSER_METHODS.contains(&name) => self.method_value(&format!("cfgparser.{}", name), &Value::obj(oid)),
+                Kind::Dict if self.cfg_sections.contains_key(&oid) && crate::models::configparser::SECTION_METHODS.contains(&name) => self.method_value(&format!("cfgsection.{}", name), &Value::obj(oid)),
+                Kind::Dict if self.cfg_sections.contains_key(&oid) && name == "name" => Value::lit_str(&self.cfg_sections[&oid].1),
                 Kind::Dict if self.counters.contains(&oid) && crate::models::counter::COUNTER_METHODS.contains(&name) => self.method_value(&format!("counter.{}", name), &Value::obj(oid)),
                 Kind::Dict if self.chainmaps.contains_key(&oid) && matches!(name, "maps" | "parents") => {
                     let c = super::Call { qual: format!("chainmap.{}", name), recv: Some(Value::obj(oid)), args: vec![], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };

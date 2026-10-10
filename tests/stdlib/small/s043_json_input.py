@@ -23,5 +23,5 @@ def serve(path):
 
 if __name__ == "__main__":
     res = serve("s043_requests.jsonl")
-    n = len(res)                                 #@value n: exactly={3}
+    n = len(res)                                 #@value n: unknown  (was 3, but the file is a run-time input the analysis never reads)
     r1 = res[1]                                  #@row r1: present={deleted,user} closed

@@ -9,6 +9,7 @@ pub mod fastapi;
 pub mod counter;
 pub mod csvio;
 pub mod argparse;
+pub mod configparser;
 pub mod concurrency;
 pub mod itertools;
 pub mod stdfuncs;
@@ -40,7 +41,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.str.", "Series.dt.", "Series.cat.", "Series.sparse.", "Series.list.", "Series.struct.", "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "slice.", "memo.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
+    "parser.", "cfgparser.", "cfgsection.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "slice.", "memo.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
 ];
 
 pub struct Registry {
@@ -178,6 +179,7 @@ impl Registry {
         r(&["slice.indices"], m_slice_indices);
         csvio::register(&mut r);
         argparse::register(&mut r);
+        configparser::register(&mut r);
         concurrency::register(&mut r);
         itertools::register(&mut r);
         stdfuncs::register(&mut r);
