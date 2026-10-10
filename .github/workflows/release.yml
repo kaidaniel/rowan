@@ -1,0 +1,188 @@
+# Release of the VS Code extension with the engine bundled, per platform. Manual only:
+# Actions → Release → Run workflow, with the new version. Tests run first (as in ci.yml);
+# then one `rowan` binary per target is built, packed into a platform-specific .vsix
+# (`vsce package --target`), and everything is attached to a GitHub Release `v<version>`.
+# Uploading the .vsix files to the Marketplace is still manual (manage page → Update);
+# automatic publishing needs a Marketplace token (`vsce publish`), not set up yet.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Extension version, new and semver (e.g. 0.1.1)"
+        required: true
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  UV_PYTHON_PREFERENCE: managed
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  check:
+    name: check the version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Semver, and no release of it yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must look like 1.2.3, got '$VERSION'"; exit 1
+          fi
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release v$VERSION exists already"; exit 1
+          fi
+
+  test:
+    name: test (${{ matrix.os }})
+    needs: check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rowan
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          cache-dependency-glob: .python-version
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Build (release)
+        working-directory: rowan
+        run: cargo build --release --locked
+
+      - name: Unit tests
+        working-directory: rowan
+        run: cargo test --release --lib --locked
+
+      - name: Golden suites
+        run: uv run --no-project python tests/run_golden.py
+
+      - name: Snapshots
+        run: uv run --no-project python tests/run_snapshots.py
+
+      - name: Extension hover rendering
+        working-directory: vscode-rowan
+        run: node test.js
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # macOS: native arm64, x64 cross-compiled on the same runner
+          - { target: darwin-arm64, os: macos-latest, rust: aarch64-apple-darwin, zig: false, run: true }
+          - { target: darwin-x64, os: macos-latest, rust: x86_64-apple-darwin, zig: false, run: false }
+          # Linux: linked against glibc 2.17 with cargo-zigbuild, so the binary runs on any
+          # distribution from the last decade (Ubuntu 18.04+, RHEL / Rocky 8+, Debian 10+)
+          - { target: linux-x64, os: ubuntu-latest, rust: x86_64-unknown-linux-gnu, zig: true, run: true }
+          - { target: linux-arm64, os: ubuntu-latest, rust: aarch64-unknown-linux-gnu, zig: true, run: false }
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rowan
+          key: ${{ matrix.rust }}
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        if: matrix.zig
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Build (cargo-zigbuild, glibc 2.17)
+        if: matrix.zig
+        working-directory: rowan
+        run: |
+          # cargo-zigbuild finds zig as `python3 -m ziglang`: a venv first on PATH holds both
+          uv venv "$RUNNER_TEMP/zig"
+          uv pip install --python "$RUNNER_TEMP/zig" cargo-zigbuild
+          export PATH="$RUNNER_TEMP/zig/bin:$PATH"
+          cargo zigbuild --release --locked --target ${{ matrix.rust }}.2.17
+
+      - name: Build
+        if: ${{ !matrix.zig }}
+        working-directory: rowan
+        run: cargo build --release --locked --target ${{ matrix.rust }}
+
+      - name: Put the binary into the extension
+        run: |
+          mkdir -p vscode-rowan/bin
+          cp rowan/target/${{ matrix.rust }}/release/rowan vscode-rowan/bin/rowan
+          chmod 755 vscode-rowan/bin/rowan
+          cp rowan/target/${{ matrix.rust }}/release/rowan rowan-${{ matrix.target }}
+
+      - name: Smoke test (native targets)
+        if: matrix.run
+        run: |
+          printf 'd = {"a": 1}\nx = d["b"]\n' > smoke.py
+          vscode-rowan/bin/rowan smoke.py | tee smoke.out
+          grep -q "definitely missing" smoke.out
+
+      - name: Package the .vsix
+        working-directory: vscode-rowan
+        run: |
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          npx --yes @vscode/vsce package --no-dependencies --target ${{ matrix.target }} \
+            --out "../rowan-${{ matrix.target }}-$VERSION.vsix"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            rowan-${{ matrix.target }}-${{ inputs.version }}.vsix
+            rowan-${{ matrix.target }}
+          retention-days: 7
+
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          gh release create "v$VERSION" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "rowan $VERSION" \
+            --notes "VS Code extension with the rowan engine bundled, one .vsix per platform (darwin-arm64, darwin-x64, linux-x64, linux-arm64), and the bare \`rowan\` binaries.
+
+          **Marketplace:** upload each .vsix at https://marketplace.visualstudio.com/manage (the extension's ⋯ menu → Update).
+          **Manual install:** \`code --install-extension rowan-<platform>-$VERSION.vsix\`."

@@ -298,11 +298,23 @@ function severityFor(tier, ns) {
 
 const BIN_RELS = ["rowan/target/release/rowan", "rowan/target/debug/rowan", "target/release/rowan", "target/debug/rowan"];
 
+/** The binary a platform-specific package carries in `bin/` (release workflow). */
+function bundledBinary() {
+  const p = path.join(__dirname, "bin", process.platform === "win32" ? "rowan.exe" : "rowan");
+  if (!fs.existsSync(p)) return null;
+  // (a .vsix is a zip: the executable bit may not survive installation)
+  try {
+    fs.chmodSync(p, 0o755);
+  } catch (_) {}
+  return p;
+}
+
 /**
  * The engine binary: the `rowan.binaryPath` setting; else the build output under a
  * workspace folder, under any ancestor of the analysed file, or next to this extension
- * (running from the repository); else `~/.cargo/bin/rowan` (`cargo install --path rowan`);
- * else `rowan` on PATH.  Returns null when nothing exists and PATH has no `rowan`.
+ * (running from the repository); else the binary bundled in `bin/`; else
+ * `~/.cargo/bin/rowan` (`cargo install --path rowan`); else `rowan` on PATH.  Returns null
+ * when nothing exists and PATH has no `rowan`.
  */
 function findBinary(config, workspaceFolders, filePath) {
   const configured = config.get("binaryPath");
@@ -325,6 +337,8 @@ function findBinary(config, workspaceFolders, filePath) {
       if (fs.existsSync(p)) return p;
     }
   }
+  const bundled = bundledBinary();
+  if (bundled) return bundled;
   const home = process.env.HOME || process.env.USERPROFILE;
   if (home) {
     const p = path.join(home, ".cargo", "bin", "rowan");

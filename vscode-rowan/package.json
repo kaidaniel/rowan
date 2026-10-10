@@ -3,7 +3,7 @@
   "displayName": "rowan — abstract interpretation for Python",
   "description": "Hover over a variable to see the values rowan infers for it; accesses that can fail as diagnostics.",
   "version": "0.1.0",
-  "publisher": "rowan",
+  "publisher": "Rowan",
   "license": "MIT",
   "engines": { "vscode": "^1.80.0" },
   "categories": ["Programming Languages", "Linters"],
@@ -19,7 +19,7 @@
         "rowan.binaryPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the rowan binary. Empty: look for rowan/target/release/rowan under a workspace folder, under any ancestor of the analysed file, or next to the extension; then ~/.cargo/bin/rowan; then `rowan` on PATH."
+          "description": "Path to the rowan binary. Empty: look for rowan/target/release/rowan under a workspace folder, under any ancestor of the analysed file, or next to the extension; then the binary bundled with the extension; then ~/.cargo/bin/rowan; then `rowan` on PATH."
         },
         "rowan.extraArgs": {
           "type": "array",
