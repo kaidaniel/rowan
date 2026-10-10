@@ -202,7 +202,8 @@ fn cell_text(v: &Value) -> Option<String> {
     match intern::key_get(k) {
         intern::Key::Str(s) => Some(s.to_string()),
         intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_) => Some(intern::key_py_str(k)),
-        _ => None,
+        // (a cell is `str()` of its value: dates, Decimals, … too)
+        _ => crate::models::chrono::str_of(k).or_else(|| crate::models::pynum::str_of(k)),
     }
 }
 

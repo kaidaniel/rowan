@@ -112,10 +112,11 @@ if __name__ == "__main__":
     end1 = back[1]["end"]                        #@value end1: exactly={"2024-03-03"}
 
     items = json.loads(os.environ.get("BOOKINGS_JSON", '[{"room": "C3", "guest": "dee", "start": "2024-04-01", "nights": 3}, {"room": "C3", "guest": "eve", "start": "2024-04-04", "nights": "n/a"}]'))
-    #@schema json.loads@L114['*']: sometimes={room,guest,start} only={room,guest,start}
+    #@schema json.loads@L114['*']: only={}
     try:
         more = load_json(items)
     except KeyError:
         more = []
     nights2, _ = occupancy(more)
     export(more)
+# (L115 corrected from sometimes={room,guest,start}: the reads run under `except KeyError`, a guarded load is no requirement, SPECIFICATION §8.4)
