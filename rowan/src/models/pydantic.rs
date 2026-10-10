@@ -561,6 +561,9 @@ impl Analyzer {
                         "str" => Ann::Scalar("str"),
                         "bool" => Ann::Scalar("bool"),
                         "Decimal" => Ann::Scalar("Decimal"),
+                        "datetime" => Ann::Scalar("datetime"),
+                        "date" => Ann::Scalar("date"),
+                        "time" => Ann::Scalar("time"),
                         _ => Ann::Other,
                     },
                 }
@@ -1445,6 +1448,58 @@ impl Analyzer {
                 }
                 join_values(outs)
             }
+            Ann::Scalar(t) if matches!(*t, "datetime" | "date" | "time") => {
+                // ISO text parses; a datetime value passes; other inputs (timestamps …) are a
+                // value of the type; text that cannot be a date fails
+                let t = *t;
+                use crate::models::chrono;
+                let kind = match t {
+                    "datetime" => chrono::DATETIME,
+                    "date" => chrono::DATE,
+                    _ => chrono::TIME,
+                };
+                if !(val.pts.is_empty() && val.kv.is_literal()) {
+                    return Value::data(t);
+                }
+                let mut outs: Vec<Value> = Vec::new();
+                let mut bad = 0;
+                let lits = crate::domain::kv_literals(&val.kv);
+                for k in lits.iter() {
+                    if let Some((kk, v, tz)) = chrono::as_chrono(k) {
+                        let conv = match (kind, kk) {
+                            (a, b) if a == b => Some(k),
+                            (chrono::DATE, chrono::DATETIME) if v.rem_euclid(86_400_000_000) == 0 => Some(chrono::chrono_key(chrono::DATE, v.div_euclid(86_400_000_000) + 1, chrono::NAIVE)),
+                            (chrono::DATETIME, chrono::DATE) => Some(chrono::chrono_key(chrono::DATETIME, (v - 1) * 86_400_000_000, chrono::NAIVE)),
+                            _ => None,
+                        };
+                        let _ = tz;
+                        match conv {
+                            Some(c) => outs.push(Value::lit(c)),
+                            None => outs.push(Value::data(t)),
+                        }
+                        continue;
+                    }
+                    if let Some(s0) = intern::key_as_str(k) {
+                        match chrono::fromisoformat(kind, &s0) {
+                            Some(c) => outs.push(Value::lit(c)),
+                            None if !s0.trim().starts_with(|c: char| c.is_ascii_digit()) => bad += 1,
+                            None => outs.push(Value::data(t)),
+                        }
+                        continue;
+                    }
+                    outs.push(Value::data(t));
+                }
+                if bad > 0 {
+                    let loc = self.pyd_field;
+                    let code = match t {
+                        "datetime" => "datetime_from_date_parsing",
+                        "date" => "date_from_datetime_parsing",
+                        _ => "time_parsing",
+                    };
+                    self.pyd_err(loc, code, bad == lits.len(), false);
+                }
+                join_values(outs)
+            }
             Ann::Scalar(t) => {
                 let t = *t;
                 if val.pts.is_empty() && val.kv.is_literal() && matches!(t, "int" | "float" | "Decimal") {
@@ -2008,6 +2063,18 @@ impl Analyzer {
                     Some(t) => key_str_lit(&t),
                     None => k,
                 })))
+            } else if opts.json && v.kv.is_literal() && crate::domain::kv_literals(&v.kv).iter().any(crate::models::chrono::is_chrono_key) {
+                // JSON mode: ISO text (UTC as `Z`)
+                KeyVal::lits(KeySet::from_iter(crate::domain::kv_literals(&v.kv).iter().map(|k| match crate::models::chrono::as_chrono(k) {
+                    Some((kind, _, tz)) if kind != crate::models::chrono::DELTA && kind != crate::models::chrono::TZ => {
+                        let t = crate::models::chrono::isoformat(k, "T", "auto").unwrap_or_default();
+                        let t = if tz == 0 { format!("{}Z", t.trim_end_matches("+00:00")) } else { t };
+                        key_str_lit(&t)
+                    }
+                    _ => k,
+                })))
+            } else if opts.json && matches!(ann, Ann::Scalar("datetime" | "date" | "time")) && !v.kv.is_literal() {
+                crate::domain::DATA
             } else if opts.json && matches!(ann, Ann::Scalar("Decimal")) && !v.kv.is_literal() {
                 crate::domain::DATA
             } else {

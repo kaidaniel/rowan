@@ -356,7 +356,7 @@ impl Analyzer {
                         }
                     }
                     // Decimal / Fraction literals compare by value (`Decimal("1.0") == 1`)
-                    let has_num = |v: &Value| v.kv.is_literal() && crate::domain::kv_literals(&v.kv).iter().any(crate::models::pynum::is_num_key);
+                    let has_num = |v: &Value| v.kv.is_literal() && crate::domain::kv_literals(&v.kv).iter().any(|k| crate::models::pynum::is_num_key(k) || crate::models::chrono::is_chrono_key(k));
                     if (has_num(&a) || has_num(&b)) && a.pts.is_empty() && b.pts.is_empty() && !super::disabled("pynum") {
                         let opn = match c.ops[0] {
                             ast::CmpOp::Eq => "eq",
@@ -369,7 +369,7 @@ impl Analyzer {
                         let mut outs: Vec<bool> = Vec::new();
                         for x in crate::domain::kv_literals(&a.kv).iter() {
                             for y in crate::domain::kv_literals(&b.kv).iter() {
-                                match crate::models::pynum::binop(opn, x, y).flatten().and_then(|k| intern::with_key(k, |kk| if let intern::Key::Bool(t) = kk { Some(*t) } else { None })) {
+                                match crate::models::pynum::binop(opn, x, y).or_else(|| crate::models::chrono::binop(opn, x, y)).flatten().and_then(|k| intern::with_key(k, |kk| if let intern::Key::Bool(t) = kk { Some(*t) } else { None })) {
                                     Some(t) => outs.push(t),
                                     None => return Value::data("bool"),
                                 }
@@ -1283,6 +1283,7 @@ impl Analyzer {
                         intern::Key::Frozen(t) => !t.is_empty(),
                         intern::Key::Dec(_, c, _) => *c != 0,
                         intern::Key::Frac(n, _) => *n != 0,
+                        intern::Key::Chrono(kind, v, _) => *kind != crate::models::chrono::DELTA || *v != 0,
                     })
                 };
                 let mut it = lits.iter();
@@ -1982,6 +1983,15 @@ impl Analyzer {
 
 /// Ordering of two literals of one kind: numbers (ints, floats, bools) or strings.
 pub fn literal_order(x: KeyId, y: KeyId) -> Option<std::cmp::Ordering> {
+    if crate::models::chrono::is_chrono_key(x) || crate::models::chrono::is_chrono_key(y) {
+        use std::cmp::Ordering::*;
+        return match (crate::models::chrono::compare("lt", x, y), crate::models::chrono::compare("eq", x, y)) {
+            (_, Some(true)) => Some(Equal),
+            (Some(true), _) => Some(Less),
+            (Some(false), Some(false)) => Some(Greater),
+            _ => None,
+        };
+    }
     if crate::models::pynum::is_num_key(x) || crate::models::pynum::is_num_key(y) {
         return crate::models::pynum::order(x, y);
     }

@@ -108,6 +108,7 @@ fn truthy(k: KeyId) -> Option<bool> {
         Key::Tuple(t) | Key::Frozen(t) => !t.is_empty(),
         Key::Dec(_, c, _) => c != 0,
         Key::Frac(n, _) => n != 0,
+        Key::Chrono(kind, v, _) => kind != crate::models::chrono::DELTA || v != 0,
         Key::Ellipsis => true,
         Key::Inv(..) | Key::Member(..) => return None,
     })
@@ -252,6 +253,7 @@ fn py_repr_k(k: &Key, ascii: bool) -> Option<String> {
         Key::Ellipsis => "Ellipsis".into(),
         Key::Dec(n, c, e) => format!("Decimal('{}')", crate::models::pynum::Dec { neg: *n, coef: *c, exp: *e }.to_str()),
         Key::Frac(n, d) => format!("Fraction({}, {})", n, d),
+        Key::Chrono(a, b, c) => crate::models::chrono::repr_raw(*a, *b, *c),
         // (several items print in hash order)
         Key::Frozen(items) if items.is_empty() => "frozenset()".into(),
         Key::Frozen(items) if items.len() == 1 => format!("frozenset({{{}}})", py_repr_k(&key_get(items[0]), ascii)?),
@@ -286,6 +288,7 @@ pub fn py_str(k: KeyId) -> Option<String> {
     match key_get(k) {
         Key::Str(s) => Some(s.to_string()),
         Key::Dec(..) | Key::Frac(..) => crate::models::pynum::str_of(k),
+        Key::Chrono(..) => crate::models::chrono::str_of(k),
         other => py_repr_k(&other, false),
     }
 }
@@ -933,6 +936,9 @@ fn format_float_spec(x: f64, sp: Spec) -> Option<String> {
 
 /// `format(value, spec)`: the full format-spec mini-language for str, int, float and bool.
 pub fn format_value(value: KeyId, spec: &str) -> Option<String> {
+    if crate::models::chrono::is_chrono_key(value) {
+        return if spec.is_empty() { crate::models::chrono::str_of(value) } else { crate::models::chrono::strftime(value, spec) };
+    }
     match key_get(value) {
         Key::Str(s) => format_str(&s, spec),
         Key::Int(i) => {
@@ -1369,7 +1375,7 @@ fn num_cmp(a: Num, b: Num) -> Option<Ordering> {
 
 /// Python `a == b`; None when unknowable (NaN inside a tuple: identity matters).
 fn py_eq(a: KeyId, b: KeyId) -> Option<bool> {
-    if let Some(r) = crate::models::pynum::binop("eq", a, b) {
+    if let Some(r) = crate::models::pynum::binop("eq", a, b).or_else(|| crate::models::chrono::binop("eq", a, b)) {
         return r.and_then(|k| truthy(k));
     }
     if let (Some(x), Some(y)) = (num(a), num(b)) {
@@ -1397,7 +1403,7 @@ fn py_eq(a: KeyId, b: KeyId) -> Option<bool> {
 
 /// Python ordering `a op b` for op in lt le gt ge; None when it raises.
 fn py_order(op: &str, a: KeyId, b: KeyId) -> Option<bool> {
-    if let Some(r) = crate::models::pynum::binop(op, a, b) {
+    if let Some(r) = crate::models::pynum::binop(op, a, b).or_else(|| crate::models::chrono::binop(op, a, b)) {
         return r.and_then(|k| truthy(k));
     }
     let test = |o: Option<Ordering>| -> bool {
@@ -1693,6 +1699,9 @@ fn binop(op: &str, a: KeyId, b: KeyId) -> Option<KeyId> {
     if let Some(r) = crate::models::pynum::binop(op, a, b) {
         return r;
     }
+    if let Some(r) = crate::models::chrono::binop(op, a, b) {
+        return r;
+    }
     match op {
         "eq" => return Some(key_bool(py_eq(a, b)?)),
         "ne" => return Some(key_bool(!py_eq(a, b)?)),
@@ -1767,6 +1776,14 @@ fn unop(op: &str, a: KeyId) -> Option<KeyId> {
         "not_" => return Some(key_bool(!truthy(a)?)),
         "truth" => return Some(key_bool(truthy(a)?)),
         _ => {}
+    }
+    if let Some((crate::models::chrono::DELTA, v, _)) = crate::models::chrono::as_chrono(a) {
+        return match op {
+            "neg" => Some(crate::models::chrono::chrono_key(crate::models::chrono::DELTA, v.checked_neg()?, crate::models::chrono::NAIVE)),
+            "pos" => Some(a),
+            "abs" => Some(crate::models::chrono::chrono_key(crate::models::chrono::DELTA, v.abs(), crate::models::chrono::NAIVE)),
+            _ => None,
+        };
     }
     if crate::models::pynum::is_num_key(a) {
         return match op {
@@ -2079,6 +2096,19 @@ pub fn builtin(name: &str, args: &[KeyId], kwargs: &[(&str, KeyId)]) -> Option<K
     if kwargs.is_empty() {
         if let Some(r) = crate::models::pynum::builtin(name, args) {
             return r;
+        }
+        if let Some(a) = args.first().filter(|a| crate::models::chrono::is_chrono_key(**a) && args.len() == 1) {
+            let s = |x: Option<String>| x.map(|t| crate::intern::key_str_lit(&t));
+            return match name {
+                "str" => s(crate::models::chrono::str_of(*a)),
+                "repr" | "ascii" => s(crate::models::chrono::repr_of(*a)),
+                "bool" => crate::models::chrono::truthy(*a).map(key_bool),
+                "abs" => match crate::models::chrono::as_chrono(*a) {
+                    Some((crate::models::chrono::DELTA, v, _)) => Some(crate::models::chrono::chrono_key(crate::models::chrono::DELTA, v.abs(), crate::models::chrono::NAIVE)),
+                    _ => None,
+                },
+                _ => None,
+            };
         }
     }
     let kw = |k: &str| kwargs.iter().find(|(n, _)| *n == k).map(|(_, v)| *v);

@@ -470,13 +470,30 @@ fn limit_denominator(f: (i128, i128), max: i128) -> Option<(i128, i128)> {
 
 // --------------------------------------------------------------------- keys
 
+thread_local! {
+    static USED: Cell<bool> = const { Cell::new(false) };
+}
+
+pub fn used() -> bool {
+    USED.with(|u| u.get())
+}
+
+pub fn reset_used() {
+    USED.with(|u| u.set(false));
+}
+
 pub fn dec_key(d: Dec) -> KeyId {
+    USED.with(|u| u.set(true));
     key(Key::Dec(d.neg, d.coef, d.exp))
 }
 
 pub fn frac_key(f: (i128, i128)) -> KeyId {
+    USED.with(|u| u.set(true));
     key(Key::Frac(f.0, f.1))
 }
+
+/// Attributes and methods of Decimal / Fraction values.
+pub const NAMES: &[&str] = &["quantize", "to_integral_value", "to_integral", "normalize", "copy_abs", "copy_negate", "is_zero", "is_signed", "adjusted", "as_integer_ratio", "scaleb", "numerator", "denominator", "limit_denominator", "is_integer"];
 
 pub fn as_dec(k: KeyId) -> Option<Dec> {
     intern::with_key(k, |kk| match kk {

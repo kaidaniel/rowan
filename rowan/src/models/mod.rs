@@ -4,6 +4,7 @@
 
 pub mod minire;
 pub mod pyre;
+pub mod chrono;
 pub mod sqlite;
 pub mod pathtext;
 pub mod pynum;
@@ -95,6 +96,21 @@ impl Registry {
         r(&["builtins.type"], m_type);
         r(&["builtins.range"], m_range);
         r(&["decimal.Decimal", "fractions.Fraction"], m_number_new);
+        r(&["datetime.date", "datetime.datetime", "datetime.time", "datetime.timedelta", "datetime.timezone"], m_chrono_new);
+        r(
+            &[
+                "datetime.date.fromisoformat", "datetime.datetime.fromisoformat", "datetime.time.fromisoformat", "datetime.datetime.strptime", "datetime.date.fromordinal",
+                "datetime.datetime.fromordinal", "datetime.datetime.combine",
+            ],
+            m_chrono_class,
+        );
+        r(
+            &[
+                "datetime.datetime.now", "datetime.datetime.today", "datetime.datetime.utcnow", "datetime.date.today", "datetime.datetime.fromtimestamp",
+                "datetime.datetime.utcfromtimestamp", "datetime.date.fromtimestamp",
+            ],
+            m_chrono_clock,
+        );
         r(&["decimal.getcontext", "decimal.localcontext", "decimal.setcontext", "decimal.Context"], m_decimal_context);
         r(&["num.*"], m_num_method);
         r(&["types.MappingProxyType"], m_mappingproxy);
@@ -365,6 +381,7 @@ pub fn external_constant(an: &Analyzer, qual: &str) -> Option<Value> {
         "string.punctuation" => st("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"),
         "string.whitespace" => st(" \t\n\r\x0b\x0c"),
         "string.printable" => st("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ \t\n\r\x0b\x0c"),
+        q if q.starts_with("datetime.") && chrono::constant(q).is_some() => Some(Value::lit(chrono::constant(q).unwrap())),
         "decimal.ROUND_HALF_EVEN" | "decimal.ROUND_HALF_UP" | "decimal.ROUND_HALF_DOWN" | "decimal.ROUND_UP" | "decimal.ROUND_DOWN" | "decimal.ROUND_CEILING" | "decimal.ROUND_FLOOR" | "decimal.ROUND_05UP" => st(qual.trim_start_matches("decimal.")),
         "os.sep" | "os.path.sep" => st("/"),
         "os.linesep" => st("\n"),
@@ -3903,6 +3920,52 @@ fn m_number_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::data(if dec { "Decimal" } else { "Fraction" })
 }
 
+/// `date(…)` / `datetime(…)` / `time(…)` / `timedelta(…)` / `timezone(…)` of known values.
+fn m_chrono_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let class = last(&c.qual).to_string();
+    let lit = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty());
+    let args: Option<Vec<KeyId>> = c.args.iter().map(lit).collect();
+    let kwargs: Option<Vec<(String, KeyId)>> = c.kwargs.iter().map(|(k, v)| lit(v).map(|x| (intern::str_get(*k).to_string(), x))).collect();
+    if let (Some(args), Some(kwargs), true) = (args, kwargs, c.star_args.is_empty() && c.star_kwargs.is_empty()) {
+        let kw: Vec<(&str, KeyId)> = kwargs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+        match chrono::construct(&class, &args, &kw) {
+            Some(Ok(k)) => return Value::lit(k),
+            Some(Err(())) => {
+                an.raise_here(if class == "timedelta" { "OverflowError" } else { "ValueError" }, st);
+                return Value::new();
+            }
+            None => {}
+        }
+    }
+    an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
+    Value::data(&class)
+}
+
+/// `datetime.fromisoformat(…)`, `datetime.strptime(…)`, `date.fromordinal(…)`, `datetime.combine(…)`.
+fn m_chrono_class(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let mut parts = c.qual.rsplit('.');
+    let name = parts.next().unwrap_or("").to_string();
+    let class = parts.next().unwrap_or("").to_string();
+    let lit = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty());
+    if let Some(args) = c.args.iter().map(lit).collect::<Option<Vec<KeyId>>>().filter(|_| c.kwargs.is_empty()) {
+        match chrono::class_method(&class, &name, &args) {
+            Some(Ok(k)) => return Value::lit(k),
+            Some(Err(())) => {
+                an.raise_here("ValueError", st);
+                return Value::new();
+            }
+            None => {}
+        }
+    }
+    an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
+    Value::data(if class == "date" { "date" } else { "datetime" })
+}
+
+/// The clock: unknown.
+fn m_chrono_clock(_an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
+    Value::data(if c.qual.starts_with("datetime.date.") { "date" } else { "datetime" })
+}
+
 /// A changed decimal context: Decimal arithmetic is no longer simulated.
 fn m_decimal_context(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     pynum::set_opaque(true);
@@ -3923,7 +3986,8 @@ fn m_num_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let kw: Vec<(&str, KeyId)> = kwargs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
     let mut outs = Vec::new();
     for r in crate::domain::kv_literals(&recv.kv).iter() {
-        match pynum::method(r, &name, &args, &kw) {
+        let res = if chrono::is_chrono_key(r) { chrono::method(r, &name, &args, &kw) } else { pynum::method(r, &name, &args, &kw) };
+        match res {
             Some(k) => outs.push(pure_result(an, st, c, k)),
             None => return Value::data("number"),
         }

@@ -39,6 +39,9 @@ pub enum Key {
     Dec(bool, u128, i32),
     /// `fractions.Fraction`: numerator, denominator (normalised)
     Frac(i128, i128),
+    /// `datetime` values: kind (date / datetime / time / timedelta / timezone), value, UTC
+    /// offset (models::chrono)
+    Chrono(u8, i64, i32),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -202,6 +205,7 @@ pub fn key_py_str(id: KeyId) -> String {
     with_key(id, |k| match k {
         Key::Str(s) => s.to_string(),
         Key::Dec(..) | Key::Frac(..) => crate::models::pynum::str_of(id).unwrap_or_default(),
+        Key::Chrono(..) => crate::models::chrono::str_of(id).unwrap_or_default(),
         _ => key_repr_inner(k),
     })
 }
@@ -249,6 +253,7 @@ fn key_repr_inner(k: &Key) -> String {
         Key::Member(q, None) => q.to_string(),
         Key::Dec(n, c, e) => format!("Decimal('{}')", crate::models::pynum::Dec { neg: *n, coef: *c, exp: *e }.to_str()),
         Key::Frac(n, d) => format!("Fraction({}, {})", n, d),
+        Key::Chrono(a, b, c) => crate::models::chrono::repr_raw(*a, *b, *c),
         Key::Frozen(items) if items.is_empty() => "frozenset()".into(),
         Key::Frozen(items) => {
             let parts: Vec<String> = items.iter().map(|k| key_repr(*k)).collect();

@@ -1618,11 +1618,13 @@ impl Analyzer {
                 return obj.clone();
             }
             // a Decimal / Fraction: its attributes and methods
-            if obj.kv.is_literal() && !crate::domain::kv_literals(&obj.kv).is_empty() && crate::domain::kv_literals(&obj.kv).iter().all(crate::models::pynum::is_num_key) {
+            let numlike = |k: KeyId| crate::models::pynum::is_num_key(k) || crate::models::chrono::is_chrono_key(k);
+            if obj.kv.is_literal() && !crate::domain::kv_literals(&obj.kv).is_empty() && crate::domain::kv_literals(&obj.kv).iter().all(numlike) {
                 let ks = crate::domain::kv_literals(&obj.kv);
+                let attr_of = |k: KeyId, n: &str| if crate::models::chrono::is_chrono_key(k) { crate::models::chrono::attr(k, n) } else { crate::models::pynum::attr(k, n) };
                 let mut out: Option<Vec<Value>> = Some(Vec::new());
                 for k in ks.iter() {
-                    match (crate::models::pynum::attr(k, name), out.as_mut()) {
+                    match (attr_of(k, name), out.as_mut()) {
                         (Some(Some(v)), Some(o)) => o.push(Value::lit(v)),
                         _ => out = None,
                     }
@@ -1630,13 +1632,25 @@ impl Analyzer {
                 if let Some(o) = out {
                     return join_values(o);
                 }
-                if crate::models::pynum::attr(ks.iter().next().unwrap(), name).is_some() {
+                if attr_of(ks.iter().next().unwrap(), name).is_some() {
                     return Value::data(name);
                 }
                 return self.method_value(&format!("num.{}", name), obj);
             }
             if matches!(obj.kv, KeyVal::Lit(_) | KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
                 return self.method_value(&format!("str.{}", name), obj);
+            }
+            if let KeyVal::Data(d) = &obj.kv {
+                let label = intern::str_get(*d);
+                if matches!(&*label, "datetime" | "date" | "time" | "timedelta" | "timezone") && crate::models::chrono::NAMES.contains(&name) {
+                    return match crate::models::chrono::attr(crate::models::chrono::chrono_key(crate::models::chrono::DELTA, 0, crate::models::chrono::NAIVE), name) {
+                        _ if matches!(name, "year" | "month" | "day" | "hour" | "minute" | "second" | "microsecond" | "days" | "seconds" | "microseconds" | "tzinfo") => Value::data(name),
+                        _ => self.method_value(&format!("num.{}", name), obj),
+                    };
+                }
+                if matches!(&*label, "Decimal" | "Fraction") && crate::models::pynum::NAMES.contains(&name) {
+                    return if matches!(name, "numerator" | "denominator") { Value::data(name) } else { self.method_value(&format!("num.{}", name), obj) };
+                }
             }
             // a slice object with known bounds
             if let Some((lo, hi, st)) = Self::slice_label_bounds(&obj.kv) {
@@ -1963,7 +1977,9 @@ impl Analyzer {
         const RE: &[&str] = &["group", "groups", "groupdict", "start", "end", "span", "lastgroup", "lastindex", "expand", "match", "search", "fullmatch", "findall", "finditer", "sub", "subn", "split", "pattern", "groupindex"];
         const PATH: &[&str] = &["stem", "suffix", "suffixes", "parent", "parents", "parts", "with_suffix", "with_name", "with_stem", "relative_to", "joinpath", "as_posix", "is_absolute"];
         const CFG: &[&str] = &["sections", "getint", "getfloat", "getboolean", "has_section", "has_option", "options", "read_string", "read_dict"];
-        (!self.sql_dbs.is_empty() && SQL.contains(&name))
+        (crate::models::chrono::used() && crate::models::chrono::NAMES.contains(&name))
+            || (crate::models::pynum::used() && crate::models::pynum::NAMES.contains(&name))
+            || (!self.sql_dbs.is_empty() && SQL.contains(&name))
             || ((!self.re_patterns.is_empty() || !self.re_matches.is_empty()) && RE.contains(&name))
             || (!self.path_classes.is_empty() && PATH.contains(&name))
             || (!self.cfg_parsers.is_empty() && CFG.contains(&name))
@@ -1992,7 +2008,7 @@ impl Analyzer {
         // an attribute of a modelled stdlib object the program makes (a cursor's
         // `description`, a match's `group`): decided per call site where the object is known
         if ph.cls.get().is_none() && !super::disabled("stdobjph") && self.stdobj_attr_name(name) {
-            self.record_event("dispatch", oid);
+            self.concrete_root(oid);
         }
         // declared class (annotation / self): resolve methods and class attributes (a
         // dataclass field's default is instance data, not a class attribute)
