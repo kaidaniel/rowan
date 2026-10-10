@@ -41,7 +41,24 @@ fn py_slice(cs: &[char], lo: Option<i64>, hi: Option<i64>, step: Option<i64>) ->
 }
 
 impl Analyzer {
+    /// Evaluate an expression. A call's result is remembered per node: narrowing a test reads
+    /// it back instead of running the call (and its side effects) a second time.
     pub fn eval(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {
+        if let ast::Expr::Call(_) = node {
+            let addr = node as *const ast::Expr as usize;
+            if self.narrow_depth > 0 && !super::disabled("narrowmemo") {
+                if let Some(v) = self.call_memo.get(&addr) {
+                    return v.clone();
+                }
+            }
+            let v = self.eval_inner(node, state);
+            self.call_memo.insert(addr, v.clone());
+            return v;
+        }
+        self.eval_inner(node, state)
+    }
+
+    fn eval_inner(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {
         match node {
             ast::Expr::StringLiteral(sl) => Value::lit(key_str_lit(sl.value.to_str())),
             ast::Expr::NumberLiteral(n) => match &n.value {

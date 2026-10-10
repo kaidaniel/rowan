@@ -875,6 +875,9 @@ pub struct Analyzer {
     pub pyd_field: Option<KeyId>,
     /// the instance whose field is being validated (containers made for it are its own)
     pub pyd_inst: Option<ObjId>,
+    /// the last value of each call node, and whether a test is being narrowed (`eval`)
+    pub call_memo: FxHashMap<usize, Value>,
+    pub narrow_depth: u32,
     pub pyd_last_failed: bool,
     /// pydantic instances: the fields their input surely / maybe gave (`model_fields_set`)
     pub pyd_set: FxHashMap<ObjId, (KeySet, KeySet)>,
@@ -1130,6 +1133,8 @@ impl Analyzer {
             pyd_verrs: Vec::new(),
             pyd_field: None,
             pyd_inst: None,
+            call_memo: FxHashMap::default(),
+            narrow_depth: 0,
             pyd_last_failed: false,
             pyd_set: FxHashMap::default(),
             pyd_inputs: FxHashMap::default(),

@@ -936,6 +936,9 @@ impl Analyzer {
                     val = self.pyd_call_validator(cls, &v, &val, inst, &f.name, state, node);
                 }
                 val = self.pyd_convert(&f.ann, &val, state, node);
+                if let Some(ls) = f.lits.clone().filter(|_| !crate::interp::disabled("pydliteral")) {
+                    val = self.pyd_check_literal(&ls, &val);
+                }
                 if !f.constraints.is_empty() && !failed(self) && !crate::interp::disabled("pydconstraints") {
                     self.pyd_check_constraints(&f.constraints, &val, state);
                 }
@@ -1451,6 +1454,60 @@ impl Analyzer {
             }
             None => Value::new(),
         }
+    }
+
+    /// A `Literal[...]` field: a literal of an option's type is one of the options or an
+    /// error; an unknown value is one of the options (or an error); a value of another type
+    /// (`1.0` for `Literal[1]`) is not decided.
+    fn pyd_check_literal(&mut self, ls: &[KeyId], val: &Value) -> Value {
+        let kind = |k: KeyId| -> u8 {
+            match intern::key_get(k) {
+                intern::Key::Str(_) => 1,
+                intern::Key::Int(_) => 2,
+                intern::Key::Bool(_) => 3,
+                intern::Key::None => 4,
+                _ => 0,
+            }
+        };
+        let opts = Value::kv_only(KeyVal::lits(KeySet::from_iter(ls.iter().copied())));
+        let mut out = Value::new();
+        let (mut bad, mut total, mut unsure) = (0, 0, false);
+        for o in val.pts.iter() {
+            total += 1;
+            unsure = true;
+            // (an unknown value, or a parameter's: one of the options; a call site that knows
+            // it decides)
+            match self.kind(o) {
+                Kind::Unknown => out = out.join(&opts),
+                Kind::Ph => {
+                    self.record_event("concrete", o);
+                    out = out.join(&opts);
+                }
+                _ => out = out.join(&Value::obj(o)),
+            }
+        }
+        if val.kv.is_literal() {
+            for k in crate::domain::kv_literals(&val.kv).iter() {
+                total += 1;
+                if ls.contains(&k) {
+                    out = out.join(&Value::lit(k));
+                } else if kind(k) != 0 && ls.iter().any(|l| kind(*l) == kind(k)) && ls.iter().all(|l| kind(*l) != 0) {
+                    bad += 1;
+                } else {
+                    unsure = true;
+                    out = out.join(&Value::lit(k));
+                }
+            }
+        } else if !val.kv.is_bot() {
+            total += 1;
+            unsure = true;
+            out = out.join(&opts);
+        }
+        if bad > 0 || unsure {
+            let loc = self.pyd_field;
+            self.pyd_err(loc, "literal_error", bad == total && bad > 0, false);
+        }
+        out
     }
 
     /// A field's default expression, evaluated in the module defining it.

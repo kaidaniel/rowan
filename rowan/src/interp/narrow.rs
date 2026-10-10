@@ -17,6 +17,12 @@ enum NarrowTarget {
 
 impl Analyzer {
     pub fn narrow(&mut self, test: &'static ast::Expr, truth: bool, state: &mut State) {
+        self.narrow_depth += 1;
+        self.narrow_impl(test, truth, state);
+        self.narrow_depth -= 1;
+    }
+
+    fn narrow_impl(&mut self, test: &'static ast::Expr, truth: bool, state: &mut State) {
         if !state.reachable {
             return;
         }
@@ -59,6 +65,29 @@ impl Analyzer {
                             let by_value = ks.iter().any(valued) || kv_literals(&lv0.kv).iter().any(valued);
                             if !ks.is_empty() && !by_value {
                                 self.narrow_kv(s(l.id.as_str()), &ks, eq, state);
+                            }
+                        } else if let Some(la) = match left { ast::Expr::Attribute(la) if matches!(&*la.value, ast::Expr::Name(_)) => Some(la), _ => None } {
+                            // `obj.attr == lit` on one object whose attribute holds known
+                            // literals: the attribute narrows (`self.unit == "F"`)
+                            let eq = if op == ast::CmpOp::Eq { truth } else { !truth };
+                            let rv = self.eval(right, state);
+                            let ks = kv_literals(&rv.kv);
+                            let ov = self.eval(&la.value, state);
+                            let ak = key_str_lit(la.attr.id.as_str());
+                            if let Some(o) = ov.single().filter(|o| self.obj(*o).single && matches!(self.kind(*o), Kind::Instance | Kind::Namespace) && rv.pts.is_empty() && ks.len() == 1 && !super::disabled("attrnarrow")) {
+                                let cur = state.slot_opt(o, Ns::Attr, ak);
+                                if let Some(cur) = cur.filter(|c| c.pts.is_empty() && c.kv.is_literal()) {
+                                    let lits = kv_literals(&cur.kv);
+                                    let valued = |k: KeyId| crate::models::pynum::is_num_key(k) || crate::models::chrono::is_chrono_key(k) || intern::key_is_number(k);
+                                    if !lits.iter().any(valued) && !ks.iter().any(valued) {
+                                        let keep: KeySet = if eq { lits.intersection(&ks) } else { lits.difference(&ks) };
+                                        if keep.is_empty() {
+                                            state.reachable = false;
+                                        } else if keep.len() < lits.len() {
+                                            state.set_slot(o, Ns::Attr, ak, Value::kv_only(KeyVal::lits(keep)), true);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
