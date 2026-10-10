@@ -671,7 +671,15 @@ impl Analyzer {
     fn pyd_root_instance(&mut self, cls: ObjId, data: &Value, state: &mut State, node: &Node) -> Value {
         let ann = self.pyd_class(cls, state).fields.iter().find(|f| f.name == "root").map(|f| f.ann.clone()).unwrap_or(Ann::Other);
         let data = &self.pyd_convert(&ann, data, state, node);
-        let site = format!("{}:{}", crate::interp::site_string(node), self.class_info(cls).name);
+        // one instance per input record (nested models of one class in one validation stay apart)
+        let site = {
+            let ins: Vec<ObjId> = data.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown | Kind::Ph | Kind::Instance | Kind::Namespace)).collect();
+            if ins.len() == 1 && !crate::interp::disabled("pydsite") {
+                format!("{}:{}:in{}", crate::interp::site_string(node), self.class_info(cls).name, ins[0])
+            } else {
+                format!("{}:{}", crate::interp::site_string(node), self.class_info(cls).name)
+            }
+        };
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", self.class_info(cls).name, node.line), Payload::Cls(cls), Some(Row::new()), Ns::Attr, None, None);
         let rk = key_str_lit("root");
         state.set_row(inst, Ns::Attr, Row::new().store(rk, true));
@@ -727,7 +735,15 @@ impl Analyzer {
             }
             data = out;
         }
-        let site = format!("{}:{}", crate::interp::site_string(node), self.class_info(cls).name);
+        // one instance per input record (nested models of one class in one validation stay apart)
+        let site = {
+            let ins: Vec<ObjId> = data.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown | Kind::Ph | Kind::Instance | Kind::Namespace)).collect();
+            if ins.len() == 1 && !crate::interp::disabled("pydsite") {
+                format!("{}:{}:in{}", crate::interp::site_string(node), self.class_info(cls).name, ins[0])
+            } else {
+                format!("{}:{}", crate::interp::site_string(node), self.class_info(cls).name)
+            }
+        };
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", self.class_info(cls).name, node.line), Payload::Cls(cls), Some(Row::new()), Ns::Attr, None, None);
         state.set_row(inst, Ns::Attr, Row::new());
         let recs: Vec<ObjId> = data.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown | Kind::Ph | Kind::Instance | Kind::Namespace)).collect();
