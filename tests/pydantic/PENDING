@@ -1,3 +1,2 @@
 # pydantic cases written but not yet expected to pass (paths relative to tests/pydantic/)
-models/ym03_config_settings.py
 models/ym04_event_ingest.py

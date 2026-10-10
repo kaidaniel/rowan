@@ -1232,16 +1232,32 @@ impl Analyzer {
             st_final = Some(st);
             break;
         }
+        let converged = st_final.is_some();
+        // (the result stabilised even if the state did not: it stands)
+        let ret_stable = self.rec_table.get(&key).map(|(pr, _, _)| *pr == ret).unwrap_or(false);
         let mut st = match st_final {
             Some(s) => s,
             None => {
-                // did not converge: use the last tabulated state
-                match self.rec_table.get(&key) {
+                // did not converge: the last tabulated state, widened (its result may be any
+                // value, the records it touched may hold other keys)
+                let mut s0 = match self.rec_table.get(&key) {
                     Some((_, pst, _)) => pst.copy_ref(),
                     None => entry_state.copy(),
+                };
+                if !super::disabled("recwiden") {
+                    let fp = s0.footprint(&entry_state);
+                    let site = s(&format!("recursion@{}", fi.qualname));
+                    for (o, ns) in fp.rows.iter().copied().collect::<Vec<_>>() {
+                        let r = s0.row(o, ns).mutate(site);
+                        s0.set_row(o, ns, r);
+                    }
                 }
+                s0
             }
         };
+        if !converged && !ret_stable && !super::disabled("recwiden") {
+            ret = ret.join(&Value::data(&format!("recursion@{}", fi.qualname)));
+        }
         if let Some(sig) = sig {
             if !self.rec_hit.contains(&key) {
                 let mut rel = State::new();

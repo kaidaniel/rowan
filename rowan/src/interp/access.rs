@@ -1985,6 +1985,15 @@ impl Analyzer {
         Value::data(&format!("L{}", node.line))
     }
 
+    /// Does a user class refuse or intercept attribute stores (frozen, `__setattr__`)?
+    pub fn has_guarded_setattr(&self) -> bool {
+        self.user_classes.iter().any(|c| {
+            self.class_info_opt(*c).map(|ci| ci.dc_frozen.get()).unwrap_or(false)
+                || self.pyd_classes.get(c).map(|p| p.frozen || p.validate_assignment).unwrap_or(false)
+                || self.cls_slots.contains_key(&(*c, Ns::Attr, key_str_lit("__setattr__")))
+        })
+    }
+
     /// Is `name` an attribute / method of a modelled stdlib object of a family this program
     /// has made objects of?
     pub fn stdobj_attr_name(&self, name: &str) -> bool {
@@ -2403,9 +2412,30 @@ impl Analyzer {
             if kind == Kind::Ph && self.pandas_on && crate::models::pandas::FRAME_ONLY_ATTRS.contains(&name) {
                 self.record_event("concrete", oid);
             }
+            // a store that may raise on some classes (a frozen model / dataclass, a
+            // `__setattr__`): decided per call site, where the class is known
+            if kind == Kind::Ph && self.ph_info(oid).cls.get().is_none() && !super::disabled("frozenph") && self.has_guarded_setattr() {
+                self.record_event("concrete", oid);
+            }
             if kind == Kind::Frame {
                 crate::models::pandas::frame_setattr(self, oid, name, v, node, state, strong);
                 continue;
+            }
+            // a placeholder of a frozen class (an exact signature class, or one the call site
+            // decides): the assignment raises there too
+            if kind == Kind::Ph && !super::disabled("frozenph") {
+                if let Some(cls) = self.ph_info(oid).cls.get() {
+                    let exact = self.ph_info(oid).exact.get();
+                    let dc = self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|ci| ci.dc_frozen.get()).unwrap_or(false));
+                    let pyd = crate::models::pydantic::is_model(self, cls) && !name.starts_with('_') && self.pyd_class(cls, state).frozen;
+                    if dc || pyd {
+                        if exact {
+                            self.raise_here(if dc { "FrozenInstanceError" } else { "ValidationError" }, state);
+                            continue;
+                        }
+                        self.record_event("concrete", oid);
+                    }
+                }
             }
             // a frozen dataclass: assignment raises FrozenInstanceError (an AttributeError)
             if kind == Kind::Instance {

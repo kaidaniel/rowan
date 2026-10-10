@@ -677,8 +677,8 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let mut verdicts: Vec<bool> = Vec::new();
     let builtin = |an: &Analyzer, cls: u32| -> Option<String> { if an.kind(cls) == Kind::External { Some(an.external_qual(cls).rsplit('.').next().unwrap_or("").to_string()) } else { None } };
-    // literal values (no objects)
-    if v.pts.is_empty() {
+    // literal values (with or without objects: both parts count)
+    if v.pts.is_empty() || (v.kv.is_literal() && !crate::domain::kv_literals(&v.kv).is_empty()) {
         let lits = crate::domain::kv_literals(&v.kv);
         if !v.kv.is_literal() || lits.is_empty() {
             if let Some(ph) = v.kv.as_param() {
@@ -3126,6 +3126,11 @@ fn m_copy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     for o in a.pts.iter() {
         if matches!(an.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance | Kind::Frame) {
             outs.push(Value::obj(an.copy_object(o, &c.node, st, deep, &mut IndexMap::new())));
+        } else if an.kind(o) == Kind::Ph && !crate::interp::disabled("copyph") {
+            // a parameter's object: decided per call site, where the copy is a new object
+            // (the summary's own answer stands for the parameter)
+            an.record_event("concrete", o);
+            outs.push(Value::obj(o));
         } else {
             outs.push(Value::obj(o));
         }

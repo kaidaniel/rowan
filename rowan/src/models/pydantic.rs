@@ -616,6 +616,10 @@ impl Analyzer {
     /// (`PREFIX` + name, case-insensitive; a nested model from `PREFIX_FIELD__SUB` keys).
     fn pyd_settings_env(&mut self, pc: &PClass, prefix: &str, delim: Option<&str>, did: ObjId, state: &mut State, node: &Node) {
         let Some(env) = crate::models::external_record(self, "os.environ", state) else { return };
+        // (the environment as the call site has it)
+        if !self.sum_stack.is_empty() && !crate::interp::disabled("settingsenv") {
+            self.record_event("concrete", env);
+        }
         let er = state.row(env, Ns::Item);
         let up = |k: KeyId| intern::key_as_str(k).map(|x| x.to_uppercase());
         for f in pc.fields.iter() {
@@ -1377,6 +1381,12 @@ impl Analyzer {
             let row = state.row(o, ns);
             if row.present.contains(k) {
                 out = out.join(&state.slot(o, ns, k));
+                // (a store under an unknown key may have written it)
+                if ns == Ns::Item && !crate::interp::disabled("pydstar") {
+                    if let Some(sv) = state.slot_opt(o, ns, intern::STAR) {
+                        out = out.join(&sv);
+                    }
+                }
             } else if row.open() {
                 let v = self.path_placeholder_value(o, ns, k, &row, state);
                 out = out.join(&v);
