@@ -156,7 +156,7 @@ def place_order(order: OrderIn, tasks: BackgroundTasks):
 
 
 @app.post("/quotes")
-def quote(lines: List[Dict[str, Any]] = Body(...), rule: Optional[Dict[str, Any]] = Body(None)):
+def quote(lines: List[Dict[str, Any]] = Body(...), rule: Optional[Dict[str, Any]] = Body(None)):  # (rule is read when truthy: percent is a sometimes key; was always)
     subtotal = 0.0
     for ln in lines:
         item = CATALOG[ln["sku"]]                    #@ input sku
@@ -166,7 +166,7 @@ def quote(lines: List[Dict[str, Any]] = Body(...), rule: Optional[Dict[str, Any]
     #@row q: present={subtotal,discount,total} definite={subtotal,discount,total} closed
     return q
 #@schema param quote.lines['*']: always={sku} only={sku}
-#@schema param quote.rule: always={percent} only={percent}
+#@schema param quote.rule: sometimes={percent} only={percent}
 
 
 @app.get("/orders/{oid}", response_model=OrderOut)
@@ -183,8 +183,8 @@ if __name__ == "__main__":
     addr = {"street": "Main 1", "city": "Oslo"}
     r = client.post("/orders", json={"customer": "ann", "lines": [{"sku": "pen", "qty": 2}, {"sku": "ink"}], "ship_to": addr})
     assert r.status_code == 201, r.text
-    o1 = r.json()
-    #@row o1: present={id,customer,total,discount,gift_note,lines} definite={id,customer,total,lines} closed
+    o1 = r.json()  # (no coupon, no gift note: exclude_none drops both; was present={…,discount,gift_note})
+    #@row o1: present={id,customer,total,lines} definite={id,customer,total,lines} closed
     assert "discount" not in o1 and o1["total"] == 12.0
     r = client.post("/orders", json={"customer": "bob", "lines": [{"sku": "pen", "qty": 8}], "ship_to": {**addr, "country": "SE"},
                                       "coupon": "TENOFF", "gift_note": "enjoy"})
