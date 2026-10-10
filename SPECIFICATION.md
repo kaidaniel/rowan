@@ -104,7 +104,7 @@ and an identity:
 | `rows` | `(object, namespace)` → `Row`: the key-set model (§4.1) |
 | `slots` | object → `(namespace, key)` → value: what is stored under each key |
 | `elems` | object → the scalar part of its elements |
-| `lens` | object → (known length, known prefix), per path |
+| `lens` | object → (known length, known prefix, possible lengths 0..15), per path |
 | `lasts` | object → the element appended last (`xs[-1]` after appends of unknown position) |
 | `reqs` | source → key → requirement (§9) |
 | `facts` | conditional facts: rows a branch had, restored when the same test recurs (§5.1) |
@@ -127,7 +127,8 @@ keys (Okasaki and Gill, as in SPARTA's `PatriciaTreeMap`):
 
 **Joins.** At a merge point two states join pointwise: names join their values (a name bound on
 one side only keeps that side's value), rows and slots join, lengths join to the shorter known
-prefix, facts both sides hold are kept.
+prefix (and to the lengths either side may have, while both know theirs), facts both sides hold
+are kept.
 
 ### 4.1 Rows: the key-set model
 
@@ -164,7 +165,9 @@ Lists and tuples keep positions in `Pos` slots while they are known:
 * literal containers, appends (also in branches: the length is per path), decided
   comprehensions, sorts by literal keys, slices, `zip` / `enumerate` / `map` over known items;
 * `if items:` gives a list of unknown length a first element on that path;
-* a list of unknown length keeps the *prefix* that is known on every path;
+* a list of unknown length keeps the *prefix* that is known on every path, and the lengths the
+  joined paths had (`len` is `1 | 2`) until its elements change: an append shifts them, any
+  other change voids them;
 * otherwise one `Elem` slot holds the join of all elements.
 
 Dicts keep insertion order (`Row.order`). Iterating a dict whose keys are known in order runs
@@ -566,7 +569,7 @@ The **optimistic reading** (`likely`, `likely-missing`) assumes unknown code did
 keys. It is labelled as such in every output.
 
 Imprecision rowan accepts (sound, but less than exact):
-* lengths join to the shorter known prefix, so a list of length 1 or 2 has an unknown length;
+* lengths past 15, or changed after a join other than by appends, are unknown;
 * a slice by an unknown bound has no positions;
 * pandas values per row are not simulated;
 * `while` loops with unknown conditions join their iterations;
