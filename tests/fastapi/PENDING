@@ -3,5 +3,4 @@ models/fm02_checkout.py
 models/fm03_profiles_auth.py
 models/fm04_analytics_pandas.py
 models/fm05_inventory_webhooks.py
-small/f034_collections_json.py
 small/f035_csv_body.py

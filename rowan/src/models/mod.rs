@@ -129,7 +129,8 @@ impl Registry {
             m_http,
         );
         r(&["response.*"], m_response_method);
-        r(&["json.dump", "json.dumps", "yaml.dump", "yaml.safe_dump", "pickle.dump", "pickle.dumps", "pprint.pprint", "pprint.pformat", "orjson.dumps"], noeffect);
+        r(&["json.dump", "yaml.dump", "yaml.safe_dump", "pickle.dump", "pprint.pprint", "pprint.pformat", "orjson.dumps"], noeffect);
+        r(&["json.dumps", "pickle.dumps"], m_json_dumps);
         r(&["copy.copy", "copy.deepcopy"], m_copy);
         r(&["dataclasses.replace"], m_dc_replace);
         r(&["dataclasses.astuple"], m_astuple);
@@ -2405,6 +2406,67 @@ fn json_literal(an: &mut Analyzer, st: &mut State, c: &Call, j: &serde_json::Val
 }
 
 /// `json.loads(text)` (pydantic's `model_validate_json` reads its text the same way).
+/// `json.dumps(x)` / `pickle.dumps(x)`: a text standing for a snapshot of x when x is plain
+/// data whose round trip keeps its structure (json: dicts with str keys and lists, no tuples
+/// or instances; pickle: any dicts / lists / tuples), so `loads` can give its structure back.
+fn m_json_dumps(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let fallback = Value::data(&format!("L{}", c.line));
+    let Some(x) = c.args.first() else { return fallback };
+    if crate::interp::disabled("jsonround") || x.pts.is_empty() || !x.kv.is_bot() {
+        return fallback;
+    }
+    let json = c.qual == "json.dumps";
+    // (plain data only, a bounded walk)
+    let mut work: Vec<u32> = x.pts.iter().collect();
+    let mut seen: rustc_hash::FxHashSet<u32> = Default::default();
+    while let Some(o) = work.pop() {
+        if !seen.insert(o) || seen.len() > 200 {
+            if seen.len() > 200 {
+                return fallback;
+            }
+            continue;
+        }
+        match an.kind(o) {
+            Kind::Dict if !pandas::is_series_obj(an, o) => {
+                let r = st.row(o, Ns::Item);
+                if json && !r.present.iter().all(intern::key_is_str) {
+                    return fallback;
+                }
+                for (_, v) in st.obj_slots(o, Ns::Item) {
+                    work.extend(v.pts.iter());
+                }
+            }
+            Kind::List => {
+                for (_, v) in st.obj_slots(o, Ns::Pos).into_iter().chain(st.obj_slots(o, Ns::Elem)) {
+                    work.extend(v.pts.iter());
+                }
+            }
+            Kind::Tuple if !json => {
+                for (_, v) in st.obj_slots(o, Ns::Pos).into_iter().chain(st.obj_slots(o, Ns::Elem)) {
+                    work.extend(v.pts.iter());
+                }
+            }
+            // (data of unknown structure inside: kept as it is)
+            Kind::Unknown if json => {}
+            _ => return fallback,
+        }
+    }
+    let snaps: Vec<String> = x.pts.iter().map(|o| an.copy_object(o, &c.node, st, true, &mut IndexMap::new()).to_string()).collect();
+    Value::data(&format!("{}:{}", if json { "jsontext" } else { "pickletext" }, snaps.join(",")))
+}
+
+/// The snapshots a `json.dumps` / `pickle.dumps` text stands for.
+fn dumped_snapshots(v: &Value, json: bool) -> Vec<u32> {
+    let mut out = Vec::new();
+    if let (true, KeyVal::Data(d)) = (v.pts.is_empty(), &v.kv) {
+        let t = intern::str_get(*d);
+        if let Some(rest) = t.strip_prefix(if json { "jsontext:" } else { "pickletext:" }) {
+            out.extend(rest.split(',').filter_map(|x| x.parse::<u32>().ok()));
+        }
+    }
+    out
+}
+
 pub fn json_loads(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     m_json_load(an, st, c)
 }
@@ -2420,6 +2482,15 @@ fn m_typeadapter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // the text of a dumps(): a copy of what was dumped
+    if matches!(c.qual.as_str(), "json.loads" | "pickle.loads") {
+        let snaps = c.args.first().map(|a| dumped_snapshots(a, c.qual == "json.loads")).unwrap_or_default();
+        // (only while the snapshot is part of this state: not a text made inside a summary)
+        let here = |o: u32| st.has_row(o, Ns::Item) || st.lens.get(&o).is_some();
+        if !snaps.is_empty() && snaps.iter().all(|o| here(*o)) {
+            return join_values(snaps.iter().map(|o| Value::obj(an.copy_object(*o, &c.node, st, true, &mut IndexMap::new()))).collect::<Vec<_>>());
+        }
+    }
     if c.qual == "json.loads" {
         // a parameter's text: decided where the caller passes a literal one
         if let Some(a) = c.args.first() {

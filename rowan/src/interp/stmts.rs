@@ -86,6 +86,24 @@ impl Analyzer {
                 if self.torch_on && crate::models::torch::is_definite_tensor(&cur) && !self.t_inplace_fits(&cur, &res, &n, state) {
                     return;
                 }
+                // `d[k] += v` with an unknown key on a closed dict: the load raised unless k was
+                // one of its keys, so the store adds none
+                if let ast::Expr::Subscript(sub) = &*a.target {
+                    if matches!(&*sub.value, ast::Expr::Name(_) | ast::Expr::Attribute(_)) && matches!(&*sub.slice, ast::Expr::Name(_) | ast::Expr::Attribute(_) | ast::Expr::Subscript(_)) && !crate::interp::disabled("augkey") {
+                        let mut probe = state.copy();
+                        let obj = self.eval(&sub.value, &mut probe);
+                        let key = self.eval_key(&sub.slice, &mut probe);
+                        let plain = !obj.pts.is_empty() && obj.kv.is_bot() && obj.pts.iter().all(|o| self.kind(o) == Kind::Dict && !self.dd_factories.contains_key(&o) && !self.counters.contains(&o) && !crate::models::pandas::is_series_obj(self, o) && { let r = state.row(o, Ns::Item); r.closed() && !r.present.is_empty() });
+                        if plain && !key.kv.is_literal() {
+                            for o in obj.pts.iter() {
+                                for k in state.row(o, Ns::Item).present.iter() {
+                                    state.set_slot(o, Ns::Item, k, res.clone(), false);
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
                 self.bind_target(&a.target, &res, state);
             }
             ast::Stmt::Return(r) => {

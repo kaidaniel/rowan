@@ -569,8 +569,10 @@ impl Analyzer {
                 }
             }
             Some(nk) => {
-                if nk != cur.kv {
-                    self.store_name(name, Value::with_kv(cur.pts.clone(), nk), state);
+                // equal to one of the literals: an unknown value is that literal now
+                let pts = if restrict && !crate::interp::disabled("restrictpts") { cur.pts.filter(|o| self.kind(o) != Kind::Unknown) } else { cur.pts.clone() };
+                if nk != cur.kv || pts != cur.pts {
+                    self.store_name(name, Value::with_kv(pts, nk), state);
                 }
             }
         }

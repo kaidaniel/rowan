@@ -923,7 +923,7 @@ impl Analyzer {
             return;
         }
         let Some(o) = robj.single() else { return };
-        let mut lit_dict = |an: &mut Analyzer, st: &mut State, name: &str, items: Vec<(String, Value)>, ci: bool| -> Option<Value> {
+        let lit_dict = |an: &mut Analyzer, st: &mut State, name: &str, items: Vec<(String, Value)>, ci: bool| -> Option<Value> {
             let d = an.alloc_at(Kind::Dict, node, st, &format!("request.{}", name), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("rq{}{}", o, name)));
             let mut row = Row::new();
             for (k, v) in items {

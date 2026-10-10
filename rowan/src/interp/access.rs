@@ -294,6 +294,9 @@ impl Analyzer {
     }
 
     pub fn load_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
+        // (objects in the key: an unknown key; lists / tuples are indexed by their own rules)
+        let okey = if ns == Ns::Item && !key.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Dict | Kind::Ph | Kind::Unknown)) && !obj.pts.is_empty() { self.opaque_key(key) } else { key.clone() };
+        let key = &okey;
         // in a summary: a value read from a dict copied from a parameter's record (its slot not
         // set here) is known only at the call site: decided there
         if !self.sum_stack.is_empty() && !super::disabled("copyread") {
@@ -760,7 +763,31 @@ impl Analyzer {
         Value::obj(pid)
     }
 
+    /// A key whose value includes objects (an unknown value, a non-literal tuple, an instance):
+    /// for the record model an unknown key (its literal part kept in the join).
+    pub fn opaque_key(&self, key: &Value) -> Value {
+        if key.pts.is_empty() || super::disabled("objkey") {
+            return key.clone();
+        }
+        let key = self.keyify(key);
+        if key.pts.is_empty() {
+            return key;
+        }
+        // a placeholder standing for its own value (`Param(ph)`): decided per call site
+        if let Some(p) = key.kv.as_param() {
+            if key.pts.len() == 1 && key.pts.contains(p) {
+                return key;
+            }
+        }
+        if key.kv.is_bot() && key.pts.iter().all(|o| self.kind(o) == Kind::Ph) {
+            return key;
+        }
+        Value::with_kv(key.pts.clone(), crate::domain::kv_join(&key.kv, &DATA))
+    }
+
     pub fn store_item(&mut self, obj: &Value, ns: Ns, key: &Value, v: &Value, node: &Node, state: &mut State) {
+        let okey = if ns == Ns::Item { self.opaque_key(key) } else { key.clone() };
+        let key = &okey;
         let targets: Vec<u32> = obj.pts.iter().filter(|o| !matches!(self.kind(*o), Kind::Series | Kind::External | Kind::Function | Kind::Bound | Kind::Class | Kind::Method)).collect();
         for &oid in &targets {
             let kind = self.kind(oid);

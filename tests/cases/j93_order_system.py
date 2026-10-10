@@ -826,8 +826,8 @@ ops = paths["root/ops"]                      #@row ops: present={name,children,a
 
 # ---------------------------------------------------------------- checks: wire format
 
-payload = json.loads(json.dumps(o1.to_dict()))  #@row payload: present={} definite={} open
-payload["id"]                                #@ input id
-payload["customer"]["tier"]                  #@ input tier
-#@schema json.loads@L829: always={id,customer}
-#@schema json.loads@L829['customer']: always={tier}
+payload = json.loads(json.dumps(o1.to_dict()))  #@row payload: present={id,customer,lines,meta,state} definite={id,customer,lines,meta,state} closed
+payload["id"]                                #@ ok id
+payload["customer"]["tier"]                  #@ ok tier
+# (a json round trip of the program's own data keeps its keys: this was open, with the schema
+# json.loads@L829: always={id,customer} / ['customer']: always={tier}, while loads was opaque)
