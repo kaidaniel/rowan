@@ -40,6 +40,8 @@ pub enum Ann {
     Var(String),
     /// a union of models (`Cat | Dog`), with the discriminator field when given
     Union(Vec<Ann>, Option<String>),
+    /// an Enum class: a member, or a value equal to one's
+    Enum(ObjId),
     Other,
 }
 
@@ -556,6 +558,15 @@ impl Analyzer {
                         return Ann::Var(n);
                     }
                 }
+                if found.is_none() && !crate::interp::disabled("pydenum") {
+                    let ec = v.pts.iter().find(|o| self.enum_members.contains_key(o)).or_else(|| {
+                        let c: Vec<ObjId> = self.user_classes.iter().copied().filter(|c| self.enum_members.contains_key(c) && self.class_info_opt(*c).map(|ci| ci.name == n).unwrap_or(false)).collect();
+                        c.iter().copied().find(|x| self.class_info(*x).module == module).or_else(|| c.first().copied())
+                    });
+                    if let Some(c) = ec {
+                        return Ann::Enum(c);
+                    }
+                }
                 match found {
                     Some(c) => Ann::Model(c),
                     None => match n.as_str() {
@@ -791,6 +802,7 @@ impl Analyzer {
             }
             field_keys.extend(f.alts.iter().map(|a| key_str_lit(a)));
             let mut val = Value::new();
+            let mut dflt = Value::new();
             // a value that depends on whether a parameter's input has the key: per call site
             {
                 let nsf = |an: &Analyzer, o: ObjId| if matches!(an.kind(o), Kind::Instance | Kind::Namespace) { Ns::Attr } else { Ns::Item };
@@ -892,26 +904,31 @@ impl Analyzer {
                         }
                     }
                     if !definite {
-                        val = val.join(&self.pyd_default(&f, node, state));
+                        dflt = dflt.join(&self.pyd_default(&f, node, state));
                     } else if val.empty() {
-                        val = self.pyd_default(&f, node, state);
+                        dflt = self.pyd_default(&f, node, state);
                     }
                 }
                 let _ = present;
             } else if !f.required {
-                val = self.pyd_default(&f, node, state);
+                dflt = self.pyd_default(&f, node, state);
             }
             if other_data && !f.required {
-                val = val.join(&self.pyd_default(&f, node, state));
+                dflt = dflt.join(&self.pyd_default(&f, node, state));
             }
-            if val.empty() {
+            if val.empty() && dflt.empty() {
                 val = Value::data(&format!("{}.{}", self.class_info(cls).name, f.name));
+            }
+            if crate::interp::disabled("pydnodefaultval") {
+                val = val.join(&std::mem::take(&mut dflt));
             }
             self.pyd_field = Some(kk);
             // a field surely missing / surely not converting: its validators do not run
             let failed = |an: &Analyzer| an.pyd_errs.last().map(|es| es.iter().any(|e| e.sure && e.loc == Some(kk))).unwrap_or(false);
             // field validators before the type's conversion, then the conversion, then after
-            if !failed(self) {
+            // (a default is not validated: validate_default is off)
+            let given = !val.empty();
+            if !failed(self) && given {
                 for v in pc.field_validators.iter().filter(|v| (v.fields.contains(&f.name) || v.fields.iter().any(|x| x == "*")) && matches!(v.mode.as_str(), "before" | "wrap" | "plain")).cloned().collect::<Vec<_>>() {
                     val = self.pyd_call_validator(cls, &v, &val, inst, &f.name, state, node);
                 }
@@ -920,11 +937,12 @@ impl Analyzer {
                     self.pyd_check_constraints(&f.constraints, &val, state);
                 }
             }
-            if !failed(self) {
+            if !failed(self) && given {
                 for v in pc.field_validators.iter().filter(|v| (v.fields.contains(&f.name) || v.fields.iter().any(|x| x == "*")) && v.mode == "after").cloned().collect::<Vec<_>>() {
                     val = self.pyd_call_validator(cls, &v, &val, inst, &f.name, state, node);
                 }
             }
+            val = val.join(&dflt);
             let r = state.row(inst, Ns::Attr).store(nk, true);
             state.set_row(inst, Ns::Attr, r);
             state.set_slot(inst, Ns::Attr, nk, val, true);
@@ -1409,7 +1427,17 @@ impl Analyzer {
             return self.call_value(&fv, node, None, state, Some(vec![]));
         }
         match f.default {
-            Some(d) => self.eval(d, state),
+            // (in the module defining the field: `Priority.NORMAL` names the model's module's)
+            Some(d) => {
+                let here = self.module_info(self.frame().module).idx;
+                let owner = crate::frontend::module_of_addr(d as *const ast::Expr as usize);
+                if let Some(idx) = owner.filter(|i| *i != here && !crate::interp::disabled("pyddefaultmodule")) {
+                    if let Some(moid) = self.modules.values().copied().find(|m| self.module_info(*m).idx == idx) {
+                        return self.eval_in_module(moid, d, state);
+                    }
+                }
+                self.eval(d, state)
+            }
             None => Value::new(),
         }
     }
@@ -1646,6 +1674,50 @@ impl Analyzer {
                     return Value::data("Decimal");
                 }
                 Value::with_kv(val.pts.clone(), coerce_kv(t, &val.kv))
+            }
+            Ann::Enum(c) => {
+                let vk = key_str_lit("value");
+                let members: Vec<(ObjId, Option<KeyId>)> = self.enum_members.get(c).cloned().unwrap_or_default().iter().map(|(_, m)| (*m, state.slot(*m, Ns::Attr, vk).kv.as_lit())).collect();
+                let all = Value::objs(crate::domain::ObjSet::from_vec(members.iter().map(|(m, _)| *m).collect()));
+                let mut out = Value::new();
+                let (mut bad, mut total, mut unsure) = (0, 0, false);
+                for o in val.pts.iter() {
+                    total += 1;
+                    if members.iter().any(|(m, _)| *m == o) {
+                        out = out.join(&Value::obj(o));
+                    } else {
+                        // (something else: a member, or an error, as the data has it)
+                        unsure = true;
+                        out = out.join(&all);
+                    }
+                }
+                if val.kv.is_literal() {
+                    for k in crate::domain::kv_literals(&val.kv).iter() {
+                        total += 1;
+                        match members.iter().find(|(_, mv)| *mv == Some(k)) {
+                            Some((m, _)) => out = out.join(&Value::obj(*m)),
+                            None => {
+                                // a value of another type may be coerced (lax mode): not decided
+                                let same_type = members.iter().all(|(_, mv)| mv.map(|x| (intern::key_as_str(x).is_some() && intern::key_as_str(k).is_some()) || (intern::key_as_int(x).is_some() && intern::key_as_int(k).is_some() && !intern::with_key(k, |kk| matches!(kk, intern::Key::Float(_) | intern::Key::Bool(_))))).unwrap_or(false));
+                                if same_type {
+                                    bad += 1;
+                                } else {
+                                    unsure = true;
+                                    out = out.join(&all);
+                                }
+                            }
+                        }
+                    }
+                } else if !val.kv.is_bot() {
+                    total += 1;
+                    unsure = true;
+                    out = out.join(&all);
+                }
+                if bad > 0 || unsure {
+                    let loc = self.pyd_field;
+                    self.pyd_err(loc, "enum", bad == total && bad > 0, false);
+                }
+                out
             }
             Ann::TypedDict(td) => {
                 let td = *td;

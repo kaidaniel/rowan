@@ -139,7 +139,7 @@ impl Analyzer {
         String::new()
     }
 
-    fn eval_in_module(&mut self, module: ObjId, e: &'static ast::Expr, state: &mut State) -> Value {
+    pub(crate) fn eval_in_module(&mut self, module: ObjId, e: &'static ast::Expr, state: &mut State) -> Value {
         let mi = self.module_info(module);
         self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), module, "fastapi", true, "<fastapi>"));
         let v = self.eval(e, state);
