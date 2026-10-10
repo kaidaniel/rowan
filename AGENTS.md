@@ -193,8 +193,7 @@ by run (the oracle reads it per line).
 
 ## Where to go next
 
-`PLAN.md` steps left: `ym04` (discriminated unions through TypeAdapter, pydantic dataclasses),
-`c001` (large app, precision), docs (README, SPECIFICATION §11 coverage table). Then: a
-concrete row model for literal frames, deletion by key pattern, records into frames, pandas `#@todo`s; torch
-facts from `<`/`!=`, dtypes; summary reuse in the server; the weak store through several
-objects; precision on real repositories. Keep this file under 200 lines.
+Pending: `c001` (large app: recursion inside summaries, per-row pandas values), `s112`
+(suspended generators). Then: possibly-unbound names (no NameError reported), deletion by key
+pattern, records into frames, pandas `#@todo`s; torch facts from `<`/`!=`, dtypes; summary
+reuse in the server; the weak store through several objects; precision on real repositories.
