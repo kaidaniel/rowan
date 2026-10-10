@@ -1101,8 +1101,18 @@ impl Analyzer {
         }
         // (user code called back by a model allocates as user code)
         let saved_md = std::mem::replace(&mut self.model_depth, 0);
+        // (the arguments, for the unknown call that replaces this one when the hard deadline cuts it)
+        let was_cut = self.hard_cut;
+        let keep = (self_v.clone(), args.clone(), kwargs.clone(), star_args.clone(), star_kwargs.clone());
         let r = self.call_user_inner(foid, self_v, args, kwargs, star_args, star_kwargs, state, node, _call_ast, entry);
         self.model_depth = saved_md;
+        if self.hard_cut && !was_cut {
+            let q = self.func_info(foid).qualname.clone();
+            self.note(format!("analysis cut at the hard deadline ({} ms) inside {}: the call is unknown code", super::limit("hard", 5 * super::limit("ms", super::MAX_MS)), q));
+            state.reachable = true;
+            let (sv, a, kw, sa, skw) = keep;
+            return self.unknown_call(&q, sv.as_ref(), &a, &kw, &sa, &skw, state, node);
+        }
         r
     }
 

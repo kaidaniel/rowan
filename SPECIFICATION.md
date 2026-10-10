@@ -320,7 +320,9 @@ their site. `ROWAN_GC=0` restricts collection to returns of values without objec
 
 * **Soft deadline**, `ms` = 2 s: no new tabulations; summaries are used instead.
 * **Hard deadline**, `hard` = 5 × the soft one: calls of user code become unknown calls, and
-  entry runs stop, so the run ends in bounded time with a sound but less precise result.
+  entry runs stop. Calls already running stop too: their bodies end where they are, and each
+  such call is replaced in its caller by an unknown call (on the state it had reached), so the
+  run ends in bounded time with a sound but less precise result.
 
 Both are set through `ROWAN_LIMITS`. Results of a run cut by a deadline depend on the
 machine's speed.

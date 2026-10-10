@@ -993,6 +993,9 @@ pub struct Analyzer {
     pub exit_count: usize,
     /// when the analysis started (see `MAX_MS`)
     pub started: std::time::Instant,
+    /// the hard deadline passed: function bodies stop, the calls they are in become unknown calls
+    pub hard_cut: bool,
+    cut_tick: u32,
     pub call_cache: FxHashMap<calls::Sig, Rc<calls::CacheHit>>,
     pub entry_instances: FxHashMap<ObjId, ObjId>,
     pub fresh_in_progress: FxHashSet<ObjId>,
@@ -1275,6 +1278,8 @@ impl Analyzer {
             work: 0,
             exit_count: 0,
             started: std::time::Instant::now(),
+            hard_cut: false,
+            cut_tick: 0,
             call_cache: FxHashMap::default(),
             entry_instances: FxHashMap::default(),
             torch_on: false,
@@ -2029,6 +2034,24 @@ impl Analyzer {
     /// are unknown code from there on.
     pub fn over_hard_deadline(&self) -> bool {
         !disabled("harddeadline") && self.started.elapsed().as_millis() as usize > limit("hard", 5 * limit("ms", MAX_MS))
+    }
+
+    /// Past the hard deadline a statement in a function body does not run: its path ends, and
+    /// the call it belongs to is replaced by an unknown call (`call_user`). Module code goes on
+    /// (its calls are unknown calls). Checked every 64 statements.
+    pub fn cut_body(&mut self, state: &mut State) -> bool {
+        if !self.hard_cut {
+            self.cut_tick = self.cut_tick.wrapping_add(1);
+            if self.cut_tick % 64 != 0 || disabled("cutbodies") || !self.over_hard_deadline() {
+                return false;
+            }
+            self.hard_cut = true;
+        }
+        if self.frames.last().is_some_and(|f| f.kind == FrameKind::Function) {
+            state.reachable = false;
+            return true;
+        }
+        false
     }
 
     pub fn run(&mut self) {

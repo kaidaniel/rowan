@@ -24,6 +24,9 @@ impl Analyzer {
 
     pub fn exec_stmt(&mut self, node: &'static ast::Stmt, state: &mut State) {
         self.work += 1;
+        if self.cut_body(state) {
+            return;
+        }
         let dbg2 = crate::interp::debug_level() == 2;
         let was = state.reachable;
         self.exec_stmt_inner(node, state);
