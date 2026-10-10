@@ -1420,15 +1420,26 @@ impl Analyzer {
             }
         };
         let per_class = !crate::interp::disabled("excclass") && !t.handlers.is_empty();
-        // raises no handler surely catches go on to the enclosing try (or out of the call)
-        if per_class {
+        // raises no handler surely catches go on to the enclosing try (or out of the call),
+        // through the finally (unless a return / jump in it swallows them)
+        let swallowing = !t.finalbody.is_empty() && (contains_return(&t.finalbody) || contains_jump(&t.finalbody));
+        if (per_class || (t.handlers.is_empty() && !crate::interp::disabled("excclass"))) && !swallowing {
             for (cls, st, ev) in recs.iter_mut() {
                 if hclasses.iter().any(|hc| hmatch(hc, cls) == Some(true)) {
                     continue;
                 }
+                let mut st2 = st.copy();
+                if !t.finalbody.is_empty() && !crate::interp::disabled("finally") {
+                    st2.reachable = true;
+                    st2.ret = None;
+                    st2.exits = None;
+                    self.exec_block(&t.finalbody, &mut st2);
+                    if !st2.reachable {
+                        continue;
+                    }
+                }
                 self.cur_exc = if ev.pts.is_empty() { None } else { Some(ev.clone()) };
                 self.cur_exc_cls = cls.clone();
-                let mut st2 = st.copy();
                 let recorded = self.record_raise_state(&mut st2);
                 self.cur_exc = None;
                 self.cur_exc_cls = None;
