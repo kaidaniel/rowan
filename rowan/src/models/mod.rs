@@ -1779,7 +1779,21 @@ fn format_fields(an: &mut Analyzer, st: &mut State, t: &str, c: &Call, mapping: 
     out
 }
 
+/// A str method; one returning a string, on a string whose text is not known, gives a
+/// string whose text is not known (its str methods apply in turn: `v.strip().title()`).
 fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let out = m_str_method_inner(an, st, c);
+    const STR_OUT: &[&str] = &["upper", "lower", "strip", "lstrip", "rstrip", "title", "capitalize", "casefold", "swapcase", "removeprefix", "removesuffix", "zfill", "center", "ljust", "rjust", "replace", "expandtabs", "join", "format"];
+    if crate::interp::disabled("strdata") || !STR_OUT.contains(&last(&c.qual)) || !out.pts.is_empty() {
+        return out;
+    }
+    match &out.kv {
+        KeyVal::Data(_) | KeyVal::Bot => Value::data("str"),
+        _ => out,
+    }
+}
+
+fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual);
     let kv = c.recv.as_ref().map(|r| r.kv.clone()).unwrap_or(DATA);
     match name {

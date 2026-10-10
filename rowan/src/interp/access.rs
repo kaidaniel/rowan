@@ -1804,6 +1804,10 @@ impl Analyzer {
                         _ => self.method_value(&format!("num.{}", name), obj),
                     };
                 }
+                // a string whose text is not known (a validated `str` field, a str method's result)
+                if &*label == "str" && super::STR_METHOD_NAMES.contains(&name) && !super::disabled("strdata") {
+                    return self.method_value(&format!("str.{}", name), obj);
+                }
                 if matches!(&*label, "Decimal" | "Fraction") && crate::models::pynum::NAMES.contains(&name) {
                     return if matches!(name, "numerator" | "denominator") { Value::data(name) } else { self.method_value(&format!("num.{}", name), obj) };
                 }

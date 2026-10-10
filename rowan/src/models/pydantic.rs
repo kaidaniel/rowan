@@ -1153,7 +1153,12 @@ impl Analyzer {
         self.raise_values.push(None);
         self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
         self.try_sum_depth.push(self.sum_stack.len());
+        // (run with the validated values: `v.strip()` of a str field is a str method there)
+        if !crate::interp::disabled("pydvaltab") {
+            self.force_tab_once = true;
+        }
         let out = self.call_user(f, Some(self_v), args, IndexMap::new(), vec![], vec![], state, node, None, false);
+        self.force_tab_once = false;
         self.guards.pop();
         self.try_marks.pop();
         self.try_sum_depth.pop();
@@ -1496,6 +1501,16 @@ impl Analyzer {
             crate::interp::FuncNode::Def(f) => crate::scopes::all_params(&f.parameters).len(),
             _ => 2,
         };
+        // (an after validator of a scalar field gets the validated value: a `str` / `int` /
+        // `float` / `bool` of the input, whatever placeholder it was read from)
+        let mut val = val.clone();
+        if v.mode != "before" && v.mode != "wrap" && !crate::interp::disabled("pydvalscalar") && !val.pts.is_empty() && val.pts.iter().all(|o| self.kind(o) == Kind::Ph) {
+            let pc = self.pyd_class(cls, state);
+            if let Some(Ann::Scalar(s)) = pc.fields.iter().find(|f| f.name == field).map(|f| f.ann.clone()) {
+                val = Value::data(if s == "str" { "str" } else { s });
+            }
+        }
+        let val = &val;
         let mut args = vec![val.clone()];
         if v.mode == "wrap" {
             // the handler validates by the field's type
