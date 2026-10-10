@@ -219,7 +219,7 @@ impl Analyzer {
                 }
                 // a builtin exception class: an exception object with its args
                 if let Some(n) = qual.strip_prefix("builtins.").filter(|n| super::exprs::is_exception_name(n)) {
-                    if kwargs.is_empty() && star_args.is_empty() && !super::disabled("excobj") && self.models.lookup(&qual).is_none() {
+                    if kwargs.is_empty() && star_args.is_empty() && !super::disabled("excobj") && !self.models.has_exact(&qual) {
                         let n = n.to_string();
                         return self.exception_object(&n, args.to_vec(), node, state);
                     }
@@ -239,6 +239,19 @@ impl Analyzer {
             }
             Kind::Method => {
                 let Payload::Method(qual, recv) = self.obj(oid).payload.clone() else { return Value::new() };
+                // `super().__init__(…)` reaching a builtin exception base: args, str / repr
+                if qual == "excinit" {
+                    for o in recv.pts.iter() {
+                        if self.kind(o) == Kind::Instance {
+                            let name = self.instance_class(o).and_then(|c| self.class_info_opt(c)).map(|ci| ci.name.clone()).unwrap_or_else(|| "Exception".into());
+                            let t = self.alloc_positional(Kind::Tuple, node, Some(args.to_vec()), Value::new(), DATA, state);
+                            let strong = recv.pts.len() == 1 && self.obj(o).single;
+                            self.store_key(o, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
+                            self.exc_objs.insert(o, name);
+                        }
+                    }
+                    return self.none_v.clone();
+                }
                 // `super().__init__(…)` / `Base.__init__(self, …)` reaching a dataclass base
                 if let Some(rest) = qual.strip_prefix("dcinit.") {
                     let (cls, self_v, args): (u32, Value, Vec<Value>) = match rest.strip_prefix("class.") {
@@ -606,6 +619,13 @@ impl Analyzer {
                 }
             }
             self.fresh_init.remove(&inst);
+        } else if self.builtin_exc_base(cls) && !super::disabled("excinit") {
+            // an Exception subclass without its own `__init__`: args are the arguments
+            let name = self.class_info(cls).name.clone();
+            let t = self.alloc_positional(Kind::Tuple, node, Some(args.to_vec()), Value::new(), DATA, state);
+            let strong = self.obj(inst).single;
+            self.store_key(inst, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
+            self.exc_objs.insert(inst, name);
         }
         Value::obj(inst)
     }
@@ -1189,6 +1209,7 @@ impl Analyzer {
         let saved_env = std::mem::take(&mut state.env);
         self.env_stack.push(saved_env.clone());
         self.raise_stack.push(false);
+        let raise_mark = self.raise_records;
         let saved_ret = state.ret.take();
         self.frames.push(new_fr);
         if let FuncNode::Def(f) = fnode {
@@ -1378,7 +1399,15 @@ impl Analyzer {
             if crate::interp::debug_level() == 2 {
                 eprintln!("  callee {} raised (tabulated at L{})", fi.qualname, node.line);
             }
-            self.note_raise();
+            // (a raise the enclosing try recorded, with its state and exception, needs no
+            // "raised somewhere" flag: the handler gets that exception, not an unknown one)
+            if self.raise_records > raise_mark && !super::disabled("recordedraise") {
+                if let Some(t) = self.raise_stack.last_mut() {
+                    *t = true;
+                }
+            } else {
+                self.note_raise();
+            }
         }
         state.env = saved_env;
         state.ret = saved_ret;
@@ -1435,6 +1464,7 @@ impl Analyzer {
             None => here,
             Some(mut prev) => prev.join(&mut here),
         });
+        self.raise_records += 1;
         true
     }
 

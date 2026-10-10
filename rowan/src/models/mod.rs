@@ -220,6 +220,11 @@ impl Registry {
         Registry { table: t }
     }
 
+    /// A model registered under exactly this name (no fallback).
+    pub fn has_exact(&self, qual: &str) -> bool {
+        self.table.contains_key(qual)
+    }
+
     pub fn lookup(&self, qual: &str) -> Option<Model> {
         if let Some(m) = self.table.get(qual) {
             return Some(*m);
@@ -1375,6 +1380,11 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let mut outs: Vec<Value> = Vec::new();
             let mut known = true;
             for o in a.pts.iter() {
+                // a builtin exception object: its class
+                if let Some(en) = an.exc_objs.get(&o).cloned().filter(|_| an.kind(o) == Kind::Namespace) {
+                    outs.push(builtin(an, &en));
+                    continue;
+                }
                 let n = match an.kind(o) {
                     Kind::Dict if !crate::models::pandas::is_series_obj(an, o) => "dict",
                     Kind::List => "list",

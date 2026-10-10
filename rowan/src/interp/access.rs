@@ -61,6 +61,22 @@ impl Analyzer {
         false
     }
 
+    /// Some class of `cls`'s MRO derives from a builtin exception class directly.
+    pub fn builtin_exc_base(&self, cls: u32) -> bool {
+        // (external bases are not in `bases`: read the class statement's base expressions)
+        self.mro(cls).iter().any(|c| {
+            self.class_info_opt(*c)
+                .map(|ci| {
+                    let user: Vec<String> = ci.bases.iter().filter_map(|b| self.class_info_opt(*b).map(|x| x.name.clone())).collect();
+                    ci.node.arguments.as_ref().map(|a| a.args.iter().any(|e| {
+                        let n = super::dotted_last(e);
+                        super::exprs::is_exception_name(&n) && !user.contains(&n)
+                    })).unwrap_or(false)
+                })
+                .unwrap_or(false)
+        })
+    }
+
     /// The attribute names `__slots__` allows on instances of `cls`, when every class of its MRO
     /// declares them (literally) and none gives a `__dict__`.
     pub fn slots_of(&self, cls: u32) -> Option<Vec<String>> {
@@ -1651,6 +1667,8 @@ impl Analyzer {
                             }
                         }
                     }
+                    // (a builtin base answers nothing here: its own methods are not user code)
+                    let found = found.filter(|fc| self.kind(*fc) != Kind::External || super::disabled("excinit"));
                     match found {
                         Some(fc) => {
                             let fv = self.cls_slots.get(&(fc, Ns::Attr, nk)).cloned().unwrap_or_default();
@@ -1669,6 +1687,11 @@ impl Analyzer {
                             let dc = ci.bases.iter().find_map(|b| self.dataclass_init_owner(*b)).unwrap();
                             let ids: Vec<String> = self_v.pts.iter().map(|x| x.to_string()).collect();
                             Value::obj(self.alloc_raw(Kind::Method, &format!("dcinit:{}:{}", dc, ids.join(",")), "", true, "dataclass __init__ via super", Payload::Method(format!("dcinit.{}", dc), self_v.clone())))
+                        }
+                        // `super().__init__(msg)` in an Exception subclass: the instance's args
+                        None if name == "__init__" && !super::disabled("excinit") && self.builtin_exc_base(cls) => {
+                            let ids: Vec<String> = self_v.pts.iter().map(|x| x.to_string()).collect();
+                            Value::obj(self.alloc_raw(Kind::Method, &format!("excinit:{}", ids.join(",")), "", true, "Exception.__init__ via super", Payload::Method("excinit".to_string(), self_v.clone())))
                         }
                         None => Value::data("super"),
                     }

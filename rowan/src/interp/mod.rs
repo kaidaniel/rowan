@@ -887,6 +887,8 @@ pub struct Analyzer {
     /// a copy's original (through copies made at the same node: `out = deepcopy(out)` in a loop
     /// makes one copy site, not a new one per round)
     pub copy_root: FxHashMap<ObjId, ObjId>,
+    /// raises recorded by an enclosing try (`record_raise_state`), counted
+    pub raise_records: u64,
     pub item_exc: Option<&'static str>,
     pub narrow_depth: u32,
     pub pyd_last_failed: bool,
@@ -1148,6 +1150,7 @@ impl Analyzer {
             np_struct: FxHashSet::default(),
             gen_yield_states: FxHashMap::default(),
             copy_root: FxHashMap::default(),
+            raise_records: 0,
             item_exc: None,
             narrow_depth: 0,
             pyd_last_failed: false,
@@ -1337,6 +1340,13 @@ impl Analyzer {
 
     /// What models keep about an object, for its clone (a summary's template instantiated).
     pub fn copy_side_tables(&mut self, t: ObjId, nid: ObjId) {
+        // (an exception object, a numpy structured array)
+        if let Some(n) = self.exc_objs.get(&t).cloned() {
+            self.exc_objs.insert(nid, n);
+        }
+        if self.np_struct.contains(&t) {
+            self.np_struct.insert(nid);
+        }
         if let Some(a) = self.argp.get(&t).cloned() {
             self.argp.insert(nid, a);
         }

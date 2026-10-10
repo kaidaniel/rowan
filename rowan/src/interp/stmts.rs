@@ -134,6 +134,21 @@ impl Analyzer {
                     // a bare raise re-raises what the running handler holds: not tracked
                     None => None,
                 };
+                // `raise X from Y`: X.__cause__ is Y (None for `from None`)
+                if let (Some(xv), Some(ce)) = (&exc_v, &r.cause) {
+                    if !crate::interp::disabled("raisecause") {
+                        let cv = self.eval(ce, state);
+                        let ck = key_str_lit("__cause__");
+                        for o in xv.pts.iter() {
+                            if matches!(self.kind(o), Kind::Instance | Kind::Namespace) || self.exc_objs.contains_key(&o) {
+                                let strong = xv.pts.len() == 1 && self.obj(o).single;
+                                let row = state.row(o, Ns::Attr).store(ck, strong);
+                                state.set_row(o, Ns::Attr, row);
+                                state.set_slot(o, Ns::Attr, ck, cv.clone(), strong);
+                            }
+                        }
+                    }
+                }
                 // uncaught here (no enclosing handler for it): the running call raises
                 let name = r.exc.as_ref().map(|e| match &**e {
                     ast::Expr::Call(c) => dotted_last(&c.func),
