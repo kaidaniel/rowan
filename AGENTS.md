@@ -33,8 +33,8 @@ cd rowan && cargo build --release && cargo test --release --lib && cd ..
 rowan/target/release/rowan FILE.py [--json|--golden|--facts] [--no-rows --no-summaries --no-entry --no-imports] [--value-depth N]
                                    [--search-path DIR]… [--follow PKG]… [--site-packages DIR]…
 rowan/target/release/rowan serve                    # JSON lines over stdio (README has the protocol)
-uv run --no-project python tests/run_golden.py      # 919/919 in ~4 s (all suites); paths select; -v
-uv run --no-project python tests/run_golden.py --pending [--prune]   # cases in tests/*/PENDING (1 left: ym04)
+uv run --no-project python tests/run_golden.py      # 952/952 in ~5 s (all suites); paths select; -v
+uv run --no-project python tests/run_golden.py --pending [--prune]   # cases in tests/*/PENDING (ym04, c001)
 uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy \
     python tests/oracle.py [--strict|--lenient] [-v] [case…]         # expectations vs a real run (755/755, ~4 min)
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py  # torch expectations vs real PyTorch
@@ -59,15 +59,15 @@ decision), `ROWAN_NO=a,b` (switch refinements off: `rg 'disabled\("' rowan/src`)
 | `interp/{stmts,exprs,funcs,narrow,access,calls}.rs` | statements, expressions, functions / iteration, narrowing, record / attribute access, calls (tabulation vs summary, call cache, dataclass init, singledispatch, exception objects). |
 | `summary.rs` | placeholders, events, `summarise_sig`, `Inst` (instantiation), `propagate_events`, `should_tabulate`. |
 | `models/mod.rs` | `Registry`; builtins, dict/list/set/str methods, `copy`, `dataclasses`, `collections`, `json` (exact `dumps` text, round trips, `object_hook`), `slice`, enum hooks. |
-| `models/{pyvalues,pure}.rs` | exact CPython values on literals (str methods, format specs, `%`, math / operator / statistics; unit-tested against CPython). |
+| `models/{pyvalues,pure,pytext}.rs` | exact CPython values on literals (str methods, format specs, `%`, math / operator / statistics; bytes methods, base64 / binascii, shlex, html, string.capwords, fnmatch, urllib.parse quoting; unit-tested against CPython). |
 | `models/{counter,csvio,argparse,concurrency}.rs` | Counter / deque; `io.StringIO` text, `csv` writer / reader / Dict*, ExitStack, redirect_stdout, closing / nullcontext, the `stdobj.*` dispatch; argparse (parse of known argv); threads, executors, futures. |
-| `models/{itertools,stdfuncs,configparser,sqlite}.rs` | itertools; heapq / bisect / operator / string.Template; configparser (INI simulated); sqlite3 (SQL simulated on in-memory DBs, SELECT columns = row keys). |
+| `models/{itertools,stdfuncs,configparser,sqlite}.rs` | itertools; heapq / bisect / operator / string.Template; configparser (INI simulated); sqlite3 (SQL simulated on in-memory DBs: expressions, aggregates, GROUP BY, ORDER BY alias / rowid, UPDATE SET expressions, rowcount; SELECT columns = row keys even when rows are not simulated; an outside connection met in a summary is left alone, `sql_touched`). |
 | `models/{pyre,remodel,pynum,chrono,pathtext}.rs` | a Python-`re` backtracking engine and the `re` model (Pattern / Match objects); exact Decimal / Fraction; datetime / date / time / timedelta; os.path, pathlib pure paths, textwrap. |
-| `models/{pydantic,fastapi}.rs` | pydantic v2 (+ v1 spellings) models, validation, dumps, TypeAdapter, settings; FastAPI routes, binding, dependencies (yield), TestClient dispatch, status codes, middlewares. |
+| `models/{pydantic,fastapi}.rs` | pydantic v2 (+ v1 spellings) models, validation (Enum / Literal fields, constraints; defaults not validated), dumps, TypeAdapter, settings; FastAPI routes, binding (Optional scalars), dependencies (yield), TestClient dispatch, status codes, middlewares; responses as the client reads them (`json_wire`). |
 | `models/{pandas,minire,torch}.rs`, `shape.rs` | pandas; a small regex matcher (pandas `regex=`); tensor shapes and the torch model. |
 | `report.rs`, `main.rs` | output formats; CLI, `serve_loop`, site-packages discovery (1 GiB-stack thread). |
 | `tests/run_golden.py`, `tests/oracle.py` | golden harness (directives: `tests/CONVENTIONS.md`), runtime oracle (strict on the library suites). |
-| `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/` | 457 / 162 / 135 / 52 / 40 / 109 / 0 / 0 files; suites have `small/`, `models/`, a `PENDING` list. |
+| `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/` | 458 / 162 / 137 / 54 / 41 / 116 / 46 / 6 files (apps: small / medium / large package programs); suites have `small/`, `models/`, a `PENDING` list. |
 | `tests/run_snapshots.py`, `tests/snapshots/` | `--json` snapshots on four old modules: the internals regression guard. |
 | `vscode-rowan/`, `rowan/py/` | VS Code extension (rowan serve); PyO3 binding (does not load on this machine). |
 
@@ -90,13 +90,17 @@ by run (the oracle reads it per line).
   a context (call chain, receiver, `sum<f>v<n>`); hitting a live site again makes the object
   weak. Models that allocate several objects at one node in a Rust loop must give each its
   own context (pydantic: per input record / container; executor.map, object_hook: column
-  offsets) or the second overwrites the first. Single identity-hashed objects (futures,
+  offsets) or the second overwrites the first; a context a model passes to `alloc_at` is a
+  suffix of the frame's (the same code run from two callers makes two objects). Single
+  identity-hashed objects (futures,
   functions, instances without `__eq__`/`__hash__`) are exact dict keys (`identity_key`);
   objects in a key otherwise make it an unknown key (`opaque_key`).
 * **Positions.** Literal containers, appends (also in branches / try bodies: lengths are per
   path, `State.lens`, joined to the shorter known prefix), decided comprehensions, sorts by
   literal keys, slices (also `slice()` objects; a slice of a placeholder is a list), yields,
-  `zip`/`enumerate`/`map`; `lst[-1]` after an append of unknown position (`State.lasts`).
+  `zip`/`enumerate`/`map`; `lst[-1]` after an append of unknown position (`State.lasts`);
+  `if items:` gives a list of unknown length a first element on that path (prefix 1, also
+  through a filter-free comprehension; a frame of such records has their sure keys).
   Dicts keep insertion order; `True`/`1`/`1.0` and StrEnum members / their values are one key.
 * **Values.** Exact on literals (`pyvalues`, `pynum`, `chrono`: Decimal / Fraction /
   datetime are literal keys too, compared by value in the `Compare` hook); comparisons,
@@ -106,7 +110,10 @@ by run (the oracle reads it per line).
   `Row.stored`, `State.name_keys`; entry runs and quiet requirement-only runs. Tuples,
   frozensets and frozen dataclass / pydantic instances with known items are value keys.
   Dict insertion order survives instantiation; an unknown order is never guessed (the
-  iteration is then abstract). Rich comparisons call `__lt__` & co (`total_ordering`).
+  iteration is then abstract). Rich comparisons call `__lt__` & co (`total_ordering`,
+  `@dataclass(order=True)`, IntEnum / StrEnum by value). Narrowing never re-runs a call: each
+  call node's last value is read back (`call_memo`); `obj.attr == lit` narrows the attribute.
+  Keys removed from open records are absent (`Row::lacks`).
 * **Stdlib objects** (`stdobj.<kind>` Namespace objects, attributes in Attr slots, methods via
   `m_stdobj`): StringIO, csv writers / readers, ExitStack, Template, Pattern / Match, path
   objects, sqlite connections / cursors. A parameter whose attribute is named like one of a
@@ -114,7 +121,8 @@ by run (the oracle reads it per line).
 * **Classes.** Dataclasses (field specs, InitVar, KW_ONLY, frozen, replace), properties,
   C3 MRO, descriptors, `__missing__`, `vars()`, Enum (members as keys, auto, Flag ops,
   StrEnum), `cached_property`, `lru_cache`, singledispatch; namedtuple / itemgetter /
-  attrgetter / re.match / UserDict are small generated modules.
+  attrgetter / re.match / UserDict / urllib.parse (urlparse, urljoin, parse_qs, urlencode,
+  ported from CPython) are small generated modules.
 * **Exceptions.** Raise states per try (`raise_states`, `raise_values`: the exception object
   with its args; builtin exceptions are objects with `args`, str / repr); a bare `raise`
   re-raises the handled value; a try body that may raise somewhere unknown gives its handler
@@ -151,7 +159,7 @@ by run (the oracle reads it per line).
 
 | input | time | notes |
 | --- | --- | --- |
-| golden (919 cases, all suites) | ~4 s | one process per case; oracle ~4 min |
+| golden (952 cases, all suites) | ~5 s | one process per case; oracle ~4 min |
 | `j93` (830 lines) / `m96_pkg` (1,716) / `proto_summary.py` (1.2k, self-referential) | 0.09 / 0.10 / 2.6 s | pass / pass / 0 ✗ |
 
 ## Known problems and limits
@@ -172,12 +180,15 @@ by run (the oracle reads it per line).
   future without its value (`sm05` to-do).
 * Identity keys of an object that later turns weak stay in rows (rare: re-allocation of a
   live single object).
-* Torch: dtype / device not modelled; numpy only the basics (model planned, `PLAN.md` §5).
+* Torch: dtype / device not modelled. numpy rides on the tensor model (importing numpy turns
+  it on; numpy semantics where they differ: transpose, reductions, cumsum, `np.*` functions).
+* pandas values per row are not simulated (groupby + sort order of literal frames: b002
+  to-dos); frames keep per-column value sets.
 
 ## Where to go next
 
 `PLAN.md` steps left: `ym04` (discriminated unions through TypeAdapter, pydantic dataclasses),
-`tests/apps` (multi-module mixed programs), the numpy model, docs (README, SPECIFICATION §11
-coverage table). Then: deletion by key pattern, records into frames, pandas `#@todo`s; torch
+`c001` (large app, precision), docs (README, SPECIFICATION §11 coverage table). Then: a
+concrete row model for literal frames, deletion by key pattern, records into frames, pandas `#@todo`s; torch
 facts from `<`/`!=`, dtypes; summary reuse in the server; the weak store through several
 objects; precision on real repositories. Keep this file under 200 lines.
