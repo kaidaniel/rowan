@@ -291,7 +291,7 @@ audit_section = report1["audit"]                   #@row audit_section: present=
 report2 = S2["report"]                             #@row report2: present={stock,shipments,bus,summary,plugins} definite={stock,shipments,bus,summary,plugins} closed
 report3 = S3["report"]                             #@row report3: present={stock,shipments,bus,summary,plugins,shortages} definite={stock,shipments,bus,summary,plugins,shortages} closed
 stock3 = report3["stock"]                          #@row stock3: present={zones,skus,top,lots,reserved} definite={zones,skus,top,lots,reserved} closed
-rt = round_trip(report1)                           #@row rt: present={} definite={} open
+rt = round_trip(report1)                           #@row rt: present={stock,shipments,bus,summary,plugins,audit} definite={stock,shipments,bus,summary,plugins,audit} closed
 csv = csv_rows(report1)
 
 # ---------------------------------------------------------------- scheduling
@@ -335,4 +335,4 @@ s1_label["insured"]                                #@ ok insured
 label_s2["insured"]                                #@ ok insured
 health3["needs_cleanup"]                           #@ missing needs_cleanup
 cfg1_features["audit"]                             #@ ok audit
-rt["summary"]                                      #@ input summary
+rt["summary"]                                      #@ ok summary

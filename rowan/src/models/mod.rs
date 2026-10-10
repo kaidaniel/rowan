@@ -2439,6 +2439,12 @@ fn json_tag(q: &str) -> String {
 
 /// `json.loads("…")` of a literal: the parsed value (dicts with exactly their keys).
 fn json_literal(an: &mut Analyzer, st: &mut State, c: &Call, j: &serde_json::Value, path: &str) -> Value {
+    let hook = c.kw("object_hook");
+    json_literal_h(an, st, c, j, path, hook.as_ref())
+}
+
+/// (`object_hook=f`: each object, innermost first, is replaced by `f(dict)`)
+fn json_literal_h(an: &mut Analyzer, st: &mut State, c: &Call, j: &serde_json::Value, path: &str, hook: Option<&Value>) -> Value {
     let site = format!("{}#json{}", crate::interp::site_string(&c.node), path);
     match j {
         serde_json::Value::Null => an.none_v.clone(),
@@ -2449,7 +2455,7 @@ fn json_literal(an: &mut Analyzer, st: &mut State, c: &Call, j: &serde_json::Val
         },
         serde_json::Value::String(t) => Value::lit(key_str_lit(t)),
         serde_json::Value::Array(items) => {
-            let vals: Vec<Value> = items.iter().enumerate().map(|(i, x)| json_literal(an, st, c, x, &format!("{}.{}", path, i))).collect();
+            let vals: Vec<Value> = items.iter().enumerate().map(|(i, x)| json_literal_h(an, st, c, x, &format!("{}.{}", path, i), hook)).collect();
             let oid = an.alloc(Kind::List, &site, st, &format!("list@L{}", c.line), Payload::None, None, Ns::Item, None, None);
             let single = an.obj(oid).single;
             let acc = join_values(vals.clone());
@@ -2467,10 +2473,19 @@ fn json_literal(an: &mut Analyzer, st: &mut State, c: &Call, j: &serde_json::Val
             let oid = an.alloc(Kind::Dict, &site, st, &format!("dict@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, None);
             let strong = an.obj(oid).single;
             for (k, x) in m.iter() {
-                let v = json_literal(an, st, c, x, &format!("{}.{}", path, k));
+                let v = json_literal_h(an, st, c, x, &format!("{}.{}", path, k), hook);
                 an.store_key(oid, Ns::Item, &KeyVal::Lit(key_str_lit(k)), &v, strong, &c.node, st);
             }
-            Value::obj(oid)
+            match hook {
+                Some(h) if !crate::interp::disabled("objecthook") => {
+                    // (a call context per object: the hook's allocations stay distinct)
+                    let mut nd = c.node;
+                    let tag = path.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32)) % 1_000_000;
+                    nd.col = c.node.col.wrapping_add(1_000_000 + tag);
+                    an.call_value(h, &nd, None, st, Some(vec![Value::obj(oid)]))
+                }
+                _ => Value::obj(oid),
+            }
         }
     }
 }
@@ -2482,10 +2497,27 @@ fn json_literal(an: &mut Analyzer, st: &mut State, c: &Call, j: &serde_json::Val
 fn m_json_dumps(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let fallback = Value::data(&format!("L{}", c.line));
     let Some(x) = c.args.first() else { return fallback };
+    let json = c.qual == "json.dumps";
+    // a parameter's value: known at the call site
+    if let Some(p) = x.kv.as_param() {
+        an.record_event("concrete", p);
+    }
+    for o in x.pts.iter() {
+        if an.kind(o) == Kind::Ph {
+            an.record_event("concrete", o);
+        }
+    }
+    // fully known data: the exact text
+    if json && !crate::interp::disabled("jsontext") {
+        if let Some(opts) = JsonOpts::of(c) {
+            if let Some(t) = json_text(an, st, x, &opts, 0) {
+                return Value::lit_str(&t);
+            }
+        }
+    }
     if crate::interp::disabled("jsonround") || x.pts.is_empty() || !x.kv.is_bot() {
         return fallback;
     }
-    let json = c.qual == "json.dumps";
     // (plain data only, a bounded walk)
     let mut work: Vec<u32> = x.pts.iter().collect();
     let mut seen: rustc_hash::FxHashSet<u32> = Default::default();
@@ -2498,8 +2530,9 @@ fn m_json_dumps(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         match an.kind(o) {
             Kind::Dict if !pandas::is_series_obj(an, o) => {
+                // (json: int / float / bool / None keys become strings)
                 let r = st.row(o, Ns::Item);
-                if json && !r.present.iter().all(intern::key_is_str) {
+                if json && !r.present.iter().all(|k| intern::key_is_str(k) || json_key_text(k).is_some()) {
                     return fallback;
                 }
                 for (_, v) in st.obj_slots(o, Ns::Item) {
@@ -2521,8 +2554,204 @@ fn m_json_dumps(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             _ => return fallback,
         }
     }
-    let snaps: Vec<String> = x.pts.iter().map(|o| an.copy_object(o, &c.node, st, true, &mut IndexMap::new()).to_string()).collect();
+    let snaps: Vec<String> = x.pts.iter().map(|o| {
+        let mut seen = IndexMap::new();
+        let n = an.copy_object(o, &c.node, st, true, &mut seen);
+        if json {
+            for (_, copy) in seen.iter() {
+                json_str_keys(an, st, *copy);
+            }
+            json_str_keys(an, st, n);
+        }
+        n.to_string()
+    }).collect();
     Value::data(&format!("{}:{}", if json { "pyjsontext" } else { "pickletext" }, snaps.join(",")))
+}
+
+/// A json object key's text for a non-str literal key (`1` → "1", True → "true").
+fn json_key_text(k: KeyId) -> Option<String> {
+    if k == intern::key_none() {
+        return Some("null".into());
+    }
+    match intern::key_get(k) {
+        intern::Key::Bool(b) => Some(if b { "true".into() } else { "false".into() }),
+        intern::Key::Int(i) => Some(i.to_string()),
+        intern::Key::Float(_) => Some(intern::key_py_str(k)),
+        _ => None,
+    }
+}
+
+/// A copied dict's keys as json makes them (strings).
+fn json_str_keys(an: &mut Analyzer, st: &mut State, o: u32) {
+    if an.kind(o) != Kind::Dict {
+        return;
+    }
+    let row = st.row(o, Ns::Item);
+    if row.present.iter().all(intern::key_is_str) {
+        return;
+    }
+    let keys: Vec<KeyId> = row.ordered_keys().unwrap_or_else(|| row.present.iter().collect());
+    let mut nr = Row::new();
+    for k in keys {
+        let v = st.slot(o, Ns::Item, k);
+        let nk = match json_key_text(k) {
+            Some(t) => key_str_lit(&t),
+            None => k,
+        };
+        if nk != k {
+            st.pop_slot(o, Ns::Item, k);
+        }
+        nr = nr.store(nk, row.definite.contains(k));
+        st.set_slot(o, Ns::Item, nk, v, true);
+    }
+    if row.open() {
+        nr = nr.data_store(Source::new("json keys", SourceKind::Data));
+    }
+    st.set_row(o, Ns::Item, nr);
+}
+
+/// `json.dumps` options that decide its text.
+struct JsonOpts {
+    sort_keys: bool,
+    indent: Option<String>,
+    item_sep: String,
+    key_sep: String,
+    ensure_ascii: bool,
+}
+
+impl JsonOpts {
+    fn of(c: &Call) -> Option<JsonOpts> {
+        let lit = |name: &str| c.kw(name).map(|v| v.kv.as_lit().filter(|_| v.pts.is_empty()));
+        let flag = |name: &str, dflt: bool| -> Option<bool> {
+            match lit(name) {
+                None => Some(dflt),
+                Some(Some(k)) => intern::with_key(k, |kk| if let intern::Key::Bool(b) = kk { Some(*b) } else { None }),
+                Some(None) => None,
+            }
+        };
+        if c.kwargs.keys().any(|k| !matches!(&*intern::str_get(*k), "sort_keys" | "indent" | "separators" | "ensure_ascii")) || c.args.len() > 1 {
+            return None;
+        }
+        let indent = match lit("indent") {
+            None => None,
+            Some(Some(k)) if k == intern::key_none() => None,
+            Some(Some(k)) => match intern::key_get(k) {
+                intern::Key::Int(i) if i >= 0 => Some(" ".repeat(i as usize)),
+                intern::Key::Str(s) => Some(s.to_string()),
+                _ => return None,
+            },
+            Some(None) => return None,
+        };
+        let (item_sep, key_sep) = match c.kw("separators") {
+            None => (if indent.is_some() { ",".to_string() } else { ", ".to_string() }, ": ".to_string()),
+            Some(v) => {
+                let k = v.kv.as_lit().filter(|_| v.pts.is_empty())?;
+                match intern::key_get(k) {
+                    intern::Key::Tuple(ks) if ks.len() == 2 => (intern::key_as_str(ks[0])?.to_string(), intern::key_as_str(ks[1])?.to_string()),
+                    _ => return None,
+                }
+            }
+        };
+        Some(JsonOpts { sort_keys: flag("sort_keys", false)?, indent, item_sep, key_sep, ensure_ascii: flag("ensure_ascii", true)? })
+    }
+}
+
+fn json_str(s: &str, ascii: bool) -> String {
+    let mut out = String::from("\"");
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if ascii && (c as u32) > 0x7e => {
+                let mut buf = [0u16; 2];
+                for u in c.encode_utf16(&mut buf) {
+                    out.push_str(&format!("\\u{:04x}", u));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The exact text `json.dumps` makes of fully known data (None: anything unknown in it).
+fn json_text(an: &Analyzer, st: &State, v: &Value, o: &JsonOpts, depth: usize) -> Option<String> {
+    if depth > 32 {
+        return None;
+    }
+    let nl = |d: usize| -> String { match &o.indent { Some(ind) => format!("\n{}", ind.repeat(d)), None => String::new() } };
+    if v.pts.is_empty() {
+        let k = v.kv.as_lit()?;
+        if k == intern::key_none() {
+            return Some("null".into());
+        }
+        return match intern::key_get(k) {
+            intern::Key::Bool(b) => Some(if b { "true".into() } else { "false".into() }),
+            intern::Key::Int(i) => Some(i.to_string()),
+            intern::Key::Float(bits) => {
+                let f = f64::from_bits(bits);
+                Some(if f.is_nan() { "NaN".into() } else if f.is_infinite() { if f > 0.0 { "Infinity".into() } else { "-Infinity".into() } } else { intern::key_py_str(k) })
+            }
+            intern::Key::Str(s) => Some(json_str(&s, o.ensure_ascii)),
+            intern::Key::Tuple(ks) => {
+                let parts: Option<Vec<String>> = ks.iter().map(|k| json_text(an, st, &Value::lit(*k), o, depth + 1)).collect();
+                let parts = parts?;
+                if parts.is_empty() {
+                    return Some("[]".into());
+                }
+                Some(format!("[{}{}{}]", nl(depth + 1), parts.join(&format!("{}{}", o.item_sep, nl(depth + 1))), nl(depth)))
+            }
+            _ => None,
+        };
+    }
+    if !v.kv.is_bot() || v.pts.len() != 1 {
+        return None;
+    }
+    let x = v.pts.first()?;
+    match an.kind(x) {
+        Kind::Dict if !pandas::is_series_obj(an, x) => {
+            let r = st.row(x, Ns::Item);
+            if !r.closed() || r.present != r.definite {
+                return None;
+            }
+            let mut keys: Vec<KeyId> = r.ordered_keys()?;
+            let ktext = |k: KeyId| -> Option<String> { intern::key_as_str(k).map(|s| s.to_string()).or_else(|| json_key_text(k)) };
+            if o.sort_keys {
+                if !keys.iter().all(|k| intern::key_is_str(*k)) {
+                    return None;
+                }
+                keys.sort_by_key(|k| intern::key_as_str(*k).map(|s| s.to_string()).unwrap_or_default());
+            }
+            if keys.is_empty() {
+                return Some("{}".into());
+            }
+            let mut parts = Vec::new();
+            for k in keys {
+                let vt = json_text(an, st, &st.slot(x, Ns::Item, k), o, depth + 1)?;
+                parts.push(format!("{}{}{}", json_str(&ktext(k)?, o.ensure_ascii), o.key_sep, vt));
+            }
+            Some(format!("{{{}{}{}}}", nl(depth + 1), parts.join(&format!("{}{}", o.item_sep, nl(depth + 1))), nl(depth)))
+        }
+        Kind::List | Kind::Tuple => {
+            let n = an.llen(x, st)?;
+            let mut parts = Vec::new();
+            for i in 0..n {
+                parts.push(json_text(an, st, &st.slot(x, Ns::Pos, intern::key_int(i as i64)), o, depth + 1)?);
+            }
+            if parts.is_empty() {
+                return Some("[]".into());
+            }
+            Some(format!("[{}{}{}]", nl(depth + 1), parts.join(&format!("{}{}", o.item_sep, nl(depth + 1))), nl(depth)))
+        }
+        _ => None,
+    }
 }
 
 /// The snapshots a `json.dumps` / `pickle.dumps` text stands for.
