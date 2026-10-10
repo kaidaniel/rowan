@@ -694,7 +694,7 @@ impl Analyzer {
                         (Some(l), Some(its)) => {
                             for (k, val) in l {
                                 match vk {
-                                    ViewKind::Keys => its.push(Value::lit(k)),
+                                    ViewKind::Keys | ViewKind::Proxy => its.push(Value::lit(k)),
                                     ViewKind::Values => its.push(val),
                                     _ => {
                                         let pid = self.alloc_raw(Kind::Pair, &format!("pair:{}:{}", oid, intern::key_repr(k)), "", true, "pair", Payload::Pair(Value::lit(k), val.clone()));
@@ -707,7 +707,7 @@ impl Analyzer {
                         _ => items = None,
                     }
                     match vk {
-                        ViewKind::Keys => elems.push(Value::kv_only(kv)),
+                        ViewKind::Keys | ViewKind::Proxy => elems.push(Value::kv_only(kv)),
                         ViewKind::Values => elems.push(vals),
                         _ => {
                             pair = true;

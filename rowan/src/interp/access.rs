@@ -687,6 +687,9 @@ impl Analyzer {
                         // `obj.__dict__[k]`: an attribute load
                         let v = self.load_item(&inst, Ns::Attr, key, node, state, report);
                         acc = acc.join(&v);
+                    } else if let Payload::View(ViewKind::Proxy, inner) = self.obj(oid).payload.clone() {
+                        let v = self.load_item(&inner, Ns::Item, key, node, state, report);
+                        acc = acc.join(&v);
                     } else {
                         acc = acc.join(&line_data);
                     }
@@ -1046,6 +1049,15 @@ impl Analyzer {
                     continue;
                 }
                 Kind::View => {
+                    // a read-only proxy: the store raises
+                    if let Payload::View(ViewKind::Proxy, _) = self.obj(oid).payload {
+                        if targets.len() == 1 {
+                            self.raise_here("TypeError", state);
+                        } else {
+                            self.may_raise_here("TypeError", state);
+                        }
+                        continue;
+                    }
                     // `obj.__dict__[k] = v`: an attribute store
                     if let Payload::View(ViewKind::Attrs, inst) = self.obj(oid).payload.clone() {
                         let insts: Vec<u32> = inst.pts.iter().collect();
@@ -1492,6 +1504,15 @@ impl Analyzer {
                 Kind::Function => state.slot_opt(oid, Ns::Attr, nk).unwrap_or_else(|| Value::data(&format!("L{}", node.line))),
                 Kind::Bound => Value::data(&format!("L{}", node.line)),
                 Kind::View => {
+                    // a proxy's read methods are the dict's (it has no mutators)
+                    if let Payload::View(ViewKind::Proxy, inner) = self.obj(oid).payload.clone() {
+                        if matches!(name, "get" | "keys" | "values" | "items" | "copy") {
+                            acc = acc.join(&self.method_value(&format!("dict.{}", name), &inner));
+                        } else {
+                            acc = acc.join(&self.load_attr(&Value::data("proxy"), name, node, state, report));
+                        }
+                        continue;
+                    }
                     if let Payload::View(ViewKind::Keys, recv) = &self.obj(oid).payload {
                         if name == "str" {
                             acc = acc.join(&Value::kv_only(KeyVal::KeysOf(crate::domain::KeysOf::new(recv.pts.clone(), Ns::Item))));
@@ -1852,7 +1873,8 @@ impl Analyzer {
             if !guarded {
                 self.record_symreq(node, KeyVal::Lit(nk), &row, oid, Ns::Attr, guarded, "attr");
             }
-            if single_target && self.strongable(oid) {
+            // (a read that cannot fail, `getattr(o, k, None)`, proves nothing)
+            if single_target && self.strongable(oid) && (!guarded || self.is_guarded(Ns::Attr)) {
                 state.set_row(oid, Ns::Attr, row.narrow_in(nk, true));
             }
             return self.path_placeholder_value(oid, Ns::Attr, nk, &row, state);

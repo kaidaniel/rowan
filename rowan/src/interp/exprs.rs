@@ -965,7 +965,7 @@ impl Analyzer {
                     if let Some(o) = b.single() {
                         if let Payload::View(vk, inner) = self.obj(o).payload.clone() {
                             match vk {
-                                ViewKind::Keys => {
+                                ViewKind::Keys | ViewKind::Proxy => {
                                     let b2 = inner;
                                     let recs = self.record_objects(&b2);
                                     if !b2.pts.is_empty() && recs.len() == b2.pts.len() && recs.iter().all(|o| matches!(self.kind(*o), Kind::Dict | Kind::Frame)) {
@@ -1086,7 +1086,7 @@ impl Analyzer {
     pub fn known_members(&self, v: &Value, state: &State) -> Option<intern::KeySet> {
         let o = v.single()?;
         match (self.kind(o), &self.obj(o).payload) {
-            (Kind::View, Payload::View(ViewKind::Keys, inner)) => {
+            (Kind::View, Payload::View(ViewKind::Keys | ViewKind::Proxy, inner)) => {
                 let d = inner.single().filter(|d| self.kind(*d) == Kind::Dict)?;
                 let row = state.row(d, Ns::Item);
                 (row.closed() && row.present == row.definite && !row.symbolic()).then(|| row.present.clone())

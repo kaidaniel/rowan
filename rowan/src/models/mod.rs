@@ -88,6 +88,7 @@ impl Registry {
         r(&["builtins.bool"], m_bool);
         r(&["builtins.type"], m_type);
         r(&["builtins.range"], m_range);
+        r(&["types.MappingProxyType"], m_mappingproxy);
         r(&["typing.get_type_hints", "typing_extensions.get_type_hints", "inspect.get_annotations"], m_type_hints);
         r(&["builtins.any", "builtins.all"], m_any_all);
         r(&["builtins.len"], m_len);
@@ -3789,6 +3790,18 @@ fn m_type_hints(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
 }
 
+/// `MappingProxyType(d)`: a live read-only view of d.
+fn m_mappingproxy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let Some(d) = c.args.first().cloned() else { return Value::data("proxy") };
+    if d.pts.is_empty() || !d.pts.iter().all(|o| matches!(an.kind(o), Kind::Dict | Kind::Ph | Kind::Unknown)) {
+        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+    }
+    let _ = st;
+    let vid = an.alloc_raw(Kind::View, &format!("view:proxy:{}:{}", c.site, d.pts.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(",")), "", true, "mappingproxy", Payload::View(ViewKind::Proxy, d.clone()));
+    an.obj_mut(vid).payload = Payload::View(ViewKind::Proxy, d);
+    Value::obj(vid)
+}
+
 fn m_range(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let ints: Option<Vec<i64>> = c.args.iter().map(|a| if a.pts.is_empty() { a.kv.as_lit().and_then(intern::key_as_int) } else { None }).collect();
     let bounds = match ints.as_deref() {
@@ -3863,7 +3876,7 @@ fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     if let Some(o) = v.single() {
         // a view of one dict: the dict's length
-        if let Payload::View(ViewKind::Keys | ViewKind::Values | ViewKind::Items, inner) = an.obj(o).payload.clone() {
+        if let Payload::View(ViewKind::Keys | ViewKind::Values | ViewKind::Items | ViewKind::Proxy, inner) = an.obj(o).payload.clone() {
             if let Some(d) = inner.single().filter(|d| matches!(an.kind(*d), Kind::Dict | Kind::Frame)) {
                 let row = st.row(d, Ns::Item);
                 if row.closed() && row.present == row.definite && !row.symbolic() {

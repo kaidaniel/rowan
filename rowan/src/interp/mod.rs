@@ -437,6 +437,8 @@ pub enum ViewKind {
     Elems,
     /// `obj.__dict__`: the instance's attributes as a dict
     Attrs,
+    /// `types.MappingProxyType(d)`: a read-only live view of the dict
+    Proxy,
 }
 
 impl ViewKind {
@@ -448,6 +450,7 @@ impl ViewKind {
             ViewKind::Rows => "rows",
             ViewKind::Elems => "elems",
             ViewKind::Attrs => "attrs",
+            ViewKind::Proxy => "proxy",
         }
     }
     pub fn from_name(n: &str) -> ViewKind {
@@ -2507,6 +2510,14 @@ impl Analyzer {
                         obs_rows.push((dd, Ns::Item, state.row(dd, Ns::Item)));
                         continue;
                     }
+                }
+                // a mapping proxy shows its dict
+                if let Payload::View(ViewKind::Proxy, inner) = self.obj(oid).payload.clone() {
+                    for dd in inner.pts.iter() {
+                        rows.push(state.row(dd, Ns::Item));
+                        obs_rows.push((dd, Ns::Item, state.row(dd, Ns::Item)));
+                    }
+                    continue;
                 }
                 let typed = self.kind(oid) == Kind::Ph && self.ph_info(oid).cls.get().map(|c| self.class_info_opt(c).is_some()).unwrap_or(false);
                 let ns = if matches!(self.kind(oid), Kind::Instance | Kind::Namespace) || typed { Ns::Attr } else { Ns::Item };
