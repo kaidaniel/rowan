@@ -1186,6 +1186,15 @@ impl Analyzer {
                     if ev.kind == "concrete" && v.pts.is_empty() && v.kv.is_literal() && !crate::interp::disabled("concretelit") {
                         return Some(ev.clone());
                     }
+                    // so does a text a model knows the structure of (a csv header, a dumped value)
+                    if ev.kind == "concrete" && v.pts.is_empty() && !crate::interp::disabled("concretetext") {
+                        if let KeyVal::Data(d) = &v.kv {
+                            let t = intern::str_get(*d);
+                            if ["csvhdr:", "pyjsontext:", "pickletext:", "jsontext:", "pydjson:"].iter().any(|p| t.starts_with(p)) {
+                                return Some(ev.clone());
+                            }
+                        }
+                    }
                 }
                 _ => {}
             }

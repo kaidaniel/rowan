@@ -1038,6 +1038,18 @@ impl Analyzer {
                     let Payload::Method(q, _) = self.obj(oid).payload.clone() else { unreachable!() };
                     crate::models::pydantic::fieldinfo_attr(self, state, &q, name, node)
                 }
+                Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("stdobj.")) => {
+                    let Payload::Method(q, _) = self.obj(oid).payload.clone() else { unreachable!() };
+                    match state.slot_opt(oid, Ns::Attr, nk) {
+                        Some(v) => v,
+                        None => self.method_value(&format!("{}.{}", q, name), &Value::obj(oid)),
+                    }
+                }
+                // a csv reader's fieldnames / line_num
+                Kind::List | Kind::View if self.csv_readers.contains_key(&oid) && matches!(name, "fieldnames" | "line_num" | "dialect" | "restkey" | "restval") => match name {
+                    "fieldnames" => self.csv_readers[&oid].clone(),
+                    _ => Value::data(name),
+                },
                 Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("pydverr.")) => {
                     let Payload::Method(q, _) = self.obj(oid).payload.clone() else { unreachable!() };
                     self.method_value(&format!("{}.{}", q, name), &Value::obj(oid))

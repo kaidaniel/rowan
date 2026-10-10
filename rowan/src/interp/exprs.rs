@@ -177,7 +177,7 @@ impl Analyzer {
                         Payload::Method(q, _) if self.kind(o) == Kind::Method => SAFE_METHODS.contains(&q.as_str()) || SELF_REPORTING.iter().any(|p| q.starts_with(p)),
                         // user code: whether it raises is reported by its own analysis
                         // builtins that raise only on wrong types (len, str, sorted, …)
-                        Payload::Str(q) if self.kind(o) == Kind::External => q.strip_prefix("builtins.").map(|n| SAFE_BUILTINS.contains(&n) || is_exception_name(n)).unwrap_or(false),
+                        Payload::Str(q) if self.kind(o) == Kind::External => q.strip_prefix("builtins.").map(|n| SAFE_BUILTINS.contains(&n) || is_exception_name(n)).unwrap_or(false) || SELF_REPORTING_EXTERNALS.contains(&q.as_str()),
                         _ => matches!(self.kind(o), Kind::Function | Kind::Bound | Kind::Class | Kind::Partial),
                     });
                     if !all_safe {
@@ -2192,4 +2192,7 @@ impl Analyzer {
 
 /// Models that say themselves where they raise (raise_here / may_raise_here): their calls are
 /// not "may raise anything".
-const SELF_REPORTING: &[&str] = &["pydantic.", "fieldinfo.", "pydverr.", "typeadapter.", "fastapi.client.", "fastapi.response.", "fastapi.request.", "fastapi.bg.", "fastapi.app.", "fastapi.router.", "fastapi.state."];
+/// Library constructors whose models report their raises.
+const SELF_REPORTING_EXTERNALS: &[&str] = &["io.StringIO", "csv.writer", "csv.DictWriter", "csv.reader", "csv.DictReader"];
+
+const SELF_REPORTING: &[&str] = &["pydantic.", "fieldinfo.", "pydverr.", "typeadapter.", "fastapi.client.", "fastapi.response.", "fastapi.request.", "stdobj.", "fastapi.bg.", "fastapi.app.", "fastapi.router.", "fastapi.state."];

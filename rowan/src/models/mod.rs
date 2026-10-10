@@ -7,6 +7,7 @@ pub mod pandas;
 pub mod pydantic;
 pub mod fastapi;
 pub mod counter;
+pub mod csvio;
 pub mod pyvalues;
 pub mod pure;
 pub mod torch;
@@ -35,7 +36,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.str.", "Series.dt.", "Series.cat.", "Series.sparse.", "Series.list.", "Series.struct.", "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
+    "parser.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
 ];
 
 pub struct Registry {
@@ -165,6 +166,7 @@ impl Registry {
         r(&["chainmap.*"], m_chainmap);
         r(&["deque.*"], counter::m_deque);
         r(&["collections.deque"], counter::deque_new);
+        csvio::register(&mut r);
         r(&["typeadapter.*"], m_typeadapter);
         r(&["torch.*"], torch::m_torch);
         r(&["numpy.*", "np.*"], torch::m_numpy);
@@ -295,7 +297,15 @@ fn m_ordered_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     m_dict(an, st, &call)
 }
 
-pub fn noeffect(_an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
+pub fn noeffect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // `print(…, file=buf)` writes into a StringIO; other writers (`json.dump(x, buf)`) make its
+    // text unknown
+    if c.qual == "builtins.print" {
+        csvio::print_into(an, st, c);
+    } else if !c.args.is_empty() || !c.kwargs.is_empty() {
+        let vals: Vec<&Value> = c.args.iter().chain(c.kwargs.values()).collect();
+        csvio::clobber(an, st, &vals, c.line);
+    }
     Value::data(&format!("L{}", c.line))
 }
 
@@ -2452,7 +2462,7 @@ fn m_json_dumps(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     let snaps: Vec<String> = x.pts.iter().map(|o| an.copy_object(o, &c.node, st, true, &mut IndexMap::new()).to_string()).collect();
-    Value::data(&format!("{}:{}", if json { "jsontext" } else { "pickletext" }, snaps.join(",")))
+    Value::data(&format!("{}:{}", if json { "pyjsontext" } else { "pickletext" }, snaps.join(",")))
 }
 
 /// The snapshots a `json.dumps` / `pickle.dumps` text stands for.
@@ -2460,7 +2470,7 @@ fn dumped_snapshots(v: &Value, json: bool) -> Vec<u32> {
     let mut out = Vec::new();
     if let (true, KeyVal::Data(d)) = (v.pts.is_empty(), &v.kv) {
         let t = intern::str_get(*d);
-        if let Some(rest) = t.strip_prefix(if json { "jsontext:" } else { "pickletext:" }) {
+        if let Some(rest) = t.strip_prefix(if json { "pyjsontext:" } else { "pickletext:" }) {
             out.extend(rest.split(',').filter_map(|x| x.parse::<u32>().ok()));
         }
     }

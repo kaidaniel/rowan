@@ -13,8 +13,6 @@ small/s040_typing_namedtuple.py
 small/s041_namespace_proxy.py
 small/s042_json_literal.py
 small/s043_json_input.py
-small/s044_csv_dictreader.py
-small/s045_csv_writer.py
 small/s046_configparser.py
 small/s047_argparse.py
 small/s048_argparse_subparsers.py

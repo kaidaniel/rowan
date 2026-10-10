@@ -1,5 +1,6 @@
 # csv.DictWriter with fieldnames: missing keys get restval, extra keys raise ValueError
-# (extrasaction="raise") or are dropped ("ignore"); csv.reader / csv.writer on lists
+# (extrasaction="raise") or are dropped ("ignore"); csv.reader / csv.writer on lists (the
+# last read is of a literal text: `ok a`, written as `input a` when DictReader was opaque)
 import csv
 import io
 
@@ -34,4 +35,4 @@ if __name__ == "__main__":
     hd = tuple(rows[0])                          #@value hd: exactly={("p","q")}
     back = list(csv.DictReader(io.StringIO(a), delimiter="|"))
     first = back[0]
-    first["a"]                                   #@ input a
+    first["a"]                                   #@ ok a

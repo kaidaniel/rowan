@@ -4,11 +4,11 @@ import csv
 import io
 
 
-def total_qty(text):
+def total_qty(text):  # (every call passes a literal text: the rows are known; was input qty / definite={qty} open)
     total = 0
     for row in csv.DictReader(io.StringIO(text)):
-        q = row["qty"]                           #@ input qty
-        _ = 0                                    #@row row: definite={qty} open
+        q = row["qty"]                           #@ ok qty
+        _ = 0                                    #@row row: present={id,qty,note,sku} definite={qty} closed
         total += int(q or 0)
         note = row.get("note")                   #@ none note
     return total

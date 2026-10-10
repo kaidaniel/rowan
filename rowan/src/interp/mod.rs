@@ -738,6 +738,9 @@ pub struct Analyzer {
     pub key_member: FxHashMap<intern::KeyId, ObjId>,
     /// dicts with case-insensitive str keys (request headers): keys are lower-cased
     pub ci_dicts: FxHashSet<ObjId>,
+    /// csv writers (their file and dialect), csv readers (their fieldnames)
+    pub csv_writers: FxHashMap<ObjId, crate::models::csvio::CsvWriter>,
+    pub csv_readers: FxHashMap<ObjId, Value>,
     /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
     pub bypass_setattr: bool,
     pub cond_depth: i32,
@@ -947,6 +950,8 @@ impl Analyzer {
             member_key: FxHashMap::default(),
             key_member: FxHashMap::default(),
             ci_dicts: FxHashSet::default(),
+            csv_writers: FxHashMap::default(),
+            csv_readers: FxHashMap::default(),
             bypass_setattr: false,
             cond_depth: 0,
             branch_depth: 0,

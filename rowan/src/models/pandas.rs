@@ -1459,6 +1459,15 @@ pub fn json_of_frame(an: &mut Analyzer, st: &mut State, c: &Call, f: u32, orient
 }
 
 fn read_frame(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // (a StringIO: read as its text)
+    if c.args.first().map(|a| !a.pts.is_empty()).unwrap_or(false) {
+        let t = crate::models::csvio::unwrap_text(an, st, &c.args[0]);
+        if t != c.args[0] {
+            let mut c2 = c.clone();
+            c2.args[0] = t;
+            return read_frame(an, st, &c2);
+        }
+    }
     // a `to_json` text read back: the frame's columns
     if c.qual.ends_with("read_json") {
         let texts = c.args.first().map(json_texts).unwrap_or_default();
