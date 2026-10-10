@@ -1533,6 +1533,9 @@ impl Analyzer {
         let mut is_dataclass = false;
         for d in &c.decorator_list {
             if let Some(q) = self.decorator_qualname(&d.expression, state) {
+                if q == "functools.total_ordering" {
+                    self.total_ordering.insert(coid);
+                }
                 if q.ends_with("dataclass") || q.ends_with("attrs.define") || q.ends_with("attr.s") {
                     is_dataclass = true;
                     if q.starts_with("pydantic") {

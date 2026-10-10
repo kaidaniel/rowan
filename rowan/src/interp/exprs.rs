@@ -9,7 +9,7 @@ use crate::intern::{self, key_float, key_int, key_str_lit, s, KeyId, STAR};
 use crate::state::{Kind, State};
 
 use super::funcs::Elem;
-use super::{is_constant, names_in, Analyzer, Payload, ViewKind, UNROLL_MAX};
+use super::{is_constant, names_in, Analyzer, ObjId, Payload, ViewKind, UNROLL_MAX};
 
 /// Python's `s[lo:hi:step]` on characters.
 fn py_slice(cs: &[char], lo: Option<i64>, hi: Option<i64>, step: Option<i64>) -> Option<String> {
@@ -335,6 +335,51 @@ impl Analyzer {
                         }
                         return Value::data("bool");
                     }
+                }
+                // instances: their comparison methods (`__lt__`, reflected, @total_ordering)
+                if c.ops.len() == 1 && !super::disabled("richcmp") && !matches!(c.ops[0], ast::CmpOp::In | ast::CmpOp::NotIn | ast::CmpOp::Is | ast::CmpOp::IsNot) {
+                    let b = self.eval(&c.comparators[0], state);
+                    let nd = frontend::node(node);
+                    if let Some(r) = self.rich_compare(c.ops[0], &a, &b, &nd, state) {
+                        return r;
+                    }
+                    // tuples: item by item
+                    if let Some(o) = self.tuple_order(&a, &b, state) {
+                        use std::cmp::Ordering::*;
+                        let r = match c.ops[0] {
+                            ast::CmpOp::Lt => o == Less,
+                            ast::CmpOp::LtE => o != Greater,
+                            ast::CmpOp::Gt => o == Greater,
+                            ast::CmpOp::GtE => o != Less,
+                            ast::CmpOp::Eq => o == Equal,
+                            _ => o != Equal,
+                        };
+                        return Value::lit(intern::key_bool(r));
+                    }
+                    if let Some(r) = self.compare_values(c.ops[0], &a, &b, &c.comparators[0], state) {
+                        return Value::lit(intern::key_bool(r));
+                    }
+                    if crate::models::pandas::is_seriesish(self, &a) || crate::models::pandas::is_seriesish(self, &b) {
+                        return Value::with_kv(ObjSet::one(self.series), DATA);
+                    }
+                    // tuples holding parameters: decided per call site
+                    for v in [&a, &b] {
+                        for o in v.pts.iter() {
+                            if self.kind(o) == Kind::Tuple {
+                                for (_, x) in state.slots_of(o) {
+                                    self.concrete_events(&x, state, 1);
+                                    if let Some(ph) = x.kv.as_param() {
+                                        self.record_event("concrete", ph);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let both = a.pts.union(&b.pts);
+                    if both.iter().any(|o| self.kind(o) == Kind::Frame) {
+                        return Value::with_kv(both.filter(|o| self.kind(o) == Kind::Frame), DATA);
+                    }
+                    return Value::data("bool");
                 }
                 if c.ops.len() == 1 {
                     if let Some(b) = self.compare_const(c.ops[0], &a, &c.comparators[0], state) {
@@ -2239,5 +2284,111 @@ pub fn slice_indices(n: i64, lo: Option<i64>, hi: Option<i64>, step: i64) -> (i6
         (adj(lo, 0, 0, n), adj(hi, n, 0, n), step)
     } else {
         (adj(lo, n - 1, -1, n - 1), adj(hi, -1, -1, n - 1), step)
+    }
+}
+
+impl Analyzer {
+    /// The comparison method `name` an instance's (user) class defines.
+    fn cmp_dunder(&self, o: ObjId, name: &str) -> Option<ObjId> {
+        if self.kind(o) != Kind::Instance {
+            return None;
+        }
+        let cls = self.instance_class(o)?;
+        let owner = self.class_lookup(cls, name)?;
+        let fv = self.cls_slots.get(&(owner, Ns::Attr, key_str_lit(name)))?;
+        fv.pts.iter().find(|f| self.kind(*f) == Kind::Function)
+    }
+
+    /// `a OP b` where an operand is an instance with comparison methods: the method, else the
+    /// other's reflected one, else what `@functools.total_ordering` derives, else identity for
+    /// `==` / `!=` (None: not such a comparison).
+    pub fn rich_compare(&mut self, op: ast::CmpOp, a: &Value, b: &Value, node: &Node, state: &mut State) -> Option<Value> {
+        let inst = |an: &Analyzer, v: &Value| v.single().filter(|o| an.kind(*o) == Kind::Instance && v.kv.is_bot());
+        let (ai, bi) = (inst(self, a), inst(self, b));
+        if ai.is_none() && bi.is_none() {
+            return None;
+        }
+        let (name, refl) = match op {
+            ast::CmpOp::Lt => ("__lt__", "__gt__"),
+            ast::CmpOp::LtE => ("__le__", "__ge__"),
+            ast::CmpOp::Gt => ("__gt__", "__lt__"),
+            ast::CmpOp::GtE => ("__ge__", "__le__"),
+            ast::CmpOp::Eq => ("__eq__", "__eq__"),
+            ast::CmpOp::NotEq => ("__ne__", "__ne__"),
+            _ => return None,
+        };
+        let call = |an: &mut Analyzer, f: ObjId, recv: &Value, other: &Value, state: &mut State| an.call_user(f, Some(recv.clone()), vec![other.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
+        if let Some(f) = ai.and_then(|o| self.cmp_dunder(o, name)) {
+            return Some(call(self, f, a, b, state));
+        }
+        if let Some(f) = bi.and_then(|o| self.cmp_dunder(o, refl)) {
+            return Some(call(self, f, b, a, state));
+        }
+        let lit = |b: Option<bool>| match b {
+            Some(x) => Value::lit(intern::key_bool(x)),
+            None => Value::data("bool"),
+        };
+        // `!=` from `__eq__`
+        if op == ast::CmpOp::NotEq {
+            if let Some(f) = ai.and_then(|o| self.cmp_dunder(o, "__eq__")).or_else(|| bi.and_then(|o| self.cmp_dunder(o, "__eq__"))) {
+                let (x, y) = if ai.and_then(|o| self.cmp_dunder(o, "__eq__")).is_some() { (a, b) } else { (b, a) };
+                let r = call(self, f, x, y, state);
+                return Some(lit(self.truth_of(&r, state, node).map(|t| !t)));
+            }
+        }
+        // @total_ordering: one ordering method and __eq__ give the others
+        let ordered = |an: &Analyzer, o: Option<ObjId>| o.and_then(|o| an.instance_class(o)).map(|c| an.mro(c).iter().any(|m| an.total_ordering.contains(m))).unwrap_or(false);
+        if matches!(op, ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE) && ordered(self, ai) {
+            if let Some(f) = ai.and_then(|o| self.cmp_dunder(o, "__lt__")) {
+                let lt = call(self, f, a, b, state);
+                let lt = self.truth_of(&lt, state, node);
+                let eqv = self.rich_compare(ast::CmpOp::Eq, a, b, node, state).unwrap_or_else(|| Value::data("bool"));
+                let eq = self.truth_of(&eqv, state, node);
+                let r = match op {
+                    ast::CmpOp::LtE => match (lt, eq) {
+                        (Some(true), _) | (_, Some(true)) => Some(true),
+                        (Some(false), Some(false)) => Some(false),
+                        _ => None,
+                    },
+                    ast::CmpOp::Gt => match (lt, eq) {
+                        (Some(true), _) | (_, Some(true)) => Some(false),
+                        (Some(false), Some(false)) => Some(true),
+                        _ => None,
+                    },
+                    ast::CmpOp::GtE => lt.map(|t| !t),
+                    _ => lt,
+                };
+                return Some(lit(r));
+            }
+        }
+        // no __eq__: identity
+        if matches!(op, ast::CmpOp::Eq | ast::CmpOp::NotEq) {
+            let no_eq = |an: &Analyzer, o: Option<ObjId>| o.map(|o| an.cmp_dunder(o, "__eq__").is_none() && an.instance_class(o).map(|c| !an.class_info(c).open_base && an.class_info(c).dataclass_fields.borrow().is_none()).unwrap_or(false)).unwrap_or(true);
+            if let (Some(x), Some(y)) = (ai, bi) {
+                if no_eq(self, ai) && no_eq(self, bi) {
+                    let same = if x == y && self.obj(x).single { Some(true) } else if x != y { Some(false) } else { None };
+                    return Some(lit(same.map(|s| if op == ast::CmpOp::Eq { s } else { !s })));
+                }
+            }
+        }
+        None
+    }
+
+    /// The order of two tuples (objects with known items, or literal tuples) item by item.
+    fn tuple_order(&self, a: &Value, b: &Value, state: &State) -> Option<std::cmp::Ordering> {
+        let tupleish = |an: &Analyzer, v: &Value| {
+            (v.pts.is_empty() && v.kv.as_lit().map(|k| intern::with_key(k, |kk| matches!(kk, intern::Key::Tuple(_)))).unwrap_or(false))
+                || (v.single().map(|o| an.kind(o) == Kind::Tuple).unwrap_or(false) && v.kv.is_bot())
+        };
+        if !tupleish(self, a) || !tupleish(self, b) {
+            return None;
+        }
+        crate::models::stdfuncs::value_order(self, state, a, b)
+    }
+
+    /// `a < b` for sorting / max / min when the items are instances ordering themselves.
+    pub fn instance_less(&mut self, a: &Value, b: &Value, node: &Node, state: &mut State) -> Option<bool> {
+        let r = self.rich_compare(ast::CmpOp::Lt, a, b, node, state)?;
+        self.truth_of(&r, state, node)
     }
 }

@@ -694,6 +694,26 @@ fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             };
             keys.push(kv.kv.as_lit().filter(|_| kv.pts.is_empty()));
         }
+        // items that order themselves (`__lt__`): compared one against the best so far
+        if keys.iter().any(|k| k.is_none()) && keyf.is_none() && !crate::interp::disabled("instorder") && items.iter().all(|x| x.single().map(|o| an.kind(o) == Kind::Instance).unwrap_or(false)) {
+            let mut best = 0usize;
+            let mut ok = true;
+            for i in 1..items.len() {
+                let (x, y) = if is_max { (items[best].clone(), items[i].clone()) } else { (items[i].clone(), items[best].clone()) };
+                // max: best < item → item; min: item < best → item
+                match an.instance_less(&x, &y, &c.node, st) {
+                    Some(true) => best = i,
+                    Some(false) => {}
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                return items[best].clone();
+            }
+        }
         if keys.iter().all(|k| k.is_some()) {
             let mut best = 0usize;
             let mut ok = true;
@@ -3811,6 +3831,25 @@ fn literal_sort_key(an: &mut Analyzer, st: &mut State, c: &Call, item: &Value) -
 
 /// The permutation `sorted` applies when every key is known (stable), else None.
 fn literal_sort_order(an: &mut Analyzer, st: &mut State, c: &Call, items: &[Value]) -> Option<Vec<usize>> {
+    // instances ordering themselves (no key=): a stable sort on their `__lt__`
+    if c.kw("key").is_none() && !items.is_empty() && !crate::interp::disabled("instorder") && items.iter().all(|x| x.single().map(|o| an.kind(o) == Kind::Instance).unwrap_or(false)) {
+        let n = items.len();
+        let mut less = vec![vec![false; n]; n];
+        for i in 0..n {
+            for j in 0..n {
+                if i != j {
+                    less[i][j] = an.instance_less(&items[i], &items[j], &c.node, st)?;
+                }
+            }
+        }
+        let reverse = c.kw("reverse").map(|r| r.kv.as_lit() == Some(intern::key_bool(true))).unwrap_or(false);
+        let mut idx: Vec<usize> = (0..n).collect();
+        idx.sort_by(|&a, &b| {
+            let o = if less[a][b] { std::cmp::Ordering::Less } else if less[b][a] { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Equal };
+            if reverse { o.reverse() } else { o }
+        });
+        return Some(idx);
+    }
     let mut keys: Vec<Vec<KeyId>> = Vec::new();
     for item in items {
         keys.push(literal_sort_key(an, st, c, item)?);

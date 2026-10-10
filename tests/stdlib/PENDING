@@ -17,7 +17,6 @@ models/sm03_inventory_report.py
 models/sm04_event_pipeline.py
 models/sm06_log_report.py
 small/s060_cached_property.py
-small/s062_total_ordering.py
 small/s086_re_groupdict.py
 small/s087_re_sub_func.py
 small/s088_re_compile.py

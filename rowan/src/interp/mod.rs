@@ -790,6 +790,8 @@ pub struct Analyzer {
     pub partial_star: FxHashMap<ObjId, Vec<Value>>,
     /// `@functools.wraps(fn)` wrappers: fn
     pub wrapped: FxHashMap<ObjId, Value>,
+    /// classes decorated with functools.total_ordering
+    pub total_ordering: FxHashSet<ObjId>,
     /// the requirements known when a try context was first flagged as raising anywhere
     /// (`may_raise` depth, requirements): its handler needs no less
     pub flag_reqs: Vec<(usize, crate::layered::TwoLevel<crate::intern::SourceId, KeyId, crate::domain::ReqInfo>)>,
@@ -1020,6 +1022,7 @@ impl Analyzer {
             infinites: FxHashMap::default(),
             partial_star: FxHashMap::default(),
             wrapped: FxHashMap::default(),
+            total_ordering: FxHashSet::default(),
             flag_reqs: Vec::new(),
             identity_objs: RefCell::new(FxHashMap::default()),
             bypass_setattr: false,
