@@ -31,7 +31,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -39,11 +39,13 @@ jobs:
         with:
           workspaces: rowan
 
-      - uses: astral-sh/setup-uv@v5
-
-      - uses: actions/setup-node@v4
+      - uses: astral-sh/setup-uv@v10
         with:
-          node-version: 20
+          cache-dependency-glob: .python-version
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
 
       - name: Build (release)
         working-directory: rowan
@@ -70,7 +72,7 @@ jobs:
 
       - name: Upload the binary
         if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rowan-linux
           path: rowan/target/release/rowan
@@ -82,12 +84,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10
+        with:
+          cache-dependency-glob: .python-version
 
       - name: Download the binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: rowan-linux
           path: rowan/target/release
@@ -107,12 +111,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10
+        with:
+          cache-dependency-glob: .python-version
 
       - name: Download the binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: rowan-linux
           path: rowan/target/release
@@ -130,17 +136,17 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Build the .vsix
         working-directory: vscode-rowan
         run: npx --yes @vscode/vsce package --no-dependencies
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rowan-vsix
           path: vscode-rowan/*.vsix
