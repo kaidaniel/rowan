@@ -496,6 +496,11 @@ impl Analyzer {
                         }
                     }
                 }
+                // the value: the delegated generator's return value
+                let rk = key_str_lit("\u{1}genret");
+                if !v.pts.is_empty() && v.kv.is_bot() && v.pts.iter().all(|o| state.slot_opt(o, Ns::Attr, rk).is_some()) {
+                    return crate::domain::join_values(v.pts.iter().map(|o| state.slot(o, Ns::Attr, rk)).collect::<Vec<_>>());
+                }
                 Value::data("yield")
             }
             ast::Expr::Slice(_) => self.eval_key(node, state),

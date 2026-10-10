@@ -1256,7 +1256,7 @@ impl Analyzer {
         // handlers that all end by re-raising: the body's reads are still required
         let reraise = !t.handlers.is_empty() && t.handlers.iter().all(|h| {
             let ast::ExceptHandler::ExceptHandler(h) = h;
-            matches!(h.body.last(), Some(ast::Stmt::Raise(r)) if r.exc.is_none())
+            matches!(h.body.last(), Some(ast::Stmt::Raise(_)))
         });
         if reraise && !crate::interp::disabled("reraisereq") {
             caught.insert("!reraise".into());

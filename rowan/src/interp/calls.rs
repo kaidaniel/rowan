@@ -1291,6 +1291,10 @@ impl Analyzer {
         if let FuncNode::Def(f) = fnode {
             if is_generator(&f.body) {
                 let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
+                // what `yield from` the generator evaluates to: its return value
+                if !super::disabled("genret") {
+                    state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}genret"), ret.clone(), true);
+                }
                 ret = Value::obj(gid);
             }
         }

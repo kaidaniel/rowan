@@ -68,6 +68,8 @@ pub struct PH {
 
 #[derive(Clone, Debug)]
 pub struct SymReq {
+    /// a guarded access whose handlers all re-raise: the input still needs the key
+    pub reraise: bool,
     pub node: Node,
     pub key_kv: KeyVal,
     pub row: Row,
@@ -471,7 +473,8 @@ impl Analyzer {
             _ => None,
         };
         let conditional = self.branch_depth > 0;
-        let sr = SymReq { node: *node, key_kv, row: row.clone(), oid, ns, guarded, rel_chain: self.call_chain.clone(), kind, file: fname, text, cls: guard, conditional };
+        let reraise = guarded && (self.catching_depth > 0 || self.guard_reraises(ns));
+        let sr = SymReq { reraise, node: *node, key_kv, row: row.clone(), oid, ns, guarded, rel_chain: self.call_chain.clone(), kind, file: fname, text, cls: guard, conditional };
         self.defer(sr);
     }
 
@@ -1522,10 +1525,13 @@ impl Analyzer {
             }
             // (an access of the callee raises into a try around this call)
             let sr_guarded = sr.guarded || (self.is_guarded(sr.ns) && !crate::interp::disabled("callguard"));
+            // (re-raised by the callee's handlers, and not caught here, or re-raised here too)
+            let here = !self.is_guarded(sr.ns) || self.guard_reraises(sr.ns) || self.catching_depth > 0;
+            let sr_reraise = if sr.guarded { sr.reraise && here } else { self.is_guarded(sr.ns) && (self.guard_reraises(sr.ns) || self.catching_depth > 0) };
             let ngroups = groups.len();
             let mut all_missing = ngroups > 0;
             for (row_c, members) in groups {
-                let tiers = self.emit_access(&sr.node, &kv, &row_c, members[0], sr.ns, sr_guarded, &sr_chain, &sr.file, state, &sr.text, sr.cls, sr.conditional);
+                let tiers = self.emit_access(&sr.node, &kv, &row_c, members[0], sr.ns, sr_guarded, &sr_chain, &sr.file, state, &sr.text, sr.cls, sr.conditional, sr_reraise);
                 if tiers.is_empty() || tiers.iter().any(|(_, t)| *t != Tier::Missing) {
                     all_missing = false;
                 }
@@ -1658,7 +1664,8 @@ impl Analyzer {
     /// Classify an access against a (concrete or symbolic) row and record its consequences.
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
-    pub fn emit_access(&mut self, node: &Node, kv: &KeyVal, row: &Row, oid: ObjId, ns: Ns, guarded: bool, chain: &Chain, file: &str, state: &mut State, text: &str, guard_cls: Option<ObjId>, conditional: bool) -> Vec<(KeyId, Tier)> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_access(&mut self, node: &Node, kv: &KeyVal, row: &Row, oid: ObjId, ns: Ns, guarded: bool, chain: &Chain, file: &str, state: &mut State, text: &str, guard_cls: Option<ObjId>, conditional: bool, reraise: bool) -> Vec<(KeyId, Tier)> {
         let mut out: Vec<(KeyId, Tier)> = Vec::new();
         let conditional = conditional || self.branch_depth > 0;
         if row.symbolic() {
@@ -1671,7 +1678,7 @@ impl Analyzer {
                     self.may_raise_here(exc, state);
                     self.record_event("guarded", oid);
                 }
-                self.defer(SymReq { node: *node, key_kv: kv.clone(), row: row.clone(), oid, ns, guarded, rel_chain: chain.clone(), kind: "load", file: file.to_string(), text: text.to_string(), cls: guard_cls, conditional });
+                self.defer(SymReq { reraise, node: *node, key_kv: kv.clone(), row: row.clone(), oid, ns, guarded, rel_chain: chain.clone(), kind: "load", file: file.to_string(), text: text.to_string(), cls: guard_cls, conditional });
             }
             return out;
         }
@@ -1686,6 +1693,9 @@ impl Analyzer {
                         let saved = std::mem::replace(&mut self.verdict_guarded, true);
                         self.verdict(node, k, &cls, oid, ns, Some(file), Some(text));
                         self.verdict_guarded = saved;
+                    }
+                    if reraise && cls.tier == Tier::Input && !crate::interp::disabled("catchreq") {
+                        self.require_providers_k(&cls, row, &site, true, state, Some(k));
                     }
                     continue;
                 }
