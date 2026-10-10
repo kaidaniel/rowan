@@ -154,6 +154,8 @@ pub struct Summary {
     pub raises: bool,
     /// the classes of what it may raise (None: not known)
     pub raise_classes: Option<Vec<crate::interp::ExcNames>>,
+    /// some path returns (false: every path raises)
+    pub completes: bool,
 }
 
 impl Summary {
@@ -831,6 +833,8 @@ impl Analyzer {
             if st.reachable {
                 ret = ret.join(&self.none_v);
             }
+            // (no path completes — every one raises: a call does not go on after it)
+            let completes = st.reachable || st.exits.is_some();
             if let Some(ex) = st.exits.take() {
                 let mut exs = ex.copy_ref();
                 st = if st.reachable { st.join(&mut exs) } else { exs };
@@ -904,6 +908,7 @@ impl Analyzer {
                 elems_fp: Vec::new(),
                 raises: self.raise_stack.last().copied().unwrap_or(false),
                 raise_classes: self.esc_cls.last().cloned().flatten(),
+                completes,
             };
             summ.compute_footprint(self, &base);
             if self.sum_hit.contains(&foid) {

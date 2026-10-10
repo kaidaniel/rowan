@@ -2114,6 +2114,7 @@ fn dict_recv(an: &Analyzer, c: &Call) -> Vec<u32> {
 fn m_get(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(key) = c.args.first() else { return Value::data("get") };
     // (a key that may be an object: an unknown key)
+    an.note_key_params(key, st);
     let okey = an.opaque_key(key, st);
     let key = &okey;
     let default = c.args.get(1).cloned().unwrap_or_else(|| an.none_v.clone());

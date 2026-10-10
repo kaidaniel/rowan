@@ -29,7 +29,8 @@ pub enum Extra {
 #[derive(Clone, Debug)]
 pub enum Ann {
     Model(ObjId),
-    List(Box<Ann>),
+    /// (list / tuple / set / frozenset / sequence / iterable: the container's own errors)
+    List(Box<Ann>, &'static str),
     Dict(Box<Ann>),
     Optional(Box<Ann>),
     /// `int` / `float` / `str` / `bool`: literals are coerced (lax mode)
@@ -443,7 +444,15 @@ impl Analyzer {
                         if base.to_lowercase().starts_with("tuple") && elts.len() != 1 && !(elts.len() == 2 && is_ellipsis(elts[1])) {
                             return Ann::Other;
                         }
-                        Ann::List(Box::new(self.pyd_ann(elts[0], module, state)))
+                        let kind = match base.to_lowercase().as_str() {
+                            "tuple" => "tuple",
+                            "set" => "set",
+                            "frozenset" => "frozenset",
+                            "sequence" => "sequence",
+                            "iterable" => "iterable",
+                            _ => "list",
+                        };
+                        Ann::List(Box::new(self.pyd_ann(elts[0], module, state)), kind)
                     }
                     "dict" | "Dict" | "Mapping" if elts.len() == 2 => Ann::Dict(Box::new(self.pyd_ann(elts[1], module, state))),
                     "Union" => {
@@ -1832,7 +1841,9 @@ impl Analyzer {
                 // or a type error when it may be no string either
                 if matches!(t, "int" | "float" | "bool") && !crate::interp::disabled("pydunkparse") {
                     // (a value already of the type — validated before, `int(x)` — converts)
-                    let of_type = |d: &str| d == t || (t == "float" && matches!(d, "int" | "bool")) || (t == "int" && d == "bool") || d.starts_with('\u{1}');
+                    // (`len(x)`, a frame's row count: ints)
+                    let int_label = |d: &str| matches!(d, "int" | "bool" | "len" | "rows");
+                    let of_type = |d: &str| d == t || (t == "float" && int_label(d)) || (t == "int" && int_label(d)) || d.starts_with('\u{1}');
                     let data_part = !val.kv.is_bot() && !val.kv.is_literal() && !matches!(&val.kv, KeyVal::Data(d) if of_type(&intern::str_get(*d)));
                     let obj_part = val.pts.iter().any(|o| matches!(self.kind(o), Kind::Unknown | Kind::Ph));
                     if data_part || obj_part {
@@ -1962,7 +1973,43 @@ impl Analyzer {
                 state.set_row(nid, Ns::Item, row);
                 Value::obj(nid)
             }
-            Ann::List(inner) if !matches!(**inner, Ann::Other) => {
+            Ann::List(inner, kind) if !matches!(**inner, Ann::Other) => {
+                // a scalar is no container (str / bytes: an Iterable's items, a Sequence's
+                // sequence_str error)
+                if !val.kv.is_bot() && !crate::interp::disabled("pydseqscalar") {
+                    let is_text = |k: KeyId| intern::key_is_str(k) || intern::with_key(k, |kk| matches!(kk, intern::Key::Bytes(_)));
+                    let code_of = |text: bool| -> Option<&'static str> {
+                        Some(match *kind {
+                            "tuple" => "tuple_type",
+                            "set" => "set_type",
+                            "frozenset" => "frozen_set_type",
+                            "sequence" if text => "sequence_str",
+                            "sequence" => "is_instance_of",
+                            "iterable" if text => return None,
+                            "iterable" => "iterable_type",
+                            _ => "list_type",
+                        })
+                    };
+                    let loc = self.pyd_field;
+                    if val.kv.is_literal() {
+                        let lits = crate::domain::kv_literals(&val.kv);
+                        let codes: Vec<Option<&'static str>> = lits.iter().map(|k| code_of(is_text(k))).collect();
+                        let mut cs: Vec<&'static str> = codes.iter().flatten().copied().collect();
+                        cs.sort();
+                        cs.dedup();
+                        let sure = codes.iter().all(|c| c.is_some()) && cs.len() == 1 && val.pts.is_empty();
+                        for c in cs {
+                            self.pyd_err(loc, c, sure, false);
+                        }
+                    } else {
+                        // (an unknown scalar: some error of the container, which one not known)
+                        let mut cs: Vec<&'static str> = [code_of(true), code_of(false)].into_iter().flatten().collect();
+                        cs.dedup();
+                        for c in cs {
+                            self.pyd_err(loc, c, false, false);
+                        }
+                    }
+                }
                 let mut outs: Vec<Value> = Vec::new();
                 for o in val.pts.iter() {
                     if !matches!(self.kind(o), Kind::List | Kind::Tuple | Kind::Set | Kind::Unknown | Kind::Ph) {
@@ -2067,7 +2114,7 @@ fn literal_tags(e: &ast::Expr) -> Option<Vec<KeyId>> {
 fn subst(a: &Ann, bind: &[(String, Ann)]) -> Ann {
     match a {
         Ann::Var(n) => bind.iter().find(|(m, _)| m == n).map(|(_, x)| x.clone()).unwrap_or(Ann::Other),
-        Ann::List(x) => Ann::List(Box::new(subst(x, bind))),
+        Ann::List(x, k) => Ann::List(Box::new(subst(x, bind)), k),
         Ann::Dict(x) => Ann::Dict(Box::new(subst(x, bind))),
         Ann::Optional(x) => Ann::Optional(Box::new(subst(x, bind))),
         Ann::Union(xs, d) => Ann::Union(xs.iter().map(|x| subst(x, bind)).collect(), d.clone()),
@@ -2620,9 +2667,9 @@ impl Analyzer {
                 continue;
             }
             match (self.kind(o), ann) {
-                (Kind::List | Kind::Tuple | Kind::Set, Ann::List(inner) | Ann::Optional(inner)) => {
+                (Kind::List | Kind::Tuple | Kind::Set, Ann::List(inner, _) | Ann::Optional(inner)) => {
                     let inner = match &**inner {
-                        Ann::List(i) => (**i).clone(),
+                        Ann::List(i, _) => (**i).clone(),
                         other => other.clone(),
                     };
                     let it = self.iterate(&Value::obj(o), node, state);
@@ -3067,7 +3114,7 @@ pub fn m_class(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         let mut a = &f.ann;
                         loop {
                             match a {
-                                Ann::List(x) | Ann::Dict(x) | Ann::Optional(x) => a = x,
+                                Ann::List(x, _) | Ann::Dict(x) | Ann::Optional(x) => a = x,
                                 _ => break,
                             }
                         }

@@ -1594,6 +1594,28 @@ fn rows_frame(rows: &[Result<Row, usize>]) -> Row {
 
 fn pd_dataframe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let data = c.arg(0, Some("data"));
+    // (records — a list of dicts, `columns=` selecting among their keys — or nothing never
+    // fail; other data may: lengths that differ, scalars without an index)
+    if c.qual == "pandas.DataFrame" && !crate::interp::disabled("dfctorraise") {
+        let records = match &data {
+            None => true,
+            Some(d) => {
+                !d.pts.is_empty() && d.kv.is_bot() && d.pts.iter().all(|o| {
+                    if !matches!(an.kind(o), Kind::List | Kind::Tuple) {
+                        return false;
+                    }
+                    if an.llen(o, st) == Some(0) {
+                        return true;
+                    }
+                    let e = an.elem_of(&Value::obj(o), &c.node, st);
+                    !e.pts.is_empty() && e.kv.is_bot() && e.pts.iter().all(|x| an.kind(x) == Kind::Dict)
+                })
+            }
+        };
+        if !records {
+            an.may_raise_here("ValueError", st);
+        }
+    }
     let from_dict = c.qual.ends_with("from_dict");
     let index_orient = from_dict && key_is(&c.kw("orient").or_else(|| c.arg(1, None)), "index");
     let cols = c.kw("columns").and_then(|v| an.lit_keys(&v, st));
@@ -2590,6 +2612,8 @@ fn reset_index(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         // levels unknown: the frame gets some columns back
         let mut d = row.data();
         if !drop {
+            // (a level's name may already be a column: ValueError)
+            an.may_raise_here("ValueError", st);
             d.sources = d.sources.insert((Source::new(&format!("reset_index@L{}", c.line), SourceKind::Call), EMPTY_LENS));
         }
         let r = Row::from_data(d);
@@ -2628,6 +2652,10 @@ fn reset_index(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let k = names.as_ref().and_then(|n| n.get(j).copied()).unwrap_or_else(|| level_column(&levels, *i));
             new_cols.push(k);
         }
+    }
+    // (a moved level whose name is a column already, or columns not all known: ValueError)
+    if !drop && (!row.closed() || row.symbolic() || new_cols.iter().any(|k| row.present.contains(*k))) {
+        an.may_raise_here("ValueError", st);
     }
     // the new columns come first
     let mut out = row.clone();

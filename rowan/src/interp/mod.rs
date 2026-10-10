@@ -101,6 +101,10 @@ pub fn safe_method(q: &str) -> bool {
         "dict" => matches!(name, "get" | "keys" | "values" | "items" | "setdefault" | "copy" | "update" | "clear" | "fromkeys"),
         "set" | "frozenset" => matches!(name, "add" | "update" | "union" | "intersection" | "difference" | "symmetric_difference" | "copy" | "clear" | "discard" | "issubset" | "issuperset" | "isdisjoint" | "intersection_update" | "difference_update" | "symmetric_difference_update"),
         "tuple" => name == "count",
+        // frame methods that cannot fail on a frame (reset_index reports its own ValueError)
+        // (a string column's accessor: these do not fail on its values)
+        "Series" => name.strip_prefix("str.").is_some_and(|m| matches!(m, "slice" | "lower" | "upper" | "strip" | "lstrip" | "rstrip" | "len" | "startswith" | "endswith" | "title" | "capitalize" | "casefold" | "swapcase" | "zfill" | "get")) && !disabled("framesafe"),
+        "DataFrame" => matches!(name, "copy" | "head" | "tail" | "to_dict" | "isna" | "notna" | "isnull" | "notnull" | "nunique" | "count" | "keys" | "items" | "iterrows" | "itertuples" | "to_numpy" | "to_records" | "reset_index" | "memory_usage" | "info") && !disabled("framesafe"),
         _ => false,
     }
 }

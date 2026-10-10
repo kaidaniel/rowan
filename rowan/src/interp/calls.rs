@@ -1208,6 +1208,14 @@ impl Analyzer {
                 }
                 let r = self.instantiate(&summ, &bind, state, node, &call_ctx, ctx_single);
                 self.call_chain = saved_chain;
+                // (a generator / coroutine function's call does not run its body)
+                let runs_body = match fi.node {
+                    FuncNode::Def(f) => !f.is_async && !super::is_generator(&f.body),
+                    _ => true,
+                };
+                if !summ.completes && summ.raises && runs_body && !super::disabled("sumnoreturn") {
+                    state.reachable = false;
+                }
                 return r;
             }
         }

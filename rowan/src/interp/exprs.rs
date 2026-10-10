@@ -200,6 +200,10 @@ impl Analyzer {
                         _ => matches!(self.kind(o), Kind::Function | Kind::Bound | Kind::Class | Kind::Partial),
                     });
                     if !all_safe {
+                        if super::debug_level() == 2 {
+                            let what: Vec<String> = fv.pts.iter().map(|o| match &self.obj(o).payload { Payload::Method(q, _) | Payload::Str(q) => q.clone(), _ => self.obj(o).label.clone() }).collect();
+                            eprintln!("  call may raise at L{}: {}", frontend::node(node).line, what.join(", "));
+                        }
                         self.flag_may_raise(state);
                     }
                 }
@@ -2571,7 +2575,7 @@ const SELF_REPORTING_EXTERNALS: &[&str] = &[
     "configparser.ConfigParser", "configparser.RawConfigParser", "dataclasses.replace", "dataclasses.asdict", "dataclasses.astuple", "dataclasses.fields", "dataclasses.is_dataclass", "json.loads", "builtins.setattr",
     "os.path.join", "os.path.basename", "os.path.dirname", "os.path.split", "os.path.splitext", "os.path.normpath", "os.path.isabs",
     "pathlib.PurePosixPath", "pathlib.PurePath", "pathlib.Path", "pathlib.PosixPath",
-    "io.StringIO", "csv.writer", "csv.DictWriter", "csv.reader", "csv.DictReader", "argparse.ArgumentParser", "threading.Thread",
+    "pandas.DataFrame", "io.StringIO", "csv.writer", "csv.DictWriter", "csv.reader", "csv.DictReader", "argparse.ArgumentParser", "threading.Thread",
     "concurrent.futures.ThreadPoolExecutor", "concurrent.futures.ProcessPoolExecutor", "concurrent.futures.as_completed", "builtins.slice", "contextlib.ExitStack", "contextlib.redirect_stdout", "contextlib.redirect_stderr", "contextlib.closing", "contextlib.nullcontext", "itertools.count", "itertools.cycle", "itertools.repeat",
     "itertools.islice", "itertools.chain", "itertools.chain.from_iterable", "itertools.product", "itertools.permutations",
     "itertools.combinations", "itertools.combinations_with_replacement", "itertools.zip_longest", "itertools.tee", "itertools.pairwise",

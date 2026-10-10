@@ -544,7 +544,12 @@ impl Analyzer {
 
     fn load_item_inner(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
         // (objects in the key: an unknown key; lists / tuples are indexed by their own rules)
-        let okey = if ns == Ns::Item && !key.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Dict | Kind::Ph | Kind::Unknown)) && !obj.pts.is_empty() { self.opaque_key(key, state) } else { key.clone() };
+        let okey = if ns == Ns::Item && !key.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Dict | Kind::Ph | Kind::Unknown)) && !obj.pts.is_empty() {
+            self.note_key_params(key, state);
+            self.opaque_key(key, state)
+        } else {
+            key.clone()
+        };
         let key = &okey;
         // in a summary: a value read from a dict copied from a parameter's record (its slot not
         // set here) is known only at the call site: decided there
@@ -577,6 +582,14 @@ impl Analyzer {
         } else {
             None
         };
+        // (a handler starts from the state before the read: the read narrows the frame to
+        // having the column)
+        let early_frame_raise = !super::disabled("frameraiseearly");
+        if let (Some(ts), true) = (&frame_tiers, early_frame_raise) {
+            if !ts.iter().all(|t| *t == Tier::Missing) && ts.iter().any(|t| !matches!(t, Tier::Proven | Tier::Likely)) {
+                self.may_raise_here("KeyError", state);
+            }
+        }
         // a slice of a placeholder (a parameter's list): a list of its elements (decided per
         // call site where the list is known)
         if ns == Ns::Item && key.pts.is_empty() && matches!(&key.kv, KeyVal::Data(d) if intern::str_get(*d).starts_with("slice")) && !super::disabled("phslice") {
@@ -900,7 +913,7 @@ impl Analyzer {
         if let Some(ts) = frame_tiers {
             if ts.iter().all(|t| *t == Tier::Missing) {
                 self.raise_here("KeyError", state);
-            } else if ts.iter().any(|t| !matches!(t, Tier::Proven | Tier::Likely)) {
+            } else if !early_frame_raise && ts.iter().any(|t| !matches!(t, Tier::Proven | Tier::Likely)) {
                 self.may_raise_here("KeyError", state);
             }
         }
@@ -1158,6 +1171,30 @@ impl Analyzer {
             state.set_row(pid, Ns::Attr, r);
         }
         Value::obj(pid)
+    }
+
+    /// A tuple key with parameters among its items (`d.get((kind, name))` in a summary): an
+    /// unknown key here, a literal one at a call site that passes literals — decided there.
+    pub fn note_key_params(&mut self, key: &Value, state: &State) {
+        if key.pts.is_empty() || super::disabled("tuplekeyparam") {
+            return;
+        }
+        let mut phs: Vec<u32> = Vec::new();
+        for o in key.pts.iter() {
+            if self.kind(o) != Kind::Tuple {
+                continue;
+            }
+            let Some(n) = self.llen(o, state) else { continue };
+            for i in 0..n {
+                let p = state.slot(o, Ns::Pos, intern::key_int(i as i64));
+                if let Some(ph) = p.kv.as_param() {
+                    phs.push(ph);
+                }
+            }
+        }
+        for ph in phs {
+            self.record_event("narrow", ph);
+        }
     }
 
     /// A key whose value includes objects (an unknown value, a non-literal tuple, an instance):

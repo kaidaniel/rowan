@@ -831,7 +831,12 @@ impl Analyzer {
         let mut pre = state.copy();
         // exception handlers (`@app.exception_handler(E)`): E is caught too
         let hooks: Vec<(String, Value, ObjId)> = self.fa_hooks.iter().filter(|h| h.1 == "exc").filter_map(|h| h.3.map(|f| (self.exc_name(&h.2), h.2.clone(), f))).collect();
-        let mut caught: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::from_iter(["HTTPException".to_string(), "RequestValidationError".to_string(), "ValidationError".to_string()]);
+        // (a pydantic ValidationError the handler's own code raises is no request error: the
+        // TestClient re-raises it, as any other exception FastAPI does not answer)
+        let mut caught: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::from_iter(["HTTPException".to_string(), "RequestValidationError".to_string()]);
+        if crate::interp::disabled("faverrescape") {
+            caught.insert("ValidationError".to_string());
+        }
         for (n, _, _) in &hooks {
             caught.insert(n.clone());
         }
@@ -1299,7 +1304,7 @@ impl Analyzer {
 fn bodyish(a: &Ann) -> bool {
     match a {
         Ann::Model(_) | Ann::TypedDict(_) | Ann::Union(..) | Ann::Dict(_) => true,
-        Ann::List(x) | Ann::Optional(x) => bodyish(x),
+        Ann::List(x, _) | Ann::Optional(x) => bodyish(x),
         _ => false,
     }
 }
