@@ -165,8 +165,25 @@ impl Analyzer {
                 };
                 let memo = self.alloc_raw(Kind::Dict, &format!("memo:{}", oid), "", true, "lru_cache", Payload::None);
                 let row = state.row(memo, Ns::Item);
+                // the hit / miss counts (cache_info), known while every call's outcome is
+                let bump = |state: &mut State, name: &str, by_known: bool| {
+                    let k = key_str_lit(name);
+                    let cur = state.slot_opt(memo, Ns::Attr, k).unwrap_or_else(|| Value::lit(intern::key_int(0)));
+                    let nv = match (cur.kv.as_lit().and_then(intern::key_as_int), by_known) {
+                        (Some(n), true) => Value::lit(intern::key_int(n + 1)),
+                        _ => Value::data("count"),
+                    };
+                    state.set_slot(memo, Ns::Attr, k, nv, true);
+                };
                 if row.definite.contains(mk) {
+                    bump(state, "hits", true);
                     return state.slot(memo, Ns::Item, mk);
+                }
+                if row.present.contains(mk) {
+                    bump(state, "hits", false);
+                    bump(state, "misses", false);
+                } else {
+                    bump(state, "misses", true);
                 }
                 let r = self.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, call_ast, false);
                 let out = if row.present.contains(mk) { r.join(&state.slot(memo, Ns::Item, mk)) } else { r };
@@ -938,8 +955,19 @@ impl Analyzer {
         }
         // --- per-call-site (tabulated) analysis ---
         let mut key = (foid, if !entry { site.clone() } else { format!("entry:{}", site) });
+        // literal arguments that differ from the running activations': not the same activation
+        // (fib(9) inside fib(10)), up to a depth
+        let mut lit_key = false;
+        if !entry && !super::disabled("litrec") && !args.is_empty() && kwargs.is_empty() && star_args.is_empty() && star_kwargs.is_empty() {
+            let lits: Option<Vec<String>> = args.iter().map(|a| a.kv.as_lit().filter(|_| a.pts.is_empty()).map(intern::key_repr)).collect();
+            let depth = self.active_by_func.get(&foid).map(|v| v.len()).unwrap_or(0);
+            if let Some(ls) = lits.filter(|_| depth < 40) {
+                key.1 = format!("{}|{}", key.1, ls.join(","));
+                lit_key = true;
+            }
+        }
         let act = self.active_by_func.get(&foid).cloned().unwrap_or_default();
-        if !self.active.contains_key(&key) && act.len() >= MAX_ACTIVE {
+        if !self.active.contains_key(&key) && act.len() >= MAX_ACTIVE && !lit_key {
             key = act.last().unwrap().clone();
         }
         if self.active.contains_key(&key) {

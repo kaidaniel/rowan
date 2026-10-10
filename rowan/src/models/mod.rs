@@ -40,7 +40,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.str.", "Series.dt.", "Series.cat.", "Series.sparse.", "Series.list.", "Series.struct.", "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "slice.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
+    "parser.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "slice.", "memo.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
 ];
 
 pub struct Registry {
@@ -159,6 +159,7 @@ impl Registry {
         r(&["argparse.ArgumentParser"], m_argparser);
         r(&["parser.*"], m_parser_method);
         r(&["functools.partial"], m_partial);
+        r(&["memo.cache_info", "memo.cache_clear"], m_memo);
         r(&["functools.reduce"], m_reduce);
         r(&["itertools.chain", "itertools.chain.from_iterable"], m_chain);
         r(&["partial.*"], m_partial_call);
@@ -3455,6 +3456,36 @@ fn m_parser_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "add_subparsers" | "add_argument_group" | "add_mutually_exclusive_group" => recv,
         _ => Value::data(&format!("L{}", c.line)),
     }
+}
+
+/// `f.cache_info()` (hits, misses, maxsize, currsize) / `f.cache_clear()` of an lru_cache'd f.
+fn m_memo(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let Some(f) = c.recv.as_ref().and_then(|r| r.single()) else { return Value::data("cache") };
+    let memo = an.alloc_raw(Kind::Dict, &format!("memo:{}", f), "", true, "lru_cache", Payload::None);
+    let zero = Value::lit(intern::key_int(0));
+    if c.qual.ends_with("cache_clear") {
+        st.set_row(memo, Ns::Item, Row::new());
+        st.drop_obj_ns(memo, Ns::Item);
+        st.set_slot(memo, Ns::Attr, key_str_lit("hits"), zero.clone(), true);
+        st.set_slot(memo, Ns::Attr, key_str_lit("misses"), zero, true);
+        return an.none_v.clone();
+    }
+    let oid = an.alloc_at(Kind::Namespace, &c.node, st, "CacheInfo", Payload::None, Some(Row::new()), Ns::Attr, None, Some("cacheinfo"));
+    let r = st.row(memo, Ns::Item);
+    let size = if r.closed() && r.present == r.definite { Value::lit(intern::key_int(r.present.len() as i64)) } else { Value::data("currsize") };
+    let mut row = Row::new();
+    for (k, v) in [
+        ("hits", st.slot_opt(memo, Ns::Attr, key_str_lit("hits")).unwrap_or_else(|| zero.clone())),
+        ("misses", st.slot_opt(memo, Ns::Attr, key_str_lit("misses")).unwrap_or_else(|| zero.clone())),
+        ("maxsize", Value::data("maxsize")),
+        ("currsize", size),
+    ] {
+        let kk = key_str_lit(k);
+        row = row.store(kk, true);
+        st.set_slot(oid, Ns::Attr, kk, v, true);
+    }
+    st.set_row(oid, Ns::Attr, row);
+    Value::obj(oid)
 }
 
 fn m_partial(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {

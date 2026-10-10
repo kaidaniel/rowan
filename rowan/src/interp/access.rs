@@ -1281,6 +1281,8 @@ impl Analyzer {
                 }
                 Kind::Unknown => self.load_unknown_attr(oid, name, node, state, guarded),
                 Kind::Ph => self.load_ph_attr(oid, name, node, state, guarded, single),
+                // an lru_cache'd function's cache_info / cache_clear
+                Kind::Function if matches!(name, "cache_info" | "cache_clear") && self.func_info(oid).is_memo.get() => self.method_value(&format!("memo.{}", name), &Value::obj(oid)),
                 // a function's names (a `@wraps(fn)` wrapper: fn's)
                 Kind::Function if matches!(name, "__name__" | "__qualname__" | "__module__" | "__wrapped__" | "__doc__") && state.slot_opt(oid, Ns::Attr, nk).is_none() && !super::disabled("fnnames") => {
                     match self.wrapped.get(&oid).cloned() {
