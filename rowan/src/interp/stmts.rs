@@ -251,6 +251,7 @@ impl Analyzer {
                 state.reachable = false;
             }
             ast::Stmt::Try(t) => self.stmt_try(t, state),
+            ast::Stmt::With(w) if self.with_suppress(w, state) => {}
             ast::Stmt::With(w) if self.with_contextmanager(w, state) => {}
             ast::Stmt::With(w) => {
                 let mut managers: Vec<(Value, Node)> = Vec::new();
@@ -360,6 +361,69 @@ impl Analyzer {
                 self.note(format!("unsupported statement IpyEscapeCommand at L{}", n.line));
             }
         }
+    }
+
+    /// `with contextlib.suppress(E, …): body`: `try: body / except (E, …): pass`. False: not
+    /// that case.
+    fn with_suppress(&mut self, w: &'static ast::StmtWith, state: &mut State) -> bool {
+        if w.items.len() != 1 || crate::interp::disabled("suppress") {
+            return false;
+        }
+        let ast::Expr::Call(call) = &w.items[0].context_expr else { return false };
+        if !matches!(&*call.func, ast::Expr::Name(_) | ast::Expr::Attribute(_)) || !call.arguments.keywords.is_empty() {
+            return false;
+        }
+        let mut probe = state.copy();
+        let fv = self.eval(&call.func, &mut probe);
+        let is_suppress = !fv.pts.is_empty() && fv.pts.iter().all(|o| self.kind(o) == Kind::External && self.external_qual(o) == "contextlib.suppress");
+        if !is_suppress {
+            return false;
+        }
+        let names: FxHashSet<String> = call.arguments.args.iter().map(dotted_last).collect();
+        self.exec_handled(&w.body, names, state);
+        true
+    }
+
+    /// `body` under a handler that catches `names` and does nothing (`suppress`).
+    pub fn exec_handled(&mut self, body: &'static [ast::Stmt], names: FxHashSet<String>, state: &mut State) {
+        let caught = expand_caught(names);
+        let mut pre = state.copy();
+        self.guards.push(caught);
+        self.may_raise.push(false);
+        self.raise_states.push(None);
+        self.raise_values.push(None);
+        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
+        self.try_sum_depth.push(self.sum_stack.len());
+        self.cond_depth += 1;
+        self.branch_depth += 1;
+        let exits_before = self.exit_count;
+        self.exec_block(body, state);
+        self.guards.pop();
+        self.try_marks.pop();
+        self.try_sum_depth.pop();
+        let flagged = self.may_raise.pop().unwrap_or(false);
+        let raised_at = self.raise_states.pop().flatten();
+        self.raise_values.pop();
+        self.branch_depth -= 1;
+        self.cond_depth -= 1;
+        let died = !state.reachable && self.exit_count == exits_before;
+        let generic = flagged || (died && raised_at.is_none());
+        let mut body_end = state.copy();
+        let mut handled = if generic { pre.join(&mut body_end) } else { State::bottom() };
+        if let Some(mut r) = raised_at {
+            handled = if handled.reachable { handled.join(&mut r) } else { r };
+        }
+        let out = match (body_end.reachable, handled.reachable) {
+            (true, true) => body_end.join(&mut handled),
+            (true, false) => body_end,
+            (false, _) => {
+                // (the body's returns stay recorded in `exits`)
+                handled.exits = body_end.exits.clone().or(handled.exits.clone());
+                handled.ret = body_end.ret.clone().or(handled.ret.clone());
+                handled
+            }
+        };
+        state.replace_with(out);
     }
 
     /// `with cm(...) as x: body` where `cm` is a `@contextmanager` generator function: the
