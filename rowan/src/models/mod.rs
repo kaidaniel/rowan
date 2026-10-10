@@ -1850,10 +1850,16 @@ fn m_setdefault(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 // present everywhere: the stored value, nothing is written
                 return an.load_item(&recv, Ns::Item, key, &c.node, st, false);
             }
-            if rows.iter().all(|r| r.closed() && !r.present.contains(k)) {
+            if rows.iter().all(|r| (r.closed() && !r.present.contains(k)) || r.absent.contains(k)) {
                 // absent everywhere: the default is stored and returned
                 an.store_item(&recv, Ns::Item, key, &default, &c.node, st);
                 return default;
+            }
+        }
+        // a record from outside the function (`os.environ`, a global): decided per call site
+        for o in &recs {
+            if an.is_entry_object(*o) && !st.row(*o, Ns::Item).definite.contains(k) {
+                an.record_event("concrete", *o);
             }
         }
     } else if let Some(ph) = key.kv.as_param() {

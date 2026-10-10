@@ -21,7 +21,7 @@ def serve(path):
     return out
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # n was 3, but the file is a run-time input the analysis never reads
     res = serve("s043_requests.jsonl")
-    n = len(res)                                 #@value n: unknown  (was 3, but the file is a run-time input the analysis never reads)
+    n = len(res)                                 #@value n: unknown
     r1 = res[1]                                  #@row r1: present={deleted,user} closed

@@ -44,6 +44,10 @@ impl Analyzer {
                 for t in &a.targets {
                     self.bind_target(t, &v, state);
                 }
+                // `flag = k in d`: a later `if flag:` narrows as the test would
+                if let [ast::Expr::Name(n)] = &a.targets[..] {
+                    self.flag_facts(n.id.as_str(), &a.value, &v, state);
+                }
             }
             ast::Stmt::AnnAssign(a) => {
                 if let Some(value) = &a.value {
@@ -799,6 +803,48 @@ impl Analyzer {
 
     /// The canonical text of a pure test (names, literals, comparisons, `in`, `is`, `not`,
     /// `and` / `or`), whether it is negated, and the names it reads.
+    /// `name = <test>` with an undecided test that narrows: facts for a later `if name:`
+    /// (the test's branch rows, restored while the rows are unchanged and name still holds v).
+    fn flag_facts(&mut self, name: &str, test: &'static ast::Expr, v: &Value, state: &mut State) {
+        fn simple(e: &ast::Expr) -> bool {
+            match e {
+                ast::Expr::Name(_) | ast::Expr::StringLiteral(_) | ast::Expr::NumberLiteral(_) | ast::Expr::BooleanLiteral(_) | ast::Expr::NoneLiteral(_) => true,
+                ast::Expr::Attribute(a) => simple(&a.value),
+                ast::Expr::Subscript(sb) => simple(&sb.value) && simple(&sb.slice),
+                ast::Expr::Tuple(t) => t.elts.iter().all(simple),
+                _ => false,
+            }
+        }
+        fn testlike(e: &ast::Expr) -> bool {
+            match e {
+                ast::Expr::Compare(c) => simple(&c.left) && c.comparators.iter().all(simple),
+                ast::Expr::UnaryOp(u) => u.op == ast::UnaryOp::Not && testlike(&u.operand),
+                ast::Expr::BoolOp(b) => b.values.iter().all(testlike),
+                ast::Expr::Call(c) => matches!(&*c.func, ast::Expr::Name(f) if matches!(f.id.as_str(), "isinstance" | "hasattr" | "callable")) && c.arguments.args.iter().all(simple) && c.arguments.keywords.is_empty(),
+                _ => false,
+            }
+        }
+        if crate::interp::disabled("flagfacts") || !state.reachable || !testlike(test) || (v.pts.is_empty() && v.kv.is_literal()) {
+            return;
+        }
+        let mut ts = state.copy();
+        self.narrow(test, true, &mut ts);
+        let mut es = state.copy();
+        self.narrow(test, false, &mut es);
+        if !ts.reachable || !es.reachable {
+            return;
+        }
+        let nid = s(name);
+        let key = s(&format!("{}@{}", name, self.frame().func.unwrap_or(0)));
+        // (the flag's own narrowing is no fact about the records)
+        let facts: Vec<_> = cond_facts_for(key, true, vec![(nid, v.clone())], &ts, &es, state)
+            .into_iter()
+            .map(|f| std::sync::Arc::new(crate::state::CondFact { cond: f.cond, truth: f.truth, deps: f.deps.clone(), rows: f.rows.iter().filter(|((o, _), _, _)| !v.pts.contains(*o)).cloned().collect(), guards: f.guards.clone() }))
+            .filter(|f| !f.rows.is_empty())
+            .collect();
+        add_facts(state, facts);
+    }
+
     fn cond_key(&self, test: &'static ast::Expr) -> Option<(intern::StrId, bool, Vec<intern::StrId>)> {
         fn pure(e: &ast::Expr) -> bool {
             match e {

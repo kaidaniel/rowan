@@ -2,8 +2,8 @@
 import os
 
 
-def settings():
-    home = os.environ["APP_HOME"]                #@ input APP_HOME
+def settings():  # APP_HOME was `input` (and always in the schema), but the driver sets it and later deletes it
+    home = os.environ["APP_HOME"]                #@ ok APP_HOME ; missing APP_HOME
     level = os.environ.get("APP_LEVEL", "info")  #@ none APP_LEVEL
     os.environ.setdefault("APP_MODE", "dev")
     mode = os.environ["APP_MODE"]                #@ ok APP_MODE
@@ -14,7 +14,7 @@ def settings():
     out = {"home": home, "level": level, "mode": mode, "debug": debug}
     _ = 0                                        #@row out: present={home,level,mode,debug} definite={home,level,mode,debug} closed
     return out
-#@schema os.environ: always={APP_HOME}
+# (no schema: the program provides APP_HOME itself)
 
 
 if __name__ == "__main__":
