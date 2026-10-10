@@ -290,6 +290,8 @@ pub struct ClassInfo {
     /// `@dataclass(frozen=True)` / `@dataclass(kw_only=True)`
     pub dc_frozen: std::cell::Cell<bool>,
     pub dc_kw_only: std::cell::Cell<bool>,
+    /// `@dataclass(order=True)`: instances of the class compare their fields as tuples
+    pub dc_order: std::cell::Cell<bool>,
     /// subclasses something in `torch.nn` (`nn.Module`): calling an instance runs `forward`
     pub nn_module: bool,
     /// attr → classes assigned to self.attr (lazy)

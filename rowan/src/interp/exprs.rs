@@ -2472,9 +2472,63 @@ impl Analyzer {
                 return Some(lit(r));
             }
         }
+        if matches!(op, ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE) && !super::disabled("dcorder") {
+            let decide = |o: std::cmp::Ordering| match op {
+                ast::CmpOp::Lt => o.is_lt(),
+                ast::CmpOp::LtE => o.is_le(),
+                ast::CmpOp::Gt => o.is_gt(),
+                _ => o.is_ge(),
+            };
+            // a member of an Enum mixing in int / str (IntEnum, StrEnum): its value
+            let mixed = |an: &Analyzer, o: Option<ObjId>| -> Option<Value> {
+                let o = o?;
+                let c = an.instance_class(o)?;
+                if !an.enum_kind.get(&c).map(|k| k.mixed).unwrap_or(false) {
+                    return None;
+                }
+                let v = state.slot(o, Ns::Attr, key_str_lit("value"));
+                v.kv.as_lit().filter(|_| v.pts.is_empty()).map(|_| v)
+            };
+            let (ma, mb) = (mixed(self, ai), mixed(self, bi));
+            if ma.is_some() || mb.is_some() {
+                let x = ma.unwrap_or_else(|| a.clone());
+                let y = mb.unwrap_or_else(|| b.clone());
+                if let Some(o) = crate::models::stdfuncs::value_order(self, state, &x, &y) {
+                    return Some(lit(Some(decide(o))));
+                }
+            }
+            // `@dataclass(order=True)`: two instances of the class compare their fields (those
+            // not `field(compare=False)`) as tuples
+            if let (Some(x), Some(y)) = (ai, bi) {
+                let cx = self.instance_class(x);
+                if cx.is_some() && cx == self.instance_class(y) && self.class_info_opt(cx.unwrap()).map(|ci| ci.dc_order.get()).unwrap_or(false) {
+                    let compared = |d: &Option<&'static ast::Expr>| match d {
+                        Some(ast::Expr::Call(fc)) if super::dotted_last(&fc.func) == "field" => !fc.arguments.keywords.iter().any(|k| k.arg.as_ref().map(|n| n.as_str()) == Some("compare") && matches!(&k.value, ast::Expr::BooleanLiteral(bl) if !bl.value)),
+                        _ => true,
+                    };
+                    let fields: Vec<KeyId> = self.dataclass_fields_mro(cx.unwrap()).iter().filter(|(_, d)| compared(d)).map(|(f, _)| key_str_lit(f)).collect();
+                    let (rx, ry) = (state.row(x, Ns::Attr), state.row(y, Ns::Attr));
+                    if fields.iter().all(|f| rx.definite.contains(*f) && ry.definite.contains(*f)) {
+                        let mut ord = Some(std::cmp::Ordering::Equal);
+                        for f in &fields {
+                            match crate::models::stdfuncs::value_order(self, state, &state.slot(x, Ns::Attr, *f), &state.slot(y, Ns::Attr, *f)) {
+                                Some(std::cmp::Ordering::Equal) => continue,
+                                o => {
+                                    ord = o;
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(o) = ord {
+                            return Some(lit(Some(decide(o))));
+                        }
+                    }
+                }
+            }
+        }
         // no __eq__: identity
         if matches!(op, ast::CmpOp::Eq | ast::CmpOp::NotEq) {
-            let no_eq = |an: &Analyzer, o: Option<ObjId>| o.map(|o| an.cmp_dunder(o, "__eq__").is_none() && an.instance_class(o).map(|c| !an.class_info(c).open_base && an.class_info(c).dataclass_fields.borrow().is_none()).unwrap_or(false)).unwrap_or(true);
+            let no_eq =|an: &Analyzer, o: Option<ObjId>| o.map(|o| an.cmp_dunder(o, "__eq__").is_none() && an.instance_class(o).map(|c| !an.class_info(c).open_base && an.class_info(c).dataclass_fields.borrow().is_none()).unwrap_or(false)).unwrap_or(true);
             if let (Some(x), Some(y)) = (ai, bi) {
                 if no_eq(self, ai) && no_eq(self, bi) {
                     let same = if x == y && self.obj(x).single { Some(true) } else if x != y { Some(false) } else { None };

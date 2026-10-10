@@ -1306,6 +1306,7 @@ impl Analyzer {
             pyd_dataclass: std::cell::Cell::new(ci.pyd_dataclass.get()),
             dc_frozen: std::cell::Cell::new(ci.dc_frozen.get()),
             dc_kw_only: std::cell::Cell::new(ci.dc_kw_only.get()),
+            dc_order: std::cell::Cell::new(ci.dc_order.get()),
             nn_module: false,
             field_classes: std::cell::RefCell::new(None),
             any_fields: std::cell::RefCell::new(None),

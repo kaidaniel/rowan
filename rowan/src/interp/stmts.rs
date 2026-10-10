@@ -1568,6 +1568,7 @@ impl Analyzer {
             pyd_dataclass: std::cell::Cell::new(false),
             dc_frozen: std::cell::Cell::new(false),
             dc_kw_only: std::cell::Cell::new(false),
+            dc_order: std::cell::Cell::new(false),
             nn_module,
             field_classes: std::cell::RefCell::new(None),
             any_fields: std::cell::RefCell::new(None),
@@ -1592,6 +1593,7 @@ impl Analyzer {
                             match (k.arg.as_ref().map(|x| x.as_str()), &k.value) {
                                 (Some("frozen"), ast::Expr::BooleanLiteral(b)) => info.dc_frozen.set(b.value),
                                 (Some("kw_only"), ast::Expr::BooleanLiteral(b)) => info.dc_kw_only.set(b.value),
+                                (Some("order"), ast::Expr::BooleanLiteral(b)) => info.dc_order.set(b.value),
                                 _ => {}
                             }
                         }
