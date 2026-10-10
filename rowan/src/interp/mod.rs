@@ -726,6 +726,9 @@ pub struct Analyzer {
     /// its own allocation context
     pub key_variants: FxHashMap<ObjId, Vec<(Vec<(ObjId, Vec<ObjId>)>, Vec<(ObjId, ObjId)>, Vec<(String, ObjId)>)>>,
     pub tab_count: FxHashMap<(ObjId, &'static str), usize>,
+    /// tabulations of one callee at one call site under the same callers (loop rounds that
+    /// re-run it): bounded, then the summary
+    pub tab_site_count: FxHashMap<(ObjId, u32, u32, usize, Vec<u32>), usize>,
     pub module_done: bool,
     pub fresh_init: FxHashSet<ObjId>,
     pub cell_classes: FxHashMap<ObjId, ObjId>,
@@ -1113,6 +1116,7 @@ impl Analyzer {
             sig_count: FxHashMap::default(),
             key_variants: FxHashMap::default(),
             tab_count: FxHashMap::default(),
+            tab_site_count: FxHashMap::default(),
             module_done: false,
             fresh_init: FxHashSet::default(),
             cell_classes: FxHashMap::default(),

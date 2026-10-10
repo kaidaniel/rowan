@@ -1125,6 +1125,28 @@ impl Analyzer {
         }
     }
 
+    /// `should_tabulate`, at most `TAB_PER_SITE` times for one callee at one call site under
+    /// the same callers (a loop fixpoint re-running a recursive call would otherwise use the
+    /// whole budget).
+    pub fn should_tabulate_at(&mut self, summary: &Summary, bind: &IndexMap<ObjId, Value>, state: &mut State, node: &crate::frontend::Node) -> bool {
+        const TAB_PER_SITE: usize = 8;
+        let key = (summary.foid, node.line, node.col, self.frames.len(), self.call_chain.clone());
+        let n = self.tab_site_count.get(&key).copied().unwrap_or(0);
+        // (a recursive call — the callee runs already — in a loop)
+        let recursive = self.active_by_func.get(&summary.foid).map(|v| !v.is_empty()).unwrap_or(false);
+        if n >= crate::interp::limit("site", TAB_PER_SITE) && recursive && self.frame().loop_depth > 0 && !crate::interp::disabled("tabsite") {
+            if debug_enabled() {
+                eprintln!("budget: summary used for {} (site L{} reached {} tabulations)", self.func_info(summary.foid).qualname, node.line, n);
+            }
+            return false;
+        }
+        let t = self.should_tabulate(summary, bind, state);
+        if t {
+            self.tab_site_count.insert(key, n + 1);
+        }
+        t
+    }
+
     pub fn should_tabulate(&mut self, summary: &Summary, bind: &IndexMap<ObjId, Value>, state: &mut State) -> bool {
         let Some(ev) = self.tabulation_reason(summary, bind, state) else {
             if debug_enabled() {
@@ -1144,7 +1166,7 @@ impl Analyzer {
             return false;
         }
         if debug_enabled() {
-            eprintln!("tabulate {} because of {} on {} [{}]", self.func_info(summary.foid).qualname, ev.kind, self.obj(ev.ph).label, summary.desc);
+            eprintln!("tabulate {} because of {} on {} [{}] chain={:?} frames={} loop={} sum={}", self.func_info(summary.foid).qualname, ev.kind, self.obj(ev.ph).label, summary.desc, self.call_chain, self.frames.len(), self.frame().loop_depth, self.sum_stack.len());
         }
         self.tab_count.insert(key, n + 1);
         true

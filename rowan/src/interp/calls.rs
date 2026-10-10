@@ -1165,7 +1165,7 @@ impl Analyzer {
             if let (Some(ps), Some(sv)) = (summ.ph_self, &self_v) {
                 bind.insert(ps, sv.clone());
             }
-            if !self.should_tabulate(&summ, &bind, state) {
+            if !self.should_tabulate_at(&summ, &bind, state, node) {
                 // (outside databases the summary did not simulate: their rows are unknown now)
                 if let Some(cons) = self.sql_touched.get(&foid).cloned() {
                     for c in cons {
