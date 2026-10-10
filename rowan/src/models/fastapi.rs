@@ -960,6 +960,10 @@ impl Analyzer {
             }
         }
         let ann = ann.unwrap_or(Ann::Other);
+        // (a response model serialises in pydantic's JSON mode; plain data goes through
+        // jsonable_encoder: Decimals as floats)
+        let decimal_float = matches!(ann, Ann::Other);
+        opts.json = !decimal_float;
         // a returned model instance (of a subclass, say) goes through the response model's
         // fields: dumped, then validated as the response model
         if !matches!(ann, Ann::Other) {
@@ -970,7 +974,8 @@ impl Analyzer {
             Ann::Other => plain,
             other => self.pyd_convert_pub(other, &plain, state, node),
         };
-        vals.push(self.pyd_dump_value_pub(&ann, &validated, &opts, state, node));
+        let dumped = self.pyd_dump_value_pub(&ann, &validated, &opts, state, node);
+        vals.push(crate::models::json_wire(self, state, node, &dumped, decimal_float));
         join_values(vals)
     }
 

@@ -2252,6 +2252,11 @@ impl Analyzer {
             outs.push(Value::kv_only(kv));
         }
         for o in v.pts.iter() {
+            // JSON mode: an Enum member is its value
+            if opts.json && self.member_key.contains_key(&o) && !crate::interp::disabled("pydenumjson") {
+                outs.push(state.slot(o, Ns::Attr, key_str_lit("value")));
+                continue;
+            }
             if is_instance(self, o) {
                 outs.push(self.pyd_dump(o, opts, state, node));
                 continue;

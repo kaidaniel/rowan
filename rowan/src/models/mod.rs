@@ -3204,6 +3204,82 @@ fn m_json_dumps(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::data(&format!("{}:{}", if json { "pyjsontext" } else { "pickletext" }, snaps.join(",")))
 }
 
+/// The value a FastAPI client reads back from a handler's (already dumped) result: a copy with
+/// the JSON text's keys (`1` → "1"), Enum members as their values, dates as ISO text and, when
+/// `decimal_float` (jsonable_encoder of plain data), Decimals as floats.
+pub fn json_wire(an: &mut Analyzer, st: &mut State, node: &crate::frontend::Node, v: &Value, decimal_float: bool) -> Value {
+    if crate::interp::disabled("jsonwire") {
+        return v.clone();
+    }
+    let lit = |k: KeyId| -> KeyId {
+        if let Some((kind, _, tz)) = crate::models::chrono::as_chrono(k) {
+            if kind != crate::models::chrono::DELTA && kind != crate::models::chrono::TZ {
+                if let Some(t) = crate::models::chrono::isoformat(k, "T", "auto") {
+                    let _ = tz;
+                    return key_str_lit(&t);
+                }
+            }
+        }
+        if decimal_float && crate::models::pynum::is_num_key(k) {
+            if let Some(f) = crate::models::pynum::str_of(k).and_then(|t| t.parse::<f64>().ok()) {
+                return intern::key_float(f);
+            }
+        }
+        k
+    };
+    // (`orig`: a copy's original, for Enum members the deep copy duplicated)
+    let conv = |an: &Analyzer, st: &State, x: &Value, orig: &rustc_hash::FxHashMap<u32, u32>| -> Value {
+        let mut kv = x.kv.clone();
+        if kv.is_literal() {
+            kv = KeyVal::lits(KeySet::from_iter(crate::domain::kv_literals(&kv).iter().map(lit)));
+        }
+        let mut out = Value::kv_only(kv);
+        for o in x.pts.iter() {
+            let m = orig.get(&o).copied().unwrap_or(o);
+            if an.member_key.contains_key(&m) {
+                out = out.join(&st.slot(m, Ns::Attr, key_str_lit("value")));
+            } else {
+                out = out.join(&Value::obj(o));
+            }
+        }
+        out
+    };
+    let top = conv(an, st, v, &Default::default());
+    let mut out = Value::kv_only(top.kv.clone());
+    for o in top.pts.iter() {
+        if !matches!(an.kind(o), Kind::Dict | Kind::List | Kind::Tuple) {
+            out = out.join(&Value::obj(o));
+            continue;
+        }
+        let mut seen = IndexMap::new();
+        let n = an.copy_object(o, node, st, true, &mut seen);
+        let orig: rustc_hash::FxHashMap<u32, u32> = seen.iter().map(|(a, b)| (*b, *a)).collect();
+        let mut copies: Vec<u32> = seen.values().copied().collect();
+        copies.push(n);
+        for c in copies {
+            if orig.get(&c).map(|m| an.member_key.contains_key(m)).unwrap_or(false) {
+                continue;
+            }
+            for ns in [Ns::Item, Ns::Pos, Ns::Elem] {
+                for (k, x) in st.obj_slots(c, ns) {
+                    let y = conv(an, st, &x, &orig);
+                    if y != x {
+                        st.set_slot(c, ns, k, y, true);
+                    }
+                }
+            }
+            if let Some(e) = st.elems.get(&c) {
+                if e.is_literal() {
+                    st.elems.insert(c, KeyVal::lits(KeySet::from_iter(crate::domain::kv_literals(&e).iter().map(lit))));
+                }
+            }
+            json_str_keys(an, st, c);
+        }
+        out = out.join(&Value::obj(n));
+    }
+    out
+}
+
 /// A json object key's text for a non-str literal key (`1` → "1", True → "true").
 fn json_key_text(k: KeyId) -> Option<String> {
     if k == intern::key_none() {
