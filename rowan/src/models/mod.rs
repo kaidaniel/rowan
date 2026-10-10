@@ -3974,16 +3974,41 @@ fn m_nt_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(recv) = c.recv.clone() else { return Value::data("namedtuple") };
     let mut outs: Vec<Value> = Vec::new();
     for o in recv.pts.iter() {
-        let Some(cls) = an.instance_class(o) else { continue };
+        if an.kind(o) == Kind::Ph {
+            // (the tuple's fields are known per call site)
+            an.record_event("concrete", o);
+        }
+        let cls = an.instance_class(o).or_else(|| if an.kind(o) == Kind::Ph { an.ph_info(o).cls.get() } else { None });
+        let Some(cls) = cls.filter(|cl| an.is_named_tuple_class(*cl)) else { continue };
         let fields: Vec<String> = an.dataclass_fields_mro(cls).into_iter().map(|(f, _)| f).collect();
         if c.qual.ends_with("_asdict") {
             let d = an.alloc_simple(Kind::Dict, &c.node, st, &format!("dict@L{}", c.line));
             for f in &fields {
-                let v = st.slot(o, Ns::Attr, key_str_lit(f));
+                let v = if an.kind(o) == Kind::Ph { an.load_attr(&Value::obj(o), f, &c.node, st, false) } else { st.slot(o, Ns::Attr, key_str_lit(f)) };
                 an.store_key(d, Ns::Item, &KeyVal::Lit(key_str_lit(f)), &v, true, &c.node, st);
             }
             outs.push(Value::obj(d));
+        } else if an.kind(o) == Kind::Ph {
+            // (a new tuple of the class: the fields read from the placeholder, then the changes)
+            let mut kw: IndexMap<intern::StrId, Value> = IndexMap::new();
+            for f in &fields {
+                let v = match c.kwargs.get(&intern::s(f)) {
+                    Some(v) => v.clone(),
+                    None => an.load_attr(&Value::obj(o), f, &c.node, st, false),
+                };
+                kw.insert(intern::s(f), v);
+            }
+            if c.kwargs.keys().any(|k| !fields.iter().any(|f| *f == *intern::str_get(*k))) {
+                an.raise_here("TypeError", st);
+                continue;
+            }
+            outs.push(an.construct(cls, &[], &kw, &[], &[], st, &c.node));
         } else {
+            if c.kwargs.keys().any(|k| !fields.iter().any(|f| *f == *intern::str_get(*k))) && !crate::interp::disabled("ntreplacebad") {
+                // `_replace` with an unknown field name: TypeError (ValueError before 3.14)
+                an.raise_here("TypeError", st);
+                continue;
+            }
             let n = an.copy_object(o, &c.node, st, false, &mut IndexMap::new());
             for (k, v) in c.kwargs.iter() {
                 let name = intern::str_get(*k);

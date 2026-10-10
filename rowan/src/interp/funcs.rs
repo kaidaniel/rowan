@@ -585,6 +585,16 @@ impl Analyzer {
                     }
                     parts[i] = parts[i].join(&sv);
                 }
+            } else if let Some(cls) = self.instance_class(oid).filter(|c| kind == Kind::Instance && self.is_named_tuple_class(*c) && !crate::interp::disabled("ntunpack")) {
+                // a NamedTuple: its fields in order
+                let fs = self.dataclass_fields_mro(cls);
+                for i in 0..n {
+                    let v = match fs.get(i) {
+                        Some((f, _)) => state.slot(oid, Ns::Attr, intern::key_str_lit(f)),
+                        None => Value::data(&format!("unpack@L{}", node.line)),
+                    };
+                    parts[i] = parts[i].join(&v);
+                }
             } else if kind == Kind::Pair {
                 if let Payload::Pair(k, val) = self.obj(oid).payload.clone() {
                     if n >= 1 {

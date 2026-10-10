@@ -2132,6 +2132,7 @@ impl Analyzer {
             self.class_info_opt(*c).map(|ci| ci.dc_frozen.get()).unwrap_or(false)
                 || self.pyd_classes.get(c).map(|p| p.frozen || p.validate_assignment).unwrap_or(false)
                 || self.cls_slots.contains_key(&(*c, Ns::Attr, key_str_lit("__setattr__")))
+                || self.is_named_tuple_class(*c)
         })
     }
 
@@ -2178,6 +2179,16 @@ impl Analyzer {
         // declared class (annotation / self): resolve methods and class attributes (a
         // dataclass field's default is instance data, not a class attribute)
         let is_field = !super::disabled("dcfield") && ph.cls.get().map(|c| self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name)).unwrap_or(false);
+        // a NamedTuple's API on a placeholder of the class; a class-less one decides per call
+        if matches!(name, "_asdict" | "_replace") && !super::disabled("ntmethods") {
+            match ph.cls.get() {
+                Some(pc) if self.class_lookup(pc, name).is_none() && self.is_named_tuple_class(pc) => {
+                    return self.method_value(&format!("namedtuple.{}", name), &Value::obj(oid));
+                }
+                None if self.user_classes.iter().any(|c| self.is_named_tuple_class(*c)) => self.record_event("concrete", oid),
+                _ => {}
+            }
+        }
         // pydantic's API on a placeholder typed with a model class (and its private attributes)
         if let Some(pcls) = ph.cls.get() {
             if name.starts_with('_') && self.pyd_is_private(pcls, name, state) {
@@ -2581,6 +2592,13 @@ impl Analyzer {
                         }
                         self.record_event("concrete", oid);
                     }
+                    if self.is_named_tuple_class(cls) && self.class_lookup(cls, "__setattr__").is_none() && !super::disabled("ntfrozen") {
+                        if exact {
+                            self.raise_here("AttributeError", state);
+                            continue;
+                        }
+                        self.record_event("concrete", oid);
+                    }
                 }
             }
             // a frozen dataclass: assignment raises FrozenInstanceError (an AttributeError)
@@ -2588,6 +2606,11 @@ impl Analyzer {
                 if let Some(cls) = self.instance_class(oid) {
                     if self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|ci| ci.dc_frozen.get()).unwrap_or(false)) && !self.fresh_init.contains(&oid) {
                         self.raise_here("FrozenInstanceError", state);
+                        continue;
+                    }
+                    // a NamedTuple's fields are read-only, and it has no instance dict
+                    if self.is_named_tuple_class(cls) && self.class_lookup(cls, "__setattr__").is_none() && !super::disabled("ntfrozen") {
+                        self.raise_here("AttributeError", state);
                         continue;
                     }
                 }
