@@ -19,3 +19,5 @@ Besides python builtins, rowan also has models for pytorch, pandas, pydantic, an
 
 Files are analysed when opened or
 saved, or with **Rowan: Analyse current file**.
+
+Source, documentation and issues: [github.com/kaidaniel/rowan](https://github.com/kaidaniel/rowan).

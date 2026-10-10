@@ -5,6 +5,8 @@
 > checked against real Python, pandas, pydantic, FastAPI and PyTorch runs), but it has not been
 > used in practice on real code bases. On large programs (thousands of lines and up) it may time out or crash.
 
+**In VS Code:** [rowan on the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=Rowan.rowan).
+
 **rowan runs your Python program without running it.** It interprets the program abstractly:
 every name holds a *set of possible values* (literals, dicts, lists, instances, functions,
 tensors, DataFrames, … or `?` for something it cannot know), every branch is taken, every
@@ -297,9 +299,11 @@ Imports of local modules and packages are followed. Installed packages are model
 Other options: `--no-entry` (don't analyse uncalled functions with unknown arguments),
 `--search-path DIR`, `--site-packages DIR`, `--value-depth N`, `--no-rows`, `--no-summaries`.
 
-**VS Code.** `vscode-rowan/` is an extension: hover over a name to see its values, keys and
-requirements, with failing accesses as diagnostics. Install `vscode-rowan/rowan-0.1.0.vsix`
-(*Extensions: Install from VSIX…*); it finds the binary in your workspace or on your PATH.
+**VS Code.** Install [rowan from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=Rowan.rowan)
+(the engine is bundled for macOS and Linux): hover over a name to see its values, keys and
+requirements, with failing accesses as diagnostics. Its source is in `vscode-rowan/`; the
+`.vsix` packages of each version are attached to the
+[GitHub releases](https://github.com/kaidaniel/rowan/releases).
 
 ## More
 
