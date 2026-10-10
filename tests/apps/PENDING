@@ -1,1 +1,6 @@
 large/c001_platform_pkg/c001_platform.py
+small/a009_shift_payroll.py
+small/a010_ticket_desk.py
+small/a011_room_bookings.py
+small/a012_metrics_ingest.py
+medium/b005_library_pkg/b005_library.py
