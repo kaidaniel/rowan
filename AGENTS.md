@@ -69,7 +69,7 @@ decision), `ROWAN_NO=a,b` (switch refinements off: `rg 'disabled\("' rowan/src`)
 | `tests/run_golden.py`, `tests/oracle.py` | golden harness (directives: `tests/CONVENTIONS.md`), runtime oracle (strict on the library suites). |
 | `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/` | 486 / 162 / 138 / 59 / 43 / 134 / 57 / 8 .py files (apps: small / medium / large package programs); suites have `small/`, `models/`, a `PENDING` list. |
 | `tests/run_snapshots.py`, `tests/snapshots/` | `--json` snapshots on four old modules: the internals regression guard. |
-| `vscode-rowan/`, `rowan/py/` | VS Code extension (rowan serve); PyO3 binding (does not load on this machine). |
+| `vscode-rowan/`, `rowan/py/`, `.github/` | VS Code extension (rowan serve); PyO3 binding (does not load on this machine); CI (`ci.yml`: build, tests, golden, snapshots on Linux + macOS, oracle, torch oracle on demand). |
 
 Directives (`tests/CONVENTIONS.md`): `#@ tier key`, `#@row NAME: present= definite= absent=
 closed|open`, `#@value NAME: exactly=|unknown|includes=`, `#@schema src: always= sometimes=
