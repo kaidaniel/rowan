@@ -1,4 +1,4 @@
-![rowan logo](rowan_icon.svg)
+![rowan logo](rowan_icon_48.png)
 
 # rowan
 
