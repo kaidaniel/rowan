@@ -702,6 +702,11 @@ impl Analyzer {
                     elems.push(self.elem_of(&Value::obj(oid), node, state));
                 }
                 Kind::Dict | Kind::Frame => {
+                    // (a dict from before a summarised call, a module constant: its items are
+                    // known where the call is)
+                    if !self.sum_stack.is_empty() && self.is_entry_object(oid) && kind == Kind::Dict && !crate::interp::disabled("entryiter") {
+                        self.record_event("concrete", oid);
+                    }
                     let lit = self.literal_dict_items(oid, state);
                     match (lit, items.as_mut()) {
                         (Some(l), Some(its)) => its.extend(l.into_iter().map(|(k, _)| Value::lit(k))),
@@ -721,6 +726,13 @@ impl Analyzer {
                             elems.push(recv);
                         }
                         continue;
+                    }
+                    if !self.sum_stack.is_empty() && !crate::interp::disabled("entryiter") {
+                        for r in recv.pts.iter() {
+                            if self.is_entry_object(r) && self.kind(r) == Kind::Dict {
+                                self.record_event("concrete", r);
+                            }
+                        }
                     }
                     let kv = KeyVal::KeysOf(KeysOf::new(recv.pts.clone(), Ns::Item));
                     let vals = join_values(recv.pts.iter().map(|r| self.record_values(r, state)).collect::<Vec<_>>());
