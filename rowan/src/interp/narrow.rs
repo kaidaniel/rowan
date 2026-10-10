@@ -204,7 +204,15 @@ impl Analyzer {
             // `if items:` / `if not items:` on a list of unknown length: on this path it has a
             // first element / is empty (this path's length only, not the object's)
             ast::Expr::Name(n) if !super::disabled("lennarrow") => {
-                let v = self.load_name(s(n.id.as_str()), &Node::none(), state);
+                let mut v = self.load_name(s(n.id.as_str()), &Node::none(), state);
+                // several containers: on the truthy path the ones known to be empty are not it
+                if truth && v.pts.len() > 1 && v.kv.is_bot() && !super::disabled("emptydrop") {
+                    let keep: Vec<u32> = v.pts.iter().filter(|o| !(matches!(self.kind(*o), Kind::List | Kind::Tuple | Kind::Set) && self.llen(*o, state) == Some(0))).collect();
+                    if !keep.is_empty() && keep.len() < v.pts.len() {
+                        v = Value::objs(crate::domain::ObjSet::from_vec(keep));
+                        self.store_name(s(n.id.as_str()), v.clone(), state);
+                    }
+                }
                 if v.pts.len() == 1 && v.kv.is_bot() {
                     let o = v.pts.first().unwrap();
                     if matches!(self.kind(o), Kind::List | Kind::Tuple) && self.obj(o).single && self.llen(o, state).is_none() {

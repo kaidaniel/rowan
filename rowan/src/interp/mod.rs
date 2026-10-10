@@ -778,6 +778,8 @@ pub struct Analyzer {
     pub handling_values: Vec<Value>,
     /// inside a call whose exceptions a thread / future keeps: reads still require their keys
     pub catching_depth: u32,
+    /// a context part every allocation adds (a model run once per receiver)
+    pub alloc_extra: Option<String>,
     /// beside `raise_stack`: the classes of the exceptions that may leave the running call
     /// (None: some of unknown class)
     pub esc_cls: Vec<Option<Vec<ExcNames>>>,
@@ -1150,6 +1152,7 @@ impl Analyzer {
             handling: Vec::new(),
             handling_values: Vec::new(),
             catching_depth: 0,
+            alloc_extra: None,
             esc_cls: Vec::new(),
             caught_load: false,
             cmp_right: None,
@@ -1657,6 +1660,12 @@ impl Analyzer {
     /// contexts makes two objects.
     pub fn alloc_at(&mut self, kind: Kind, node: &Node, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, single: Option<bool>, ctx: Option<&str>) -> ObjId {
         let site = site_string(node);
+        let joined: Option<String> = match (&self.alloc_extra, ctx) {
+            (Some(x), Some(c)) => Some(format!("{}/{}", x, c)),
+            (Some(x), None) => Some(x.clone()),
+            (None, c) => c.map(|c| c.to_string()),
+        };
+        let ctx = joined.as_deref();
         let full = match ctx {
             Some(c) if !disabled("allocctx") => Some(format!("{}/{}", self.frame().ctx, c)),
             Some(c) => Some(c.to_string()),
@@ -2044,13 +2053,16 @@ impl Analyzer {
             };
             if debug_enabled() {
                 eprintln!(
-                    "[rowan] entry {} L{} t={:.1}s objs={} summaries={} verdicts={}",
+                    "[rowan] entry {} L{} t={:.1}s objs={} summaries={} verdicts={} quiet={} torch={} analysed={}",
                     fi.qualname,
                     fi.node.node().line,
                     self.now(),
                     self.objects.len(),
                     self.summary_table.len(),
-                    self.verdicts.len()
+                    self.verdicts.len(),
+                    quiet,
+                    self.torch_modules.contains(&fi.module),
+                    self.analysed_funcs.contains(&oid)
                 );
             }
             // a closure made by a factory's entry run starts from that run's state (its cells)

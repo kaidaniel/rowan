@@ -111,7 +111,11 @@ impl Analyzer {
         let mut states: Vec<State> = Vec::new();
         for oid in targets {
             let mut st = pre.copy();
+            // (a groupby method of one of several groupby objects: its results are its own)
+            let own = matches!(&self.obj(oid).payload, Payload::Method(q, r) if q.starts_with("groupby.") && r.pts.iter().all(|g| self.kind(g) == Kind::Groupby)) && !super::disabled("gbalts");
+            let saved = if own { self.alloc_extra.replace(format!("gbm{}", oid)) } else { self.alloc_extra.clone() };
             outs.push(self.call_one(oid, &args, &kwargs, &star_args, &star_kwargs, &mut st, node, call_ast));
+            self.alloc_extra = saved;
             states.push(st);
         }
         let mut out = states.remove(0);
@@ -239,6 +243,20 @@ impl Analyzer {
             }
             Kind::Method => {
                 let Payload::Method(qual, recv) = self.obj(oid).payload.clone() else { return Value::new() };
+                // several groupby objects (`groupby` over one of several columns): the model runs
+                // once per object, each making its own results
+                if qual.starts_with("groupby.") && recv.pts.len() > 1 && recv.pts.iter().all(|o| self.kind(o) == Kind::Groupby) && !super::disabled("gbalts") {
+                    let mut outs: Vec<Value> = Vec::new();
+                    for g in recv.pts.iter() {
+                        let mv = self.method_value(&qual, &Value::obj(g));
+                        let Some(mo) = mv.single() else { continue };
+                        let saved = self.alloc_extra.replace(format!("gb{}", g));
+                        let r = self.call_one(mo, args, kwargs, star_args, star_kwargs, state, node, call_ast);
+                        self.alloc_extra = saved;
+                        outs.push(r);
+                    }
+                    return join_values(outs);
+                }
                 // `super().__init__(…)` reaching a builtin exception base: args, str / repr
                 if qual == "excinit" {
                     for o in recv.pts.iter() {

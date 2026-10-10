@@ -707,7 +707,11 @@ impl Analyzer {
                     continue;
                 }
                 Kind::Groupby => {
+                    // (several groupby objects: each selection is an object of its own)
+                    let several = obj.pts.iter().filter(|o| self.kind(*o) == Kind::Groupby).count() > 1 && !super::disabled("gbalts");
+                    let saved = if several { self.alloc_extra.replace(format!("gb{}", oid)) } else { self.alloc_extra.clone() };
                     let v = crate::models::pandas::groupby_select(self, oid, key, node, state);
+                    self.alloc_extra = saved;
                     acc = acc.join(&v);
                     continue;
                 }
@@ -1078,6 +1082,10 @@ impl Analyzer {
             self.verdict(node, k, &Classification::with_note(Tier::DataKey, "data-derived key into a closed record"), oid, ns, None, None);
         }
         let mut v = self.all_values(oid, ns, state);
+        // (a closed record: the unknown key is one of its keys — one of their values)
+        if row.closed() && !row.symbolic() && !row.top && !super::disabled("closedunkey") {
+            return v;
+        }
         if v.pts.is_empty() && row.open() {
             let p = self.path_placeholder_value(oid, ns, STAR, &row, state);
             v = v.join(&p);

@@ -2912,6 +2912,28 @@ fn set_index(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 fn groupby(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // one of several known column names (`by = "name" if … else "host"`): a groupby per name
+    if let Some(b) = c.arg(0, Some("by")).filter(|b| b.pts.is_empty() && !crate::interp::disabled("gbalts")) {
+        if let KeyVal::Lits(ks) = &b.kv {
+            if (2..=8).contains(&ks.len()) && ks.iter().all(intern::key_is_str) {
+                let mut outs: Vec<Value> = Vec::new();
+                for k in intern::sorted_by_str(ks.iter()) {
+                    let mut c2 = c.clone();
+                    if !c2.args.is_empty() {
+                        c2.args[0] = Value::lit(k);
+                    } else {
+                        c2.kwargs.insert(intern::s("by"), Value::lit(k));
+                    }
+                    outs.push(groupby_one(an, st, &c2, Some(&format!("gbalt{}", intern::key_repr(k)))));
+                }
+                return crate::domain::join_values(outs);
+            }
+        }
+    }
+    groupby_one(an, st, c, None)
+}
+
+fn groupby_one(an: &mut Analyzer, st: &mut State, c: &Call, ctx: Option<&str>) -> Value {
     let fs = frames(an, c.recv.as_ref());
     let by = c.arg(0, Some("by"));
     let ks = by.as_ref().and_then(|b| an.lit_keys(b, st));
@@ -2922,7 +2944,7 @@ fn groupby(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let ai = !key_is_bool(&c.kw("as_index"), false);
     let seq = by.as_ref().and_then(|b| lit_key_seq(an, st, b).or_else(|| b.kv.as_lit().filter(|_| b.pts.is_empty()).map(|k| vec![k])));
     let payload = Payload::Groupby(fs.clone(), ks, ai, None);
-    let gid = an.alloc_at(Kind::Groupby, &c.node, st, &format!("groupby@L{}", c.line), payload.clone(), None, Ns::Item, None, None);
+    let gid = an.alloc_at(Kind::Groupby, &c.node, st, &format!("groupby@L{}", c.line), payload.clone(), None, Ns::Item, None, ctx);
     an.obj_mut(gid).payload = payload;
     if let Some(seq) = seq {
         st.set_slot(gid, Ns::Meta, mk("by"), Value::lit(intern::key_tuple(seq)), true);
