@@ -264,7 +264,7 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
                 if !v.pts.is_empty() && v.pts.iter().all(|o| matches!(an.kind(o), Kind::Function | Kind::Class | Kind::Module | Kind::External)) {
                     continue;
                 }
-                let labels: Vec<String> = v.pts.iter().filter(|o| an.kind(*o) != Kind::Unknown).map(|o| an.obj(o).label.clone()).collect();
+                let labels: Vec<String> = v.pts.iter().filter(|o| an.kind(*o) != Kind::Unknown).map(|o| an.obj(o).label.to_string()).collect();
                 let rendered = render_value(an, st, &v, 0, &mut Vec::new());
                 if labels.is_empty() {
                     lines.push(format!("  {} = {}", name, rendered));
@@ -317,7 +317,7 @@ pub fn to_json(an: &Analyzer) -> Vec<J> {
         out.push(json!({"kind": "schema", "source": label, "keys": keys}));
     }
     for ((qual, ctx), (_, rows)) in &an.summaries {
-        let returns: serde_json::Map<String, J> = rows.iter().map(|(o, r)| (an.obj(*o).label.clone(), J::String(r.to_string()))).collect();
+        let returns: serde_json::Map<String, J> = rows.iter().map(|(o, r)| (an.obj(*o).label.to_string(), J::String(r.to_string()))).collect();
         out.push(json!({"kind": "summary", "function": qual, "context": ctx, "returns": returns}));
     }
     out
@@ -554,8 +554,8 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
             let name = l.trim_start_matches("def ").split(" bound").next().unwrap_or(&l).to_string();
             format!("{} (bound)", name)
         }
-        Kind::Class => an.obj(o).label.clone(),
-        Kind::Module => an.obj(o).label.clone(),
+        Kind::Class => an.obj(o).label.to_string(),
+        Kind::Module => an.obj(o).label.to_string(),
         // an unknown named in the program's terms (`a`, `a(b)`, `cfg["db"]`), else `?`
         Kind::Unknown | Kind::Ph => an.symbol_for(o).cloned().unwrap_or_else(|| "?".into()),
         Kind::External => an.external_qual(o).trim_start_matches("builtins.").to_string(),
@@ -775,7 +775,7 @@ pub fn facts_json(an: &Analyzer) -> J {
                 let origin = an.origins.get(oid).map(|(t, l, g)| json!({"text": t, "line": l, "given": g}));
                 json!({
                     "id": oid,
-                    "label": o.label,
+                    "label": &*o.label,
                     "kind": o.kind.name(),
                     "item": item.as_ref().map(row_json),
                     "attr": attr.as_ref().map(row_json),

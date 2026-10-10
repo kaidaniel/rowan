@@ -201,7 +201,7 @@ impl Analyzer {
                     });
                     if !all_safe {
                         if super::debug_level() == 2 {
-                            let what: Vec<String> = fv.pts.iter().map(|o| match &self.obj(o).payload { Payload::Method(q, _) | Payload::Str(q) => q.clone(), _ => self.obj(o).label.clone() }).collect();
+                            let what: Vec<String> = fv.pts.iter().map(|o| match &self.obj(o).payload { Payload::Method(q, _) | Payload::Str(q) => q.clone(), _ => self.obj(o).label.to_string() }).collect();
                             eprintln!("  call may raise at L{}: {}", frontend::node(node).line, what.join(", "));
                         }
                         self.flag_may_raise(state);

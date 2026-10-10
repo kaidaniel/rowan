@@ -446,7 +446,7 @@ impl Analyzer {
                 if matches!(self.kind(*o), Kind::Unknown | Kind::Ph) {
                     continue;
                 }
-                let g = self.obj(*o).label.clone();
+                let g = self.obj(*o).label.to_string();
                 if !given.contains(&g) {
                     given.push(g);
                 }
@@ -1087,7 +1087,7 @@ impl Analyzer {
                     // allocate distinct objects
                     let ctx = if !recv.single {
                         site.to_string()
-                    } else if self.site_clones.get(&recv.site).copied().unwrap_or(0) >= super::limit("clones", MAX_CLONES) {
+                    } else if self.site_clones.get(&*recv.site).copied().unwrap_or(0) >= super::limit("clones", MAX_CLONES) {
                         String::new()
                     } else {
                         format!("o{}/{}", recv.id, site)
@@ -1417,7 +1417,7 @@ impl Analyzer {
                         }
                         let ob = self.obj(o);
                         if let Some(base) = ob.site.strip_suffix("#recent") {
-                            recents.push((o, ob.kind, base.to_string(), ob.ctx.clone()));
+                            recents.push((o, ob.kind, base.to_string(), ob.ctx.to_string()));
                         }
                     }
                     let top = self.recent_stack.last_mut().unwrap();

@@ -424,7 +424,7 @@ impl Analyzer {
         if !self.sum_stack.is_empty() && (self.kind(ph) == Kind::Ph || self.is_entry_object(ph)) {
             if crate::interp::debug_level() == 2 {
                 let top = *self.sum_stack.last().unwrap();
-                let par = if self.kind(ph) == Kind::Ph { self.ph_info(ph).parent.map(|p| self.obj(p).label.clone()).unwrap_or_default() } else { String::new() };
+                let par = if self.kind(ph) == Kind::Ph { self.ph_info(ph).parent.map(|p| self.obj(p).label.to_string()).unwrap_or_default() } else { String::new() };
                 eprintln!("  event {} on {} (parent {}) in {} [{}]", kind, self.obj(ph).label, par, self.func_info(top).qualname, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
             }
             self.sum_events.last_mut().unwrap().insert((kind, ph), Event { kind, ph });
@@ -2100,7 +2100,7 @@ fn erow_of(pre: &State, state: &State, born: &FxHashMap<(ObjId, Ns), Row>, a: Ob
 }
 
 fn group_by_site(an: &Analyzer, tg: &ObjSet) -> Vec<Vec<ObjId>> {
-    let mut by: Vec<((Kind, String), Vec<ObjId>)> = Vec::new();
+    let mut by: Vec<((Kind, std::sync::Arc<str>), Vec<ObjId>)> = Vec::new();
     for a in tg.iter() {
         let key = (an.kind(a), an.obj(a).site.clone());
         if let Some(e) = by.iter_mut().find(|(k, _)| *k == key) {
@@ -2295,7 +2295,7 @@ impl Inst {
     /// one group per target up to `MAX_SYMREQ_TARGETS`, then one joined group per site.
     fn focus_groups(&mut self, an: &Analyzer, state: &State, pre: &State, ph: ObjId, tg: &ObjSet) -> Vec<(Focus, Vec<ObjId>)> {
         if an.opts.site_resolution {
-            let mut groups: Vec<((Kind, String, Focus), Vec<ObjId>)> = Vec::new();
+            let mut groups: Vec<((Kind, std::sync::Arc<str>, Focus), Vec<ObjId>)> = Vec::new();
             for a in tg.iter() {
                 let f = Focus::of_target(pre, state, &self.born, ph, a);
                 let key = (an.kind(a), an.obj(a).site.clone(), f);
@@ -2335,7 +2335,7 @@ impl Inst {
             let o = an.obj(t);
             (o.kind, o.site.clone(), o.ctx.clone(), o.label.clone(), o.single, an.llen(t, &self.summary.exit), o.iter_elem, o.depth, o.derived_from, o.payload.clone())
         };
-        let tsite = tsite.strip_suffix("#recent").map(|x| x.to_string()).unwrap_or(tsite);
+        let tsite: String = tsite.strip_suffix("#recent").map(|x| x.to_string()).unwrap_or_else(|| tsite.to_string());
         // templates allocated at one line in different inner contexts (two objects built by
         // one constructor inside the body) stay distinct in the clone
         let tsite = if tctx.is_empty() || crate::interp::disabled("clonectx") { tsite } else { format!("{}|{}", tsite, tctx) };

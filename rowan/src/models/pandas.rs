@@ -5173,7 +5173,7 @@ pub fn view_setattr(an: &mut Analyzer, vid: u32, name: &str, v: &Value, state: &
     if name != "name" && name != "names" {
         return;
     }
-    let is_index = an.obj(vid).label == "index";
+    let is_index = &*an.obj(vid).label == "index";
     for f in recv.pts.iter() {
         if an.kind(f) == Kind::Frame {
             if is_index {

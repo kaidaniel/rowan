@@ -622,10 +622,12 @@ impl Payload {
 pub struct Obj {
     pub id: ObjId,
     pub kind: Kind,
-    pub site: String,
-    pub ctx: String,
+    /// site, context and label are shared strings (one allocation per distinct string: many
+    /// objects have the same context or label)
+    pub site: std::sync::Arc<str>,
+    pub ctx: std::sync::Arc<str>,
     pub single: bool,
-    pub label: String,
+    pub label: std::sync::Arc<str>,
     pub payload: Payload,
     /// containers built from a literal: positional slots are valid
     pub literal_len: Option<usize>,
@@ -787,7 +789,8 @@ pub struct Analyzer {
     pub site_paths: Vec<String>,
     pub analyse_entry_points: bool,
     pub objects: Vec<Obj>,
-    pub obj_index: FxHashMap<(Kind, String, String), ObjId>,
+    /// (kind, site, context) -> object; site and context interned
+    pub obj_index: FxHashMap<(Kind, StrId, StrId), ObjId>,
     pub verdicts: Vec<Verdict>,
     pub verdict_keys: FxHashSet<(String, u32, u32, String, Tier, ObjId, Chain)>,
     pub notes: Vec<String>,
@@ -1188,8 +1191,8 @@ impl Analyzer {
             objects: vec![Obj {
                 id: 0,
                 kind: Kind::Unknown,
-                site: String::new(),
-                ctx: String::new(),
+                site: "".into(),
+                ctx: "".into(),
                 single: true,
                 label: "<none>".into(),
                 payload: Payload::None,
@@ -1422,7 +1425,7 @@ impl Analyzer {
         self.objects[oid as usize].kind
     }
     pub fn label(&self, oid: ObjId) -> String {
-        self.objects[oid as usize].label.clone()
+        self.objects[oid as usize].label.to_string()
     }
     pub fn has_obj(&self, oid: ObjId) -> bool {
         (oid as usize) < self.objects.len() && oid > 0
@@ -1500,7 +1503,7 @@ impl Analyzer {
     }
 
     pub fn alloc_raw(&mut self, kind: Kind, site: &str, ctx: &str, single: bool, label: &str, payload: Payload) -> ObjId {
-        let key = (kind, site.to_string(), ctx.to_string());
+        let key = (kind, intern::s(site), intern::s(ctx));
         if let Some(&oid) = self.obj_index.get(&key) {
             let o = &mut self.objects[oid as usize];
             o.single = o.single && single;
@@ -1521,10 +1524,10 @@ impl Analyzer {
         self.objects.push(Obj {
             id: oid,
             kind,
-            site: site.to_string(),
-            ctx: ctx.to_string(),
+            site: intern::str_get(key.1),
+            ctx: intern::str_get(key.2),
             single,
-            label: label.to_string(),
+            label: intern::str_get(intern::s(label)),
             payload,
             literal_len: None,
             known_prefix: None,
@@ -1687,7 +1690,7 @@ impl Analyzer {
             }
             oid
         } else {
-            let existed = self.obj_index.get(&(kind, site.to_string(), ctx.clone())).copied();
+            let existed = self.obj_index.get(&(kind, intern::s(site), intern::s(&ctx))).copied();
             let payload2 = payload.clone();
             let mut oid = self.alloc_raw(kind, site, &ctx, single, &label, payload);
             // (made earlier in the same model call: held by the model's own code)
@@ -1720,7 +1723,7 @@ impl Analyzer {
                         // (the variants made so far, their liveness in one walk)
                         let made: Vec<(String, Option<ObjId>)> = (1..=8usize).map(|k| {
                             let vctx = format!("{}~{}", ctx, k);
-                            let v = self.obj_index.get(&(kind, site.to_string(), vctx.clone())).copied();
+                            let v = self.obj_index.get(&(kind, intern::s(site), intern::s(&vctx))).copied();
                             (vctx, v)
                         }).collect();
                         let first_free = made.iter().position(|(_, v)| v.is_none()).unwrap_or(made.len());
@@ -1918,7 +1921,7 @@ impl Analyzer {
             col: node.col,
             key,
             tier: cls.tier,
-            obj: self.obj(oid).label.clone(),
+            obj: self.obj(oid).label.to_string(),
             chain,
             note: cls.note.clone(),
             providers: cls.providers.iter().map(|(s, _)| crate::domain::source_label(*s)).collect(),
@@ -3055,7 +3058,7 @@ impl Analyzer {
                 Kind::Unknown | Kind::Ph | Kind::External => info.unknown = true,
                 // a tuple of known literals is that literal (as Python prints it)
                 Kind::Tuple | Kind::Pair if self.literal_tuple(o, state, 0).is_some() => info.lits.push(self.literal_tuple(o, state, 0).unwrap()),
-                _ => info.objects.push(self.obj(o).label.clone()),
+                _ => info.objects.push(self.obj(o).label.to_string()),
             }
         }
         if v.pts.is_empty() && v.kv.is_bot() {
