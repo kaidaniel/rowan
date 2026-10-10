@@ -16,9 +16,6 @@ models/sm02_layered_config.py
 models/sm03_inventory_report.py
 models/sm04_event_pipeline.py
 models/sm06_log_report.py
-small/s055_partial_positional.py
-small/s056_partial_keyword.py
-small/s058_wraps_decorator.py
 small/s059_lru_cache.py
 small/s060_cached_property.py
 small/s062_total_ordering.py

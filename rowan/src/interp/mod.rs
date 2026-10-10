@@ -786,6 +786,10 @@ pub struct Analyzer {
     pub cookie_jars: FxHashSet<ObjId>,
     /// itertools.count / cycle / repeat(x) objects
     pub infinites: FxHashMap<ObjId, crate::models::itertools::Infinite>,
+    /// partials' bound `**mapping`s of unknown keys
+    pub partial_star: FxHashMap<ObjId, Vec<Value>>,
+    /// `@functools.wraps(fn)` wrappers: fn
+    pub wrapped: FxHashMap<ObjId, Value>,
     /// the requirements known when a try context was first flagged as raising anywhere
     /// (`may_raise` depth, requirements): its handler needs no less
     pub flag_reqs: Vec<(usize, crate::layered::TwoLevel<crate::intern::SourceId, KeyId, crate::domain::ReqInfo>)>,
@@ -1014,6 +1018,8 @@ impl Analyzer {
             exit_callbacks: FxHashMap::default(),
             cookie_jars: FxHashSet::default(),
             infinites: FxHashMap::default(),
+            partial_star: FxHashMap::default(),
+            wrapped: FxHashMap::default(),
             flag_reqs: Vec::new(),
             identity_objs: RefCell::new(FxHashMap::default()),
             bypass_setattr: false,
@@ -1273,6 +1279,12 @@ impl Analyzer {
         }
         if let Some(m) = self.chainmaps.get(&t).cloned() {
             self.chainmaps.insert(nid, m);
+        }
+        if let Some(p) = self.partial_star.get(&t).cloned() {
+            self.partial_star.insert(nid, p);
+        }
+        if let Some(w) = self.wrapped.get(&t).cloned() {
+            self.wrapped.insert(nid, w);
         }
     }
 
@@ -1848,7 +1860,11 @@ impl Analyzer {
                     crate::shape::note_param(crate::shape::sym(oid, a.name.id.as_str()), i as u32);
                 }
             }
+            let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
             for a in params {
+                // (keyword-only parameters are passed by keyword)
+                let kwonly = fparams.kwonlyargs.iter().any(|k| std::ptr::eq(&k.parameter, a)) && !disabled("entrykwonly");
+                let n_before = args.len();
                 let is_vararg = fparams.vararg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);
                 let is_kwarg = fparams.kwarg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);
                 if is_vararg || is_kwarg {
@@ -1878,6 +1894,10 @@ impl Analyzer {
                         continue;
                     }
                     args.push(d.join(&Value::obj(poid)));
+                    if kwonly && args.len() > n_before {
+                        let v = args.pop().unwrap();
+                        kwargs.insert(pname, v);
+                    }
                     continue;
                 }
                 let mut v = match &a.annotation {
@@ -1888,14 +1908,18 @@ impl Analyzer {
                     let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
                     v = Some(Value::obj(poid));
                 }
-                args.push(v.unwrap());
+                if kwonly {
+                    kwargs.insert(pname, v.unwrap());
+                } else {
+                    args.push(v.unwrap());
+                }
             }
             self.entry_scope = None;
             let fake = Node::synthetic(mi.idx, fi.node.node().line);
             let saved_entry = self.entry_run.replace(oid);
             let before = self.objects.len() as ObjId;
             let saved_quiet = std::mem::replace(&mut self.quiet, quiet);
-            self.call_user(oid, self_val, args, IndexMap::new(), star_args, star_kwargs, &mut st, &fake, None, true);
+            self.call_user(oid, self_val, args, kwargs, star_args, star_kwargs, &mut st, &fake, None, true);
             self.quiet = saved_quiet;
             self.entry_run = saved_entry;
             if quiet {

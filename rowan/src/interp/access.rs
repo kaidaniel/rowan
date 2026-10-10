@@ -1114,6 +1114,40 @@ impl Analyzer {
                         None => Value::obj(self.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, &q, Payload::Str(q.clone()))),
                     }
                 }
+                // a partial's func / args / keywords
+                Kind::Partial if matches!(name, "func" | "args" | "keywords") && !super::disabled("partialattrs") => {
+                    let Payload::Partial(f, args, kw) = self.obj(oid).payload.clone() else { unreachable!() };
+                    match name {
+                        "func" => f,
+                        "args" => {
+                            let tid = self.alloc_at(Kind::Tuple, node, state, "partial.args", Payload::None, None, Ns::Item, None, Some(&format!("pargs{}", oid)));
+                            for (i, a) in args.iter().enumerate() {
+                                state.set_slot(tid, Ns::Pos, intern::key_int(i as i64), a.clone(), true);
+                            }
+                            let acc = join_values(args.clone());
+                            state.set_slot(tid, Ns::Elem, STAR, acc, true);
+                            self.set_llen(tid, state, Some(args.len()));
+                            Value::obj(tid)
+                        }
+                        _ => {
+                            let did = self.alloc_at(Kind::Dict, node, state, "partial.keywords", Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("pkw{}", oid)));
+                            let mut row = Row::new();
+                            for (k, v) in kw.iter() {
+                                let kk = key_str_lit(&intern::str_get(*k));
+                                row = row.store(kk, true);
+                                state.set_slot(did, Ns::Item, kk, v.clone(), true);
+                            }
+                            if let Some(st2) = self.partial_star.get(&oid).cloned() {
+                                for sk in st2 {
+                                    self.copy_into(did, Ns::Item, &sk, state, false, &KeySet::new());
+                                    row = state.row(did, Ns::Item).join(&row);
+                                }
+                            }
+                            state.set_row(did, Ns::Item, row);
+                            Value::obj(did)
+                        }
+                    }
+                }
                 Kind::Parser | Kind::Groupby | Kind::Partial => self.method_value(&format!("{}.{}", k.name(), name), &Value::obj(oid)),
                 Kind::Instance if name == "__class__" => match self.instance_class(oid) {
                     Some(c) => Value::obj(c),
@@ -1247,6 +1281,26 @@ impl Analyzer {
                 }
                 Kind::Unknown => self.load_unknown_attr(oid, name, node, state, guarded),
                 Kind::Ph => self.load_ph_attr(oid, name, node, state, guarded, single),
+                // a function's names (a `@wraps(fn)` wrapper: fn's)
+                Kind::Function if matches!(name, "__name__" | "__qualname__" | "__module__" | "__wrapped__" | "__doc__") && state.slot_opt(oid, Ns::Attr, nk).is_none() && !super::disabled("fnnames") => {
+                    match self.wrapped.get(&oid).cloned() {
+                        Some(w) if name == "__wrapped__" => w,
+                        Some(w) => self.load_attr(&w, name, node, state, false),
+                        None => {
+                            let fi = self.func_info(oid);
+                            match name {
+                                "__name__" => Value::lit_str(fi.qualname.rsplit('.').next().unwrap_or(&fi.qualname)),
+                                "__qualname__" => Value::lit_str(&fi.py_qualname()),
+                                "__module__" => Value::lit_str(&self.module_info(fi.module).name),
+                                "__doc__" => Value::data("doc"),
+                                _ => {
+                                    let _ = report;
+                                    Value::data(name)
+                                }
+                            }
+                        }
+                    }
+                }
                 // a singledispatch function's register
                 Kind::Function if name == "register" && self.sdispatch.contains_key(&oid) => self.method_value("sdispatch.register", &Value::obj(oid)),
                 Kind::Function => state.slot_opt(oid, Ns::Attr, nk).unwrap_or_else(|| Value::data(&format!("L{}", node.line))),

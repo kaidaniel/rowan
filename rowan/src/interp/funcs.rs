@@ -273,6 +273,16 @@ impl Analyzer {
                 crate::models::fastapi::apply_route(self, &dv, &fv);
                 continue;
             }
+            // `@functools.wraps(fn)`: the wrapper takes fn's name, qualname, doc, __wrapped__
+            if q == "functools.wraps" && !crate::interp::disabled("wraps") {
+                if let (ast::Expr::Call(cl), Some(f)) = (&d.expression, fobj) {
+                    if let Some(a0) = cl.arguments.args.first() {
+                        let wv = self.eval(a0, state);
+                        self.wrapped.insert(f, wv);
+                    }
+                }
+                continue;
+            }
             if KNOWN_IDENTITY_DECORATORS.contains(&q.as_str()) || q.ends_with(".getter") || q.ends_with(".deleter") || q.ends_with(".register") {
                 continue;
             }

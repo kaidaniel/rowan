@@ -3459,9 +3459,51 @@ fn m_parser_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn m_partial(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(f) = c.args.first() else { return Value::data("partial") };
-    let payload = Payload::Partial(f.clone(), c.args[1..].to_vec(), c.kwargs.clone());
+    let mut func = f.clone();
+    let mut args: Vec<Value> = c.args[1..].to_vec();
+    let mut kw = c.kwargs.clone();
+    let mut star: Vec<Value> = c.star_kwargs.clone();
+    // `partial(partial(f, a, k=1), b, k=2)` is `partial(f, a, b, k=2)`
+    if let Some(inner) = f.single().filter(|o| an.kind(*o) == Kind::Partial && !crate::interp::disabled("partialflat")) {
+        if let Payload::Partial(f0, a0, k0) = an.obj(inner).payload.clone() {
+            func = f0;
+            let mut a = a0;
+            a.extend(args);
+            args = a;
+            let mut k = k0;
+            for (kk, v) in kw.iter() {
+                k.insert(*kk, v.clone());
+            }
+            kw = k;
+            let mut s0 = an.partial_star.get(&inner).cloned().unwrap_or_default();
+            s0.extend(star);
+            star = s0;
+        }
+    }
+    // `**opts`: its literal keys become bound keywords; an open mapping is passed on as it is
+    let mut rest_star: Vec<Value> = Vec::new();
+    for sk in &star {
+        let recs = an.record_objects(sk);
+        let closed = recs.len() == 1 && { let r = st.row(recs[0], Ns::Item); r.closed() && r.present == r.definite && r.present.iter().all(intern::key_is_str) };
+        if closed && !crate::interp::disabled("partialstar") {
+            let d = recs[0];
+            for k in st.row(d, Ns::Item).ordered_keys().unwrap_or_else(|| st.row(d, Ns::Item).present.iter().collect()) {
+                if let Some(name) = intern::key_as_str(k) {
+                    kw.insert(intern::s(&name), st.slot(d, Ns::Item, k));
+                }
+            }
+        } else {
+            rest_star.push(sk.clone());
+        }
+    }
+    let payload = Payload::Partial(func, args, kw);
     let oid = an.alloc_at(Kind::Partial, &c.node, st, &format!("partial@L{}", c.line), payload.clone(), None, Ns::Item, None, None);
     an.obj_mut(oid).payload = payload;
+    if !rest_star.is_empty() {
+        an.partial_star.insert(oid, rest_star);
+    } else {
+        an.partial_star.remove(&oid);
+    }
     Value::obj(oid)
 }
 
@@ -3499,8 +3541,11 @@ fn m_partial_call(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         let mut fake_args = bound_args.clone();
         fake_args.extend(c.args.iter().cloned());
+        // (bound `**opts` of unknown keys: passed on before the call's own)
+        let mut star = an.partial_star.get(&x).cloned().unwrap_or_default();
+        star.extend(c.star_kwargs.iter().cloned());
         for fo in f.pts.iter() {
-            outs.push(an.call_one(fo, &fake_args, &kw, &c.star_args, &c.star_kwargs, st, &c.node, c.call_ast));
+            outs.push(an.call_one(fo, &fake_args, &kw, &c.star_args, &star, st, &c.node, c.call_ast));
         }
     }
     if outs.is_empty() {
