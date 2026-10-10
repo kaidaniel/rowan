@@ -793,6 +793,9 @@ pub struct Analyzer {
     /// configparser parsers and their sections (models::configparser)
     pub cfg_parsers: FxHashMap<ObjId, crate::models::configparser::CfgSpec>,
     pub cfg_sections: FxHashMap<ObjId, (crate::models::configparser::CfgSpec, String)>,
+    /// compiled patterns (text, flags) and match objects (models::remodel)
+    pub re_patterns: FxHashMap<ObjId, (String, u32)>,
+    pub re_matches: FxHashMap<ObjId, crate::models::remodel::ReMatch>,
     /// itertools.count / cycle / repeat(x) objects
     pub infinites: FxHashMap<ObjId, crate::models::itertools::Infinite>,
     /// partials' bound `**mapping`s of unknown keys
@@ -1031,6 +1034,8 @@ impl Analyzer {
             td_param_src: FxHashMap::default(),
             cfg_parsers: FxHashMap::default(),
             cfg_sections: FxHashMap::default(),
+            re_patterns: FxHashMap::default(),
+            re_matches: FxHashMap::default(),
             infinites: FxHashMap::default(),
             partial_star: FxHashMap::default(),
             wrapped: FxHashMap::default(),
@@ -1306,6 +1311,12 @@ impl Analyzer {
         }
         if let Some(c) = self.cfg_sections.get(&t).cloned() {
             self.cfg_sections.insert(nid, c);
+        }
+        if let Some(c) = self.re_patterns.get(&t).cloned() {
+            self.re_patterns.insert(nid, c);
+        }
+        if let Some(c) = self.re_matches.get(&t).cloned() {
+            self.re_matches.insert(nid, c);
         }
     }
 

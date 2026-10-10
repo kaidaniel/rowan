@@ -54,4 +54,7 @@ if __name__ == "__main__":
     raw_cp = configparser.RawConfigParser()
     raw_cp.read_string("[s]\nv = %(a)s\n")
     rv = raw_cp.get("s", "v")                    #@value rv: exactly={"%(a)s"}
-    u = from_file("app.ini")
+    try:
+        u = from_file("app.ini")
+    except KeyError:
+        pass

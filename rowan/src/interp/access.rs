@@ -694,6 +694,11 @@ impl Analyzer {
                         acc = acc.join(&line_data);
                     }
                 }
+                // a regex match: `m[g]` is its group
+                Kind::Namespace if self.re_matches.contains_key(&oid) => match crate::models::remodel::match_item(self, oid, key) {
+                    Some(v) => acc = acc.join(&v),
+                    None => acc = acc.join(&line_data),
+                },
                 Kind::Zip | Kind::Enumerate => {
                     acc = acc.join(&line_data);
                 }
@@ -1261,6 +1266,10 @@ impl Analyzer {
                 Kind::External => {
                     let q = format!("{}.{}", self.external_qual(oid), name);
                     if let Some(v) = crate::models::generated_class(self, state, &q) {
+                        acc = acc.join(&v);
+                        continue;
+                    }
+                    if let Some(v) = crate::models::external_constant(self, &q) {
                         acc = acc.join(&v);
                         continue;
                     }

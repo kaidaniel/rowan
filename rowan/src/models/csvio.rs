@@ -362,6 +362,12 @@ pub fn m_stdobj(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if q.starts_with("stdobj.thread.") || q.starts_with("stdobj.executor.") || q.starts_with("stdobj.future.") {
         return crate::models::concurrency::m_conc(an, st, c);
     }
+    if q.starts_with("stdobj.repattern.") {
+        return crate::models::remodel::m_re(an, st, c);
+    }
+    if q.starts_with("stdobj.rematch.") {
+        return crate::models::remodel::m_match(an, st, c);
+    }
     if q.starts_with("stdobj.template.") {
         return crate::models::stdfuncs::m_template(an, st, c);
     }

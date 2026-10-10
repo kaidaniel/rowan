@@ -3,6 +3,8 @@
 //! prefix fallbacks.
 
 pub mod minire;
+pub mod pyre;
+pub mod remodel;
 pub mod pandas;
 pub mod pydantic;
 pub mod fastapi;
@@ -149,7 +151,6 @@ impl Registry {
         // a coroutine is analysed as its result: running / awaiting it is that value
         r(&["asyncio.run", "asyncio.create_task", "asyncio.ensure_future", "asyncio.wait_for", "asyncio.shield"], m_first_arg);
         r(&["asyncio.gather"], m_gather);
-        r(&["re.match", "re.search", "re.fullmatch"], m_re_match);
         r(&["builtins.exec", "builtins.eval"], m_exec);
         r(&["builtins.globals"], m_globals);
         r(&["types.SimpleNamespace", "argparse.Namespace"], m_simplenamespace);
@@ -180,6 +181,7 @@ impl Registry {
         csvio::register(&mut r);
         argparse::register(&mut r);
         configparser::register(&mut r);
+        remodel::register(&mut r);
         concurrency::register(&mut r);
         itertools::register(&mut r);
         stdfuncs::register(&mut r);
@@ -327,6 +329,46 @@ pub fn noeffect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn last(q: &str) -> &str {
     q.rsplit('.').next().unwrap_or(q)
+}
+
+/// Module constants with known values (`re.IGNORECASE`, `math.pi`, `string.digits`, …).
+pub fn external_constant(an: &Analyzer, qual: &str) -> Option<Value> {
+    if crate::interp::disabled("extconst") {
+        return None;
+    }
+    let int = |i: i64| Some(Value::lit(intern::key_int(i)));
+    let st = |s: &str| Some(Value::lit(key_str_lit(s)));
+    match qual {
+        "re.I" | "re.IGNORECASE" => int(2),
+        "re.L" | "re.LOCALE" => int(4),
+        "re.M" | "re.MULTILINE" => int(8),
+        "re.S" | "re.DOTALL" => int(16),
+        "re.U" | "re.UNICODE" => int(32),
+        "re.X" | "re.VERBOSE" => int(64),
+        "re.A" | "re.ASCII" => int(256),
+        "re.NOFLAG" => int(0),
+        "sys.maxsize" => int(i64::MAX),
+        "string.ascii_letters" => st("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+        "string.ascii_lowercase" => st("abcdefghijklmnopqrstuvwxyz"),
+        "string.ascii_uppercase" => st("ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+        "string.digits" => st("0123456789"),
+        "string.hexdigits" => st("0123456789abcdefABCDEF"),
+        "string.octdigits" => st("01234567"),
+        "string.punctuation" => st("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"),
+        "string.whitespace" => st(" \t\n\r\x0b\x0c"),
+        "string.printable" => st("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ \t\n\r\x0b\x0c"),
+        "os.sep" | "os.path.sep" => st("/"),
+        "os.linesep" => st("\n"),
+        "os.pathsep" => st(":"),
+        "os.curdir" => st("."),
+        "os.pardir" => st(".."),
+        _ if an.torch_on => None,
+        "math.pi" => Some(Value::lit(intern::key_float(std::f64::consts::PI))),
+        "math.e" => Some(Value::lit(intern::key_float(std::f64::consts::E))),
+        "math.tau" => Some(Value::lit(intern::key_float(std::f64::consts::TAU))),
+        "math.inf" => Some(Value::lit(intern::key_float(f64::INFINITY))),
+        _ => None,
+    }
 }
 
 // ------------------------------------------------------------- externals that are records
@@ -3182,7 +3224,7 @@ fn m_exec(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     an.unknown_call(&c.qual, None, &reach, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node)
 }
 
-fn m_re_match(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+pub fn re_match_generated(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(pat) = c.args.first().and_then(|a| a.kv.as_lit().filter(|_| a.pts.is_empty())).and_then(intern::key_as_str) else {
         return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
     };
