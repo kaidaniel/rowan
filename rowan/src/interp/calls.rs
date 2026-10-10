@@ -1334,6 +1334,21 @@ impl Analyzer {
                 self.call_cache.insert(sig, Rc::new(CacheHit { raises, ret: ret.clone(), fp_state, fp, verdicts: rel_verdicts }));
             }
         }
+        // a generator whose body never ends (`while True: yield …`): the caller resumes from
+        // one of its yields, and the yields go on (their number is unknown)
+        if let FuncNode::Def(f) = fnode {
+            if is_generator(&f.body) && !st.reachable {
+                let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
+                if let Some(mut ys) = self.gen_yield_states.remove(&gid) {
+                    let p = self.prefix(gid, &ys);
+                    match p {
+                        Some(n) => ys.lens.insert(gid, (None, n)),
+                        None => ys.lens.insert(gid, (None, 0)),
+                    };
+                    st = ys;
+                }
+            }
+        }
         state.set_to(&mut st);
         if let FuncNode::Def(f) = fnode {
             if is_generator(&f.body) {

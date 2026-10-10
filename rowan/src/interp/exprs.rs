@@ -597,6 +597,14 @@ impl Analyzer {
         if fi.generator.get().is_none() {
             fi.generator.set(Some(gid));
         }
+        if !super::disabled("genyieldstates") {
+            let mut here = state.copy();
+            let joined = match self.gen_yield_states.remove(&gid) {
+                Some(mut prev) => prev.join(&mut here),
+                None => here,
+            };
+            self.gen_yield_states.insert(gid, joined);
+        }
     }
 
     pub fn eval_key(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {

@@ -881,6 +881,9 @@ pub struct Analyzer {
     /// numpy structured arrays (fields are Item keys); the exception a missing item raises
     /// when every target is one (`ValueError`, not KeyError)
     pub np_struct: FxHashSet<ObjId>,
+    /// per generator object, the join of the states at its yields (a caller resumes from one
+    /// of them when the body never ends)
+    pub gen_yield_states: FxHashMap<ObjId, State>,
     pub item_exc: Option<&'static str>,
     pub narrow_depth: u32,
     pub pyd_last_failed: bool,
@@ -1140,6 +1143,7 @@ impl Analyzer {
             pyd_inst: None,
             call_memo: FxHashMap::default(),
             np_struct: FxHashSet::default(),
+            gen_yield_states: FxHashMap::default(),
             item_exc: None,
             narrow_depth: 0,
             pyd_last_failed: false,
