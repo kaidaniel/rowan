@@ -1,11 +1,11 @@
-![rowan logo](rowan_icon_48.png)
-
 # rowan
 
 > [!WARNING]
 > **rowan is experimental.** It is extensively tested (about a thousand example programs,
 > checked against real Python, pandas, pydantic, FastAPI and PyTorch runs), but it has not been
 > used in practice on real code bases. On large programs (thousands of lines and up) it may time out or crash.
+
+![rowan logo](rowan_icon_256.png)
 
 **In VS Code:** [rowan on the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=Rowan.rowan).
 
