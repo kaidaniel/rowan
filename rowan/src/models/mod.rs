@@ -69,9 +69,10 @@ impl Registry {
         r(&["dataclasses.fields"], m_dc_fields);
         r(&["builtins.map", "builtins.filter"], m_map);
         r(&["builtins.str"], m_str);
+        r(&["builtins.repr"], m_repr);
         r(
             &[
-                "builtins.print", "builtins.repr",
+                "builtins.print",
                 "builtins.id", "builtins.hash",
                 "builtins.format", "builtins.input", "builtins.callable", "builtins.issubclass", "builtins.hex",
                 "builtins.chr", "builtins.ord", "builtins.open", "builtins.divmod", "builtins.pow",
@@ -1244,9 +1245,19 @@ fn m_str(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         if let Some(t) = an.enum_text(a, st) {
             return t;
         }
+        if let Some(t) = an.exc_text(a, false, st) {
+            return t;
+        }
         return Value::kv_only(an.rename_kv(&a.kv, &RenameFn::new(FnKind::Str)));
     }
     Value::lit_str("")
+}
+
+fn m_repr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    if let Some(t) = c.args.first().and_then(|a| an.exc_text(a, true, st)) {
+        return t;
+    }
+    noeffect(an, st, c)
 }
 
 /// `int(x)` / `float(x)`: on a known number or numeric string the value; on a known string

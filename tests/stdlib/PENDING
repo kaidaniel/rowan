@@ -38,9 +38,6 @@ small/s072_batched.py
 small/s073_itemgetter.py
 small/s074_attrgetter_methodcaller.py
 small/s075_operator_reduce.py
-small/s078_exitstack.py
-small/s079_closing_nullcontext.py
-small/s080_redirect_stdout.py
 small/s084_heapq.py
 small/s085_bisect.py
 small/s086_re_groupdict.py

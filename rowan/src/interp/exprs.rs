@@ -446,11 +446,12 @@ impl Analyzer {
         if let Some(t) = h.target {
             self.bind_target(t, &v, state);
         }
-        self.cm_frames.push((self.frames.len() + 1, callee_env.clone()));
+        self.cm_frames.push((self.frames.len() + 1, callee_env.clone(), self.env_stack.len()));
         match h.then.take() {
             Some(f) => f(self, v, state),
             None => self.exec_block(h.body, state),
         }
+        h.body_died = !state.reachable;
         self.cm_frames.pop();
         let after = std::mem::replace(&mut state.env, callee_env);
         if let Some(top) = self.env_stack.last_mut() {
@@ -2193,7 +2194,7 @@ impl Analyzer {
 /// Library constructors whose models report their raises.
 const SELF_REPORTING_EXTERNALS: &[&str] = &[
     "io.StringIO", "csv.writer", "csv.DictWriter", "csv.reader", "csv.DictReader", "argparse.ArgumentParser", "threading.Thread",
-    "concurrent.futures.ThreadPoolExecutor", "concurrent.futures.ProcessPoolExecutor", "concurrent.futures.as_completed", "builtins.slice",
+    "concurrent.futures.ThreadPoolExecutor", "concurrent.futures.ProcessPoolExecutor", "concurrent.futures.as_completed", "builtins.slice", "contextlib.ExitStack", "contextlib.redirect_stdout", "contextlib.redirect_stderr", "contextlib.closing", "contextlib.nullcontext",
 ];
 
 const SELF_REPORTING: &[&str] = &["pydantic.", "fieldinfo.", "pydverr.", "typeadapter.", "fastapi.client.", "fastapi.response.", "fastapi.request.", "stdobj.", "fastapi.bg.", "fastapi.app.", "fastapi.router.", "fastapi.state."];

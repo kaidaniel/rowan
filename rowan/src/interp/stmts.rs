@@ -143,7 +143,7 @@ impl Analyzer {
                 let caught = self.guards.iter().any(|g| {
                     g.contains("*") || g.contains("Exception") || g.contains("BaseException") || names.iter().any(|n| g.contains(n) || n == "*" && !g.is_empty())
                 });
-                self.cur_exc = exc_v.filter(|v| v.pts.iter().any(|o| self.kind(o) == Kind::Instance || matches!(&self.obj(o).payload, Payload::Method(q, _) if q == "fastapi.httpexc")));
+                self.cur_exc = exc_v.filter(|v| v.pts.iter().any(|o| self.kind(o) == Kind::Instance || self.exc_objs.contains_key(&o) || matches!(&self.obj(o).payload, Payload::Method(q, _) if q == "fastapi.httpexc")));
                 let recorded = state.reachable && !crate::interp::disabled("raisestate") && self.record_raise_state(state);
                 self.cur_exc = None;
                 if !caught {
@@ -260,6 +260,9 @@ impl Analyzer {
                     let n = frontend::node(&item.context_expr);
                     let mut entered = self.call_method_if_defined(&v, "__enter__", &n, state);
                     if entered.is_none() {
+                        entered = crate::models::csvio::enter_value(self, state, &v);
+                    }
+                    if entered.is_none() {
                         entered = Some(if v.pts.iter().any(|o| self.kind(o).is_record()) { v.clone() } else { Value::data(&format!("with@L{}", frontend::node(w).line)) });
                     }
                     if let Some(ov) = &item.optional_vars {
@@ -267,6 +270,10 @@ impl Analyzer {
                     }
                     managers.push((v, n));
                 }
+                // `redirect_stdout(buf)`: prints in the body go to buf
+                let redirects = crate::models::csvio::redirect_targets(self, state, &managers.iter().map(|m| m.0.clone()).collect::<Vec<_>>());
+                let n_redirects = redirects.len();
+                self.stdout_redirect.extend(redirects);
                 // a manager whose `__exit__` returns True swallows the body's exception: the
                 // body is a try whose catch-all handler continues after the with
                 let swallows = managers.iter().any(|(v, _)| self.exit_swallows(v, state));
@@ -299,12 +306,18 @@ impl Analyzer {
                 } else {
                     self.exec_block(&w.body, state);
                 }
+                for _ in 0..n_redirects {
+                    self.stdout_redirect.pop();
+                }
                 // the managers' __exit__ runs on the way out (innermost first)
                 if state.reachable {
                     for (v, n) in managers.iter().rev() {
                         // the body is analysed as not raising: __exit__(None, None, None)
                         let none = self.none_v.clone();
                         self.call_method_with(v, "__exit__", vec![none.clone(), none.clone(), none], n, state);
+                        // an ExitStack: its callbacks, last registered first; closing(x): x.close()
+                        crate::models::csvio::exitstack_close(self, state, v, n);
+                        crate::models::csvio::closing_exit(self, state, v, n);
                     }
                 }
             }
@@ -444,7 +457,7 @@ impl Analyzer {
         if self.kind(f) != Kind::Function || !self.func_info(f).is_contextmanager.get() {
             return false;
         }
-        let prev = self.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.frames.len(), env_after: None, ran: false, then: None });
+        let prev = self.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.frames.len(), env_after: None, ran: false, then: None, body_died: false });
         self.force_tab_once = true;
         let n = frontend::node(&item.context_expr);
         let fv = self.eval(&call.func, state);
@@ -456,9 +469,9 @@ impl Analyzer {
                 if let Some(env) = h.env_after {
                     state.env = env;
                 }
-                if !state.reachable {
-                    // the generator did not finish normally after the body: still go on after
-                    // the with (an exception there would be the body's)
+                if !state.reachable && !h.body_died && !crate::interp::disabled("cmdied") {
+                    // the generator did not finish normally after a body that did: still go on
+                    // after the with (an exception there would be the body's)
                     state.reachable = true;
                 }
             }

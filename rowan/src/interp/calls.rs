@@ -200,6 +200,13 @@ impl Analyzer {
                 if let Some(v) = crate::models::pure::try_pure(self, state, &call) {
                     return v;
                 }
+                // a builtin exception class: an exception object with its args
+                if let Some(n) = qual.strip_prefix("builtins.").filter(|n| super::exprs::is_exception_name(n)) {
+                    if kwargs.is_empty() && star_args.is_empty() && !super::disabled("excobj") && self.models.lookup(&qual).is_none() {
+                        let n = n.to_string();
+                        return self.exception_object(&n, args.to_vec(), node, state);
+                    }
+                }
                 if let Some(m) = self.models.lookup(&qual) {
                     if qual.starts_with("pandas.") && !self.sum_stack.is_empty() && crate::models::pandas::frame_producer(&qual).is_none() {
                         // a frame built from a parameter's contents: decided per call site
@@ -1260,9 +1267,14 @@ impl Analyzer {
             return false;
         }
         let mut here = state.copy();
-        if self.frames.len() < *fl {
-            // the try is in a `@contextmanager` generator whose with body is running
-            if let Some((_, env)) = self.cm_frames.iter().rev().find(|(d, _)| *d == *fl) {
+        // the try is in a `@contextmanager` generator whose with body is running (also from a
+        // callee of the body): the generator's names
+        let in_cm = self.cm_frames.iter().rev().find(|(d, _, el0)| *d == *fl && *el <= *el0).map(|(_, env, _)| env.clone());
+        if let Some(env) = in_cm.filter(|_| !crate::interp::disabled("cmraise")) {
+            here.env = env;
+            here.narrowed = Default::default();
+        } else if self.frames.len() < *fl {
+            if let Some((_, env, _)) = self.cm_frames.iter().rev().find(|(d, _, _)| *d == *fl) {
                 here.env = env.clone();
                 here.narrowed = Default::default();
             }
@@ -1294,7 +1306,42 @@ impl Analyzer {
         let oid = self.alloc_at(Kind::Namespace, node, state, &format!("{}@L{}", cls_name, node.line), Payload::None, Some(row), Ns::Attr, None, None);
         let strong = self.obj(oid).single;
         self.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
+        self.exc_objs.insert(oid, cls_name.to_string());
         Value::obj(oid)
+    }
+
+    /// `str(e)` / `repr(e)` of exception objects with known args.
+    pub fn exc_text(&self, v: &Value, repr: bool, state: &State) -> Option<Value> {
+        if v.pts.is_empty() || !v.kv.is_bot() || super::disabled("exctext") {
+            return None;
+        }
+        let mut out = Vec::new();
+        for o in v.pts.iter() {
+            let name = self.exc_objs.get(&o)?;
+            let t = state.slot(o, Ns::Attr, key_str_lit("args"));
+            let tid = t.single()?;
+            let n = self.llen(tid, state)?;
+            let mut parts = Vec::new();
+            for i in 0..n {
+                let a = state.slot(tid, Ns::Pos, intern::key_int(i as i64));
+                parts.push(a.kv.as_lit().filter(|_| a.pts.is_empty())?);
+            }
+            let reprs: Vec<String> = parts.iter().map(|k| intern::key_repr(*k)).collect();
+            let s = if repr {
+                format!("{}({})", name, reprs.join(", "))
+            } else if parts.len() == 1 {
+                // (a KeyError shows its key's repr)
+                if name == "KeyError" { reprs[0].clone() } else { intern::key_py_str(parts[0]) }
+            } else if parts.is_empty() {
+                String::new()
+            } else if parts.len() == 1 {
+                reprs[0].clone()
+            } else {
+                format!("({})", reprs.join(", "))
+            };
+            out.push(Value::lit(key_str_lit(&s)));
+        }
+        Some(crate::domain::join_values(out))
     }
 
     /// An exception named `name` is raised here (the rest of the path is dead).

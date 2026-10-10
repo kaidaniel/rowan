@@ -25,6 +25,8 @@ fn slot_key(name: &str) -> intern::KeyId {
 pub struct Raised {
     pub level: u8,
     pub names: Vec<String>,
+    /// the exception objects raised (empty: not known)
+    pub exc: Value,
 }
 
 impl Analyzer {
@@ -82,7 +84,8 @@ impl Analyzer {
             }
             None => {}
         }
-        (join_values(outs), Raised { level, names })
+        let exc = if any { Value::new() } else { raised_v.clone() };
+        (join_values(outs), Raised { level, names, exc })
     }
 
     /// Re-raising what a call raised (`future.result()`).
@@ -170,6 +173,16 @@ fn future_of(an: &mut Analyzer, st: &mut State, node: &Node, ctx: &str, v: Value
     let o = obj(an, st, node, "stdobj.future", ctx);
     st.set_slot(o, Ns::Attr, slot_key("result"), v, true);
     st.set_slot(o, Ns::Attr, slot_key("raised"), Value::lit(intern::key_int(r.level as i64)), true);
+    // what exception() gives: None, the raised exception, or (not known) either
+    let none = an.none_v.clone();
+    let exc = match r.level {
+        0 => none,
+        2 if !r.exc.empty() => r.exc.clone(),
+        2 => Value::data("exception"),
+        _ if !r.exc.empty() => r.exc.join(&none),
+        _ => none.join(&Value::data("exception")),
+    };
+    st.set_slot(o, Ns::Attr, slot_key("exc"), exc, true);
     an.future_excs.insert(o, r.names.clone());
     Value::obj(o)
 }
@@ -208,7 +221,7 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let iters: Vec<crate::interp::funcs::Iteration> = its.iter().map(|x| an.iterate(x, &c.node, st)).collect();
                 let all_known = iters.iter().all(|i| i.items.is_some());
                 let mut results = Vec::new();
-                let mut worst = Raised { level: 0, names: vec![] };
+                let mut worst = Raised { level: 0, names: vec![], exc: Value::new() };
                 if all_known && !iters.is_empty() {
                     let n = iters.iter().map(|i| i.items.as_ref().unwrap().len()).min().unwrap_or(0);
                     for k in 0..n {
@@ -264,7 +277,7 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             "done" => return Value::lit(intern::key_bool(true)),
             "cancel" | "cancelled" | "running" => return Value::lit(intern::key_bool(false)),
-            "exception" => return Value::data("exception"),
+            "exception" => return join_values(objs.iter().map(|o| st.slot(*o, Ns::Attr, slot_key("exc"))).collect::<Vec<_>>()),
             "add_done_callback" => {
                 if let Some(f) = c.args.first().cloned() {
                     an.call_catching(&f, vec![recv.clone()], IndexMap::new(), st, &c.node);
@@ -280,7 +293,12 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// `concurrent.futures.as_completed(fs)`: the futures, in any order.
 pub fn as_completed(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(fs) = c.args.first() else { return Value::data("as_completed") };
-    let e = an.iterate(fs, &c.node, st).elem.one_or_empty();
+    let it = an.iterate(fs, &c.node, st);
+    // (a dict of futures: its keys, the future objects)
+    let e = match &it.items {
+        Some(items) => join_values(items.iter().map(|x| an.unkey(x)).collect::<Vec<_>>()),
+        None => it.elem.one_or_empty(),
+    };
     let lid = an.alloc_at(Kind::List, &c.node, st, &format!("as_completed@L{}", c.line), Payload::None, None, Ns::Item, None, Some("asc"));
     st.set_slot(lid, Ns::Elem, intern::STAR, e.clone(), true);
     st.elems.insert(lid, e.kv.clone());

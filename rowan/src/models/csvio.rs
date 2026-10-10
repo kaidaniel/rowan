@@ -4,6 +4,8 @@
 //! with known positions and keys. A text whose header a `DictWriter` wrote but whose rows are
 //! unknown (`csvhdr:`) still gives `DictReader` rows with exactly those keys.
 
+use indexmap::IndexMap;
+
 use crate::domain::{join_values, KeyVal, Ns, ObjId, Row, Source, SourceKind, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit};
@@ -360,6 +362,11 @@ pub fn m_stdobj(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if q.starts_with("stdobj.thread.") || q.starts_with("stdobj.executor.") || q.starts_with("stdobj.future.") {
         return crate::models::concurrency::m_conc(an, st, c);
     }
+    if q.starts_with("stdobj.exitstack.") {
+        let name = q.rsplit('.').next().unwrap_or("").to_string();
+        let recv = c.recv.clone().unwrap_or_default();
+        return m_exitstack(an, st, c, &name, &recv);
+    }
     let name = q.rsplit('.').next().unwrap_or("");
     let recv = c.recv.clone().unwrap_or_default();
     if q.starts_with("stdobj.stringio.") {
@@ -669,9 +676,16 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::obj(vid)
 }
 
-/// `print(*args, sep=" ", end="\n", file=f)` into a StringIO: its text extended.
+/// `print(*args, sep=" ", end="\n", file=f)` into a StringIO: its text extended (without
+/// `file=`: where `redirect_stdout` sends it).
 pub fn print_into(an: &mut Analyzer, st: &mut State, c: &Call) {
-    let Some(f) = c.kw("file") else { return };
+    let f = match c.kw("file") {
+        Some(f) => f,
+        None => match an.stdout_redirect.last() {
+            Some(f) => f.clone(),
+            None => return,
+        },
+    };
     let sep = c.kw("sep").map(|v| cell_text(&v).unwrap_or_else(|| "\u{0}".into())).unwrap_or_else(|| " ".into());
     let end = c.kw("end").map(|v| cell_text(&v).unwrap_or_else(|| "\u{0}".into())).unwrap_or_else(|| "\n".into());
     let parts: Option<Vec<String>> = c.args.iter().map(|a| if a.pts.is_empty() { a.kv.as_lit().map(intern::key_py_str) } else { None }).collect();
@@ -682,8 +696,149 @@ pub fn print_into(an: &mut Analyzer, st: &mut State, c: &Call) {
     write_into(an, st, &f, &piece, c.line, false);
 }
 
+/// `contextlib.redirect_stdout(f)` / `redirect_stderr(f)`: a manager holding its target.
+pub fn redirect_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let oid = an.alloc_at(Kind::Namespace, &c.node, st, "redirect", Payload::Method("stdobj.redirect".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
+    an.obj_mut(oid).payload = Payload::Method("stdobj.redirect".into(), Value::new());
+    let target = c.arg(0, Some("new_target")).unwrap_or_default();
+    st.set_slot(oid, Ns::Attr, key_str_lit("\u{1}target"), target, true);
+    st.set_slot(oid, Ns::Attr, key_str_lit("\u{1}stderr"), Value::lit(intern::key_bool(c.qual.ends_with("stderr"))), true);
+    Value::obj(oid)
+}
+
+/// The StringIO targets of the `redirect_stdout` managers among `managers`.
+pub fn redirect_targets(an: &Analyzer, st: &State, managers: &[Value]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for m in managers {
+        for o in m.pts.iter() {
+            if an.kind(o) == Kind::Namespace && matches!(&an.obj(o).payload, Payload::Method(q, _) if q == "stdobj.redirect") {
+                let err = st.slot(o, Ns::Attr, key_str_lit("\u{1}stderr")).kv.as_lit() == Some(intern::key_bool(true));
+                if !err {
+                    out.push(st.slot(o, Ns::Attr, key_str_lit("\u{1}target")));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `contextlib.closing(x)` (closes x at exit) / `contextlib.nullcontext(x=None)`: `as` gives x.
+pub fn closing_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let kind = if c.qual.ends_with("closing") { "stdobj.closing" } else { "stdobj.nullcontext" };
+    let oid = an.alloc_at(Kind::Namespace, &c.node, st, kind, Payload::Method(kind.into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
+    an.obj_mut(oid).payload = Payload::Method(kind.into(), Value::new());
+    let target = c.arg(0, Some("enter_result")).or_else(|| c.arg(0, Some("thing"))).unwrap_or_else(|| an.none_v.clone());
+    st.set_slot(oid, Ns::Attr, key_str_lit("\u{1}target"), target, true);
+    Value::obj(oid)
+}
+
+/// What `with m as x` binds for these managers (None: not one of them).
+pub fn enter_value(an: &Analyzer, st: &State, v: &Value) -> Option<Value> {
+    let mut outs = Vec::new();
+    for o in v.pts.iter() {
+        match &an.obj(o).payload {
+            Payload::Method(q, _) if an.kind(o) == Kind::Namespace && matches!(q.as_str(), "stdobj.closing" | "stdobj.nullcontext" | "stdobj.redirect") => outs.push(st.slot(o, Ns::Attr, key_str_lit("\u{1}target"))),
+            Payload::Method(q, _) if an.kind(o) == Kind::Namespace && q.starts_with("stdobj.") => outs.push(Value::obj(o)),
+            _ => return None,
+        }
+    }
+    if outs.is_empty() {
+        None
+    } else {
+        Some(join_values(outs))
+    }
+}
+
+/// `closing(x)`'s exit: `x.close()`.
+pub fn closing_exit(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) {
+    for o in v.pts.iter() {
+        if an.kind(o) == Kind::Namespace && matches!(&an.obj(o).payload, Payload::Method(q, _) if q == "stdobj.closing") {
+            let t = st.slot(o, Ns::Attr, key_str_lit("\u{1}target"));
+            let m = an.load_attr(&t, "close", node, st, false);
+            an.call_value(&m, node, None, st, Some(vec![]));
+        }
+    }
+}
+
+/// `contextlib.ExitStack()`.
+pub fn exitstack_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let oid = an.alloc_at(Kind::Namespace, &c.node, st, "ExitStack", Payload::Method("stdobj.exitstack".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
+    an.obj_mut(oid).payload = Payload::Method("stdobj.exitstack".into(), Value::new());
+    an.exit_callbacks.insert(oid, Vec::new());
+    Value::obj(oid)
+}
+
+/// An ExitStack's exit: its callbacks, last registered first.
+pub fn exitstack_close(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) {
+    for o in v.pts.iter() {
+        let Some(cbs) = an.exit_callbacks.get(&o).cloned() else { continue };
+        an.exit_callbacks.insert(o, Vec::new());
+        for (i, (f, args, kwargs)) in cbs.into_iter().enumerate().collect::<Vec<_>>().into_iter().rev() {
+            let mut nd = *node;
+            nd.col = node.col.wrapping_add(3_000_000 + i as u32);
+            for fo in f.pts.iter() {
+                if an.kind(fo) == Kind::Function {
+                    an.call_user(fo, None, args.clone(), kwargs.clone(), vec![], vec![], st, &nd, None, false);
+                } else {
+                    an.call_value(&Value::obj(fo), &nd, None, st, Some(args.clone()));
+                }
+            }
+        }
+    }
+}
+
+fn m_exitstack(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, recv: &Value) -> Value {
+    match name {
+        "callback" | "push" => {
+            let Some(f) = c.args.first().cloned() else { return an.none_v.clone() };
+            let args: Vec<Value> = if name == "push" { vec![an.none_v.clone(), an.none_v.clone(), an.none_v.clone()] } else { c.args.iter().skip(1).cloned().collect() };
+            for o in recv.pts.iter() {
+                an.exit_callbacks.entry(o).or_default().push((f.clone(), args.clone(), c.kwargs.clone()));
+            }
+            f
+        }
+        "enter_context" => {
+            // (a @contextmanager generator ran to its end when called: its yielded value)
+            let Some(cm) = c.args.first().cloned() else { return Value::data("context") };
+            let mut outs = Vec::new();
+            for o in cm.pts.iter() {
+                match an.kind(o) {
+                    Kind::List if an.obj(o).iterator => {
+                        let it = an.iterate(&Value::obj(o), &c.node, st);
+                        outs.push(match it.items {
+                            Some(items) if !items.is_empty() => items[0].clone(),
+                            _ => it.elem.one_or_empty(),
+                        });
+                    }
+                    Kind::Instance => {
+                        let v = an.call_method_if_defined(&Value::obj(o), "__enter__", &c.node, st).unwrap_or_else(|| Value::obj(o));
+                        // its __exit__ at the stack's exit
+                        let none = an.none_v.clone();
+                        let ex = an.load_attr(&Value::obj(o), "__exit__", &c.node, st, false);
+                        for s in recv.pts.iter() {
+                            an.exit_callbacks.entry(s).or_default().push((ex.clone(), vec![none.clone(), none.clone(), none.clone()], IndexMap::new()));
+                        }
+                        outs.push(v);
+                    }
+                    _ => outs.push(Value::obj(o)),
+                }
+            }
+            join_values(outs)
+        }
+        "close" => {
+            exitstack_close(an, st, recv, &c.node);
+            an.none_v.clone()
+        }
+        "__enter__" => recv.clone(),
+        _ => Value::data(name),
+    }
+}
+
 pub fn register(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {
     r(&["io.StringIO"], stringio_new);
+    r(&["contextlib.redirect_stdout", "contextlib.redirect_stderr"], redirect_new);
+    r(&["contextlib.ExitStack"], exitstack_new);
+    r(&["contextlib.closing", "contextlib.nullcontext"], closing_new);
     r(&["csv.writer", "csv.DictWriter"], writer_new);
     r(&["csv.reader"], reader_new);
     r(&["csv.DictReader"], dictreader_new);

@@ -603,7 +603,7 @@ impl Analyzer {
             let r = an.fa_run_handler(func, gens, req, entry, st, &nd);
             an.fa_gen_ret = Some(an.fa_gen_ret.take().unwrap_or_default().join(&r));
         });
-        let prev = self.cm_hook.replace(crate::interp::CmHook { body: &[], target: None, depth: self.frames.len(), env_after: None, ran: false, then: Some(then) });
+        let prev = self.cm_hook.replace(crate::interp::CmHook { body: &[], target: None, depth: self.frames.len(), env_after: None, ran: false, then: Some(then), body_died: false });
         let outer = self.fa_gen_ret.take();
         self.force_tab_once = true;
         self.call_user(g, None, vec![], kwargs, vec![], vec![], state, node, None, false);

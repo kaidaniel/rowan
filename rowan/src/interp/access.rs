@@ -119,14 +119,14 @@ impl Analyzer {
 
     /// Enum members (and Flag combinations) used as keys are their `Key::Member` literals.
     pub fn keyify(&self, v: &Value) -> Value {
-        if v.pts.is_empty() || self.member_key.is_empty() || super::disabled("memberkey") {
+        if v.pts.is_empty() || super::disabled("memberkey") {
             return v.clone();
         }
         let mut ks: Vec<KeyId> = Vec::new();
         let mut rest: Vec<u32> = Vec::new();
         for o in v.pts.iter() {
-            match self.member_key.get(&o) {
-                Some(k) => ks.push(*k),
+            match self.member_key.get(&o).copied().or_else(|| self.identity_key(o)) {
+                Some(k) => ks.push(k),
                 None => rest.push(o),
             }
         }
@@ -135,6 +135,40 @@ impl Analyzer {
         }
         let out = Value::with_kv(crate::domain::ObjSet::from_vec(rest), v.kv.clone());
         out.join(&Value::kv_only(KeyVal::lits(KeySet::from_iter(ks))))
+    }
+
+    /// A key standing for one object hashed by its identity (a future, a function, an instance
+    /// of a class without `__eq__` / `__hash__`), while that object is one runtime object.
+    pub fn identity_key(&self, o: u32) -> Option<KeyId> {
+        if let Some(k) = self.identity_keys.borrow().get(&o) {
+            return Some(*k);
+        }
+        if super::disabled("idkey") || !self.sum_stack.is_empty() {
+            return None;
+        }
+        let ob = self.obj(o);
+        if !ob.single || ob.site.ends_with("#recent") {
+            return None;
+        }
+        let ok = match ob.kind {
+            Kind::Namespace => matches!(&ob.payload, Payload::Method(q, _) if q.starts_with("stdobj.")),
+            Kind::Function | Kind::Class => true,
+            Kind::Instance => match self.instance_class(o) {
+                Some(c) => {
+                    let ci = self.class_info(c);
+                    !ci.open_base && ci.dataclass_fields.borrow().is_none() && !ci.pydantic && !crate::models::pydantic::is_model(self, c) && !ci.named_tuple && !ci.dict_base && !ci.typed_dict && !ci.pyd_dataclass.get() && self.class_lookup(c, "__eq__").is_none() && self.class_lookup(c, "__hash__").is_none() && !self.enum_members.contains_key(&c)
+                }
+                None => false,
+            },
+            _ => false,
+        };
+        if !ok {
+            return None;
+        }
+        let k = intern::key_member(&format!("<{} #{}>", ob.label, o), None);
+        self.identity_keys.borrow_mut().insert(o, k);
+        self.identity_objs.borrow_mut().insert(k, o);
+        Some(k)
     }
 
     /// A mixed-in member key compares as its value (`Mode.FAST == "fast"`).
@@ -168,7 +202,7 @@ impl Analyzer {
         for o in v.pts.iter() {
             let mk = *self.member_key.get(&o)?;
             let Payload::Cls(cls) = self.obj(o).payload else { return None };
-            let ek = self.enum_kind.get(&cls).copied().unwrap_or_default();
+            let ek = self.enum_kind.get(&cls).copied()?;
             if ek.repr_value {
                 let (_, val) = self.member_value(o, state)?;
                 out.push(key_str_lit(&intern::key_py_str(val)));
@@ -263,7 +297,7 @@ impl Analyzer {
 
     /// Member keys (read back from a record's keys) are the member objects.
     pub fn unkey(&self, v: &Value) -> Value {
-        if self.key_member.is_empty() || super::disabled("memberkey") {
+        if (self.key_member.is_empty() && self.identity_objs.borrow().is_empty()) || super::disabled("memberkey") {
             return v.clone();
         }
         let lits = crate::domain::kv_literals(&v.kv);
@@ -273,8 +307,8 @@ impl Analyzer {
         let mut pts = v.pts.clone();
         let mut rest: Vec<KeyId> = Vec::new();
         for k in lits.iter() {
-            match self.key_member.get(&k) {
-                Some(m) => pts = pts.union(&crate::domain::ObjSet::one(*m)),
+            match self.key_member.get(&k).copied().or_else(|| self.identity_objs.borrow().get(&k).copied()) {
+                Some(m) => pts = pts.union(&crate::domain::ObjSet::one(m)),
                 None => rest.push(k),
             }
         }

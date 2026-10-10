@@ -248,6 +248,8 @@ pub struct CmHook {
     /// instead of a body: code run with the yielded value (a FastAPI yield dependency: the rest
     /// of the request)
     pub then: Option<Box<dyn FnOnce(&mut Analyzer, Value, &mut State)>>,
+    /// the body did not finish normally (it raised or returned)
+    pub body_died: bool,
 }
 
 #[derive(Debug)]
@@ -676,7 +678,9 @@ pub struct Analyzer {
     pub cm_hook: Option<CmHook>,
     /// while a `@contextmanager` body runs: (generator frame depth, its locals), so a try in
     /// the generator around the yield sees its own names when the body raises
-    pub cm_frames: Vec<(usize, IndexMap<StrId, Value>)>,
+    /// `@contextmanager` generators whose with body is running: (their frame depth, their env
+    /// at the yield, the env stack's length then)
+    pub cm_frames: Vec<(usize, IndexMap<StrId, Value>, usize)>,
     /// the next user call is analysed concretely (no summary)
     pub force_tab_once: bool,
     /// `vars(obj)` dicts: stores into them are stores of obj's attributes
@@ -749,6 +753,15 @@ pub struct Analyzer {
     pub sd_bypass: Option<ObjId>,
     /// futures: the exception classes their call raised (empty: any)
     pub future_excs: FxHashMap<ObjId, Vec<String>>,
+    /// identity-hashed objects used as dict keys ↔ their keys
+    pub identity_keys: RefCell<FxHashMap<ObjId, KeyId>>,
+    /// builtin exception objects: their class names
+    pub exc_objs: FxHashMap<ObjId, String>,
+    /// the StringIO objects `redirect_stdout` sends prints to (innermost last)
+    pub stdout_redirect: Vec<Value>,
+    /// ExitStack callbacks: (callable, positional, keyword arguments), in registration order
+    pub exit_callbacks: FxHashMap<ObjId, Vec<(Value, Vec<Value>, IndexMap<StrId, Value>)>>,
+    pub identity_objs: RefCell<FxHashMap<KeyId, ObjId>>,
     /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
     pub bypass_setattr: bool,
     pub cond_depth: i32,
@@ -965,6 +978,11 @@ impl Analyzer {
             sdispatch_method: FxHashSet::default(),
             sd_bypass: None,
             future_excs: FxHashMap::default(),
+            identity_keys: RefCell::new(FxHashMap::default()),
+            exc_objs: FxHashMap::default(),
+            stdout_redirect: Vec::new(),
+            exit_callbacks: FxHashMap::default(),
+            identity_objs: RefCell::new(FxHashMap::default()),
             bypass_setattr: false,
             cond_depth: 0,
             branch_depth: 0,
@@ -1329,8 +1347,11 @@ impl Analyzer {
                     }
                     oid = r;
                 } else {
-                    // one summary object for both, weak
+                    // one summary object for both, weak (no longer one key)
                     self.obj_mut(oid).single = false;
+                    if let Some(k) = self.identity_keys.borrow_mut().remove(&oid) {
+                        self.identity_objs.borrow_mut().remove(&k);
+                    }
                 }
             }
             oid
