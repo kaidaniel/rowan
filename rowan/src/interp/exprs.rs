@@ -1560,6 +1560,9 @@ impl Analyzer {
             }
         }
         if let Some(ph) = v.kv.as_param() {
+            if let Some(b) = self.assumed_truth(ph) {
+                return Some(b);
+            }
             self.record_event("truth", ph);
             return None;
         }
@@ -1570,6 +1573,10 @@ impl Analyzer {
         for oid in v.pts.iter() {
             match self.kind(oid) {
                 Kind::Ph => {
+                    if let Some(b) = self.assumed_truth(oid) {
+                        verdicts.push(b);
+                        continue;
+                    }
                     self.record_event("truth", oid);
                     return None;
                 }

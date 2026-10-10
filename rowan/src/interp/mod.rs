@@ -757,6 +757,8 @@ pub struct Analyzer {
     pub rec_runs: FxHashMap<ObjId, usize>,
     /// the receiver value while `load_attr` goes over a value of many objects
     pub many_receivers: Option<Value>,
+    /// the outcomes the summary variant being analysed assumes: (placeholder path, `T`/`F`/`L…`)
+    pub assume: Vec<(String, String)>,
     pub module_done: bool,
     pub fresh_init: FxHashSet<ObjId>,
     pub cell_classes: FxHashMap<ObjId, ObjId>,
@@ -1163,6 +1165,7 @@ impl Analyzer {
             rec_tabs: FxHashMap::default(),
             rec_runs: FxHashMap::default(),
             many_receivers: None,
+            assume: Vec::new(),
             module_done: false,
             fresh_init: FxHashSet::default(),
             cell_classes: FxHashMap::default(),
@@ -3570,4 +3573,29 @@ pub fn is_simple_generator(body: &[ast::Stmt]) -> bool {
     }
     let mut yields = 0;
     !disabled("gensimple") && body.iter().all(|s| stmt_ok(s, &mut yields)) && yields > 0
+}
+
+/// Does the body handle or raise exceptions (`try`, `raise`, `with`, `assert`), nested functions
+/// aside? There a summary is less exact than a re-analysis of the call.
+pub fn has_exception_flow(body: &[ast::Stmt]) -> bool {
+    struct V(bool);
+    impl<'a> ast::visitor::source_order::SourceOrderVisitor<'a> for V {
+        fn visit_stmt(&mut self, st: &'a ast::Stmt) {
+            match st {
+                ast::Stmt::Try(_) | ast::Stmt::Raise(_) | ast::Stmt::With(_) | ast::Stmt::Assert(_) => self.0 = true,
+                ast::Stmt::FunctionDef(_) | ast::Stmt::ClassDef(_) => {}
+                _ => {
+                    if !self.0 {
+                        ast::visitor::source_order::walk_stmt(self, st);
+                    }
+                }
+            }
+        }
+    }
+    use ast::visitor::source_order::SourceOrderVisitor;
+    let mut v = V(false);
+    for st in body {
+        v.visit_stmt(st);
+    }
+    v.0
 }

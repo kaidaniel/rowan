@@ -1214,29 +1214,39 @@ impl Analyzer {
                 }
                 sig.sort();
             }
+            let sig_base = sig.clone();
             let summ = self.summarise_sig(foid, state, sig);
             let Some(summ) = summ else {
                 return Value::new(); // recursion through the symbolic path: ⊥ summary
             };
             let (call_ctx, ctx_single) = self.receiver_ctx(&self_v, &site);
-            let mut bind: IndexMap<u32, Value> = IndexMap::new();
-            for (name, ph) in summ.ph_by_name.iter() {
-                if let Some(bv) = bound.get(name) {
-                    let mut bv = bv.clone();
-                    let pcls = self.ph_info(*ph).cls.get();
-                    if let Some(pc) = pcls.filter(|_| super::disabled("hintsound")) {
-                        if !bv.pts.is_empty() {
-                            let kept = bv.pts.filter(|o| self.may_be_instance(o, pc));
-                            if kept != bv.pts {
-                                bv = Value::with_kv(kept, bv.kv.clone());
-                            }
+            let mut bind = self.summary_bindings(&summ, &bound, &self_v);
+            // (events whose outcome this call decides: a variant of the summary analysed with
+            // those outcomes assumed, instead of re-analysing the call — §6.2)
+            let mut summ = summ;
+            // (only where the call is not re-analysed anyway — past the soft deadline: a summary
+            // is less exact than a re-analysis, which follows the caller's concrete objects)
+            // (off by default, `variantmode=1` past the soft deadline, `=2` always: measured on email,
+            // a variant analysed late or against placeholders loses most of what a re-analysis
+            // proves — SUGGESTED_CHANGES 3.1)
+            let mode = super::limit("variantmode", 0);
+            let asm = if mode >= 2 || (mode == 1 && self.over_deadline()) { self.variant_assumptions(&summ, &bind, state) } else { Vec::new() };
+            if !asm.is_empty() {
+                let mut s2 = sig_base.clone();
+                s2.extend(asm);
+                s2.sort();
+                if self.variant_slot_free(foid, &s2) {
+                    if let Some(v) = self.summarise_sig(foid, state, s2) {
+                        let vb = self.summary_bindings(&v, &bound, &self_v);
+                        // (past the deadline the alternative is the joined summary: the variant, sound for
+                        // this call, is at least as exact; before it, only where it is as exact as a
+                        // re-analysis)
+                        if (mode == 1 && self.over_deadline()) || self.variant_exact_here(&v, &vb, state) {
+                            bind = vb;
+                            summ = v;
                         }
                     }
-                    bind.insert(*ph, bv);
                 }
-            }
-            if let (Some(ps), Some(sv)) = (summ.ph_self, &self_v) {
-                bind.insert(ps, sv.clone());
             }
             if !self.should_tabulate_at(&summ, &bind, state, node) {
                 // (outside databases the summary did not simulate: their rows are unknown now)
@@ -2108,6 +2118,30 @@ impl Analyzer {
 
     /// Hashable description of everything a callee can observe, or None if too large.
     #[allow(clippy::too_many_arguments)]
+    /// The call's values for a summary's parameter placeholders (and `self`).
+    fn summary_bindings(&self, summ: &crate::summary::Summary, bound: &IndexMap<StrId, Value>, self_v: &Option<Value>) -> IndexMap<u32, Value> {
+        let mut bind: IndexMap<u32, Value> = IndexMap::new();
+        for (name, ph) in summ.ph_by_name.iter() {
+            if let Some(bv) = bound.get(name) {
+                let mut bv = bv.clone();
+                let pcls = self.ph_info(*ph).cls.get();
+                if let Some(pc) = pcls.filter(|_| super::disabled("hintsound")) {
+                    if !bv.pts.is_empty() {
+                        let kept = bv.pts.filter(|o| self.may_be_instance(o, pc));
+                        if kept != bv.pts {
+                            bv = Value::with_kv(kept, bv.kv.clone());
+                        }
+                    }
+                }
+                bind.insert(*ph, bv);
+            }
+        }
+        if let (Some(ps), Some(sv)) = (summ.ph_self, self_v) {
+            bind.insert(ps, sv.clone());
+        }
+        bind
+    }
+
     pub fn call_signature(&self, foid: u32, site: &str, entry: bool, self_v: &Option<Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &State) -> Option<Sig> {
         let fi = self.func_info(foid);
         let mut vals: Vec<Value> = args.to_vec();
