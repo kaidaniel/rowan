@@ -1105,6 +1105,13 @@ impl Analyzer {
         match name {
             "shape" => return Some(self.t_size_value(&s, node, st)),
             "ndim" => return Some(self.t_rank_value(&s)),
+            // numpy's `size` is an attribute (the element count), torch's a method
+            "size" if !self.torch_real && !crate::interp::disabled("npsize") => {
+                return Some(match s.dims() {
+                    Some(d) => dim_value(sh::product(&d)),
+                    None => Value::data("size"),
+                })
+            }
             "T" => {
                 return Some(match s.dims() {
                     Some(mut d) => {
@@ -4606,6 +4613,95 @@ impl Analyzer {
     }
 }
 
+/// A numpy structured array: `np.array(rows, dtype=[("x", "i4"), …])`, `np.zeros(n, dtype=…)`
+/// (the fields known), `np.genfromtxt(…, names=True)` (fields from the file's header: an open
+/// record whose reads are requirements). An object with the fields as Item keys (each a 1-D
+/// array), `shape` / `size` / `ndim` / `dtype.names`; a missing field raises ValueError.
+fn np_structured(an: &mut Analyzer, st: &mut State, c: &Call, q: &str) -> Option<Value> {
+    if crate::interp::disabled("npstruct") {
+        return None;
+    }
+    let names: Option<Vec<KeyId>> = match q {
+        "genfromtxt" | "recfromcsv" => {
+            let named = q == "recfromcsv" || c.kw("names").map(|v| v.kv.as_lit() == Some(intern::key_bool(true))).unwrap_or(false);
+            if !named {
+                return None;
+            }
+            None
+        }
+        "array" | "zeros" | "ones" | "empty" => {
+            let dt = c.kw("dtype")?;
+            let items = an.iterate(&dt, &c.node, st).items?;
+            let mut ns = Vec::new();
+            for it in items {
+                let parts = an.iterate(&it, &c.node, st).items?;
+                let n = parts.first()?;
+                ns.push(n.kv.as_lit().filter(|_| n.pts.is_empty()).filter(|k| intern::key_as_str(*k).is_some())?);
+            }
+            if ns.is_empty() {
+                return None;
+            }
+            Some(ns)
+        }
+        _ => return None,
+    };
+    // the number of records
+    let n: Option<i64> = match q {
+        "array" => c.args.first().and_then(|d| d.single()).and_then(|o| an.llen(o, st)).map(|l| l as i64),
+        "zeros" | "ones" | "empty" => c.args.first().and_then(|a| a.kv.as_lit()).and_then(intern::key_as_int),
+        _ => None,
+    };
+    let elem_shape = match n {
+        Some(k) => Shape::known(vec![sh::lit(k)]),
+        None => Shape::any(),
+    };
+    let oid = an.alloc_at(Kind::Namespace, &c.node, st, &format!("ndarray@L{}", c.line), Payload::None, Some(crate::domain::Row::new()), Ns::Attr, None, Some("npstruct"));
+    let mut row = crate::domain::Row::new();
+    match &names {
+        Some(ns) => {
+            for k in ns {
+                row = row.store(*k, true);
+                st.set_slot(oid, Ns::Item, *k, tensor_value(elem_shape.clone()), true);
+            }
+            row = row.with_order(ns.clone());
+        }
+        None => {
+            row = crate::domain::Row::with_source(crate::domain::Source::new(&format!("genfromtxt@L{}", c.line), crate::domain::SourceKind::External));
+            st.set_slot(oid, Ns::Item, intern::STAR, tensor_value(elem_shape.clone()), false);
+        }
+    }
+    st.set_row(oid, Ns::Item, row);
+    let mut arow = crate::domain::Row::new();
+    let mut set = |st: &mut State, name: &str, v: Value| {
+        let k = intern::key_str_lit(name);
+        arow = arow.store(k, true);
+        st.set_slot(oid, Ns::Attr, k, v, true);
+    };
+    let nv = match n {
+        Some(k) => Value::lit(intern::key_int(k)),
+        None => Value::data("size"),
+    };
+    set(st, "size", nv.clone());
+    set(st, "ndim", Value::lit(intern::key_int(1)));
+    let shape = an.alloc_positional_sfx(Kind::Tuple, &c.node, "#npshape", Some(vec![nv]), Value::new(), crate::domain::DATA, st);
+    set(st, "shape", shape);
+    let did = an.alloc_at(Kind::Namespace, &c.node, st, "dtype", Payload::None, Some(crate::domain::Row::new()), Ns::Attr, None, Some("npdtype"));
+    let nk = intern::key_str_lit("names");
+    let names_v = match &names {
+        Some(ns) => {
+            let kv = crate::domain::KeyVal::lits(intern::KeySet::from_iter(ns.iter().copied()));
+            an.alloc_positional_sfx(Kind::Tuple, &c.node, "#npnames", Some(ns.iter().map(|k| Value::lit(*k)).collect()), Value::new(), kv, st)
+        }
+        None => Value::data("names"),
+    };
+    st.set_row(did, Ns::Attr, crate::domain::Row::new().store(nk, true));
+    st.set_slot(did, Ns::Attr, nk, names_v, true);
+    set(st, "dtype", Value::obj(did));
+    st.set_row(oid, Ns::Attr, arow);
+    an.np_struct.insert(oid);
+    Some(Value::obj(oid))
+}
+
 /// numpy arrays share the tensor model (shapes, the same methods; `axis=` is `dim=`).
 pub fn m_numpy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if !an.torch_on {
@@ -4614,6 +4710,9 @@ pub fn m_numpy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let q = c.qual.strip_prefix("numpy.").or_else(|| c.qual.strip_prefix("np.")).unwrap_or("");
     let node = c.node;
     let shape_arg = |an: &Analyzer, st: &State, v: Option<Value>| -> Option<Shape> { v.and_then(|v| an.t_shape_arg(&v, st)) };
+    if let Some(v) = np_structured(an, st, c, q) {
+        return v;
+    }
     match q {
         "zeros" | "ones" | "empty" | "full" | "random.rand" | "random.randn" | "random.random" | "random.normal" | "random.uniform" | "random.randint" => {
             let s = match q {

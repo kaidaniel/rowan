@@ -52,7 +52,7 @@ pub fn param_slot_of(k: KeyId) -> Option<u32> {
 impl Analyzer {
     /// The innermost handler that catches this namespace's error re-raises it.
     pub fn guard_reraises(&self, ns: Ns) -> bool {
-        let want: &[&str] = if ns == Ns::Item { ITEM_GUARDS } else { ATTR_GUARDS };
+        let want: &[&str] = if ns == Ns::Item { if self.item_exc == Some("ValueError") { super::VALUE_GUARDS } else { ITEM_GUARDS } } else { ATTR_GUARDS };
         for g in self.guards.iter().rev() {
             if g.iter().any(|x| want.contains(&x.as_str())) {
                 return g.contains("!reraise");
@@ -62,7 +62,7 @@ impl Analyzer {
     }
 
     pub fn is_guarded(&self, ns: Ns) -> bool {
-        let want: &[&str] = if ns == Ns::Item { ITEM_GUARDS } else { ATTR_GUARDS };
+        let want: &[&str] = if ns == Ns::Item { if self.item_exc == Some("ValueError") { super::VALUE_GUARDS } else { ITEM_GUARDS } } else { ATTR_GUARDS };
         self.guards.iter().any(|g| g.iter().any(|x| want.contains(&x.as_str())))
     }
 
@@ -476,6 +476,15 @@ impl Analyzer {
     }
 
     pub fn load_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
+        // a numpy structured array's missing field raises ValueError
+        let exc = if ns == Ns::Item && !obj.pts.is_empty() && !self.np_struct.is_empty() && obj.pts.iter().all(|o| self.np_struct.contains(&o)) { Some("ValueError") } else { None };
+        let saved = std::mem::replace(&mut self.item_exc, exc);
+        let v = self.load_item_inner(obj, ns, key, node, state, report);
+        self.item_exc = saved;
+        v
+    }
+
+    fn load_item_inner(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
         // (objects in the key: an unknown key; lists / tuples are indexed by their own rules)
         let okey = if ns == Ns::Item && !key.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Dict | Kind::Ph | Kind::Unknown)) && !obj.pts.is_empty() { self.opaque_key(key, state) } else { key.clone() };
         let key = &okey;
@@ -882,7 +891,7 @@ impl Analyzer {
                     // the handler sees the state as it is here (and a KeyError / AttributeError
                     // carrying the key)
                     if !self.raise_states.is_empty() && !super::disabled("excvalue") {
-                        let cname = if ns == Ns::Item { "KeyError" } else { "AttributeError" };
+                        let cname = if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" };
                         let e = self.exception_object(cname, vec![Value::lit(k)], node, state);
                         self.cur_exc = Some(e);
                     }

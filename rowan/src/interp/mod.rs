@@ -125,6 +125,7 @@ pub const NOEFFECT_METHOD_NAMES: &[&str] = &[
 pub const DICT_METHOD_NAMES: &[&str] = &["get", "items", "keys", "values", "update", "pop", "setdefault", "copy", "popitem", "clear"];
 /// Methods that make a class-less placeholder a list (modelled by `list.*`).
 pub const LIST_METHOD_NAMES: &[&str] = &["append", "extend", "insert", "remove", "sort", "reverse"];
+pub const VALUE_GUARDS: &[&str] = &["ValueError", "Exception", "BaseException", "*"];
 pub const ITEM_GUARDS: &[&str] = &["KeyError", "LookupError", "Exception", "BaseException", "IndexError", "*"];
 pub const ATTR_GUARDS: &[&str] = &["AttributeError", "Exception", "BaseException", "*"];
 pub const KNOWN_IDENTITY_DECORATORS: &[&str] = &[
@@ -877,6 +878,10 @@ pub struct Analyzer {
     pub pyd_inst: Option<ObjId>,
     /// the last value of each call node, and whether a test is being narrowed (`eval`)
     pub call_memo: FxHashMap<usize, Value>,
+    /// numpy structured arrays (fields are Item keys); the exception a missing item raises
+    /// when every target is one (`ValueError`, not KeyError)
+    pub np_struct: FxHashSet<ObjId>,
+    pub item_exc: Option<&'static str>,
     pub narrow_depth: u32,
     pub pyd_last_failed: bool,
     /// pydantic instances: the fields their input surely / maybe gave (`model_fields_set`)
@@ -1134,6 +1139,8 @@ impl Analyzer {
             pyd_field: None,
             pyd_inst: None,
             call_memo: FxHashMap::default(),
+            np_struct: FxHashSet::default(),
+            item_exc: None,
             narrow_depth: 0,
             pyd_last_failed: false,
             pyd_set: FxHashMap::default(),
@@ -2612,7 +2619,8 @@ impl Analyzer {
                     continue;
                 }
                 let typed = self.kind(oid) == Kind::Ph && self.ph_info(oid).cls.get().map(|c| self.class_info_opt(c).is_some()).unwrap_or(false);
-                let ns = if matches!(self.kind(oid), Kind::Instance | Kind::Namespace) || typed { Ns::Attr } else { Ns::Item };
+                // (a numpy structured array is keyed by its fields)
+                let ns = if (matches!(self.kind(oid), Kind::Instance | Kind::Namespace) || typed) && !self.np_struct.contains(&oid) { Ns::Attr } else { Ns::Item };
                 ns_used = ns;
                 rows.push(state.row(oid, ns));
                 obs_rows.push((oid, ns, state.row(oid, ns)));
