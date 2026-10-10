@@ -1094,6 +1094,12 @@ fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// `dataclasses.asdict(obj)`: a dict of the fields, nested dataclass instances (also in
 /// lists / tuples) converted the same way.
+/// `dataclasses.asdict(v)` at `node` (a dataclass inside a pydantic dump).
+pub fn asdict_of(an: &mut Analyzer, st: &mut State, node: &crate::frontend::Node, v: &Value) -> Value {
+    let c = Call { qual: "dataclasses.asdict".into(), recv: None, args: vec![v.clone()], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
+    m_asdict(an, st, &c)
+}
+
 fn m_asdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first().cloned() else { return Value::data("asdict") };
     fn conv(an: &mut Analyzer, st: &mut State, c: &Call, v: &Value, depth: u32) -> Value {
@@ -3535,9 +3541,15 @@ fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             return out;
         }
+        // (json.loads reports its own raises: a text that does not parse raises here)
         if let Some(text) = c.args.first().filter(|a| a.pts.is_empty()).and_then(|a| a.kv.as_lit()).and_then(intern::key_as_str) {
-            if let Ok(j) = serde_json::from_str::<serde_json::Value>(&text) {
-                return json_literal(an, st, c, &j, "");
+            match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(j) => return json_literal(an, st, c, &j, ""),
+                Err(_) if !crate::interp::disabled("jsonraise") => {
+                    an.raise_here("JSONDecodeError", st);
+                    return Value::new();
+                }
+                Err(_) => {}
             }
         }
         // one of several literal texts: the join of their structures
@@ -3548,6 +3560,7 @@ fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 return join_values(outs);
             }
         }
+        an.may_raise_here("JSONDecodeError", st);
     }
     let tag = json_tag(&c.qual);
     let src = Source::new(&format!("{}@L{}", tag, c.line), SourceKind::External);

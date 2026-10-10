@@ -2381,7 +2381,7 @@ impl Analyzer {
 /// Library constructors whose models report their raises.
 const SELF_REPORTING_EXTERNALS: &[&str] = &[
     // (simulated exactly: an exception is raised by the code they run, `__post_init__` …)
-    "dataclasses.replace", "dataclasses.asdict", "dataclasses.astuple", "dataclasses.fields", "dataclasses.is_dataclass",
+    "dataclasses.replace", "dataclasses.asdict", "dataclasses.astuple", "dataclasses.fields", "dataclasses.is_dataclass", "json.loads",
     "os.path.join", "os.path.basename", "os.path.dirname", "os.path.split", "os.path.splitext", "os.path.normpath", "os.path.isabs",
     "pathlib.PurePosixPath", "pathlib.PurePath", "pathlib.Path", "pathlib.PosixPath",
     "io.StringIO", "csv.writer", "csv.DictWriter", "csv.reader", "csv.DictReader", "argparse.ArgumentParser", "threading.Thread",

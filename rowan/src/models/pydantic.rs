@@ -277,9 +277,10 @@ impl Analyzer {
                         if let Some(v) = &a.value {
                             let v: &'static ast::Expr = v;
                             match v {
-                                ast::Expr::Call(c) if dotted_last(&c.func) == "Field" => {
+                                // (`dataclasses.field(...)` in a pydantic dataclass too)
+                                ast::Expr::Call(c) if matches!(dotted_last(&c.func).as_str(), "Field" | "field") => {
                                     f.constraints.extend(field_constraints(c));
-                                    if let Some(d) = c.arguments.args.first() {
+                                    if let Some(d) = c.arguments.args.first().filter(|_| dotted_last(&c.func) == "Field") {
                                         if !is_ellipsis(d) {
                                             f.default = Some(d);
                                             f.required = false;
@@ -456,7 +457,7 @@ impl Analyzer {
                             }
                         } else {
                             let ms: Vec<Ann> = non_none.iter().map(|x| self.pyd_ann(x, module, state)).collect();
-                            let u = if ms.iter().all(|m| matches!(m, Ann::Model(_))) { Ann::Union(ms, None) } else { Ann::Other };
+                            let u = if ms.len() == 1 && !crate::interp::disabled("pydsingleunion") { ms.into_iter().next().unwrap() } else if ms.iter().all(|m| matches!(m, Ann::Model(_))) { Ann::Union(ms, None) } else { Ann::Other };
                             if non_none.len() < elts.len() {
                                 Ann::Optional(Box::new(u))
                             } else {
@@ -489,7 +490,7 @@ impl Analyzer {
                                 y => ms.push(y),
                             }
                         }
-                        let u = if ms.iter().all(|m| matches!(m, Ann::Model(_))) { Ann::Union(ms, None) } else { Ann::Other };
+                        let u = if ms.len() == 1 && !crate::interp::disabled("pydsingleunion") { ms.into_iter().next().unwrap() } else if ms.iter().all(|m| matches!(m, Ann::Model(_))) { Ann::Union(ms, None) } else { Ann::Other };
                         if none {
                             Ann::Optional(Box::new(u))
                         } else {
@@ -1059,21 +1060,27 @@ impl Analyzer {
             }
         }
         if report && !errs.is_empty() && state.reachable {
-            let idx = self.pyd_verrs.len();
-            self.pyd_verrs.push(errs.clone());
-            let eo = self.alloc_raw(Kind::Namespace, &format!("pydverr:{}", crate::interp::site_string(node)), "", false, "ValidationError", Payload::Method(format!("pydverr.{}", idx), Value::new()));
-            self.obj_mut(eo).payload = Payload::Method(format!("pydverr.{}", idx), Value::new());
-            state.set_row(eo, Ns::Attr, Row::new().data_store(crate::domain::Source::new("ValidationError", crate::domain::SourceKind::Data)));
-            self.cur_exc = Some(Value::obj(eo));
-            if errs.iter().any(|e| e.sure) {
-                self.raise_here("ValidationError", state);
-            } else {
-                self.may_raise_here("ValidationError", state);
-            }
-            self.cur_exc = None;
+            self.pyd_raise_errors(errs, state, node);
         }
         outs.push(Value::obj(inst));
         join_values(outs)
+    }
+
+    /// A ValidationError holding `errs` (its `errors()`), raised here when one is sure.
+    fn pyd_raise_errors(&mut self, errs: Vec<PErr>, state: &mut State, node: &Node) {
+        let idx = self.pyd_verrs.len();
+        let sure = errs.iter().any(|e| e.sure);
+        self.pyd_verrs.push(errs);
+        let eo = self.alloc_raw(Kind::Namespace, &format!("pydverr:{}", crate::interp::site_string(node)), "", false, "ValidationError", Payload::Method(format!("pydverr.{}", idx), Value::new()));
+        self.obj_mut(eo).payload = Payload::Method(format!("pydverr.{}", idx), Value::new());
+        state.set_row(eo, Ns::Attr, Row::new().data_store(crate::domain::Source::new("ValidationError", crate::domain::SourceKind::Data)));
+        self.cur_exc = Some(Value::obj(eo));
+        if sure {
+            self.raise_here("ValidationError", state);
+        } else {
+            self.may_raise_here("ValidationError", state);
+        }
+        self.cur_exc = None;
     }
 
     /// Field constraints on known values: an error when every value breaks one (maybe when
@@ -1641,8 +1648,19 @@ impl Analyzer {
                                 pc.fields.iter().find(|f| f.name == *d).and_then(|f| f.lits.clone()).map(|ls| ls.iter().any(|l| tl.contains(*l))).unwrap_or(true)
                             }).collect();
                             if chosen.is_empty() {
-                                // no member has that tag: a ValidationError
-                                self.may_raise_here("ValidationError", state);
+                                // no member has that tag: a ValidationError (union_tag_invalid)
+                                if self.pyd_errs.is_empty() && !crate::interp::disabled("uniontag") {
+                                    let errs = vec![PErr { loc: Some(dk), typ: "union_tag_invalid", sure: val.pts.len() == 1 && val.kv.is_bot(), ctx: false }];
+                                    self.pyd_raise_errors(errs, state, node);
+                                    if !state.reachable {
+                                        return Value::new();
+                                    }
+                                } else if !self.pyd_errs.is_empty() {
+                                    let loc = self.pyd_field.or(Some(dk));
+                                    self.pyd_err(loc, "union_tag_invalid", val.pts.len() == 1 && val.kv.is_bot(), false);
+                                } else {
+                                    self.may_raise_here("ValidationError", state);
+                                }
                                 continue;
                             }
                         }
@@ -2415,6 +2433,21 @@ impl Analyzer {
             if is_instance(self, o) {
                 outs.push(self.pyd_dump(o, opts, state, node));
                 continue;
+            }
+            // a dataclass (pydantic's or the standard one) dumps as the dict of its fields
+            let dc_cls = match self.kind(o) {
+                Kind::Instance => self.instance_class(o),
+                Kind::Ph => self.ph_info(o).cls.get().filter(|c| !is_model(self, *c)),
+                _ => None,
+            };
+            if !crate::interp::disabled("pyddcdump") && dc_cls.map(|c| !self.dataclass_fields_mro(c).is_empty()).unwrap_or(false) {
+                outs.push(crate::models::asdict_of(self, state, node, &Value::obj(o)));
+                continue;
+            }
+            // a placeholder of no known class: what it dumps to is decided per call site (a
+            // model, a dataclass, a container of them)
+            if self.kind(o) == Kind::Ph && self.ph_info(o).cls.get().is_none() && !crate::interp::disabled("pyddumpph") {
+                self.record_event("concrete", o);
             }
             if self.kind(o) == Kind::Ph && self.ph_info(o).cls.get().map(|c| is_model(self, c)).unwrap_or(false) {
                 outs.push(self.pyd_dump(o, opts, state, node));

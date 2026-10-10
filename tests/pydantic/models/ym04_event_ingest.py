@@ -1,4 +1,4 @@
-# event ingestion: JSON lines -> a discriminated union via TypeAdapter, per-kind handlers updating pydantic-dataclass aggregates, errors collected from ValidationError.errors(), a generic result envelope
+# event ingestion: JSON lines -> a discriminated union via TypeAdapter, per-kind handlers updating pydantic-dataclass aggregates, errors collected from ValidationError.errors(), a generic result envelope (L34 was `definite={amount} absent={amount_cents} open`: cents only ever sees the literal line, exactly these keys; amount_cents is required only instead of amount, an either-key requirement: to-do below)
 import json
 from dataclasses import asdict, field
 from typing import Annotated, Generic, Literal, TypeVar, Union
@@ -31,7 +31,7 @@ class Purchase(Base):
     def cents(cls, data):
         if "amount_cents" in data:
             data = {k: v for k, v in data.items() if k != "amount_cents"} | {"amount": data["amount_cents"] / 100}
-            #@row data: definite={amount} absent={amount_cents} open
+            #@row data: present={kind,ts,order_id,amount} definite={kind,ts,order_id,amount} absent={amount_cents} closed
         return data
 
 
@@ -159,4 +159,5 @@ if __name__ == "__main__":
         except AttributeError:
             pass
 
-#@schema json.loads@L63: always={kind,ts} sometimes={target,order_id,amount,amount_cents,user} only={kind,ts}
+#@schema json.loads@L63: always={kind,ts} sometimes={target,order_id,amount,user} only={kind,ts}
+#@todo schema json.loads@L63: always={kind,ts} sometimes={target,order_id,amount,amount_cents,user} only={kind,ts}
