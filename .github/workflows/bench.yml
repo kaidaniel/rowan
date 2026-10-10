@@ -12,8 +12,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: bench-${{ github.ref }}
-  # (on main every commit keeps its numbers; on a PR a newer push supersedes the run)
+  # on main every commit gets its own run (and its numbers); on a PR a newer push supersedes
+  group: bench-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'pr' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -160,3 +160,76 @@ jobs:
             echo "Wall time and memory vary ±10–20% between runners; work, units, tabulations and objects are deterministic."
             echo "Per-program profiles: the bench jobs' summaries; flamegraphs: the bench-<program> artifacts."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # History across commits (main only): github-action-benchmark appends this run's numbers to
+  # the data on the `gh-pages` branch (dev/bench/data.js, charts in dev/bench/index.html), and
+  # the branch's contents are deployed to GitHub Pages (Settings → Pages → Source: GitHub
+  # Actions): https://kaidaniel.github.io/rowan/dev/bench/
+  history:
+    name: history
+    needs: bench
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: write
+    concurrency:
+      # one writer of gh-pages at a time
+      group: bench-history
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          cache-dependency-glob: .python-version
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bench-*
+          path: results
+          merge-multiple: true
+
+      - name: Results as benchmark entries
+        run: uv run --no-project python bench/history.py results bench-history.json
+
+      - name: Append to the history on gh-pages
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: rowan
+          tool: customSmallerIsBetter
+          output-file-path: bench-history.json
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          # informational: a regression shows in the charts and the job log, nothing fails
+          alert-threshold: "130%"
+          comment-on-alert: false
+          fail-on-alert: false
+
+      - name: The gh-pages contents
+        uses: actions/checkout@v7
+        with:
+          ref: gh-pages
+          path: site
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    name: publish to GitHub Pages
+    needs: history
+    if: always() && needs.history.result == 'success'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}dev/bench/
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
