@@ -1169,7 +1169,8 @@ impl Analyzer {
         // (a generator runs per call site: its caller sees only its suspension points, see below)
         // (not a `@contextmanager` / yield-dependency body: it runs around its with block)
         let under_cm = self.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth == self.frames.len());
-        let gen_fn = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body)) && !under_cm && !super::disabled("genlazy");
+        // (a simple generator — straight-line yields, no calls — is summarised like a function)
+        let gen_fn = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body) && !super::is_simple_generator(&f.body)) && !under_cm && !super::disabled("genlazy");
         let forced = std::mem::take(&mut self.force_tab_once) || self.torch_modules.contains(&fi.module) || gen_fn;
         if self.use_summaries && self.model_call == 0 && !forced {
             let bound = self.compute_bindings(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);

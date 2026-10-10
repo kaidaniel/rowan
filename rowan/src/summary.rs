@@ -873,7 +873,18 @@ impl Analyzer {
                 st.exits = None;
             }
             st.reachable = true;
-            if let Some(gen) = fi.generator.get() {
+            let simple_gen = matches!(fnode, FuncNode::Def(f) if crate::interp::is_generator(&f.body) && crate::interp::is_simple_generator(&f.body));
+            if simple_gen {
+                // (a simple generator: its items, in this run's own object — cloned per call)
+                let ctx = self.frame().ctx.clone();
+                let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
+                if !st.has_slot(gid, Ns::Elem, STAR) {
+                    self.set_llen(gid, &mut st, Some(0));
+                }
+                st.set_slot(gid, Ns::Attr, intern::key_str_lit("\u{1}genret"), ret.clone(), true);
+                self.obj_mut(gid).iterator = true;
+                ret = Value::obj(gid);
+            } else if let Some(gen) = fi.generator.get() {
                 if let FuncNode::Def(f) = fnode {
                     if crate::interp::is_generator(&f.body) {
                         ret = Value::obj(gen);
@@ -2169,6 +2180,9 @@ impl Inst {
         self.clones.insert(t, nid);
         an.set_llen(nid, state, tll);
         an.obj_mut(nid).iter_elem = titer;
+        if an.obj(t).iterator {
+            an.obj_mut(nid).iterator = true;
+        }
         an.obj_mut(nid).depth = tdepth;
         if let Some(d) = tderived {
             let dd = self.resolve(an, state, pre, d);

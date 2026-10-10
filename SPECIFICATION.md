@@ -354,7 +354,10 @@ class.
 
 ## 8. Generators and iterators
 
-Calling a generator function runs its body eagerly, at the call site. The items are a list
+Calling a generator function runs its body eagerly, at the call site. A *simple* generator
+(straight-line `yield`s of expressions without calls, assignments to locals, `if`) is summarised
+instead, like a function returning its items, and cloned per call (`is_simple_generator`): no
+effects happen between its items. The items are a list
 object (`gen:<f>`), with known positions where the yields are straight-line or in decided
 branches, and a known prefix for endless generators.
 

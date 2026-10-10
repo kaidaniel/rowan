@@ -3515,3 +3515,59 @@ fn own_source(label: &str, own: &str, span: (u32, u32), in_main: bool) -> bool {
         None => false,
     }
 }
+
+/// A generator whose body is straight-line code: `yield` statements, assignments to local
+/// names, `if` / `pass` / `return`, and expressions without calls (a call could change objects
+/// between two items, which a consumer of the first item must not see yet). Its items are a
+/// fixed list built from reads of its inputs, with no effects per item: it is summarised like
+/// an ordinary function returning that list, instead of re-run at every call site.
+pub fn is_simple_generator(body: &[ast::Stmt]) -> bool {
+    fn expr_ok(e: &ast::Expr) -> bool {
+        struct V(bool);
+        impl<'a> ast::visitor::source_order::SourceOrderVisitor<'a> for V {
+            fn visit_expr(&mut self, e: &'a ast::Expr) {
+                if matches!(
+                    e,
+                    ast::Expr::Call(_) | ast::Expr::Yield(_) | ast::Expr::YieldFrom(_) | ast::Expr::Await(_) | ast::Expr::Lambda(_) | ast::Expr::ListComp(_) | ast::Expr::SetComp(_) | ast::Expr::DictComp(_) | ast::Expr::Generator(_) | ast::Expr::Named(_)
+                ) {
+                    self.0 = false;
+                }
+                if self.0 {
+                    ast::visitor::source_order::walk_expr(self, e);
+                }
+            }
+        }
+        use ast::visitor::source_order::SourceOrderVisitor;
+        let mut v = V(true);
+        v.visit_expr(e);
+        v.0
+    }
+    fn target_ok(t: &ast::Expr) -> bool {
+        match t {
+            ast::Expr::Name(_) => true,
+            ast::Expr::Tuple(tu) => tu.elts.iter().all(target_ok),
+            ast::Expr::List(l) => l.elts.iter().all(target_ok),
+            _ => false,
+        }
+    }
+    fn stmt_ok(s: &ast::Stmt, yields: &mut usize) -> bool {
+        match s {
+            ast::Stmt::Expr(e) => match &*e.value {
+                ast::Expr::Yield(y) => {
+                    *yields += 1;
+                    y.value.as_deref().is_none_or(expr_ok)
+                }
+                other => expr_ok(other),
+            },
+            ast::Stmt::Assign(a) => a.targets.iter().all(target_ok) && expr_ok(&a.value),
+            ast::Stmt::AnnAssign(a) => target_ok(&a.target) && a.value.as_deref().is_none_or(expr_ok),
+            ast::Stmt::AugAssign(a) => matches!(&*a.target, ast::Expr::Name(_)) && expr_ok(&a.value),
+            ast::Stmt::If(i) => expr_ok(&i.test) && i.body.iter().all(|s| stmt_ok(s, yields)) && i.elif_else_clauses.iter().all(|c| c.test.as_ref().is_none_or(expr_ok) && c.body.iter().all(|s| stmt_ok(s, yields))),
+            ast::Stmt::Pass(_) => true,
+            ast::Stmt::Return(r) => r.value.as_deref().is_none_or(expr_ok),
+            _ => false,
+        }
+    }
+    let mut yields = 0;
+    !disabled("gensimple") && body.iter().all(|s| stmt_ok(s, &mut yields)) && yields > 0
+}
