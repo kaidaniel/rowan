@@ -33,10 +33,10 @@ cd rowan && cargo build --release && cargo test --release --lib && cd ..
 rowan/target/release/rowan FILE.py [--json|--golden|--facts] [--no-rows --no-summaries --no-entry --no-imports] [--value-depth N]
                                    [--search-path DIR]… [--follow PKG]… [--site-packages DIR]…
 rowan/target/release/rowan serve                    # JSON lines over stdio (README has the protocol)
-uv run --no-project python tests/run_golden.py      # 970/970 in ~5 s (all suites); paths select; -v
+uv run --no-project python tests/run_golden.py      # 997/997 in ~5 s (all suites); paths select; -v
 uv run --no-project python tests/run_golden.py --pending [--prune]   # cases in tests/*/PENDING (s112, c001)
 uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy \
-    python tests/oracle.py [--strict|--lenient] [-v] [case…]         # expectations vs a real run (811/811, ~4 min)
+    python tests/oracle.py [--strict|--lenient] [-v] [case…]         # expectations vs a real run (840/840, ~4 min)
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py  # torch expectations vs real PyTorch
 uv run --no-project python tests/run_snapshots.py   # SAME on 4 snapshots (fixed caps, no deadline); --update after review
 cd vscode-rowan && node test.js && npm run package  # hover rendering check; rebuilds rowan-0.1.0.vsix
@@ -67,7 +67,7 @@ decision), `ROWAN_NO=a,b` (switch refinements off: `rg 'disabled\("' rowan/src`)
 | `models/{pandas,minire,torch}.rs`, `shape.rs` | pandas; a small regex matcher (pandas `regex=`); tensor shapes and the torch model. |
 | `report.rs`, `main.rs` | output formats; CLI, `serve_loop`, site-packages discovery (1 GiB-stack thread). |
 | `tests/run_golden.py`, `tests/oracle.py` | golden harness (directives: `tests/CONVENTIONS.md`), runtime oracle (strict on the library suites). |
-| `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/` | 459 / 162 / 137 / 58 / 42 / 124 / 46 / 7 files (apps: small / medium / large package programs); suites have `small/`, `models/`, a `PENDING` list. |
+| `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/` | 476 / 162 / 137 / 58 / 42 / 134 / 57 / 8 files (apps: small / medium / large package programs); suites have `small/`, `models/`, a `PENDING` list. |
 | `tests/run_snapshots.py`, `tests/snapshots/` | `--json` snapshots on four old modules: the internals regression guard. |
 | `vscode-rowan/`, `rowan/py/` | VS Code extension (rowan serve); PyO3 binding (does not load on this machine). |
 
@@ -127,7 +127,7 @@ by run (the oracle reads it per line).
   `EXC_BASES` for builtins; each handler starts from the raises it may catch that no earlier
   one surely catches, the rest go to the enclosing try; a model's raise inside a call is an
   exception object of its class, args unknown); builtin exceptions are objects with `args`,
-  str / repr; a known out-of-range list index raises IndexError; a bare `raise`
+  str / repr; a known out-of-range list index and a `del` of a missing key raise; a bare `raise`
   re-raises the handled value; a try body that may raise somewhere unknown gives its handler
   the requirements recorded up to there (`flag_reqs`); reads under a handler that always
   re-raises, or in threads / futures, stay requirements; `contextlib.suppress`; ExitStack;
@@ -162,7 +162,7 @@ by run (the oracle reads it per line).
 
 | input | time | notes |
 | --- | --- | --- |
-| golden (970 cases, all suites) | ~5 s | one process per case; oracle ~4 min |
+| golden (997 cases, all suites) | ~5 s | one process per case; oracle ~4 min |
 | `j93` (830 lines) / `m96_pkg` (1,716) / `proto_summary.py` (1.2k, self-referential) | 0.09 / 0.10 / 2.6 s | pass / pass / 0 ✗ |
 
 ## Known problems and limits
@@ -193,7 +193,8 @@ by run (the oracle reads it per line).
 
 ## Where to go next
 
-Pending: `c001` (large app: recursion inside summaries, per-row pandas values), `s112`
-(suspended generators). Then: possibly-unbound names (no NameError reported), deletion by key
-pattern, records into frames, pandas `#@todo`s; torch facts from `<`/`!=`, dtypes; summary
-reuse in the server; the weak store through several objects; precision on real repositories.
+Pending: `c001` (large app), `s112` (suspended generators), `a010` / `a012` (re-validated
+values, frames from dumps), `a011` (the oracle counts a key whose caught KeyError fired as
+required; guarded loads record none, SPECIFICATION §8.4: decide). Then: possibly-unbound names,
+deletion by key pattern, records into frames, pandas `#@todo`s; torch facts from `<`/`!=`,
+dtypes; summary reuse in the server; the weak store through several objects; real repositories.
