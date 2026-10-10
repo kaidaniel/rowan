@@ -1,3 +1,5 @@
+<img src="rowan_icon.svg" alt="rowan logo" width="96" align="right">
+
 # rowan
 
 > [!WARNING]
