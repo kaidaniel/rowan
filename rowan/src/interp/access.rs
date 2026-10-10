@@ -2433,7 +2433,7 @@ impl Analyzer {
         v
     }
 
-    /// A value declared dynamically typed (`Any`): accesses on it are not checkable (§8.5).
+    /// A value declared dynamically typed (`Any`): accesses on it are not checkable (§6.6).
     pub fn dynamic_value(&mut self, label: &str, state: &mut State) -> Value {
         let oid = self.alloc_raw(Kind::Unknown, &format!("any:{}", label), "", true, &format!("Any {}", label), Payload::None);
         if !state.has_row(oid, Ns::Item) {

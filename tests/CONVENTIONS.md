@@ -47,7 +47,7 @@ fields — and the **values** of names when they follow from the program text.
   `only ∪ sometimes ∪ always` must not.
 
 The precise answer is what holds for **every** run of the program, as written (the driver's
-inputs are examples). Rules of thumb (SPECIFICATION §2, §3, §6.4, §10):
+inputs are examples). Rules of thumb (SPECIFICATION §2, §4, §6.4, §9):
 
 * Literals are tracked through arithmetic, comparisons, string methods, formatting, `len` of
   known containers, comprehensions over known values, `sorted` / `min` / `max` of literals.

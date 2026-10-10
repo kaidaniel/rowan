@@ -1,4 +1,4 @@
-//! Abstract interpreter over the Python AST (SPECIFICATION.md §5–§10).  Port of
+//! Abstract interpreter over the Python AST (SPECIFICATION.md §3–§10).  Port of
 //! `rowan/interp.py`; the statement/expression/narrowing/access/call parts live in the
 //! sibling files of this module.
 
@@ -2373,7 +2373,7 @@ impl Analyzer {
         None
     }
 
-    /// A declared row for an annotated entry-point parameter (§8.5).
+    /// A declared row for an annotated entry-point parameter (§6.6).
     pub fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
         let node = Self::strip_annotation(ann)?;
         let v = self.eval(node, state);

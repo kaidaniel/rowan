@@ -1,4 +1,4 @@
-//! Narrowing (guards, §8.4): port of `narrow` and its helpers.
+//! Narrowing (guards, SPECIFICATION.md §5.1): port of `narrow` and its helpers.
 
 use indexmap::IndexMap;
 use ruff_python_ast as ast;

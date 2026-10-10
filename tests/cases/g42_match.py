@@ -1,4 +1,4 @@
-"""`match` statements: cases are joined (no pattern narrowing yet, spec §16)."""
+"""`match` statements: cases are joined (no pattern narrowing yet)."""
 
 
 def classify(evt):

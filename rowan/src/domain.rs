@@ -1,4 +1,4 @@
-//! Abstract domains (SPECIFICATION.md §5.4, §7): `KeyVal`, `Lens`, `Source`, `Row`,
+//! Abstract domains (SPECIFICATION.md §2, §4.1): `KeyVal`, `Lens`, `Source`, `Row`,
 //! `ReqInfo`, `Value`, `classify`.  Port of `rowan/domain.py` over interned ids.
 
 use std::fmt;
@@ -760,7 +760,7 @@ impl Row {
         }
     }
 
-    // -- transfers (§7.3) --------------------------------------------------
+    // -- transfers (§4.1) --------------------------------------------------
     pub fn store(&self, k: KeyId, strong: bool) -> Row {
         let mut d = self.data();
         if strong && !d.order.contains(&k) {
@@ -1302,7 +1302,7 @@ pub fn chain_extend(chain: &[u32], more: &[u32]) -> Chain {
 }
 
 // ---------------------------------------------------------------------------
-// verdict classification (§3.1 / §13)
+// verdict classification (§10)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -1450,7 +1450,7 @@ pub fn classify(row: &Row, k: KeyId) -> Classification {
 }
 
 // ---------------------------------------------------------------------------
-// key values (§5.4)
+// key values (§2)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -1688,7 +1688,7 @@ pub fn kv_restrict(kv: &KeyVal, keys: &KeySet) -> Option<KeyVal> {
 }
 
 // ---------------------------------------------------------------------------
-// requirements (§7.4)
+// requirements (§9)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]

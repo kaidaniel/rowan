@@ -11,7 +11,7 @@ use crate::intern::{self, key_repr};
 use crate::interp::{Analyzer, Verdict};
 use crate::state::Kind;
 
-/// One verdict per (access site, key, call chain): per-target verdicts are combined (§13).
+/// One verdict per (access site, key, call chain): per-target verdicts are combined (§10).
 pub fn dedupe(verdicts: &[Verdict]) -> Vec<Verdict> {
     let mut groups: IndexMap<(String, u32, u32, String, Vec<u32>, Ns, String, bool), Vec<&Verdict>> = IndexMap::new();
     for v in verdicts {
@@ -395,7 +395,7 @@ fn row_json(r: &crate::domain::Row) -> J {
 
 /// The `--facts` document for editor integration: per (line, name) the value and the rows
 /// of the objects it may point to, the verdicts, and the schema table.
-/// A value as the user would write it, as far as it is known (spec §2.2): literals (`1`,
+/// A value as the user would write it, as far as it is known (SPECIFICATION.md §2.1): literals (`1`,
 /// `"a"`, several as `1 | 2 | ?`), dicts with their keys and values (`{"a": 1, "b"?: ?, **?}`),
 /// lists / tuples by position when known (`[1, 2]`, `(1,)`), else `list[X]` /
 /// `tuple[X, ...]`, instances as `Cls(a=1, **?)`, functions / classes by name, `?` for

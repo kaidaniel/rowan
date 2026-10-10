@@ -1,4 +1,4 @@
-//! Tensor shapes (SPECIFICATION.md §2.3): symbolic dims as normalised polynomials over atoms,
+//! Tensor shapes (SPECIFICATION.md §11.4): symbolic dims as normalised polynomials over atoms,
 //! shapes as `prefix, [*rest], suffix` with assumptions, constraints (requirements / facts),
 //! and the relational facts a path carries (`TFacts`: ranks and dim equalities).
 //!

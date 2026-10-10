@@ -1333,7 +1333,7 @@ impl Analyzer {
             self.set_cursor(o, None, state);
         }
         let mut pre = state.copy();
-        // dry run for exhaustive key iteration (§8.3)
+        // dry run for exhaustive key iteration (§5.2)
         let mut exh_ops: Vec<(u32, Ns, Row, KeySet, intern::LensId)> = Vec::new();
         let key_part = it.elem.key_part();
         if it.exhaustive && !has_jump {

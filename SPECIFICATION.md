@@ -1,838 +1,553 @@
-# rowan — an abstract interpreter for Python
+# rowan: specification
 
-Status: started as draft v0.1 of a design for *key-set inference on Python records*; the
-engine that implements it became a general abstract interpreter (§0, §2), and this document
-now describes it that way. Section numbers are kept (other documents cite them); open
-questions are collected in §17.
+How rowan works, as implemented in `rowan/` (Rust). The README shows what it does; this
+document says how and with what guarantees. Code names in `backticks` point into
+`rowan/src/`.
 
----
+## 1. Overview
 
-## 0. Summary
+rowan is a whole-program **abstract interpreter** for Python. It parses the program (ruff's
+parser) and walks the syntax tree directly, without an intermediate representation, executing
+it on abstract values:
 
-**What it does.** `rowan` is a whole-program abstract interpreter for Python. Every
-expression evaluates to an abstract *value*: a set of possibilities, each a literal
-(`1`, `"a"`, `None`), an abstract heap object (a dict, list, tuple, set, instance, class,
-function, closure, generator, iterator, module, exception, …) or *unknown* (`?`: data from
-outside, a parameter nobody passes, the result of unknown code). Objects carry what is
-known about their contents through *models*, one per kind of thing: the key sets of dicts
-and the attributes of instances (§2.1), list and tuple positions, literal arithmetic and
-comparisons, string operations, iterator cursors, dict insertion order, exception values,
-and models of the standard library and pandas (§11). Control flow (branches, loops,
-exceptions, `match`, `with`, generators, closures, calls) is interpreted over these values,
-per call site where it matters (§9).
+* a **value** is a set of possibilities: literals, abstract objects, or *unknown* (§2);
+* **objects** live in an abstract heap, identified by allocation site and context (§3);
+* the **state** at a program point maps names to values and objects to what is known about
+  their contents (§4);
+* both sides of every branch run, and their states are joined. Loops run to a fixpoint or
+  are unrolled (§5). Calls are interpreted per call site where that matters, and through
+  reusable summaries elsewhere (§6). Exceptions (§7) and generators (§8) follow their real
+  control flow;
+* library calls go to **models** that compute what the library would, exactly on known
+  values (§11);
+* along the way rowan records **requirements**, the keys the program reads from values that
+  came from outside (§9), and **verdicts** on every access (§10).
 
-What it reports, from those values:
+Design principles:
 
-1. **What each name holds** at each point, in a notation that reads like Python (§2.2): `{"id": 1, "role"?: "admin", **?}`, `[1, ?]`, `list[Order(id=?)]`, `1 | 2 | ?`.
-2. **Accesses that can fail** — a key or attribute that is definitely, possibly or likely missing, with tiers (§3.1).
-3. **Requirements on inputs** — which keys and attributes the program demands of values that enter from outside (`read_csv`, `json.load`, request bodies, env, parameters of functions nobody calls), propagated back to where they came from: the inferred schema (§3.2).
+* **One value domain.** Dicts, instances, lists, frames, tensors, strings and numbers are all
+  values. What is known about an object's contents comes from the model for its kind. An
+  unknown is the same `?` everywhere.
+* **Facts live on objects, not on names.** Aliasing is a question of which objects a name may
+  hold.
+* **Sound by default, attributed when not.** Where a result depends on code rowan cannot see,
+  the uncertainty is recorded with its cause (a `mutator`: "unknown call `lib.f` at L10"), and
+  the sound and the optimistic reading are kept side by side (§10).
+* **Exact on known data.** A library call on known values computes CPython's result: string
+  methods, formatting, arithmetic, `json.dumps` text, regex matches, SQL queries,
+  `datetime` arithmetic, pandas columns, tensor shapes.
 
-Key sets were the starting point and remain the model behind 2 and 3 (§2.1): may-set,
-must-set, closed/open, with every source of openness *attributed* to a program point. They
-are not privileged otherwise: an unknown dict value, list element, attribute or literal is
-the same `?`.
+## 2. Values
 
-**How.** Four stages: (1) Python → small SSA IR with an explicit heap and closures-as-objects; (2) points-to + call graph (Andersen-style, with context spent only where it matters: 1-call-site heap cloning for factory allocations, 1-object sensitivity for receivers); (3) per function, two abstract-interpretation fixpoints over a *row lattice* whose elements are symbolic in the function's inputs, so that a function's fixpoint directly yields a polymorphic summary (a jump function) instantiated at every call site — the IDE framework in abstract-interpretation clothing; (4) library models supply row transformers for stdlib/pandas, and a reporter turns rows + requirements into verdicts.
+`Value { pts, kv }` (`domain.rs`): `pts` is a set of object ids (§3), `kv` the scalar part:
 
-**Key decisions.**
-- D1 One value domain for everything; what is known about an object's contents comes from the model for its kind (§2). Key-addressed values (dicts, instances, DataFrame columns, namespaces, …) share one key-set model; types differ only in their models.
-- D2 Facts live on abstract heap objects, not on variables; aliasing is a points-to question (§6).
-- D3 Uncertainty is *attributed*, never collapsed to ⊤: "unknown function `lib.f` may have changed this" is carried alongside the optimistic key set, so a sound reading and a useful reading coexist in one value (§7, §10, §13).
-- D4 Context sensitivity through summaries (functional approach), not call strings; heap identity is the only k-limited thing (§9, §14).
-- D5 Soundness is relative to models and modulo Python's dynamic features — the same stance as pyright/mypy.
-
-**Out of scope (v1).** Keys built by arbitrary string computation, `getattr`/`setattr` with computed names, `exec`, metaclass magic, exhaustive pandas coverage, must-information through data-dependent recursion, Series index semantics.
-
-**Reading order.** §1–3 (what), §4–9 (how), §10–13 (edges and output), §14 (theory), §15 (implementation incl. SPARTA), §16–17 (limits, open questions), Appendix A (golden test cases).
-
----
-
-## 1. Goals, non-goals, success criteria
-
-**Goals**
-- G1 Schema inference for external inputs (CSV/Excel/SQL/JSON/env/argparse/request bodies/API responses) from usage, split into *always-read* and *sometimes-read*, with renames traced back to the source.
-- G2 Function documentation: for functions returning records, the returned keys (must/may/open) *as a function of the arguments' keys*.
-- G3 Diagnostics: (a) definitely-missing key on a closed row (typos, after projection/deletion/merge-suffixing); (b) possibly-missing (conditional construction); (c) likely-missing after unknown code; (d) data-derived key indexing a closed record.
-- G4 Developer-tool latency: whole-program first run in seconds for ~50k LOC; incremental re-analysis of a changed function and its dependents well under a second (engine phase, §15.3).
-- G5 Precision where naive tools fail: closures, factories, object state, kwargs plumbing — no merging by variable name.
-
-**Non-goals (v1).** Type inference as an end in itself (values are tracked as far as they matter for the reports and the notation); soundness against dynamic features beyond `exec`/`eval` of literal code; concurrency; pandas MultiIndex/row-label semantics.
-
-**Success criteria (prototype).** Zero false ✗ on the golden suite (Appendix A) and on the differential runtime harness (§15.4); every runtime-observed key set contained in the sound concretization; report volume on real repos within a budget set after a baseline run (target: a handful per KLOC, majority actionable).
-
----
-
-## 2. Values and models
-
-A value is a set of possibilities: literals, abstract objects (§6.1) and possibly *unknown*.
-An object's kind selects the models that describe its contents and behaviour: dicts and
-instances the key-set model below; lists and tuples positions (known length, known prefix,
-or any number of elements like `X`); generators and iterators a cursor; classes their
-attributes, MRO and protocol methods (`__getitem__`, `__iter__`, `__bool__`, descriptors,
-…); functions and closures their bodies and captured cells; library calls their models
-(§11). Unknown is one thing for every kind — an unknown dict value, list element, attribute
-or argument are all `?`.
-
-### 2.1 The key-set model (records)
-
-**Definition.** A *record* is any value addressable by a finite set of names. The key-set model manipulates triples `(object, namespace, key)`.
-
-**Namespaces**
-- `item` — `obj[key]` on dicts and dict subclasses, DataFrame columns, TypedDict, `os.environ`, `**kwargs`.
-- `attr` — `obj.name` on instances, modules, dataclasses, NamedTuples, `argparse.Namespace`, pandas `itertuples()` rows.
-
-`item` and `attr` are distinct namespaces on the same object. Models may alias them: DataFrame `df.col` ≡ `df["col"]` for identifier-like columns; `vars(o)` / `o.__dict__` expose `attr` as an `item` view of the same object.
-
-**Not records** (other models describe them)
-- Lists, tuples, sets: positions when known, else an element value (§2).
-- Instances of user classes defining `__getitem__` / `__getattr__`: `obj[k]` lowers to a method call and requirements flow through the method body. `Mapping` / `UserDict` subclasses are analysed through their methods unless a model says otherwise.
-- pandas Series: not a record (its index is row labels, i.e. data). Exceptions are the virtual rows produced by `iterrows` / `apply(axis=1)` / `itertuples`, which are records keyed by the frame's columns.
-
-**Keys.** Literals of type `str`, `int`, `bool`, tuples of those, and enum members are tracked; anything else is `Data` (§5.4).
-
-**Decision.** All type-specific semantics (what `merge`, `asdict`, `**` do to key sets) live in models (§11); the core never special-cases a type.
-
-### 2.2 Notation for values
-
-Values are printed as Python-like text (the text report, the editor hover, `--facts`):
-
-| Shown | Meaning |
+| `KeyVal` | meaning |
 | --- | --- |
-| `1`, `"a"`, `None` | a known literal |
-| `1 \| 2 \| ?` | one of several possibilities (`?` listed last) |
-| `?` | a value nothing is known about |
-| `a`, `a(b)`, `cfg["db"]`, `rows[*].name`, `json.loads(text)`, `1 + b` | an unknown value named in the program's own terms: a parameter, the result of a call rowan cannot see into, a read from another unknown (`[*]`: any element), an input, an expression over unknowns. A symbol is printed only where its names mean the same thing (inside its function; module-level ones everywhere); elsewhere the value is `?`. The legend under a value says what is known about each symbol (`a: ?`, `cfg: {"db": ?, **?}`). |
-| `{"id": 1, "role"?: "admin", "x"~: ?}` | a dict with exactly these keys: `"id"` always, `"role"` on some paths only (`?` after the key), `"x"` unless unknown code removed it (`~`) |
-| `{"id": 1, **?}` | the same, plus possibly other keys (an unknown dict spread in: the record is open) |
+| `Bot` | no scalar possibility (the value is only objects) |
+| `Lit(k)` | one literal |
+| `Lits(S)` | one of a finite set of literals (at most `MAX_LITS` = 64, beyond that `Data`) |
+| `KeysOf(objs, ns)` | one of the keys of these objects (a loop over `d`, `d.keys()`, `df.columns`) |
+| `Data(label)` | unknown. The label names it in the program's terms (`row["id"]`, `x.shape[0]`, `json.loads(text)`), types it when known (`str`, `int`, `len`), or encodes a tensor shape (§11.4) |
+| `Param(ph)` | the unknown value of a summary placeholder (§6.1) |
+
+**Literals** (`intern.rs`, interned to `KeyId`) are `str`, `bytes`, `int`, `float`, `bool`,
+`None`, tuples and frozensets of literals, `Decimal` and `Fraction` (compared by value),
+`datetime` values, Enum members, and the identity of single objects that hash by identity
+(functions, instances without `__eq__` / `__hash__`). `True`, `1` and `1.0` are one dict key, as
+in Python.
+
+### 2.1 Notation
+
+Values print as Python-like text (text report, editor hover, `--facts`):
+
+| shown | meaning |
+| --- | --- |
+| `1`, `"a"`, `None` | a literal |
+| `1 \| 2 \| ?` | one of several possibilities |
+| `?` | nothing known |
+| `a`, `cfg["db"]`, `rows[*].name`, `json.loads(text)`, `1 + b` | an unknown named by where it comes from. Printed only where the names mean the same (inside their function), elsewhere `?`; the hover's legend says what is known about each |
+| `{"id": 1, "role"?: "admin", "x"~: ?}` | a dict with these keys: `id` always, `role` on some paths, `x` unless unknown code removed it |
+| `{"id": 1, **?}` | the same, open: other keys may exist |
 | `Order(id=1, **?)` | an instance and its attributes, same marks |
-| `[1, ?]`, `(1,)` | a list / tuple with known positions |
-| `list[X]`, `set[X]`, `tuple[X, ...]` | any number of elements, each like `X` (`list[?]`: nothing known) |
-| `{…}`, `[…]`, `Name(…)`, `…` | left out by the printer (depth, more than eight entries, a cycle) |
-| `Tensor[B, T, 4*C]` | a tensor of that shape (§2.4); the legend names the dims (`B, T, C: x.shape`) |
-| `Tensor[*x.shape[:-1], 10]`, `Tensor[*, 10]` | leading dims as a slice of another tensor's shape / unknown in number |
-| `Tensor[…] (if x.dim() >= 2)` | a shape that holds under a rank assumption (`x @ y` with ranks unknown) |
+| `[1, ?]`, `(1,)`, `list[X]`, `set[X]` | known positions; any number of elements like `X` |
+| `Tensor[B, T, 4*C]`, `Tensor[*x.shape[:-1], 10]` | a tensor shape (§11.4) |
+| `{…}`, `[…]`, `…` | cut by the printer (depth, more than eight entries, a cycle) |
 
-### 2.3 Tensor shapes (PyTorch)
+## 3. Objects
 
-In a program that imports torch, tensors are values whose model is their *shape*: a list of
-symbolic dims, possibly with a *rest* of unknown length.
-- **Dims** are integer polynomials over atoms. The atoms are:
-  - `x.shape[i]`, the dims of an unknown named `x` (a parameter, an attribute read, an unknown
-    call's result, named by its variable);
-  - named ints (`n`, `self.n_embd`, `config.n_embd`);
-  - `a // k`, `a % k`, `max`, `min`;
-  - `?`, unknown.
+An object (`Obj`, `interp/mod.rs`) has a **kind** (`Kind`: Dict, List, Tuple, Set, Instance,
+Class, Function, Module, Frame, Series, Ph(aceholder), Unknown, …), a **payload** with
+kind-specific data (a function's code and closure cells, an instance's class, a view's dict),
+and an identity:
 
-  Two dims are equal when their difference normalises to 0, and different when it is a
-  nonzero constant; otherwise the question is undecided.
-- **A rest** is a slice of one unknown's shape (`*x.shape[:-1]`), a broadcast of rests, or
-  `*` (unknown).
-- **Operations check their conditions.** A condition decided false is a *shape error*: the
-  operation raises, and the path ends there. An undecided condition is a *requirement* at
-  that line (`x.shape[-1] == 512`, `x.dim() in (2, 3)`), and from there on it is a *fact* on
-  the path. The facts are ranks of unknowns and dim equalities (a substitution oriented to
-  literals, then named ints, then the earlier parameter). `assert` and `if` tests on dims and
-  ranks give facts too; joins keep the facts both sides have.
-- **Ranks unknown:** `x @ y` with unknown ranks is the ≥2-D case under the assumption
-  `x.dim() >= 2, y.dim() >= 2`, and the assumption disappears once the ranks are known.
-- **Dims that differ at a join** become one atom per set of alternatives (shown `?`). The atom
-  stays the same over loop iterations, so a requirement on it becomes a fact.
-- **Where symbols come from:**
-  - every function of such a module is also analysed on its own with open parameters;
-  - methods see `self` as built by `__init__` from open arguments;
-  - dims from `__init__` print through the shortest self-attribute path holding them, else in
-    `__init__`'s own names.
-- **Coverage.** The model covers:
-  - creation;
-  - elementwise ops with broadcasting;
-  - `matmul` / `mm` / `bmm` / `einsum`;
-  - shape ops (`view` with `-1`, `permute`, `transpose`, `squeeze`, `flatten`, `unflatten`,
-    `expand`, `repeat`, `chunk` / `split` / `unbind`, `cat` / `stack`);
-  - reductions;
-  - indexing (ints, slices, `None`, `...`, masks, index tensors);
-  - `nn` layers: Linear, Embedding, the norms, conv / pool / upsample formulas,
-    RNN / LSTM / GRU, MultiheadAttention, Transformer layers, Sequential / ModuleList /
-    ModuleDict;
-  - `torch.nn.functional`;
-  - user `nn.Module` subclasses (calling one runs `forward`).
+* **Site and context.** An allocation is identified by its site (the module-prefixed
+  `line:col`, plus `#i` per unrolled loop iteration) and a context: the call chain (up to
+  `chain` = 2 levels, hashed beyond), the receiver for methods, `sum<f>v<n>` inside a summary.
+  Executing the same site in the same context returns the same object.
+* **Single objects and weak ones.** An object that stands for at most one runtime object is
+  *single*. Stores into it are strong: they replace the old value. Allocating a site again
+  while its earlier object is still live (reachable from the state, `live_among`) gives a
+  *variant* (`ctx~1` … `ctx~8`). Past eight, the site's object is *merged*: rows and slots
+  then only join, which keeps a store into one runtime object from overwriting the others.
+* **Recency.** Inside a loop, the object allocated by the current iteration is a strong
+  recent object, folded into the site's summary object at the back edge.
+* Objects are never removed from the table: verdicts and facts refer to them. Garbage
+  collection (§6.7) removes their *state*, not the objects.
 
-  dtype and device are not modelled.
+## 4. State
 
----
+`State` (`state.rs`) is one program point on one path:
 
-## 3. Outputs
-
-### 3.1 Verdict tiers for an access
-
-For each load / `del` / `pop` / `[]+=` site `o[k]`, per target object, then combined (§13):
-
-| Tier | Condition | Reading |
-| --- | --- | --- |
-| ✓ proven | k ∈ definite.proven | sound |
-| ✓ likely | k ∈ definite.likely ∖ definite.proven (an unknown mutator touched o after k was established) | optimistic |
-| ⚠ possibly missing | k ∈ present ∖ definite — set on some path, not all; report names the store sites and their conditions | sound |
-| ✗ definitely missing | row closed and k ∉ present, or k ∈ absent.proven | sound |
-| ⚠ likely missing | k ∉ present and `open` contains only Mutator attributions — report names the calls that could have added it | optimistic |
-| ◌ input-dependent | k ∉ present and `open` contains Adder attributions — folded into the schema report, not a diagnostic | — |
-| ⚠ data key into record | k is `Data(…)` and o is a closed record (not a map, §12) | heuristic |
-| (none) | o is a map; `.get`, `in`, guarded loads | — |
-
-### 3.2 Schemas
-For every open source (an allocation carrying an `Adder` attribution): `always ⊆ sometimes` key sets; per key, the access sites that demanded it; disjunction groups ("`email`: in `orders.csv` or `customers.csv`"); renames traced back (`customer_id` ← `id`).
-
-### 3.3 Function summaries (human-readable)
-```
-build(user, admin) -> dict
-  returns : {id} ∪ {role}?                  closed
-  requires: user.attr ⊇ {id}
-public(rec) -> dict
-  returns : keys(rec) ∖ {password}
-point(**kw) -> dict
-  returns : {x, y} ∪ keys(kw)
-```
-
-### 3.4 Machine output (the JSON field names `row`, `present`, `definite`, `closed` describe the key-set model of §2.1)
-JSON lines: `{"kind": "verdict" | "schema" | "summary", "site": "file:line:col", "object": "<stable id>", …}`. Object ids are `alloc@file:line:col[context]`, stable across runs for IDE integration.
-
----
-
-## 4. Architecture
-
-```
- .py files ──► Frontend (§5) ──► IR: SSA locals, CFG, explicit heap ops
-                                      │
-                                      ▼
-                         Points-to + call graph (§6)
-                                      │
-                                      ▼
-     ┌── per function, in call-graph SCC order (§8, §9) ──────────────────┐
-     │   forward  : object ↦ RowExpr   (provision, symbolic in inputs)     │
-     │   backward : object ↦ Req       (requirement)                       │
-     │   summary  = exit RowExpr / entry Req per placeholder + return      │
-     └──────────────────────────────────────────────────────────────────────┘
-                                      │        ▲
-                                      ▼        │  models (§11)
-                                 Reporter (§13)
-```
-
-Everything upstream of the fixpoints is Python-specific. The fixpoints are generic lattice machinery (§14). Models are a registry.
-
----
-
-## 5. Frontend and IR
-
-### 5.1 Inputs
-A package root and/or entry files. Imports are resolved against configured roots. Third-party and stdlib modules are not analysed unless pure-Python and opted in; they are covered by models or treated as unknown (§10). Type stubs (typeshed, pandas-stubs) are consulted only for *return kinds* (record / frame / container / scalar) and for declared parameter types used as points-to seeds (§6.3).
-
-### 5.2 IR
-Per function: a CFG of basic blocks; locals in SSA (phi at joins); the heap explicit.
-
-```
-v = const c                       # literal: str / int / bool / None / tuple of consts
-v = alloc site kind               # kind ∈ {dict, list, set, tuple, obj(class), closure(fn), cell, virtual}
-v = load   o ns k                 # k is an IR value; ns ∈ {item, attr}
-    store  o ns k v
-    delete o ns k
-v = call   f args kwargs          # f is an IR value; *args / **kwargs flagged
-v = phi    [(pred_block, v_i)]
-    branch cond → true_block, false_block
-    ret v
-    raise v
-v = iter   o kind                 # kind ∈ {keys, items, values, elems}; v is the loop variable
-    guard  cond                   # marker on CFG edges for narrowing (§8.4)
-```
-Every instruction keeps its source position. Loads carry a `guarded` flag (§5.3).
-
-### 5.3 Lowering rules
-
-| Python | IR |
+| field | holds |
 | --- | --- |
-| `d = {"a": x, **e}` | `alloc dict`; `store d item "a" x`; copy `e → d` (model `dict.update`) |
-| `d[k] = v`, `d[k]`, `del d[k]` | store / load / delete |
-| `d[k] += v` | load then store |
-| `o.a`, `o.a = v` (incl. `self`) | load / store with ns = attr |
-| `{k: f(v) for k, v in src.items()}` | own scope; `alloc dict`; loop over `iter src items`; store |
-| list/set comprehensions | own scope; container alloc; element stores |
-| dict union operator (PEP 584), `{**d, **e}` | fresh dict + two copies |
-| `for k in d`, `d.keys()`, `d.items()` | `iter d keys/items` |
-| `for x in lst` | `iter lst elems` |
-| `with ctx as v` | `v = call ctx.__enter__`; `__exit__` call on every exit edge |
-| `@dec def f` | `f = call dec f0` |
-| `lambda`, nested `def` | `alloc closure` with captured cells; free variables read/written through cells; `nonlocal` write = store to cell |
-| `class C:` body | module-level `alloc obj(class)`; methods are functions with a `self` placeholder (§9.2) |
-| `try: … except KeyError/LookupError/Exception/bare:` | loads in the `try` body get `guarded` |
-| `assert cond`, `if cond` | `guard` on the outgoing edges |
-| `functools.partial(f, a)` | model: closure-like object binding `a` |
-| conditional expression, walrus, chained comparison, star-unpacking | standard desugaring |
-| `global g` write | store to the module object's attr slot |
-| `yield v` (v1) | element store into the generator's virtual container; `await` transparent |
+| `env` | local names → values |
+| `rows` | `(object, namespace)` → `Row`: the key-set model (§4.1) |
+| `slots` | object → `(namespace, key)` → value: what is stored under each key |
+| `elems` | object → the scalar part of its elements |
+| `lens` | object → (known length, known prefix), per path |
+| `lasts` | object → the element appended last (`xs[-1]` after appends of unknown position) |
+| `reqs` | source → key → requirement (§9) |
+| `facts` | conditional facts: rows a branch had, restored when the same test recurs (§5.1) |
+| `tf` | tensor facts: ranks and dim equalities on this path (§11.4) |
+| `ret`, `exits` | the returned value so far; the states of paths that returned |
+| `reachable` | false after a `raise`, `return`, `break`, or a call whose every path raises |
 
-### 5.4 Key values (string domain)
-Every IR value has a `KeyVal`, its abstract value when used as a key, computed by constant propagation over SSA:
+**Namespaces** (`Ns`): `Item` (`d[k]`, frame columns), `Attr` (`o.k`), `Cell` (closure cells),
+`Pos` (list and tuple positions), `Elem` (any element), `Meta` (pandas index, labels, dtypes).
 
-```
-KeyVal ::= Lit(k)                 # one tracked literal
-         | Lits(S)                # finite set, |S| ≤ 64: literal containers; loop variables over them
-         | Param(p)               # the value of placeholder p of the enclosing function (resolved at call sites)
-         | KeysOf(o, ns)          # keys of object o   (from `iter o keys/items`, `o.columns`, `o.to_dict()`)
-         | ElemsOf(o)             # elements of a container object (from `iter o elems`)
-         | Map(f, KeyVal)         # f ∈ {upper, lower, strip, title, prefix(s), suffix(s), replace(a,b), str, int}
-         | Data(site)             # anything else
-```
-A KeyVal may be a bounded disjunction (≤ 4 atoms); overflow → `Data`. An f-string with one hole and literal surroundings yields `Map(prefix/suffix, KeyVal(hole))`; other f-strings → `Data`. Cross-module constants (`from consts import KEY`) resolve through the module object's attr slot. Patterns (v2): a bounded vocabulary of `prefix*` keys so that `d[f"col_{i}"]` can match `d["col_3"]` as "possibly".
+**Persistence** (`layered.rs`). The maps are persistent big-endian Patricia tries on integer
+keys (Okasaki and Gill, as in SPARTA's `PatriciaTreeMap`):
+* copying a state is O(1);
+* a write copies the path to its leaf (in place when no copy shares it);
+* `join`, `same` and `diff_keys` skip the subtrees two states share, so they cost what the
+  states differ in.
 
-**Decision.** `ast` (CPython) is the parser: it is the only one guaranteed to track the running language version. LibCST only if an editor integration needs lossless positions.
+`slots` and `reqs` keep a copy-on-write hash map per object or source (`TwoLevel`).
 
----
+**Joins.** At a merge point two states join pointwise: names join their values (a name bound on
+one side only keeps that side's value), rows and slots join, lengths join to the shorter known
+prefix, facts both sides hold are kept.
 
-## 6. Points-to and call graph
+### 4.1 Rows: the key-set model
 
-### 6.1 Abstract objects
-`AbstractObject = (allocation site, heap context)`, interned to `ObjectId`.
+A `Row` describes the keys of one object in one namespace (`RowData`, `domain.rs`):
 
-- **Sites.** Every `alloc`; every modelled call that returns a fresh record/frame/container (`read_csv@L`, `merge@L`); every open source; placeholders (§9.2); access-path placeholders under open sources (`cfg["db"]` when `cfg` is open), k-limited to depth 3.
-- **Heap context — 1-call-site cloning.** An allocation inside function `f`, executed on behalf of call site `c` of `f`, gets context `c`: one clone per call site of the allocating function. Deeper call chains keep only the innermost call site (k = 1). Module-level allocations have the empty context.
-- **Receiver context — 1-object.** Allocations inside a *method* are cloned per receiver object instead of per call site, so each `Cache()` site gets its own `self.store`. Combined rule: context = receiver object if the allocating function is a method, else the call site.
-- **Single flag.** An object is *single* if its site executes at most once per context: the site is not inside a loop in its function, the context's call site is not inside a loop, and the allocating function is not in a recursive SCC. Only single objects receive strong updates.
+| field | meaning |
+| --- | --- |
+| `present` | keys that may be there |
+| `definite` | keys there on every path (`⊆ present`) |
+| `likely` | keys there unless unknown code removed them (`⊇ definite`) |
+| `absent`, `absent_likely` | keys surely (likely) not there: deleted, renamed away, projected out |
+| `sources` | open sources the row may hold keys of (an input, a data key), each with a *lens* (renames, kills, prefixes applied since) |
+| `mutators` | unknown code that may have changed the object (e.g. an unknown call at L10) |
+| `top` | nothing known |
+| `terms`, `dterms`, `lterms`, `pstores` | in summaries: keys of a placeholder's entry row (present / definite / likely), and stores whose key is a placeholder's value (§6.1) |
+| `order` | insertion order of the keys stored strongly (dict iteration order) |
 
-### 6.2 Slots
-`(ObjectId, ns, key) → PointsToSet` for literal keys; `(ObjectId, ns, *)` for non-literal keys; `(ObjectId, elem)` for containers; `(closure, cell_i)`; `(module, attr)`; `(class, attr)` for class attributes and methods; `(instance, attr)` falls back to the class MRO. Dicts are therefore field-sensitive on literal keys, so `cfg["db"]["host"]` reaches the right inner object.
+A row with no sources, mutators or `top` is **closed**: its keys are exactly `present`. Joins
+take the union of `present`, `sources` and `mutators` and the intersection of `definite`,
+`likely` and `absent`.
 
-Containers additionally record `elems : KeyVal` (join of their literal elements), so `["clicks", "views"]` gives `ElemsOf → Lits({clicks, views})`.
+Transfers:
+* a strong store adds the key to `present`, `definite` and `likely`; a weak store adds it to
+  `present` only;
+* a strong delete adds the key to `absent`;
+* copying a record (`{**r}`, `dict(r)`, `update`) adds its keys, terms and sources;
+* an unknown call adds a mutator and empties `definite`, keeping `likely` (§6.5);
+* a store under an unknown key (`d[f(x)] = 1`) adds a data source;
+* a successful read narrows the key in: after `r["x"]` the program went on, so `x` was there.
 
-### 6.3 Resolution
-Inclusion (Andersen) constraints over SSA values and slots, solved by a worklist; flow-insensitive on the heap, flow-sensitive on locals via SSA.
+### 4.2 Positions and elements
 
-- `call f` with `f` pointing to function objects → direct edges; closures bind cells; bound methods bind `self`.
-- `o.m(…)` → MRO lookup on the classes of `o`'s objects; several classes → several targets, joined at analysis time (§9.6).
-- `C(…)` → fresh instance + `__init__`.
-- Modelled callables → the model decides (may create virtual objects, may invoke callbacks with virtual arguments).
-- Unresolvable (`getattr` with computed name, unknown module, dynamic) → *unknown call* (§10).
-- Annotation seeds: a parameter annotated with class `C` points to a placeholder instance of `C`; `-> pd.DataFrame` makes the return value a frame object; TypedDict / dataclass annotations give the placeholder a *declared row* (§8.5).
+Lists and tuples keep positions in `Pos` slots while they are known:
+* literal containers, appends (also in branches: the length is per path), decided
+  comprehensions, sorts by literal keys, slices, `zip` / `enumerate` / `map` over known items;
+* `if items:` gives a list of unknown length a first element on that path;
+* a list of unknown length keeps the *prefix* that is known on every path;
+* otherwise one `Elem` slot holds the join of all elements.
+
+Dicts keep insertion order (`Row.order`). Iterating a dict whose keys are known in order runs
+each key, a key present only on some paths both run and skipped.
+
+## 5. Statements
+
+### 5.1 Branches and narrowing
+
+Both branches of an `if` run on copies of the state unless the test is decided. The test
+narrows each branch:
+
+* `k in d` / `k not in d`, `d.get(k) is None`, `hasattr` narrow the row;
+* `x is None` and comparisons with literals narrow the name;
+* `isinstance(x, C)` narrows to objects of `C` (an unknown class keeps everything);
+* truthiness drops `None`, `0`, `""` and known-empty containers on the true branch;
+* `obj.attr == lit` narrows the attribute.
+
+An unknown key tested `in` a closed dict of string keys narrows to those keys. A test assigned
+to a name (`flag = k in d`) narrows when the name is tested later. When the same test recurs
+after a join (`if flag: … if flag: …`), each branch gets back the rows it had (`CondFact`).
+`while` and `match` narrow the same way; a `match` case that cannot match is skipped, one that
+surely matches ends the match.
+
+### 5.2 Loops
+
+* A loop over a known iterable of at most `UNROLL_MAX` (16) items is **unrolled**: each
+  iteration runs with its item, and `break` / `continue` rejoin where Python would.
+* The known prefix of a list of unknown length runs first, unrolled; the rest runs as a
+  fixpoint.
+* Other loops iterate to a **fixpoint**: the head joins the entry state with the back edge
+  until it stops changing, at most `LOOP_MAX_ITER` (40) rounds. At the cap, what still changes
+  is widened (open rows, unknown values), so the exit state is a post-fixpoint.
+* A loop over a dict's keys that stores under every key leaves those keys definite.
+* After a loop, a later `if xs:` gets the rows the iterations left (the loop ran at least once
+  exactly when the iterable was non-empty).
+
+### 5.3 Other statements
+
+* `with` calls `__enter__` / `__exit__`. A `@contextmanager` runs its generator, and the `with`
+  body runs at every `yield` the generator reaches, each from that yield's state; the caller's
+  names after the `with` join over them. An `__exit__` returning true swallows the exception.
+* Comprehensions have their own scope, decided when their iterable is known.
+* `del`, augmented assignment, star unpacking, the walrus operator, `global` / `nonlocal`
+  (through module slots and cells) and class bodies run as written.
+
+## 6. Calls
+
+### 6.1 Summaries
+
+A function body is analysed once per *signature variant* against **placeholders**: one per
+parameter, `self`, closure cell, and each access path below them that the body touches
+(`self.store`, `cfg["db"]`), up to `PATH_DEPTH` (3). The variant is the classes of the receiver
+and of instance arguments, and the code in the closure cells, up to `MAX_SIGNATURES` (8). The
+result, a `Summary` (`summary.rs`), holds:
+
+* the **footprint**: the rows, slots and elements that differ between entry and exit, for
+  objects the caller can reach;
+* the returned value; the requirements recorded on placeholders; verdicts relative to the
+  placeholders;
+* **events**: places where the body lost information about a placeholder (§6.2);
+* whether it may raise, the classes it may raise (§7), and whether any path completes.
+
+At a call site the summary is **instantiated**:
+1. placeholders are bound to the caller's objects and values;
+2. the footprint is substituted and applied: strong when a placeholder is bound to one single
+   object, joined otherwise;
+3. objects allocated in the body are cloned into the call's context;
+4. requirements and verdicts are re-expressed in the caller's terms.
+
+A summary whose every path raises ends the caller's path.
+
+### 6.2 Tabulation: re-analysing a call site
+
+Instantiation is exact only where the body did not depend on what the placeholders hold. The
+body records an **event** wherever it did:
+* a call or method dispatch through a parameter;
+* `isinstance`, truthiness, `in`, iteration, `.get`, arithmetic or formatting on a parameter;
+* a subscript of a parameter by position;
+* a model's `concrete` event (a pandas call on a parameter, a known text a reader parses).
+
+When a call site's arguments decide one of these events (a real function, a literal, a known
+container), the body is run concretely at that call site instead: it is **tabulated**.
+Tabulation is limited to 256 runs per function and event kind, 8 runs of a recursive call at
+one site inside a loop, and the soft deadline (§6.8). The **call cache** replays a tabulated
+call's footprint when the same callee meets the same observable input again.
+
+### 6.3 Recursion
+
+A function reached again while it is being analysed uses the partial summary of the previous
+round. The function iterates until its return value, exit state and requirements are stable,
+for at most `MAX_SUMMARY_ROUNDS` (3) rounds in summaries and `REC_MAX_ITER` (8) when tabulated.
+A recursion that does not converge widens its result and the rows it touched. At most
+`MAX_ACTIVE` (4) activations of one function are run at once.
 
 ### 6.4 Entry points
-Functions never called inside the program (CLI mains, framework handlers, tests) are analysed with all parameters as open `Adder` sources, so their requirements become schemas (request bodies, CLI args). A config list of framework decorators (`@app.get`, `@celery.task`, …) marks handlers explicitly; the heuristic default is "uncalled and decorated".
 
----
+Functions nobody in the program calls (library code, handlers, CLI mains) are analysed with
+open parameters: their requirements become schemas (`param F.x`), and their variables get
+results too. Functions that are called also get a quiet, requirement-only run with open
+parameters, which gives their own contract. FastAPI handlers are entry points with an open
+request (§11.3). Torch modules analyse every function on its own.
 
-## 7. Abstract domains
+### 6.5 Unknown calls
 
-### 7.1 Attributions
-```
-Attr ::= Adder(site) | Mutator(site) | Top
-```
-- `Adder` — a source that can only *add* unknown keys: `read_csv@L`, `json.load@L`, a store with a `Data` key at L, an entry-point parameter, `**` of an open dict.
-- `Mutator` — unknown code that could add *or remove* keys: an unknown call at L, an escape at L (§10).
-- `Top` — nothing known (the lattice ⊤).
+A call rowan cannot resolve or model (an unknown import, a dynamic callee):
+* records a **mutator** on every record reachable from its arguments and receiver (at most
+  `MAX_MUTATED`, 24), which drops their `definite` keys but keeps `likely`;
+* returns a fresh unknown object whose rows join the argument records (an unknown call may
+  return one of them). With more than `MAX_ARG_JOIN` (64) records it returns an open row
+  instead;
+* may raise anything;
+* is listed in the report's notes.
 
-### 7.2 Row (provision)
-For one object at one program point:
+A small set of calls known not to touch their arguments (`print`, logging, `len`, `str`, …) has
+no effect.
 
-```
-Row = ⟨ present  ⊆ K            keys with positive evidence (may)
-        definite ⊆ present      keys present on all paths      — a pair (likely ⊇ proven)
-        absent   ⊆ K            keys known removed / excluded  — a pair (likely ⊇ proven)
-        open     ⊆ Attr         ∅ ⇒ closed row ⟩
-```
-`proven` variants are what sound reasoning may use; `likely` variants survive unknown mutators. They coincide until a `Mutator` attribution is added, at which point both `proven` sets become ∅ while `likely` is kept; later strong stores/deletes add to both again.
+### 6.6 Classes, closures, decorators
 
-- **Order / join** (componentwise): `present` ∪, `open` ∪, every `definite`/`absent` variant ∩. ⊥ = unreachable (flag). ⊤ = `⟨∅, ∅, ∅, {Top}⟩`.
-- **Sound concretization.** `γ(r) = { S | definite.proven ⊆ S, S ∩ absent.proven = ∅, open = ∅ ⇒ S ⊆ present }`. When `open ≠ ∅`, `present` is not part of γ; it is evidence used by the optimistic reading, which substitutes `likely` for `proven` and treats `present` as the candidate set with `open` as the list of things that could violate it.
-- **Invariants** maintained by every transfer: `definite ⊆ present`; `present ∩ absent = ∅`. `absent` only carries information when `open ≠ ∅` (a closed row is absent everywhere outside `present` by definition).
+* **Classes:** C3 MRO, properties and descriptors, `__getattr__`, `__getitem__` / `__iter__` /
+  `__missing__` / `__eq__` / `__lt__` and the other protocol methods, `super()`, class
+  attributes.
+* **Dataclasses** (field specs, `InitVar`, `KW_ONLY`, `frozen`, `order`, `replace`), Enum
+  (members are keys), NamedTuple and TypedDict.
+* **Closures** capture cells: two closures from one factory call have their own cells.
+* **Decorators** run as calls; `functools.wraps`, `lru_cache`, `cached_property`,
+  `singledispatch`, `total_ordering`, `property`, `staticmethod` and `classmethod` are
+  modelled.
+* **Annotations.** An annotation types a placeholder only through wrappers that keep the
+  value's class (`Optional`, `Annotated`, `Final`, `ClassVar`, a union with `None` and one
+  class). `list[Foo]` is a list, not a `Foo`; a union of several classes types nothing. The
+  hinted class also filters the argument's objects at instantiation: a call that violates the
+  hint gets the hinted class's behaviour (§13).
 
-### 7.3 RowExpr (symbolic rows, for summaries)
-`RowExpr = Row + terms`, where terms reference placeholders ρ (§9.2):
+### 6.7 Garbage collection
 
-```
-terms_present  : { ρ ↦ (kill ⊆ K, rename) }     contributes rename(ρ.present  ∖ kill)
-terms_definite : { ρ ↦ (kill ⊆ K, rename) }     contributes rename(ρ.definite ∖ kill); placeholders ⊆ those of terms_present
-rename         : finite partial map K → K  |  named transformer (upper, lower, prefix(s), …)  |  identity
-```
-Meaning: `present(r) = present ∪ ⋃_ρ rename_ρ(ρ.present ∖ kill_ρ)`; likewise for `definite`; `open(r) = open ∪ ⋃_ρ ρ.open`.
+At every `return`, in tabulated calls and summary runs, objects the call allocated that are no
+longer reachable lose their state (`drop_garbage_at_return`). Dead objects then stop costing
+joins and comparisons, and allocation sites stay strong (§3). Reachability starts from these
+roots:
+* the returned value;
+* what older objects' changed slots hold (globals, parameters' records, cells);
+* the call's placeholders and unknown objects, since they stand for objects outside the call;
+* the analyzer's side tables and value stacks (`gc_pinned`).
 
-**Transfers** (literal parts are pointwise; the terms column states the extra effect):
+It follows slots, element kinds, payloads and side tables (`obj_edges`). Parts of an input
+(unknown objects, path placeholders) are never collected: the same path finds them again by
+their site. `ROWAN_GC=0` restricts collection to returns of values without objects.
 
-| transfer | literal sets | terms |
+### 6.8 Deadlines
+
+* **Soft deadline**, `ms` = 2 s: no new tabulations; summaries are used instead.
+* **Hard deadline**, `hard` = 5 × the soft one: calls of user code become unknown calls, and
+  entry runs stop, so the run ends in bounded time with a sound but less precise result.
+
+Both are set through `ROWAN_LIMITS`. Results of a run cut by a deadline depend on the
+machine's speed.
+
+## 7. Exceptions
+
+Each `try` collects **raise states**: the state at each point that may raise, per exception
+class.
+* A class is named by its MRO; builtin classes come with their bases (`EXC_BASES`), and
+  library classes are module-qualified.
+* Each handler starts from the raises it may catch that no earlier handler surely catches; the
+  rest go to the enclosing `try`, or leave the call (a summary records which classes).
+* An exception object carries its `args`, `str` and `repr`, and model raises carry their real
+  attributes (a `JSONDecodeError`'s `msg`, `pos`, `lineno`, `colno`; a pydantic
+  `ValidationError`'s `errors()`).
+* A bare `raise` re-raises the handled value.
+* `finally` runs on every way out. `contextlib.suppress`, `ExitStack` and `with` blocks that
+  swallow work as at runtime.
+* A read inside a `try` whose handler catches its `KeyError` still records the key as
+  required: the exception fires when the key is missing, whether caught or not (§9).
+* A frame column read that may fail records its `KeyError` before it narrows the frame to
+  having the column, so the handler starts from before the read.
+
+## 8. Generators and iterators
+
+Calling a generator function runs its body eagerly, at the call site. The items are a list
+object (`gen:<f>`), with known positions where the yields are straight-line or in decided
+branches, and a known prefix for endless generators.
+
+* **One-shot.** A generator keeps a cursor: a loop or `next` consumes items, and a `break`
+  leaves the rest for a later consumer.
+* **Effects per item.** Objects the body changes before each yield hold, for a consumer, the
+  state at that yield (`GenEffects`). A consumer that takes item *k* sees the effects up to
+  yield *k*.
+* **Lazy wrappers.** `zip`, `map`, `filter` and `islice` over generators pull items as CPython
+  would (`zip` stops at the shortest input).
+* `yield from` delegates and evaluates to the generator's return value.
+* **Iterator protocol.** An iterator class whose `__iter__` returns `self` is iterated through
+  `__next__`.
+
+## 9. Requirements and schemas
+
+A read of a key from an object whose row includes an open source (an input) is a
+**requirement** on that source.
+
+* **Sources.** `json.load(s)`, `read_csv` and the other readers, `os.environ`, request bodies,
+  the parameters of entry points, unknown call results; the open parts of their contents are
+  sources too (`json.loads@L8['database']`, `param f.rows['*']`). Lenses map a key read after a
+  rename back to the source's own name.
+* **always / sometimes.** A key read on every path from the source's creation is `always`, one
+  read on some paths only `sometimes`. Reads in a loop over a source's elements are `always`
+  per element. A read behind `if k in src`, or with `.get`, requires nothing.
+* **Guarded reads.** A read under a handler that catches its `KeyError` is still required:
+  dropping the key makes the exception fire. That is the rule the runtime oracle checks.
+* **Propagation.** Requirements recorded on a summary's placeholders are substituted at each
+  call into the caller's sources. A function's own contract is its `param F.x` schema.
+* **Disjunctions.** A key provided by one of several sources, or under one of several names,
+  is reported as alternatives (`'amount' | 'amt'`).
+
+## 10. Verdicts
+
+Every key or attribute read, `del` and `pop` gets a verdict per target object, from that
+object's row (`classify`, `domain.rs`):
+
+| tier | when | reading |
 | --- | --- | --- |
-| strong store k | present ∪{k}; definite(both) ∪{k}; absent(both) ∖{k} | — |
-| weak store k | present ∪{k}; absent.likely ∖{k} | — |
-| store with key `Data(site)` | open ∪{Adder(site)} | — |
-| strong delete k | present ∖{k}; definite ∖{k}; absent(both) ∪{k} | every ρ: kill ∪{k} |
-| weak delete k | definite(both) ∖{k} | — |
-| rename m | m applied to present/definite; absent := ∅ unless closed | rename := m ∘ rename |
-| project to C (`df[[…]]`, `usecols`, `df.columns = …`) | present := C; definite(both) := C (projection raises on missing); open := ∅ | terms := ∅ |
-| copy from r₂ (`{**r₂}`, `dict(r₂)`, `update`, merge/concat side) | present ∪ present₂; definite ∪ definite₂ (strong) or unchanged (weak); absent ∖ present₂, and := ∅ if open₂ ≠ ∅; open ∪ open₂ | terms ∪ terms₂ |
-| mutator at L | open ∪{Mutator(L)}; proven variants := ∅ | — |
+| `proven` ✓ | the key is `definite` | sound |
+| `likely` ✓~ | `likely` but not `definite`: an unknown call ran since it was set | optimistic |
+| `possibly` ⚠ | `present` but not `definite` | sound |
+| `missing` ✗ | the row is closed and lacks the key, or the key is `absent` | sound |
+| `likely-missing` ⚠~ | not present, and only mutators keep the row open | optimistic |
+| `input` ◌ | not present, and the row is open through an input: becomes a schema entry | — |
+| `datakey` | an unknown key into a closed record | heuristic |
+| `map`, `unknown`, `symbolic` | a dict keyed by data; nothing known; a summary placeholder's row (decided at instantiation) | — |
 
-**Join of RowExprs.** Literal parts as in Row. `terms_present`: union over placeholders; for a shared ρ, `kill = kill₁ ∩ kill₂`; differing renames are kept as a term list (cap 4), beyond that degrade to `open ∪ {Top-rename@L}`. `terms_definite`: intersection over placeholders, `kill = kill₁ ∪ kill₂`, renames must agree.
-
-**Composition is substitution.** Instantiating ρ with a RowExpr r′ yields a RowExpr (the terms of r′ become terms of the result with composed kills/renames). The class is closed under substitution and join — exactly the condition the IDE framework places on jump functions (§14).
-
-### 7.4 Req (requirement, backward)
-```
-Req     = ⟨ always ⊆ KeyTerm, sometimes ⊆ KeyTerm ⟩,  always ⊆ sometimes
-KeyTerm ::= Lit(k) | Param(p) | Map(f, KeyTerm) | ElemsOf(ρ) | KeysOf(ρ) | Data(site)
-```
-Join (backward merge, i.e. at CFG splits): `always` ∩, `sometimes` ∪. Backward transfers at a node, for object o:
-
-| node | effect on Req(o) |
-| --- | --- |
-| unguarded load / delete / `pop` without default `o[k]` | sometimes ∪{k}; always ∪{k} if k is a single term |
-| `.get`, `in`, `setdefault`, `pop(k, default)` | — |
-| load under `try … except KeyError` / `suppress(KeyError)` | as an unguarded load: the exception fires when k is missing, caught or not (the runtime oracle's rule); the handler's path keeps the requirement |
-| strong store `o[k] = v` | always ∖{k}; sometimes ∖{k} |
-| weak store | always ∖{k} |
-| `o₂` derived from `o` by copy / rename / projection (model edge) | Req(o) ∪= rename⁻¹(Req(o₂)) |
-| `o₂` derived from `o` and `o′` by union (merge, concat) | sometimes(o) ∪= Req(o₂); plus a disjunction-group id for the report; `on`-keys go to `always` of both |
-| call | callee Req over placeholders, `Param(p)` substituted by the call-site KeyVal of the argument, transferred to the actual objects |
-| allocation / open source | terminal: schema entry (open) or discharged (closed; redundant with the forward pass) |
-
-### 7.5 State
-Forward state at a program point: `ObjectId ↦ RowExpr` (absent key ⇒ ⊤; the whole map is ⊥ at unreachable points). Backward state: `ObjectId ↦ Req` (absent key ⇒ no requirement).
-
----
-
-## 8. Intraprocedural analysis
-
-### 8.1 Forward pass
-Abstract interpretation over the CFG with the transfers of §7.3, applied to the objects an instruction touches according to points-to. A store through a value that points to several objects, or to a non-single object, is weak; otherwise strong. Loads narrow (§8.4). Fixpoint: Bourdoncle weak topological ordering + worklist. The lattice is finite, so no widening is needed for termination; the caps on term lists and KeyVal disjunctions are the only widenings.
-
-### 8.2 Backward pass
-The CFG reversed, with the transfers of §7.4. Runs after the forward pass of the same function (it needs strong/weak classification, guard flags and narrowing). Requirements reaching a placeholder become part of the function's Req summary; those reaching a local allocation are discharged (closed) or become schema entries (open).
-
-### 8.3 Loops
-- General loops: ordinary fixpoint. Stores in a loop are weak unless the target object was allocated in the same iteration (the single flag is tracked with loop depth).
-- **Exhaustive literal loops.** `for v in e` where `KeyVal(e) ∈ {Lits(S), ElemsOf(o) with elems = Lits(S)}`, `S ≠ ∅`, and the body executes `store o[v]` on every iteration (the store dominates the back-edge; no `break` / `continue` / `return` / `raise` before it): on the loop's normal-exit edge apply a strong store of every `k ∈ S`. This is what makes `{f: 0 for f in ["a", "b"]}` a closed, definite row without unrolling.
-
-### 8.4 Narrowing (guards)
-Edge transfers on the true/false CFG edges, applied to every object the tested value points to (definite form only for single objects; otherwise present-only):
-
-| condition (true edge) | effect |
-| --- | --- |
-| `k in o`, `o.get(k) is not None`, `o.get(k)` truthy, `k in df.columns`, `hasattr(o, k)` | definite(both) ∪{k} |
-| `k not in o`, or the false edge of the row above | present ∖{k}; absent(both) ∪{k} |
-| `S <= o.keys()`, `set(S).issubset(o)`, `all(k in o for k in S)` with `Lits(S)` | definite ∪ S |
-| `assert cond` | as `if cond` with the false edge unreachable |
-| successful unguarded load `o[k]` (fall-through edge) | definite(both) ∪{k} — "if execution continued, k was there" |
-| load inside `try … except KeyError` | guarded: no verdict, but a requirement (its KeyError fires for k); no narrowing on the handler path |
-| `isinstance(o, dict)`, TypedDict narrowing | v2 |
-
-The fall-through rule is how requirement facts feed provision facts; the merge-suffix case (Appendix A, case 9) depends on it.
-
-### 8.5 Declared rows
-TypedDict, dataclass, NamedTuple, pydantic and `attrs` definitions yield a *declared row*: `present = definite = fields`, closed; `total=False` / optional fields are present-only; pydantic `extra="allow"` → open `Adder`. Used (a) as the entry row of placeholder parameters annotated with them, (b) as a check against the inferred return row of functions annotated `-> T` ("returns {…} but declares T"), (c) by the `asdict()` / `vars()` models.
-
----
-
-## 9. Interprocedural analysis
-
-### 9.1 Order
-Condense the call graph into SCCs; process bottom-up. Inside an SCC, iterate all member summaries to a fixpoint, starting from ⊥ summaries (returns ⊥, no effects, no requirements). Bounded by lattice height; 2–3 rounds in practice.
-
-### 9.2 Placeholders
-A summary is expressed over placeholders ρ, one for each of:
-- parameter (positional, keyword-only; `*args` as a container; `**kwargs` as a dict record),
-- captured cell (closures),
-- module global read or written,
-- `self`, and every access path from a placeholder that the body touches (`self.store`, `cfg["db"]`), k-limited to depth 3,
-- the receiver's class attributes.
-
-On entry each placeholder object has `RowExpr = ⟨∅, ∅, ∅, ∅⟩ + terms {ρ ↦ (∅, identity)}` — "whatever the caller passes".
-
-### 9.3 Summary
-```
-Summary(f) = { placeholder-rooted path ↦ RowExpr at exit }        effects
-           ∪ { return ↦ RowExpr | fresh object(s) }
-           ∪ { placeholder-rooted path ↦ Req at entry }           requirements
-           ∪ { escaping allocation sites }                        cloned per call site on instantiation
-           ∪ { calls through placeholders }                       callbacks, resolved at instantiation
-```
-
-### 9.4 Instantiation at a call site
-1. Bind placeholders to the caller's objects (points-to at the call site) and `Param(p)` to the arguments' KeyVals.
-2. Substitute into each effect RowExpr; apply to the caller's state — strong (replace) if the placeholder bound to exactly one single object, else weak (join with the existing row).
-3. Create or look up clones of escaping allocations with context = this call site; bind the return value's RowExpr.
-4. Substitute into the Req summary and add to the caller's backward state.
-5. **Aliasing.** If two placeholders bind to overlapping object sets, the summary's no-alias assumption is violated; v1 downgrades every effect through either placeholder to weak. (v2: re-analyse the callee under the aliasing pattern, cached per pattern.)
-
-### 9.5 Closures, callbacks, higher-order calls
-A closure object carries its cells (§6.2). A call through a value that points to closure objects instantiates the inner function's summary with its cell placeholders bound to those cell objects — which were cloned per creation call site (§6.1), so two counters from one factory never share a row. Models that invoke callbacks (`map`, `sorted(key=…)`, `apply(axis=1)`, `pipe`, `groupby.apply`) instantiate the callback's summary with model-supplied virtual arguments (e.g. a row object whose RowExpr copies the frame's). Decorators: analysable ones are ordinary calls; `wraps`, `lru_cache`, `property`, `staticmethod`, `classmethod`, `contextmanager` have models; an unknown decorator makes calls to the decorated function unknown in the sound reading and identity in the optimistic one.
-
-### 9.6 Methods and object state
-`self` is a placeholder; attribute paths from it are placeholders; effects on them are part of the summary (`put`: `self.store` gains `Param(k)`). At `c.put("user", u)`, `self.store` binds to the dict allocated in `__init__` for the receiver object of `c` (1-object context), and the update is strong if that dict is single. Dynamic dispatch to several candidate methods joins their instantiated effects and intersects their `always` requirements.
-
-### 9.7 Recursion
-Handled by the SCC fixpoint. The return RowExpr converges to the join over all return sites; objects allocated in recursive calls collapse onto one clone per call site (k = 1), so self-referential heap shapes stay finite. Must-information through recursion is lost by construction (Appendix A, case 10).
-
-### 9.8 Implementation notes (written for the Phase-0 prototype; the Rust engine in `rowan/` behaves the same except where `AGENTS.md` says otherwise — the prototype itself has been removed)
-What the prototype does where it departs from the text above; see README "Deviations".
-- **Order (9.1).** Summaries are computed on demand at the first call rather than bottom-up over precomputed SCCs. A function reached again while its own summary is being computed uses the *partial* summary of the previous round (⊥ in round 1) and the function iterates (≤ 6 rounds) until its return value, exit state and deferred accesses are stable. A callee summarised against a partial summary of a function further up the stack is cached as final — the SCC is not re-iterated as a whole (known imprecision for mutual recursion).
-- **Fallback (9.3/9.4).** Besides effects and requirements, a summary records *events*: places where the symbolic analysis lost information about a placeholder (a call or attribute dispatch through it, `isinstance`/truthiness/`in` on it, iteration over it). A call site whose binding for that placeholder carries the missing information (an actual function or object; a literal; a literal container) analyses the body concretely instead of instantiating the summary — always for calls/dispatch, at most 12 times per function for the literal/structural events. Beyond that budget the summary is used; accesses it recorded under an `isinstance` guard or a declared class are then applied only to targets of that class.
-- **Footprint (9.4).** The effects kept are the exit/entry *difference* of the symbolic heap (identity rows and slots holding their own entry placeholder are dropped) restricted to objects the caller can reach (return value, entry objects' slots, module bindings); the rest of the body's allocations are dead at exit. When a placeholder binds to several caller objects, its exit RowExpr is substituted per target with that target's own entry row (not the join), which keeps rows from growing across aliased calls.
-- **Context inside a summary.** Deferred accesses keep one call site of context below the function; the caller's chain is prepended on use, and a recursive instantiation of a partial summary does not nest the recursive site, so the number of distinct contexts stays bounded.
-- **Closures (9.5).** A closure's summary is specialised on the code its cells hold (sibling closures, classes); data cells stay symbolic.
-- **Declared types (8.5).** A parameter annotated with a user class, a `self.x = C(...)` assignment in the class body or a dataclass field `x: C` gives the placeholder a class: methods resolve on it, name-based dispatch is avoided, and objects of unrelated classes are filtered out of its binding. Fields annotated `Any`/`object` make accesses through them unreportable.
-
----
-
-## 10. Unknowns, escape, attribution
-
-**Unknown call at L** (no summary, no model):
-- every object reachable (k-limited, through slots) from the arguments and receiver gets `Mutator(L)` (§7.3 last row);
-- the return value is a fresh virtual object with `Row = ⟨∅, ∅, ∅, {Mutator(L)}⟩` for every record-like return kind the stubs allow (dict / frame / unknown); scalar kinds produce no object.
-
-**Escape at L.** Storing an object into a module global, a class attribute, or an object passed to unknown code, or returning it from an entry point: `Mutator(L)` from that point on — not retroactively; facts computed earlier in the same function stand.
-
-**Allowlist (config).** Callees known not to mutate record arguments (`print`, `logging.*`, `len`, `json.dumps`, …) add nothing. Everything with a model is handled by the model.
-
-**Readings.** The sound reading of a row with a `Mutator` attribution is `⟨definite.proven, absent.proven, open⟩`; the optimistic reading uses `present` and the `likely` variants. §13 fixes which tier uses which.
-
----
+Over the objects a name may hold: all proven gives proven, all missing gives missing, and
+anything else is `possibly`, with the per-object breakdown. A verdict carries its call chain
+(`via L96>L85`), since verdicts are per call context. Reads that cannot fail (`.get`, `in`,
+`getattr` with a default) give no verdict. Duplicates per object, key, tier and call context
+are reported once.
 
 ## 11. Library models
 
-### 11.1 Interface
-```python
-class Model(Protocol):
-    def apply(self, call: CallSite, args: BoundArgs, state: ForwardState) -> Effects: ...
+Models (`models/`) are registered by qualified name (`Registry`). A model receives the call's
+arguments and the state. It returns a value, may change the state, record requirements and
+raises, and call back into user code (`key=` functions, validators, handlers). An
+unmodelled function of a modelled library is an unknown call (§6.5).
 
-class Effects:
-    edges:     list[tuple[ObjectId, Transfer]]          # transfers of §7.3, incl. copy-from
-    returns:   RetSpec                                   # Fresh(RowExpr) | Alias(arg) | NoRecord | Unknown
-    requires:  list[tuple[ObjectId, KeyTerm, bool]]      # (object, key, always) — consumed by the backward pass
-    callbacks: list[tuple[Value, list[VirtualArg]]]      # callable argument + the arguments to call it with
-```
-A declarative layer covers most models: `identity`, `copy(src)`, `gen(keys)`, `kill(keys)`, `rename(map | fn)`, `project(keys)`, `open(Adder)`, `require(arg, keys)`, `callback(arg, row_of=other_arg)`, selected per argument shape (`Lits` vs `Data`). Models are keyed by resolved qualified name plus receiver kind (`pandas.DataFrame.merge`), with a per-kind fallback (`pandas.DataFrame.*` → `copy + Adder(L)` for unmodelled methods that return a frame), so the long tail degrades to "open", not to "wrong".
+### 11.1 Standard library
 
-### 11.2 Initial registry
-
-**Builtins / stdlib.** Exact on literal values wherever CPython's result is decided (values are
-literal keys: str, bytes, int, float, bool, None, tuples, frozensets, Decimal / Fraction,
-datetime values, Enum members); anything else keeps the record model's soundness (open rows,
-`?` values). Coverage:
+Exact on literal values wherever CPython's result is decided (`pyvalues.rs`, `pytext.rs`,
+`pynum.rs`, `chrono.rs`), unit-tested against CPython:
 
 | area | modelled |
 | --- | --- |
-| builtins | `len`, `sum` (CPython's float summation), `min` / `max` / `sorted` (keys, tuples, `__lt__`, `@dataclass(order=True)`, IntEnum), `any` / `all`, `enumerate` / `zip` / `map` / `filter` / `reversed` / `range`, `int` / `float` / `str` / `repr` / `format` / `bool` / `bytes` / `str(b, enc)`, `isinstance` / `hasattr` (by type for builtin containers) / `getattr`, `vars`, `iter` / `next`, `divmod`, `round`, `abs`, `chr` / `ord` / `hex` |
-| str / bytes / dict / list / set methods | all methods on literals (`format`, `%`, f-string specs; `partition`, `translate`, `casefold`, …; bytes `decode` / `hex` / `split`…); dict views and order; `fromkeys`, `setdefault`, `update`, `pop` / `del` (a removed key is absent, also on open records), `|` |
-| collections | `Counter` (counts, `most_common` ties in insertion order, views), `defaultdict`, `OrderedDict` (`move_to_end`), `deque` (`rotate`, `maxlen`), `ChainMap`, `namedtuple`, `UserDict` |
-| itertools / functools / operator / heapq / bisect | all of itertools on known items; `partial`, `reduce`, `wraps`, `lru_cache` / `cache`, `cached_property`, `singledispatch`, `total_ordering`; `itemgetter` / `attrgetter`; heapq; bisect |
-| dataclasses / enum / typing | fields, defaults / factories, `InitVar`, `KW_ONLY`, `frozen`, `order`, `replace`, `asdict` / `astuple` / `fields`; Enum / IntEnum / StrEnum / Flag (members are keys, `auto`); TypedDict (`total=`, required / optional keys), NamedTuple, `get_type_hints` |
-| text | `re` (a Python-regex engine: Pattern / Match objects, groups, `sub` with callbacks), `string.Template` / `capwords`, `textwrap`, `shlex`, `html`, `fnmatch`, `base64` / `binascii`, `urllib.parse` (`urlparse` / `urlsplit` / `urljoin` / `parse_qs(l)` / `urlencode` / `quote`) |
-| data formats | `json` (exact `dumps` text, `loads` of literals, round trips, `object_hook`; open input), `csv` (reader / writer / Dict*, dialects, StringIO text), `configparser` (INI simulated: sections, interpolation, `getint`, fallbacks), `sqlite3` (in-memory SQL simulated: CREATE / INSERT / SELECT with expressions, aggregates, GROUP BY, ORDER BY, LIMIT; UPDATE / DELETE, `rowcount`, `Row` factory; a SELECT's columns are its rows' keys even when the rows are not known) |
-| numbers / time | `math`, `statistics`, `decimal` (contexts, quantize), `fractions`, `datetime` / `date` / `time` / `timedelta` / `timezone` (arithmetic, `strftime` / `strptime` / `isoformat`) |
-| os / paths / process | `os.environ` (open, program-wide; `pop` / `del` / stores tracked), `os.path`, `pathlib` pure paths, `argparse` (known argv: namespaces, subcommands, choices, `SystemExit`), `logging` (no effect), `contextlib` (`contextmanager`, `suppress`, `ExitStack`, `redirect_stdout`, `closing`), `threading` / `concurrent.futures` (targets run, futures hold results), `copy` |
+| builtins | `len`, `sum`, `min` / `max` / `sorted` (keys, `__lt__`), `any` / `all`, `enumerate` / `zip` / `map` / `filter` / `reversed` / `range`, conversions, `isinstance` / `hasattr` / `getattr` / `setattr`, `vars`, `iter` / `next`, `divmod`, `round`, `abs`, `chr` / `ord` |
+| str / bytes / dict / list / set | all methods on literals: `format`, `%`, format specs, f-strings; dict views, order, `fromkeys`, `setdefault`, `update`, `pop`, `\|` |
+| collections | `Counter`, `defaultdict`, `OrderedDict`, `deque`, `ChainMap`, `namedtuple`, `UserDict` |
+| itertools / functools / operator / heapq / bisect | all of itertools on known items; `partial`, `reduce`, `wraps`, `lru_cache`, `cached_property`, `singledispatch`, `total_ordering`; `itemgetter` / `attrgetter` |
+| dataclasses / enum / typing | fields, defaults, `replace`, `asdict` / `astuple`; Enum / IntEnum / StrEnum / Flag; TypedDict, NamedTuple |
+| text | `re` (a backtracking engine with Python's syntax: Pattern / Match objects, groups, `sub` with callbacks), `string.Template`, `textwrap`, `shlex`, `html`, `fnmatch`, `base64` / `binascii`, `urllib.parse` |
+| data formats | `json` (exact `dumps` text; `loads` of literals, with CPython's `JSONDecodeError` messages and positions; `object_hook`), `csv` (readers / writers, dialects, `StringIO`), `configparser` (INI simulated), `sqlite3` (in-memory SQL simulated: CREATE / INSERT / SELECT with expressions, aggregates, GROUP BY, ORDER BY, LIMIT, UPDATE, DELETE, `rowcount`) |
+| numbers / time | `math`, `statistics`, `decimal` (contexts, `quantize`), `fractions`, `datetime` / `date` / `time` / `timedelta` (arithmetic, `strftime` / `strptime`, `isoformat`) |
+| os / process | `os.environ` (an input; its stores and deletes tracked), `os.path`, `pathlib` pure paths, `argparse` (parse of known argv), `contextlib`, `threading` / `concurrent.futures` (targets run, futures hold results), `copy`, `logging` |
 
-**pydantic** (v2, with the v1 spellings). A model instance's attributes are its fields
-(closed unless `extra="allow"`); construction reads each field from the input by alias (a
-required field is a read: missing → `ValidationError`, open input → a requirement); values are
-validated by the annotation (scalars coerced in lax mode, `Literal` / Enum options, nested
-models, lists / dicts of them, discriminated unions with `union_tag_invalid`, `Field`
-constraints); defaults are not validated; validators (field / model, before / after / wrap)
-run as user code; dumps (`model_dump`, `model_dump_json`, `mode="json"`, include / exclude /
-exclude_none / exclude_unset / by_alias, computed fields, serializers; dataclass fields dump as
-dicts); `TypeAdapter`, `RootModel`, generics, pydantic dataclasses, `BaseSettings` (from
-`os.environ`). `ValidationError.errors()` holds the errors' `loc` / `type` / `msg`.
+### 11.2 pandas
 
-**FastAPI.** Routes (app, routers, prefixes), each handler analysed as an entry point with open
-requests and run concretely for each `TestClient` call: path / query / header / cookie /
-body parameters converted by their annotations (Optional scalars, Enum / Literal; a text no
-value of the type can be → 422), dependencies (cached per request, `yield`), middlewares,
-exception handlers, `HTTPException` details, status codes (404 / 405 / 422 / route
-`status_code`), `response_model` (JSON mode), and the response body as the client reads it
-(JSON keys as text, Enum values, ISO dates, Decimals as floats outside a response model).
+A frame's row is its **columns** (tuples for MultiIndex columns). Beside it, `Meta` slots keep
+what literal data tells: the index levels, row labels and count, and per column its literal
+values and dtype.
 
-**numpy** rides on the tensor model (§2.3): shapes through creation, reshape, transpose,
-broadcasting, reductions with `axis` / `keepdims`, indexing, `where`, concatenation; numpy's
-own semantics where they differ from torch (`transpose` permutes, `size` is an attribute,
-`cumsum` flattens). Structured arrays: the fields of a record dtype are keys (a missing one is a
-`ValueError`), `genfromtxt(names=True)` fields are requirements on the file.
+A **Series** whose index matters (a column, a frame's row, a reduction, a grouped aggregate) is
+a record of its labels.
 
-**pandas** (`df` is a DataFrame). A frame's row is its **columns** (keys may be tuples:
-MultiIndex columns; a plain key on them reads the top level). What literal data tells is kept
-beside the row in meta slots: the **index levels** (names in order; *unknown* unless the op says
-— constructors / `merge` / `melt` / `concat(ignore_index=)` give a fresh RangeIndex, derived
-frames their source's, `join` the left's), the **row labels** and **row count** (known for
-literal data), and per column its **literal values** (`may` / `sure` sets) and **dtype**
-(`int`, `float`, `num`, `bool`, `object`). A **Series** whose index matters (a column, a frame's
-row, a reduction over the columns, a grouped aggregate, `pd.Series(…)`) is a dict-like object:
-its keys are the index labels, with a name, index levels and values; masks and arithmetic give
-the generic Series. Inside a function a pandas call on a parameter (or on a path below it, or
-on a frame made before the call) is decided per call site (a `concrete` event).
+| call | columns |
+| --- | --- |
+| `read_csv`, `read_json`, `read_excel`, … | open: an input, so its columns become a schema; `usecols=` / `names=` closed |
+| `pd.DataFrame(records / dict / rows)` | the keys, definite when the record count is known |
+| `df[[…]]`, `loc`, `iloc`, `filter`, `select_dtypes`, `reindex` | projection in order |
+| masks, `query`, `head`, `drop_duplicates`, sorts, element-wise ops | the same columns, fewer rows |
+| `df[k] = v`, `assign`, `insert`, `eval("c = …")` | store |
+| `drop`, `pop`, `rename`, `add_prefix`, `df.columns = …` | kill or rename (renamed-away names are absent) |
+| `set_index`, `reset_index`, `T` | index levels ↔ columns |
+| `merge`, `join` | per column, by which side may have it: suffixes on clashes, keys once; an open side never provides a plain name the other side surely has |
+| `concat`, `groupby(…).agg / size / transform / apply`, `rolling`, `resample` | unions; aggregates with `(col, func)` columns; group keys first with `as_index=False` |
+| `pivot`, `pivot_table`, `crosstab`, `get_dummies`, `melt`, `stack`, `unstack` | from the literal values of the column that becomes the columns, else open |
+| `iterrows`, `itertuples`, `apply(axis=1)`, `to_dict`, `to_json` | rows as records with the frame's columns |
 
-| call | columns | also |
-| --- | --- | --- |
-| `read_csv/excel/parquet/sql/json(…)` | open; `usecols=` / `names=` closed (in order) | `usecols` required; `index_col=` leaves (required); `read_json` of a `to_json` text: the frame's |
-| `pd.DataFrame(dict / records / rows / frame / dict of Series, columns=, index=)`, `from_dict(orient=index / tight)`, `from_records(exclude=)`, `DataFrame(**split)` | keys / union of records (definite when the count is known) / `0..n-1` / the frame's; `columns=` exactly those | row count, labels, column values and dtypes from literals |
-| `df[k]`, `df.k`, `df.get(k, d)` | a column Series (name k, the frame's index) | `get`: never raises; a method name is not a column |
-| `df[[…]]`, `df.loc[:, […]]`, `iloc[:, slice / positions]`, `filter(items / like / regex)`, `select_dtypes`, `reindex(columns=)`, `reindex_like` | projection in order (a list holding a column on some paths only: that column possible, a `sometimes` requirement); positions by the known column order | — |
-| masks, `loc[mask]`, `query`, `head/tail/sample/drop_duplicates/dropna/nlargest`, sorts, copies, element-wise ops | same columns | row subsets weaken labels / values to `may`; `query` / `eval` read the expression's names (`eval` assigns) |
-| `df[k] = v`, `insert`, `assign(k=v / callable, **dict)`, `eval("c = …")` | store k | values / dtype from the stored value |
-| `drop`, `del`, `pop`, `rename(columns=map / fn / lambda, errors=raise)`, `add_prefix/suffix`, `df.columns = […] / .str.lower() / .map(f)`, `set_axis` | kill / rename (lens; renamed-away names absent) | — |
-| `set_index`, `reset_index(level=, names=, drop=)`, `rename_axis`, `T` / `transpose` | index levels ↔ columns (`index` / `level_i` for unnamed levels) | labels from a key column's values |
-| `merge` / `merge_asof` / `join` | per column, the cases of which side has it: both → the suffixes (`""` keeps the name), one → the name; keys once; `how=cross`, `indicator=` (`_merge`) | an open side does not provide a plain name the other side surely has |
-| `concat(rows / axis=1, keys=, names=, join=inner)` | union (NaN-filled: definite when the pieces are known); axis=1: Series by name (unnamed: position), `keys=` → (key, column) | index levels |
-| `groupby(k)…` reductions / `size` / `agg(name=(c, f), **dict)` / `agg({c: f or […]})` / `agg([…])` / `transform` / `cumcount` / `apply` / `filter` / `describe` | value columns; MultiIndex `(col, f)`; Series named by a single selection; `as_index=False` puts the keys first | group labels from the key's values; `apply` gets each group without the key (pandas 3) |
-| `rolling/expanding/ewm/resample` (also on groups and Series) | the frame's columns (`on=` kept / moved to the index) | `ohlc` |
-| `pivot`, `pivot_table(margins=)`, `crosstab`, `unstack`, `stack`, `melt`, `get_dummies`, `wide_to_long`, `json_normalize` | from the literal values of the column / level that becomes the columns (open when unknown); `All` margins; `melt` / `wide_to_long` / `json_normalize` from literals | — |
-| `describe`, `agg` on frames, `corr/cov`, reductions | statistics labels / Series over the columns (`numeric_only`) | numeric columns from dtypes |
-| `iterrows`, `itertuples` (`Index`, `_<pos>`, `name=None`), `apply(axis=1)`, `to_dict(orient)`, `to_records`, `to_json` / `json.loads` | rows as records with the frame's columns; accesses on a row narrow the row, not the frame (a frame may have no rows) | known values fill the cells |
-| `if k not in df.columns: raise …` | — | k required of the inputs |
-| an unmodelled method returning a frame | the receiver's columns, open, index unknown | — |
+A pandas call on a parameter inside a function is decided per call site (a `concrete` event,
+§6.2).
 
-### 11.3 Model tests
-Programs with hand-written expectations, checked against the real library by a runtime oracle
-(`tests/oracle.py`; `tests/torch_oracle.py` for shapes): it runs each case once per input, traces
-every line, and refutes a row (`definite ⊆ K`, `absent ∩ K = ∅`, `K ⊆ present` when closed), a
-value, a verdict (`ok` never raised, `missing` always, `possibly` both — strict) or a schema (a
-`read_csv` returning the frame minus one column must raise for an `always` column and must not for
-a column outside `only`). `tests/pandas/` (137 programs), `tests/pydantic/`, `tests/fastapi/`, `tests/stdlib/`, `tests/apps/` run
-strict; `tests/cases/` lenient.
+### 11.3 pydantic and FastAPI
 
----
+**pydantic** (v2, with the v1 spellings):
+* **Model instances.** Their attributes are the fields: closed, or open with
+  `extra="allow"`.
+* **Construction** (`Model(...)`, `model_validate`) reads each field by alias. A missing
+  required field is a `ValidationError`, and on an open input a requirement.
+* **Validation** follows the annotation: lax coercion of scalars, `Literal` / Enum options,
+  nested models (whose errors join the outer list under the field's path), lists and dicts of
+  them, discriminated unions, `Field` constraints, container types (a `str` for `list[str]` is
+  `list_type`).
+* **Validators** (field / model, before / after / wrap) run as user code. Defaults are not
+  validated.
+* **Dumps** (`model_dump`, `model_dump_json`, include / exclude / `exclude_none` /
+  `exclude_unset` / `by_alias`, computed fields, serializers) follow their options.
+* **Other API:** `TypeAdapter`, `RootModel`, generics, pydantic dataclasses, `BaseSettings`
+  (from `os.environ`).
+* **Errors:** `ValidationError.errors()` holds each error's `loc`, `type` and `msg`.
 
-## 12. Role classification (noise control)
+**FastAPI:**
+* **Routes** (apps, routers, prefixes). Each handler is an entry point with an open request,
+  and runs concretely for every `TestClient` call.
+* **Parameters:** path, query, header, cookie and body, converted by their annotations (a value
+  no conversion accepts is a 422).
+* **Request handling:** dependencies (cached per request, `yield`), middlewares, exception
+  handlers, `HTTPException`, status codes, `response_model`, and the JSON the client reads back.
+* **Escaping exceptions:** an exception the app doesn't answer, including a `ValidationError`
+  raised by the handler's own code, propagates out of the `TestClient` call, as it does at
+  runtime.
 
-An object's *role* is computed from the forward result at the end of the allocating function and refined by callers:
-- `record` — at least one literal key store and no `Data`-keyed store;
-- `map` — at least one `Data`-keyed store (or `defaultdict` / `Counter` / `dict.fromkeys(Data)`) and at most one literal store;
-- `mixed` — both (a config dict with a literal `"default"` plus data keys): record for literal keys, map for `Data` keys;
-- open sources are records (their keys are external, not computed).
+### 11.4 Tensors: PyTorch and numpy
 
-`Data`-keyed loads on a `map` are not reported. On a closed `record` they are reported once per (object, load site) as "data key into closed record" with a suggestion (`.get`, validation).
+In a program that imports torch or numpy, a tensor's value is its **shape**: a list of
+symbolic dims, possibly with a rest of unknown length, encoded in a `Data` label (`shape.rs`).
 
----
+* **Dims** are integer polynomials over atoms: `x.shape[i]` of an unknown named `x`, named ints
+  (`n`, `self.n_embd`), `a // k`, `a % k`, `max`, `min`. Two dims are equal when their
+  difference is 0 and different when it is a nonzero constant; otherwise the question is
+  undecided.
+* **A rest** is a slice of one unknown's shape (`*x.shape[:-1]`), a broadcast of rests, or `*`.
+* **Operations check their conditions.** A condition decided false is a **shape error**: the
+  operation raises and the path ends. An undecided one is a **requirement** at that line
+  (`x.shape[-1] == 512`, `x.dim() == 3`), and from there on a **fact** on the path (`State.tf`).
+  `assert` and `if` tests on dims give facts too.
+* **Coverage:**
+  * creation; elementwise ops with broadcasting; `matmul` / `bmm` / `einsum`;
+  * shape ops (`view` with `-1`, `permute`, `transpose`, `squeeze`, `flatten`, `expand`,
+    `repeat`, `chunk` / `split`, `cat` / `stack`); reductions; indexing;
+  * `nn` layers (Linear, Embedding, norms, convolutions, pooling, RNN / LSTM / GRU, attention,
+    Transformer layers, containers) and `torch.nn.functional`;
+  * user `nn.Module` subclasses (calling one runs `forward`).
 
-## 13. Reporting
+  dtype and device are not modelled.
+* **numpy** uses the same shapes, with numpy's semantics where they differ (`transpose`
+  permutes, `size` is an attribute, `cumsum` flattens). The fields of a structured array are
+  keys.
 
-Per access site, per target object: derive the tier from §3.1 using `proven` variants for ✓ / ✗ and `likely` variants for the "likely" tiers. Combine over the points-to targets: all ✓ → ✓; all ✗ → ✗; otherwise ⚠ with the per-target breakdown. KeyVal handling: `Lit` direct; `Lits` → the worst key, listed; `KeysOf(o₂)` → ✓ if `present(o₂) ⊆ definite(o)`, ⚠ otherwise; `Data` → §12.
+## 12. Outputs and interfaces
 
-Explanations: for "possibly missing", the store sites of k (a side table filled during the forward pass) with the nearest enclosing condition of each; for "definitely missing" after projection / deletion / merge-suffixing, the responsible site (every kill records its site). Deduplication: one report per (object, key, tier) per function; schema entries aggregate program-wide.
+* **Text report** (`rowan FILE`): diagnostics (verdicts other than proven), tensor-shape errors
+  and requirements, inferred schemas, function results per call context, module-level values
+  at exit, notes (unknown calls).
+* **`--json`**: one JSON object per line, `kind` = `verdict` (site, key, namespace, tier,
+  object, call chain, note), `schema` (source, key, always / sometimes, sites), `summary`.
+* **`--facts`**: the document the editor integration reads: per name and line the values
+  (text and structure, with the row sets `present`, `definite`, `likely`, `absent`, `closed`,
+  `sources`, `mutators`), verdicts, schemas, shape errors.
+* **`rowan serve`**: JSON lines over stdio.
+  * `{"id": 1, "cmd": "analyse", "path": "/abs/file.py"}` answers with the `--facts` document
+    under `result`, plus `cached`, `ms` and `deps` (the modules it loaded).
+  * A result is reused while the file and every module it loaded are unchanged (content
+    hashes).
+  * `{"cmd": "changed", "paths": […]}` drops the results that depend on those files;
+    `{"cmd": "shutdown"}` exits.
+* **Imports.** Local modules and packages are followed (relative imports, `pkg/__init__.py`).
+  Installed packages are modelled or unknown, unless followed with `--follow PKG` (their
+  source from site-packages; no interpreter runs).
 
----
+## 13. Soundness and limits
 
-## 14. Theory and complexity
+The **sound reading** is the `proven`, `possibly` and `missing` tiers, the `definite` /
+`present` / `absent` sets of rows and the values, relative to:
 
-- **Lattices.** The forward domain (§7.3) and backward domain (§7.4) are complete lattices of finite height: keys range over `K` (program literals), attributions over program points, placeholders over a function's inputs, term lists are capped. All transfers are monotone, so Kleene iteration from ⊥ reaches the least fixpoint (Tarski) in at most *height* steps; Bourdoncle's WTO orders the worklist so nested loops converge in few sweeps. No widening is needed for termination; the caps are precision/efficiency widenings.
-- **Distributivity → IDE.** Every transfer distributes over join except the merge-suffix and intersection-shaped comprehension models (over-approximated). The problem is therefore an IDE instance (Sagiv–Reps–Horwitz 1996): facts = objects, values = rows, jump functions = `rename(ρ ∖ kill) ∪ gen`, a class closed under composition and join (§7.3). Consequences: (1) the summary-based solution equals the meet-over-all-valid-paths solution — full call-site context sensitivity for rows without call strings (Sharir–Pnueli's functional approach); (2) polynomial cost: per function `O(|CFG| × |live objects| × WTO sweeps)`, interprocedurally `O(Σ_f |Summary(f)| × |call sites of f|)`; (3) demand-driven variants exist (run the backward pass from one source).
-- **Where approximation lives.** Heap identity: k = 1 call-site cloning and 1-object receivers (Milanova-style object sensitivity), allocation-site summaries in loops and recursion, weak updates, a single `elem` slot per container. Nothing else merges.
+* the models: a model that is wrong about a library is wrong in rowan;
+* the trusted annotations: a parameter's class from its annotation filters the arguments, so a
+  call that violates the hint is analysed as if it respected it;
+* Python's dynamic features: `exec` / `eval` of non-literal code, `setattr` and `getattr` with
+  unknown names, metaclass behaviour, and monkey-patching are unknown or ignored.
 
----
+The **optimistic reading** (`likely`, `likely-missing`) assumes unknown code did not remove
+keys. It is labelled as such in every output.
 
-## 15. Implementation plan
+Imprecision rowan accepts (sound, but less than exact):
+* lengths join to the shorter known prefix, so a list of length 1 or 2 has an unknown length;
+* a slice by an unknown bound has no positions;
+* pandas values per row are not simulated;
+* `while` loops with unknown conditions join their iterations;
+* mutual recursion widens after three rounds;
+* a store through a name holding several objects is weak on each;
+* runs cut by a deadline lose precision.
 
-### 15.1 Phase 0 — Python prototype (validate the design)
-Frontend (`ast`) → IR → points-to → forward/backward passes → reporter, with ~40 models, run on the golden suite (Appendix A) and then on 5–10 real repositories. Pure Python with interned `KeyId` / `ObjectId` ints and `frozenset`s. This handles tens of thousands of lines and lets the IR lowering and the models — the real risk — iterate daily. Deliverable: a CLI emitting §3.4 JSON.
-
-### 15.2 Phase 1 — Evaluation
-Differential runtime harness (§15.4); precision and noise metrics; model-coverage report (calls that degraded to `Adder` / `Mutator`, ranked by frequency); fix verdict thresholds; freeze the IR format.
-
-### 15.3 Phase 2 — Engine
-Keep the frontend in Python (§5.4 decision). Serialize the IR (flatbuffers or JSON lines) and move points-to and the fixpoints into a compiled engine.
-
-**SPARTA (C++) / sparta-rs (Rust) assessment.** The fit is good for the fixpoint layer and nowhere else.
-
-- *Direct mappings.* `Row` = reduced product of an over/under set domain (`present` / `definite`; `PatriciaTreeOverUnderSetAbstractDomain` in C++), an under-set domain (`absent`), a powerset (`open`), using `ReducedProductAbstractDomain`; `RowExpr` adds a small map domain for terms. Per-point state = `PatriciaTreeMapAbstractEnvironment<ObjectId, RowExprDomain>`. Fixpoint = `MonotonicFixpointIterator` over our CFG with `analyze_node` / `analyze_edge` — edge transfers are exactly §8.4 narrowing; the backward pass uses the backwards iteration adaptor; SCC levels run in parallel on `WorkQueue`. Patricia trees keyed by interned ints give persistent, structure-sharing environments, which matters once a function's per-node states hold hundreds of objects.
-- *Not provided.* The Python frontend, points-to / call graph, summaries and instantiation, models, the reporter — i.e. most of the code. Mariana Trench is the template for the interprocedural layer (bottom-up per-method models over "ports", k-limited access paths, "features" ≈ our attributions) and Pysa for Python-specific call resolution; both are worth reading before writing §9.
-- *IDE vs SPARTA is not a choice.* Running SPARTA's intraprocedural fixpoint over the *symbolic* RowExpr domain computes the function's jump function at the exit node; summaries compose bottom-up as in Mariana Trench. No tabulation algorithm is needed, and nothing in §7–9 changes.
-- *C++ vs Rust.* The Rust port is younger and ships fewer combinators (confirm over/under sets, environments and the backwards adaptor; each is small to write). The Python-tooling ecosystem is Rust: `ruff_python_parser` if the frontend ever leaves Python, PyO3/maturin to ship a wheel, salsa for incremental recomputation of summaries. C++ if the team already runs C++/Buck or wants to lift Mariana Trench code directly. Recommendation: Rust, after Phase 1 has proven the design; the engine is under a third of the system.
-
-### 15.4 Testing
-- **Golden suite.** Appendix A cases as fixtures with exact expected rows, requirements and verdicts.
-- **Differential runtime oracle.** Instrument programs (a `sys.settrace` hook plus wrappers on `dict`-equivalent access and `DataFrame.__getitem__`) to record the concrete key set at each access site during test runs. Every observed set must lie in the sound concretization of the inferred row — a violation is a bug or a model gap — and the optimistic reading's precision is measured against the same data.
-- **Model oracle tests** (§11.3).
-- **Noise budget.** Tier counts per KLOC on real repositories, with manually labelled samples.
-
-### 15.5 Phase 3 — Integration
-LSP (hover: row and requirements; diagnostics), CI mode (schema drift between commits), pre-commit. Incremental: summaries cached by function body hash + model-registry version; dependents invalidated through the call graph.
-
----
-
-## 16. Known limitations
-- Keys from string computation outside the `Map` vocabulary → `Data`, unless the parts are known literals (the engine evaluates `%` / f-string formatting, `split`, `partition`, `join` on known values).
-- `getattr` / `setattr` with computed names, `exec`, `__getattr__` / `__getitem__` magic on unmodelled classes, metaclasses → unknown.
-- One element slot per container when positions are unknown: a list of heterogeneous dicts joins their rows (may-only). The engine keeps positions for literal containers, straight-line appends, decided comprehensions and known-key sorts.
-- Module-global state mutated from many places: flow-insensitive join → may-only.
-- Depth-dependent recursion: no must-information (case 10).
-- Unknown decorators and framework-driven dispatch: unknown in the sound reading; mitigated by the entry-point rule (§6.4) and models.
-- pandas operations whose columns come from data are open by construction; Series index semantics ignored.
-- Must-information across weak updates and summary objects is lost; strong updates need the single flag (§6.1).
-- The optimistic reading is deliberately unsound and is labelled as such in every output.
-
----
-
-## 17. Open questions for review
-1. §2 — DataFrame attribute aliasing: only for identifier-like columns, or always?
-2. §6.1 — k for heap cloning: 1 call site proposed; 2 would separate `make_handler(cfg)` called from two wrappers of one factory. Decide on Phase 1 data.
-3. §7.2 — Keep `present` as labelled evidence in schema reports under the sound reading, or drop it there?
-4. §7.4 — Disjunctive requirements from union sources: side-table groups (proposed) or a disjunction term in `Req`?
-5. §8.3 — Loop-unrolling budget (64) and the policy for comprehensions over `Data`.
-6. §6.4 — Entry-point detection: config list, heuristics, or both?
-7. §9.4 — Aliasing fallback: weak-everything (proposed) vs cached re-analysis.
-8. §9.5 — Treat unknown decorators as identity in the sound reading too? (Proposed: no.)
-9. §2 — Series: ignore index entirely in v1? (Proposed: yes.)
-10. §15.1 — Emit the IR in the frozen serialized format from day one, so the Phase 2 engine consumes prototype output unchanged?
-
----
-
-## Appendix A — Golden cases
-
-Each case lists the code and the exact expected facts. `R(o)` is the row of object `o` at the marked point; `Req(src)` the schema arriving at an open source.
-
-### A1. Conditional key, closed row, narrowing
-```python
-def build(user, admin):
-    d = {"id": user.id}
-    if admin:
-        d["role"] = "admin"
-    return d
-
-r = build(u, flag)
-r["role"]                        # ⚠ possibly missing — store at L4 under `admin`
-if "role" in r: r["role"]        # ✓ proven (narrowed)
-r.get("role", "user")            # no requirement
-r["rolle"]                       # ✗ definitely missing — closed row
-try: r["tenant"]                 # guarded — no verdict, no requirement
-except KeyError: ...
-```
-Expect: `Summary(build).return = ⟨present {id, role}, definite {id}, absent ∅, open ∅⟩`; `Req(user.attr) = {id}` always.
-
-### A2. Unknown calls vs open sources
-```python
-cfg = json.load(fp)              # R = ⟨∅, ∅, ∅, {Adder(json.load@L1)}⟩
-cfg = lib.apply_defaults(cfg)    # unknown: return object R = ⟨∅,∅,∅,{Mutator(@L2)}⟩; arg gets Mutator(@L2)
-cfg["timeout"]                   # ◌ schema: json@L1 needs timeout — "unless apply_defaults adds it"
-
-opts = {"host": "db", "port": 5432}
-lib.apply_defaults(opts)         # in-place unknown: open += {Mutator(@L7)}, proven := ∅, likely kept
-opts["host"]                     # ✓ likely
-opts["user"]                     # ⚠ likely missing — only apply_defaults@L7 could add it
-```
-Expect: `Req(json@L1) = {timeout}` sometimes; attribution of the Mutator on the schema line.
-
-### A3. One summary, three contexts
-```python
-def point(**kw):
-    return {"x": 0, "y": 0, **kw}      # Summary: return = ⟨{x,y}, {x,y}, ∅, ∅⟩ + terms {ρ_kw ↦ (∅, id)}
-
-point(z=1)["z"]                         # ✓ proven
-point()["z"]                            # ✗ definitely missing
-point(**json.load(fp))["z"]             # ◌ schema: that json needs z
-```
-Expect: the summary is computed once; three distinct return clones (`alloc@L2[call@L4]` etc.).
-
-### A4. Loop keys: literal vs data
-```python
-d = {}
-for c in ["a", "b", "c"]:               # exhaustive literal loop → strong stores on exit
-    d[c] = compute(c)
-d["a"]                                   # ✓ proven
-d["z"]                                   # ✗ definitely missing
-
-counts = {}
-for w in words:                          # Data(words@L8)
-    counts[w] = counts.get(w, 0) + 1     # role: map
-counts["the"]                            # not reported (map)
-```
-Expect: `R(d) = ⟨{a,b,c}, {a,b,c}, ∅, ∅⟩` after the loop; `R(counts) = ⟨∅, ∅, ∅, {Adder(store@L9)}⟩`, role map.
-
-### A5. Relational rows
-```python
-def public(rec):
-    return {k: v for k, v in rec.items() if k != "password"}   # return terms {ρ_rec ↦ ({password}, id)}
-def shout(rec):
-    return {k.upper(): v for k, v in rec.items()}               # return terms {ρ_rec ↦ (∅, upper)}
-
-u = {"name": "k", "password": "…"}
-public(u)["password"]            # ✗ definitely missing
-shout(public(u))["NAME"]         # ✓ proven
-shout(public(u))["name"]         # ✗ definitely missing
-public(json.load(fp))["x"]       # ◌ schema: json needs x
-```
-Expect: `Summary(public).return` has no literal keys, one term; instantiation with `R(u)` gives `⟨{name}, {name}, ∅, ∅⟩`.
-
-### A6. Escaping closures
-```python
-def make_counter(fields):
-    counts = {f: 0 for f in fields}          # cell object; dict cloned per call site of make_counter
-    def bump(name): counts[name] += 1        # Req(counts) = {Param(name)} always
-    return bump, (lambda: dict(counts))      # dict(o): copy edge
-
-bump, snap = make_counter(["clicks", "views"])
-bump("clicks")                               # ✓ proven
-bump("purchases")                            # ✗ definitely missing in this counter
-other, _ = make_counter(["purchases"])
-other("purchases")                           # ✓ proven — separate cell, separate row
-snap()["views"]                              # ✓ proven
-```
-Expect: two cell objects `cell@L2[call@L6]`, `cell@L2[call@L9]`; `R` of the first dict `⟨{clicks, views}, {clicks, views}, ∅, ∅⟩` via `ElemsOf(ρ_fields)` → `Lits`.
-
-### A7. Object state
-```python
-class Cache:
-    def __init__(self): self.store = {}
-    def put(self, k, v): self.store[k] = v       # effect: self.store gains Param(k) (strong if single)
-    def user(self): return self.store["user"]    # Req(self.store) = {user} always
-
-c = Cache(); c.user()                            # ✗ definitely missing
-c.put("user", u); c.user()                       # ✓ proven — strong update on a single object
-d = Cache(); d.user()                            # ✗ definitely missing — separate instance
-```
-Expect: `self.store` placeholder bound to `dict@L2[obj c]` vs `dict@L2[obj d]`.
-
-### A8. Aliasing is a points-to question
-```python
-a = {"x": 1}
-b = a;       b["y"] = 2;  a["y"]                 # ✓ proven — same object
-c = dict(a); c["z"] = 3;  a["z"]                 # ✗ definitely missing — copy
-n = {"inner": a}
-copy.copy(n)["inner"]["w"] = 1;     a["w"]       # ✓ proven — shallow copy shares the inner object
-copy.deepcopy(n)["inner"]["q"] = 1; a["q"]       # ✗ definitely missing
-```
-
-### A9. pandas pipeline
-```python
-orders = pd.read_csv(f_orders)                                      # open: Adder(read_csv@L1)
-cust = pd.read_csv(f_cust).rename(columns={"id": "customer_id"})    # open; rename edge
-
-orders["total"] = orders["qty"] * orders["price"]                   # Req: qty, price; strong store total
-WEIGHTS = {"EU": 1.0, "US": 1.2}
-def score(row):
-    return row["total"] * WEIGHTS[row["region"]]
-orders["score"] = orders.apply(score, axis=1)   # callback with virtual row ← R(orders): Req region flows back
-                                                # ⚠ data key into closed record: WEIGHTS[Data(orders.region)]
-orders["name"].str.strip(); cust["name"].str.strip()   # fall-through narrowing: name ∈ definite of both
-m = orders.merge(cust, on="customer_id", how="left")   # Req customer_id on both; name → name_x, name_y; kill name
-m["email"]                                              # ◌ email ∈ ρ_orders ∪ ρ_cust (disjunction group)
-m["name"]                                               # ✗ definitely missing — suffixed by merge@L13
-top = m[m["score"] > 1][["customer_id", "email", "name_x"]]   # project: closed
-top["qty"]                                              # ✗ definitely missing after projection
-```
-Expect schemas: `Req(read_csv@L1) = {qty, price, region, name, customer_id}` always, `{email}` sometimes (group with cust); `Req(read_csv@L2) = {id, name}` always (`customer_id` mapped back through the rename), `{email}` sometimes.
-
-### A10. Recursion
-```python
-def tree(depth):
-    if depth == 0: return {"leaf": True}
-    return {"l": tree(depth - 1), "r": tree(depth - 1)}
-
-t = tree(3)
-t["l"]["r"]["leaf"]            # ⚠ possibly missing at every step
-t["x"]                          # ✗ definitely missing
-```
-Expect: `Summary(tree).return = ⟨{leaf, l, r}, ∅, ∅, ∅⟩` after two SCC rounds; the inner objects are the same clone (`dict@L3[call@L3]`).
-
-### A11. Dispatch
-```python
-class Base:
-    def enrich(self, d): return d
-class A(Base):
-    def enrich(self, d): return {**d, "a": 1}
-class B(Base):
-    def enrich(self, d): return {**d, "b": 1}
-
-def run(h: Base): return h.enrich({"id": 1})
-run(A())["a"]                          # ✓ proven — receiver resolved to A.enrich
-run(B())["a"]                          # ✗ definitely missing
-[h.enrich({"id": 1}) for h in hs]      # hs unknown: join over MRO targets → ⟨{id, a, b}, {id}, ∅, ∅⟩
-```
+The open bugs and planned work are in `SUGGESTED_CHANGES.md`.

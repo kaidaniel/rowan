@@ -1117,7 +1117,7 @@ impl Analyzer {
             }
         };
         self.analysed_funcs.insert(foid);
-        // --- symbolic summaries (§7.3/§9): analyse the body once, instantiate per call ---
+        // --- symbolic summaries (§6.1/§6.2): analyse the body once, instantiate per call ---
         // (a generator runs per call site: its caller sees only its suspension points, see below)
         // (not a `@contextmanager` / yield-dependency body: it runs around its with block)
         let under_cm = self.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth == self.frames.len());
@@ -1262,7 +1262,7 @@ impl Analyzer {
         }
         if self.active.contains_key(&key) {
             self.rec_hit.insert(key.clone());
-            // widen the entry arguments with the ones of this recursive call (§9.7)
+            // widen the entry arguments with the ones of this recursive call (§6.3)
             if let Some((e_self, e_args, e_kwargs)) = self.rec_entry.get(&key).cloned() {
                 let n_self = match (&e_self, &self_v) {
                     (Some(a), Some(b)) => Some(a.join(b)),
@@ -1379,7 +1379,7 @@ impl Analyzer {
                 return ret;
             }
         }
-        // context for allocations inside the callee (§6.1)
+        // context for allocations inside the callee (§3)
         let (ctx, ctx_single) = self.receiver_ctx(&self_v, &site);
         let fr_single = self.frame().single && self.frame().loop_depth == 0 && ctx_single;
         let fr_single_nl = self.frame().single_nl && ctx_single;

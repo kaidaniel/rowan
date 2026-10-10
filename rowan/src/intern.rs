@@ -1,6 +1,5 @@
-//! Global interners for keys, sources, lenses and small strings (spec §15.3 / AGENTS.md
-//! "change, don't transcribe": every set the analysis manipulates is a sorted vector of
-//! `u32` ids, so joins are merges and comparisons are memcmp).
+//! Global interners for keys, sources, lenses and small strings (every set the
+//! analysis manipulates is a sorted vector of `u32` ids, so joins are merges and comparisons are memcmp).
 //!
 //! Interners are thread-local: the analysis of one program runs on one thread.
 
