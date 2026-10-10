@@ -2191,7 +2191,10 @@ impl Analyzer {
 /// Models that say themselves where they raise (raise_here / may_raise_here): their calls are
 /// not "may raise anything".
 /// Library constructors whose models report their raises.
-const SELF_REPORTING_EXTERNALS: &[&str] = &["io.StringIO", "csv.writer", "csv.DictWriter", "csv.reader", "csv.DictReader"];
+const SELF_REPORTING_EXTERNALS: &[&str] = &[
+    "io.StringIO", "csv.writer", "csv.DictWriter", "csv.reader", "csv.DictReader", "argparse.ArgumentParser", "threading.Thread",
+    "concurrent.futures.ThreadPoolExecutor", "concurrent.futures.ProcessPoolExecutor", "concurrent.futures.as_completed", "builtins.slice",
+];
 
 const SELF_REPORTING: &[&str] = &["pydantic.", "fieldinfo.", "pydverr.", "typeadapter.", "fastapi.client.", "fastapi.response.", "fastapi.request.", "stdobj.", "fastapi.bg.", "fastapi.app.", "fastapi.router.", "fastapi.state."];
 

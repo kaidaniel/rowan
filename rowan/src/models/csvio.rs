@@ -357,6 +357,9 @@ pub fn writer_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// `stdobj.stringio.<m>` / `stdobj.csvwriter.<m>`.
 pub fn m_stdobj(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let q = c.qual.as_str();
+    if q.starts_with("stdobj.thread.") || q.starts_with("stdobj.executor.") || q.starts_with("stdobj.future.") {
+        return crate::models::concurrency::m_conc(an, st, c);
+    }
     let name = q.rsplit('.').next().unwrap_or("");
     let recv = c.recv.clone().unwrap_or_default();
     if q.starts_with("stdobj.stringio.") {

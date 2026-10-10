@@ -9,6 +9,7 @@ pub mod fastapi;
 pub mod counter;
 pub mod csvio;
 pub mod argparse;
+pub mod concurrency;
 pub mod pyvalues;
 pub mod pure;
 pub mod torch;
@@ -171,6 +172,7 @@ impl Registry {
         r(&["slice.indices"], m_slice_indices);
         csvio::register(&mut r);
         argparse::register(&mut r);
+        concurrency::register(&mut r);
         r(&["typeadapter.*"], m_typeadapter);
         r(&["torch.*"], torch::m_torch);
         r(&["numpy.*", "np.*"], torch::m_numpy);

@@ -747,6 +747,8 @@ pub struct Analyzer {
     pub sdispatch: FxHashMap<ObjId, Vec<(Value, ObjId)>>,
     pub sdispatch_method: FxHashSet<ObjId>,
     pub sd_bypass: Option<ObjId>,
+    /// futures: the exception classes their call raised (empty: any)
+    pub future_excs: FxHashMap<ObjId, Vec<String>>,
     /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
     pub bypass_setattr: bool,
     pub cond_depth: i32,
@@ -962,6 +964,7 @@ impl Analyzer {
             sdispatch: FxHashMap::default(),
             sdispatch_method: FxHashSet::default(),
             sd_bypass: None,
+            future_excs: FxHashMap::default(),
             bypass_setattr: false,
             cond_depth: 0,
             branch_depth: 0,
