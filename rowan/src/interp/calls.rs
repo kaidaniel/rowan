@@ -506,11 +506,20 @@ impl Analyzer {
                 match lits {
                     Some(ls) => {
                         let mut all_hit = true;
+                        let is_flag = self.enum_kind.get(&cls).map(|k| k.flag).unwrap_or(false) && !super::disabled("flagcall");
+                        let all_bits: i64 = ms.iter().filter_map(|(_, m)| state.slot(*m, Ns::Attr, vk).kv.as_lit().and_then(intern::key_as_int)).fold(0, |a, b| a | b);
                         for l in ls.iter() {
                             let hit = ms.iter().find(|(_, m)| state.slot(*m, Ns::Attr, vk).kv.as_lit() == Some(l));
                             match hit {
                                 Some((_, m)) => out = out.join(&Value::obj(*m)),
-                                None => all_hit = false,
+                                // a Flag: any combination of the members' bits (0 too)
+                                None => match intern::key_as_int(l).filter(|i| is_flag && *i >= 0 && i & !all_bits == 0) {
+                                    Some(i) => {
+                                        let fm = self.flag_member(cls, i, node, state);
+                                        out = out.join(&Value::obj(fm));
+                                    }
+                                    None => all_hit = false,
+                                },
                             }
                         }
                         if out.empty() {

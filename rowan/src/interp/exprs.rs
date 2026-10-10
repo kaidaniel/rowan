@@ -1013,6 +1013,28 @@ impl Analyzer {
                         return self.compare_const(op, &ka, right, state);
                     }
                 }
+                // several literals in a positional container of known literals: decided when
+                // every one is there, or none is
+                if a.pts.is_empty() && a.kv.is_literal() && lits.len() > 1 && !super::disabled("inmanylits") {
+                    let b = self.eval_right(right, state);
+                    if let Some(o) = b.single().filter(|o| matches!(self.kind(*o), Kind::List | Kind::Tuple | Kind::Set)) {
+                        if let Some(n) = self.llen(o, state) {
+                            let items: Option<Vec<KeyId>> = (0..n).map(|i| {
+                                let sv = state.slot(o, Ns::Pos, key_int(i as i64));
+                                // (Enum members / identity objects as their keys)
+                                let sv = if sv.pts.is_empty() { sv } else { self.keyify_in(&sv, state) };
+                                sv.kv.as_lit().filter(|_| sv.pts.is_empty())
+                            }).collect();
+                            if let Some(items) = items {
+                                let hits = lits.iter().filter(|k| items.contains(k)).count();
+                                if hits == lits.len() || hits == 0 {
+                                    let found = hits > 0;
+                                    return Some(if op == ast::CmpOp::In { found } else { !found });
+                                }
+                            }
+                        }
+                    }
+                }
                 // a literal key in records whose rows decide it
                 if a.pts.is_empty() && a.kv.is_literal() && lits.len() == 1 {
                     let k = lits.iter().next().unwrap();

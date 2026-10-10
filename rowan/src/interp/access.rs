@@ -451,7 +451,7 @@ impl Analyzer {
                 return *m;
             }
         }
-        // the name: the members it combines, highest value first (`R|W`); None for 0 / unnamed bits
+        // the name: the members it combines, lowest value first (`R|W`); None for 0 / unnamed bits
         let mut parts: Vec<(i64, String)> = Vec::new();
         let mut covered = 0i64;
         for (n, m) in &ms {
@@ -462,7 +462,7 @@ impl Analyzer {
                 }
             }
         }
-        parts.sort_by(|p, q| q.0.cmp(&p.0));
+        parts.sort_by(|p, q| p.0.cmp(&q.0));
         let name = if r != 0 && covered == r { Value::lit_str(&parts.iter().map(|p| p.1.as_str()).collect::<Vec<_>>().join("|")) } else { self.none_v.clone() };
         let cname = self.class_info(cls).name.clone();
         let qual = format!("{}({})", cname, r);
@@ -620,8 +620,9 @@ impl Analyzer {
             let mut out = Value::new();
             for oid in obj.pts.iter() {
                 let ms = self.enum_members[&oid].clone();
+                let aliases = self.enum_aliases.get(&oid).cloned().unwrap_or_default();
                 match key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_str) {
-                    Some(nm) => match ms.iter().find(|(n, _)| *n == *nm) {
+                    Some(nm) => match aliases.iter().chain(ms.iter()).find(|(n, _)| *n == *nm) {
                         Some((_, m)) => {
                             let cls = Classification::new(Tier::Proven);
                             if !guarded { self.verdict(node, key_str_lit(&nm), &cls, oid, Ns::Item, None, None); } else { self.verdict_guarded(node, key_str_lit(&nm), &cls, oid, Ns::Item); }
@@ -1527,7 +1528,7 @@ impl Analyzer {
                         }
                         if changed { Value::with_kv(out.pts, v.kv.clone()) } else { v }
                     } else if name == "__members__" && self.enum_members.contains_key(&oid) {
-                        let ms = self.enum_members[&oid].clone();
+                        let ms = self.enum_aliases.get(&oid).cloned().unwrap_or_else(|| self.enum_members[&oid].clone());
                         let d = self.alloc_raw(Kind::Dict, &format!("enum-members:{}", oid), "", true, "__members__", Payload::None);
                         let mut row = Row::new();
                         let mut order = Vec::new();

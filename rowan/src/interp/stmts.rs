@@ -1840,6 +1840,7 @@ impl Analyzer {
             // `auto()`: the lower-cased name (StrEnum), the next power of two (Flag), else the
             // last int value + 1
             let mut last_int: i64 = 0;
+            let mut member_vals: Vec<(crate::intern::KeyId, u32)> = Vec::new();
             for st in &c.body {
                 let ast::Stmt::Assign(a) = st else { continue };
                 let [ast::Expr::Name(n)] = &a.targets[..] else { continue };
@@ -1875,6 +1876,13 @@ impl Analyzer {
                 if let Some(i) = v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(crate::intern::key_as_int) {
                     last_int = last_int.max(i);
                 }
+                // a value an earlier member has: an alias of that member (not iterated)
+                let vlit = v.kv.as_lit().filter(|_| v.pts.is_empty());
+                if let Some(prev) = vlit.and_then(|l| member_vals.iter().find(|(x, _)| *x == l)).map(|(_, m)| *m).filter(|_| !crate::interp::disabled("enumalias")) {
+                    self.cls_slots.insert((coid, Ns::Attr, nk), Value::obj(prev));
+                    self.enum_aliases.entry(coid).or_default().push((name, prev));
+                    continue;
+                }
                 let mid = self.alloc_raw(Kind::Instance, &format!("enum:{}:{}", coid, name), "", true, &format!("{}.{}", c.name.id, name), Payload::Cls(coid));
                 let mut row = Row::new();
                 for (k, val) in [("name", Value::lit(nk)), ("value", v.clone())] {
@@ -1888,6 +1896,10 @@ impl Analyzer {
                 let mk = crate::intern::key_member(&format!("{}.{}", c.name.id, name), mval);
                 self.member_key.insert(mid, mk);
                 self.key_member.insert(mk, mid);
+                if let Some(l) = vlit {
+                    member_vals.push((l, mid));
+                }
+                self.enum_aliases.entry(coid).or_default().push((name.clone(), mid));
                 members.push((name, mid));
             }
             self.enum_members.insert(coid, members);

@@ -820,6 +820,9 @@ pub struct Analyzer {
     pub t_dim_alias: FxHashMap<(ObjId, crate::shape::DimId), String>,
     /// Enum classes: their members in definition order
     pub enum_members: FxHashMap<ObjId, Vec<(String, ObjId)>>,
+    /// every name of an Enum in definition order, aliases (a name whose value an earlier
+    /// member has) included: name → member (`Color[name]`, `__members__`)
+    pub enum_aliases: FxHashMap<ObjId, Vec<(String, ObjId)>>,
     /// Enum classes: (mixes in str / int: equal to its value, `str()` is the value (ReprEnum:
     /// StrEnum, IntEnum, IntFlag), a Flag)
     pub enum_kind: FxHashMap<ObjId, EnumKind>,
@@ -1116,6 +1119,7 @@ impl Analyzer {
             symbol_scope: FxHashMap::default(),
             entry_scope: None,
             enum_members: FxHashMap::default(),
+            enum_aliases: FxHashMap::default(),
             enum_kind: FxHashMap::default(),
             member_key: FxHashMap::default(),
             key_member: FxHashMap::default(),
