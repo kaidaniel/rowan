@@ -814,7 +814,7 @@ impl Analyzer {
                 let ns_of = |an: &Analyzer, o: ObjId| if matches!(an.kind(o), Kind::Instance | Kind::Namespace) { Ns::Attr } else { Ns::Item };
                 let definite = recs.iter().all(|o| keys.iter().any(|k| state.row(*o, ns_of(self, *o)).definite.contains(*k)));
                 let present = recs.iter().any(|o| keys.iter().any(|k| state.row(*o, ns_of(self, *o)).present.contains(*k) || state.row(*o, ns_of(self, *o)).open()));
-                if f.required && !definite && report {
+                if f.required && !definite && (report || self.fa_body_validation) {
                     let sure_missing = !other_data && recs.iter().all(|o| !state.row(*o, ns_of(self, *o)).open() && !keys.iter().any(|k| state.row(*o, ns_of(self, *o)).present.contains(*k)));
                     self.pyd_err(Some(kk), "missing", sure_missing, false);
                 }

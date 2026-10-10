@@ -2561,7 +2561,10 @@ impl Analyzer {
             // the statement raised on this path: nothing to observe after it
             return;
         }
-        let reqs: Vec<(u32, String)> = self.row_check_requests.iter().filter(|(f, ln, _)| *ln == n.line && *f == file).map(|(_, ln, name)| (*ln, name.clone())).collect();
+        // (a simple statement spanning several lines: a check on any of its lines)
+        let simple = matches!(stmt, ast::Stmt::Assign(_) | ast::Stmt::AnnAssign(_) | ast::Stmt::AugAssign(_) | ast::Stmt::Expr(_) | ast::Stmt::Return(_) | ast::Stmt::Delete(_));
+        let last = if simple { n.end_line } else { n.line };
+        let reqs: Vec<(u32, String)> = self.row_check_requests.iter().filter(|(f, ln, _)| *ln >= n.line && *ln <= last && *f == file).map(|(_, ln, name)| (*ln, name.clone())).collect();
         for (ln, name) in reqs {
             let v = self.load_name(s(&name), &n, state);
             let mut rows: Vec<Row> = Vec::new();

@@ -52,7 +52,12 @@ impl Analyzer {
                             let eq = if op == ast::CmpOp::Eq { truth } else { !truth };
                             let rv = self.eval(right, state);
                             let ks = kv_literals(&rv.kv);
-                            if !ks.is_empty() {
+                            // (Decimal / Fraction / datetime literals equal others by value, not
+                            // as keys: no narrowing by key identity)
+                            let lv0 = self.load_name(s(l.id.as_str()), &Node::none(), state);
+                            let valued = |k: KeyId| crate::models::pynum::is_num_key(k) || crate::models::chrono::is_chrono_key(k);
+                            let by_value = ks.iter().any(valued) || kv_literals(&lv0.kv).iter().any(valued);
+                            if !ks.is_empty() && !by_value {
                                 self.narrow_kv(s(l.id.as_str()), &ks, eq, state);
                             }
                         }

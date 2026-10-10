@@ -283,10 +283,21 @@ impl Analyzer {
                 }
                 continue;
             }
-            if KNOWN_IDENTITY_DECORATORS.contains(&q.as_str()) || q.ends_with(".getter") || q.ends_with(".deleter") || q.ends_with(".register") {
+            // a decorator that is user code (a bound method of a user object, a function held in
+            // a variable): applied like one (`@registry.register("csv")` fills the registry)
+            let user_target = !q.starts_with("user:") && !crate::interp::disabled("userdeco") && {
+                let target: &'static ast::Expr = match &d.expression {
+                    ast::Expr::Call(c) => &c.func,
+                    other => other,
+                };
+                let mut probe = state.copy();
+                let tv = self.eval(target, &mut probe);
+                !tv.pts.is_empty() && tv.pts.iter().all(|o| matches!(self.kind(o), Kind::Function | Kind::Bound))
+            };
+            if !user_target && (KNOWN_IDENTITY_DECORATORS.contains(&q.as_str()) || q.ends_with(".getter") || q.ends_with(".deleter") || q.ends_with(".register")) {
                 continue;
             }
-            if q.starts_with("user:") {
+            if q.starts_with("user:") || user_target {
                 let (target, call_ast) = match &d.expression {
                     ast::Expr::Call(c) => (&*c.func, Some(c)),
                     other => (other, None),

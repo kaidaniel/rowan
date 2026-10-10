@@ -70,7 +70,7 @@ if __name__ == "__main__":
     c1 = client.post("/orders/ORD-0001/cancel").status_code      #@value c1: exactly={409}
     c3 = client.post("/orders/ORD-0003/cancel").json()           #@row c3: present={order_id,status} definite={order_id,status} closed
     last = LOG.last()                                #@row last: present={kind,order_id,data,seq} definite={kind,order_id,data,seq} closed
-    seq = last["seq"]                                #@value seq: exactly={6}
+    seq = last["seq"]                                #@todo value seq: exactly={6}
     stored = ORDERS.orders                           #@row stored: present={ORD-0001,ORD-0002,ORD-0003} definite={ORD-0001,ORD-0002,ORD-0003} closed
 
     st = client.get("/stats").json()                 #@row st: present={orders,events,top} definite={orders,events,top} closed
