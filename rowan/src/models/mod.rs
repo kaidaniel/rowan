@@ -11,6 +11,7 @@ pub mod csvio;
 pub mod argparse;
 pub mod concurrency;
 pub mod itertools;
+pub mod stdfuncs;
 pub mod pyvalues;
 pub mod pure;
 pub mod torch;
@@ -176,6 +177,7 @@ impl Registry {
         argparse::register(&mut r);
         concurrency::register(&mut r);
         itertools::register(&mut r);
+        stdfuncs::register(&mut r);
         r(&["typeadapter.*"], m_typeadapter);
         r(&["torch.*"], torch::m_torch);
         r(&["numpy.*", "np.*"], torch::m_numpy);

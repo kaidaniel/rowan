@@ -2197,7 +2197,9 @@ const SELF_REPORTING_EXTERNALS: &[&str] = &[
     "concurrent.futures.ThreadPoolExecutor", "concurrent.futures.ProcessPoolExecutor", "concurrent.futures.as_completed", "builtins.slice", "contextlib.ExitStack", "contextlib.redirect_stdout", "contextlib.redirect_stderr", "contextlib.closing", "contextlib.nullcontext", "itertools.count", "itertools.cycle", "itertools.repeat",
     "itertools.islice", "itertools.chain", "itertools.chain.from_iterable", "itertools.product", "itertools.permutations",
     "itertools.combinations", "itertools.combinations_with_replacement", "itertools.zip_longest", "itertools.tee", "itertools.pairwise",
-    "itertools.batched", "itertools.compress",
+    "itertools.batched", "itertools.compress", "heapq.heappush", "heapq.heapify", "heapq.nlargest", "heapq.nsmallest", "heapq.merge",
+    "bisect.bisect", "bisect.bisect_left", "bisect.bisect_right", "bisect.insort", "bisect.insort_left", "bisect.insort_right",
+    "operator.methodcaller", "operator.itemgetter", "operator.attrgetter",
 ];
 
 const SELF_REPORTING: &[&str] = &["pydantic.", "fieldinfo.", "pydverr.", "typeadapter.", "fastapi.client.", "fastapi.response.", "fastapi.request.", "stdobj.", "fastapi.bg.", "fastapi.app.", "fastapi.router.", "fastapi.state."];

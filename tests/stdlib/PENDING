@@ -1,5 +1,4 @@
 small/s001_dict_methods.py
-small/s005_list_set_tuple.py
 small/s016_numeric_builtins.py
 small/s020_set_keys.py
 small/s021_str_format.py
@@ -23,10 +22,6 @@ small/s058_wraps_decorator.py
 small/s059_lru_cache.py
 small/s060_cached_property.py
 small/s062_total_ordering.py
-small/s074_attrgetter_methodcaller.py
-small/s075_operator_reduce.py
-small/s084_heapq.py
-small/s085_bisect.py
 small/s086_re_groupdict.py
 small/s087_re_sub_func.py
 small/s088_re_compile.py
