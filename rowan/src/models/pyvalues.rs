@@ -3568,8 +3568,23 @@ mod tests {
         }
     }
 
+    /// `math` functions CPython takes from the platform's libm: glibc and Apple's libm differ
+    /// by an ulp on some inputs (the expected values were recorded on macOS), and rowan uses the
+    /// same libm as the CPython on that machine.
+    fn libm_ulp(got: &str, want: &str, py: &str) -> bool {
+        const LIBM: &[&str] = &["sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh",
+            "asinh", "acosh", "atanh", "exp", "exp2", "expm1", "log", "log2", "log10", "log1p", "cbrt", "erf", "erfc",
+            "gamma", "lgamma"];
+        let libm = py.strip_prefix("math.").and_then(|r| r.split('(').next()).is_some_and(|n| LIBM.contains(&n));
+        match (libm, got.parse::<f64>(), want.parse::<f64>()) {
+            (true, Ok(g), Ok(w)) if g.is_finite() && w.is_finite() && g.signum() == w.signum() =>
+                g.to_bits().abs_diff(w.to_bits()) <= 1,
+            _ => false,
+        }
+    }
+
     fn chk(bad: &mut Vec<String>, got: String, want: &str, py: &str) {
-        if got != want {
+        if got != want && !libm_ulp(&got, want, py) {
             bad.push(format!("{py}\n    python: {want}\n    rowan:  {got}"));
         }
     }
