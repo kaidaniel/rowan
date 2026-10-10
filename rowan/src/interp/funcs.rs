@@ -164,7 +164,7 @@ impl Analyzer {
                 Kind::Class => return Some(format!("class:{}", self.class_info(oid).name)),
                 Kind::Method => {
                     if let Payload::Method(q, _) = &self.obj(oid).payload {
-                        if q.starts_with("fastapi.") {
+                        if q.starts_with("fastapi.") || q.starts_with("sdispatch.") {
                             return Some(q.clone());
                         }
                     }
@@ -221,6 +221,39 @@ impl Analyzer {
                                 }
                             }
                         }
+                    }
+                }
+                continue;
+            }
+            // `@singledispatch`: implementations registered on it are chosen by the type of the
+            // first argument
+            if matches!(q.as_str(), "functools.singledispatch" | "functools.singledispatchmethod") && !crate::interp::disabled("sdispatch") {
+                if let Some(f) = fobj.filter(|o| self.kind(*o) == Kind::Function) {
+                    self.sdispatch.insert(f, Vec::new());
+                    if q.ends_with("method") {
+                        self.sdispatch_method.insert(f);
+                    }
+                }
+                continue;
+            }
+            if q == "sdispatch.register" {
+                let dv = match &d.expression {
+                    ast::Expr::Call(c) => self.eval(&c.func, state),
+                    other => self.eval(other, state),
+                };
+                let base = dv.pts.iter().find_map(|m| match &self.obj(m).payload {
+                    Payload::Method(_, b) => b.single(),
+                    _ => None,
+                });
+                let impl_f = fobj.filter(|o| self.kind(*o) == Kind::Function);
+                if let (Some(base), Some(impl_f)) = (base, impl_f) {
+                    // the type: `@f.register(T)`, else the first parameter's annotation
+                    let ty = match &d.expression {
+                        ast::Expr::Call(c) if !c.arguments.args.is_empty() => Some(self.eval(&c.arguments.args[0], state)),
+                        _ => self.sdispatch_annotation(impl_f, self.sdispatch_method.contains(&base), state),
+                    };
+                    if let (Some(ty), Some(reg)) = (ty, self.sdispatch.get_mut(&base)) {
+                        reg.push((ty, impl_f));
                     }
                 }
                 continue;

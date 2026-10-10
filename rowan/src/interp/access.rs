@@ -1191,6 +1191,8 @@ impl Analyzer {
                 }
                 Kind::Unknown => self.load_unknown_attr(oid, name, node, state, guarded),
                 Kind::Ph => self.load_ph_attr(oid, name, node, state, guarded, single),
+                // a singledispatch function's register
+                Kind::Function if name == "register" && self.sdispatch.contains_key(&oid) => self.method_value("sdispatch.register", &Value::obj(oid)),
                 Kind::Function => state.slot_opt(oid, Ns::Attr, nk).unwrap_or_else(|| Value::data(&format!("L{}", node.line))),
                 Kind::Bound => Value::data(&format!("L{}", node.line)),
                 Kind::View => {

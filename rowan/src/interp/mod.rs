@@ -743,6 +743,10 @@ pub struct Analyzer {
     pub csv_readers: FxHashMap<ObjId, Value>,
     /// argparse parsers, their subparsers and groups
     pub argp: FxHashMap<ObjId, crate::models::argparse::ArgObj>,
+    /// singledispatch functions: (type, implementation) in registration order; the methods
+    pub sdispatch: FxHashMap<ObjId, Vec<(Value, ObjId)>>,
+    pub sdispatch_method: FxHashSet<ObjId>,
+    pub sd_bypass: Option<ObjId>,
     /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
     pub bypass_setattr: bool,
     pub cond_depth: i32,
@@ -955,6 +959,9 @@ impl Analyzer {
             csv_writers: FxHashMap::default(),
             csv_readers: FxHashMap::default(),
             argp: FxHashMap::default(),
+            sdispatch: FxHashMap::default(),
+            sdispatch_method: FxHashSet::default(),
+            sd_bypass: None,
             bypass_setattr: false,
             cond_depth: 0,
             branch_depth: 0,

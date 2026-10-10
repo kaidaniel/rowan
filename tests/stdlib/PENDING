@@ -24,7 +24,6 @@ small/s056_partial_keyword.py
 small/s058_wraps_decorator.py
 small/s059_lru_cache.py
 small/s060_cached_property.py
-small/s061_singledispatch.py
 small/s062_total_ordering.py
 small/s063_groupby_key.py
 small/s064_chain.py
