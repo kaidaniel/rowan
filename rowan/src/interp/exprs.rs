@@ -935,13 +935,13 @@ impl Analyzer {
                     self.record_event("narrow", ph);
                 }
                 // members of a Flag: bits; else a member is its key
-                if !self.member_key.is_empty() && !a.pts.is_empty() {
+                if (!self.member_key.is_empty() || !self.identity_objs.borrow().is_empty()) && !a.pts.is_empty() {
                     let b = self.eval_right(right, state);
                     if let Some(r) = self.flag_contains(a, &b, state) {
                         return Some(if op == ast::CmpOp::In { r } else { !r });
                     }
                     self.cmp_right = Some(b);
-                    let ka = self.keyify(a);
+                    let ka = self.keyify_in(a, state);
                     if ka.pts.is_empty() {
                         return self.compare_const(op, &ka, right, state);
                     }
@@ -1156,6 +1156,13 @@ impl Analyzer {
         let mut ks: Vec<KeyId> = Vec::with_capacity(n);
         for i in 0..n {
             let v = state.slot(oid, Ns::Pos, key_int(i as i64));
+            // an object hashing by value / identity: its key
+            let v = if !v.pts.is_empty() && v.kv.is_bot() && v.pts.len() == 1 && !crate::interp::disabled("setkeys") {
+                let kv = self.keyify_in(&v, state);
+                if kv.pts.is_empty() { kv } else { v }
+            } else {
+                v
+            };
             match (v.pts.is_empty(), v.kv.as_lit()) {
                 (true, Some(k)) => ks.push(k),
                 _ => {

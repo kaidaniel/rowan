@@ -1589,6 +1589,8 @@ pub struct DumpOpts {
     pub unknown_sel: bool,
     /// the default dump, under a wrap model serializer
     pub raw: bool,
+    /// `mode="json"` / `model_dump_json`: values made JSON-compatible
+    pub json: bool,
 }
 
 /// The values of a `Literal[...]` annotation.
@@ -1905,7 +1907,8 @@ impl Analyzer {
             } else {
                 state.slot(oid, Ns::Attr, nk)
             };
-            let sub = opts.sub_include.iter().find(|(k, _)| *k == nk).map(|(_, o)| o.clone()).unwrap_or_else(|| DumpOpts { by_alias: opts.by_alias, exclude_none: opts.exclude_none, exclude_unset: opts.exclude_unset, exclude_defaults: opts.exclude_defaults, ..Default::default() });
+            let mut sub = opts.sub_include.iter().find(|(k, _)| *k == nk).map(|(_, o)| o.clone()).unwrap_or_else(|| DumpOpts { by_alias: opts.by_alias, exclude_none: opts.exclude_none, exclude_unset: opts.exclude_unset, exclude_defaults: opts.exclude_defaults, ..Default::default() });
+            sub.json = opts.json;
             let mut dv = self.pyd_dump_value(&ann, &v, &sub, state, node);
             let fser: Vec<Validator> = pc.field_serializers.iter().filter(|s0| s0.fields.contains(&name) || s0.fields.iter().any(|x| x == "*")).cloned().collect();
             for fs in fser {
@@ -1999,7 +2002,18 @@ impl Analyzer {
     fn pyd_dump_value(&mut self, ann: &Ann, v: &Value, opts: &DumpOpts, state: &mut State, node: &Node) -> Value {
         let mut outs: Vec<Value> = Vec::new();
         if !v.kv.is_bot() {
-            outs.push(Value::kv_only(v.kv.clone()));
+            // JSON mode: a Decimal / Fraction is its text
+            let kv = if opts.json && v.kv.is_literal() && crate::domain::kv_literals(&v.kv).iter().any(crate::models::pynum::is_num_key) {
+                KeyVal::lits(KeySet::from_iter(crate::domain::kv_literals(&v.kv).iter().map(|k| match crate::models::pynum::str_of(k) {
+                    Some(t) => key_str_lit(&t),
+                    None => k,
+                })))
+            } else if opts.json && matches!(ann, Ann::Scalar("Decimal")) && !v.kv.is_literal() {
+                crate::domain::DATA
+            } else {
+                v.kv.clone()
+            };
+            outs.push(Value::kv_only(kv));
         }
         for o in v.pts.iter() {
             if is_instance(self, o) {
@@ -2090,6 +2104,7 @@ pub fn key_spec(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) -> Op
 fn dump_opts(an: &mut Analyzer, st: &mut State, c: &Call) -> DumpOpts {
     let flag = |c: &Call, n: &str| c.kwargs.get(&s(n)).map(|v| v.kv.as_lit() == Some(intern::key_bool(true))).unwrap_or(false);
     let mut o = DumpOpts { exclude_none: flag(c, "exclude_none"), exclude_unset: flag(c, "exclude_unset"), exclude_defaults: flag(c, "exclude_defaults"), by_alias: flag(c, "by_alias"), ..Default::default() };
+    o.json = c.qual.ends_with("model_dump_json") || c.qual.ends_with(".json") || c.kwargs.get(&s("mode")).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_str).as_deref() == Some("json");
     if let Some(v) = c.kwargs.get(&s("include")).cloned() {
         match key_spec(an, st, &v, &c.node) {
             Some((ks, nested)) => {
@@ -2167,6 +2182,12 @@ pub fn m_instance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             // the text of the dump (with its options): `json.loads` gives a copy of it
             let opts = dump_opts(an, st, c);
             let dumps = join_values(recv.pts.iter().map(|o| an.pyd_dump(o, &opts, st, &c.node)).collect::<Vec<_>>());
+            // the exact text, when every value is known (`indent=` aside)
+            if c.kwargs.get(&s("indent")).is_none() {
+                if let Some(t) = crate::models::compact_json_text(an, st, &dumps) {
+                    return Value::lit(key_str_lit(&t));
+                }
+            }
             let ids: Vec<String> = dumps.pts.iter().map(|o| o.to_string()).collect();
             Value::data(&format!("pydjson:{}", ids.join(",")))
         }

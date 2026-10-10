@@ -670,8 +670,16 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 intern::Key::None => "NoneType",
                 intern::Key::Tuple(_) => "tuple",
                 intern::Key::Bytes(_) => "bytes",
+                intern::Key::Dec(..) => "Decimal",
+                intern::Key::Frac(..) => "Fraction",
+                intern::Key::Frozen(_) => "frozenset",
                 _ => "?",
             });
+            // (an abstract class like numbers.Number or collections.abc.Hashable: not decided)
+            const KNOWN: &[&str] = &["str", "bool", "int", "float", "NoneType", "tuple", "bytes", "Decimal", "Fraction", "frozenset", "object", "list", "dict", "set", "complex", "bytearray", "type", "range", "defaultdict", "OrderedDict", "Counter", "deque"];
+            if kind == "?" || classes.iter().any(|cls| builtin(an, *cls).map(|b| !KNOWN.contains(&b.as_str())).unwrap_or(false)) {
+                return Value::data("bool");
+            }
             let hit = classes.iter().any(|cls| match builtin(an, *cls) {
                 Some(b) => b == kind || (b == "int" && kind == "bool") || (b == "object"),
                 None => false,
@@ -2959,6 +2967,13 @@ fn json_text(an: &Analyzer, st: &State, v: &Value, o: &JsonOpts, depth: usize) -
         }
         _ => None,
     }
+}
+
+/// Compact JSON text (pydantic's `model_dump_json`: no spaces, non-ASCII kept) of a value
+/// with known contents.
+pub fn compact_json_text(an: &Analyzer, st: &State, v: &Value) -> Option<String> {
+    let o = JsonOpts { sort_keys: false, indent: None, item_sep: ",".into(), key_sep: ":".into(), ensure_ascii: false };
+    json_text(an, st, v, &o, 0)
 }
 
 /// The snapshots a `json.dumps` / `pickle.dumps` text stands for.

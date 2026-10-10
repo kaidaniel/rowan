@@ -155,10 +155,15 @@ impl Analyzer {
         if kind == Kind::Instance && depth <= 3 && !super::disabled("valuekey") && self.obj(o).single {
             let c = self.instance_class(o)?;
             let ci = self.class_info_opt(c)?;
-            if !ci.dc_frozen.get() || self.class_lookup(c, "__hash__").is_some() || self.class_lookup(c, "__eq__").is_some() {
+            // a frozen pydantic model hashes by its fields too
+            let pyd_fields: Option<Vec<(String, Option<&'static ast::Expr>)>> = self.pyd_classes.get(&c).filter(|p| p.frozen && !super::disabled("pydkey")).map(|p| p.fields.iter().map(|f| (f.name.clone(), None)).collect());
+            if (!ci.dc_frozen.get() && pyd_fields.is_none()) || self.class_lookup(c, "__hash__").is_some() || self.class_lookup(c, "__eq__").is_some() {
                 return None;
             }
-            let fields = ci.dataclass_fields.borrow().clone()?;
+            let fields = match pyd_fields {
+                Some(f) => f,
+                None => ci.dataclass_fields.borrow().clone()?,
+            };
             let row = state.row(o, Ns::Attr);
             let mut parts = Vec::new();
             for (f, _) in &fields {
