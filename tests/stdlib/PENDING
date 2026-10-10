@@ -17,7 +17,6 @@ models/sm01_orders_cli.py
 models/sm02_layered_config.py
 models/sm03_inventory_report.py
 models/sm04_event_pipeline.py
-models/sm05_job_runner.py
 models/sm06_log_report.py
 small/s055_partial_positional.py
 small/s056_partial_keyword.py

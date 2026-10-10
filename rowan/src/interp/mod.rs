@@ -667,6 +667,10 @@ pub struct Analyzer {
     /// exception names handled by the running `except` clauses (innermost last): what a bare
     /// `raise` re-raises
     pub handling: Vec<FxHashSet<String>>,
+    /// the exception values the running handlers hold (a bare `raise` re-raises them)
+    pub handling_values: Vec<Value>,
+    /// inside a call whose exceptions a thread / future keeps: reads still require their keys
+    pub catching_depth: u32,
     /// the right operand of a comparison link already evaluated (chained comparisons)
     pub cmp_right: Option<Value>,
     /// per running comprehension: the cells of its variables (closed over by functions made
@@ -955,6 +959,8 @@ impl Analyzer {
             raise_values: Vec::new(),
             cur_exc: None,
             handling: Vec::new(),
+            handling_values: Vec::new(),
+            catching_depth: 0,
             cmp_right: None,
             comp_cells: Vec::new(),
             key_alias: None,

@@ -50,6 +50,17 @@ pub fn param_slot_of(k: KeyId) -> Option<u32> {
 }
 
 impl Analyzer {
+    /// The innermost handler that catches this namespace's error re-raises it.
+    pub fn guard_reraises(&self, ns: Ns) -> bool {
+        let want: &[&str] = if ns == Ns::Item { ITEM_GUARDS } else { ATTR_GUARDS };
+        for g in self.guards.iter().rev() {
+            if g.iter().any(|x| want.contains(&x.as_str())) {
+                return g.contains("!reraise");
+            }
+        }
+        false
+    }
+
     pub fn is_guarded(&self, ns: Ns) -> bool {
         let want: &[&str] = if ns == Ns::Item { ITEM_GUARDS } else { ATTR_GUARDS };
         self.guards.iter().any(|g| g.iter().any(|x| want.contains(&x.as_str())))
@@ -691,6 +702,11 @@ impl Analyzer {
                             *m = true;
                         }
                         self.record_event("guarded", oid);
+                        // (a thread / future keeps the exception for the caller, a handler that
+                        // re-raises lets it go on: still required)
+                        if (self.catching_depth > 0 || self.guard_reraises(ns)) && !super::disabled("catchreq") {
+                            self.record_symreq(node, KeyVal::Lit(k), &row, oid, ns, false, "load");
+                        }
                     } else {
                         self.record_symreq(node, KeyVal::Lit(k), &row, oid, ns, guarded, "load");
                     }
@@ -729,6 +745,10 @@ impl Analyzer {
                 }
                 if guarded && cls.tier != Tier::Sym && !crate::interp::disabled("guardedverdicts") {
                     self.verdict_guarded(node, k, &cls, oid, ns);
+                }
+                // (a handler that re-raises, a thread / future: the input still needs the key)
+                if guarded && cls.tier == Tier::Input && (self.catching_depth > 0 || self.guard_reraises(ns)) && !crate::interp::disabled("catchreq") {
+                    self.require_providers_k(&cls, &row, &site, true, state, Some(k));
                 }
                 if !guarded && cls.tier != Tier::Sym {
                     self.verdict(node, k, &cls, oid, ns, None, None);

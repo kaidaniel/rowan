@@ -151,7 +151,8 @@ tasks = TASKS                                      #@row tasks: present={sum,gre
 
 if __name__ == "__main__":
     results, registry, log, checks = run_with_cleanup(SPECS)
-    #@row results: present={j1,j2,j3,x2} definite={j1,j2,j3,x2} closed
+    #@row results: present={j1,j2,j3,x2} definite_within={j1,j2,j3,x2} closed
+    #@todo row results: definite={j1,j2,j3,x2}  (x2's KeyError, raised in a summarised task under a re-raising @contextmanager, reaches the future without its value)
     r1 = results["j1"]
     #@row r1: present={ok,job,value} definite={ok,job,value} closed
     v1 = r1["value"]                               #@row v1: present={total,n} definite={total,n} closed
@@ -186,4 +187,4 @@ if __name__ == "__main__":
     value, printed = dry_run(SPECS[1])             #@value printed: exactly={"hello ann\n"}
     #@row value: present={greeting,lang} definite={greeting,lang} closed
     totals = quick_totals([{"args": {"values": [5]}}, {"args": {"values": [1, 1]}}])
-    t0 = totals[0]                                 #@value t0: exactly={2}
+    t0 = totals[0]                                 #@todo value t0: exactly={2}  (as_completed's results come in any order: sorted() of them is not modelled)

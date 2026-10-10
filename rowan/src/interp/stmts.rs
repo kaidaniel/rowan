@@ -144,6 +144,10 @@ impl Analyzer {
                     g.contains("*") || g.contains("Exception") || g.contains("BaseException") || names.iter().any(|n| g.contains(n) || n == "*" && !g.is_empty())
                 });
                 self.cur_exc = exc_v.filter(|v| v.pts.iter().any(|o| self.kind(o) == Kind::Instance || self.exc_objs.contains_key(&o) || matches!(&self.obj(o).payload, Payload::Method(q, _) if q == "fastapi.httpexc")));
+                // a bare raise: the exception the handler holds
+                if r.exc.is_none() && !crate::interp::disabled("reraisevalue") {
+                    self.cur_exc = self.handling_values.last().cloned().filter(|v| !v.pts.is_empty());
+                }
                 let recorded = state.reachable && !crate::interp::disabled("raisestate") && self.record_raise_state(state);
                 self.cur_exc = None;
                 if !caught {
@@ -1202,7 +1206,15 @@ impl Analyzer {
             }
         }
         // a handler for a class catches its subclasses too
-        let caught = expand_caught(caught);
+        let mut caught = expand_caught(caught);
+        // handlers that all end by re-raising: the body's reads are still required
+        let reraise = !t.handlers.is_empty() && t.handlers.iter().all(|h| {
+            let ast::ExceptHandler::ExceptHandler(h) = h;
+            matches!(h.body.last(), Some(ast::Stmt::Raise(r)) if r.exc.is_none())
+        });
+        if reraise && !crate::interp::disabled("reraisereq") {
+            caught.insert("!reraise".into());
+        }
         // returns inside the try are collected apart from the earlier ones: the finally runs
         // on their way out
         let has_finally = !t.finalbody.is_empty() && !crate::interp::disabled("finally");
@@ -1268,16 +1280,16 @@ impl Analyzer {
             if !hs.reachable {
                 continue;
             }
+            // the exceptions raised at the recorded points (anything else: unknown)
+            let hn = frontend::node(h);
+            let unknown = Value::data(&format!("exc@L{}", hn.line));
+            let ev = match &raised_exc {
+                Some(v) if !generic => v.clone(),
+                Some(v) => v.join(&unknown),
+                None => unknown,
+            };
             if let Some(name) = &h.name {
-                let hn = frontend::node(h);
-                // the exceptions raised at the recorded points (anything else: unknown)
-                let unknown = Value::data(&format!("exc@L{}", hn.line));
-                let ev = match &raised_exc {
-                    Some(v) if !generic => v.clone(),
-                    Some(v) => v.join(&unknown),
-                    None => unknown,
-                };
-                self.store_name(s(name.id.as_str()), ev, &mut hs);
+                self.store_name(s(name.id.as_str()), ev.clone(), &mut hs);
             }
             let mut names: FxHashSet<String> = FxHashSet::default();
             match &h.type_ {
@@ -1292,7 +1304,9 @@ impl Analyzer {
                 },
             }
             self.handling.push(names);
+            self.handling_values.push(ev);
             self.exec_block(&h.body, &mut hs);
+            self.handling_values.pop();
             self.handling.pop();
             results.push(hs);
         }

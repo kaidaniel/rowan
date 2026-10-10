@@ -1525,7 +1525,13 @@ impl Analyzer {
                     // around it reaches its handler)
                     if !sr.guarded && matches!(tier, Tier::Missing | Tier::Possibly | Tier::Input | Tier::LikelyMissing) && !crate::interp::disabled("symreqraise") {
                         let exc = if sr.ns == Ns::Attr { "AttributeError" } else { "KeyError" };
+                        // (the exception, with its key, for a handler's `as e`)
+                        if !self.raise_states.is_empty() && !crate::interp::disabled("excvalue") {
+                            let e = self.exception_object(exc, vec![Value::lit(k)], &sr.node, state);
+                            self.cur_exc = Some(e);
+                        }
                         self.may_raise_here(exc, &mut pre.copy());
+                        self.cur_exc = None;
                     }
                 }
             }

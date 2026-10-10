@@ -40,6 +40,7 @@ impl Analyzer {
         self.raise_values.push(None);
         self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
         self.try_sum_depth.push(self.sum_stack.len());
+        self.catching_depth += 1;
         let mut outs = Vec::new();
         for fo in f.pts.iter() {
             let v = match self.kind(fo) {
@@ -48,6 +49,7 @@ impl Analyzer {
             };
             outs.push(v);
         }
+        self.catching_depth -= 1;
         self.guards.pop();
         self.try_marks.pop();
         self.try_sum_depth.pop();
