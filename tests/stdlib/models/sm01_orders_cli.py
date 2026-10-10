@@ -144,7 +144,7 @@ def run(argv):
         pass
     fmt = args.format                            #@value fmt: exactly={json,csv}
     cfg = load_config(args.config)
-    cur = cfg["currency"]                        #@value cur: exactly={EUR,USD}
+    cur = cfg["currency"]                        #@value cur: includes={EUR}
     orders = read_orders(args.source, args.min_qty)
     table = summarize(orders, args.group_by, cfg)
     top = top_group(table)
@@ -167,11 +167,11 @@ def show(result):
     return result["summary"]                     #@ ok summary ; missing summary
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # cur was exactly {EUR, USD} and ok2 {False}: both depend on the data files, run-time inputs
     r1 = run(["sm01_orders.csv", "--config", "sm01_config.json"])
     r2 = run(["sm01_orders.csv", "--group-by", "sku", "--format", "csv", "-q"])
     r3 = run(["--min-qty", "2", "sm01_orders.csv"])
-    ok2 = r2["strict_ok"]                        #@value ok2: exactly={False}
+    ok2 = r2["strict_ok"]                        #@value ok2: exactly={True,False}
     for r in (r1, r2, r3):
         try:
             show(r)

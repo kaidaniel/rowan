@@ -688,7 +688,7 @@ impl Analyzer {
                         continue;
                     }
                     let kv = KeyVal::KeysOf(KeysOf::new(recv.pts.clone(), Ns::Item));
-                    let vals = join_values(recv.pts.iter().map(|r| self.all_values(r, Ns::Item, state)));
+                    let vals = join_values(recv.pts.iter().map(|r| self.record_values(r, state)).collect::<Vec<_>>());
                     let lit = if recv.pts.len() == 1 { self.literal_dict_items(recv.pts.first().unwrap(), state) } else { None };
                     match (lit, items.as_mut()) {
                         (Some(l), Some(its)) => {
@@ -1002,6 +1002,20 @@ impl Analyzer {
 
     pub fn all_values(&self, oid: u32, ns: Ns, state: &State) -> Value {
         state.all_slots(oid, ns)
+    }
+
+    /// The values a record holds, including what its unknown keys hold (a parameter's dict,
+    /// an open record: its content under an unknown key).
+    pub fn record_values(&mut self, oid: u32, state: &mut State) -> Value {
+        let v = state.all_slots(oid, Ns::Item);
+        let row = state.row(oid, Ns::Item);
+        // (keys stored under unknown names keep their values in the `*` slot: only content
+        // from outside — a parameter, an input, unknown code — is not there)
+        let outside = row.top || row.symbolic() || row.sources.iter().any(|(src, _)| !crate::domain::source_is_data(src));
+        if (self.kind(oid) == Kind::Ph || (row.open() && outside)) && !super::disabled("openvalues") {
+            return v.join(&self.path_placeholder_value(oid, Ns::Item, STAR, &row, state));
+        }
+        v
     }
 
     /// Finite literal key set denoted by a value, or None.

@@ -2734,11 +2734,8 @@ fn m_json_dumps(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if let Some(p) = x.kv.as_param() {
         an.record_event("concrete", p);
     }
-    for o in x.pts.iter() {
-        if an.kind(o) == Kind::Ph {
-            an.record_event("concrete", o);
-        }
-    }
+    // (placeholders inside the containers too: `{"meta": meta, …}`)
+    an.concrete_events(x, st, 3);
     // fully known data: the exact text
     if json && !crate::interp::disabled("jsontext") {
         if let Some(opts) = JsonOpts::of(c) {

@@ -1878,7 +1878,17 @@ impl Inst {
         }
         let (oid, ns) = unrho(r);
         let targets = self.resolve(an, state, pre, oid);
-        let out = if targets.is_empty() { Row::new() } else { join_rows(targets.iter().map(|t| erow_of(pre, state, &self.born, t, ns))) };
+        // (a placeholder standing for no object here: whatever value it is, its keys are not
+        // known — an empty closed row would claim there are none)
+        let out = if targets.is_empty() {
+            if an.has_obj(oid) && an.kind(oid) == Kind::Ph && !crate::interp::disabled("unresolvedtop") {
+                Row::top()
+            } else {
+                Row::new()
+            }
+        } else {
+            join_rows(targets.iter().map(|t| erow_of(pre, state, &self.born, t, ns)))
+        };
         self.erow_cache.insert(r, out.clone());
         out
     }
@@ -2069,6 +2079,11 @@ impl Inst {
         let mut acc = Value::new();
         let key = ph.key.unwrap_or(STAR);
         for p in parents.iter() {
+            // the content of a dict under an unknown key: its values (iterating it gives keys)
+            if key == STAR && ph.ns == Ns::Item && an.kind(p) == Kind::Dict && !crate::interp::disabled("dictstar") {
+                acc = acc.join(&an.record_values(p, state));
+                continue;
+            }
             if key == STAR {
                 let it = an.iterate(&Value::obj(p), &Node::none(), state);
                 let e = it.elem.flat();

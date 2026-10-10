@@ -468,6 +468,21 @@ impl Analyzer {
                     // `k in d` with k a parameter: decided per call site when k is a literal there
                     self.record_event("narrow", *ph);
                 }
+                // an unknown key in closed dicts of string keys: one of those keys
+                KeyVal::KeysOf(_) | KeyVal::Data(_) if member && !crate::interp::disabled("keysofin") => {
+                    let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
+                    if rows.iter().all(|r| r.closed() && !r.symbolic()) && lv.pts.is_empty() {
+                        let mut may = KeySet::new();
+                        for r in &rows {
+                            may = may.union(&r.present);
+                        }
+                        if !may.is_empty() && may.iter().all(intern::key_is_str) {
+                            self.narrow_key_expr(left, &lv, &may, &may, state);
+                        } else if may.is_empty() {
+                            state.reachable = false;
+                        }
+                    }
+                }
                 KeyVal::Lits(ks) if member => {
                     let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
                     if rows.iter().all(|r| r.closed()) {

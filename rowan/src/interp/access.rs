@@ -1175,6 +1175,15 @@ impl Analyzer {
     /// oid[ns] ∪= keys of every record in src (dict spread / update / dict(x)).
     pub fn copy_into(&mut self, oid: u32, ns: Ns, src: &Value, state: &mut State, strong: bool, kill: &KeySet) {
         let recs = self.record_objects(src);
+        // an unknown value copied in (`{**entry}` with entry unknown): any keys
+        if recs.is_empty() && src.pts.is_empty() && !src.kv.is_bot() && !src.kv.is_literal() && !super::disabled("copyunknown") {
+            if let Some(ph) = src.kv.as_param() {
+                self.record_event("concrete", ph);
+            }
+            let n = state.rows.len();
+            let r = state.row(oid, ns).data_store(Source::new(&format!("copy@{}", n), SourceKind::Data));
+            state.set_row(oid, ns, r);
+        }
         if recs.is_empty() {
             if !src.pts.is_empty() {
                 let n = state.rows.len();
