@@ -1690,6 +1690,18 @@ impl Analyzer {
                     continue;
                 }
                 self.verdict(node, k, &cls, oid, ns, Some(file), Some(text));
+                if cls.tier == Tier::Proven && ns == Ns::Item {
+                    if let Some(src) = self.td_param_src.get(&oid).copied() {
+                        let fresh = !state.reqs.inner(&src).map(|d| d.contains_key(&k)).unwrap_or(false);
+                        state.require(src, k, intern::s(&site), intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
+                        if conditional && fresh {
+                            let tgt = state.reqs.writable(&src);
+                            if let Some(cur) = tgt.get(&k).cloned() {
+                                tgt.insert(k, crate::domain::ReqInfo { always: false, ..cur });
+                            }
+                        }
+                    }
+                }
                 if cls.tier == Tier::Input {
                     self.require_providers_k(&cls, row, &site, true, state, Some(k));
                     if conditional {

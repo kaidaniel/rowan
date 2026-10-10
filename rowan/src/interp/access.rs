@@ -219,6 +219,62 @@ impl Analyzer {
         out.join(&Value::kv_only(KeyVal::lits(KeySet::from_iter(ks))))
     }
 
+    /// A TypedDict's required and optional keys (`total=`, `Required[…]` / `NotRequired[…]`,
+    /// inherited from TypedDict bases).
+    pub fn typed_dict_keys(&self, cls: u32) -> Option<(KeySet, KeySet)> {
+        let ci = self.class_info_opt(cls)?;
+        if !ci.typed_dict {
+            return None;
+        }
+        let (mut req, mut opt) = (KeySet::new(), KeySet::new());
+        for b in ci.bases.iter() {
+            if let Some((r, o)) = self.typed_dict_keys(*b) {
+                req = req.union(&r);
+                opt = opt.union(&o);
+            }
+        }
+        let c = ci.node;
+        let total = c.arguments.as_ref().and_then(|a| a.keywords.iter().find(|k| k.arg.as_ref().map(|x| x.as_str()) == Some("total"))).map(|k| !matches!(&k.value, ast::Expr::BooleanLiteral(b) if !b.value)).unwrap_or(true);
+        let last = |e: &ast::Expr| -> String {
+            match e {
+                ast::Expr::Name(n) => n.id.to_string(),
+                ast::Expr::Attribute(a) => a.attr.id.to_string(),
+                _ => String::new(),
+            }
+        };
+        for st in &c.body {
+            if let ast::Stmt::AnnAssign(a) = st {
+                if let ast::Expr::Name(n) = &*a.target {
+                    let mut required = total;
+                    let mut ann: &ast::Expr = &a.annotation;
+                    // `Annotated[Required[int], …]`
+                    loop {
+                        let ast::Expr::Subscript(sb) = ann else { break };
+                        match last(&sb.value).as_str() {
+                            "Required" => required = true,
+                            "NotRequired" => required = false,
+                            "Annotated" | "ReadOnly" => {}
+                            _ => break,
+                        }
+                        ann = match &*sb.slice {
+                            ast::Expr::Tuple(t) if !t.elts.is_empty() => &t.elts[0],
+                            other => other,
+                        };
+                    }
+                    let k = intern::key_str_lit(&n.id);
+                    if required {
+                        req = req.union(&KeySet::one(k));
+                        opt = opt.difference(&KeySet::one(k));
+                    } else {
+                        opt = opt.union(&KeySet::one(k));
+                        req = req.difference(&KeySet::one(k));
+                    }
+                }
+            }
+        }
+        Some((req, opt))
+    }
+
     /// A key standing for one object hashed by its identity (a future, a function, an instance
     /// of a class without `__eq__` / `__hash__`), while that object is one runtime object.
     pub fn identity_key(&self, o: u32) -> Option<KeyId> {
@@ -830,6 +886,18 @@ impl Analyzer {
                     if cls.tier == Tier::Input {
                         self.require_providers_k(&cls, &row, &site, true, state, Some(k));
                     }
+                    if cls.tier == Tier::Proven && ns == Ns::Item {
+                        if let Some(src) = self.td_param_src.get(&oid).copied() {
+                            let fresh = !state.reqs.inner(&src).map(|d| d.contains_key(&k)).unwrap_or(false);
+                            state.require(src, k, s(&site), intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
+                            if fresh && (self.branch_depth > 0 || self.cond_depth > 0) {
+                                let tgt = state.reqs.writable(&src);
+                                if let Some(cur) = tgt.get(&k).cloned() {
+                                    tgt.insert(k, crate::domain::ReqInfo { always: false, ..cur });
+                                }
+                            }
+                        }
+                    }
                     if cls.tier != Tier::Missing && is_lit && single_target && self.strongable(oid) {
                         row = row.narrow_in(k, true);
                         state.set_row(oid, ns, row.clone());
@@ -1265,6 +1333,21 @@ impl Analyzer {
                     }
                 }
                 Kind::Namespace | Kind::Instance => self.load_instance_attr(oid, name, node, state, guarded, single),
+                Kind::Class if matches!(name, "__required_keys__" | "__optional_keys__" | "__total__") && self.class_info_opt(oid).map(|ci| ci.typed_dict).unwrap_or(false) => {
+                    match self.typed_dict_keys(oid) {
+                        Some((req, opt)) if name != "__total__" => {
+                            let ks: Vec<Value> = intern::sorted_by_str(if name == "__required_keys__" { req } else { opt }.iter()).into_iter().map(Value::lit).collect();
+                            let o = self.alloc_simple(Kind::Set, node, state, &format!("{}@L{}", name, node.line));
+                            self.set_members(o, KeySet::from_iter(ks.iter().filter_map(|v| v.kv.as_lit())), state);
+                            Value::obj(o)
+                        }
+                        Some(_) => {
+                            let total = self.class_info_opt(oid).and_then(|ci| ci.node.arguments.as_ref().and_then(|a| a.keywords.iter().find(|k| k.arg.as_ref().map(|x| x.as_str()) == Some("total")).map(|k| !matches!(&k.value, ast::Expr::BooleanLiteral(b) if !b.value)))).unwrap_or(true);
+                            Value::lit(intern::key_bool(total))
+                        }
+                        None => Value::data("typeddict"),
+                    }
+                }
                 Kind::Class if matches!(name, "__name__" | "__qualname__") && self.class_lookup(oid, name).is_none() => {
                     let n = self.class_info_opt(oid).map(|ci| ci.name.clone()).unwrap_or_default();
                     Value::lit(key_str_lit(&n))

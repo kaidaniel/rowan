@@ -1,4 +1,3 @@
-small/s039_typeddict.py
 small/s040_typing_namedtuple.py
 small/s041_namespace_proxy.py
 small/s043_json_input.py

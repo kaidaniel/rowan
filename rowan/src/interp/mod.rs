@@ -784,6 +784,9 @@ pub struct Analyzer {
     pub exit_callbacks: FxHashMap<ObjId, Vec<(Value, Vec<Value>, IndexMap<StrId, Value>)>>,
     /// TestClient cookie jars (dicts with `set`)
     pub cookie_jars: FxHashSet<ObjId>,
+    /// entry parameters annotated with a TypedDict: the declared row's reads are still the
+    /// input's schema (the parameter's source)
+    pub td_param_src: FxHashMap<ObjId, crate::domain::SourceId>,
     /// itertools.count / cycle / repeat(x) objects
     pub infinites: FxHashMap<ObjId, crate::models::itertools::Infinite>,
     /// partials' bound `**mapping`s of unknown keys
@@ -1019,6 +1022,7 @@ impl Analyzer {
             stdout_redirect: Vec::new(),
             exit_callbacks: FxHashMap::default(),
             cookie_jars: FxHashSet::default(),
+            td_param_src: FxHashMap::default(),
             infinites: FxHashMap::default(),
             partial_star: FxHashMap::default(),
             wrapped: FxHashMap::default(),
@@ -1904,7 +1908,7 @@ impl Analyzer {
                     continue;
                 }
                 let mut v = match &a.annotation {
-                    Some(ann) => self.param_from_annotation(ann, &fi, &mut st),
+                    Some(ann) => self.param_from_annotation(ann, &fi, a.name.id.as_str(), &mut st),
                     None => None,
                 };
                 if v.is_none() {
@@ -1990,7 +1994,7 @@ impl Analyzer {
     }
 
     /// A declared row for an annotated entry-point parameter (§8.5).
-    pub fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, state: &mut State) -> Option<Value> {
+    pub fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
         let node = Self::strip_annotation(ann)?;
         let v = self.eval(node, state);
         for oid in v.pts.iter() {
@@ -1998,15 +2002,23 @@ impl Analyzer {
             if o == Kind::Class {
                 let ci = self.class_info(oid);
                 if ci.has_fields() {
-                    let fields: KeySet = KeySet::from_iter(ci.fields().iter().map(|(f, _)| key_str_lit(f)));
+                    let mut fields: KeySet = KeySet::from_iter(ci.fields().iter().map(|(f, _)| key_str_lit(f)));
                     let ns = if ci.typed_dict { Ns::Item } else { Ns::Attr };
+                    // a TypedDict's `total=False` / `NotRequired` keys may be absent
+                    let mut declared = Row::closed_with(fields.clone());
+                    if ci.typed_dict && !disabled("tdoptional") {
+                        if let Some((req, opt)) = self.typed_dict_keys(oid) {
+                            fields = req.union(&opt);
+                            declared = Row::from_data(crate::domain::RowData { present: fields.clone(), definite: req.clone(), likely: req, ..Default::default() });
+                        }
+                    }
                     let inst = self.alloc(
                         Kind::Instance,
                         &format!("param:{}:{}", fi.qualname, ci.name),
                         state,
                         &format!("{} param", ci.name),
                         Payload::Cls(oid),
-                        Some(Row::closed_with(fields.clone())),
+                        Some(declared),
                         ns,
                         Some(true),
                         Some(&format!("entry:{}", fi.qualname)),
@@ -2014,6 +2026,10 @@ impl Analyzer {
                     for f in fields.iter() {
                         let v = self.typed_field_value(oid, &intern::key_py_str(f), state, &format!("entry:{}", fi.qualname));
                         state.set_slot(inst, ns, f, v, true);
+                    }
+                    if ci.typed_dict && !disabled("tdparam") {
+                        let src = Source::new(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param);
+                        self.td_param_src.insert(inst, src);
                     }
                     return Some(Value::obj(inst));
                 }
@@ -2136,7 +2152,7 @@ impl Analyzer {
                         }
                     }
                     let v = match &a.annotation {
-                        Some(ann) => self.param_from_annotation(ann, &fi, state),
+                        Some(ann) => self.param_from_annotation(ann, &fi, a.name.id.as_str(), state),
                         None => None,
                     };
                     args.push(match v {
