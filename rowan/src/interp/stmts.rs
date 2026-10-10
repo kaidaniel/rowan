@@ -1824,9 +1824,8 @@ impl Analyzer {
         if !matches!(self.frame().kind, FrameKind::Function) {
             return;
         }
-        // (`ROWAN_GC=1`: also at returns of objects — off by default: a call-cache hit replays
-        // only its footprint, so an object it returns unchanged keeps no row once collected)
-        let general = std::env::var("ROWAN_GC").map(|v| v == "1").unwrap_or(false);
+        // (`ROWAN_GC=0`: only at a return of a value without objects, the old rule)
+        let general = crate::interp::gc_on();
         if !general && (!v.pts.is_empty() || matches!(v.kv, KeyVal::KeysOf(_))) {
             return;
         }
@@ -1849,6 +1848,9 @@ impl Analyzer {
         }
         if fresh.is_empty() || fresh.len() > if general { 4096 } else { 64 } {
             return;
+        }
+        if crate::interp::debug_level() >= 1 && std::env::var("ROWAN_GCDBG").is_ok() {
+            eprintln!("gc: at a return of {} (L{}) value objects {:?} fresh {:?}", self.frame().label, self.frame().ctx, v.pts.to_vec(), { let mut f: Vec<u32> = fresh.iter().copied().collect(); f.sort(); f });
         }
         // roots: the returned value, what older objects' changed slots hold (globals,
         // parameters, cells, …), and what the analyzer holds beyond the state
@@ -1876,6 +1878,9 @@ impl Analyzer {
         }
         if general {
             self.gc_pinned(&mut work);
+            // (placeholders and unknown objects stand for objects outside the call — a
+            // parameter's record, an input's part: what they hold is reachable from there)
+            work.extend(fresh.iter().copied().filter(|o| matches!(self.kind(*o), Kind::Unknown | Kind::Ph)));
         }
         // (older objects reach fresh ones only through those roots: only fresh ones expand)
         let mut reached: rustc_hash::FxHashSet<u32> = Default::default();
@@ -1886,7 +1891,15 @@ impl Analyzer {
             self.obj_edges(o, state, &mut work);
         }
         for o in fresh {
+            // (a part of an input — an unknown object, a placeholder — is found again by its
+            // path whenever that path is read: its rows belong to the input, never garbage)
+            if matches!(self.kind(o), Kind::Unknown | Kind::Ph) && general {
+                continue;
+            }
             if !reached.contains(&o) {
+                if crate::interp::debug_level() >= 1 && std::env::var("ROWAN_GCDBG").is_ok() {
+                    eprintln!("gc: drop {} {} at the return of {} (L{})", o, self.obj(o).label, self.frame().label, self.frame().ctx);
+                }
                 state.forget_obj(o);
             }
         }

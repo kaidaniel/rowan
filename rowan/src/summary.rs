@@ -819,6 +819,14 @@ impl Analyzer {
                 Some(b) => b,
                 None => st.copy(),
             };
+            // (the collector at returns runs in summary runs too, against the state after
+            // binding the parameters)
+            if crate::interp::gc_on() && !matches!(fnode, FuncNode::Def(f) if crate::interp::is_generator(&f.body)) {
+                let b = base.copy_ref();
+                if let Some(fr) = self.frames.last_mut() {
+                    fr.pre_call = Some(crate::interp::PreCall(obj_mark, std::rc::Rc::new(b)));
+                }
+            }
             // run the body
             match fnode {
                 FuncNode::Lambda(l) => {

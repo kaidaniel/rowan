@@ -1299,7 +1299,7 @@ impl Analyzer {
         }
         // summary cache: same callee, same call site, same observable input → replay the effects
         let sig = self.call_signature(foid, &site, entry, &self_v, &args, &kwargs, &star_args, &star_kwargs, state);
-        if let Some(sig) = &sig {
+        if let Some(sig) = sig.as_ref().filter(|_| !super::disabled("callcache")) {
             if let Some(hit) = self.call_cache.get(sig).cloned() {
                 if super::debug_enabled() {
                     eprintln!("cache hit for {} at {}", self.func_info(foid).qualname, site);
@@ -1404,6 +1404,8 @@ impl Analyzer {
         self.esc_cls.push(Some(Vec::new()));
         let raise_mark = self.raise_records;
         let saved_ret = state.ret.take();
+        // (the caller's recorded returns are not the callee's: its end must not join them in)
+        let saved_exits = if super::disabled("callexits") { None } else { state.exits.take() };
         let mut saved_yields: Option<(ObjId, Option<Vec<(super::YieldKey, State)>>)> = None;
         self.frames.push(new_fr);
         if let FuncNode::Def(f) = fnode {
@@ -1688,6 +1690,9 @@ impl Analyzer {
         }
         state.env = saved_env;
         state.ret = saved_ret;
+        if saved_exits.is_some() {
+            state.exits = saved_exits;
+        }
         ret
     }
 

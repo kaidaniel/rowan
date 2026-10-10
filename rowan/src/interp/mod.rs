@@ -62,6 +62,15 @@ pub fn disabled(name: &str) -> bool {
 
 /// Tunable limits: `ROWAN_LIMITS=tab=24,call=32,clones=8,chain=2,path=3,active=4` overrides
 /// the defaults (for bisecting precision / time trade-offs).
+/// Abstract garbage collection at returns (`ROWAN_GC=0` turns it off): objects a call made
+/// that nothing reaches any more leave the state.
+pub fn gc_on() -> bool {
+    thread_local! {
+        static ON: bool = std::env::var("ROWAN_GC").map(|v| v != "0").unwrap_or(true);
+    }
+    ON.with(|o| *o)
+}
+
 pub fn limit(name: &str, default: usize) -> usize {
     thread_local! {
         static LIMITS: std::collections::HashMap<String, usize> = {
