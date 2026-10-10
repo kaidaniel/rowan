@@ -35,6 +35,10 @@ pub enum Key {
     Member(Arc<str>, Option<KeyId>),
     /// a frozenset of keys (sorted by id): a value key
     Frozen(Vec<KeyId>),
+    /// `decimal.Decimal`: sign, coefficient, exponent (models::pynum)
+    Dec(bool, u128, i32),
+    /// `fractions.Fraction`: numerator, denominator (normalised)
+    Frac(i128, i128),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -197,6 +201,7 @@ pub fn key_frozen(mut items: Vec<KeyId>) -> KeyId {
 pub fn key_py_str(id: KeyId) -> String {
     with_key(id, |k| match k {
         Key::Str(s) => s.to_string(),
+        Key::Dec(..) | Key::Frac(..) => crate::models::pynum::str_of(id).unwrap_or_default(),
         _ => key_repr_inner(k),
     })
 }
@@ -242,6 +247,8 @@ fn key_repr_inner(k: &Key) -> String {
         Key::Inv(f, k) => format!("{}⁻¹({})", f, key_repr(*k)),
         Key::Member(_, Some(v)) => key_repr(*v),
         Key::Member(q, None) => q.to_string(),
+        Key::Dec(n, c, e) => format!("Decimal('{}')", crate::models::pynum::Dec { neg: *n, coef: *c, exp: *e }.to_str()),
+        Key::Frac(n, d) => format!("Fraction({}, {})", n, d),
         Key::Frozen(items) if items.is_empty() => "frozenset()".into(),
         Key::Frozen(items) => {
             let parts: Vec<String> = items.iter().map(|k| key_repr(*k)).collect();

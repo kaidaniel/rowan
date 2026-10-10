@@ -1597,6 +1597,24 @@ impl Analyzer {
                 // `df.columns.str.strip().str.lower()`: the accessor of renamed column names
                 return obj.clone();
             }
+            // a Decimal / Fraction: its attributes and methods
+            if obj.kv.is_literal() && !crate::domain::kv_literals(&obj.kv).is_empty() && crate::domain::kv_literals(&obj.kv).iter().all(crate::models::pynum::is_num_key) {
+                let ks = crate::domain::kv_literals(&obj.kv);
+                let mut out: Option<Vec<Value>> = Some(Vec::new());
+                for k in ks.iter() {
+                    match (crate::models::pynum::attr(k, name), out.as_mut()) {
+                        (Some(Some(v)), Some(o)) => o.push(Value::lit(v)),
+                        _ => out = None,
+                    }
+                }
+                if let Some(o) = out {
+                    return join_values(o);
+                }
+                if crate::models::pynum::attr(ks.iter().next().unwrap(), name).is_some() {
+                    return Value::data(name);
+                }
+                return self.method_value(&format!("num.{}", name), obj);
+            }
             if matches!(obj.kv, KeyVal::Lit(_) | KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
                 return self.method_value(&format!("str.{}", name), obj);
             }

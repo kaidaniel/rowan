@@ -933,6 +933,7 @@ pub fn site_string(n: &Node) -> String {
 
 impl Analyzer {
     pub fn new(source: String, filename: &str, search_paths: Vec<String>, analyse_entry_points: bool, follow_imports: bool, use_summaries: Option<bool>) -> Result<Analyzer, String> {
+        crate::models::pynum::set_opaque(false);
         let use_summaries = use_summaries.unwrap_or_else(|| std::env::var("ROWAN_SUMMARIES").map(|v| v != "0").unwrap_or(true));
         let (idx, tree) = frontend::parse("__main__", Some(filename), source)?;
         frontend::set_main(idx);

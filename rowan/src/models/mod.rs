@@ -4,6 +4,7 @@
 
 pub mod minire;
 pub mod pyre;
+pub mod pynum;
 pub mod remodel;
 pub mod pandas;
 pub mod pydantic;
@@ -43,7 +44,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.str.", "Series.dt.", "Series.cat.", "Series.sparse.", "Series.list.", "Series.struct.", "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "cfgparser.", "cfgsection.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "slice.", "memo.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
+    "parser.", "num.", "cfgparser.", "cfgsection.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "slice.", "memo.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
 ];
 
 pub struct Registry {
@@ -91,6 +92,9 @@ impl Registry {
         r(&["builtins.bool"], m_bool);
         r(&["builtins.type"], m_type);
         r(&["builtins.range"], m_range);
+        r(&["decimal.Decimal", "fractions.Fraction"], m_number_new);
+        r(&["decimal.getcontext", "decimal.localcontext", "decimal.setcontext", "decimal.Context"], m_decimal_context);
+        r(&["num.*"], m_num_method);
         r(&["types.MappingProxyType"], m_mappingproxy);
         r(&["typing.get_type_hints", "typing_extensions.get_type_hints", "inspect.get_annotations"], m_type_hints);
         r(&["builtins.any", "builtins.all"], m_any_all);
@@ -357,6 +361,7 @@ pub fn external_constant(an: &Analyzer, qual: &str) -> Option<Value> {
         "string.punctuation" => st("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"),
         "string.whitespace" => st(" \t\n\r\x0b\x0c"),
         "string.printable" => st("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ \t\n\r\x0b\x0c"),
+        "decimal.ROUND_HALF_EVEN" | "decimal.ROUND_HALF_UP" | "decimal.ROUND_HALF_DOWN" | "decimal.ROUND_UP" | "decimal.ROUND_DOWN" | "decimal.ROUND_CEILING" | "decimal.ROUND_FLOOR" | "decimal.ROUND_05UP" => st(qual.trim_start_matches("decimal.")),
         "os.sep" | "os.path.sep" => st("/"),
         "os.linesep" => st("\n"),
         "os.pathsep" => st(":"),
@@ -3852,6 +3857,76 @@ fn m_mappingproxy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::obj(vid)
 }
 
+/// `Decimal(x)` / `Fraction(a, b)` of known values: a literal (models::pynum).
+fn m_number_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let lit = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty());
+    let dec = c.qual.starts_with("decimal.");
+    let a = c.arg(0, Some(if dec { "value" } else { "numerator" }));
+    let b = if dec { None } else { c.arg(1, Some("denominator")) };
+    let known = a.as_ref().map(|v| lit(v).is_some()).unwrap_or(true) && b.as_ref().map(|v| lit(v).is_some()).unwrap_or(true) && (!dec || c.args.len() <= 1);
+    if known {
+        let (ka, kb) = (a.as_ref().and_then(lit), b.as_ref().and_then(lit));
+        let r = if dec { pynum::decimal_new(ka) } else { pynum::fraction_new(ka, kb) };
+        if let Some(k) = r {
+            return Value::lit(k);
+        }
+        // `Decimal("x")` / `Fraction(1, 0)`: raises, or a value not simulated
+        let bad_text = ka.and_then(intern::key_as_str).is_some_and(|s| !s.trim().to_lowercase().contains("inf") && !s.trim().to_lowercase().contains("nan"));
+        if bad_text || (!dec && kb.and_then(intern::key_as_int) == Some(0)) {
+            an.raise_here(if dec { "decimal.InvalidOperation" } else { "ZeroDivisionError" }, st);
+            return Value::new();
+        }
+    }
+    an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
+    Value::data(if dec { "Decimal" } else { "Fraction" })
+}
+
+/// A changed decimal context: Decimal arithmetic is no longer simulated.
+fn m_decimal_context(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    pynum::set_opaque(true);
+    an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node)
+}
+
+/// A Decimal / Fraction method (`d.quantize(…)`, `f.limit_denominator(…)`).
+fn m_num_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let name = last(&c.qual).to_string();
+    let lit = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty());
+    let recv = c.recv.clone().unwrap_or_default();
+    let args: Option<Vec<KeyId>> = c.args.iter().map(lit).collect();
+    let kwargs: Option<Vec<(String, KeyId)>> = c.kwargs.iter().map(|(k, v)| lit(v).map(|x| (intern::str_get(*k).to_string(), x))).collect();
+    let (Some(args), Some(kwargs)) = (args, kwargs) else {
+        an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
+        return Value::data("number");
+    };
+    let kw: Vec<(&str, KeyId)> = kwargs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    let mut outs = Vec::new();
+    for r in crate::domain::kv_literals(&recv.kv).iter() {
+        match pynum::method(r, &name, &args, &kw) {
+            Some(k) => outs.push(pure_result(an, st, c, k)),
+            None => return Value::data("number"),
+        }
+    }
+    if outs.is_empty() {
+        return Value::data("number");
+    }
+    join_values(outs)
+}
+
+/// A literal result, a literal tuple as a tuple object.
+fn pure_result(an: &mut Analyzer, st: &mut State, c: &Call, k: KeyId) -> Value {
+    let items = intern::with_key(k, |kk| match kk {
+        intern::Key::Tuple(xs) => Some(xs.clone()),
+        _ => None,
+    });
+    match items {
+        Some(xs) => {
+            let vals: Vec<Value> = xs.iter().map(|x| Value::lit(*x)).collect();
+            an.alloc_positional(Kind::Tuple, &c.node, Some(vals), Value::new(), DATA, st)
+        }
+        None => Value::lit(k),
+    }
+}
+
 fn m_range(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let ints: Option<Vec<i64>> = c.args.iter().map(|a| if a.pts.is_empty() { a.kv.as_lit().and_then(intern::key_as_int) } else { None }).collect();
     let bounds = match ints.as_deref() {
@@ -3981,48 +4056,83 @@ fn m_sum(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     if let Some(items) = it.items {
-        let mut acc_i: i64 = 0;
-        let mut acc_f: f64 = 0.0;
-        let mut float = false;
+        let lit = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty());
+        let start = match c.args.get(1).or(c.kwargs.get(&s("start"))) {
+            Some(v) => match lit(v) {
+                Some(k) => k,
+                None => return Value::data("sum"),
+            },
+            None => intern::key_int(0),
+        };
+        let mut ks: Vec<KeyId> = Vec::with_capacity(items.len());
         for item in &items {
-            let Some(k) = item.kv.as_lit().filter(|_| item.pts.is_empty()) else { return Value::data("sum") };
-            match intern::with_key(k, |kk| match kk {
-                intern::Key::Int(i) => Some((*i as f64, false, *i)),
-                intern::Key::Bool(b) => Some((if *b { 1.0 } else { 0.0 }, false, *b as i64)),
-                intern::Key::Float(b) => Some((f64::from_bits(*b), true, 0)),
-                _ => None,
-            }) {
-                Some((f, is_f, i)) => {
-                    acc_f += f;
-                    if is_f {
-                        float = true;
-                    } else {
-                        acc_i = acc_i.wrapping_add(i);
-                    }
-                }
+            match lit(item) {
+                Some(k) => ks.push(k),
                 None => return Value::data("sum"),
             }
         }
-        if let Some(start) = c.args.get(1) {
-            match start.kv.as_lit().filter(|_| start.pts.is_empty()).and_then(|k| intern::with_key(k, |kk| match kk {
-                intern::Key::Int(i) => Some((*i as f64, false, *i)),
-                intern::Key::Float(b) => Some((f64::from_bits(*b), true, 0)),
-                _ => None,
-            })) {
-                Some((f, is_f, i)) => {
-                    acc_f += f;
-                    if is_f {
-                        float = true;
-                    } else {
-                        acc_i = acc_i.wrapping_add(i);
-                    }
-                }
-                None => return Value::data("sum"),
-            }
-        }
-        return if float { Value::lit(intern::key_float(acc_f)) } else { Value::lit(intern::key_int(acc_i)) };
+        return match py_sum(start, &ks) {
+            Some(k) => Value::lit(k),
+            None => Value::data("sum"),
+        };
     }
     Value::data("sum")
+}
+
+/// CPython's `sum(items, start)` on literals: the exact int path, then the compensated
+/// (Neumaier) float path, then plain `+`.
+pub fn py_sum(start: KeyId, items: &[KeyId]) -> Option<KeyId> {
+    let get = |k: KeyId| intern::key_get(k);
+    let mut acc = start;
+    let mut i = 0;
+    // ints (an exact int start)
+    if let intern::Key::Int(mut a) = get(acc) {
+        while i < items.len() {
+            match get(items[i]) {
+                intern::Key::Int(x) => a = a.checked_add(x)?,
+                intern::Key::Bool(b) => a = a.checked_add(b as i64)?,
+                _ => break,
+            }
+            i += 1;
+        }
+        acc = intern::key_int(a);
+        if i < items.len() {
+            acc = pyvalues::operator_call("add", &[acc, items[i]])?;
+            i += 1;
+        }
+    }
+    // floats
+    if let intern::Key::Float(bits) = get(acc) {
+        let mut f = f64::from_bits(bits);
+        let mut c = 0.0f64;
+        while i < items.len() {
+            match get(items[i]) {
+                intern::Key::Float(xb) => {
+                    let x = f64::from_bits(xb);
+                    let t = f + x;
+                    if f.abs() >= x.abs() {
+                        c += (f - t) + x;
+                    } else {
+                        c += (x - t) + f;
+                    }
+                    f = t;
+                }
+                intern::Key::Int(x) => f += x as f64,
+                intern::Key::Bool(b) => f += b as i64 as f64,
+                _ => break,
+            }
+            i += 1;
+        }
+        if c != 0.0 && c.is_finite() {
+            f += c;
+        }
+        acc = intern::key_float(f);
+    }
+    while i < items.len() {
+        acc = pyvalues::operator_call("add", &[acc, items[i]])?;
+        i += 1;
+    }
+    Some(acc)
 }
 
 /// The sort key of one item as literals: the item itself, or `key(item)`, when it is a

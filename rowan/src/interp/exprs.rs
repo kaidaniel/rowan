@@ -340,6 +340,29 @@ impl Analyzer {
                 if c.ops.len() == 1 && !super::disabled("richcmp") && !matches!(c.ops[0], ast::CmpOp::In | ast::CmpOp::NotIn | ast::CmpOp::Is | ast::CmpOp::IsNot) {
                     let b = self.eval(&c.comparators[0], state);
                     let nd = frontend::node(node);
+                    // Decimal / Fraction literals compare by value (`Decimal("1.0") == 1`)
+                    let has_num = |v: &Value| v.kv.is_literal() && crate::domain::kv_literals(&v.kv).iter().any(crate::models::pynum::is_num_key);
+                    if (has_num(&a) || has_num(&b)) && a.pts.is_empty() && b.pts.is_empty() && !super::disabled("pynum") {
+                        let opn = match c.ops[0] {
+                            ast::CmpOp::Eq => "eq",
+                            ast::CmpOp::NotEq => "ne",
+                            ast::CmpOp::Lt => "lt",
+                            ast::CmpOp::LtE => "le",
+                            ast::CmpOp::Gt => "gt",
+                            _ => "ge",
+                        };
+                        let mut outs: Vec<bool> = Vec::new();
+                        for x in crate::domain::kv_literals(&a.kv).iter() {
+                            for y in crate::domain::kv_literals(&b.kv).iter() {
+                                match crate::models::pynum::binop(opn, x, y).flatten().and_then(|k| intern::with_key(k, |kk| if let intern::Key::Bool(t) = kk { Some(*t) } else { None })) {
+                                    Some(t) => outs.push(t),
+                                    None => return Value::data("bool"),
+                                }
+                            }
+                        }
+                        outs.dedup();
+                        return if outs.len() == 1 { Value::lit(intern::key_bool(outs[0])) } else { Value::data("bool") };
+                    }
                     if let Some(r) = self.rich_compare(c.ops[0], &a, &b, &nd, state) {
                         return r;
                     }
@@ -1231,6 +1254,8 @@ impl Analyzer {
                         intern::Key::Inv(..) => true,
                         intern::Key::Member(..) => true,
                         intern::Key::Frozen(t) => !t.is_empty(),
+                        intern::Key::Dec(_, c, _) => *c != 0,
+                        intern::Key::Frac(n, _) => *n != 0,
                     })
                 };
                 let mut it = lits.iter();
@@ -1925,6 +1950,9 @@ impl Analyzer {
 
 /// Ordering of two literals of one kind: numbers (ints, floats, bools) or strings.
 pub fn literal_order(x: KeyId, y: KeyId) -> Option<std::cmp::Ordering> {
+    if crate::models::pynum::is_num_key(x) || crate::models::pynum::is_num_key(y) {
+        return crate::models::pynum::order(x, y);
+    }
     let nx = intern::with_key(x, num_of);
     let ny = intern::with_key(y, num_of);
     if let (Some(a), Some(b)) = (nx, ny) {

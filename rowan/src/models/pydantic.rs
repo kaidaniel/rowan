@@ -560,6 +560,7 @@ impl Analyzer {
                         "float" => Ann::Scalar("float"),
                         "str" => Ann::Scalar("str"),
                         "bool" => Ann::Scalar("bool"),
+                        "Decimal" => Ann::Scalar("Decimal"),
                         _ => Ann::Other,
                     },
                 }
@@ -1446,18 +1447,31 @@ impl Analyzer {
             }
             Ann::Scalar(t) => {
                 let t = *t;
-                if val.pts.is_empty() && val.kv.is_literal() && matches!(t, "int" | "float") {
+                if val.pts.is_empty() && val.kv.is_literal() && matches!(t, "int" | "float" | "Decimal") {
                     let lits = crate::domain::kv_literals(&val.kv);
                     let fails = |k: KeyId| {
                         let c = coerce_kv(t, &KeyVal::Lit(k));
                         let k2 = c.as_lit().unwrap();
-                        if t == "int" { intern::key_as_int(k2).is_none() } else { !intern::key_is_number(k2) }
+                        match t {
+                            "int" => intern::key_as_int(k2).is_none(),
+                            "Decimal" => crate::models::pynum::as_dec(k2).is_none(),
+                            _ => !intern::key_is_number(k2),
+                        }
                     };
                     let bad = lits.iter().filter(|k| fails(*k)).count();
                     if bad > 0 {
                         let loc = self.pyd_field;
-                        self.pyd_err(loc, if t == "int" { "int_parsing" } else { "float_parsing" }, bad == lits.len(), false);
+                        let code = match t {
+                            "int" => "int_parsing",
+                            "Decimal" => "decimal_parsing",
+                            _ => "float_parsing",
+                        };
+                        self.pyd_err(loc, code, bad == lits.len(), false);
                     }
+                }
+                // an unknown value validated as a Decimal is a Decimal (not the str it came as)
+                if t == "Decimal" && !(val.pts.is_empty() && val.kv.is_literal()) {
+                    return Value::data("Decimal");
                 }
                 Value::with_kv(val.pts.clone(), coerce_kv(t, &val.kv))
             }
@@ -1634,6 +1648,23 @@ fn coerce_kv(t: &str, kv: &KeyVal) -> KeyVal {
                     if f.fract() == 0.0 {
                         return intern::key_int(f as i64);
                     }
+                }
+                k
+            }
+            "Decimal" => {
+                use crate::models::pynum;
+                if pynum::as_dec(k).is_some() {
+                    return k;
+                }
+                if let Some(s0) = as_str.as_ref() {
+                    return pynum::Dec::parse(s0.trim()).map(pynum::dec_key).unwrap_or(k);
+                }
+                if let Some(i) = as_int.filter(|_| !is_bool(k)) {
+                    return pynum::dec_key(pynum::Dec::from_int(i as i128));
+                }
+                // a float goes through its repr (`0.1` → `Decimal('0.1')`)
+                if let Some(f) = as_float(k) {
+                    return pynum::Dec::parse(&crate::models::pyvalues::float_repr(f)).map(pynum::dec_key).unwrap_or(k);
                 }
                 k
             }

@@ -106,6 +106,8 @@ fn truthy(k: KeyId) -> Option<bool> {
         Key::Str(s) => !s.is_empty(),
         Key::Bytes(b) => !b.is_empty(),
         Key::Tuple(t) | Key::Frozen(t) => !t.is_empty(),
+        Key::Dec(_, c, _) => c != 0,
+        Key::Frac(n, _) => n != 0,
         Key::Ellipsis => true,
         Key::Inv(..) | Key::Member(..) => return None,
     })
@@ -248,6 +250,8 @@ fn py_repr_k(k: &Key, ascii: bool) -> Option<String> {
         Key::None => "None".into(),
         Key::Bytes(b) => repr_bytes(b),
         Key::Ellipsis => "Ellipsis".into(),
+        Key::Dec(n, c, e) => format!("Decimal('{}')", crate::models::pynum::Dec { neg: *n, coef: *c, exp: *e }.to_str()),
+        Key::Frac(n, d) => format!("Fraction({}, {})", n, d),
         // (several items print in hash order)
         Key::Frozen(items) if items.is_empty() => "frozenset()".into(),
         Key::Frozen(items) if items.len() == 1 => format!("frozenset({{{}}})", py_repr_k(&key_get(items[0]), ascii)?),
@@ -281,6 +285,7 @@ pub fn py_ascii(k: KeyId) -> Option<String> {
 pub fn py_str(k: KeyId) -> Option<String> {
     match key_get(k) {
         Key::Str(s) => Some(s.to_string()),
+        Key::Dec(..) | Key::Frac(..) => crate::models::pynum::str_of(k),
         other => py_repr_k(&other, false),
     }
 }
@@ -1364,6 +1369,9 @@ fn num_cmp(a: Num, b: Num) -> Option<Ordering> {
 
 /// Python `a == b`; None when unknowable (NaN inside a tuple: identity matters).
 fn py_eq(a: KeyId, b: KeyId) -> Option<bool> {
+    if let Some(r) = crate::models::pynum::binop("eq", a, b) {
+        return r.and_then(|k| truthy(k));
+    }
     if let (Some(x), Some(y)) = (num(a), num(b)) {
         return Some(num_cmp(x, y) == Some(Ordering::Equal));
     }
@@ -1389,6 +1397,9 @@ fn py_eq(a: KeyId, b: KeyId) -> Option<bool> {
 
 /// Python ordering `a op b` for op in lt le gt ge; None when it raises.
 fn py_order(op: &str, a: KeyId, b: KeyId) -> Option<bool> {
+    if let Some(r) = crate::models::pynum::binop(op, a, b) {
+        return r.and_then(|k| truthy(k));
+    }
     let test = |o: Option<Ordering>| -> bool {
         match o {
             None => false,
@@ -1679,6 +1690,9 @@ fn contains(container: KeyId, item: KeyId) -> Option<bool> {
 }
 
 fn binop(op: &str, a: KeyId, b: KeyId) -> Option<KeyId> {
+    if let Some(r) = crate::models::pynum::binop(op, a, b) {
+        return r;
+    }
     match op {
         "eq" => return Some(key_bool(py_eq(a, b)?)),
         "ne" => return Some(key_bool(!py_eq(a, b)?)),
@@ -1753,6 +1767,14 @@ fn unop(op: &str, a: KeyId) -> Option<KeyId> {
         "not_" => return Some(key_bool(!truthy(a)?)),
         "truth" => return Some(key_bool(truthy(a)?)),
         _ => {}
+    }
+    if crate::models::pynum::is_num_key(a) {
+        return match op {
+            "neg" => crate::models::pynum::binop("sub", key_int(0), a).flatten().or_else(|| crate::models::pynum::binop("mul", a, key_int(-1)).flatten()),
+            "pos" => Some(a),
+            "abs" => crate::models::pynum::builtin("abs", &[a]).flatten(),
+            _ => None,
+        };
     }
     let n = num(a)?;
     match (op, n) {
@@ -2054,6 +2076,11 @@ fn mod_pow(base: i64, exp: i64, m: i64) -> Option<i64> {
 
 /// A builtin called with literal arguments.
 pub fn builtin(name: &str, args: &[KeyId], kwargs: &[(&str, KeyId)]) -> Option<KeyId> {
+    if kwargs.is_empty() {
+        if let Some(r) = crate::models::pynum::builtin(name, args) {
+            return r;
+        }
+    }
     let kw = |k: &str| kwargs.iter().find(|(n, _)| *n == k).map(|(_, v)| *v);
     let allowed: &[&str] = match name {
         "int" => &["base"],
