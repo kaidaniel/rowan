@@ -689,7 +689,21 @@ impl Analyzer {
                             state.set_slot(oid, ns, k, dflt, absent);
                         }
                     }
-                    state.set_row(oid, ns, r);
+                    // (a weak insertion — one of several keys, a weak object — still never
+                    // fails the read: it is made against the keys inserted, then the weak row
+                    // is put back)
+                    if !strong && counter_restore.is_none() && !super::disabled("ddweakread") {
+                        let mut sr = r.clone();
+                        for k in ks.iter() {
+                            if !sr.definite.contains(k) {
+                                sr = sr.store(k, true);
+                            }
+                        }
+                        counter_restore = Some(r);
+                        state.set_row(oid, ns, sr);
+                    } else {
+                        state.set_row(oid, ns, r);
+                    }
                 } else if key.kv.as_param().is_none() {
                     // an unknown key: some key gets the factory's value
                     if let Some(f) = self.dd_factories.get(&oid).cloned() {

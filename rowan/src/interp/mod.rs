@@ -1057,6 +1057,9 @@ pub struct Analyzer {
     pub zip_strict: FxHashSet<ObjId>,
     /// dicts that are `collections.Counter`s
     pub counters: FxHashSet<ObjId>,
+    /// `sorted(d.items())` of a closed dict whose keys are known literals (some maybe there):
+    /// the items in sorted order with their sureness, for `dict(...)` of the list
+    pub sorted_items: FxHashMap<ObjId, Rc<Vec<(KeyId, Value, bool)>>>,
     /// ChainMaps: the maps they look through (the first takes the writes)
     pub chainmaps: FxHashMap<ObjId, Vec<Value>>,
     /// deques and their maxlen
@@ -1318,6 +1321,7 @@ impl Analyzer {
             fa_app_deps: FxHashMap::default(),
             zip_strict: FxHashSet::default(),
             counters: FxHashSet::default(),
+            sorted_items: FxHashMap::default(),
             chainmaps: FxHashMap::default(),
             deques: FxHashMap::default(),
             userdict_classes: FxHashSet::default(),

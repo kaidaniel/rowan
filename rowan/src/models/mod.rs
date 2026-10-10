@@ -433,6 +433,24 @@ fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     an.obj_mut(oid).copied_from = Some(s1);
                 }
             }
+        } else if let Some(items) = src.single().filter(|_| src.kv.is_bot()).and_then(|x| an.sorted_items.get(&x).cloned()) {
+            // `dict(sorted(d.items()))`: d's keys (the sure ones sure) in sorted order
+            let mut d = st.row(oid, Ns::Item).data();
+            let mut order = d.order.to_vec();
+            for (k, val, sure) in items.iter() {
+                d.present = d.present.insert(*k);
+                d.stored = d.stored.insert(*k);
+                if *sure {
+                    d.definite = d.definite.insert(*k);
+                    d.likely = d.likely.insert(*k);
+                }
+                if !order.contains(k) {
+                    order.push(*k);
+                }
+                st.set_slot(oid, Ns::Item, *k, val.clone(), true);
+            }
+            d.order = order.into();
+            st.set_row(oid, Ns::Item, Row::from_data(d));
         } else {
             for x in src.pts.iter() {
                 match an.kind(x) {
@@ -542,6 +560,12 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     };
     let oid = an.alloc_simple(kind, &c.node, st, &format!("{}@L{}", last(&c.qual), c.line));
     an.set_llen(oid, st, None);
+    an.sorted_items.remove(&oid);
+    if c.qual == "builtins.sorted" && c.kw("key").is_none() && an.obj(oid).single && !crate::interp::disabled("sorteditems") {
+        if let Some(items) = c.args.first().and_then(|a| sorted_dict_items(an, st, a, c)) {
+            an.sorted_items.insert(oid, std::rc::Rc::new(items));
+        }
+    }
     if let Some(a) = c.args.first() {
         let it = an.iterate(a, &c.node, st);
         if c.qual == "builtins.iter" {
@@ -631,6 +655,19 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         }
                         an.normalize_set(oid, st);
                     }
+                }
+            }
+        }
+        // a dict with some keys only maybe there: the sure keys before the first maybe one
+        // are the first items (the length is not known)
+        if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple") && an.llen(oid, st).is_none() && an.obj(oid).single && !crate::interp::disabled("maybeprefix") {
+            if let Some(m) = an.maybe_dict_items(a, st) {
+                let lead: Vec<Value> = m.iter().take_while(|(_, sure)| *sure).map(|(v, _)| v.clone()).collect();
+                if !lead.is_empty() {
+                    for (i, v) in lead.iter().enumerate() {
+                        st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
+                    }
+                    st.lens.insert(oid, (None, lead.len()));
                 }
             }
         }
@@ -3738,17 +3775,30 @@ fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         // (json.loads reports its own raises: a text that does not parse raises here)
         // (a str, or bytes / bytearray in UTF-8)
+        // (bytes in UTF-8, a BOM dropped as `utf-8-sig` does; NUL bytes may mean UTF-16 / 32)
         let lit_text = |k: KeyId| -> Option<String> {
-            intern::key_as_str(k).map(|s| s.to_string()).or_else(|| intern::with_key(k, |kk| if let intern::Key::Bytes(b) = kk { String::from_utf8(b.clone()).ok() } else { None }))
+            intern::key_as_str(k).map(|s| s.to_string()).or_else(|| intern::with_key(k, |kk| if let intern::Key::Bytes(b) = kk { if b.contains(&0) { None } else { String::from_utf8(b.strip_prefix(b"\xef\xbb\xbf".as_slice()).unwrap_or(b).to_vec()).ok() } } else { None }))
         };
         if let Some(text) = c.args.first().filter(|a| a.pts.is_empty()).and_then(|a| a.kv.as_lit()).and_then(lit_text) {
-            match serde_json::from_str::<serde_json::Value>(&text) {
-                Ok(j) => return json_literal(an, st, c, &j, ""),
-                Err(_) if !crate::interp::disabled("jsonraise") => {
+            // (where CPython's decoder fails: the JSONDecodeError with its msg / pos / lineno /
+            // colno; a text it accepts that serde does not, NaN / Infinity, stays unknown)
+            match (serde_json::from_str::<serde_json::Value>(&text), crate::models::pytext::py_json_error(&text)) {
+                (Ok(j), None) => return json_literal(an, st, c, &j, ""),
+                (_, Some((msg, pos))) if !crate::interp::disabled("jsonraise") => {
+                    let (lineno, colno, full) = crate::models::pytext::py_json_error_parts(&text, &msg, pos);
+                    let e = an.exception_object("JSONDecodeError", vec![Value::lit(intern::key_str_lit(&full))], &c.node, st);
+                    if let Some(o) = e.single() {
+                        let strong = an.obj(o).single;
+                        for (name, v) in [("msg", Value::lit(intern::key_str_lit(&msg))), ("doc", Value::lit(intern::key_str_lit(&text))), ("pos", Value::lit(intern::key_int(pos as i64))), ("lineno", Value::lit(intern::key_int(lineno))), ("colno", Value::lit(intern::key_int(colno)))] {
+                            an.store_key(o, Ns::Attr, &KeyVal::Lit(intern::key_str_lit(name)), &v, strong, &c.node, st);
+                        }
+                    }
+                    an.cur_exc = Some(e);
                     an.raise_here("JSONDecodeError", st);
+                    an.cur_exc = None;
                     return Value::new();
                 }
-                Err(_) => {}
+                _ => {}
             }
         }
         // one of several literal texts: the join of their structures
@@ -4985,6 +5035,34 @@ fn literal_sort_key(an: &mut Analyzer, st: &mut State, c: &Call, item: &Value) -
 }
 
 /// The permutation `sorted` applies when every key is known (stable), else None.
+/// The items of `sorted(d.items())` when `d` is a closed dict whose keys are known,
+/// pairwise comparable literals and only some of them maybe there: (key, value, sure) in
+/// sorted order (the keys present at run time come in that order).
+fn sorted_dict_items(an: &Analyzer, st: &State, a: &Value, c: &Call) -> Option<Vec<(KeyId, Value, bool)>> {
+    let v = a.single().filter(|_| a.kv.is_bot())?;
+    let Payload::View(ViewKind::Items, recv) = &an.obj(v).payload else { return None };
+    let d = recv.single().filter(|r| recv.kv.is_bot() && an.kind(*r) == Kind::Dict)?;
+    let row = st.row(d, Ns::Item);
+    if !row.closed() || row.symbolic() || row.present == row.definite || row.present.len() > 64 || st.has_slot(d, Ns::Item, STAR) || an.counters.contains(&d) {
+        return None;
+    }
+    let mut keys: Vec<KeyId> = row.present.iter().collect();
+    for i in 0..keys.len() {
+        for j in (i + 1)..keys.len() {
+            crate::interp::exprs::literal_order(keys[i], keys[j])?;
+        }
+    }
+    keys.sort_by(|x, y| crate::interp::exprs::literal_order(*x, *y).unwrap());
+    let reverse = match c.kw("reverse") {
+        None => false,
+        Some(r) => intern::with_key(r.kv.as_lit()?, |kk| match kk { intern::Key::Bool(b) => Some(*b), _ => None })?,
+    };
+    if reverse {
+        keys.reverse();
+    }
+    Some(keys.into_iter().map(|k| (k, st.slot(d, Ns::Item, k), row.definite.contains(k))).collect())
+}
+
 fn literal_sort_order(an: &mut Analyzer, st: &mut State, c: &Call, items: &[Value]) -> Option<Vec<usize>> {
     // instances ordering themselves (no key=): a stable sort on their `__lt__`
     if c.kw("key").is_none() && !items.is_empty() && !crate::interp::disabled("instorder") && items.iter().all(|x| x.single().map(|o| an.kind(o) == Kind::Instance).unwrap_or(false)) {

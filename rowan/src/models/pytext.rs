@@ -854,9 +854,311 @@ pub fn module_call(family: &str, name: &str, args: &[KeyId], kwargs: &[(&str, Ke
     }
 }
 
+// ---------------------------------------------------------------- json errors
+
+/// Where CPython's `json.loads(s)` fails on a text: the exception's `msg` and `pos` (a
+/// character index), following `json.decoder` / `json.scanner` and the C scanner CPython
+/// uses (its messages for bad escapes / control characters); None when the text parses (NaN / Infinity included).
+pub fn py_json_error(s: &str) -> Option<(String, usize)> {
+    let c: Vec<char> = s.chars().collect();
+    if c.first() == Some(&'\u{feff}') {
+        return Some(("Unexpected UTF-8 BOM (decode using utf-8-sig)".to_string(), 0));
+    }
+    let ws = |c: &[char], mut i: usize| {
+        while i < c.len() && matches!(c[i], ' ' | '\t' | '\n' | '\r') {
+            i += 1;
+        }
+        i
+    };
+    let idx = ws(&c, 0);
+    let end = match json_scan(&c, idx) {
+        Ok(e) => e,
+        Err(JErr::Stop(i)) => return Some(("Expecting value".to_string(), i)),
+        Err(JErr::At(m, i)) => return Some((m, i)),
+    };
+    let end = ws(&c, end);
+    if end != c.len() {
+        return Some(("Extra data".to_string(), end));
+    }
+    None
+}
+
+enum JErr {
+    /// (no value starts here: the caller reports "Expecting value")
+    Stop(usize),
+    At(String, usize),
+}
+
+fn is_ws(c: &[char], i: usize) -> bool {
+    i < c.len() && matches!(c[i], ' ' | '\t' | '\n' | '\r')
+}
+
+fn skip_ws(c: &[char], mut i: usize) -> usize {
+    while is_ws(c, i) {
+        i += 1;
+    }
+    i
+}
+
+fn starts(c: &[char], i: usize, w: &str) -> bool {
+    let w: Vec<char> = w.chars().collect();
+    i + w.len() <= c.len() && c[i..i + w.len()] == w[..]
+}
+
+fn json_scan(c: &[char], idx: usize) -> Result<usize, JErr> {
+    let Some(&ch) = c.get(idx) else { return Err(JErr::Stop(idx)) };
+    match ch {
+        '"' => return json_string(c, idx + 1),
+        '{' => return json_object(c, idx + 1),
+        '[' => return json_array(c, idx + 1),
+        'n' if starts(c, idx, "null") => return Ok(idx + 4),
+        't' if starts(c, idx, "true") => return Ok(idx + 4),
+        'f' if starts(c, idx, "false") => return Ok(idx + 5),
+        _ => {}
+    }
+    // -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?
+    let mut i = idx;
+    if c.get(i) == Some(&'-') {
+        i += 1;
+    }
+    let digit = |i: usize| c.get(i).is_some_and(|d| d.is_ascii_digit());
+    if digit(i) {
+        if c[i] == '0' {
+            i += 1;
+        } else {
+            while digit(i) {
+                i += 1;
+            }
+        }
+        if c.get(i) == Some(&'.') && digit(i + 1) {
+            i += 1;
+            while digit(i) {
+                i += 1;
+            }
+        }
+        if matches!(c.get(i), Some('e' | 'E')) {
+            let mut j = i + 1;
+            if matches!(c.get(j), Some('+' | '-')) {
+                j += 1;
+            }
+            if digit(j) {
+                while digit(j) {
+                    j += 1;
+                }
+                i = j;
+            }
+        }
+        return Ok(i);
+    }
+    if ch == 'N' && starts(c, idx, "NaN") {
+        return Ok(idx + 3);
+    }
+    if ch == 'I' && starts(c, idx, "Infinity") {
+        return Ok(idx + 8);
+    }
+    if ch == '-' && starts(c, idx, "-Infinity") {
+        return Ok(idx + 9);
+    }
+    Err(JErr::Stop(idx))
+}
+
+/// `end` is just after the opening quote.
+fn json_string(c: &[char], mut end: usize) -> Result<usize, JErr> {
+    let begin = end - 1;
+    let unterminated = || JErr::At("Unterminated string starting at".to_string(), begin);
+    loop {
+        let Some(&ch) = c.get(end) else { return Err(unterminated()) };
+        end += 1;
+        if ch == '"' {
+            return Ok(end);
+        }
+        if (ch as u32) < 0x20 {
+            return Err(JErr::At("Invalid control character at".to_string(), end - 1));
+        }
+        if ch != '\\' {
+            continue;
+        }
+        let Some(&esc) = c.get(end) else { return Err(unterminated()) };
+        if esc != 'u' {
+            if !matches!(esc, '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't') {
+                // (the C scanner's message, at the backslash)
+                return Err(JErr::At("Invalid \\escape".to_string(), end - 1));
+            }
+            end += 1;
+        } else {
+            let hex4 = |p: usize| -> Option<u32> {
+                let h: String = c.get(p + 1..p + 5)?.iter().collect();
+                if h.len() == 4 && h.chars().all(|x| x.is_ascii_hexdigit()) { u32::from_str_radix(&h, 16).ok() } else { None }
+            };
+            let Some(uni) = hex4(end) else { return Err(JErr::At("Invalid \\uXXXX escape".to_string(), end)) };
+            end += 5;
+            if (0xd800..=0xdbff).contains(&uni) && starts(c, end, "\\u") {
+                let Some(uni2) = hex4(end + 1) else { return Err(JErr::At("Invalid \\uXXXX escape".to_string(), end + 1)) };
+                if (0xdc00..=0xdfff).contains(&uni2) {
+                    end += 6;
+                }
+            }
+        }
+    }
+}
+
+/// `end` is just after `{`.
+fn json_object(c: &[char], mut end: usize) -> Result<usize, JErr> {
+    let mut next = c.get(end).copied();
+    if next != Some('"') {
+        if is_ws(c, end) {
+            end = skip_ws(c, end);
+            next = c.get(end).copied();
+        }
+        if next == Some('}') {
+            return Ok(end + 1);
+        } else if next != Some('"') {
+            return Err(JErr::At("Expecting property name enclosed in double quotes".to_string(), end));
+        }
+    }
+    end += 1;
+    loop {
+        end = json_string(c, end)?;
+        if c.get(end) != Some(&':') {
+            end = skip_ws(c, end);
+            if c.get(end) != Some(&':') {
+                return Err(JErr::At("Expecting ':' delimiter".to_string(), end));
+            }
+        }
+        end += 1;
+        end = skip_ws(c, end);
+        end = match json_scan(c, end) {
+            Ok(e) => e,
+            Err(JErr::Stop(i)) => return Err(JErr::At("Expecting value".to_string(), i)),
+            Err(e) => return Err(e),
+        };
+        end = skip_ws(c, end);
+        let next = c.get(end).copied();
+        end += 1;
+        if next == Some('}') {
+            return Ok(end);
+        } else if next != Some(',') {
+            return Err(JErr::At("Expecting ',' delimiter".to_string(), end - 1));
+        }
+        let comma = end - 1;
+        end = skip_ws(c, end);
+        let next = c.get(end).copied();
+        end += 1;
+        if next != Some('"') {
+            if next == Some('}') {
+                return Err(JErr::At("Illegal trailing comma before end of object".to_string(), comma));
+            }
+            return Err(JErr::At("Expecting property name enclosed in double quotes".to_string(), end - 1));
+        }
+    }
+}
+
+/// `end` is just after `[`.
+fn json_array(c: &[char], mut end: usize) -> Result<usize, JErr> {
+    end = skip_ws(c, end);
+    if c.get(end) == Some(&']') {
+        return Ok(end + 1);
+    }
+    loop {
+        end = match json_scan(c, end) {
+            Ok(e) => e,
+            Err(JErr::Stop(i)) => return Err(JErr::At("Expecting value".to_string(), i)),
+            Err(e) => return Err(e),
+        };
+        end = skip_ws(c, end);
+        let next = c.get(end).copied();
+        end += 1;
+        if next == Some(']') {
+            return Ok(end);
+        } else if next != Some(',') {
+            return Err(JErr::At("Expecting ',' delimiter".to_string(), end - 1));
+        }
+        let comma = end - 1;
+        end = skip_ws(c, end);
+        if c.get(end) == Some(&']') {
+            return Err(JErr::At("Illegal trailing comma before end of array".to_string(), comma));
+        }
+    }
+}
+
+/// `JSONDecodeError(msg, doc, pos)`: (lineno, colno, str(e)).
+pub fn py_json_error_parts(doc: &str, msg: &str, pos: usize) -> (i64, i64, String) {
+    let before: Vec<char> = doc.chars().take(pos).collect();
+    let lineno = before.iter().filter(|c| **c == '\n').count() as i64 + 1;
+    let colno = match before.iter().rposition(|c| *c == '\n') {
+        Some(i) => (pos - i) as i64,
+        None => pos as i64 + 1,
+    };
+    (lineno, colno, format!("{}: line {} column {} (char {})", msg, lineno, colno, pos))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_errors_as_cpython() {
+        // (expected: CPython 3.14's json.loads, JSONDecodeError msg / pos)
+        let cases: Vec<(&str, Option<(String, usize)>)> = vec![
+        ("not json", Some(("Expecting value".to_string(), 0))),
+        ("", Some(("Expecting value".to_string(), 0))),
+        ("   ", Some(("Expecting value".to_string(), 3))),
+        ("{", Some(("Expecting property name enclosed in double quotes".to_string(), 1))),
+        ("}", Some(("Expecting value".to_string(), 0))),
+        ("[", Some(("Expecting value".to_string(), 1))),
+        ("]", Some(("Expecting value".to_string(), 0))),
+        ("[1,]", Some(("Illegal trailing comma before end of array".to_string(), 2))),
+        ("{\"a\":1,}", Some(("Illegal trailing comma before end of object".to_string(), 6))),
+        ("{\"a\" 1}", Some(("Expecting ':' delimiter".to_string(), 5))),
+        ("{\"a\":}", Some(("Expecting value".to_string(), 5))),
+        ("{a:1}", Some(("Expecting property name enclosed in double quotes".to_string(), 1))),
+        ("{\"a\":1 \"b\":2}", Some(("Expecting ',' delimiter".to_string(), 7))),
+        ("[1 2]", Some(("Expecting ',' delimiter".to_string(), 3))),
+        ("\"abc", Some(("Unterminated string starting at".to_string(), 0))),
+        ("\"a\\x\"", Some(("Invalid \\escape".to_string(), 2))),
+        ("\"a\\u12\"", Some(("Invalid \\uXXXX escape".to_string(), 3))),
+        ("\"a\tb\"", Some(("Invalid control character at".to_string(), 2))),
+        ("[1, 2] x", Some(("Extra data".to_string(), 7))),
+        ("NaN", None),
+        ("-Infinity", None),
+        ("Infinity", None),
+        ("[NaN, 1e5, -0.5E-3]", None),
+        ("01", Some(("Extra data".to_string(), 1))),
+        ("-", Some(("Expecting value".to_string(), 0))),
+        ("1.", Some(("Extra data".to_string(), 1))),
+        ("1e", Some(("Extra data".to_string(), 1))),
+        ("tru", Some(("Expecting value".to_string(), 0))),
+        ("nul", Some(("Expecting value".to_string(), 0))),
+        ("{\"a\": [1, {\"b\": }]}", Some(("Expecting value".to_string(), 16))),
+        ("\n\n  {\"x\": 1,\n \"y\" }", Some(("Expecting ':' delimiter".to_string(), 18))),
+        ("﻿{}", Some(("Unexpected UTF-8 BOM (decode using utf-8-sig)".to_string(), 0))),
+        ("{\"a\":1}\n", None),
+        ("[\"\\ud800\"]", None),
+        ("[\"\\ud800\\u12\"]", Some(("Invalid \\uXXXX escape".to_string(), 9))),
+        ("{\"k\": \"v\"} {\"k\": 2}", Some(("Extra data".to_string(), 11))),
+        ("{ }", None),
+        ("[ ]", None),
+        ("[,1]", Some(("Expecting value".to_string(), 1))),
+        ("{,}", Some(("Expecting property name enclosed in double quotes".to_string(), 1))),
+        ("{\"a\":1,,}", Some(("Expecting property name enclosed in double quotes".to_string(), 7))),
+        ("[1,,2]", Some(("Expecting value".to_string(), 3))),
+        ("\"\\", Some(("Unterminated string starting at".to_string(), 0))),
+        ("{\"a\"", Some(("Expecting ':' delimiter".to_string(), 4))),
+        ("{\"a\":", Some(("Expecting value".to_string(), 5))),
+        ("{\"a\":1", Some(("Expecting ',' delimiter".to_string(), 6))),
+        ("[1", Some(("Expecting ',' delimiter".to_string(), 2))),
+        ("[1,", Some(("Expecting value".to_string(), 3))),
+        ("-a", Some(("Expecting value".to_string(), 0))),
+        ("+1", Some(("Expecting value".to_string(), 0))),
+        (".5", Some(("Expecting value".to_string(), 0))),
+        ("[true, false, null]", None),
+        ("\"é\\u00e9\" x", Some(("Extra data".to_string(), 10))),
+        ("{\"é\": 1, x}", Some(("Expecting property name enclosed in double quotes".to_string(), 9))),
+        ];
+        let bad: Vec<String> = cases.iter().filter(|(s, want)| py_json_error(s) != *want).map(|(s, want)| format!("{:?}: got {:?} want {:?}", s, py_json_error(s), want)).collect();
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+        assert_eq!(py_json_error_parts("a\nbc", "Expecting value", 3).2, "Expecting value: line 2 column 2 (char 3)");
+    }
 
     #[test]
     fn text_functions() {

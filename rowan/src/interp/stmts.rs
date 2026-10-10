@@ -1277,6 +1277,45 @@ impl Analyzer {
                 return;
             }
         }
+        // a list of unknown length whose first items are known on every path: those
+        // iterations are unrolled, the loop runs on from there (any later item)
+        let mut prefix_breaks: Option<State> = None;
+        let mut prefixed = false;
+        if let (None, None, Some(o)) = (&it.items, once, itv.single().filter(|_| itv.kv.is_bot())) {
+            if matches!(self.kind(o), Kind::List | Kind::Tuple) && !self.obj(o).iterator && self.obj(o).single && self.llen(o, state).is_none() && !crate::interp::disabled("listprefix") {
+                if let Some(p) = self.prefix(o, state).filter(|p| *p <= UNROLL_MAX) {
+                    let items: Vec<Value> = (0..p).map(|i| state.slot(o, Ns::Pos, intern::key_int(i as i64))).collect();
+                    prefixed = true;
+                    for (idx, item) in items.iter().enumerate() {
+                        if !state.reachable {
+                            break;
+                        }
+                        self.frame_mut().unroll.push(idx);
+                        self.bind_iter_target(&f.target, &Elem::One(item.clone()), state);
+                        self.loop_stack.push(LoopCtx::default());
+                        self.exec_block(&f.body, state);
+                        let ctx = self.loop_stack.pop().unwrap();
+                        self.frame_mut().unroll.pop();
+                        if let Some(mut c) = ctx.continues {
+                            let j = if state.reachable { state.join(&mut c) } else { c };
+                            state.replace_with(j);
+                        }
+                        if let Some(mut b) = ctx.breaks {
+                            prefix_breaks = Some(match prefix_breaks.take() {
+                                None => b,
+                                Some(mut e) => e.join(&mut b),
+                            });
+                        }
+                    }
+                    if !state.reachable {
+                        if let Some(b) = prefix_breaks.take() {
+                            state.replace_with(b);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
         // (a loop that may break off: where the iterator stands after it is not known)
         if let (Some(o), true) = (once, has_jump) {
             self.set_cursor(o, None, state);
@@ -1380,7 +1419,7 @@ impl Analyzer {
         }
         // the loop ran at least once exactly when its iterable was non-empty: a later test of
         // that (`if xs:`, `if n > 0:` for `range(n)`) gets the rows the iterations left
-        if f.orelse.is_empty() && !has_jump && back.reachable && pre.reachable && exit_s.reachable && !crate::interp::disabled("loopfacts") {
+        if f.orelse.is_empty() && !has_jump && !prefixed && back.reachable && pre.reachable && exit_s.reachable && !crate::interp::disabled("loopfacts") {
             let mut assigned: Vec<intern::StrId> = Vec::new();
             f.body.iter().for_each(|x| collect_assigned(x, &mut assigned));
             let func = self.frame().func.unwrap_or(0);
@@ -1404,6 +1443,9 @@ impl Analyzer {
                 new.extend(cond_facts_for(s(&format!("{}@{}", text, func)), true, deps, &back, &pre, &exit_s));
             }
             add_facts(&mut exit_s, new);
+        }
+        if let Some(mut b) = prefix_breaks {
+            exit_s = if exit_s.reachable { exit_s.join(&mut b) } else { b };
         }
         state.replace_with(exit_s);
     }

@@ -584,8 +584,10 @@ impl Analyzer {
         state.set_slot(gid, Ns::Elem, STAR, v.clone(), false);
         let cur = state.elems.get(&gid).unwrap_or_else(|| v.kv.clone());
         state.elems.insert(gid, kv_join(&cur, &v.kv));
-        // straight-line yields keep their order
-        let positional = self.frame().single && self.frame().loop_depth == 0 && self.cond_depth == 0 && self.obj(gid).single;
+        // straight-line yields keep their order; in a branch too (a length per path, joined
+        // to the shorter known prefix, like appends)
+        let in_branch = self.cond_depth > 0;
+        let positional = self.frame().single && self.frame().loop_depth == 0 && (!in_branch || !super::disabled("genbranchpos")) && self.obj(gid).single;
         let ll = if fresh { Some(0) } else { self.llen(gid, state) };
         match (positional, ll) {
             (true, Some(n)) if n < 16 => {
@@ -597,7 +599,11 @@ impl Analyzer {
                     while ps.len() <= n {
                         ps.push(None);
                     }
-                    ps[n] = Some(state.copy());
+                    // (in a branch: another path may have its own item n)
+                    ps[n] = match (in_branch, ps[n].take()) {
+                        (true, Some(mut prev)) => Some(prev.join(&mut state.copy())),
+                        _ => Some(state.copy()),
+                    };
                 }
             }
             // (the yields so far keep their positions: a known prefix)
