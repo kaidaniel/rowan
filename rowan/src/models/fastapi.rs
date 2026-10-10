@@ -260,7 +260,7 @@ impl Analyzer {
             None => (None, None),
         };
         let marker = meta.or_else(|| self.fa_marker(&fi, &pname));
-        let ann_name = ann.map(|a| dotted_last(a)).unwrap_or_default();
+        let ann_name = ann.map(scalar_ann_name).unwrap_or_default();
         let open = |an: &mut Analyzer, st: &mut State| -> Value {
             Value::obj(an.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param, st, &format!("param {}", pname), "", Ns::Item, vec![]))
         };
@@ -364,7 +364,15 @@ impl Analyzer {
         let mut v = Value::new();
         // (an Enum / Literal annotation validates the text itself)
         let restrictable = ann.map(|a| self.fa_restrictable(&fi, a, state)).unwrap_or(false);
-        let conv = |ann_name: &str, text: &str| if restrictable { Value::lit_str(text) } else { conv_scalar(ann_name, text) };
+        // (a text the annotation surely rejects converts to nothing and is a 422 below)
+        let bad = std::cell::Cell::new(false);
+        let conv = |ann_name: &str, text: &str| {
+            let v = if restrictable { Value::lit_str(text) } else { conv_scalar(ann_name, text) };
+            if v.empty() {
+                bad.set(true);
+            }
+            v
+        };
         if let Some(r) = req {
             if let Some((_, val)) = route_path.iter().find(|(n, _)| *n == pname) {
                 v = conv(&ann_name, val);
@@ -442,6 +450,13 @@ impl Analyzer {
                 } else {
                     v = default.clone().unwrap_or_else(|| Value::data("query"));
                 }
+            }
+            if bad.get() && !crate::interp::disabled("fabadscalar") {
+                if v.empty() {
+                    self.raise_here("RequestValidationError", state);
+                    return Value::new();
+                }
+                self.may_raise_here("RequestValidationError", state);
             }
             if let Some(a) = ann {
                 v = self.fa_restrict(&fi, a, v, default.as_ref(), state);
@@ -1158,13 +1173,26 @@ fn bodyish(a: &Ann) -> bool {
     }
 }
 
+/// A path / query text as the scalar annotation `ann` converts it; nothing when the text is
+/// surely rejected (a 422), unknown data when the conversion is not modelled.
 fn conv_scalar(ann: &str, text: &str) -> Value {
+    // (empty, or a character no number has, and not inf / infinity / nan)
+    let surely_not_number = |t: &str| {
+        let t = t.trim();
+        let word = t.trim_start_matches(['+', '-']).to_ascii_lowercase();
+        t.is_empty() || (t.chars().any(|ch| !(ch.is_ascii_digit() || "+-._eE".contains(ch))) && !matches!(word.as_str(), "inf" | "infinity" | "nan"))
+    };
     match ann {
         "int" => match text.parse::<i64>() {
             Ok(n) => Value::lit(intern::key_int(n)),
+            Err(_) if surely_not_number(text) => Value::new(),
             Err(_) => Value::data("int"),
         },
-        "float" => Value::data("float"),
+        "float" => match text.parse::<f64>() {
+            Ok(f) => Value::lit(intern::key_float(f)),
+            Err(_) if surely_not_number(text) => Value::new(),
+            Err(_) => Value::data("float"),
+        },
         "bool" => match text.to_lowercase().as_str() {
             "true" | "1" | "yes" | "on" => Value::lit(intern::key_bool(true)),
             "false" | "0" | "no" | "off" => Value::lit(intern::key_bool(false)),
@@ -1453,4 +1481,23 @@ pub fn apply_route(an: &mut Analyzer, dv: &Value, f: &Value) {
 
 pub fn install(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {
     r(&["fastapi.*", "starlette.*"], m_fastapi);
+}
+
+/// The scalar a path / query annotation converts to: `Optional[X]`, `Union[X, None]` and
+/// `X | None` are X.
+fn scalar_ann_name(a: &ast::Expr) -> String {
+    let is_none = |e: &ast::Expr| matches!(e, ast::Expr::NoneLiteral(_)) || dotted_last(e) == "None";
+    match a {
+        ast::Expr::Subscript(sb) if dotted_last(&sb.value) == "Optional" => scalar_ann_name(&sb.slice),
+        ast::Expr::Subscript(sb) if dotted_last(&sb.value) == "Union" => match &*sb.slice {
+            ast::Expr::Tuple(t) => {
+                let rest: Vec<&ast::Expr> = t.elts.iter().filter(|e| !is_none(e)).collect();
+                if rest.len() == 1 { scalar_ann_name(rest[0]) } else { dotted_last(a) }
+            }
+            _ => dotted_last(a),
+        },
+        ast::Expr::BinOp(b) if b.op == ast::Operator::BitOr && is_none(&b.right) => scalar_ann_name(&b.left),
+        ast::Expr::BinOp(b) if b.op == ast::Operator::BitOr && is_none(&b.left) => scalar_ann_name(&b.right),
+        _ => dotted_last(a),
+    }
 }
