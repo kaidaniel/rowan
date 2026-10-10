@@ -2760,44 +2760,166 @@ impl Analyzer {
                     return found;
                 }
             }
-            for (_, v) in state.slots.for_key(&o) {
-                push_value(&v, &mut work);
-            }
-            if let Some(kv) = state.elems.get(&o) {
-                push_value(&Value::kv_only(kv), &mut work);
-            }
-            if !self.has_obj(o) {
-                continue;
-            }
-            match &self.obj(o).payload {
-                Payload::Func(fi) => work.extend(fi.closure.values().copied()),
-                Payload::Ph(p) => {
-                    if let Some(par) = p.parent {
-                        work.push(par);
-                    }
-                }
-                Payload::Method(_, v) | Payload::View(_, v) | Payload::Enumerate(v, _) => push_value(v, &mut work),
-                Payload::Bound(f, v) | Payload::Super(f, v) => {
-                    work.push(*f);
-                    push_value(v, &mut work);
-                }
-                Payload::Zip(a, b) | Payload::Pair(a, b) => {
-                    push_value(a, &mut work);
-                    push_value(b, &mut work);
-                }
-                Payload::Partial(f, args, kw) => {
-                    push_value(f, &mut work);
-                    for a in args {
-                        push_value(a, &mut work);
-                    }
-                    for v in kw.values() {
-                        push_value(v, &mut work);
-                    }
-                }
+            self.obj_edges(o, state, &mut work);
+        }
+        found
+    }
+
+    /// The objects `o` refers to: its slots and element kinds in `state`, its payload, and what
+    /// side tables keyed by it hold (a ChainMap's maps, a defaultdict's factory, …).
+    pub fn obj_edges(&self, o: ObjId, state: &State, work: &mut Vec<ObjId>) {
+        fn push_value(v: &Value, work: &mut Vec<ObjId>) {
+            work.extend(v.pts.iter());
+            match &v.kv {
+                KeyVal::KeysOf(ko) => work.extend(ko.objs.iter()),
+                KeyVal::Param(p) => work.push(*p),
                 _ => {}
             }
         }
-        found
+        for (_, v) in state.slots.for_key(&o) {
+            push_value(&v, work);
+        }
+        if let Some(kv) = state.elems.get(&o) {
+            push_value(&Value::kv_only(kv), work);
+        }
+        for (lo, v) in state.lasts.iter() {
+            if *lo == o {
+                push_value(v, work);
+            }
+        }
+        if !self.has_obj(o) {
+            return;
+        }
+        match &self.obj(o).payload {
+            Payload::Func(fi) => work.extend(fi.closure.values().copied()),
+            Payload::Ph(p) => {
+                if let Some(par) = p.parent {
+                    work.push(par);
+                }
+            }
+            Payload::Cls(c) => work.push(*c),
+            Payload::Method(_, v) | Payload::View(_, v) | Payload::Enumerate(v, _) => push_value(v, work),
+            Payload::Bound(f, v) | Payload::Super(f, v) => {
+                work.push(*f);
+                push_value(v, work);
+            }
+            Payload::Zip(a, b) | Payload::Pair(a, b) => {
+                push_value(a, work);
+                push_value(b, work);
+            }
+            Payload::Partial(f, args, kw) => {
+                push_value(f, work);
+                for a in args {
+                    push_value(a, work);
+                }
+                for v in kw.values() {
+                    push_value(v, work);
+                }
+            }
+            Payload::Groupby(fs, _, _, _) => work.extend(fs.iter().copied()),
+            Payload::Locidx(_, f) => work.push(*f),
+            _ => {}
+        }
+        if let Some(ms) = self.chainmaps.get(&o) {
+            ms.iter().for_each(|m| push_value(m, work));
+        }
+        if let Some(v) = self.dd_factories.get(&o) {
+            push_value(v, work);
+        }
+        if let Some(v) = self.csv_readers.get(&o) {
+            push_value(v, work);
+        }
+        if let Some(v) = self.wrapped.get(&o) {
+            push_value(v, work);
+        }
+        if let Some(vs) = self.partial_star.get(&o) {
+            vs.iter().for_each(|v| push_value(v, work));
+        }
+        if let Some(srcs) = self.lazy_src.get(&o) {
+            work.extend(srcs.iter().map(|(s, _)| *s));
+        }
+        for m in [&self.attr_mirrors, &self.entry_instances, &self.copy_root, &self.sql_cursors, &self.cell_classes] {
+            if let Some(x) = m.get(&o) {
+                work.push(*x);
+            }
+        }
+        if let Some(xs) = self.sql_touched.get(&o) {
+            work.extend(xs.iter().copied());
+        }
+        if let Some(xs) = self.pyd_inputs.get(&o) {
+            work.extend(xs.iter().copied());
+        }
+        if let Some(items) = self.sorted_items.get(&o) {
+            items.iter().for_each(|(_, v, _)| push_value(v, work));
+        }
+        if let Some(cbs) = self.exit_callbacks.get(&o) {
+            for (f, args, kw) in cbs {
+                push_value(f, work);
+                args.iter().for_each(|a| push_value(a, work));
+                kw.values().for_each(|v| push_value(v, work));
+            }
+        }
+        if let Some(ds) = self.sdispatch.get(&o) {
+            for (v, f) in ds {
+                push_value(v, work);
+                work.push(*f);
+            }
+        }
+        if let Some(ds) = self.fa_app_deps.get(&o) {
+            ds.iter().for_each(|v| push_value(v, work));
+        }
+    }
+
+    /// Objects the analyzer itself holds beyond the state: what side tables keyed by other
+    /// objects refer to, exceptions in flight, the callers' names, loop recency objects.
+    pub fn gc_pinned(&self, work: &mut Vec<ObjId>) {
+        fn push_value(v: &Value, work: &mut Vec<ObjId>) {
+            work.extend(v.pts.iter());
+            match &v.kv {
+                KeyVal::KeysOf(ko) => work.extend(ko.objs.iter()),
+                KeyVal::Param(p) => work.push(*p),
+                _ => {}
+            }
+        }
+        let st = State::new();
+        for o in self.chainmaps.keys().chain(self.dd_factories.keys()).chain(self.csv_readers.keys()).chain(self.wrapped.keys()).chain(self.partial_star.keys()).chain(self.lazy_src.keys()).chain(self.attr_mirrors.keys()).chain(self.entry_instances.keys()).chain(self.copy_root.keys()).chain(self.sql_cursors.keys()).chain(self.sql_touched.keys()).chain(self.pyd_inputs.keys()).chain(self.sorted_items.keys()).chain(self.exit_callbacks.keys()).chain(self.sdispatch.keys()).chain(self.fa_app_deps.keys()) {
+            // (the side-table edges only: the key itself may be dead)
+            let mut w = Vec::new();
+            self.obj_edges(*o, &st, &mut w);
+            work.extend(w);
+        }
+        for v in self.cur_exc.iter().chain(self.raise_values.iter().flatten()).chain(self.handling_values.iter()).chain(self.cmp_right.iter()).chain(self.stdout_redirect.iter()).chain(std::iter::once(&self.fa_status)).chain(self.fa_gen_ret.iter()) {
+            push_value(v, work);
+        }
+        for c in &self.fa_dep_cache {
+            c.values().for_each(|v| push_value(v, work));
+        }
+        for (_, _, v, f) in &self.fa_hooks {
+            push_value(v, work);
+            work.extend(f.iter().copied());
+        }
+        for env in &self.env_stack {
+            env.values().for_each(|v| push_value(v, work));
+        }
+        for (_, env, _) in &self.cm_frames {
+            env.values().for_each(|v| push_value(v, work));
+        }
+        for cells in &self.comp_cells {
+            work.extend(cells.values().copied());
+        }
+        for rs in &self.recent_stack {
+            work.extend(rs.iter().map(|(o, _, _, _)| *o));
+        }
+        for rs in &self.fa_out_resp {
+            work.extend(rs.iter().copied());
+        }
+        for fr in &self.frames {
+            work.push(fr.module);
+            work.extend(fr.cells.values().copied());
+            for ov in &fr.overlays {
+                ov.values().for_each(|v| push_value(v, work));
+            }
+        }
     }
 
     /// What a value is, for the golden harness's `#@value` checks: literals it may be, whether

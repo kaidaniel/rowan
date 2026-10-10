@@ -120,7 +120,19 @@ impl Analyzer {
                     // definitely missing): no normal exit from here
                     return;
                 }
-                self.drop_garbage_at_return(&v, state);
+                // (names a row check of this line reads after it are still there)
+                let mut keep = v.clone();
+                if !self.row_check_requests.is_empty() {
+                    let n = frontend::node(r);
+                    let file = self.rel_file(n.module);
+                    let names: Vec<String> = self.row_check_requests.iter().filter(|(f, ln, _)| *ln >= n.line && *ln <= n.end_line && *f == file).map(|(_, _, nm)| nm.clone()).collect();
+                    for nm in names {
+                        if let Some(x) = state.env.get(&s(&nm)) {
+                            keep = keep.join(x);
+                        }
+                    }
+                }
+                self.drop_garbage_at_return(&keep, state);
                 state.ret = Some(match &state.ret {
                     None => v,
                     Some(cur) => cur.join(&v),
@@ -1809,9 +1821,13 @@ impl Analyzer {
     /// on another path keeps that path's keys).
     fn drop_garbage_at_return(&mut self, v: &Value, state: &mut State) {
         let Some(crate::interp::PreCall(mark, pre)) = self.frame().pre_call.clone() else { return };
-        // (only a value without objects: what models tie to objects — payloads, side tables —
-        // is not followed here)
-        if !v.pts.is_empty() || matches!(v.kv, KeyVal::KeysOf(_)) || !matches!(self.frame().kind, FrameKind::Function) {
+        if !matches!(self.frame().kind, FrameKind::Function) {
+            return;
+        }
+        // (`ROWAN_GC=1`: also at returns of objects — off by default: a call-cache hit replays
+        // only its footprint, so an object it returns unchanged keeps no row once collected)
+        let general = std::env::var("ROWAN_GC").map(|v| v == "1").unwrap_or(false);
+        if !general && (!v.pts.is_empty() || matches!(v.kv, KeyVal::KeysOf(_))) {
             return;
         }
         let fp = state.footprint(&pre);
@@ -1826,22 +1842,30 @@ impl Analyzer {
                 fresh.insert(*o);
             }
         }
-        if fresh.is_empty() || fresh.len() > 64 {
+        for o in fp.elems.iter() {
+            if *o >= mark {
+                fresh.insert(*o);
+            }
+        }
+        if fresh.is_empty() || fresh.len() > if general { 4096 } else { 64 } {
             return;
         }
-        let refs = |val: &Value, out: &mut Vec<u32>| {
-            out.extend(val.pts.iter());
-            if let KeyVal::KeysOf(ko) = &val.kv {
-                out.extend(ko.objs.iter());
-            }
-        };
-        // roots: the returned value, and what older objects' changed slots hold (globals,
-        // parameters, cells, …)
+        // roots: the returned value, what older objects' changed slots hold (globals,
+        // parameters, cells, …), and what the analyzer holds beyond the state
         let mut work: Vec<u32> = Vec::new();
+        work.extend(v.pts.iter());
+        match &v.kv {
+            KeyVal::KeysOf(ko) => work.extend(ko.objs.iter()),
+            KeyVal::Param(p) => work.push(*p),
+            _ => {}
+        }
         for (o, sk) in fp.slots.iter() {
             if *o < mark {
                 if let Some(val) = state.slots.get(o, sk) {
-                    refs(&val, &mut work);
+                    work.extend(val.pts.iter());
+                    if let KeyVal::KeysOf(ko) = &val.kv {
+                        work.extend(ko.objs.iter());
+                    }
                 }
             }
         }
@@ -1850,23 +1874,16 @@ impl Analyzer {
                 work.extend(ko.objs.iter());
             }
         }
+        if general {
+            self.gc_pinned(&mut work);
+        }
+        // (older objects reach fresh ones only through those roots: only fresh ones expand)
         let mut reached: rustc_hash::FxHashSet<u32> = Default::default();
         while let Some(o) = work.pop() {
-            if !reached.insert(o) {
+            if !reached.insert(o) || o < mark {
                 continue;
             }
-            for (_, val) in state.slots.for_key(&o) {
-                refs(&val, &mut work);
-            }
-            // (an object a model ties to another: a ChainMap's maps, a view's target)
-            if let Payload::View(_, inner) = &self.obj(o).payload {
-                refs(inner, &mut work);
-            }
-            if let Some(ms) = self.chainmaps.get(&o) {
-                for m in ms {
-                    refs(m, &mut work);
-                }
-            }
+            self.obj_edges(o, state, &mut work);
         }
         for o in fresh {
             if !reached.contains(&o) {
