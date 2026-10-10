@@ -976,6 +976,14 @@ fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 fn m_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // (setattr reports its own raises: frozen classes, slots, setter-less properties raise in
+    // the store; an object of unknown class may)
+    an.concrete_args(c.args.iter().take(2), st);
+    if let Some(o) = c.args.first() {
+        if o.pts.is_empty() || o.pts.iter().any(|x| !matches!(an.kind(x), Kind::Instance | Kind::Namespace | Kind::Class | Kind::Module | Kind::Function)) || c.args.get(1).map(|k| k.kv.as_lit().is_none()).unwrap_or(true) {
+            an.may_raise_here("AttributeError", st);
+        }
+    }
     if c.args.len() >= 3 {
         match c.args[1].kv.as_lit().and_then(intern::key_as_str) {
             Some(name) => an.store_attr(&c.args[0], &name, &c.args[2], &c.node, st),

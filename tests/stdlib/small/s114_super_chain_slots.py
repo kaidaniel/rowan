@@ -3,7 +3,7 @@ method is written in: Leaf -> Mid -> TimestampMixin -> Base, so every level's at
 once and the mixin's append happens after Base made the list; a class-level dict mutated in
 __init__ is shared by all instances (keys from literal names exact, from input unknown); a
 property setter on a __slots__ class stores through the slot (no other attribute can be set);
-__getattr__ answers only for attributes the instance lacks."""
+__getattr__ answers only for attributes the instance lacks (L109 was `ok level`: no verdict, t198)."""
 import json
 import os
 
@@ -106,7 +106,7 @@ if __name__ == "__main__":
     c = Config({"mode": "fast"})
     #@row c: present={data} definite={data} closed
     mode = c.mode                                #@value mode: exactly={"fast"}
-    lev = c.level                                #@ ok level
+    lev = c.level                                #@ none level
     _ = 0                                        #@value lev: exactly={"default"}
     build(json.loads(os.environ.get("SPEC", '{"name": "z", "extra": 0}')))
     #@schema json.loads@L111: always={name} only={name,extra}

@@ -61,6 +61,47 @@ impl Analyzer {
         false
     }
 
+    /// The attribute names `__slots__` allows on instances of `cls`, when every class of its MRO
+    /// declares them (literally) and none gives a `__dict__`.
+    pub fn slots_of(&self, cls: u32) -> Option<Vec<String>> {
+        let mut out: Vec<String> = Vec::new();
+        for c in self.mro(cls) {
+            let Some(ci) = self.class_info_opt(c) else {
+                // (`object` at the end of the MRO has no instance dict of its own)
+                if self.kind(c) == Kind::External && self.external_qual(c) == "builtins.object" {
+                    continue;
+                }
+                return None;
+            };
+            let mut found = false;
+            for st in ci.node.body.iter() {
+                let ast::Stmt::Assign(a) = st else { continue };
+                if !matches!(&a.targets[..], [ast::Expr::Name(n)] if n.id.as_str() == "__slots__") {
+                    continue;
+                }
+                let elts: Vec<&ast::Expr> = match &*a.value {
+                    ast::Expr::Tuple(t) => t.elts.iter().collect(),
+                    ast::Expr::List(l) => l.elts.iter().collect(),
+                    e @ ast::Expr::StringLiteral(_) => vec![e],
+                    _ => return None,
+                };
+                for e in elts {
+                    let ast::Expr::StringLiteral(s0) = e else { return None };
+                    let nm = s0.value.to_str().to_string();
+                    if nm == "__dict__" {
+                        return None;
+                    }
+                    out.push(nm);
+                }
+                found = true;
+            }
+            if !found {
+                return None;
+            }
+        }
+        Some(out)
+    }
+
     pub fn is_guarded(&self, ns: Ns) -> bool {
         let want: &[&str] = if ns == Ns::Item { if self.item_exc == Some("ValueError") { super::VALUE_GUARDS } else { ITEM_GUARDS } } else { ATTR_GUARDS };
         self.guards.iter().any(|g| g.iter().any(|x| want.contains(&x.as_str())))
@@ -2515,6 +2556,14 @@ impl Analyzer {
                         self.call_user(setter, Some(Value::obj(oid)), vec![v.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
                         continue;
                     }
+                    // a property without a setter: the assignment raises
+                    if kind == Kind::Instance && !super::disabled("propnoset") {
+                        let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
+                        if !cv.pts.is_empty() && cv.pts.iter().all(|f| self.kind(f) == Kind::Function && self.func_info(f).is_property.get()) {
+                            self.raise_here("AttributeError", state);
+                            continue;
+                        }
+                    }
                     // a data descriptor (an object whose class has `__set__`) takes the store
                     if !super::disabled("descriptors") {
                         let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
@@ -2531,6 +2580,15 @@ impl Analyzer {
                 if !self.bypass_setattr && !super::disabled("setattrdunder") && self.class_lookup(cls, "__setattr__").is_some() {
                     self.call_method_with(&Value::obj(oid), "__setattr__", vec![Value::lit(nk), v.clone()], node, state);
                     continue;
+                }
+            }
+            // `__slots__` on every class of the MRO (no `__dict__`): another name raises
+            if kind == Kind::Instance && !super::disabled("slots") {
+                if let Some(allowed) = self.instance_class(oid).and_then(|c| self.slots_of(c)) {
+                    if !allowed.iter().any(|a| a == name) {
+                        self.raise_here("AttributeError", state);
+                        continue;
+                    }
                 }
             }
             let strong_key = strong || (targets.len() == 1 && self.fresh_init.contains(&oid));
