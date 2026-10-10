@@ -495,10 +495,19 @@ impl Analyzer {
                     self.run_cm_body(v, state);
                     return self.none_v.clone();
                 }
-                if y.value.is_some() {
+                // (a bare `yield` yields None)
+                if y.value.is_some() || super::disabled("bareyield") {
                     self.yield_value(v, state, (y as *const _ as usize, 0));
+                } else {
+                    let nv = self.none_v.clone();
+                    self.yield_value(nv, state, (y as *const _ as usize, 0));
                 }
-                Value::data("yield")
+                // the value of the `yield` expression: what `send` passes, None when iterated
+                if crate::frontend::any_send_call() || super::disabled("bareyield") {
+                    Value::data("yield")
+                } else {
+                    self.none_v.clone()
+                }
             }
             ast::Expr::YieldFrom(y) => {
                 let v = self.eval(&y.value, state);

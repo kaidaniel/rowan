@@ -35,7 +35,8 @@ fields — and the **values** of names when they follow from the program text.
 * `#@ TIER key` on an access line (`d["k"]`, `o.k`, `d.pop("k")`, `M(**d)`, …): `ok` (never
   fails), `missing` (always fails), `possibly` (some paths), `input` (depends on input data),
   `sound` (anything but missing), `none` (no verdict: guarded / `.get`). Several:
-  `#@ ok a ; missing b`.
+  `#@ ok a ; missing b`. A variable read is checked the same way (`#@ possibly x`: x bound on
+  some paths only; the oracle counts a NameError / UnboundLocalError for x).
 * `#@schema SOURCE: always={…} sometimes={…} only={…}` — what the program requires of an
   input: `json.loads@L<n>` / `json.load@L<n>` / `read_csv@L<n>` (the call on line n of this
   file), `param F.X` (parameter X of function F, for functions called with input from

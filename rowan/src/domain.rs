@@ -30,6 +30,8 @@ pub enum Ns {
     Pos,
     Elem,
     Meta,
+    /// a variable (verdicts only: a read of a name bound on some paths only)
+    Name,
 }
 
 impl Ns {
@@ -41,6 +43,7 @@ impl Ns {
             Ns::Pos => "pos",
             Ns::Elem => "elem",
             Ns::Meta => "meta",
+            Ns::Name => "name",
         }
     }
 }

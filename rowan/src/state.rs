@@ -127,6 +127,9 @@ pub struct State {
     pub lasts: Arc<Vec<(ObjId, Value)>>,
     /// tensor-shape facts on this path: ranks and dim equalities (shape.rs)
     pub tf: Arc<crate::shape::TFacts>,
+    /// locals bound on some paths only (a join of a path that bound the name with one that did
+    /// not): reading one may raise UnboundLocalError
+    pub unbound: Arc<Vec<StrId>>,
 }
 
 /// At the join of a branch on a pure test: when `cond` (a canonical test text) is `truth`,
@@ -142,6 +145,9 @@ pub struct CondFact {
     /// rows of the objects the test reads, as at the join: the fact holds only while they are
     /// unchanged (a test like `"x" in cfg` reads cfg's keys)
     pub guards: Vec<((ObjId, Ns), Row)>,
+    /// the possibly-unbound locals of the branch and of the join (`State::unbound`), when they
+    /// differ: a name bound in this branch only is bound again when the test recurs
+    pub unbound: Option<(Arc<Vec<StrId>>, Arc<Vec<StrId>>)>,
 }
 
 impl Default for State {
@@ -195,6 +201,7 @@ impl State {
             name_keys: Arc::new(Vec::new()),
             lasts: Arc::new(Vec::new()),
             tf: Arc::new(crate::shape::TFacts::default()),
+            unbound: Arc::new(Vec::new()),
         }
     }
 
@@ -223,6 +230,7 @@ impl State {
             name_keys: self.name_keys.clone(),
             lasts: self.lasts.clone(),
             tf: self.tf.clone(),
+            unbound: self.unbound.clone(),
         }
     }
 
@@ -243,6 +251,7 @@ impl State {
             name_keys: self.name_keys.clone(),
             lasts: self.lasts.clone(),
             tf: self.tf.clone(),
+            unbound: self.unbound.clone(),
         }
     }
 
@@ -275,6 +284,7 @@ impl State {
         self.name_keys = o.name_keys.clone();
         self.lasts = o.lasts.clone();
         self.tf = o.tf.clone();
+        self.unbound = o.unbound.clone();
     }
 
     pub fn clear_last(&mut self, oid: ObjId) {
@@ -342,6 +352,7 @@ impl State {
         s.tf = if Arc::ptr_eq(&self.tf, &o.tf) || self.tf == o.tf { self.tf.clone() } else { Arc::new(self.tf.join(&o.tf)) };
         s.name_keys = if Arc::ptr_eq(&self.name_keys, &o.name_keys) { self.name_keys.clone() } else { Arc::new(self.name_keys.iter().filter(|x| o.name_keys.contains(x)).copied().collect()) };
         s.lasts = join_lasts(&self.lasts, &o.lasts);
+        s.unbound = join_unbound(self, o);
         s
     }
 
@@ -605,6 +616,25 @@ pub struct Footprint {
     pub rows: Vec<(ObjId, Ns)>,
     pub slots: Vec<(ObjId, SlotKey)>,
     pub elems: Vec<ObjId>,
+}
+
+/// Locals possibly unbound after a join: those of either side, and the names bound on one side
+/// only.
+fn join_unbound(a: &State, b: &State) -> Arc<Vec<StrId>> {
+    if crate::interp::disabled("unbound") || crate::interp::disabled("unboundjoin") {
+        return Arc::new(Vec::new());
+    }
+    let one_sided = a.env.keys().filter(|k| !b.env.contains_key(*k)).chain(b.env.keys().filter(|k| !a.env.contains_key(*k)));
+    let mut out: Vec<StrId> = a.unbound.iter().chain(b.unbound.iter()).copied().chain(one_sided.copied()).collect();
+    if out.is_empty() {
+        return a.unbound.clone();
+    }
+    out.sort();
+    out.dedup();
+    if out == *a.unbound {
+        return a.unbound.clone();
+    }
+    Arc::new(out)
 }
 
 pub fn join_env(a: &IndexMap<StrId, Value>, b: &IndexMap<StrId, Value>) -> IndexMap<StrId, Value> {

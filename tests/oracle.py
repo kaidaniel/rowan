@@ -127,7 +127,7 @@ def row_problem(spec: Dict[str, Any], v: Any) -> Optional[str]:
 
 
 def raised_for(e: BaseException, key: Any) -> bool:
-    """Did `e` say that `key` is missing? `KeyError(key)`, AttributeError `.name`, or a message
+    """Did `e` say that `key` is missing? `KeyError(key)`, AttributeError / NameError `.name`, or a message
     naming it (pandas: `Column not found: k`, `"['k'] not in index"`, `Label(s) ['k'] do not
     exist`; numpy: `no field of name k`)."""
     if isinstance(e, KeyError):
@@ -136,6 +136,9 @@ def raised_for(e: BaseException, key: Any) -> bool:
     if key in validation_missing(e):
         return True
     if isinstance(e, AttributeError) and getattr(e, "name", None) == key:
+        return True
+    if isinstance(e, NameError) and (getattr(e, "name", None) == key or (
+            isinstance(e, UnboundLocalError) and str(e).startswith(f"cannot access local variable '{key}'"))):
         return True
     if isinstance(e, (KeyError, AttributeError, ValueError)) and isinstance(key, (str, int)):
         msg = str(e)

@@ -167,8 +167,6 @@ The soundness stance and accepted imprecision are in SPECIFICATION §13. The bug
 items and precision to-dos are listed, each with how to reproduce it,
 in `SUGGESTED_CHANGES.md`. The main ones:
 
-* names bound on one side of a join look bound on every path;
-* a bare `yield` gives no item;
 * deadline-cut runs depend on machine load;
 * the `exits` fix doubled the objects on rich.
 
@@ -179,6 +177,6 @@ Other limits:
 
 ## Where to go next
 
-Work `SUGGESTED_CHANGES.md` in order: the two bugs (1.1, 1.2) with golden cases first, then
+Work `SUGGESTED_CHANGES.md` in order:
 the performance items (the rich object doubling, the `summarise_sig` tables, a work-based
 budget), the on-demand server experiment, and the precision to-dos (`#@todo`s in the suites).

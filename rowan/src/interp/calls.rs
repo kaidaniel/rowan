@@ -1399,6 +1399,7 @@ impl Analyzer {
             new_fr.cells.insert(*n, *c);
         }
         let saved_env = std::mem::take(&mut state.env);
+        let saved_unbound = std::mem::take(&mut state.unbound);
         self.env_stack.push(saved_env.clone());
         self.raise_stack.push(false);
         self.esc_cls.push(Some(Vec::new()));
@@ -1689,6 +1690,7 @@ impl Analyzer {
             }
         }
         state.env = saved_env;
+        state.unbound = saved_unbound;
         state.ret = saved_ret;
         if saved_exits.is_some() {
             state.exits = saved_exits;
@@ -2016,6 +2018,7 @@ impl Analyzer {
             new_fr.cells.insert(*n, *c);
         }
         let saved_env = std::mem::take(&mut state.env);
+        let saved_unbound = std::mem::take(&mut state.unbound);
         self.env_stack.push(saved_env.clone());
         self.frames.push(new_fr);
         let fake = Node::synthetic(fi.node.node().module, fi.node.node().line);
@@ -2024,6 +2027,7 @@ impl Analyzer {
         self.frames.pop();
         self.env_stack.pop();
         state.env = saved_env;
+        state.unbound = saved_unbound;
     }
 
     /// Hashable description of everything a callee can observe, or None if too large.

@@ -889,7 +889,7 @@ impl Analyzer {
         // (the flag's own narrowing is no fact about the records)
         let facts: Vec<_> = cond_facts_for(key, true, vec![(nid, v.clone())], &ts, &es, state)
             .into_iter()
-            .map(|f| std::sync::Arc::new(crate::state::CondFact { cond: f.cond, truth: f.truth, deps: f.deps.clone(), rows: f.rows.iter().filter(|((o, _), _, _)| !v.pts.contains(*o)).cloned().collect(), guards: f.guards.clone() }))
+            .map(|f| std::sync::Arc::new(crate::state::CondFact { cond: f.cond, truth: f.truth, deps: f.deps.clone(), rows: f.rows.iter().filter(|((o, _), _, _)| !v.pts.contains(*o)).cloned().collect(), guards: f.guards.clone(), unbound: f.unbound.clone() }))
             .filter(|f| !f.rows.is_empty())
             .collect();
         add_facts(state, facts);
@@ -953,6 +953,11 @@ impl Analyzer {
             for (k, branch, joined) in &f.rows {
                 if st.row(k.0, k.1) == *joined {
                     st.set_row(k.0, k.1, branch.clone());
+                }
+            }
+            if let Some((branch, joined)) = &f.unbound {
+                if st.unbound == *joined {
+                    st.unbound = branch.clone();
                 }
             }
         }
@@ -2371,12 +2376,22 @@ fn cond_facts_for(key: intern::StrId, pos: bool, deps: Vec<(intern::StrId, Value
         rt.push((k, tr, jr.clone()));
         re.push((k, er, jr));
     }
-    if rt.is_empty() {
+    // (a branch's unbound names: its own, and the joined names it did not bind)
+    let branch_unbound = |b: &State| -> std::sync::Arc<Vec<intern::StrId>> {
+        let mut u: Vec<intern::StrId> = b.unbound.iter().copied().chain(j.env.keys().filter(|k| !b.env.contains_key(*k)).copied()).collect();
+        u.sort();
+        u.dedup();
+        std::sync::Arc::new(u)
+    };
+    let (ut, ue) = (branch_unbound(then_s), branch_unbound(else_s));
+    let unb = |b: std::sync::Arc<Vec<intern::StrId>>| if b != j.unbound && !crate::interp::disabled("unboundfact") { Some((b, j.unbound.clone())) } else { None };
+    let (ut, ue) = (unb(ut), unb(ue));
+    if rt.is_empty() && ut.is_none() && ue.is_none() {
         return Vec::new();
     }
     vec![
-        std::sync::Arc::new(crate::state::CondFact { cond: key, truth: pos, deps: deps.clone(), rows: rt, guards: guards.clone() }),
-        std::sync::Arc::new(crate::state::CondFact { cond: key, truth: !pos, deps, rows: re, guards }),
+        std::sync::Arc::new(crate::state::CondFact { cond: key, truth: pos, deps: deps.clone(), rows: rt, guards: guards.clone(), unbound: ut }),
+        std::sync::Arc::new(crate::state::CondFact { cond: key, truth: !pos, deps, rows: re, guards, unbound: ue }),
     ]
 }
 

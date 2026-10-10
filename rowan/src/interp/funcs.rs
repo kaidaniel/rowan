@@ -347,6 +347,21 @@ impl Analyzer {
     }
 
     // ------------------------------------------------------------- names
+    /// A read of a name bound on some paths only: possibly a NameError / UnboundLocalError.
+    /// After it the program went on, so the name is bound on this path.
+    fn unbound_read(&mut self, name: StrId, module: crate::domain::ObjId, node: &Node, state: &mut State, exc: &str) {
+        if node.line == 0 {
+            return;
+        }
+        let key = intern::key(intern::Key::Str(str_get(name)));
+        let cls = crate::domain::Classification::with_note(crate::domain::Tier::Possibly, "bound on some paths only");
+        self.verdict(node, key, &cls, module, Ns::Name, None, None);
+        self.may_raise_here(exc, state);
+        if state.unbound.contains(&name) {
+            state.unbound = std::sync::Arc::new(state.unbound.iter().copied().filter(|n| *n != name).collect());
+        }
+    }
+
     pub fn load_name(&mut self, name: StrId, node: &Node, state: &mut State) -> Value {
         let _ = node;
         for ov in self.frame().overlays.iter().rev() {
@@ -367,8 +382,17 @@ impl Analyzer {
             let scope = self.frame().scope;
             let mi = self.module_info(fr_module);
             if mi.scopes.get(scope).is_local(&str_get(name)) {
-                if let Some(v) = state.env.get(&name) {
-                    return v.clone();
+                if let Some(v) = state.env.get(&name).cloned() {
+                    if state.unbound.contains(&name) {
+                        self.unbound_read(name, fr_module, node, state, "UnboundLocalError");
+                    }
+                    return v;
+                }
+                if !super::disabled("unbound") && node.line > 0 {
+                    let key = intern::key(intern::Key::Str(str_get(name)));
+                    let cls = crate::domain::Classification::with_note(crate::domain::Tier::Missing, "bound on no path to here");
+                    self.verdict(node, key, &cls, fr_module, Ns::Name, None, None);
+                    self.raise_here("UnboundLocalError", state);
                 }
                 return Value::data(&format!("unbound {}", str_get(name)));
             }
@@ -383,6 +407,14 @@ impl Analyzer {
             }
         }
         if let Some(v) = state.slot_opt(fr_module, Ns::Attr, intern::key(intern::Key::Str(str_get(name)))) {
+            if fr_kind == FrameKind::Module && !super::disabled("unbound") {
+                let k = intern::key(intern::Key::Str(str_get(name)));
+                let row = state.row(fr_module, Ns::Attr);
+                if row.present.contains(k) && !row.definite.contains(k) && row.mutators.is_empty() && !row.top && row.sources.is_empty() {
+                    self.unbound_read(name, fr_module, node, state, "NameError");
+                    state.set_row(fr_module, Ns::Attr, row.narrow_in(k, true));
+                }
+            }
             // a summary reading a module name that is rebound elsewhere: the value is the one at
             // each call site (a deferred load), not the one when the summary was made
             if fr_kind == FrameKind::Function && self.deferred_global(fr_module, &str_get(name), &v) {
@@ -409,6 +441,19 @@ impl Analyzer {
         let data_only = v.pts.iter().all(|o| matches!(self.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance));
         let mutable_seq = !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::List | Kind::Set) || (self.kind(o) == Kind::Dict && !crate::interp::disabled("globaldict"))) && !crate::interp::disabled("globalseq") && self.mutated_in_functions(module, name);
         data_only && (mutable_seq || self.module_info(module).scopes.rebound.contains(name))
+    }
+
+    /// A narrowed value for a name (a test on it): its value changes, not whether it is bound.
+    pub fn rebind_name(&mut self, name: StrId, v: Value, state: &mut State) {
+        let module = self.frame().module;
+        let at_module = self.frame().kind == FrameKind::Module;
+        let row = if at_module { Some(state.row(module, Ns::Attr)) } else { None };
+        let unbound = state.unbound.clone();
+        self.store_name(name, v, state);
+        if let Some(r) = row {
+            state.set_row(module, Ns::Attr, r);
+        }
+        state.unbound = unbound;
     }
 
     pub fn store_name(&mut self, name: StrId, v: Value, state: &mut State) {
@@ -449,6 +494,9 @@ impl Analyzer {
             if mi.scopes.get(scope).globals_decl.contains(&*str_get(name)) {
                 state.set_slot(fr_module, Ns::Attr, key, v, true);
                 return;
+            }
+            if state.unbound.contains(&name) {
+                state.unbound = std::sync::Arc::new(state.unbound.iter().copied().filter(|n| *n != name).collect());
             }
             state.env.insert(name, v);
             return;

@@ -298,6 +298,24 @@ pub fn module_path(idx: u32) -> Option<String> {
     REG.with(|r| r.borrow().modules[idx as usize].path.clone())
 }
 
+/// Does a `.send(` call appear in any module parsed so far? (a `yield` expression is None
+/// unless something is sent; cached per module count)
+pub fn any_send_call() -> bool {
+    thread_local! {
+        static SEND: RefCell<(usize, bool)> = const { RefCell::new((0, false)) };
+    }
+    REG.with(|r| {
+        let r = r.borrow();
+        SEND.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.0 != r.modules.len() {
+                *c = (r.modules.len(), r.modules.iter().any(|m| m.source.contains(".send(")));
+            }
+            c.1
+        })
+    })
+}
+
 pub fn module_source_lines(idx: u32) -> Vec<String> {
     REG.with(|r| r.borrow().modules[idx as usize].source.lines().map(|s| s.to_string()).collect())
 }

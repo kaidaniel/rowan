@@ -3008,7 +3008,8 @@ impl Analyzer {
         let last = if simple { n.end_line } else { n.line };
         let reqs: Vec<(u32, String)> = self.row_check_requests.iter().filter(|(f, ln, _)| *ln >= n.line && *ln <= last && *f == file).map(|(_, ln, name)| (*ln, name.clone())).collect();
         for (ln, name) in reqs {
-            let v = self.load_name(s(&name), &n, state);
+            // (an observation, not a read of the program: no position, so no unbound-name check)
+            let v = self.load_name(s(&name), &Node::none(), state);
             let mut rows: Vec<Row> = Vec::new();
             let mut ns_used = Ns::Item;
             let mut obs_rows: Vec<(ObjId, Ns, Row)> = Vec::new();

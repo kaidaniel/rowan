@@ -210,7 +210,7 @@ impl Analyzer {
                     let keep: Vec<u32> = v.pts.iter().filter(|o| !(matches!(self.kind(*o), Kind::List | Kind::Tuple | Kind::Set) && self.llen(*o, state) == Some(0))).collect();
                     if !keep.is_empty() && keep.len() < v.pts.len() {
                         v = Value::objs(crate::domain::ObjSet::from_vec(keep));
-                        self.store_name(s(n.id.as_str()), v.clone(), state);
+                        self.rebind_name(s(n.id.as_str()), v.clone(), state);
                     }
                 }
                 if v.pts.len() == 1 && v.kv.is_bot() {
@@ -283,7 +283,7 @@ impl Analyzer {
 
     fn store_narrowed(&mut self, store: &StoreTarget, v: Value, state: &mut State) {
         match store {
-            StoreTarget::Name(n) => self.store_name(*n, v, state),
+            StoreTarget::Name(n) => self.rebind_name(*n, v, state),
             StoreTarget::Narrowed(k) => {
                 state.narrowed.insert(*k, v);
             }
@@ -694,7 +694,7 @@ impl Analyzer {
                 } else {
                     Value::objs(cur.pts.clone())
                 };
-                self.store_name(name, v, state);
+                self.rebind_name(name, v, state);
             }
             None => {
                 if restrict || cur.pts.is_empty() {
@@ -704,14 +704,14 @@ impl Analyzer {
                     }
                 } else if cur.kv.is_literal() {
                     // every literal excluded: the objects remain
-                    self.store_name(name, Value::objs(cur.pts.clone()), state);
+                    self.rebind_name(name, Value::objs(cur.pts.clone()), state);
                 }
             }
             Some(nk) => {
                 // equal to one of the literals: an unknown value is that literal now
                 let pts = if restrict && !crate::interp::disabled("restrictpts") { cur.pts.filter(|o| self.kind(o) != Kind::Unknown) } else { cur.pts.clone() };
                 if nk != cur.kv || pts != cur.pts {
-                    self.store_name(name, Value::with_kv(pts, nk), state);
+                    self.rebind_name(name, Value::with_kv(pts, nk), state);
                 }
             }
         }

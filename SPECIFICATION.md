@@ -109,6 +109,7 @@ and an identity:
 | `reqs` | source → key → requirement (§9) |
 | `facts` | conditional facts: rows a branch had, restored when the same test recurs (§5.1) |
 | `tf` | tensor facts: ranks and dim equalities on this path (§11.4) |
+| `unbound` | locals bound on some paths only: a name one side of a join bound and the other did not |
 | `ret`, `exits` | the returned value so far; the states of paths that returned |
 | `reachable` | false after a `raise`, `return`, `break`, or a call whose every path raises |
 
@@ -357,6 +358,8 @@ branches, and a known prefix for endless generators.
 * **Lazy wrappers.** `zip`, `map`, `filter` and `islice` over generators pull items as CPython
   would (`zip` stops at the shortest input).
 * `yield from` delegates and evaluates to the generator's return value.
+* A bare `yield` yields `None`. A `yield` expression's value is `None` (iteration sends nothing),
+  or unknown when the program calls `.send(` anywhere.
 * **Iterator protocol.** An iterator class whose `__iter__` returns `self` is iterated through
   `__next__`.
 
@@ -400,6 +403,13 @@ anything else is `possibly`, with the per-object breakdown. A verdict carries it
 (`via L96>L85`), since verdicts are per call context. Reads that cannot fail (`.get`, `in`,
 `getattr` with a default) give no verdict. Duplicates per object, key, tier and call context
 are reported once.
+
+**Names.** A read of a variable bound on some paths only is `possibly` in the `name`
+namespace (`name['x'] possibly missing`), and may raise `NameError` (`UnboundLocalError` in a
+function) from the state before the read. After the read the name is bound on that path. A local
+that no path binds is `missing`, and the read ends the path. Module names use the module's
+attribute row, locals `State::unbound`, and a recurring test restores a branch's bound names as
+it restores rows (§5.1). Narrowing changes a name's value, never whether it is bound.
 
 ## 11. Library models
 
