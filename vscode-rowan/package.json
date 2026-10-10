@@ -1,7 +1,7 @@
 {
   "name": "rowan",
-  "displayName": "rowan — abstract interpretation for Python",
-  "description": "Hover over a variable to see the values rowan infers for it; accesses that can fail as diagnostics.",
+  "displayName": "rowan",
+  "description": "An abstract Interpreter for python.",
   "version": "0.1.0",
   "publisher": "Rowan",
   "license": "MIT",

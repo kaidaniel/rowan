@@ -1,12 +1,8 @@
-# rowan for VS Code
-
-> **⚠ Experimental.** rowan is a research prototype. Expect rough edges, and expect large
-> files (thousands of lines, big packages) to be slow or to time out.
+> **⚠ Experimental.** `rowan` is in development. Expect it to crash on large files and outputs to be at times poorly explained.
 
 rowan is an **abstract interpreter for Python**: it runs your program on *sets of possible
-values* instead of real ones. **Hover over any variable** to see what it can hold — which
-literals, which dict keys, which are certain and which only maybe there. Accesses that can
-fail show up as diagnostics.
+values* instead of real ones. **Hover over any variable** to see what it can hold - which
+literals, which dict keys, which are certain and which only maybe there.
 
 ```python
 def make_user(name, admin):
@@ -17,12 +13,9 @@ def make_user(name, admin):
 
 ana = make_user("ana", True)    # hover: {"active": True, "name": "ana", "role": "admin"}
 bo = make_user("bo", False)     # hover: {"active": True, "name": "bo"}
-
-bo["role"]                      # ✗ 'role' definitely missing
-
-for u in [ana, bo]:
-    print(u["role"])            # ⚠ 'role' possibly missing: ✓ for ana, ✗ for bo
 ```
 
-No setup: the analyser is bundled with the extension. Files are analysed when opened or
+Besides python builtins, rowan also has models for pytorch, pandas, pydantic, and a few other libraries. Local imports are resolved but other external dependencies are not analysed.
+
+Files are analysed when opened or
 saved, or with **Rowan: Analyse current file**.
