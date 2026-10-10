@@ -1091,7 +1091,7 @@ impl Analyzer {
             }
         }
         for o in head.lens.diff_keys(&prev.lens) {
-            head.lens.insert(o, (None, 0));
+            head.lens.insert(o, (None, 0, 0));
         }
     }
 

@@ -24,7 +24,7 @@ with cm() as v:
 top = y                                           #@value top: exactly={1,2}
 dv = d["k"]                                       #@value dv: exactly={1,2}
 #@row d: present={k} definite={k} closed
-n = len(LOG)                                      #@todo value n: exactly={1,2}
+n = len(LOG)                                      #@value n: exactly={1,2}
 
 #@value n: includes={1,2}
 

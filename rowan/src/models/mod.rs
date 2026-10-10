@@ -667,13 +667,22 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     for (i, v) in lead.iter().enumerate() {
                         st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
                     }
-                    st.lens.insert(oid, (None, lead.len()));
+                    st.lens.insert(oid, (None, lead.len(), 0));
                 }
             }
         }
     } else {
         st.elems.insert(oid, KeyVal::Lits(KeySet::new()));
         an.set_llen(oid, st, Some(0));
+    }
+    // (a copy of a list / tuple whose length is one of a few: the same alternatives)
+    if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple" | "builtins.sorted" | "builtins.reversed") && an.llen(oid, st).is_none() && !crate::interp::disabled("lenalts") {
+        if let Some(src) = c.args.first().and_then(|a| a.single()).filter(|s| matches!(an.kind(*s), Kind::List | Kind::Tuple)) {
+            if let Some((None, _, m)) = st.lens.get(&src).filter(|l| l.2 != 0) {
+                let p = an.prefix(oid, st).unwrap_or(0);
+                st.lens.insert(oid, (None, p, m));
+            }
+        }
     }
     Value::obj(oid)
 }
@@ -2481,7 +2490,33 @@ fn m_unknown_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 // ----------------------------------------------------------- list.*
+/// `lst.append(x)` / `lst.extend(known items)` on a list whose length is one of a few: the
+/// alternatives shifted by the number added (a length past 15 voids them all).
 fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let added: Option<usize> = match last(&c.qual) {
+        "append" => Some(1),
+        "extend" => c.args.first().and_then(|a| a.single()).filter(|o| matches!(an.kind(*o), Kind::List | Kind::Tuple)).and_then(|o| an.llen(o, st)),
+        _ => None,
+    };
+    let before: Vec<(crate::domain::ObjId, u16)> = match (&c.recv, added) {
+        (Some(r), Some(_)) if !crate::interp::disabled("lenalts") => r.pts.iter().filter_map(|o| st.lens.get(&o).filter(|l| l.0.is_none() && l.2 != 0).map(|l| (o, l.2))).collect(),
+        _ => Vec::new(),
+    };
+    let r = m_append_inner(an, st, c);
+    if let Some(k) = added {
+        for (o, m) in before {
+            if let Some((None, p, 0)) = st.lens.get(&o) {
+                let shifted = (m as u32) << k;
+                if shifted <= 0xFFFF {
+                    st.lens.insert(o, (None, p, shifted as u16));
+                }
+            }
+        }
+    }
+    r
+}
+
+fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual);
     let recv = c.recv.clone().unwrap_or_default();
     for oid in recv.pts.iter() {
@@ -3184,6 +3219,16 @@ fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     match name {
         "copy" => join_values(recv.pts.iter().map(|o| Value::obj(an.copy_object(o, &c.node, st, false, &mut IndexMap::new()))).collect::<Vec<_>>()),
         "remove" | "discard" | "clear" | "sort" | "reverse" | "insert" => {
+            // `clear` on one list, whatever its length: empty
+            if name == "clear" && !crate::interp::disabled("listclear") {
+                if let Some(oid) = recv.single().filter(|o| an.kind(*o) == Kind::List && an.obj(*o).single && !crate::state::is_merged(*o)) {
+                    st.drop_obj_ns(oid, Ns::Pos);
+                    st.drop_obj_ns(oid, Ns::Elem);
+                    st.elems.remove(&oid);
+                    an.set_llen(oid, st, Some(0));
+                    return an.none_v.clone();
+                }
+            }
             // one list with known positions: updated in place
             if let Some(oid) = recv.single() {
                 if let Some(mut ps) = an.known_positions(oid, st).filter(|_| !crate::interp::disabled("listinplace")) {
@@ -4861,6 +4906,25 @@ fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
         return Value::data("len");
+    }
+    // lists / tuples whose possible lengths are known (on this path, or as the alternatives of
+    // the paths joined here): one of those
+    if v.kv.is_bot() && !crate::interp::disabled("lenalts") && v.pts.iter().all(|o| matches!(an.kind(o), Kind::List | Kind::Tuple)) {
+        let mut all: Vec<usize> = Vec::new();
+        let mut known = true;
+        for o in v.pts.iter() {
+            match an.len_alts(o, st) {
+                Some(ls) => all.extend(ls),
+                None => {
+                    known = false;
+                    break;
+                }
+            }
+        }
+        if known && !all.is_empty() {
+            let ks = intern::KeySet::from_iter(all.into_iter().map(|n| intern::key_int(n as i64)));
+            return Value::kv_only(crate::domain::KeyVal::lits(ks));
+        }
     }
     if let Some(o) = v.single() {
         // a view of one dict: the dict's length

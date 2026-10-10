@@ -1696,7 +1696,7 @@ impl Analyzer {
                             self.objects[gid as usize].known_prefix = Some(p);
                         }
                     }
-                    ys.lens.insert(gid, (None, p));
+                    ys.lens.insert(gid, (None, p, 0));
                     st = ys;
                 }
             }
@@ -1887,10 +1887,10 @@ impl Analyzer {
         }
         touched.sort_unstable();
         touched.dedup();
-        let entry = |an: &Analyzer, s: &State, o: ObjId| -> (Option<usize>, usize) {
+        let entry = |an: &Analyzer, s: &State, o: ObjId| -> (Option<usize>, usize, u16) {
             s.lens.get(&o).unwrap_or_else(|| {
                 let ob = &an.objects[o as usize];
-                (ob.literal_len, ob.literal_len.or(ob.known_prefix).unwrap_or(0))
+                (ob.literal_len, ob.literal_len.or(ob.known_prefix).unwrap_or(0), 0)
             })
         };
         for o in touched {

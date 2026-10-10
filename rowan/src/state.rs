@@ -109,7 +109,7 @@ pub struct State {
     /// lists / tuples: (the length when known on this path, the number of leading positions
     /// known: all of them when the length is known); written at birth, so a key on one side
     /// only of a join is an object born there
-    pub lens: LayerMap<ObjId, (Option<usize>, usize)>,
+    pub lens: LayerMap<ObjId, (Option<usize>, usize, u16)>,
     /// Source -> {key term -> ReqInfo}
     pub reqs: TwoLevel<SourceId, KeyId, ReqInfo>,
     pub ret: Option<Value>,
@@ -288,6 +288,12 @@ impl State {
     }
 
     pub fn clear_last(&mut self, oid: ObjId) {
+        // (an element changed: the length alternatives of the last join no longer hold either)
+        if let Some((None, p, m)) = self.lens.get(&oid) {
+            if m != 0 {
+                self.lens.insert(oid, (None, p, 0));
+            }
+        }
         if self.lasts.iter().any(|(o, _)| *o == oid) {
             self.lasts = Arc::new(self.lasts.iter().filter(|(o, _)| *o != oid).cloned().collect());
         }
@@ -762,8 +768,22 @@ pub fn is_merged(oid: ObjId) -> bool {
     MERGED.with(|m| m.borrow().contains(&oid))
 }
 
-pub fn join_len(a: &(Option<usize>, usize), b: &(Option<usize>, usize)) -> (Option<usize>, usize) {
+/// Lengths join to the one both sides have, else to unknown with the shorter known prefix and
+/// the possible lengths (a bit per length 0..15, 0: no information) when both sides know theirs.
+pub fn join_len(a: &(Option<usize>, usize, u16), b: &(Option<usize>, usize, u16)) -> (Option<usize>, usize, u16) {
     let pa = a.0.unwrap_or(a.1);
     let pb = b.0.unwrap_or(b.1);
-    (if a.0 == b.0 { a.0 } else { None }, pa.min(pb))
+    if a.0.is_some() && a.0 == b.0 {
+        return (a.0, pa.min(pb), 0);
+    }
+    let mask = |x: &(Option<usize>, usize, u16)| -> u16 {
+        match x.0 {
+            Some(n) if n < 16 => 1u16 << n,
+            Some(_) => 0,
+            None => x.2,
+        }
+    };
+    let (ma, mb) = (mask(a), mask(b));
+    let m = if ma != 0 && mb != 0 && !crate::interp::disabled("lenalts") { ma | mb } else { 0 };
+    (None, pa.min(pb), m)
 }

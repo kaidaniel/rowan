@@ -47,8 +47,8 @@ keys = tuple([k for k, v in blue.__rich_repr__()])
 
 either = Style("green", len(sys.argv) > 2)
 ne = len(list(either.__rich_repr__()))
-# (lengths 2 or 3 join to an unknown length: SUGGESTED_CHANGES 6, y435)
-#@todo value ne: exactly={2, 3}
+# (lengths 2 or 3: the alternatives of the joined paths, shifted by the last yield)
+#@value ne: exactly={2, 3}
 
 f = tuple(fields({"a": 1, "b": 2}))
 #@value f: exactly={(1, 2, None)}

@@ -609,6 +609,8 @@ impl Analyzer {
         let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &label, Payload::None);
         // a fresh generator list (no yield yet in this activation) starts empty
         let fresh = !state.has_slot(gid, Ns::Elem, STAR);
+        // (lengths that were one of a few: one more each, after this item)
+        let alts_before = if fresh { 0 } else { state.lens.get(&gid).filter(|l| l.0.is_none()).map(|l| l.2).unwrap_or(0) };
         state.set_slot(gid, Ns::Elem, STAR, v.clone(), false);
         let cur = state.elems.get(&gid).unwrap_or_else(|| v.kv.clone());
         state.elems.insert(gid, kv_join(&cur, &v.kv));
@@ -652,6 +654,14 @@ impl Analyzer {
             _ => {
                 self.set_llen(gid, state, None);
                 state.drop_obj_ns(gid, Ns::Pos);
+            }
+        }
+        if alts_before != 0 && !super::disabled("lenalts") {
+            if let Some((None, p, 0)) = state.lens.get(&gid) {
+                let shifted = (alts_before as u32) << 1;
+                if shifted <= 0xFFFF {
+                    state.lens.insert(gid, (None, p, shifted as u16));
+                }
             }
         }
         let fi = self.func_info(foid);
@@ -2260,7 +2270,7 @@ impl Analyzer {
                 let ekv = state.elems.get(&oid).unwrap_or(crate::domain::DATA);
                 if !(e.pts.is_empty() && ekv.is_bot()) {
                     state.set_slot(oid, Ns::Pos, key_int(0), Value::with_kv(e.pts, ekv), true);
-                    state.lens.insert(oid, (None, 1));
+                    state.lens.insert(oid, (None, 1, 0));
                 }
             }
         }

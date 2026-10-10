@@ -2003,6 +2003,20 @@ impl Analyzer {
                 self.record_resolved_fact(fo.line, fo.name, &v, rows, slots, fo.scope, state);
             }
         }
+        // (lists made in the body keep the length alternatives they had at its end: the
+        // footprint's element writes above cleared them)
+        if !crate::interp::disabled("lenalts") {
+            for (tpl, nid) in inst.clones.iter() {
+                if !inst.new_clones.contains(nid) {
+                    continue;
+                }
+                if let Some((None, p, m)) = summary.exit.lens.get(tpl).filter(|l| l.2 != 0) {
+                    if matches!(state.lens.get(nid), Some((None, _, _)) | None) {
+                        state.lens.insert(*nid, (None, p, m));
+                    }
+                }
+            }
+        }
         let ret = inst.remap_value(self, state, &pre, &summary.ret);
         if !in_summary {
             let fi = self.func_info(summary.foid);
@@ -2367,6 +2381,10 @@ impl Inst {
         }
         self.clones.insert(t, nid);
         an.set_llen(nid, state, tll);
+        // (the template's length alternatives too)
+        if let Some((None, p, m)) = self.summary.exit.lens.get(&t).filter(|l| l.2 != 0) {
+            state.lens.insert(nid, (None, p, m));
+        }
         an.obj_mut(nid).iter_elem = titer;
         if an.obj(t).iterator {
             an.obj_mut(nid).iterator = true;

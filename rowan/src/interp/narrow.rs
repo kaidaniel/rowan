@@ -221,10 +221,10 @@ impl Analyzer {
                                 let e = state.slot(o, Ns::Elem, intern::STAR);
                                 let ekv = state.elems.get(&o).unwrap_or(crate::domain::DATA);
                                 state.set_slot(o, Ns::Pos, intern::key_int(0), Value::with_kv(e.pts, ekv), true);
-                                state.lens.insert(o, (None, 1));
+                                state.lens.insert(o, (None, 1, 0));
                             }
                         } else if self.prefix(o, state).is_none() {
-                            state.lens.insert(o, (Some(0), 0));
+                            state.lens.insert(o, (Some(0), 0, 0));
                         }
                     }
                     // a falsy dict is empty on this path (`while queue:` ends with no keys)

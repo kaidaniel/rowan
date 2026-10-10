@@ -1611,12 +1611,24 @@ impl Analyzer {
         }
     }
 
+    /// The possible lengths of a list / tuple on this path: the exact one, or the alternatives
+    /// a join kept (lengths 0..15 on the joined paths).
+    pub fn len_alts(&self, o: ObjId, st: &State) -> Option<Vec<usize>> {
+        if let Some(n) = self.llen(o, st) {
+            return Some(vec![n]);
+        }
+        match st.lens.get(&o) {
+            Some((None, _, m)) if m != 0 => Some((0..16).filter(|i| m & (1 << i) != 0).collect()),
+            _ => None,
+        }
+    }
+
     /// The number of leading positions known (the length when known; after appends of unknown
     /// count, the length before them).
     pub fn prefix(&self, o: ObjId, st: &State) -> Option<usize> {
         let p = match st.lens.get(&o) {
-            Some((Some(n), _)) => n,
-            Some((None, p)) => p,
+            Some((Some(n), _, _)) => n,
+            Some((None, p, _)) => p,
             None => self.objects[o as usize].literal_len.or(self.objects[o as usize].known_prefix).unwrap_or(0),
         };
         Some(p).filter(|p| *p > 0)
@@ -1625,14 +1637,14 @@ impl Analyzer {
     /// (also the object's own field: what a state not descended from the one it was made in,
     /// a summary's, reads)
     pub fn set_llen(&mut self, o: ObjId, st: &mut State, v: Option<usize>) {
-        st.lens.insert(o, (v, v.unwrap_or(0)));
+        st.lens.insert(o, (v, v.unwrap_or(0), 0));
         self.objects[o as usize].literal_len = v;
         self.objects[o as usize].known_prefix = None;
     }
 
     /// The length is unknown now, its first `n` positions are still known.
     pub fn set_prefix(&mut self, o: ObjId, st: &mut State, n: usize) {
-        st.lens.insert(o, (None, n));
+        st.lens.insert(o, (None, n, 0));
         self.objects[o as usize].literal_len = None;
         self.objects[o as usize].known_prefix = Some(n);
     }
@@ -1750,7 +1762,7 @@ impl Analyzer {
         };
         let obj_single = self.obj(oid).single;
         // born here: its length is unknown until the code making it says
-        state.lens.insert(oid, (None, 0));
+        state.lens.insert(oid, (None, 0, 0));
         if kind.is_record() || kind == Kind::Frame {
             let fresh = row.unwrap_or_default();
             if state.has_row(oid, ns) && !obj_single {
@@ -3217,7 +3229,7 @@ impl Analyzer {
                     so.derived_from = derived;
                 }
             }
-            back.lens.insert(sid, (None, 0));
+            back.lens.insert(sid, (None, 0, 0));
             map.insert(*r, sid);
         }
         let rename_value = |v: &Value, map: &FxHashMap<ObjId, ObjId>| -> Option<Value> {
