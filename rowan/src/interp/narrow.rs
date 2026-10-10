@@ -116,7 +116,19 @@ impl Analyzer {
                     if fname == "hasattr" && args.len() == 2 {
                         let kv = self.eval(&args[1], state);
                         if let Some(k) = kv.kv.as_lit() {
-                            let rec = self.eval(&args[0], state);
+                            let mut rec = self.eval(&args[0], state);
+                            // (an attribute row describes instances and namespaces; a builtin
+                            // container's attributes are its type's: decided by the type, or not)
+                            let builtin = |an: &Analyzer, o: u32| matches!(an.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set);
+                            if !rec.pts.is_empty() && rec.pts.iter().all(|o| builtin(self, o)) {
+                                if let Some(name) = intern::key_as_str(k) {
+                                    if rec.pts.iter().all(|o| crate::models::builtin_has_attr(self, o, &name) == Some(!truth)) {
+                                        state.reachable = false;
+                                    }
+                                }
+                                return;
+                            }
+                            rec = Value::with_kv(rec.pts.filter(|o| !builtin(self, o)), KeyVal::Bot);
                             self.narrow_record(&rec, Ns::Attr, k, truth, state);
                         }
                         return;
@@ -535,7 +547,8 @@ impl Analyzer {
             }
             return;
         }
-        if let ast::Expr::Name(l) = left {
+        // (a literal right side is a string: `in` tests substrings, not keys)
+        if let (ast::Expr::Name(l), false) = (left, !rv.kv.is_bot() || rv.pts.is_empty()) {
             let ks = self.lit_keys(&rv, state);
             if let Some(ks) = ks {
                 self.narrow_kv(s(l.id.as_str()), &ks, member, state);

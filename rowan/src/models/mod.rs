@@ -21,6 +21,7 @@ pub mod itertools;
 pub mod stdfuncs;
 pub mod pyvalues;
 pub mod pure;
+pub mod pytext;
 pub mod torch;
 
 use indexmap::IndexMap;
@@ -1009,6 +1010,30 @@ fn m_delattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// `hasattr(obj, "name")` on instances of known classes: decided by the attribute rows and
 /// the class (a class without `__getattr__`).
+/// `hasattr(o, name)` for a builtin dict / list / tuple / set: its type's methods are there;
+/// what only records of user classes have (dataclass / pydantic / namedtuple API, `__dict__`)
+/// is not; anything else is not decided here (Counter, defaultdict, OrderedDict add methods).
+pub fn builtin_has_attr(an: &Analyzer, o: u32, name: &str) -> Option<bool> {
+    const DICT_M: &[&str] = &["keys", "values", "items", "get", "pop", "popitem", "setdefault", "update", "clear", "copy", "fromkeys"];
+    const LIST_M: &[&str] = &["append", "extend", "insert", "remove", "pop", "clear", "index", "count", "sort", "reverse", "copy"];
+    const SET_M: &[&str] = &["add", "discard", "remove", "pop", "clear", "copy", "union", "intersection", "difference", "symmetric_difference", "issubset", "issuperset", "isdisjoint", "update"];
+    const ABSENT: &[&str] = &["__dataclass_fields__", "__dataclass_params__", "__pydantic_fields__", "model_fields", "model_dump", "model_validate", "__fields__", "_fields", "_asdict", "_replace", "__dict__", "__slots__", "dict", "json"];
+    let methods: &[&str] = match an.kind(o) {
+        Kind::Dict => DICT_M,
+        Kind::List => LIST_M,
+        Kind::Tuple => &["index", "count"],
+        Kind::Set => SET_M,
+        _ => return None,
+    };
+    if methods.contains(&name) {
+        Some(true)
+    } else if ABSENT.contains(&name) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let unknown = Value::data("hasattr");
     if c.args.len() < 2 {
@@ -1016,12 +1041,16 @@ fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let Some(name) = c.args[1].kv.as_lit().filter(|_| c.args[1].pts.is_empty()).and_then(intern::key_as_str) else { return unknown };
     // dunder attributes come from places not modelled (decorators, the type itself)
-    if name.starts_with("__") {
+    if name.starts_with("__") && !(c.args[0].kv.is_bot() && !c.args[0].pts.is_empty() && c.args[0].pts.iter().all(|o| builtin_has_attr(an, o, &name) == Some(false))) {
         return unknown;
     }
     let k = key_str_lit(&name);
+    let v0 = &c.args[0];
+    if v0.pts.is_empty() && v0.kv.is_literal() && crate::domain::kv_literals(&v0.kv).iter().all(intern::key_is_str) && crate::interp::STR_METHOD_NAMES.contains(&&*name) {
+        return Value::lit(intern::key_bool(true));
+    }
     let objs: Vec<u32> = c.args[0].pts.iter().collect();
-    if objs.is_empty() {
+    if objs.is_empty() || !c.args[0].kv.is_bot() {
         return unknown;
     }
     let mut verdicts: Vec<bool> = Vec::new();
@@ -1029,6 +1058,10 @@ fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         if an.kind(o) == Kind::Ph {
             an.record_event("narrow", o);
             return unknown;
+        }
+        if let Some(b) = builtin_has_attr(an, o, &name) {
+            verdicts.push(b);
+            continue;
         }
         if an.kind(o) != Kind::Instance {
             return unknown;
@@ -1381,6 +1414,10 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 fn m_str(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // `str(b, encoding[, errors])` decodes (known bytes: models::pytext)
+    if c.args.len() > 1 || c.kwargs.keys().any(|k| matches!(&*intern::str_get(*k), "encoding" | "errors")) {
+        return Value::data("str");
+    }
     if let Some(a) = c.args.first() {
         if let Some(t) = an.enum_text(a, st) {
             return t;
@@ -2475,7 +2512,10 @@ fn m_chainmap(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 pub fn generated_class(an: &mut Analyzer, st: &mut State, qual: &str) -> Option<Value> {
     let (modname, cname, src) = match qual {
         "collections.UserDict" => ("<collections.UserDict>", "UserDict", USERDICT_SRC),
-        _ => return None,
+        _ => match qual.strip_prefix("urllib.parse.") {
+            Some(n) if URLLIB_NAMES.contains(&n) && !crate::interp::disabled("urllibgen") => ("<urllib.parse>", n, URLLIB_SRC),
+            _ => return None,
+        },
     };
     let moid = match an.modules.get(modname) {
         Some(&m) => m,
@@ -2490,11 +2530,341 @@ pub fn generated_class(an: &mut Analyzer, st: &mut State, qual: &str) -> Option<
         an.run_module(moid, st);
     }
     let v = st.slot(moid, Ns::Attr, key_str_lit(cname));
-    if let Some(c) = v.single() {
-        an.userdict_classes.insert(c);
+    if cname == "UserDict" {
+        if let Some(c) = v.single() {
+            an.userdict_classes.insert(c);
+        }
     }
     Some(v)
 }
+
+/// `urllib.parse` functions analysed as Python (CPython's, for str inputs; anything else is an
+/// unknown call). Quoting is `models::pytext` (through `_up`).
+const URLLIB_NAMES: &[&str] = &["urlparse", "urlsplit", "urlunparse", "urlunsplit", "urljoin", "urldefrag", "parse_qs", "parse_qsl", "urlencode", "ParseResult", "SplitResult", "DefragResult"];
+
+const URLLIB_SRC: &str = r#"
+import urllib.parse as _up
+import _rowan_opaque
+from typing import NamedTuple
+
+uses_relative = ['', 'ftp', 'http', 'gopher', 'nntp', 'imap', 'wais', 'file', 'https', 'shttp', 'mms', 'prospero', 'rtsp', 'rtsps', 'rtspu', 'sftp', 'svn', 'svn+ssh', 'ws', 'wss']
+uses_netloc = ['', 'ftp', 'http', 'gopher', 'nntp', 'telnet', 'imap', 'wais', 'file', 'mms', 'https', 'shttp', 'snews', 'prospero', 'rtsp', 'rtsps', 'rtspu', 'rsync', 'svn', 'svn+ssh', 'sftp', 'nfs', 'git', 'git+ssh', 'ws', 'wss', 'itms-services']
+uses_params = ['', 'ftp', 'hdl', 'prospero', 'http', 'imap', 'https', 'shttp', 'rtsp', 'rtsps', 'rtspu', 'sip', 'sips', 'mms', 'sftp', 'tel']
+scheme_chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+-.'
+_WS = '\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\x0c\r\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f '
+
+
+def _userinfo(netloc):
+    userinfo, have_info, hostinfo = netloc.rpartition('@')
+    if have_info:
+        username, have_password, password = userinfo.partition(':')
+        if not have_password:
+            password = None
+    else:
+        username = password = None
+    return username, password
+
+
+def _hostinfo(netloc):
+    _, _, hostinfo = netloc.rpartition('@')
+    _, have_open_br, bracketed = hostinfo.partition('[')
+    if have_open_br:
+        hostname, _, port = bracketed.partition(']')
+        _, _, port = port.partition(':')
+    else:
+        hostname, _, port = hostinfo.partition(':')
+    if not port:
+        port = None
+    return hostname, port
+
+
+def _hostname(netloc):
+    hostname = _hostinfo(netloc)[0]
+    if not hostname:
+        return None
+    hostname, percent, zone = hostname.partition('%')
+    return hostname.lower() + percent + zone
+
+
+def _port(netloc):
+    port = _hostinfo(netloc)[1]
+    if port is not None:
+        if port.isdigit() and port.isascii():
+            port = int(port)
+        else:
+            raise ValueError("Port could not be cast to integer value")
+        if not (0 <= port <= 65535):
+            raise ValueError("Port out of range 0-65535")
+    return port
+
+
+class SplitResult(NamedTuple):
+    scheme: str
+    netloc: str
+    path: str
+    query: str
+    fragment: str
+
+    @property
+    def username(self):
+        return _userinfo(self.netloc)[0]
+
+    @property
+    def password(self):
+        return _userinfo(self.netloc)[1]
+
+    @property
+    def hostname(self):
+        return _hostname(self.netloc)
+
+    @property
+    def port(self):
+        return _port(self.netloc)
+
+    def geturl(self):
+        return urlunsplit(self)
+
+
+class ParseResult(NamedTuple):
+    scheme: str
+    netloc: str
+    path: str
+    params: str
+    query: str
+    fragment: str
+
+    @property
+    def username(self):
+        return _userinfo(self.netloc)[0]
+
+    @property
+    def password(self):
+        return _userinfo(self.netloc)[1]
+
+    @property
+    def hostname(self):
+        return _hostname(self.netloc)
+
+    @property
+    def port(self):
+        return _port(self.netloc)
+
+    def geturl(self):
+        return urlunparse(self)
+
+
+class DefragResult(NamedTuple):
+    url: str
+    fragment: str
+
+    def geturl(self):
+        if self.fragment:
+            return self.url + '#' + self.fragment
+        return self.url
+
+
+def _splitnetloc(url, start=0):
+    delim = len(url)
+    for c in '/?#':
+        wdelim = url.find(c, start)
+        if wdelim >= 0:
+            delim = min(delim, wdelim)
+    return url[start:delim], url[delim:]
+
+
+def _urlsplit(url, scheme=None, allow_fragments=True):
+    url = url.lstrip(_WS)
+    url = url.replace('\t', '').replace('\r', '').replace('\n', '')
+    if scheme is not None:
+        scheme = scheme.strip(_WS)
+        scheme = scheme.replace('\t', '').replace('\r', '').replace('\n', '')
+    netloc = query = fragment = None
+    i = url.find(':')
+    if i > 0 and url[0].isascii() and url[0].isalpha():
+        ok = True
+        for c in url[:i]:
+            if c not in scheme_chars:
+                ok = False
+                break
+        if ok:
+            scheme, url = url[:i].lower(), url[i+1:]
+    if url[:2] == '//':
+        netloc, url = _splitnetloc(url, 2)
+        if '[' in netloc or ']' in netloc:
+            return _rowan_opaque.urlsplit(url)
+        if not netloc.isascii():
+            return _rowan_opaque.urlsplit(url)
+    if allow_fragments and '#' in url:
+        url, fragment = url.split('#', 1)
+    if '?' in url:
+        url, query = url.split('?', 1)
+    return (scheme, netloc, url, query, fragment)
+
+
+def _splitparams(url):
+    if '/' in url:
+        i = url.find(';', url.rfind('/'))
+        if i < 0:
+            return url, None
+    else:
+        i = url.find(';')
+    return url[:i], url[i+1:]
+
+
+def urlsplit(url, scheme='', allow_fragments=True):
+    if not isinstance(url, str) or not isinstance(scheme, str):
+        return _rowan_opaque.urlsplit(url, scheme)
+    scheme, netloc, url, query, fragment = _urlsplit(url, scheme, allow_fragments)
+    return SplitResult(scheme or '', netloc or '', url, query or '', fragment or '')
+
+
+def urlparse(url, scheme='', allow_fragments=True):
+    if not isinstance(url, str) or not isinstance(scheme, str):
+        return _rowan_opaque.urlparse(url, scheme)
+    scheme, netloc, url, query, fragment = _urlsplit(url, scheme, allow_fragments)
+    if (scheme or '') in uses_params and ';' in url:
+        url, params = _splitparams(url)
+    else:
+        params = None
+    return ParseResult(scheme or '', netloc or '', url, params or '', query or '', fragment or '')
+
+
+def _urlunsplit(scheme, netloc, url, query, fragment):
+    if netloc is not None:
+        if url and url[:1] != '/':
+            url = '/' + url
+        url = '//' + netloc + url
+    elif url[:2] == '//':
+        url = '//' + url
+    if scheme:
+        url = scheme + ':' + url
+    if query is not None:
+        url = url + '?' + query
+    if fragment is not None:
+        url = url + '#' + fragment
+    return url
+
+
+def urlunsplit(components):
+    scheme, netloc, url, query, fragment = components
+    if not netloc:
+        if scheme and scheme in uses_netloc and (not url or url[:1] == '/'):
+            netloc = ''
+        else:
+            netloc = None
+    return _urlunsplit(scheme or None, netloc, url, query or None, fragment or None)
+
+
+def urlunparse(components):
+    scheme, netloc, url, params, query, fragment = components
+    if not netloc:
+        if scheme and scheme in uses_netloc and (not url or url[:1] == '/'):
+            netloc = ''
+        else:
+            netloc = None
+    if params:
+        url = "%s;%s" % (url, params)
+    return _urlunsplit(scheme or None, netloc, url, query or None, fragment or None)
+
+
+def urljoin(base, url, allow_fragments=True):
+    if not base:
+        return url
+    if not url:
+        return base
+    if not isinstance(base, str) or not isinstance(url, str):
+        return _rowan_opaque.urljoin(base, url)
+    bscheme, bnetloc, bpath, bquery, bfragment = _urlsplit(base, None, allow_fragments)
+    scheme, netloc, path, query, fragment = _urlsplit(url, None, allow_fragments)
+    if scheme is None:
+        scheme = bscheme
+    if scheme != bscheme or (scheme and scheme not in uses_relative):
+        return url
+    if not scheme or scheme in uses_netloc:
+        if netloc:
+            return _urlunsplit(scheme, netloc, path, query, fragment)
+        netloc = bnetloc
+    if not path:
+        path = bpath
+        if query is None:
+            query = bquery
+            if fragment is None:
+                fragment = bfragment
+        return _urlunsplit(scheme, netloc, path, query, fragment)
+    base_parts = bpath.split('/')
+    if base_parts[-1] != '':
+        del base_parts[-1]
+    if path[:1] == '/':
+        segments = path.split('/')
+    else:
+        segments = base_parts + path.split('/')
+        segments = segments[:1] + [s for s in segments[1:-1] if s] + segments[-1:]
+    resolved_path = []
+    for seg in segments:
+        if seg == '..':
+            if resolved_path:
+                resolved_path.pop()
+        elif seg == '.':
+            continue
+        else:
+            resolved_path.append(seg)
+    if segments[-1] in ('.', '..'):
+        resolved_path.append('')
+    return _urlunsplit(scheme, netloc, '/'.join(resolved_path) or '/', query, fragment)
+
+
+def urldefrag(url):
+    if not isinstance(url, str):
+        return _rowan_opaque.urldefrag(url)
+    if '#' in url:
+        s, n, p, q, frag = _urlsplit(url)
+        defrag = _urlunsplit(s, n, p, q, None)
+    else:
+        frag = ''
+        defrag = url
+    return DefragResult(defrag, frag or '')
+
+
+def parse_qsl(qs, keep_blank_values=False, strict_parsing=False, encoding='utf-8', errors='replace', max_num_fields=None, separator='&'):
+    if not isinstance(qs, str) or not isinstance(separator, str) or not separator or strict_parsing or max_num_fields is not None:
+        return _rowan_opaque.parse_qsl(qs)
+    r = []
+    if not qs:
+        return r
+    for name_value in qs.split(separator):
+        if name_value:
+            name, has_eq, value = name_value.partition('=')
+            if value or keep_blank_values:
+                name = _up.unquote_plus(name, encoding=encoding, errors=errors)
+                value = _up.unquote_plus(value, encoding=encoding, errors=errors)
+                r.append((name, value))
+    return r
+
+
+def parse_qs(qs, keep_blank_values=False, strict_parsing=False, encoding='utf-8', errors='replace', max_num_fields=None, separator='&'):
+    parsed_result = {}
+    pairs = parse_qsl(qs, keep_blank_values, strict_parsing, encoding, errors, max_num_fields, separator)
+    for name, value in pairs:
+        if name in parsed_result:
+            parsed_result[name].append(value)
+        else:
+            parsed_result[name] = [value]
+    return parsed_result
+
+
+def urlencode(query, doseq=False, safe='', encoding=None, errors=None):
+    if hasattr(query, "items"):
+        query = query.items()
+    l = []
+    for k, v in query:
+        k = _up.quote_plus(k if isinstance(k, str) else str(k), safe)
+        if not doseq or isinstance(v, (str, int, float, bool)) or v is None:
+            l.append(k + '=' + _up.quote_plus(v if isinstance(v, str) else str(v), safe))
+        else:
+            for elt in v:
+                l.append(k + '=' + _up.quote_plus(elt if isinstance(elt, str) else str(elt), safe))
+    return '&'.join(l)
+"#;
 
 const USERDICT_SRC: &str = r#"
 class UserDict:

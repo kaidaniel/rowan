@@ -82,7 +82,7 @@ pub fn try_pure(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
         let q = c.qual.as_str();
         let pure_family = match q.rsplit_once('.') {
             Some(("builtins", n)) => BUILTINS.contains(&n),
-            Some((f, _)) => matches!(f, "math" | "operator" | "statistics" | "str"),
+            Some((f, _)) => matches!(f, "math" | "operator" | "statistics" | "str") || crate::models::pytext::FAMILIES.contains(&f),
             None => false,
         };
         if pure_family {
@@ -98,10 +98,23 @@ fn try_pure_lits(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
     }
     let q = c.qual.as_str();
     let (family, name) = q.rsplit_once('.')?;
-    let as_seq = SEQ_OK.contains(&name) || family == "statistics" || (family == "str" && name == "join");
+    let as_seq = SEQ_OK.contains(&name) || family == "statistics" || (family == "str" && name == "join") || crate::models::pytext::seq_arg(family, name);
     let args: Option<Vec<KeyId>> = c.args.iter().map(|a| lit_of(an, st, a, as_seq)).collect();
     let kwargs: Option<Vec<(String, KeyId)>> = c.kwargs.iter().map(|(k, v)| lit_of(an, st, v, false).map(|x| (intern::str_get(*k).to_string(), x))).collect();
     match family {
+        // `bytes(...)`, `str(b, encoding)`
+        "builtins" if name == "bytes" || (name == "str" && (c.args.len() > 1 || !c.kwargs.is_empty())) => {
+            let (args, kwargs) = (args?, kwargs?);
+            let kw: Vec<(&str, KeyId)> = kwargs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+            let r = if name == "bytes" { crate::models::pytext::bytes_new(&args, &kw) } else { crate::models::pytext::str_decode(&args, &kw) };
+            r.map(Value::lit)
+        }
+        f if crate::models::pytext::FAMILIES.contains(&f) => {
+            let (args, kwargs) = (args?, kwargs?);
+            let kw: Vec<(&str, KeyId)> = kwargs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+            let r = crate::models::pytext::module_call(f, name, &args, &kw)?;
+            Some(result_value(an, st, c, r))
+        }
         "builtins" if BUILTINS.contains(&name) && !c.args.is_empty() => {
             let (args, kwargs) = (args?, kwargs?);
             let kw: Vec<(&str, KeyId)> = kwargs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
@@ -151,8 +164,10 @@ fn try_pure_lits(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
             let kw: Vec<(&str, KeyId)> = kwargs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
             let mut outs: Vec<Value> = Vec::new();
             for r in rs {
-                let text = intern::key_as_str(r)?;
-                let res = pyvalues::str_method(&text, name, &args, &kw)?;
+                let res = match intern::key_get(r) {
+                    intern::Key::Bytes(b) => crate::models::pytext::bytes_method(&b, name, &args, &kw)?,
+                    _ => pyvalues::str_method(&intern::key_as_str(r)?, name, &args, &kw)?,
+                };
                 outs.push(result_value(an, st, c, res));
             }
             Some(join_values(outs))

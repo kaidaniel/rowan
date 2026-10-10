@@ -107,7 +107,8 @@ pub fn safe_method(q: &str) -> bool {
 pub const STR_METHOD_NAMES: &[&str] = &[
     "strip", "lower", "upper", "title", "split", "replace", "startswith", "endswith", "format", "join", "lstrip", "rstrip", "encode",
     "decode", "isdigit", "isalpha", "zfill", "casefold", "capitalize", "partition", "rsplit", "splitlines", "find", "count", "ljust",
-    "rjust", "center",
+    "rjust", "center", "rpartition", "rfind", "rindex", "isascii", "isalnum", "isspace", "islower", "isupper", "istitle", "isnumeric",
+    "isdecimal", "isidentifier", "isprintable", "removeprefix", "removesuffix", "swapcase", "expandtabs", "format_map", "translate",
 ];
 pub const SCALAR_EXTRA_NAMES: &[&str] = &[
     "append", "extend", "sort", "index", "insert", "remove", "isoformat", "strftime", "timestamp", "date", "time",
