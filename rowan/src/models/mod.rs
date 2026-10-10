@@ -4082,10 +4082,11 @@ pub fn re_match_generated(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
     let moid = match an.modules.get(&modname) {
         Some(&m) => m,
         None => {
-            let items = names.iter().map(|n| format!("{:?}: _GROUP", n)).collect::<Vec<_>>().join(", ");
-            let groups = (0..ngroups).map(|_| "_GROUP").collect::<Vec<_>>().join(", ");
+            // (an unknown text's groups: unknown strings, shown as `?`, not the helper's name)
+            let items = names.iter().map(|n| format!("{:?}: str(_GROUP)", n)).collect::<Vec<_>>().join(", ");
+            let groups = (0..ngroups).map(|_| "str(_GROUP)").collect::<Vec<_>>().join(", ");
             let src = format!(
-                "class Match:\n    def groupdict(self, default=None):\n        return {{{}}}\n\n    def group(self, *names):\n        return _GROUP\n\n    def groups(self, default=None):\n        return ({}{})\n\n    def start(self, g=0):\n        return _POS\n\n    def end(self, g=0):\n        return _POS\n\n    def span(self, g=0):\n        return (_POS, _POS)\n\n\ndef matched():\n    return Match()\n",
+                "class Match:\n    def groupdict(self, default=None):\n        return {{{}}}\n\n    def group(self, *names):\n        return str(_GROUP)\n\n    def groups(self, default=None):\n        return ({}{})\n\n    def start(self, g=0):\n        return int(_POS)\n\n    def end(self, g=0):\n        return int(_POS)\n\n    def span(self, g=0):\n        return (int(_POS), int(_POS))\n\n\ndef matched():\n    return Match()\n",
                 items,
                 groups,
                 if ngroups == 1 { "," } else { "" }
