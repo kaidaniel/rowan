@@ -940,6 +940,23 @@ impl Analyzer {
         let lits = crate::domain::kv_literals(&a.kv);
         let has_ph = a.pts.iter().any(|o| self.kind(o) == Kind::Ph || self.kind(o) == Kind::Unknown);
         let known_lits = a.kv.is_literal() || a.kv.is_bot();
+        // an unknown length against 0 (or a negative number): `len(xs) >= 0` holds
+        if let (true, KeyVal::Data(d), ast::Expr::NumberLiteral(nl)) = (a.pts.is_empty(), &a.kv, right) {
+            if &*intern::str_get(*d) == "len" && !super::disabled("lennonneg") {
+                if let ast::Number::Int(i) = &nl.value {
+                    if let Some(n) = i.as_i64() {
+                        match op {
+                            ast::CmpOp::GtE if n <= 0 => return Some(true),
+                            ast::CmpOp::Gt if n < 0 => return Some(true),
+                            ast::CmpOp::Lt if n <= 0 => return Some(false),
+                            ast::CmpOp::LtE if n < 0 => return Some(false),
+                            ast::CmpOp::Eq | ast::CmpOp::NotEq if n < 0 => return Some(op == ast::CmpOp::NotEq),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
         match op {
             ast::CmpOp::Is | ast::CmpOp::IsNot if matches!(right, ast::Expr::NoneLiteral(_)) => {
                 let is_none = if a.pts.is_empty() && a.kv.is_literal() && lits.len() == 1 && lits.contains(none) {
@@ -2457,7 +2474,7 @@ const SELF_REPORTING_EXTERNALS: &[&str] = &[
     "operator.methodcaller", "operator.itemgetter", "operator.attrgetter",
 ];
 
-const SELF_REPORTING: &[&str] = &["excinit", "pydantic.", "fieldinfo.", "pydverr.", "typeadapter.", "fastapi.client.", "fastapi.response.", "fastapi.request.", "stdobj.", "fastapi.bg.", "fastapi.app.", "fastapi.router.", "fastapi.state."];
+const SELF_REPORTING: &[&str] = &["excinit", "str.format", "pydantic.", "fieldinfo.", "pydverr.", "typeadapter.", "fastapi.client.", "fastapi.response.", "fastapi.request.", "stdobj.", "fastapi.bg.", "fastapi.app.", "fastapi.router.", "fastapi.state."];
 
 /// The positions `xs[lo:hi:step]` selects from a sequence of length `n` (`slice.indices`).
 pub fn slice_positions(n: i64, lo: Option<i64>, hi: Option<i64>, step: i64) -> Vec<i64> {

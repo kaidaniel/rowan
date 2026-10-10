@@ -1783,6 +1783,12 @@ fn format_fields(an: &mut Analyzer, st: &mut State, t: &str, c: &Call, mapping: 
 /// string whose text is not known (its str methods apply in turn: `v.strip().title()`).
 fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let out = m_str_method_inner(an, st, c);
+    // (`format` / `format_map` report their own raises: their field reads do; a result not
+    // computed here may raise anywhere)
+    if matches!(last(&c.qual), "format" | "format_map") && !(out.pts.is_empty() && out.kv.is_literal()) {
+        an.flag_may_raise(st);
+        an.note_raise();
+    }
     const STR_OUT: &[&str] = &["upper", "lower", "strip", "lstrip", "rstrip", "title", "capitalize", "casefold", "swapcase", "removeprefix", "removesuffix", "zfill", "center", "ljust", "rjust", "replace", "expandtabs", "join", "format"];
     if crate::interp::disabled("strdata") || !STR_OUT.contains(&last(&c.qual)) || !out.pts.is_empty() {
         return out;
@@ -1922,6 +1928,11 @@ fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let mapping = if name == "format_map" { c.args.first().cloned() } else { None };
             if name == "format_map" && mapping.is_none() {
                 return Value::data(&format!("L{}", c.line));
+            }
+            // a template from a parameter: decided per call site (with its fields)
+            if let Some(ph) = kv.as_param().filter(|_| !crate::interp::disabled("formatph")) {
+                an.record_event("concrete", ph);
+                an.concrete_args(c.args.iter().chain(c.kwargs.values()).chain(c.star_kwargs.iter()), st);
             }
             if let Some(t) = kv.as_lit().and_then(intern::key_as_str) {
                 if let Some(out) = format_fields(an, st, &t, c, mapping.as_ref()) {
