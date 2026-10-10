@@ -34,7 +34,7 @@ rowan/target/release/rowan FILE.py [--json|--golden|--facts] [--no-rows --no-sum
                                    [--search-path DIR]… [--follow PKG]… [--site-packages DIR]…
 rowan/target/release/rowan serve                    # JSON lines over stdio (README has the protocol)
 uv run --no-project python tests/run_golden.py      # 970/970 in ~5 s (all suites); paths select; -v
-uv run --no-project python tests/run_golden.py --pending [--prune]   # cases in tests/*/PENDING (ym04, c001)
+uv run --no-project python tests/run_golden.py --pending [--prune]   # cases in tests/*/PENDING (s112, c001)
 uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy \
     python tests/oracle.py [--strict|--lenient] [-v] [case…]         # expectations vs a real run (811/811, ~4 min)
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py  # torch expectations vs real PyTorch
@@ -179,6 +179,9 @@ by run (the oracle reads it per line).
   into a frame's columns / groupby keys (fm04 to-dos); a changed decimal context makes
   Decimal arithmetic unknown; `as_completed` order is unknown; `ExitStack.enter_context`
   runs a @contextmanager generator to its end when entered; a thread target runs at `start()`.
+* Generators run eagerly per call site (always tabulated); objects older than the call that
+  the body changes hold the join of the pre-call, yield and end states (y425: exact after full
+  consumption is a to-do); resuming after a partial `for` / `islice` / `zip` is not (s112).
 * An exception raised in a summarised callee under a re-raising @contextmanager may reach a
   future without its value (`sm05` to-do).
 * Identity keys of an object that later turns weak stay in rows (rare: re-allocation of a

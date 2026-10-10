@@ -957,7 +957,11 @@ impl Analyzer {
         };
         self.analysed_funcs.insert(foid);
         // --- symbolic summaries (§7.3/§9): analyse the body once, instantiate per call ---
-        let forced = std::mem::take(&mut self.force_tab_once) || self.torch_modules.contains(&fi.module);
+        // (a generator runs per call site: its caller sees only its suspension points, see below)
+        // (not a `@contextmanager` / yield-dependency body: it runs around its with block)
+        let under_cm = self.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth == self.frames.len());
+        let gen_fn = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body)) && !under_cm && !super::disabled("genlazy");
+        let forced = std::mem::take(&mut self.force_tab_once) || self.torch_modules.contains(&fi.module) || gen_fn;
         if self.use_summaries && self.model_call == 0 && !forced {
             let bound = self.compute_bindings(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
             // the classes of the arguments: the summary is specialised on them
@@ -1229,6 +1233,8 @@ impl Analyzer {
         let chain_len = self.call_chain.len();
 
         let mut pre_bind = state.copy();
+        let obj_mark_call = self.objects.len() as ObjId;
+        let gen_cm = self.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth + 1 == self.frames.len());
         self.bind_params(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
         let mut entry_state = state.copy();
         let mut ret = Value::new();
@@ -1355,6 +1361,16 @@ impl Analyzer {
                 self.call_cache.insert(sig, Rc::new(CacheHit { raises, ret: ret.clone(), fp_state, fp, verdicts: rel_verdicts }));
             }
         }
+        // the generator's body runs here, eagerly, but its caller sees the heap only where the
+        // body is suspended: before the first item, at a yield, or at its end. The objects that
+        // existed before the call and that the body changed hold the join of those states.
+        let gen_yields = match fnode {
+            FuncNode::Def(f) if is_generator(&f.body) && !gen_cm && !super::disabled("genlazy") => {
+                let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
+                Some((gid, self.gen_yield_states.get(&gid).map(|y| y.copy_ref())))
+            }
+            _ => None,
+        };
         // a generator whose body never ends (`while True: yield …`): the caller resumes from
         // one of its yields, and the yields go on (their number is unknown)
         if let FuncNode::Def(f) = fnode {
@@ -1369,6 +1385,9 @@ impl Analyzer {
                     st = ys;
                 }
             }
+        }
+        if let Some((gid, ys)) = gen_yields {
+            self.gen_suspension_join(&mut st, &pre_bind, ys.as_ref(), gid, obj_mark_call);
         }
         state.set_to(&mut st);
         if let FuncNode::Def(f) = fnode {
@@ -1473,6 +1492,59 @@ impl Analyzer {
         });
         self.raise_records += 1;
         true
+    }
+
+    /// The heap a generator's caller sees (see the call): the touched objects older than
+    /// `mark` (but the generator's own item list) joined over `pre`, the yield states and `st`.
+    fn gen_suspension_join(&mut self, st: &mut State, pre: &State, yields: Option<&State>, gid: ObjId, mark: ObjId) {
+        if !st.reachable {
+            return;
+        }
+        let fp = st.footprint(pre);
+        let old = |o: ObjId| o < mark && o != gid;
+        let others: Vec<&State> = std::iter::once(pre).chain(yields.filter(|y| y.reachable)).collect();
+        for (o, ns) in fp.rows.iter().copied().filter(|(o, _)| old(*o)).collect::<Vec<_>>() {
+            let mut r = st.row(o, ns);
+            for x in &others {
+                r = r.join(&x.row(o, ns));
+            }
+            st.set_row(o, ns, r);
+        }
+        let mut touched: Vec<ObjId> = Vec::new();
+        for (o, sk) in fp.slots.iter().copied().filter(|(o, _)| old(*o)).collect::<Vec<_>>() {
+            touched.push(o);
+            let mut v = st.slots.get(&o, &sk).unwrap_or_default();
+            for x in &others {
+                v = v.join(&x.slots.get(&o, &sk).unwrap_or_default());
+            }
+            st.slots.set(&o, sk, v);
+            if matches!(sk.0, Ns::Pos | Ns::Elem) {
+                st.clear_last(o);
+            }
+        }
+        for o in fp.elems.iter().copied().filter(|o| old(*o)) {
+            touched.push(o);
+            let mut kv = st.elems.get(&o).unwrap_or(DATA);
+            for x in &others {
+                kv = crate::domain::kv_join(&kv, &x.elems.get(&o).unwrap_or(DATA));
+            }
+            st.elems.insert(o, kv);
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        let entry = |an: &Analyzer, s: &State, o: ObjId| -> (Option<usize>, usize) {
+            s.lens.get(&o).unwrap_or_else(|| {
+                let ob = &an.objects[o as usize];
+                (ob.literal_len, ob.literal_len.or(ob.known_prefix).unwrap_or(0))
+            })
+        };
+        for o in touched {
+            let mut l = entry(self, st, o);
+            for x in &others {
+                l = crate::state::join_len(&l, &entry(self, x, o));
+            }
+            st.lens.insert(o, l);
+        }
     }
 
     /// The class names of an exception value (one class; None: not known).
