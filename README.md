@@ -1,4 +1,4 @@
-<img src="rowan_icon.svg" alt="rowan logo" width="96" align="right">
+![rowan logo](rowan_icon.svg)
 
 # rowan
 
