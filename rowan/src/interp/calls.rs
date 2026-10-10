@@ -1453,6 +1453,13 @@ impl Analyzer {
             here.exits = pre.exits.clone();
         }
         let exc = self.cur_exc.take().unwrap_or_else(|| Value::data("exception"));
+        let cls = self.cur_exc_cls.take().or_else(|| self.exc_value_names(&exc));
+        let depth = self.raise_states.len();
+        if let Some((d, recs)) = self.raise_cls.last_mut() {
+            if *d == depth {
+                recs.push((cls, here.copy(), exc.clone()));
+            }
+        }
         if let Some(rv) = self.raise_values.last_mut() {
             *rv = Some(match rv.take() {
                 None => exc,
@@ -1466,6 +1473,58 @@ impl Analyzer {
         });
         self.raise_records += 1;
         true
+    }
+
+    /// The class names of an exception value (one class; None: not known).
+    pub fn exc_value_names(&self, v: &Value) -> Option<super::ExcNames> {
+        if !v.kv.is_bot() || v.pts.is_empty() {
+            return None;
+        }
+        let mut out: Option<super::ExcNames> = None;
+        for o in v.pts.iter() {
+            let names = if let Some(c) = self.instance_class(o) {
+                self.exc_class_names(c)?
+            } else if let Some(n) = self.exc_objs.get(&o) {
+                super::builtin_exc_names(n)
+            } else if self.kind(o) == Kind::External && self.class_info_opt(o).is_none() {
+                // (a raised class: `raise KeyError`)
+                super::builtin_exc_names(self.external_qual(o).rsplit('.').next().unwrap_or(""))
+            } else {
+                return None;
+            };
+            match &out {
+                None => out = Some(names),
+                Some(prev) if *prev == names => {}
+                Some(_) => return None,
+            }
+        }
+        out
+    }
+
+    /// The names of a user exception class's MRO, with the builtin bases' names.
+    pub fn exc_class_names(&self, cls: u32) -> Option<super::ExcNames> {
+        let mro = self.mro(cls);
+        let mut names: Vec<String> = Vec::new();
+        let mut complete = true;
+        for c in mro.iter() {
+            let ci = self.class_info_opt(*c)?;
+            names.push(ci.name.clone());
+            let user: Vec<String> = ci.bases.iter().filter_map(|b| self.class_info_opt(*b).map(|x| x.name.clone())).collect();
+            for e in ci.node.arguments.as_ref().map(|a| a.args.iter().collect::<Vec<_>>()).unwrap_or_default() {
+                let n = super::dotted_last(e);
+                if user.contains(&n) || n == "object" {
+                    continue;
+                }
+                let (bn, full) = super::builtin_exc_names(&n);
+                complete &= full;
+                for b in bn {
+                    if !names.contains(&b) {
+                        names.push(b);
+                    }
+                }
+            }
+        }
+        Some((names, complete))
     }
 
     /// A builtin exception (`KeyError(key)`, …) as a value: open attributes, known `args`.
@@ -1523,7 +1582,26 @@ impl Analyzer {
     /// this state; otherwise the enclosing call raises.
     pub fn may_raise_here(&mut self, name: &str, state: &mut State) {
         let caught = self.guards.iter().any(|g| g.contains("*") || g.contains("Exception") || g.contains("BaseException") || g.contains(name));
-        if caught && self.record_raise_state(state) {
+        if self.cur_exc_cls.is_none() {
+            self.cur_exc_cls = Some(super::builtin_exc_names(name));
+        }
+        // a builtin exception a model raises: an object of its class (its args not known)
+        if caught && self.cur_exc.is_none() && !self.raise_states.is_empty() && !super::disabled("implicitexc") {
+            if let Some(nd) = self.exc_node {
+                let n = name.rsplit('.').next().unwrap_or(name);
+                if super::builtin_exc_names(n).1 && super::is_builtin_name(n) {
+                    let e = self.exception_object(n, vec![], &nd, state);
+                    if let Some(o) = e.pts.iter().next() {
+                        let strong = self.obj(o).single;
+                        self.store_key(o, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &Value::data("args"), strong, &nd, state);
+                    }
+                    self.cur_exc = Some(e);
+                }
+            }
+        }
+        let recorded = caught && self.record_raise_state(state);
+        self.cur_exc_cls = None;
+        if recorded {
             return;
         }
         if let Some(t) = self.raise_stack.last_mut() {

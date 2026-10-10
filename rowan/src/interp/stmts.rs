@@ -162,13 +162,32 @@ impl Analyzer {
                 let caught = self.guards.iter().any(|g| {
                     g.contains("*") || g.contains("Exception") || g.contains("BaseException") || names.iter().any(|n| g.contains(n) || n == "*" && !g.is_empty())
                 });
-                self.cur_exc = exc_v.filter(|v| v.pts.iter().any(|o| self.kind(o) == Kind::Instance || self.exc_objs.contains_key(&o) || matches!(&self.obj(o).payload, Payload::Method(q, _) if q == "fastapi.httpexc")));
+                self.cur_exc = exc_v.clone().filter(|v| v.pts.iter().any(|o| self.kind(o) == Kind::Instance || self.exc_objs.contains_key(&o) || matches!(&self.obj(o).payload, Payload::Method(q, _) if q == "fastapi.httpexc")));
                 // a bare raise: the exception the handler holds
                 if r.exc.is_none() && !crate::interp::disabled("reraisevalue") {
                     self.cur_exc = self.handling_values.last().cloned().filter(|v| !v.pts.is_empty());
                 }
+                // the class raised: of the exception object, of a raised class, or (a bare
+                // raise of something unknown) a subclass of what the handler catches
+                self.cur_exc_cls = match &self.cur_exc {
+                    Some(v) => self.exc_value_names(v),
+                    None => match &exc_v {
+                        Some(v) if v.kv.is_bot() && v.pts.len() == 1 && self.class_info_opt(v.pts.iter().next().unwrap()).is_some() => self.exc_class_names(v.pts.iter().next().unwrap()),
+                        Some(v) if v.kv.is_bot() && v.pts.len() == 1 && self.kind(v.pts.iter().next().unwrap()) == Kind::External => {
+                            let q = self.external_qual(v.pts.iter().next().unwrap());
+                            q.strip_prefix("builtins.").map(crate::interp::builtin_exc_names)
+                        }
+                        _ => None,
+                    },
+                };
+                if self.cur_exc_cls.is_none() && r.exc.is_none() && names.len() == 1 && names[0] != "*" {
+                    self.cur_exc_cls = Some((crate::interp::builtin_exc_names(&names[0]).0, false));
+                }
+                // (a handler of a base class catches it too)
+                let caught = caught || self.cur_exc_cls.as_ref().is_some_and(|(ns, _)| self.guards.iter().any(|g| ns.iter().any(|n| g.contains(n))));
                 let recorded = state.reachable && !crate::interp::disabled("raisestate") && self.record_raise_state(state);
                 self.cur_exc = None;
+                self.cur_exc_cls = None;
                 if !caught {
                     if crate::interp::debug_level() == 2 {
                         eprintln!("  raise statement at L{} in {}", frontend::node(r).line, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
@@ -1344,6 +1363,7 @@ impl Analyzer {
         self.may_raise.push(false);
         self.raise_states.push(None);
         self.raise_values.push(None);
+        self.raise_cls.push((self.raise_states.len(), Vec::new()));
         self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
         self.try_sum_depth.push(self.sum_stack.len());
         self.cond_depth += 1;
@@ -1361,6 +1381,62 @@ impl Analyzer {
         let flagged = self.may_raise.pop().unwrap_or(false);
         let mut raised_at = self.raise_states.pop().flatten();
         let raised_exc = self.raise_values.pop().flatten();
+        let mut recs = self.raise_cls.pop().map(|(_, r)| r).unwrap_or_default();
+        // the handlers' classes: which recorded raise each one catches (Python takes the
+        // first handler that matches)
+        let hclasses: Vec<(FxHashSet<String>, bool)> = t.handlers.iter().map(|h| {
+            let ast::ExceptHandler::ExceptHandler(h) = h;
+            let elts: Vec<&ast::Expr> = match h.type_.as_deref() {
+                None => vec![],
+                Some(ast::Expr::Tuple(tup)) => tup.elts.iter().collect(),
+                Some(other) => vec![other],
+            };
+            if h.type_.is_none() {
+                return (["*".to_string()].into_iter().collect(), true);
+            }
+            // (no decided miss unless every name is a known exception class)
+            let known = elts.iter().all(|e| {
+                let n = dotted_last(e);
+                let builtin = crate::interp::builtin_exc_names(&n);
+                let user = matches!(e, ast::Expr::Name(_)) && {
+                    let v = self.eval(e, &mut pre.copy());
+                    v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| self.class_info_opt(o).is_some_and(|ci| ci.name == n))
+                };
+                user || (builtin.1 && builtin.0.len() > 1) || n == "BaseException"
+            });
+            (elts.iter().map(|e| dotted_last(e)).collect(), known)
+        }).collect();
+        let hmatch = |hc: &(FxHashSet<String>, bool), cls: &Option<crate::interp::ExcNames>| -> Option<bool> {
+            if hc.0.contains("*") {
+                return Some(true);
+            }
+            let (names, full) = cls.as_ref()?;
+            if names.iter().any(|n| hc.0.contains(n)) {
+                Some(true)
+            } else if *full && hc.1 {
+                Some(false)
+            } else {
+                None
+            }
+        };
+        let per_class = !crate::interp::disabled("excclass") && !t.handlers.is_empty();
+        // raises no handler surely catches go on to the enclosing try (or out of the call)
+        if per_class {
+            for (cls, st, ev) in recs.iter_mut() {
+                if hclasses.iter().any(|hc| hmatch(hc, cls) == Some(true)) {
+                    continue;
+                }
+                self.cur_exc = if ev.pts.is_empty() { None } else { Some(ev.clone()) };
+                self.cur_exc_cls = cls.clone();
+                let mut st2 = st.copy();
+                let recorded = self.record_raise_state(&mut st2);
+                self.cur_exc = None;
+                self.cur_exc_cls = None;
+                if !recorded {
+                    self.note_raise();
+                }
+            }
+        }
         let died = !state.reachable && self.exit_count == exits_before;
         let generic = flagged || (died && raised_at.is_none());
         let body_may_raise = generic || raised_at.is_some();
@@ -1378,6 +1454,16 @@ impl Analyzer {
             eprintln!("  try at L{}: may_raise={} at_access={} reachable={} exited={}", frontend::node(t).line, flagged, raised_at.is_some(), state.reachable, self.exit_count != exits_before);
         }
         let mut body_end = state.copy();
+        // (where a raise from anywhere in the body enters a handler)
+        let mut generic_entry = if generic && per_class {
+            let mut g = pre.copy();
+            if let Some(r) = flag_reqs.as_mut() {
+                g.reqs = r.copy();
+            }
+            g.join(&mut body_end.copy())
+        } else {
+            State::bottom()
+        };
         // the handler starts from the states at the accesses that may raise; anything else
         // that may raise (unknown calls, raise statements, callees) can happen anywhere
         let mut handler_entry: Option<State> = if !t.handlers.is_empty() {
@@ -1405,20 +1491,39 @@ impl Analyzer {
             self.exec_block(&t.orelse, &mut body_end);
         }
         results.push(body_end);
-        for h in &t.handlers {
+        for (hi, h) in t.handlers.iter().enumerate() {
             let ast::ExceptHandler::ExceptHandler(h) = h;
-            let mut hs = handler_entry.as_mut().unwrap().copy();
-            if !hs.reachable {
-                continue;
-            }
             // the exceptions raised at the recorded points (anything else: unknown)
             let hn = frontend::node(h);
             let unknown = Value::data(&format!("exc@L{}", hn.line));
-            let ev = match &raised_exc {
-                Some(v) if !generic => v.clone(),
-                Some(v) => v.join(&unknown),
-                None => unknown,
+            let (mut hs, ev) = if per_class {
+                // the raises this handler may catch that no earlier one surely catches
+                let mut e = generic_entry.copy();
+                let mut ev = if generic { Some(unknown.clone()) } else { None };
+                for (cls, st, x) in recs.iter_mut() {
+                    if hmatch(&hclasses[hi], cls) == Some(false) || hclasses[..hi].iter().any(|hc| hmatch(hc, cls) == Some(true)) {
+                        continue;
+                    }
+                    let mut r = st.copy();
+                    e = if e.reachable { e.join(&mut r) } else { r };
+                    let x = if x.pts.is_empty() { unknown.clone() } else { x.clone() };
+                    ev = Some(match ev { None => x, Some(p) => p.join(&x) });
+                }
+                if !body_may_raise {
+                    e = State::bottom();
+                }
+                (e, ev.unwrap_or(unknown))
+            } else {
+                let ev = match &raised_exc {
+                    Some(v) if !generic => v.clone(),
+                    Some(v) => v.join(&unknown),
+                    None => unknown,
+                };
+                (handler_entry.as_mut().unwrap().copy(), ev)
             };
+            if !hs.reachable {
+                continue;
+            }
             if let Some(name) = &h.name {
                 self.store_name(s(name.id.as_str()), ev.clone(), &mut hs);
             }

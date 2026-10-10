@@ -202,7 +202,9 @@ impl Analyzer {
                     }
                 }
                 let nd = frontend::node(node);
+                let saved_node = self.exc_node.replace(nd);
                 let r = self.call_value(&fv, &nd, Some(c), state, None);
+                self.exc_node = saved_node;
                 // `t.setdefault(k, …)` through a name: whichever object `t` is has k now
                 if let ast::Expr::Attribute(a) = &*c.func {
                     if let (ast::Expr::Name(nm), "setdefault", Some(first)) = (&*a.value, a.attr.id.as_str(), c.arguments.args.first()) {

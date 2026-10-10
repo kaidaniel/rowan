@@ -834,8 +834,11 @@ impl Analyzer {
                                 acc = acc.join(&state.slot(oid, Ns::Pos, intern::key_int(i)));
                             } else if -n <= i && i < 0 {
                                 acc = acc.join(&state.slot(oid, Ns::Pos, intern::key_int(n + i)));
+                            } else if kind != Kind::Set && single_target && self.obj(oid).single && !super::disabled("indexraise") {
+                                // out of range on a list of known length
+                                self.raise_here("IndexError", state);
                             } else {
-                                acc = acc.join(&state.slot(oid, Ns::Elem, STAR));
+                                acc = acc.join(&state.slot(oid, Ns::Pos, intern::key_int(i)).join(&state.slot(oid, Ns::Elem, STAR)));
                             }
                         }
                         _ => {
@@ -952,7 +955,10 @@ impl Analyzer {
                         let e = self.exception_object(cname, vec![Value::lit(k)], node, state);
                         self.cur_exc = Some(e);
                     }
-                    if !self.record_raise_state(state) {
+                    self.cur_exc_cls = Some(super::builtin_exc_names(if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" }));
+                    let recorded = self.record_raise_state(state);
+                    self.cur_exc_cls = None;
+                    if !recorded {
                         if let Some(m) = self.may_raise.last_mut() {
                             *m = true;
                         }

@@ -23,7 +23,7 @@ if __name__ == "__main__":
     o1 = len(overrides())                        #@value o1: exactly={0}
     os.environ["APP_WIDTH"] = "30"
     o2 = len(overrides())                        #@value o2: exactly={1}
-    d = json.loads(sys.argv[1])
+    d = json.loads(os.environ.get("S104_D", '{"a": 1, "b": 2, "c": 3}'))  # (was sys.argv[1]: no argv in the oracle run)
     d.pop("a", None)
     del d["b"]
     a = d.get("a")                               #@value a: exactly={None}

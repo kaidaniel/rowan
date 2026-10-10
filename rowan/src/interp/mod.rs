@@ -271,6 +271,54 @@ pub struct CmHook {
     pub body_died: bool,
 }
 
+/// An exception class's name and its bases' names; `true`: that is the whole MRO.
+pub type ExcNames = (Vec<String>, bool);
+pub type RaiseRec = (Option<ExcNames>, State, Value);
+
+/// Builtin (and modelled library) exception classes and their bases.
+pub const EXC_BASES: &[(&str, &str)] = &[
+    ("Exception", "BaseException"), ("SystemExit", "BaseException"), ("KeyboardInterrupt", "BaseException"), ("GeneratorExit", "BaseException"),
+    ("BaseExceptionGroup", "BaseException"),
+    ("ArithmeticError", "Exception"), ("ZeroDivisionError", "ArithmeticError"), ("OverflowError", "ArithmeticError"), ("FloatingPointError", "ArithmeticError"),
+    ("LookupError", "Exception"), ("KeyError", "LookupError"), ("IndexError", "LookupError"),
+    ("ValueError", "Exception"), ("UnicodeError", "ValueError"), ("UnicodeDecodeError", "UnicodeError"), ("UnicodeEncodeError", "UnicodeError"),
+    ("UnicodeTranslateError", "UnicodeError"),
+    ("TypeError", "Exception"), ("AttributeError", "Exception"), ("NameError", "Exception"), ("UnboundLocalError", "NameError"),
+    ("RuntimeError", "Exception"), ("NotImplementedError", "RuntimeError"), ("RecursionError", "RuntimeError"), ("AssertionError", "Exception"),
+    ("ImportError", "Exception"), ("ModuleNotFoundError", "ImportError"), ("EOFError", "Exception"), ("MemoryError", "Exception"),
+    ("StopIteration", "Exception"), ("StopAsyncIteration", "Exception"), ("SyntaxError", "Exception"), ("IndentationError", "SyntaxError"),
+    ("SystemError", "Exception"), ("BufferError", "Exception"), ("ReferenceError", "Exception"), ("Warning", "Exception"),
+    ("OSError", "Exception"), ("IOError", "Exception"), ("EnvironmentError", "Exception"),
+    ("FileNotFoundError", "OSError"), ("PermissionError", "OSError"), ("TimeoutError", "OSError"), ("ConnectionError", "OSError"),
+    ("BlockingIOError", "OSError"), ("ChildProcessError", "OSError"), ("FileExistsError", "OSError"), ("InterruptedError", "OSError"),
+    ("IsADirectoryError", "OSError"), ("NotADirectoryError", "OSError"), ("ProcessLookupError", "OSError"),
+    ("BrokenPipeError", "ConnectionError"), ("ConnectionAbortedError", "ConnectionError"), ("ConnectionRefusedError", "ConnectionError"),
+    ("ConnectionResetError", "ConnectionError"),
+    // (library exceptions the models raise)
+    ("JSONDecodeError", "ValueError"), ("ValidationError", "ValueError"), ("FrozenInstanceError", "AttributeError"),
+];
+
+/// The names of a builtin exception class and its bases (`IOError` is `OSError`).
+pub fn builtin_exc_names(name: &str) -> ExcNames {
+    let mut n = name.rsplit('.').next().unwrap_or(name).to_string();
+    let mut out: Vec<String> = Vec::new();
+    loop {
+        if n == "IOError" || n == "EnvironmentError" || n == "OSError" {
+            out.extend(["OSError", "IOError", "EnvironmentError"].iter().map(|s| s.to_string()));
+            n = "Exception".into();
+            continue;
+        }
+        out.push(n.clone());
+        if n == "BaseException" {
+            return (out, true);
+        }
+        match EXC_BASES.iter().find(|(c, _)| *c == n) {
+            Some((_, b)) => n = b.to_string(),
+            None => return (out, false),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ClassInfo {
     pub name: String,
@@ -889,6 +937,13 @@ pub struct Analyzer {
     pub copy_root: FxHashMap<ObjId, ObjId>,
     /// raises recorded by an enclosing try (`record_raise_state`), counted
     pub raise_records: u64,
+    /// the raises recorded for each running try (the depth of `raise_states` when it began):
+    /// the exception's class names (None: not known), the state, the exception value
+    pub raise_cls: Vec<(usize, Vec<RaiseRec>)>,
+    /// the class of the exception being recorded (set beside `cur_exc`)
+    pub cur_exc_cls: Option<ExcNames>,
+    /// the call being evaluated: where an exception a model raises is allocated
+    pub exc_node: Option<Node>,
     pub item_exc: Option<&'static str>,
     pub narrow_depth: u32,
     pub pyd_last_failed: bool,
@@ -1151,6 +1206,9 @@ impl Analyzer {
             gen_yield_states: FxHashMap::default(),
             copy_root: FxHashMap::default(),
             raise_records: 0,
+            raise_cls: Vec::new(),
+            cur_exc_cls: None,
+            exc_node: None,
             item_exc: None,
             narrow_depth: 0,
             pyd_last_failed: false,
