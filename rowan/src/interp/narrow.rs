@@ -219,6 +219,11 @@ impl Analyzer {
                             state.lens.insert(o, (Some(0), 0));
                         }
                     }
+                    // a falsy dict is empty on this path (`while queue:` ends with no keys)
+                    if !truth && self.kind(o) == Kind::Dict && self.obj(o).single && !super::disabled("dictfalsy") {
+                        state.set_row(o, Ns::Item, crate::domain::Row::new());
+                        state.drop_obj_ns(o, Ns::Item);
+                    }
                 }
             }
             _ => {}
