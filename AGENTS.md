@@ -184,8 +184,7 @@ by run (the oracle reads it per line).
   consumption is a to-do); resuming after a partial `for` / `islice` / `zip` is not (s112).
 * An exception raised in a summarised callee under a re-raising @contextmanager may reach a
   future without its value (`sm05` to-do).
-* Identity keys of an object that later turns weak stay in rows (rare: re-allocation of a
-  live single object).
+* Identity keys of an object that later turns weak stay in rows (rare).
 * Torch: dtype / device not modelled. numpy rides on the tensor model (importing numpy turns
   it on; numpy semantics where they differ: transpose, reductions, cumsum, `np.*` functions).
 * pandas values per row are not simulated (groupby + sort order of literal frames: b002
