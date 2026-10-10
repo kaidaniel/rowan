@@ -1948,6 +1948,7 @@ impl Inst {
         if let Some(f) = an.dd_factories.get(&t).cloned() {
             an.dd_factories.insert(nid, f);
         }
+        an.copy_side_tables(t, nid);
         let existed = !self.fresh_clone(nid);
         if !existed {
             self.new_clones.insert(nid);

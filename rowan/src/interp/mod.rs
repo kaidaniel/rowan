@@ -741,6 +741,8 @@ pub struct Analyzer {
     /// csv writers (their file and dialect), csv readers (their fieldnames)
     pub csv_writers: FxHashMap<ObjId, crate::models::csvio::CsvWriter>,
     pub csv_readers: FxHashMap<ObjId, Value>,
+    /// argparse parsers, their subparsers and groups
+    pub argp: FxHashMap<ObjId, crate::models::argparse::ArgObj>,
     /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
     pub bypass_setattr: bool,
     pub cond_depth: i32,
@@ -952,6 +954,7 @@ impl Analyzer {
             ci_dicts: FxHashSet::default(),
             csv_writers: FxHashMap::default(),
             csv_readers: FxHashMap::default(),
+            argp: FxHashMap::default(),
             bypass_setattr: false,
             cond_depth: 0,
             branch_depth: 0,
@@ -1185,6 +1188,31 @@ impl Analyzer {
         });
         self.obj_index.insert(key, oid);
         oid
+    }
+
+    /// What models keep about an object, for its clone (a summary's template instantiated).
+    pub fn copy_side_tables(&mut self, t: ObjId, nid: ObjId) {
+        if let Some(a) = self.argp.get(&t).cloned() {
+            self.argp.insert(nid, a);
+        }
+        if let Some(w) = self.csv_writers.get(&t).cloned() {
+            self.csv_writers.insert(nid, w);
+        }
+        if let Some(r) = self.csv_readers.get(&t).cloned() {
+            self.csv_readers.insert(nid, r);
+        }
+        if self.ci_dicts.contains(&t) {
+            self.ci_dicts.insert(nid);
+        }
+        if let Some(d) = self.deques.get(&t).cloned() {
+            self.deques.insert(nid, d);
+        }
+        if self.counters.contains(&t) {
+            self.counters.insert(nid);
+        }
+        if let Some(m) = self.chainmaps.get(&t).cloned() {
+            self.chainmaps.insert(nid, m);
+        }
     }
 
     /// The length of a list / tuple on this path (positions 0..n are its items), else None.
