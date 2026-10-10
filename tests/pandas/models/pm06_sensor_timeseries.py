@@ -65,9 +65,9 @@ def clean(readings):
         out["pressure"] = out["pressure"].ffill()                       #@ ok pressure
     if "firmware" in out.columns:
         out = out.drop(columns=["firmware"])
-    # (out holds the dropped frame on one path and the narrowed one on the other: rowan joins
-    # the old frame's row over both paths, so firmware stays possible)
-    #@todo row out: present={temp,humidity,pressure} absent={timestamp,firmware} open
+    # (out holds the dropped frame on one path and, on the other, the frame the test found
+    # without firmware: absent on both)
+    #@row out: present={temp,humidity,pressure} absent={timestamp,firmware} open
     n_rows = len(out)  #@row out: definite={temp,humidity} absent={timestamp} open
     return out
 

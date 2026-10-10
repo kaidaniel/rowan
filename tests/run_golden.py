@@ -93,6 +93,7 @@ def collect_expectations(src: str):
     for i0, line in enumerate(src.splitlines(), 1):
         # a line holding only a directive comment applies to the code line above it
         i = eff[i0] if i0 < len(eff) else i0
+        from_todo = "#@todo" in line
         if "#@todo" in line:
             TODO_COUNT[0] += 1
             if os.environ.get("ROWAN_TODO") != "check":
@@ -110,6 +111,9 @@ def collect_expectations(src: str):
             for clause in m.group(1).split(";"):
                 cm = re.match(r"\s*(\w+)\s*:\s*(.*)$", clause)
                 if not cm:
+                    if from_todo:
+                        # (a to-do's prose after a `;`: not a clause)
+                        continue
                     raise ValueError(f"line {i}: bad #@value clause {clause!r}")
                 spec: Dict[str, Any] = {}
                 for part in re.findall(r"(\w+)=(\{[^}]*\})", cm.group(2)):
