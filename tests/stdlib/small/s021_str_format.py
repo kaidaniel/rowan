@@ -18,7 +18,7 @@ def tagline(rec):
 
 
 def soft(rec):
-    return "{title} by {author}".format_map(Lenient(rec))  #@ none author
+    return "{title} by {author}".format_map(Lenient(rec))  #@ sound author  (was `none`: a present author is a proven read, a missing one goes to __missing__)
 
 
 if __name__ == "__main__":

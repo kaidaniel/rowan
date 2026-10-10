@@ -1623,19 +1623,44 @@ impl Analyzer {
                         match el {
                             ast::InterpolatedStringElement::Literal(l) => parts.push(Part::Lit(l.value.to_string())),
                             ast::InterpolatedStringElement::Interpolation(i) => {
-                                if i.conversion != ast::ConversionFlag::None {
-                                    parts.push(Part::Opaque);
-                                } else if let Some(spec) = &i.format_spec {
-                                    // a literal spec applied to a known value (`{n:03d}`)
+                                let v = self.eval(&i.expression, state);
+                                // `{x!r}` / `{x!s}` / `{x!a}`: the converted text
+                                let v = match i.conversion {
+                                    ast::ConversionFlag::None => self.enum_text(&v, state).unwrap_or(v),
+                                    conv => {
+                                        let name = match conv {
+                                            ast::ConversionFlag::Repr => "repr",
+                                            ast::ConversionFlag::Ascii => "ascii",
+                                            _ => "str",
+                                        };
+                                        let v = if name == "str" { self.enum_text(&v, state).unwrap_or(v) } else { v };
+                                        match v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(|k| crate::models::pyvalues::builtin(name, &[k], &[])) {
+                                            Some(t) => Value::lit(t),
+                                            None => {
+                                                if let Some(ph) = v.kv.as_param() {
+                                                    self.record_event("narrow", ph);
+                                                }
+                                                Value::data("conv")
+                                            }
+                                        }
+                                    }
+                                };
+                                if let Some(spec) = &i.format_spec {
+                                    // a spec applied to a known value (`{n:03d}`, `{x:>{w}}`)
                                     let mut spec_text = String::new();
                                     let mut literal_spec = true;
                                     for se in spec.elements.iter() {
                                         match se {
                                             ast::InterpolatedStringElement::Literal(l) => spec_text.push_str(&l.value),
-                                            _ => literal_spec = false,
+                                            ast::InterpolatedStringElement::Interpolation(si) => {
+                                                let sv = self.eval(&si.expression, state);
+                                                match sv.kv.as_lit().filter(|_| sv.pts.is_empty() && si.conversion == ast::ConversionFlag::None && si.format_spec.is_none()) {
+                                                    Some(k) => spec_text.push_str(&intern::key_py_str(k)),
+                                                    None => literal_spec = false,
+                                                }
+                                            }
                                         }
                                     }
-                                    let v = self.eval(&i.expression, state);
                                     if let Some(ph) = v.kv.as_param() {
                                         self.record_event("narrow", ph);
                                     }
@@ -1647,8 +1672,6 @@ impl Analyzer {
                                         _ => parts.push(Part::Opaque),
                                     }
                                 } else {
-                                    let v = self.eval(&i.expression, state);
-                                    let v = self.enum_text(&v, state).unwrap_or(v);
                                     parts.push(Part::Hole(v));
                                 }
                             }

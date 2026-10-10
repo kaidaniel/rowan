@@ -1385,21 +1385,30 @@ fn m_str_fn(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
 }
 
 /// `"{} {name:>4}".format(...)` with a known template and known arguments.
-fn format_template_literal(t: &str, c: &Call) -> Option<String> {
+/// `t.format(*args, **kwargs)` / `t.format_map(mapping)`: every field is looked up (names
+/// not given as keywords from `**mapping` / the mapping, `.attr` / `[key]` accessors read
+/// there, so a missing key is reported); the text when every piece is a known literal.
+fn format_fields(an: &mut Analyzer, st: &mut State, t: &str, c: &Call, mapping: Option<&Value>) -> Option<String> {
     let lit_of = |v: &Value| -> Option<KeyId> { v.kv.as_lit().filter(|_| v.pts.is_empty()) };
     let chars: Vec<char> = t.chars().collect();
-    let mut out = String::new();
+    let mut out = Some(String::new());
+    let push = |out: &mut Option<String>, p: Option<String>| {
+        match (out.as_mut(), p) {
+            (Some(o), Some(p)) => o.push_str(&p),
+            _ => *out = None,
+        }
+    };
     let mut auto = 0usize;
     let mut i = 0;
     while i < chars.len() {
         let ch = chars[i];
         if ch == '{' && chars.get(i + 1) == Some(&'{') {
-            out.push('{');
+            push(&mut out, Some("{".into()));
             i += 2;
             continue;
         }
         if ch == '}' && chars.get(i + 1) == Some(&'}') {
-            out.push('}');
+            push(&mut out, Some("}".into()));
             i += 2;
             continue;
         }
@@ -1407,36 +1416,129 @@ fn format_template_literal(t: &str, c: &Call) -> Option<String> {
             return None;
         }
         if ch != '{' {
-            out.push(ch);
+            push(&mut out, Some(ch.to_string()));
             i += 1;
             continue;
         }
-        let end = chars[i..].iter().position(|x| *x == '}')? + i;
+        // the field runs to the matching `}` (a nested `{w}` in the spec counts)
+        let mut depth = 0;
+        let mut end = None;
+        for (j, x) in chars.iter().enumerate().skip(i + 1) {
+            match x {
+                '{' => depth += 1,
+                '}' if depth == 0 => {
+                    end = Some(j);
+                    break;
+                }
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        let end = end?;
         let field: String = chars[i + 1..end].iter().collect();
-        if field.contains('{') {
-            return None;
-        }
-        let (head, spec) = match field.split_once(':') {
-            Some((h, s)) => (h.to_string(), s.to_string()),
-            None => (field.clone(), String::new()),
-        };
-        if head.contains('!') || head.contains('.') || head.contains('[') {
-            return None;
-        }
-        let v = if head.is_empty() {
-            auto += 1;
-            c.args.get(auto - 1)?
-        } else if let Ok(n) = head.parse::<usize>() {
-            c.args.get(n)?
-        } else {
-            c.kwargs.get(&s(&head))?
-        };
-        let k = lit_of(v)?;
-        let piece = if spec.is_empty() { intern::key_py_str(k) } else { crate::interp::exprs::format_spec_literal(k, &spec)? };
-        out.push_str(&piece);
         i = end + 1;
+        // field_name [!conv] [:spec]; `[` … `]` may hold `:` / `!`
+        let mut name_end = field.len();
+        let mut in_br = false;
+        for (j, x) in field.char_indices() {
+            match x {
+                '[' => in_br = true,
+                ']' => in_br = false,
+                '!' | ':' if !in_br => {
+                    name_end = j;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let name = &field[..name_end];
+        let rest = &field[name_end..];
+        let (conv, spec) = if let Some(r) = rest.strip_prefix('!') {
+            let (cv, sp) = r.split_at(r.find(':').unwrap_or(r.len()));
+            (Some(cv.to_string()), sp.strip_prefix(':').unwrap_or("").to_string())
+        } else {
+            (None, rest.strip_prefix(':').unwrap_or("").to_string())
+        };
+        let head_end = name.find(|x| x == '.' || x == '[').unwrap_or(name.len());
+        let head = &name[..head_end];
+        let mut v: Value = if head.is_empty() || head.chars().all(|x| x.is_ascii_digit()) {
+            let n = if head.is_empty() {
+                auto += 1;
+                auto - 1
+            } else {
+                head.parse::<usize>().ok()?
+            };
+            match c.args.get(n) {
+                Some(v) if c.star_args.is_empty() || n < c.args.len() => v.clone(),
+                _ => {
+                    push(&mut out, None);
+                    continue;
+                }
+            }
+        } else if let Some(v) = c.kwargs.get(&s(head)) {
+            v.clone()
+        } else if let Some(m) = mapping {
+            an.load_item(m, Ns::Item, &Value::lit(key_str_lit(head)), &c.node, st, true)
+        } else if !c.star_kwargs.is_empty() && !crate::interp::disabled("fmtkw") {
+            let mut acc = Value::new();
+            for sk in c.star_kwargs.clone() {
+                acc = acc.join(&an.load_item(&sk, Ns::Item, &Value::lit(key_str_lit(head)), &c.node, st, true));
+            }
+            acc
+        } else {
+            push(&mut out, None);
+            continue;
+        };
+        // accessors
+        let mut acc = &name[head_end..];
+        while !acc.is_empty() {
+            if let Some(r) = acc.strip_prefix('.') {
+                let e = r.find(|x| x == '.' || x == '[').unwrap_or(r.len());
+                v = an.load_attr(&v, &r[..e], &c.node, st, true);
+                acc = &r[e..];
+            } else if let Some(r) = acc.strip_prefix('[') {
+                let e = r.find(']')?;
+                let k = &r[..e];
+                let key = match k.parse::<i64>() {
+                    Ok(n) if k.chars().all(|x| x.is_ascii_digit()) => intern::key_int(n),
+                    _ => key_str_lit(k),
+                };
+                v = an.load_item(&v, Ns::Item, &Value::lit(key), &c.node, st, true);
+                acc = &r[e + 1..];
+            } else {
+                return None;
+            }
+        }
+        if out.is_none() || spec.contains('{') {
+            out = None;
+            continue;
+        }
+        let Some(k) = lit_of(&v) else {
+            out = None;
+            continue;
+        };
+        let k = match conv.as_deref() {
+            None | Some("s") => k,
+            Some("r") => match crate::models::pyvalues::builtin("repr", &[k], &[]) {
+                Some(x) => x,
+                None => {
+                    out = None;
+                    continue;
+                }
+            },
+            Some("a") => match crate::models::pyvalues::builtin("ascii", &[k], &[]) {
+                Some(x) => x,
+                None => {
+                    out = None;
+                    continue;
+                }
+            },
+            _ => return None,
+        };
+        let piece = if spec.is_empty() { Some(intern::key_py_str(k)) } else { crate::interp::exprs::format_spec_literal(k, &spec) };
+        push(&mut out, piece);
     }
-    Some(out)
+    out
 }
 
 fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -1564,31 +1666,20 @@ fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let arg = intern::key_tuple(vec![c.args[0].kv.as_lit().unwrap(), c.args[1].kv.as_lit().unwrap()]);
             Value::kv_only(an.rename_kv(&kv, &RenameFn::with_arg(FnKind::Replace, arg)))
         }
-        "format" => {
-            // named fields not given as keywords come from `**mapping`: reads of it
-            if !c.star_kwargs.is_empty() && !crate::interp::disabled("fmtkw") {
-                if let Some(t) = kv.as_lit().and_then(intern::key_as_str) {
-                    let mut rest: &str = &t;
-                    while let Some(i) = rest.find('{') {
-                        let after = &rest[i + 1..];
-                        if after.starts_with('{') {
-                            rest = &after[1..];
-                            continue;
-                        }
-                        let Some(j) = after.find('}') else { break };
-                        let field = &after[..j];
-                        let name: String = field.split(|ch| ch == ':' || ch == '!' || ch == '.' || ch == '[').next().unwrap_or("").to_string();
-                        if !name.is_empty() && !name.chars().all(|ch| ch.is_ascii_digit()) && !c.kwargs.contains_key(&s(&name)) {
-                            for sk in c.star_kwargs.clone() {
-                                an.load_item(&sk, Ns::Item, &Value::lit(key_str_lit(&name)), &c.node, st, true);
-                            }
-                        }
-                        rest = &after[j..];
-                    }
-                }
+        "format" | "format_map" => {
+            let mapping = if name == "format_map" { c.args.first().cloned() } else { None };
+            if name == "format_map" && mapping.is_none() {
+                return Value::data(&format!("L{}", c.line));
             }
-            if let Some(out) = kv.as_lit().and_then(intern::key_as_str).and_then(|t| format_template_literal(&t, c)) {
-                return Value::lit(key_str_lit(&out));
+            if let Some(t) = kv.as_lit().and_then(intern::key_as_str) {
+                if let Some(out) = format_fields(an, st, &t, c, mapping.as_ref()) {
+                    return Value::lit(key_str_lit(&out));
+                }
+                // fields from parameters: decided per call site
+                an.concrete_args(c.args.iter().chain(c.kwargs.values()).chain(c.star_kwargs.iter()), st);
+            }
+            if name == "format_map" {
+                return Value::data(&format!("L{}", c.line));
             }
             if let Some(k) = kv.as_lit() {
                 if let Some(sk) = intern::key_as_str(k) {
@@ -3636,6 +3727,7 @@ fn m_range(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         _ => None,
     };
     let Some((lo, hi, step)) = bounds.filter(|_| c.kwargs.is_empty() && !crate::interp::disabled("range")) else {
+        an.concrete_args(c.args.iter(), st);
         let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("range@L{}", c.line));
         an.set_llen(oid, st, None);
         // (for the tensor model: an int of unknown value)

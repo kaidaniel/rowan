@@ -151,6 +151,34 @@ impl Analyzer {
     /// The key a tuple / frozenset with known items hashes as (`(1, "a")`, `frozenset({"r"})`).
     pub fn value_key(&self, o: u32, state: &State, depth: usize) -> Option<KeyId> {
         let kind = self.kind(o);
+        // a frozen dataclass instance hashes by its fields: `Key(ns='a', name='b')`
+        if kind == Kind::Instance && depth <= 3 && !super::disabled("valuekey") && self.obj(o).single {
+            let c = self.instance_class(o)?;
+            let ci = self.class_info_opt(c)?;
+            if !ci.dc_frozen.get() || self.class_lookup(c, "__hash__").is_some() || self.class_lookup(c, "__eq__").is_some() {
+                return None;
+            }
+            let fields = ci.dataclass_fields.borrow().clone()?;
+            let row = state.row(o, Ns::Attr);
+            let mut parts = Vec::new();
+            for (f, _) in &fields {
+                let fk = intern::key_str_lit(f);
+                if !row.definite.contains(fk) {
+                    return None;
+                }
+                let v = state.slot(o, Ns::Attr, fk);
+                let k = match (v.pts.is_empty(), v.kv.as_lit(), v.single()) {
+                    (true, Some(k), _) => k,
+                    (false, _, Some(x)) if v.kv.is_bot() => self.value_key(x, state, depth + 1)?,
+                    _ => return None,
+                };
+                parts.push(format!("{}={}", f, intern::key_repr(k)));
+            }
+            let name = self.obj(c).label.trim_start_matches("class ").to_string();
+            let k = intern::key_member(&format!("{}({})", name, parts.join(", ")), None);
+            self.identity_objs.borrow_mut().entry(k).or_insert(o);
+            return Some(k);
+        }
         if !matches!(kind, Kind::Tuple | Kind::Set) || depth > 3 || super::disabled("valuekey") || !self.obj(o).single {
             return None;
         }
@@ -390,7 +418,7 @@ impl Analyzer {
         if !self.sum_stack.is_empty() && !super::disabled("copyread") {
             if let Some(k) = key.kv.as_lit().filter(|_| key.pts.is_empty()) {
                 for o in obj.pts.iter() {
-                    if self.kind(o) != Kind::Dict || state.has_slot(o, ns, k) {
+                    if !(self.kind(o) == Kind::Dict || (self.kind(o) == Kind::Instance && ns == Ns::Item)) || state.has_slot(o, ns, k) {
                         continue;
                     }
                     let refs = state.row(o, ns).refs();
@@ -569,6 +597,10 @@ impl Analyzer {
                                     acc = acc.join(&r);
                                     if row.present.contains(k) {
                                         acc = acc.join(&state.slot(oid, Ns::Item, k));
+                                    }
+                                    // an open / symbolic dict may hold it (never a missing key)
+                                    if !row.present.contains(k) && (row.open() || row.symbolic()) {
+                                        acc = acc.join(&line_data);
                                     }
                                     continue;
                                 }

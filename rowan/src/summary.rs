@@ -430,6 +430,20 @@ impl Analyzer {
         }
     }
 
+    /// Concrete events on the parameters a model's arguments hold (placeholders, `Param`
+    /// values, containers of them): a model call decided per call site.
+    pub fn concrete_args<'a>(&mut self, vals: impl IntoIterator<Item = &'a Value>, state: &State) {
+        if self.sum_stack.is_empty() {
+            return;
+        }
+        for v in vals {
+            self.concrete_events(v, state, 1);
+            if let Some(ph) = v.kv.as_param() {
+                self.record_event("concrete", ph);
+            }
+        }
+    }
+
     /// Record a deferred access; the same access seen again is merged by joining its rows.
     pub fn defer(&mut self, mut sr: SymReq) {
         if sr.rel_chain.len() > MAX_REL_CHAIN {

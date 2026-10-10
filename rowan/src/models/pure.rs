@@ -86,12 +86,7 @@ pub fn try_pure(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
             None => false,
         };
         if pure_family {
-            for v in c.args.iter().chain(c.kwargs.values()).chain(c.recv.iter()) {
-                an.concrete_events(v, st, 1);
-                if let Some(ph) = v.kv.as_param() {
-                    an.record_event("concrete", ph);
-                }
-            }
+            an.concrete_args(c.args.iter().chain(c.kwargs.values()).chain(c.recv.iter()), st);
         }
     }
     r
