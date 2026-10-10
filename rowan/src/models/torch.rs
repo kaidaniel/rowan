@@ -1550,7 +1550,49 @@ impl Analyzer {
         let node = c.node;
         let s = self.t_shape(recv, st).unwrap_or_else(Shape::any);
         let a0 = self.t_kw(c, args, 0, "dim").or_else(|| kw(c, "axis").cloned());
-        let keepdim = kw(c, "keepdim").and_then(|v| self.t_bool(v)).unwrap_or(false);
+        let keepdim = kw(c, "keepdim").or_else(|| kw(c, "keepdims")).and_then(|v| self.t_bool(v)).unwrap_or(false);
+        // numpy arrays (torch not imported): where numpy's methods differ from torch's
+        if !self.torch_real && !crate::interp::disabled("numpysem") {
+            match name {
+                // `transpose(*axes)` permutes (no axes: reversed)
+                "transpose" if args.len() != 2 || s.rank().map(|r| r != 2).unwrap_or(true) => {
+                    let perm: Option<Vec<i64>> = if args.is_empty() {
+                        s.rank().map(|r| (0..r as i64).rev().collect())
+                    } else if args.len() == 1 {
+                        self.t_seq(&args[0], st).map(|v| v.iter().filter_map(|x| self.t_int(x)).collect())
+                    } else {
+                        args.iter().map(|a| self.t_int(a)).collect()
+                    };
+                    let Some(perm) = perm else { return tensor_value(Shape::any()) };
+                    return self.t_permute(&s, &perm, &node, st);
+                }
+                // reductions give an array (torch: values and indices)
+                "max" | "min" | "amax" | "amin" | "ptp" | "nanmax" | "nanmin" => {
+                    let dims = match self.t_dims_arg(a0, st) {
+                        Ok(d) => d,
+                        Err(_) => return tensor_value(Shape::any()),
+                    };
+                    if dims.is_none() && !keepdim {
+                        return tensor_value(Shape::known(vec![]));
+                    }
+                    return match self.t_reduce(&s, dims, keepdim, &node, st, name) {
+                        Some(r) => tensor_value(r),
+                        None => Value::new(),
+                    };
+                }
+                // no axis: over the flattened array
+                "cumsum" | "cumprod" if a0.is_none() => {
+                    return match s.dims() {
+                        Some(ds) => tensor_value(Shape::known(vec![ds.iter().fold(sh::lit(1), |acc, d| sh::mul(acc, *d))])),
+                        None => tensor_value(Shape::any()),
+                    };
+                }
+                "sort" => return tensor_value(sh::norm_shape(&s, &st.tf)),
+                "ravel" => return self.t_method("flatten", recv, &[], c, st),
+                "repeat" | "resize" => return tensor_value(Shape::any()),
+                _ => {}
+            }
+        }
         if IDENTITY.contains(&name) {
             return tensor_value(s);
         }
@@ -4613,7 +4655,112 @@ pub fn m_numpy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let call = Call { qual: format!("tensor.{}", name), recv: Some(recv.clone()), args: rest.clone(), kwargs: rename_axis(&c.kwargs), star_args: vec![], star_kwargs: vec![], node, call_ast: None, site: c.site.clone(), line: c.line };
             an.t_method(name, &recv, &rest, &call, st)
         }
-        _ => Value::data(&format!("L{}", c.line)),
+        _ => numpy_fn(an, st, c, q),
+    }
+}
+
+/// `np.f(x, …)`: reductions / elementwise functions as the array methods (numpy semantics),
+/// binary ufuncs by broadcasting, `where`, `vstack` / `hstack` / `column_stack`.
+fn numpy_fn(an: &mut Analyzer, st: &mut State, c: &Call, q: &str) -> Value {
+    const METHODS: &[&str] = &[
+        "sum", "mean", "std", "var", "prod", "max", "min", "amax", "amin", "ptp", "nansum", "nanmean", "nanmax", "nanmin", "argmax", "argmin", "cumsum", "cumprod", "sort",
+        "argsort", "all", "any", "abs", "absolute", "exp", "log", "log1p", "log2", "log10", "sqrt", "sin", "cos", "tan", "tanh", "clip", "round", "around", "floor", "ceil",
+        "square", "sign", "isnan", "isfinite", "isinf", "negative", "ravel", "squeeze", "swapaxes", "flip", "nan_to_num", "count_nonzero",
+    ];
+    const BINARY: &[&str] = &["maximum", "minimum", "add", "subtract", "multiply", "divide", "true_divide", "floor_divide", "power", "mod", "remainder", "fmax", "fmin", "hypot", "arctan2", "logical_and", "logical_or", "greater", "less", "equal", "not_equal", "greater_equal", "less_equal"];
+    let unknown = || Value::data(&format!("L{}", c.line));
+    let shape_of = |an: &Analyzer, st: &State, v: &Value| -> Option<Shape> {
+        if is_tensor(v) {
+            return an.t_shape(v, st);
+        }
+        // a Python number broadcasts as a scalar
+        if v.pts.is_empty() && v.kv.as_lit().map(intern::key_is_number).unwrap_or(false) {
+            return Some(Shape::known(vec![]));
+        }
+        None
+    };
+    if METHODS.contains(&q) {
+        // (an array, or an unknown value used as one: a parameter)
+        let Some(recv) = c.args.first().cloned().filter(|v| is_tensor(v) || (!v.kv.is_literal() && v.pts.iter().all(|o| matches!(an.kind(o), Kind::Ph | Kind::Unknown)))) else { return unknown() };
+        let rest: Vec<Value> = c.args[1..].to_vec();
+        let call = Call { qual: format!("tensor.{}", q), recv: Some(recv.clone()), args: rest.clone(), kwargs: c.kwargs.clone(), star_args: vec![], star_kwargs: vec![], node: c.node, call_ast: None, site: c.site.clone(), line: c.line };
+        let saved = std::mem::replace(&mut an.torch_real, false);
+        let name = match q {
+            "absolute" => "abs",
+            "around" => "round",
+            "negative" => "neg",
+            other => other,
+        };
+        let r = an.t_method(name, &recv, &rest, &call, st);
+        an.torch_real = saved;
+        return r;
+    }
+    if BINARY.contains(&q) && c.args.len() >= 2 {
+        let (Some(a), Some(b)) = (shape_of(an, st, &c.args[0]), shape_of(an, st, &c.args[1])) else { return unknown() };
+        let node = c.node;
+        let r = an.t_broadcast(&a, &b, &node, st, q);
+        if matches!(q, "logical_and" | "logical_or" | "greater" | "less" | "equal" | "not_equal" | "greater_equal" | "less_equal") {
+            if let Some(s) = an.t_shape(&r, st) {
+                return bool_tensor_value(s);
+            }
+        }
+        return r;
+    }
+    let node = c.node;
+    match q {
+        // np.linalg: solve(a, b) has b's shape; inv / pinv keep / transpose a's; det / norm
+        "linalg.solve" => match c.args.get(1).and_then(|b| shape_of(an, st, b)) {
+            Some(s) => tensor_value(s),
+            None => tensor_value(Shape::any()),
+        },
+        "linalg.inv" => match c.args.first().and_then(|a| shape_of(an, st, a)) {
+            Some(s) => tensor_value(s),
+            None => tensor_value(Shape::any()),
+        },
+        "linalg.pinv" => match c.args.first().and_then(|a| shape_of(an, st, a)).and_then(|s| s.dims()) {
+            Some(mut d) if d.len() >= 2 => {
+                let n = d.len();
+                d.swap(n - 1, n - 2);
+                tensor_value(Shape::known(d))
+            }
+            _ => tensor_value(Shape::any()),
+        },
+        "linalg.det" => match c.args.first().and_then(|a| shape_of(an, st, a)).and_then(|s| s.dims()) {
+            Some(d) if d.len() >= 2 => tensor_value(Shape::known(d[..d.len() - 2].to_vec())),
+            _ => tensor_value(Shape::any()),
+        },
+        "linalg.norm" if c.args.len() == 1 && c.kwargs.is_empty() => tensor_value(Shape::known(vec![])),
+        "where" if c.args.len() == 3 => {
+            let shapes: Option<Vec<Shape>> = c.args.iter().map(|a| shape_of(an, st, a)).collect();
+            let Some(ss) = shapes else { return unknown() };
+            let ab = an.t_broadcast(&ss[1], &ss[2], &node, st, "where");
+            match an.t_shape(&ab, st) {
+                Some(s) => an.t_broadcast(&ss[0], &s, &node, st, "where"),
+                None => unknown(),
+            }
+        }
+        "vstack" | "row_stack" | "hstack" | "column_stack" => {
+            let Some(seq) = c.args.first() else { return unknown() };
+            let it = an.iterate(seq, &node, st);
+            let Some(items) = it.items else { return unknown() };
+            let shapes: Option<Vec<Shape>> = items.iter().map(|v| shape_of(an, st, v)).collect();
+            let Some(ss) = shapes else { return unknown() };
+            let ranks: Option<Vec<usize>> = ss.iter().map(|s| s.rank()).collect();
+            let Some(ranks) = ranks else { return tensor_value(Shape::any()) };
+            // vstack: 1-D arrays become rows; hstack: 1-D arrays join along axis 0
+            let (lifted, axis): (Vec<Shape>, i64) = match q {
+                "vstack" | "row_stack" => (ss.iter().zip(&ranks).map(|(s, r)| if *r == 1 { Shape::known(vec![sh::lit(1), s.dims().unwrap()[0]]) } else { s.clone() }).collect(), 0),
+                "column_stack" => (ss.iter().zip(&ranks).map(|(s, r)| if *r == 1 { Shape::known(vec![s.dims().unwrap()[0], sh::lit(1)]) } else { s.clone() }).collect(), 1),
+                _ => (ss.clone(), if ranks.iter().all(|r| *r == 1) { 0 } else { 1 }),
+            };
+            let vals: Vec<Value> = lifted.into_iter().map(tensor_value).collect();
+            let lst = an.alloc_positional(Kind::List, &node, Some(vals), Value::new(), crate::domain::DATA, st);
+            let mut kw = IndexMap::new();
+            kw.insert(s("dim"), Value::lit(intern::key_int(axis)));
+            let call = Call { qual: "torch.cat".into(), recv: None, args: vec![lst], kwargs: kw, star_args: vec![], star_kwargs: vec![], node, call_ast: c.call_ast, site: c.site.clone(), line: c.line };
+            an.t_torch_fn("cat", &call, st)
+        }
+        _ => unknown(),
     }
 }
 
