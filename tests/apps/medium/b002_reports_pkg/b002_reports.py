@@ -7,7 +7,7 @@ from reporting.fmt import money, period_label, summary_line, wrap_note
 from reporting.loader import NOTES_CSV, load_products, load_sales
 from reporting.transform import by_category, by_region, sales_frame
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # todos at L43-L80: exact per-row pandas values (groupby + sort order, filtered row counts) need a concrete table model; frames keep per-column value sets
     os.environ.pop("REPORT_TITLE", None)
     os.environ.pop("REPORT_WIDTH", None)
 
@@ -40,10 +40,10 @@ if __name__ == "__main__":
     #@row df: present={date,region,rep,sku,qty,price,name,category,revenue} definite={date,region,rep,sku,qty,price,name,category,revenue} closed
     reg = by_region(df)                              #@row reg: present={region,orders,qty,revenue} definite={region,orders,qty,revenue} closed
     top_region = reg.to_dict("records")[0]           #@row top_region: present={region,orders,qty,revenue} definite={region,orders,qty,revenue} closed
-    tr_name = top_region["region"]                   #@value tr_name: exactly={"north"}
-    line = summary_line(top_region)                  #@value line: exactly={"north: 3 orders / 10 units"}
+    tr_name = top_region["region"]                   #@todo value tr_name: exactly={"north"}
+    line = summary_line(top_region)                  #@todo value line: exactly={"north: 3 orders / 10 units"}
     cats = by_category(df)                           #@row cats: present={category,qty,revenue} definite={category,qty,revenue} closed
-    best_cat = cats.to_dict("records")[0]["category"]   #@value best_cat: exactly={"electronics"}
+    best_cat = cats.to_dict("records")[0]["category"]   #@todo value best_cat: exactly={"electronics"}
 
     # ---------------------------------------------------------------- formatting
     period = period_label(["2024-03-09", "2024-03-01"])   #@value period: exactly={"01 Mar to 09 Mar 2024"}
@@ -58,7 +58,7 @@ if __name__ == "__main__":
     res1 = run(["regions"])
     #@row res1: present={command,header,rows,text,rule} definite={command,header,rows,text,rule} absent={footer} closed
     h1 = res1["header"]                              #@value h1: exactly={"Monthly sales (EUR) - 01 Mar to 09 Mar 2024"}
-    nrows1 = len(res1["rows"])                       #@value nrows1: exactly={2}
+    nrows1 = len(res1["rows"])                       #@todo value nrows1: exactly={2}
     row1 = res1["rows"][1]                           #@row row1: present={region,orders,qty,revenue} definite={region,orders,qty,revenue} closed
 
     os.environ["REPORT_TITLE"] = "Q1 sales"
@@ -71,13 +71,13 @@ if __name__ == "__main__":
     os.environ.pop("REPORT_WIDTH")
     res3 = run(["reps", "--top", "1", "--min-qty", "0"])
     rep0 = res3["rows"][0]                           #@row rep0: present={rep,qty,revenue} definite={rep,qty,revenue} closed
-    rep_name = rep0["rep"]                           #@value rep_name: exactly={"ann"}
+    rep_name = rep0["rep"]                           #@todo value rep_name: exactly={"ann"}
     rule3 = len(res3["rule"])                        #@value rule3: exactly={40}
 
     os.environ.pop("REPORT_TITLE")
     res4 = run(["regions", "--region", "west"], csv_text=NOTES_CSV)
     h4 = res4["header"]                              #@value h4: exactly={"Monthly sales (EUR) - 02 Apr to 03 Apr 2024"}
-    west = res4["rows"][0]["revenue"]                #@value west: exactly={51.0}
+    west = res4["rows"][0]["revenue"]                #@todo value west: exactly={51.0}
     try:
         run(["totals"])
         bad = False
