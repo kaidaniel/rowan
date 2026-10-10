@@ -2608,6 +2608,17 @@ impl Analyzer {
     /// A concrete hover fact for a line inside a function whose summary was instantiated:
     /// `rows` are the rows resolved for this call; the text shows them with values unknown
     /// (the caller's state after the call does not tell what the slots held at that line).
+    /// Does the fact at (line, name) of a concrete run show all the texts it can (4)?
+    pub fn fact_full(&self, line: u32, name: StrId) -> bool {
+        !self.torch_on && !disabled("factcap") && self.facts.get(&(line, name, false)).is_some_and(|e| e.texts.len() >= 4)
+    }
+
+    pub fn join_fact_value(&mut self, line: u32, name: StrId, v: &Value) {
+        if let Some(e) = self.facts.get_mut(&(line, name, false)) {
+            e.value = e.value.join(v);
+        }
+    }
+
     pub fn record_resolved_fact(&mut self, line: u32, name: StrId, v: &Value, rows: Vec<(ObjId, Option<Row>, Option<Row>)>, slots: Vec<(ObjId, Ns, KeyId, Value)>, scope: u32, state: &State) {
         let mut scratch = state.copy_ref();
         // contents as they were at that line (captured, resolved for this call); objects whose
@@ -2704,6 +2715,28 @@ impl Analyzer {
             }
         }
         let scope = self.frame().func.unwrap_or(0);
+        // (a fact that has all the texts it shows (4) only joins the value and rows: rendering a
+        // large value at every run of the line is what costs — not in torch programs, whose
+        // hover is the assignment's own value)
+        if !self.torch_on && !disabled("factcap") {
+            if let Some(e) = self.facts.get_mut(&(node.line, name, symbolic)) {
+                if e.texts.len() >= 4 {
+                    e.value = e.value.join(v);
+                    for (oid, item, attr) in rows {
+                        match e.rows.get_mut(&oid) {
+                            Some((ci, ca)) => {
+                                *ci = join_opt(ci, &item);
+                                *ca = join_opt(ca, &attr);
+                            }
+                            None => {
+                                e.rows.insert(oid, (item, attr));
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
         // tensors: dims named by locals / letters, printed in the function's own terms
         let (pctx, tnames, tlegend) = if self.torch_on {
             let mut ctx = self.t_print_ctx(state);

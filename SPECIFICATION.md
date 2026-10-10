@@ -538,7 +538,8 @@ symbolic dims, possibly with a rest of unknown length, encoded in a `Data` label
   object, call chain, note), `schema` (source, key, always / sometimes, sites), `summary`.
 * **`--facts`**: the document the editor integration reads: per name and line the values
   (text and structure, with the row sets `present`, `definite`, `likely`, `absent`, `closed`,
-  `sources`, `mutators`), verdicts, schemas, shape errors.
+  `sources`, `mutators`) for at most 16 of the objects a name may hold (`objects_total`
+  counts them all), verdicts, schemas, shape errors.
 * **`rowan serve`**: JSON lines over stdio.
   * `{"id": 1, "cmd": "analyse", "path": "/abs/file.py"}` answers with the `--facts` document
     under `result`, plus `cached`, `ms` and `deps` (the modules it loaded).

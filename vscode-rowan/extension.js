@@ -249,7 +249,10 @@ function renderHover(name, facts, verdicts) {
       const from = o.kind === "ph" ? "whatever the caller passes" : srcs.length ? srcs.map(describeSource).join("; ") : o.label;
       out.push(`- \`?\` comes from ${from}`);
     }
-    if (known.length > 1) out.push(`- may be one of ${known.length} objects:`);
+    // (rowan describes at most 16 objects of a name: `objects_total` counts them all)
+    const total = Math.max(f.objects_total || 0, objs.length);
+    const more = total - objs.length;
+    if (known.length > 1 || more > 0) out.push(`- may be one of ${known.length + more} objects${more > 0 ? ` (${known.length} shown)` : ""}:`);
     for (const o of known) {
       const head = known.length > 1 ? `  - **${o.label}** (${o.kind})` : `- object **${o.label}** (${o.kind})`;
       const row = o.kind === "instance" || o.kind === "namespace" ? o.attr : o.item || o.attr;

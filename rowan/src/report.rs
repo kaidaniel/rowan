@@ -97,6 +97,9 @@ pub fn dedupe(verdicts: &[Verdict]) -> Vec<Verdict> {
     out
 }
 
+/// How many of the objects a name may hold the facts document describes (the rest: a count).
+pub const MAX_FACT_OBJECTS: usize = 16;
+
 /// How many distinct call chains one finding is reported under (the shortest ones).
 pub const MAX_CHAINS_PER_FINDING: usize = 8;
 
@@ -760,9 +763,13 @@ pub fn facts_json(an: &Analyzer) -> J {
     let sch = schema_rows(an);
     let mut facts: Vec<J> = Vec::new();
     for ((line, name, symbolic), f) in &an.facts {
+        // (a hover lists the objects a name may hold: past `MAX_FACT_OBJECTS` only the count —
+        // a name holding hundreds of objects made the document hundreds of MB)
+        let objects_total = f.rows.len();
         let objects: Vec<J> = f
             .rows
             .iter()
+            .take(MAX_FACT_OBJECTS)
             .map(|(oid, (item, attr))| {
                 let o = an.obj(*oid);
                 let origin = an.origins.get(oid).map(|(t, l, g)| json!({"text": t, "line": l, "given": g}));
@@ -838,7 +845,7 @@ pub fn facts_json(an: &Analyzer) -> J {
             Some(p) => (p.clone(), f.texts.iter().filter(|t| *t != p).cloned().collect()),
             None => (f.texts.join(" | "), vec![]),
         };
-        facts.push(json!({"line": line, "name": name.to_string(), "symbolic": symbolic, "values": values, "text": text, "examples": examples, "legend": f.legend.iter().filter(|(s0, d)| !(d == "?" && f.texts.iter().all(|t| t.starts_with("Tensor[")) && an.facts_sym_is_tensor(s0))).chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "required": required, "requires": requires}));
+        facts.push(json!({"line": line, "name": name.to_string(), "symbolic": symbolic, "values": values, "text": text, "examples": examples, "legend": f.legend.iter().filter(|(s0, d)| !(d == "?" && f.texts.iter().all(|t| t.starts_with("Tensor[")) && an.facts_sym_is_tensor(s0))).chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "required": required, "requires": requires}));
     }
     let verdicts: Vec<J> = reported(an).iter().map(|v| verdict_json(an, v)).collect();
     let mut schemas = serde_json::Map::new();

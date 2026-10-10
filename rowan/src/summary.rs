@@ -975,7 +975,8 @@ impl Analyzer {
                 symreqs,
                 rel_verdicts: rel_list,
                 obs: self.sum_obs.last().cloned().unwrap_or_default(),
-                fact_obs: self.sum_fact_obs.last().cloned().unwrap_or_default(),
+                // (moved, not cloned: the list is reset at the next round anyway)
+                fact_obs: self.sum_fact_obs.last_mut().map(std::mem::take).unwrap_or_default(),
                 notes: body_notes,
                 templates,
                 events,
@@ -1965,6 +1966,17 @@ impl Analyzer {
         }
         // hover facts inside the body, for this call
         for fo in &summary.fact_obs {
+            // (a caller's list is capped like the body's own, and a fact that has all its texts
+            // only joins the value: replaying every observation of every callee at every call
+            // made `--facts` runs 50x slower than the analysis)
+            if in_summary && self.sum_fact_obs.last().is_some_and(|t| t.len() >= 4096) {
+                break;
+            }
+            if !in_summary && self.fact_full(fo.line, fo.name) {
+                let v = inst.remap_value(self, state, &pre, &fo.value);
+                self.join_fact_value(fo.line, fo.name, &v);
+                continue;
+            }
             let v = inst.remap_value(self, state, &pre, &fo.value);
             let mut rows: Vec<(ObjId, Option<Row>, Option<Row>)> = Vec::new();
             for (o, item, attr) in &fo.rows {
