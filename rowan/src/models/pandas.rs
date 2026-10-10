@@ -1686,9 +1686,26 @@ fn pd_dataframe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
                 let mut r = rows_frame(&rows);
                 if it.items.is_none() {
-                    // rows of unknown count: a key of one row may be no column (no rows)
+                    // rows of unknown count: a key of one row may be no column (no rows); with a
+                    // first row known to exist, the keys every possible row surely has are
                     let mut d = r.data();
-                    d.definite = KeySet::new();
+                    let mut sure = KeySet::new();
+                    if an.prefix(x, st).is_some() && !crate::interp::disabled("nonemptyrows") {
+                        if let Elem::One(e) = &it.elem {
+                            if !e.pts.is_empty() && e.kv.is_bot() && e.pts.iter().all(|o| an.kind(o) == Kind::Dict) {
+                                let mut acc: Option<KeySet> = None;
+                                for o in e.pts.iter() {
+                                    let dr = st.row(o, Ns::Item);
+                                    acc = Some(match acc {
+                                        None => dr.definite.clone(),
+                                        Some(a) => a.intersection(&dr.definite),
+                                    });
+                                }
+                                sure = acc.unwrap_or_default().intersection(&d.present);
+                            }
+                        }
+                    }
+                    d.definite = sure;
                     d.likely = d.present.clone();
                     r = Row::from_data(d);
                 }

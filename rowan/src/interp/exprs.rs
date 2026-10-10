@@ -1995,6 +1995,14 @@ impl Analyzer {
         if state.elems.get(&oid).is_none() {
             state.elems.insert(oid, BOT);
         }
+        // (a source list with a first element, read before iterating it)
+        let src_nonempty = strong && kind != Kind::Set && gens.len() == 1 && gens[0].ifs.is_empty() && !gens[0].is_async && !super::disabled("comprefix") && match &gens[0].iter {
+            ast::Expr::Name(src) => {
+                let sv = self.load_name(s(src.id.as_str()), &Node::none(), state);
+                sv.single().filter(|o| matches!(self.kind(*o), Kind::List | Kind::Tuple) && sv.kv.is_bot()).map(|so| self.prefix(so, state).is_some()).unwrap_or(false)
+            }
+            _ => false,
+        };
         let mark = self.comp_known.len();
         self.comp(gens, state, &mut body);
         self.comp_known.truncate(mark);
@@ -2003,6 +2011,16 @@ impl Analyzer {
         } else {
             self.set_llen(oid, state, None);
             state.drop_obj_ns(oid, Ns::Pos);
+            // `[f(x) for x in items]` over a list with a first element (`if items:`): the
+            // result has one too (one of the body's values)
+            if src_nonempty {
+                let e = state.slot(oid, Ns::Elem, STAR);
+                let ekv = state.elems.get(&oid).unwrap_or(crate::domain::DATA);
+                if !(e.pts.is_empty() && ekv.is_bot()) {
+                    state.set_slot(oid, Ns::Pos, key_int(0), Value::with_kv(e.pts, ekv), true);
+                    state.lens.insert(oid, (None, 1));
+                }
+            }
         }
         if kind == Kind::Set {
             self.normalize_set(oid, state);

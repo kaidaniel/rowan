@@ -201,6 +201,26 @@ impl Analyzer {
                     }
                 }
             }
+            // `if items:` / `if not items:` on a list of unknown length: on this path it has a
+            // first element / is empty (this path's length only, not the object's)
+            ast::Expr::Name(n) if !super::disabled("lennarrow") => {
+                let v = self.load_name(s(n.id.as_str()), &Node::none(), state);
+                if v.pts.len() == 1 && v.kv.is_bot() {
+                    let o = v.pts.first().unwrap();
+                    if matches!(self.kind(o), Kind::List | Kind::Tuple) && self.obj(o).single && self.llen(o, state).is_none() {
+                        if truth {
+                            if self.prefix(o, state).is_none() {
+                                let e = state.slot(o, Ns::Elem, intern::STAR);
+                                let ekv = state.elems.get(&o).unwrap_or(crate::domain::DATA);
+                                state.set_slot(o, Ns::Pos, intern::key_int(0), Value::with_kv(e.pts, ekv), true);
+                                state.lens.insert(o, (None, 1));
+                            }
+                        } else if self.prefix(o, state).is_none() {
+                            state.lens.insert(o, (Some(0), 0));
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
