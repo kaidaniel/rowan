@@ -1368,7 +1368,10 @@ impl Analyzer {
         // a ValidationError the program (or FastAPI: a 422) handles: no diagnostic
         let saved = self.verdict_guarded;
         self.verdict_guarded |= self.validation_caught();
+        // (a missing field is pydantic's ValidationError, not a KeyError)
+        let saved_exc = std::mem::replace(&mut self.item_exc_force, if crate::interp::disabled("pydvalexc") { None } else { Some("ValidationError") });
         let v = if ns == Ns::Attr { self.load_attr(recv, &intern::key_py_str(k), node, state, true) } else { self.load_item(recv, Ns::Item, &Value::lit(k), node, state, true) };
+        self.item_exc_force = saved_exc;
         self.verdict_guarded = saved;
         v
     }

@@ -52,7 +52,7 @@ pub fn param_slot_of(k: KeyId) -> Option<u32> {
 impl Analyzer {
     /// The innermost handler that catches this namespace's error re-raises it.
     pub fn guard_reraises(&self, ns: Ns) -> bool {
-        let want: &[&str] = if ns == Ns::Item { if self.item_exc == Some("ValueError") { super::VALUE_GUARDS } else { ITEM_GUARDS } } else { ATTR_GUARDS };
+        let want: &[&str] = if ns == Ns::Item { match self.item_exc { Some("ValueError") => super::VALUE_GUARDS, Some("ValidationError") => super::VALIDATION_GUARDS, _ => ITEM_GUARDS } } else { ATTR_GUARDS };
         for g in self.guards.iter().rev() {
             if g.iter().any(|x| want.contains(&x.as_str())) {
                 return g.contains("!reraise");
@@ -119,7 +119,7 @@ impl Analyzer {
     }
 
     pub fn is_guarded(&self, ns: Ns) -> bool {
-        let want: &[&str] = if ns == Ns::Item { if self.item_exc == Some("ValueError") { super::VALUE_GUARDS } else { ITEM_GUARDS } } else { ATTR_GUARDS };
+        let want: &[&str] = if ns == Ns::Item { match self.item_exc { Some("ValueError") => super::VALUE_GUARDS, Some("ValidationError") => super::VALIDATION_GUARDS, _ => ITEM_GUARDS } } else { ATTR_GUARDS };
         self.guards.iter().any(|g| g.iter().any(|x| want.contains(&x.as_str())))
     }
 
@@ -535,6 +535,7 @@ impl Analyzer {
     pub fn load_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
         // a numpy structured array's missing field raises ValueError
         let exc = if ns == Ns::Item && !obj.pts.is_empty() && !self.np_struct.is_empty() && obj.pts.iter().all(|o| self.np_struct.contains(&o)) { Some("ValueError") } else { None };
+        let exc = if ns == Ns::Item { self.item_exc_force.or(exc) } else { exc };
         let saved = std::mem::replace(&mut self.item_exc, exc);
         let v = self.load_item_inner(obj, ns, key, node, state, report);
         self.item_exc = saved;
@@ -965,30 +966,42 @@ impl Analyzer {
                     if crate::interp::debug_level() == 2 {
                         eprintln!("  guarded access may raise: {:?} tier {:?} at L{}", intern::key_repr(k), cls.tier, node.line);
                     }
+                    // (a model's own read — pydantic collecting its field errors — raises nothing here:
+                    // the model raises its ValidationError, with every error, afterwards)
+                    let model_read = ns == Ns::Item && self.item_exc == Some("ValidationError");
+                    if model_read {
+                        if self.caught_load && cls.tier == Tier::Input && !super::disabled("catchreq") {
+                            self.require_providers_k(&cls, &row, &site, true, state, Some(k));
+                        }
+                    }
                     // the handler sees the state as it is here (and a KeyError / AttributeError
                     // carrying the key)
-                    if !self.raise_states.is_empty() && !super::disabled("excvalue") {
+                    if model_read {
+                    } else if !self.raise_states.is_empty() && !super::disabled("excvalue") {
                         let cname = if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" };
                         let e = self.exception_object(cname, vec![Value::lit(k)], node, state);
                         self.cur_exc = Some(e);
                     }
                     // (required on the handler's path too: the exception fired for the key)
-                    if self.caught_load && cls.tier == Tier::Input && !super::disabled("catchreq") {
+                    if !model_read && self.caught_load && cls.tier == Tier::Input && !super::disabled("catchreq") {
                         self.require_providers_k(&cls, &row, &site, true, state, Some(k));
                     }
-                    self.cur_exc_cls = Some(super::builtin_exc_names(if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" }));
-                    let recorded = self.record_raise_state(state);
-                    self.cur_exc_cls = None;
-                    if !recorded {
-                        if let Some(m) = self.may_raise.last_mut() {
-                            *m = true;
+                    if !model_read {
+                        self.cur_exc_cls = Some(super::builtin_exc_names(if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" }));
+                        let recorded = self.record_raise_state(state);
+                        self.cur_exc_cls = None;
+                        if !recorded {
+                            if let Some(m) = self.may_raise.last_mut() {
+                                *m = true;
+                            }
                         }
                     }
-                    if try_guard && cls.tier == Tier::Missing && is_lit && single_target && !row.symbolic() {
+                    if model_read {
+                    } else if try_guard && cls.tier == Tier::Missing && is_lit && single_target && !row.symbolic() {
                         // the access raises here: the rest of the try body is unreachable
                         state.reachable = false;
                     }
-                    if try_guard && cls.tier != Tier::Missing && is_lit && single_target && self.strongable(oid) {
+                    if try_guard && !model_read && cls.tier != Tier::Missing && is_lit && single_target && self.strongable(oid) {
                         // no exception raised: the key is present from here on
                         row = row.narrow_in(k, true);
                         state.set_row(oid, ns, row.clone());

@@ -833,10 +833,12 @@ impl Analyzer {
         for (n, _, _) in &hooks {
             caught.insert(n.clone());
         }
-        self.guards.push(crate::interp::stmts::expand_caught(caught));
+        let caught_names = crate::interp::stmts::expand_caught(caught);
+        self.guards.push(caught_names.clone());
         self.may_raise.push(false);
         self.raise_states.push(None);
         self.raise_values.push(None);
+        self.raise_cls.push((self.raise_states.len(), Vec::new()));
         self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
         self.try_sum_depth.push(self.sum_stack.len());
         self.fa_dep_cache.push(rustc_hash::FxHashMap::default());
@@ -850,9 +852,44 @@ impl Analyzer {
         self.try_marks.pop();
         self.try_sum_depth.pop();
         let flagged = self.may_raise.pop().unwrap_or(false);
-        let raised_at = self.raise_states.pop().flatten();
-        let raised_v = self.raise_values.pop().flatten().unwrap_or_default();
+        let mut raised_at = self.raise_states.pop().flatten();
+        let mut raised_v = self.raise_values.pop().flatten().unwrap_or_default();
+        let recs = self.raise_cls.pop().map(|(_, r)| r).unwrap_or_default();
         let _ = &mut pre;
+        // exceptions of known classes that FastAPI does not answer (a KeyError, …) are
+        // re-raised by the TestClient at the call: they go on to the enclosing try
+        if !crate::interp::disabled("faescape") && !recs.is_empty() {
+            let answered = |c: &Option<crate::interp::ExcNames>| match c {
+                Some((names, _)) => names.iter().any(|n| caught_names.contains(n)),
+                None => true,
+            };
+            if recs.iter().any(|(c, _, _)| !answered(c)) {
+                let mut keep_st: Option<State> = None;
+                let mut keep_v = Value::new();
+                for (c, mut st, ev) in recs {
+                    if answered(&c) {
+                        let mut s2 = st.copy();
+                        keep_st = Some(match keep_st { None => s2, Some(mut a) => a.join(&mut s2) });
+                        keep_v = keep_v.join(&ev);
+                    } else {
+                        self.cur_exc = if ev.pts.is_empty() { None } else { Some(ev.clone()) };
+                        self.cur_exc_cls = c.clone();
+                        let mut s2 = st.copy();
+                        let recorded = self.record_raise_state(&mut s2);
+                        self.cur_exc = None;
+                        self.cur_exc_cls = None;
+                        if !recorded {
+                            self.note_raise();
+                        } else if let Some(t) = self.raise_stack.last_mut() {
+                            *t = true;
+                        }
+                        self.merge_esc(c.map(|x| vec![x]));
+                    }
+                }
+                raised_at = keep_st;
+                raised_v = keep_v;
+            }
+        }
         // other exceptions (KeyError, …) escape: TestClient raises them at the call
         if flagged {
             if crate::interp::debug_level() == 2 {

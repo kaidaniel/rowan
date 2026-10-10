@@ -126,6 +126,7 @@ pub const DICT_METHOD_NAMES: &[&str] = &["get", "items", "keys", "values", "upda
 /// Methods that make a class-less placeholder a list (modelled by `list.*`).
 pub const LIST_METHOD_NAMES: &[&str] = &["append", "extend", "insert", "remove", "sort", "reverse"];
 pub const VALUE_GUARDS: &[&str] = &["ValueError", "Exception", "BaseException", "*"];
+pub const VALIDATION_GUARDS: &[&str] = &["ValidationError", "ValueError", "Exception", "BaseException", "*"];
 pub const ITEM_GUARDS: &[&str] = &["KeyError", "LookupError", "Exception", "BaseException", "IndexError", "*"];
 pub const ATTR_GUARDS: &[&str] = &["AttributeError", "Exception", "BaseException", "*"];
 pub const KNOWN_IDENTITY_DECORATORS: &[&str] = &[
@@ -987,6 +988,9 @@ pub struct Analyzer {
     /// the call being evaluated: where an exception a model raises is allocated
     pub exc_node: Option<Node>,
     pub item_exc: Option<&'static str>,
+    /// what a missing key raises in the reads a model makes (pydantic's field reads: a
+    /// ValidationError)
+    pub item_exc_force: Option<&'static str>,
     pub narrow_depth: u32,
     pub pyd_last_failed: bool,
     /// pydantic instances: the fields their input surely / maybe gave (`model_fields_set`)
@@ -1258,6 +1262,7 @@ impl Analyzer {
             cur_exc_cls: None,
             exc_node: None,
             item_exc: None,
+            item_exc_force: None,
             narrow_depth: 0,
             pyd_last_failed: false,
             pyd_set: FxHashMap::default(),
