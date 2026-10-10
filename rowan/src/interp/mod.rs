@@ -765,6 +765,8 @@ pub struct Analyzer {
     pub stdout_redirect: Vec<Value>,
     /// ExitStack callbacks: (callable, positional, keyword arguments), in registration order
     pub exit_callbacks: FxHashMap<ObjId, Vec<(Value, Vec<Value>, IndexMap<StrId, Value>)>>,
+    /// TestClient cookie jars (dicts with `set`)
+    pub cookie_jars: FxHashSet<ObjId>,
     pub identity_objs: RefCell<FxHashMap<KeyId, ObjId>>,
     /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
     pub bypass_setattr: bool,
@@ -988,6 +990,7 @@ impl Analyzer {
             exc_objs: FxHashMap::default(),
             stdout_redirect: Vec::new(),
             exit_callbacks: FxHashMap::default(),
+            cookie_jars: FxHashSet::default(),
             identity_objs: RefCell::new(FxHashMap::default()),
             bypass_setattr: false,
             cond_depth: 0,

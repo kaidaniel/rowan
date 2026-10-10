@@ -1217,6 +1217,8 @@ impl Analyzer {
                     }
                 }
                 Kind::Dict if self.chainmaps.contains_key(&oid) && name == "new_child" => self.method_value("chainmap.new_child", &Value::obj(oid)),
+                // a TestClient cookie jar's set / delete
+                Kind::Dict if matches!(name, "set" | "delete") && self.cookie_jars.contains(&oid) => self.method_value(&format!("fastapi.cookies.{}", name), &Value::obj(oid)),
                 Kind::Dict => self.method_value(&format!("dict.{}", name), &Value::obj(oid)),
                 Kind::List if self.deques.contains_key(&oid) && crate::models::counter::DEQUE_METHODS.contains(&name) => {
                     if name == "maxlen" {

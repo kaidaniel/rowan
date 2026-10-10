@@ -36,6 +36,8 @@ pub struct Req {
     pub query: Option<Value>,
     pub url_query: Vec<(String, String)>,
     pub headers: Option<Value>,
+    /// the cookies the client sends (its jar, or `cookies=`)
+    pub cookies: Option<Value>,
     pub path: Vec<(String, String)>,
     /// the request object (shared by the middlewares and the handler)
     pub obj: Option<Value>,
@@ -53,6 +55,7 @@ fn fa_obj(an: &mut Analyzer, st: &mut State, node: &Node, qual: &str, v: Value, 
         "fastapi.request" => &["query_params", "headers", "cookies", "path_params", "method", "url", "client", "state", "scope", "app", "json", "body", "form"],
         "fastapi.response" => &["json", "status_code", "headers", "text", "content", "raise_for_status"],
         "fastapi.bg" => &["add_task"],
+        "fastapi.client" => &["cookies"],
         "fastapi.outresp" => &["status_code", "headers", "set_cookie", "delete_cookie", "media_type", "body", "background"],
         _ => &[],
     };
@@ -359,6 +362,32 @@ impl Analyzer {
         if let Some(r) = req {
             if let Some((_, val)) = route_path.iter().find(|(n, _)| *n == pname) {
                 v = conv(&ann_name, val);
+            } else if matches!(&marker, Some((q, _)) if q.starts_with("fastapi.param.Cookie")) && !crate::interp::disabled("facookie") {
+                let ck = match &marker {
+                    Some((q, _)) if q.contains(".alias=") => q.split(".alias=").nth(1).unwrap_or(&pname).to_string(),
+                    _ => pname.clone(),
+                };
+                let mut found = false;
+                if let Some(cj) = &r.cookies {
+                    for o in cj.pts.iter() {
+                        let row = state.row(o, Ns::Item);
+                        let k = key_str_lit(&ck);
+                        if row.present.contains(k) {
+                            v = v.join(&state.slot(o, Ns::Item, k));
+                            found = row.definite.contains(k);
+                            if !found {
+                                v = v.join(&default.clone().unwrap_or_else(|| Value::data("cookie")));
+                            }
+                            found = true;
+                        } else if row.open() {
+                            v = v.join(&Value::data("cookie"));
+                            found = true;
+                        }
+                    }
+                }
+                if !found {
+                    v = default.clone().unwrap_or_else(|| Value::data("cookie"));
+                }
             } else if matches!(&marker, Some((q, _)) if q.starts_with("fastapi.param.Header")) {
                 let hk = pname.replace('_', "-");
                 if let Some(h) = &r.headers {
@@ -635,7 +664,10 @@ impl Analyzer {
         let n = self.fa_pending.len();
         self.fa_pending.push((idx, rq));
         let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
+        // (the middleware runs concretely: the handler's requirements are this run's)
+        self.force_tab_once = true;
         self.call_user(first, None, vec![robj, Value::obj(cn)], IndexMap::new(), vec![], vec![], state, node, None, false);
+        self.force_tab_once = false;
         Some(())
     }
 
@@ -819,7 +851,12 @@ impl Analyzer {
                 rs.set_slot(did, Ns::Item, dk, detail, true);
                 out = out.join(&Value::obj(did));
             }
-            let after = if state.reachable { state.copy().join(&mut rs) } else { rs };
+            let mut after = if state.reachable { state.copy().join(&mut rs) } else { rs.copy() };
+            // (an error response is an exceptional exit: what the handler needs on its normal
+            // path stays needed — `always`)
+            if state.reachable && !crate::interp::disabled("faexcreqs") {
+                after.reqs = state.reqs.copy().join_with(&mut rs.reqs, &mut |a, b| a.join(b), &mut |a| a.clone());
+            }
             state.replace_with(after);
         }
         self.fa_status = if status.empty() { Value::data("status_code") } else { status };
@@ -991,6 +1028,11 @@ impl Analyzer {
     fn fa_client_call(&mut self, app: &Value, method: &str, c: &Call, state: &mut State) -> Value {
         let url = c.arg(0, Some("url")).and_then(|u| str_of(&u));
         let mut req = Req { json: c.kwargs.get(&s("json")).cloned(), query: c.kwargs.get(&s("params")).cloned(), headers: c.kwargs.get(&s("headers")).cloned(), ..Default::default() };
+        // the cookies: `cookies=`, else the client's jar
+        req.cookies = c.kwargs.get(&s("cookies")).cloned().or_else(|| {
+            let cl = c.recv.as_ref().and_then(|r| r.single())?;
+            state.slot_opt(cl, Ns::Attr, key_str_lit("cookies"))
+        });
         let (path, qs) = match &url {
             Some(u) => match u.split_once('?') {
                 Some((p, q)) => (Some(p.to_string()), q.to_string()),
@@ -1132,6 +1174,19 @@ fn conv_scalar(ann: &str, text: &str) -> Value {
 pub fn m_fastapi(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let q = c.qual.as_str();
     let last = q.rsplit('.').next().unwrap_or("");
+    // `client.cookies.set(name, value)`: a store into the jar
+    if q == "fastapi.cookies.set" || q == "fastapi.cookies.delete" {
+        let recv = c.recv.clone().unwrap_or_default();
+        if let Some(k) = c.args.first() {
+            if q.ends_with("set") {
+                let v = c.args.get(1).cloned().or_else(|| c.kw("value")).unwrap_or_default();
+                an.store_item(&recv, Ns::Item, k, &v, &c.node, st);
+            } else {
+                an.delete_item(&recv, Ns::Item, k, &c.node, st, false);
+            }
+        }
+        return an.none_v.clone();
+    }
     // a middleware's call_next(request): the route's response
     if let Some(n) = q.strip_prefix("fastapi.callnext.").and_then(|x| x.parse::<usize>().ok()) {
         let Some((idx, rq)) = an.fa_pending.get(n).cloned() else { return Value::data("response") };
@@ -1330,6 +1385,13 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
 pub fn object_attr(an: &mut Analyzer, oid: ObjId, name: &str, node: &Node, state: &mut State) -> Option<Value> {
     let (kind, pv) = payload_of(an, oid)?;
     match (kind.as_str(), name) {
+        // the client's cookie jar: a dict (set / clear / get / update / [k] = v)
+        ("fastapi.client", "cookies") => {
+            let d = an.alloc_at(Kind::Dict, node, state, "cookies", Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("jar{}", oid)));
+            state.set_row(d, Ns::Item, Row::new());
+            an.cookie_jars.insert(d);
+            Some(Value::obj(d))
+        }
         ("fastapi.response", "status_code") => Some(Value::data("status_code")),
         // (not set by the handler: the route's status)
         ("fastapi.outresp", "status_code") => Some(Value::data("unset_status")),

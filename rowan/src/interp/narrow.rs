@@ -562,10 +562,28 @@ impl Analyzer {
             return;
         }
         let new = if restrict { kv_restrict(&cur.kv, keys) } else { kv_exclude(&cur.kv, keys) };
+        // objects that may equal a literal (an unknown value, a placeholder, an instance with
+        // its own __eq__)
+        let maybe_eq = cur.pts.filter(|o| matches!(self.kind(o), Kind::Unknown | Kind::Ph | Kind::Instance | Kind::External));
         match new {
+            None if !maybe_eq.is_empty() && !crate::interp::disabled("narrowobjs") => {
+                // none of the literals is left: the objects are what remains (one of the keys)
+                let v = if restrict {
+                    Value::with_kv(maybe_eq.filter(|o| self.kind(o) == Kind::Instance), KeyVal::lits(keys.clone()))
+                } else {
+                    Value::objs(cur.pts.clone())
+                };
+                self.store_name(name, v, state);
+            }
             None => {
-                if cur.kv.is_literal() {
-                    state.reachable = false;
+                if restrict || cur.pts.is_empty() {
+                    // (a dict / list never equals a literal)
+                    if cur.kv.is_literal() {
+                        state.reachable = false;
+                    }
+                } else if cur.kv.is_literal() {
+                    // every literal excluded: the objects remain
+                    self.store_name(name, Value::objs(cur.pts.clone()), state);
                 }
             }
             Some(nk) => {

@@ -119,10 +119,10 @@ def clean_update(body):
     return changes, ignored
 
 
-def apply_update(name, changes):
+def apply_update(name, changes):  # (bob's first update sets bio, ann has one: bio is definite in every call; was definite={name,email,roles})
     rec = USERS[name]
     rec.update(changes)
-    #@row rec: present={name,email,roles,bio,city} definite={name,email,roles} closed
+    #@row rec: present={name,email,roles,bio,city} definite={name,email,roles,bio} closed
     return rec
 
 
@@ -174,8 +174,8 @@ if __name__ == "__main__":
     client.cookies.set("session", "s-bob")
     me = client.get("/me", headers={"X-Request-Id": "r1"})
     assert me.headers["x-request-id"] == "r1"
-    bob = me.json()
-    #@row bob: present={name,email,roles,bio,city} definite={name,email,roles} absent={bio,city} closed
+    bob = me.json()  # (bob has no bio / city and exclude_none drops them: was present={…,bio,city} with absent={bio,city})
+    #@row bob: present={name,email,roles} definite={name,email,roles} absent={bio,city} closed
     up = client.patch("/me", json={"bio": "new", "admin": True, "name": "eve"}).json()
     assert up == {"changed": ["bio"], "ignored": ["admin", "name"], "via": "cookie"}, up
     assert client.patch("/me", json={"email": "nope"}).status_code == 422

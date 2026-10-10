@@ -1,3 +1,2 @@
 models/fm01_todo_service.py
-models/fm03_profiles_auth.py
 models/fm04_analytics_pandas.py
