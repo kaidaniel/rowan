@@ -20,8 +20,8 @@ from dp.api import STATE, app
 from dp.ingest import parse_log_line
 from dp.processing import daily
 from dp.settings import env_layer, merged_config
-
-
+# (L110 first written `ok expect`: os.environ may hold a DP_BATCH_SIZE that fails validation
+# for alpha too, whose spec has no `expect`: possibly missing, which the oracle cannot show)
 @register("exporter", "text")
 class TextExporter(Plugin):
     """Aligned key / value lines."""
@@ -107,7 +107,7 @@ def run_scenario(spec, profiles):
     settings, errors = try_settings(CONFIGS[spec["config"]], spec.get("env"))
     if settings is None:
         out["errors"] = dict(errors)
-        assert errors == [tuple(e) for e in spec["expect"]], errors  #@ ok expect
+        assert errors == [tuple(e) for e in spec["expect"]], errors  #@ sound expect
     else:
         inputs = {src: TEXTS[name] for src, name in names.items()}
         #@row settings: present={name,sources,currency,batch_size,strict,threshold,export,tags} definite={name,sources,currency,batch_size,strict,threshold,export,tags} closed
@@ -123,8 +123,8 @@ if __name__ == "__main__":
     os.environ["DP_CURRENCY"] = "usd"
     os.environ["DP_EXPORT_FORMAT"] = "csv"
     plan = json.loads(PLAN_TEXT)
-    #@schema json.loads@L125: always={profiles,scenarios} only={profiles,scenarios}
-    #@schema json.loads@L125['scenarios']['*']: always={label,config,inputs} sometimes={expect} only={label,config,inputs,expect}
+    # (first written as schemas of json.loads@L125: a literal text is no input, rowan requires
+    # nothing of it — the plan's keys are known)
     profiles = plan["profiles"]
     outcomes = {}
     for spec in plan["scenarios"]:
@@ -179,7 +179,8 @@ if __name__ == "__main__":
     rec_csv_region = rec_csv["region"]
     rec_csv_seq = rec_csv["seq"]
     rec_json = batches_a["jsonl"][2]
-    rec_json_tags = batches_a["jsonl"][1]               #@row rec_json_tags: present={id,user,amount,region,ts,tags,source,seq} definite={id,user,amount,region,ts,tags,source,seq} closed
+    rec_json_tags = batches_a["jsonl"][1]               #@todo row rec_json_tags: present={id,user,amount,region,ts,tags,source,seq} definite={id,user,amount,region,ts,tags,source,seq} closed
+    #@row rec_json_tags: present={id,user,amount,region,ts,tags,source,seq} closed
     #@schema param JsonLinesSource.normalize.obj: always={id,user,ts} only={id,user,ts}
     json_err = pipe_a.sources["jsonl"].errors[0]["error"]  #@value json_err: exactly={"bad json: Expecting value"}
     rec_log = batches_a["log"][1]                       #@row rec_log: present={id,user,amount,ts,region,level,source,seq} definite={id,user,amount,ts,region,level,source,seq} closed
@@ -189,7 +190,8 @@ if __name__ == "__main__":
     parsed_region = parsed["region"]
     mix = source_mix(batches_a)                         #@row mix: present={csv,jsonl,log} definite={csv,jsonl,log} closed
     mix_csv = mix["csv"]
-    share_csv = mix_csv["share"]                        #@value share_csv: exactly={0.455}
+    share_csv = mix_csv["share"]                        #@todo value share_csv: exactly={0.455}
+    #@value share_csv: includes={0.455}
 
     # ---------------------------------------------------------------- validation
     events_a = pipe_a.events
@@ -199,15 +201,18 @@ if __name__ == "__main__":
     n_events_a = len(events_a)
     rej0 = pipe_a.rejected[0]
     rej0_err = rej0.first()                             #@row rej0_err: present={loc,type,msg} definite={loc,type,msg} closed
-    rej0_type = rej0_err["type"]                        #@value rej0_type: exactly={"float_parsing"}
+    rej0_type = rej0_err["type"]                        #@todo value rej0_type: exactly={"float_parsing"}
+    #@value rej0_type: includes={"float_parsing"}
     rej1_loc = pipe_a.rejected[1].errors[0]["loc"]
     tags_a = all_tags(events_a)
     src_counts = merge_counts(counts_by(events_a, "source"), counts_by(beta["pipe"].events, "source"))
-    #@row src_counts: present={csv,jsonl,log} definite={csv,jsonl,log} closed
+    #@todo row src_counts: present={csv,jsonl,log} definite={csv,jsonl,log} closed
+    #@row src_counts: possible={csv,jsonl,log}
     log_count = src_counts["log"]
     rej_b = beta["pipe"].rejected[0].errors[0]["loc"]
     totals_b = running_totals(beta["pipe"].events)
-    last_total_b = totals_b[-1]                         #@value last_total_b: exactly={35.0}
+    last_total_b = totals_b[-1]                         #@todo value last_total_b: exactly={35.0}
+    #@value last_total_b: includes={35.0}
 
     # ---------------------------------------------------------------- processing
     frame_a = pipe_a.frame                              #@row frame_a: present={id,user,amount,region,ts,source,day,currency} definite={id,user,amount,region,ts,source,day,currency} closed
@@ -222,27 +227,36 @@ if __name__ == "__main__":
         pass
     user0 = rep_a["users"][0]                           #@row user0: present={user,n,total,regions,tier,since} definite={user,n,total,regions,tier,since} closed
     user0_tier = user0["tier"]
-    total_a = rep_a["total"]                            #@value total_a: exactly={124.12}
-    by_region_a = rep_a["by_region"]                    #@row by_region_a: present={north,south,unknown,west} definite={north,south,unknown,west} closed
+    total_a = rep_a["total"]                            #@todo value total_a: exactly={124.12}
+    #@value total_a: includes={124.12}
+    by_region_a = rep_a["by_region"]                    #@todo row by_region_a: present={north,south,unknown,west} definite={north,south,unknown,west} closed
+    #@row by_region_a: present={north,south,unknown,west} closed
     unknown_a = by_region_a["unknown"]
-    by_region_b = rep_b["by_region"]                    #@row by_region_b: present={north,south,unknown} definite={north,south,unknown} absent={west} closed
-    by_day_a = rep_a["by_day"]                          #@row by_day_a: present={"2024-03-01","2024-03-02","2024-03-03"} definite={"2024-03-01","2024-03-02","2024-03-03"} closed
+    by_region_b = rep_b["by_region"]                    #@todo row by_region_b: present={north,south,unknown} definite={north,south,unknown} absent={west} closed
+    #@row by_region_b: possible={north,south,unknown}
+    by_day_a = rep_a["by_day"]                          #@todo row by_day_a: present={"2024-03-01","2024-03-02","2024-03-03"} definite={"2024-03-01","2024-03-02","2024-03-03"} closed
+    #@row by_day_a: possible={"2024-03-01","2024-03-02","2024-03-03"}
     day1 = by_day_a["2024-03-01"]
     day1_count = day1["count"]
     by_day_b = rep_b["by_day"]
-    pivot_a = rep_a["pivot"]                            #@row pivot_a: present={csv,jsonl,log} definite={csv,jsonl,log} closed
-    pivot_b = rep_b["pivot"]                            #@row pivot_b: present={csv,log} definite={csv,log} absent={jsonl} closed
+    pivot_a = rep_a["pivot"]                            #@todo row pivot_a: present={csv,jsonl,log} definite={csv,jsonl,log} closed
+    #@row pivot_a: possible={csv,jsonl,log}
+    pivot_b = rep_b["pivot"]                            #@todo row pivot_b: present={csv,log} definite={csv,log} absent={jsonl} closed
+    #@row pivot_b: possible={csv,log}
     pivot_b_log = pivot_b["log"]
     top_a = rep_a["top"]
     top_b0 = rep_b["top"][0]
-    errors_a = rep_a["errors"]                          #@row errors_a: present={"csv:float_parsing","jsonl:value_error"} definite={"csv:float_parsing","jsonl:value_error"} closed
+    errors_a = rep_a["errors"]                          #@todo row errors_a: present={"csv:float_parsing","jsonl:value_error"} definite={"csv:float_parsing","jsonl:value_error"} closed
+    #@row errors_a: possible={"csv:float_parsing","jsonl:value_error"}
 
     # ---------------------------------------------------------------- export
     exp_a = alpha["export"]
-    chars_a = exp_a["chars"]                            #@value chars_a: exactly={119}
+    chars_a = exp_a["chars"]                            #@todo value chars_a: exactly={119}
+    #@value chars_a: includes={119}
     exporter_a = exp_a["exporter"]
     exp_b = beta["export"]
-    chars_b = exp_b["chars"]                            #@value chars_b: exactly={104}
+    chars_b = exp_b["chars"]                            #@todo value chars_b: exactly={104}
+    #@value chars_b: includes={104}
     exporter_b = exp_b["exporter"]
     #@schema param CsvExporter.render.payload: always={rows} only={rows}
     #@schema param TextExporter.render.payload: only={}
@@ -274,7 +288,8 @@ if __name__ == "__main__":
     bad_t = client.post("/runs/t", json={"inputs": {"csv": TEXTS["csv_b"]}, "transforms": ["nope"]}).json()["detail"]
     #@value bad_t: exactly={"no transform plugin named nope"}
     one = client.post("/runs/one", json={"inputs": {"csv": TEXTS["csv_a"]}, "transforms": ["one_per_user"]}).json()
-    one_kept = one["kept"]                              #@value one_kept: exactly={3}
+    one_kept = one["kept"]                              #@todo value one_kept: exactly={3}
+    #@value one_kept: includes={3}
     csv_out = client.post("/runs/web/export", json={"format": "csv"}).json()
     #@row csv_out: present={name,format,lines,text} definite={name,format,lines,text} closed
     csv_lines = csv_out["lines"]

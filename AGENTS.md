@@ -33,10 +33,10 @@ cd rowan && cargo build --release && cargo test --release --lib && cd ..
 rowan/target/release/rowan FILE.py [--json|--golden|--facts] [--no-rows --no-summaries --no-entry --no-imports] [--value-depth N]
                                    [--search-path DIR]… [--follow PKG]… [--site-packages DIR]…
 rowan/target/release/rowan serve                    # JSON lines over stdio (README has the protocol)
-uv run --no-project python tests/run_golden.py      # 997/997 in ~5 s (all suites); paths select; -v
-uv run --no-project python tests/run_golden.py --pending [--prune]   # cases in tests/*/PENDING (s112, c001)
+uv run --no-project python tests/run_golden.py      # 1011/1011 in ~5 s (all suites); paths select; -v
+uv run --no-project python tests/run_golden.py --pending [--prune]   # cases in tests/*/PENDING (none left)
 uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy \
-    python tests/oracle.py [--strict|--lenient] [-v] [case…]         # expectations vs a real run (840/840, ~4 min)
+    python tests/oracle.py [--strict|--lenient] [-v] [case…]         # expectations vs a real run (849/849, ~4 min)
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py  # torch expectations vs real PyTorch
 uv run --no-project python tests/run_snapshots.py   # SAME on 4 snapshots (fixed caps, no deadline); --update after review
 cd vscode-rowan && node test.js && npm run package  # hover rendering check; rebuilds rowan-0.1.0.vsix
@@ -67,7 +67,7 @@ decision), `ROWAN_NO=a,b` (switch refinements off: `rg 'disabled\("' rowan/src`)
 | `models/{pandas,minire,torch}.rs`, `shape.rs` | pandas; a small regex matcher (pandas `regex=`); tensor shapes and the torch model. |
 | `report.rs`, `main.rs` | output formats; CLI, `serve_loop`, site-packages discovery (1 GiB-stack thread). |
 | `tests/run_golden.py`, `tests/oracle.py` | golden harness (directives: `tests/CONVENTIONS.md`), runtime oracle (strict on the library suites). |
-| `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/` | 476 / 162 / 137 / 58 / 42 / 134 / 57 / 8 files (apps: small / medium / large package programs); suites have `small/`, `models/`, a `PENDING` list. |
+| `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/` | 454 / 162 / 138 / 59 / 43 / 134 / 57 / 8 files (apps: small / medium / large package programs); suites have `small/`, `models/`, a `PENDING` list. |
 | `tests/run_snapshots.py`, `tests/snapshots/` | `--json` snapshots on four old modules: the internals regression guard. |
 | `vscode-rowan/`, `rowan/py/` | VS Code extension (rowan serve); PyO3 binding (does not load on this machine). |
 
@@ -154,7 +154,9 @@ by run (the oracle reads it per line).
 * **Soundness guards** worth knowing: a non-converged recursion widens its result and the
   rows it touched; `copy`/`deepcopy` of a parameter decides per call site; `**x` of an
   unknown value opens the row; deleting through an unknown key demotes every key; an
-  unresolved placeholder's row is unknown; `isinstance` counts a value's literal part.
+  unresolved placeholder's row is unknown; `isinstance` counts a value's literal part; a
+  summary whose every path raises ends the caller's path (`completes`); a guarded frame column
+  read records its KeyError before it narrows the frame to having the column.
 * **Budgets.** 2 s soft deadline; 256 tabulations per function / call, 256 clones per site,
   `MAX_ACTIVE` 4, 3 summary rounds, unroll 16 (torch 64), path 3.
 
@@ -162,38 +164,36 @@ by run (the oracle reads it per line).
 
 | input | time | notes |
 | --- | --- | --- |
-| golden (997 cases, all suites) | ~5 s | one process per case; oracle ~4 min |
-| `j93` (830 lines) / `m96_pkg` (1,716) / `proto_summary.py` (1.2k, self-referential) | 0.09 / 0.10 / 2.6 s | pass / pass / 0 ✗ |
+| golden (1011 cases, all suites) | ~5 s | one process per case; oracle ~4 min |
+| `j93` (830 lines) / `m96_pkg` (1,716) / `proto_summary.py` (1.2k, self-referential) | 0.09 / 0.10 / 3.6 s | pass / pass / 0 ✗ |
 
 ## Known problems and limits
 
-* PyO3 wheel fails to load on macOS 26 / Xcode 26; CLI / extension skip it.
-* Large self-referential programs are noisy; precision on real repositories never measured.
+* PyO3 wheel fails to load on macOS 26 / Xcode 26 (CLI / extension skip it); large
+  self-referential programs are noisy; precision on real repositories never measured.
 * A store through a name holding several objects is weak on each (`x346`/`x347` to-dos).
 * An unknown call whose arguments hold records may alias them; its attribute row is open.
 * Mutual recursion widens after 3 rounds; `while` with unknown conditions joins; `match`
   class / sequence patterns stay undecided; `getattr` needs a known name.
-* pandas: no relations between columns; absent keys of open frames listed only when seen.
 * Deletion by a key pattern (`for k in [k for k in os.environ if k.startswith(P)]: del …`)
   only demotes keys (sm02 / ym03 to-dos); record values do not flow from a list of records
   into a frame's columns / groupby keys (fm04 to-dos); a changed decimal context makes
   Decimal arithmetic unknown; `as_completed` order is unknown; `ExitStack.enter_context`
   runs a @contextmanager generator to its end when entered; a thread target runs at `start()`.
-* Generators run eagerly per call site (always tabulated); objects older than the call that
-  the body changes hold the join of the pre-call, yield and end states (y425: exact after full
-  consumption is a to-do); resuming after a partial `for` / `islice` / `zip` is not (s112).
-* An exception raised in a summarised callee under a re-raising @contextmanager may reach a
-  future without its value (`sm05` to-do).
-* Identity keys of an object that later turns weak stay in rows (rare).
+* Generators run eagerly per call site (always tabulated), effects per item (`GenEffects`).
+* A slice by an unknown bound (`recs[:n]`, n from os.environ) has no positions (c001 to-dos:
+  values known where positions exist would need a third `lens` field); pandas `sort_values` /
+  `drop_duplicates` still count as "may raise anything" (mixed-type columns: TypeError).
+* An exception from a summarised callee under a re-raising @contextmanager may reach a future
+  without its value (`sm05` to-do); identity keys of an object turned weak stay in rows.
 * Torch: dtype / device not modelled. numpy rides on the tensor model (importing numpy turns
   it on; numpy semantics where they differ: transpose, reductions, cumsum, `np.*` functions).
-* pandas values per row are not simulated (groupby + sort order of literal frames: b002
-  to-dos); frames keep per-column value sets.
+* pandas: no relations between columns; absent keys of open frames listed only when seen;
+  values per row not simulated (b002 to-dos), frames keep per-column value sets.
 
 ## Where to go next
 
-Pending: `c001` (large app), `s112` (suspended generators), `a010` / `a012` (re-validated
-values, frames from dumps), `a011` (the oracle counts a key whose caught KeyError fired as
-required; guarded loads record none, SPECIFICATION §8.4: decide). Then: possibly-unbound names,
-deletion by key pattern, records into frames, pandas `#@todo`s; torch facts from `<`/`!=`,
-dtypes; summary reuse in the server; the weak store through several objects; real repositories.
+PENDING is empty. Next: the profiling plan in `SUGGESTED_CHANGES.md` (untracked; a 10k+ line
+corpus, findings into that file first). Then: positions under an unknown bound (c001 to-dos),
+possibly-unbound names, deletion by key pattern, records into frames, pandas `#@todo`s; torch
+facts from `<`/`!=`, dtypes; summary reuse in the server; the weak store through several objects.
