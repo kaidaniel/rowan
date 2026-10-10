@@ -1,6 +1,5 @@
 small/s001_dict_methods.py
 small/s005_list_set_tuple.py
-small/s006_zip_strict.py
 small/s016_numeric_builtins.py
 small/s020_set_keys.py
 small/s021_str_format.py

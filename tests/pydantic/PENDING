@@ -3,7 +3,5 @@ small/y013_frozen.py
 small/y019_dump_alias_json_mode.py
 small/y020_dump_json_loads.py
 models/ym01_user_service.py
-models/ym02_order_pipeline.py
 models/ym03_config_settings.py
 models/ym04_event_ingest.py
-models/ym05_v1_compat_api.py

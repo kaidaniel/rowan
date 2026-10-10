@@ -87,6 +87,23 @@ pub const SAFE_METHODS: &[&str] = &[
     "dict.get", "dict.keys", "dict.values", "dict.items", "dict.setdefault", "dict.copy", "list.append", "str.upper", "str.lower",
     "str.strip", "str.title", "str.format", "str.join",
 ];
+
+/// Builtin container / str methods that raise only on arguments of the wrong type (not on
+/// the values): their calls are not "may raise anything".
+pub fn safe_method(q: &str) -> bool {
+    if SAFE_METHODS.contains(&q) {
+        return true;
+    }
+    let Some((recv, name)) = q.split_once('.') else { return false };
+    match recv {
+        "str" => !matches!(name, "index" | "rindex" | "format" | "format_map" | "encode" | "decode"),
+        "list" => matches!(name, "append" | "extend" | "insert" | "sort" | "reverse" | "copy" | "count" | "clear"),
+        "dict" => matches!(name, "get" | "keys" | "values" | "items" | "setdefault" | "copy" | "update" | "clear" | "fromkeys"),
+        "set" | "frozenset" => matches!(name, "add" | "update" | "union" | "intersection" | "difference" | "symmetric_difference" | "copy" | "clear" | "discard" | "issubset" | "issuperset" | "isdisjoint" | "intersection_update" | "difference_update" | "symmetric_difference_update"),
+        "tuple" => name == "count",
+        _ => false,
+    }
+}
 pub const STR_METHOD_NAMES: &[&str] = &[
     "strip", "lower", "upper", "title", "split", "replace", "startswith", "endswith", "format", "join", "lstrip", "rstrip", "encode",
     "decode", "isdigit", "isalpha", "zfill", "casefold", "capitalize", "partition", "rsplit", "splitlines", "find", "count", "ljust",

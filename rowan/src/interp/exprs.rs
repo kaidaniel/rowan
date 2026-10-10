@@ -9,7 +9,7 @@ use crate::intern::{self, key_float, key_int, key_str_lit, s, KeyId, STAR};
 use crate::state::{Kind, State};
 
 use super::funcs::Elem;
-use super::{is_constant, names_in, Analyzer, Payload, ViewKind, SAFE_METHODS, UNROLL_MAX};
+use super::{is_constant, names_in, Analyzer, Payload, ViewKind, UNROLL_MAX};
 
 /// Python's `s[lo:hi:step]` on characters.
 fn py_slice(cs: &[char], lo: Option<i64>, hi: Option<i64>, step: Option<i64>) -> Option<String> {
@@ -174,7 +174,7 @@ impl Analyzer {
                 let fv = self.eval(&c.func, state);
                 if !self.may_raise.is_empty() {
                     let all_safe = fv.pts.iter().all(|o| match &self.obj(o).payload {
-                        Payload::Method(q, _) if self.kind(o) == Kind::Method => SAFE_METHODS.contains(&q.as_str()) || SELF_REPORTING.iter().any(|p| q.starts_with(p)),
+                        Payload::Method(q, _) if self.kind(o) == Kind::Method => super::safe_method(q) || SELF_REPORTING.iter().any(|p| q.starts_with(p)),
                         // user code: whether it raises is reported by its own analysis
                         // builtins that raise only on wrong types (len, str, sorted, …)
                         Payload::Str(q) if self.kind(o) == Kind::External => q.strip_prefix("builtins.").map(|n| SAFE_BUILTINS.contains(&n) || is_exception_name(n)).unwrap_or(false) || SELF_REPORTING_EXTERNALS.contains(&q.as_str()),

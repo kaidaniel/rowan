@@ -967,16 +967,29 @@ impl Analyzer {
                 state.set_row(inst, Ns::Attr, r);
             }
         }
-        // v1 `@root_validator` (post): the dict of values in, a dict out
+        // v1 `@root_validator` (post): the dict of field values in (the values themselves, not
+        // their dumps), a dict out whose values become the fields
         for v in pc.root_post.clone() {
-            let vals = self.pyd_dump(inst, &DumpOpts::default(), state, node);
-            let out = self.call_user(v.func, Some(Value::obj(cls)), vec![vals], IndexMap::new(), vec![], vec![], state, node, None, false);
-            for d in out.pts.iter().filter(|o| self.kind(*o) == Kind::Dict).collect::<Vec<_>>() {
+            let did = self.alloc_at(Kind::Dict, node, state, &format!("values@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("rootv{}", inst)));
+            let mut vrow = Row::new();
+            let irow = state.row(inst, Ns::Attr);
+            for f in pc.fields.iter() {
+                let nk = key_str_lit(&f.name);
+                if irow.present.contains(nk) {
+                    vrow = vrow.store(nk, irow.definite.contains(nk));
+                    state.set_slot(did, Ns::Item, nk, state.slot(inst, Ns::Attr, nk), true);
+                }
+            }
+            state.set_row(did, Ns::Item, vrow);
+            let out = self.call_user(v.func, Some(Value::obj(cls)), vec![Value::obj(did)], IndexMap::new(), vec![], vec![], state, node, None, false);
+            let outs: Vec<ObjId> = out.pts.iter().filter(|o| self.kind(*o) == Kind::Dict).collect();
+            let strong = outs.len() == 1 && out.kv.is_bot();
+            for d in outs {
                 for f in pc.fields.iter() {
                     let nk = key_str_lit(&f.name);
                     if state.row(d, Ns::Item).present.contains(nk) {
                         let nv = state.slot(d, Ns::Item, nk);
-                        state.set_slot(inst, Ns::Attr, nk, nv, false);
+                        state.set_slot(inst, Ns::Attr, nk, nv, strong && state.row(d, Ns::Item).definite.contains(nk));
                     }
                 }
             }
