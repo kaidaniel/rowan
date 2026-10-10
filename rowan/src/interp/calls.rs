@@ -25,6 +25,35 @@ pub struct DcSpec {
     pub kw_only: bool,
 }
 
+/// An object's slots in a call signature: the state's own shared table (no copy), equal by
+/// pointer or contents, hashed independently of order.
+#[derive(Clone)]
+pub struct SigSlots(Option<std::sync::Arc<rustc_hash::FxHashMap<crate::state::SlotKey, Value>>>);
+
+impl PartialEq for SigSlots {
+    fn eq(&self, o: &Self) -> bool {
+        match (&self.0, &o.0) {
+            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b) || **a == **b,
+            (None, None) => true,
+            (Some(a), None) | (None, Some(a)) => a.is_empty(),
+        }
+    }
+}
+impl Eq for SigSlots {}
+impl std::hash::Hash for SigSlots {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        use std::hash::BuildHasher;
+        let Some(m) = &self.0 else { return 0usize.hash(h) };
+        let bh = rustc_hash::FxBuildHasher;
+        let mut acc: u64 = 0;
+        for e in m.iter() {
+            acc = acc.wrapping_add(bh.hash_one(e));
+        }
+        m.len().hash(h);
+        acc.hash(h);
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Sig {
     foid: u32,
@@ -35,7 +64,7 @@ pub struct Sig {
     kwargs: Vec<(StrId, Value)>,
     star_args: Vec<Value>,
     star_kwargs: Vec<Value>,
-    heap: Vec<(u32, Option<Row>, Option<Row>, Vec<((Ns, KeyId), Value)>, Option<KeyVal>, bool)>,
+    heap: Vec<(u32, Option<Row>, Option<Row>, SigSlots, Option<KeyVal>, bool)>,
     guards: Vec<Vec<String>>,
     fr_single: bool,
     ctx: String,
@@ -2072,7 +2101,7 @@ impl Analyzer {
         seen.sort_unstable();
         let mut heap = Vec::with_capacity(seen.len());
         for oid in seen {
-            heap.push((oid, state.rows.get(&(oid, Ns::Item)), state.rows.get(&(oid, Ns::Attr)), state.slots_of(oid), state.elems.get(&oid), self.obj(oid).single));
+            heap.push((oid, state.rows.get(&(oid, Ns::Item)), state.rows.get(&(oid, Ns::Attr)), SigSlots(state.slots.m.get_ref(&oid).cloned()), state.elems.get(&oid), self.obj(oid).single));
         }
         let guards: Vec<Vec<String>> = self
             .guards
