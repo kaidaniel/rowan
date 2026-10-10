@@ -33,10 +33,10 @@ cd rowan && cargo build --release && cargo test --release --lib && cd ..
 rowan/target/release/rowan FILE.py [--json|--golden|--facts] [--no-rows --no-summaries --no-entry --no-imports] [--value-depth N]
                                    [--search-path DIR]… [--follow PKG]… [--site-packages DIR]…
 rowan/target/release/rowan serve                    # JSON lines over stdio (README has the protocol)
-uv run --no-project python tests/run_golden.py      # 1015/1015 in ~5 s (all suites); paths select; -v
+uv run --no-project python tests/run_golden.py      # 1016/1016 in ~5 s (all suites); paths select; -v
 uv run --no-project python tests/run_golden.py --pending [--prune]   # cases in tests/*/PENDING (none left)
 uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy \
-    python tests/oracle.py [--strict|--lenient] [-v] [case…]         # expectations vs a real run (849/849, ~4 min)
+    python tests/oracle.py [--strict|--lenient] [-v] [case…]         # expectations vs a real run (854/854, ~4 min)
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py  # torch expectations vs real PyTorch
 uv run --no-project python tests/run_snapshots.py   # SAME on 4 snapshots (fixed caps, no deadline); --update after review
 cd vscode-rowan && node test.js && npm run package  # hover rendering check; rebuilds rowan-0.1.0.vsix
@@ -156,7 +156,8 @@ by run (the oracle reads it per line).
   unknown value opens the row; deleting through an unknown key demotes every key; an
   unresolved placeholder's row is unknown; `isinstance` counts a value's literal part; a
   summary whose every path raises ends the caller's path (`completes`); a guarded frame column
-  read records its KeyError before it narrows the frame to having the column.
+  read records its KeyError before it narrows the frame to having the column; abstract GC at
+  returns (`drop_garbage_at_return`, `obj_edges`, `gc_pinned`; `ROWAN_GC=0` off).
 * **Budgets.** 2 s soft deadline (no new tabulations), hard deadline 5× (`hard=`: user calls
   become unknown calls, entry runs stop); 256 tabulations per function / call, 256 clones per
   site, `MAX_ACTIVE` 4, 3 summary rounds, unroll 16 (torch 64), path 3. Profiling notes and
@@ -166,13 +167,12 @@ by run (the oracle reads it per line).
 
 | input | time | notes |
 | --- | --- | --- |
-| golden (1015 cases, all suites) | ~5 s | one process per case; oracle ~4 min |
+| golden (1016 cases, all suites) | ~5 s | one process per case; oracle ~4 min |
 | `j93` (830 lines) / `m96_pkg` (1,716) / `proto_summary.py` (1.2k, self-referential) | 0.09 / 0.10 / 3.6 s | pass / pass / 0 ✗ |
 
 ## Known problems and limits
 
-* PyO3 wheel fails to load on macOS 26 / Xcode 26 (CLI / extension skip it); large
-  self-referential programs are noisy; precision on real repositories never measured.
+* PyO3 wheel fails to load on macOS 26 / Xcode 26; precision on real repos never measured.
 * A store through a name holding several objects is weak on each (`x346`/`x347` to-dos); an
   unknown call whose arguments hold records may alias them (its attribute row is open).
 * Mutual recursion widens after 3 rounds; unknown `while` conditions join; `match` class /
