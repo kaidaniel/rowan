@@ -1896,6 +1896,7 @@ impl Analyzer {
             if !reached.insert(o) || o < mark {
                 continue;
             }
+            self.walked.set(self.walked.get() + 1);
             self.obj_edges(o, state, &mut work);
         }
         for o in fresh {

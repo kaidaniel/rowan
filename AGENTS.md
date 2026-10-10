@@ -83,7 +83,9 @@ and macOS, then the oracle on Linux. The torch oracle runs only on a manual disp
 * `ROWAN_NO=a,b` switches refinements off by name (`rg 'disabled\("' rowan/src` lists them).
   Use it to bisect which refinement causes a result.
 * `ROWAN_LIMITS=ms=2000,hard=10000,tab=256,call=256,clones=256,chain=2,path=3`: the soft and
-  hard deadlines, budgets, call-string depth and access-path depth.
+  hard deadlines, budgets, call-string depth and access-path depth. `work=550000` (about 2 s
+  here) puts the deadlines on work units instead: reproducible runs of large programs for
+  comparisons and profiles (the `work:` line of `ROWAN_DEBUG=1` shows the units).
 * `ROWAN_SUMMARIES=0`: the old per-call-site engine, with no summaries.
 * `ROWAN_GC=0`: garbage collection only for returns of values without objects.
   With `ROWAN_DEBUG=1`, `ROWAN_GCDBG=1` prints what each

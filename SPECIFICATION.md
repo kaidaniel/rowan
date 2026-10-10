@@ -324,8 +324,13 @@ their site. `ROWAN_GC=0` restricts collection to returns of values without objec
   such call is replaced in its caller by an unknown call (on the state it had reached), so the
   run ends in bounded time with a sound but less precise result.
 
-Both are set through `ROWAN_LIMITS`. Results of a run cut by a deadline depend on the
-machine's speed.
+With `ROWAN_LIMITS=work=N` both deadlines count work instead of time (statements run, summary
+templates instantiated, objects visited by reachability walks at 16 to a unit; soft at N, hard
+at 5N): a run cut by them gives the same result on any machine and under any load. About
+270,000 units take a second on an Apple M-series machine.
+
+Both are set through `ROWAN_LIMITS`. With the default clock deadlines, the results of a run
+cut by a deadline depend on the machine's speed and load.
 
 ## 7. Exceptions
 

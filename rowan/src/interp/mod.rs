@@ -989,6 +989,8 @@ pub struct Analyzer {
     pub site_clones: FxHashMap<String, usize>,
     /// statements executed plus objects instantiated (debug output)
     pub work: usize,
+    /// objects visited by reachability walks (liveness, GC): part of the work measure
+    pub walked: std::cell::Cell<usize>,
     /// return / break / continue statements executed (a try body that ends with one did not raise)
     pub exit_count: usize,
     /// when the analysis started (see `MAX_MS`)
@@ -1276,6 +1278,7 @@ impl Analyzer {
             cls_slots: FxHashMap::default(),
             site_clones: FxHashMap::default(),
             work: 0,
+            walked: std::cell::Cell::new(0),
             exit_count: 0,
             started: std::time::Instant::now(),
             hard_cut: false,
@@ -2026,14 +2029,31 @@ impl Analyzer {
         }
     }
 
+    /// The work done so far: statements run, summary templates instantiated, and objects visited
+    /// by reachability walks (16 to a unit). `ROWAN_LIMITS=work=N` puts the deadlines on it
+    /// (soft at N, hard at 5N, `hardwork=`) instead of the clock: a run cut by them gives the
+    /// same result on any machine and under any load.
+    pub fn work_units(&self) -> usize {
+        self.work + self.walked.get() / 16
+    }
+
     pub fn over_deadline(&self) -> bool {
-        self.started.elapsed().as_millis() as usize > limit("ms", MAX_MS)
+        match limit("work", 0) {
+            0 => self.started.elapsed().as_millis() as usize > limit("ms", MAX_MS),
+            w => self.work_units() > w,
+        }
     }
 
     /// Past the hard deadline (`ROWAN_LIMITS=hard=N`, 5× the soft one): calls of user code
     /// are unknown code from there on.
     pub fn over_hard_deadline(&self) -> bool {
-        !disabled("harddeadline") && self.started.elapsed().as_millis() as usize > limit("hard", 5 * limit("ms", MAX_MS))
+        if disabled("harddeadline") {
+            return false;
+        }
+        match limit("work", 0) {
+            0 => self.started.elapsed().as_millis() as usize > limit("hard", 5 * limit("ms", MAX_MS)),
+            w => self.work_units() > limit("hardwork", 5 * w),
+        }
     }
 
     /// Past the hard deadline a statement in a function body does not run: its path ends, and
@@ -2786,6 +2806,7 @@ impl Analyzer {
             if !seen.insert(o) {
                 continue;
             }
+            self.walked.set(self.walked.get() + 1);
             if targets.contains(&o) {
                 found.insert(o);
                 if found.len() == targets.len() {

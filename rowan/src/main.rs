@@ -279,7 +279,7 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
         }
     }
     if std::env::var("ROWAN_DEBUG").is_ok() {
-        eprintln!("work: {} (tabulations {}, objects {}, {} ms{})", an.work, an.tab_count.values().sum::<usize>(), an.objects.len(), an.started.elapsed().as_millis(), if an.over_deadline() { ", degraded after the deadline" } else { "" });
+        eprintln!("work: {} (units {}, tabulations {}, objects {}, {} ms{})", an.work, an.work_units(), an.tab_count.values().sum::<usize>(), an.objects.len(), an.started.elapsed().as_millis(), if an.over_deadline() { ", degraded after the deadline" } else { "" });
     }
     if facts {
         return Ok((serde_json::to_string(&report::facts_json(&an)).unwrap(), deps));
