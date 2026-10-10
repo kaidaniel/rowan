@@ -1905,9 +1905,10 @@ fn m_get(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     if let Some(k) = key.kv.as_lit() {
         let recs = an.record_objects(&recv);
+        an.entry_key_events(&recs, k, st);
         if !recs.is_empty() && recs.len() == recv.pts.len() && recs.iter().all(|o| an.kind(*o) != Kind::Frame) {
             // absent from every closed target: the default alone, no load
-            if recs.iter().all(|o| { let r = st.row(*o, Ns::Item); r.closed() && !r.present.contains(k) }) {
+            if recs.iter().all(|o| { let r = st.row(*o, Ns::Item); r.lacks(k) }) {
                 return default;
             }
         }
@@ -1937,7 +1938,7 @@ fn m_setdefault(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 // present everywhere: the stored value, nothing is written
                 return an.load_item(&recv, Ns::Item, key, &c.node, st, false);
             }
-            if rows.iter().all(|r| (r.closed() && !r.present.contains(k)) || r.absent.contains(k)) {
+            if rows.iter().all(|r| r.lacks(k)) {
                 // absent everywhere: the default is stored and returned
                 an.store_item(&recv, Ns::Item, key, &default, &c.node, st);
                 return default;
@@ -2059,9 +2060,10 @@ fn m_pop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     if let Some(k) = key.kv.as_lit() {
         let recs = an.record_objects(&recv);
+        an.entry_key_events(&recs, k, st);
         if !recs.is_empty() && recs.len() == recv.pts.len() && recs.iter().all(|o| an.kind(*o) != Kind::Frame) {
             let rows: Vec<Row> = recs.iter().map(|o| st.row(*o, Ns::Item)).collect();
-            if has_default && rows.iter().all(|r| r.closed() && !r.present.contains(k)) {
+            if has_default && rows.iter().all(|r| r.lacks(k)) {
                 // absent everywhere: the default alone
                 return c.args[1].clone();
             }

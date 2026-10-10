@@ -380,6 +380,19 @@ impl Analyzer {
         !self.sum_stack.is_empty() && (oid < *self.sum_obj_mark.last().unwrap() || self.kind(oid) == Kind::Ph)
     }
 
+    /// Presence of literal key k in records from outside the function (`os.environ`, a
+    /// global) that the summary leaves undecided: decided per call site.
+    pub fn entry_key_events(&mut self, recs: &[ObjId], k: crate::intern::KeyId, st: &crate::state::State) {
+        for o in recs {
+            if self.kind(*o) != Kind::Ph && self.is_entry_object(*o) {
+                let r = st.row(*o, crate::domain::Ns::Item);
+                if !r.definite.contains(k) && !r.lacks(k) {
+                    self.record_event("concrete", *o);
+                }
+            }
+        }
+    }
+
     /// The symbolic analysis just lost information about entry object `ph`.
     pub fn record_event(&mut self, kind: &'static str, ph: ObjId) {
         if !self.sum_stack.is_empty() && (self.kind(ph) == Kind::Ph || self.is_entry_object(ph)) {

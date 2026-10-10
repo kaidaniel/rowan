@@ -635,7 +635,7 @@ pub fn m_template(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                                 let recs = an.record_objects(m);
                                 let rows: Vec<crate::domain::Row> = recs.iter().map(|o| st.row(*o, Ns::Item)).collect();
                                 let k = intern::key_str_lit(n);
-                                if !recs.is_empty() && rows.iter().all(|r| (r.closed() && !r.present.contains(k)) || r.absent.contains(k)) {
+                                if !recs.is_empty() && rows.iter().all(|r| r.lacks(k)) {
                                     push(&mut out, Some(format!("${}", n)));
                                     continue;
                                 }

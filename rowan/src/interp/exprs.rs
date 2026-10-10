@@ -1016,7 +1016,7 @@ impl Analyzer {
                                         if rows.iter().all(|r| r.definite.contains(k)) {
                                             return Some(op == ast::CmpOp::In);
                                         }
-                                        if rows.iter().all(|r| r.closed() && !r.present.contains(k)) {
+                                        if rows.iter().all(|r| r.lacks(k)) {
                                             return Some(op != ast::CmpOp::In);
                                         }
                                     }
@@ -1043,16 +1043,21 @@ impl Analyzer {
                         }
                     }
                     let recs = self.record_objects(&b);
+                    self.entry_key_events(&recs, k, state);
                     if !b.pts.is_empty() && recs.len() == b.pts.len() && recs.iter().all(|o| matches!(self.kind(*o), Kind::Dict | Kind::Frame)) {
                         let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
                         let member = if rows.iter().all(|r| r.definite.contains(k)) {
                             true
-                        } else if rows.iter().all(|r| r.closed() && !r.present.contains(k)) {
+                        } else if rows.iter().all(|r| r.lacks(k)) {
                             false
                         } else {
                             return None;
                         };
                         return Some(if op == ast::CmpOp::In { member } else { !member });
+                    }
+                    // removed (`del`, `pop`) or excluded on every path, whatever the container
+                    if !b.pts.is_empty() && recs.len() == b.pts.len() && recs.iter().all(|o| state.row(*o, Ns::Item).absent.contains(k)) {
+                        return Some(op != ast::CmpOp::In);
                     }
                 }
                 None

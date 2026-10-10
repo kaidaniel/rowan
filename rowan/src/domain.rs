@@ -661,6 +661,11 @@ impl Row {
         !self.open()
     }
 
+    /// k is surely not a key: removed on every path, or the row is closed without it.
+    pub fn lacks(&self, k: KeyId) -> bool {
+        self.absent.contains(k) || (self.closed() && !self.present.contains(k))
+    }
+
     pub fn is_map(&self) -> bool {
         self.sources.iter().any(|(s, _)| source_is_data(s))
     }
