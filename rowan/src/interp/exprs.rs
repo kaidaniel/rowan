@@ -181,7 +181,7 @@ impl Analyzer {
                         _ => matches!(self.kind(o), Kind::Function | Kind::Bound | Kind::Class | Kind::Partial),
                     });
                     if !all_safe {
-                        *self.may_raise.last_mut().unwrap() = true;
+                        self.flag_may_raise(state);
                     }
                 }
                 let nd = frontend::node(node);

@@ -302,9 +302,7 @@ impl Analyzer {
         if let Some(t) = self.raise_stack.last_mut() {
             *t = true;
         }
-        if let Some(m) = self.may_raise.last_mut() {
-            *m = true;
-        }
+        self.flag_may_raise(state);
         // unknown code may remove keys stored through names
         state.drop_name_keys(None);
         // unknown code may change what an earlier test read: facts about it no longer hold
@@ -1361,6 +1359,18 @@ impl Analyzer {
             *t = true;
         }
         if let Some(m) = self.may_raise.last_mut() {
+            *m = true;
+        }
+    }
+
+    /// The running try context may raise from here on (where exactly is not known): the
+    /// requirements recorded so far are its handler's too.
+    pub fn flag_may_raise(&mut self, state: &mut State) {
+        let d = self.may_raise.len();
+        if let Some(m) = self.may_raise.last_mut() {
+            if !*m && !super::disabled("flagreqs") {
+                self.flag_reqs.push((d, state.reqs.copy()));
+            }
             *m = true;
         }
     }

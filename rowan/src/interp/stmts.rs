@@ -1230,10 +1230,14 @@ impl Analyzer {
         self.cond_depth += 1;
         self.branch_depth += 1;
         let exits_before = self.exit_count;
+        let fl_mark = self.flag_reqs.len();
+        let fl_depth = self.may_raise.len();
         self.exec_block(&t.body, state);
         self.guards.pop();
         self.try_marks.pop();
         self.try_sum_depth.pop();
+        // the requirements known where the body first may have raised anywhere
+        let mut flag_reqs = self.flag_reqs.drain(fl_mark..).find(|(d, _)| *d == fl_depth).map(|(_, r)| r);
         // a body that ended because it returned (or broke out) did not raise
         let flagged = self.may_raise.pop().unwrap_or(false);
         let mut raised_at = self.raise_states.pop().flatten();
@@ -1258,7 +1262,15 @@ impl Analyzer {
         // the handler starts from the states at the accesses that may raise; anything else
         // that may raise (unknown calls, raise statements, callees) can happen anywhere
         let mut handler_entry: Option<State> = if !t.handlers.is_empty() {
-            let mut e = if generic { pre.join(&mut body_end) } else { State::bottom() };
+            let mut e = if generic {
+                let mut g = pre.copy();
+                if let Some(r) = flag_reqs.as_mut() {
+                    g.reqs = r.copy();
+                }
+                g.join(&mut body_end)
+            } else {
+                State::bottom()
+            };
             if let Some(mut r) = raised_at {
                 e = if e.reachable { e.join(&mut r) } else { r };
             }

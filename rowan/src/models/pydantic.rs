@@ -1045,9 +1045,8 @@ impl Analyzer {
         // an exception pydantic does not catch (KeyError, …) escapes: the enclosing try / call
         // learns it may raise
         if flagged {
-            if let Some(m) = self.may_raise.last_mut() {
-                *m = true;
-            }
+            let mut pre2 = pre.copy();
+            self.flag_may_raise(&mut pre2);
         }
         let Some(mut r) = raised_at else { return (out, false, false) };
         let died = !state.reachable;
