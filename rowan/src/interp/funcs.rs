@@ -980,7 +980,8 @@ impl Analyzer {
         if row.open() || row.present != row.definite || row.present.len() > UNROLL_MAX {
             return None;
         }
-        if state.has_slot(oid, Ns::Item, STAR) {
+        // (a Counter's STAR slot is the count of a missing key, not a key)
+        if state.has_slot(oid, Ns::Item, STAR) && !self.counters.contains(&oid) {
             return None;
         }
         // insertion order when it is known (a guess would make order-dependent results wrong)

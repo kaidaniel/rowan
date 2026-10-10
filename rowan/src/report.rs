@@ -467,6 +467,17 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
             }
             render_record(an, state, o, Ns::Item, None, depth, seen)
         }
+        // a (key, value) pair of `items()` / `zip` / `enumerate`: a 2-tuple
+        Kind::Pair => {
+            let crate::interp::Payload::Pair(k, v) = &an.obj(o).payload else { return "?".into() };
+            if depth >= max_depth {
+                return "(…)".into();
+            }
+            seen.push(o);
+            let out = format!("({}, {})", render_value(an, state, k, deeper, seen), render_value(an, state, v, deeper, seen));
+            seen.pop();
+            out
+        }
         Kind::List | Kind::Tuple | Kind::Set => {
             let (open, close, ty) = match kind {
                 Kind::List => ("[", "]", "list"),
@@ -492,6 +503,15 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
                         format!("({},)", items[0])
                     } else {
                         format!("{}{}{}", open, items.join(", "), close)
+                    }
+                }
+                // a set of known literal members: them, sorted (a set has no order)
+                Some(n) if kind == Kind::Set && depth < max_depth && n <= MAX_ITEMS && set_members(state, o, n).is_some() => {
+                    let ms = set_members(state, o, n).unwrap();
+                    if ms.is_empty() {
+                        "set()".into()
+                    } else {
+                        format!("{{{}}}", ms.iter().map(|k| render_value(an, state, &Value::lit(*k), deeper, seen)).collect::<Vec<_>>().join(", "))
                     }
                 }
                 // unknown length: what any element may be, in typing notation
@@ -842,4 +862,16 @@ fn cons_atoms(c: &crate::shape::Cons, out: &mut Vec<crate::shape::AtomId>) {
             g.iter().for_each(|x| cons_atoms(x, out));
         }
     }
+}
+
+/// The members of set `o` of known length `n` when every position holds one literal, sorted.
+fn set_members(state: &State, o: ObjId, n: usize) -> Option<Vec<crate::intern::KeyId>> {
+    let mut ms = Vec::new();
+    for i in 0..n {
+        let sv = state.slot_opt(o, Ns::Pos, intern::key_int(i as i64))?;
+        ms.push(sv.kv.as_lit().filter(|_| sv.pts.is_empty())?);
+    }
+    ms.sort_by(|a, b| crate::interp::exprs::literal_order(*a, *b).unwrap_or_else(|| intern::key_repr(*a).cmp(&intern::key_repr(*b))));
+    ms.dedup();
+    Some(ms)
 }

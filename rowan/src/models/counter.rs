@@ -248,7 +248,7 @@ pub fn m_counter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     if let Some(n) = n {
                         cs.truncate(n.max(0) as usize);
                     }
-                    let items: Vec<Value> = cs.iter().map(|(k, n)| an.alloc_positional(Kind::Tuple, &c.node, Some(vec![Value::lit(*k), Value::lit(intern::key_int(*n))]), Value::new(), crate::domain::DATA, st)).collect();
+                    let items: Vec<Value> = cs.iter().enumerate().map(|(i, (k, n))| an.alloc_positional_sfx(Kind::Tuple, &c.node, &format!("#mc{}", i), Some(vec![Value::lit(*k), Value::lit(intern::key_int(*n))]), Value::new(), crate::domain::DATA, st)).collect();
                     an.alloc_positional(Kind::List, &c.node, Some(items), Value::new(), crate::domain::DATA, st)
                 }
                 None => {

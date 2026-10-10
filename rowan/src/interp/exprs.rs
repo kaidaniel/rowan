@@ -831,7 +831,15 @@ impl Analyzer {
     /// A fresh list / tuple at `nd`: with `vals` its positions are known (while the allocation
     /// is single), otherwise its elements are `elem`; `kv` is its element key-value.
     pub fn alloc_positional(&mut self, kind: Kind, nd: &Node, vals: Option<Vec<Value>>, elem: Value, kv: KeyVal, state: &mut State) -> Value {
-        let nid = self.alloc_at(kind, nd, state, &format!("{}@L{}", kind.name(), nd.line), Payload::None, None, Ns::Item, None, None);
+        self.alloc_positional_sfx(kind, nd, "", vals, elem, kv, state)
+    }
+
+    /// `alloc_positional` at the node's site plus `sfx` (several objects one model call makes
+    /// at one node, e.g. the pairs of `most_common`: `#0`, `#1`, …).
+    #[allow(clippy::too_many_arguments)]
+    pub fn alloc_positional_sfx(&mut self, kind: Kind, nd: &Node, sfx: &str, vals: Option<Vec<Value>>, elem: Value, kv: KeyVal, state: &mut State) -> Value {
+        let site = format!("{}{}", crate::interp::site_string(nd), sfx);
+        let nid = self.alloc(kind, &site, state, &format!("{}@L{}", kind.name(), nd.line), Payload::None, None, Ns::Item, None, None);
         let single = self.obj(nid).single;
         let acc = match &vals {
             Some(vs) => crate::domain::join_values(vs.clone()),
