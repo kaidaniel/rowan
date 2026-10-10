@@ -1236,6 +1236,47 @@ impl Analyzer {
                 return;
             }
         }
+        // a closed dict with some keys only maybe there: each item unrolled, a maybe one run
+        // on one path and skipped on the other
+        if it.items.is_none() {
+            if let Some(mitems) = self.maybe_dict_items(&itv, state) {
+                let mut breaks: Option<State> = None;
+                for (idx, (item, sure)) in mitems.iter().enumerate() {
+                    if !state.reachable {
+                        break;
+                    }
+                    let mut skipped = if *sure { None } else { Some(state.copy()) };
+                    self.frame_mut().unroll.push(idx);
+                    self.bind_iter_target(&f.target, &Elem::One(item.clone()), state);
+                    self.loop_stack.push(LoopCtx::default());
+                    self.exec_block(&f.body, state);
+                    let ctx = self.loop_stack.pop().unwrap();
+                    self.frame_mut().unroll.pop();
+                    if let Some(mut c) = ctx.continues {
+                        let j = if state.reachable { state.join(&mut c) } else { c };
+                        state.replace_with(j);
+                    }
+                    if let Some(mut b) = ctx.breaks {
+                        breaks = Some(match breaks.take() {
+                            None => b,
+                            Some(mut e) => e.join(&mut b),
+                        });
+                    }
+                    if let Some(mut s0) = skipped.take() {
+                        let j = if state.reachable { state.join(&mut s0) } else { s0 };
+                        state.replace_with(j);
+                    }
+                }
+                if !f.orelse.is_empty() && state.reachable {
+                    self.exec_block(&f.orelse, state);
+                }
+                if let Some(mut b) = breaks {
+                    let j = if state.reachable { state.join(&mut b) } else { b };
+                    state.replace_with(j);
+                }
+                return;
+            }
+        }
         // (a loop that may break off: where the iterator stands after it is not known)
         if let (Some(o), true) = (once, has_jump) {
             self.set_cursor(o, None, state);
@@ -1726,6 +1767,8 @@ impl Analyzer {
     /// on another path keeps that path's keys).
     fn drop_garbage_at_return(&mut self, v: &Value, state: &mut State) {
         let Some(crate::interp::PreCall(mark, pre)) = self.frame().pre_call.clone() else { return };
+        // (only a value without objects: what models tie to objects — payloads, side tables —
+        // is not followed here)
         if !v.pts.is_empty() || matches!(v.kv, KeyVal::KeysOf(_)) || !matches!(self.frame().kind, FrameKind::Function) {
             return;
         }
@@ -1750,7 +1793,8 @@ impl Analyzer {
                 out.extend(ko.objs.iter());
             }
         };
-        // roots: what older objects' changed slots hold (globals, parameters, cells, …)
+        // roots: the returned value, and what older objects' changed slots hold (globals,
+        // parameters, cells, …)
         let mut work: Vec<u32> = Vec::new();
         for (o, sk) in fp.slots.iter() {
             if *o < mark {

@@ -1020,6 +1020,42 @@ impl Analyzer {
     }
 
     /// [(key, value)] for a closed dict whose keys are all definite literals (unrollable).
+    /// A loop over a closed dict (or a view of one) whose keys are known in their order but
+    /// some only maybe there: its items, each with whether it surely comes (a `for` runs a
+    /// maybe item on one path and skips it on the other).
+    pub fn maybe_dict_items(&mut self, v: &Value, state: &State) -> Option<Vec<(Value, bool)>> {
+        if super::disabled("maybeitems") {
+            return None;
+        }
+        let o = v.single().filter(|_| v.kv.is_bot())?;
+        let (d, vk) = match (self.kind(o), &self.obj(o).payload) {
+            (Kind::Dict, _) => (o, ViewKind::Keys),
+            (Kind::View, Payload::View(vk, recv)) if matches!(vk, ViewKind::Keys | ViewKind::Values | ViewKind::Items | ViewKind::Proxy) => (recv.single().filter(|r| recv.kv.is_bot() && self.kind(*r) == Kind::Dict)?, *vk),
+            _ => return None,
+        };
+        let row = state.row(d, Ns::Item);
+        if !row.closed() || row.symbolic() || row.present == row.definite || row.present.len() > UNROLL_MAX || state.has_slot(d, Ns::Item, STAR) || self.counters.contains(&d) {
+            return None;
+        }
+        let keys = row.ordered_keys()?;
+        let mut out = Vec::new();
+        for k in keys {
+            let sure = row.definite.contains(k);
+            let val = state.slot(d, Ns::Item, k);
+            let item = match vk {
+                ViewKind::Keys | ViewKind::Proxy => Value::lit(k),
+                ViewKind::Values => val,
+                _ => {
+                    let pid = self.alloc_raw(Kind::Pair, &format!("pair:{}:{}", o, intern::key_repr(k)), "", true, "pair", Payload::Pair(Value::lit(k), val.clone()));
+                    self.obj_mut(pid).payload = Payload::Pair(Value::lit(k), val);
+                    Value::obj(pid)
+                }
+            };
+            out.push((item, sure));
+        }
+        Some(out)
+    }
+
     pub fn literal_dict_items(&mut self, oid: u32, state: &State) -> Option<Vec<(KeyId, Value)>> {
         if self.kind(oid) == Kind::Ph {
             self.record_event("iter", oid);
