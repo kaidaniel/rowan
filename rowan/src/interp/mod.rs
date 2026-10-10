@@ -873,6 +873,8 @@ pub struct Analyzer {
     pub pyd_errs: Vec<Vec<crate::models::pydantic::PErr>>,
     pub pyd_verrs: Vec<Vec<crate::models::pydantic::PErr>>,
     pub pyd_field: Option<KeyId>,
+    /// the instance whose field is being validated (containers made for it are its own)
+    pub pyd_inst: Option<ObjId>,
     pub pyd_last_failed: bool,
     /// pydantic instances: the fields their input surely / maybe gave (`model_fields_set`)
     pub pyd_set: FxHashMap<ObjId, (KeySet, KeySet)>,
@@ -1127,6 +1129,7 @@ impl Analyzer {
             pyd_errs: Vec::new(),
             pyd_verrs: Vec::new(),
             pyd_field: None,
+            pyd_inst: None,
             pyd_last_failed: false,
             pyd_set: FxHashMap::default(),
             pyd_inputs: FxHashMap::default(),
@@ -1508,9 +1511,16 @@ impl Analyzer {
     }
 
     /// `alloc` at an AST node.
+    /// A model's `ctx` is a suffix of the frame's context: the same code run from two call
+    /// contexts makes two objects.
     pub fn alloc_at(&mut self, kind: Kind, node: &Node, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, single: Option<bool>, ctx: Option<&str>) -> ObjId {
         let site = site_string(node);
-        self.alloc(kind, &site, state, label, payload, row, ns, single, ctx)
+        let full = match ctx {
+            Some(c) if !disabled("allocctx") => Some(format!("{}/{}", self.frame().ctx, c)),
+            Some(c) => Some(c.to_string()),
+            None => None,
+        };
+        self.alloc(kind, &site, state, label, payload, row, ns, single, full.as_deref())
     }
 
     /// Short form used by most models: a record-ish object at a node with a row.

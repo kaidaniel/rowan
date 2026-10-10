@@ -595,7 +595,9 @@ impl Analyzer {
             let data = args.first().cloned().or_else(|| kwargs.get(&s("root")).cloned()).unwrap_or_else(|| Value::data("root"));
             return self.pyd_root_instance(cls, &data, state, node);
         }
-        let did = self.alloc_at(Kind::Dict, node, state, &format!("{}(…)@L{}", self.class_info(cls).name, node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some("pydinput"));
+        // (per call context: two constructions at one node from different callers stay apart)
+        let ictx = "pydinput".to_string();
+        let did = self.alloc_at(Kind::Dict, node, state, &format!("{}(…)@L{}", self.class_info(cls).name, node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&ictx));
         state.set_row(did, Ns::Item, Row::new());
         for sk in star_kwargs {
             self.copy_into(did, Ns::Item, sk, state, true, &KeySet::new());
@@ -923,6 +925,7 @@ impl Analyzer {
                 val = val.join(&std::mem::take(&mut dflt));
             }
             self.pyd_field = Some(kk);
+            let saved_inst = self.pyd_inst.replace(inst);
             // a field surely missing / surely not converting: its validators do not run
             let failed = |an: &Analyzer| an.pyd_errs.last().map(|es| es.iter().any(|e| e.sure && e.loc == Some(kk))).unwrap_or(false);
             // field validators before the type's conversion, then the conversion, then after
@@ -943,6 +946,7 @@ impl Analyzer {
                 }
             }
             val = val.join(&dflt);
+            self.pyd_inst = saved_inst;
             let r = state.row(inst, Ns::Attr).store(nk, true);
             state.set_row(inst, Ns::Attr, r);
             state.set_slot(inst, Ns::Attr, nk, val, true);
@@ -1427,19 +1431,38 @@ impl Analyzer {
             return self.call_value(&fv, node, None, state, Some(vec![]));
         }
         match f.default {
-            // (in the module defining the field: `Priority.NORMAL` names the model's module's)
+            // (in the module defining the field: `Priority.NORMAL` names the model's module's;
+            // a mutable default is copied per instance, here per construction site)
             Some(d) => {
-                let here = self.module_info(self.frame().module).idx;
-                let owner = crate::frontend::module_of_addr(d as *const ast::Expr as usize);
-                if let Some(idx) = owner.filter(|i| *i != here && !crate::interp::disabled("pyddefaultmodule")) {
-                    if let Some(moid) = self.modules.values().copied().find(|m| self.module_info(*m).idx == idx) {
-                        return self.eval_in_module(moid, d, state);
+                let v = self.pyd_default_expr(d, state);
+                if crate::interp::disabled("pyddefaultcopy") {
+                    return v;
+                }
+                let mut out = Value::kv_only(v.kv.clone());
+                for o in v.pts.iter() {
+                    if matches!(self.kind(o), Kind::List | Kind::Dict | Kind::Set) {
+                        let mut seen = IndexMap::new();
+                        out = out.join(&Value::obj(self.copy_object(o, node, state, true, &mut seen)));
+                    } else {
+                        out = out.join(&Value::obj(o));
                     }
                 }
-                self.eval(d, state)
+                out
             }
             None => Value::new(),
         }
+    }
+
+    /// A field's default expression, evaluated in the module defining it.
+    fn pyd_default_expr(&mut self, d: &'static ast::Expr, state: &mut State) -> Value {
+        let here = self.module_info(self.frame().module).idx;
+        let owner = crate::frontend::module_of_addr(d as *const ast::Expr as usize);
+        if let Some(idx) = owner.filter(|i| *i != here && !crate::interp::disabled("pyddefaultmodule")) {
+            if let Some(moid) = self.modules.values().copied().find(|m| self.module_info(*m).idx == idx) {
+                return self.eval_in_module(moid, d, state);
+            }
+        }
+        self.eval(d, state)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1760,7 +1783,10 @@ impl Analyzer {
                     }
                     let it = self.iterate(&Value::obj(o), node, state);
                     // (one list per input list: nested lists in one validation stay apart)
-                    let ctx = format!("pyl{}", o);
+                    let ctx = match self.pyd_inst.filter(|_| !crate::interp::disabled("pylinst")) {
+                        Some(i) => format!("pyl{}i{}", o, i),
+                        None => format!("pyl{}", o),
+                    };
                     match it.items {
                         Some(items) => {
                             let conv: Vec<Value> = items.iter().map(|x| self.pyd_convert(inner, x, state, node)).collect();
