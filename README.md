@@ -1,5 +1,10 @@
 # rowan
 
+> [!WARNING]
+> **rowan is experimental.** It is extensively tested (about a thousand example programs,
+> checked against real Python, pandas, pydantic, FastAPI and PyTorch runs), but it has not been
+> used in practice on real code bases. On large programs (thousands of lines and up) it may time out or crash.
+
 **rowan runs your Python program without running it.** It interprets the program abstractly:
 every name holds a *set of possible values* (literals, dicts, lists, instances, functions,
 tensors, DataFrames, … or `?` for something it cannot know), every branch is taken, every
