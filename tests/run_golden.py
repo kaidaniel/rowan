@@ -188,6 +188,12 @@ def check_results(verdict_exp, row_exp_checks, schema_exp, vs, sch) -> List[str]
             # present in another) say the same, more precisely
             if tier == "possibly" and any(v["tier"] in ("missing", "likely-missing") for v in matches) and any(v["tier"] in ("proven", "likely", "input") for v in matches):
                 continue
+            # (the oracle's reading: the line raised for k in some runs and not in others, where
+            # the access read another key: rowan's per-key verdicts say k fails, the other key not)
+            if tier == "possibly" and matches and all(v["tier"] in ("missing", "likely-missing") for v in matches):
+                cols = {v.get("col") for v in matches}
+                if any(v["key"] != key_str(key) and v.get("col") in cols and v["tier"] in ("proven", "likely", "input") for v in here):
+                    continue
             # and the converse: per-run tiers that differ (`ok k ; missing k`) joined into one
             # verdict over the runs are `possibly`
             if tier != "possibly" and any(v["tier"] == "possibly" for v in matches):
