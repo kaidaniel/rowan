@@ -476,12 +476,28 @@ impl Analyzer {
                 }
                 KeyVal::Param(ph) => {
                     // `k in d` with k a parameter: decided per call site when k is a literal there
-                    self.record_event("narrow", *ph);
-                }
-                // an unknown key in closed dicts of string keys: one of those keys
-                KeyVal::KeysOf(_) | KeyVal::Data(_) if member && !crate::interp::disabled("keysofin") => {
+                    // (closed dicts of string keys: the key is one of theirs at any call site)
                     let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
-                    if rows.iter().all(|r| r.closed() && !r.symbolic()) && lv.pts.is_empty() {
+                    // (a module-level dict read in a summary is a placeholder: maybe closed)
+                    let global_ph = |an: &Analyzer, o: u32| an.kind(o) == Kind::Ph && an.ph_info(o).parent.map(|p| an.kind(p) == Kind::Module).unwrap_or(false);
+                    let closed = recs.iter().zip(rows.iter()).all(|(o, r)| global_ph(self, *o) || self.is_entry_object(*o) || (r.closed() && !r.symbolic() && r.present.iter().all(intern::key_is_str))) && !crate::interp::disabled("keysofin");
+                    self.record_event(if closed && member { "keynarrow" } else { "narrow" }, *ph);
+                }
+                _ if lv.pts.iter().any(|o| self.kind(o) == Kind::Ph) && !crate::interp::disabled("keysofin") => {
+                    // (closed dicts of string keys: the key is one of theirs at any call site)
+                    let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
+                    let closed = rows.iter().all(|r| r.closed() && !r.symbolic() && r.present.iter().all(intern::key_is_str));
+                    for o in lv.pts.iter() {
+                        if self.kind(o) == Kind::Ph {
+                            self.record_event(if closed && member { "keynarrow" } else { "narrow" }, o);
+                        }
+                    }
+                }
+                // an unknown key (data, or an unknown value's object) in closed dicts of string
+                // keys: one of those keys
+                KeyVal::KeysOf(_) | KeyVal::Data(_) | KeyVal::Bot if member && !crate::interp::disabled("keysofin") && (lv.pts.is_empty() || lv.pts.iter().all(|o| self.kind(o) == Kind::Unknown)) && !(lv.pts.is_empty() && lv.kv.is_bot()) => {
+                    let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
+                    if rows.iter().all(|r| r.closed() && !r.symbolic()) {
                         let mut may = KeySet::new();
                         for r in &rows {
                             may = may.union(&r.present);

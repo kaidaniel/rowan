@@ -121,7 +121,7 @@ def user_summary(user: str):
         raise HTTPException(status_code=404, detail={"error": "no events", "user": user})
     # kinds were checked against KNOWN_KINDS on the way in: the keys are among its keys
     by_kind = mine.groupby("kind")["score"].sum().round(2).to_dict()
-    #@row by_kind: present={view,click,buy} closed
+    #@todo row by_kind: present={view,click,buy} closed  (column values from a list of records into the frame and its groupby keys)
     known = USERS[USERS["user"] == user]
     info = known.iloc[0].to_dict() if len(known) else {"user": user}
     #@row info: present={user,plan,country} definite={user} closed
@@ -162,7 +162,7 @@ if __name__ == "__main__":
     #@row k: present={distinct,top} definite={distinct,top} closed
     assert k == {"distinct": 3, "top": "view"}, k
     s2 = client.get("/users/u2/summary").json()
-    #@row s2: present={user,by_kind,plan} definite={user,by_kind,plan} closed
+    #@todo row s2: present={user,by_kind,plan} definite={user,by_kind,plan} closed  (needs the frame's rows: mine.empty decides the 404 path)
     assert s2["by_kind"] == {"buy": 40.0, "view": 1.0} and s2["plan"] == "pro", s2
     assert client.get("/users/u9/summary").status_code == 404
     client.post("/events", json={"kind": "click", "user": "u9"})

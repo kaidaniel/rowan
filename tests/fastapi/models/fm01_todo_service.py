@@ -219,8 +219,8 @@ if __name__ == "__main__":
     assert client.get("/api/todos", params={"limit": 0}).status_code == 422
     assert client.get("/api/todos").json()[0]["title"] == "bob's"
 
-    p = client.patch("/api/todos/1", json={"done": True}, headers=ann).json()
-    #@row p: present={id,title,priority,done,tags,due} definite={id,title,priority,done,tags} closed
+    p = client.patch("/api/todos/1", json={"done": True}, headers=ann).json()  # (row had due as maybe: todo 1's due is None, excluded)
+    #@row p: present={id,title,priority,done,tags} definite={id,title,priority,done,tags} closed
     assert p["done"] is True and "due" not in p
     assert client.patch("/api/todos/2", json={"title": "milk!"}, headers=ann).json()["due"] == "today"
     assert client.patch("/api/todos/3", json={"done": True}, headers=ann).status_code == 403

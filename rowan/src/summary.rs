@@ -1195,6 +1195,12 @@ impl Analyzer {
                         return Some(ev.clone());
                     }
                 }
+                // an unknown key tested against closed dicts: narrows to their keys anywhere
+                "keynarrow" => {
+                    if !v.empty() && !v.pts.iter().any(|o| self.kind(o) == Kind::Ph) && v.kv.as_param().is_none() {
+                        return Some(ev.clone());
+                    }
+                }
                 "isinstance" | "concrete" | "guarded" => {
                     if !concrete.is_empty() {
                         return Some(ev.clone());
