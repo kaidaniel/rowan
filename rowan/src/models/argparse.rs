@@ -262,8 +262,9 @@ fn read_arg(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<ArgSpec> {
     };
     let choices = match c.kw("choices") {
         Some(ch) => {
+            // (choices not known item by item: values are not checked against them)
             let it = an.iterate(&ch, &c.node, st);
-            Some(it.items?)
+            Some(it.items.unwrap_or_else(|| vec![Value::data("choice")]))
         }
         None => None,
     };
