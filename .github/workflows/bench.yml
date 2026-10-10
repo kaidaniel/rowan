@@ -1,0 +1,162 @@
+# Benchmarks: rowan on three large real programs, without its deadlines, one job each in
+# parallel, cut at 5 minutes. Records wall time, peak memory, rowan's deterministic work
+# counters and verdict counts, plus a `perf` profile (top functions in the job summary, a
+# flamegraph as an artifact). Informational only: every job has continue-on-error, and this
+# workflow must not be a required status check, so it never blocks a merge.
+name: Bench
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: bench-${{ github.ref }}
+  # (on main every commit keeps its numbers; on a PR a newer push supersedes the run)
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  UV_PYTHON_PREFERENCE: managed
+
+jobs:
+  build:
+    name: build (frame pointers)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rowan
+          key: bench-fp
+
+      - name: Build (release, with frame pointers for perf's call stacks)
+        working-directory: rowan
+        env:
+          RUSTFLAGS: -C force-frame-pointers=yes
+        run: cargo build --release --locked
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bench-rowan
+          path: rowan/target/release/rowan
+          retention-days: 3
+
+  bench:
+    name: bench ${{ matrix.program }}
+    needs: build
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        program: [stdlib12k, email, rich]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          cache-dependency-glob: .python-version
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: bench-rowan
+          path: bin
+
+      - run: chmod +x bin/rowan
+
+      - name: Prepare the program
+        id: prep
+        run: echo "file=$(uv run --no-project python bench/prepare.py ${{ matrix.program }})" >> "$GITHUB_OUTPUT"
+
+      - name: Install perf and inferno (profiling is optional)
+        id: perf
+        continue-on-error: true
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq linux-tools-common "linux-tools-$(uname -r)" \
+            || sudo apt-get install -y -qq linux-tools-common linux-tools-azure
+          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+          perf --version
+          cargo install inferno --locked --quiet
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run (no deadlines, 5 minute timeout)
+        run: |
+          PERF=""
+          if [ "${{ steps.perf.outputs.ok }}" = "true" ]; then PERF="--perf perf.data"; fi
+          uv run --no-project python bench/run.py ${{ matrix.program }} bin/rowan \
+            "${{ steps.prep.outputs.file }}" --timeout 300 --out results $PERF
+
+      - name: Profile report
+        if: steps.perf.outputs.ok == 'true'
+        continue-on-error: true
+        run: |
+          perf report -i perf.data --stdio --no-children --sort symbol --percent-limit 0.5 2>/dev/null \
+            | grep -v '^#' | grep -v '^$' | head -25 > results/${{ matrix.program }}.profile.txt
+          perf script -i perf.data 2>/dev/null | inferno-collapse-perf | inferno-flamegraph \
+            --title "rowan: ${{ matrix.program }}" > results/${{ matrix.program }}.flamegraph.svg
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.program }}"
+            echo
+            echo "| program | result | wall | peak memory | work | units | tabulations | objects | ✗/⚠ verdicts |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+            cat results/${{ matrix.program }}.md 2>/dev/null || echo "| ${{ matrix.program }} | no result | | | | | | | |"
+            if [ -s results/${{ matrix.program }}.profile.txt ]; then
+              echo
+              echo "Top functions by self time (perf, frame-pointer stacks; flamegraph in the artifact):"
+              echo
+              echo '```'
+              cat results/${{ matrix.program }}.profile.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          gzip -f results/*.err 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bench-${{ matrix.program }}
+          path: results/
+          retention-days: 30
+
+  summary:
+    name: summary
+    needs: bench
+    if: always()
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bench-*
+          path: results
+          merge-multiple: true
+
+      - name: One table for all programs
+        run: |
+          {
+            echo "## rowan benchmarks (no deadlines, 5 minute timeout per program)"
+            echo
+            echo "| program | result | wall | peak memory | work | units | tabulations | objects | ✗/⚠ verdicts |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+            for p in stdlib12k email rich; do
+              cat "results/$p.md" 2>/dev/null || echo "| $p | no result | | | | | | | |"
+            done
+            echo
+            echo "Wall time and memory vary ±10–20% between runners; work, units, tabulations and objects are deterministic."
+            echo "Per-program profiles: the bench jobs' summaries; flamegraphs: the bench-<program> artifacts."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -38,6 +38,8 @@ uv run --no-project --with pandas --with pydantic --with pydantic-settings --wit
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py [case…]
 cd vscode-rowan && node test.js && npm run package  # hover rendering check; rebuilds rowan-0.1.0.vsix
 cargo install --path rowan                          # the installed binary (~/.cargo/bin/rowan)
+uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"
+                                                    # benchmark (stdlib12k / email / rich), no deadlines; CI: bench.yml
 ```
 
 The oracle runs one fresh Python process per case, plus one per key a `#@schema` checks, each
