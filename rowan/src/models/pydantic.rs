@@ -1098,10 +1098,14 @@ impl Analyzer {
             return join_values(outs);
         }
         if !report && self.fa_body_validation && !errs.is_empty() && state.reachable && !crate::interp::disabled("fabody422") {
-            if errs.iter().any(|e| e.sure) {
-                self.raise_here("RequestValidationError", state);
+            if crate::interp::disabled("fadetail") {
+                if errs.iter().any(|e| e.sure) {
+                    self.raise_here("RequestValidationError", state);
+                } else {
+                    self.may_raise_here("RequestValidationError", state);
+                }
             } else {
-                self.may_raise_here("RequestValidationError", state);
+                self.pyd_raise_errors_as(errs.clone(), state, node, "RequestValidationError");
             }
         }
         if report && !errs.is_empty() && state.reachable {
@@ -1113,6 +1117,12 @@ impl Analyzer {
 
     /// A ValidationError holding `errs` (its `errors()`), raised here when one is sure.
     fn pyd_raise_errors(&mut self, errs: Vec<PErr>, state: &mut State, node: &Node) {
+        self.pyd_raise_errors_as(errs, state, node, "ValidationError");
+    }
+
+    /// The same, raised as `cls` (FastAPI's `RequestValidationError` for a request body: the
+    /// errors object travels with it, for the 422 detail).
+    fn pyd_raise_errors_as(&mut self, errs: Vec<PErr>, state: &mut State, node: &Node, cls: &str) {
         let sure = errs.iter().any(|e| e.sure);
         // (an equal list made before: the same one)
         let idx = match self.pyd_verrs.iter().position(|l| *l == errs) {
@@ -1155,12 +1165,16 @@ impl Analyzer {
         self.obj_mut(eo).payload = Payload::Method(format!("pydverr.{}", use_idx), Value::new());
         state.set_row(eo, Ns::Attr, Row::new().data_store(crate::domain::Source::new("ValidationError", crate::domain::SourceKind::Data)));
         self.cur_exc = Some(Value::obj(eo));
+        if cls != "ValidationError" {
+            self.cur_exc_cls = Some(crate::interp::builtin_exc_names(cls));
+        }
         if sure {
-            self.raise_here("ValidationError", state);
+            self.raise_here(cls, state);
         } else {
-            self.may_raise_here("ValidationError", state);
+            self.may_raise_here(cls, state);
         }
         self.cur_exc = None;
+        self.cur_exc_cls = None;
     }
 
     /// Field constraints on known values: an error when every value breaks one (maybe when
@@ -3194,46 +3208,47 @@ pub fn fieldinfo_attr(an: &mut Analyzer, st: &mut State, q: &str, name: &str, no
     }
 }
 
-/// A ValidationError's methods (`pydverr.<idx>.<name>`): `errors()` (one record per
-/// problem, in field order; `include_url=False` leaves out `url`), `error_count()`.
-pub fn m_pydverr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    let mut it = c.qual.splitn(3, '.');
-    let (_, idx, name) = (it.next(), it.next().and_then(|x| x.parse::<usize>().ok()), it.next().unwrap_or(""));
-    let Some(errs) = idx.and_then(|i| an.pyd_verrs.get(i).cloned()) else { return Value::data("ValidationError") };
-    match name {
-        "errors" => {
-            let url = !matches!(c.kwargs.get(&s("include_url")).and_then(|v| v.kv.as_lit()), Some(k) if k == intern::key_bool(false));
+/// The records of ValidationError number `idx` (`errors()`): one dict per problem, its `loc`
+/// a tuple (prefixed by `prefix`: FastAPI's `"body"`), `url` when asked for.
+pub fn verr_errors(an: &mut Analyzer, st: &mut State, node: &crate::frontend::Node, idx: usize, url: bool, prefix: Option<KeyId>) -> Value {
+    let Some(errs) = an.pyd_verrs.get(idx).cloned() else { return Value::data("errors") };
+    let line = node.line;
+    let c_node = *node;
             let mut items: Vec<Value> = Vec::new();
             for (i, e) in errs.iter().enumerate() {
-                let d = an.alloc_at(Kind::Dict, &c.node, st, &format!("error@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("verr{}:{}:{}", idx.unwrap(), i, url)));
+                let d = an.alloc_at(Kind::Dict, &c_node, st, &format!("error@L{}", line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("verr{}:{}:{}", idx, i, url)));
                 let mut row = Row::new();
                 // one tuple per record (records made at one site must not share it)
-                let lt = an.alloc_at(Kind::Tuple, &c.node, st, &format!("loc@L{}", c.line), Payload::None, None, Ns::Item, None, Some(&format!("verrloc{}:{}", idx.unwrap(), i)));
+                let lt = an.alloc_at(Kind::Tuple, &c_node, st, &format!("loc@L{}", line), Payload::None, None, Ns::Item, None, Some(&format!("verrloc{}:{}", idx, i)));
                 // (objects shared with other uses — past the clone budget — take these facts
                 // weakly)
                 let dstrong = an.obj(d).single;
                 let lstrong = an.obj(lt).single;
-                match e.loc {
-                    // (a nested model's error: the path through its field)
-                    Some(k) if intern::with_key(k, |kk| matches!(kk, intern::Key::Tuple(_))) => {
-                        let parts = intern::with_key(k, |kk| if let intern::Key::Tuple(t) = kk { t.clone() } else { vec![] });
-                        for (j, p) in parts.iter().enumerate() {
+                // (the parts of the location, after `prefix`; unknown: no positions)
+                let parts: Option<Vec<KeyId>> = match e.loc {
+                    Some(k) if intern::with_key(k, |kk| matches!(kk, intern::Key::Tuple(_))) => Some(intern::with_key(k, |kk| if let intern::Key::Tuple(t) = kk { t.clone() } else { vec![] })),
+                    Some(k) => Some(vec![k]),
+                    None => None,
+                };
+                match parts {
+                    Some(ps) => {
+                        let ps: Vec<KeyId> = prefix.into_iter().chain(ps).collect();
+                        for (j, p) in ps.iter().enumerate() {
                             st.set_slot(lt, Ns::Pos, intern::key_int(j as i64), Value::lit(*p), lstrong);
                         }
-                        st.set_slot(lt, Ns::Elem, intern::STAR, join_values(parts.iter().map(|p| Value::lit(*p)).collect::<Vec<_>>()), lstrong);
-                        st.elems.insert(lt, KeyVal::lits(intern::KeySet::from_iter(parts.iter().copied())));
-                        an.set_llen(lt, st, Some(parts.len()));
-                    }
-                    Some(k) => {
-                        st.set_slot(lt, Ns::Pos, intern::key_int(0), Value::lit(k), lstrong);
-                        st.set_slot(lt, Ns::Elem, intern::STAR, Value::lit(k), lstrong);
-                        st.elems.insert(lt, KeyVal::Lit(k));
-                        an.set_llen(lt, st, Some(1));
+                        st.set_slot(lt, Ns::Elem, intern::STAR, join_values(ps.iter().map(|p| Value::lit(*p)).collect::<Vec<_>>()), lstrong);
+                        st.elems.insert(lt, KeyVal::lits(intern::KeySet::from_iter(ps.iter().copied())));
+                        an.set_llen(lt, st, Some(ps.len()));
                     }
                     None => {
+                        if let Some(p) = prefix {
+                            st.set_slot(lt, Ns::Pos, intern::key_int(0), Value::lit(p), lstrong);
+                            an.set_prefix(lt, st, 1);
+                        } else {
+                            an.set_llen(lt, st, None);
+                        }
                         st.set_slot(lt, Ns::Elem, intern::STAR, Value::data("loc"), lstrong);
                         st.elems.insert(lt, crate::domain::DATA);
-                        an.set_llen(lt, st, None);
                     }
                 }
                 let loc = Value::obj(lt);
@@ -3254,11 +3269,23 @@ pub fn m_pydverr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 items.push(Value::obj(d));
             }
             if errs.iter().all(|e| e.sure) {
-                an.alloc_positional(Kind::List, &c.node, Some(items), Value::new(), crate::domain::DATA, st)
+                an.alloc_positional(Kind::List, &c_node, Some(items), Value::new(), crate::domain::DATA, st)
             } else {
                 let elem = join_values(items);
-                an.alloc_positional(Kind::List, &c.node, None, elem, crate::domain::DATA, st)
+                an.alloc_positional(Kind::List, &c_node, None, elem, crate::domain::DATA, st)
             }
+}
+
+/// A ValidationError's methods (`pydverr.<idx>.<name>`): `errors()` (one record per
+/// problem, in field order; `include_url=False` leaves out `url`), `error_count()`.
+pub fn m_pydverr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let mut it = c.qual.splitn(3, '.');
+    let (_, idx, name) = (it.next(), it.next().and_then(|x| x.parse::<usize>().ok()), it.next().unwrap_or(""));
+    let Some(errs) = idx.and_then(|i| an.pyd_verrs.get(i).cloned()) else { return Value::data("ValidationError") };
+    match name {
+        "errors" => {
+            let url = !matches!(c.kwargs.get(&s("include_url")).and_then(|v| v.kv.as_lit()), Some(k) if k == intern::key_bool(false));
+            verr_errors(an, st, &c.node, idx.unwrap(), url, None)
         }
         "error_count" if errs.iter().all(|e| e.sure) => Value::lit(intern::key_int(errs.len() as i64)),
         "title" => Value::data("title"),

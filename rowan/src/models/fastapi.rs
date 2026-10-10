@@ -981,7 +981,21 @@ impl Analyzer {
                 // the detail of a raised HTTPException
                 let mut detail = Value::new();
                 let mut other = raised_v.pts.is_empty() || !raised_v.kv.is_bot();
+                // (a request body that breaks its model: FastAPI's detail is pydantic's errors,
+                // their `loc` after "body")
+                let mut verr = false;
                 for o in &rest {
+                    let verr_idx = match &self.obj(*o).payload {
+                        Payload::Method(q, _) if !crate::interp::disabled("fadetail") => q.strip_prefix("pydverr.").and_then(|x| x.parse::<usize>().ok()),
+                        _ => None,
+                    };
+                    if let Some(i) = verr_idx {
+                        let errs = crate::models::pydantic::verr_errors(self, &mut rs, node, i, false, Some(key_str_lit("body")));
+                        detail = detail.join(&errs);
+                        status = status.join(&Value::lit(intern::key_int(422)));
+                        verr = true;
+                        continue;
+                    }
                     match payload_of(self, *o) {
                         Some((q, _)) if q == "fastapi.httpexc" => {
                             detail = detail.join(&rs.slot(*o, Ns::Attr, key_str_lit("detail")));
@@ -990,6 +1004,7 @@ impl Analyzer {
                         _ => other = true,
                     }
                 }
+                let _ = verr;
                 // (a validation error: 422)
                 if other {
                     status = status.join(&Value::lit(intern::key_int(422)));
