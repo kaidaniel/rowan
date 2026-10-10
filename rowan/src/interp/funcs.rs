@@ -1110,10 +1110,21 @@ impl Analyzer {
         let o_kind = self.kind(oid);
         let kind = if matches!(o_kind, Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance | Kind::Frame) { o_kind } else { Kind::Dict };
         let tag = if deep { "deep" } else { "copy" };
-        let label = format!("{} of {}@L{}", tag, self.obj(oid).label, node.line);
+        // (the original's id in the site: a deep copy's nested copies are distinct objects; a
+        // copy of a copy made at this node counts as a copy of the first original)
+        let prefix = format!("{}:{}:", tag, self.site_of(node));
+        // (a clone of such a copy, made by a summary's instantiation, has the same site)
+        let site_root = self.obj(oid).site.strip_prefix(&prefix).and_then(|rest| rest.split(['#', ':']).nth(1)).and_then(|r| r.parse::<u32>().ok());
+        let root = match (self.copy_root.get(&oid), site_root) {
+            _ if super::disabled("copyroot") => oid,
+            (Some(&r), _) if self.obj(oid).site.starts_with(&prefix) => r,
+            (_, Some(r)) if (r as usize) < self.objects.len() => r,
+            _ => oid,
+        };
+        let label = format!("{} of {}@L{}", tag, self.obj(root).label, node.line);
         let payload = self.obj(oid).payload.clone();
-        // (the original's id in the site: a deep copy's nested copies are distinct objects)
-        let nid = self.alloc(kind, &format!("{}:{}:{}:{}", tag, self.site_of(node), kind.name(), oid), state, &label, payload, None, if kind == Kind::Instance { Ns::Attr } else { Ns::Item }, None, None);
+        let nid = self.alloc(kind, &format!("{}{}:{}", prefix, kind.name(), root), state, &label, payload, None, if kind == Kind::Instance { Ns::Attr } else { Ns::Item }, None, None);
+        self.copy_root.insert(nid, root);
         seen.insert(oid, nid);
         if self.is_entry_object(oid) {
             self.obj_mut(nid).copied_from = Some(oid);

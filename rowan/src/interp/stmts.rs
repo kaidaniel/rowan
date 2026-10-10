@@ -980,12 +980,60 @@ impl Analyzer {
         }
     }
 
+    /// A loop fixpoint cut off at `LOOP_MAX_ITER`: what still changed between the last two
+    /// heads is widened to unknown (names and slots get unknown data, rows open, lengths
+    /// unknown), so the exit state covers every later iteration.
+    fn widen_unconverged(&mut self, head: &mut State, prev: &State) {
+        if crate::interp::debug_level() >= 1 {
+            let fp0 = head.footprint(prev);
+            let nn: Vec<String> = head.env.iter().filter(|(k, v)| prev.env.get(*k) != Some(*v)).map(|(k, _)| intern::str_get(*k).to_string()).collect();
+            eprintln!("[rowan] loop fixpoint cut off after {} rounds: widening names {:?}, {} rows, {} slots, {} elems, lens {}", LOOP_MAX_ITER, nn, fp0.rows.len(), fp0.slots.len(), fp0.elems.len(), head.lens.diff_keys(&prev.lens).len());
+            if crate::interp::debug_level() >= 2 {
+                for (o, ns) in fp0.rows.iter().take(5) {
+                    eprintln!("    row {} {:?} {:?} -> {:?}", self.obj(*o).label, ns, prev.row(*o, *ns), head.row(*o, *ns));
+                }
+                for (o, sk) in fp0.slots.iter().take(5) {
+                    eprintln!("    slot {} {:?} {:?} -> {:?}", self.obj(*o).label, sk, prev.slots.get(o, sk), head.slots.get(o, sk));
+                }
+            }
+        }
+        // (tensor-model values — shapes, dims — join differing dims into `?` atoms already)
+        let shape_like = |v: &Value| matches!(&v.kv, KeyVal::Data(d) if intern::str_get(*d).starts_with('\u{1}'));
+        let widen = |v: &Value| if shape_like(v) { v.clone() } else { v.join(&Value::data("loop")) };
+        let names: Vec<intern::StrId> = head.env.iter().filter(|(k, v)| prev.env.get(*k) != Some(*v)).map(|(k, _)| *k).collect();
+        for n in names {
+            let v = widen(&head.env[&n]);
+            head.env.insert(n, v);
+        }
+        let fp = head.footprint(prev);
+        for (o, ns) in fp.rows {
+            let r = head.row(o, ns).data_store(crate::domain::Source::new("loop widening", crate::domain::SourceKind::Data));
+            head.set_row(o, ns, r);
+        }
+        for (o, sk) in fp.slots {
+            if let Some(v) = head.slots.get(&o, &sk) {
+                head.slots.set(&o, sk, widen(&v));
+            }
+        }
+        for o in fp.elems {
+            let shape_elem = matches!(head.elems.get(&o), Some(KeyVal::Data(d)) if intern::str_get(d).starts_with('\u{1}'));
+            if !shape_elem {
+                head.elems.insert(o, crate::domain::DATA);
+            }
+        }
+        for o in head.lens.diff_keys(&prev.lens) {
+            head.lens.insert(o, (None, 0));
+        }
+    }
+
     fn stmt_while_loop(&mut self, w: &'static ast::StmtWhile, state: &mut State) {
         let mut pre = state.copy();
         let mut head = state.copy();
         let mut exit_acc: Option<State> = None;
         self.frame_mut().loop_depth += 1;
         self.cond_depth += 1;
+        let mut converged = false;
+        let mut prev_head = head.copy();
         for _ in 0..LOOP_MAX_ITER {
             let mut body_s = head.copy();
             let mark = self.objects.len() as u32;
@@ -1015,9 +1063,13 @@ impl Analyzer {
             self.rename_recent(&mut back, &head, recs, mark);
             let new_head = pre.join_loop(&mut back);
             if new_head.same(&head) {
+                converged = true;
                 break;
             }
-            head = new_head;
+            prev_head = std::mem::replace(&mut head, new_head);
+        }
+        if !converged && !crate::interp::disabled("loopwiden") {
+            self.widen_unconverged(&mut head, &prev_head);
         }
         self.cond_depth -= 1;
         self.frame_mut().loop_depth -= 1;
@@ -1120,6 +1172,8 @@ impl Analyzer {
         self.frame_mut().loop_depth += 1;
         self.cond_depth += 1;
         let mut back = State::bottom();
+        let mut converged = false;
+        let mut prev_head = head.copy();
         for _ in 0..LOOP_MAX_ITER {
             let mut body_s = head.copy();
             let mark = self.objects.len() as u32;
@@ -1142,9 +1196,13 @@ impl Analyzer {
             self.rename_recent(&mut back, &head, recs, mark);
             let new_head = pre.join_loop(&mut back);
             if new_head.same(&head) {
+                converged = true;
                 break;
             }
-            head = new_head;
+            prev_head = std::mem::replace(&mut head, new_head);
+        }
+        if !converged && !crate::interp::disabled("loopwiden") {
+            self.widen_unconverged(&mut head, &prev_head);
         }
         self.cond_depth -= 1;
         self.frame_mut().loop_depth -= 1;

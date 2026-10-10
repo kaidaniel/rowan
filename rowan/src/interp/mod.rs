@@ -884,6 +884,9 @@ pub struct Analyzer {
     /// per generator object, the join of the states at its yields (a caller resumes from one
     /// of them when the body never ends)
     pub gen_yield_states: FxHashMap<ObjId, State>,
+    /// a copy's original (through copies made at the same node: `out = deepcopy(out)` in a loop
+    /// makes one copy site, not a new one per round)
+    pub copy_root: FxHashMap<ObjId, ObjId>,
     pub item_exc: Option<&'static str>,
     pub narrow_depth: u32,
     pub pyd_last_failed: bool,
@@ -1144,6 +1147,7 @@ impl Analyzer {
             call_memo: FxHashMap::default(),
             np_struct: FxHashSet::default(),
             gen_yield_states: FxHashMap::default(),
+            copy_root: FxHashMap::default(),
             item_exc: None,
             narrow_depth: 0,
             pyd_last_failed: false,
