@@ -172,6 +172,16 @@ pub struct Summary {
 
 impl Summary {
     /// Exit facts that differ from the entry state `base` and are not the identity.
+    /// Does the summary change objects that existed before the call (stores, deletions,
+    /// unknown calls on them — not the narrowing of a parameter's row by a successful read)?
+    /// For a generator that means effects between items, which only its concrete run orders.
+    pub fn changes_outside(&self, an: &Analyzer) -> bool {
+        let outside = |o: ObjId| !self.templates.contains(&o) && !matches!(an.kind(o), Kind::Unknown);
+        self.slots_fp.iter().any(|((o, _, _), _)| outside(*o))
+            || self.elems_fp.iter().any(|(o, _)| outside(*o))
+            || self.rows_fp.iter().any(|(o, _, r)| outside(*o) && (!r.absent.is_empty() || !r.mutators.is_empty() || !r.pstores.is_empty()))
+    }
+
     pub fn compute_footprint(&mut self, an: &Analyzer, base: &State) {
         let is_path_of = |v: &Value, oid: ObjId, ns: Ns, key: KeyId| -> bool {
             let Some(ph) = v.single() else { return false };
@@ -887,14 +897,18 @@ impl Analyzer {
                 ret = ret.join(&self.none_v);
             }
             // (no path completes — every one raises: a call does not go on after it)
-            let completes = st.reachable || st.exits.is_some();
+            // (a generator's call does not run its body: it always completes)
+            let completes = st.reachable || st.exits.is_some() || matches!(fnode, FuncNode::Def(f) if crate::interp::is_generator(&f.body));
             if let Some(ex) = st.exits.take() {
                 let mut exs = ex.copy_ref();
                 st = if st.reachable { st.join(&mut exs) } else { exs };
                 st.exits = None;
             }
             st.reachable = true;
-            let simple_gen = matches!(fnode, FuncNode::Def(f) if crate::interp::is_generator(&f.body) && crate::interp::is_simple_generator(&f.body));
+            // (a generator's items in this run's own object, cloned per call: a simple one always;
+            // any generator with `genfull=1` (off by default: email lost most proven accesses) — a call whose generator changes objects
+            // from before the call keeps the concrete run, `Summary::changes_outside`)
+            let simple_gen = matches!(fnode, FuncNode::Def(f) if crate::interp::is_generator(&f.body) && (crate::interp::is_simple_generator(&f.body) || crate::interp::limit("genfull", 0) > 0));
             if simple_gen {
                 // (a simple generator: its items, in this run's own object — cloned per call)
                 let ctx = self.frame().ctx.clone();

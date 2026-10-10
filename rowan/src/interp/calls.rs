@@ -1170,7 +1170,8 @@ impl Analyzer {
         // (not a `@contextmanager` / yield-dependency body: it runs around its with block)
         let under_cm = self.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth == self.frames.len());
         // (a simple generator — straight-line yields, no calls — is summarised like a function)
-        let gen_fn = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body) && !super::is_simple_generator(&f.body)) && !under_cm && !super::disabled("genlazy");
+        let gen_fn = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body) && !super::is_simple_generator(&f.body)) && !under_cm && !super::disabled("genlazy") && super::limit("genfull", 0) == 0;
+        let gen_summ = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body)) && !under_cm && !super::disabled("genlazy");
         let forced = std::mem::take(&mut self.force_tab_once) || self.torch_modules.contains(&fi.module) || gen_fn;
         if self.use_summaries && self.model_call == 0 && !forced {
             let bound = self.compute_bindings(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
@@ -1248,7 +1249,10 @@ impl Analyzer {
                     }
                 }
             }
-            if !self.should_tabulate_at(&summ, &bind, state, node) {
+            // (a generator whose body changes objects from before the call: its concrete run
+            // orders those effects between the items)
+            let gen_concrete = gen_summ && summ.changes_outside(self);
+            if !gen_concrete && !self.should_tabulate_at(&summ, &bind, state, node) {
                 // (outside databases the summary did not simulate: their rows are unknown now)
                 if let Some(cons) = self.sql_touched.get(&foid).cloned() {
                     for c in cons {
