@@ -956,6 +956,9 @@ pub struct Analyzer {
     /// a requirement-only entry run (`param F.x` schemas of a called function): no verdicts,
     /// row checks, facts or notes
     pub quiet: bool,
+    /// no record-access verdicts (shapes still reported): the own run of a called function
+    /// of a torch / numpy module
+    pub quiet_records: bool,
     /// FastAPI: routes, `include_router` edges (app, router, prefix), router prefixes, handlers
     pub fa_routes: Vec<crate::models::fastapi::FaRoute>,
     pub fa_includes: Vec<(ObjId, ObjId, String)>,
@@ -1216,6 +1219,7 @@ impl Analyzer {
             pyd_inputs: FxHashMap::default(),
             pyd_generic: FxHashMap::default(),
             quiet: false,
+            quiet_records: false,
             fa_routes: Vec::new(),
             fa_includes: Vec::new(),
             fa_prefix: FxHashMap::default(),
@@ -1716,7 +1720,7 @@ impl Analyzer {
     }
 
     pub fn verdict(&mut self, node: &Node, key: KeyId, cls: &Classification, oid: ObjId, ns: Ns, file_override: Option<&str>, text_override: Option<&str>) {
-        if matches!(cls.tier, Tier::Map | Tier::Sym) || self.quiet {
+        if matches!(cls.tier, Tier::Map | Tier::Sym) || self.quiet || self.quiet_records {
             return;
         }
         // a key written as `True` that reached the dict's `1`: reported as written
@@ -2101,7 +2105,10 @@ impl Analyzer {
             let saved_entry = self.entry_run.replace(oid);
             let before = self.objects.len() as ObjId;
             let saved_quiet = std::mem::replace(&mut self.quiet, quiet);
+            let called_torch = self.analysed_funcs.contains(&oid) && self.torch_modules.contains(&fi.module) && !disabled("torchquietrec");
+            let saved_qr = std::mem::replace(&mut self.quiet_records, called_torch);
             self.call_user(oid, self_val, args, kwargs, star_args, star_kwargs, &mut st, &fake, None, true);
+            self.quiet_records = saved_qr;
             self.quiet = saved_quiet;
             self.entry_run = saved_entry;
             if quiet {
