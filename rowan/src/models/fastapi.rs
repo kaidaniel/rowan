@@ -311,7 +311,8 @@ impl Analyzer {
         let default: Option<Value> = match &marker {
             Some((q, d)) if q.starts_with("fastapi.param.") => {
                 if d.empty() {
-                    None
+                    // (`Annotated[int, Query(ge=1)] = 2`: the parameter's own default)
+                    fi.defaults.get(&s(&pname)).cloned().filter(|dv| !dv.pts.iter().any(|o| payload_of(self, o).is_some()))
                 } else {
                     Some(d.clone())
                 }
@@ -457,6 +458,25 @@ impl Analyzer {
                     return Value::new();
                 }
                 self.may_raise_here("RequestValidationError", state);
+            }
+            // `Query(ge=1)` / `Path(gt=0)` constraints on the value the request gave (a default
+            // is not validated)
+            let cons = marker_constraints(p);
+            if !cons.is_empty() && !crate::interp::disabled("faconstraints") && default.as_ref() != Some(&v) {
+                if v.pts.is_empty() && v.kv.is_literal() {
+                    let lits = crate::domain::kv_literals(&v.kv);
+                    let bad: Vec<KeyId> = lits.iter().filter(|k| *k != intern::key_none() && crate::models::pydantic::literal_breaks(&cons, *k).is_some()).collect();
+                    if !bad.is_empty() {
+                        if bad.len() == lits.len() {
+                            self.raise_here("RequestValidationError", state);
+                            return Value::new();
+                        }
+                        self.may_raise_here("RequestValidationError", state);
+                        v = Value::kv_only(crate::domain::KeyVal::lits(intern::KeySet::from_iter(lits.iter().filter(|k| !bad.contains(k)))));
+                    }
+                } else if !v.empty() {
+                    self.may_raise_here("RequestValidationError", state);
+                }
             }
             if let Some(a) = ann {
                 v = self.fa_restrict(&fi, a, v, default.as_ref(), state);
@@ -1390,6 +1410,9 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
             for fo in f.pts.iter().collect::<Vec<_>>() {
                 if an.kind(fo) == Kind::Function {
                     an.call_user(fo, None, args.clone(), c.kwargs.clone(), vec![], vec![], st, &c.node, None, false);
+                } else if c.kwargs.is_empty() && !crate::interp::disabled("fabgany") {
+                    // (a bound method, a builtin's method, a partial: called as well)
+                    an.call_value(&Value::obj(fo), &c.node, None, st, Some(args.clone()));
                 }
             }
             an.none_v.clone()
@@ -1486,6 +1509,27 @@ pub fn apply_route(an: &mut Analyzer, dv: &Value, f: &Value) {
 
 pub fn install(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {
     r(&["fastapi.*", "starlette.*"], m_fastapi);
+}
+
+/// The constraints of a parameter's `Query` / `Path` / `Header` / `Cookie` / `Form` marker
+/// (in `Annotated[...]` or as the default).
+fn marker_constraints(p: &'static ast::ParameterWithDefault) -> Vec<(String, KeyId)> {
+    let mut calls: Vec<&'static ast::ExprCall> = Vec::new();
+    if let Some(ast::Expr::Subscript(sb)) = p.parameter.annotation.as_deref() {
+        if dotted_last(&sb.value) == "Annotated" {
+            if let ast::Expr::Tuple(tp) = &*sb.slice {
+                for m in tp.elts.iter().skip(1) {
+                    if let ast::Expr::Call(c) = m {
+                        calls.push(c);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(ast::Expr::Call(c)) = p.default.as_deref() {
+        calls.push(c);
+    }
+    calls.into_iter().filter(|c| matches!(dotted_last(&c.func).as_str(), "Query" | "Path" | "Header" | "Cookie" | "Form")).flat_map(crate::models::pydantic::field_constraints).collect()
 }
 
 /// The scalar a path / query annotation converts to: `Optional[X]`, `Union[X, None]` and

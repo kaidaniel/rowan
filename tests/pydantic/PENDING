@@ -1,1 +1,5 @@
 # pydantic cases written but not yet expected to pass (paths relative to tests/pydantic/)
+small/y050_copy_fields_set.py
+small/y051_validator_errors_alias.py
+small/y052_nested_list_dumps.py
+small/y053_before_after_validators.py

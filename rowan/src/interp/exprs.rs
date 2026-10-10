@@ -765,6 +765,17 @@ impl Analyzer {
     }
 
     fn slice_positional(&mut self, obj: &Value, sl: &'static ast::ExprSlice, node: &'static ast::Expr, state: &mut State) -> Option<Value> {
+        // a bound that is a parameter (`xs[:limit]`): decided per call site
+        if !self.sum_stack.is_empty() && !super::disabled("sliceparam") {
+            for e in [&sl.lower, &sl.upper, &sl.step].into_iter().flatten() {
+                if let ast::Expr::Name(n) = &**e {
+                    let v = self.load_name(s(n.id.as_str()), &Node::none(), state);
+                    if let Some(p) = v.kv.as_param() {
+                        self.record_event("concrete", p);
+                    }
+                }
+            }
+        }
         if let Some(step_e) = sl.step.as_deref() {
             // a known step (positive or negative) with known or default bounds
             let step = self.int_value(step_e, state)?;

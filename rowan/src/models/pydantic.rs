@@ -1100,52 +1100,12 @@ impl Analyzer {
             Some(e) => e.1 += 1,
             None => errs.push((code, 1)),
         };
-        let num = |k: KeyId| -> Option<f64> {
-            intern::with_key(k, |kk| match kk {
-                intern::Key::Int(i) => Some(*i as f64),
-                intern::Key::Float(b) => Some(f64::from_bits(*b)),
-                _ => None,
-            })
-        };
         for k in &lits {
             if *k == intern::key_none() {
                 continue;
             }
-            let len = intern::key_as_str(*k).map(|s| s.chars().count());
-            for (c, lim) in cons {
-                let bad = match (c.as_str(), len, num(*k), intern::key_as_int(*lim), num(*lim)) {
-                    ("min_length", Some(l), _, Some(m), _) => (l as i64) < m,
-                    ("max_length", Some(l), _, Some(m), _) => (l as i64) > m,
-                    ("gt", _, Some(x), _, Some(m)) => !(x > m),
-                    ("ge", _, Some(x), _, Some(m)) => !(x >= m),
-                    ("lt", _, Some(x), _, Some(m)) => !(x < m),
-                    ("le", _, Some(x), _, Some(m)) => !(x <= m),
-                    ("pattern", Some(_), _, _, _) => {
-                        let text = intern::key_as_str(*k).unwrap();
-                        match intern::key_as_str(*lim).and_then(|p| crate::models::pyre::Regex::new(&p, 0)) {
-                            Some(re) => {
-                                let cs: Vec<char> = text.chars().collect();
-                                // (pydantic searches: `re.search`, anchors as the pattern says)
-                                matches!(re.search(&cs, 0, cs.len(), None), Ok(None))
-                            }
-                            None => false,
-                        }
-                    }
-                    _ => false,
-                };
-                if bad {
-                    let code = match (c.as_str(), len.is_some()) {
-                        ("min_length", true) => "string_too_short",
-                        ("max_length", true) => "string_too_long",
-                        ("pattern", _) => "string_pattern_mismatch",
-                        ("gt", _) => "greater_than",
-                        ("ge", _) => "greater_than_equal",
-                        ("lt", _) => "less_than",
-                        _ => "less_than_equal",
-                    };
-                    note(code, &mut errs);
-                    break;
-                }
+            if let Some(code) = literal_breaks(cons, *k) {
+                note(code, &mut errs);
             }
         }
         // lists / sets / dicts with a known size
@@ -2055,7 +2015,54 @@ fn const_key(e: &ast::Expr) -> Option<KeyId> {
 }
 
 /// The constraints of a `Field(…)` call.
-fn field_constraints(c: &ast::ExprCall) -> Vec<(String, KeyId)> {
+/// The error a known literal gets from `Field` / `Query` constraints (`gt`, `min_length`,
+/// `pattern`, …), if it breaks one.
+pub fn literal_breaks(cons: &[(String, KeyId)], k: KeyId) -> Option<&'static str> {
+    let num = |k: KeyId| -> Option<f64> {
+        intern::with_key(k, |kk| match kk {
+            intern::Key::Int(i) => Some(*i as f64),
+            intern::Key::Float(b) => Some(f64::from_bits(*b)),
+            _ => None,
+        })
+    };
+    let len = intern::key_as_str(k).map(|s| s.chars().count());
+    for (c, lim) in cons {
+        let bad = match (c.as_str(), len, num(k), intern::key_as_int(*lim), num(*lim)) {
+            ("min_length", Some(l), _, Some(m), _) => (l as i64) < m,
+            ("max_length", Some(l), _, Some(m), _) => (l as i64) > m,
+            ("gt", _, Some(x), _, Some(m)) => !(x > m),
+            ("ge", _, Some(x), _, Some(m)) => !(x >= m),
+            ("lt", _, Some(x), _, Some(m)) => !(x < m),
+            ("le", _, Some(x), _, Some(m)) => !(x <= m),
+            ("pattern", Some(_), _, _, _) => {
+                let text = intern::key_as_str(k).unwrap();
+                match intern::key_as_str(*lim).and_then(|p| crate::models::pyre::Regex::new(&p, 0)) {
+                    Some(re) => {
+                        let cs: Vec<char> = text.chars().collect();
+                        // (pydantic searches: `re.search`, anchors as the pattern says)
+                        matches!(re.search(&cs, 0, cs.len(), None), Ok(None))
+                    }
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+        if bad {
+            return Some(match (c.as_str(), len.is_some()) {
+                ("min_length", true) => "string_too_short",
+                ("max_length", true) => "string_too_long",
+                ("pattern", _) => "string_pattern_mismatch",
+                ("gt", _) => "greater_than",
+                ("ge", _) => "greater_than_equal",
+                ("lt", _) => "less_than",
+                _ => "less_than_equal",
+            });
+        }
+    }
+    None
+}
+
+pub fn field_constraints(c: &ast::ExprCall) -> Vec<(String, KeyId)> {
     let mut out = Vec::new();
     for k in c.arguments.keywords.iter() {
         let Some(n) = k.arg.as_ref().map(|x| x.to_string()) else { continue };

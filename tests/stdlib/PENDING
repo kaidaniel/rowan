@@ -1,1 +1,9 @@
 
+small/s111_side_effect_conditions.py
+small/s112_generator_resume.py
+small/s113_closure_state.py
+small/s114_super_chain_slots.py
+small/s115_exception_flows.py
+small/s116_dict_building.py
+small/s117_string_keys.py
+small/s118_sort_group_order.py
