@@ -2808,11 +2808,16 @@ impl Analyzer {
                 _ => {}
             }
         }
-        for (_, v) in state.slots.for_key(&o) {
-            push_value(&v, work);
+        // (the slot table in place: a walk visits the whole reachable heap)
+        if let Some(d) = state.slots.m.get_ref(&o) {
+            for v in d.values() {
+                push_value(v, work);
+            }
         }
-        if let Some(kv) = state.elems.get(&o) {
-            push_value(&Value::kv_only(kv), work);
+        match state.elems.get_ref(&o) {
+            Some(KeyVal::KeysOf(ko)) => work.extend(ko.objs.iter()),
+            Some(KeyVal::Param(p)) => work.push(*p),
+            _ => {}
         }
         for (lo, v) in state.lasts.iter() {
             if *lo == o {
