@@ -683,8 +683,18 @@ impl Analyzer {
             // (nested ones too: `TABLE[1][0]`; bounded)
             let mut seen_c: FxHashSet<ObjId> = FxHashSet::default();
             for moid in module_oids {
+                // (the module's slot table is shared with the caller's state, not copied: every
+                // summary would otherwise keep its own copy of every module's attributes)
+                let shared = !crate::interp::disabled("modshare");
+                if shared {
+                    if let Some(inner) = state.slots.m.get_ref(&moid) {
+                        st.slots.m.insert(moid, inner.clone());
+                    }
+                }
                 for (k, v) in state.obj_slots(moid, Ns::Attr) {
-                    st.slots.set(&moid, (Ns::Attr, k), v.clone());
+                    if !shared {
+                        st.slots.set(&moid, (Ns::Attr, k), v.clone());
+                    }
                     let mut work: Vec<ObjId> = v.pts.iter().collect();
                     while let Some(x) = work.pop() {
                         if seen_c.len() > 4096 || !seen_c.insert(x) {
