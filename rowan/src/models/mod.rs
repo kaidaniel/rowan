@@ -36,7 +36,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.str.", "Series.dt.", "Series.cat.", "Series.sparse.", "Series.list.", "Series.struct.", "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
+    "parser.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "slice.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
 ];
 
 pub struct Registry {
@@ -166,6 +166,8 @@ impl Registry {
         r(&["chainmap.*"], m_chainmap);
         r(&["deque.*"], counter::m_deque);
         r(&["collections.deque"], counter::deque_new);
+        r(&["builtins.slice"], m_slice);
+        r(&["slice.indices"], m_slice_indices);
         csvio::register(&mut r);
         r(&["typeadapter.*"], m_typeadapter);
         r(&["torch.*"], torch::m_torch);
@@ -329,6 +331,12 @@ pub fn external_record(an: &mut Analyzer, qual: &str, state: &mut State) -> Opti
 fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("dict@L{}", c.line));
     if let Some(src) = c.args.first() {
+        // a parameter: a mapping or pairs, decided per call site
+        for x in src.pts.iter() {
+            if an.kind(x) == Kind::Ph && !crate::interp::disabled("dictph") {
+                an.record_event("concrete", x);
+            }
+        }
         let recs = an.record_objects(src);
         if !recs.is_empty() {
             an.copy_into(oid, Ns::Item, src, st, true, &KeySet::new());
@@ -2017,6 +2025,58 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     an.none_v.clone()
+}
+
+/// `slice(stop)` / `slice(start, stop[, step])`: the label a `a:b:c` subscript makes (known
+/// int / None bounds), else an unknown slice.
+fn m_slice(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
+    let none = intern::key_none();
+    // a parameter bound: known at the call site
+    for a in &c.args {
+        if let Some(p) = a.kv.as_param() {
+            an.record_event("concrete", p);
+        }
+    }
+    let b = |v: &Value| -> Option<String> {
+        if !v.pts.is_empty() {
+            return None;
+        }
+        let k = v.kv.as_lit()?;
+        if k == none {
+            return Some(String::new());
+        }
+        intern::key_as_int(k).filter(|_| !intern::with_key(k, |kk| matches!(kk, intern::Key::Bool(_)))).map(|i| i.to_string())
+    };
+    let parts: Option<Vec<String>> = match c.args.len() {
+        1 => b(&c.args[0]).map(|h| vec![String::new(), h, String::new()]),
+        2 | 3 => {
+            let mut v: Vec<Option<String>> = c.args.iter().map(b).collect();
+            if v.len() == 2 {
+                v.push(Some(String::new()));
+            }
+            v.into_iter().collect()
+        }
+        _ => None,
+    };
+    match parts {
+        Some(p) => Value::data(&format!("slice[{}]@L{}", p.join(":"), c.line)),
+        None => Value::data(&format!("slice@L{}", c.line)),
+    }
+}
+
+fn m_slice_indices(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
+    let recv = c.recv.clone().unwrap_or_default();
+    let n = c.args.first().and_then(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).and_then(intern::key_as_int);
+    match (Analyzer::slice_label_bounds(&recv.kv), n) {
+        (Some((lo, hi, st)), Some(n)) if n >= 0 && st != Some(0) => {
+            let (a, b, s) = crate::interp::exprs::slice_indices(n, lo, hi, st.unwrap_or(1));
+            Value::lit(intern::key_tuple(vec![intern::key_int(a), intern::key_int(b), intern::key_int(s)]))
+        }
+        _ => {
+            let _ = an;
+            Value::data("indices")
+        }
+    }
 }
 
 /// Set methods: decided on sets with known (literal) members, else the element model.

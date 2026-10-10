@@ -673,22 +673,7 @@ impl Analyzer {
             let n = self.llen(oid, state)? as i64;
             let lo = match sl.lower.as_deref() { None => None, Some(e) => Some(self.int_value(e, state)?) };
             let hi = match sl.upper.as_deref() { None => None, Some(e) => Some(self.int_value(e, state)?) };
-            let norm = |b: i64| if b < 0 { b + n } else { b };
-            let idx: Vec<i64> = if step > 0 {
-                let s = lo.map(norm).unwrap_or(0).clamp(0, n);
-                let e = hi.map(norm).unwrap_or(n).clamp(0, n);
-                (s..e).step_by(step as usize).collect()
-            } else {
-                let s = lo.map(norm).unwrap_or(n - 1).clamp(-1, n - 1);
-                let e = hi.map(norm).unwrap_or(-1).clamp(-1, n - 1);
-                let mut v = Vec::new();
-                let mut i = s;
-                while i > e {
-                    v.push(i);
-                    i += step;
-                }
-                v
-            };
+            let idx = slice_positions(n, lo, hi, step);
             let vals: Vec<Value> = idx.iter().map(|i| state.slot(oid, Ns::Pos, key_int(*i))).collect();
             let kv = state.elems.get(&oid).unwrap_or(DATA);
             let nd = frontend::node(node);
@@ -739,6 +724,19 @@ impl Analyzer {
         let vals: Vec<Value> = (lo..hi.max(lo)).map(|i| state.slot(oid, Ns::Pos, key_int(i))).collect();
         let kv = state.elems.get(&oid).unwrap_or(DATA);
         Some(self.alloc_positional(kind, &nd, Some(vals), Value::new(), kv, state))
+    }
+
+    /// The label of a slice with known bounds (`slice[1:3:]@L5`): its bounds (None: omitted).
+    pub fn slice_label_bounds(kv: &KeyVal) -> Option<(Option<i64>, Option<i64>, Option<i64>)> {
+        let KeyVal::Data(d) = kv else { return None };
+        let t = intern::str_get(*d);
+        let inner = t.strip_prefix("slice[")?.split(']').next()?.to_string();
+        let parts: Vec<&str> = inner.split(':').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let p = |x: &str| -> Option<Option<i64>> { if x.is_empty() { Some(None) } else { x.parse::<i64>().ok().map(Some) } };
+        Some((p(parts[0])?, p(parts[1])?, p(parts[2])?))
     }
 
     /// A fresh list / tuple at `nd`: with `vals` its positions are known (while the allocation
@@ -2196,3 +2194,41 @@ impl Analyzer {
 const SELF_REPORTING_EXTERNALS: &[&str] = &["io.StringIO", "csv.writer", "csv.DictWriter", "csv.reader", "csv.DictReader"];
 
 const SELF_REPORTING: &[&str] = &["pydantic.", "fieldinfo.", "pydverr.", "typeadapter.", "fastapi.client.", "fastapi.response.", "fastapi.request.", "stdobj.", "fastapi.bg.", "fastapi.app.", "fastapi.router.", "fastapi.state."];
+
+/// The positions `xs[lo:hi:step]` selects from a sequence of length `n` (`slice.indices`).
+pub fn slice_positions(n: i64, lo: Option<i64>, hi: Option<i64>, step: i64) -> Vec<i64> {
+    let norm = |b: i64| if b < 0 { b + n } else { b };
+    if step > 0 {
+        let s = lo.map(norm).unwrap_or(0).clamp(0, n);
+        let e = hi.map(norm).unwrap_or(n).clamp(0, n);
+        (s..e).step_by(step as usize).collect()
+    } else {
+        let s = lo.map(norm).unwrap_or(n - 1).clamp(-1, n - 1);
+        let e = hi.map(norm).unwrap_or(-1).clamp(-1, n - 1);
+        let mut v = Vec::new();
+        let mut i = s;
+        while i > e {
+            v.push(i);
+            i += step;
+        }
+        v
+    }
+}
+
+/// `slice(lo, hi, step).indices(n)`.
+pub fn slice_indices(n: i64, lo: Option<i64>, hi: Option<i64>, step: i64) -> (i64, i64, i64) {
+    let adj = |b: Option<i64>, dflt: i64, lower: i64, upper: i64| -> i64 {
+        match b {
+            None => dflt,
+            Some(b) => {
+                let b = if b < 0 { b + n } else { b };
+                b.clamp(lower, upper)
+            }
+        }
+    };
+    if step > 0 {
+        (adj(lo, 0, 0, n), adj(hi, n, 0, n), step)
+    } else {
+        (adj(lo, n - 1, -1, n - 1), adj(hi, -1, -1, n - 1), step)
+    }
+}

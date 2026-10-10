@@ -328,6 +328,29 @@ impl Analyzer {
         } else {
             None
         };
+        // a slice of a placeholder (a parameter's list): a list of its elements (decided per
+        // call site where the list is known)
+        if ns == Ns::Item && key.pts.is_empty() && matches!(&key.kv, KeyVal::Data(d) if intern::str_get(*d).starts_with("slice")) && !super::disabled("phslice") {
+            let phs: Vec<u32> = obj.pts.iter().filter(|o| self.kind(*o) == Kind::Ph).collect();
+            if !phs.is_empty() {
+                let mut acc = Value::new();
+                for ph in &phs {
+                    self.record_event("concrete", *ph);
+                    let e = self.elem_of(&Value::obj(*ph), node, state);
+                    let lid = self.alloc_at(Kind::List, node, state, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, Some(&format!("slice{}", ph)));
+                    state.set_slot(lid, Ns::Elem, STAR, Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv)), true);
+                    state.elems.insert(lid, e.kv.clone());
+                    self.set_llen(lid, state, None);
+                    acc = acc.join(&Value::obj(lid));
+                }
+                let rest: Vec<u32> = obj.pts.iter().filter(|o| self.kind(*o) != Kind::Ph).collect();
+                if rest.is_empty() {
+                    return acc;
+                }
+                let others = Value::with_kv(crate::domain::ObjSet::from_vec(rest), obj.kv.clone());
+                return acc.join(&self.load_item(&others, ns, key, node, state, report));
+            }
+        }
         // `lst[-1]` right after `lst.append(x)`: x
         if ns == Ns::Item && !state.lasts.is_empty() && key.pts.is_empty() && key.kv.as_lit() == Some(intern::key_int(-1)) && !obj.pts.is_empty() && (obj.kv.is_bot() || obj.kv.as_param().map(|p| obj.pts.contains(p)).unwrap_or(false)) {
             let vs: Option<Vec<Value>> = obj.pts.iter().map(|o| state.last_of(o)).collect();
@@ -497,6 +520,19 @@ impl Analyzer {
                 }
                 Kind::List | Kind::Tuple | Kind::Set => {
                     let is_slice = matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice"));
+                    // a slice object with known bounds (`xs[slice(0, n)]`) on known positions
+                    if is_slice && kind != Kind::Set && single_target && !super::disabled("sliceobj") {
+                        if let (Some((lo, hi, step)), Some(n)) = (Self::slice_label_bounds(&key.kv), self.llen(oid, state)) {
+                            let step = step.unwrap_or(1);
+                            if step != 0 {
+                                let idx = crate::interp::exprs::slice_positions(n as i64, lo, hi, step);
+                                let vals: Vec<Value> = idx.iter().map(|i| state.slot(oid, Ns::Pos, intern::key_int(*i))).collect();
+                                let kv = state.elems.get(&oid).unwrap_or(DATA);
+                                acc = acc.join(&self.alloc_positional(kind, node, Some(vals), Value::new(), kv, state));
+                                continue;
+                            }
+                        }
+                    }
                     if is_slice && kind != Kind::Set {
                         // a slice is a container of the same elements (positions unknown)
                         let elem = state.slot(oid, Ns::Elem, STAR);
@@ -1232,6 +1268,20 @@ impl Analyzer {
             }
             if matches!(obj.kv, KeyVal::Lit(_) | KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
                 return self.method_value(&format!("str.{}", name), obj);
+            }
+            // a slice object with known bounds
+            if let Some((lo, hi, st)) = Self::slice_label_bounds(&obj.kv) {
+                let lit = |b: Option<i64>, an: &Analyzer| match b {
+                    Some(i) => Value::lit(intern::key_int(i)),
+                    None => an.none_v.clone(),
+                };
+                match name {
+                    "start" => return lit(lo, self),
+                    "stop" => return lit(hi, self),
+                    "step" => return lit(st, self),
+                    "indices" => return self.method_value("slice.indices", obj),
+                    _ => {}
+                }
             }
             return self.method_value(&format!("unknown.{}", name), obj);
         }
