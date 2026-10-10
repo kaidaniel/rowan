@@ -751,6 +751,12 @@ pub struct Analyzer {
     /// tabulations of one callee at one call site under the same callers (loop rounds that
     /// re-run it): bounded, then the summary
     pub tab_site_count: FxHashMap<(ObjId, u32, u32, usize, Vec<u32>), usize>,
+    /// tabulations of a recursive call below the outermost activation of its function
+    pub rec_tabs: FxHashMap<ObjId, usize>,
+    /// body runs of a recursive function below its outermost activation
+    pub rec_runs: FxHashMap<ObjId, usize>,
+    /// the receiver value while `load_attr` goes over a value of many objects
+    pub many_receivers: Option<Value>,
     pub module_done: bool,
     pub fresh_init: FxHashSet<ObjId>,
     pub cell_classes: FxHashMap<ObjId, ObjId>,
@@ -1154,6 +1160,9 @@ impl Analyzer {
             key_variants: FxHashMap::default(),
             tab_count: FxHashMap::default(),
             tab_site_count: FxHashMap::default(),
+            rec_tabs: FxHashMap::default(),
+            rec_runs: FxHashMap::default(),
+            many_receivers: None,
             module_done: false,
             fresh_init: FxHashSet::default(),
             cell_classes: FxHashMap::default(),
@@ -2801,12 +2810,18 @@ impl Analyzer {
                 }
             }
         }
+        // (a walk over a large heap is bounded: past the budget the targets not found yet are
+        // taken as live, which is always sound: their site makes a recent / variant object)
+        let budget = limit("livewalk", 20_000);
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
         while let Some(o) = work.pop() {
             if !seen.insert(o) {
                 continue;
             }
             self.walked.set(self.walked.get() + 1);
+            if seen.len() > budget && !disabled("livewalk") {
+                return targets.iter().copied().collect();
+            }
             if targets.contains(&o) {
                 found.insert(o);
                 if found.len() == targets.len() {

@@ -1521,6 +1521,10 @@ impl Analyzer {
             return v;
         }
         let mut acc = Value::new();
+        // (one k-way union of all targets' values: a receiver of many objects, joined pairwise,
+        // costs the product of their sizes)
+        let mut parts: Vec<Value> = Vec::new();
+        let saved_many = std::mem::replace(&mut self.many_receivers, if obj.pts.len() > 32 && !super::disabled("manyrecv") { Some(obj.clone()) } else { None });
         let guarded = self.is_guarded(Ns::Attr) || !report;
         let single = obj.pts.len() == 1;
         let nk = key_str_lit(name);
@@ -1543,11 +1547,11 @@ impl Analyzer {
                 Kind::External => {
                     let q = format!("{}.{}", self.external_qual(oid), name);
                     if let Some(v) = crate::models::generated_class(self, state, &q) {
-                        acc = acc.join(&v);
+                        parts.push(v);
                         continue;
                     }
                     if let Some(v) = crate::models::external_constant(self, &q) {
-                        acc = acc.join(&v);
+                        parts.push(v);
                         continue;
                     }
                     match crate::models::external_record(self, &q, state) {
@@ -1877,8 +1881,10 @@ impl Analyzer {
                 }
                 _ => Value::data(&format!("L{}", node.line)),
             };
-            acc = acc.join(&v);
+            parts.push(v);
         }
+        self.many_receivers = saved_many;
+        acc = acc.join(&crate::domain::join_values(parts));
         if obj.pts.is_empty() {
             if name == "str" && matches!(obj.kv, KeyVal::KeysOf(_)) {
                 // `df.columns.str.strip().str.lower()`: the accessor of renamed column names
@@ -1943,8 +1949,15 @@ impl Analyzer {
     }
 
     pub fn method_value(&mut self, qual: &str, recv: &Value) -> Value {
-        let ids: Vec<String> = recv.pts.iter().map(|x| x.to_string()).collect();
-        let key = format!("method:{}:{}:{}", qual, ids.join(","), recv.kv);
+        // (a receiver of many objects is keyed by a hash of their ids, not by the list)
+        let ids: String = if recv.pts.len() > 32 {
+            use std::hash::BuildHasher;
+            let v = recv.pts.to_vec();
+            format!("h{:x}.{:x}.{}.{}.{}", rustc_hash::FxBuildHasher.hash_one(&v), rustc_hash::FxBuildHasher.hash_one((&v, 0x9e37u16)), v.len(), v[0], v[v.len() - 1])
+        } else {
+            recv.pts.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+        };
+        let key = format!("method:{}:{}:{}", qual, ids, recv.kv);
         Value::obj(self.alloc_raw(Kind::Method, &key, "", true, qual, Payload::Method(qual.to_string(), recv.clone())))
     }
 
@@ -2637,6 +2650,17 @@ impl Analyzer {
                 let fv = self.cls_slots.get(&(*c, Ns::Attr, nk)).cloned().unwrap_or_default();
                 for f in fv.pts.iter() {
                     if self.kind(f) == Kind::Function {
+                        // (a receiver value of many objects: one bound method for all of them, its
+                        // receiver the whole value, not one per object — thousands in a recursion
+                        // over unknown values, each run on its own)
+                        if let Some(all) = self.many_receivers.clone() {
+                            use std::hash::BuildHasher;
+                            let ids = all.pts.to_vec();
+                            let h = rustc_hash::FxBuildHasher.hash_one(&ids);
+                            let label = format!("{} bound to one of {} values", self.obj(f).label, ids.len());
+                            outs.push(Value::obj(self.alloc_raw(Kind::Bound, &format!("bound:{}:set:{:x}.{}", f, h, ids.len()), "", true, &label, Payload::Bound(f, all))));
+                            continue;
+                        }
                         let label = format!("{} bound to {}", self.obj(f).label, self.obj(oid).label);
                         outs.push(Value::obj(self.alloc_raw(Kind::Bound, &format!("bound:{}:{}", f, oid), "", true, &label, Payload::Bound(f, Value::obj(oid)))));
                     }

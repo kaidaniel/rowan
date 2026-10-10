@@ -1799,9 +1799,22 @@ impl Value {
 }
 
 pub fn join_values(vals: impl IntoIterator<Item = Value>) -> Value {
-    let mut acc = Value::new();
+    // (the objects in one sort: pairwise unions of many large sets are quadratic)
+    let mut ids: Vec<ObjId> = Vec::new();
+    let mut kv = BOT;
+    let mut n = 0usize;
+    let mut first: Option<Value> = None;
     for v in vals {
-        acc = acc.join(&v);
+        n += 1;
+        ids.extend(v.pts.iter());
+        kv = kv_join(&kv, &v.kv);
+        if n == 1 {
+            first = Some(v);
+        }
     }
-    acc
+    match (n, first) {
+        (0, _) => Value::new(),
+        (1, Some(v)) => v,
+        _ => Value { pts: ObjSet::from_vec(ids), kv },
+    }
 }

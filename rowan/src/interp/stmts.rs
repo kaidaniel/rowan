@@ -1944,7 +1944,7 @@ impl Analyzer {
             return;
         }
         let mut roots: Vec<u32> = Vec::new();
-        let mut push = |v: &Value, roots: &mut Vec<u32>| {
+        let push = |v: &Value, roots: &mut Vec<u32>| {
             roots.extend(v.pts.iter());
             match &v.kv {
                 KeyVal::KeysOf(ko) => roots.extend(ko.objs.iter()),

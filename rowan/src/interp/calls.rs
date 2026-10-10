@@ -384,7 +384,16 @@ impl Analyzer {
     }
 
     pub fn unknown_call(&mut self, qual: &str, recv: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
-        let site = format!("{}@L{}", qual, node.line);
+        // (a call of the result of a call of the result of … : past two levels the result is
+        // the call node's own object, as access paths below an input are bounded; otherwise
+        // recursion over unknown values makes new objects without end)
+        let deep = qual.matches("result of").count() >= 2 && !crate::interp::disabled("unkdepth");
+        let site = if deep {
+            let text: String = crate::frontend::text_at(node).chars().take(40).collect();
+            format!("call {} at M{}:L{}:{}", text, node.module, node.line, node.col)
+        } else {
+            format!("{}@L{}", qual, node.line)
+        };
         // unknown code may raise
         if crate::interp::debug_level() == 2 {
             eprintln!("  unknown call {} in {} (may raise)", site, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
@@ -1299,6 +1308,20 @@ impl Analyzer {
         if !self.active.contains_key(&key) && act.len() >= MAX_ACTIVE && !lit_key {
             key = act.last().unwrap().clone();
         }
+        // (several recursive call sites, each a new activation, multiply with every level of
+        // nesting: below the outermost activation at most `recact` new ones, then a recursive
+        // call joins the innermost running activation, as past MAX_ACTIVE)
+        if !super::disabled("recact") {
+            if act.is_empty() {
+                self.rec_tabs.remove(&foid);
+            } else if !self.active.contains_key(&key) && !lit_key {
+                let n = self.rec_tabs.entry(foid).or_default();
+                *n += 1;
+                if *n > super::limit("recact", 64) {
+                    key = act.last().unwrap().clone();
+                }
+            }
+        }
         if self.active.contains_key(&key) {
             self.rec_hit.insert(key.clone());
             // widen the entry arguments with the ones of this recursive call (§6.3)
@@ -1486,7 +1509,20 @@ impl Analyzer {
         let mut entry_state = state.copy();
         let mut ret = Value::new();
         let mut st_final: Option<State> = None;
-        for _ in 0..REC_MAX_ITER {
+        // (below the outermost activation of a recursive function its bodies run at most `recruns`
+        // times in all: past that an activation stops iterating, and is widened as one that did
+        // not converge)
+        let nested = self.active_by_func.get(&foid).map(|v| v.len() > 1).unwrap_or(false);
+        for round in 0..REC_MAX_ITER {
+            if nested && !super::disabled("recruns") {
+                let n = self.rec_runs.entry(foid).or_default();
+                *n += 1;
+                if round > 0 && *n > super::limit("recruns", 256) {
+                    break;
+                }
+            } else if !nested && round == 0 {
+                self.rec_runs.remove(&foid);
+            }
             let mut st = entry_state.copy();
             match fnode {
                 FuncNode::Lambda(l) => {
