@@ -10,7 +10,7 @@ b = {}
 t = a if cond else b
 t["x"] = 1
 if t is a:
-    # Out of reach for now: the store through `t` is weak on both dicts, and `t is a` does
-    # not bring back which one it hit (store/alias correlation, see h72 in AGENTS.md).
-    a["x"]                                   #@todo ok x
+    # (`t is a` makes t that dict, and the key stored through t is then a's: the name's keys
+    # hold on whichever object it is)
+    a["x"]                                   #@ ok x
     a["x"]                                   #@ sound x

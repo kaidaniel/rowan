@@ -185,6 +185,8 @@ narrows each branch:
 * `isinstance(x, C)` narrows to objects of `C` (an unknown class keeps everything);
 * truthiness drops `None`, `0`, `""` and known-empty containers on the true branch;
 * `obj.attr == lit` narrows the attribute.
+* `t is a` with `a` one object narrows `t` to it (`is not`: takes `a` out); keys stored through a
+  name while it held several dicts hold on the one it is narrowed to.
 
 An unknown key tested `in` a closed dict of string keys narrows to those keys. A test assigned
 to a name (`flag = k in d`) narrows when the name is tested later. When the same test recurs

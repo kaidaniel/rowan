@@ -449,11 +449,24 @@ impl Analyzer {
         let at_module = self.frame().kind == FrameKind::Module;
         let row = if at_module { Some(state.row(module, Ns::Attr)) } else { None };
         let unbound = state.unbound.clone();
+        // (keys stored through the name hold on whichever object it is: narrowed to one dict,
+        // they are that dict's — `t is a` after `t[k] = …` with t one of a, b)
+        let keys: Vec<KeyId> = state.name_keys.iter().filter(|(n, _)| *n == name).map(|(_, k)| *k).collect();
+        let one = v.single().filter(|o| self.kind(*o) == Kind::Dict && v.kv.is_bot());
         self.store_name(name, v, state);
         if let Some(r) = row {
             state.set_row(module, Ns::Attr, r);
         }
         state.unbound = unbound;
+        for k in keys {
+            state.add_name_key(name, k);
+            if let Some(o) = one.filter(|_| !super::disabled("namekeynarrow")) {
+                let r = state.row(o, Ns::Item);
+                if !r.definite.contains(k) {
+                    state.set_row(o, Ns::Item, r.narrow_in(k, true));
+                }
+            }
+        }
     }
 
     pub fn store_name(&mut self, name: StrId, v: Value, state: &mut State) {

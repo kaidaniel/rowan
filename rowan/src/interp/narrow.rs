@@ -91,6 +91,28 @@ impl Analyzer {
                             }
                         }
                     }
+                    ast::CmpOp::Is | ast::CmpOp::IsNot if !matches!(right, ast::Expr::NoneLiteral(_)) && !crate::interp::disabled("isobj") => {
+                        // `t is a` with `a` one object: on the true side t is a, on the false side
+                        // a is not among t's objects
+                        let same = if op == ast::CmpOp::Is { truth } else { !truth };
+                        for (name_e, other_e) in [(left, right), (right, left)] {
+                            let ast::Expr::Name(nm) = name_e else { continue };
+                            let name = s(nm.id.as_str());
+                            let cur = self.load_name(name, &Node::none(), state);
+                            let o = self.eval(other_e, &mut state.copy());
+                            let Some(target) = o.single().filter(|x| o.kv.is_bot() && self.obj(*x).single && !crate::state::is_merged(*x)) else { continue };
+                            if !cur.pts.contains(target) || cur.pts.len() < 2 || !cur.kv.is_bot() {
+                                continue;
+                            }
+                            if same {
+                                self.rebind_name(name, Value::obj(target), state);
+                            } else {
+                                let rest = cur.pts.filter(|x| x != target);
+                                self.rebind_name(name, Value::objs(rest), state);
+                            }
+                            break;
+                        }
+                    }
                     ast::CmpOp::Is | ast::CmpOp::IsNot => {
                         if matches!(right, ast::Expr::NoneLiteral(_)) {
                             let is_none = if op == ast::CmpOp::Is { truth } else { !truth };
