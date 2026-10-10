@@ -33,6 +33,8 @@ pub enum Key {
     /// an Enum member as a key: `Cls.NAME`, with its value when the enum mixes in str / int
     /// (`StrEnum`, `IntEnum`, `class M(str, Enum)`: equal to and hashed as the value)
     Member(Arc<str>, Option<KeyId>),
+    /// a frozenset of keys (sorted by id): a value key
+    Frozen(Vec<KeyId>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -185,6 +187,12 @@ pub fn key_tuple(items: Vec<KeyId>) -> KeyId {
     key(Key::Tuple(items))
 }
 
+pub fn key_frozen(mut items: Vec<KeyId>) -> KeyId {
+    items.sort();
+    items.dedup();
+    key(Key::Frozen(items))
+}
+
 /// Python's `str(k)` for the key (used where the prototype formats a key into a string).
 pub fn key_py_str(id: KeyId) -> String {
     with_key(id, |k| match k {
@@ -234,6 +242,11 @@ fn key_repr_inner(k: &Key) -> String {
         Key::Inv(f, k) => format!("{}⁻¹({})", f, key_repr(*k)),
         Key::Member(_, Some(v)) => key_repr(*v),
         Key::Member(q, None) => q.to_string(),
+        Key::Frozen(items) if items.is_empty() => "frozenset()".into(),
+        Key::Frozen(items) => {
+            let parts: Vec<String> = items.iter().map(|k| key_repr(*k)).collect();
+            format!("frozenset({{{}}})", parts.join(", "))
+        }
     }
 }
 

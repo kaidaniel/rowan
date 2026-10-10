@@ -148,6 +148,49 @@ impl Analyzer {
         out.join(&Value::kv_only(KeyVal::lits(KeySet::from_iter(ks))))
     }
 
+    /// The key a tuple / frozenset with known items hashes as (`(1, "a")`, `frozenset({"r"})`).
+    pub fn value_key(&self, o: u32, state: &State, depth: usize) -> Option<KeyId> {
+        let kind = self.kind(o);
+        if !matches!(kind, Kind::Tuple | Kind::Set) || depth > 3 || super::disabled("valuekey") || !self.obj(o).single {
+            return None;
+        }
+        let n = self.llen(o, state)?;
+        if n > 16 {
+            return None;
+        }
+        let mut ks = Vec::with_capacity(n);
+        for i in 0..n {
+            let v = state.slot(o, Ns::Pos, intern::key_int(i as i64));
+            let k = match (v.pts.is_empty(), v.kv.as_lit(), v.single()) {
+                (true, Some(k), _) => k,
+                (false, _, Some(x)) if v.kv.is_bot() => self.value_key(x, state, depth + 1)?,
+                _ => return None,
+            };
+            ks.push(k);
+        }
+        Some(if kind == Kind::Tuple { intern::key_tuple(ks) } else { intern::key_frozen(ks) })
+    }
+
+    /// `keyify`, with tuples / frozensets of known items as their value keys.
+    pub fn keyify_in(&self, v: &Value, state: &State) -> Value {
+        if v.pts.is_empty() {
+            return v.clone();
+        }
+        let mut ks: Vec<KeyId> = Vec::new();
+        let mut rest: Vec<u32> = Vec::new();
+        for o in v.pts.iter() {
+            match self.value_key(o, state, 0) {
+                Some(k) => ks.push(k),
+                None => rest.push(o),
+            }
+        }
+        if ks.is_empty() {
+            return self.keyify(v);
+        }
+        let out = self.keyify(&Value::with_kv(crate::domain::ObjSet::from_vec(rest), v.kv.clone()));
+        out.join(&Value::kv_only(KeyVal::lits(KeySet::from_iter(ks))))
+    }
+
     /// A key standing for one object hashed by its identity (a future, a function, an instance
     /// of a class without `__eq__` / `__hash__`), while that object is one runtime object.
     pub fn identity_key(&self, o: u32) -> Option<KeyId> {
@@ -340,7 +383,7 @@ impl Analyzer {
 
     pub fn load_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
         // (objects in the key: an unknown key; lists / tuples are indexed by their own rules)
-        let okey = if ns == Ns::Item && !key.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Dict | Kind::Ph | Kind::Unknown)) && !obj.pts.is_empty() { self.opaque_key(key) } else { key.clone() };
+        let okey = if ns == Ns::Item && !key.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Dict | Kind::Ph | Kind::Unknown)) && !obj.pts.is_empty() { self.opaque_key(key, state) } else { key.clone() };
         let key = &okey;
         // in a summary: a value read from a dict copied from a parameter's record (its slot not
         // set here) is known only at the call site: decided there
@@ -855,11 +898,11 @@ impl Analyzer {
 
     /// A key whose value includes objects (an unknown value, a non-literal tuple, an instance):
     /// for the record model an unknown key (its literal part kept in the join).
-    pub fn opaque_key(&self, key: &Value) -> Value {
+    pub fn opaque_key(&self, key: &Value, state: &State) -> Value {
         if key.pts.is_empty() || super::disabled("objkey") {
             return key.clone();
         }
-        let key = self.keyify(key);
+        let key = self.keyify_in(key, state);
         if key.pts.is_empty() {
             return key;
         }
@@ -876,7 +919,7 @@ impl Analyzer {
     }
 
     pub fn store_item(&mut self, obj: &Value, ns: Ns, key: &Value, v: &Value, node: &Node, state: &mut State) {
-        let okey = if ns == Ns::Item { self.opaque_key(key) } else { key.clone() };
+        let okey = if ns == Ns::Item { self.opaque_key(key, state) } else { key.clone() };
         let key = &okey;
         let targets: Vec<u32> = obj.pts.iter().filter(|o| !matches!(self.kind(*o), Kind::Series | Kind::External | Kind::Function | Kind::Bound | Kind::Class | Kind::Method)).collect();
         for &oid in &targets {

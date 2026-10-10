@@ -105,7 +105,7 @@ fn truthy(k: KeyId) -> Option<bool> {
         Key::None => false,
         Key::Str(s) => !s.is_empty(),
         Key::Bytes(b) => !b.is_empty(),
-        Key::Tuple(t) => !t.is_empty(),
+        Key::Tuple(t) | Key::Frozen(t) => !t.is_empty(),
         Key::Ellipsis => true,
         Key::Inv(..) | Key::Member(..) => return None,
     })
@@ -248,6 +248,10 @@ fn py_repr_k(k: &Key, ascii: bool) -> Option<String> {
         Key::None => "None".into(),
         Key::Bytes(b) => repr_bytes(b),
         Key::Ellipsis => "Ellipsis".into(),
+        // (several items print in hash order)
+        Key::Frozen(items) if items.is_empty() => "frozenset()".into(),
+        Key::Frozen(items) if items.len() == 1 => format!("frozenset({{{}}})", py_repr_k(&key_get(items[0]), ascii)?),
+        Key::Frozen(_) => return None,
         Key::Tuple(items) => {
             let mut parts = Vec::with_capacity(items.len());
             for it in items {

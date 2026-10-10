@@ -571,7 +571,7 @@ impl Analyzer {
             }
             _ => {
                 let v = self.eval(node, state);
-                self.keyify(&v)
+                self.keyify_in(&v, state)
             }
         }
     }
@@ -1230,6 +1230,7 @@ impl Analyzer {
                         intern::Key::Ellipsis => true,
                         intern::Key::Inv(..) => true,
                         intern::Key::Member(..) => true,
+                        intern::Key::Frozen(t) => !t.is_empty(),
                     })
                 };
                 let mut it = lits.iter();

@@ -1705,7 +1705,7 @@ fn dict_recv(an: &Analyzer, c: &Call) -> Vec<u32> {
 fn m_get(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(key) = c.args.first() else { return Value::data("get") };
     // (a key that may be an object: an unknown key)
-    let okey = an.opaque_key(key);
+    let okey = an.opaque_key(key, st);
     let key = &okey;
     let default = c.args.get(1).cloned().unwrap_or_else(|| an.none_v.clone());
     let recv = c.recv.clone().unwrap_or_default();
@@ -1743,7 +1743,7 @@ fn m_get(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn m_setdefault(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(key) = c.args.first() else { return Value::data("setdefault") };
-    let okey = an.opaque_key(key);
+    let okey = an.opaque_key(key, st);
     let key = &okey;
     let default = c.args.get(1).cloned().unwrap_or_else(|| an.none_v.clone());
     let recv = c.recv.clone().unwrap_or_default();
@@ -3721,6 +3721,13 @@ fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let row = st.row(o, Ns::Item);
             if row.closed() && row.present == row.definite && !row.symbolic() {
                 return Value::lit(intern::key_int(row.definite.len() as i64));
+            }
+            // keys from a parameter (`d.update(rec)`): decided per call site
+            if row.symbolic() {
+                for r in row.refs().to_vec() {
+                    let (p, _) = crate::domain::unrho(r);
+                    an.record_event("concrete", p);
+                }
             }
             // keys set on some paths: between the sure and the possible count
             if row.closed() && !row.symbolic() && row.present.len() - row.definite.len() <= 8 && !crate::interp::disabled("lenrange") {

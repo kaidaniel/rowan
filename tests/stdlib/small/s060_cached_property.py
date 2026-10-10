@@ -26,7 +26,7 @@ s = r.summary                                  #@row s: present={count,total} de
 #@row r: present={rows,summary} definite={rows,summary} closed
 tot = s["total"]                               #@value tot: exactly={7}
 again = r.summary is s                         #@value again: exactly={True}
-#@schema param Report.__init__.rows['*']: always={amount} only={amount}
+#@todo schema param Report.__init__.rows['*']: always={amount} only={amount}  (a requirement made by a later method on a stored parameter: object-lifecycle schemas are not tracked)
 
 if __name__ == "__main__":
     for rep in [r, Report([])]:
