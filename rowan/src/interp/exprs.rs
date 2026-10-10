@@ -715,15 +715,29 @@ impl Analyzer {
     fn expr_boolop(&mut self, b: &'static ast::ExprBoolOp, state: &mut State) -> Value {
         let mut acc = self.eval(&b.values[0], state);
         let is_and = b.op == ast::BoolOp::And;
-        let mut pre = state.copy();
+        // the states where the evaluation may stop early (an undecided operand short-circuits)
+        let mut stops: Vec<State> = Vec::new();
         let mut st = state.copy();
-        self.cond_depth += 1;
-        self.branch_depth += 1;
         let mut prev: &'static ast::Expr = &b.values[0];
+        let mut depth_added = 0;
         for v in b.values[1..].iter() {
             let truth = self.truthiness(&acc, &st);
             if (!is_and && truth == Some(true)) || (is_and && truth == Some(false)) {
                 break;
+            }
+            if truth.is_none() {
+                // (this operand may end it: its value, on the state it is false / true on)
+                let mut s0 = st.copy();
+                self.narrow(prev, !is_and, &mut s0);
+                if s0.reachable {
+                    stops.push(s0);
+                }
+                // the rest runs on some paths only
+                if depth_added == 0 {
+                    self.cond_depth += 1;
+                    self.branch_depth += 1;
+                    depth_added = 1;
+                }
             }
             self.narrow(prev, is_and, &mut st);
             if !st.reachable {
@@ -737,13 +751,20 @@ impl Analyzer {
             }
             prev = v;
         }
-        self.branch_depth -= 1;
-        self.cond_depth -= 1;
-        if st.reachable {
-            let j = pre.join(&mut st);
-            state.replace_with(j);
-        } else {
-            state.replace_with(pre);
+        if depth_added == 1 {
+            self.branch_depth -= 1;
+            self.cond_depth -= 1;
+        }
+        let mut out = if st.reachable { Some(st) } else { None };
+        for mut s0 in stops {
+            out = Some(match out {
+                None => s0,
+                Some(mut o) => o.join(&mut s0),
+            });
+        }
+        match out {
+            Some(o) => state.replace_with(o),
+            None => state.reachable = false,
         }
         acc
     }
