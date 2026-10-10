@@ -547,6 +547,14 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let pid = an.alloc_raw(Kind::Pair, &format!("pair:{}", c.site), &ctx, true, "pair", Payload::Pair(k.clone(), v.clone()));
                 st.set_slot(oid, Ns::Elem, STAR, Value::obj(pid), true);
                 st.elems.insert(oid, DATA);
+                // `sorted(d.items(), key=f)` with unknown items: f reads every pair
+                if c.qual == "builtins.sorted" && it.items.is_none() {
+                    if let Some(keyfn) = c.kw("key") {
+                        if !keyfn.pts.is_empty() {
+                            an.call_value(&keyfn, &c.node, None, st, Some(vec![Value::obj(pid)]));
+                        }
+                    }
+                }
                 // known pairs (zip / enumerate / items of known inputs) keep their positions;
                 // sorted by known literal keys, in that order
                 let plain = matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple" | "builtins.reversed" | "builtins.sorted");

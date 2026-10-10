@@ -615,8 +615,10 @@ impl Analyzer {
                                 Some(f) => self.call_value(&f, node, None, state, Some(vec![])),
                                 None => state.slot(oid, Ns::Item, STAR),
                             };
+                            // (a key the closed row surely lacks: no earlier value to keep)
+                            let absent = r.closed() && !r.present.contains(k) && !r.symbolic();
                             r = r.store(k, strong);
-                            state.set_slot(oid, ns, k, dflt, false);
+                            state.set_slot(oid, ns, k, dflt, absent);
                         }
                     }
                     state.set_row(oid, ns, r);
