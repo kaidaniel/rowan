@@ -12,6 +12,14 @@ use rustc_hash::FxHashMap;
 
 pub const FLATTEN_EVERY: u32 = 10;
 
+/// `ROWAN_LIMITS=flatten=N`: layers between flattened copies (default `FLATTEN_EVERY`).
+fn flatten_every() -> u32 {
+    thread_local! {
+        static N: u32 = crate::interp::limit("flatten", FLATTEN_EVERY as usize).max(2) as u32;
+    }
+    N.with(|n| *n)
+}
+
 /// `ROWAN_NO=lineage`: flattened nodes forget the chain they replaced (the old behaviour).
 fn lineage_off() -> bool {
     thread_local! {
@@ -178,7 +186,7 @@ impl<K: Clone + Eq + Hash, V: Clone + PartialEq> LayerMap<K, V> {
         }
         let depth = self.node.as_ref().map(|n| n.depth + 1).unwrap_or(1);
         let data = std::mem::take(&mut self.data);
-        let node = if depth % FLATTEN_EVERY == 0 {
+        let node = if depth % flatten_every() == 0 {
             // materialise the contents and make this node a root
             let tmp = LayerMap { node: self.node.clone(), data };
             let flat = tmp.materialise();
