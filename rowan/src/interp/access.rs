@@ -1242,6 +1242,13 @@ impl Analyzer {
                 let site = format!("store@L{}", node.line);
                 state.set_row(oid, ns, row.data_store(Source::new(&site, SourceKind::Data)));
                 state.set_slot(oid, ns, STAR, Value::with_kv(v.pts.clone(), DATA), false);
+                // the unknown key may be any of the keys there: each may hold the value now
+                if !super::disabled("unkstore") {
+                    let keys: Vec<KeyId> = state.slot_keys(oid, ns).into_iter().filter(|k| *k != STAR).collect();
+                    for k in keys {
+                        state.set_slot(oid, ns, k, v.clone(), false);
+                    }
+                }
             }
         }
     }
