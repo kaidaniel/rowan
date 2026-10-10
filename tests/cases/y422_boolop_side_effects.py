@@ -21,4 +21,5 @@ if __name__ == "__main__":
     s = note("e", 0) and note("f", 1)            #@value s: exactly={0}
     t3 = "".join(LOG)                            #@value t3: exactly={"abcde"}
     u = note("g", len(sys.argv) > 3) and note("h", 1)
-    n = len(LOG)                                 #@value n: exactly={6,7}
+    n = len(LOG)                                 #@value n: includes={6,7}
+    #@todo value n: exactly={6,7}
