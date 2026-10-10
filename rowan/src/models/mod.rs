@@ -996,6 +996,12 @@ fn m_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let recs = an.record_objects(&c.args[0]);
                 let strong = recs.len() == 1 && an.strongable(recs[0]) && !crate::interp::disabled("setattrstrong");
                 for o in recs {
+                    // a user `__setattr__` takes the store, whatever the name
+                    let hook = an.kind(o) == Kind::Instance && !an.bypass_setattr && !crate::interp::disabled("setattrdunder") && an.instance_class(o).is_some_and(|cls| an.class_lookup(cls, "__setattr__").is_some());
+                    if hook {
+                        an.call_method_with(&Value::obj(o), "__setattr__", vec![c.args[1].clone(), c.args[2].clone()], &c.node, st);
+                        continue;
+                    }
                     an.store_key(o, Ns::Attr, &c.args[1].kv, &c.args[2], strong, &c.node, st);
                 }
             }
@@ -1047,6 +1053,49 @@ pub fn builtin_has_attr(an: &Analyzer, o: u32, name: &str) -> Option<bool> {
     }
 }
 
+/// Run `o.__getattr__(name)` on a copy of the state under a try catching AttributeError:
+/// Some(false) when it surely raises it, Some(true) when it surely returns, None otherwise (or
+/// when it changes the heap).
+fn getattr_hook_outcome(an: &mut Analyzer, st: &mut State, o: u32, k: KeyId, node: &crate::frontend::Node) -> Option<bool> {
+    if crate::interp::disabled("hasattrhook") {
+        return None;
+    }
+    let mut s2 = st.copy();
+    let mark = an.objects.len() as u32;
+    let caught: rustc_hash::FxHashSet<String> = ["AttributeError".to_string()].into_iter().collect();
+    an.guards.push(caught);
+    an.may_raise.push(false);
+    an.raise_states.push(None);
+    an.raise_values.push(None);
+    an.raise_cls.push((an.raise_states.len(), Vec::new()));
+    an.try_marks.push((an.frames.len(), an.env_stack.len(), s2.copy()));
+    an.try_sum_depth.push(an.sum_stack.len());
+    an.raise_stack.push(false);
+    an.call_method_with(&Value::obj(o), "__getattr__", vec![Value::lit(k)], node, &mut s2);
+    let escaped = an.raise_stack.pop().unwrap_or(false);
+    an.try_sum_depth.pop();
+    an.try_marks.pop();
+    let recs = an.raise_cls.pop().map(|(_, r)| r).unwrap_or_default();
+    an.raise_values.pop();
+    let raised = an.raise_states.pop().flatten();
+    let flagged = an.may_raise.pop().unwrap_or(false);
+    an.guards.pop();
+    if flagged || escaped {
+        return None;
+    }
+    // (objects it made, the exception among them, do not count)
+    let fp = s2.footprint(st);
+    if fp.rows.iter().any(|(x, _)| *x < mark) || fp.slots.iter().any(|(x, _)| *x < mark) || fp.elems.iter().any(|x| *x < mark) {
+        return None;
+    }
+    let all_attr = recs.iter().all(|(cls, _, _)| cls.as_ref().is_some_and(|(n, _)| n.iter().any(|x| x == "AttributeError")));
+    match (s2.reachable, raised.is_some()) {
+        (false, true) if all_attr && !recs.is_empty() => Some(false),
+        (true, false) => Some(true),
+        _ => None,
+    }
+}
+
 fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let unknown = Value::data("hasattr");
     if c.args.len() < 2 {
@@ -1080,8 +1129,22 @@ fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             return unknown;
         }
         let Some(cls) = an.instance_class(o) else { return unknown };
-        if !an.hierarchy_closed(cls) || an.class_lookup(cls, "__getattr__").is_some() {
+        if !an.hierarchy_closed(cls) {
             return unknown;
+        }
+        if an.class_lookup(cls, "__getattr__").is_some() {
+            // the normal lookup first; then hasattr is `__getattr__` under `except AttributeError`
+            if an.class_lookup(cls, &name).is_some() || st.row(o, Ns::Attr).definite.contains(k) {
+                verdicts.push(true);
+                continue;
+            }
+            match getattr_hook_outcome(an, st, o, k, &c.node) {
+                Some(b) => {
+                    verdicts.push(b);
+                    continue;
+                }
+                None => return unknown,
+            }
         }
         if an.class_lookup(cls, &name).is_some() {
             verdicts.push(true);
