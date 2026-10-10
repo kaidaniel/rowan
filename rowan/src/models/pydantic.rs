@@ -750,6 +750,10 @@ impl Analyzer {
             return join_values(outs);
         }
         let mut data = Value::with_kv(crate::domain::ObjSet::from_vec(rest), data.kv.clone());
+        // (inside the validation of another model: its errors go to that one's list)
+        let nested = !self.pyd_errs.is_empty() && !crate::interp::disabled("pydnested");
+        let nest_prefix = self.pyd_nest_prefix.take();
+        let saved_field = self.pyd_field;
         self.pyd_errs.push(Vec::new());
         // `mode="before"` model validators (v1 `root_validator(pre=True)`) see the raw input
         // and return what is validated
@@ -928,7 +932,8 @@ impl Analyzer {
             self.pyd_field = Some(kk);
             let saved_inst = self.pyd_inst.replace(inst);
             // a field surely missing / surely not converting: its validators do not run
-            let failed = |an: &Analyzer| an.pyd_errs.last().map(|es| es.iter().any(|e| e.sure && e.loc == Some(kk))).unwrap_or(false);
+            let under = |l: Option<KeyId>| l == Some(kk) || l.map(|l| intern::with_key(l, |x| matches!(x, intern::Key::Tuple(t) if t.first() == Some(&kk)))).unwrap_or(false);
+            let failed = |an: &Analyzer| an.pyd_errs.last().map(|es| es.iter().any(|e| e.sure && under(e.loc))).unwrap_or(false);
             // field validators before the type's conversion, then the conversion, then after
             // (a default is not validated: validate_default is off)
             let given = !val.empty();
@@ -1051,6 +1056,30 @@ impl Analyzer {
                     self.record_event("concrete", o);
                 }
             }
+        }
+        if nested {
+            // the enclosing validation reports them: loc under the field (unknown when the
+            // nested model is not a plain field: an item of a list, a dict value)
+            self.pyd_field = saved_field;
+            for e in errs {
+                let loc = match (nest_prefix, e.loc) {
+                    (Some(p), Some(l)) => {
+                        let mut parts = vec![p];
+                        match intern::with_key(l, |kk| if let intern::Key::Tuple(t) = kk { Some(t.clone()) } else { None }) {
+                            Some(t) => parts.extend(t),
+                            None => parts.push(l),
+                        }
+                        Some(intern::key_tuple(parts))
+                    }
+                    (Some(p), None) => Some(intern::key_tuple(vec![p])),
+                    (None, _) => None,
+                };
+                if let Some(top) = self.pyd_errs.last_mut() {
+                    top.push(PErr { loc, typ: e.typ, sure: e.sure, ctx: e.ctx });
+                }
+            }
+            outs.push(Value::obj(inst));
+            return join_values(outs);
         }
         if !report && self.fa_body_validation && !errs.is_empty() && state.reachable && !crate::interp::disabled("fabody422") {
             if errs.iter().any(|e| e.sure) {
@@ -1569,7 +1598,10 @@ impl Analyzer {
                     return val.clone();
                 }
                 let lits = Value::kv_only(val.kv.clone());
+                // (its errors are this model's, under this field)
+                let saved_prefix = std::mem::replace(&mut self.pyd_nest_prefix, self.pyd_field);
                 let mut out = self.pyd_validate(c, &Value::objs(crate::domain::ObjSet::from_vec(recs)), state, node, false);
+                self.pyd_nest_prefix = saved_prefix;
                 if !val.kv.is_bot() && val.kv.is_literal() {
                     out = out.join(&lits);
                 }
@@ -3088,6 +3120,16 @@ pub fn m_pydverr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 // one tuple per record (records made at one site must not share it)
                 let lt = an.alloc_at(Kind::Tuple, &c.node, st, &format!("loc@L{}", c.line), Payload::None, None, Ns::Item, None, Some(&format!("verrloc{}:{}", idx.unwrap(), i)));
                 match e.loc {
+                    // (a nested model's error: the path through its field)
+                    Some(k) if intern::with_key(k, |kk| matches!(kk, intern::Key::Tuple(_))) => {
+                        let parts = intern::with_key(k, |kk| if let intern::Key::Tuple(t) = kk { t.clone() } else { vec![] });
+                        for (j, p) in parts.iter().enumerate() {
+                            st.set_slot(lt, Ns::Pos, intern::key_int(j as i64), Value::lit(*p), true);
+                        }
+                        st.set_slot(lt, Ns::Elem, intern::STAR, join_values(parts.iter().map(|p| Value::lit(*p)).collect::<Vec<_>>()), true);
+                        st.elems.insert(lt, KeyVal::lits(intern::KeySet::from_iter(parts.iter().copied())));
+                        an.set_llen(lt, st, Some(parts.len()));
+                    }
                     Some(k) => {
                         st.set_slot(lt, Ns::Pos, intern::key_int(0), Value::lit(k), true);
                         st.set_slot(lt, Ns::Elem, intern::STAR, Value::lit(k), true);

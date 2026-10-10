@@ -991,6 +991,9 @@ pub struct Analyzer {
     pub pyd_errs: Vec<Vec<crate::models::pydantic::PErr>>,
     pub pyd_verrs: Vec<Vec<crate::models::pydantic::PErr>>,
     pub pyd_field: Option<KeyId>,
+    /// a nested model being validated for this field of the enclosing one (its errors' loc
+    /// starts with it)
+    pub pyd_nest_prefix: Option<KeyId>,
     /// the instance whose field is being validated (containers made for it are its own)
     pub pyd_inst: Option<ObjId>,
     /// the last value of each call node, and whether a test is being narrowed (`eval`)
@@ -1283,6 +1286,7 @@ impl Analyzer {
             pyd_errs: Vec::new(),
             pyd_verrs: Vec::new(),
             pyd_field: None,
+            pyd_nest_prefix: None,
             pyd_inst: None,
             call_memo: FxHashMap::default(),
             np_struct: FxHashSet::default(),
