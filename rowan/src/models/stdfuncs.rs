@@ -501,4 +501,176 @@ pub fn register(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {
         m_operator_fn,
     );
     r(&["operator.methodcaller"], m_methodcaller);
+    r(&["string.Template"], m_template_new);
+}
+
+// ------------------------------------------------------------------ string.Template
+
+/// The pieces of a `$`-template: literal text and placeholder names; None for an invalid `$`
+/// (substitute raises ValueError there, safe_substitute keeps it).
+enum TPiece {
+    Text(String),
+    Name(String),
+    Bad,
+}
+
+fn template_pieces(t: &str) -> Vec<TPiece> {
+    let ident = |s: &str| -> usize {
+        let b = s.as_bytes();
+        if b.is_empty() || !(b[0].is_ascii_alphabetic() || b[0] == b'_') {
+            return 0;
+        }
+        b.iter().take_while(|c| c.is_ascii_alphanumeric() || **c == b'_').count()
+    };
+    let mut out = Vec::new();
+    let mut text = String::new();
+    let mut rest = t;
+    while let Some(i) = rest.find('$') {
+        text.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        if let Some(r) = after.strip_prefix('$') {
+            text.push('$');
+            rest = r;
+            continue;
+        }
+        let (name, used) = if let Some(r) = after.strip_prefix('{') {
+            let n = ident(r);
+            if n > 0 && r[n..].starts_with('}') {
+                (Some(r[..n].to_string()), n + 2)
+            } else {
+                (None, 0)
+            }
+        } else {
+            let n = ident(after);
+            if n > 0 {
+                (Some(after[..n].to_string()), n)
+            } else {
+                (None, 0)
+            }
+        };
+        if !text.is_empty() {
+            out.push(TPiece::Text(std::mem::take(&mut text)));
+        }
+        match name {
+            Some(n) => {
+                out.push(TPiece::Name(n));
+                rest = &after[used..];
+            }
+            None => {
+                out.push(TPiece::Bad);
+                text.push('$');
+                rest = after;
+            }
+        }
+    }
+    text.push_str(rest);
+    if !text.is_empty() {
+        out.push(TPiece::Text(text));
+    }
+    out
+}
+
+/// `Template(text)`: a stdobj holding its text (`.template`).
+fn m_template_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let text = c.arg(0, Some("template")).unwrap_or_else(|| Value::data("template"));
+    let p = crate::interp::Payload::Method("stdobj.template".into(), text.clone());
+    let oid = an.alloc_at(Kind::Namespace, &c.node, st, &format!("Template@L{}", c.line), p.clone(), Some(crate::domain::Row::new()), Ns::Attr, None, None);
+    an.obj_mut(oid).payload = p;
+    let tk = intern::key_str_lit("template");
+    st.set_row(oid, Ns::Attr, crate::domain::Row::new().store(tk, true));
+    st.set_slot(oid, Ns::Attr, tk, text, true);
+    Value::obj(oid)
+}
+
+/// `t.substitute(mapping, **kws)` / `t.safe_substitute(…)` / `t.get_identifiers()` / `t.is_valid()`.
+pub fn m_template(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
+    let text = c.recv.as_ref().and_then(|r| r.single()).and_then(|o| match &an.obj(o).payload {
+        crate::interp::Payload::Method(_, t) => t.kv.as_lit().filter(|_| t.pts.is_empty()).and_then(intern::key_as_str).map(|s| s.to_string()),
+        _ => None,
+    });
+    let Some(text) = text else {
+        an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
+        return Value::data("template");
+    };
+    let pieces = template_pieces(&text);
+    match name.as_str() {
+        "get_identifiers" => {
+            let mut ids: Vec<String> = Vec::new();
+            for p in &pieces {
+                if let TPiece::Name(n) = p {
+                    if !ids.contains(n) {
+                        ids.push(n.clone());
+                    }
+                }
+            }
+            let vals: Vec<Value> = ids.iter().map(|x| Value::lit_str(x)).collect();
+            let kv = crate::domain::KeyVal::lits(intern::KeySet::from_iter(vals.iter().filter_map(|v| v.kv.as_lit())));
+            an.alloc_positional(Kind::List, &c.node, Some(vals), Value::new(), kv, st)
+        }
+        "is_valid" => Value::lit(intern::key_bool(!pieces.iter().any(|p| matches!(p, TPiece::Bad)))),
+        "substitute" | "safe_substitute" => {
+            let safe = name == "safe_substitute";
+            let mapping = c.args.first().cloned();
+            let mut out = Some(String::new());
+            let push = |out: &mut Option<String>, s: Option<String>| match (out.as_mut(), s) {
+                (Some(o), Some(s)) => o.push_str(&s),
+                _ => *out = None,
+            };
+            for p in &pieces {
+                match p {
+                    TPiece::Text(t) => push(&mut out, Some(t.clone())),
+                    TPiece::Bad if safe => push(&mut out, Some(String::new())),
+                    TPiece::Bad => {
+                        an.raise_here("ValueError", st);
+                        return Value::new();
+                    }
+                    TPiece::Name(n) => {
+                        let v = if let Some(v) = c.kwargs.get(&intern::s(n)) {
+                            Some(v.clone())
+                        } else if let Some(m) = &mapping {
+                            let key = Value::lit(intern::key_str_lit(n));
+                            if safe {
+                                // absent: the placeholder stays; maybe absent: unknown text
+                                let recs = an.record_objects(m);
+                                let rows: Vec<crate::domain::Row> = recs.iter().map(|o| st.row(*o, Ns::Item)).collect();
+                                let k = intern::key_str_lit(n);
+                                if !recs.is_empty() && rows.iter().all(|r| (r.closed() && !r.present.contains(k)) || r.absent.contains(k)) {
+                                    push(&mut out, Some(format!("${}", n)));
+                                    continue;
+                                }
+                                if recs.is_empty() || !rows.iter().all(|r| r.definite.contains(k)) {
+                                    an.load_item(m, Ns::Item, &key, &c.node, st, false);
+                                    out = None;
+                                    continue;
+                                }
+                                Some(an.load_item(m, Ns::Item, &key, &c.node, st, false))
+                            } else {
+                                Some(an.load_item(m, Ns::Item, &key, &c.node, st, true))
+                            }
+                        } else if safe {
+                            push(&mut out, Some(format!("${}", n)));
+                            continue;
+                        } else {
+                            an.raise_here("KeyError", st);
+                            return Value::new();
+                        };
+                        let piece = v.and_then(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).map(intern::key_py_str);
+                        push(&mut out, piece);
+                    }
+                }
+            }
+            if !st.reachable {
+                return Value::new();
+            }
+            match out {
+                Some(s) => Value::lit_str(&s),
+                None => {
+                    an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
+                    Value::data("template")
+                }
+            }
+        }
+        _ => Value::data("template"),
+    }
 }

@@ -1,4 +1,3 @@
-small/s050_string_template.py
 models/sm01_orders_cli.py
 models/sm02_layered_config.py
 models/sm03_inventory_report.py
