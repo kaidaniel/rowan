@@ -1952,6 +1952,10 @@ fn m_setdefault(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 fn m_update(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // a parameter's mapping (or keywords): decided per call site
+    if !crate::interp::disabled("updateph") {
+        an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
+    }
     let recs = dict_recv(an, c);
     let strong = recs.len() == 1 && an.obj(recs[0]).single;
     for oid in recs {

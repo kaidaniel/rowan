@@ -63,6 +63,16 @@ impl Analyzer {
                             if !is_none {
                                 self.narrow_get_truthy(left, state);
                             }
+                            // the name is None / is not None
+                            if let ast::Expr::Name(l) = left {
+                                if !crate::interp::disabled("isnone") {
+                                    let cur = self.load_name(s(l.id.as_str()), &Node::none(), state);
+                                    let has_none = kv_literals(&cur.kv).contains(intern::key_none());
+                                    if has_none || is_none {
+                                        self.narrow_kv(s(l.id.as_str()), &KeySet::one(intern::key_none()), is_none, state);
+                                    }
+                                }
+                            }
                         }
                     }
                     ast::CmpOp::LtE | ast::CmpOp::Lt => {

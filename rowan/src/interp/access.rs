@@ -1258,6 +1258,10 @@ impl Analyzer {
                 row = row.delete(k, strong && is_lit);
                 state.pop_slot(oid, ns, k);
             }
+            // an unknown key: any key may be the one deleted
+            if !key.kv.is_literal() && key.kv.as_param().is_none() && !super::disabled("delunknown") {
+                row = row.mutate(s(&format!("del@L{}", node.line)));
+            }
             state.set_row(oid, ns, row);
         }
     }

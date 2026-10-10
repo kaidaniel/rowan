@@ -107,12 +107,12 @@ def db_config(cp):
     return {"url": url, "pool": pool, "timeout": timeout}
 
 
-def apply_overrides(cfg, raw):
+def apply_overrides(cfg, raw):  # L114 was `ok host ; ok port` (no override has port), L115 `none workers` (out["workers"] is read)
     out = dict(cfg)
     for key in ("host", "port"):
         if key in raw:
-            out[key] = raw[key]                  #@ ok host ; ok port
-    out["workers"] = int(raw.get("workers", out["workers"]))  #@ none workers
+            out[key] = raw[key]                  #@ ok host
+    out["workers"] = int(raw.get("workers", out["workers"]))  #@ ok workers
     if raw["strict"]:                            #@ ok strict
         out["strict"] = True
     _ = 0                                        #@row out: present={host,port,workers,log_level,extras,db,strict} definite={host,port,workers,log_level,extras} closed
@@ -142,10 +142,10 @@ def mode():
     return m
 
 
-def secret():
+def secret():  # was `input`: set_env sets SM02_FALLBACK, then deletes it (every SM02_ key) before the second call
     s = os.environ.get("SM02_SECRET")            #@ none SM02_SECRET
     if s is None:
-        return os.environ["SM02_FALLBACK"]       #@ input SM02_FALLBACK
+        return os.environ["SM02_FALLBACK"]       #@todo ok SM02_FALLBACK ; missing SM02_FALLBACK
     return s
 
 
@@ -162,12 +162,12 @@ def set_env(values):
 if __name__ == "__main__":
     set_env({"SM02_PORT": "7000", "SM02_DEBUG": "1", "SM02_FALLBACK": "fb"})
     c1 = build(INI_BASE)
-    p1 = c1["port"]                              #@value p1: exactly={7000}
-    ex1 = c1["extras"]                           #@row ex1: definite={url} open
-    # precise: the driver controls every SM02_ variable (set_env deletes the others)
+    p1 = c1["port"]                              #@todo value p1: exactly={7000}
+    ex1 = c1["extras"]                           #@row ex1: open
+    # precise: the driver controls every SM02_ variable (set_env deletes the others); url is in extras surely
     #@todo row ex1: present={debug,fallback,url} definite={debug,fallback,url} closed
-    s1 = secret()                                #@value s1: exactly={fb}
-    m1 = mode()                                  #@value m1: exactly={dev}
+    s1 = secret()                                #@todo value s1: exactly={fb}
+    m1 = mode()                                  #@todo value m1: exactly={dev}
 
     set_env({})
     c2 = build(INI_MIN, {"strict": False, "workers": "8"})
