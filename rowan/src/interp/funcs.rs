@@ -715,6 +715,18 @@ impl Analyzer {
                         }
                     }
                 }
+                // an sqlite cursor: its remaining rows
+                Kind::Namespace if self.sql_cursors.contains_key(&oid) => {
+                    if let Some(rows) = crate::models::sqlite::cursor_rows(self, state, node, oid) {
+                        state.set_slot(oid, Ns::Attr, key_str_lit("\u{1}pos"), Value::data("pos"), true);
+                        let it = self.iterate(&rows, node, state);
+                        match (it.items, items.as_mut()) {
+                            (Some(xs), Some(its)) => its.extend(xs),
+                            _ => items = None,
+                        }
+                        elems.push(it.elem.flat());
+                    }
+                }
                 // itertools.count / cycle / repeat: no end
                 Kind::Namespace if self.infinites.contains_key(&oid) => {
                     items = None;

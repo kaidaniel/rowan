@@ -798,6 +798,10 @@ pub struct Analyzer {
     pub re_matches: FxHashMap<ObjId, crate::models::remodel::ReMatch>,
     /// pathlib path objects' classes (models::pathtext)
     pub path_classes: FxHashMap<ObjId, String>,
+    /// sqlite3 connections (their databases), cursors (their connection), Row dicts (columns)
+    pub sql_dbs: FxHashMap<ObjId, crate::models::sqlite::Db>,
+    pub sql_cursors: FxHashMap<ObjId, ObjId>,
+    pub sql_rows: FxHashMap<ObjId, Vec<String>>,
     /// itertools.count / cycle / repeat(x) objects
     pub infinites: FxHashMap<ObjId, crate::models::itertools::Infinite>,
     /// partials' bound `**mapping`s of unknown keys
@@ -1040,6 +1044,9 @@ impl Analyzer {
             re_patterns: FxHashMap::default(),
             re_matches: FxHashMap::default(),
             path_classes: FxHashMap::default(),
+            sql_dbs: FxHashMap::default(),
+            sql_cursors: FxHashMap::default(),
+            sql_rows: FxHashMap::default(),
             infinites: FxHashMap::default(),
             partial_star: FxHashMap::default(),
             wrapped: FxHashMap::default(),
@@ -1324,6 +1331,15 @@ impl Analyzer {
         }
         if let Some(c) = self.path_classes.get(&t).cloned() {
             self.path_classes.insert(nid, c);
+        }
+        if let Some(c) = self.sql_dbs.get(&t).cloned() {
+            self.sql_dbs.insert(nid, c);
+        }
+        if let Some(c) = self.sql_cursors.get(&t).cloned() {
+            self.sql_cursors.insert(nid, c);
+        }
+        if let Some(c) = self.sql_rows.get(&t).cloned() {
+            self.sql_rows.insert(nid, c);
         }
     }
 

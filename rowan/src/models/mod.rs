@@ -4,6 +4,7 @@
 
 pub mod minire;
 pub mod pyre;
+pub mod sqlite;
 pub mod pathtext;
 pub mod pynum;
 pub mod remodel;
@@ -187,6 +188,7 @@ impl Registry {
         argparse::register(&mut r);
         configparser::register(&mut r);
         remodel::register(&mut r);
+        sqlite::register(&mut r);
         pathtext::register(&mut r);
         concurrency::register(&mut r);
         itertools::register(&mut r);

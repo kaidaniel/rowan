@@ -362,6 +362,9 @@ pub fn m_stdobj(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if q.starts_with("stdobj.thread.") || q.starts_with("stdobj.executor.") || q.starts_with("stdobj.future.") {
         return crate::models::concurrency::m_conc(an, st, c);
     }
+    if q.starts_with("stdobj.sqlcon.") || q.starts_with("stdobj.sqlcur.") {
+        return crate::models::sqlite::m_sql(an, st, c);
+    }
     if q.starts_with("stdobj.path.") {
         return crate::models::pathtext::m_path_method(an, st, c);
     }

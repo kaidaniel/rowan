@@ -699,6 +699,13 @@ impl Analyzer {
                         acc = acc.join(&line_data);
                     }
                 }
+                // an sqlite3.Row indexed by position
+                Kind::Dict if self.sql_rows.contains_key(&oid) && key.kv.as_lit().and_then(intern::key_as_int).is_some() => match crate::models::sqlite::row_index(self, state, oid, key) {
+                    Some(v) => acc = acc.join(&v),
+                    None => {
+                        self.raise_here("IndexError", state);
+                    }
+                },
                 // a regex match: `m[g]` is its group
                 Kind::Namespace if self.re_matches.contains_key(&oid) => match crate::models::remodel::match_item(self, oid, key) {
                     Some(v) => acc = acc.join(&v),
@@ -1944,6 +1951,19 @@ impl Analyzer {
         Value::data(&format!("L{}", node.line))
     }
 
+    /// Is `name` an attribute / method of a modelled stdlib object of a family this program
+    /// has made objects of?
+    pub fn stdobj_attr_name(&self, name: &str) -> bool {
+        const SQL: &[&str] = &["execute", "executemany", "executescript", "cursor", "fetchone", "fetchall", "fetchmany", "description", "row_factory", "rowcount", "lastrowid", "commit", "connection"];
+        const RE: &[&str] = &["group", "groups", "groupdict", "start", "end", "span", "lastgroup", "lastindex", "expand", "match", "search", "fullmatch", "findall", "finditer", "sub", "subn", "split", "pattern", "groupindex"];
+        const PATH: &[&str] = &["stem", "suffix", "suffixes", "parent", "parents", "parts", "with_suffix", "with_name", "with_stem", "relative_to", "joinpath", "as_posix", "is_absolute"];
+        const CFG: &[&str] = &["sections", "getint", "getfloat", "getboolean", "has_section", "has_option", "options", "read_string", "read_dict"];
+        (!self.sql_dbs.is_empty() && SQL.contains(&name))
+            || ((!self.re_patterns.is_empty() || !self.re_matches.is_empty()) && RE.contains(&name))
+            || (!self.path_classes.is_empty() && PATH.contains(&name))
+            || (!self.cfg_parsers.is_empty() && CFG.contains(&name))
+    }
+
     /// Does any user subclass of `base` (other than `except`) define `name`?
     fn subclass_overrides(&self, base: u32, except: Option<u32>, name: &str) -> bool {
         let nk = key_str_lit(name);
@@ -1963,6 +1983,11 @@ impl Analyzer {
         if self.pandas_on && (crate::models::pandas::FRAME_ONLY_ATTRS.contains(&name) || crate::models::pandas::DF_METHODS.contains(&name) || matches!(name, "str" | "dt" | "cat")) {
             // a frame's indexers / columns / a Series accessor: decided per call site
             self.concrete_root(oid);
+        }
+        // an attribute of a modelled stdlib object the program makes (a cursor's
+        // `description`, a match's `group`): decided per call site where the object is known
+        if ph.cls.get().is_none() && !super::disabled("stdobjph") && self.stdobj_attr_name(name) {
+            self.record_event("dispatch", oid);
         }
         // declared class (annotation / self): resolve methods and class attributes (a
         // dataclass field's default is instance data, not a class attribute)
