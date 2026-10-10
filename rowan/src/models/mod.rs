@@ -2122,11 +2122,31 @@ fn m_pop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if !recv.pts.is_empty() && listy && (c.args.is_empty() || int_key) {
         // list.pop through a placeholder (or with no key): an element
         let mut outs = Vec::new();
+        // (pop reports its own raises: an empty list / an index outside it is an IndexError)
+        let mut maybe_raise = false;
         for oid in recv.pts.iter() {
             match an.kind(oid) {
-                Kind::Ph => outs.push(an.iterate(&Value::obj(oid), &c.node, st).elem.flat()),
-                _ => outs.push(list_pop_one(an, st, oid, c)),
+                Kind::Ph => {
+                    maybe_raise = true;
+                    outs.push(an.iterate(&Value::obj(oid), &c.node, st).elem.flat())
+                }
+                _ => {
+                    let before = an.llen(oid, st);
+                    let idx = c.args.first().and_then(|a| a.kv.as_lit()).and_then(intern::key_as_int);
+                    let ok = match (before, idx) {
+                        (Some(n), None) => n > 0,
+                        (Some(n), Some(i)) => (i >= 0 && (i as usize) < n) || (i < 0 && ((-i) as usize) <= n),
+                        _ => false,
+                    };
+                    if !ok {
+                        maybe_raise = true;
+                    }
+                    outs.push(list_pop_one(an, st, oid, c));
+                }
             }
+        }
+        if maybe_raise {
+            an.may_raise_here("IndexError", st);
         }
         return join_values(outs);
     }
@@ -2158,6 +2178,10 @@ fn m_pop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 return out;
             }
         }
+    }
+    // (pop reports its own raises: without a default a key that may be missing is a KeyError)
+    if !has_default {
+        an.may_raise_here("KeyError", st);
     }
     let mut out = an.load_item(&recv, Ns::Item, key, &c.node, st, !has_default);
     an.delete_item(&recv, Ns::Item, key, &c.node, st, false);

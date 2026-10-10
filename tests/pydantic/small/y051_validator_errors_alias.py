@@ -3,7 +3,7 @@ whose errors() list the failing fields in definition order, with `loc` by alias 
 `type` (`missing`, `int_parsing`, `value_error`); populate_by_name accepts the field name as
 well as the alias; a validator's return value (lowercased) is the stored value; dumps by_alias
 use the alias as the key. The caller's result row depends on which branch ran; for a record
-from input both branches are possible and nothing is required of the input (errors caught)."""
+from input both branches are possible (schema was only={}: the caught ValidationError is still raised)."""
 import json
 import os
 
@@ -61,5 +61,5 @@ if __name__ == "__main__":
     plain = User(user_id=5, email="Q@R").model_dump()
     #@row plain: present={user_id,email,age} definite={user_id,email,age} absent={userId} closed
     r6 = register(json.loads(os.environ.get("USER_JSON", '{"userId": 9, "email": "z@z"}')))
-    #@schema json.loads@L63: only={}
+    #@schema json.loads@L63: always={email} sometimes={userId,user_id} only={email,userId,user_id}
     _ = 0                                        #@row r6: present={ok,user,where,types} definite={ok} closed

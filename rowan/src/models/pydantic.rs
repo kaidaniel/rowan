@@ -1731,6 +1731,29 @@ impl Analyzer {
                 if t == "Decimal" && !(val.pts.is_empty() && val.kv.is_literal()) {
                     return Value::data("Decimal");
                 }
+                // objects validated as a scalar: the scalar (a container is an error; something
+                // unknown may be one)
+                if matches!(t, "str" | "int" | "float" | "bool") && !val.pts.is_empty() && !crate::interp::disabled("pydscalarobj") {
+                    let containers = val.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance)).count();
+                    let total = val.pts.len() + usize::from(!val.kv.is_bot());
+                    if containers > 0 || val.pts.iter().any(|o| matches!(self.kind(o), Kind::Unknown | Kind::Ph)) {
+                        let loc = self.pyd_field;
+                        let code = match t {
+                            "str" => "string_type",
+                            "int" => "int_type",
+                            "float" => "float_type",
+                            _ => "bool_type",
+                        };
+                        self.pyd_err(loc, code, containers == total, false);
+                    }
+                    for o in val.pts.iter() {
+                        if self.kind(o) == Kind::Ph {
+                            self.record_event("concrete", o);
+                        }
+                    }
+                    let rest = Value::kv_only(coerce_kv(t, &val.kv));
+                    return if containers == total { rest } else { rest.join(&Value::data(t)) };
+                }
                 Value::with_kv(val.pts.clone(), coerce_kv(t, &val.kv))
             }
             Ann::Enum(c) => {
@@ -2388,11 +2411,17 @@ impl Analyzer {
         if pc.extra == Extra::Allow && (!ph || !crate::interp::disabled("phextra")) {
             let ir = state.row(oid, Ns::Attr);
             let fieldset: KeySet = KeySet::from_iter(pc.fields.iter().map(|f| key_str_lit(&f.name)));
-            for k in ir.present.iter() {
+            // (in the instance's insertion order when known: the fields, then the extras)
+            let ordered = ir.ordered_keys().filter(|_| !crate::interp::disabled("pydextraorder"));
+            let keys: Vec<KeyId> = ordered.clone().unwrap_or_else(|| ir.present.iter().collect());
+            for k in keys {
                 if fieldset.contains(k) || opts.exclude.as_ref().map(|e| e.contains(k)).unwrap_or(false) || opts.include.as_ref().map(|i| !i.contains(k)).unwrap_or(false) {
                     continue;
                 }
                 row = row.store(k, ir.definite.contains(k));
+                if ordered.is_some() {
+                    order.push(k);
+                }
                 state.set_slot(did, Ns::Item, k, state.slot(oid, Ns::Attr, k), true);
             }
             if ir.open() && opts.include.is_none() {
@@ -2537,6 +2566,24 @@ pub fn key_spec(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) -> Op
     Some((KeySet::from_iter(ks), nested))
 }
 
+/// The keys a nested include / exclude spec names: for a list field `{"__all__": {...}}` is the
+/// spec of every item (per-index specs are not read: None).
+fn item_spec(an: &mut Analyzer, st: &mut State, sub: &Value, node: &Node) -> Option<KeySet> {
+    let (sk, nested) = key_spec(an, st, sub, node)?;
+    let all = key_str_lit("__all__");
+    if sk.contains(all) && !crate::interp::disabled("pydallspec") {
+        if sk.len() != 1 {
+            return None;
+        }
+        let inner = nested.iter().find(|(k, _)| *k == all).map(|(_, v)| v.clone())?;
+        return key_spec(an, st, &inner, node).map(|(ks, _)| ks);
+    }
+    if sk.iter().any(|k| intern::key_as_int(k).is_some()) {
+        return None;
+    }
+    Some(sk)
+}
+
 fn dump_opts(an: &mut Analyzer, st: &mut State, c: &Call) -> DumpOpts {
     let flag = |c: &Call, n: &str| c.kwargs.get(&s(n)).map(|v| v.kv.as_lit() == Some(intern::key_bool(true))).unwrap_or(false);
     let mut o = DumpOpts { exclude_none: flag(c, "exclude_none"), exclude_unset: flag(c, "exclude_unset"), exclude_defaults: flag(c, "exclude_defaults"), by_alias: flag(c, "by_alias"), ..Default::default() };
@@ -2546,8 +2593,9 @@ fn dump_opts(an: &mut Analyzer, st: &mut State, c: &Call) -> DumpOpts {
             Some((ks, nested)) => {
                 o.include = Some(ks);
                 for (k, sub) in nested {
-                    if let Some((sk, _)) = key_spec(an, st, &sub, &c.node) {
-                        o.sub_include.push((k, DumpOpts { include: Some(sk), by_alias: o.by_alias, ..Default::default() }));
+                    match item_spec(an, st, &sub, &c.node) {
+                        Some(sk) => o.sub_include.push((k, DumpOpts { include: Some(sk), by_alias: o.by_alias, ..Default::default() })),
+                        None => o.unknown_sel = true,
                     }
                 }
             }
@@ -2562,8 +2610,9 @@ fn dump_opts(an: &mut Analyzer, st: &mut State, c: &Call) -> DumpOpts {
                 let whole: Vec<KeyId> = ks.iter().filter(|k| !nested.iter().any(|(n, sub)| n == k && !sub.pts.is_empty() && sub.kv.is_bot())).collect();
                 o.exclude = Some(KeySet::from_iter(whole));
                 for (k, sub) in nested {
-                    if let Some((sk, _)) = key_spec(an, st, &sub, &c.node) {
-                        o.sub_include.push((k, DumpOpts { exclude: Some(sk), by_alias: o.by_alias, ..Default::default() }));
+                    match item_spec(an, st, &sub, &c.node) {
+                        Some(sk) => o.sub_include.push((k, DumpOpts { exclude: Some(sk), by_alias: o.by_alias, ..Default::default() })),
+                        None => o.unknown_sel = true,
                     }
                 }
             }
@@ -2667,6 +2716,24 @@ pub fn m_instance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         }
                     } else {
                         an.copy_into(cp, Ns::Attr, &u, st, true, &KeySet::new());
+                    }
+                }
+                // the copy's fields set: the original's, plus what `update=` sets
+                if !crate::interp::disabled("pydcopyset") {
+                    if let Some((mut sure, mut maybe)) = an.pyd_set.get(&o).cloned() {
+                        if let Some(u) = c.kwargs.get(&s("update")) {
+                            let one = u.pts.len() == 1;
+                            for x in u.pts.iter().filter(|x| an.kind(*x) == Kind::Dict) {
+                                let ur = st.row(x, Ns::Item);
+                                for k in ur.present.iter() {
+                                    if one && ur.definite.contains(k) {
+                                        sure = sure.insert(k);
+                                    }
+                                    maybe = maybe.insert(k);
+                                }
+                            }
+                        }
+                        an.pyd_set.insert(cp, (sure, maybe));
                     }
                 }
                 outs.push(Value::obj(cp));

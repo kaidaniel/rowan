@@ -83,7 +83,7 @@ pub fn debug_enabled() -> bool {
     }
 }
 
-pub const SAFE_METHODS: &[&str] = &[
+pub const SAFE_METHODS: &[&str] = &["dict.pop", "list.pop", 
     "dict.get", "dict.keys", "dict.values", "dict.items", "dict.setdefault", "dict.copy", "list.append", "str.upper", "str.lower",
     "str.strip", "str.title", "str.format", "str.join",
 ];

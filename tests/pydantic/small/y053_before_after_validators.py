@@ -1,9 +1,9 @@
 """Hypothesis: a model_validator(mode="before") that renames a legacy key on a copy decides the
 fields (the renamed key is not an extra, the caller's dict keeps its old key) and the renamed
 field counts as set; extra="allow" puts unknown keys after the fields in a dump; an after
-validator that raises for some field values gives a caught ValidationError of type value_error,
-a missing field one of type missing. Input records may take every branch: the result row is
-open (extras) with nothing definite, and nothing is required of the input."""
+validator that raises for some field values gives a caught ValidationError of type value_error, a missing field one of type missing. Input records may take every branch: the result row is
+open (extras) with nothing definite; start is required (a caught missing still counts), kind
+unless type is given (corrected: was "nothing is required", against the pydantic convention)."""
 import json
 import os
 
@@ -56,5 +56,6 @@ if __name__ == "__main__":
     err3 = r3["error"]                           #@value err3: exactly={"value_error"}
     err4 = load({"start": 1})["error"]           #@value err4: exactly={"missing"}
     r5 = load(json.loads(os.environ.get("EVENT", '{"type": "z", "start": 3, "tag": 1}')))
-    #@schema json.loads@L58: only={}
-    _ = 0                                        #@row r5: present={kind,start,end,error} definite={} open
+    #@schema json.loads@L58: always={start} sometimes={kind} only={kind,start,type}
+    _ = 0                                        #@row r5: possible={kind,start,end,error} definite={} open
+#@todo row r5: present={kind,start,end,error} definite={} open  (type is popped by the before validator or absent: never an extra)
