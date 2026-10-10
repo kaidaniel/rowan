@@ -2644,7 +2644,9 @@ impl Analyzer {
             return self.method_value(&q, &Value::data(&format!("L{}", node.line)));
         }
         let cands: Vec<u32> = self.user_classes.iter().copied().filter(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, nk))).collect();
-        if !cands.is_empty() {
+        // (a name many classes define — `render`, `get_style` — says little about which one an
+        // unknown value is: past `duck` classes it is unknown code, not a call of every one)
+        if !cands.is_empty() && (cands.len() <= super::limit("duck", 8) || super::disabled("duck")) {
             let mut outs: Vec<Value> = Vec::new();
             for c in &cands {
                 let fv = self.cls_slots.get(&(*c, Ns::Attr, nk)).cloned().unwrap_or_default();
