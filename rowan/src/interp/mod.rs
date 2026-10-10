@@ -1662,10 +1662,13 @@ impl Analyzer {
             if self.model_depth > 0 {
                 self.model_born.insert(oid, self.model_epoch);
             }
-            if existed == Some(oid) && (self.is_live(oid, state) || model_held) {
+            // (past the hard deadline no walk: the site's object is taken as still in use,
+            // so it is merged — weak, always sound)
+            let hard = existed == Some(oid) && self.over_hard_deadline();
+            if existed == Some(oid) && (hard || model_held || self.is_live(oid, state)) {
                 // allocated again while the earlier object is still reachable (a method run
                 // twice on one receiver, a call repeated in a loop)
-                if self.opts.recency && single && !self.recent_stack.is_empty() {
+                if self.opts.recency && single && !self.recent_stack.is_empty() && !hard {
                     // inside a loop: a strong recent object, folded into the summary object
                     // at the loop's back-edge (the earlier object becomes that summary)
                     let rsite = format!("{}#recent", site);
@@ -1680,20 +1683,19 @@ impl Analyzer {
                     // of its own (a method run twice on one receiver keeps both records), up
                     // to a few; past them one summary object, weak (no longer one key)
                     let mut variant: Option<ObjId> = None;
-                    if !disabled("allocvariants") && single {
-                        for k in 1..=8usize {
+                    if !disabled("allocvariants") && single && !hard {
+                        // (the variants made so far, their liveness in one walk)
+                        let made: Vec<(String, Option<ObjId>)> = (1..=8usize).map(|k| {
                             let vctx = format!("{}~{}", ctx, k);
-                            match self.obj_index.get(&(kind, site.to_string(), vctx.clone())).copied() {
-                                None => {
-                                    variant = Some(self.alloc_raw(kind, site, &vctx, single, &label, payload2.clone()));
-                                    break;
-                                }
-                                Some(v) if !self.is_live(v, state) => {
-                                    variant = Some(self.alloc_raw(kind, site, &vctx, single, &label, payload2.clone()));
-                                    break;
-                                }
-                                Some(_) => {}
-                            }
+                            let v = self.obj_index.get(&(kind, site.to_string(), vctx.clone())).copied();
+                            (vctx, v)
+                        }).collect();
+                        let first_free = made.iter().position(|(_, v)| v.is_none()).unwrap_or(made.len());
+                        let olds: Vec<ObjId> = made[..first_free].iter().filter_map(|(_, v)| *v).collect();
+                        let live = if olds.is_empty() { FxHashSet::default() } else { self.live_among(&olds, state) };
+                        let pick = made.iter().position(|(_, v)| match v { None => true, Some(o) => !live.contains(o) });
+                        if let Some(i) = pick {
+                            variant = Some(self.alloc_raw(kind, site, &made[i].0, single, &label, payload2.clone()));
                         }
                     }
                     match variant {
@@ -2010,6 +2012,12 @@ impl Analyzer {
         self.started.elapsed().as_millis() as usize > limit("ms", MAX_MS)
     }
 
+    /// Past the hard deadline (`ROWAN_LIMITS=hard=N`, 5× the soft one): calls of user code
+    /// are unknown code from there on.
+    pub fn over_hard_deadline(&self) -> bool {
+        !disabled("harddeadline") && self.started.elapsed().as_millis() as usize > limit("hard", 5 * limit("ms", MAX_MS))
+    }
+
     pub fn run(&mut self) {
         crate::state::set_narrowed_same(self.opts.narrowed_same);
         let mut state = State::new();
@@ -2053,6 +2061,9 @@ impl Analyzer {
 
     fn analyse_uncalled_range(&mut self, from: ObjId, n: ObjId, state: &mut State, quiet_pass: bool) {
         for oid in from..n {
+            if self.over_hard_deadline() {
+                break;
+            }
             if self.kind(oid) != Kind::Function || self.entry_done.contains(&oid) {
                 continue;
             }
@@ -2660,6 +2671,13 @@ impl Analyzer {
     /// Is `oid` reachable from a binding the program can still use: the locals of every
     /// active frame, loop overlays, cells, module objects, narrowed values, the return value?
     pub fn is_live(&self, oid: ObjId, state: &State) -> bool {
+        !self.live_among(&[oid], state).is_empty()
+    }
+
+    /// Which of `targets` the program can still reach (one walk from the roots for all; it
+    /// stops when every one is found).
+    pub fn live_among(&self, targets: &[ObjId], state: &State) -> FxHashSet<ObjId> {
+        let mut found: FxHashSet<ObjId> = FxHashSet::default();
         fn push_value(v: &Value, work: &mut Vec<ObjId>) {
             work.extend(v.pts.iter());
             match &v.kv {
@@ -2694,11 +2712,14 @@ impl Analyzer {
         }
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
         while let Some(o) = work.pop() {
-            if o == oid {
-                return true;
-            }
             if !seen.insert(o) {
                 continue;
+            }
+            if targets.contains(&o) {
+                found.insert(o);
+                if found.len() == targets.len() {
+                    return found;
+                }
             }
             for (_, v) in state.slots.for_key(&o) {
                 push_value(&v, &mut work);
@@ -2737,7 +2758,7 @@ impl Analyzer {
                 _ => {}
             }
         }
-        false
+        found
     }
 
     /// What a value is, for the golden harness's `#@value` checks: literals it may be, whether

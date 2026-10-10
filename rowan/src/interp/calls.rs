@@ -106,6 +106,10 @@ impl Analyzer {
         if targets.len() == 1 {
             return self.call_one(targets[0], &args, &kwargs, &star_args, &star_kwargs, state, node, call_ast);
         }
+        // (past the hard deadline: one unknown call for all of them)
+        if self.over_hard_deadline() && targets.iter().all(|o| matches!(self.kind(*o), Kind::Function | Kind::Bound)) {
+            return self.unknown_call("?", None, &args, &kwargs, &star_args, &star_kwargs, state, node);
+        }
         let mut pre = state.copy();
         let mut outs: Vec<Value> = Vec::new();
         let mut states: Vec<State> = Vec::new();
@@ -118,10 +122,19 @@ impl Analyzer {
             self.alloc_extra = saved;
             states.push(st);
         }
-        let mut out = states.remove(0);
-        for mut st in states {
-            out = out.join(&mut st);
+        // (pairwise: each round joins what the others wrote once, not the growing join again)
+        while states.len() > 1 {
+            let mut next: Vec<State> = Vec::with_capacity(states.len().div_ceil(2));
+            let mut it = states.into_iter();
+            while let Some(mut a) = it.next() {
+                match it.next() {
+                    Some(mut b) => next.push(a.join(&mut b)),
+                    None => next.push(a),
+                }
+            }
+            states = next;
         }
+        let out = states.pop().unwrap();
         state.replace_with(out);
         join_values(outs)
     }
@@ -1050,6 +1063,13 @@ impl Analyzer {
 
     #[allow(clippy::too_many_arguments)]
     pub fn call_user(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, _call_ast: Option<&'static ast::ExprCall>, entry: bool) -> Value {
+        // past the hard deadline a user function is unknown code (its result unknown, its
+        // arguments possibly changed, it may raise): the run ends in bounded time
+        if self.over_hard_deadline() {
+            let q = self.func_info(foid).qualname.clone();
+            self.note(format!("analysis cut at the hard deadline ({} ms): later calls are unknown code", super::limit("hard", 5 * super::limit("ms", super::MAX_MS))));
+            return self.unknown_call(&q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
+        }
         // (user code called back by a model allocates as user code)
         let saved_md = std::mem::replace(&mut self.model_depth, 0);
         let r = self.call_user_inner(foid, self_v, args, kwargs, star_args, star_kwargs, state, node, _call_ast, entry);
