@@ -33,8 +33,8 @@ cd rowan && cargo build --release && cargo test --release --lib && cd ..
 rowan/target/release/rowan FILE.py [--json|--golden|--facts] [--no-rows --no-summaries --no-entry --no-imports] [--value-depth N]
                                    [--search-path DIR]… [--follow PKG]… [--site-packages DIR]…
 rowan/target/release/rowan serve                    # JSON lines over stdio (README has the protocol)
-uv run --no-project python tests/run_golden.py      # 857/857 in ~4 s (all suites); paths select; -v
-uv run --no-project python tests/run_golden.py --pending [--prune]   # cases in tests/*/PENDING (60 left)
+uv run --no-project python tests/run_golden.py      # 919/919 in ~4 s (all suites); paths select; -v
+uv run --no-project python tests/run_golden.py --pending [--prune]   # cases in tests/*/PENDING (1 left: ym04)
 uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy \
     python tests/oracle.py [--strict|--lenient] [-v] [case…]         # expectations vs a real run (755/755, ~4 min)
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py  # torch expectations vs real PyTorch
@@ -47,11 +47,11 @@ decision), `ROWAN_NO=a,b` (switch refinements off: `rg 'disabled\("' rowan/src`)
 `ROWAN_LIMITS=ms=2000,tab=256,call=256,clones=256,chain=2,path=3`, `ROWAN_FOLLOW=pkg,…`,
 `ROWAN_SUMMARIES=0` (old per-call-site engine), `ROWAN_TODO=check` (check `#@todo`s too).
 
-## Layout (Rust engine `rowan/`, ~48k lines)
+## Layout (Rust engine `rowan/`, ~58k lines)
 
 | file | role |
 | --- | --- |
-| `intern.rs` | interners (keys incl. `Key::Member` for Enum members / identity-hashed objects, strings, sources, lenses); `IdSet<T>`. |
+| `intern.rs` | interners; keys incl. `Member` (Enum members, identity / frozen-dataclass value keys), `Frozen` (frozensets), `Dec` / `Frac` (Decimal / Fraction), `Chrono` (datetime values); `IdSet<T>`. |
 | `domain.rs` | `Row` (present/definite/likely/absent, sources, mutators, terms), `KeyVal` (Lit/Lits/KeysOf/Data/Bot/Param), `Value`, `classify`. |
 | `layered.rs`, `state.rs` | persistent layered maps; `State` (env, rows, slots, elems, `lens` (list length / known prefix per path), `lasts` (last appended), reqs, ret, exits). |
 | `frontend.rs`, `scopes.rs` | ruff parsing, leaked `&'static` trees, node→module registry, parse cache, `site_prefix`; lexical scopes. |
@@ -60,12 +60,14 @@ decision), `ROWAN_NO=a,b` (switch refinements off: `rg 'disabled\("' rowan/src`)
 | `summary.rs` | placeholders, events, `summarise_sig`, `Inst` (instantiation), `propagate_events`, `should_tabulate`. |
 | `models/mod.rs` | `Registry`; builtins, dict/list/set/str methods, `copy`, `dataclasses`, `collections`, `json` (exact `dumps` text, round trips, `object_hook`), `slice`, enum hooks. |
 | `models/{pyvalues,pure}.rs` | exact CPython values on literals (str methods, format specs, `%`, math / operator / statistics; unit-tested against CPython). |
-| `models/{counter,csvio,argparse,concurrency}.rs` | Counter / deque; `io.StringIO` text, `csv` writer / reader / Dict*, ExitStack, redirect_stdout, closing / nullcontext; argparse (parse of known argv); threads, executors, futures. |
+| `models/{counter,csvio,argparse,concurrency}.rs` | Counter / deque; `io.StringIO` text, `csv` writer / reader / Dict*, ExitStack, redirect_stdout, closing / nullcontext, the `stdobj.*` dispatch; argparse (parse of known argv); threads, executors, futures. |
+| `models/{itertools,stdfuncs,configparser,sqlite}.rs` | itertools; heapq / bisect / operator / string.Template; configparser (INI simulated); sqlite3 (SQL simulated on in-memory DBs, SELECT columns = row keys). |
+| `models/{pyre,remodel,pynum,chrono,pathtext}.rs` | a Python-`re` backtracking engine and the `re` model (Pattern / Match objects); exact Decimal / Fraction; datetime / date / time / timedelta; os.path, pathlib pure paths, textwrap. |
 | `models/{pydantic,fastapi}.rs` | pydantic v2 (+ v1 spellings) models, validation, dumps, TypeAdapter, settings; FastAPI routes, binding, dependencies (yield), TestClient dispatch, status codes, middlewares. |
-| `models/{pandas,minire,torch}.rs`, `shape.rs` | pandas; a small regex matcher; tensor shapes and the torch model. |
+| `models/{pandas,minire,torch}.rs`, `shape.rs` | pandas; a small regex matcher (pandas `regex=`); tensor shapes and the torch model. |
 | `report.rs`, `main.rs` | output formats; CLI, `serve_loop`, site-packages discovery (1 GiB-stack thread). |
 | `tests/run_golden.py`, `tests/oracle.py` | golden harness (directives: `tests/CONVENTIONS.md`), runtime oracle (strict on the library suites). |
-| `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps}/` | 456 / 162 / 135 / 51 / 40 / 106 / 0 files; suites have `small/`, `models/`, a `PENDING` list. |
+| `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/` | 457 / 162 / 135 / 52 / 40 / 109 / 0 / 0 files; suites have `small/`, `models/`, a `PENDING` list. |
 | `tests/run_snapshots.py`, `tests/snapshots/` | `--json` snapshots on four old modules: the internals regression guard. |
 | `vscode-rowan/`, `rowan/py/` | VS Code extension (rowan serve); PyO3 binding (does not load on this machine). |
 
@@ -96,10 +98,19 @@ by run (the oracle reads it per line).
   literal keys, slices (also `slice()` objects; a slice of a placeholder is a list), yields,
   `zip`/`enumerate`/`map`; `lst[-1]` after an append of unknown position (`State.lasts`).
   Dicts keep insertion order; `True`/`1`/`1.0` and StrEnum members / their values are one key.
-* **Values.** Exact on literals (`pyvalues`); comparisons, membership, `is None`, narrowing
-  (a name holding literals and unknown objects keeps both outcomes); `while` / `match`;
-  branch facts (`CondFact`); `Row.stored`, `State.name_keys`; entry runs (uncalled functions,
-  FastAPI handlers) and quiet requirement-only runs for `param F.x` schemas.
+* **Values.** Exact on literals (`pyvalues`, `pynum`, `chrono`: Decimal / Fraction /
+  datetime are literal keys too, compared by value in the `Compare` hook); comparisons,
+  membership, `is None` narrows names; an unknown key tested `in` a closed dict of string keys
+  narrows to its keys (`keynarrow` events through summaries); `flag = k in d` records the
+  test's branch rows for a later `if flag:` (`flag_facts`); `while` / `match`; `CondFact`s;
+  `Row.stored`, `State.name_keys`; entry runs and quiet requirement-only runs. Tuples,
+  frozensets and frozen dataclass / pydantic instances with known items are value keys.
+  Dict insertion order survives instantiation; an unknown order is never guessed (the
+  iteration is then abstract). Rich comparisons call `__lt__` & co (`total_ordering`).
+* **Stdlib objects** (`stdobj.<kind>` Namespace objects, attributes in Attr slots, methods via
+  `m_stdobj`): StringIO, csv writers / readers, ExitStack, Template, Pattern / Match, path
+  objects, sqlite connections / cursors. A parameter whose attribute is named like one of a
+  family the program uses (`stdobj_attr_name`) decides per call site.
 * **Classes.** Dataclasses (field specs, InitVar, KW_ONLY, frozen, replace), properties,
   C3 MRO, descriptors, `__missing__`, `vars()`, Enum (members as keys, auto, Flag ops,
   StrEnum), `cached_property`, `lru_cache`, singledispatch; namedtuple / itemgetter /
@@ -129,6 +140,10 @@ by run (the oracle reads it per line).
   cookie, Enum and Literal validation → 422), dependencies (cached, route / router level,
   yield), TestClient (headers, cookie jar, query, status codes, 404 / 405, HTTPException
   detail, exception handlers), BackgroundTasks, request.state.
+* **Soundness guards** worth knowing: a non-converged recursion widens its result and the
+  rows it touched; `copy`/`deepcopy` of a parameter decides per call site; `**x` of an
+  unknown value opens the row; deleting through an unknown key demotes every key; an
+  unresolved placeholder's row is unknown; `isinstance` counts a value's literal part.
 * **Budgets.** 2 s soft deadline; 256 tabulations per function / call, 256 clones per site,
   `MAX_ACTIVE` 4, 3 summary rounds, unroll 16 (torch 64), path 3.
 
@@ -136,7 +151,7 @@ by run (the oracle reads it per line).
 
 | input | time | notes |
 | --- | --- | --- |
-| golden (857 cases, all suites) | ~4 s | one process per case; oracle ~4 min |
+| golden (919 cases, all suites) | ~4 s | one process per case; oracle ~4 min |
 | `j93` (830 lines) / `m96_pkg` (1,716) / `proto_summary.py` (1.2k, self-referential) | 0.09 / 0.10 / 2.6 s | pass / pass / 0 ✗ |
 
 ## Known problems and limits
@@ -148,9 +163,11 @@ by run (the oracle reads it per line).
 * Mutual recursion widens after 3 rounds; `while` with unknown conditions joins; `match`
   class / sequence patterns stay undecided; `getattr` needs a known name.
 * pandas: no relations between columns; absent keys of open frames listed only when seen.
-* `Decimal` / `fractions` / `datetime` values are not modelled (unknown); `as_completed`
-  order is unknown (no multiset of items); `ExitStack.enter_context` runs a @contextmanager
-  generator to its end when entered; a thread target runs at `start()`.
+* Deletion by a key pattern (`for k in [k for k in os.environ if k.startswith(P)]: del …`)
+  only demotes keys (sm02 / ym03 to-dos); record values do not flow from a list of records
+  into a frame's columns / groupby keys (fm04 to-dos); a changed decimal context makes
+  Decimal arithmetic unknown; `as_completed` order is unknown; `ExitStack.enter_context`
+  runs a @contextmanager generator to its end when entered; a thread target runs at `start()`.
 * An exception raised in a summarised callee under a re-raising @contextmanager may reach a
   future without its value (`sm05` to-do).
 * Identity keys of an object that later turns weak stay in rows (rare: re-allocation of a
@@ -159,9 +176,8 @@ by run (the oracle reads it per line).
 
 ## Where to go next
 
-`PLAN.md` steps left: the 60 cases in `tests/*/PENDING` (stdlib tail: itertools, re, os.path,
-pathlib, textwrap / string.Template, heapq / bisect, TypedDict / NamedTuple / MappingProxyType,
-configparser, os.environ; pydantic / FastAPI models), `tests/apps` (multi-module mixed
-programs), the numpy model, docs (README, SPECIFICATION §11 coverage table). Then: pandas
-`#@todo`s; torch facts from `<`/`!=`, dtypes; summary reuse in the server; the weak store
-through several objects; precision on real repositories. Keep this file under 200 lines.
+`PLAN.md` steps left: `ym04` (discriminated unions through TypeAdapter, pydantic dataclasses),
+`tests/apps` (multi-module mixed programs), the numpy model, docs (README, SPECIFICATION §11
+coverage table). Then: deletion by key pattern, records into frames, pandas `#@todo`s; torch
+facts from `<`/`!=`, dtypes; summary reuse in the server; the weak store through several
+objects; precision on real repositories. Keep this file under 200 lines.
