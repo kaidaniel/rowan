@@ -1056,6 +1056,28 @@ impl Analyzer {
         (out.join(&Value::data("validator")), died, true)
     }
 
+    /// A converted list (`List[M]`) at `node` in context `ctx`: positions when known.
+    fn pyd_list(&mut self, vals: Option<Vec<Value>>, elem: Value, node: &Node, state: &mut State, ctx: &str) -> Value {
+        let nid = self.alloc_at(Kind::List, node, state, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, Some(ctx));
+        let single = self.obj(nid).single;
+        let acc = match &vals {
+            Some(vs) => join_values(vs.clone()),
+            None => elem,
+        };
+        state.set_slot(nid, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), single);
+        state.elems.insert(nid, crate::domain::DATA);
+        match vals {
+            Some(vs) if single => {
+                self.set_llen(nid, state, Some(vs.len()));
+                for (i, v) in vs.iter().enumerate() {
+                    state.set_slot(nid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
+                }
+            }
+            _ => self.set_llen(nid, state, None),
+        }
+        Value::obj(nid)
+    }
+
     /// Private attributes get their defaults, then a user `model_post_init` runs.
     fn pyd_init_privates(&mut self, cls: ObjId, inst: ObjId, state: &mut State, node: &Node) {
         let pc = self.pyd_class(cls, state);
@@ -1467,10 +1489,12 @@ impl Analyzer {
                         continue;
                     }
                     let it = self.iterate(&Value::obj(o), node, state);
+                    // (one list per input list: nested lists in one validation stay apart)
+                    let ctx = format!("pyl{}", o);
                     match it.items {
                         Some(items) => {
                             let conv: Vec<Value> = items.iter().map(|x| self.pyd_convert(inner, x, state, node)).collect();
-                            outs.push(self.alloc_positional(Kind::List, node, Some(conv), Value::new(), crate::domain::DATA, state));
+                            outs.push(self.pyd_list(Some(conv), Value::new(), node, state, &ctx));
                         }
                         None => {
                             let e = match it.elem {
@@ -1478,7 +1502,7 @@ impl Analyzer {
                                 _ => Value::data("elem"),
                             };
                             let ce = self.pyd_convert(inner, &e, state, node);
-                            outs.push(self.alloc_positional(Kind::List, node, None, ce, crate::domain::DATA, state));
+                            outs.push(self.pyd_list(None, ce, node, state, &ctx));
                         }
                     }
                 }
@@ -1495,7 +1519,7 @@ impl Analyzer {
                         let row = state.row(o, Ns::Item);
                         let e = self.path_placeholder_value(o, Ns::Item, intern::STAR, &row, state);
                         let ce = self.pyd_convert(inner, &e, state, node);
-                        let nid = self.alloc_at(Kind::Dict, node, state, &format!("dict@L{}", node.line), Payload::None, None, Ns::Item, None, Some("pyddict"));
+                        let nid = self.alloc_at(Kind::Dict, node, state, &format!("dict@L{}", node.line), Payload::None, None, Ns::Item, None, Some(&format!("pyddict{}", o)));
                         state.set_row(nid, Ns::Item, Row::new().data_store(crate::domain::Source::new(&format!("dict@L{}", node.line), crate::domain::SourceKind::Data)));
                         state.set_slot(nid, Ns::Item, intern::STAR, ce, true);
                         outs.push(Value::obj(nid));
@@ -1505,7 +1529,7 @@ impl Analyzer {
                         outs.push(Value::obj(o));
                         continue;
                     }
-                    let nid = self.alloc_at(Kind::Dict, node, state, &format!("dict@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some("pyddict"));
+                    let nid = self.alloc_at(Kind::Dict, node, state, &format!("dict@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("pyddict{}", o)));
                     let row = state.row(o, Ns::Item);
                     state.set_row(nid, Ns::Item, row.clone());
                     for k in row.present.iter() {
@@ -1950,10 +1974,11 @@ impl Analyzer {
                         other => other.clone(),
                     };
                     let it = self.iterate(&Value::obj(o), node, state);
+                    let ctx = format!("dumpl{}", o);
                     match it.items {
                         Some(items) => {
                             let conv: Vec<Value> = items.iter().map(|x| self.pyd_dump_value(&inner, x, opts, state, node)).collect();
-                            outs.push(self.alloc_positional(Kind::List, node, Some(conv), Value::new(), crate::domain::DATA, state));
+                            outs.push(self.pyd_list(Some(conv), Value::new(), node, state, &ctx));
                         }
                         None => {
                             let e = match it.elem {
@@ -1961,7 +1986,7 @@ impl Analyzer {
                                 _ => Value::data("elem"),
                             };
                             let ce = self.pyd_dump_value(&inner, &e, opts, state, node);
-                            outs.push(self.alloc_positional(Kind::List, node, None, ce, crate::domain::DATA, state));
+                            outs.push(self.pyd_list(None, ce, node, state, &ctx));
                         }
                     }
                 }

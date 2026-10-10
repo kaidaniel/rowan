@@ -33,3 +33,20 @@ d = p.model_dump()
 dw = d["work"]
 #@row dw: present={city} definite={city} closed
 dwc = dw["city"]                                     #@value dwc: exactly={rome}
+
+
+class Line(BaseModel):
+    sku: str
+
+
+class Order(BaseModel):
+    id: int
+    items: List[Line]
+
+
+orders = [Order.model_validate(o) for o in [{"id": 1, "items": [{"sku": "a"}, {"sku": "b"}]}, {"id": 2, "items": [{"sku": "c"}]}]]
+o0 = orders[0]
+it = o0.items[1]
+#@row it: present={sku} definite={sku} closed
+sk = it.sku                                          #@value sk: exactly={b}
+n2 = len(orders[1].items)                            #@value n2: exactly={1}
