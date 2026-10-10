@@ -228,13 +228,15 @@ pub fn rebuild(an: &mut Analyzer, st: &mut State, node: &Node, oid: u32) {
 
 /// A configparser exception may be raised here (`except configparser.Error` catches it too).
 fn cfg_raise(an: &mut Analyzer, st: &mut State, name: &str, sure: bool) {
-    let caught_base = an.guards.iter().any(|g| g.contains("Error") && !g.contains(name));
-    let n = if caught_base { "Error" } else { name };
+    // (its class: configparser's hierarchy, `except configparser.Error` catches it too)
+    let q = if name == "ValueError" { name.to_string() } else { format!("configparser.{}", name) };
+    an.cur_exc_cls = Some(crate::interp::builtin_exc_names(&q));
     if sure {
-        an.raise_here(n, st);
+        an.raise_here(&q, st);
     } else {
-        an.may_raise_here(n, st);
+        an.may_raise_here(&q, st);
     }
+    an.cur_exc_cls = None;
 }
 
 fn convert(kind: &str, s: &str) -> Option<intern::KeyId> {
@@ -264,7 +266,13 @@ fn get_value(an: &mut Analyzer, st: &mut State, spec: &CfgSpec, kind: &str, sec:
     let (Some(sec), Some(opt), true) = (sec, opt, spec.known) else {
         if fallback.is_none() {
             cfg_raise(an, st, "NoOptionError", false);
+            cfg_raise(an, st, "NoSectionError", false);
         }
+        // (a value that does not convert, an interpolation that fails)
+        if kind != "get" {
+            cfg_raise(an, st, "ValueError", false);
+        }
+        cfg_raise(an, st, "InterpolationError", false);
         return unknown_of(kind).join(&fallback.unwrap_or_default());
     };
     let Some(opts) = spec.options(&sec) else {
@@ -340,6 +348,12 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 // text from a parameter: decided per call site
                 an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
                 spec.known = false;
+                // (a text that does not parse: MissingSectionHeaderError / ParsingError /
+                // DuplicateSectionError / DuplicateOptionError)
+                if name != "read_dict" {
+                    cfg_raise(an, st, "ParsingError", false);
+                    cfg_raise(an, st, "DuplicateSectionError", false);
+                }
             }
             an.cfg_parsers.insert(oid, spec);
             rebuild(an, st, &c.node, oid);

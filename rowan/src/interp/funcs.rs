@@ -886,6 +886,15 @@ impl Analyzer {
                     self.obj_mut(eid).depth = d;
                     if !state.has_row(eid, Ns::Item) {
                         let srcs = row.sources.map(|(src, _)| (crate::domain::source_extend(src, STAR), intern::EMPTY_LENS));
+                        // (an element was taken on this path: its source's requirements are
+                        // known here, none so far — see the nested-source join)
+                        if !crate::interp::disabled("nestedreqjoin") {
+                            for (cs, _) in srcs.iter() {
+                                if state.reqs.inner(&cs).is_none() {
+                                    state.reqs.writable(&cs);
+                                }
+                            }
+                        }
                         let r = Row::from_data(crate::domain::RowData { sources: srcs, mutators: row.mutators.clone(), ..Default::default() });
                         state.set_row(eid, Ns::Item, r.clone());
                         state.set_row(eid, Ns::Attr, r);

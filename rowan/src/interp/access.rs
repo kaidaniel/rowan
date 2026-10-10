@@ -890,6 +890,17 @@ impl Analyzer {
 
     #[allow(clippy::too_many_arguments)]
     fn load_record(&mut self, oid: u32, ns: Ns, key: &Value, node: &Node, state: &mut State, guarded: bool, single_target: bool, try_guard: bool) -> Value {
+        // (a load a `try` handler guards: its exception still fires when the key is missing, so
+        // the key is required of the input all the same — the runtime oracle's rule)
+        let caught = try_guard && !super::disabled("caughtreq");
+        let saved = std::mem::replace(&mut self.caught_load, caught);
+        let v = self.load_record_inner(oid, ns, key, node, state, guarded, single_target, try_guard);
+        self.caught_load = saved;
+        v
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_record_inner(&mut self, oid: u32, ns: Ns, key: &Value, node: &Node, state: &mut State, guarded: bool, single_target: bool, try_guard: bool) -> Value {
         let kind = self.kind(oid);
         let mut row = state.row(oid, ns);
         let kv = &key.kv;
@@ -897,8 +908,10 @@ impl Analyzer {
         if let Some(ph) = kv.as_param() {
             if !guarded {
                 self.record_symreq(node, kv.clone(), &row, oid, ns, guarded, "load");
-            } else if let Some(m) = self.may_raise.last_mut() {
-                *m = true;
+            } else if try_guard || super::disabled("getnoraise") {
+                if let Some(m) = self.may_raise.last_mut() {
+                    *m = true;
+                }
             }
             let mut v = self.all_values(oid, ns, state);
             // the key's value is unknown: the content may also come from the object's open
@@ -926,13 +939,16 @@ impl Analyzer {
                 let cls = classify(&row, k);
                 if cls.tier == Tier::Sym {
                     if guarded {
-                        if let Some(m) = self.may_raise.last_mut() {
-                            *m = true;
+                        // (a `.get`-like read never raises; a try-guarded one may)
+                        if try_guard || super::disabled("getnoraise") {
+                            if let Some(m) = self.may_raise.last_mut() {
+                                *m = true;
+                            }
                         }
                         self.record_event("guarded", oid);
                         // (a thread / future keeps the exception for the caller, a handler that
                         // re-raises lets it go on: still required)
-                        if (self.catching_depth > 0 || self.guard_reraises(ns)) && !super::disabled("catchreq") {
+                        if (self.catching_depth > 0 || self.guard_reraises(ns) || self.caught_load) && !super::disabled("catchreq") {
                             self.record_symreq(node, KeyVal::Lit(k), &row, oid, ns, false, "load");
                         }
                     } else {
@@ -945,7 +961,7 @@ impl Analyzer {
                         row = row.narrow_in(k, true);
                         state.set_row(oid, ns, row.clone());
                     }
-                } else if guarded && cls.tier != Tier::Proven {
+                } else if guarded && cls.tier != Tier::Proven && (try_guard || super::disabled("getnoraise")) {
                     if crate::interp::debug_level() == 2 {
                         eprintln!("  guarded access may raise: {:?} tier {:?} at L{}", intern::key_repr(k), cls.tier, node.line);
                     }
@@ -955,6 +971,10 @@ impl Analyzer {
                         let cname = if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" };
                         let e = self.exception_object(cname, vec![Value::lit(k)], node, state);
                         self.cur_exc = Some(e);
+                    }
+                    // (required on the handler's path too: the exception fired for the key)
+                    if self.caught_load && cls.tier == Tier::Input && !super::disabled("catchreq") {
+                        self.require_providers_k(&cls, &row, &site, true, state, Some(k));
                     }
                     self.cur_exc_cls = Some(super::builtin_exc_names(if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" }));
                     let recorded = self.record_raise_state(state);
@@ -978,7 +998,7 @@ impl Analyzer {
                     self.verdict_guarded(node, k, &cls, oid, ns);
                 }
                 // (a handler that re-raises, a thread / future: the input still needs the key)
-                if guarded && cls.tier == Tier::Input && (self.catching_depth > 0 || self.guard_reraises(ns)) && !crate::interp::disabled("catchreq") {
+                if guarded && cls.tier == Tier::Input && (self.catching_depth > 0 || self.guard_reraises(ns) || self.caught_load) && !crate::interp::disabled("catchreq") {
                     self.require_providers_k(&cls, &row, &site, true, state, Some(k));
                 }
                 if !guarded && cls.tier != Tier::Sym {
@@ -1085,6 +1105,15 @@ impl Analyzer {
         self.obj_mut(pid).depth = d;
         if !state.has_row(pid, Ns::Item) {
             let srcs = row.sources.filter(|(src, _)| !crate::domain::source_is_data(src)).map(|(src, _)| (crate::domain::source_extend(src, k), intern::EMPTY_LENS));
+            // (the parent's value was read on this path: its requirements are known here, none
+            // so far — a path without the entry never read it)
+            if !super::disabled("nestedreqjoin") {
+                for (cs, _) in srcs.iter() {
+                    if state.reqs.inner(&cs).is_none() {
+                        state.reqs.writable(&cs);
+                    }
+                }
+            }
             let r = if srcs.is_empty() && row.mutators.is_empty() {
                 Row::top()
             } else {

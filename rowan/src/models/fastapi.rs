@@ -1397,6 +1397,11 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
         ("fastapi.app", "on_event") => fa_obj(an, st, &c.node, "fastapi.hookx", Value::new(), &format!("hook{}", c.site)),
         ("fastapi.app", "dependency_overrides") => Value::data("overrides"),
         ("fastapi.app", _) => an.none_v.clone(),
+        // (the raw body of a known json= payload: its bytes as httpx sends them)
+        ("fastapi.request", "body") if !crate::interp::disabled("fabodytext") => match crate::models::json_body_text(an, st, &pv) {
+            Some(t) => Value::lit(intern::key(intern::Key::Bytes(t.into_bytes()))),
+            None => pv.clone(),
+        },
         ("fastapi.request", "json" | "body" | "form") => pv.clone(),
         ("fastapi.request", "query_params" | "headers" | "cookies" | "path_params") => {
             let oid = an.alloc_at(Kind::Dict, &c.node, st, &format!("request.{}", name), Payload::None, None, Ns::Item, None, Some(&format!("rq{}{}", o, name)));

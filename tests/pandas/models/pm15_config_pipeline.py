@@ -196,4 +196,6 @@ if __name__ == "__main__":
 # so no input needs them)
 #@schema read_csv@L151: always={id,region,product,units,unit_price} only={id,region,product,units,unit_price}
 #@schema read_csv@L152: always={id,region,product,units,unit_price} only={id,region,product,units,unit_price}
-#@schema read_csv@L153: always={team,opened,closed} only={team,opened,closed}
+#@schema read_csv@L153: always={team,opened,closed,high} only={team,opened,closed,high}
+# (L199 corrected: `high` added — high_of_open's read of the tickets frame raises a KeyError for it
+#  every run; caught, it still counts as required, the oracle's rule)

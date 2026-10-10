@@ -1071,8 +1071,10 @@ fn getattr_hook_outcome(an: &mut Analyzer, st: &mut State, o: u32, k: KeyId, nod
     an.try_marks.push((an.frames.len(), an.env_stack.len(), s2.copy()));
     an.try_sum_depth.push(an.sum_stack.len());
     an.raise_stack.push(false);
+    an.esc_cls.push(Some(Vec::new()));
     an.call_method_with(&Value::obj(o), "__getattr__", vec![Value::lit(k)], node, &mut s2);
     let escaped = an.raise_stack.pop().unwrap_or(false);
+    an.esc_cls.pop();
     an.try_sum_depth.pop();
     an.try_marks.pop();
     let recs = an.raise_cls.pop().map(|(_, r)| r).unwrap_or_default();
@@ -1512,7 +1514,16 @@ fn m_str(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         if let Some(t) = an.exc_text(a, false, st) {
             return t;
         }
-        return Value::kv_only(an.rename_kv(&a.kv, &RenameFn::new(FnKind::Str)));
+        let mut out = if a.kv.is_bot() { Value::new() } else { Value::kv_only(an.rename_kv(&a.kv, &RenameFn::new(FnKind::Str))) };
+        // (a text not known: a string all the same, its str methods apply)
+        if matches!(out.kv, KeyVal::Data(_)) && !crate::interp::disabled("strdata") {
+            out = Value::data("str");
+        }
+        // the objects' part (an unknown value, an instance's __str__, …): some string
+        if !a.pts.is_empty() && !crate::interp::disabled("strobjs") {
+            out = out.join(&Value::data("str"));
+        }
+        return out;
     }
     Value::lit_str("")
 }
@@ -3570,6 +3581,13 @@ fn json_str(s: &str, ascii: bool) -> String {
 }
 
 /// The exact text `json.dumps` makes of fully known data (None: anything unknown in it).
+/// The JSON text httpx sends for a request's `json=` body (compact separators, no ASCII
+/// escaping), when the value is known.
+pub fn json_body_text(an: &Analyzer, st: &State, v: &Value) -> Option<String> {
+    let o = JsonOpts { sort_keys: false, indent: None, item_sep: ",".into(), key_sep: ":".into(), ensure_ascii: false };
+    json_text(an, st, v, &o, 0)
+}
+
 fn json_text(an: &Analyzer, st: &State, v: &Value, o: &JsonOpts, depth: usize) -> Option<String> {
     if depth > 32 {
         return None;
@@ -3712,7 +3730,11 @@ fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             return out;
         }
         // (json.loads reports its own raises: a text that does not parse raises here)
-        if let Some(text) = c.args.first().filter(|a| a.pts.is_empty()).and_then(|a| a.kv.as_lit()).and_then(intern::key_as_str) {
+        // (a str, or bytes / bytearray in UTF-8)
+        let lit_text = |k: KeyId| -> Option<String> {
+            intern::key_as_str(k).map(|s| s.to_string()).or_else(|| intern::with_key(k, |kk| if let intern::Key::Bytes(b) = kk { String::from_utf8(b.clone()).ok() } else { None }))
+        };
+        if let Some(text) = c.args.first().filter(|a| a.pts.is_empty()).and_then(|a| a.kv.as_lit()).and_then(lit_text) {
             match serde_json::from_str::<serde_json::Value>(&text) {
                 Ok(j) => return json_literal(an, st, c, &j, ""),
                 Err(_) if !crate::interp::disabled("jsonraise") => {

@@ -11,8 +11,8 @@ def extract(rec):
     n = len(out)                                  #@value n: exactly={1,3}
     #@row out: present={id,email,verified} definite={id} closed
     return out
-#@schema param extract.rec: always={id} only={id}
-
+#@schema param extract.rec: always={id,contact} only={id,contact}
+#@schema param extract.rec['contact']: always={email} only={email}
 
 def first_ok(cands, key):
     for c in cands:
@@ -30,3 +30,5 @@ try:
     b["email"]                                      #@ missing email
 except KeyError:
     pass
+# (L14 corrected from always={id}, L15 added: the suppressed reads raise a KeyError for contact, and for
+#  email when contact is there; caught, they still count as required, the oracle's rule)

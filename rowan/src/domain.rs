@@ -498,6 +498,12 @@ pub fn source_extend(s: SourceId, k: KeyId) -> SourceId {
     intern::source(src)
 }
 
+/// A source below another's key (`json.loads@L3['db']`): its requirements hold where the
+/// parent's value was read.
+pub fn source_is_nested(s: SourceId) -> bool {
+    with_source(s, |src| !src.path.is_empty())
+}
+
 pub fn source_is_data(s: SourceId) -> bool {
     with_source(s, |src| src.kind == SourceKind::Data)
 }

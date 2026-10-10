@@ -464,6 +464,12 @@ impl<K: Clone + Eq + Hash, IK: Clone + Eq + Hash, V: Clone + PartialEq> TwoLevel
 
     /// Join where inner entries present on one side only are transformed by `one_side`.
     pub fn join_with(&mut self, o: &mut Self, both: &mut dyn FnMut(&V, &V) -> V, one_side: &mut dyn FnMut(&V) -> V) -> Self {
+        self.join_with_keep(o, both, one_side, &|_| false)
+    }
+
+    /// `join_with`, but an outer key whose whole inner map one side lacks keeps the other
+    /// side's values unchanged when `keep_whole` says so.
+    pub fn join_with_keep(&mut self, o: &mut Self, both: &mut dyn FnMut(&V, &V) -> V, one_side: &mut dyn FnMut(&V) -> V, keep_whole: &dyn Fn(&K) -> bool) -> Self {
         self.share();
         o.share();
         let a = &self.m;
@@ -492,6 +498,9 @@ impl<K: Clone + Eq + Hash, IK: Clone + Eq + Hash, V: Clone + PartialEq> TwoLevel
                     if !inherited {
                         new.data.insert(k, Some(x));
                     }
+                }
+                (Some(d), None) | (None, Some(d)) if keep_whole(&k) => {
+                    new.data.insert(k, Some(d));
                 }
                 (Some(d), None) | (None, Some(d)) => {
                     let m: FxHashMap<IK, V> = d.iter().map(|(nk, v)| (nk.clone(), one_side(v))).collect();

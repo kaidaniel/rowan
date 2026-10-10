@@ -296,10 +296,30 @@ pub const EXC_BASES: &[(&str, &str)] = &[
     ("ConnectionResetError", "ConnectionError"),
     // (library exceptions the models raise)
     ("JSONDecodeError", "ValueError"), ("ValidationError", "ValueError"), ("FrozenInstanceError", "AttributeError"),
+    // (module-qualified: a bare `Error` names different classes in different modules)
+    ("configparser.Error", "Exception"), ("configparser.NoSectionError", "configparser.Error"), ("configparser.NoOptionError", "configparser.Error"),
+    ("configparser.DuplicateSectionError", "configparser.Error"), ("configparser.DuplicateOptionError", "configparser.Error"),
+    ("configparser.InterpolationError", "configparser.Error"), ("configparser.ParsingError", "configparser.Error"),
+    ("configparser.MissingSectionHeaderError", "configparser.ParsingError"),
 ];
 
 /// The names of a builtin exception class and its bases (`IOError` is `OSError`).
 pub fn builtin_exc_names(name: &str) -> ExcNames {
+    // a module-qualified class of the table: its chain, by the classes' own names
+    if EXC_BASES.iter().any(|(c, _)| *c == name && c.contains('.')) {
+        let mut out: Vec<String> = Vec::new();
+        let mut n = name.to_string();
+        while n.contains('.') {
+            out.push(n.rsplit('.').next().unwrap_or("").to_string());
+            match EXC_BASES.iter().find(|(c, _)| *c == n) {
+                Some((_, b)) => n = b.to_string(),
+                None => return (out, false),
+            }
+        }
+        let (rest, full) = builtin_exc_names(&n);
+        out.extend(rest);
+        return (out, full);
+    }
     let mut n = name.rsplit('.').next().unwrap_or(name).to_string();
     let mut out: Vec<String> = Vec::new();
     loop {
@@ -396,6 +416,19 @@ pub struct Frame {
     pub symbolic: bool,
     /// indices of the enclosing unrolled loop iterations (part of the call context)
     pub unroll: Vec<usize>,
+    /// a tabulated call: the objects allocated from here on are its own, and the state before
+    /// it (a `return` drops its own objects nothing can reach any more)
+    pub pre_call: Option<PreCall>,
+}
+
+/// (see `Frame::pre_call`)
+#[derive(Clone)]
+pub struct PreCall(pub ObjId, pub std::rc::Rc<State>);
+
+impl std::fmt::Debug for PreCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PreCall({})", self.0)
+    }
 }
 
 impl Frame {
@@ -415,6 +448,7 @@ impl Frame {
             label: label.to_string(),
             symbolic: false,
             unroll: Vec::new(),
+            pre_call: None,
         }
     }
 }
@@ -743,6 +777,11 @@ pub struct Analyzer {
     pub handling_values: Vec<Value>,
     /// inside a call whose exceptions a thread / future keeps: reads still require their keys
     pub catching_depth: u32,
+    /// beside `raise_stack`: the classes of the exceptions that may leave the running call
+    /// (None: some of unknown class)
+    pub esc_cls: Vec<Option<Vec<ExcNames>>>,
+    /// a load guarded by a `try` handler is running (its key is still required)
+    pub caught_load: bool,
     /// the right operand of a comparison link already evaluated (chained comparisons)
     pub cmp_right: Option<Value>,
     /// per running comprehension: the cells of its variables (closed over by functions made
@@ -1107,6 +1146,8 @@ impl Analyzer {
             handling: Vec::new(),
             handling_values: Vec::new(),
             catching_depth: 0,
+            esc_cls: Vec::new(),
+            caught_load: false,
             cmp_right: None,
             comp_cells: Vec::new(),
             key_alias: None,

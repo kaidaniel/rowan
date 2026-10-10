@@ -378,7 +378,8 @@ Join (backward merge, i.e. at CFG splits): `always` ∩, `sometimes` ∪. Backwa
 | node | effect on Req(o) |
 | --- | --- |
 | unguarded load / delete / `pop` without default `o[k]` | sometimes ∪{k}; always ∪{k} if k is a single term |
-| guarded load, `.get`, `in`, `setdefault`, `pop(k, default)` | — |
+| `.get`, `in`, `setdefault`, `pop(k, default)` | — |
+| load under `try … except KeyError` / `suppress(KeyError)` | as an unguarded load: the exception fires when k is missing, caught or not (the runtime oracle's rule); the handler's path keeps the requirement |
 | strong store `o[k] = v` | always ∖{k}; sometimes ∖{k} |
 | weak store | always ∖{k} |
 | `o₂` derived from `o` by copy / rename / projection (model edge) | Req(o) ∪= rename⁻¹(Req(o₂)) |
@@ -413,7 +414,7 @@ Edge transfers on the true/false CFG edges, applied to every object the tested v
 | `S <= o.keys()`, `set(S).issubset(o)`, `all(k in o for k in S)` with `Lits(S)` | definite ∪ S |
 | `assert cond` | as `if cond` with the false edge unreachable |
 | successful unguarded load `o[k]` (fall-through edge) | definite(both) ∪{k} — "if execution continued, k was there" |
-| load inside `try … except KeyError` | guarded: no requirement; no narrowing on the handler path |
+| load inside `try … except KeyError` | guarded: no verdict, but a requirement (its KeyError fires for k); no narrowing on the handler path |
 | `isinstance(o, dict)`, TypedDict narrowing | v2 |
 
 The fall-through rule is how requirement facts feed provision facts; the merge-suffix case (Appendix A, case 9) depends on it.

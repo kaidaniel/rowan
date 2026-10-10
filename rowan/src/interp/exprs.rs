@@ -2462,7 +2462,7 @@ impl Analyzer {
 /// Library constructors whose models report their raises.
 const SELF_REPORTING_EXTERNALS: &[&str] = &[
     // (simulated exactly: an exception is raised by the code they run, `__post_init__` …)
-    "dataclasses.replace", "dataclasses.asdict", "dataclasses.astuple", "dataclasses.fields", "dataclasses.is_dataclass", "json.loads", "builtins.setattr",
+    "configparser.ConfigParser", "configparser.RawConfigParser", "dataclasses.replace", "dataclasses.asdict", "dataclasses.astuple", "dataclasses.fields", "dataclasses.is_dataclass", "json.loads", "builtins.setattr",
     "os.path.join", "os.path.basename", "os.path.dirname", "os.path.split", "os.path.splitext", "os.path.normpath", "os.path.isabs",
     "pathlib.PurePosixPath", "pathlib.PurePath", "pathlib.Path", "pathlib.PosixPath",
     "io.StringIO", "csv.writer", "csv.DictWriter", "csv.reader", "csv.DictReader", "argparse.ArgumentParser", "threading.Thread",
@@ -2474,7 +2474,7 @@ const SELF_REPORTING_EXTERNALS: &[&str] = &[
     "operator.methodcaller", "operator.itemgetter", "operator.attrgetter",
 ];
 
-const SELF_REPORTING: &[&str] = &["excinit", "str.format", "pydantic.", "fieldinfo.", "pydverr.", "typeadapter.", "fastapi.client.", "fastapi.response.", "fastapi.request.", "stdobj.", "fastapi.bg.", "fastapi.app.", "fastapi.router.", "fastapi.state."];
+const SELF_REPORTING: &[&str] = &["excinit", "str.format", "cfgparser.", "cfgsection.", "pydantic.", "fieldinfo.", "pydverr.", "typeadapter.", "fastapi.client.", "fastapi.response.", "fastapi.request.", "stdobj.", "fastapi.bg.", "fastapi.app.", "fastapi.router.", "fastapi.state."];
 
 /// The positions `xs[lo:hi:step]` selects from a sequence of length `n` (`slice.indices`).
 pub fn slice_positions(n: i64, lo: Option<i64>, hi: Option<i64>, step: i64) -> Vec<i64> {

@@ -152,6 +152,8 @@ pub struct Summary {
     pub elems_fp: Vec<(ObjId, KeyVal)>,
     /// the body may raise an uncaught exception (or calls unknown code)
     pub raises: bool,
+    /// the classes of what it may raise (None: not known)
+    pub raise_classes: Option<Vec<crate::interp::ExcNames>>,
 }
 
 impl Summary {
@@ -498,7 +500,7 @@ impl Analyzer {
             _ => None,
         };
         let conditional = self.branch_depth > 0;
-        let reraise = guarded && (self.catching_depth > 0 || self.guard_reraises(ns));
+        let reraise = guarded && (self.catching_depth > 0 || self.guard_reraises(ns) || self.caught_load);
         let sr = SymReq { reraise, node: *node, key_kv, row: row.clone(), oid, ns, guarded, rel_chain: self.call_chain.clone(), kind, file: fname, text, cls: guard, conditional };
         self.defer(sr);
     }
@@ -634,7 +636,7 @@ impl Analyzer {
         let saved_rec_hit = std::mem::take(&mut self.rec_hit);
         let saved_recent = std::mem::take(&mut self.recent_stack);
         if let Some(f0) = saved_frames.first() {
-            self.frames.push(Frame { unroll: Vec::new(), kind: f0.kind, scope: f0.scope, module: f0.module, ctx: f0.ctx.clone(), single: f0.single, single_nl: f0.single_nl, func: f0.func, cells: f0.cells.clone(), class_oid: f0.class_oid, overlays: Vec::new(), loop_depth: f0.loop_depth, label: f0.label.clone(), symbolic: f0.symbolic });
+            self.frames.push(Frame { pre_call: None, unroll: Vec::new(), kind: f0.kind, scope: f0.scope, module: f0.module, ctx: f0.ctx.clone(), single: f0.single, single_nl: f0.single_nl, func: f0.func, cells: f0.cells.clone(), class_oid: f0.class_oid, overlays: Vec::new(), loop_depth: f0.loop_depth, label: f0.label.clone(), symbolic: f0.symbolic });
         }
         self.cond_depth = 0;
         self.sum_stack.push(foid);
@@ -644,6 +646,7 @@ impl Analyzer {
         self.sum_obs.push(Vec::new());
         self.sum_fact_obs.push(Vec::new());
         self.raise_stack.push(false);
+        self.esc_cls.push(Some(Vec::new()));
         self.sum_obj_mark.push(self.objects.len() as ObjId);
         self.sum_deps.push(FxHashSet::default());
         let verdict_mark = self.verdicts.len();
@@ -667,6 +670,9 @@ impl Analyzer {
             *self.sum_fact_obs.last_mut().unwrap() = Vec::new();
             *self.sum_events.last_mut().unwrap() = IndexMap::new();
             *self.raise_stack.last_mut().unwrap() = false;
+            if let Some(e) = self.esc_cls.last_mut() {
+                *e = Some(Vec::new());
+            }
             let obj_mark = *self.sum_obj_mark.last().unwrap();
             let mut st = State::new();
             st.symbolic = true;
@@ -897,6 +903,7 @@ impl Analyzer {
                 slots_fp: Vec::new(),
                 elems_fp: Vec::new(),
                 raises: self.raise_stack.last().copied().unwrap_or(false),
+                raise_classes: self.esc_cls.last().cloned().flatten(),
             };
             summ.compute_footprint(self, &base);
             if self.sum_hit.contains(&foid) {
@@ -944,6 +951,7 @@ impl Analyzer {
         self.sum_fact_obs.pop();
         self.sum_events.pop();
         self.raise_stack.pop();
+        self.esc_cls.pop();
         self.sum_obj_mark.pop();
         let deps = self.sum_deps.pop().unwrap_or_default();
         self.sum_hit.remove(&foid);
@@ -1583,8 +1591,10 @@ impl Analyzer {
             // (an access of the callee raises into a try around this call)
             let sr_guarded = sr.guarded || (self.is_guarded(sr.ns) && !crate::interp::disabled("callguard"));
             // (re-raised by the callee's handlers, and not caught here, or re-raised here too)
-            let here = !self.is_guarded(sr.ns) || self.guard_reraises(sr.ns) || self.catching_depth > 0;
-            let sr_reraise = if sr.guarded { sr.reraise && here } else { self.is_guarded(sr.ns) && (self.guard_reraises(sr.ns) || self.catching_depth > 0) };
+            // (a try here catching the callee's exception: still required, the oracle's rule)
+            let caught_here = !crate::interp::disabled("caughtreq");
+            let here = !self.is_guarded(sr.ns) || self.guard_reraises(sr.ns) || self.catching_depth > 0 || caught_here;
+            let sr_reraise = if sr.guarded { sr.reraise && here } else { self.is_guarded(sr.ns) && (self.guard_reraises(sr.ns) || self.catching_depth > 0 || caught_here) };
             let ngroups = groups.len();
             let mut all_missing = ngroups > 0;
             for (row_c, members) in groups {
@@ -1607,7 +1617,20 @@ impl Analyzer {
                             let e = self.exception_object(exc, vec![Value::lit(k)], &sr.node, state);
                             self.cur_exc = Some(e);
                         }
-                        self.may_raise_here(exc, &mut pre.copy());
+                        // (the handler's path needs the key too — its exception fired for it — and
+                        // what the callee read before it)
+                        let mut p2 = pre.copy();
+                        if !crate::interp::disabled("caughtreq") {
+                            for (src, d) in state.reqs.items() {
+                                for (k2, info) in d.iter() {
+                                    let had = pre.reqs.inner(&src).map(|x| x.contains_key(k2)).unwrap_or(false);
+                                    if !had {
+                                        p2.reqs.writable(&src).insert(*k2, info.clone());
+                                    }
+                                }
+                            }
+                        }
+                        self.may_raise_here(exc, &mut p2);
                         self.cur_exc = None;
                     }
                 }

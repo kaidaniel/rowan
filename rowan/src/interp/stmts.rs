@@ -120,6 +120,7 @@ impl Analyzer {
                     // definitely missing): no normal exit from here
                     return;
                 }
+                self.drop_garbage_at_return(&v, state);
                 state.ret = Some(match &state.ret {
                     None => v,
                     Some(cur) => cur.join(&v),
@@ -185,10 +186,13 @@ impl Analyzer {
                 }
                 // (a handler of a base class catches it too)
                 let caught = caught || self.cur_exc_cls.as_ref().is_some_and(|(ns, _)| self.guards.iter().any(|g| ns.iter().any(|n| g.contains(n))));
+                let raised_cls = self.cur_exc_cls.clone();
                 let recorded = state.reachable && !crate::interp::disabled("raisestate") && self.record_raise_state(state);
                 self.cur_exc = None;
                 self.cur_exc_cls = None;
                 if !caught {
+                    // (the class leaving the call: known, or not)
+                    self.merge_esc(raised_cls.map(|c| vec![c]));
                     if crate::interp::debug_level() == 2 {
                         eprintln!("  raise statement at L{} in {}", frontend::node(r).line, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
                     }
@@ -1648,6 +1652,75 @@ impl Analyzer {
             self.exec_block(&t.finalbody, &mut out);
         }
         state.replace_with(out);
+    }
+
+    /// A `return` of a value without objects (`return None`) in a tabulated call: the call's
+    /// own objects that nothing older can reach are garbage on this path; forgetting them
+    /// lets the join of the exits keep what the other paths say of them (a record returned
+    /// on another path keeps that path's keys).
+    fn drop_garbage_at_return(&mut self, v: &Value, state: &mut State) {
+        let Some(crate::interp::PreCall(mark, pre)) = self.frame().pre_call.clone() else { return };
+        if !v.pts.is_empty() || matches!(v.kv, KeyVal::KeysOf(_)) || !matches!(self.frame().kind, FrameKind::Function) {
+            return;
+        }
+        let fp = state.footprint(&pre);
+        let mut fresh: rustc_hash::FxHashSet<u32> = Default::default();
+        for (o, _) in fp.rows.iter() {
+            if *o >= mark {
+                fresh.insert(*o);
+            }
+        }
+        for (o, _) in fp.slots.iter() {
+            if *o >= mark {
+                fresh.insert(*o);
+            }
+        }
+        if fresh.is_empty() || fresh.len() > 64 {
+            return;
+        }
+        let refs = |val: &Value, out: &mut Vec<u32>| {
+            out.extend(val.pts.iter());
+            if let KeyVal::KeysOf(ko) = &val.kv {
+                out.extend(ko.objs.iter());
+            }
+        };
+        // roots: what older objects' changed slots hold (globals, parameters, cells, …)
+        let mut work: Vec<u32> = Vec::new();
+        for (o, sk) in fp.slots.iter() {
+            if *o < mark {
+                if let Some(val) = state.slots.get(o, sk) {
+                    refs(&val, &mut work);
+                }
+            }
+        }
+        for o in fp.elems.iter().filter(|o| **o < mark) {
+            if let Some(KeyVal::KeysOf(ko)) = state.elems.get(o) {
+                work.extend(ko.objs.iter());
+            }
+        }
+        let mut reached: rustc_hash::FxHashSet<u32> = Default::default();
+        while let Some(o) = work.pop() {
+            if !reached.insert(o) {
+                continue;
+            }
+            for (_, val) in state.slots.for_key(&o) {
+                refs(&val, &mut work);
+            }
+            // (an object a model ties to another: a ChainMap's maps, a view's target)
+            if let Payload::View(_, inner) = &self.obj(o).payload {
+                refs(inner, &mut work);
+            }
+            if let Some(ms) = self.chainmaps.get(&o) {
+                for m in ms {
+                    refs(m, &mut work);
+                }
+            }
+        }
+        for o in fresh {
+            if !reached.contains(&o) {
+                state.forget_obj(o);
+            }
+        }
     }
 
     fn stmt_classdef(&mut self, c: &'static ast::StmtClassDef, state: &mut State) {

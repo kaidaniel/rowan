@@ -333,7 +333,7 @@ impl State {
         s.slots = self.slots.join(&mut o.slots, &mut |a, b| a.join(b));
         s.elems = self.elems.join(&o.elems, &mut |a, b| kv_join(a, b));
         s.lens = self.lens.join(&o.lens, &mut join_len);
-        s.reqs = self.reqs.join_with(&mut o.reqs, &mut |a, b| a.join(b), &mut |a| a.demote());
+        s.reqs = self.reqs.join_with_keep(&mut o.reqs, &mut |a, b| a.join(b), &mut |a| a.demote(), &nested_keep);
         s.ret = ret;
         s.exits = exits;
         s.reachable = true;
@@ -367,7 +367,7 @@ impl State {
         self.slots = self.slots.join(&mut o.slots, &mut |a, b| a.join(b));
         self.elems = self.elems.join(&o.elems, &mut |a, b| kv_join(a, b));
         self.lens = self.lens.join(&o.lens, &mut join_len);
-        self.reqs = self.reqs.join_with(&mut o.reqs, &mut |a, b| a.join(b), &mut |a| a.demote());
+        self.reqs = self.reqs.join_with_keep(&mut o.reqs, &mut |a, b| a.join(b), &mut |a| a.demote(), &nested_keep);
         self.lasts = join_lasts(&self.lasts, &o.lasts);
     }
 
@@ -546,6 +546,17 @@ impl State {
         v
     }
 
+    /// Forget all of an object (an object that is garbage on this path: a join takes the
+    /// other paths' facts about it).
+    pub fn forget_obj(&mut self, oid: ObjId) {
+        for ns in [Ns::Item, Ns::Attr, Ns::Cell, Ns::Pos, Ns::Elem, Ns::Meta] {
+            self.rows.remove(&(oid, ns));
+        }
+        self.slots.drop_key(&oid);
+        self.elems.remove(&oid);
+        self.lens.remove(&oid);
+    }
+
     pub fn drop_obj(&mut self, oid: ObjId) {
         self.slots.drop_key(&oid);
     }
@@ -685,6 +696,12 @@ fn join_lasts(a: &Arc<Vec<(ObjId, Value)>>, b: &Arc<Vec<(ObjId, Value)>>) -> Arc
 }
 
 /// Lengths at a join: the length when equal, the shorter known prefix.
+/// (requirements on a nested source a path lacks entirely: that path never read the parent's
+/// value, so the requirement still holds wherever it was read)
+fn nested_keep(s: &crate::domain::SourceId) -> bool {
+    crate::domain::source_is_nested(*s) && !crate::interp::disabled("nestedreqjoin")
+}
+
 pub fn join_len(a: &(Option<usize>, usize), b: &(Option<usize>, usize)) -> (Option<usize>, usize) {
     let pa = a.0.unwrap_or(a.1);
     let pb = b.0.unwrap_or(b.1);
