@@ -503,7 +503,7 @@ impl Analyzer {
         if self.kind(f) != Kind::Function || !self.func_info(f).is_contextmanager.get() {
             return false;
         }
-        let prev = self.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.frames.len(), env_after: None, ran: false, then: None, body_died: false });
+        let prev = self.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.frames.len(), env_after: None, ran: false, then: None, body_died: false, env_before: None, multi: true });
         self.force_tab_once = true;
         let n = frontend::node(&item.context_expr);
         let fv = self.eval(&call.func, state);

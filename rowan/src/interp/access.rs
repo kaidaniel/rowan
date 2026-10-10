@@ -543,6 +543,16 @@ impl Analyzer {
     }
 
     fn load_item_inner(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
+        // (a parameter indexed by a position or a slice: a literal string there decides it)
+        if ns == Ns::Item && key.pts.is_empty() && !super::disabled("strlitidx") {
+            let positional = key.kv.as_lit().is_some_and(|k| intern::key_as_int(k).is_some() && !intern::key_is_str(k)) || matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice"));
+            if positional {
+                let phs: Vec<u32> = obj.pts.iter().filter(|o| self.kind(*o) == Kind::Ph).collect();
+                for ph in phs {
+                    self.record_event("strlit", ph);
+                }
+            }
+        }
         // (objects in the key: an unknown key; lists / tuples are indexed by their own rules)
         let okey = if ns == Ns::Item && !key.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Dict | Kind::Ph | Kind::Unknown)) && !obj.pts.is_empty() {
             self.note_key_params(key, state);

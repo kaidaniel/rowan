@@ -454,6 +454,18 @@ fn value_eq(an: &Analyzer, st: &State, a: &Value, b: &Value) -> Option<bool> {
     if a.pts.len() == 1 && a.pts == b.pts && a.kv.is_bot() && b.kv.is_bot() && an.obj(a.pts.first().unwrap()).single {
         return Some(true);
     }
+    // an instance of plain user classes without `__eq__` equals only itself: never a literal
+    let plain = |v: &Value| {
+        v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| {
+            an.kind(o) == Kind::Instance && an.instance_class(o).is_some_and(|c| {
+                an.class_lookup(c, "__eq__").is_none() && an.mro(c).iter().all(|m| an.class_info_opt(*m).is_some_and(|ci| !ci.open_base && !ci.dict_base && !ci.typed_dict && !ci.named_tuple))
+            })
+        })
+    };
+    let lit = |v: &Value| v.pts.is_empty() && v.kv.is_literal();
+    if !crate::interp::disabled("plaineq") && ((plain(a) && lit(b)) || (plain(b) && lit(a))) {
+        return Some(false);
+    }
     let _ = st;
     None
 }

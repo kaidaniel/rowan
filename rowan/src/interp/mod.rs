@@ -277,8 +277,12 @@ pub struct CmHook {
     /// instead of a body: code run with the yielded value (a FastAPI yield dependency: the rest
     /// of the request)
     pub then: Option<Box<dyn FnOnce(&mut Analyzer, Value, &mut State)>>,
-    /// the body did not finish normally (it raised or returned)
+    /// the body did not finish normally (it raised or returned) — on every run
     pub body_died: bool,
+    /// the caller's names before the body (each run at another yield starts from them)
+    pub env_before: Option<IndexMap<StrId, Value>>,
+    /// the body may run again at another reachable yield (not a `then` callback: it runs once)
+    pub multi: bool,
 }
 
 /// An exception class's name and its bases' names; `true`: that is the whole MRO.
@@ -2303,26 +2307,61 @@ impl Analyzer {
     }
 
     /// Strip `Optional[X]`, `list[X]`, `"X"`, `X | None` down to the inner expression.
+    /// The class-bearing part of an annotation: wrappers that keep the value's class are
+    /// unwrapped (`Optional`, `Annotated`, `Final`, `ClassVar`, `Required`, a union with `None`
+    /// and one other member); a container (`list[Foo]`, `dict[str, Foo]`) is the container
+    /// itself, not its element class; a union of several classes has none.
     pub fn strip_annotation(ann: &'static ast::Expr) -> Option<&'static ast::Expr> {
+        let is_none = |e: &ast::Expr| matches!(e, ast::Expr::NoneLiteral(_)) || matches!(e, ast::Expr::Name(n) if n.id.as_str() == "None");
         let mut node = ann;
-        while let ast::Expr::Subscript(sub) = node {
-            node = &sub.slice;
-            if let ast::Expr::Tuple(t) = node {
-                if let Some(first) = t.elts.first() {
-                    node = first;
+        for _ in 0..16 {
+            match node {
+                ast::Expr::StringLiteral(sl) => {
+                    let txt = sl.value.to_str().to_string();
+                    node = frontend::parse_expression(&txt)?;
                 }
+                ast::Expr::Subscript(sub) => {
+                    let elts: Vec<&'static ast::Expr> = match &*sub.slice {
+                        ast::Expr::Tuple(t) => t.elts.iter().collect(),
+                        e => vec![e],
+                    };
+                    match dotted_last(&sub.value).as_str() {
+                        "Optional" | "Annotated" | "Final" | "ClassVar" | "Required" | "NotRequired" | "ReadOnly" => node = elts.first()?,
+                        "Union" => {
+                            let rest: Vec<&'static ast::Expr> = elts.into_iter().filter(|e| !is_none(e)).collect();
+                            if rest.len() != 1 && !disabled("annunion") {
+                                return None;
+                            }
+                            node = rest.first()?;
+                        }
+                        // (a container: its own class; the old rule took the element's)
+                        _ if !disabled("annelem") => return Some(&sub.value),
+                        _ => node = elts.first()?,
+                    }
+                }
+                ast::Expr::BinOp(b) if b.op == ast::Operator::BitOr => {
+                    // (`A | B | None`: flattened)
+                    let mut parts: Vec<&'static ast::Expr> = Vec::new();
+                    let mut stack: Vec<&'static ast::Expr> = vec![node];
+                    while let Some(e) = stack.pop() {
+                        match e {
+                            ast::Expr::BinOp(b2) if b2.op == ast::Operator::BitOr => {
+                                stack.push(&b2.right);
+                                stack.push(&b2.left);
+                            }
+                            e => parts.push(e),
+                        }
+                    }
+                    let rest: Vec<&'static ast::Expr> = parts.into_iter().filter(|e| !is_none(e)).collect();
+                    if rest.len() != 1 && !disabled("annunion") {
+                        return None;
+                    }
+                    node = rest.first()?;
+                }
+                _ => return Some(node),
             }
         }
-        if let ast::Expr::BinOp(b) = node {
-            if b.op == ast::Operator::BitOr {
-                node = &b.left;
-            }
-        }
-        if let ast::Expr::StringLiteral(sl) = node {
-            let txt = sl.value.to_str().to_string();
-            return frontend::parse_expression(&txt);
-        }
-        Some(node)
+        None
     }
 
     /// A declared row for an annotated entry-point parameter (§8.5).

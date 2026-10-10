@@ -490,7 +490,8 @@ impl Analyzer {
                     Some(v) => self.eval(v, state),
                     None => self.none_v.clone(),
                 };
-                if self.cm_hook.as_ref().map(|h| !h.ran && self.frames.len() == h.depth + 1).unwrap_or(false) {
+                // (the with body runs at every yield the generator reaches: one per path)
+                if self.cm_hook.as_ref().map(|h| (!h.ran || (h.multi && !super::disabled("cmyields"))) && self.frames.len() == h.depth + 1).unwrap_or(false) {
                     self.run_cm_body(v, state);
                     return self.none_v.clone();
                 }
@@ -552,7 +553,14 @@ impl Analyzer {
     fn run_cm_body(&mut self, v: Value, state: &mut State) {
         let Some(mut h) = self.cm_hook.take() else { return };
         let callee_fr = self.frames.pop().unwrap();
-        let caller_env = self.env_stack.last().cloned().unwrap_or_default();
+        let caller_env = match &h.env_before {
+            Some(e) => e.clone(),
+            None => {
+                let e = self.env_stack.last().cloned().unwrap_or_default();
+                h.env_before = Some(e.clone());
+                e
+            }
+        };
         let callee_env = std::mem::replace(&mut state.env, caller_env);
         let callee_ret = state.ret.take();
         let callee_exits = state.exits.take();
@@ -564,9 +572,14 @@ impl Analyzer {
             Some(f) => f(self, v, state),
             None => self.exec_block(h.body, state),
         }
-        h.body_died = !state.reachable;
+        h.body_died = !state.reachable && (!h.ran || h.body_died);
         self.cm_frames.pop();
         let after = std::mem::replace(&mut state.env, callee_env);
+        // (another yield's run: the caller's names after the with are either run's)
+        let after = match h.env_after.take() {
+            Some(prev) if h.ran => crate::state::join_env(&prev, &after),
+            _ => after,
+        };
         if let Some(top) = self.env_stack.last_mut() {
             *top = after.clone();
         }

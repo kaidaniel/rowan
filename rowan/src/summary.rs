@@ -1274,6 +1274,12 @@ impl Analyzer {
                         return Some(ev.clone());
                     }
                 }
+                // a subscript of a parameter that is a literal string / bytes at the call site
+                "strlit" => {
+                    if v.pts.is_empty() && v.kv.is_literal() {
+                        return Some(ev.clone());
+                    }
+                }
                 // an unknown key tested against closed dicts: narrows to their keys anywhere
                 "keynarrow" => {
                     if !v.empty() && !v.pts.iter().any(|o| self.kind(o) == Kind::Ph) && v.kv.as_param().is_none() {
