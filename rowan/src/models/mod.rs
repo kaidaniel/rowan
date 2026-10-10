@@ -933,10 +933,17 @@ fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // a generator with known yields: the item at the cursor, which moves on
     if let Some(g) = a.single() {
         if matches!(an.kind(g), Kind::List) && an.obj(g).single {
+            // (an endless generator: the positions it is known to reach)
+            if let (None, Some(p), Some(cur)) = (an.llen(g, st), an.prefix(g, st), an.cursor_of(g, st)) {
+                if cur < p && an.obj(g).iterator && !crate::interp::disabled("genprefix") {
+                    an.set_cursor(g, Some(cur as usize + 1), st);
+                    return st.slot(g, Ns::Pos, intern::key_int(cur as i64));
+                }
+            }
             if let Some(n) = an.llen(g, st) {
-                let cur = st.slot_opt(g, Ns::Attr, key_str_lit("__cursor")).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_int).unwrap_or(0);
+                let cur = an.cursor_of(g, st).map(|c| c as i64).unwrap_or(-1);
                 if cur >= 0 && (cur as usize) < n {
-                    st.set_slot(g, Ns::Attr, key_str_lit("__cursor"), Value::lit(intern::key_int(cur + 1)), true);
+                    an.set_cursor(g, Some(cur as usize + 1), st);
                     return st.slot(g, Ns::Pos, intern::key_int(cur));
                 }
                 if cur >= 0 && (cur as usize) >= n && !crate::interp::disabled("nextend") {

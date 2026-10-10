@@ -510,7 +510,114 @@ impl Analyzer {
         self.model_depth += 1;
         let r = m(self, state, call);
         self.model_depth -= 1;
+        if !super::disabled("iterconsume") {
+            self.after_model_consume(call, &r, state);
+        }
         r
+    }
+
+    /// What a model call does to the one-shot iterators it is given: a full consumer uses
+    /// them up; a lazy wrapper (zip, islice, map, …) takes from them when it is consumed
+    /// itself; anything else leaves their position unknown.
+    fn after_model_consume(&mut self, call: &Call, r: &Value, state: &mut State) {
+        // (one-shot iterators, and lazy iterators over them)
+        let its: Vec<(usize, u32)> = call.args.iter().chain(call.star_args.iter()).enumerate().filter_map(|(i, a)| a.single().filter(|o| a.kv.is_bot() && ((self.obj(*o).iterator && self.obj(*o).single && matches!(self.kind(*o), Kind::List)) || self.lazy_src.contains_key(o))).map(|o| (i, o))).collect();
+        if its.is_empty() {
+            return;
+        }
+        let q = call.qual.as_str();
+        const FULL: &[&str] = &[
+            "builtins.list", "builtins.tuple", "builtins.set", "builtins.frozenset", "builtins.dict", "builtins.sorted", "builtins.sum", "builtins.min", "builtins.max",
+            "str.join", "collections.Counter", "collections.deque", "collections.OrderedDict", "collections.defaultdict", "list.extend", "set.update", "dict.update",
+            "statistics.mean", "statistics.median", "statistics.fmean", "math.fsum", "math.prod", "bytes.join",
+        ];
+        const LAZY_ALL: &[&str] = &["builtins.map", "builtins.filter", "builtins.enumerate", "builtins.iter", "itertools.chain", "itertools.starmap", "itertools.takewhile", "itertools.dropwhile", "itertools.accumulate", "itertools.compress", "itertools.groupby", "itertools.pairwise", "itertools.batched"];
+        if matches!(q, "builtins.next" | "builtins.iter") && its.len() == 1 && r.single() == Some(its[0].1) {
+            return;
+        }
+        if q == "builtins.next" {
+            return;
+        }
+        if FULL.contains(&q) {
+            for (_, o) in its {
+                self.exhaust(&Value::obj(o), state);
+            }
+            return;
+        }
+        let robj = r.single().filter(|ro| !its.iter().any(|(_, o)| o == ro));
+        if q == "itertools.islice" {
+            // islice(it, stop) / islice(it, start, stop): start + the items it gives
+            let lit = |v: Option<&Value>| v.and_then(|x| x.kv.as_lit().filter(|_| x.pts.is_empty())).and_then(intern::key_as_int);
+            let n = match call.args.len() {
+                2 => lit(call.args.get(1)),
+                n if n >= 3 => lit(call.args.get(2)),
+                _ => None,
+            };
+            if let (Some(ro), Some(n)) = (robj, n) {
+                self.lazy_src.insert(ro, vec![(its[0].1, Some(n.max(0) as usize))]);
+                return;
+            }
+        }
+        if q == "builtins.zip" {
+            if let (Some(ro), Some(pulls)) = (robj, self.zip_pulls(call, state)) {
+                self.lazy_src.insert(ro, pulls);
+                return;
+            }
+        }
+        if LAZY_ALL.contains(&q) {
+            if let Some(ro) = robj {
+                self.lazy_src.insert(ro, its.iter().map(|(_, o)| (*o, None)).collect());
+                return;
+            }
+        }
+        for (_, o) in its {
+            if self.lazy_src.contains_key(&o) {
+                self.consume_lazy(&Value::obj(o), false, state);
+            } else {
+                self.set_cursor(o, None, state);
+            }
+        }
+    }
+
+    /// The items `zip(...)` takes from each one-shot iterator argument when it is consumed:
+    /// rounds = the shortest length; in the last round the arguments before the first that
+    /// ran out each gave one more.
+    fn zip_pulls(&mut self, call: &Call, state: &mut State) -> Option<Vec<(ObjId, Option<usize>)>> {
+        if !call.star_args.is_empty() || call.kwargs.keys().any(|k| &*intern::str_get(*k) != "strict") {
+            return None;
+        }
+        // (exact remaining length, or a lower bound)
+        let mut lens: Vec<(Option<usize>, usize, Option<u32>)> = Vec::new();
+        for a in &call.args {
+            let one = a.single().filter(|o| a.kv.is_bot() && self.obj(*o).iterator && self.obj(*o).single && matches!(self.kind(*o), Kind::List));
+            match one {
+                Some(o) => {
+                    let c = self.cursor_of(o, state)?;
+                    match self.llen(o, state) {
+                        Some(n) => lens.push((Some(n.saturating_sub(c)), n.saturating_sub(c), Some(o))),
+                        None => lens.push((None, self.prefix(o, state).unwrap_or(0).saturating_sub(c), Some(o))),
+                    }
+                }
+                None => {
+                    let it = self.iterate(a, &call.node, state);
+                    let n = it.items.map(|v| v.len())?;
+                    lens.push((Some(n), n, None));
+                }
+            }
+        }
+        let rounds = lens.iter().filter_map(|(e, _, _)| *e).min()?;
+        // (an argument of unknown length must surely outlast the shortest)
+        if lens.iter().any(|(e, lb, _)| e.is_none() && *lb <= rounds) {
+            return None;
+        }
+        let first_out = lens.iter().position(|(e, _, _)| *e == Some(rounds))?;
+        let mut out = Vec::new();
+        for (i, (_, _, o)) in lens.iter().enumerate() {
+            if let Some(o) = o {
+                out.push((*o, Some(if i < first_out { rounds + 1 } else { rounds })));
+            }
+        }
+        Some(out)
     }
 
     pub fn construct(&mut self, cls: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
@@ -1072,6 +1179,13 @@ impl Analyzer {
                 if !self.sum_stack.is_empty() {
                     self.propagate_events(&summ, &bind, state);
                 }
+                // (a one-shot iterator handed to a summarised call: how much it takes is not known)
+                if !super::disabled("itercursor") {
+                    let its: Vec<u32> = args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(self_v.iter()).filter_map(|v| v.single().filter(|o| self.obj(*o).iterator && self.obj(*o).single)).collect();
+                    for o in its {
+                        self.set_cursor(o, None, state);
+                    }
+                }
                 let saved_chain = std::mem::take(&mut self.call_chain);
                 self.call_chain = chain_extend(&saved_chain, &[node.line]);
                 if summ.raises {
@@ -1265,6 +1379,11 @@ impl Analyzer {
                 let gid = self.alloc(Kind::List, &format!("gen:{}", foid), state, &format!("generator {}", fi.qualname), Payload::None, None, Ns::Item, None, Some(&ctx));
                 self.set_llen(gid, state, Some(0));
                 state.elems.insert(gid, KeyVal::Lits(KeySet::new()));
+                // (a new activation: not consumed yet, its own item states)
+                state.slots.remove(&gid, &(Ns::Attr, key_str_lit("__cursor")));
+                state.slots.remove(&gid, &(Ns::Attr, key_str_lit("\u{1}effpos")));
+                self.gen_pos_states.remove(&gid);
+                self.gen_eff.remove(&gid);
             }
         }
         let saved_chain = std::mem::take(&mut self.call_chain);
@@ -1419,23 +1538,50 @@ impl Analyzer {
             }
             _ => None,
         };
+        // (a generator that ran to its end: the state there, for a consumer that uses it up)
+        let finite_end = if gen_yields.is_some() && st.reachable { Some(st.copy()) } else { None };
         // a generator whose body never ends (`while True: yield …`): the caller resumes from
         // one of its yields, and the yields go on (their number is unknown)
         if let FuncNode::Def(f) = fnode {
             if is_generator(&f.body) && !st.reachable {
                 let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
                 if let Some(mut ys) = self.gen_yield_states.remove(&gid) {
-                    let p = self.prefix(gid, &ys);
-                    match p {
-                        Some(n) => ys.lens.insert(gid, (None, n)),
-                        None => ys.lens.insert(gid, (None, 0)),
-                    };
+                    let mut p = self.prefix(gid, &ys).unwrap_or(0);
+                    // (the yields joined: every position some yield made is there — the items
+                    // the endless loop is known to give first)
+                    if !super::disabled("genprefix") {
+                        while ys.has_slot(gid, Ns::Pos, intern::key_int(p as i64)) {
+                            p += 1;
+                        }
+                        if p > 0 {
+                            self.objects[gid as usize].known_prefix = Some(p);
+                        }
+                    }
+                    ys.lens.insert(gid, (None, p));
                     st = ys;
                 }
             }
         }
         if let Some((gid, ys)) = gen_yields {
             self.gen_suspension_join(&mut st, &pre_bind, ys.as_ref(), gid, obj_mark_call);
+            // the effects per item: before the first, the objects are as before the call
+            if !super::disabled("geneffects") && st.reachable {
+                let fp = st.footprint(&pre_bind);
+                let old = |o: ObjId| o < obj_mark_call && o != gid;
+                let rows: Vec<(ObjId, Ns)> = fp.rows.iter().copied().filter(|(o, _)| old(*o)).collect();
+                let slots: Vec<(ObjId, crate::state::SlotKey)> = fp.slots.iter().copied().filter(|(o, _)| old(*o)).collect();
+                let elems: Vec<ObjId> = fp.elems.iter().copied().filter(|o| old(*o)).collect();
+                let mut lens: Vec<ObjId> = slots.iter().map(|(o, _)| *o).chain(elems.iter().copied()).collect();
+                lens.sort_unstable();
+                lens.dedup();
+                if !rows.is_empty() || !slots.is_empty() || !elems.is_empty() {
+                    let at = self.gen_pos_states.remove(&gid).unwrap_or_default();
+                    let ge = super::GenEffects { rows, slots, elems, lens, pre: pre_bind.copy(), at, end: finite_end, join: st.copy() };
+                    crate::interp::exprs::gen_copy_facts_pub(&mut st, &pre_bind, &ge);
+                    st.set_slot(gid, Ns::Attr, key_str_lit("\u{1}effpos"), Value::lit(key_str_lit("pre")), true);
+                    self.gen_eff.insert(gid, std::rc::Rc::new(ge));
+                }
+            }
         }
         state.set_to(&mut st);
         if let FuncNode::Def(f) = fnode {
@@ -1444,6 +1590,10 @@ impl Analyzer {
                 // what `yield from` the generator evaluates to: its return value
                 if !super::disabled("genret") {
                     state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}genret"), ret.clone(), true);
+                }
+                // (one-shot: what a consumer takes is gone for the next one)
+                if !super::disabled("geniter") {
+                    self.obj_mut(gid).iterator = true;
                 }
                 ret = Value::obj(gid);
             }

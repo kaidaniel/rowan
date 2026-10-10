@@ -959,7 +959,10 @@ impl Analyzer {
         // test such as `while True` is decided by the body alone: not unrolled); the rest of
         // the loop, from where the test stops being decided, is analysed as a loop
         let mut breaks: Option<State> = None;
-        if !is_constant(&w.test) && !crate::interp::disabled("whileunroll") {
+        // (in a generator, `while True:` too: its yields get their positions, and a consumer
+        // that takes a few items sees exactly those)
+        let gen_body = is_constant(&w.test) && self.frame().func.map(|f| matches!(self.func_info(f).node, crate::interp::FuncNode::Def(d) if crate::interp::is_generator(&d.body))).unwrap_or(false) && !crate::interp::disabled("genwhileunroll");
+        if (!is_constant(&w.test) || gen_body) && !crate::interp::disabled("whileunroll") {
             let mut idx = 0usize;
             loop {
                 if !state.reachable {
@@ -1131,10 +1134,60 @@ impl Analyzer {
         let itv = self.eval(&f.iter, state);
         let iter_node = frontend::node(&*f.iter);
         let it = self.iterate(&itv, &iter_node, state);
-        // a one-shot iterator is used up by the loop (a break leaves it partly consumed: the
-        // later iterations see the rest, which is not tracked)
-        self.exhaust(&itv, state);
         let has_jump = contains_jump(&f.body);
+        // a one-shot iterator is used up by the loop; a `break` leaves the rest: the cursor
+        // follows the unrolled iterations, else it is not known after a loop that may break
+        let once = itv.single().filter(|o| self.obj(*o).iterator && self.obj(*o).single && !crate::interp::disabled("itercursor"));
+        let c0 = once.and_then(|o| self.cursor_of(o, state)).unwrap_or(0);
+        // an endless generator with known first items: those iterations are unrolled (the
+        // cursor follows), the rest of the loop runs on from there
+        if let (Some(o), None, true) = (once, &it.items, matches!(&*f.iter, ast::Expr::Name(_))) {
+            if let (None, Some(p)) = (self.llen(o, state), self.prefix(o, state)) {
+                if p > c0 && p - c0 <= UNROLL_MAX && !crate::interp::disabled("genprefix") {
+                    let items: Vec<Value> = (c0..p).map(|i| state.slot(o, Ns::Pos, intern::key_int(i as i64))).collect();
+                    let mut breaks: Option<State> = None;
+                    for (idx, item) in items.iter().enumerate() {
+                        if !state.reachable {
+                            break;
+                        }
+                        self.set_cursor(o, Some(c0 + idx + 1), state);
+                        self.frame_mut().unroll.push(idx);
+                        self.bind_iter_target(&f.target, &Elem::One(item.clone()), state);
+                        self.loop_stack.push(LoopCtx::default());
+                        self.exec_block(&f.body, state);
+                        let ctx = self.loop_stack.pop().unwrap();
+                        if let Some(mut c) = ctx.continues {
+                            let j = if state.reachable { state.join(&mut c) } else { c };
+                            state.replace_with(j);
+                        }
+                        if let Some(mut b) = ctx.breaks {
+                            breaks = Some(match breaks.take() {
+                                None => b,
+                                Some(mut e) => e.join(&mut b),
+                            });
+                        }
+                        self.frame_mut().unroll.pop();
+                    }
+                    if state.reachable {
+                        // (the rest: from the end of the known items)
+                        self.stmt_for(f, state);
+                    }
+                    if let Some(mut b) = breaks {
+                        let j = if state.reachable { state.join(&mut b) } else { b };
+                        state.replace_with(j);
+                    }
+                    return;
+                }
+            }
+        }
+        if once.is_none() || !has_jump {
+            if has_jump {
+                // (a lazy iterator a loop may break off: its sources' positions are not known)
+                self.consume_lazy(&itv, false, state);
+            } else {
+                self.exhaust(&itv, state);
+            }
+        }
         if let Some(items) = &it.items {
             if items.len() <= UNROLL_MAX {
                 // unrolled: `continue` rejoins at the next iteration, `break` at the exit
@@ -1142,6 +1195,9 @@ impl Analyzer {
                 for (idx, item) in items.iter().enumerate() {
                     if !state.reachable {
                         break;
+                    }
+                    if let (Some(o), true) = (once, has_jump) {
+                        self.set_cursor(o, Some(c0 + idx + 1), state);
                     }
                     self.frame_mut().unroll.push(idx);
                     self.bind_iter_target(&f.target, &Elem::One(item.clone()), state);
@@ -1167,12 +1223,22 @@ impl Analyzer {
                 if !f.orelse.is_empty() && state.reachable {
                     self.exec_block(&f.orelse, state);
                 }
+                if let (Some(_), true) = (once, has_jump) {
+                    // (run to the end: used up)
+                    if state.reachable {
+                        self.exhaust(&itv, state);
+                    }
+                }
                 if let Some(mut b) = breaks {
                     let j = state.join(&mut b);
                     state.replace_with(j);
                 }
                 return;
             }
+        }
+        // (a loop that may break off: where the iterator stands after it is not known)
+        if let (Some(o), true) = (once, has_jump) {
+            self.set_cursor(o, None, state);
         }
         let mut pre = state.copy();
         // dry run for exhaustive key iteration (§8.3)

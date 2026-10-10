@@ -34,22 +34,22 @@ def opened(state):
 if __name__ == "__main__":
     log = []
     g = tracked(log)
-    n0 = len(log)                                #@value n0: includes={0}
-    #@todo value n0: exactly={0}
+    n0 = len(log)                                #@value n0: exactly={0}
+    # (the floors here were the eager model's: the exact answers hold now)
     a = next(g)                                  #@value a: exactly={0}
     d = {}
     h = fill(d)
     first = next(h)                              #@value first: exactly={1}
-    hasb = "b" in d                              #@value hasb: includes={False}
-    _ = 0                                        #@row d: present={a,b} closed
-    #@todo row d: present={a,b} definite={a} closed
+    hasb = "b" in d                              #@value hasb: exactly={False}
+    _ = 0                                        #@row d: present={a} definite={a} absent={b} closed
+    # (the earlier to-do said present={a,b}: wrong, fill stores b only after its first yield)
     doubled = list(pure([1, 2, 3]))
     last = doubled[2]                            #@value last: exactly={6}
     nd = len(doubled)                            #@value nd: exactly={3}
     log2 = []
     total = sum(tracked(log2))                   #@value total: exactly={3}
-    n2 = len(log2)                               #@value n2: includes={3}
-    #@todo value n2: exactly={3}
+    n2 = len(log2)                               #@value n2: exactly={3}
+    #
     st = {}
     with opened(st) as s:
         inside = s["open"]                       #@value inside: exactly={True}

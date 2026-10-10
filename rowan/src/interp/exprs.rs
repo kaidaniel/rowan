@@ -591,7 +591,20 @@ impl Analyzer {
             (true, Some(n)) if n < 16 => {
                 state.set_slot(gid, Ns::Pos, key_int(n as i64), v, true);
                 self.set_llen(gid, state, Some(n + 1));
+                // (the state at this item: what a consumer that took it sees of the effects)
+                if !crate::interp::disabled("geneffects") {
+                    let ps = self.gen_pos_states.entry(gid).or_default();
+                    while ps.len() <= n {
+                        ps.push(None);
+                    }
+                    ps[n] = Some(state.copy());
+                }
             }
+            // (the yields so far keep their positions: a known prefix)
+            (_, Some(n)) if n > 0 && !crate::interp::disabled("genprefix") => {
+                self.set_prefix(gid, state, n);
+            }
+            _ if self.prefix(gid, state).is_some() && !crate::interp::disabled("genprefix") => {}
             _ => {
                 self.set_llen(gid, state, None);
                 state.drop_obj_ns(gid, Ns::Pos);
@@ -1335,14 +1348,99 @@ impl Analyzer {
     }
 
     /// A one-shot iterator iterated to its end: later iterations see nothing.
+    /// A lazy iterator consumed (to the end, or partly: `full` false): what it takes from its
+    /// sources.
+    pub fn consume_lazy(&mut self, v: &Value, full: bool, state: &mut State) {
+        for lo in v.pts.iter() {
+            let Some(srcs) = self.lazy_src.get(&lo).cloned() else { continue };
+            // (consumed once on a path: a one-shot iterator itself)
+            let done = key_str_lit("\u{1}consumed");
+            if state.has_slot(lo, Ns::Attr, done) {
+                continue;
+            }
+            state.set_slot(lo, Ns::Attr, done, Value::lit(intern::key_bool(true)), true);
+            for (src, n) in srcs {
+                match (full, n, self.cursor_of(src, state)) {
+                    (true, Some(n), Some(c)) => {
+                        let end = match self.llen(src, state) {
+                            Some(len) => (c + n).min(len),
+                            None => c + n,
+                        };
+                        self.set_cursor(src, Some(end), state);
+                    }
+                    (true, None, _) => {
+                        self.exhaust(&Value::obj(src), state);
+                    }
+                    _ => {
+                        self.set_cursor(src, None, state);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Move a one-shot iterator's cursor (None: not known). A generator with tracked effects
+    /// gets the facts of the objects it changes as they are after that many items — while
+    /// they still are what was installed last (the consumer did not change them meanwhile).
+    pub fn set_cursor(&mut self, o: u32, c: Option<usize>, state: &mut State) {
+        self.set_cursor_ex(o, c, false, state)
+    }
+
+    /// `set_cursor`; `at_end`: used up (its length may not be known).
+    pub fn set_cursor_ex(&mut self, o: u32, c: Option<usize>, at_end: bool, state: &mut State) {
+        let cv = match c {
+            Some(n) => Value::lit(key_int(n as i64)),
+            None => Value::data(if at_end { "cursor-end" } else { "cursor" }),
+        };
+        state.set_slot(o, Ns::Attr, key_str_lit("__cursor"), cv, true);
+        let Some(ge) = self.gen_eff.get(&o).cloned() else { return };
+        let tk = key_str_lit("\u{1}effpos");
+        let tag = state.slot_opt(o, Ns::Attr, tk).and_then(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).and_then(intern::key_as_str).map(|s| s.to_string());
+        let expected: Option<&State> = match tag.as_deref() {
+            Some("pre") => Some(&ge.pre),
+            Some("join") => Some(&ge.join),
+            Some("end") => ge.end.as_ref(),
+            Some(t) => t.strip_prefix("at").and_then(|k| k.parse::<usize>().ok()).and_then(|k| ge.at.get(k)).and_then(|x| x.as_ref()),
+            None => None,
+        };
+        let Some(expected) = expected else { return };
+        if !gen_facts_equal(state, expected, &ge) {
+            state.set_slot(o, Ns::Attr, tk, Value::data("effpos"), true);
+            return;
+        }
+        let ended = at_end || matches!((c, self.llen(o, state)), (Some(k), Some(n)) if k >= n);
+        let (target, ntag): (&State, String) = match c {
+            Some(0) => (&ge.pre, "pre".into()),
+            _ if ended && ge.end.is_some() => (ge.end.as_ref().unwrap(), "end".into()),
+            Some(k) => match ge.at.get(k - 1).and_then(|x| x.as_ref()) {
+                Some(s) => (s, format!("at{}", k - 1)),
+                None => (&ge.join, "join".into()),
+            },
+            None => (&ge.join, "join".into()),
+        };
+        gen_copy_facts(state, target, &ge);
+        state.set_slot(o, Ns::Attr, tk, Value::lit(key_str_lit(&ntag)), true);
+    }
+
+    /// How many items a one-shot iterator has given (None: not known).
+    pub fn cursor_of(&self, o: u32, state: &State) -> Option<usize> {
+        match state.slot_opt(o, Ns::Attr, key_str_lit("__cursor")) {
+            None => Some(0),
+            Some(v) => v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_int).map(|i| i.max(0) as usize),
+        }
+    }
+
     pub fn exhaust(&mut self, v: &Value, state: &mut State) {
         if super::disabled("exhaust") {
             return;
         }
+        self.consume_lazy(v, true, state);
         if let Some(o) = v.single() {
             if self.obj(o).iterator && self.obj(o).single {
-                if let Some(n) = self.llen(o, state) {
-                    state.set_slot(o, Ns::Attr, key_str_lit("__cursor"), Value::lit(key_int(n as i64)), true);
+                match self.llen(o, state) {
+                    Some(n) => self.set_cursor(o, Some(n), state),
+                    // (used up, its length not known: at its end all the same)
+                    None => self.set_cursor_ex(o, None, true, state),
                 }
             }
         }
@@ -2673,5 +2771,58 @@ impl Analyzer {
     pub fn instance_less(&mut self, a: &Value, b: &Value, node: &Node, state: &mut State) -> Option<bool> {
         let r = self.rich_compare(ast::CmpOp::Lt, a, b, node, state)?;
         self.truth_of(&r, state, node)
+    }
+}
+
+/// Do two states agree on the facts a generator's effects concern?
+fn gen_facts_equal(a: &State, b: &State, ge: &crate::interp::GenEffects) -> bool {
+    ge.rows.iter().all(|k| a.rows.get(k) == b.rows.get(k))
+        && ge.slots.iter().all(|(o, sk)| a.slots.get(o, sk) == b.slots.get(o, sk))
+        && ge.elems.iter().all(|o| a.elems.get(o) == b.elems.get(o))
+        && ge.lens.iter().all(|o| a.lens.get(o) == b.lens.get(o))
+}
+
+/// Install `src`'s facts about a generator's affected objects into `dst`.
+pub fn gen_copy_facts_pub(dst: &mut State, src: &State, ge: &crate::interp::GenEffects) {
+    gen_copy_facts(dst, src, ge)
+}
+
+fn gen_copy_facts(dst: &mut State, src: &State, ge: &crate::interp::GenEffects) {
+    for k in &ge.rows {
+        match src.rows.get(k) {
+            Some(r) => dst.rows.insert(*k, r),
+            None => {
+                dst.rows.remove(k);
+            }
+        }
+    }
+    for (o, sk) in &ge.slots {
+        match src.slots.get(o, sk) {
+            Some(v) => dst.slots.set(o, *sk, v),
+            None => {
+                dst.slots.remove(o, sk);
+            }
+        }
+    }
+    for o in &ge.elems {
+        match src.elems.get(o) {
+            Some(v) => dst.elems.insert(*o, v),
+            None => {
+                dst.elems.remove(o);
+            }
+        }
+    }
+    for o in &ge.lens {
+        match src.lens.get(o) {
+            Some(v) => dst.lens.insert(*o, v),
+            None => {
+                dst.lens.remove(o);
+            }
+        }
+    }
+    for (o, sk) in &ge.slots {
+        if matches!(sk.0, Ns::Pos | Ns::Elem) {
+            dst.clear_last(*o);
+        }
     }
 }

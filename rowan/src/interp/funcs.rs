@@ -690,9 +690,9 @@ impl Analyzer {
                 Kind::List | Kind::Tuple | Kind::Set => {
                     let ll = self.llen(oid, state);
                     // a generator partly consumed by next(): iteration starts at its cursor
-                    let cursor = state.slot_opt(oid, Ns::Attr, key_str_lit("__cursor")).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_int).unwrap_or(0).max(0) as usize;
-                    match (ll, items.as_mut()) {
-                        (Some(n), Some(its)) => {
+                    let cursor = self.cursor_of(oid, state);
+                    match (ll, items.as_mut(), cursor) {
+                        (Some(n), Some(its), Some(cursor)) => {
                             for i in cursor.min(n)..n {
                                 its.push(state.slot(oid, Ns::Pos, key_int(i as i64)));
                             }
@@ -773,12 +773,17 @@ impl Analyzer {
                     let Payload::Zip(ks, vs) = self.obj(oid).payload.clone() else { continue };
                     let mut ki = self.iterate(&ks, node, state);
                     let mut vi = self.iterate(&vs, node, state);
-                    // an infinite side yields as many items as the other has
-                    if let (Some(inf), Some(n)) = (self.infinite_of(&ks), vi.items.as_ref().map(|x| x.len())) {
-                        ki.items = self.infinite_take(&inf, n);
+                    // an infinite side (or a generator known that far) yields as many items as the
+                    // other has
+                    if let (None, Some(n)) = (&ki.items, vi.items.as_ref().map(|x| x.len())) {
+                        if let Some(its) = self.take_known(&ks, n, state) {
+                            ki.items = Some(its);
+                        }
                     }
-                    if let (Some(inf), Some(n)) = (self.infinite_of(&vs), ki.items.as_ref().map(|x| x.len())) {
-                        vi.items = self.infinite_take(&inf, n);
+                    if let (None, Some(n)) = (&vi.items, ki.items.as_ref().map(|x| x.len())) {
+                        if let Some(its) = self.take_known(&vs, n, state) {
+                            vi.items = Some(its);
+                        }
                     }
                     // a strict zip that did not raise: both sides as long as the known one
                     let strict = self.zip_strict.contains(&oid);

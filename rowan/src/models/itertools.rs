@@ -72,6 +72,26 @@ impl Analyzer {
         self.infinites.get(&o).cloned()
     }
 
+    /// The next `n` items of an iterator whose items are known that far: an infinite one, or
+    /// a one-shot iterator (a generator) from its cursor within its known positions (fewer at
+    /// its end).
+    pub fn take_known(&mut self, v: &Value, n: usize, st: &State) -> Option<Vec<Value>> {
+        if let Some(inf) = self.infinite_of(v) {
+            return self.infinite_take(&inf, n);
+        }
+        let o = v.single().filter(|o| v.kv.is_bot() && self.obj(*o).iterator && self.obj(*o).single && self.kind(*o) == Kind::List)?;
+        if crate::interp::disabled("genprefix") {
+            return None;
+        }
+        let c = self.cursor_of(o, st)?;
+        let end = match self.llen(o, st) {
+            Some(len) => (c + n).min(len),
+            None if c + n <= self.prefix(o, st).unwrap_or(0) => c + n,
+            None => return None,
+        };
+        Some((c..end).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect())
+    }
+
     /// The first `n` items of an infinite iterator.
     pub fn infinite_take(&mut self, inf: &Infinite, n: usize) -> Option<Vec<Value>> {
         if n > MAX_ITEMS {
@@ -191,7 +211,7 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     Some(e) => an.infinite_take(&inf, e.max(0) as usize),
                     None => None,
                 },
-                None => items(an, &src, &node, st).0,
+                None => items(an, &src, &node, st).0.or_else(|| stop.and_then(|e| an.take_known(&src, e.max(0) as usize, st))),
             };
             match its {
                 Some(its) => {

@@ -422,6 +422,20 @@ pub struct Frame {
     pub pre_call: Option<PreCall>,
 }
 
+/// What a generator's body does to objects older than its call, by how far it has run: the
+/// facts of those objects before it ran (`pre`), at its k-th yield (`at[k]`), at its end,
+/// and joined over all of them.
+pub struct GenEffects {
+    pub rows: Vec<(ObjId, Ns)>,
+    pub slots: Vec<(ObjId, crate::state::SlotKey)>,
+    pub elems: Vec<ObjId>,
+    pub lens: Vec<ObjId>,
+    pub pre: State,
+    pub at: Vec<Option<State>>,
+    pub end: Option<State>,
+    pub join: State,
+}
+
 /// (see `Frame::pre_call`)
 #[derive(Clone)]
 pub struct PreCall(pub ObjId, pub std::rc::Rc<State>);
@@ -778,6 +792,13 @@ pub struct Analyzer {
     pub handling_values: Vec<Value>,
     /// inside a call whose exceptions a thread / future keeps: reads still require their keys
     pub catching_depth: u32,
+    /// a generator's effects on older objects, per item: see `set_cursor`
+    pub gen_eff: FxHashMap<ObjId, std::rc::Rc<GenEffects>>,
+    /// the state at each positioned yield of the running generator activations
+    pub gen_pos_states: FxHashMap<ObjId, Vec<Option<State>>>,
+    /// lazy iterators (zip / islice / map …) over one-shot iterators: what consuming them
+    /// takes from each source (Some(n): n items, None: all)
+    pub lazy_src: FxHashMap<ObjId, Vec<(ObjId, Option<usize>)>>,
     /// a context part every allocation adds (a model run once per receiver)
     pub alloc_extra: Option<String>,
     /// beside `raise_stack`: the classes of the exceptions that may leave the running call
@@ -1152,6 +1173,9 @@ impl Analyzer {
             handling: Vec::new(),
             handling_values: Vec::new(),
             catching_depth: 0,
+            gen_eff: FxHashMap::default(),
+            gen_pos_states: FxHashMap::default(),
+            lazy_src: FxHashMap::default(),
             alloc_extra: None,
             esc_cls: Vec::new(),
             caught_load: false,

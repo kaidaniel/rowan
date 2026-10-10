@@ -667,6 +667,8 @@ impl Analyzer {
                             (_, crate::interp::funcs::Elem::One(e)) => e,
                             _ => Value::data("depends"),
                         });
+                        // (FastAPI runs it to its end after the response: its effects all happen)
+                        self.exhaust(&r, state);
                     } else {
                         outs.push(r);
                     }
