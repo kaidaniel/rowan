@@ -1734,15 +1734,52 @@ impl Analyzer {
                             _ => !intern::key_is_number(k2),
                         }
                     };
-                    let bad = lits.iter().filter(|k| fails(*k)).count();
-                    if bad > 0 {
+                    let bad: Vec<KeyId> = lits.iter().filter(|k| fails(*k)).collect();
+                    if !bad.is_empty() {
                         let loc = self.pyd_field;
-                        let code = match t {
+                        // (an int from a float with a fractional part: int_from_float)
+                        let code_of = |k: KeyId| match t {
+                            "int" if intern::with_key(k, |kk| matches!(kk, intern::Key::Float(_))) => "int_from_float",
                             "int" => "int_parsing",
                             "Decimal" => "decimal_parsing",
                             _ => "float_parsing",
                         };
-                        self.pyd_err(loc, code, bad == lits.len(), false);
+                        let mut codes: Vec<&str> = bad.iter().map(|k| code_of(*k)).collect();
+                        codes.sort();
+                        codes.dedup();
+                        let sure = bad.len() == lits.len() && codes.len() == 1;
+                        for code in codes {
+                            self.pyd_err(loc, code, sure, false);
+                        }
+                    }
+                }
+                // an unknown value (a text from a file, any input) may not convert: a parsing error,
+                // or a type error when it may be no string either
+                if matches!(t, "int" | "float" | "bool") && !crate::interp::disabled("pydunkparse") {
+                    // (a value already of the type — validated before, `int(x)` — converts)
+                    let of_type = |d: &str| d == t || (t == "float" && matches!(d, "int" | "bool")) || (t == "int" && d == "bool") || d.starts_with('\u{1}');
+                    let data_part = !val.kv.is_bot() && !val.kv.is_literal() && !matches!(&val.kv, KeyVal::Data(d) if of_type(&intern::str_get(*d)));
+                    let obj_part = val.pts.iter().any(|o| matches!(self.kind(o), Kind::Unknown | Kind::Ph));
+                    if data_part || obj_part {
+                        let loc = self.pyd_field;
+                        let code = match t {
+                            "int" => "int_parsing",
+                            "float" => "float_parsing",
+                            _ => "bool_parsing",
+                        };
+                        self.pyd_err(loc, code, false, false);
+                        if t == "int" {
+                            self.pyd_err(loc, "int_from_float", false, false);
+                        }
+                        let known_str = matches!(&val.kv, KeyVal::Data(d) if &*intern::str_get(*d) == "str") && !obj_part;
+                        if data_part && !known_str {
+                            let tcode = match t {
+                                "int" => "int_type",
+                                "float" => "float_type",
+                                _ => "bool_type",
+                            };
+                            self.pyd_err(loc, tcode, false, false);
+                        }
                     }
                 }
                 // an unknown value validated as a Decimal is a Decimal (not the str it came as)
