@@ -1550,9 +1550,11 @@ fn item_columns(an: &Analyzer, st: &State, v: &Value) -> Option<Vec<Result<Row, 
         match an.kind(x) {
             Kind::Dict | Kind::Frame => {
                 let mut d = Row::new().copy_from(&st.row(x, Ns::Item), true, &KeySet::new(), EMPTY_LENS).data();
-                // a key the record has is a column of the frame
-                d.definite = d.present.clone();
-                d.likely = d.likely.union(&d.present);
+                // a key the record surely has is a column of the frame; one it may have, maybe
+                if crate::interp::disabled("recmaybe") {
+                    d.definite = d.present.clone();
+                    d.likely = d.likely.union(&d.present);
+                }
                 let r = Row::from_data(d);
                 rec = Some(match rec {
                     None => r,
