@@ -1801,6 +1801,13 @@ impl Analyzer {
         }
         if name == "torch" || name.starts_with("torch.") {
             self.torch_on = true;
+            self.torch_real = true;
+            let m = self.frame().module;
+            self.torch_modules.insert(m);
+        }
+        // numpy arrays are tensors to the shape model
+        if (name == "numpy" || name.starts_with("numpy.")) && !crate::interp::disabled("numpyshapes") {
+            self.torch_on = true;
             let m = self.frame().module;
             self.torch_modules.insert(m);
         }

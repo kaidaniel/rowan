@@ -345,7 +345,13 @@ impl Analyzer {
             };
             let report = req.is_none();
             let v = match &pann {
-                Ann::Model(c) => self.pyd_validate_opts(*c, &raw, state, node, report),
+                Ann::Model(c) => {
+                    // (a test request's body: its validation errors are the 422 response)
+                    let saved = std::mem::replace(&mut self.fa_body_validation, !report);
+                    let v = self.pyd_validate_opts(*c, &raw, state, node, report);
+                    self.fa_body_validation = saved;
+                    v
+                }
                 Ann::Other => raw,
                 other => self.pyd_convert_pub(other, &raw, state, node),
             };

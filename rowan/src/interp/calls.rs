@@ -233,7 +233,7 @@ impl Analyzer {
                         let vals: Vec<&Value> = args.iter().chain(kwargs.values()).collect();
                         crate::models::pandas::symbolic_frames_event(self, state, &vals);
                     }
-                    return m(self, state, &call);
+                    return self.run_model(m, state, &call);
                 }
                 self.unknown_call(&qual, None, args, kwargs, star_args, star_kwargs, state, node)
             }
@@ -267,7 +267,7 @@ impl Analyzer {
                     }
                 }
                 if let Some(m) = self.models.lookup(&qual) {
-                    return m(self, state, &call);
+                    return self.run_model(m, state, &call);
                 }
                 self.unknown_call(&qual, Some(&recv), &call.args, kwargs, star_args, star_kwargs, state, node)
             }
@@ -465,6 +465,18 @@ impl Analyzer {
             }
         }
         false
+    }
+
+    /// A model call: objects it allocates at one site stay distinct from each other (one
+    /// weak object) even while only the model's own code holds them.
+    pub fn run_model(&mut self, m: crate::models::Model, state: &mut State, call: &Call) -> Value {
+        if self.model_depth == 0 {
+            self.model_epoch += 1;
+        }
+        self.model_depth += 1;
+        let r = m(self, state, call);
+        self.model_depth -= 1;
+        r
     }
 
     pub fn construct(&mut self, cls: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
@@ -877,6 +889,15 @@ impl Analyzer {
 
     #[allow(clippy::too_many_arguments)]
     pub fn call_user(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, _call_ast: Option<&'static ast::ExprCall>, entry: bool) -> Value {
+        // (user code called back by a model allocates as user code)
+        let saved_md = std::mem::replace(&mut self.model_depth, 0);
+        let r = self.call_user_inner(foid, self_v, args, kwargs, star_args, star_kwargs, state, node, _call_ast, entry);
+        self.model_depth = saved_md;
+        r
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn call_user_inner(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, _call_ast: Option<&'static ast::ExprCall>, entry: bool) -> Value {
         // a singledispatch function: the implementation for the first argument's type
         if self.sdispatch.contains_key(&foid) && self.sd_bypass.take() != Some(foid) && !args.is_empty() && star_args.is_empty() {
             return self.sdispatch_call(foid, self_v, args, kwargs, star_kwargs, state, node, entry);

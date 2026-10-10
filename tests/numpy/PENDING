@@ -1,1 +1,5 @@
 
+small/n001_creation_reshape.py
+small/n002_reductions_axis.py
+small/n004_indexing_stack.py
+small/n005_where_errors.py

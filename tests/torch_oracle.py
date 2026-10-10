@@ -32,6 +32,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from shapes import _split_top, directive_lines, parse_where, split_if  # noqa: E402
 
+import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 torch.manual_seed(0)
@@ -85,6 +86,8 @@ def env_of(frame, inits: Dict[int, Dict[str, Any]], where: Dict[str, str]) -> Di
 
 def shape_of(v: Any) -> Optional[Tuple[int, ...]]:
     if isinstance(v, torch.Tensor):
+        return tuple(v.shape)
+    if isinstance(v, (np.ndarray, np.generic)):
         return tuple(v.shape)
     if isinstance(v, torch.Size):
         return tuple(v)
@@ -233,7 +236,7 @@ def run_case(path: str, verbose: bool) -> List[str]:
 def main(argv: List[str]) -> int:
     verbose = "-v" in argv
     args = [a for a in argv if not a.startswith("-")]
-    paths = args or sorted(glob.glob(os.path.join(HERE, "torch", "*", "*.py")))
+    paths = args or sorted(glob.glob(os.path.join(HERE, "torch", "*", "*.py")) + glob.glob(os.path.join(HERE, "numpy", "*", "*.py")))
     bad = 0
     total = 0
     for p in paths:

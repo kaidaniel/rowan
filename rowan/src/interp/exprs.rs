@@ -1489,7 +1489,7 @@ impl Analyzer {
                 ast::Operator::BitAnd => "and_",
                 _ => "",
             };
-            if !name.is_empty() && !super::disabled("pure") && !self.torch_on {
+            if !name.is_empty() && !super::disabled("pure") && !self.torch_real {
                 if let Some(r) = crate::models::pyvalues::operator_call(name, &[x, y]) {
                     let is_tuple = intern::with_key(r, |k| matches!(k, intern::Key::Tuple(_)));
                     if !is_tuple {

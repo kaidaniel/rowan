@@ -323,7 +323,7 @@ fn m_math(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
     }
-    if an.torch_on && !matches!(c.qual.as_str(), "math.floor" | "math.ceil" | "math.isclose" | "math.isnan" | "math.isinf" | "math.prod" | "math.gcd" | "math.comb" | "math.factorial") {
+    if an.torch_real && !matches!(c.qual.as_str(), "math.floor" | "math.ceil" | "math.isclose" | "math.isnan" | "math.isinf" | "math.prod" | "math.gcd" | "math.comb" | "math.factorial") {
         return crate::models::torch::num_value();
     }
     Value::data(&format!("L{}", c.line))
@@ -388,7 +388,7 @@ pub fn external_constant(an: &Analyzer, qual: &str) -> Option<Value> {
         "os.pathsep" => st(":"),
         "os.curdir" => st("."),
         "os.pardir" => st(".."),
-        _ if an.torch_on => None,
+        _ if an.torch_real => None,
         "math.pi" => Some(Value::lit(intern::key_float(std::f64::consts::PI))),
         "math.e" => Some(Value::lit(intern::key_float(std::f64::consts::E))),
         "math.tau" => Some(Value::lit(intern::key_float(std::f64::consts::TAU))),

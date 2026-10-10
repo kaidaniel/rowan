@@ -1026,6 +1026,13 @@ impl Analyzer {
                 }
             }
         }
+        if !report && self.fa_body_validation && !errs.is_empty() && state.reachable && !crate::interp::disabled("fabody422") {
+            if errs.iter().any(|e| e.sure) {
+                self.raise_here("RequestValidationError", state);
+            } else {
+                self.may_raise_here("RequestValidationError", state);
+            }
+        }
         if report && !errs.is_empty() && state.reachable {
             let idx = self.pyd_verrs.len();
             self.pyd_verrs.push(errs.clone());

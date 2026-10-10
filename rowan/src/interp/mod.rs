@@ -721,6 +721,16 @@ pub struct Analyzer {
     pub entry_scope: Option<u32>,
     /// some module imported torch: tensor semantics for `@`, tensor methods on unknowns, …
     pub torch_on: bool,
+    /// torch itself is imported (numpy alone turns the tensor model on too, but keeps exact
+    /// literal arithmetic)
+    pub torch_real: bool,
+    /// model calls running (`run_model`), the outermost one's number, and the objects
+    /// allocated in it
+    pub model_depth: u32,
+    /// validating a FastAPI test request's body (errors are a 422)
+    pub fa_body_validation: bool,
+    pub model_epoch: u64,
+    pub model_born: FxHashMap<ObjId, u64>,
     /// pandas is imported: frame-style accesses on placeholders are decided per call site
     pub pandas_on: bool,
     /// modules that import torch (their functions all get entry runs and are tabulated)
@@ -1072,6 +1082,11 @@ impl Analyzer {
             call_cache: FxHashMap::default(),
             entry_instances: FxHashMap::default(),
             torch_on: false,
+            torch_real: false,
+            model_depth: 0,
+            fa_body_validation: false,
+            model_epoch: 0,
+            model_born: FxHashMap::default(),
             pandas_on: false,
             torch_modules: FxHashSet::default(),
             entry_run: None,
@@ -1435,7 +1450,12 @@ impl Analyzer {
             let existed = self.obj_index.get(&(kind, site.to_string(), ctx.clone())).copied();
             let payload2 = payload.clone();
             let mut oid = self.alloc_raw(kind, site, &ctx, single, &label, payload);
-            if existed == Some(oid) && self.is_live(oid, state) {
+            // (made earlier in the same model call: held by the model's own code)
+            let model_held = self.model_depth > 0 && self.model_born.get(&oid) == Some(&self.model_epoch) && !disabled("modelborn");
+            if self.model_depth > 0 {
+                self.model_born.insert(oid, self.model_epoch);
+            }
+            if existed == Some(oid) && (self.is_live(oid, state) || model_held) {
                 // allocated again while the earlier object is still reachable (a method run
                 // twice on one receiver, a call repeated in a loop)
                 if self.opts.recency && single && !self.recent_stack.is_empty() {

@@ -21,7 +21,12 @@ pub fn counts(an: &Analyzer, oid: ObjId, st: &State) -> Option<Vec<(KeyId, i64)>
     if row.open() || row.present != row.definite {
         return None;
     }
-    let keys = row.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(row.present.iter()));
+    // (insertion order decides most_common's ties: never guessed)
+    let keys = match row.ordered_keys() {
+        Some(k) => k,
+        None if row.present.len() <= 1 => intern::sorted_by_str(row.present.iter()),
+        None => return None,
+    };
     let _ = an;
     keys.into_iter()
         .map(|k| {
