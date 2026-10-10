@@ -13,7 +13,7 @@ use crate::state::{Footprint, Kind, State};
 use crate::domain::ObjId;
 
 use super::funcs::cell_key;
-use super::{is_generator, Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, Payload, Verdict, MAX_ACTIVE, MAX_CLONES, MAX_MUTATED, NOEFFECT_METHOD_NAMES, REC_MAX_ITER};
+use super::{is_generator, Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, Payload, Verdict, MAX_ACTIVE, MAX_ARG_JOIN, MAX_CLONES, MAX_MUTATED, NOEFFECT_METHOD_NAMES, REC_MAX_ITER};
 
 /// A dataclass field as `__init__` takes it (`dc_specs`).
 #[derive(Clone, Debug)]
@@ -407,7 +407,10 @@ impl Analyzer {
                 self.origins.insert(rid, (t, node.line, given));
             }
         }
-        if !arg_recs.is_empty() {
+        // (many records given — a value joined over many contexts: the result is any record,
+        // an open row, rather than the join of them all and a copy of all their slots)
+        let joinable = arg_recs.len() <= crate::interp::limit("argjoin", MAX_ARG_JOIN);
+        if !arg_recs.is_empty() && joinable {
             let row = join_rows(arg_recs.iter().map(|(o, n)| state.row(*o, *n)));
             let mut d = row.data();
             d.definite = KeySet::new();
@@ -427,8 +430,9 @@ impl Analyzer {
             }
         } else {
             let src = Source::new(&site, SourceKind::Call);
-            state.set_row(rid, Ns::Item, Row::with_source(src));
-            state.set_row(rid, Ns::Attr, Row::with_source(src));
+            let mutated = |r: Row| if arg_recs.is_empty() { r } else { r.mutate(site_id) };
+            state.set_row(rid, Ns::Item, mutated(Row::with_source(src)));
+            state.set_row(rid, Ns::Attr, mutated(Row::with_source(src)));
         }
         self.note(format!("unknown call {}", site));
         Value::obj(rid)
@@ -1380,6 +1384,7 @@ impl Analyzer {
         self.esc_cls.push(Some(Vec::new()));
         let raise_mark = self.raise_records;
         let saved_ret = state.ret.take();
+        let mut saved_yields: Option<(ObjId, Option<Vec<(super::YieldKey, State)>>)> = None;
         self.frames.push(new_fr);
         if let FuncNode::Def(f) = fnode {
             if is_generator(&f.body) {
@@ -1387,10 +1392,15 @@ impl Analyzer {
                 let gid = self.alloc(Kind::List, &format!("gen:{}", foid), state, &format!("generator {}", fi.qualname), Payload::None, None, Ns::Item, None, Some(&ctx));
                 self.set_llen(gid, state, Some(0));
                 state.elems.insert(gid, KeyVal::Lits(KeySet::new()));
-                // (a new activation: not consumed yet, its own item states)
+                // (a new activation: not consumed yet, its own item states; a running one's
+                // yields are put back after it)
+                // (keyed as `yield_value` finds it: the site's object, not a variant `alloc` made)
+                let ygid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
+                saved_yields = Some((ygid, self.gen_yield_states.remove(&ygid)));
                 state.slots.remove(&gid, &(Ns::Attr, key_str_lit("__cursor")));
                 state.slots.remove(&gid, &(Ns::Attr, key_str_lit("\u{1}effpos")));
                 self.gen_pos_states.remove(&gid);
+                self.gen_pos_conflict.retain(|(g, _)| *g != gid);
                 self.gen_eff.remove(&gid);
             }
         }
@@ -1542,7 +1552,7 @@ impl Analyzer {
         let gen_yields = match fnode {
             FuncNode::Def(f) if is_generator(&f.body) && !gen_cm && !super::disabled("genlazy") => {
                 let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
-                Some((gid, self.gen_yield_states.get(&gid).map(|y| y.copy_ref())))
+                Some((gid, self.gen_yield_states.get(&gid).map(|v| v.iter().map(|(_, s)| s.copy_ref()).collect::<Vec<State>>()).unwrap_or_default()))
             }
             _ => None,
         };
@@ -1553,7 +1563,15 @@ impl Analyzer {
         if let FuncNode::Def(f) = fnode {
             if is_generator(&f.body) && !st.reachable {
                 let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
-                if let Some(mut ys) = self.gen_yield_states.remove(&gid) {
+                let joined = self.gen_yield_states.remove(&gid).and_then(|v| {
+                    let mut it = v.into_iter().map(|(_, s)| s);
+                    let mut acc = it.next()?;
+                    for mut s in it {
+                        acc = acc.join(&mut s);
+                    }
+                    Some(acc)
+                });
+                if let Some(mut ys) = joined {
                     let mut p = self.prefix(gid, &ys).unwrap_or(0);
                     // (the yields joined: every position some yield made is there — the items
                     // the endless loop is known to give first)
@@ -1571,7 +1589,7 @@ impl Analyzer {
             }
         }
         if let Some((gid, ys)) = gen_yields {
-            self.gen_suspension_join(&mut st, &pre_bind, ys.as_ref(), gid, obj_mark_call);
+            self.gen_suspension_join(&mut st, &pre_bind, &ys, gid, obj_mark_call);
             // the effects per item: before the first, the objects are as before the call
             if !super::disabled("geneffects") && st.reachable {
                 let fp = st.footprint(&pre_bind);
@@ -1588,6 +1606,16 @@ impl Analyzer {
                     crate::interp::exprs::gen_copy_facts_pub(&mut st, &pre_bind, &ge);
                     st.set_slot(gid, Ns::Attr, key_str_lit("\u{1}effpos"), Value::lit(key_str_lit("pre")), true);
                     self.gen_eff.insert(gid, std::rc::Rc::new(ge));
+                }
+            }
+        }
+        if let Some((gid, prev)) = saved_yields {
+            match prev {
+                Some(v) => {
+                    self.gen_yield_states.insert(gid, v);
+                }
+                None => {
+                    self.gen_yield_states.remove(&gid);
                 }
             }
         }
@@ -1706,13 +1734,13 @@ impl Analyzer {
 
     /// The heap a generator's caller sees (see the call): the touched objects older than
     /// `mark` (but the generator's own item list) joined over `pre`, the yield states and `st`.
-    fn gen_suspension_join(&mut self, st: &mut State, pre: &State, yields: Option<&State>, gid: ObjId, mark: ObjId) {
+    fn gen_suspension_join(&mut self, st: &mut State, pre: &State, yields: &[State], gid: ObjId, mark: ObjId) {
         if !st.reachable {
             return;
         }
         let fp = st.footprint(pre);
         let old = |o: ObjId| o < mark && o != gid;
-        let others: Vec<&State> = std::iter::once(pre).chain(yields.filter(|y| y.reachable)).collect();
+        let others: Vec<&State> = std::iter::once(pre).chain(yields.iter().filter(|y| y.reachable)).collect();
         for (o, ns) in fp.rows.iter().copied().filter(|(o, _)| old(*o)).collect::<Vec<_>>() {
             let mut r = st.row(o, ns);
             for x in &others {

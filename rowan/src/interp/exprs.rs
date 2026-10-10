@@ -495,7 +495,7 @@ impl Analyzer {
                     return self.none_v.clone();
                 }
                 if y.value.is_some() {
-                    self.yield_value(v, state);
+                    self.yield_value(v, state, (y as *const _ as usize, 0));
                 }
                 Value::data("yield")
             }
@@ -506,12 +506,12 @@ impl Analyzer {
                 match it.items {
                     // known items: yielded one by one, in order
                     Some(items) if !super::disabled("yieldfrom") => {
-                        for item in items {
-                            self.yield_value(item, state);
+                        for (i, item) in items.into_iter().enumerate() {
+                            self.yield_value(item, state, (y as *const _ as usize, i + 1));
                         }
                     }
                     _ => {
-                        self.yield_value(it.elem.flat(), state);
+                        self.yield_value(it.elem.flat(), state, (y as *const _ as usize, 0));
                         // an unknown number of items: positions after this are unknown
                         if let Some(foid) = self.frame().func {
                             if let Some(gid) = self.func_info(foid).generator.get() {
@@ -578,7 +578,9 @@ impl Analyzer {
         self.cm_hook = Some(h);
     }
 
-    fn yield_value(&mut self, v: Value, state: &mut State) {
+    /// `site`: the yield (and the item of a `yield from`), which with the unrolled loop
+    /// positions names the suspension point.
+    fn yield_value(&mut self, v: Value, state: &mut State, site: (usize, usize)) {
         let Some(foid) = self.frame().func else { return };
         let ctx = self.frame().ctx.clone();
         let label = format!("generator {}", self.frame().label);
@@ -599,15 +601,25 @@ impl Analyzer {
                 self.set_llen(gid, state, Some(n + 1));
                 // (the state at this item: what a consumer that took it sees of the effects)
                 if !crate::interp::disabled("geneffects") {
+                    // (in a branch: another path may have its own item n — the consumer then
+                    // takes the generator's joined state there)
+                    let conflicted = self.gen_pos_conflict.contains(&(gid, n));
+                    let mut conflict_now = false;
                     let ps = self.gen_pos_states.entry(gid).or_default();
                     while ps.len() <= n {
                         ps.push(None);
                     }
-                    // (in a branch: another path may have its own item n)
-                    ps[n] = match (in_branch, ps[n].take()) {
-                        (true, Some(mut prev)) => Some(prev.join(&mut state.copy())),
+                    ps[n] = match (in_branch, ps[n].take(), conflicted) {
+                        (_, _, true) => None,
+                        (true, Some(_), false) => {
+                            conflict_now = true;
+                            None
+                        }
                         _ => Some(state.copy()),
                     };
+                    if conflict_now {
+                        self.gen_pos_conflict.insert((gid, n));
+                    }
                 }
             }
             // (the yields so far keep their positions: a known prefix)
@@ -625,12 +637,22 @@ impl Analyzer {
             fi.generator.set(Some(gid));
         }
         if !super::disabled("genyieldstates") {
-            let mut here = state.copy();
-            let joined = match self.gen_yield_states.remove(&gid) {
-                Some(mut prev) => prev.join(&mut here),
-                None => here,
-            };
-            self.gen_yield_states.insert(gid, joined);
+            const MAX_YIELD_STATES: usize = 4096;
+            let key = (site.0, site.1, self.frame().unroll.clone());
+            // (in a loop's fixpoint a later round's state at a suspension point covers the
+            // earlier rounds', as the loop's exit does)
+            let in_fixpoint = self.frame().loop_depth > 0 && !super::disabled("genyieldkey");
+            let here = state.copy();
+            let ys = self.gen_yield_states.entry(gid).or_default();
+            if let Some(slot) = ys.iter_mut().find(|(k, _)| in_fixpoint && *k == key) {
+                slot.1 = here;
+            } else if ys.len() < MAX_YIELD_STATES {
+                ys.push((key, here));
+            } else if let Some(last) = ys.last_mut() {
+                // (past the cap: the last one stands for the rest too)
+                let mut h = here;
+                last.1 = last.1.join(&mut h);
+            }
         }
     }
 

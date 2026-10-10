@@ -827,7 +827,13 @@ impl Analyzer {
                     st.record_exit();
                     st.reachable = false;
                 }
-                FuncNode::Def(f) => self.exec_block(&f.body, &mut st),
+                FuncNode::Def(f) => {
+                    // (the yields of this run are its own: the running activations' are put
+                    // back after it)
+                    let saved_yields = std::mem::take(&mut self.gen_yield_states);
+                    self.exec_block(&f.body, &mut st);
+                    self.gen_yield_states = saved_yields;
+                }
             }
             let mut ret = st.ret.clone().unwrap_or_default();
             if st.reachable {

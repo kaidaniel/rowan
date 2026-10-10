@@ -712,7 +712,7 @@ impl Row {
         let implicit = !crate::interp::disabled("closedabsent");
         let absent_in = |x: &Row, y: &KeySet| -> KeySet { if implicit && x.closed() { x.absent.union(&y.difference(&x.present)) } else { x.absent.clone() } };
         let absent_l_in = |x: &Row, y: &KeySet| -> KeySet { if implicit && x.closed() { x.absent_likely.union(&y.difference(&x.present)) } else { x.absent_likely.clone() } };
-        Row::from_data(RowData {
+        Row::from_data_of(RowData {
             present: self.present.union(&o.present),
             definite: self.definite.intersection(&o.definite),
             likely: self.likely.intersection(&o.likely),
@@ -727,7 +727,21 @@ impl Row {
             pstores: join_pstores(&self.pstores, &o.pstores),
             order: join_order(&self.order, &o.order),
             stored: self.stored.union(&o.stored),
-        })
+        }, &[self, o])
+    }
+
+    /// `from_data`, but one of `like` itself when the data is the same as its (the shared row
+    /// keeps later comparisons a pointer test)
+    pub fn from_data_of(data: RowData, like: &[&Row]) -> Row {
+        let mut h = FxHasher::default();
+        data.hash(&mut h);
+        let hash = h.finish();
+        for r in like {
+            if r.inner.hash == hash && r.inner.data == data {
+                return (*r).clone();
+            }
+        }
+        Row { inner: Arc::new(RowInner { data, hash }) }
     }
 
     /// The same row with its insertion order replaced.

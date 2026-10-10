@@ -890,6 +890,39 @@ impl Analyzer {
                 Kind::Instance if self.instance_class(oid).and_then(|c| self.class_lookup(c, "__iter__")).is_some() && !crate::interp::disabled("useriter") => {
                     // a user iterable: what its `__iter__` returns
                     let r = self.call_method_with(&Value::obj(oid), "__iter__", Vec::new(), node, state).unwrap_or_default();
+                    // an iterator (`return self`, an object with `__next__`): its items are what
+                    // `__next__` returns (iterating it again would ask `__iter__` forever)
+                    let iters: Vec<u32> = r.pts.iter().filter(|p| *p == oid || (self.kind(*p) == Kind::Instance && self.instance_class(*p).and_then(|c| self.class_lookup(c, "__next__")).is_some())).collect();
+                    if !iters.is_empty() && !crate::interp::disabled("usernext") {
+                        items = None;
+                        exhaustive = false;
+                        let mut none_taken = state.copy();
+                        let mut nexts = Value::new();
+                        for it in &iters {
+                            if self.instance_class(*it).and_then(|c| self.class_lookup(c, "__next__")).is_some() {
+                                nexts = nexts.join(&self.call_method_with(&Value::obj(*it), "__next__", Vec::new(), node, state).unwrap_or_default());
+                            } else {
+                                nexts = nexts.join(&Value::data("next"));
+                            }
+                        }
+                        // (the loop may take no item: StopIteration at once)
+                        let j = if state.reachable { state.join(&mut none_taken) } else { none_taken };
+                        state.replace_with(j);
+                        elems.push(nexts);
+                        let rest = Value::with_kv(r.pts.filter(|p| !iters.contains(&p)), r.kv.clone());
+                        if rest.empty() {
+                            continue;
+                        }
+                        let sub = self.iterate(&rest, node, state);
+                        match sub.elem {
+                            Elem::One(e) => elems.push(e),
+                            Elem::Pair(k, v) => {
+                                pair = true;
+                                pairs.push((k, v));
+                            }
+                        }
+                        continue;
+                    }
                     let sub = self.iterate(&r, node, state);
                     match (sub.items, items.as_mut()) {
                         (Some(si), Some(its)) => its.extend(si),

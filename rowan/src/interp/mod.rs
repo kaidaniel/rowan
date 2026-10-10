@@ -32,6 +32,11 @@ pub const REC_MAX_ITER: usize = 8;
 pub const PATH_DEPTH: u32 = 3;
 pub const MAX_ACTIVE: usize = 4;
 pub const MAX_MUTATED: usize = 24;
+/// records an unknown call's result joins at most (past that: an open row)
+pub const MAX_ARG_JOIN: usize = 64;
+/// a generator's suspension point: the yield node, the `yield from` item, the unrolled loop
+/// positions
+pub type YieldKey = (usize, usize, Vec<usize>);
 pub const MAX_CLONES: usize = 256;
 /// Milliseconds after which the analysis degrades gracefully: no new tabulations (summaries
 /// are used instead) and no new clones (allocation sites collapse onto their context-free
@@ -803,6 +808,8 @@ pub struct Analyzer {
     pub gen_eff: FxHashMap<ObjId, std::rc::Rc<GenEffects>>,
     /// the state at each positioned yield of the running generator activations
     pub gen_pos_states: FxHashMap<ObjId, Vec<Option<State>>>,
+    /// positions of a generator's activation that two paths yield (no single state)
+    pub gen_pos_conflict: rustc_hash::FxHashSet<(ObjId, usize)>,
     /// lazy iterators (zip / islice / map …) over one-shot iterators: what consuming them
     /// takes from each source (Some(n): n items, None: all)
     pub lazy_src: FxHashMap<ObjId, Vec<(ObjId, Option<usize>)>>,
@@ -1007,7 +1014,9 @@ pub struct Analyzer {
     pub np_struct: FxHashSet<ObjId>,
     /// per generator object, the join of the states at its yields (a caller resumes from one
     /// of them when the body never ends)
-    pub gen_yield_states: FxHashMap<ObjId, State>,
+    /// the states at the yields of a generator's running activation (copies, read per key
+    /// where the caller needs them: joining whole heaps per yield was the cost)
+    pub gen_yield_states: FxHashMap<ObjId, Vec<(YieldKey, State)>>,
     /// a copy's original (through copies made at the same node: `out = deepcopy(out)` in a loop
     /// makes one copy site, not a new one per round)
     pub copy_root: FxHashMap<ObjId, ObjId>,
@@ -1189,6 +1198,7 @@ impl Analyzer {
             catching_depth: 0,
             gen_eff: FxHashMap::default(),
             gen_pos_states: FxHashMap::default(),
+            gen_pos_conflict: Default::default(),
             lazy_src: FxHashMap::default(),
             alloc_extra: None,
             esc_cls: Vec::new(),

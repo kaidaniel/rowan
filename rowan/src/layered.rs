@@ -6,11 +6,19 @@
 //! copy-on-write inner map per key (object slots, source requirements).
 
 use std::hash::Hash;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use rustc_hash::FxHashMap;
 
 pub const FLATTEN_EVERY: u32 = 10;
+
+/// `ROWAN_NO=lineage`: flattened nodes forget the chain they replaced (the old behaviour).
+fn lineage_off() -> bool {
+    thread_local! {
+        static OFF: bool = std::env::var("ROWAN_NO").map(|v| v.split(',').any(|x| x.trim() == "lineage")).unwrap_or(false);
+    }
+    OFF.with(|o| *o)
+}
 
 /// A layer: `None` values are tombstones (DELETED).
 struct Node<K, V> {
@@ -19,6 +27,20 @@ struct Node<K, V> {
     depth: u32,
     /// materialised contents; only on flattened (root) nodes, which have no parent
     flat: Option<FxHashMap<K, V>>,
+    /// a flattened node's lineage: the chain it replaced (its `data` are its own writes on
+    /// top of it), alive while a state forked from that chain holds it — so a join with such
+    /// a state still finds their common ancestor instead of copying both maps
+    prev: Option<Weak<Node<K, V>>>,
+}
+
+impl<K, V> Node<K, V> {
+    /// The node below this one: the parent, or the replaced chain of a flattened node.
+    fn up(&self) -> Option<Arc<Node<K, V>>> {
+        match &self.parent {
+            Some(p) => Some(p.clone()),
+            None => self.prev.as_ref().and_then(|w| w.upgrade()),
+        }
+    }
 }
 
 pub struct LayerMap<K, V> {
@@ -160,9 +182,12 @@ impl<K: Clone + Eq + Hash, V: Clone + PartialEq> LayerMap<K, V> {
             // materialise the contents and make this node a root
             let tmp = LayerMap { node: self.node.clone(), data };
             let flat = tmp.materialise();
-            Arc::new(Node { parent: None, data: FxHashMap::default(), depth: 0, flat: Some(flat) })
+            let keep = !lineage_off();
+            let prev = if keep { self.node.as_ref().map(Arc::downgrade) } else { None };
+            let data = if keep { tmp.data } else { FxHashMap::default() };
+            Arc::new(Node { parent: None, data, depth: 0, flat: Some(flat), prev })
         } else {
-            Arc::new(Node { parent: self.node.clone(), data, depth, flat: None })
+            Arc::new(Node { parent: self.node.clone(), data, depth, flat: None, prev: None })
         };
         self.node = Some(node.clone());
         Some(node)
@@ -179,7 +204,7 @@ impl<K: Clone + Eq + Hash, V: Clone + PartialEq> LayerMap<K, V> {
             return LayerMap { node: self.node.clone(), data: FxHashMap::default() };
         }
         let depth = self.node.as_ref().map(|n| n.depth + 1).unwrap_or(1);
-        let node = Arc::new(Node { parent: self.node.clone(), data: self.data.clone(), depth, flat: None });
+        let node = Arc::new(Node { parent: self.node.clone(), data: self.data.clone(), depth, flat: None, prev: None });
         LayerMap { node: Some(node), data: FxHashMap::default() }
     }
 
@@ -195,43 +220,49 @@ impl<K: Clone + Eq + Hash, V: Clone + PartialEq> LayerMap<K, V> {
         if a.is_none() && b.is_none() {
             return (None, true);
         }
-        let mut ids: Vec<*const Node<K, V>> = Vec::new();
-        let mut n = a;
+        // (the chains through flattened nodes' lineage too; the Arcs held while walking)
+        let mut ids: rustc_hash::FxHashSet<*const Node<K, V>> = rustc_hash::FxHashSet::default();
+        let mut keep: Vec<Arc<Node<K, V>>> = Vec::new();
+        let mut n = a.cloned();
         while let Some(node) = n {
-            ids.push(Arc::as_ptr(node));
-            n = node.parent.as_ref();
+            ids.insert(Arc::as_ptr(&node));
+            n = node.up();
+            keep.push(node);
         }
-        let mut n = b;
+        let mut n = b.cloned();
         while let Some(node) = n {
-            if ids.contains(&Arc::as_ptr(node)) {
-                return (Some(node.clone()), true);
+            if ids.contains(&Arc::as_ptr(&node)) {
+                return (Some(node), true);
             }
-            n = node.parent.as_ref();
+            n = node.up();
         }
         (None, false)
     }
 
     /// {key: value} for every key written above `anc` (topmost write wins; tombstones kept).
     fn values_above(&self, anc: Option<&Arc<Node<K, V>>>) -> FxHashMap<K, Option<V>> {
-        let mut layers: Vec<&FxHashMap<K, Option<V>>> = vec![&self.data];
-        let mut n = self.node.as_ref();
+        let mut nodes: Vec<Arc<Node<K, V>>> = Vec::new();
+        let mut n = self.node.clone();
         while let Some(node) = n {
             if let Some(a) = anc {
-                if Arc::ptr_eq(node, a) {
+                if Arc::ptr_eq(&node, a) {
                     break;
                 }
             }
-            layers.push(&node.data);
-            n = node.parent.as_ref();
+            n = node.up();
+            nodes.push(node);
         }
-        if layers.len() == 1 {
+        if nodes.is_empty() {
             return self.data.clone();
         }
         let mut out: FxHashMap<K, Option<V>> = FxHashMap::default();
-        for d in layers.iter().rev() {
-            for (k, v) in d.iter() {
+        for node in nodes.iter().rev() {
+            for (k, v) in node.data.iter() {
                 out.insert(k.clone(), v.clone());
             }
+        }
+        for (k, v) in self.data.iter() {
+            out.insert(k.clone(), v.clone());
         }
         out
     }
