@@ -60,6 +60,8 @@ pub struct PField {
     pub ann: Ann,
     /// `Literal["cat", …]`: the values the field takes (a union's tags)
     pub lits: Option<Vec<KeyId>>,
+    /// `Field(min_length=3, gt=0, pattern=…)` (also in `Annotated[…]`): name, literal value
+    pub constraints: Vec<(String, KeyId)>,
 }
 
 #[derive(Clone, Debug)]
@@ -269,11 +271,12 @@ impl Analyzer {
                         }
                         let ann = self.pyd_ann(&a.annotation, ci.module, state);
                         let optional = ann_optional(&a.annotation);
-                        let mut f = PField { name: name.clone(), alias: None, ser_alias: None, alts: Vec::new(), default: None, factory: None, required: true, optional, ann, lits: literal_tags(&a.annotation) };
+                        let mut f = PField { name: name.clone(), alias: None, ser_alias: None, alts: Vec::new(), default: None, factory: None, required: true, optional, ann, lits: literal_tags(&a.annotation), constraints: annotated_constraints(&a.annotation) };
                         if let Some(v) = &a.value {
                             let v: &'static ast::Expr = v;
                             match v {
                                 ast::Expr::Call(c) if dotted_last(&c.func) == "Field" => {
+                                    f.constraints.extend(field_constraints(c));
                                     if let Some(d) = c.arguments.args.first() {
                                         if !is_ellipsis(d) {
                                             f.default = Some(d);
@@ -398,7 +401,7 @@ impl Analyzer {
             }
         }
         if root && !fields.iter().any(|f| f.name == "root") {
-            fields.push(PField { name: "root".into(), alias: None, ser_alias: None, alts: Vec::new(), default: None, factory: None, required: true, optional: false, ann: root_ann.unwrap_or(Ann::Other), lits: None });
+            fields.push(PField { name: "root".into(), alias: None, ser_alias: None, alts: Vec::new(), default: None, factory: None, required: true, optional: false, ann: root_ann.unwrap_or(Ann::Other), lits: None, constraints: Vec::new() });
         }
         if let Some(bind) = self.pyd_generic.get(&cls).cloned() {
             for f in fields.iter_mut() {
@@ -909,6 +912,9 @@ impl Analyzer {
                     val = self.pyd_call_validator(cls, &v, &val, inst, &f.name, state, node);
                 }
                 val = self.pyd_convert(&f.ann, &val, state, node);
+                if !f.constraints.is_empty() && !failed(self) && !crate::interp::disabled("pydconstraints") {
+                    self.pyd_check_constraints(&f.constraints, &val, state);
+                }
             }
             if !failed(self) {
                 for v in pc.field_validators.iter().filter(|v| (v.fields.contains(&f.name) || v.fields.iter().any(|x| x == "*")) && v.mode == "after").cloned().collect::<Vec<_>>() {
@@ -1032,6 +1038,99 @@ impl Analyzer {
         }
         outs.push(Value::obj(inst));
         join_values(outs)
+    }
+
+    /// Field constraints on known values: an error when every value breaks one (maybe when
+    /// some do).
+    fn pyd_check_constraints(&mut self, cons: &[(String, KeyId)], val: &Value, state: &State) {
+        let lits: Vec<KeyId> = crate::domain::kv_literals(&val.kv).iter().collect();
+        let mut n = lits.len() + val.pts.len();
+        if val.kv.is_bot() && val.pts.is_empty() {
+            return;
+        }
+        if !val.kv.is_literal() && !val.kv.is_bot() {
+            // unknown values may break them
+            n += 1;
+        }
+        let mut errs: Vec<(&'static str, usize)> = Vec::new();
+        let note = |code: &'static str, errs: &mut Vec<(&'static str, usize)>| match errs.iter_mut().find(|(c, _)| *c == code) {
+            Some(e) => e.1 += 1,
+            None => errs.push((code, 1)),
+        };
+        let num = |k: KeyId| -> Option<f64> {
+            intern::with_key(k, |kk| match kk {
+                intern::Key::Int(i) => Some(*i as f64),
+                intern::Key::Float(b) => Some(f64::from_bits(*b)),
+                _ => None,
+            })
+        };
+        for k in &lits {
+            if *k == intern::key_none() {
+                continue;
+            }
+            let len = intern::key_as_str(*k).map(|s| s.chars().count());
+            for (c, lim) in cons {
+                let bad = match (c.as_str(), len, num(*k), intern::key_as_int(*lim), num(*lim)) {
+                    ("min_length", Some(l), _, Some(m), _) => (l as i64) < m,
+                    ("max_length", Some(l), _, Some(m), _) => (l as i64) > m,
+                    ("gt", _, Some(x), _, Some(m)) => !(x > m),
+                    ("ge", _, Some(x), _, Some(m)) => !(x >= m),
+                    ("lt", _, Some(x), _, Some(m)) => !(x < m),
+                    ("le", _, Some(x), _, Some(m)) => !(x <= m),
+                    ("pattern", Some(_), _, _, _) => {
+                        let text = intern::key_as_str(*k).unwrap();
+                        match intern::key_as_str(*lim).and_then(|p| crate::models::pyre::Regex::new(&p, 0)) {
+                            Some(re) => {
+                                let cs: Vec<char> = text.chars().collect();
+                                // (pydantic searches: `re.search`, anchors as the pattern says)
+                                matches!(re.search(&cs, 0, cs.len(), None), Ok(None))
+                            }
+                            None => false,
+                        }
+                    }
+                    _ => false,
+                };
+                if bad {
+                    let code = match (c.as_str(), len.is_some()) {
+                        ("min_length", true) => "string_too_short",
+                        ("max_length", true) => "string_too_long",
+                        ("pattern", _) => "string_pattern_mismatch",
+                        ("gt", _) => "greater_than",
+                        ("ge", _) => "greater_than_equal",
+                        ("lt", _) => "less_than",
+                        _ => "less_than_equal",
+                    };
+                    note(code, &mut errs);
+                    break;
+                }
+            }
+        }
+        // lists / sets / dicts with a known size
+        for o in val.pts.iter() {
+            let size = match self.kind(o) {
+                Kind::List | Kind::Tuple | Kind::Set => self.llen(o, state),
+                Kind::Dict => {
+                    let r = state.row(o, Ns::Item);
+                    (r.closed() && r.present == r.definite && !r.symbolic()).then(|| r.present.len())
+                }
+                _ => None,
+            };
+            let Some(sz) = size else { continue };
+            for (c, lim) in cons {
+                let Some(m) = intern::key_as_int(*lim) else { continue };
+                let code = match c.as_str() {
+                    "min_length" if (sz as i64) < m => "too_short",
+                    "max_length" if (sz as i64) > m => "too_long",
+                    _ => continue,
+                };
+                note(code, &mut errs);
+                break;
+            }
+        }
+        let loc = self.pyd_field;
+        for (code, cnt) in errs {
+            self.pyd_err(loc, code, cnt == n, true);
+        }
     }
 
     fn pyd_err(&mut self, loc: Option<KeyId>, typ: &'static str, sure: bool, ctx: bool) {
@@ -1742,6 +1841,58 @@ fn coerce_kv(t: &str, kv: &KeyVal) -> KeyVal {
         KeyVal::Lits(ks) => KeyVal::lits(KeySet::from_iter(ks.iter().map(conv))),
         other => other.clone(),
     }
+}
+
+/// A number / string literal (negative numbers too).
+fn const_key(e: &ast::Expr) -> Option<KeyId> {
+    Some(match e {
+        ast::Expr::StringLiteral(s0) => key_str_lit(s0.value.to_str()),
+        ast::Expr::NumberLiteral(n) => match &n.value {
+            ast::Number::Int(i) => intern::key_int(i.as_i64()?),
+            ast::Number::Float(f) => intern::key_float(*f),
+            _ => return None,
+        },
+        ast::Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::USub) => match const_key(&u.operand)? {
+            k => match intern::key_get(k) {
+                intern::Key::Int(i) => intern::key_int(-i),
+                intern::Key::Float(b) => intern::key_float(-f64::from_bits(b)),
+                _ => return None,
+            },
+        },
+        _ => return None,
+    })
+}
+
+/// The constraints of a `Field(…)` call.
+fn field_constraints(c: &ast::ExprCall) -> Vec<(String, KeyId)> {
+    let mut out = Vec::new();
+    for k in c.arguments.keywords.iter() {
+        let Some(n) = k.arg.as_ref().map(|x| x.to_string()) else { continue };
+        if matches!(n.as_str(), "min_length" | "max_length" | "gt" | "ge" | "lt" | "le" | "pattern") {
+            if let Some(v) = const_key(&k.value) {
+                out.push((n, v));
+            }
+        }
+    }
+    out
+}
+
+/// `Annotated[str, Field(min_length=3)]`: the Field's constraints.
+fn annotated_constraints(ann: &ast::Expr) -> Vec<(String, KeyId)> {
+    let ast::Expr::Subscript(sb) = ann else { return Vec::new() };
+    if dotted_last(&sb.value) != "Annotated" {
+        return Vec::new();
+    }
+    let ast::Expr::Tuple(t) = &*sb.slice else { return Vec::new() };
+    let mut out = Vec::new();
+    for e in t.elts.iter().skip(1) {
+        if let ast::Expr::Call(c) = e {
+            if dotted_last(&c.func) == "Field" {
+                out.extend(field_constraints(c));
+            }
+        }
+    }
+    out
 }
 
 /// The key of a literal default (`"light"`, `12`, `None`, `True`, `-1`).

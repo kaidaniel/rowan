@@ -79,7 +79,7 @@ def hash_pw(pw):
     return "h:" + pw[::-1]
 
 
-def register(store, payload):
+def register(store, payload):  # the schema had `login` too, but its read is guarded by `"login" in data` (w308)
     data = UserIn.model_validate(payload)        #@ possibly password ; possibly username
     #@row data: present={username,email,full_name,password,address} definite={username,email,full_name,password,address} absent={login,fullName} closed
     fields = data.model_dump(exclude={"password"})
@@ -201,6 +201,6 @@ if __name__ == "__main__":
             pass
     listing = admin_listing(store)
 
-#@schema param register.payload: always={email,password} sometimes={username,login} only={email,password,username,login}
+#@schema param register.payload: always={email,password} sometimes={username} only={email,password,username}
 #@schema param register.payload['address']: always={street,city} only={street,city}
 #@schema param update_profile.patch_payload: only={}
