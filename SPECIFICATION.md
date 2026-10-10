@@ -304,7 +304,8 @@ no effect.
 ### 6.7 Garbage collection
 
 At every `return`, in tabulated calls and summary runs, objects the call allocated that are no
-longer reachable lose their state (`drop_garbage_at_return`). Dead objects then stop costing
+longer reachable lose their state (and at the exit of a loop in a function, objects the
+loop allocated that the frame's names no longer reach) (`drop_garbage_at_return`). Dead objects then stop costing
 joins and comparisons, and allocation sites stay strong (§3). Reachability starts from these
 roots:
 * the returned value;

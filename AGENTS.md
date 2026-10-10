@@ -169,7 +169,7 @@ The soundness stance and accepted imprecision are in SPECIFICATION §13. The bug
 items and precision to-dos are listed, each with how to reproduce it,
 in `SUGGESTED_CHANGES.md`. The main ones:
 
-* deadline-cut runs depend on machine load;
+* runs cut by the clock deadlines depend on machine load (`ROWAN_LIMITS=work=N` does not);
 * the `exits` fix doubled the objects on rich.
 
 Other limits:

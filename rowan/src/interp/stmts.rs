@@ -287,8 +287,16 @@ impl Analyzer {
                 }
             }
             ast::Stmt::If(i) => self.stmt_if(&i.test, &i.body, &i.elif_else_clauses, state),
-            ast::Stmt::While(w) => self.stmt_while(w, state),
-            ast::Stmt::For(f) => self.stmt_for(f, state),
+            ast::Stmt::While(w) => {
+                let g = self.loop_gc_begin(state);
+                self.stmt_while(w, state);
+                self.loop_gc_end(g, state);
+            }
+            ast::Stmt::For(f) => {
+                let g = self.loop_gc_begin(state);
+                self.stmt_for(f, state);
+                self.loop_gc_end(g, state);
+            }
             ast::Stmt::Break(_) => {
                 self.exit_count += 1;
                 if let Some(ctx) = self.loop_stack.last_mut() {
@@ -1837,7 +1845,20 @@ impl Analyzer {
         if !general && (!v.pts.is_empty() || matches!(v.kv, KeyVal::KeysOf(_))) {
             return;
         }
-        let fp = state.footprint(&pre);
+        let mut roots: Vec<u32> = Vec::new();
+        roots.extend(v.pts.iter());
+        match &v.kv {
+            KeyVal::KeysOf(ko) => roots.extend(ko.objs.iter()),
+            KeyVal::Param(p) => roots.push(*p),
+            _ => {}
+        }
+        self.collect_since(mark, &pre, roots, general, state);
+    }
+
+    /// Objects allocated since `mark` that no root reaches lose their state (`drop_garbage_at_return`;
+    /// at a loop's exit the roots are the frame's live names).
+    fn collect_since(&mut self, mark: u32, pre: &State, roots: Vec<u32>, general: bool, state: &mut State) {
+        let fp = state.footprint(pre);
         let mut fresh: rustc_hash::FxHashSet<u32> = Default::default();
         for (o, _) in fp.rows.iter() {
             if *o >= mark {
@@ -1858,17 +1879,11 @@ impl Analyzer {
             return;
         }
         if crate::interp::debug_level() >= 1 && std::env::var("ROWAN_GCDBG").is_ok() {
-            eprintln!("gc: at a return of {} (L{}) value objects {:?} fresh {:?}", self.frame().label, self.frame().ctx, v.pts.to_vec(), { let mut f: Vec<u32> = fresh.iter().copied().collect(); f.sort(); f });
+            eprintln!("gc: in {} (L{}) roots {:?} fresh {:?}", self.frame().label, self.frame().ctx, roots, { let mut f: Vec<u32> = fresh.iter().copied().collect(); f.sort(); f });
         }
         // roots: the returned value, what older objects' changed slots hold (globals,
         // parameters, cells, …), and what the analyzer holds beyond the state
-        let mut work: Vec<u32> = Vec::new();
-        work.extend(v.pts.iter());
-        match &v.kv {
-            KeyVal::KeysOf(ko) => work.extend(ko.objs.iter()),
-            KeyVal::Param(p) => work.push(*p),
-            _ => {}
-        }
+        let mut work: Vec<u32> = roots;
         for (o, sk) in fp.slots.iter() {
             if *o < mark {
                 if let Some(val) = state.slots.get(o, sk) {
@@ -1912,6 +1927,59 @@ impl Analyzer {
                 state.forget_obj(o);
             }
         }
+    }
+
+    /// Garbage collection at a loop's exit (in a function): objects the loop allocated that the
+    /// frame's names, the enclosing frames and the analyzer no longer reach lose their state.
+    fn loop_gc_begin(&mut self, state: &mut State) -> Option<(u32, State)> {
+        if !crate::interp::gc_on() || crate::interp::disabled("loopgc") || !matches!(self.frame().kind, FrameKind::Function) || self.frame().pre_call.is_none() {
+            return None;
+        }
+        Some((self.objects.len() as u32, state.copy()))
+    }
+
+    fn loop_gc_end(&mut self, g: Option<(u32, State)>, state: &mut State) {
+        let Some((mark, pre)) = g else { return };
+        if !state.reachable {
+            return;
+        }
+        let mut roots: Vec<u32> = Vec::new();
+        let mut push = |v: &Value, roots: &mut Vec<u32>| {
+            roots.extend(v.pts.iter());
+            match &v.kv {
+                KeyVal::KeysOf(ko) => roots.extend(ko.objs.iter()),
+                KeyVal::Param(p) => roots.push(*p),
+                _ => {}
+            }
+        };
+        for v in state.env.values() {
+            push(v, &mut roots);
+        }
+        for v in state.narrowed.values() {
+            push(v, &mut roots);
+        }
+        if let Some(r) = &state.ret {
+            push(r, &mut roots);
+        }
+        for env in &self.env_stack {
+            for v in env.values() {
+                push(v, &mut roots);
+            }
+        }
+        for fr in &self.frames {
+            roots.push(fr.module);
+            roots.extend(fr.cells.values().copied());
+            for ov in &fr.overlays {
+                for v in ov.values() {
+                    push(v, &mut roots);
+                }
+            }
+        }
+        for (o, v) in state.lasts.iter() {
+            roots.push(*o);
+            push(v, &mut roots);
+        }
+        self.collect_since(mark, &pre, roots, true, state);
     }
 
     fn stmt_classdef(&mut self, c: &'static ast::StmtClassDef, state: &mut State) {
