@@ -3753,7 +3753,8 @@ fn m_copy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let deep = c.qual.ends_with("deepcopy");
     let mut outs = Vec::new();
     for o in a.pts.iter() {
-        if matches!(an.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance | Kind::Frame) {
+        // (an object from input is a new object too: stores into the copy do not reach it)
+        if matches!(an.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance | Kind::Frame) || (an.kind(o) == Kind::Unknown && !crate::interp::disabled("copyunknownobj")) {
             outs.push(Value::obj(an.copy_object(o, &c.node, st, deep, &mut IndexMap::new())));
         } else if an.kind(o) == Kind::Ph && !crate::interp::disabled("copyph") {
             // a parameter's object: decided per call site, where the copy is a new object

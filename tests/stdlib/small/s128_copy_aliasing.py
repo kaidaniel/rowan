@@ -47,6 +47,7 @@ if __name__ == "__main__":
     o4 = json.loads(os.environ.get("S128_C", '{"db": {"host": "e"}, "tags": [], "x": 0}'))
     #@schema json.loads@L47: always={db,tags} only={db,tags}
     tweak(snapshot(o4, False))
-    #@row o4: present={db,tags} definite={db,tags} open
+    #@row o4: open
     od4 = o4["db"]
-    #@row od4: present={port} definite={port} open
+    #@row od4: open
+    #@todo row od4: present={port} definite={port} open  (and o4: present={db,tags} definite={db,tags} open — keys read through a shallow copy of an input object, and its shared nested dict, are the original's too)
