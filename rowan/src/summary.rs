@@ -2111,6 +2111,11 @@ impl Inst {
             self.collided.insert(nid);
             self.new_clones.remove(&nid);
         }
+        // (a clone that is not one object — collapsed past the clone budget, shared with other
+        // calls' clones — takes the template's facts weakly, as a collision does)
+        if !an.obj(nid).single && !crate::interp::disabled("weakclone") {
+            self.collided.insert(nid);
+        }
         self.clones.insert(t, nid);
         an.set_llen(nid, state, tll);
         an.obj_mut(nid).iter_elem = titer;

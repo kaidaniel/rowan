@@ -1461,7 +1461,9 @@ impl Analyzer {
         let n = self.site_clones.get(site).copied().unwrap_or(0);
         if (n >= limit("clones", MAX_CLONES) || self.over_deadline()) && !ctx.is_empty() {
             // too many clones of one allocation site: collapse onto the context-free summary object
-            return self.alloc_raw(kind, site, "", false, label, payload);
+            let o = self.alloc_raw(kind, site, "", false, label, payload);
+            crate::state::mark_merged(o);
+            return o;
         }
         self.site_clones.insert(site.to_string(), n + 1);
         let oid = self.objects.len() as ObjId;
@@ -1656,10 +1658,35 @@ impl Analyzer {
                     }
                     oid = r;
                 } else {
-                    // one summary object for both, weak (no longer one key)
-                    self.obj_mut(oid).single = false;
-                    if let Some(k) = self.identity_keys.borrow_mut().remove(&oid) {
-                        self.identity_objs.borrow_mut().remove(&k);
+                    // another object of the site while the first is still in use: a variant
+                    // of its own (a method run twice on one receiver keeps both records), up
+                    // to a few; past them one summary object, weak (no longer one key)
+                    let mut variant: Option<ObjId> = None;
+                    if !disabled("allocvariants") && single {
+                        for k in 1..=8usize {
+                            let vctx = format!("{}~{}", ctx, k);
+                            match self.obj_index.get(&(kind, site.to_string(), vctx.clone())).copied() {
+                                None => {
+                                    variant = Some(self.alloc_raw(kind, site, &vctx, single, &label, payload2.clone()));
+                                    break;
+                                }
+                                Some(v) if !self.is_live(v, state) => {
+                                    variant = Some(self.alloc_raw(kind, site, &vctx, single, &label, payload2.clone()));
+                                    break;
+                                }
+                                Some(_) => {}
+                            }
+                        }
+                    }
+                    match variant {
+                        Some(v) => oid = v,
+                        None => {
+                            self.obj_mut(oid).single = false;
+                            crate::state::mark_merged(oid);
+                            if let Some(k) = self.identity_keys.borrow_mut().remove(&oid) {
+                                self.identity_objs.borrow_mut().remove(&k);
+                            }
+                        }
                     }
                 }
             }

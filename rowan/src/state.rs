@@ -484,6 +484,16 @@ impl State {
     }
 
     pub fn set_row(&mut self, oid: ObjId, ns: Ns, row: Row) {
+        // (an object several runtime objects share: what is installed joins what is there)
+        if is_merged(oid) {
+            if let Some(cur) = self.rows.get(&(oid, ns)) {
+                if cur != row {
+                    let j = cur.join(&row);
+                    self.rows.insert((oid, ns), j);
+                }
+                return;
+            }
+        }
         self.rows.insert((oid, ns), row);
     }
 
@@ -503,6 +513,7 @@ impl State {
         if matches!(ns, Ns::Pos | Ns::Elem) {
             self.clear_last(oid);
         }
+        let strong = strong && !is_merged(oid);
         if strong {
             self.slots.set(&oid, (ns, key), v);
         } else {
@@ -700,6 +711,25 @@ fn join_lasts(a: &Arc<Vec<(ObjId, Value)>>, b: &Arc<Vec<(ObjId, Value)>>) -> Arc
 /// value, so the requirement still holds wherever it was read)
 fn nested_keep(s: &crate::domain::SourceId) -> bool {
     crate::domain::source_is_nested(*s) && !crate::interp::disabled("nestedreqjoin")
+}
+
+thread_local! {
+    static MERGED: std::cell::RefCell<rustc_hash::FxHashSet<ObjId>> = std::cell::RefCell::new(rustc_hash::FxHashSet::default());
+}
+
+/// An abstract object that stands for several runtime objects made at different times (a
+/// clone collapsed past the clone budget, a site re-allocated while live): no store into it
+/// replaces what is there.
+pub fn mark_merged(oid: ObjId) {
+    if !crate::interp::disabled("mergedobjs") {
+        MERGED.with(|m| {
+            m.borrow_mut().insert(oid);
+        });
+    }
+}
+
+pub fn is_merged(oid: ObjId) -> bool {
+    MERGED.with(|m| m.borrow().contains(&oid))
 }
 
 pub fn join_len(a: &(Option<usize>, usize), b: &(Option<usize>, usize)) -> (Option<usize>, usize) {

@@ -678,6 +678,39 @@ impl Analyzer {
 
     // ------------------------------------------------------------ iteration
     pub fn iterate(&mut self, v: &Value, node: &Node, state: &mut State) -> Iteration {
+        // one of several containers (or strings): their items are alternatives, not one
+        // sequence — joined position by position when every one is a sequence of one known
+        // length, else not known (the elements are still the join)
+        let n_alts = v.pts.len() + usize::from(!v.kv.is_bot());
+        let multi_lits = v.pts.is_empty() && matches!(&v.kv, KeyVal::Lits(ks) if ks.len() > 1);
+        let alts_mode = (n_alts > 1 || multi_lits) && !crate::interp::disabled("iteralts");
+        let mut alt_items: Option<Vec<Value>> = None;
+        if alts_mode {
+            let mut lists: Option<Vec<Vec<Value>>> = Some(Vec::new());
+            for o in v.pts.iter() {
+                let seq = matches!(self.kind(o), Kind::List | Kind::Tuple) && !self.obj(o).iterator;
+                match (seq, self.llen(o, state), lists.as_mut()) {
+                    (true, Some(n), Some(ls)) if n <= UNROLL_MAX => ls.push((0..n).map(|i| state.slot(o, Ns::Pos, key_int(i as i64))).collect()),
+                    _ => lists = None,
+                }
+            }
+            match (&v.kv, lists.as_mut()) {
+                (KeyVal::Bot, _) => {}
+                (kv, Some(ls)) if kv.is_literal() => {
+                    for k in crate::domain::kv_literals(kv).iter() {
+                        match intern::key_as_str(k) {
+                            Some(s) if s.chars().count() <= UNROLL_MAX => ls.push(s.chars().map(|ch| Value::lit(intern::key_str_lit(&ch.to_string()))).collect()),
+                            _ => {
+                                lists = None;
+                                break;
+                            }
+                        }
+                    }
+                }
+                _ => lists = None,
+            }
+            alt_items = lists.filter(|ls| !ls.is_empty() && ls.iter().all(|l| l.len() == ls[0].len())).map(|ls| (0..ls[0].len()).map(|i| join_values(ls.iter().map(|l| l[i].clone()).collect::<Vec<_>>())).collect());
+        }
         let mut items: Option<Vec<Value>> = Some(Vec::new());
         let mut elems: Vec<Value> = Vec::new();
         let mut pairs: Vec<(Value, Value)> = Vec::new();
@@ -939,10 +972,16 @@ impl Analyzer {
                 elems.push(Value::kv_only(KeyVal::lits(ks)));
             } else if v.kv.is_literal() {
                 let ks = crate::domain::kv_literals(&v.kv);
-                if ks.len() <= UNROLL_MAX {
-                    items = Some(intern::sorted_by_str(ks.iter()).into_iter().map(Value::lit).collect());
+                // (one of several strings: its characters)
+                if ks.iter().all(intern::key_is_str) && !crate::interp::disabled("iteralts") {
+                    let chars: KeySet = ks.iter().flat_map(|k| intern::key_as_str(k).map(|s| s.chars().map(|ch| intern::key_str_lit(&ch.to_string())).collect::<Vec<_>>()).unwrap_or_default()).collect();
+                    elems.push(Value::kv_only(KeyVal::lits(chars)));
+                } else {
+                    if ks.len() <= UNROLL_MAX {
+                        items = Some(intern::sorted_by_str(ks.iter()).into_iter().map(Value::lit).collect());
+                    }
+                    elems.push(Value::kv_only(KeyVal::lits(ks)));
                 }
-                elems.push(Value::kv_only(KeyVal::lits(ks)));
             } else {
                 elems.push(line_data.clone());
             }
@@ -960,10 +999,16 @@ impl Analyzer {
                 kacc = kacc.join(e);
             }
             let exh = exhaustive && pairs.len() == 1;
+            if alts_mode {
+                items = alt_items;
+            }
             return Iteration { items, elem: Elem::Pair(kacc, vacc), exhaustive: exh };
         }
         let elem = join_values(elems.iter().cloned());
         let exh = exhaustive && elems.len() == 1 && matches!(elem.kv, KeyVal::KeysOf(_));
+        if alts_mode {
+            items = alt_items;
+        }
         Iteration { items, elem: Elem::One(elem), exhaustive: exh }
     }
 

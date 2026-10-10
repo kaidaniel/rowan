@@ -77,7 +77,7 @@ pub struct Validator {
 
 /// One problem a validation finds: where (the input key), pydantic's error type, whether
 /// it surely happens, whether its record has a `ctx`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PErr {
     pub loc: Option<KeyId>,
     pub typ: &'static str,
@@ -1040,10 +1040,17 @@ impl Analyzer {
             }
         }
         self.pyd_init_privates(cls, inst, state, node);
+        // (`mode="after"` model validators run only when the fields validated: not after a
+        // sure field error; after a maybe one, their own error is a maybe one)
+        let field_failed = self.pyd_errs.last().map(|es| es.iter().any(|e| e.sure)).unwrap_or(false) && !crate::interp::disabled("pydafterskip");
+        let field_maybe = self.pyd_errs.last().map(|es| !es.is_empty()).unwrap_or(false);
         for v in pc.model_after.clone() {
+            if field_failed {
+                break;
+            }
             let (_, sure, maybe) = self.pyd_catching(v.func, Value::obj(inst), vec![], state, node);
             if maybe {
-                self.pyd_err(None, "value_error", sure, true);
+                self.pyd_err(None, "value_error", sure && !field_maybe, true);
             }
         }
         // the problems found: a ValidationError (surely, or on some paths)
@@ -1097,11 +1104,46 @@ impl Analyzer {
 
     /// A ValidationError holding `errs` (its `errors()`), raised here when one is sure.
     fn pyd_raise_errors(&mut self, errs: Vec<PErr>, state: &mut State, node: &Node) {
-        let idx = self.pyd_verrs.len();
         let sure = errs.iter().any(|e| e.sure);
-        self.pyd_verrs.push(errs);
-        let eo = self.alloc_raw(Kind::Namespace, &format!("pydverr:{}", crate::interp::site_string(node)), "", false, "ValidationError", Payload::Method(format!("pydverr.{}", idx), Value::new()));
-        self.obj_mut(eo).payload = Payload::Method(format!("pydverr.{}", idx), Value::new());
+        // (an equal list made before: the same one)
+        let idx = match self.pyd_verrs.iter().position(|l| *l == errs) {
+            Some(i) => i,
+            None => {
+                self.pyd_verrs.push(errs);
+                self.pyd_verrs.len() - 1
+            }
+        };
+        // (per call context: separate calls, unrolled rounds keep their own errors)
+        let ctx = if crate::interp::disabled("pydverrctx") { String::new() } else { self.frame().ctx.clone() };
+        let eo = self.alloc_raw(Kind::Namespace, &format!("pydverr:{}", crate::interp::site_string(node)), &ctx, false, "ValidationError", Payload::Method(format!("pydverr.{}", idx), Value::new()));
+        // (one object per raise site: a second raise there — another loop round, another
+        // record — makes it either one's errors, in no known order)
+        let mut use_idx = idx;
+        if let Payload::Method(q, _) = &self.obj(eo).payload {
+            if let Some(old) = q.strip_prefix("pydverr.").and_then(|x| x.parse::<usize>().ok()).filter(|o| *o != idx && !crate::interp::disabled("pydverrmerge")) {
+                let mut both: Vec<PErr> = self.pyd_verrs.get(old).cloned().unwrap_or_default();
+                both.extend(self.pyd_verrs[idx].iter().cloned());
+                for e in both.iter_mut() {
+                    e.sure = false;
+                }
+                // (the same error twice: once)
+                let mut uniq: Vec<PErr> = Vec::new();
+                for e in both {
+                    if !uniq.iter().any(|u| u.loc == e.loc && u.typ == e.typ && u.ctx == e.ctx) {
+                        uniq.push(e);
+                    }
+                }
+                // (an equal list made before: the same one, so a loop's rounds converge)
+                use_idx = match self.pyd_verrs.iter().position(|l| *l == uniq) {
+                    Some(i) => i,
+                    None => {
+                        self.pyd_verrs.push(uniq);
+                        self.pyd_verrs.len() - 1
+                    }
+                };
+            }
+        }
+        self.obj_mut(eo).payload = Payload::Method(format!("pydverr.{}", use_idx), Value::new());
         state.set_row(eo, Ns::Attr, Row::new().data_store(crate::domain::Source::new("ValidationError", crate::domain::SourceKind::Data)));
         self.cur_exc = Some(Value::obj(eo));
         if sure {
@@ -1755,7 +1797,8 @@ impl Analyzer {
             }
             Ann::Scalar(t) => {
                 let t = *t;
-                if val.pts.is_empty() && val.kv.is_literal() && matches!(t, "int" | "float" | "Decimal") {
+                // (the value's literal part: its objects, if any, are checked below)
+                if val.kv.is_literal() && !val.kv.is_bot() && matches!(t, "int" | "float" | "Decimal") {
                     let lits = crate::domain::kv_literals(&val.kv);
                     let fails = |k: KeyId| {
                         let c = coerce_kv(t, &KeyVal::Lit(k));
@@ -1779,7 +1822,7 @@ impl Analyzer {
                         let mut codes: Vec<&str> = bad.iter().map(|k| code_of(*k)).collect();
                         codes.sort();
                         codes.dedup();
-                        let sure = bad.len() == lits.len() && codes.len() == 1;
+                        let sure = bad.len() == lits.len() && codes.len() == 1 && val.pts.is_empty();
                         for code in codes {
                             self.pyd_err(loc, code, sure, false);
                         }
@@ -3119,25 +3162,29 @@ pub fn m_pydverr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let mut row = Row::new();
                 // one tuple per record (records made at one site must not share it)
                 let lt = an.alloc_at(Kind::Tuple, &c.node, st, &format!("loc@L{}", c.line), Payload::None, None, Ns::Item, None, Some(&format!("verrloc{}:{}", idx.unwrap(), i)));
+                // (objects shared with other uses — past the clone budget — take these facts
+                // weakly)
+                let dstrong = an.obj(d).single;
+                let lstrong = an.obj(lt).single;
                 match e.loc {
                     // (a nested model's error: the path through its field)
                     Some(k) if intern::with_key(k, |kk| matches!(kk, intern::Key::Tuple(_))) => {
                         let parts = intern::with_key(k, |kk| if let intern::Key::Tuple(t) = kk { t.clone() } else { vec![] });
                         for (j, p) in parts.iter().enumerate() {
-                            st.set_slot(lt, Ns::Pos, intern::key_int(j as i64), Value::lit(*p), true);
+                            st.set_slot(lt, Ns::Pos, intern::key_int(j as i64), Value::lit(*p), lstrong);
                         }
-                        st.set_slot(lt, Ns::Elem, intern::STAR, join_values(parts.iter().map(|p| Value::lit(*p)).collect::<Vec<_>>()), true);
+                        st.set_slot(lt, Ns::Elem, intern::STAR, join_values(parts.iter().map(|p| Value::lit(*p)).collect::<Vec<_>>()), lstrong);
                         st.elems.insert(lt, KeyVal::lits(intern::KeySet::from_iter(parts.iter().copied())));
                         an.set_llen(lt, st, Some(parts.len()));
                     }
                     Some(k) => {
-                        st.set_slot(lt, Ns::Pos, intern::key_int(0), Value::lit(k), true);
-                        st.set_slot(lt, Ns::Elem, intern::STAR, Value::lit(k), true);
+                        st.set_slot(lt, Ns::Pos, intern::key_int(0), Value::lit(k), lstrong);
+                        st.set_slot(lt, Ns::Elem, intern::STAR, Value::lit(k), lstrong);
                         st.elems.insert(lt, KeyVal::Lit(k));
                         an.set_llen(lt, st, Some(1));
                     }
                     None => {
-                        st.set_slot(lt, Ns::Elem, intern::STAR, Value::data("loc"), true);
+                        st.set_slot(lt, Ns::Elem, intern::STAR, Value::data("loc"), lstrong);
                         st.elems.insert(lt, crate::domain::DATA);
                         an.set_llen(lt, st, None);
                     }
@@ -3153,8 +3200,9 @@ pub fn m_pydverr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 for (k, v) in entries {
                     let kk = key_str_lit(k);
                     row = row.store(kk, true);
-                    st.set_slot(d, Ns::Item, kk, v, true);
+                    st.set_slot(d, Ns::Item, kk, v, dstrong);
                 }
+                let row = if dstrong { row } else { st.row(d, Ns::Item).join(&row) };
                 st.set_row(d, Ns::Item, row);
                 items.push(Value::obj(d));
             }
