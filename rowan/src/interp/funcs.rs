@@ -972,8 +972,12 @@ impl Analyzer {
         if state.has_slot(oid, Ns::Item, STAR) {
             return None;
         }
-        // insertion order when it is known (else a fixed order by key)
-        let keys = row.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(row.present.iter()));
+        // insertion order when it is known (a guess would make order-dependent results wrong)
+        let keys = match row.ordered_keys() {
+            Some(k) => k,
+            None if row.present.len() <= 1 || super::disabled("dictorder") => intern::sorted_by_str(row.present.iter()),
+            None => return None,
+        };
         Some(keys.into_iter().map(|k| (k, state.slot(oid, Ns::Item, k))).collect())
     }
 

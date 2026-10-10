@@ -965,6 +965,19 @@ impl Row {
         let mut dterms: Vec<(Rho, LensId)> = Vec::new();
         let mut lterms: Vec<(Rho, LensId)> = Vec::new();
         let mut pstores: Vec<(Rho, bool, LensId)> = Vec::new();
+        // insertion order: the entry row's (one plain term), then the keys stored here
+        let mut order: Vec<KeyId> = Vec::new();
+        if self.terms.len() == 1 && self.terms.first().map(|(_, l)| l == EMPTY_LENS).unwrap_or(false) {
+            let e = entry_row_of(self.terms.first().unwrap().0);
+            if let Some(ks) = e.ordered_keys() {
+                order = ks;
+            }
+        }
+        for k in self.order.iter() {
+            if !order.contains(k) {
+                order.push(*k);
+            }
+        }
         for (r, l) in self.terms.iter() {
             let e = entry_row_of(r);
             present = present.union(&lens_image(l, &e.present));
@@ -1002,11 +1015,16 @@ impl Row {
             dterms: TermSet::from_vec(dterms),
             lterms: TermSet::from_vec(lterms),
             pstores: PStoreSet::new(),
-            order: self.order.clone(),
+            order: order.into(),
             stored: self.stored.clone(),
         });
         let mut remaining: Vec<(Rho, bool, LensId)> = Vec::new();
-        for (r, strong, l) in self.pstores.union(&PStoreSet::from_vec(pstores)).iter() {
+        // (several parameter-keyed stores, or one besides literal stores: their relative order
+        // is not recorded, so a new key among them leaves the order unknown)
+        let all_ps = self.pstores.union(&PStoreSet::from_vec(pstores));
+        let order_unsure = all_ps.len() > 1 || (!all_ps.is_empty() && !self.order.is_empty());
+        let known_before: KeySet = out.present.clone();
+        for (r, strong, l) in all_ps.iter() {
             let kv = kv_of(r);
             match kv {
                 KeyVal::Param(ph) => {
@@ -1033,6 +1051,11 @@ impl Row {
             } else {
                 out = out.data_store(Source::new(&format!("store@param{}", r), SourceKind::Data));
             }
+        }
+        if order_unsure && !out.present.difference(&known_before).is_empty() {
+            let mut d = out.data();
+            d.order = Vec::new().into();
+            out = Row::from_data(d);
         }
         if !remaining.is_empty() {
             let mut d = out.data();
