@@ -88,15 +88,23 @@ and macOS, then the oracle on Linux. The torch oracle runs only on a manual disp
   hard deadlines, budgets, call-string depth and access-path depth. `work=550000` (about 2 s
   here) puts the deadlines on work units instead: reproducible runs of large programs for
   comparisons and profiles (the `work:` line of `ROWAN_DEBUG=1` shows the units).
+* Experimental, off by default (measured not worth it, SUGGESTED_CHANGES 3.1):
+  `ROWAN_LIMITS=variantmode=1|2` (summary variants per decided outcome; `variantlits=1` for
+  literal outcomes) and `genfull=1` (summaries for every generator).
 * `ROWAN_SUMMARIES=0`: the old per-call-site engine, with no summaries.
 * `ROWAN_GC=0`: garbage collection only for returns of values without objects.
   With `ROWAN_DEBUG=1`, `ROWAN_GCDBG=1` prints what each
   collection drops.
 * `ROWAN_FOLLOW=pkg,…` is the same as `--follow`. `ROWAN_TODO=check` also checks `#@todo`s,
   to see which to-dos the engine now meets.
-* **Profiling:** use short runs (a few seconds). Use `samply` / `sample <pid> 3` on the release
-  binary, and `MallocStackLogging=lite` + `malloc_history <pid> -allBySize` for memory. macOS
-  has no `timeout`; use `perl -e 'alarm N; exec @ARGV' rowan …`.
+* **Profiling:** use short runs (a few seconds), several in parallel, long ones in the
+  background. Use `sample <pid> 3` on the release binary (inclusive time per function from its
+  call tree), and `MallocStackLogging=lite` + `malloc_history <pid> -allBySize` for memory
+  (it slows the run: scale the deadlines). macOS has no `timeout`; use
+  `perl -e 'alarm N; exec @ARGV' rowan …`. Compare builds on results (proven / missing /
+  possibly / schema counts of `--json`), not only on counters, and with `work=N` when a
+  deadline cuts the run. `bench/` (the other agent's harness: `bench/run.py`, programs in
+  `bench/work/{stdlib12k,email,rich}`) runs without deadlines.
 
 ## Layout (Rust engine `rowan/src/`, ~64k lines)
 
@@ -159,8 +167,9 @@ editor extension (talks to `rowan serve`).
 | golden (all suites) | ~5 s | one process per case |
 | oracle | ~1.5 min | cases in parallel (one thread per CPU) |
 | `j93` (830 lines) / `m96_pkg` (1,716) | 0.09 / 0.10 s | |
-| `proto_summary.py` (1.2k, self-referential) | 2.05 s | |
-| email (stdlib, 10k lines) / rich (25k) | ~11 / ~14 s | cut by the hard deadline; 283 MB / 2.1 GB |
+| `proto_summary.py` (1.2k, self-referential) | 2.1 s (`--facts` 3.2 s, 13.6 MB) | |
+| email (stdlib, 10k lines) / rich (38k) | ~10 / ~11 s | cut by the hard deadline; rich 1.1 GB |
+| stdlib12k without deadlines | ~20 s | `bench/`; rich does not finish without deadlines (3.0) |
 
 Large programs are not yet run to completion, and precision on real repositories has not
 been measured.
