@@ -34,14 +34,14 @@ uv run --no-project python tests/run_golden.py      # all suites, ~5 s; paths se
 uv run --no-project python tests/run_golden.py --pending [--prune]   # cases in tests/*/PENDING
 uv run --no-project python tests/run_snapshots.py   # --update only after reviewing the diff
 uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy \
-    python tests/oracle.py [--strict|--lenient] [-v] [case…]         # expectations vs real runs, ~4 min
+    python tests/oracle.py [--strict|--lenient] [-v] [-j N] [case…]  # expectations vs real runs, ~1.5 min
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py [case…]
 cd vscode-rowan && node test.js && npm run package  # hover rendering check; rebuilds rowan-0.1.0.vsix
 cargo install --path rowan                          # the installed binary (~/.cargo/bin/rowan)
 ```
 
-The oracle is slow because it runs one fresh Python process per case, plus one per key a
-`#@schema` checks, each under a line tracer. Run it on the cases you touched while working,
+The oracle runs one fresh Python process per case, plus one per key a `#@schema` checks, each
+under a line tracer, as many at a time as there are CPUs. Run it on the cases you touched while working,
 and in full before a commit that changes models. CI (`.github/workflows/ci.yml`) runs the
 build, `cargo test`, golden, pending (informational), snapshots and the hover test on Linux
 and macOS, then the oracle on Linux. The torch oracle runs only on a manual dispatch with
@@ -155,7 +155,7 @@ editor extension (talks to `rowan serve`).
 | input | time | notes |
 | --- | --- | --- |
 | golden (all suites) | ~5 s | one process per case |
-| oracle | ~4 min | sequential (SUGGESTED_CHANGES 3.6) |
+| oracle | ~1.5 min | cases in parallel (one thread per CPU) |
 | `j93` (830 lines) / `m96_pkg` (1,716) | 0.09 / 0.10 s | |
 | `proto_summary.py` (1.2k, self-referential) | 2.05 s | |
 | email (stdlib, 10k lines) / rich (25k) | ~11 / ~14 s | cut by the hard deadline; 283 MB / 2.1 GB |

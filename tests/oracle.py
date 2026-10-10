@@ -2,9 +2,10 @@
 checks its hand-written `#@` expectations against what actually happens (never against
 rowan).
 
-    uv run --no-project --with pandas python tests/oracle.py [--strict|--lenient] [-v] [case…]
+    uv run --no-project --with pandas python tests/oracle.py [--strict|--lenient] [-v] [-j N] [case…]
 
-Default: `tests/pandas/*/*.py` strict, `tests/cases/` lenient. After a directive's line runs,
+Cases run in parallel (`-j N`, default: the number of CPUs). Default: `tests/pandas/*/*.py`
+strict, `tests/cases/` lenient. After a directive's line runs,
 in every run that reaches it (one process per case, scratch working directory, timeout):
 
 * `#@row NAME: …` — the keys K of NAME's value (a DataFrame's columns, a dict's keys, a Series'
@@ -549,14 +550,26 @@ def main(argv: List[str]) -> int:
         return 0
     verbose = "-v" in argv
     force = "strict" if "--strict" in argv else "lenient" if "--lenient" in argv else None
+    jobs = os.cpu_count() or 4
+    if "-j" in argv:
+        i = argv.index("-j")
+        jobs = int(argv[i + 1])
+        argv = argv[:i] + argv[i + 2:]
     args = [a for a in argv if not a.startswith("-")]
     paths = args or suite_cases()
     bad = 0
     checked = unreached = 0
-    for p in paths:
+
+    def one(p: str) -> Tuple[bool, Dict[str, Any]]:
         ap = os.path.abspath(p)
         strict = force == "strict" if force else any(os.sep + s + os.sep in ap for s in STRICT_SUITES)
-        res = run_child(ap, ["--strict"] if strict else [])
+        return strict, run_child(ap, ["--strict"] if strict else [])
+
+    # (cases are independent: each child runs in its own scratch directory; results in order)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        results = list(pool.map(one, paths))
+    for p, (strict, res) in zip(paths, results):
         checked += res["total"] - res["unreached"]
         unreached += res["unreached"]
         if res["fails"]:
