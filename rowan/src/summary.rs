@@ -423,6 +423,14 @@ impl Analyzer {
     /// A "concrete" event on every placeholder in `v` and in the containers it holds (to
     /// `depth` levels): a model whose result depends on their contents.
     pub fn concrete_events(&mut self, v: &Value, state: &State, depth: usize) {
+        // the keys of a placeholder or outside record (`sorted(d)`, a `for k in d` variable)
+        if let crate::domain::KeyVal::KeysOf(ko) = &v.kv {
+            for o in ko.objs.iter() {
+                if self.kind(o) == Kind::Ph || self.is_entry_object(o) {
+                    self.record_event("concrete", o);
+                }
+            }
+        }
         for oid in v.pts.iter() {
             if self.kind(oid) == Kind::Ph {
                 self.record_event("concrete", oid);

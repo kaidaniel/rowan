@@ -264,6 +264,10 @@ fn read_arg(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<ArgSpec> {
         Some(ch) => {
             // (choices not known item by item: values are not checked against them)
             let it = an.iterate(&ch, &c.node, st);
+            if it.items.is_none() {
+                // (choices from a parameter or a global: decided per call site)
+                an.concrete_args([&ch, &it.elem.flat()], st);
+            }
             Some(it.items.unwrap_or_else(|| vec![Value::data("choice")]))
         }
         None => None,
