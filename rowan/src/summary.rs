@@ -1239,6 +1239,19 @@ impl Analyzer {
                         return Some(ev.clone());
                     }
                 }
+                // an instance that holds an attribute of the name of a class data attribute
+                "clsattr" => {
+                    for o in &concrete {
+                        if self.kind(*o) != Kind::Instance {
+                            continue;
+                        }
+                        let row = state.row(*o, Ns::Attr);
+                        let Some(cls) = self.instance_class(*o) else { continue };
+                        if row.open() || row.present.iter().any(|k| intern::key_as_str(k).is_some_and(|n| self.class_lookup(cls, &n).is_some())) {
+                            return Some(ev.clone());
+                        }
+                    }
+                }
                 "isinstance" | "concrete" | "guarded" => {
                     if !concrete.is_empty() {
                         return Some(ev.clone());

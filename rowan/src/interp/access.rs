@@ -2147,6 +2147,11 @@ impl Analyzer {
                 if !ph.exact.get() && self.subclass_overrides(pcls, Some(c), name) {
                     self.record_event("dispatch", oid);
                 }
+                // a data attribute of the class: an instance with its own attribute of the
+                // name shadows it (decided per call site)
+                if !cv.pts.is_empty() && !cv.pts.iter().any(|o| matches!(self.kind(o), Kind::Function | Kind::Bound | Kind::Method | Kind::Class | Kind::External)) || !cv.kv.is_bot() {
+                    self.record_event("clsattr", oid);
+                }
                 return out;
             }
             if !ph.exact.get() && self.subclass_overrides(pcls, Some(pcls), name) {
