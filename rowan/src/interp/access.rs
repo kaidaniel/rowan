@@ -1333,6 +1333,28 @@ impl Analyzer {
                     }
                 }
                 Kind::Namespace | Kind::Instance => self.load_instance_attr(oid, name, node, state, guarded, single),
+                Kind::Class if name == "__annotations__" && self.class_lookup(oid, name).is_none() && self.class_info_opt(oid).is_some() => {
+                    let names = crate::models::annotated_names(self, oid, false).unwrap_or_default();
+                    crate::models::names_dict(self, state, node, &names, None, "annotation")
+                }
+                Kind::Class if matches!(name, "_fields" | "_field_defaults") && self.class_lookup(oid, name).is_none() && self.is_named_tuple_class(oid) && !super::disabled("ntmethods") => {
+                    let fs = self.dataclass_fields_mro(oid);
+                    if name == "_fields" {
+                        let vs: Vec<Value> = fs.iter().map(|(f, _)| Value::lit(key_str_lit(f))).collect();
+                        let kv = KeyVal::lits(vs.iter().filter_map(|v| v.kv.as_lit()).collect());
+                        self.alloc_positional(Kind::Tuple, node, Some(vs), Value::new(), kv, state)
+                    } else {
+                        let mut names = Vec::new();
+                        let mut vals = Vec::new();
+                        for (f, d) in fs.iter() {
+                            if let Some(d) = d {
+                                names.push(f.clone());
+                                vals.push(self.eval(d, state));
+                            }
+                        }
+                        crate::models::names_dict(self, state, node, &names, Some(vals), "default")
+                    }
+                }
                 Kind::Class if matches!(name, "__required_keys__" | "__optional_keys__" | "__total__") && self.class_info_opt(oid).map(|ci| ci.typed_dict).unwrap_or(false) => {
                     match self.typed_dict_keys(oid) {
                         Some((req, opt)) if name != "__total__" => {
@@ -1442,6 +1464,10 @@ impl Analyzer {
                 // an lru_cache'd function's cache_info / cache_clear
                 Kind::Function if matches!(name, "cache_info" | "cache_clear") && self.func_info(oid).is_memo.get() => self.method_value(&format!("memo.{}", name), &Value::obj(oid)),
                 // a function's names (a `@wraps(fn)` wrapper: fn's)
+                Kind::Function if name == "__annotations__" && state.slot_opt(oid, Ns::Attr, nk).is_none() => {
+                    let names = crate::models::annotated_names(self, oid, false).unwrap_or_default();
+                    crate::models::names_dict(self, state, node, &names, None, "annotation")
+                }
                 Kind::Function if matches!(name, "__name__" | "__qualname__" | "__module__" | "__wrapped__" | "__doc__") && state.slot_opt(oid, Ns::Attr, nk).is_none() && !super::disabled("fnnames") => {
                     match self.wrapped.get(&oid).cloned() {
                         Some(w) if name == "__wrapped__" => w,

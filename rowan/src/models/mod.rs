@@ -88,6 +88,7 @@ impl Registry {
         r(&["builtins.bool"], m_bool);
         r(&["builtins.type"], m_type);
         r(&["builtins.range"], m_range);
+        r(&["typing.get_type_hints", "typing_extensions.get_type_hints", "inspect.get_annotations"], m_type_hints);
         r(&["builtins.any", "builtins.all"], m_any_all);
         r(&["builtins.len"], m_len);
         r(&["builtins.sum"], m_sum);
@@ -3718,6 +3719,76 @@ fn m_bool(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// `range(...)` with known int bounds: a list whose items are known when it is short; its
 /// bounds decide membership at any length.
+/// The names a class (its MRO for `get_type_hints`) or a function annotates, in order.
+pub fn annotated_names(an: &Analyzer, o: crate::domain::ObjId, mro: bool) -> Option<Vec<String>> {
+    match an.kind(o) {
+        Kind::Class => {
+            let mut out: Vec<String> = Vec::new();
+            let classes: Vec<crate::domain::ObjId> = if mro { an.mro(o).iter().rev().copied().collect() } else { vec![o] };
+            let mut any = false;
+            for c in classes {
+                let Some(ci) = an.class_info_opt(c) else { continue };
+                any = true;
+                for stmt in &ci.node.body {
+                    if let ruff_python_ast::Stmt::AnnAssign(a) = stmt {
+                        if let ruff_python_ast::Expr::Name(n) = &*a.target {
+                            let n = n.id.to_string();
+                            if !out.contains(&n) {
+                                out.push(n);
+                            }
+                        }
+                    }
+                }
+            }
+            any.then_some(out)
+        }
+        Kind::Function => {
+            let fi = an.func_info(o);
+            let crate::interp::FuncNode::Def(f) = fi.node else { return Some(vec![]) };
+            let p = &f.parameters;
+            let mut out: Vec<String> = Vec::new();
+            for a in p.posonlyargs.iter().chain(p.args.iter()).chain(p.kwonlyargs.iter()) {
+                if a.parameter.annotation.is_some() {
+                    out.push(a.parameter.name.id.to_string());
+                }
+            }
+            for a in p.vararg.iter().chain(p.kwarg.iter()) {
+                if a.annotation.is_some() {
+                    out.push(a.name.id.to_string());
+                }
+            }
+            if f.returns.is_some() {
+                out.push("return".into());
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+/// A closed dict of the given keys, each holding unknown data.
+pub fn names_dict(an: &mut Analyzer, st: &mut State, node: &crate::frontend::Node, names: &[String], vals: Option<Vec<Value>>, what: &str) -> Value {
+    let did = an.alloc_at(Kind::Dict, node, st, &format!("{}@L{}", what, node.line), Payload::None, Some(Row::new()), Ns::Item, None, None);
+    let mut row = Row::new();
+    for (i, n) in names.iter().enumerate() {
+        let k = key_str_lit(n);
+        row = row.store(k, true);
+        let v = vals.as_ref().and_then(|vs| vs.get(i).cloned()).unwrap_or_else(|| Value::data(what));
+        st.set_slot(did, Ns::Item, k, v, true);
+    }
+    st.set_row(did, Ns::Item, row);
+    Value::obj(did)
+}
+
+fn m_type_hints(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let Some(o) = c.args.first().and_then(|v| v.single()) else { return Value::data("hints") };
+    let mro = !c.qual.starts_with("inspect.");
+    match annotated_names(an, o, mro) {
+        Some(names) => names_dict(an, st, &c.node, &names, None, "hints"),
+        None => Value::data("hints"),
+    }
+}
+
 fn m_range(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let ints: Option<Vec<i64>> = c.args.iter().map(|a| if a.pts.is_empty() { a.kv.as_lit().and_then(intern::key_as_int) } else { None }).collect();
     let bounds = match ints.as_deref() {
