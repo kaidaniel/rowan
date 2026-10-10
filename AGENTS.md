@@ -195,5 +195,5 @@ by run (the oracle reads it per line).
 
 ## Where to go next
 
-`SUGGESTED_CHANGES.md` (untracked): memory profile, abstract GC, on-demand server, violated hints
-(owner's call); then c001 to-dos, possibly-unbound names, key-pattern deletion, torch dtypes.
+`SUGGESTED_CHANGES.md` (untracked) lists what is left: two bugs, the hints decision, memory /
+deadline leads, the on-demand server experiment, refactors, precision to-dos.
