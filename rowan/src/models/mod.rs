@@ -2107,6 +2107,45 @@ fn m_setdefault(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     an.load_item(&recv, Ns::Item, key, &c.node, st, false)
 }
 
+/// `d.update(obj)` / `dict(obj)` with an instance of a user class that is no dict: an object
+/// with `keys()` is read as `obj[k]` for each key it lists; otherwise it is an iterable of
+/// pairs (unknown here: the row opens). Returns false when `src` holds no such instance.
+fn update_from_instances(an: &mut Analyzer, st: &mut State, oid: u32, src: &Value, strong: bool, c: &Call) -> bool {
+    let src = &an.unkey(src);
+    if crate::interp::disabled("mappingproto") || src.pts.is_empty() {
+        return false;
+    }
+    let insts: Vec<u32> = src.pts.iter().filter(|o| an.kind(*o) == Kind::Instance && an.instance_class(*o).is_some_and(|cl| !an.class_info_opt(cl).map(|ci| ci.dict_base || ci.typed_dict || ci.pydantic).unwrap_or(true))).collect();
+    if insts.is_empty() || insts.len() != src.pts.len() {
+        return false;
+    }
+    let strong = strong && insts.len() == 1;
+    for inst in insts {
+        let cls = an.instance_class(inst).unwrap();
+        if an.class_lookup(cls, "keys").is_some() {
+            let ks = an.call_method_with(&Value::obj(inst), "keys", vec![], &c.node, st).unwrap_or_else(|| Value::data("keys"));
+            let it = an.iterate(&ks, &c.node, st);
+            match it.items {
+                Some(items) => {
+                    for k in items {
+                        let v = an.call_method_with(&Value::obj(inst), "__getitem__", vec![k.clone()], &c.node, st).unwrap_or_else(|| Value::data("getitem"));
+                        an.store_key(oid, Ns::Item, &k.kv, &v, strong, &c.node, st);
+                    }
+                }
+                None => {
+                    let k = it.elem.flat();
+                    let v = an.call_method_with(&Value::obj(inst), "__getitem__", vec![k.clone()], &c.node, st).unwrap_or_else(|| Value::data("getitem"));
+                    an.store_key(oid, Ns::Item, &KeyVal::Data(intern::s("mapkeys")), &v, false, &c.node, st);
+                }
+            }
+        } else {
+            let r = st.row(oid, Ns::Item).data_store(Source::new(&format!("update@L{}", c.line), SourceKind::Data));
+            st.set_row(oid, Ns::Item, r);
+        }
+    }
+    true
+}
+
 fn m_update(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // a parameter's mapping (or keywords): decided per call site
     if !crate::interp::disabled("updateph") {
@@ -2116,7 +2155,8 @@ fn m_update(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let strong = recs.len() == 1 && an.obj(recs[0]).single;
     for oid in recs {
         if let Some(src) = c.args.first() {
-            if !an.record_objects(src).is_empty() {
+            if update_from_instances(an, st, oid, src, strong, c) {
+            } else if !an.record_objects(src).is_empty() {
                 an.copy_into(oid, Ns::Item, src, st, strong, &KeySet::new());
             } else if !src.pts.is_empty() {
                 let it = an.iterate(src, &c.node, st);
@@ -4167,7 +4207,8 @@ fn m_defaultdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         src_arg = c.args.first().cloned();
     }
     if let Some(sa) = src_arg {
-        if !an.record_objects(&sa).is_empty() {
+        if update_from_instances(an, st, oid, &sa, true, c) {
+        } else if !an.record_objects(&sa).is_empty() {
             an.copy_into(oid, Ns::Item, &sa, st, true, &KeySet::new());
         } else if name != "Counter" {
             let r = st.row(oid, Ns::Item).data_store(Source::new(&format!("{}@L{}", name, c.line), SourceKind::Data));

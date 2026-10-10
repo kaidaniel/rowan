@@ -617,6 +617,20 @@ impl Analyzer {
                 }
             }
         }
+        // known strings of n characters: their characters (`k, v = "ab"`)
+        if v.pts.is_empty() && v.kv.is_literal() && !crate::interp::disabled("unpackstr") {
+            let lits = crate::domain::kv_literals(&v.kv);
+            let strs: Option<Vec<Vec<char>>> = lits.iter().map(|k| intern::key_as_str(k).map(|s| s.chars().collect::<Vec<char>>()).filter(|cs| cs.len() == n)).collect();
+            if let Some(strs) = strs.filter(|s| !s.is_empty()) {
+                let mut out: Vec<Value> = (0..n).map(|_| Value::new()).collect();
+                for cs in &strs {
+                    for i in 0..n {
+                        out[i] = out[i].join(&Value::lit(intern::key_str_lit(&cs[i].to_string())));
+                    }
+                }
+                return out;
+            }
+        }
         if v.pts.is_empty() {
             // positional slots for literal tuple keys: `a, b = ("x", 1)` / `for k, ns in keys`
             // where the keys are tuple literals (Options::positional)
