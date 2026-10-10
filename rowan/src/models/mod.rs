@@ -4,6 +4,7 @@
 
 pub mod minire;
 pub mod pyre;
+pub mod pathtext;
 pub mod pynum;
 pub mod remodel;
 pub mod pandas;
@@ -186,6 +187,7 @@ impl Registry {
         argparse::register(&mut r);
         configparser::register(&mut r);
         remodel::register(&mut r);
+        pathtext::register(&mut r);
         concurrency::register(&mut r);
         itertools::register(&mut r);
         stdfuncs::register(&mut r);
@@ -1336,6 +1338,9 @@ fn m_str(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn m_repr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if let Some(t) = c.args.first().and_then(|a| an.exc_text(a, true, st)) {
         return t;
+    }
+    if let Some(r) = c.args.first().and_then(|a| a.single()).and_then(|o| pathtext::path_repr(an, o)) {
+        return Value::lit_str(&r);
     }
     noeffect(an, st, c)
 }

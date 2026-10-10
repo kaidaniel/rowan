@@ -2,9 +2,6 @@ models/sm01_orders_cli.py
 models/sm02_layered_config.py
 models/sm03_inventory_report.py
 models/sm06_log_report.py
-small/s091_os_path.py
-small/s092_purepath.py
-small/s093_textwrap_string.py
 small/s094_sqlite_row.py
 small/s095_abc_dispatch.py
 small/s096_getattr_getitem.py

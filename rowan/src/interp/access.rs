@@ -336,6 +336,11 @@ impl Analyzer {
         if v.pts.is_empty() || !v.kv.is_bot() || super::disabled("enumtext") {
             return None;
         }
+        // pathlib paths: their text
+        if v.pts.iter().all(|o| crate::models::pathtext::is_path(self, o)) {
+            let ts: Option<Vec<KeyId>> = v.pts.iter().map(|o| crate::models::pathtext::path_text(self, o).map(|t| key_str_lit(&t))).collect();
+            return ts.map(|ks| Value::kv_only(KeyVal::lits(KeySet::from_iter(ks))));
+        }
         let mut out: Vec<KeyId> = Vec::new();
         for o in v.pts.iter() {
             let mk = *self.member_key.get(&o)?;
@@ -1325,6 +1330,9 @@ impl Analyzer {
                 Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("fieldinfo.")) => {
                     let Payload::Method(q, _) = self.obj(oid).payload.clone() else { unreachable!() };
                     crate::models::pydantic::fieldinfo_attr(self, state, &q, name, node)
+                }
+                Kind::Namespace if crate::models::pathtext::is_path(self, oid) && crate::models::pathtext::PATH_PROPS.contains(&name) => {
+                    crate::models::pathtext::path_attr(self, state, oid, name, node).unwrap_or_else(|| Value::data(name))
                 }
                 Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("stdobj.")) => {
                     let Payload::Method(q, _) = self.obj(oid).payload.clone() else { unreachable!() };

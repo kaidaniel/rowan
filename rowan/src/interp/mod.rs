@@ -796,6 +796,8 @@ pub struct Analyzer {
     /// compiled patterns (text, flags) and match objects (models::remodel)
     pub re_patterns: FxHashMap<ObjId, (String, u32)>,
     pub re_matches: FxHashMap<ObjId, crate::models::remodel::ReMatch>,
+    /// pathlib path objects' classes (models::pathtext)
+    pub path_classes: FxHashMap<ObjId, String>,
     /// itertools.count / cycle / repeat(x) objects
     pub infinites: FxHashMap<ObjId, crate::models::itertools::Infinite>,
     /// partials' bound `**mapping`s of unknown keys
@@ -1037,6 +1039,7 @@ impl Analyzer {
             cfg_sections: FxHashMap::default(),
             re_patterns: FxHashMap::default(),
             re_matches: FxHashMap::default(),
+            path_classes: FxHashMap::default(),
             infinites: FxHashMap::default(),
             partial_star: FxHashMap::default(),
             wrapped: FxHashMap::default(),
@@ -1318,6 +1321,9 @@ impl Analyzer {
         }
         if let Some(c) = self.re_matches.get(&t).cloned() {
             self.re_matches.insert(nid, c);
+        }
+        if let Some(c) = self.path_classes.get(&t).cloned() {
+            self.path_classes.insert(nid, c);
         }
     }
 

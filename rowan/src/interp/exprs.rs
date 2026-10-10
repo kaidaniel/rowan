@@ -340,6 +340,21 @@ impl Analyzer {
                 if c.ops.len() == 1 && !super::disabled("richcmp") && !matches!(c.ops[0], ast::CmpOp::In | ast::CmpOp::NotIn | ast::CmpOp::Is | ast::CmpOp::IsNot) {
                     let b = self.eval(&c.comparators[0], state);
                     let nd = frontend::node(node);
+                    // pathlib paths: equal when their texts are (never equal to a str)
+                    if matches!(c.ops[0], ast::CmpOp::Eq | ast::CmpOp::NotEq) && !super::disabled("patheq") {
+                        let pt = |an: &Analyzer, v: &Value| v.single().filter(|_| v.kv.is_bot()).and_then(|o| crate::models::pathtext::path_text(an, o));
+                        let (pa, pb) = (pt(self, &a), pt(self, &b));
+                        if pa.is_some() || pb.is_some() {
+                            let decided = match (&pa, &pb) {
+                                (Some(x), Some(y)) => Some(x == y),
+                                (Some(_), None) | (None, Some(_)) if (a.pts.is_empty() && a.kv.is_literal()) || (b.pts.is_empty() && b.kv.is_literal()) => Some(false),
+                                _ => None,
+                            };
+                            if let Some(eq) = decided {
+                                return Value::lit(intern::key_bool(if c.ops[0] == ast::CmpOp::Eq { eq } else { !eq }));
+                            }
+                        }
+                    }
                     // Decimal / Fraction literals compare by value (`Decimal("1.0") == 1`)
                     let has_num = |v: &Value| v.kv.is_literal() && crate::domain::kv_literals(&v.kv).iter().any(crate::models::pynum::is_num_key);
                     if (has_num(&a) || has_num(&b)) && a.pts.is_empty() && b.pts.is_empty() && !super::disabled("pynum") {
@@ -1313,6 +1328,11 @@ impl Analyzer {
     pub fn binop(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Value {
         if let Some(v) = self.binop_dunder(op, a, b, node, state) {
             return v;
+        }
+        if op == ast::Operator::Div && !super::disabled("pathdiv") {
+            if let Some(v) = crate::models::pathtext::path_div(self, state, a, b, node) {
+                return v;
+            }
         }
         if let Some(v) = self.flag_binop(op, a, b, node, state) {
             return v;
