@@ -2707,7 +2707,9 @@ impl Analyzer {
                 }
                 let typed = self.kind(oid) == Kind::Ph && self.ph_info(oid).cls.get().map(|c| self.class_info_opt(c).is_some()).unwrap_or(false);
                 // (a numpy structured array is keyed by its fields)
-                let ns = if (matches!(self.kind(oid), Kind::Instance | Kind::Namespace) || typed) && !self.np_struct.contains(&oid) { Ns::Attr } else { Ns::Item };
+                // (an instance of a dict subclass: its items)
+                let dict_sub = self.kind(oid) == Kind::Instance && self.instance_class(oid).is_some_and(|c| self.mro(c).iter().any(|x| self.class_info_opt(*x).map(|ci| ci.dict_base).unwrap_or(false))) && !disabled("dictsubrow");
+                let ns = if (matches!(self.kind(oid), Kind::Instance | Kind::Namespace) || typed) && !self.np_struct.contains(&oid) && !dict_sub { Ns::Attr } else { Ns::Item };
                 ns_used = ns;
                 rows.push(state.row(oid, ns));
                 obs_rows.push((oid, ns, state.row(oid, ns)));
