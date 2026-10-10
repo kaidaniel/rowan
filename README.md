@@ -33,7 +33,22 @@ numeric ones, `reset_index()` the index names; a Series whose index matters (a c
 side may have it (an open input never provides a plain name the other side surely has), and
 calls inside functions are analysed per call site. 135 test programs (120 small, 15
 pipelines) in `tests/pandas/` are checked against real pandas by the runtime oracle
-`tests/oracle.py`, which also checks every claim of the 417 plain-Python cases that runs.
+`tests/oracle.py`, which also checks every claim of the plain-Python cases that runs.
+
+**pydantic, FastAPI, the standard library, numpy.** A pydantic model's attributes are its
+fields; construction and `model_validate` read the input by alias (a missing required field is
+a `ValidationError`, an open input gets a requirement), validate the values (lax coercion,
+`Literal` / Enum options, nested models, discriminated unions, constraints) and run the
+validators as user code; dumps follow their options. FastAPI handlers are entry points with
+open requests and run concretely for every `TestClient` call (parameters converted by their
+annotations, 422s, dependencies, middlewares, the JSON the client reads back). Most of the
+standard library is modelled exactly on known values: `re` (a Python-regex engine), `json`,
+`csv`, `configparser`, `sqlite3` (in-memory SQL simulated, with aggregates), `argparse`,
+`datetime`, `decimal` / `fractions`, `collections`, `itertools` / `functools`, `urllib.parse`,
+text helpers (SPECIFICATION §11.2 lists them). numpy arrays use the tensor shapes; structured
+arrays are records of their fields. The suites `tests/pydantic`, `tests/fastapi`,
+`tests/stdlib`, `tests/numpy` and `tests/apps` (single files to multi-module packages mixing
+these libraries) are all checked against the real libraries by the oracle.
 
 The design is in `SPECIFICATION.md`; `AGENTS.md` has the engineering notes for whoever
 works on it next. The engine is written in Rust (`rowan/`); it was ported from a Python
@@ -45,8 +60,9 @@ rowan/target/release/rowan prog.py                # text report
 rowan/target/release/rowan prog.py --json         # JSON lines (verdicts, schemas, summaries)
 rowan/target/release/rowan prog.py --facts        # per-name facts for editor integration
 rowan/target/release/rowan lib.py --no-entry      # only what the module itself runs (no entry-point pass)
-uv run --no-project python tests/run_golden.py    # golden suite (417 cases + 162 torch + 135 pandas)
-uv run --no-project --with pandas python tests/oracle.py   # the runtime oracle on the cases (strict on tests/pandas)
+uv run --no-project python tests/run_golden.py    # golden suite (954 cases over all suites)
+uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy \
+    python tests/oracle.py                        # the runtime oracle on the cases (strict on the library suites)
 uv run --no-project python tests/run_snapshots.py # output snapshots on larger inputs
 ```
 
@@ -145,12 +161,13 @@ known.
 | `rowan/src/scopes.rs`, `rowan/src/frontend.rs` | lexical scopes; parsing (ruff), node locations |
 | `rowan/src/interp/` | the abstract interpreter over the AST: statements, expressions, calls, closures as cell objects, classes / MRO / properties / dunder protocols, declared types, loops with recency, narrowing, guarded loads, unknown calls with attribution, entry-point analysis of uncalled functions |
 | `rowan/src/summary.rs` | symbolic function summaries (spec §7.3/§9): placeholders, deferred accesses, imprecision events, footprints, instantiation with allocation-site resolution, SCC re-iteration |
-| `rowan/src/models/` | library models: builtins, `dict`/`list`/`str`, `json`/`yaml`/`pickle`, `copy`, `dataclasses`, `collections`, `csv.DictReader`, `argparse`, `os.environ`, `functools.partial`, `requests`, pandas, torch (`torch.rs`) |
+| `rowan/src/models/` | library models: builtins and exact literal values (`pyvalues`, `pytext`), `dict`/`list`/`str`, `json`/`yaml`/`pickle`, `copy`, `dataclasses`, `collections`, `csv`, `argparse`, `configparser`, `sqlite3`, `re`, `datetime`, `decimal`, paths, threads / futures, pydantic, FastAPI, pandas, torch / numpy (`torch.rs`) |
 | `rowan/src/shape.rs` | tensor shapes: symbolic dims, shapes, facts, printing |
 | `rowan/src/report.rs` | per-access verdict combination, schema table, text / JSON / facts output |
-| `tests/run_golden.py`, `tests/cases/` | golden harness: expectations are `#@` comments in the case files (417 cases, each written before running the engine) |
+| `tests/run_golden.py`, `tests/cases/` | golden harness: expectations are `#@` comments in the case files (458 plain-Python cases, each written before running the engine) |
+| `tests/{pydantic,fastapi,stdlib,numpy,apps}/` | library suites (`small/`, `models/`; apps: `small/`, `medium/` and `large/` packages), `PENDING` lists, `CONVENTIONS.md` |
 | `tests/torch/`, `tests/torch_oracle.py` | 162 torch cases (`CONVENTIONS.md`); the oracle runs them under real PyTorch |
-| `tests/pandas/`, `tests/oracle.py` | 135 pandas cases (`CONVENTIONS.md`, `PENDING`); the oracle runs every case under real pandas / Python (rows, values, verdicts, schemas by mutation) |
+| `tests/pandas/`, `tests/oracle.py` | 137 pandas cases (`CONVENTIONS.md`, `PENDING`); the oracle runs every case under real pandas / Python (rows, values, verdicts, schemas by mutation) |
 | `tests/run_snapshots.py`, `tests/snapshots/`, `tests/fixtures/` | output snapshots on the example and three large fixture programs |
 | `examples/etl_report.py` | a realistic script with planted bugs (all found; also golden case e34) |
 | `vscode-rowan/`, `rowan/py/` | VS Code extension (uses `rowan serve`); PyO3 binding (does not load on the current macOS toolchain) |
@@ -191,7 +208,7 @@ known.
 
 ## Performance
 
-Release build, Apple M-series: the 579-case golden suite runs in 2 s (one process per
+Release build, Apple M-series: the 954-case golden suite runs in 5 s (one process per
 case; each torch model in about 0.02 s); an 830-line program and a 1,700-line twelve-module package analyse in 0.1 s each;
 a 1.2k-line self-referential module hits the 2 s soft deadline and finishes in 2.5 s with
 reduced precision. 137 scripts from local projects analysed in 0.8 s total without

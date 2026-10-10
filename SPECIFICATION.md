@@ -505,7 +505,47 @@ A declarative layer covers most models: `identity`, `copy(src)`, `gen(keys)`, `k
 
 ### 11.2 Initial registry
 
-**Builtins / stdlib.** `dict.{get, setdefault, update, pop, popitem, keys, values, items, copy, clear, fromkeys}`; `dict()`; `dict(zip(ks, vs))` (`Lits` → closed); `{**}` / PEP 584 union; `copy.copy` (new outer object, inner slots aliased); `copy.deepcopy` (fresh recursively); `json.load(s)` (open `Adder`, nested access-path placeholders); `json.dump(s)` (reads: no requirement); `csv.DictReader` (rows: open `Adder` per reader; `fieldnames=` → closed); `os.environ` (open `Adder`, program-wide); `argparse` (`add_argument("--x")` → attr `x` on the parsed namespace); `dataclasses.asdict` / `fields`; `vars`; `getattr(o, Lit)`; `collections.defaultdict` / `Counter` (map role, never raise); `functools.{partial, wraps, lru_cache}`; `sorted` / `map` / `filter` / `min` / `max` with `key=`; `itertools.groupby`.
+**Builtins / stdlib.** Exact on literal values wherever CPython's result is decided (values are
+literal keys: str, bytes, int, float, bool, None, tuples, frozensets, Decimal / Fraction,
+datetime values, Enum members); anything else keeps the record model's soundness (open rows,
+`?` values). Coverage:
+
+| area | modelled |
+| --- | --- |
+| builtins | `len`, `sum` (CPython's float summation), `min` / `max` / `sorted` (keys, tuples, `__lt__`, `@dataclass(order=True)`, IntEnum), `any` / `all`, `enumerate` / `zip` / `map` / `filter` / `reversed` / `range`, `int` / `float` / `str` / `repr` / `format` / `bool` / `bytes` / `str(b, enc)`, `isinstance` / `hasattr` (by type for builtin containers) / `getattr`, `vars`, `iter` / `next`, `divmod`, `round`, `abs`, `chr` / `ord` / `hex` |
+| str / bytes / dict / list / set methods | all methods on literals (`format`, `%`, f-string specs; `partition`, `translate`, `casefold`, …; bytes `decode` / `hex` / `split`…); dict views and order; `fromkeys`, `setdefault`, `update`, `pop` / `del` (a removed key is absent, also on open records), `|` |
+| collections | `Counter` (counts, `most_common` ties in insertion order, views), `defaultdict`, `OrderedDict` (`move_to_end`), `deque` (`rotate`, `maxlen`), `ChainMap`, `namedtuple`, `UserDict` |
+| itertools / functools / operator / heapq / bisect | all of itertools on known items; `partial`, `reduce`, `wraps`, `lru_cache` / `cache`, `cached_property`, `singledispatch`, `total_ordering`; `itemgetter` / `attrgetter`; heapq; bisect |
+| dataclasses / enum / typing | fields, defaults / factories, `InitVar`, `KW_ONLY`, `frozen`, `order`, `replace`, `asdict` / `astuple` / `fields`; Enum / IntEnum / StrEnum / Flag (members are keys, `auto`); TypedDict (`total=`, required / optional keys), NamedTuple, `get_type_hints` |
+| text | `re` (a Python-regex engine: Pattern / Match objects, groups, `sub` with callbacks), `string.Template` / `capwords`, `textwrap`, `shlex`, `html`, `fnmatch`, `base64` / `binascii`, `urllib.parse` (`urlparse` / `urlsplit` / `urljoin` / `parse_qs(l)` / `urlencode` / `quote`) |
+| data formats | `json` (exact `dumps` text, `loads` of literals, round trips, `object_hook`; open input), `csv` (reader / writer / Dict*, dialects, StringIO text), `configparser` (INI simulated: sections, interpolation, `getint`, fallbacks), `sqlite3` (in-memory SQL simulated: CREATE / INSERT / SELECT with expressions, aggregates, GROUP BY, ORDER BY, LIMIT; UPDATE / DELETE, `rowcount`, `Row` factory; a SELECT's columns are its rows' keys even when the rows are not known) |
+| numbers / time | `math`, `statistics`, `decimal` (contexts, quantize), `fractions`, `datetime` / `date` / `time` / `timedelta` / `timezone` (arithmetic, `strftime` / `strptime` / `isoformat`) |
+| os / paths / process | `os.environ` (open, program-wide; `pop` / `del` / stores tracked), `os.path`, `pathlib` pure paths, `argparse` (known argv: namespaces, subcommands, choices, `SystemExit`), `logging` (no effect), `contextlib` (`contextmanager`, `suppress`, `ExitStack`, `redirect_stdout`, `closing`), `threading` / `concurrent.futures` (targets run, futures hold results), `copy` |
+
+**pydantic** (v2, with the v1 spellings). A model instance's attributes are its fields
+(closed unless `extra="allow"`); construction reads each field from the input by alias (a
+required field is a read: missing → `ValidationError`, open input → a requirement); values are
+validated by the annotation (scalars coerced in lax mode, `Literal` / Enum options, nested
+models, lists / dicts of them, discriminated unions with `union_tag_invalid`, `Field`
+constraints); defaults are not validated; validators (field / model, before / after / wrap)
+run as user code; dumps (`model_dump`, `model_dump_json`, `mode="json"`, include / exclude /
+exclude_none / exclude_unset / by_alias, computed fields, serializers; dataclass fields dump as
+dicts); `TypeAdapter`, `RootModel`, generics, pydantic dataclasses, `BaseSettings` (from
+`os.environ`). `ValidationError.errors()` holds the errors' `loc` / `type` / `msg`.
+
+**FastAPI.** Routes (app, routers, prefixes), each handler analysed as an entry point with open
+requests and run concretely for each `TestClient` call: path / query / header / cookie /
+body parameters converted by their annotations (Optional scalars, Enum / Literal; a text no
+value of the type can be → 422), dependencies (cached per request, `yield`), middlewares,
+exception handlers, `HTTPException` details, status codes (404 / 405 / 422 / route
+`status_code`), `response_model` (JSON mode), and the response body as the client reads it
+(JSON keys as text, Enum values, ISO dates, Decimals as floats outside a response model).
+
+**numpy** rides on the tensor model (§2.3): shapes through creation, reshape, transpose,
+broadcasting, reductions with `axis` / `keepdims`, indexing, `where`, concatenation; numpy's
+own semantics where they differ from torch (`transpose` permutes, `size` is an attribute,
+`cumsum` flattens). Structured arrays: the fields of a record dtype are keys (a missing one is a
+`ValueError`), `genfromtxt(names=True)` fields are requirements on the file.
 
 **pandas** (`df` is a DataFrame). A frame's row is its **columns** (keys may be tuples:
 MultiIndex columns; a plain key on them reads the top level). What literal data tells is kept
@@ -545,7 +585,8 @@ Programs with hand-written expectations, checked against the real library by a r
 every line, and refutes a row (`definite ⊆ K`, `absent ∩ K = ∅`, `K ⊆ present` when closed), a
 value, a verdict (`ok` never raised, `missing` always, `possibly` both — strict) or a schema (a
 `read_csv` returning the frame minus one column must raise for an `always` column and must not for
-a column outside `only`). `tests/pandas/` (135 programs) runs strict; `tests/cases/` lenient.
+a column outside `only`). `tests/pandas/` (137 programs), `tests/pydantic/`, `tests/fastapi/`, `tests/stdlib/`, `tests/apps/` run
+strict; `tests/cases/` lenient.
 
 ---
 
