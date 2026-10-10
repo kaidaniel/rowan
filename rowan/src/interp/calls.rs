@@ -1175,7 +1175,7 @@ impl Analyzer {
                 if let Some(bv) = bound.get(name) {
                     let mut bv = bv.clone();
                     let pcls = self.ph_info(*ph).cls.get();
-                    if let Some(pc) = pcls {
+                    if let Some(pc) = pcls.filter(|_| super::disabled("hintsound")) {
                         if !bv.pts.is_empty() {
                             let kept = bv.pts.filter(|o| self.may_be_instance(o, pc));
                             if kept != bv.pts {

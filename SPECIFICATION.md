@@ -243,7 +243,8 @@ body records an **event** wherever it did:
 * a call or method dispatch through a parameter;
 * `isinstance`, truthiness, `in`, iteration, `.get`, arithmetic or formatting on a parameter;
 * a subscript of a parameter by position;
-* a model's `concrete` event (a pandas call on a parameter, a known text a reader parses).
+* a model's `concrete` event (a pandas call on a parameter, a known text a reader parses);
+* an attribute read through a parameter whose class comes only from its annotation (`hint`).
 
 When a call site's arguments decide one of these events (a real function, a literal, a known
 container), the body is run concretely at that call site instead: it is **tabulated**.
@@ -294,9 +295,10 @@ no effect.
   modelled.
 * **Annotations.** An annotation types a placeholder only through wrappers that keep the
   value's class (`Optional`, `Annotated`, `Final`, `ClassVar`, a union with `None` and one
-  class). `list[Foo]` is a list, not a `Foo`; a union of several classes types nothing. The
-  hinted class also filters the argument's objects at instantiation: a call that violates the
-  hint gets the hinted class's behaviour (§13).
+  class). `list[Foo]` is a list, not a `Foo`; a union of several classes types nothing. A
+  hint is trusted only where the class is unknown: the arguments' classes at a call take
+  precedence (the summary is specialised on them), and a call site that passes an instance of
+  another class than the hint's runs the body concretely (a `hint` event, §6.2).
 
 ### 6.7 Garbage collection
 
@@ -533,8 +535,8 @@ The **sound reading** is the `proven`, `possibly` and `missing` tiers, the `defi
 `present` / `absent` sets of rows and the values, relative to:
 
 * the models: a model that is wrong about a library is wrong in rowan;
-* the trusted annotations: a parameter's class from its annotation filters the arguments, so a
-  call that violates the hint is analysed as if it respected it;
+* annotations, for values whose class is unknown: an entry point's parameter `x: Foo` is a
+  `Foo` (a caller outside the program could pass anything);
 * Python's dynamic features: `exec` / `eval` of non-literal code, `setattr` and `getattr` with
   unknown names, metaclass behaviour, and monkey-patching are unknown or ignored.
 

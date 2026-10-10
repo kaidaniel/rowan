@@ -163,13 +163,12 @@ been measured.
 
 ## Known problems
 
-The soundness stance and accepted imprecision are in SPECIFICATION §13. The bugs, open
-decisions, performance items and precision to-dos are listed, each with how to reproduce it,
+The soundness stance and accepted imprecision are in SPECIFICATION §13. The bugs, performance
+items and precision to-dos are listed, each with how to reproduce it,
 in `SUGGESTED_CHANGES.md`. The main ones:
 
 * names bound on one side of a join look bound on every path;
 * a bare `yield` gives no item;
-* violated type hints are trusted (a decision for the owner);
 * deadline-cut runs depend on machine load;
 * the `exits` fix doubled the objects on rich.
 

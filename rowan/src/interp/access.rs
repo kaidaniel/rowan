@@ -2321,6 +2321,11 @@ impl Analyzer {
                 return self.method_value(&format!("pydantic.{}", name), &Value::obj(oid));
             }
         }
+        // (a class only from the annotation: a call site passing an instance of another class
+        // runs the body concretely, hints are not trusted over known classes)
+        if !ph.exact.get() && ph.cls.get().is_some_and(|c| self.class_info_opt(c).is_some()) && !super::disabled("hintsound") {
+            self.record_event("hint", oid);
+        }
         if let (Some(pcls), false) = (ph.cls.get(), is_field) {
             if let Some(c) = self.class_lookup(pcls, name) {
                 let cv = self.cls_slots.get(&(c, Ns::Attr, nk)).cloned().unwrap_or_default();

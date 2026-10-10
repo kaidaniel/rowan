@@ -754,12 +754,16 @@ impl Analyzer {
             }
             let mut args: Vec<Value> = Vec::new();
             for p in &positional {
-                let cls = match &p.annotation {
-                    Some(ann) => self.annotation_class(ann, &fi, state),
-                    None => sig_cls(p.name.id.as_str()),
+                // (the arguments' class at this call wins over the annotation: a hint is trusted only
+                // where the class is unknown)
+                let sigc = if crate::interp::disabled("hintsound") { None } else { sig_cls(p.name.id.as_str()) };
+                let cls = match (&p.annotation, sigc) {
+                    (_, Some(c)) => Some(c),
+                    (Some(ann), None) => self.annotation_class(ann, &fi, state),
+                    (None, None) => sig_cls(p.name.id.as_str()),
                 };
                 let ph = self.new_placeholder(PhKind::Param, foid, p.name.id.as_str(), None, Ns::Item, None, cls, "");
-                if p.annotation.is_none() && cls.is_some() {
+                if (p.annotation.is_none() || sigc.is_some()) && cls.is_some() {
                     self.ph_info(ph).exact.set(true);
                 }
                 ph_by_name.insert(s(p.name.id.as_str()), ph);
@@ -767,12 +771,16 @@ impl Analyzer {
             }
             let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
             for p in &kwonly {
-                let cls = match &p.annotation {
-                    Some(ann) => self.annotation_class(ann, &fi, state),
-                    None => sig_cls(p.name.id.as_str()),
+                // (the arguments' class at this call wins over the annotation: a hint is trusted only
+                // where the class is unknown)
+                let sigc = if crate::interp::disabled("hintsound") { None } else { sig_cls(p.name.id.as_str()) };
+                let cls = match (&p.annotation, sigc) {
+                    (_, Some(c)) => Some(c),
+                    (Some(ann), None) => self.annotation_class(ann, &fi, state),
+                    (None, None) => sig_cls(p.name.id.as_str()),
                 };
                 let ph = self.new_placeholder(PhKind::Param, foid, p.name.id.as_str(), None, Ns::Item, None, cls, "");
-                if p.annotation.is_none() && cls.is_some() {
+                if (p.annotation.is_none() || sigc.is_some()) && cls.is_some() {
                     self.ph_info(ph).exact.set(true);
                 }
                 ph_by_name.insert(s(p.name.id.as_str()), ph);
@@ -1248,6 +1256,13 @@ impl Analyzer {
                 "call" => {
                     if !concrete.is_empty() {
                         return Some(ev.clone());
+                    }
+                }
+                "hint" => {
+                    if let Some(c) = self.ph_info(ev.ph).cls.get() {
+                        if concrete.iter().any(|o| self.kind(*o) == Kind::Instance && !self.may_be_instance(*o, c)) {
+                            return Some(ev.clone());
+                        }
                     }
                 }
                 "dispatch" => {
@@ -2336,7 +2351,7 @@ impl Inst {
             }
             acc = acc.join(&v);
         }
-        if let Some(c) = ph.cls.get() {
+        if let Some(c) = ph.cls.get().filter(|_| crate::interp::disabled("hintsound")) {
             if !acc.pts.is_empty() {
                 let kept = acc.pts.filter(|o| an.may_be_instance(o, c));
                 if kept != acc.pts {
