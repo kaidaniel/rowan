@@ -4151,6 +4151,8 @@ fn m_defaultdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             c.args.clone()
         };
         an.chainmaps.insert(oid, maps.clone());
+        // (built from parameters: the maps are known per call site)
+        an.concrete_args(c.args.iter(), st);
         // every map, the first one winning: copied from the last to the first
         for sa in maps.iter().rev() {
             if !an.record_objects(sa).is_empty() {

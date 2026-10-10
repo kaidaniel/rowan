@@ -1172,8 +1172,12 @@ impl Analyzer {
                         let s1 = strong && first.pts.len() == 1 && self.strongable(m);
                         self.store_key(m, Ns::Item, &key.kv, v, s1, node, state);
                     }
-                    let s1 = strong && self.strongable(oid);
-                    self.store_key(oid, Ns::Item, &key.kv, v, s1, node, state);
+                    if self.chainmaps[&oid].len() > 1 && !crate::interp::disabled("chaindel") {
+                        self.refresh_chainmap(oid, state);
+                    } else {
+                        let s1 = strong && self.strongable(oid);
+                        self.store_key(oid, Ns::Item, &key.kv, v, s1, node, state);
+                    }
                 }
                 Kind::Dict if self.attr_mirrors.contains_key(&oid) => {
                     // a `vars(obj)` dict: obj's attributes change with it
@@ -1295,6 +1299,21 @@ impl Analyzer {
         }
     }
 
+    /// A ChainMap's merged keys and values, rebuilt from its maps (the first one wins).
+    pub fn refresh_chainmap(&mut self, oid: u32, state: &mut State) {
+        let maps = self.chainmaps.get(&oid).cloned().unwrap_or_default();
+        state.set_row(oid, Ns::Item, Row::new());
+        state.drop_obj_ns(oid, Ns::Item);
+        for sa in maps.iter().rev() {
+            if !self.record_objects(sa).is_empty() {
+                self.copy_into(oid, Ns::Item, sa, state, true, &KeySet::new());
+            } else {
+                let r = state.row(oid, Ns::Item).data_store(Source::new(&format!("ChainMap@{}", oid), SourceKind::Data));
+                state.set_row(oid, Ns::Item, r);
+            }
+        }
+    }
+
     pub fn delete_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) {
         let objs: Vec<u32> = obj.pts.iter().collect();
         self.kill_facts_on(&objs, state);
@@ -1305,6 +1324,18 @@ impl Analyzer {
             let strong = targets.len() == 1 && self.obj(oid).single;
             if kind == Kind::Frame && ns == Ns::Item {
                 crate::models::pandas::frame_delitem(self, oid, key, node, state, strong, report);
+                continue;
+            }
+            if kind == Kind::Ph && ns == Ns::Item && !self.chainmaps.is_empty() && !super::disabled("chaindel") {
+                // (a ChainMap passed in deletes from its first map: decided per call site)
+                self.record_event("concrete", oid);
+            }
+            // a ChainMap: the first map loses the key (KeyError when only a later map has it);
+            // the view is the maps' again
+            if kind == Kind::Dict && ns == Ns::Item && self.chainmaps.contains_key(&oid) && !super::disabled("chaindel") {
+                let first = self.chainmaps[&oid].first().cloned().unwrap_or_default();
+                self.delete_item(&first, ns, key, node, state, report);
+                self.refresh_chainmap(oid, state);
                 continue;
             }
             if kind == Kind::Instance && ns == Ns::Item {
@@ -1328,17 +1359,40 @@ impl Analyzer {
                 // `del d[k]` with k a parameter: decided per call site when k is a literal there
                 self.record_event("narrow", *ph);
             }
+            let mut raise: Option<(bool, KeyId)> = None;
             for k in intern::sorted_by_str(crate::domain::kv_literals(&key.kv).iter()) {
+                let cls = classify(&row, k);
                 if report && !self.is_guarded(ns) {
-                    let cls = classify(&row, k);
                     self.verdict(node, k, &cls, oid, ns, None, None);
                     if cls.tier == Tier::Input {
                         let site = self.access_site(node);
                         self.require_providers_k(&cls, &row, &site, false, state, Some(k));
                     }
                 }
+                // (a `del` of a key that is not there raises KeyError)
+                if !matches!(cls.tier, Tier::Proven | Tier::Map | Tier::Sym) && kind != Kind::Ph {
+                    let surely = cls.tier == Tier::Missing && is_lit && strong;
+                    raise = Some((surely || raise.map(|r| r.0).unwrap_or(false), k));
+                }
                 row = row.delete(k, strong && is_lit);
                 state.pop_slot(oid, ns, k);
+            }
+            if let Some((surely, k)) = raise.filter(|_| ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown) && !super::disabled("delraise")) {
+                state.set_row(oid, ns, row.clone());
+                let exc = if ns == Ns::Item { "KeyError" } else { "AttributeError" };
+                if !self.raise_states.is_empty() {
+                    let e = self.exception_object(exc, vec![Value::lit(k)], node, state);
+                    self.cur_exc = Some(e);
+                }
+                if surely {
+                    self.raise_here(exc, state);
+                } else {
+                    self.may_raise_here(exc, state);
+                }
+                self.cur_exc = None;
+                if surely {
+                    continue;
+                }
             }
             // an unknown key: any key may be the one deleted
             if !key.kv.is_literal() && key.kv.as_param().is_none() && !super::disabled("delunknown") {

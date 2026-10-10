@@ -1,6 +1,5 @@
 
 small/s112_generator_resume.py
-small/s121_chainmap_writes.py
 small/s122_update_forms.py
 small/s125_format_map_missing.py
 small/s126_sorted_stability.py
