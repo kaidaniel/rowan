@@ -53,7 +53,7 @@ decision), `ROWAN_NO=a,b` (switch refinements off: `rg 'disabled\("' rowan/src`)
 | --- | --- |
 | `intern.rs` | interners; keys incl. `Member` (Enum members, identity / frozen-dataclass value keys), `Frozen` (frozensets), `Dec` / `Frac` (Decimal / Fraction), `Chrono` (datetime values); `IdSet<T>`. |
 | `domain.rs` | `Row` (present/definite/likely/absent, sources, mutators, terms), `KeyVal` (Lit/Lits/KeysOf/Data/Bot/Param), `Value`, `classify`. |
-| `layered.rs`, `state.rs` | persistent layered maps; `State` (env, rows, slots, elems, `lens` (list length / known prefix per path), `lasts` (last appended), reqs, ret, exits). |
+| `layered.rs`, `state.rs` | persistent maps (big-endian Patricia tries on integer keys, SPARTA-style merges; `TwoLevel` keeps hash inner maps); `State` (env, rows, slots, elems, `lens` (list length / known prefix per path), `lasts` (last appended), reqs, ret, exits). |
 | `frontend.rs`, `scopes.rs` | ruff parsing, leaked `&'static` trees, node→module registry, parse cache, `site_prefix`; lexical scopes. |
 | `interp/mod.rs` | `Analyzer` (+ model side tables: enums, argparse, csv, futures, singledispatch, identity keys, cookie jars…), `Obj`, allocation (`alloc_full`), `llen`/`set_llen`, `copy_side_tables`, budgets. |
 | `interp/{stmts,exprs,funcs,narrow,access,calls}.rs` | statements, expressions, functions / iteration, narrowing, record / attribute access, calls (tabulation vs summary, call cache, dataclass init, singledispatch, exception objects). |
