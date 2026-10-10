@@ -183,13 +183,41 @@ impl Analyzer {
         let skip_self = fi.cls.is_some() && !fi.is_static.get();
         let all: Vec<&'static ast::ParameterWithDefault> = params.posonlyargs.iter().chain(params.args.iter()).chain(params.kwonlyargs.iter()).collect();
         let body_params: Vec<String> = all.iter().filter(|p| self.fa_is_body_param(&fi, p, state)).map(|p| p.parameter.name.id.to_string()).collect();
-        for (i, p) in all.iter().enumerate() {
-            if i == 0 && skip_self {
-                continue;
-            }
+        // FastAPI solves the dependencies before it validates the request's own values (a
+        // missing header is a 422 after the sub-dependencies ran)
+        // (read off the program text: evaluating the markers again would make them weak)
+        let is_dep = |an: &mut Analyzer, p: &'static ast::ParameterWithDefault, _st: &mut State| -> bool {
             let pname = p.parameter.name.id.to_string();
-            let v = self.fa_param(func, p, req, &body_params, state, node, depth);
-            out.insert(s(&pname), v);
+            let call_is_dep = |e: &ast::Expr| matches!(e, ast::Expr::Call(c) if matches!(dotted_last(&c.func).as_str(), "Depends" | "Security"));
+            let in_ann = match p.parameter.annotation.as_deref() {
+                Some(ast::Expr::Subscript(sb)) if dotted_last(&sb.value) == "Annotated" => match &*sb.slice {
+                    ast::Expr::Tuple(tu) => tu.elts.iter().skip(1).any(|e| call_is_dep(e)),
+                    _ => false,
+                },
+                _ => false,
+            };
+            in_ann || matches!(an.fa_marker(&fi, &pname), Some((q, _)) if q == "fastapi.depends")
+        };
+        let mut vals: Vec<Option<Value>> = vec![None; all.len()];
+        for pass in 0..2 {
+            for (i, p) in all.iter().enumerate() {
+                if i == 0 && skip_self {
+                    continue;
+                }
+                let dep = crate::interp::disabled("fadepsfirst") || is_dep(self, p, state);
+                if (pass == 0) != dep {
+                    continue;
+                }
+                if pass == 1 && vals[i].is_some() {
+                    continue;
+                }
+                vals[i] = Some(self.fa_param(func, p, req, &body_params, state, node, depth));
+            }
+        }
+        for (i, p) in all.iter().enumerate() {
+            if let Some(v) = vals[i].take() {
+                out.insert(s(p.parameter.name.id.as_str()), v);
+            }
         }
         out
     }
@@ -405,18 +433,57 @@ impl Analyzer {
                 }
             } else if matches!(&marker, Some((q, _)) if q.starts_with("fastapi.param.Header")) {
                 let hk = pname.replace('_', "-");
+                // (whether the request surely has it / surely lacks it)
+                let mut surely_absent = true;
+                let mut surely_present = false;
                 if let Some(h) = &r.headers {
+                    if !h.kv.is_bot() && !h.kv.is_literal() {
+                        surely_absent = false;
+                    }
                     for o in h.pts.iter() {
                         let row = state.row(o, Ns::Item);
+                        if row.open() {
+                            surely_absent = false;
+                        }
                         for k in row.present.iter() {
                             if intern::key_as_str(k).map(|x| x.to_lowercase() == hk.to_lowercase()).unwrap_or(false) {
                                 v = v.join(&state.slot(o, Ns::Item, k));
+                                surely_absent = false;
+                                surely_present |= row.definite.contains(k) && h.pts.len() == 1;
                             }
                         }
                     }
                 }
-                if v.empty() {
-                    v = default.clone().unwrap_or_else(|| Value::data("header"));
+                // (the headers a TestClient always sends)
+                const CLIENT_HEADERS: &[(&str, &str)] = &[("host", "testserver"), ("accept", "*/*"), ("accept-encoding", "gzip, deflate"), ("connection", "keep-alive"), ("user-agent", "testclient")];
+                if !surely_present {
+                    if let Some((_, hv)) = CLIENT_HEADERS.iter().find(|(n, _)| *n == hk.to_lowercase()) {
+                        if v.empty() {
+                            v = Value::lit_str(hv);
+                        }
+                        surely_absent = false;
+                    }
+                }
+                if v.empty() || !surely_present {
+                    match default.clone() {
+                        Some(d) => v = v.join(&d),
+                        None if surely_absent && v.empty() && !crate::interp::disabled("faheadermissing") => {
+                            // a required header the request does not send: 422
+                            self.raise_here("RequestValidationError", state);
+                            return Value::new();
+                        }
+                        None if !surely_present && !crate::interp::disabled("faheadermissing") => {
+                            self.may_raise_here("RequestValidationError", state);
+                            if v.empty() {
+                                v = Value::data("header");
+                            }
+                        }
+                        None => {
+                            if v.empty() {
+                                v = Value::data("header");
+                            }
+                        }
+                    }
                 }
             } else {
                 let alias = match &marker {
