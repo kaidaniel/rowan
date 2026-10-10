@@ -1312,7 +1312,24 @@ impl Analyzer {
         // (fib(9) inside fib(10)), up to a depth
         let mut lit_key = false;
         if !entry && !super::disabled("litrec") && !args.is_empty() && kwargs.is_empty() && star_args.is_empty() && star_kwargs.is_empty() {
-            let lits: Option<Vec<String>> = args.iter().map(|a| a.kv.as_lit().filter(|_| a.pts.is_empty()).map(intern::key_repr)).collect();
+            // (a tensor of a fully known shape counts like a literal: halving until length 1)
+            let lits: Option<Vec<String>> = args
+                .iter()
+                .map(|a| {
+                    if let Some(k) = a.kv.as_lit().filter(|_| a.pts.is_empty()) {
+                        return Some(intern::key_repr(k));
+                    }
+                    if self.torch_on && !super::disabled("litrectensor") {
+                        if let Some(sh) = crate::models::torch::tensor_shape(a) {
+                            if sh.rest.is_none() && sh.suffix.is_empty() && sh.assume.is_empty() {
+                                let dims: Option<Vec<i64>> = sh.prefix.iter().map(|d| crate::shape::as_lit(*d)).collect();
+                                return dims.map(|ds| format!("T{:?}", ds));
+                            }
+                        }
+                    }
+                    None
+                })
+                .collect();
             let depth = self.active_by_func.get(&foid).map(|v| v.len()).unwrap_or(0);
             if let Some(ls) = lits.filter(|_| depth < 40) {
                 key.1 = format!("{}|{}", key.1, ls.join(","));
