@@ -813,6 +813,9 @@ pub struct Analyzer {
     pub path_classes: FxHashMap<ObjId, String>,
     /// sqlite3 connections (their databases), cursors (their connection), Row dicts (columns)
     pub sql_dbs: FxHashMap<ObjId, crate::models::sqlite::Db>,
+    /// functions whose summary met a connection from outside (left alone there): a summary
+    /// used without tabulating leaves those databases' rows unknown
+    pub sql_touched: FxHashMap<ObjId, FxHashSet<ObjId>>,
     pub sql_cursors: FxHashMap<ObjId, ObjId>,
     pub sql_rows: FxHashMap<ObjId, Vec<String>>,
     /// itertools.count / cycle / repeat(x) objects
@@ -1060,6 +1063,7 @@ impl Analyzer {
             re_matches: FxHashMap::default(),
             path_classes: FxHashMap::default(),
             sql_dbs: FxHashMap::default(),
+            sql_touched: FxHashMap::default(),
             sql_cursors: FxHashMap::default(),
             sql_rows: FxHashMap::default(),
             infinites: FxHashMap::default(),

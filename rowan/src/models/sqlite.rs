@@ -39,6 +39,8 @@ pub struct Rs {
     pub rows: Option<Vec<Vec<Option<KeyId>>>>,
     /// the source an unknown result's values come from
     pub source: String,
+    /// rows an INSERT / UPDATE / DELETE changed, when known
+    pub rowcount: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -150,6 +152,9 @@ fn lex(sql: &str) -> Option<Vec<Tok>> {
 enum SqlV {
     Lit(KeyId),
     Param(Option<String>),
+    /// (UPDATE … SET only) a column of the row, `a <op> b`
+    Col(String),
+    Bin(Box<SqlV>, String, Box<SqlV>),
 }
 
 #[derive(Clone, Debug)]
@@ -163,7 +168,7 @@ struct Cond {
 enum Stmt {
     Create { name: String, cols: Vec<(String, String)>, pk: Option<usize>, if_not: bool },
     Insert { table: String, cols: Option<Vec<String>>, rows: Vec<Vec<SqlV>>, or: Option<String> },
-    Select { cols: Option<Vec<(String, Option<String>)>>, table: String, conds: Option<Vec<Cond>>, order: Vec<(String, bool)>, limit: Option<usize>, offset: usize, distinct: bool },
+    Select { cols: Option<Vec<(String, Option<SExpr>)>>, table: String, conds: Option<Vec<Cond>>, group: Vec<String>, having: bool, order: Vec<(OrdT, bool)>, limit: Option<SqlV>, offset: Option<SqlV>, distinct: bool },
     Update { table: String, sets: Vec<(String, SqlV)>, conds: Option<Vec<Cond>> },
     Delete { table: String, conds: Option<Vec<Cond>> },
     Drop { table: String },
@@ -232,6 +237,26 @@ impl P {
         };
         self.i += 1;
         Some(v)
+    }
+    /// `SET c = <expr>`: a value, a column, or `x <op> y` of those (+ - * ||).
+    fn set_operand(&mut self) -> Option<SqlV> {
+        if let Some(Tok::Id(x)) = self.t.get(self.i).cloned() {
+            if !["NULL", "TRUE", "FALSE"].iter().any(|k| x.eq_ignore_ascii_case(k)) {
+                self.i += 1;
+                return Some(SqlV::Col(x));
+            }
+        }
+        self.value()
+    }
+    fn set_expr(&mut self) -> Option<SqlV> {
+        let a = self.set_operand()?;
+        for op in ["+", "-", "*", "||"] {
+            if self.eat_p(op) {
+                let b = self.set_operand()?;
+                return Some(SqlV::Bin(Box::new(a), op.to_string(), Box::new(b)));
+            }
+        }
+        Some(a)
     }
     fn end(&mut self) -> bool {
         self.eat_p(";");
@@ -443,7 +468,7 @@ fn parse(sql: &str) -> Option<Stmt> {
         let distinct = p.eat_kw("DISTINCT");
         p.eat_kw("ALL");
         // result columns up to FROM
-        let mut cols: Option<Vec<(String, Option<String>)>> = Some(Vec::new());
+        let mut cols: Option<Vec<(String, Option<SExpr>)>> = Some(Vec::new());
         let mut star = false;
         loop {
             if p.eat_p("*") {
@@ -485,11 +510,7 @@ fn parse(sql: &str) -> Option<Stmt> {
                         p.i += 1;
                     }
                 }
-                let src = match (&plain, &toks[..]) {
-                    (Some(c), _) => Some(c.clone()),
-                    (None, [Tok::Id(f), Tok::P(a), Tok::P(s), Tok::P(b)]) if f.eq_ignore_ascii_case("count") && a == "(" && s == "*" && b == ")" => Some("\u{1}count".to_string()),
-                    _ => None,
-                };
+                let src = parse_sexpr(&toks);
                 if let Some(cs) = cols.as_mut() {
                     cs.push((name, src));
                 }
@@ -521,7 +542,7 @@ fn parse(sql: &str) -> Option<Stmt> {
                 None => {
                     p.i = save;
                     // an unsupported filter: skip to ORDER / LIMIT, rows unknown
-                    while p.i < p.t.len() && !p.kw("ORDER") && !p.kw("LIMIT") {
+                    while p.i < p.t.len() && !p.kw("ORDER") && !p.kw("LIMIT") && !p.kw("GROUP") {
                         p.i += 1;
                     }
                     None
@@ -530,8 +551,25 @@ fn parse(sql: &str) -> Option<Stmt> {
         } else {
             Some(Vec::new())
         };
-        if p.kw("GROUP") {
-            return None;
+        let mut group = Vec::new();
+        if p.eat_kw("GROUP") {
+            if !p.eat_kw("BY") {
+                return None;
+            }
+            loop {
+                group.push(p.ident()?);
+                if !p.eat_p(",") {
+                    break;
+                }
+            }
+        }
+        // (a HAVING filter: the rows are not simulated, the columns are known)
+        let mut having = false;
+        if p.eat_kw("HAVING") {
+            having = true;
+            while p.i < p.t.len() && !p.kw("ORDER") && !p.kw("LIMIT") {
+                p.i += 1;
+            }
         }
         let mut order = Vec::new();
         if p.eat_kw("ORDER") {
@@ -539,37 +577,42 @@ fn parse(sql: &str) -> Option<Stmt> {
                 return None;
             }
             loop {
-                let c = p.ident()?;
+                let term = match p.t.get(p.i)? {
+                    Tok::Num(n) => {
+                        let k = n.parse::<usize>().ok()?;
+                        p.i += 1;
+                        OrdT::Pos(k)
+                    }
+                    _ => OrdT::Name(p.ident()?),
+                };
                 let desc = if p.eat_kw("DESC") {
                     true
                 } else {
                     p.eat_kw("ASC");
                     false
                 };
-                order.push((c, desc));
+                order.push((term, desc));
                 if !p.eat_p(",") {
                     break;
                 }
             }
         }
         let mut limit = None;
-        let mut offset = 0;
+        let mut offset = None;
         if p.eat_kw("LIMIT") {
-            match p.value()? {
-                SqlV::Lit(k) => limit = Some(usize::try_from(intern::key_as_int(k)?).ok()?),
-                _ => return None,
-            }
+            limit = Some(p.value()?);
             if p.eat_kw("OFFSET") {
-                match p.value()? {
-                    SqlV::Lit(k) => offset = usize::try_from(intern::key_as_int(k)?).ok()?,
-                    _ => return None,
-                }
+                offset = Some(p.value()?);
+            } else if p.eat_p(",") {
+                // `LIMIT offset, count`
+                offset = limit.take();
+                limit = Some(p.value()?);
             }
         }
         if !p.end() {
             return None;
         }
-        return Some(Stmt::Select { cols, table, conds, order, limit, offset, distinct });
+        return Some(Stmt::Select { cols, table, conds, group, having, order, limit, offset, distinct });
     }
     if p.eat_kw("UPDATE") {
         let table = p.ident()?;
@@ -582,7 +625,7 @@ fn parse(sql: &str) -> Option<Stmt> {
             if !p.eat_p("=") {
                 return None;
             }
-            sets.push((c, p.value()?));
+            sets.push((c, p.set_expr()?));
             if !p.eat_p(",") {
                 break;
             }
@@ -617,7 +660,447 @@ fn parse(sql: &str) -> Option<Stmt> {
     None
 }
 
+// --------------------------------------------------------------------- expressions
+
+/// An ORDER BY term: a result column (or a table column) by name, or a result position.
+#[derive(Clone, Debug)]
+enum OrdT {
+    Name(String),
+    Pos(usize),
+}
+
+/// A result-column expression.
+#[derive(Clone, Debug)]
+enum SExpr {
+    Lit(KeyId),
+    Param(Option<String>),
+    Col(String),
+    Neg(Box<SExpr>),
+    Bin(Box<SExpr>, String, Box<SExpr>),
+    Func(String, Vec<SExpr>),
+    /// an aggregate: name, argument (None: `*`), DISTINCT
+    Agg(String, Option<Box<SExpr>>, bool),
+}
+
+const AGGS: &[&str] = &["sum", "total", "count", "avg", "min", "max"];
+
+impl SExpr {
+    fn is_agg(&self) -> bool {
+        match self {
+            SExpr::Agg(..) => true,
+            SExpr::Neg(a) => a.is_agg(),
+            SExpr::Bin(a, _, b) => a.is_agg() || b.is_agg(),
+            SExpr::Func(_, xs) => xs.iter().any(|x| x.is_agg()),
+            _ => false,
+        }
+    }
+    fn has_positional(&self) -> bool {
+        match self {
+            SExpr::Param(None) => true,
+            SExpr::Neg(a) => a.has_positional(),
+            SExpr::Bin(a, _, b) => a.has_positional() || b.has_positional(),
+            SExpr::Func(_, xs) => xs.iter().any(|x| x.has_positional()),
+            SExpr::Agg(_, Some(a), _) => a.has_positional(),
+            _ => false,
+        }
+    }
+}
+
+/// A result column's tokens as an expression; None when not understood.
+fn parse_sexpr(toks: &[Tok]) -> Option<SExpr> {
+    let mut i = 0;
+    let e = sexpr(toks, &mut i, 0)?;
+    (i == toks.len()).then_some(e)
+}
+
+fn sexpr(t: &[Tok], i: &mut usize, min: u8) -> Option<SExpr> {
+    let prec = |op: &str| -> Option<u8> {
+        match op {
+            "||" => Some(3),
+            "*" | "/" | "%" => Some(2),
+            "+" | "-" => Some(1),
+            _ => None,
+        }
+    };
+    let mut lhs = satom(t, i)?;
+    while let Some(Tok::P(op)) = t.get(*i) {
+        let Some(pr) = prec(op) else { break };
+        if pr < min {
+            break;
+        }
+        let op = op.clone();
+        *i += 1;
+        let rhs = sexpr(t, i, pr + 1)?;
+        lhs = SExpr::Bin(Box::new(lhs), op, Box::new(rhs));
+    }
+    Some(lhs)
+}
+
+fn satom(t: &[Tok], i: &mut usize) -> Option<SExpr> {
+    let tok = t.get(*i)?.clone();
+    *i += 1;
+    Some(match tok {
+        Tok::P(x) if x == "(" => {
+            let e = sexpr(t, i, 0)?;
+            match t.get(*i)? {
+                Tok::P(c) if c == ")" => *i += 1,
+                _ => return None,
+            }
+            e
+        }
+        Tok::P(x) if x == "-" => SExpr::Neg(Box::new(satom(t, i)?)),
+        Tok::P(x) if x == "+" => satom(t, i)?,
+        Tok::Num(n) => match n.parse::<i64>() {
+            Ok(v) => SExpr::Lit(intern::key_int(v)),
+            Err(_) => SExpr::Lit(intern::key_float(n.parse::<f64>().ok()?)),
+        },
+        Tok::Str(s) => SExpr::Lit(key_str_lit(&s)),
+        Tok::Param(n) => SExpr::Param(n),
+        Tok::Id(x) if x.eq_ignore_ascii_case("NULL") => SExpr::Lit(intern::key_none()),
+        Tok::Id(x) if x.eq_ignore_ascii_case("TRUE") => SExpr::Lit(intern::key_int(1)),
+        Tok::Id(x) if x.eq_ignore_ascii_case("FALSE") => SExpr::Lit(intern::key_int(0)),
+        Tok::Id(f) if matches!(t.get(*i), Some(Tok::P(p)) if p == "(") => {
+            *i += 1;
+            let name = f.to_ascii_lowercase();
+            let mut distinct = false;
+            if matches!(t.get(*i), Some(Tok::Id(d)) if d.eq_ignore_ascii_case("DISTINCT")) {
+                distinct = true;
+                *i += 1;
+            }
+            let mut args: Vec<SExpr> = Vec::new();
+            let mut star = false;
+            if matches!(t.get(*i), Some(Tok::P(p)) if p == "*") {
+                star = true;
+                *i += 1;
+            } else if !matches!(t.get(*i), Some(Tok::P(p)) if p == ")") {
+                loop {
+                    args.push(sexpr(t, i, 0)?);
+                    if matches!(t.get(*i), Some(Tok::P(p)) if p == ",") {
+                        *i += 1;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            match t.get(*i)? {
+                Tok::P(c) if c == ")" => *i += 1,
+                _ => return None,
+            }
+            // `min(a, b)` / `max(a, b)` are scalar
+            if AGGS.contains(&name.as_str()) && (args.len() <= 1) {
+                if star && name != "count" {
+                    return None;
+                }
+                SExpr::Agg(name, if star { None } else { Some(Box::new(args.into_iter().next()?)) }, distinct)
+            } else {
+                if star || distinct {
+                    return None;
+                }
+                SExpr::Func(name, args)
+            }
+        }
+        Tok::Id(x) => {
+            // `t.col`: the column
+            if matches!(t.get(*i), Some(Tok::P(d)) if d == ".") {
+                *i += 1;
+                match t.get(*i)? {
+                    Tok::Id(c) => {
+                        *i += 1;
+                        SExpr::Col(c.clone())
+                    }
+                    _ => return None,
+                }
+            } else {
+                SExpr::Col(x)
+            }
+        }
+        _ => return None,
+    })
+}
+
+struct Env<'a> {
+    cols: &'a [(String, String)],
+    ps: &'a [Value],
+    named: &'a IndexMap<String, Value>,
+}
+
+fn is_float_key(k: KeyId) -> bool {
+    intern::with_key(k, |kk| matches!(kk, intern::Key::Float(_)))
+}
+
+fn num_f(k: KeyId) -> Option<f64> {
+    intern::with_key(k, |kk| match kk {
+        intern::Key::Int(i) => Some(*i as f64),
+        intern::Key::Float(b) => Some(f64::from_bits(*b)),
+        _ => None,
+    })
+}
+
+/// sqlite arithmetic on known values: NULL in, NULL out; integers stay integers (None on
+/// overflow; `/` truncates, by zero is NULL), a real makes a real; `||` of texts / integers.
+fn sql_arith(op: &str, x: KeyId, y: KeyId) -> Option<KeyId> {
+    if x == intern::key_none() || y == intern::key_none() {
+        return Some(intern::key_none());
+    }
+    if op == "||" {
+        let txt = |k: KeyId| intern::key_as_str(k).map(|s| s.to_string()).or_else(|| if is_float_key(k) { None } else { intern::key_as_int(k).map(|i| i.to_string()) });
+        return Some(key_str_lit(&format!("{}{}", txt(x)?, txt(y)?)));
+    }
+    num_f(x)?;
+    num_f(y)?;
+    if !is_float_key(x) && !is_float_key(y) {
+        let (i, j) = (intern::key_as_int(x)?, intern::key_as_int(y)?);
+        return match op {
+            "+" => i.checked_add(j).map(intern::key_int),
+            "-" => i.checked_sub(j).map(intern::key_int),
+            "*" => i.checked_mul(j).map(intern::key_int),
+            "/" | "%" if j == 0 => Some(intern::key_none()),
+            "/" => i.checked_div(j).map(intern::key_int),
+            "%" => i.checked_rem(j).map(intern::key_int),
+            _ => None,
+        };
+    }
+    let (p, q) = (num_f(x)?, num_f(y)?);
+    let r = match op {
+        "+" => p + q,
+        "-" => p - q,
+        "*" => p * q,
+        "/" if q == 0.0 => return Some(intern::key_none()),
+        "/" => p / q,
+        _ => return None,
+    };
+    r.is_finite().then(|| intern::key_float(r))
+}
+
+/// `round(x, n)`: a real; None near a tie (sqlite's decimal rounding is not reproduced there).
+fn sql_round(x: KeyId, n: i64) -> Option<KeyId> {
+    if x == intern::key_none() {
+        return Some(intern::key_none());
+    }
+    let v = num_f(x)?;
+    if !(0..=10).contains(&n) || v.abs() > 1e15 {
+        return None;
+    }
+    let m = 10f64.powi(n as i32);
+    let s = v.abs() * m;
+    if (s - s.floor() - 0.5).abs() < 1e-6 {
+        return None;
+    }
+    let r = (s + 0.5).floor() / m;
+    Some(intern::key_float(if v < 0.0 { -r } else { r }))
+}
+
+fn scalar_func(name: &str, args: &[Option<KeyId>]) -> Option<KeyId> {
+    let none = intern::key_none();
+    match (name, args) {
+        ("round", [x]) => sql_round((*x)?, 0),
+        ("round", [x, n]) => sql_round((*x)?, intern::key_as_int((*n)?)?),
+        ("abs", [x]) => {
+            let x = (*x)?;
+            if x == none {
+                return Some(none);
+            }
+            if is_float_key(x) {
+                Some(intern::key_float(num_f(x)?.abs()))
+            } else {
+                intern::key_as_int(x)?.checked_abs().map(intern::key_int)
+            }
+        }
+        ("upper" | "lower", [x]) => {
+            let x = (*x)?;
+            if x == none {
+                return Some(none);
+            }
+            let s = intern::key_as_str(x)?;
+            Some(key_str_lit(&if name == "upper" { s.to_ascii_uppercase() } else { s.to_ascii_lowercase() }))
+        }
+        ("length", [x]) => {
+            let x = (*x)?;
+            if x == none {
+                return Some(none);
+            }
+            Some(intern::key_int(intern::key_as_str(x)?.chars().count() as i64))
+        }
+        ("coalesce" | "ifnull", xs) if xs.len() >= 2 => {
+            for x in xs {
+                let x = (*x)?;
+                if x != none {
+                    return Some(x);
+                }
+            }
+            Some(none)
+        }
+        ("min" | "max", xs) if xs.len() >= 2 => {
+            let mut best: Option<KeyId> = None;
+            for x in xs {
+                let x = (*x)?;
+                if x == none {
+                    return Some(none);
+                }
+                best = Some(match best {
+                    None => x,
+                    Some(b) => {
+                        let o = sql_cmp(x, b)?;
+                        if (name == "max" && o.is_gt()) || (name == "min" && o.is_lt()) { x } else { b }
+                    }
+                });
+            }
+            best
+        }
+        _ => None,
+    }
+}
+
+fn eval_row(e: &SExpr, env: &Env, row: &[Option<KeyId>]) -> Option<KeyId> {
+    match e {
+        SExpr::Lit(k) => Some(*k),
+        SExpr::Param(_) => param_value(env.ps, env.named, &mut 0, &match e {
+            SExpr::Param(n) => SqlV::Param(n.clone()),
+            _ => unreachable!(),
+        })
+        .and_then(|x| lit(&x)),
+        SExpr::Col(c) => row[env.cols.iter().position(|(n, _)| n.eq_ignore_ascii_case(c))?],
+        SExpr::Neg(a) => sql_arith("-", intern::key_int(0), eval_row(a, env, row)?),
+        SExpr::Bin(a, op, b) => sql_arith(op, eval_row(a, env, row)?, eval_row(b, env, row)?),
+        SExpr::Func(f, xs) => scalar_func(f, &xs.iter().map(|x| eval_row(x, env, row)).collect::<Vec<_>>()),
+        SExpr::Agg(..) => None,
+    }
+}
+
+/// An expression over one group: aggregates over its rows, grouped columns their key.
+fn eval_group(e: &SExpr, env: &Env, gcols: &[(usize, KeyId)], rows: &[Vec<Option<KeyId>>]) -> Option<KeyId> {
+    match e {
+        SExpr::Col(c) => {
+            let i = env.cols.iter().position(|(n, _)| n.eq_ignore_ascii_case(c))?;
+            // (a bare column outside GROUP BY: sqlite picks some row)
+            gcols.iter().find(|(j, _)| *j == i).map(|(_, k)| *k)
+        }
+        SExpr::Lit(_) | SExpr::Param(_) => eval_row(e, env, &[]),
+        SExpr::Neg(a) => sql_arith("-", intern::key_int(0), eval_group(a, env, gcols, rows)?),
+        SExpr::Bin(a, op, b) => sql_arith(op, eval_group(a, env, gcols, rows)?, eval_group(b, env, gcols, rows)?),
+        SExpr::Func(f, xs) => scalar_func(f, &xs.iter().map(|x| eval_group(x, env, gcols, rows)).collect::<Vec<_>>()),
+        SExpr::Agg(name, arg, distinct) => {
+            let none = intern::key_none();
+            let Some(arg) = arg else { return Some(intern::key_int(rows.len() as i64)) };
+            let mut vals: Vec<KeyId> = Vec::new();
+            for r in rows {
+                let v = eval_row(arg, env, r)?;
+                if v != none && !(*distinct && vals.contains(&v)) {
+                    vals.push(v);
+                }
+            }
+            match name.as_str() {
+                "count" => Some(intern::key_int(vals.len() as i64)),
+                "min" | "max" => {
+                    let mut best: Option<KeyId> = None;
+                    for v in vals {
+                        best = Some(match best {
+                            None => v,
+                            Some(b) => {
+                                let o = sql_cmp(v, b)?;
+                                if (name == "max" && o.is_gt()) || (name == "min" && o.is_lt()) { v } else { b }
+                            }
+                        });
+                    }
+                    Some(best.unwrap_or(none))
+                }
+                "sum" | "total" | "avg" => {
+                    if vals.iter().any(|v| num_f(*v).is_none()) {
+                        return None;
+                    }
+                    if vals.is_empty() {
+                        return Some(if name == "total" { intern::key_float(0.0) } else { none });
+                    }
+                    let all_int = vals.iter().all(|v| !is_float_key(*v));
+                    if all_int && name == "sum" {
+                        let mut s: i64 = 0;
+                        for v in &vals {
+                            s = s.checked_add(intern::key_as_int(*v)?)?;
+                        }
+                        return Some(intern::key_int(s));
+                    }
+                    // (sqlite ≥ 3.43: Kahan–Babuška–Neumaier summation of reals)
+                    let (mut sum, mut err) = (0.0f64, 0.0f64);
+                    for v in &vals {
+                        let x = num_f(*v)?;
+                        let t = sum + x;
+                        if sum.abs() >= x.abs() {
+                            err += (sum - t) + x;
+                        } else {
+                            err += (x - t) + sum;
+                        }
+                        sum = t;
+                    }
+                    let total = sum + err;
+                    let r = if name == "avg" { total / vals.len() as f64 } else { total };
+                    r.is_finite().then(|| intern::key_float(r))
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
 // --------------------------------------------------------------------- values
+
+/// A SET expression with its parameters bound: a value (None: unknown), a column, `a op b`.
+enum SetV {
+    K(Option<KeyId>),
+    Col(usize),
+    Bin(Box<SetV>, String, Box<SetV>),
+}
+
+fn resolve_set(v: &SqlV, cols: &[(String, String)], ps: &[Value], named: &IndexMap<String, Value>, pos: &mut usize) -> Option<SetV> {
+    Some(match v {
+        SqlV::Col(c) => SetV::Col(cols.iter().position(|(n, _)| n.eq_ignore_ascii_case(c))?),
+        SqlV::Bin(a, op, b) => {
+            let a = resolve_set(a, cols, ps, named, pos)?;
+            let b = resolve_set(b, cols, ps, named, pos)?;
+            SetV::Bin(Box::new(a), op.clone(), Box::new(b))
+        }
+        _ => SetV::K(param_value(ps, named, pos, v).and_then(|x| lit(&x))),
+    })
+}
+
+/// sqlite arithmetic on stored values: NULL in, NULL out; integers stay integers (None on
+/// overflow), a real makes a real; `||` of texts; anything else is not simulated (None).
+fn eval_set(v: &SetV, row: &[Option<KeyId>]) -> Option<KeyId> {
+    match v {
+        SetV::K(k) => *k,
+        SetV::Col(i) => row[*i],
+        SetV::Bin(a, op, b) => {
+            let (x, y) = (eval_set(a, row)?, eval_set(b, row)?);
+            if x == intern::key_none() || y == intern::key_none() {
+                return Some(intern::key_none());
+            }
+            if op == "||" {
+                return Some(key_str_lit(&format!("{}{}", intern::key_as_str(x)?, intern::key_as_str(y)?)));
+            }
+            let fl = |k: KeyId| intern::with_key(k, |kk| match kk {
+                intern::Key::Int(i) => Some(*i as f64),
+                intern::Key::Float(b) => Some(f64::from_bits(*b)),
+                _ => None,
+            });
+            match (intern::key_as_int(x).filter(|_| fl(x).is_some()), intern::key_as_int(y).filter(|_| fl(y).is_some()), intern::with_key(x, |kk| matches!(kk, intern::Key::Float(_))) || intern::with_key(y, |kk| matches!(kk, intern::Key::Float(_)))) {
+                (Some(i), Some(j), false) => match op.as_str() {
+                    "+" => i.checked_add(j),
+                    "-" => i.checked_sub(j),
+                    _ => i.checked_mul(j),
+                }
+                .map(intern::key_int),
+                _ => {
+                    let (p, q) = (fl(x)?, fl(y)?);
+                    let r = match op.as_str() {
+                        "+" => p + q,
+                        "-" => p - q,
+                        _ => p * q,
+                    };
+                    r.is_finite().then(|| intern::key_float(r))
+                }
+            }
+        }
+    }
+}
 
 /// sqlite's type affinity applied to a stored value.
 fn affinity(ty: &str, k: KeyId) -> KeyId {
@@ -757,6 +1240,7 @@ fn param_value(params: &[Value], named: &IndexMap<String, Value>, pos: &mut usiz
             v
         }
         SqlV::Param(Some(n)) => named.get(n).cloned(),
+        SqlV::Col(_) | SqlV::Bin(..) => None,
     }
 }
 
@@ -820,7 +1304,7 @@ fn run(an: &mut Analyzer, con: u32, sql: &str, params: Option<(Vec<Value>, Index
     let mut db = an.sql_dbs.get(&con).cloned()?;
     let src = format!("sqlite3.connect@L{}", db.line);
     let stmt = parse(sql);
-    let unknown_rs = |cols: Option<Vec<String>>, table: &str| Rs { cols, rows: None, source: format!("{}:{}", src, table) };
+    let unknown_rs = |cols: Option<Vec<String>>, table: &str| Rs { cols, rows: None, source: format!("{}:{}", src, table), rowcount: None };
     let Some(stmt) = stmt else {
         // unsupported SQL: whatever it touched is unknown now
         let low = sql.to_lowercase();
@@ -882,6 +1366,9 @@ fn run(an: &mut Analyzer, con: u32, sql: &str, params: Option<(Vec<Value>, Index
                         }
                         t.rows.as_mut().unwrap().push(new);
                     }
+                    if t.rows.is_some() {
+                        out.rowcount = Some(rows.len() as i64);
+                    }
                 }
                 _ => t.rows = None,
             }
@@ -889,22 +1376,29 @@ fn run(an: &mut Analyzer, con: u32, sql: &str, params: Option<(Vec<Value>, Index
         Stmt::Update { table, sets, conds } => {
             if let Some(t) = db.tables.get_mut(&table) {
                 let ok = (|| -> Option<()> {
-                    if uncertain {
-                        return None;
-                    }
                     let conds = conds?;
                     let ps = params.as_ref()?;
                     let rows = t.rows.as_mut()?;
                     let mut pos0 = 0;
-                    let set_vals: Vec<(usize, Option<KeyId>)> = sets.iter().map(|(c, v)| Some((t.cols.iter().position(|(n, _)| n.eq_ignore_ascii_case(c))?, param_value(ps, &named, &mut pos0, v).and_then(|x| lit(&x))))).collect::<Option<Vec<_>>>()?;
+                    let mut set_vals: Vec<(usize, SetV)> = Vec::new();
+                    for (c, v) in sets.iter() {
+                        let ci = t.cols.iter().position(|(n, _)| n.eq_ignore_ascii_case(c))?;
+                        set_vals.push((ci, resolve_set(v, &t.cols, ps, &named, &mut pos0)?));
+                    }
+                    let mut n = 0;
                     for r in rows.iter_mut() {
                         let mut pos = pos0;
                         if matches_conds(&conds, &t.cols, r, ps, &named, &mut pos)? {
+                            n += 1;
+                            let old = r.clone();
                             for (ci, v) in &set_vals {
-                                r[*ci] = v.map(|k| affinity(&t.cols[*ci].1, k));
+                                let new = eval_set(v, &old).map(|k| affinity(&t.cols[*ci].1, k));
+                                // (a statement that may not run: a changed cell is unknown)
+                                r[*ci] = if uncertain && new != old[*ci] { None } else { new };
                             }
                         }
                     }
+                    out.rowcount = Some(n);
                     Some(())
                 })();
                 if ok.is_none() {
@@ -915,9 +1409,6 @@ fn run(an: &mut Analyzer, con: u32, sql: &str, params: Option<(Vec<Value>, Index
         Stmt::Delete { table, conds } => {
             if let Some(t) = db.tables.get_mut(&table) {
                 let ok = (|| -> Option<()> {
-                    if uncertain {
-                        return None;
-                    }
                     let conds = conds?;
                     let ps = params.as_ref()?;
                     let rows = t.rows.as_ref()?;
@@ -928,6 +1419,11 @@ fn run(an: &mut Analyzer, con: u32, sql: &str, params: Option<(Vec<Value>, Index
                             keep.push(r.clone());
                         }
                     }
+                    out.rowcount = Some((rows.len() - keep.len()) as i64);
+                    // (a statement that may not run and removes rows: the count is unknown)
+                    if uncertain && keep.len() != rows.len() {
+                        return None;
+                    }
                     t.rows = Some(keep);
                     Some(())
                 })();
@@ -936,7 +1432,7 @@ fn run(an: &mut Analyzer, con: u32, sql: &str, params: Option<(Vec<Value>, Index
                 }
             }
         }
-        Stmt::Select { cols, table, conds, order, limit, offset, distinct } => {
+        Stmt::Select { cols, table, conds, group, having, order, limit, offset, distinct } => {
             let t = db.tables.get(&table).cloned();
             // the result columns: as named, or the table's
             let names: Option<Vec<String>> = match (&cols, &t) {
@@ -950,24 +1446,134 @@ fn run(an: &mut Analyzer, con: u32, sql: &str, params: Option<(Vec<Value>, Index
                 return Some(out);
             };
             let rows = (|| -> Option<Vec<Vec<Option<KeyId>>>> {
+                if having {
+                    return None;
+                }
                 let conds = conds?;
                 let ps = params.clone()?;
                 let mut sel: Vec<Vec<Option<KeyId>>> = Vec::new();
-                for r in t.rows.as_ref()? {
+                let mut sel_rowid: Vec<usize> = Vec::new();
+                for (ri, r) in t.rows.as_ref()?.iter().enumerate() {
                     let mut pos = 0;
                     if matches_conds(&conds, &t.cols, r, &ps, &named, &mut pos)? {
                         sel.push(r.clone());
+                        sel_rowid.push(ri);
                     }
                 }
-                for (c, desc) in order.iter().rev() {
-                    let i = t.cols.iter().position(|(n, _)| n.eq_ignore_ascii_case(c))?;
-                    let mut ok = true;
-                    sel.sort_by(|a, b| match (a[i], b[i]) {
-                        (Some(x), Some(y)) => sql_cmp(x, y).unwrap_or_else(|| {
-                            ok = false;
+                // the positional parameters after the WHERE's: LIMIT / OFFSET
+                let mut lpos = conds.iter().filter(|c| matches!(c.val, Some(SqlV::Param(None)))).count();
+                let ex: Option<Vec<SExpr>> = match &cols {
+                    None => None,
+                    Some(cs) => Some(cs.iter().map(|(_, e)| e.clone()).collect::<Option<Vec<_>>>()?),
+                };
+                let env = Env { cols: &t.cols, ps: &ps, named: &named };
+                if ex.as_ref().map(|es| es.iter().any(|e| e.has_positional())).unwrap_or(false) {
+                    return None;
+                }
+                let grouped = !group.is_empty() || ex.as_ref().map(|es| es.iter().any(|e| e.is_agg())).unwrap_or(false);
+                // result rows, each with the source row it came from (ungrouped)
+                let mut res: Vec<(Vec<Option<KeyId>>, Option<Vec<Option<KeyId>>>)> = Vec::new();
+                if grouped {
+                    let es = ex.as_ref()?;
+                    let gidx: Vec<usize> = group.iter().map(|g| t.cols.iter().position(|(n, _)| n.eq_ignore_ascii_case(g))).collect::<Option<Vec<_>>>()?;
+                    let mut groups: Vec<(Vec<KeyId>, Vec<Vec<Option<KeyId>>>)> = Vec::new();
+                    if gidx.is_empty() {
+                        groups.push((Vec::new(), sel.clone()));
+                    } else {
+                        for r in &sel {
+                            let key: Vec<KeyId> = gidx.iter().map(|i| r[*i]).collect::<Option<Vec<_>>>()?;
+                            match groups.iter_mut().find(|(k, _)| *k == key) {
+                                Some((_, rs)) => rs.push(r.clone()),
+                                None => groups.push((key, vec![r.clone()])),
+                            }
+                        }
+                        // (sqlite's GROUP BY sorter: groups in key order)
+                        let mut ok = true;
+                        groups.sort_by(|a, b| {
+                            for (x, y) in a.0.iter().zip(b.0.iter()) {
+                                match sql_cmp(*x, *y) {
+                                    Some(std::cmp::Ordering::Equal) => continue,
+                                    Some(o) => return o,
+                                    None => {
+                                        ok = false;
+                                        return std::cmp::Ordering::Equal;
+                                    }
+                                }
+                            }
                             std::cmp::Ordering::Equal
-                        }),
-                        _ => {
+                        });
+                        if !ok {
+                            return None;
+                        }
+                    }
+                    for (key, rs) in &groups {
+                        let gcols: Vec<(usize, KeyId)> = gidx.iter().copied().zip(key.iter().copied()).collect();
+                        let vals: Vec<Option<KeyId>> = es.iter().map(|e| eval_group(e, &env, &gcols, rs)).collect();
+                        res.push((vals, None));
+                    }
+                } else {
+                    for (ri, r) in sel.iter().enumerate() {
+                        let vals: Vec<Option<KeyId>> = match &ex {
+                            None => r.clone(),
+                            Some(es) => es.iter().map(|e| eval_row(e, &env, r)).collect(),
+                        };
+                        // (the source row, then its rowid: the INTEGER PRIMARY KEY, else the
+                        // insertion order, which rowids follow)
+                        let mut src = r.clone();
+                        src.push(match t.pk {
+                            Some(pk) => r[pk],
+                            None => Some(intern::key_int(sel_rowid[ri] as i64)),
+                        });
+                        res.push((vals, Some(src)));
+                    }
+                }
+                if distinct {
+                    let mut seen: Vec<(Vec<Option<KeyId>>, Option<Vec<Option<KeyId>>>)> = Vec::new();
+                    for r in res {
+                        if r.0.iter().any(|x| x.is_none()) {
+                            return None;
+                        }
+                        if !seen.iter().any(|s| s.0 == r.0) {
+                            seen.push(r);
+                        }
+                    }
+                    res = seen;
+                }
+                // ORDER BY: a result column (name / position), or a column of the table
+                let rnames = names.clone()?;
+                for (term, desc) in order.iter().rev() {
+                    let pick: Box<dyn Fn(&(Vec<Option<KeyId>>, Option<Vec<Option<KeyId>>>)) -> Option<KeyId>> = match term {
+                        OrdT::Pos(k) if *k >= 1 && *k <= rnames.len() => {
+                            let i = k - 1;
+                            Box::new(move |r| r.0[i])
+                        }
+                        OrdT::Pos(_) => return None,
+                        OrdT::Name(n) => match rnames.iter().position(|x| x.eq_ignore_ascii_case(n)) {
+                            Some(i) => Box::new(move |r| r.0[i]),
+                            None => {
+                                let rowid = ["rowid", "oid", "_rowid_"].iter().any(|x| n.eq_ignore_ascii_case(x));
+                                let i = match t.cols.iter().position(|(c, _)| c.eq_ignore_ascii_case(n)) {
+                                    Some(i) => i,
+                                    None if rowid => t.cols.len(),
+                                    None => return None,
+                                };
+                                Box::new(move |r| r.1.as_ref().and_then(|s| s[i]))
+                            }
+                        },
+                    };
+                    let keys: Vec<KeyId> = res.iter().map(|r| pick(r)).collect::<Option<Vec<_>>>()?;
+                    let mut idx: Vec<usize> = (0..res.len()).collect();
+                    let mut ok = true;
+                    // (stable: ties keep their order, descending too)
+                    idx.sort_by(|a, b| match sql_cmp(keys[*a], keys[*b]) {
+                        Some(o) => {
+                            if *desc {
+                                o.reverse()
+                            } else {
+                                o
+                            }
+                        }
+                        None => {
                             ok = false;
                             std::cmp::Ordering::Equal
                         }
@@ -975,59 +1581,23 @@ fn run(an: &mut Analyzer, con: u32, sql: &str, params: Option<(Vec<Value>, Index
                     if !ok {
                         return None;
                     }
-                    if *desc {
-                        sel.reverse();
-                        // (a stable descending sort keeps ties in insertion order)
-                        let mut fixed: Vec<Vec<Option<KeyId>>> = Vec::new();
-                        let mut j = 0;
-                        while j < sel.len() {
-                            let mut k = j;
-                            while k + 1 < sel.len() && sel[k + 1][i] == sel[j][i] {
-                                k += 1;
-                            }
-                            let mut grp: Vec<Vec<Option<KeyId>>> = sel[j..=k].to_vec();
-                            grp.reverse();
-                            fixed.extend(grp);
-                            j = k + 1;
-                        }
-                        sel = fixed;
-                    }
+                    res = idx.into_iter().map(|i| res[i].clone()).collect();
                 }
-                // projection
-                let mut proj: Vec<Vec<Option<KeyId>>> = Vec::new();
-                let n = sel.len();
-                match &cols {
-                    None => proj = sel,
-                    Some(cs) => {
-                        if cs.iter().any(|(_, s)| s.as_deref() == Some("\u{1}count")) {
-                            if cs.len() != 1 {
-                                return None;
-                            }
-                            proj.push(vec![Some(intern::key_int(n as i64))]);
-                        } else {
-                            let idx: Vec<usize> = cs.iter().map(|(_, s)| s.as_ref().and_then(|c| t.cols.iter().position(|(n, _)| n.eq_ignore_ascii_case(c)))).collect::<Option<Vec<_>>>()?;
-                            for r in sel {
-                                proj.push(idx.iter().map(|i| r[*i]).collect());
-                            }
+                let num = |v: &Option<SqlV>, lpos: &mut usize| -> Option<Option<i64>> {
+                    match v {
+                        None => Some(None),
+                        Some(v) => {
+                            let x = param_value(&ps, &named, lpos, v).and_then(|x| lit(&x))?;
+                            Some(Some(intern::key_as_int(x)?))
                         }
                     }
-                }
-                if distinct {
-                    let mut seen: Vec<Vec<Option<KeyId>>> = Vec::new();
-                    for r in proj {
-                        if r.iter().any(|x| x.is_none()) {
-                            return None;
-                        }
-                        if !seen.contains(&r) {
-                            seen.push(r);
-                        }
-                    }
-                    proj = seen;
-                }
-                let proj: Vec<_> = proj.into_iter().skip(offset).collect();
-                Some(match limit {
-                    Some(l) => proj.into_iter().take(l).collect(),
-                    None => proj,
+                };
+                let lim = num(&limit, &mut lpos)?;
+                let off = num(&offset, &mut lpos)?;
+                let proj: Vec<Vec<Option<KeyId>>> = res.into_iter().map(|r| r.0).skip(off.unwrap_or(0).max(0) as usize).collect();
+                Some(match lim {
+                    Some(l) if l >= 0 => proj.into_iter().take(l as usize).collect(),
+                    _ => proj,
                 })
             })();
             out.rows = rows;
@@ -1126,8 +1696,9 @@ fn cursor_obj(an: &mut Analyzer, st: &mut State, node: &Node, con: u32, rs: Rs, 
     };
     set(st, "\u{1}rows", list);
     set(st, "\u{1}pos", Value::lit(intern::key_int(0)));
-    let rc = match &rs.rows {
-        Some(_) if rs.cols.is_some() => Value::lit(intern::key_int(-1)),
+    let rc = match (&rs.rows, rs.rowcount) {
+        (_, Some(n)) => Value::lit(intern::key_int(n)),
+        (Some(_), None) if rs.cols.is_some() => Value::lit(intern::key_int(-1)),
         _ => Value::data("rowcount"),
     };
     set(st, "rowcount", rc);
@@ -1168,7 +1739,7 @@ fn exec_on(an: &mut Analyzer, st: &mut State, c: &Call, con: u32, existing: Opti
             }
         }
         let line = an.sql_dbs.get(&con).map(|d| d.line).unwrap_or(0);
-        let rs = Rs { cols: None, rows: None, source: format!("sqlite3.connect@L{}:?", line) };
+        let rs = Rs { cols: None, rows: None, source: format!("sqlite3.connect@L{}:?", line), rowcount: None };
         return cursor_obj(an, st, &c.node, con, rs, existing);
     };
     let pv = c.arg(1, Some(if many { "seq_of_parameters" } else { "parameters" }));
@@ -1177,14 +1748,23 @@ fn exec_on(an: &mut Analyzer, st: &mut State, c: &Call, con: u32, existing: Opti
         match seq.flatten() {
             Some(items) => {
                 let mut last = Rs::default();
+                let mut total: Option<i64> = Some(0);
                 for item in items {
                     let ps = params_of(an, st, &c.node, Some(&item));
+                    if ps.is_none() {
+                        an.concrete_args([&item], st);
+                    }
                     last = run(an, con, &sql, ps, uncertain).unwrap_or_default();
+                    total = total.zip(last.rowcount).map(|(a, b)| a + b);
                 }
+                // (executemany: the rows all of them changed)
+                last.rowcount = total;
                 last
             }
             None => {
-                // unknown parameters: the statement's tables lose their rows
+                // unknown parameters (a parameter, a global read in a summary: decided per
+                // call site): the statement's tables lose their rows
+                an.concrete_args(c.args.iter(), st);
                 run(an, con, &sql, None, true).unwrap_or_default()
             }
         }
@@ -1205,6 +1785,15 @@ pub fn m_sql(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let is_con = an.sql_dbs.contains_key(&o);
     let con = if is_con { Some(o) } else { an.sql_cursors.get(&o).copied() };
     let Some(con) = con else { return Value::data("sqlite") };
+    // a connection from outside the function met while summarising: the database is not the
+    // summary's to read or change; decided per call site
+    if !an.sum_stack.is_empty() && an.is_entry_object(con) && !crate::interp::disabled("sqlentry") {
+        an.record_event("concrete", con);
+        for f in an.sum_stack.clone() {
+            an.sql_touched.entry(f).or_default().insert(con);
+        }
+        return Value::data("sqlite");
+    }
     match (is_con, name.as_str()) {
         (_, "execute") => exec_on(an, st, c, con, if is_con { None } else { Some(o) }, false),
         (_, "executemany") => exec_on(an, st, c, con, if is_con { None } else { Some(o) }, true),

@@ -445,6 +445,10 @@ impl Analyzer {
                     p = self.ph_info(par).parent;
                     n += 1;
                 }
+            } else if matches!(self.kind(oid), Kind::List | Kind::Tuple | Kind::Dict | Kind::Set) && self.is_entry_object(oid) && !crate::interp::disabled("entryconcrete") {
+                // a container from outside the function (a global): its contents as the call
+                // site has them
+                self.record_event("concrete", oid);
             } else if depth > 0 && matches!(self.kind(oid), Kind::List | Kind::Tuple | Kind::Dict | Kind::Set) && !self.is_entry_object(oid) {
                 for (_, x) in state.slots_of(oid) {
                     self.concrete_events(&x, state, depth - 1);
@@ -668,11 +672,24 @@ impl Analyzer {
             st.symbolic = true;
             // module bindings and the contents of module-level literal containers are entry facts
             let module_oids: Vec<ObjId> = self.modules.values().copied().collect();
+            // (nested ones too: `TABLE[1][0]`; bounded)
+            let mut seen_c: FxHashSet<ObjId> = FxHashSet::default();
             for moid in module_oids {
                 for (k, v) in state.obj_slots(moid, Ns::Attr) {
                     st.slots.set(&moid, (Ns::Attr, k), v.clone());
-                    for x in v.pts.iter() {
+                    let mut work: Vec<ObjId> = v.pts.iter().collect();
+                    while let Some(x) = work.pop() {
+                        if seen_c.len() > 4096 || !seen_c.insert(x) {
+                            continue;
+                        }
                         let xk = self.kind(x);
+                        if matches!(xk, Kind::List | Kind::Tuple | Kind::Set) || (xk == Kind::Dict && self.module_done) {
+                            if !crate::interp::disabled("nestedglobals") {
+                                for (_, v2) in state.slots_of(x) {
+                                    work.extend(v2.pts.iter());
+                                }
+                            }
+                        }
                         if matches!(xk, Kind::List | Kind::Tuple | Kind::Set) {
                             for ((ns2, k2), v2) in state.slots_of(x) {
                                 st.slots.set(&x, (ns2, k2), v2);

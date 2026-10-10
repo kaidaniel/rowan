@@ -1005,6 +1005,16 @@ impl Analyzer {
                 bind.insert(ps, sv.clone());
             }
             if !self.should_tabulate(&summ, &bind, state) {
+                // (outside databases the summary did not simulate: their rows are unknown now)
+                if let Some(cons) = self.sql_touched.get(&foid).cloned() {
+                    for c in cons {
+                        if let Some(db) = self.sql_dbs.get_mut(&c) {
+                            for t in db.tables.values_mut() {
+                                t.rows = None;
+                            }
+                        }
+                    }
+                }
                 if !self.sum_stack.is_empty() {
                     self.propagate_events(&summ, &bind, state);
                 }
