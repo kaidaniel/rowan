@@ -32,4 +32,4 @@ if __name__ == "__main__":
     left = len(q3)                               #@value left: includes={0}
     e = drain({})
     #@row e: present={} definite={} closed
-    #@todo value left: exactly={0}  (q3 is any JSON value: a falsy one that len() accepts is empty)
+    #@value left: exactly={0}  (q3 is any JSON value: a falsy one that len() accepts is empty)

@@ -254,6 +254,15 @@ impl Analyzer {
                         state.set_row(o, Ns::Item, crate::domain::Row::new());
                         state.drop_obj_ns(o, Ns::Item);
                     }
+                    // a falsy unknown value (a JSON document, an input): an empty container if
+                    // len() or a key read accepts it at all (a falsy number makes them raise)
+                    if !truth && self.kind(o) == Kind::Unknown && self.obj(o).single && v.kv.is_bot() && !super::disabled("unkfalsy") {
+                        state.set_row(o, Ns::Item, crate::domain::Row::new());
+                        state.drop_obj_ns(o, Ns::Item);
+                        state.drop_obj_ns(o, Ns::Pos);
+                        state.drop_obj_ns(o, Ns::Elem);
+                        state.lens.insert(o, (Some(0), 0, 0));
+                    }
                 }
             }
             _ => {}

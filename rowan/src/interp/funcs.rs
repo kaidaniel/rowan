@@ -5,7 +5,7 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{join_values, KeyVal, KeysOf, Ns, ObjSet, Row, SourceKind, Value, DATA};
+use crate::domain::{join_values, KeyVal, KeysOf, Ns, ObjId, ObjSet, Row, SourceKind, Value, DATA};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_int, key_str_lit, s, str_get, KeyId, KeySet, StrId, STAR};
 use crate::state::{Kind, State};
@@ -738,6 +738,52 @@ impl Analyzer {
     }
 
     // ------------------------------------------------------------ iteration
+    /// The items of an iterator object through `__next__`, when every call is decided (None:
+    /// not decided, or it changes other objects than itself and the items it returns).
+    fn unroll_next(&mut self, it: ObjId, node: &Node, state: &mut State) -> Option<Vec<Value>> {
+        let m = self.load_attr(&Value::obj(it), "__next__", node, state, false);
+        if m.pts.is_empty() {
+            return None;
+        }
+        let mut cur = state.copy();
+        let mut seq: Vec<Value> = Vec::new();
+        for _ in 0..super::UNROLL_MAX {
+            let mark = self.objects.len() as ObjId;
+            let mut probe = cur.copy();
+            // (the classes raised, as a try records them: StopIteration ends the iteration)
+            self.raise_cls.push((self.raise_states.len() + 1, Vec::new()));
+            let (v, r) = self.call_catching(&m, Vec::new(), IndexMap::new(), &mut probe, node);
+            let recs = self.raise_cls.pop().map(|(_, r)| r).unwrap_or_default();
+            let only_stop = !recs.is_empty() && recs.iter().all(|(c, _, _)| c.as_ref().is_some_and(|(names, _)| names.iter().any(|n| n == "StopIteration")));
+            // (effects only on the iterator, the objects its attributes hold — its own state,
+            // like the list it pops from — and on objects the call made)
+            let fp = probe.footprint(&cur);
+            let held: Vec<ObjId> = cur.slots_of(it).iter().filter(|((ns, _), _)| *ns == Ns::Attr).flat_map(|(_, v)| v.pts.to_vec()).collect();
+            let own = |o: ObjId| o == it || o >= mark || held.contains(&o);
+            if fp.rows.iter().any(|(o, _)| !own(*o)) || fp.slots.iter().any(|(o, _)| !own(*o)) || fp.elems.iter().any(|o| !own(*o)) {
+                return None;
+            }
+            match r.level {
+                0 if probe.reachable => {
+                    // (the items so far live in the state while the next call runs: a record
+                    // made at the same site again is then a new object, not the earlier item)
+                    probe.env.insert(s(&format!("\u{1}next{}", seq.len())), v.clone());
+                    seq.push(v);
+                    cur = probe;
+                }
+                2 if only_stop && (r.names.is_empty() || r.names == ["StopIteration"]) => {
+                    for i in 0..seq.len() {
+                        cur.env.shift_remove(&s(&format!("\u{1}next{}", i)));
+                    }
+                    state.replace_with(cur);
+                    return Some(seq);
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
     pub fn iterate(&mut self, v: &Value, node: &Node, state: &mut State) -> Iteration {
         // one of several containers (or strings): their items are alternatives, not one
         // sequence — joined position by position when every one is a sequence of one known
@@ -954,6 +1000,19 @@ impl Analyzer {
                     // an iterator (`return self`, an object with `__next__`): its items are what
                     // `__next__` returns (iterating it again would ask `__iter__` forever)
                     let iters: Vec<u32> = r.pts.iter().filter(|p| *p == oid || (self.kind(*p) == Kind::Instance && self.instance_class(*p).and_then(|c| self.class_lookup(c, "__next__")).is_some())).collect();
+                    // (one iterator whose `__next__` is decided call by call — an item, or surely
+                    // StopIteration — and changes nothing but its own state and the items it makes:
+                    // its items, in order, up to UNROLL_MAX)
+                    if iters.len() == 1 && r.pts.len() == 1 && r.kv.is_bot() && items.is_some() && !crate::interp::disabled("nextunroll") {
+                        let it = iters[0];
+                        if let Some(seq) = self.unroll_next(it, node, state) {
+                            if let Some(its) = items.as_mut() {
+                                its.extend(seq.iter().cloned());
+                            }
+                            elems.push(join_values(seq));
+                            continue;
+                        }
+                    }
                     if !iters.is_empty() && !crate::interp::disabled("usernext") {
                         items = None;
                         exhaustive = false;

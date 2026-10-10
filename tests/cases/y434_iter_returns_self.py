@@ -20,7 +20,7 @@ out = []
 for rec in Lines(["a", "b"]):
     out.append(rec["line"])                       #@ ok line
     #@row rec: present={line,n} definite={line,n} closed
-first = out[0]                                    #@todo value first: exactly={"a"}
+first = out[0]                                    #@value first: exactly={"a"}
 #@value first: includes={"a"}
-n = len(out)                                      #@todo value n: exactly={2}
+n = len(out)                                      #@value n: exactly={2}
 #@value n: includes={2}
