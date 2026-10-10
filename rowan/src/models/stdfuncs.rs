@@ -24,6 +24,12 @@ pub fn value_order(an: &Analyzer, st: &State, a: &Value, b: &Value) -> Option<Or
                 _ => None,
             };
         }
+        // a (key, value) pair of items() / zip / enumerate
+        if let Some(o) = v.single().filter(|o| an.kind(*o) == Kind::Pair && v.kv.is_bot()) {
+            if let crate::interp::Payload::Pair(k, x) = &an.obj(o).payload {
+                return Some(vec![k.clone(), x.clone()]);
+            }
+        }
         let o = v.single().filter(|o| an.kind(*o) == Kind::Tuple && v.kv.is_bot())?;
         let n = an.llen(o, st)?;
         Some((0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect())

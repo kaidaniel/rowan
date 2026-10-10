@@ -495,24 +495,26 @@ fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn m_fromkeys(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("dict.fromkeys@L{}", c.line));
-    let mut ks = c.args.first().and_then(|a| an.lit_keys(a, st));
-    if ks.is_none() {
-        // known items that are literals (a user iterable, a generator)
-        if let Some(a) = c.args.first() {
-            let items = an.iterate(a, &c.node, st).items;
-            let lits: Option<Vec<KeyId>> = items.and_then(|its| its.iter().map(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).collect());
-            ks = lits.map(|l| l.into_iter().collect());
-        }
-    }
     let val = c.args.get(1).cloned().unwrap_or_else(|| an.none_v.clone());
-    if let Some(ks) = ks {
-        let mut row = st.row(oid, Ns::Item);
-        for k in ks.iter() {
+    let Some(a) = c.args.first() else { return Value::obj(oid) };
+    // known items that are literals, in order (a list, a string's characters, a generator)
+    let items = an.iterate(a, &c.node, st).items;
+    let lits: Option<Vec<KeyId>> = items.and_then(|its| its.iter().map(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).collect());
+    let mut row = st.row(oid, Ns::Item);
+    if let Some(ls) = lits {
+        for k in ls {
             row = row.store(k, true);
             st.set_slot(oid, Ns::Item, k, val.clone(), true);
         }
         st.set_row(oid, Ns::Item, row);
-    } else if let Some(a) = c.args.first() {
+    } else if let Some(ks) = if a.pts.is_empty() { None } else { an.lit_keys(a, st) } {
+        // the literals the iterable may hold (how many is not known): possible keys
+        for k in ks.iter() {
+            row = row.store(k, false);
+            st.set_slot(oid, Ns::Item, k, val.clone(), true);
+        }
+        st.set_row(oid, Ns::Item, row);
+    } else {
         let el = an.elem_of(a, &c.node, st);
         an.store_key(oid, Ns::Item, &el.kv, &val, false, &c.node, st);
     }
@@ -770,6 +772,7 @@ fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if let Some(items) = cands.filter(|its| !its.is_empty() && its.len() <= crate::interp::UNROLL_MAX) {
         let keyf = c.kw("key").filter(|k| !k.pts.is_empty());
         let mut keys: Vec<Option<KeyId>> = Vec::new();
+        let mut kvals: Vec<Value> = Vec::new();
         for (i, item) in items.iter().enumerate() {
             let kv = match &keyf {
                 Some(f) => {
@@ -781,6 +784,7 @@ fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 None => item.clone(),
             };
             keys.push(kv.kv.as_lit().filter(|_| kv.pts.is_empty()));
+            kvals.push(kv);
         }
         // items that order themselves (`__lt__`): compared one against the best so far
         if keys.iter().any(|k| k.is_none()) && keyf.is_none() && !crate::interp::disabled("instorder") && items.iter().all(|x| x.single().map(|o| an.kind(o) == Kind::Instance).unwrap_or(false)) {
@@ -807,6 +811,25 @@ fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let mut ok = true;
             for i in 1..items.len() {
                 match crate::interp::exprs::literal_order(keys[i].unwrap(), keys[best].unwrap()) {
+                    Some(std::cmp::Ordering::Greater) if is_max => best = i,
+                    Some(std::cmp::Ordering::Less) if !is_max => best = i,
+                    Some(_) => {}
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                return items[best].clone();
+            }
+        }
+        // keys that are tuples / pairs of known items: compared item by item
+        if keys.iter().any(|k| k.is_none()) && !crate::interp::disabled("tupleminmax") {
+            let mut best = 0usize;
+            let mut ok = true;
+            for i in 1..items.len() {
+                match crate::models::stdfuncs::value_order(an, st, &kvals[i], &kvals[best]) {
                     Some(std::cmp::Ordering::Greater) if is_max => best = i,
                     Some(std::cmp::Ordering::Less) if !is_max => best = i,
                     Some(_) => {}

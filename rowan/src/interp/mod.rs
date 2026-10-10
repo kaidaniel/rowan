@@ -2502,7 +2502,7 @@ impl Analyzer {
             match self.kind(o) {
                 Kind::Unknown | Kind::Ph | Kind::External => info.unknown = true,
                 // a tuple of known literals is that literal (as Python prints it)
-                Kind::Tuple if self.literal_tuple(o, state, 0).is_some() => info.lits.push(self.literal_tuple(o, state, 0).unwrap()),
+                Kind::Tuple | Kind::Pair if self.literal_tuple(o, state, 0).is_some() => info.lits.push(self.literal_tuple(o, state, 0).unwrap()),
                 _ => info.objects.push(self.obj(o).label.clone()),
             }
         }
