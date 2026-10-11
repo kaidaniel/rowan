@@ -63,7 +63,8 @@ and macOS, then the oracle on Linux. The torch oracle runs only on a manual disp
   * `#@value NAME: exactly= | unknown | includes=`;
   * `#@schema src: always= sometimes= only=`;
   * floors `possible=` / `definite_within=`; `#@todo …` for known imprecision; `#@argv …`;
-    `#@objects <= N` (a bound on the objects made, for blow-up cases; N by hand);
+    `#@objects <= N` / `#@tabulations <= N` (bounds on the objects made and the per-call-site
+    body runs, for blow-up cases; N by hand); `#@limits k=v,…` (the case's `ROWAN_LIMITS`);
   * torch: `#@shape`.
 
   A directive-only line applies to the code line above. `possibly k` also holds when rowan's

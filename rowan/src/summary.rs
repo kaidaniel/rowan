@@ -1230,7 +1230,7 @@ impl Analyzer {
             return false;
         };
         let kkey: &'static str = if ev.kind == "call" || ev.kind == "dispatch" { ev.kind } else { "lit" };
-        let key = (summary.foid, kkey);
+        let key = (self.func_info(summary.foid).node.addr(), kkey);
         let n = self.tab_count.get(&key).copied().unwrap_or(0);
         let budget = if kkey == "call" || kkey == "dispatch" { crate::interp::limit("call", MAX_CALL_TABULATIONS) } else { crate::interp::limit("tab", MAX_TABULATIONS) };
         let over_time = self.over_deadline();

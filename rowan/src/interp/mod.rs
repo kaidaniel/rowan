@@ -749,7 +749,11 @@ pub struct Analyzer {
     /// summary key variants (code cells, typed cells, signature) seen per function: each gets
     /// its own allocation context
     pub key_variants: FxHashMap<ObjId, Vec<(Vec<(ObjId, Vec<ObjId>)>, Vec<(ObjId, ObjId)>, Vec<(String, ObjId)>)>>,
-    pub tab_count: FxHashMap<(ObjId, &'static str), usize>,
+    /// tabulations decided by a summary's events, per function code (`FuncNode::addr`: every
+    /// closure object made from one `def` shares the budget) and kind
+    pub tab_count: FxHashMap<(usize, &'static str), usize>,
+    /// every tabulated body run (forced ones included): the golden `#@tabulations <= N` bound
+    pub tab_runs: usize,
     /// tabulations of one callee at one call site under the same callers (loop rounds that
     /// re-run it): bounded, then the summary
     pub tab_site_count: FxHashMap<(ObjId, u32, u32, usize, Vec<u32>), usize>,
@@ -1175,6 +1179,7 @@ impl Analyzer {
             sig_count: FxHashMap::default(),
             key_variants: FxHashMap::default(),
             tab_count: FxHashMap::default(),
+            tab_runs: 0,
             tab_site_count: FxHashMap::default(),
             rec_tabs: FxHashMap::default(),
             rec_runs: FxHashMap::default(),

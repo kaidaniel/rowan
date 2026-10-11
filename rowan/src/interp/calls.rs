@@ -1332,6 +1332,7 @@ impl Analyzer {
             }
         }
         // --- per-call-site (tabulated) analysis ---
+        self.tab_runs += 1;
         let mut key = (foid, if !entry { site.clone() } else { format!("entry:{}", site) });
         // literal arguments that differ from the running activations': not the same activation
         // (fib(9) inside fib(10)), up to a depth
