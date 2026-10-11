@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791703797172,
+  "lastUpdate": 1791707916526,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -220,6 +220,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: wall time",
             "value": 46.47,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 1323,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 688892,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 3483606,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 41664,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 154320,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "59e3b2f7547dfb9c11a78bb53ac2cd87cbdc6b67",
+          "message": "Summary variants removed again (revert of 96fa750): measured at equal work with variants always on and unchecked, re-analyses fall by 0-7 % (with literal outcomes), time is unchanged, and proven accesses drop (email 118 -> 21, stdlib12k 1478 -> 1077). The variants covered only truth / narrow outcomes of fixed-truth objects, a small share of what triggers re-analyses. Golden 1024/1024, snapshots same, cargo test ok\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T08:44:49+01:00",
+          "tree_id": "3a1b948b3bac22763e5e064d5aff66ab3af1e349",
+          "url": "https://github.com/kaidaniel/rowan/commit/59e3b2f7547dfb9c11a78bb53ac2cd87cbdc6b67"
+        },
+        "date": 1791707915932,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 301.82,
+            "unit": "s",
+            "extra": "cut at the 300 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1490,
+            "unit": "MB",
+            "extra": "cut at the 300 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 301.87,
+            "unit": "s",
+            "extra": "cut at the 300 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 12732,
+            "unit": "MB",
+            "extra": "cut at the 300 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 48.59,
             "unit": "s",
             "extra": "finished"
           },
