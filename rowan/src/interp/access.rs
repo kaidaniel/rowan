@@ -671,6 +671,8 @@ impl Analyzer {
             }
             return out;
         }
+        // (all targets' values joined at once: a pairwise join over many targets is quadratic)
+        let mut parts: Vec<Value> = vec![std::mem::take(&mut acc)];
         for oid in obj.pts.iter() {
             let kind = self.kind(oid);
             // a Counter reads a missing key as 0 without inserting it: the row is put back
@@ -740,7 +742,7 @@ impl Analyzer {
             match kind {
                 Kind::Locidx => {
                     let v = crate::models::pandas::loc_get(self, oid, key, node, state);
-                    acc = acc.join(&v);
+                    parts.push(v);
                     continue;
                 }
                 Kind::Groupby => {
@@ -749,7 +751,7 @@ impl Analyzer {
                     let saved = if several { self.alloc_extra.replace(format!("gb{}", oid)) } else { self.alloc_extra.clone() };
                     let v = crate::models::pandas::groupby_select(self, oid, key, node, state);
                     self.alloc_extra = saved;
-                    acc = acc.join(&v);
+                    parts.push(v);
                     continue;
                 }
                 Kind::Instance if ns == Ns::Item => {
@@ -760,7 +762,7 @@ impl Analyzer {
                             for f in fv.pts.iter() {
                                 if self.kind(f) == Kind::Function {
                                     let r = self.call_user(f, Some(Value::obj(oid)), vec![key.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
-                                    acc = acc.join(&r);
+                                    parts.push(r);
                                 }
                             }
                             continue;
@@ -771,13 +773,13 @@ impl Analyzer {
                                 let row = state.row(oid, Ns::Item);
                                 if !row.definite.contains(k) {
                                     let r = self.call_method_with(&Value::obj(oid), "__missing__", vec![key.clone()], node, state).unwrap_or_default();
-                                    acc = acc.join(&r);
+                                    parts.push(r);
                                     if row.present.contains(k) {
-                                        acc = acc.join(&state.slot(oid, Ns::Item, k));
+                                        parts.push(state.slot(oid, Ns::Item, k));
                                     }
                                     // an open / symbolic dict may hold it (never a missing key)
                                     if !row.present.contains(k) && (row.open() || row.symbolic()) {
-                                        acc = acc.join(&line_data);
+                                        parts.push(line_data.clone());
                                     }
                                     continue;
                                 }
@@ -785,7 +787,7 @@ impl Analyzer {
                         }
                         if let Some(ci) = self.class_info_opt(cls) {
                             if !ci.typed_dict && !ci.named_tuple && !ci.open_base {
-                                acc = acc.join(&line_data);
+                                parts.push(line_data.clone());
                                 continue;
                             }
                         }
@@ -798,37 +800,37 @@ impl Analyzer {
                     // a (key, value) pair indexed by 0 / 1 (or -2 / -1)
                     let idx = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
                     match (idx, self.obj(oid).payload.clone()) {
-                        (Some(0 | -2), Payload::Pair(k, _)) => acc = acc.join(&k),
-                        (Some(1 | -1), Payload::Pair(_, v)) => acc = acc.join(&v),
-                        _ => acc = acc.join(&line_data),
+                        (Some(0 | -2), Payload::Pair(k, _)) => parts.push(k),
+                        (Some(1 | -1), Payload::Pair(_, v)) => parts.push(v),
+                        _ => parts.push(line_data.clone()),
                     }
                 }
                 Kind::View => {
                     if let Payload::View(ViewKind::Attrs, inst) = self.obj(oid).payload.clone() {
                         // `obj.__dict__[k]`: an attribute load
                         let v = self.load_item(&inst, Ns::Attr, key, node, state, report);
-                        acc = acc.join(&v);
+                        parts.push(v);
                     } else if let Payload::View(ViewKind::Proxy, inner) = self.obj(oid).payload.clone() {
                         let v = self.load_item(&inner, Ns::Item, key, node, state, report);
-                        acc = acc.join(&v);
+                        parts.push(v);
                     } else {
-                        acc = acc.join(&line_data);
+                        parts.push(line_data.clone());
                     }
                 }
                 // an sqlite3.Row indexed by position
                 Kind::Dict if self.sql_rows.contains_key(&oid) && key.kv.as_lit().and_then(intern::key_as_int).is_some() => match crate::models::sqlite::row_index(self, state, oid, key) {
-                    Some(v) => acc = acc.join(&v),
+                    Some(v) => parts.push(v),
                     None => {
                         self.raise_here("IndexError", state);
                     }
                 },
                 // a regex match: `m[g]` is its group
                 Kind::Namespace if self.re_matches.contains_key(&oid) => match crate::models::remodel::match_item(self, oid, key) {
-                    Some(v) => acc = acc.join(&v),
-                    None => acc = acc.join(&line_data),
+                    Some(v) => parts.push(v),
+                    None => parts.push(line_data.clone()),
                 },
                 Kind::Zip | Kind::Enumerate => {
-                    acc = acc.join(&line_data);
+                    parts.push(line_data.clone());
                 }
                 Kind::List | Kind::Tuple | Kind::Set => {
                     let is_slice = matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice"));
@@ -840,7 +842,7 @@ impl Analyzer {
                                 let idx = crate::interp::exprs::slice_positions(n as i64, lo, hi, step);
                                 let vals: Vec<Value> = idx.iter().map(|i| state.slot(oid, Ns::Pos, intern::key_int(*i))).collect();
                                 let kv = state.elems.get(&oid).unwrap_or(DATA);
-                                acc = acc.join(&self.alloc_positional(kind, node, Some(vals), Value::new(), kv, state));
+                                parts.push(self.alloc_positional(kind, node, Some(vals), Value::new(), kv, state));
                                 continue;
                             }
                         }
@@ -853,20 +855,20 @@ impl Analyzer {
                         self.set_llen(nid, state, None);
                         state.set_slot(nid, Ns::Elem, STAR, elem, true);
                         state.elems.insert(nid, kv);
-                        acc = acc.join(&Value::obj(nid));
+                        parts.push(Value::obj(nid));
                         continue;
                     }
                     let ll = self.llen(oid, state);
                     let idx = key.kv.as_lit().and_then(|k| intern::with_key(k, |kk| if let intern::Key::Int(i) = kk { Some(*i) } else { None }));
                     // the element appended last
                     if let (Some(-1), None, Some(v)) = (idx, ll, state.last_of(oid)) {
-                        acc = acc.join(&v);
+                        parts.push(v);
                         continue;
                     }
                     // positions below a known prefix stay valid after appends of unknown count
                     if let (Some(i), None, Some(p)) = (idx, ll, self.prefix(oid, state)) {
                         if 0 <= i && (i as usize) < p {
-                            acc = acc.join(&state.slot(oid, Ns::Pos, intern::key_int(i)));
+                            parts.push(state.slot(oid, Ns::Pos, intern::key_int(i)));
                             continue;
                         }
                     }
@@ -874,26 +876,26 @@ impl Analyzer {
                         (Some(i), Some(n)) => {
                             let n = n as i64;
                             if 0 <= i && i < n {
-                                acc = acc.join(&state.slot(oid, Ns::Pos, intern::key_int(i)));
+                                parts.push(state.slot(oid, Ns::Pos, intern::key_int(i)));
                             } else if -n <= i && i < 0 {
-                                acc = acc.join(&state.slot(oid, Ns::Pos, intern::key_int(n + i)));
+                                parts.push(state.slot(oid, Ns::Pos, intern::key_int(n + i)));
                             } else if kind != Kind::Set && single_target && self.obj(oid).single && !super::disabled("indexraise") {
                                 // out of range on a list of known length
                                 self.raise_here("IndexError", state);
                             } else {
-                                acc = acc.join(&state.slot(oid, Ns::Pos, intern::key_int(i)).join(&state.slot(oid, Ns::Elem, STAR)));
+                                parts.push(state.slot(oid, Ns::Pos, intern::key_int(i)).join(&state.slot(oid, Ns::Elem, STAR)));
                             }
                         }
                         _ => {
                             let e = state.slot(oid, Ns::Elem, STAR);
-                            acc = acc.join(&Value::with_kv(e.pts, DATA));
+                            parts.push(Value::with_kv(e.pts, DATA));
                         }
                     }
                 }
-                Kind::Series => acc = acc.join(&Value::with_kv(ObjSet::one(self.series), DATA)),
+                Kind::Series => parts.push(Value::with_kv(ObjSet::one(self.series), DATA)),
                 Kind::Frame if ns == Ns::Item => {
                     let v = crate::models::pandas::frame_getitem_n(self, oid, key, node, state, guarded, report);
-                    acc = acc.join(&v);
+                    parts.push(v);
                 }
                 k if k.is_record() => {
                     let ckv = self.canon_kv(oid, ns, &key.kv, state);
@@ -909,14 +911,15 @@ impl Analyzer {
                     } else {
                         self.load_record(oid, ns, key, node, state, guarded, single_target, try_guard)
                     };
-                    acc = acc.join(&v);
+                    parts.push(v);
                 }
-                _ => acc = acc.join(&line_data),
+                _ => parts.push(line_data.clone()),
             }
             if let Some(r) = counter_restore {
                 state.set_row(oid, ns, r);
             }
         }
+        acc = crate::domain::join_values(parts);
         if obj.pts.is_empty() {
             acc = line_data;
         }

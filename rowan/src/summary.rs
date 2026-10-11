@@ -1595,6 +1595,7 @@ impl Analyzer {
             obj_mark: self.objects.len() as ObjId,
             in_summary,
             clones: IndexMap::new(),
+            clone_ids: FxHashSet::default(),
             collided: FxHashSet::default(),
             resolved: FxHashMap::default(),
             born: FxHashMap::default(),
@@ -1764,7 +1765,7 @@ impl Analyzer {
             let tg = inst.resolve(self, state, &pre, *oid);
             for a in tg.iter() {
                 let nk = inst.remap_value(self, state, &pre, &Value::kv_only(kv.clone())).kv;
-                if (inst.clones.values().any(|c| *c == a) || summary.templates.contains(oid)) && !inst.collided.contains(&a) {
+                if (inst.clone_ids.contains(&a) || summary.templates.contains(oid)) && !inst.collided.contains(&a) {
                     state.elems.insert(a, nk);
                 } else {
                     let nv = match state.elems.get(&a) {
@@ -1821,10 +1822,13 @@ impl Analyzer {
             let many = tg.len() > 1;
             let sr_chain = chain_extend(&chain, &sr.rel_chain);
             let mut groups: Vec<(Row, Vec<ObjId>)> = Vec::new();
+            // (groups found by the row's hash: thousands of targets made the search quadratic)
+            let mut group_of: FxHashMap<Row, usize> = FxHashMap::default();
             let mut add = |row: Row, members: Vec<ObjId>| {
-                if let Some(g) = groups.iter_mut().find(|(r, _)| *r == row) {
-                    g.1.extend(members);
+                if let Some(&gi) = group_of.get(&row) {
+                    groups[gi].1.extend(members);
                 } else {
+                    group_of.insert(row.clone(), groups.len());
                     groups.push((row, members));
                 }
             };
@@ -2151,6 +2155,8 @@ struct Inst {
     obj_mark: ObjId,
     in_summary: bool,
     clones: IndexMap<ObjId, ObjId>,
+    /// the objects in `clones`' values (a membership test per target and per new clone)
+    clone_ids: FxHashSet<ObjId>,
     /// clones shared by several templates (same allocation site and context, e.g. the levels
     /// of a recursive structure): their facts combine instead of overwriting each other
     collided: FxHashSet<ObjId>,
@@ -2376,7 +2382,7 @@ impl Inst {
         if !existed {
             self.new_clones.insert(nid);
         }
-        if self.clones.values().any(|c| *c == nid) {
+        if self.clone_ids.contains(&nid) {
             self.collided.insert(nid);
             self.new_clones.remove(&nid);
         }
@@ -2386,6 +2392,7 @@ impl Inst {
             self.collided.insert(nid);
         }
         self.clones.insert(t, nid);
+        self.clone_ids.insert(nid);
         an.set_llen(nid, state, tll);
         // (the template's length alternatives too)
         if let Some((None, p, m)) = self.summary.exit.lens.get(&t).filter(|l| l.2 != 0) {
