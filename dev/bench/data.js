@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791726861309,
+  "lastUpdate": 1791727379047,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -1594,6 +1594,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: objects",
             "value": 284160,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "263990755f7b1e22a399e948343bdc4de2dcbb3b",
+          "message": "Soundness: a receiver that is one of several objects, one of whose classes runs user code for the operation (`__getitem__` / `__setitem__` / `__delitem__`, a property or descriptor, `__getattr__`, `__setattr__`), runs it per object on its own state, joined (`split_dispatch` / `per_receiver` at the entry of load_item / store_item / delete_item / load_attr / store_attr); several definitions of one `__call__` / `forward` likewise (`call_alternatives`). They ran in sequence on one state: the second saw the first's effects as definite, and the first's raise ended every path.\n\ny469 (new, expectations by hand; the oracle agrees; failed before: `log` held both alternatives' keys as definite, and the statements after a subscript one of whose `__getitem__` raises were \"never executed\"). ROWAN_NO=splitdispatch: off.\n\nBench, work=550000: unchanged but rich proven 595 -> 610. Snapshots: proto_domain verdicts renamed, no new `missing`. Golden 1048/1048, oracle 886/886, cargo test pass.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T14:29:19+01:00",
+          "tree_id": "a935f003fbca7cdaef2ad1c5ca21f6a28fd6e6a8",
+          "url": "https://github.com/kaidaniel/rowan/commit/263990755f7b1e22a399e948343bdc4de2dcbb3b"
+        },
+        "date": 1791727378481,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 1805.43,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1578,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 1807.33,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 5825,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 1402.88,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 1376,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 4224694,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 82949735,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 53341,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 284173,
             "unit": "count",
             "extra": "finished"
           }
