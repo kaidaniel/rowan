@@ -761,6 +761,8 @@ pub struct Analyzer {
     pub many_receivers: Option<Value>,
     /// the outcomes the summary variant being analysed assumes: (placeholder path, `T`/`F`/`L…`)
     pub assume: Vec<(String, String)>,
+    /// `__next__` functions whose calls were not decided once (`unroll_next`)
+    pub no_unroll_next: FxHashSet<ObjId>,
     pub module_done: bool,
     pub fresh_init: FxHashSet<ObjId>,
     pub cell_classes: FxHashMap<ObjId, ObjId>,
@@ -1169,6 +1171,7 @@ impl Analyzer {
             rec_runs: FxHashMap::default(),
             many_receivers: None,
             assume: Vec::new(),
+            no_unroll_next: FxHashSet::default(),
             module_done: false,
             fresh_init: FxHashSet::default(),
             cell_classes: FxHashMap::default(),
