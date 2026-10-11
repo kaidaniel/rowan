@@ -236,12 +236,13 @@ impl<'a, 'b> SourceOrderVisitor<'b> for Collector<'a> {
         }
     }
 
-    fn visit_except_handler(&mut self, h: &'b ast::ExceptHandler) {
-        let ast::ExceptHandler::ExceptHandler(h) = h;
+    fn visit_except_handler(&mut self, handler: &'b ast::ExceptHandler) {
+        let ast::ExceptHandler::ExceptHandler(h) = handler;
         if let Some(n) = &h.name {
             self.bind(n.id.to_string());
         }
-        source_order::walk_except_handler(self, &ast::ExceptHandler::ExceptHandler(h.clone()));
+        // (the handler itself, not a copy: scopes are keyed by node addresses)
+        source_order::walk_except_handler(self, handler);
     }
 
     fn visit_pattern(&mut self, p: &'b ast::Pattern) {

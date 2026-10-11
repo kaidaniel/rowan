@@ -321,7 +321,7 @@ impl Analyzer {
                     if cls != 0 {
                         for o in self_v.pts.iter() {
                             if matches!(self.kind(o), Kind::Instance | Kind::Ph) {
-                                self.dataclass_init(cls, o, &args, kwargs, star_kwargs, state, node);
+                                self.dataclass_init(cls, o, &args, star_args, kwargs, star_kwargs, state, node);
                             }
                         }
                     }
@@ -836,7 +836,7 @@ impl Analyzer {
             owner == Some(true)
         };
         if dc_init {
-            self.dataclass_init(cls, inst, args, kwargs, star_kwargs, state, node);
+            self.dataclass_init(cls, inst, args, star_args, kwargs, star_kwargs, state, node);
             return Value::obj(inst);
         }
         if let Some(init) = self.class_lookup(cls, "__init__") {
@@ -882,10 +882,41 @@ impl Analyzer {
     /// The generated `__init__` of a dataclass / TypedDict / NamedTuple `cls` run on `inst`
     /// (a fresh instance, or `self` when called explicitly as `Base.__init__(self, …)` /
     /// `super().__init__(…)` from a subclass).
-    pub fn dataclass_init(&mut self, cls: u32, inst: ObjId, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_kwargs: &[Value], state: &mut State, node: &Node) {
+    pub fn dataclass_init(&mut self, cls: u32, inst: ObjId, args: &[Value], star_args: &[Value], kwargs: &IndexMap<StrId, Value>, star_kwargs: &[Value], state: &mut State, node: &Node) {
         let ci = self.class_info(cls);
         let ns = if ci.typed_dict { Ns::Item } else { Ns::Attr };
         let mut initvars: Vec<Value> = Vec::new();
+        // `*seq` arguments: a sequence of known length gives positional arguments in order; past
+        // one of unknown length every further positional field may come from it (its element)
+        let mut args_full: Vec<Value> = args.to_vec();
+        let mut star_rest: Option<Value> = None;
+        if !super::disabled("dcstarargs") {
+            for sa in star_args {
+                if star_rest.is_some() {
+                    break;
+                }
+                // (a list / tuple of known length: its positions)
+                if let Some(o) = sa.single().filter(|o| matches!(self.kind(*o), Kind::Tuple | Kind::List) && sa.kv.is_bot()) {
+                    if let Some(n) = self.llen(o, state) {
+                        for i in 0..n {
+                            args_full.push(state.slot(o, Ns::Pos, intern::key_int(i as i64)));
+                        }
+                        continue;
+                    }
+                }
+                let it = self.iterate(sa, node, state);
+                match it.items {
+                    Some(items) if it.exhaustive => args_full.extend(items),
+                    _ => {
+                        star_rest = Some(match it.elem {
+                            super::funcs::Elem::One(v) => v,
+                            super::funcs::Elem::Pair(a, b) => a.join(&b),
+                        })
+                    }
+                }
+            }
+        }
+        let args: &[Value] = &args_full;
         {
             let specs = self.dc_specs(cls);
             let mut pos = 0usize;
@@ -917,6 +948,13 @@ impl Analyzer {
                     v = Some(args[pos - 1].clone());
                 } else if let Some(kv) = kwargs.get(&s(fname)) {
                     v = Some(kv.clone());
+                } else if let (Some(rest), false) = (&star_rest, spec.kw_only) {
+                    // (from the sequence of unknown length, or the default when it is short)
+                    let r = if rest.empty() { Value::data("field") } else { rest.clone() };
+                    v = Some(match default {
+                        Some(d) => self.dataclass_default(d, node, state).join(&r),
+                        None => r,
+                    });
                 } else if !star_kwargs.is_empty() {
                     // `**data` supplies the field when it has the key (over the default); a
                     // field without a default must come from it: a read (a requirement on an
