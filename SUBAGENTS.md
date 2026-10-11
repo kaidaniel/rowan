@@ -54,8 +54,11 @@ engine, datetime and FastAPI. When you drop a model:
    untracked, in the repository root of the owner's checkout. Compare it with your notes:
    * add what it lacks;
    * drop items your review shows are wrong or already fixed.
-4. **Plan.** Write a plan: the items you will work on, in order, each with the objective(s)
-   above it serves and how you will measure it. Prefer items that move several objectives at
+4. **Plan.** You are free to decide what kind of work to do: look for bugs to fix, make
+   iterative performance improvements, or do large-scale refactorings and redesigns. The test
+   suite (about a thousand golden programs, the runtime oracle, snapshots) catches many
+   regressions, so a big change is not reckless. Write a plan: the items you will work on,
+   in order, each with the objective(s) above it serves and how you will measure it. Prefer items that move several objectives at
    once, for example a redesign that bounds work (4, 5, 6) and also removes code and knobs
    (7, 8).
 5. **Implement the items one by one.** For each item:
