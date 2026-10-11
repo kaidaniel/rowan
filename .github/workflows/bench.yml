@@ -1,5 +1,5 @@
 # Benchmarks: rowan on three large real programs, without its deadlines, one job each in
-# parallel, cut at 5 minutes. Records wall time, peak memory, rowan's deterministic work
+# parallel, cut at 30 minutes. Records wall time, peak memory, rowan's deterministic work
 # counters and verdict counts, plus a `perf` profile (top functions in the job summary, a
 # flamegraph as an artifact). Informational only: every job has continue-on-error, and this
 # workflow must not be a required status check, so it never blocks a merge.
@@ -55,7 +55,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     continue-on-error: true
-    timeout-minutes: 25
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -90,12 +90,12 @@ jobs:
           cargo install inferno --locked --quiet
           echo "ok=true" >> "$GITHUB_OUTPUT"
 
-      - name: Run (no deadlines, 5 minute timeout)
+      - name: Run (no deadlines, 30 minute timeout)
         run: |
           PERF=""
           if [ "${{ steps.perf.outputs.ok }}" = "true" ]; then PERF="--perf perf.data"; fi
           uv run --no-project python bench/run.py ${{ matrix.program }} bin/rowan \
-            "${{ steps.prep.outputs.file }}" --timeout 300 --out results $PERF
+            "${{ steps.prep.outputs.file }}" --timeout 1800 --out results $PERF
 
       - name: Profile report
         if: steps.perf.outputs.ok == 'true'
@@ -149,7 +149,7 @@ jobs:
       - name: One table for all programs
         run: |
           {
-            echo "## rowan benchmarks (no deadlines, 5 minute timeout per program)"
+            echo "## rowan benchmarks (no deadlines, 30 minute timeout per program)"
             echo
             echo "| program | result | wall | peak memory | work | units | tabulations | objects | ✗/⚠ verdicts |"
             echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
