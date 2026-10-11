@@ -815,7 +815,8 @@ pub struct Analyzer {
     /// per enclosing try (parallel to `raise_states`): the frame depth and caller-env depth
     /// it runs in and the state before it, so a raise inside a callee hands the handler the
     /// try frame's locals
-    pub try_marks: Vec<(usize, usize, State)>,
+    /// per active try: frame depth, env-stack depth, the state before it, the object mark
+    pub try_marks: Vec<(usize, usize, State, ObjId)>,
     /// summary depth at each try (a raise inside a callee's summary is not this try's)
     pub try_sum_depth: Vec<usize>,
     /// per enclosing try (parallel to `raise_states`): the exceptions raised at those points

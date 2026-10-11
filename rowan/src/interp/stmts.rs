@@ -352,7 +352,7 @@ impl Analyzer {
                     self.may_raise.push(false);
                     self.raise_states.push(None);
                     self.raise_values.push(None);
-                    self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
+                    self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
                     self.try_sum_depth.push(self.sum_stack.len());
                     let exits_before = self.exit_count;
                     self.exec_block(&w.body, state);
@@ -474,7 +474,7 @@ impl Analyzer {
         self.may_raise.push(false);
         self.raise_states.push(None);
         self.raise_values.push(None);
-        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
+        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
         self.try_sum_depth.push(self.sum_stack.len());
         self.cond_depth += 1;
         self.branch_depth += 1;
@@ -1545,7 +1545,7 @@ impl Analyzer {
         self.raise_states.push(None);
         self.raise_values.push(None);
         self.raise_cls.push((self.raise_states.len(), Vec::new()));
-        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
+        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
         self.try_sum_depth.push(self.sum_stack.len());
         self.cond_depth += 1;
         self.branch_depth += 1;
@@ -1857,7 +1857,7 @@ impl Analyzer {
 
     /// Objects allocated since `mark` that no root reaches lose their state (`drop_garbage_at_return`;
     /// at a loop's exit the roots are the frame's live names).
-    fn collect_since(&mut self, mark: u32, pre: &State, roots: Vec<u32>, general: bool, state: &mut State) {
+    pub fn collect_since(&mut self, mark: u32, pre: &State, roots: Vec<u32>, general: bool, state: &mut State) {
         let fp = state.footprint(pre);
         let mut fresh: rustc_hash::FxHashSet<u32> = Default::default();
         for (o, _) in fp.rows.iter() {

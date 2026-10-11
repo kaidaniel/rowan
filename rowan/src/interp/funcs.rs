@@ -776,7 +776,7 @@ impl Analyzer {
             self.raise_states.push(None);
             self.raise_values.push(None);
             self.raise_cls.push((self.raise_states.len(), Vec::new()));
-            self.try_marks.push((self.frames.len(), self.env_stack.len(), pre));
+            self.try_marks.push((self.frames.len(), self.env_stack.len(), pre, self.objects.len() as u32));
             self.try_sum_depth.push(self.sum_stack.len());
             let v = self.call_value(&m, node, None, &mut probe, Some(Vec::new()));
             self.guards.pop();

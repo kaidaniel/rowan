@@ -1121,7 +1121,7 @@ fn getattr_hook_outcome(an: &mut Analyzer, st: &mut State, o: u32, k: KeyId, nod
     an.raise_states.push(None);
     an.raise_values.push(None);
     an.raise_cls.push((an.raise_states.len(), Vec::new()));
-    an.try_marks.push((an.frames.len(), an.env_stack.len(), s2.copy()));
+    an.try_marks.push((an.frames.len(), an.env_stack.len(), s2.copy(), an.objects.len() as u32));
     an.try_sum_depth.push(an.sum_stack.len());
     an.raise_stack.push(false);
     an.esc_cls.push(Some(Vec::new()));

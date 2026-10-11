@@ -846,7 +846,7 @@ impl Analyzer {
         self.raise_states.push(None);
         self.raise_values.push(None);
         self.raise_cls.push((self.raise_states.len(), Vec::new()));
-        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
+        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
         self.try_sum_depth.push(self.sum_stack.len());
         self.fa_dep_cache.push(rustc_hash::FxHashMap::default());
         self.fa_out_resp.push(Vec::new());

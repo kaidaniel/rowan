@@ -1245,7 +1245,7 @@ impl Analyzer {
         self.may_raise.push(false);
         self.raise_states.push(None);
         self.raise_values.push(None);
-        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy()));
+        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
         self.try_sum_depth.push(self.sum_stack.len());
         // (run with the validated values: `v.strip()` of a str field is a str method there)
         if !crate::interp::disabled("pydvaltab") {

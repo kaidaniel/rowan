@@ -1819,7 +1819,8 @@ impl Analyzer {
     /// An exception raised here is caught by the innermost enclosing try: its handler starts
     /// from this state (with the try frame's locals when the raise is inside a callee).
     pub fn record_raise_state(&mut self, state: &mut State) -> bool {
-        let Some((fl, el, pre)) = self.try_marks.last() else { return false };
+        let Some((fl, el, pre, tmark)) = self.try_marks.last() else { return false };
+        let tmark = *tmark;
         if self.try_sum_depth.last().map(|d| self.sum_stack.len() > *d).unwrap_or(false) && !crate::interp::disabled("sumraise") {
             // inside a callee's summary: its rows are relative to that summary; the call's
             // instantiation decides whether it raises here
@@ -1844,6 +1845,52 @@ impl Analyzer {
             here.exits = pre.exits.clone();
         }
         let exc = self.cur_exc.take().unwrap_or_else(|| Value::data("exception"));
+        // (what callees made since the try began and nothing reaches after the unwind — the
+        // try's names, the frames above it, the exception — is garbage in the raise state: a
+        // try around a large recursion otherwise joins every callee's objects at every raise)
+        if crate::interp::gc_on() && !crate::interp::disabled("raisegc") {
+            let fl = *fl;
+            let el = *el;
+            let pre_try = pre.copy_ref();
+            let mut roots: Vec<ObjId> = Vec::new();
+            let push = |v: &Value, roots: &mut Vec<ObjId>| {
+                roots.extend(v.pts.iter());
+                match &v.kv {
+                    KeyVal::KeysOf(ko) => roots.extend(ko.objs.iter()),
+                    KeyVal::Param(p) => roots.push(*p),
+                    _ => {}
+                }
+            };
+            for v in here.env.values() {
+                push(v, &mut roots);
+            }
+            for v in here.narrowed.values() {
+                push(v, &mut roots);
+            }
+            if let Some(r) = &here.ret {
+                push(r, &mut roots);
+            }
+            for env in self.env_stack.iter().take(el) {
+                for v in env.values() {
+                    push(v, &mut roots);
+                }
+            }
+            for fr in self.frames.iter().take(fl) {
+                roots.push(fr.module);
+                roots.extend(fr.cells.values().copied());
+                for ov in &fr.overlays {
+                    for v in ov.values() {
+                        push(v, &mut roots);
+                    }
+                }
+            }
+            for (o, v) in here.lasts.iter() {
+                roots.push(*o);
+                push(v, &mut roots);
+            }
+            push(&exc, &mut roots);
+            self.collect_since(tmark, &pre_try, roots, true, &mut here);
+        }
         let cls = self.cur_exc_cls.take().or_else(|| self.exc_value_names(&exc));
         let depth = self.raise_states.len();
         if let Some((d, recs)) = self.raise_cls.last_mut() {
