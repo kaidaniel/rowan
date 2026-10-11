@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791715897530,
+  "lastUpdate": 1791718155556,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -916,6 +916,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: tabulations",
             "value": 37452,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 123883,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "19569c23feb6f567d7b2d0935c8bce44862ce0d5",
+          "message": "Generators: a `while True:` is unrolled only outside other loops and unrolled iterations (nested unrolling multiplied the iterations by 16 per level: email's `FeedParser._parsegen` nests three and held 4,097 yield states per run), and the join a caller sees over a generator's yield states diffs each yield state against the one before it and joins each distinct row once (it joined every touched fact with every yield state: 77M row joins on email). Yield states are kept with an index by key (`YieldStates`). The tabulation counter counts body runs (recursive calls answered by a running activation return without one).\n\nGolden: JSON carries `joins` (joins of two different rows, a deterministic cost counter, also on the `work:` line) and `work`; directives `#@joins <= N` and `#@work <= N`. y451 (new: three nested `while True:` in a generator, 10,212 objects before, under 600 now) and y452 (new: a generator toggling 12 records between 384 yields, 19,584 row joins before, under 12,000 now); expectations by hand, the oracle agrees. `ROWAN_DEBUG=1` prints `tabrun F (why)` for every per-call-site run.\n\nBench, work=550000: email 31 s -> 6.8 s (unloaded machine), reaching further: proven 317 -> 355, schema entries 99 -> 136, row joins 5.0M (without the join change) -> 0.78M; one \"likely-missing\" lost (main.py `msg[\"Subject\"]`). Its new `missing` verdicts on `StringIO` methods (feedparser.py:104-113) and `HeaderRegistry.__getitem__` predate this change (the previous build gives them with a larger budget): next. stdlib12k / rich results unchanged. Golden 1031/1031, oracle 869/869, cargo test, snapshots (unchanged), hover test pass.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T11:55:47+01:00",
+          "tree_id": "5e5e612ebfb5309289d1b881ac4a45f57ccff15d",
+          "url": "https://github.com/kaidaniel/rowan/commit/19569c23feb6f567d7b2d0935c8bce44862ce0d5"
+        },
+        "date": 1791718154879,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 1805.38,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1694,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 1806.48,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 13979,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 23.97,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 948,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 560904,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 2416484,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 28301,
             "unit": "count",
             "extra": "finished"
           },
