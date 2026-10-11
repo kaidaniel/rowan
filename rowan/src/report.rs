@@ -28,15 +28,7 @@ pub fn dedupe(verdicts: &[Verdict]) -> Vec<Verdict> {
                 }
             }
         }
-        let labels: Vec<&str> = by_obj.values().map(|v| v.obj.as_str()).collect();
-        let mut uniq = labels.clone();
-        uniq.sort();
-        uniq.dedup();
-        let names: IndexMap<u32, String> = if uniq.len() != labels.len() {
-            by_obj.iter().map(|(o, v)| (*o, format!("{}#{}", v.obj, o))).collect()
-        } else {
-            by_obj.iter().map(|(o, v)| (*o, v.obj.clone())).collect()
-        };
+        let names: IndexMap<u32, String> = by_obj.iter().map(|(o, v)| (*o, v.obj.clone())).collect();
         let mut tiers: Vec<Tier> = by_obj.values().map(|v| v.tier).collect();
         tiers.sort();
         tiers.dedup();
@@ -46,14 +38,16 @@ pub fn dedupe(verdicts: &[Verdict]) -> Vec<Verdict> {
         let first = vs[0];
         if tiers.len() == 1 {
             let v = by_obj.values().next().unwrap();
-            let mut objs: Vec<String> = names.values().cloned().collect();
-            objs.sort();
-            out.push(Verdict { obj: objs.join(", "), ..(*v).clone() });
+            out.push(Verdict { obj: object_list(names.values()), ..(*v).clone() });
             continue;
         }
-        let mut sorted: Vec<(&u32, &&Verdict)> = by_obj.iter().collect();
-        sorted.sort_by_key(|(o, _)| **o);
-        let breakdown: Vec<String> = sorted.iter().map(|(o, v)| format!("{} for {}", v.tier.symbol(), names[*o])).collect();
+        // (per tier, the objects it holds for)
+        let mut by_tier: IndexMap<Tier, Vec<String>> = IndexMap::new();
+        for (o, v) in by_obj.iter() {
+            by_tier.entry(v.tier).or_default().push(names[o].clone());
+        }
+        by_tier.sort_keys();
+        let breakdown: Vec<String> = by_tier.iter().map(|(t, ns)| format!("{} for {}", t.symbol(), object_list(ns.iter()))).collect();
         let tier = if tiers.iter().all(|t| matches!(t, Tier::Proven | Tier::Likely)) {
             Tier::Likely
         } else if tiers.iter().all(|t| matches!(t, Tier::Input | Tier::Proven | Tier::Likely)) {
@@ -64,14 +58,12 @@ pub fn dedupe(verdicts: &[Verdict]) -> Vec<Verdict> {
         let mut provs: Vec<String> = by_obj.values().flat_map(|v| v.providers.clone()).collect();
         provs.sort();
         provs.dedup();
-        let mut objs: Vec<String> = names.values().cloned().collect();
-        objs.sort();
         out.push(Verdict {
             line: first.line,
             col: first.col,
             key: first.key,
             tier,
-            obj: objs.join(", "),
+            obj: object_list(names.values()),
             chain: first.chain.clone(),
             note: format!("depends on which object: {}", breakdown.join("; ")),
             providers: provs,
@@ -95,6 +87,22 @@ pub fn dedupe(verdicts: &[Verdict]) -> Vec<Verdict> {
     }
     out.sort_by(|a, b| (&a.file, a.line, a.col, key_repr(a.key), &a.chain).cmp(&(&b.file, b.line, b.col, key_repr(b.key), &b.chain)));
     out
+}
+
+/// Objects named by where they were made, each once with how many there are (`dict@L4 ×2`),
+/// the first few only (`… 5 more`).
+fn object_list<'a>(names: impl Iterator<Item = &'a String>) -> String {
+    const SHOWN: usize = 3;
+    let mut counts: IndexMap<&str, usize> = IndexMap::new();
+    for n in names {
+        *counts.entry(n.as_str()).or_default() += 1;
+    }
+    counts.sort_keys();
+    let mut parts: Vec<String> = counts.iter().take(SHOWN).map(|(n, c)| if *c > 1 { format!("{} ×{}", n, c) } else { n.to_string() }).collect();
+    if counts.len() > SHOWN {
+        parts.push(format!("… {} more", counts.len() - SHOWN));
+    }
+    parts.join(", ")
 }
 
 /// How many of the objects a name may hold the facts document describes (the rest: a count).
@@ -242,14 +250,22 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
         }
     }
     if show_summaries && !an.summaries.is_empty() {
-        lines.push(String::new());
-        lines.push("== function results (per call context) ==".into());
         let mut entries: Vec<(&(String, String), &(crate::domain::Value, Vec<(u32, crate::domain::Row)>))> = an.summaries.iter().collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
+        let mut out: Vec<String> = Vec::new();
         for ((qual, ctx), (_, rows)) in entries {
             for (oid, row) in rows {
-                lines.push(format!("  {} [{}] -> {}: {}", qual, ctx, an.obj(*oid).label, row));
+                // (a result nothing is known about says nothing)
+                if row.present.is_empty() && row.open() {
+                    continue;
+                }
+                out.push(format!("  {} [{}] -> {}: {}", qual, ctx, an.obj(*oid).label, row));
             }
+        }
+        if !out.is_empty() {
+            lines.push(String::new());
+            lines.push("== function results (per call context) ==".into());
+            lines.extend(out);
         }
     }
     if show_rows {
@@ -281,7 +297,46 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
             lines.push(format!("  {}", n));
         }
     }
-    lines.join("\n")
+    let body = lines.join("\n");
+    let legend = legend(&body);
+    if legend.is_empty() {
+        return body;
+    }
+    format!("{}\n\n== legend ==\n{}", body, legend.join("\n"))
+}
+
+/// What each mark the report uses means (only the marks it uses).
+fn legend(text: &str) -> Vec<String> {
+    let diag = text.split("\n== ").next().unwrap_or("");
+    let has_tier = |sym: &str| diag.lines().any(|l| l.split_whitespace().nth(1) == Some(sym));
+    let mut out = Vec::new();
+    let mut add = |used: bool, mark: &str, meaning: &str| {
+        if used {
+            out.push(format!("  {:<12} {}", mark, meaning));
+        }
+    };
+    add(has_tier("✗"), "✗", "the access fails on every path that reaches it (key / attribute definitely missing)");
+    add(has_tier("⚠"), "⚠", "the access fails on some paths (possibly missing)");
+    add(has_tier("⚠~"), "⚠~", "missing unless code rowan cannot see added it (likely missing)");
+    add(has_tier("◌"), "◌", "present only if the input provides it (see the schemas)");
+    add(has_tier("⚠data"), "⚠data", "a key computed from data, into a record with a fixed set of keys");
+    add(diag.contains("  ← "), "← SOURCE", "the input(s) that may provide the key");
+    add(diag.contains("  via L"), "via L1>L2", "the call sites the access was reached through (outermost first)");
+    add(diag.contains("  ["), "[obj@L5]", "the object accessed, named by where it was made");
+    add(text.contains("always   :"), "always", "keys read on every path through the code");
+    add(text.contains("sometimes:"), "sometimes", "keys read on some paths only");
+    add(text.contains("['*']"), "['*']", "any element / value of the input");
+    let schemas = text.split("\n== inferred schemas").nth(1).and_then(|s| s.split("\n== ").next()).unwrap_or("");
+    add(schemas.contains("' | '"), "'a' | 'b'", "either key will do (the code reads whichever is there)");
+    let values = ["\n== function results", "\n== module-level values at exit =="].iter().find_map(|h| text.find(h)).map(|i| &text[i..]).unwrap_or("");
+    let values = values.split("\n== notes ==").next().unwrap_or("");
+    add(values.contains('?'), "?", "a value rowan cannot know (an input, unknown code)");
+    add(values.contains("\"?:") || values.contains("?="), "\"k\"?: / k?=", "a key / attribute present on some paths only");
+    add(values.contains("~:") || values.contains("~="), "\"k\"~: / k~=", "present unless code rowan cannot see removed it");
+    add(values.contains("**?"), "**?", "other keys / attributes rowan cannot know");
+    add(values.contains(" | "), "a | b", "one of these, depending on the path");
+    add(values.contains('…'), "…", "more items, or deeper levels, not shown");
+    out
 }
 
 pub fn verdict_json(an: &Analyzer, v: &Verdict) -> J {

@@ -278,6 +278,9 @@ on some paths only; `**?` means other keys may exist; `list[X]` is any number of
 `X`; `Tensor[B, T, 4*C]` is a tensor shape. Inside a function, unknowns are named by where they
 come from (`row["id"]`, `x.shape[0]`, `json.loads(text)`).
 
+The text report ends with a legend of the marks it uses. A finding on several objects names
+each allocation site once, with a count (`dict@L4 ×2`), and the first few only.
+
 ## Building and running
 
 You need a Rust toolchain (stable, from [rustup](https://rustup.rs)). Python is not needed to
