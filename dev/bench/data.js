@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791709563046,
+  "lastUpdate": 1791709899828,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -502,6 +502,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: objects",
             "value": 154320,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "b82fa0981453eb1746f1a6e7fbaa40f10ecc9373",
+          "message": "Duck typing stops at the parts of a value duck-typed as several classes: an unknown value or class-less placeholder dispatched to two or more user classes marks its parts (attributes, items, elements at any depth, results of unknown calls on them, a summary parameter bound to one via a signature entry) as not duck-typed in turn, the bound methods of a many-object receiver take only the objects the rule leaves, and a recursive call with such an argument inside the function's own summary run is unknown code (the partial summary duck-types its parameter). Every part of every part was read as every class up to the access-path depth: rich's pretty printer made 1.3M objects. rich at work=550000: objects 1.33M -> 291k, 110 s -> 15 s, 5.2 GB -> 1.6 GB (palette.py:35 loses a proven run, table.py:442 gains one); email / stdlib12k unchanged but one verdict. y446 (new: a pretty printer over unknown values, 8152 -> under 2000 objects; the oracle agrees) with the new golden directive `#@objects <= N` (golden JSON carries the object count). Snapshots reviewed: proto_summary loses 6 \"sometimes\" schema entries on fields of duck-typed results, the rest are object renamings. Golden 1028/1028, oracle 866/866, cargo test, hover test pass. ROWAN_NO=duckparts / duckrec: off\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T10:04:05+01:00",
+          "tree_id": "f5155c40c5c6bf5a52c72324d64895dc1fa184d8",
+          "url": "https://github.com/kaidaniel/rowan/commit/b82fa0981453eb1746f1a6e7fbaa40f10ecc9373"
+        },
+        "date": 1791709899001,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 301.72,
+            "unit": "s",
+            "extra": "cut at the 300 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1367,
+            "unit": "MB",
+            "extra": "cut at the 300 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 301.87,
+            "unit": "s",
+            "extra": "cut at the 300 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 7795,
+            "unit": "MB",
+            "extra": "cut at the 300 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 24.67,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 975,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 575981,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 2638661,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 36506,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 135638,
             "unit": "count",
             "extra": "finished"
           }
