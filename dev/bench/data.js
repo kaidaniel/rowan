@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791733439952,
+  "lastUpdate": 1791733463595,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -1942,6 +1942,66 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: peak memory",
             "value": 870,
+            "unit": "MB",
+            "extra": "cut at the 600 s timeout"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "271bedbb4cffa966a6748bf9f7c6712dd236fa57",
+          "message": "tweak",
+          "timestamp": "2026-10-11T16:31:35+01:00",
+          "tree_id": "5e456c270e97acd1fb658f258a507d29a8128ae1",
+          "url": "https://github.com/kaidaniel/rowan/commit/271bedbb4cffa966a6748bf9f7c6712dd236fa57"
+        },
+        "date": 1791733463248,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 602.17,
+            "unit": "s",
+            "extra": "cut at the 600 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1537,
+            "unit": "MB",
+            "extra": "cut at the 600 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 602.42,
+            "unit": "s",
+            "extra": "cut at the 600 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 4766,
+            "unit": "MB",
+            "extra": "cut at the 600 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 601.07,
+            "unit": "s",
+            "extra": "cut at the 600 s timeout"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 876,
             "unit": "MB",
             "extra": "cut at the 600 s timeout"
           }
