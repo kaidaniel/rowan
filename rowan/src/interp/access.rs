@@ -1528,7 +1528,14 @@ impl Analyzer {
         // (one k-way union of all targets' values: a receiver of many objects, joined pairwise,
         // costs the product of their sizes)
         let mut parts: Vec<Value> = Vec::new();
-        let saved_many = std::mem::replace(&mut self.many_receivers, if obj.pts.len() > 32 && !super::disabled("manyrecv") { Some(obj.clone()) } else { None });
+        let saved_many = std::mem::replace(&mut self.many_receivers, if obj.pts.len() > 32 && !super::disabled("manyrecv") {
+            use std::hash::BuildHasher;
+            let ids = obj.pts.to_vec();
+            let key = format!("{:x}.{}", rustc_hash::FxBuildHasher.hash_one(&ids), ids.len());
+            Some((obj.clone(), key, None))
+        } else {
+            None
+        });
         let guarded = self.is_guarded(Ns::Attr) || !report;
         let single = obj.pts.len() == 1;
         let nk = key_str_lit(name);
@@ -2392,7 +2399,7 @@ impl Analyzer {
         }
         // (a declared builtin container is that container: no user-class candidates)
         if !has_cls && builtin_cls.is_none() {
-            let cands: Vec<u32> = self.user_classes.iter().copied().filter(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, nk))).collect();
+            let cands: Vec<u32> = self.classes_defining(nk);
             if !cands.is_empty() {
                 let mut outs: Vec<Value> = Vec::new();
                 for c in &cands {
@@ -2647,10 +2654,15 @@ impl Analyzer {
             let q = if STR_METHOD_NAMES.contains(&name) { format!("str.{}", name) } else { format!("unknown.{}", name) };
             return self.method_value(&q, &Value::data(&format!("L{}", node.line)));
         }
-        let cands: Vec<u32> = self.user_classes.iter().copied().filter(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, nk))).collect();
+        let cands: Vec<u32> = self.classes_defining(nk);
         // (a name many classes define — `render`, `get_style` — says little about which one an
         // unknown value is: past `duck` classes it is unknown code, not a call of every one)
         if !cands.is_empty() && (cands.len() <= super::limit("duck", 8) || super::disabled("duck")) {
+            // (a receiver value of many objects: the bound methods are the same for each of its
+            // unknown objects — made once per attribute read)
+            if let Some((_, _, Some(done))) = &self.many_receivers {
+                return done.clone();
+            }
             let mut outs: Vec<Value> = Vec::new();
             for c in &cands {
                 let fv = self.cls_slots.get(&(*c, Ns::Attr, nk)).cloned().unwrap_or_default();
@@ -2659,12 +2671,9 @@ impl Analyzer {
                         // (a receiver value of many objects: one bound method for all of them, its
                         // receiver the whole value, not one per object — thousands in a recursion
                         // over unknown values, each run on its own)
-                        if let Some(all) = self.many_receivers.clone() {
-                            use std::hash::BuildHasher;
-                            let ids = all.pts.to_vec();
-                            let h = rustc_hash::FxBuildHasher.hash_one(&ids);
-                            let label = format!("{} bound to one of {} values", self.obj(f).label, ids.len());
-                            outs.push(Value::obj(self.alloc_raw(Kind::Bound, &format!("bound:{}:set:{:x}.{}", f, h, ids.len()), "", true, &label, Payload::Bound(f, all))));
+                        if let Some((all, key, _)) = self.many_receivers.clone() {
+                            let label = format!("{} bound to one of {} values", self.obj(f).label, all.pts.len());
+                            outs.push(Value::obj(self.alloc_raw(Kind::Bound, &format!("bound:{}:set:{}", f, key), "", true, &label, Payload::Bound(f, all))));
                             continue;
                         }
                         let label = format!("{} bound to {}", self.obj(f).label, self.obj(oid).label);
@@ -2673,7 +2682,11 @@ impl Analyzer {
                 }
             }
             if !outs.is_empty() {
-                return join_values(outs);
+                let v = join_values(outs);
+                if let Some(m) = self.many_receivers.as_mut() {
+                    m.2 = Some(v.clone());
+                }
+                return v;
             }
         }
         let row = state.row(oid, Ns::Attr);

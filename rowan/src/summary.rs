@@ -2309,17 +2309,23 @@ impl Inst {
     /// one group per target up to `MAX_SYMREQ_TARGETS`, then one joined group per site.
     fn focus_groups(&mut self, an: &Analyzer, state: &State, pre: &State, ph: ObjId, tg: &ObjSet) -> Vec<(Focus, Vec<ObjId>)> {
         if an.opts.site_resolution {
-            let mut groups: Vec<((Kind, std::sync::Arc<str>, Focus), Vec<ObjId>)> = Vec::new();
+            // (groups indexed by kind and site, the focus compared within a site only: a target
+            // set of thousands made this quadratic)
+            let mut groups: Vec<(Focus, Vec<ObjId>)> = Vec::new();
+            let mut by_site: FxHashMap<(Kind, std::sync::Arc<str>), Vec<usize>> = FxHashMap::default();
             for a in tg.iter() {
                 let f = Focus::of_target(pre, state, &self.born, ph, a);
-                let key = (an.kind(a), an.obj(a).site.clone(), f);
-                if let Some(g) = groups.iter_mut().find(|(k, _)| *k == key) {
-                    g.1.push(a);
-                } else {
-                    groups.push((key, vec![a]));
+                let sk = (an.kind(a), an.obj(a).site.clone());
+                let ids = by_site.entry(sk).or_default();
+                match ids.iter().copied().find(|gi| groups[*gi].0 == f) {
+                    Some(gi) => groups[gi].1.push(a),
+                    None => {
+                        ids.push(groups.len());
+                        groups.push((f, vec![a]));
+                    }
                 }
             }
-            return groups.into_iter().map(|((_, _, f), m)| (f, m)).collect();
+            return groups;
         }
         if tg.len() <= MAX_SYMREQ_TARGETS {
             return tg.iter().map(|a| (Focus::of_target(pre, state, &self.born, ph, a), vec![a])).collect();
@@ -2453,12 +2459,13 @@ impl Inst {
             Some(p) => self.resolve(an, state, pre, p),
             None => ObjSet::new(),
         };
-        let mut acc = Value::new();
+        // (all parents' values joined at once: a pairwise join over many parents is quadratic)
+        let mut parts: Vec<Value> = Vec::new();
         let key = ph.key.unwrap_or(STAR);
         for p in parents.iter() {
             // the content of a dict under an unknown key: its values (iterating it gives keys)
             if key == STAR && ph.ns == Ns::Item && an.kind(p) == Kind::Dict && !crate::interp::disabled("dictstar") {
-                acc = acc.join(&an.record_values(p, state));
+                parts.push(an.record_values(p, state));
                 continue;
             }
             if key == STAR {
@@ -2471,7 +2478,7 @@ impl Inst {
                         }
                     }
                 }
-                acc = acc.join(&e);
+                parts.push(e);
                 continue;
             }
             if let Some(kph) = param_slot_of(key) {
@@ -2486,28 +2493,28 @@ impl Inst {
                         for i in ints {
                             let j = if i < 0 { n + i } else { i };
                             if 0 <= j && j < n {
-                                acc = acc.join(&pre.slot(p, Ns::Pos, intern::key_int(j)));
+                                parts.push(pre.slot(p, Ns::Pos, intern::key_int(j)));
                             }
                         }
                     } else {
-                        acc = acc.join(&pre.all_slots(p, Ns::Pos));
-                        acc = acc.join(&pre.slot(p, Ns::Elem, STAR));
+                        parts.push(pre.all_slots(p, Ns::Pos));
+                        parts.push(pre.slot(p, Ns::Elem, STAR));
                     }
                     continue;
                 }
                 if !lits.is_empty() {
                     for k in lits.iter() {
-                        acc = acc.join(&pre.slot(p, ph.ns, k));
+                        parts.push(pre.slot(p, ph.ns, k));
                     }
-                    acc = acc.join(&pre.slot(p, ph.ns, STAR));
+                    parts.push(pre.slot(p, ph.ns, STAR));
                 } else {
-                    acc = acc.join(&pre.all_slots(p, ph.ns));
+                    parts.push(pre.all_slots(p, ph.ns));
                 }
-                if acc.empty() {
+                if parts.iter().all(|x| x.empty()) {
                     let row = pre.row(p, ph.ns);
                     if row.open() {
                         let v = an.path_placeholder_value(p, ph.ns, STAR, &row, state);
-                        acc = acc.join(&v);
+                        parts.push(v);
                     }
                 }
                 continue;
@@ -2518,7 +2525,7 @@ impl Inst {
             if ph.ns == Ns::Attr && an.kind(p) == Kind::Module && !an.sum_stack.is_empty() && !crate::interp::disabled("globalrd2") {
                 if let Some(name) = intern::key_as_str(key) {
                     if an.deferred_global(p, &name, &v) {
-                        acc = acc.join(&an.path_placeholder_value(p, Ns::Attr, key, &Row::new(), state));
+                        parts.push(an.path_placeholder_value(p, Ns::Attr, key, &Row::new(), state));
                         continue;
                     }
                 }
@@ -2528,12 +2535,12 @@ impl Inst {
                 if let Some(name) = intern::key_as_str(key) {
                     if matches!(&*name, "__name__" | "__qualname__") && an.class_lookup(p, &name).is_none() {
                         let n = an.class_info_opt(p).map(|ci| ci.name.clone()).unwrap_or_default();
-                        acc = acc.join(&Value::lit(intern::key_str_lit(&n)));
+                        parts.push(Value::lit(intern::key_str_lit(&n)));
                         continue;
                     }
                     let cv = an.class_attr_value(p, &name);
                     if !cv.empty() {
-                        acc = acc.join(&cv);
+                        parts.push(cv);
                         continue;
                     }
                 }
@@ -2579,8 +2586,9 @@ impl Inst {
                     }
                 }
             }
-            acc = acc.join(&v);
+            parts.push(v);
         }
+        let mut acc = crate::domain::join_values(parts);
         if let Some(c) = ph.cls.get().filter(|_| crate::interp::disabled("hintsound")) {
             if !acc.pts.is_empty() {
                 let kept = acc.pts.filter(|o| an.may_be_instance(o, c));

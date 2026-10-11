@@ -758,13 +758,15 @@ pub struct Analyzer {
     /// body runs of a recursive function below its outermost activation
     pub rec_runs: FxHashMap<ObjId, usize>,
     /// the receiver value while `load_attr` goes over a value of many objects
-    pub many_receivers: Option<Value>,
+    pub many_receivers: Option<(Value, String, Option<Value>)>,
     /// the outcomes the summary variant being analysed assumes: (placeholder path, `T`/`F`/`L…`)
     pub assume: Vec<(String, String)>,
     /// `__next__` functions whose calls were not decided once (`unroll_next`)
     pub no_unroll_next: FxHashSet<ObjId>,
     /// the last raise recorded per try depth (state before collection, class, exception)
     pub raise_last: FxHashMap<usize, (State, Option<ExcNames>, Value)>,
+    /// user classes defining an attribute name, for the class table's size it was computed at
+    pub classes_by_attr: std::cell::RefCell<((usize, usize), FxHashMap<KeyId, Vec<ObjId>>)>,
     pub module_done: bool,
     pub fresh_init: FxHashSet<ObjId>,
     pub cell_classes: FxHashMap<ObjId, ObjId>,
@@ -1176,6 +1178,7 @@ impl Analyzer {
             assume: Vec::new(),
             no_unroll_next: FxHashSet::default(),
             raise_last: FxHashMap::default(),
+            classes_by_attr: Default::default(),
             module_done: false,
             fresh_init: FxHashSet::default(),
             cell_classes: FxHashMap::default(),
@@ -2639,6 +2642,22 @@ impl Analyzer {
         if let Some(e) = self.facts.get_mut(&(line, name, false)) {
             e.value = e.value.join(v);
         }
+    }
+
+    /// The user classes that define attribute `nk` (in definition order), cached while the
+    /// class table does not grow: an unknown value's attribute is looked up in every class.
+    pub fn classes_defining(&self, nk: KeyId) -> Vec<ObjId> {
+        let version = (self.cls_slots.len(), self.user_classes.len());
+        let mut c = self.classes_by_attr.borrow_mut();
+        if c.0 != version {
+            *c = (version, FxHashMap::default());
+        }
+        if let Some(v) = c.1.get(&nk) {
+            return v.clone();
+        }
+        let v: Vec<ObjId> = self.user_classes.iter().copied().filter(|cl| self.cls_slots.contains_key(&(*cl, Ns::Attr, nk))).collect();
+        c.1.insert(nk, v.clone());
+        v
     }
 
     pub fn record_resolved_fact(&mut self, line: u32, name: StrId, v: &Value, rows: Vec<(ObjId, Option<Row>, Option<Row>)>, slots: Vec<(ObjId, Ns, KeyId, Value)>, scope: u32, state: &State) {
