@@ -532,7 +532,66 @@ impl Analyzer {
         }
     }
 
+    /// A receiver of several objects (or objects and a scalar) one of which runs user code for
+    /// the operation: they are alternatives, one state each (the second must not see the
+    /// first's effects, nor the first's raise end the others' paths).
+    fn split_dispatch(&self, obj: &Value, dispatch: &dyn Fn(&Analyzer, u32) -> bool) -> bool {
+        obj.pts.len() + usize::from(!obj.kv.is_bot()) > 1 && !super::disabled("splitdispatch") && obj.pts.iter().any(|o| dispatch(self, o))
+    }
+
+    fn per_receiver(&mut self, obj: &Value, state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &Value, &mut State) -> Value) -> Value {
+        let mut parts: Vec<Value> = obj.pts.iter().map(Value::obj).collect();
+        if !obj.kv.is_bot() {
+            parts.push(Value::kv_only(obj.kv.clone()));
+        }
+        let mut outs: Vec<Value> = Vec::new();
+        let mut acc: Option<State> = None;
+        for p in parts {
+            let mut st = state.copy();
+            outs.push(f(self, &p, &mut st));
+            acc = Some(match acc {
+                None => st,
+                Some(mut a) => a.join(&mut st),
+            });
+        }
+        if let Some(a) = acc {
+            state.replace_with(a);
+        }
+        crate::domain::join_values(outs)
+    }
+
+    /// The class of an instance (or of a placeholder of a user class), when it is a user class.
+    fn user_class_of(&self, o: u32) -> Option<u32> {
+        let c = match self.kind(o) {
+            Kind::Instance => self.instance_class(o),
+            Kind::Ph => self.ph_info(o).cls.get(),
+            _ => None,
+        }?;
+        self.class_info_opt(c).map(|_| c)
+    }
+
+    fn has_user_method(&self, o: u32, m: &str) -> bool {
+        self.user_class_of(o).is_some_and(|c| self.class_lookup(c, m).is_some())
+    }
+
+    /// Reading / writing attribute `name` of `o` runs user code: a property, a descriptor,
+    /// `__getattr__` / `__getattribute__` (reading), `__setattr__` (writing).
+    fn attr_runs_user_code(&self, o: u32, name: &str, store: bool) -> bool {
+        let Some(c) = self.user_class_of(o) else { return false };
+        let hooks: &[&str] = if store { &["__setattr__"] } else { &["__getattr__", "__getattribute__"] };
+        if hooks.iter().any(|h| self.class_lookup(c, h).is_some()) {
+            return true;
+        }
+        let Some(dc) = self.class_lookup(c, name) else { return false };
+        let cv = self.cls_slots.get(&(dc, Ns::Attr, key_str_lit(name))).cloned().unwrap_or_default();
+        let runs = cv.pts.iter().any(|f| (self.kind(f) == Kind::Function && self.func_info(f).is_property.get()) || (self.kind(f) == Kind::Instance && self.instance_class(f).is_some_and(|fc| self.class_lookup(fc, if store { "__set__" } else { "__get__" }).is_some())));
+        runs
+    }
+
     pub fn load_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
+        if ns == Ns::Item && self.split_dispatch(obj, &|an, o| an.has_user_method(o, "__getitem__")) {
+            return self.per_receiver(obj, state, &mut |an, o, st| an.load_item(o, ns, key, node, st, report));
+        }
         // a numpy structured array's missing field raises ValueError
         let exc = if ns == Ns::Item && !obj.pts.is_empty() && !self.np_struct.is_empty() && obj.pts.iter().all(|o| self.np_struct.contains(&o)) { Some("ValueError") } else { None };
         let exc = if ns == Ns::Item { self.item_exc_force.or(exc) } else { exc };
@@ -1234,6 +1293,13 @@ impl Analyzer {
     }
 
     pub fn store_item(&mut self, obj: &Value, ns: Ns, key: &Value, v: &Value, node: &Node, state: &mut State) {
+        if ns == Ns::Item && self.split_dispatch(obj, &|an, o| an.has_user_method(o, "__setitem__")) {
+            self.per_receiver(obj, state, &mut |an, o, st| {
+                an.store_item(o, ns, key, v, node, st);
+                Value::new()
+            });
+            return;
+        }
         let okey = if ns == Ns::Item { self.opaque_key(key, state) } else { key.clone() };
         let key = &okey;
         let targets: Vec<u32> = obj.pts.iter().filter(|o| !matches!(self.kind(*o), Kind::Series | Kind::External | Kind::Function | Kind::Bound | Kind::Class | Kind::Method)).collect();
@@ -1430,6 +1496,13 @@ impl Analyzer {
     }
 
     pub fn delete_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) {
+        if ns == Ns::Item && self.split_dispatch(obj, &|an, o| an.has_user_method(o, "__delitem__")) {
+            self.per_receiver(obj, state, &mut |an, o, st| {
+                an.delete_item(o, ns, key, node, st, report);
+                Value::new()
+            });
+            return;
+        }
         let objs: Vec<u32> = obj.pts.iter().collect();
         self.kill_facts_on(&objs, state);
         state.drop_name_keys(None);
@@ -1519,6 +1592,9 @@ impl Analyzer {
 
     // ---------------------------------------------------------- attributes
     pub fn load_attr(&mut self, obj: &Value, name: &str, node: &Node, state: &mut State, report: bool) -> Value {
+        if self.split_dispatch(obj, &|an, o| an.attr_runs_user_code(o, name, false)) {
+            return self.per_receiver(obj, state, &mut |an, o, st| an.load_attr(o, name, node, st, report));
+        }
         let unk = self.unkey(obj);
         let obj = &unk;
         if let Some(v) = self.t_getattr(obj, name, node, state) {
@@ -2795,6 +2871,13 @@ impl Analyzer {
     }
 
     pub fn store_attr(&mut self, obj: &Value, name: &str, v: &Value, node: &Node, state: &mut State) {
+        if self.split_dispatch(obj, &|an, o| an.attr_runs_user_code(o, name, true)) {
+            self.per_receiver(obj, state, &mut |an, o, st| {
+                an.store_attr(o, name, v, node, st);
+                Value::new()
+            });
+            return;
+        }
         if self.torch_on {
 
         }

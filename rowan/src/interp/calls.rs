@@ -172,6 +172,32 @@ impl Analyzer {
         join_values(outs)
     }
 
+    /// Several definitions of one method (conditional ones): alternatives, one state each.
+    #[allow(clippy::too_many_arguments)]
+    fn call_alternatives(&mut self, fns: &[u32], recv: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+        if fns.len() == 1 || super::disabled("splitdispatch") {
+            let mut outs = Vec::new();
+            for x in fns {
+                outs.push(self.call_user(*x, Some(Value::obj(recv)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, call_ast, false));
+            }
+            return join_values(outs);
+        }
+        let mut outs = Vec::new();
+        let mut acc: Option<State> = None;
+        for x in fns {
+            let mut st = state.copy();
+            outs.push(self.call_user(*x, Some(Value::obj(recv)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), &mut st, node, call_ast, false));
+            acc = Some(match acc {
+                None => st,
+                Some(mut a) => a.join(&mut st),
+            });
+        }
+        if let Some(a) = acc {
+            state.replace_with(a);
+        }
+        join_values(outs)
+    }
+
     pub fn call_one(&mut self, oid: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
         let kind = self.kind(oid);
         // torch: a layer object / Sequential, or a user nn.Module (its forward)
@@ -183,13 +209,8 @@ impl Analyzer {
                 if self.class_lookup(cls, "__call__").is_none() {
                     if let Some(m) = self.class_lookup(cls, "forward") {
                         let f = self.cls_slots.get(&(m, Ns::Attr, key_str_lit("forward"))).cloned().unwrap_or_default();
-                        let mut outs = Vec::new();
-                        for x in f.pts.iter() {
-                            if self.kind(x) == Kind::Function {
-                                outs.push(self.call_user(x, Some(Value::obj(oid)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, call_ast, false));
-                            }
-                        }
-                        return join_values(outs);
+                        let fns: Vec<u32> = f.pts.iter().filter(|x| self.kind(*x) == Kind::Function).collect();
+                        return self.call_alternatives(&fns, oid, args, kwargs, star_args, star_kwargs, state, node, call_ast);
                     }
                 }
             }
@@ -368,13 +389,8 @@ impl Analyzer {
                         if f.pts.is_empty() {
                             return Value::new();
                         }
-                        let mut outs = Vec::new();
-                        for x in f.pts.iter() {
-                            if self.kind(x) == Kind::Function {
-                                outs.push(self.call_user(x, Some(Value::obj(oid)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, call_ast, false));
-                            }
-                        }
-                        return join_values(outs);
+                        let fns: Vec<u32> = f.pts.iter().filter(|x| self.kind(*x) == Kind::Function).collect();
+                        return self.call_alternatives(&fns, oid, args, kwargs, star_args, star_kwargs, state, node, call_ast);
                     }
                 }
                 let q = format!("call of {}", self.obj(oid).label);
