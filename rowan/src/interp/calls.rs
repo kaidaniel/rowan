@@ -436,7 +436,17 @@ impl Analyzer {
             state.set_row(*oid, *ns, r);
         }
         let arg_recs: Vec<(u32, Ns)> = touched.iter().copied().filter(|(oid, _)| vals.iter().any(|v| v.pts.contains(*oid))).collect();
-        let rid = self.alloc(Kind::Unknown, &format!("ret:{}", site), state, &format!("result of {}", site), Payload::None, None, Ns::Item, Some(true), None);
+        // (the result's object is keyed by the last call site of the context only, k = 1: with
+        // the whole call string every context made its own result and its own tree of parts —
+        // a recursive walk over unknown values, rich's pretty printer; `unkretk=0` no context,
+        // `=2` the whole call string)
+        let full_ctx = self.frame().ctx.clone();
+        let rctx: String = match super::limit("unkretk", 1) {
+            0 => String::new(),
+            1 => full_ctx.rsplit('/').next().unwrap_or("").to_string(),
+            _ => full_ctx.clone(),
+        };
+        let rid = self.alloc(Kind::Unknown, &format!("ret:{}", site), state, &format!("result of {}", site), Payload::None, None, Ns::Item, Some(true), Some(&rctx));
         if let Some(r) = recv {
             for o in r.pts.iter() {
                 self.note_part(o, rid);
