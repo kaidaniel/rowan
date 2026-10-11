@@ -63,8 +63,9 @@ and macOS, then the oracle on Linux. The torch oracle runs only on a manual disp
   * `#@value NAME: exactly= | unknown | includes=`;
   * `#@schema src: always= sometimes= only=`;
   * floors `possible=` / `definite_within=`; `#@todo …` for known imprecision; `#@argv …`;
-    `#@objects <= N` / `#@tabulations <= N` (bounds on the objects made and the per-call-site
-    body runs, for blow-up cases; N by hand); `#@limits k=v,…` (the case's `ROWAN_LIMITS`);
+    `#@objects <= N` / `#@tabulations <= N` / `#@joins <= N` / `#@work <= N` (bounds on the
+    objects made, per-call-site body runs, joins of two different rows, statements run: for
+    blow-up cases, N by hand); `#@limits k=v,…` (the case's `ROWAN_LIMITS`);
   * torch: `#@shape`.
 
   A directive-only line applies to the code line above. `possibly k` also holds when rowan's
@@ -82,7 +83,9 @@ and macOS, then the oracle on Linux. The torch oracle runs only on a manual disp
 ## Debugging switches
 
 * `ROWAN_DEBUG=1|2`:
-  * `1`: tabulation reasons, summaries, budgets, and a `work:` line at the end with counts;
+  * `1`: tabulation reasons (`tabulate …`, and `tabrun F (why)` for every per-call-site run:
+    event / generator / model / torch / once / genconcrete), summaries, budgets, and a `work:`
+    line at the end with counts (statements, units, body runs, objects, row joins);
   * `2`: also every event, raise and try decision.
 * `ROWAN_NO=a,b` switches refinements off by name (`rg 'disabled\("' rowan/src` lists them).
   Use it to bisect which refinement causes a result.
@@ -95,8 +98,7 @@ and macOS, then the oracle on Linux. The torch oracle runs only on a manual disp
   outcome were removed again (code in 96fa750).
 * `ROWAN_SUMMARIES=0`: the old per-call-site engine, with no summaries.
 * `ROWAN_GC=0`: garbage collection only for returns of values without objects.
-  With `ROWAN_DEBUG=1`, `ROWAN_GCDBG=1` prints what each
-  collection drops.
+  With `ROWAN_DEBUG=1`, `ROWAN_GCDBG=1` prints what each collection drops.
 * `ROWAN_FOLLOW=pkg,…` is the same as `--follow`. `ROWAN_TODO=check` also checks `#@todo`s,
   to see which to-dos the engine now meets.
 * **Profiling:** use short runs (a few seconds), several in parallel, long ones in the

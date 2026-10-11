@@ -597,6 +597,13 @@ impl fmt::Debug for Row {
 
 thread_local! {
     static EMPTY_ROW: Row = Row::from_data(RowData::default());
+    /// joins of two different rows (a deterministic cost measure: golden `#@joins <= N`)
+    static ROW_JOINS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of joins of two different rows so far.
+pub fn row_joins() -> usize {
+    ROW_JOINS.with(|c| c.get())
 }
 
 impl Default for Row {
@@ -704,6 +711,7 @@ impl Row {
         if self == o {
             return self.clone();
         }
+        ROW_JOINS.with(|c| c.set(c.get() + 1));
         let sources = if o.sources.is_subset(&self.sources) {
             self.sources.clone()
         } else if self.sources.is_subset(&o.sources) {

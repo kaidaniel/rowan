@@ -1196,7 +1196,22 @@ impl Analyzer {
         // (a simple generator — straight-line yields, no calls — is summarised like a function)
         let gen_fn = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body) && !super::is_simple_generator(&f.body)) && !under_cm && !super::disabled("genlazy") && super::limit("genfull", 0) == 0;
         let gen_summ = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body)) && !under_cm && !super::disabled("genlazy");
-        let forced = std::mem::take(&mut self.force_tab_once) || self.torch_modules.contains(&fi.module) || gen_fn;
+        let once = std::mem::take(&mut self.force_tab_once);
+        let forced = once || self.torch_modules.contains(&fi.module) || gen_fn;
+        // (why the body runs per call site: `ROWAN_DEBUG=1` prints it with each tabulated run)
+        let mut why: &'static str = if !self.use_summaries {
+            "nosummaries"
+        } else if once {
+            "once"
+        } else if gen_fn {
+            "generator"
+        } else if forced {
+            "torch"
+        } else if self.model_call > 0 {
+            "model"
+        } else {
+            "event"
+        };
         if self.use_summaries && self.model_call == 0 && !forced {
             let bound = self.compute_bindings(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
             // the classes of the arguments: the summary is specialised on them
@@ -1277,6 +1292,9 @@ impl Analyzer {
             // (a generator whose body changes objects from before the call: its concrete run
             // orders those effects between the items)
             let gen_concrete = gen_summ && summ.changes_outside(self);
+            if gen_concrete {
+                why = "genconcrete";
+            }
             if !gen_concrete && !self.should_tabulate_at(&summ, &bind, state, node) {
                 // (outside databases the summary did not simulate: their rows are unknown now)
                 if let Some(cons) = self.sql_touched.get(&foid).cloned() {
@@ -1332,7 +1350,9 @@ impl Analyzer {
             }
         }
         // --- per-call-site (tabulated) analysis ---
-        self.tab_runs += 1;
+        if super::debug_enabled() {
+            eprintln!("tabrun {} ({}) at {} frames={} sum={} chain={:?}", fi.qualname, why, site, self.frames.len(), self.sum_stack.len(), self.call_chain);
+        }
         let mut key = (foid, if !entry { site.clone() } else { format!("entry:{}", site) });
         // literal arguments that differ from the running activations': not the same activation
         // (fib(9) inside fib(10)), up to a depth
@@ -1527,7 +1547,7 @@ impl Analyzer {
         let saved_ret = state.ret.take();
         // (the caller's recorded returns are not the callee's: its end must not join them in)
         let saved_exits = if super::disabled("callexits") { None } else { state.exits.take() };
-        let mut saved_yields: Option<(ObjId, Option<Vec<(super::YieldKey, State)>>)> = None;
+        let mut saved_yields: Option<(ObjId, Option<super::YieldStates>)> = None;
         self.frames.push(new_fr);
         if let FuncNode::Def(f) = fnode {
             if is_generator(&f.body) {
@@ -1581,6 +1601,7 @@ impl Analyzer {
             } else if !nested && round == 0 {
                 self.rec_runs.remove(&foid);
             }
+            self.tab_runs += 1;
             let mut st = entry_state.copy();
             match fnode {
                 FuncNode::Lambda(l) => {
@@ -1708,7 +1729,7 @@ impl Analyzer {
         let gen_yields = match fnode {
             FuncNode::Def(f) if is_generator(&f.body) && !gen_cm && !super::disabled("genlazy") => {
                 let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
-                Some((gid, self.gen_yield_states.get(&gid).map(|v| v.iter().map(|(_, s)| s.copy_ref()).collect::<Vec<State>>()).unwrap_or_default()))
+                Some((gid, self.gen_yield_states.get(&gid).map(|v| v.states().map(|s| s.copy_ref()).collect::<Vec<State>>()).unwrap_or_default()))
             }
             _ => None,
         };
@@ -1720,7 +1741,7 @@ impl Analyzer {
             if is_generator(&f.body) && !st.reachable {
                 let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
                 let joined = self.gen_yield_states.remove(&gid).and_then(|v| {
-                    let mut it = v.into_iter().map(|(_, s)| s);
+                    let mut it = v.list.into_iter().map(|(_, s)| s);
                     let mut acc = it.next()?;
                     for mut s in it {
                         acc = acc.join(&mut s);
@@ -1958,47 +1979,81 @@ impl Analyzer {
         }
         let fp = st.footprint(pre);
         let old = |o: ObjId| o < mark && o != gid;
-        let others: Vec<&State> = std::iter::once(pre).chain(yields.iter().filter(|y| y.reachable)).collect();
-        for (o, ns) in fp.rows.iter().copied().filter(|(o, _)| old(*o)).collect::<Vec<_>>() {
-            let mut r = st.row(o, ns);
-            for x in &others {
-                r = r.join(&x.row(o, ns));
-            }
-            st.set_row(o, ns, r);
-        }
-        let mut touched: Vec<ObjId> = Vec::new();
-        for (o, sk) in fp.slots.iter().copied().filter(|(o, _)| old(*o)).collect::<Vec<_>>() {
-            touched.push(o);
-            let mut v = st.slots.get(&o, &sk).unwrap_or_default();
-            for x in &others {
-                v = v.join(&x.slots.get(&o, &sk).unwrap_or_default());
-            }
-            st.slots.set(&o, sk, v);
-            if matches!(sk.0, Ns::Pos | Ns::Elem) {
-                st.clear_last(o);
-            }
-        }
-        for o in fp.elems.iter().copied().filter(|o| old(*o)) {
-            touched.push(o);
-            let mut kv = st.elems.get(&o).unwrap_or(DATA);
-            for x in &others {
-                kv = crate::domain::kv_join(&kv, &x.elems.get(&o).unwrap_or(DATA));
-            }
-            st.elems.insert(o, kv);
-        }
-        touched.sort_unstable();
-        touched.dedup();
+        let ys: Vec<&State> = yields.iter().filter(|y| y.reachable).collect();
+        // Each fact of `st` is joined with `pre`'s and every yield state's. Yield states are
+        // copies of one another changed by the body, sharing structure: each is diffed against
+        // the one before it (the first against `pre`), and only the keys the diff names are
+        // joined. A fact a state does not change equals the previous state's, joined already
+        // (a generator can hold thousands of yield states, and joining every touched fact with
+        // each was facts × yields).
         let entry = |an: &Analyzer, s: &State, o: ObjId| -> (Option<usize>, usize, u16) {
             s.lens.get(&o).unwrap_or_else(|| {
                 let ob = &an.objects[o as usize];
                 (ob.literal_len, ob.literal_len.or(ob.known_prefix).unwrap_or(0), 0)
             })
         };
-        for o in touched {
-            let mut l = entry(self, st, o);
-            for x in &others {
-                l = crate::state::join_len(&l, &entry(self, x, o));
+        // (with the distinct rows already joined: most yield states share their rows)
+        let mut rows: rustc_hash::FxHashMap<(ObjId, Ns), (crate::domain::Row, rustc_hash::FxHashSet<crate::domain::Row>)> = rustc_hash::FxHashMap::default();
+        for (o, ns) in fp.rows.iter().copied().filter(|(o, _)| old(*o)) {
+            let (a, b) = (st.row(o, ns), pre.row(o, ns));
+            let j = a.join(&b);
+            rows.insert((o, ns), (j, [a, b].into_iter().collect()));
+        }
+        let mut slots: rustc_hash::FxHashMap<(ObjId, crate::state::SlotKey), Value> = rustc_hash::FxHashMap::default();
+        let mut touched: Vec<ObjId> = Vec::new();
+        for (o, sk) in fp.slots.iter().copied().filter(|(o, _)| old(*o)) {
+            touched.push(o);
+            slots.insert((o, sk), st.slots.get(&o, &sk).unwrap_or_default().join(&pre.slots.get(&o, &sk).unwrap_or_default()));
+        }
+        let mut elems: rustc_hash::FxHashMap<ObjId, KeyVal> = rustc_hash::FxHashMap::default();
+        for o in fp.elems.iter().copied().filter(|o| old(*o)) {
+            touched.push(o);
+            elems.insert(o, crate::domain::kv_join(&st.elems.get(&o).unwrap_or(DATA), &pre.elems.get(&o).unwrap_or(DATA)));
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        let mut lens: rustc_hash::FxHashMap<ObjId, (Option<usize>, usize, u16)> = touched.iter().map(|o| (*o, crate::state::join_len(&entry(self, st, *o), &entry(self, pre, *o)))).collect();
+        let mut prev = pre;
+        for y in ys {
+            let base = std::mem::replace(&mut prev, y);
+            for k in y.rows.diff_keys(&base.rows) {
+                if let Some((r, seen)) = rows.get_mut(&k) {
+                    let yr = y.row(k.0, k.1);
+                    if !seen.contains(&yr) {
+                        *r = r.join(&yr);
+                        seen.insert(yr);
+                    }
+                }
             }
+            for (o, sk) in y.slots.diff_keys(&base.slots) {
+                if let Some(v) = slots.get_mut(&(o, sk)) {
+                    *v = v.join(&y.slots.get(&o, &sk).unwrap_or_default());
+                }
+            }
+            for o in y.elems.diff_keys(&base.elems) {
+                if let Some(kv) = elems.get_mut(&o) {
+                    *kv = crate::domain::kv_join(kv, &y.elems.get(&o).unwrap_or(DATA));
+                }
+            }
+            for o in y.lens.diff_keys(&base.lens) {
+                if let Some(l) = lens.get_mut(&o) {
+                    *l = crate::state::join_len(l, &entry(self, y, o));
+                }
+            }
+        }
+        for ((o, ns), (r, _)) in rows {
+            st.set_row(o, ns, r);
+        }
+        for ((o, sk), v) in slots {
+            st.slots.set(&o, sk, v);
+            if matches!(sk.0, Ns::Pos | Ns::Elem) {
+                st.clear_last(o);
+            }
+        }
+        for (o, kv) in elems {
+            st.elems.insert(o, kv);
+        }
+        for (o, l) in lens {
             st.lens.insert(o, l);
         }
     }

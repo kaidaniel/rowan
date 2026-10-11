@@ -37,6 +37,39 @@ pub const MAX_ARG_JOIN: usize = 64;
 /// a generator's suspension point: the yield node, the `yield from` item, the unrolled loop
 /// positions
 pub type YieldKey = (usize, usize, Vec<usize>);
+
+/// The states of one generator activation at its suspension points, in order, keyed by the
+/// yield site and its unroll path (a key may repeat), with the first index of each key.
+#[derive(Default)]
+pub struct YieldStates {
+    pub list: Vec<(YieldKey, State)>,
+    first: FxHashMap<YieldKey, usize>,
+}
+
+impl YieldStates {
+    pub fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    pub fn push(&mut self, key: YieldKey, st: State) {
+        self.first.entry(key.clone()).or_insert(self.list.len());
+        self.list.push((key, st));
+    }
+
+    /// The first state recorded under `key`.
+    pub fn get_mut(&mut self, key: &YieldKey) -> Option<&mut State> {
+        let i = *self.first.get(key)?;
+        Some(&mut self.list[i].1)
+    }
+
+    pub fn states(&self) -> impl Iterator<Item = &State> {
+        self.list.iter().map(|(_, s)| s)
+    }
+}
 pub const MAX_CLONES: usize = 256;
 /// Milliseconds after which the analysis degrades gracefully: no new tabulations (summaries
 /// are used instead) and no new clones (allocation sites collapse onto their context-free
@@ -1060,7 +1093,7 @@ pub struct Analyzer {
     /// of them when the body never ends)
     /// the states at the yields of a generator's running activation (copies, read per key
     /// where the caller needs them: joining whole heaps per yield was the cost)
-    pub gen_yield_states: FxHashMap<ObjId, Vec<(YieldKey, State)>>,
+    pub gen_yield_states: FxHashMap<ObjId, YieldStates>,
     /// a copy's original (through copies made at the same node: `out = deepcopy(out)` in a loop
     /// makes one copy site, not a new one per round)
     pub copy_root: FxHashMap<ObjId, ObjId>,

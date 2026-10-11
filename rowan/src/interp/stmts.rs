@@ -988,8 +988,10 @@ impl Analyzer {
         // the loop, from where the test stops being decided, is analysed as a loop
         let mut breaks: Option<State> = None;
         // (in a generator, `while True:` too: its yields get their positions, and a consumer
-        // that takes a few items sees exactly those)
-        let gen_body = is_constant(&w.test) && self.frame().func.map(|f| matches!(self.func_info(f).node, crate::interp::FuncNode::Def(d) if crate::interp::is_generator(&d.body))).unwrap_or(false) && !crate::interp::disabled("genwhileunroll");
+        // that takes a few items sees exactly those; only outside other loops and unrolled
+        // iterations, as nested unrolling multiplies: email's `_parsegen` nests such loops)
+        let outermost = self.frame().loop_depth == 0 && self.frame().unroll.is_empty();
+        let gen_body = is_constant(&w.test) && (outermost || crate::interp::disabled("genwhileouter")) && self.frame().func.map(|f| matches!(self.func_info(f).node, crate::interp::FuncNode::Def(d) if crate::interp::is_generator(&d.body))).unwrap_or(false) && !crate::interp::disabled("genwhileunroll");
         if (!is_constant(&w.test) || gen_body) && !crate::interp::disabled("whileunroll") {
             let mut idx = 0usize;
             loop {

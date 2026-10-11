@@ -676,11 +676,11 @@ impl Analyzer {
             let in_fixpoint = self.frame().loop_depth > 0 && !super::disabled("genyieldkey");
             let here = state.copy();
             let ys = self.gen_yield_states.entry(gid).or_default();
-            if let Some(slot) = ys.iter_mut().find(|(k, _)| in_fixpoint && *k == key) {
-                slot.1 = here;
+            if let Some(slot) = ys.get_mut(&key).filter(|_| in_fixpoint) {
+                *slot = here;
             } else if ys.len() < MAX_YIELD_STATES {
-                ys.push((key, here));
-            } else if let Some(last) = ys.last_mut() {
+                ys.push(key, here);
+            } else if let Some(last) = ys.list.last_mut() {
                 // (past the cap: the last one stands for the rest too)
                 let mut h = here;
                 last.1 = last.1.join(&mut h);
