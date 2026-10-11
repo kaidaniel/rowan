@@ -677,6 +677,11 @@ impl Row {
         !self.sources.is_empty() || !self.mutators.is_empty() || self.top || self.symbolic()
     }
 
+    /// Content from an input or the function's entry (not only from unknown code run on it).
+    pub fn has_input(&self) -> bool {
+        !self.sources.is_empty() || self.top || self.symbolic()
+    }
+
     pub fn closed(&self) -> bool {
         !self.open()
     }

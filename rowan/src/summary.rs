@@ -1708,7 +1708,10 @@ impl Analyzer {
             for a in tg.iter() {
                 // a store under an unknown key (STAR: the parameter's value was not a
                 // literal) may have hit any key: never strong, it would wipe the others
-                let strong = *ns != Ns::Elem && ((is_template && !inst.collided.contains(&a)) || (tg.len() == 1 && self.strongable(a) && targets_count.get(&(a, *ns)).copied().unwrap_or(1) == 1 && keys.len() == 1));
+                // (an object from before the call whose key the body stored on some paths only:
+                // the others keep its value)
+                let every_path = !matches!(ns, Ns::Item | Ns::Attr) || !summary.exit.has_row(*oid, *ns) || { let r = summary.exit.row(*oid, *ns); r.definite.contains(*k) && r.stored.contains(*k) };
+                let strong = *ns != Ns::Elem && ((is_template && !inst.collided.contains(&a)) || (tg.len() == 1 && self.strongable(a) && targets_count.get(&(a, *ns)).copied().unwrap_or(1) == 1 && keys.len() == 1 && every_path));
                 for kk in &keys {
                     state.set_slot(a, *ns, *kk, nv.clone(), strong);
                 }

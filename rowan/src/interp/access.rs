@@ -1001,6 +1001,8 @@ impl Analyzer {
     fn load_record_inner(&mut self, oid: u32, ns: Ns, key: &Value, node: &Node, state: &mut State, guarded: bool, single_target: bool, try_guard: bool) -> Value {
         let kind = self.kind(oid);
         let mut row = state.row(oid, ns);
+        // (the row before this read narrows it)
+        let row0 = row.clone();
         let kv = &key.kv;
         let site = self.access_site(node);
         if let Some(ph) = kv.as_param() {
@@ -1139,7 +1141,10 @@ impl Analyzer {
                 if !star.pts.is_empty() {
                     v = v.join(&Value::with_kv(star.pts, DATA));
                 }
-                if v.pts.is_empty() && matches!(v.kv, KeyVal::Data(_) | KeyVal::Bot) && (row.open() || cls.tier == Tier::Map) {
+                // (a key of an open record stored on some paths only: on the others its value is
+                // the input's, which a slot one path made does not cover)
+                let partly_stored = !v.empty() && row0.has_input() && !(row0.definite.contains(k) && row0.stored.contains(k));
+                if partly_stored || (v.pts.is_empty() && matches!(v.kv, KeyVal::Data(_) | KeyVal::Bot) && (row.open() || cls.tier == Tier::Map)) {
                     let p = self.path_placeholder_value(oid, ns, k, &row, state);
                     v = v.join(&p);
                     if is_lit {
@@ -2382,10 +2387,25 @@ impl Analyzer {
         let ph = self.ph_info(oid);
         let nk = key_str_lit(name);
         if let Some(v) = state.slot_opt(oid, Ns::Attr, nk) {
-            // set in this function: the read succeeds
-            if !guarded && state.row(oid, Ns::Attr).definite.contains(nk) {
-                self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
+            // set in this function: the read succeeds where it was set on every path; set on
+            // some only, the others have the argument's own attribute
+            let row = state.row(oid, Ns::Attr);
+            if row.definite.contains(nk) && row.stored.contains(nk) {
+                if !guarded {
+                    self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
+                }
+                return v;
             }
+            if !guarded {
+                self.record_symreq(node, KeyVal::Lit(nk), &row, oid, Ns::Attr, guarded, "attr");
+            }
+            if single_target {
+                state.set_row(oid, Ns::Attr, row.narrow_in(nk, true));
+            }
+            // (from here on the slot holds both: a later read, and the call's effect on the
+            // argument, see either)
+            let v = v.join(&self.path_placeholder_value(oid, Ns::Attr, nk, &row, state));
+            state.set_slot(oid, Ns::Attr, nk, v.clone(), true);
             return v;
         }
         if self.pandas_on && (crate::models::pandas::FRAME_ONLY_ATTRS.contains(&name) || crate::models::pandas::DF_METHODS.contains(&name) || matches!(name, "str" | "dt" | "cat")) {
@@ -2399,7 +2419,7 @@ impl Analyzer {
         }
         // declared class (annotation / self): resolve methods and class attributes (a
         // dataclass field's default is instance data, not a class attribute)
-        let is_field = true && ph.cls.get().map(|c| self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name)).unwrap_or(false);
+        let is_field = ph.cls.get().map(|c| self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name)).unwrap_or(false);
         // a NamedTuple's API on a placeholder of the class; a class-less one decides per call
         if matches!(name, "_asdict" | "_replace") {
             match ph.cls.get() {
