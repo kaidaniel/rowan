@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791733178782,
+  "lastUpdate": 1791733231126,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -1800,6 +1800,90 @@ window.BENCHMARK_DATA = {
             "value": 1068,
             "unit": "MB",
             "extra": "cut at the 600 s timeout"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "87e184d06fab6a959eb1d4977a2360b2d4010bb4",
+          "message": "Docs: one engineering document. SPECIFICATION.md is folded into AGENTS.md as a short overview of how the engine works (values, objects, state, rows, statements, calls, generators, requirements, verdicts, models, deadlines, soundness), brought up to date (with as try/finally, raises tabulating at a caller's handler, code-keyed budgets); its user-facing parts (what is modelled, what is sound) go to README.md. AGENTS.md is trimmed (191 lines) and source comments no longer cite spec sections.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T16:06:46+01:00",
+          "tree_id": "dadf1f0eae454f5c2201cf335ea6824f25a3e0f1",
+          "url": "https://github.com/kaidaniel/rowan/commit/87e184d06fab6a959eb1d4977a2360b2d4010bb4"
+        },
+        "date": 1791733230625,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 1807.28,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1577,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 1805.93,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 8495,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 1118.58,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 1375,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 4224694,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 82949735,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 53341,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 284173,
+            "unit": "count",
+            "extra": "finished"
           }
         ]
       }
