@@ -86,15 +86,6 @@ impl Kind {
 
 pub type SlotKey = (Ns, KeyId);
 
-thread_local! {
-    /// `State::same` also compares `narrowed` (Options::narrowed_same); set by the analyser.
-    static NARROWED_SAME: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
-}
-
-pub fn set_narrowed_same(on: bool) {
-    NARROWED_SAME.with(|c| c.set(on));
-}
-
 /// Mutable analysis state at one program point.
 pub struct State {
     /// current frame's plain locals (small; copied eagerly)
@@ -398,24 +389,17 @@ impl State {
         // differs), restricted to the footprint. A recursive call answered by its running
         // activation joins that activation's footprint at every call: per key it was calls ×
         // footprint lookups.
-        let diff = !crate::interp::disabled("fpdiff");
-        let rows: Vec<(ObjId, Ns)> = if diff {
+        let rows: Vec<(ObjId, Ns)> = {
             let s: rustc_hash::FxHashSet<(ObjId, Ns)> = fp.rows.iter().copied().collect();
             o.rows.diff_keys(&self.rows).into_iter().filter(|k| s.contains(k)).collect()
-        } else {
-            fp.rows.clone()
         };
-        let slots: Vec<(ObjId, SlotKey)> = if diff {
+        let slots: Vec<(ObjId, SlotKey)> = {
             let s: rustc_hash::FxHashSet<(ObjId, SlotKey)> = fp.slots.iter().copied().collect();
             o.slots.diff_keys(&self.slots).into_iter().filter(|k| s.contains(k)).collect()
-        } else {
-            fp.slots.clone()
         };
-        let elems: Vec<ObjId> = if diff {
+        let elems: Vec<ObjId> = {
             let s: rustc_hash::FxHashSet<ObjId> = fp.elems.iter().copied().collect();
             o.elems.diff_keys(&self.elems).into_iter().filter(|k| s.contains(k)).collect()
-        } else {
-            fp.elems.clone()
         };
         FP_VISITS.with(|c| c.set(c.get() + rows.len() + slots.len() + elems.len()));
         for k in &rows {
@@ -452,11 +436,9 @@ impl State {
         let mut touched: Vec<ObjId> = fp.slots.iter().map(|(o, _)| *o).chain(fp.elems.iter().copied()).collect();
         touched.sort_unstable();
         touched.dedup();
-        let touched: Vec<ObjId> = if diff {
+        let touched: Vec<ObjId> = {
             let s: rustc_hash::FxHashSet<ObjId> = touched.into_iter().collect();
             o.lens.diff_keys(&self.lens).into_iter().filter(|k| s.contains(k)).collect()
-        } else {
-            touched
         };
         for k in touched {
             if let Some(v) = o.lens.get(&k) {
@@ -481,32 +463,14 @@ impl State {
                 }
             }
         }
-        if diff {
-            for (src, k) in o.reqs.diff_keys(&self.reqs) {
-                let Some(info) = o.reqs.get(&src, &k) else { continue };
-                let tgt = self.reqs.writable(&src);
-                let nv = match tgt.get(&k) {
-                    Some(cur) => cur.join(&info),
-                    None => info.demote(),
-                };
-                tgt.insert(k, nv);
-            }
-            return;
-        }
-        for (src, d) in o.reqs.items() {
-            if let Some(cur) = self.reqs.inner(&src) {
-                if Arc::ptr_eq(&cur, &d) {
-                    continue;
-                }
-            }
+        for (src, k) in o.reqs.diff_keys(&self.reqs) {
+            let Some(info) = o.reqs.get(&src, &k) else { continue };
             let tgt = self.reqs.writable(&src);
-            for (k, info) in d.iter() {
-                let nv = match tgt.get(k) {
-                    Some(cur) => cur.join(info),
-                    None => info.demote(),
-                };
-                tgt.insert(*k, nv);
-            }
+            let nv = match tgt.get(&k) {
+                Some(cur) => cur.join(&info),
+                None => info.demote(),
+            };
+            tgt.insert(k, nv);
         }
     }
 
@@ -518,7 +482,7 @@ impl State {
     pub fn same(&self, o: &State) -> bool {
         self.reachable == o.reachable
             && self.env == o.env
-            && (!NARROWED_SAME.with(|c| c.get()) || self.narrowed == o.narrowed)
+            && self.narrowed == o.narrowed
             && self.ret == o.ret
             && (Arc::ptr_eq(&self.tf, &o.tf) || self.tf == o.tf)
             && self.exits.is_none() == o.exits.is_none()
@@ -675,9 +639,6 @@ pub struct Footprint {
 /// Locals possibly unbound after a join: those of either side, and the names bound on one side
 /// only.
 fn join_unbound(a: &State, b: &State) -> Arc<Vec<StrId>> {
-    if crate::interp::disabled("unbound") || crate::interp::disabled("unboundjoin") {
-        return Arc::new(Vec::new());
-    }
     let one_sided = a.env.keys().filter(|k| !b.env.contains_key(*k)).chain(b.env.keys().filter(|k| !a.env.contains_key(*k)));
     let mut out: Vec<StrId> = a.unbound.iter().chain(b.unbound.iter()).copied().chain(one_sided.copied()).collect();
     if out.is_empty() {
@@ -802,7 +763,7 @@ fn join_lasts(a: &Arc<Vec<(ObjId, Value)>>, b: &Arc<Vec<(ObjId, Value)>>) -> Arc
 /// (requirements on a nested source a path lacks entirely: that path never read the parent's
 /// value, so the requirement still holds wherever it was read)
 fn nested_keep(s: &crate::domain::SourceId) -> bool {
-    crate::domain::source_is_nested(*s) && !crate::interp::disabled("nestedreqjoin")
+    crate::domain::source_is_nested(*s)
 }
 
 thread_local! {
@@ -813,11 +774,9 @@ thread_local! {
 /// clone collapsed past the clone budget, a site re-allocated while live): no store into it
 /// replaces what is there.
 pub fn mark_merged(oid: ObjId) {
-    if !crate::interp::disabled("mergedobjs") {
-        MERGED.with(|m| {
-            m.borrow_mut().insert(oid);
-        });
-    }
+    MERGED.with(|m| {
+        m.borrow_mut().insert(oid);
+    });
 }
 
 pub fn is_merged(oid: ObjId) -> bool {
@@ -849,7 +808,7 @@ pub fn join_len(a: &(Option<usize>, usize, u16), b: &(Option<usize>, usize, u16)
         }
     };
     let (ma, mb) = (mask(a), mask(b));
-    let m = if ma != 0 && mb != 0 && !crate::interp::disabled("lenalts") { ma | mb } else { 0 };
+    let m = if ma != 0 && mb != 0 { ma | mb } else { 0 };
     (None, pa.min(pb), m)
 }
 

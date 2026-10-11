@@ -724,9 +724,8 @@ impl Row {
             cap_sources(self.sources.union(&o.sources))
         };
         // (a closed row lacks every key it does not have: absent there too)
-        let implicit = !crate::interp::disabled("closedabsent");
-        let absent_in = |x: &Row, y: &KeySet| -> KeySet { if implicit && x.closed() { x.absent.union(&y.difference(&x.present)) } else { x.absent.clone() } };
-        let absent_l_in = |x: &Row, y: &KeySet| -> KeySet { if implicit && x.closed() { x.absent_likely.union(&y.difference(&x.present)) } else { x.absent_likely.clone() } };
+        let absent_in = |x: &Row, y: &KeySet| -> KeySet { if x.closed() { x.absent.union(&y.difference(&x.present)) } else { x.absent.clone() } };
+        let absent_l_in = |x: &Row, y: &KeySet| -> KeySet { if x.closed() { x.absent_likely.union(&y.difference(&x.present)) } else { x.absent_likely.clone() } };
         Row::from_data_of(RowData {
             present: self.present.union(&o.present),
             definite: self.definite.intersection(&o.definite),
@@ -846,7 +845,7 @@ impl Row {
         let f = |ks: &KeySet| ks.map(|k| step.apply(k));
         let push = |l: LensId| lens_push(l, step.clone());
         // a key stays absent when every key renamed to it was absent
-        let absent = if crate::interp::disabled("renameabsent") { KeySet::new() } else { self.absent.filter(|k| step.inverse(k).iter().all(|c| self.absent.contains(c))) };
+        let absent = { self.absent.filter(|k| step.inverse(k).iter().all(|c| self.absent.contains(c))) };
         Row::from_data(RowData {
             present: f(&self.present),
             definite: f(&self.definite),

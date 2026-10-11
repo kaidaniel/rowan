@@ -125,7 +125,6 @@ Run the oracle on the cases you touched, and in full before a commit that change
 * `ROWAN_DEBUG=1`: tabulation reasons (`tabrun F (why)`), summaries, budgets, and a final
   `work:` line (units, body runs, objects, row joins, visits). `2`: also every event, raise and
   try decision. With it, `ROWAN_GCDBG=1` prints what each collection drops.
-* `ROWAN_NO=a,b` switches refinements off by name (`rg 'disabled\("' rowan/src`), to bisect.
 * `ROWAN_LIMITS=ms=2000,hard=10000,tab=256,call=256,clones=256,chain=2,path=3`. `work=550000`
   (about 2 s) gives reproducible runs for comparisons. A change that removes liveness walks
   spends a `work=N` budget on more statements: compare progress in equal time

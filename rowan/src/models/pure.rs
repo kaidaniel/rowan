@@ -93,7 +93,7 @@ pub fn try_pure(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
 }
 
 fn try_pure_lits(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
-    if crate::interp::disabled("pure") || !c.star_args.is_empty() || !c.star_kwargs.is_empty() {
+    if !c.star_args.is_empty() || !c.star_kwargs.is_empty() {
         return None;
     }
     let q = c.qual.as_str();

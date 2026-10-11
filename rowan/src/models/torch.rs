@@ -1106,7 +1106,7 @@ impl Analyzer {
             "shape" => return Some(self.t_size_value(&s, node, st)),
             "ndim" => return Some(self.t_rank_value(&s)),
             // numpy's `size` is an attribute (the element count), torch's a method
-            "size" if !self.torch_real && !crate::interp::disabled("npsize") => {
+            "size" if !self.torch_real => {
                 return Some(match s.dims() {
                     Some(d) => dim_value(sh::product(&d)),
                     None => Value::data("size"),
@@ -1559,7 +1559,7 @@ impl Analyzer {
         let a0 = self.t_kw(c, args, 0, "dim").or_else(|| kw(c, "axis").cloned());
         let keepdim = kw(c, "keepdim").or_else(|| kw(c, "keepdims")).and_then(|v| self.t_bool(v)).unwrap_or(false);
         // numpy arrays (torch not imported): where numpy's methods differ from torch's
-        if !self.torch_real && !crate::interp::disabled("numpysem") {
+        if !self.torch_real {
             match name {
                 // `transpose(*axes)` permutes (no axes: reversed)
                 "transpose" if args.len() != 2 || s.rank().map(|r| r != 2).unwrap_or(true) => {
@@ -4618,9 +4618,6 @@ impl Analyzer {
 /// record whose reads are requirements). An object with the fields as Item keys (each a 1-D
 /// array), `shape` / `size` / `ndim` / `dtype.names`; a missing field raises ValueError.
 fn np_structured(an: &mut Analyzer, st: &mut State, c: &Call, q: &str) -> Option<Value> {
-    if crate::interp::disabled("npstruct") {
-        return None;
-    }
     let names: Option<Vec<KeyId>> = match q {
         "genfromtxt" | "recfromcsv" => {
             let named = q == "recfromcsv" || c.kw("names").map(|v| v.kv.as_lit() == Some(intern::key_bool(true))).unwrap_or(false);

@@ -21,7 +21,6 @@ pub const MAX_SUMMARY_ROUNDS: usize = 3;
 pub const MAX_REL_CHAIN: usize = 1;
 pub const MAX_TABULATIONS: usize = 256;
 pub const MAX_CALL_TABULATIONS: usize = 256;
-pub const MAX_SYMREQ_TARGETS: usize = 8;
 
 pub fn is_code_kind(k: Kind) -> bool {
     matches!(k, Kind::Function | Kind::Class | Kind::Bound | Kind::External | Kind::Partial | Kind::Method)
@@ -483,7 +482,7 @@ impl Analyzer {
                     p = self.ph_info(par).parent;
                     n += 1;
                 }
-            } else if matches!(self.kind(oid), Kind::List | Kind::Tuple | Kind::Dict | Kind::Set) && self.is_entry_object(oid) && !crate::interp::disabled("entryconcrete") {
+            } else if matches!(self.kind(oid), Kind::List | Kind::Tuple | Kind::Dict | Kind::Set) && self.is_entry_object(oid) {
                 // a container from outside the function (a global): its contents as the call
                 // site has them
                 self.record_event("concrete", oid);
@@ -691,7 +690,7 @@ impl Analyzer {
         let notes_mark = self.notes.len();
         let mut summary: Option<Rc<Summary>> = None;
         for rnd in 0..MAX_SUMMARY_ROUNDS {
-            if rnd >= 1 && self.opts.scc {
+            if rnd >= 1 {
                 // callees summarised against the previous round's partial summary are redone
                 self.summary_provisional.retain(|_, (_, deps)| !deps.contains(&foid));
             }
@@ -721,16 +720,10 @@ impl Analyzer {
             for moid in module_oids {
                 // (the module's slot table is shared with the caller's state, not copied: every
                 // summary would otherwise keep its own copy of every module's attributes)
-                let shared = !crate::interp::disabled("modshare");
-                if shared {
-                    if let Some(inner) = state.slots.m.get_ref(&moid) {
-                        st.slots.m.insert(moid, inner.clone());
-                    }
+                if let Some(inner) = state.slots.m.get_ref(&moid) {
+                    st.slots.m.insert(moid, inner.clone());
                 }
-                for (k, v) in state.obj_slots(moid, Ns::Attr) {
-                    if !shared {
-                        st.slots.set(&moid, (Ns::Attr, k), v.clone());
-                    }
+                for (_, v) in state.obj_slots(moid, Ns::Attr) {
                     let mut work: Vec<ObjId> = v.pts.iter().collect();
                     while let Some(x) = work.pop() {
                         if seen_c.len() > 4096 || !seen_c.insert(x) {
@@ -738,10 +731,8 @@ impl Analyzer {
                         }
                         let xk = self.kind(x);
                         if matches!(xk, Kind::List | Kind::Tuple | Kind::Set) || (xk == Kind::Dict && self.module_done) {
-                            if !crate::interp::disabled("nestedglobals") {
-                                for (_, v2) in state.slots_of(x) {
-                                    work.extend(v2.pts.iter());
-                                }
+                            for (_, v2) in state.slots_of(x) {
+                                work.extend(v2.pts.iter());
                             }
                         }
                         if matches!(xk, Kind::List | Kind::Tuple | Kind::Set) {
@@ -802,7 +793,7 @@ impl Analyzer {
             for p in &positional {
                 // (the arguments' class at this call wins over the annotation: a hint is trusted only
                 // where the class is unknown)
-                let sigc = if crate::interp::disabled("hintsound") { None } else { sig_cls(p.name.id.as_str()) };
+                let sigc = { sig_cls(p.name.id.as_str()) };
                 let cls = match (&p.annotation, sigc) {
                     (_, Some(c)) => Some(c),
                     (Some(ann), None) => self.annotation_class(ann, &fi, state),
@@ -819,7 +810,7 @@ impl Analyzer {
             for p in &kwonly {
                 // (the arguments' class at this call wins over the annotation: a hint is trusted only
                 // where the class is unknown)
-                let sigc = if crate::interp::disabled("hintsound") { None } else { sig_cls(p.name.id.as_str()) };
+                let sigc = { sig_cls(p.name.id.as_str()) };
                 let cls = match (&p.annotation, sigc) {
                     (_, Some(c)) => Some(c),
                     (Some(ann), None) => self.annotation_class(ann, &fi, state),
@@ -946,8 +937,7 @@ impl Analyzer {
             self.frames.pop();
             // bound methods / method values / views made in the body hold receivers that are
             // templates themselves: cloned with them (their payloads are remapped)
-            let old_filter = crate::interp::disabled("boundtmpl");
-            let templates: FxHashSet<ObjId> = (obj_mark..self.objects.len() as ObjId).filter(|o| !matches!(self.kind(*o), Kind::Ph | Kind::External | Kind::Super) && !(old_filter && matches!(self.kind(*o), Kind::Method | Kind::Bound | Kind::View))).collect();
+            let templates: FxHashSet<ObjId> = (obj_mark..self.objects.len() as ObjId).filter(|o| !matches!(self.kind(*o), Kind::Ph | Kind::External | Kind::Super)).collect();
             let rel_full: Vec<Verdict> = self.verdicts[verdict_mark..].to_vec();
             let mut seen_rel: FxHashSet<(String, u32, u32, String, Tier, ObjId, Chain)> = FxHashSet::default();
             let mut rel_list: Vec<Verdict> = Vec::new();
@@ -1060,9 +1050,7 @@ impl Analyzer {
         }
         // not converged within the rounds: widened, but final for the callers from here on
         if let Some(s) = &summary {
-            if !crate::interp::disabled("partialclear") {
-                s.partial.set(false);
-            }
+            s.partial.set(false);
         }
         self.sum_stack.pop();
         self.sum_ctxs.pop();
@@ -1077,10 +1065,8 @@ impl Analyzer {
         let deps = self.sum_deps.pop().unwrap_or_default();
         self.sum_hit.remove(&foid);
         self.sum_partial.remove(&foid);
-        if self.opts.scc {
-            // foid's summary is final now: everything computed against its partial one is stale
-            self.summary_provisional.retain(|_, (_, d)| !d.contains(&foid));
-        }
+        // foid's summary is final now: everything computed against its partial one is stale
+        self.summary_provisional.retain(|_, (_, d)| !d.contains(&foid));
         self.frames = saved_frames;
         self.call_chain = saved_chain;
         self.loop_stack = saved_loops;
@@ -1099,7 +1085,7 @@ impl Analyzer {
         match summary {
             Some(rc) => {
                 rc.partial.set(false);
-                if self.opts.scc && !deps.is_empty() {
+                if !deps.is_empty() {
                     self.summary_provisional.insert(skey, (rc.clone(), deps));
                 } else {
                     self.summary_table.insert(skey, rc.clone());
@@ -1184,7 +1170,7 @@ impl Analyzer {
         };
         // a value holding this summary's own placeholders (a cell holding a parameter): the
         // bindings of those placeholders
-        let v = if !crate::interp::disabled("bindsub") && (v.pts.iter().any(|o| bind.contains_key(&o)) || v.kv.as_param().map(|p| bind.contains_key(&p)).unwrap_or(false)) {
+        let v = if v.pts.iter().any(|o| bind.contains_key(&o)) || v.kv.as_param().map(|p| bind.contains_key(&p)).unwrap_or(false) {
             let mut out = Value::with_kv(v.pts.filter(|o| !bind.contains_key(&o)), if v.kv.as_param().map(|p| bind.contains_key(&p)).unwrap_or(false) { crate::domain::BOT } else { v.kv.clone() });
             for o in v.pts.iter() {
                 if let Some(b) = bind.get(&o) {
@@ -1256,7 +1242,7 @@ impl Analyzer {
         let n = self.tab_site_count.get(&key).copied().unwrap_or(0);
         // (a recursive call — the callee runs already — in a loop)
         let recursive = self.active_by_func.get(&summary.foid).map(|v| !v.is_empty()).unwrap_or(false);
-        if n >= crate::interp::limit("site", TAB_PER_SITE) && recursive && self.frame().loop_depth > 0 && !crate::interp::disabled("tabsite") {
+        if n >= crate::interp::limit("site", TAB_PER_SITE) && recursive && self.frame().loop_depth > 0 {
             if debug_enabled() {
                 eprintln!("budget: summary used for {} (site L{} reached {} tabulations)", self.func_info(summary.foid).qualname, node.line, n);
             }
@@ -1301,7 +1287,7 @@ impl Analyzer {
     /// A raise leaving the function being summarised (no try of its own catches it): its
     /// state is kept for the summary's raise footprint.
     pub fn note_summary_raise(&mut self, state: &State) {
-        if self.sum_stack.is_empty() || crate::interp::disabled("raisefp") {
+        if self.sum_stack.is_empty() {
             return;
         }
         let Some(acc) = self.sum_raise_acc.last_mut() else { return };
@@ -1359,12 +1345,12 @@ impl Analyzer {
     }
 
     pub(crate) fn class_resolves(&self, oid: ObjId, name: &str) -> bool {
-        if self.kind(oid) == Kind::Class && !crate::interp::disabled("classdunders") {
+        if self.kind(oid) == Kind::Class {
             return (name.starts_with("__") && name.ends_with("__")) || name == "mro" || self.class_lookup(oid, name).is_some();
         }
         // (an object a model simulates — a StringIO, a pattern, a pydantic error: its attributes
         // are the model's, its row holds the model's own state)
-        if self.kind(oid) == Kind::Namespace && !crate::interp::disabled("modelattrs") {
+        if self.kind(oid) == Kind::Namespace {
             if let crate::interp::Payload::Method(q, _) = &self.obj(oid).payload {
                 if ["stdobj.", "pydverr.", "typeadapter.", "fastapi."].iter().any(|p| q.starts_with(p)) {
                     return true;
@@ -1376,12 +1362,12 @@ impl Analyzer {
         }
         // (every instance has `object`'s attributes, and its class's `__module__` / `__doc__`;
         // `__dict__` / `__weakref__` unless `__slots__` drop them: taken as there)
-        if OBJECT_ATTRS.contains(&name) && !crate::interp::disabled("objectattrs") {
+        if OBJECT_ATTRS.contains(&name) {
             return true;
         }
         match self.instance_class(oid) {
             // (`__getattr__` / `__getattribute__` answer any name)
-            Some(c) if !crate::interp::disabled("getattrcls") && (self.class_lookup(c, "__getattr__").is_some() || self.class_lookup(c, "__getattribute__").is_some()) => true,
+            Some(c) if self.class_lookup(c, "__getattr__").is_some() || self.class_lookup(c, "__getattribute__").is_some() => true,
             // (a field's class-level default is shadowed by the instance's attribute)
             Some(c) => self.class_lookup(c, name).is_some() && !self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name),
             None => false,
@@ -1505,11 +1491,11 @@ impl Analyzer {
                         return Some(ev.clone());
                     }
                     // a literal (a column name, a key) decides a model's answer too
-                    if ev.kind == "concrete" && v.pts.is_empty() && v.kv.is_literal() && !crate::interp::disabled("concretelit") {
+                    if ev.kind == "concrete" && v.pts.is_empty() && v.kv.is_literal() {
                         return Some(ev.clone());
                     }
                     // so does a text a model knows the structure of (a csv header, a dumped value)
-                    if ev.kind == "concrete" && v.pts.is_empty() && !crate::interp::disabled("concretetext") {
+                    if ev.kind == "concrete" && v.pts.is_empty() {
                         if let KeyVal::Data(d) = &v.kv {
                             let t = intern::str_get(*d);
                             if ["csvhdr:", "pyjsontext:", "pickletext:", "jsontext:", "pydjson:"].iter().any(|p| t.starts_with(p)) {
@@ -1536,7 +1522,7 @@ impl Analyzer {
 
     /// An instance whose class defines `__getitem__` (a subscript calls it).
     fn indexes_by_getitem(&self, oid: ObjId) -> bool {
-        if self.kind(oid) != Kind::Instance || crate::interp::disabled("getitemcls") {
+        if self.kind(oid) != Kind::Instance {
             return false;
         }
         let Some(c) = self.instance_class(oid) else { return false };
@@ -1632,7 +1618,7 @@ impl Analyzer {
             }
             for (a, concrete) in per_target {
                 // keys known absent before the call stay so unless the callee added them
-                let concrete = if pre.has_row(a, ns) && !crate::interp::disabled("keepabsent") {
+                let concrete = if pre.has_row(a, ns) {
                     let before = pre.row(a, ns);
                     let lost = before.absent.difference(&concrete.present).difference(&concrete.absent);
                     if lost.is_empty() || !expr.mentions(oid) && !expr.is_entry() {
@@ -1708,7 +1694,7 @@ impl Analyzer {
             for a in tg.iter() {
                 // through a placeholder of the summary being built: an append of its own (in
                 // order, positional while this call is straight-line code)
-                if self.kind(a) == Kind::Ph && !crate::interp::disabled("phappend") {
+                if self.kind(a) == Kind::Ph {
                     let positional = *i >= 0 && tg.len() == 1 && self.frame().loop_depth == 0 && self.cond_depth == 0;
                     let j = if positional { (0..16).find(|j| !state.has_slot(a, Ns::Pos, crate::interp::access::append_slot_key(*j))).unwrap_or(-1) } else { -1 };
                     let k = crate::interp::access::append_slot_key(j);
@@ -1736,7 +1722,7 @@ impl Analyzer {
             }
         }
         // 3c. the elements the body appended last
-        if !summary.exit.lasts.is_empty() && !crate::interp::disabled("lastelem") {
+        if !summary.exit.lasts.is_empty() {
             for (oid, v) in summary.exit.lasts.iter() {
                 let tg = inst.resolve(self, state, &pre, *oid);
                 if tg.len() != 1 {
@@ -1844,12 +1830,10 @@ impl Analyzer {
                 }
             }
             // (an access of the callee raises into a try around this call)
-            let sr_guarded = sr.guarded || (self.is_guarded(sr.ns) && !crate::interp::disabled("callguard"));
+            let sr_guarded = sr.guarded || (self.is_guarded(sr.ns));
             // (re-raised by the callee's handlers, and not caught here, or re-raised here too)
             // (a try here catching the callee's exception: still required, the oracle's rule)
-            let caught_here = !crate::interp::disabled("caughtreq");
-            let here = !self.is_guarded(sr.ns) || self.guard_reraises(sr.ns) || self.catching_depth > 0 || caught_here;
-            let sr_reraise = if sr.guarded { sr.reraise && here } else { self.is_guarded(sr.ns) && (self.guard_reraises(sr.ns) || self.catching_depth > 0 || caught_here) };
+            let sr_reraise = if sr.guarded { sr.reraise } else { self.is_guarded(sr.ns) };
             let ngroups = groups.len();
             let mut all_missing = ngroups > 0;
             for (row_c, members) in groups {
@@ -1865,23 +1849,21 @@ impl Analyzer {
                     }
                     // an access of the callee that may fail here: the call may raise (a try
                     // around it reaches its handler)
-                    if !sr.guarded && matches!(tier, Tier::Missing | Tier::Possibly | Tier::Input | Tier::LikelyMissing) && !crate::interp::disabled("symreqraise") {
+                    if !sr.guarded && matches!(tier, Tier::Missing | Tier::Possibly | Tier::Input | Tier::LikelyMissing) {
                         let exc = if sr.ns == Ns::Attr { "AttributeError" } else { "KeyError" };
                         // (the exception, with its key, for a handler's `as e`)
-                        if !self.raise_states.is_empty() && !crate::interp::disabled("excvalue") {
+                        if !self.raise_states.is_empty() {
                             let e = self.exception_object(exc, vec![Value::lit(k)], &sr.node, state);
                             self.cur_exc = Some(e);
                         }
                         // (the handler's path needs the key too — its exception fired for it — and
                         // what the callee read before it)
                         let mut p2 = pre.copy();
-                        if !crate::interp::disabled("caughtreq") {
-                            for (src, d) in state.reqs.items() {
-                                for (k2, info) in d.iter() {
-                                    let had = pre.reqs.inner(&src).map(|x| x.contains_key(k2)).unwrap_or(false);
-                                    if !had {
-                                        p2.reqs.writable(&src).insert(*k2, info.clone());
-                                    }
+                        for (src, d) in state.reqs.items() {
+                            for (k2, info) in d.iter() {
+                                let had = pre.reqs.inner(&src).map(|x| x.contains_key(k2)).unwrap_or(false);
+                                if !had {
+                                    p2.reqs.writable(&src).insert(*k2, info.clone());
                                 }
                             }
                         }
@@ -1892,7 +1874,7 @@ impl Analyzer {
             }
             // an access on every path of the callee that surely fails, under a try around the
             // call that catches it: the call raises there (as a guarded access does)
-            if all_missing && !sr.guarded && !sr.conditional && self.is_guarded(sr.ns) && !crate::interp::disabled("surefail") {
+            if all_missing && !sr.guarded && !sr.conditional && self.is_guarded(sr.ns) {
                 sure_fail = true;
             }
         }
@@ -2000,15 +1982,13 @@ impl Analyzer {
         }
         // (lists made in the body keep the length alternatives they had at its end: the
         // footprint's element writes above cleared them)
-        if !crate::interp::disabled("lenalts") {
-            for (tpl, nid) in inst.clones.iter() {
-                if !inst.new_clones.contains(nid) {
-                    continue;
-                }
-                if let Some((None, p, m)) = summary.exit.lens.get(tpl).filter(|l| l.2 != 0) {
-                    if matches!(state.lens.get(nid), Some((None, _, _)) | None) {
-                        state.lens.insert(*nid, (None, p, m));
-                    }
+        for (tpl, nid) in inst.clones.iter() {
+            if !inst.new_clones.contains(nid) {
+                continue;
+            }
+            if let Some((None, p, m)) = summary.exit.lens.get(tpl).filter(|l| l.2 != 0) {
+                if matches!(state.lens.get(nid), Some((None, _, _)) | None) {
+                    state.lens.insert(*nid, (None, p, m));
                 }
             }
         }
@@ -2032,8 +2012,8 @@ impl Analyzer {
             if !self.sum_stack.is_empty() {
                 // a callee's access deferred again, now under a try of this function: it may
                 // raise into the handler; decided where the record is known
-                let guarded = guarded || (self.is_guarded(ns) && !crate::interp::disabled("symreqraise"));
-                if guarded && !crate::interp::disabled("symreqraise") && self.is_guarded(ns) {
+                let guarded = guarded || (self.is_guarded(ns));
+                if guarded && self.is_guarded(ns) {
                     let exc = if ns == Ns::Attr { "AttributeError" } else { "KeyError" };
                     self.may_raise_here(exc, state);
                     self.record_event("guarded", oid);
@@ -2049,12 +2029,10 @@ impl Analyzer {
                 let cls = classify(row, k);
                 out.push((k, cls.tier));
                 if guarded {
-                    if !crate::interp::disabled("guardedverdicts") {
-                        let saved = std::mem::replace(&mut self.verdict_guarded, true);
-                        self.verdict(node, k, &cls, oid, ns, Some(file), Some(text));
-                        self.verdict_guarded = saved;
-                    }
-                    if reraise && cls.tier == Tier::Input && !crate::interp::disabled("catchreq") {
+                    let saved = std::mem::replace(&mut self.verdict_guarded, true);
+                    self.verdict(node, k, &cls, oid, ns, Some(file), Some(text));
+                    self.verdict_guarded = saved;
+                    if reraise && cls.tier == Tier::Input {
                         self.require_providers_k(&cls, row, &site, true, state, Some(k));
                     }
                     continue;
@@ -2106,19 +2084,6 @@ fn erow_of(pre: &State, state: &State, born: &FxHashMap<(ObjId, Ns), Row>, a: Ob
     } else {
         state.row(a, ns)
     }
-}
-
-fn group_by_site(an: &Analyzer, tg: &ObjSet) -> Vec<Vec<ObjId>> {
-    let mut by: Vec<((Kind, std::sync::Arc<str>), Vec<ObjId>)> = Vec::new();
-    for a in tg.iter() {
-        let key = (an.kind(a), an.obj(a).site.clone());
-        if let Some(e) = by.iter_mut().find(|(k, _)| *k == key) {
-            e.1.push(a);
-        } else {
-            by.push((key, vec![a]));
-        }
-    }
-    by.into_iter().map(|(_, m)| m).collect()
 }
 
 /// The entry rows substituted for one placeholder when a symbolic row is concretised for
@@ -2243,7 +2208,7 @@ impl Inst {
         // (a placeholder standing for no object here: whatever value it is, its keys are not
         // known — an empty closed row would claim there are none)
         let out = if targets.is_empty() {
-            if an.has_obj(oid) && an.kind(oid) == Kind::Ph && !crate::interp::disabled("unresolvedtop") {
+            if an.has_obj(oid) && an.kind(oid) == Kind::Ph {
                 Row::top()
             } else {
                 Row::new()
@@ -2300,44 +2265,26 @@ impl Inst {
         hit
     }
 
-    /// Targets of placeholder `ph` partitioned for concretisation.  With site resolution
-    /// (AGENTS.md next step 3) targets of one allocation site that share their entry rows
-    /// form one group with one exact representative row; otherwise the prototype's scheme:
-    /// one group per target up to `MAX_SYMREQ_TARGETS`, then one joined group per site.
+    /// Targets of placeholder `ph` partitioned for concretisation: targets of one allocation
+    /// site that share their entry rows form one group with one exact representative row.
     fn focus_groups(&mut self, an: &Analyzer, state: &State, pre: &State, ph: ObjId, tg: &ObjSet) -> Vec<(Focus, Vec<ObjId>)> {
-        if an.opts.site_resolution {
-            // (groups indexed by kind and site, the focus compared within a site only: a target
-            // set of thousands made this quadratic)
-            let mut groups: Vec<(Focus, Vec<ObjId>)> = Vec::new();
-            let mut by_site: FxHashMap<(Kind, std::sync::Arc<str>), Vec<usize>> = FxHashMap::default();
-            for a in tg.iter() {
-                let f = Focus::of_target(pre, state, &self.born, ph, a);
-                let sk = (an.kind(a), an.obj(a).site.clone());
-                let ids = by_site.entry(sk).or_default();
-                match ids.iter().copied().find(|gi| groups[*gi].0 == f) {
-                    Some(gi) => groups[gi].1.push(a),
-                    None => {
-                        ids.push(groups.len());
-                        groups.push((f, vec![a]));
-                    }
+        // (groups indexed by kind and site, the focus compared within a site only: a target
+        // set of thousands made this quadratic)
+        let mut groups: Vec<(Focus, Vec<ObjId>)> = Vec::new();
+        let mut by_site: FxHashMap<(Kind, std::sync::Arc<str>), Vec<usize>> = FxHashMap::default();
+        for a in tg.iter() {
+            let f = Focus::of_target(pre, state, &self.born, ph, a);
+            let sk = (an.kind(a), an.obj(a).site.clone());
+            let ids = by_site.entry(sk).or_default();
+            match ids.iter().copied().find(|gi| groups[*gi].0 == f) {
+                Some(gi) => groups[gi].1.push(a),
+                None => {
+                    ids.push(groups.len());
+                    groups.push((f, vec![a]));
                 }
             }
-            return groups;
         }
-        if tg.len() <= MAX_SYMREQ_TARGETS {
-            return tg.iter().map(|a| (Focus::of_target(pre, state, &self.born, ph, a), vec![a])).collect();
-        }
-        let mut out = Vec::new();
-        for members in group_by_site(an, tg) {
-            if members.len() == 1 {
-                out.push((Focus::of_target(pre, state, &self.born, ph, members[0]), members));
-            } else {
-                let ri = join_rows(members.iter().map(|a| erow_of(pre, state, &self.born, *a, Ns::Item)));
-                let ra = join_rows(members.iter().map(|a| erow_of(pre, state, &self.born, *a, Ns::Attr)));
-                out.push((Focus { ph, item: ri, attr: ra }, members));
-            }
-        }
-        out
+        groups
     }
 
     fn fresh_clone(&self, nid: ObjId) -> bool {
@@ -2355,7 +2302,7 @@ impl Inst {
         let tsite: String = tsite.strip_suffix("#recent").map(|x| x.to_string()).unwrap_or_else(|| tsite.to_string());
         // templates allocated at one line in different inner contexts (two objects built by
         // one constructor inside the body) stay distinct in the clone
-        let tsite = if tctx.is_empty() || crate::interp::disabled("clonectx") { tsite } else { format!("{}|{}", tsite, tctx) };
+        let tsite = if tctx.is_empty() { tsite } else { format!("{}|{}", tsite, tctx) };
         let ns = if matches!(tkind, Kind::Instance | Kind::Namespace) { Ns::Attr } else { Ns::Item };
         let nid = an.alloc_in_frame(tkind, &tsite, state, &tlabel, Payload::None, None, ns, tsingle, &self.call_ctx, self.ctx_single);
         if let Some(o) = an.origins.get(&t).cloned() {
@@ -2379,7 +2326,7 @@ impl Inst {
         }
         // (a clone that is not one object — collapsed past the clone budget, shared with other
         // calls' clones — takes the template's facts weakly, as a collision does)
-        if !an.obj(nid).single && !crate::interp::disabled("weakclone") {
+        if !an.obj(nid).single {
             self.collided.insert(nid);
         }
         self.clones.insert(t, nid);
@@ -2462,7 +2409,7 @@ impl Inst {
         let key = ph.key.unwrap_or(STAR);
         for p in parents.iter() {
             // the content of a dict under an unknown key: its values (iterating it gives keys)
-            if key == STAR && ph.ns == Ns::Item && an.kind(p) == Kind::Dict && !crate::interp::disabled("dictstar") {
+            if key == STAR && ph.ns == Ns::Item && an.kind(p) == Kind::Dict {
                 parts.push(an.record_values(p, state));
                 continue;
             }
@@ -2520,7 +2467,7 @@ impl Inst {
             let mut v = pre.slot(p, ph.ns, key);
             // a module name read as a deferred load, met while building another summary: the
             // load stays deferred (the summary must not mutate the module's actual list)
-            if ph.ns == Ns::Attr && an.kind(p) == Kind::Module && !an.sum_stack.is_empty() && !crate::interp::disabled("globalrd2") {
+            if ph.ns == Ns::Attr && an.kind(p) == Kind::Module && !an.sum_stack.is_empty() {
                 if let Some(name) = intern::key_as_str(key) {
                     if an.deferred_global(p, &name, &v) {
                         parts.push(an.path_placeholder_value(p, Ns::Attr, key, &Row::new(), state));
@@ -2528,7 +2475,7 @@ impl Inst {
                     }
                 }
             }
-            if ph.ns == Ns::Attr && an.kind(p) == Kind::Class && v.empty() && !crate::interp::disabled("clsattrpath") {
+            if ph.ns == Ns::Attr && an.kind(p) == Kind::Class && v.empty() {
                 // a class's attribute through a parameter: its class table, or its name
                 if let Some(name) = intern::key_as_str(key) {
                     if matches!(&*name, "__name__" | "__qualname__") && an.class_lookup(p, &name).is_none() {
@@ -2586,15 +2533,6 @@ impl Inst {
             }
             parts.push(v);
         }
-        let mut acc = crate::domain::join_values(parts);
-        if let Some(c) = ph.cls.get().filter(|_| crate::interp::disabled("hintsound")) {
-            if !acc.pts.is_empty() {
-                let kept = acc.pts.filter(|o| an.may_be_instance(o, c));
-                if kept != acc.pts {
-                    acc = Value::with_kv(kept, acc.kv.clone());
-                }
-            }
-        }
-        acc
+        crate::domain::join_values(parts)
     }
 }

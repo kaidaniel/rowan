@@ -364,9 +364,6 @@ fn last(q: &str) -> &str {
 
 /// Module constants with known values (`re.IGNORECASE`, `math.pi`, `string.digits`, …).
 pub fn external_constant(an: &Analyzer, qual: &str) -> Option<Value> {
-    if crate::interp::disabled("extconst") {
-        return None;
-    }
     let int = |i: i64| Some(Value::lit(intern::key_int(i)));
     let st = |s: &str| Some(Value::lit(key_str_lit(s)));
     match qual {
@@ -422,7 +419,7 @@ fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if let Some(src) = c.args.first() {
         // a parameter: a mapping or pairs, decided per call site
         for x in src.pts.iter() {
-            if an.kind(x) == Kind::Ph && !crate::interp::disabled("dictph") {
+            if an.kind(x) == Kind::Ph {
                 an.record_event("concrete", x);
             }
         }
@@ -562,7 +559,7 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_simple(kind, &c.node, st, &format!("{}@L{}", last(&c.qual), c.line));
     an.set_llen(oid, st, None);
     an.sorted_items.remove(&oid);
-    if c.qual == "builtins.sorted" && c.kw("key").is_none() && an.obj(oid).single && !crate::interp::disabled("sorteditems") {
+    if c.qual == "builtins.sorted" && c.kw("key").is_none() && an.obj(oid).single {
         if let Some(items) = c.args.first().and_then(|a| sorted_dict_items(an, st, a, c)) {
             an.sorted_items.insert(oid, std::rc::Rc::new(items));
         }
@@ -661,7 +658,7 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         // a dict with some keys only maybe there: the sure keys before the first maybe one
         // are the first items (the length is not known)
-        if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple") && an.llen(oid, st).is_none() && an.obj(oid).single && !crate::interp::disabled("maybeprefix") {
+        if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple") && an.llen(oid, st).is_none() && an.obj(oid).single {
             if let Some(m) = an.maybe_dict_items(a, st) {
                 let lead: Vec<Value> = m.iter().take_while(|(_, sure)| *sure).map(|(v, _)| v.clone()).collect();
                 if !lead.is_empty() {
@@ -677,7 +674,7 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         an.set_llen(oid, st, Some(0));
     }
     // (a copy of a list / tuple whose length is one of a few: the same alternatives)
-    if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple" | "builtins.sorted" | "builtins.reversed") && an.llen(oid, st).is_none() && !crate::interp::disabled("lenalts") {
+    if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple" | "builtins.sorted" | "builtins.reversed") && an.llen(oid, st).is_none() {
         if let Some(src) = c.args.first().and_then(|a| a.single()).filter(|s| matches!(an.kind(*s), Kind::List | Kind::Tuple)) {
             if let Some((None, _, m)) = st.lens.get(&src).filter(|l| l.2 != 0) {
                 let p = an.prefix(oid, st).unwrap_or(0);
@@ -711,9 +708,6 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 return Value::data("bool");
             }
         }
-    }
-    if crate::interp::disabled("isinst") {
-        return Value::data("bool");
     }
     let mut classes: Vec<u32> = Vec::new();
     for o in cv.pts.iter() {
@@ -840,7 +834,7 @@ fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             kvals.push(kv);
         }
         // items that order themselves (`__lt__`): compared one against the best so far
-        if keys.iter().any(|k| k.is_none()) && keyf.is_none() && !crate::interp::disabled("instorder") && items.iter().all(|x| x.single().map(|o| an.kind(o) == Kind::Instance).unwrap_or(false)) {
+        if keys.iter().any(|k| k.is_none()) && keyf.is_none() && items.iter().all(|x| x.single().map(|o| an.kind(o) == Kind::Instance).unwrap_or(false)) {
             let mut best = 0usize;
             let mut ok = true;
             for i in 1..items.len() {
@@ -878,7 +872,7 @@ fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
         // keys that are tuples / pairs of known items: compared item by item
-        if keys.iter().any(|k| k.is_none()) && !crate::interp::disabled("tupleminmax") {
+        if keys.iter().any(|k| k.is_none()) {
             let mut best = 0usize;
             let mut ok = true;
             for i in 1..items.len() {
@@ -919,7 +913,7 @@ fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn m_zip(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // `zip(*rows)` / `zip(a, b, c)`: every input with known items gives the tuples directly
-    if (!c.star_args.is_empty() || c.args.len() != 2) && !crate::interp::disabled("zipn") {
+    if !c.star_args.is_empty() || c.args.len() != 2 {
         let mut inputs: Option<Vec<Value>> = Some(c.args.clone());
         for sa in &c.star_args {
             match (an.iterate(sa, &c.node, st).items, inputs.as_mut()) {
@@ -947,7 +941,7 @@ fn m_zip(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     an.obj_mut(oid).payload = Payload::Zip(a.clone(), b.clone());
     // `strict=True`: lengths that differ raise ValueError; otherwise both have the known one
     let strict = c.kwargs.get(&intern::s("strict")).and_then(|v| v.kv.as_lit()) == Some(intern::key_bool(true));
-    if strict && !crate::interp::disabled("zipstrict") {
+    if strict {
         an.zip_strict.insert(oid);
         let la = an.iterate(&a, &c.node, st).items.map(|x| x.len());
         let lb = an.iterate(&b, &c.node, st).items.map(|x| x.len());
@@ -982,7 +976,7 @@ fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         if matches!(an.kind(g), Kind::List) && an.obj(g).single {
             // (an endless generator: the positions it is known to reach)
             if let (None, Some(p), Some(cur)) = (an.llen(g, st), an.prefix(g, st), an.cursor_of(g, st)) {
-                if cur < p && an.obj(g).iterator && !crate::interp::disabled("genprefix") {
+                if cur < p && an.obj(g).iterator {
                     an.set_cursor(g, Some(cur as usize + 1), st);
                     return st.slot(g, Ns::Pos, intern::key_int(cur as i64));
                 }
@@ -993,7 +987,7 @@ fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     an.set_cursor(g, Some(cur as usize + 1), st);
                     return st.slot(g, Ns::Pos, intern::key_int(cur));
                 }
-                if cur >= 0 && (cur as usize) >= n && !crate::interp::disabled("nextend") {
+                if cur >= 0 && (cur as usize) >= n {
                     // exhausted: the default, else StopIteration
                     return match c.args.get(1) {
                         Some(d) => d.clone(),
@@ -1048,10 +1042,10 @@ fn m_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             Some(name) => an.store_attr(&c.args[0], &name, &c.args[2], &c.node, st),
             None => {
                 let recs = an.record_objects(&c.args[0]);
-                let strong = recs.len() == 1 && an.strongable(recs[0]) && !crate::interp::disabled("setattrstrong");
+                let strong = recs.len() == 1 && an.strongable(recs[0]);
                 for o in recs {
                     // a user `__setattr__` takes the store, whatever the name
-                    let hook = an.kind(o) == Kind::Instance && !an.bypass_setattr && !crate::interp::disabled("setattrdunder") && an.instance_class(o).is_some_and(|cls| an.class_lookup(cls, "__setattr__").is_some());
+                    let hook = an.kind(o) == Kind::Instance && !an.bypass_setattr && an.instance_class(o).is_some_and(|cls| an.class_lookup(cls, "__setattr__").is_some());
                     if hook {
                         an.call_method_with(&Value::obj(o), "__setattr__", vec![c.args[1].clone(), c.args[2].clone()], &c.node, st);
                         continue;
@@ -1134,9 +1128,6 @@ pub fn builtin_has_attr(an: &Analyzer, o: u32, name: &str) -> Option<bool> {
 /// Some(false) when it surely raises it, Some(true) when it surely returns, None otherwise (or
 /// when it changes the heap).
 fn getattr_hook_outcome(an: &mut Analyzer, st: &mut State, o: u32, k: KeyId, node: &crate::frontend::Node) -> Option<bool> {
-    if crate::interp::disabled("hasattrhook") {
-        return None;
-    }
     let mut s2 = st.copy();
     let mark = an.objects.len() as u32;
     let caught: rustc_hash::FxHashSet<String> = ["AttributeError".to_string()].into_iter().collect();
@@ -1344,7 +1335,7 @@ fn m_dc_fields(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn m_vars(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first() else { return Value::data("vars") };
     // a parameter's vars(): the live view of its attributes (as `obj.__dict__`)
-    if c.qual == "builtins.vars" && !crate::interp::disabled("varsview") {
+    if c.qual == "builtins.vars" {
         if let Some(p) = a.single().filter(|o| an.kind(*o) == Kind::Ph) {
             let vid = an.alloc_raw(Kind::View, &format!("view:attrs:{}", p), "", true, "__dict__", Payload::View(ViewKind::Attrs, Value::obj(p)));
             an.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(p));
@@ -1372,7 +1363,7 @@ fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     an.set_llen(oid, st, None);
     if c.args.len() >= 2 {
         let it = an.iterate(&c.args[1], &c.node, st);
-        if c.qual.ends_with("filter") && !crate::interp::disabled("filteritems") {
+        if c.qual.ends_with("filter") {
             if let Some(items) = it.items.as_ref().filter(|its| its.len() <= crate::interp::UNROLL_MAX) {
                 // known items: the predicate per item (None: the item's truth); decided for all
                 // of them, the kept items keep their positions
@@ -1485,7 +1476,7 @@ fn m_reduce(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// `type(x)` with one argument: the class of an instance of a known class (else unknown).
 fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // `type("Name", (), {...})`: a class whose attributes are the namespace's items
-    if c.args.len() == 3 && !crate::interp::disabled("type3") {
+    if c.args.len() == 3 {
         let name = c.args[0].kv.as_lit().filter(|_| c.args[0].pts.is_empty()).and_then(intern::key_as_str);
         let no_bases = c.args[1].single().map(|o| an.llen(o, st) == Some(0)).unwrap_or(false);
         let ns = c.args[2].single().filter(|o| an.kind(*o) == Kind::Dict);
@@ -1527,63 +1518,61 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             return join_values(cs.into_iter().map(Value::obj).collect::<Vec<Value>>());
         }
         // builtin values: their builtin class (the object the builtin name is)
-        if !crate::interp::disabled("typebuiltin") {
-            let builtin = |an: &mut Analyzer, n: &str| -> Value { Value::obj(an.alloc_raw(Kind::External, &format!("ext:builtins.{}", n), "", true, n, Payload::Str(format!("builtins.{}", n)))) };
-            let mut outs: Vec<Value> = Vec::new();
-            let mut known = true;
-            for o in a.pts.iter() {
-                // a builtin exception object: its class
-                if let Some(en) = an.exc_objs.get(&o).cloned().filter(|_| an.kind(o) == Kind::Namespace) {
-                    outs.push(builtin(an, &en));
+        let builtin = |an: &mut Analyzer, n: &str| -> Value { Value::obj(an.alloc_raw(Kind::External, &format!("ext:builtins.{}", n), "", true, n, Payload::Str(format!("builtins.{}", n)))) };
+        let mut outs: Vec<Value> = Vec::new();
+        let mut known = true;
+        for o in a.pts.iter() {
+            // a builtin exception object: its class
+            if let Some(en) = an.exc_objs.get(&o).cloned().filter(|_| an.kind(o) == Kind::Namespace) {
+                outs.push(builtin(an, &en));
+                continue;
+            }
+            let n = match an.kind(o) {
+                Kind::Dict if !crate::models::pandas::is_series_obj(an, o) => "dict",
+                Kind::List => "list",
+                Kind::Tuple => "tuple",
+                Kind::Set => "set",
+                Kind::Ph => {
+                    an.record_event("concrete", o);
+                    known = false;
                     continue;
                 }
-                let n = match an.kind(o) {
-                    Kind::Dict if !crate::models::pandas::is_series_obj(an, o) => "dict",
-                    Kind::List => "list",
-                    Kind::Tuple => "tuple",
-                    Kind::Set => "set",
-                    Kind::Ph => {
-                        an.record_event("concrete", o);
-                        known = false;
-                        continue;
-                    }
-                    _ => {
-                        known = false;
-                        continue;
-                    }
-                };
-                outs.push(builtin(an, n));
-            }
-            match &a.kv {
-                KeyVal::Bot => {}
-                kv if kv.is_literal() => {
-                    for k in crate::domain::kv_literals(kv).iter() {
-                        let n = intern::with_key(k, |kk| match kk {
-                            intern::Key::Str(_) => "str",
-                            intern::Key::Int(_) => "int",
-                            intern::Key::Float(_) => "float",
-                            intern::Key::Bool(_) => "bool",
-                            intern::Key::None => "NoneType",
-                            intern::Key::Bytes(_) => "bytes",
-                            intern::Key::Tuple(_) => "tuple",
-                            _ => "",
-                        });
-                        if n.is_empty() {
-                            known = false;
-                        } else {
-                            outs.push(builtin(an, n));
-                        }
-                    }
-                }
-                KeyVal::Param(p) => {
-                    an.record_event("concrete", *p);
+                _ => {
                     known = false;
+                    continue;
                 }
-                _ => known = false,
+            };
+            outs.push(builtin(an, n));
+        }
+        match &a.kv {
+            KeyVal::Bot => {}
+            kv if kv.is_literal() => {
+                for k in crate::domain::kv_literals(kv).iter() {
+                    let n = intern::with_key(k, |kk| match kk {
+                        intern::Key::Str(_) => "str",
+                        intern::Key::Int(_) => "int",
+                        intern::Key::Float(_) => "float",
+                        intern::Key::Bool(_) => "bool",
+                        intern::Key::None => "NoneType",
+                        intern::Key::Bytes(_) => "bytes",
+                        intern::Key::Tuple(_) => "tuple",
+                        _ => "",
+                    });
+                    if n.is_empty() {
+                        known = false;
+                    } else {
+                        outs.push(builtin(an, n));
+                    }
+                }
             }
-            if known && !outs.is_empty() {
-                return join_values(outs);
+            KeyVal::Param(p) => {
+                an.record_event("concrete", *p);
+                known = false;
             }
+            _ => known = false,
+        }
+        if known && !outs.is_empty() {
+            return join_values(outs);
         }
     }
     Value::data(&format!("type@L{}", c.line))
@@ -1603,11 +1592,11 @@ fn m_str(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         let mut out = if a.kv.is_bot() { Value::new() } else { Value::kv_only(an.rename_kv(&a.kv, &RenameFn::new(FnKind::Str))) };
         // (a text not known: a string all the same, its str methods apply)
-        if matches!(out.kv, KeyVal::Data(_)) && !crate::interp::disabled("strdata") {
+        if matches!(out.kv, KeyVal::Data(_)) {
             out = Value::data("str");
         }
         // the objects' part (an unknown value, an instance's __str__, …): some string
-        if !a.pts.is_empty() && !crate::interp::disabled("strobjs") {
+        if !a.pts.is_empty() {
             out = out.join(&Value::data("str"));
         }
         return out;
@@ -1815,7 +1804,7 @@ fn format_fields(an: &mut Analyzer, st: &mut State, t: &str, c: &Call, mapping: 
             v.clone()
         } else if let Some(m) = mapping {
             an.load_item(m, Ns::Item, &Value::lit(key_str_lit(head)), &c.node, st, true)
-        } else if !c.star_kwargs.is_empty() && !crate::interp::disabled("fmtkw") {
+        } else if !c.star_kwargs.is_empty() {
             let mut acc = Value::new();
             for sk in c.star_kwargs.clone() {
                 acc = acc.join(&an.load_item(&sk, Ns::Item, &Value::lit(key_str_lit(head)), &c.node, st, true));
@@ -1888,7 +1877,7 @@ fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         an.note_raise();
     }
     const STR_OUT: &[&str] = &["upper", "lower", "strip", "lstrip", "rstrip", "title", "capitalize", "casefold", "swapcase", "removeprefix", "removesuffix", "zfill", "center", "ljust", "rjust", "replace", "expandtabs", "join", "format"];
-    if crate::interp::disabled("strdata") || !STR_OUT.contains(&last(&c.qual)) || !out.pts.is_empty() {
+    if !STR_OUT.contains(&last(&c.qual)) || !out.pts.is_empty() {
         return out;
     }
     match &out.kv {
@@ -2028,7 +2017,7 @@ fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 return Value::data(&format!("L{}", c.line));
             }
             // a template from a parameter: decided per call site (with its fields)
-            if let Some(ph) = kv.as_param().filter(|_| !crate::interp::disabled("formatph")) {
+            if let Some(ph) = kv.as_param() {
                 an.record_event("concrete", ph);
                 an.concrete_args(c.args.iter().chain(c.kwargs.values()).chain(c.star_kwargs.iter()), st);
             }
@@ -2118,7 +2107,7 @@ fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 None => Some(None),
                 Some(a) => a.kv.as_lit().and_then(intern::key_as_str).map(|s| Some(s.to_string())),
             };
-            if let (Some(k), Some(sep), true) = (kv.as_lit(), sep, name == "split" && an.obj(oid).single && !crate::interp::disabled("split")) {
+            if let (Some(k), Some(sep), true) = (kv.as_lit(), sep, name == "split" && an.obj(oid).single) {
                 if let Some(text) = intern::key_as_str(k) {
                     let parts: Vec<String> = match sep {
                         Some(sep) if !sep.is_empty() => text.split(sep.as_str()).map(|p| p.to_string()).collect(),
@@ -2236,7 +2225,7 @@ fn m_setdefault(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// pairs (unknown here: the row opens). Returns false when `src` holds no such instance.
 fn update_from_instances(an: &mut Analyzer, st: &mut State, oid: u32, src: &Value, strong: bool, c: &Call) -> bool {
     let src = &an.unkey(src);
-    if crate::interp::disabled("mappingproto") || src.pts.is_empty() {
+    if src.pts.is_empty() {
         return false;
     }
     let insts: Vec<u32> = src.pts.iter().filter(|o| an.kind(*o) == Kind::Instance && an.instance_class(*o).is_some_and(|cl| !an.class_info_opt(cl).map(|ci| ci.dict_base || ci.typed_dict || ci.pydantic).unwrap_or(true))).collect();
@@ -2272,9 +2261,7 @@ fn update_from_instances(an: &mut Analyzer, st: &mut State, oid: u32, src: &Valu
 
 fn m_update(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // a parameter's mapping (or keywords): decided per call site
-    if !crate::interp::disabled("updateph") {
-        an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
-    }
+    an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
     let recs = dict_recv(an, c);
     let strong = recs.len() == 1 && an.obj(recs[0]).single;
     for oid in recs {
@@ -2447,14 +2434,12 @@ fn m_move_to_end(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let recs = dict_recv(an, c);
     // the key is looked up: an access (KeyError when it is not there)
     if let (Some(kv), Some(recv)) = (c.args.first(), c.recv.clone()) {
-        if !crate::interp::disabled("mtaccess") {
-            let row0 = recs.first().map(|o| st.row(*o, Ns::Item));
-            an.load_item(&recv, Ns::Item, kv, &c.node, st, true);
-            if let (Some(k), Some(r0)) = (kv.kv.as_lit().filter(|_| kv.pts.is_empty()), row0) {
-                if recs.len() == 1 && r0.closed() && !r0.present.contains(k) {
-                    an.raise_here("KeyError", st);
-                    return Value::new();
-                }
+        let row0 = recs.first().map(|o| st.row(*o, Ns::Item));
+        an.load_item(&recv, Ns::Item, kv, &c.node, st, true);
+        if let (Some(k), Some(r0)) = (kv.kv.as_lit().filter(|_| kv.pts.is_empty()), row0) {
+            if recs.len() == 1 && r0.closed() && !r0.present.contains(k) {
+                an.raise_here("KeyError", st);
+                return Value::new();
             }
         }
     }
@@ -2533,7 +2518,7 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         _ => None,
     };
     let before: Vec<(crate::domain::ObjId, u16)> = match (&c.recv, added) {
-        (Some(r), Some(_)) if !crate::interp::disabled("lenalts") => r.pts.iter().filter_map(|o| st.lens.get(&o).filter(|l| l.0.is_none() && l.2 != 0).map(|l| (o, l.2))).collect(),
+        (Some(r), Some(_)) => r.pts.iter().filter_map(|o| st.lens.get(&o).filter(|l| l.0.is_none() && l.2 != 0).map(|l| (o, l.2))).collect(),
         _ => Vec::new(),
     };
     let r = m_append_inner(an, st, c);
@@ -2621,7 +2606,7 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         an.set_llen(oid, st, None);
     }
     // the last element after an append (whatever the length)
-    if name == "append" && !crate::interp::disabled("lastelem") {
+    if name == "append" {
         if let (Some(oid), Some(x)) = (recv.single(), c.args.last()) {
             if (an.kind(oid) == Kind::List && an.obj(oid).single) || an.kind(oid) == Kind::Ph {
                 st.set_last(oid, x.clone());
@@ -2814,7 +2799,7 @@ pub fn generated_class(an: &mut Analyzer, st: &mut State, qual: &str) -> Option<
     let (modname, cname, src) = match qual {
         "collections.UserDict" => ("<collections.UserDict>", "UserDict", USERDICT_SRC),
         _ => match qual.strip_prefix("urllib.parse.") {
-            Some(n) if URLLIB_NAMES.contains(&n) && !crate::interp::disabled("urllibgen") => ("<urllib.parse>", n, URLLIB_SRC),
+            Some(n) if URLLIB_NAMES.contains(&n) => ("<urllib.parse>", n, URLLIB_SRC),
             _ => return None,
         },
     };
@@ -3254,7 +3239,7 @@ fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "copy" => join_values(recv.pts.iter().map(|o| Value::obj(an.copy_object(o, &c.node, st, false, &mut IndexMap::new()))).collect::<Vec<_>>()),
         "remove" | "discard" | "clear" | "sort" | "reverse" | "insert" => {
             // `clear` on one list, whatever its length: empty
-            if name == "clear" && !crate::interp::disabled("listclear") {
+            if name == "clear" {
                 if let Some(oid) = recv.single().filter(|o| an.kind(*o) == Kind::List && an.obj(*o).single && !crate::state::is_merged(*o)) {
                     st.drop_obj_ns(oid, Ns::Pos);
                     st.drop_obj_ns(oid, Ns::Elem);
@@ -3265,7 +3250,7 @@ fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             // one list with known positions: updated in place
             if let Some(oid) = recv.single() {
-                if let Some(mut ps) = an.known_positions(oid, st).filter(|_| !crate::interp::disabled("listinplace")) {
+                if let Some(mut ps) = an.known_positions(oid, st) {
                     let done = match name {
                         "clear" => {
                             ps.clear();
@@ -3427,7 +3412,7 @@ fn json_literal_h(an: &mut Analyzer, st: &mut State, c: &Call, j: &serde_json::V
                 an.store_key(oid, Ns::Item, &KeyVal::Lit(key_str_lit(k)), &v, strong, &c.node, st);
             }
             match hook {
-                Some(h) if !crate::interp::disabled("objecthook") => {
+                Some(h) => {
                     // (a call context per object: the hook's allocations stay distinct)
                     let mut nd = c.node;
                     let tag = path.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32)) % 1_000_000;
@@ -3455,14 +3440,14 @@ fn m_json_dumps(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // (placeholders inside the containers too: `{"meta": meta, …}`)
     an.concrete_events(x, st, 3);
     // fully known data: the exact text
-    if json && !crate::interp::disabled("jsontext") {
+    if json {
         if let Some(opts) = JsonOpts::of(c) {
             if let Some(t) = json_text(an, st, x, &opts, 0) {
                 return Value::lit_str(&t);
             }
         }
     }
-    if crate::interp::disabled("jsonround") || x.pts.is_empty() || !x.kv.is_bot() {
+    if x.pts.is_empty() || !x.kv.is_bot() {
         return fallback;
     }
     // (plain data only, a bounded walk)
@@ -3519,9 +3504,6 @@ fn m_json_dumps(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// the JSON text's keys (`1` → "1"), Enum members as their values, dates as ISO text and, when
 /// `decimal_float` (jsonable_encoder of plain data), Decimals as floats.
 pub fn json_wire(an: &mut Analyzer, st: &mut State, node: &crate::frontend::Node, v: &Value, decimal_float: bool) -> Value {
-    if crate::interp::disabled("jsonwire") {
-        return v.clone();
-    }
     let lit = |k: KeyId| -> KeyId {
         if let Some((kind, _, tz)) = crate::models::chrono::as_chrono(k) {
             if kind != crate::models::chrono::DELTA && kind != crate::models::chrono::TZ {
@@ -3864,7 +3846,7 @@ fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             // colno; a text it accepts that serde does not, NaN / Infinity, stays unknown)
             match (serde_json::from_str::<serde_json::Value>(&text), crate::models::pytext::py_json_error(&text)) {
                 (Ok(j), None) => return json_literal(an, st, c, &j, ""),
-                (_, Some((msg, pos))) if !crate::interp::disabled("jsonraise") => {
+                (_, Some((msg, pos))) => {
                     let (lineno, colno, full) = crate::models::pytext::py_json_error_parts(&text, &msg, pos);
                     let e = an.exception_object("JSONDecodeError", vec![Value::lit(intern::key_str_lit(&full))], &c.node, st);
                     if let Some(o) = e.single() {
@@ -3938,9 +3920,9 @@ fn m_copy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let mut outs = Vec::new();
     for o in a.pts.iter() {
         // (an object from input is a new object too: stores into the copy do not reach it)
-        if matches!(an.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance | Kind::Frame) || (an.kind(o) == Kind::Unknown && !crate::interp::disabled("copyunknownobj")) {
+        if matches!(an.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance | Kind::Frame) || (an.kind(o) == Kind::Unknown) {
             outs.push(Value::obj(an.copy_object(o, &c.node, st, deep, &mut IndexMap::new())));
-        } else if an.kind(o) == Kind::Ph && !crate::interp::disabled("copyph") {
+        } else if an.kind(o) == Kind::Ph {
             // a parameter's object: decided per call site, where the copy is a new object
             // (the summary's own answer stands for the parameter)
             an.record_event("concrete", o);
@@ -4190,7 +4172,7 @@ fn m_nt_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             outs.push(an.construct(cls, &[], &kw, &[], &[], st, &c.node));
         } else {
-            if c.kwargs.keys().any(|k| !fields.iter().any(|f| *f == *intern::str_get(*k))) && !crate::interp::disabled("ntreplacebad") {
+            if c.kwargs.keys().any(|k| !fields.iter().any(|f| *f == *intern::str_get(*k))) {
                 // `_replace` with an unknown field name: TypeError (ValueError before 3.14)
                 an.raise_here("TypeError", st);
                 continue;
@@ -4306,7 +4288,7 @@ fn m_dc_replace(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             Kind::Ph => an.ph_info(o).cls.get(),
             _ => None,
         };
-        if let Some(cls) = cls.filter(|cl| an.class_info_opt(*cl).map(|ci| ci.has_fields() && !ci.named_tuple).unwrap_or(false) && !crate::interp::disabled("dcreplace")) {
+        if let Some(cls) = cls.filter(|cl| an.class_info_opt(*cl).map(|ci| ci.has_fields() && !ci.named_tuple).unwrap_or(false)) {
             let specs = an.dc_specs(cls);
             let mut kw: IndexMap<intern::StrId, Value> = IndexMap::new();
             for sp in specs.iter().filter(|sp| sp.init && !sp.initvar) {
@@ -4349,7 +4331,7 @@ fn m_passthrough(_an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
 
 fn m_defaultdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual).to_string();
-    if name == "Counter" && !crate::interp::disabled("counter") {
+    if name == "Counter" {
         return counter::construct(an, st, c);
     }
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("{}@L{}", name, c.line));
@@ -4381,7 +4363,7 @@ fn m_defaultdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
         if name == "defaultdict" && !c.args.is_empty() {
-            if !c.args[0].pts.is_empty() && !crate::interp::disabled("ddfactory") {
+            if !c.args[0].pts.is_empty() {
                 // the factory runs per inserted key (see `load_item`); no shared default
                 an.dd_factories.insert(oid, c.args[0].clone());
             } else if !c.args[0].pts.is_empty() {
@@ -4559,7 +4541,7 @@ fn m_partial(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let mut kw = c.kwargs.clone();
     let mut star: Vec<Value> = c.star_kwargs.clone();
     // `partial(partial(f, a, k=1), b, k=2)` is `partial(f, a, b, k=2)`
-    if let Some(inner) = f.single().filter(|o| an.kind(*o) == Kind::Partial && !crate::interp::disabled("partialflat")) {
+    if let Some(inner) = f.single().filter(|o| an.kind(*o) == Kind::Partial) {
         if let Payload::Partial(f0, a0, k0) = an.obj(inner).payload.clone() {
             func = f0;
             let mut a = a0;
@@ -4580,7 +4562,7 @@ fn m_partial(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     for sk in &star {
         let recs = an.record_objects(sk);
         let closed = recs.len() == 1 && { let r = st.row(recs[0], Ns::Item); r.closed() && r.present == r.definite && r.present.iter().all(intern::key_is_str) };
-        if closed && !crate::interp::disabled("partialstar") {
+        if closed {
             let d = recs[0];
             for k in st.row(d, Ns::Item).ordered_keys().unwrap_or_else(|| st.row(d, Ns::Item).present.iter().collect()) {
                 if let Some(name) = intern::key_as_str(k) {
@@ -4878,7 +4860,7 @@ fn m_range(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         Some([start, stop, step]) if *step != 0 => Some((*start, *stop, *step)),
         _ => None,
     };
-    let Some((lo, hi, step)) = bounds.filter(|_| c.kwargs.is_empty() && !crate::interp::disabled("range")) else {
+    let Some((lo, hi, step)) = bounds.filter(|_| c.kwargs.is_empty()) else {
         an.concrete_args(c.args.iter(), st);
         let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("range@L{}", c.line));
         an.set_llen(oid, st, None);
@@ -4944,7 +4926,7 @@ fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     // lists / tuples whose possible lengths are known (on this path, or as the alternatives of
     // the paths joined here): one of those
-    if v.kv.is_bot() && !crate::interp::disabled("lenalts") && v.pts.iter().all(|o| matches!(an.kind(o), Kind::List | Kind::Tuple)) {
+    if v.kv.is_bot() && v.pts.iter().all(|o| matches!(an.kind(o), Kind::List | Kind::Tuple)) {
         let mut all: Vec<usize> = Vec::new();
         let mut known = true;
         for o in v.pts.iter() {
@@ -4993,7 +4975,7 @@ fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
             }
             // keys set on some paths: between the sure and the possible count
-            if row.closed() && !row.symbolic() && row.present.len() - row.definite.len() <= 8 && !crate::interp::disabled("lenrange") {
+            if row.closed() && !row.symbolic() && row.present.len() - row.definite.len() <= 8 {
                 let ks = intern::KeySet::from_iter((row.definite.len()..=row.present.len()).map(|n| intern::key_int(n as i64)));
                 return Value::kv_only(crate::domain::KeyVal::lits(ks));
             }
@@ -5165,7 +5147,7 @@ fn sorted_dict_items(an: &Analyzer, st: &State, a: &Value, c: &Call) -> Option<V
 
 fn literal_sort_order(an: &mut Analyzer, st: &mut State, c: &Call, items: &[Value]) -> Option<Vec<usize>> {
     // instances ordering themselves (no key=): a stable sort on their `__lt__`
-    if c.kw("key").is_none() && !items.is_empty() && !crate::interp::disabled("instorder") && items.iter().all(|x| x.single().map(|o| an.kind(o) == Kind::Instance).unwrap_or(false)) {
+    if c.kw("key").is_none() && !items.is_empty() && items.iter().all(|x| x.single().map(|o| an.kind(o) == Kind::Instance).unwrap_or(false)) {
         let n = items.len();
         let mut less = vec![vec![false; n]; n];
         for i in 0..n {

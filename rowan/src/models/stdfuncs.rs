@@ -463,7 +463,7 @@ fn value_eq(an: &Analyzer, st: &State, a: &Value, b: &Value) -> Option<bool> {
         })
     };
     let lit = |v: &Value| v.pts.is_empty() && v.kv.is_literal();
-    if !crate::interp::disabled("plaineq") && ((plain(a) && lit(b)) || (plain(b) && lit(a))) {
+    if (plain(a) && lit(b)) || (plain(b) && lit(a)) {
         return Some(false);
     }
     let _ = st;

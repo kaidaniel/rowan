@@ -195,7 +195,7 @@ impl Analyzer {
                 }
                 continue;
             }
-            if q.ends_with("contextmanager") && !crate::interp::disabled("cmhook") {
+            if q.ends_with("contextmanager") {
                 if let Some(fi) = &fi {
                     fi.is_contextmanager.set(true);
                     continue;
@@ -227,7 +227,7 @@ impl Analyzer {
             }
             // `@singledispatch`: implementations registered on it are chosen by the type of the
             // first argument
-            if matches!(q.as_str(), "functools.singledispatch" | "functools.singledispatchmethod") && !crate::interp::disabled("sdispatch") {
+            if matches!(q.as_str(), "functools.singledispatch" | "functools.singledispatchmethod") {
                 if let Some(f) = fobj.filter(|o| self.kind(*o) == Kind::Function) {
                     self.sdispatch.insert(f, Vec::new());
                     if q.ends_with("method") {
@@ -274,7 +274,7 @@ impl Analyzer {
                 continue;
             }
             // `@functools.wraps(fn)`: the wrapper takes fn's name, qualname, doc, __wrapped__
-            if q == "functools.wraps" && !crate::interp::disabled("wraps") {
+            if q == "functools.wraps" {
                 if let (ast::Expr::Call(cl), Some(f)) = (&d.expression, fobj) {
                     if let Some(a0) = cl.arguments.args.first() {
                         let wv = self.eval(a0, state);
@@ -285,7 +285,7 @@ impl Analyzer {
             }
             // a decorator that is user code (a bound method of a user object, a function held in
             // a variable): applied like one (`@registry.register("csv")` fills the registry)
-            let user_target = !q.starts_with("user:") && !crate::interp::disabled("userdeco") && {
+            let user_target = !q.starts_with("user:") && {
                 let target: &'static ast::Expr = match &d.expression {
                     ast::Expr::Call(c) => &c.func,
                     other => other,
@@ -328,7 +328,7 @@ impl Analyzer {
         for oid in v.pts.iter() {
             // (a placeholder of a class, in a summary: the class's method; a subclass may
             // override it, decided per call site)
-            let ph_cls = if self.kind(oid) == Kind::Ph && !super::disabled("phmethod") { self.ph_info(oid).cls.get().filter(|c| self.class_info_opt(*c).is_some()) } else { None };
+            let ph_cls = if self.kind(oid) == Kind::Ph { self.ph_info(oid).cls.get().filter(|c| self.class_info_opt(*c).is_some()) } else { None };
             if let Some(cls) = ph_cls {
                 if !self.ph_info(oid).exact.get() {
                     self.record_event("hint", oid);
@@ -405,7 +405,7 @@ impl Analyzer {
                     }
                     return v;
                 }
-                if !super::disabled("unbound") && node.line > 0 {
+                if node.line > 0 {
                     let key = intern::key(intern::Key::Str(str_get(name)));
                     let cls = crate::domain::Classification::with_note(crate::domain::Tier::Missing, "bound on no path to here");
                     self.verdict(node, key, &cls, fr_module, Ns::Name, None, None);
@@ -424,7 +424,7 @@ impl Analyzer {
             }
         }
         if let Some(v) = state.slot_opt(fr_module, Ns::Attr, intern::key(intern::Key::Str(str_get(name)))) {
-            if fr_kind == FrameKind::Module && !super::disabled("unbound") {
+            if fr_kind == FrameKind::Module {
                 let k = intern::key(intern::Key::Str(str_get(name)));
                 let row = state.row(fr_module, Ns::Attr);
                 if row.present.contains(k) && !row.definite.contains(k) && row.mutators.is_empty() && !row.top && row.sources.is_empty() {
@@ -452,11 +452,11 @@ impl Analyzer {
     /// rebound elsewhere, or a list / set that functions mutate (their effects land at the
     /// positions the call site has, not those of the state the summary was made in).
     pub fn deferred_global(&self, module: u32, name: &str, v: &Value) -> bool {
-        if !self.is_entry_object(module) || crate::interp::disabled("globalrd") {
+        if !self.is_entry_object(module) {
             return false;
         }
         let data_only = v.pts.iter().all(|o| matches!(self.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance));
-        let mutable_seq = !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::List | Kind::Set) || (self.kind(o) == Kind::Dict && !crate::interp::disabled("globaldict"))) && !crate::interp::disabled("globalseq") && self.mutated_in_functions(module, name);
+        let mutable_seq = !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::List | Kind::Set) || (self.kind(o) == Kind::Dict)) && self.mutated_in_functions(module, name);
         data_only && (mutable_seq || self.module_info(module).scopes.rebound.contains(name))
     }
 
@@ -477,7 +477,7 @@ impl Analyzer {
         state.unbound = unbound;
         for k in keys {
             state.add_name_key(name, k);
-            if let Some(o) = one.filter(|_| !super::disabled("namekeynarrow")) {
+            if let Some(o) = one {
                 let r = state.row(o, Ns::Item);
                 if !r.definite.contains(k) {
                     state.set_row(o, Ns::Item, r.narrow_in(k, true));
@@ -545,10 +545,9 @@ impl Analyzer {
             return;
         }
         // a module-level binding inside a loop is strong under the recency abstraction (the
-        // flow-sensitive state is re-bound every iteration anyway); the prototype keeps it weak
-        let strong = self.frame().loop_depth == 0 || self.opts.recency;
-        state.set_slot(fr_module, Ns::Attr, key, v, strong);
-        let r = state.row(fr_module, Ns::Attr).store(key, strong);
+        // flow-sensitive state is re-bound every iteration anyway)
+        state.set_slot(fr_module, Ns::Attr, key, v, true);
+        let r = state.row(fr_module, Ns::Attr).store(key, true);
         state.set_row(fr_module, Ns::Attr, r);
     }
 
@@ -580,7 +579,7 @@ impl Analyzer {
                 self.store_item(&obj, Ns::Item, &key, v, &n, state);
                 // `t[k] = v`: whichever object `t` is has k now
                 if let (ast::Expr::Name(nm), Some(k)) = (&*sub.value, key.kv.as_lit().filter(|_| key.pts.is_empty())) {
-                    if obj.pts.len() > 1 && obj.pts.iter().all(|o| self.kind(o) == Kind::Dict) && !crate::interp::disabled("namekeys") {
+                    if obj.pts.len() > 1 && obj.pts.iter().all(|o| self.kind(o) == Kind::Dict) {
                         state.add_name_key(s(nm.id.as_str()), k);
                     }
                 }
@@ -663,7 +662,7 @@ impl Analyzer {
                     }
                     parts[i] = parts[i].join(&sv);
                 }
-            } else if let Some(cls) = self.instance_class(oid).filter(|c| kind == Kind::Instance && self.is_named_tuple_class(*c) && !crate::interp::disabled("ntunpack")) {
+            } else if let Some(cls) = self.instance_class(oid).filter(|c| kind == Kind::Instance && self.is_named_tuple_class(*c)) {
                 // a NamedTuple: its fields in order
                 let fs = self.dataclass_fields_mro(cls);
                 for i in 0..n {
@@ -690,7 +689,7 @@ impl Analyzer {
                 }
             } else {
                 // an iterable whose items are known by position (zip / enumerate of known lists)
-                if matches!(kind, Kind::Zip | Kind::Enumerate) && !crate::interp::disabled("unpackzip") {
+                if matches!(kind, Kind::Zip | Kind::Enumerate) {
                     let it = self.iterate(&Value::obj(oid), node, state);
                     if let Some(items) = it.items.filter(|v| v.len() == n) {
                         for i in 0..n {
@@ -706,7 +705,7 @@ impl Analyzer {
             }
         }
         // known strings of n characters: their characters (`k, v = "ab"`)
-        if v.pts.is_empty() && v.kv.is_literal() && !crate::interp::disabled("unpackstr") {
+        if v.pts.is_empty() && v.kv.is_literal() {
             let lits = crate::domain::kv_literals(&v.kv);
             let strs: Option<Vec<Vec<char>>> = lits.iter().map(|k| intern::key_as_str(k).map(|s| s.chars().collect::<Vec<char>>()).filter(|cs| cs.len() == n)).collect();
             if let Some(strs) = strs.filter(|s| !s.is_empty()) {
@@ -721,11 +720,9 @@ impl Analyzer {
         }
         if v.pts.is_empty() {
             // positional slots for literal tuple keys: `a, b = ("x", 1)` / `for k, ns in keys`
-            // where the keys are tuple literals (Options::positional)
-            if self.opts.positional {
-                if let Some(cols) = tuple_key_columns(&v.kv, n) {
-                    return cols;
-                }
+            // where the keys are tuple literals
+            if let Some(cols) = tuple_key_columns(&v.kv, n) {
+                return cols;
             }
             parts = (0..n).map(|_| Value::data(&format!("unpack@L{}", node.line))).collect();
         }
@@ -845,7 +842,7 @@ impl Analyzer {
         // length, else not known (the elements are still the join)
         let n_alts = v.pts.len() + usize::from(!v.kv.is_bot());
         let multi_lits = v.pts.is_empty() && matches!(&v.kv, KeyVal::Lits(ks) if ks.len() > 1);
-        let alts_mode = (n_alts > 1 || multi_lits) && !crate::interp::disabled("iteralts");
+        let alts_mode = n_alts > 1 || multi_lits;
         let mut alt_items: Option<Vec<Value>> = None;
         if alts_mode {
             let mut lists: Option<Vec<Vec<Value>>> = Some(Vec::new());
@@ -899,7 +896,7 @@ impl Analyzer {
                 Kind::Dict | Kind::Frame => {
                     // (a dict from before a summarised call, a module constant: its items are
                     // known where the call is)
-                    if !self.sum_stack.is_empty() && self.is_entry_object(oid) && kind == Kind::Dict && !crate::interp::disabled("entryiter") {
+                    if !self.sum_stack.is_empty() && self.is_entry_object(oid) && kind == Kind::Dict {
                         self.record_event("concrete", oid);
                     }
                     let lit = self.literal_dict_items(oid, state);
@@ -922,7 +919,7 @@ impl Analyzer {
                         }
                         continue;
                     }
-                    if !self.sum_stack.is_empty() && !crate::interp::disabled("entryiter") {
+                    if !self.sum_stack.is_empty() {
                         for r in recv.pts.iter() {
                             if self.is_entry_object(r) && self.kind(r) == Kind::Dict {
                                 self.record_event("concrete", r);
@@ -1049,7 +1046,7 @@ impl Analyzer {
                     }
                     elems.push(join_values(ms));
                 }
-                Kind::Instance if self.instance_class(oid).and_then(|c| self.class_lookup(c, "__iter__")).is_some() && !crate::interp::disabled("useriter") => {
+                Kind::Instance if self.instance_class(oid).and_then(|c| self.class_lookup(c, "__iter__")).is_some() => {
                     // a user iterable: what its `__iter__` returns
                     let r = self.call_method_with(&Value::obj(oid), "__iter__", Vec::new(), node, state).unwrap_or_default();
                     // an iterator (`return self`, an object with `__next__`): its items are what
@@ -1058,7 +1055,7 @@ impl Analyzer {
                     // (one iterator whose `__next__` is decided call by call — an item, or surely
                     // StopIteration — and changes nothing but its own state and the items it makes:
                     // its items, in order, up to UNROLL_MAX)
-                    if iters.len() == 1 && r.pts.len() == 1 && r.kv.is_bot() && items.is_some() && !crate::interp::disabled("nextunroll") {
+                    if iters.len() == 1 && r.pts.len() == 1 && r.kv.is_bot() && items.is_some() {
                         let it = iters[0];
                         if let Some(seq) = self.unroll_next(it, node, state) {
                             if let Some(its) = items.as_mut() {
@@ -1068,7 +1065,7 @@ impl Analyzer {
                             continue;
                         }
                     }
-                    if !iters.is_empty() && !crate::interp::disabled("usernext") {
+                    if !iters.is_empty() {
                         items = None;
                         exhaustive = false;
                         let mut none_taken = state.copy();
@@ -1147,11 +1144,9 @@ impl Analyzer {
                         let srcs = row.sources.map(|(src, _)| (crate::domain::source_extend(src, STAR), intern::EMPTY_LENS));
                         // (an element was taken on this path: its source's requirements are
                         // known here, none so far — see the nested-source join)
-                        if !crate::interp::disabled("nestedreqjoin") {
-                            for (cs, _) in srcs.iter() {
-                                if state.reqs.inner(&cs).is_none() {
-                                    state.reqs.writable(&cs);
-                                }
+                        for (cs, _) in srcs.iter() {
+                            if state.reqs.inner(&cs).is_none() {
+                                state.reqs.writable(&cs);
                             }
                         }
                         let r = Row::from_data(crate::domain::RowData { sources: srcs, mutators: row.mutators.clone(), ..Default::default() });
@@ -1182,7 +1177,7 @@ impl Analyzer {
             } else if v.kv.is_literal() {
                 let ks = crate::domain::kv_literals(&v.kv);
                 // (one of several strings: its characters)
-                if ks.iter().all(intern::key_is_str) && !crate::interp::disabled("iteralts") {
+                if ks.iter().all(intern::key_is_str) {
                     let chars: KeySet = ks.iter().flat_map(|k| intern::key_as_str(k).map(|s| s.chars().map(|ch| intern::key_str_lit(&ch.to_string())).collect::<Vec<_>>()).unwrap_or_default()).collect();
                     elems.push(Value::kv_only(KeyVal::lits(chars)));
                 } else {
@@ -1278,9 +1273,6 @@ impl Analyzer {
     /// some only maybe there: its items, each with whether it surely comes (a `for` runs a
     /// maybe item on one path and skips it on the other).
     pub fn maybe_dict_items(&mut self, v: &Value, state: &State) -> Option<Vec<(Value, bool)>> {
-        if super::disabled("maybeitems") {
-            return None;
-        }
         let o = v.single().filter(|_| v.kv.is_bot())?;
         let (d, vk) = match (self.kind(o), &self.obj(o).payload) {
             (Kind::Dict, _) => (o, ViewKind::Keys),
@@ -1327,7 +1319,7 @@ impl Analyzer {
         // insertion order when it is known (a guess would make order-dependent results wrong)
         let keys = match row.ordered_keys() {
             Some(k) => k,
-            None if row.present.len() <= 1 || super::disabled("dictorder") => intern::sorted_by_str(row.present.iter()),
+            None if row.present.len() <= 1 => intern::sorted_by_str(row.present.iter()),
             None => return None,
         };
         Some(keys.into_iter().map(|k| (k, state.slot(oid, Ns::Item, k))).collect())
@@ -1364,7 +1356,7 @@ impl Analyzer {
         // (keys stored under unknown names keep their values in the `*` slot: only content
         // from outside — a parameter, an input, unknown code — is not there)
         let outside = row.top || row.symbolic() || row.sources.iter().any(|(src, _)| !crate::domain::source_is_data(src));
-        if (self.kind(oid) == Kind::Ph || (row.open() && outside)) && !super::disabled("openvalues") {
+        if self.kind(oid) == Kind::Ph || (row.open() && outside) {
             return v.join(&self.path_placeholder_value(oid, Ns::Item, STAR, &row, state));
         }
         v
@@ -1385,7 +1377,7 @@ impl Analyzer {
                 Kind::List | Kind::Tuple | Kind::Set => match state.elems.get(&oid) {
                     Some(kv) if kv.is_literal() => out = out.union(&crate::domain::kv_literals(&kv)),
                     _ => {
-                        if self.is_entry_object(oid) && !crate::interp::disabled("entrymapping") {
+                        if self.is_entry_object(oid) {
                             self.record_event("concrete", oid);
                         }
                         return None;
@@ -1420,7 +1412,7 @@ impl Analyzer {
                 return None;
             }
             let row = state.row(oid, Ns::Item);
-            if row.symbolic() && self.is_entry_object(oid) && !crate::interp::disabled("entrymapping") {
+            if row.symbolic() && self.is_entry_object(oid) {
                 // a dict from before the call (a module constant): known at the call site
                 self.record_event("concrete", oid);
                 return None;
@@ -1456,7 +1448,6 @@ impl Analyzer {
         // (a clone of such a copy, made by a summary's instantiation, has the same site)
         let site_root = self.obj(oid).site.strip_prefix(&prefix).and_then(|rest| rest.split(['#', ':']).nth(1)).and_then(|r| r.parse::<u32>().ok());
         let root = match (self.copy_root.get(&oid), site_root) {
-            _ if super::disabled("copyroot") => oid,
             (Some(&r), _) if self.obj(oid).site.starts_with(&prefix) => r,
             (_, Some(r)) if (r as usize) < self.objects.len() => r,
             _ => oid,

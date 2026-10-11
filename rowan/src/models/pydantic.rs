@@ -466,7 +466,7 @@ impl Analyzer {
                             }
                         } else {
                             let ms: Vec<Ann> = non_none.iter().map(|x| self.pyd_ann(x, module, state)).collect();
-                            let u = if ms.len() == 1 && !crate::interp::disabled("pydsingleunion") { ms.into_iter().next().unwrap() } else if ms.iter().all(|m| matches!(m, Ann::Model(_))) { Ann::Union(ms, None) } else { Ann::Other };
+                            let u = if ms.len() == 1 { ms.into_iter().next().unwrap() } else if ms.iter().all(|m| matches!(m, Ann::Model(_))) { Ann::Union(ms, None) } else { Ann::Other };
                             if non_none.len() < elts.len() {
                                 Ann::Optional(Box::new(u))
                             } else {
@@ -499,7 +499,7 @@ impl Analyzer {
                                 y => ms.push(y),
                             }
                         }
-                        let u = if ms.len() == 1 && !crate::interp::disabled("pydsingleunion") { ms.into_iter().next().unwrap() } else if ms.iter().all(|m| matches!(m, Ann::Model(_))) { Ann::Union(ms, None) } else { Ann::Other };
+                        let u = if ms.len() == 1 { ms.into_iter().next().unwrap() } else if ms.iter().all(|m| matches!(m, Ann::Model(_))) { Ann::Union(ms, None) } else { Ann::Other };
                         if none {
                             Ann::Optional(Box::new(u))
                         } else {
@@ -568,7 +568,7 @@ impl Analyzer {
                         return Ann::Var(n);
                     }
                 }
-                if found.is_none() && !crate::interp::disabled("pydenum") {
+                if found.is_none() {
                     let ec = v.pts.iter().find(|o| self.enum_members.contains_key(o)).or_else(|| {
                         let c: Vec<ObjId> = self.user_classes.iter().copied().filter(|c| self.enum_members.contains_key(c) && self.class_info_opt(*c).map(|ci| ci.name == n).unwrap_or(false)).collect();
                         c.iter().copied().find(|x| self.class_info(*x).module == module).or_else(|| c.first().copied())
@@ -640,7 +640,7 @@ impl Analyzer {
     fn pyd_settings_env(&mut self, pc: &PClass, prefix: &str, delim: Option<&str>, did: ObjId, state: &mut State, node: &Node) {
         let Some(env) = crate::models::external_record(self, "os.environ", state) else { return };
         // (the environment as the call site has it)
-        if !self.sum_stack.is_empty() && !crate::interp::disabled("settingsenv") {
+        if !self.sum_stack.is_empty() {
             self.record_event("concrete", env);
         }
         let er = state.row(env, Ns::Item);
@@ -708,7 +708,7 @@ impl Analyzer {
         // one instance per input record (nested models of one class in one validation stay apart)
         let site = {
             let ins: Vec<ObjId> = data.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown | Kind::Ph | Kind::Instance | Kind::Namespace)).collect();
-            if ins.len() == 1 && !crate::interp::disabled("pydsite") {
+            if ins.len() == 1 {
                 format!("{}:{}:in{}", crate::interp::site_string(node), self.class_info(cls).name, ins[0])
             } else {
                 format!("{}:{}", crate::interp::site_string(node), self.class_info(cls).name)
@@ -760,7 +760,7 @@ impl Analyzer {
         }
         let mut data = Value::with_kv(crate::domain::ObjSet::from_vec(rest), data.kv.clone());
         // (inside the validation of another model: its errors go to that one's list)
-        let nested = !self.pyd_errs.is_empty() && !crate::interp::disabled("pydnested");
+        let nested = !self.pyd_errs.is_empty();
         let nest_prefix = self.pyd_nest_prefix.take();
         let saved_field = self.pyd_field;
         self.pyd_errs.push(Vec::new());
@@ -776,7 +776,7 @@ impl Analyzer {
         // one instance per input record (nested models of one class in one validation stay apart)
         let site = {
             let ins: Vec<ObjId> = data.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown | Kind::Ph | Kind::Instance | Kind::Namespace)).collect();
-            if ins.len() == 1 && !crate::interp::disabled("pydsite") {
+            if ins.len() == 1 {
                 format!("{}:{}:in{}", crate::interp::site_string(node), self.class_info(cls).name, ins[0])
             } else {
                 format!("{}:{}", crate::interp::site_string(node), self.class_info(cls).name)
@@ -935,9 +935,6 @@ impl Analyzer {
             if val.empty() && dflt.empty() {
                 val = Value::data(&format!("{}.{}", self.class_info(cls).name, f.name));
             }
-            if crate::interp::disabled("pydnodefaultval") {
-                val = val.join(&std::mem::take(&mut dflt));
-            }
             self.pyd_field = Some(kk);
             let saved_inst = self.pyd_inst.replace(inst);
             // a field surely missing / surely not converting: its validators do not run
@@ -951,10 +948,10 @@ impl Analyzer {
                     val = self.pyd_call_validator(cls, &v, &val, inst, &f.name, state, node);
                 }
                 val = self.pyd_convert(&f.ann, &val, state, node);
-                if let Some(ls) = f.lits.clone().filter(|_| !crate::interp::disabled("pydliteral")) {
+                if let Some(ls) = f.lits.clone() {
                     val = self.pyd_check_literal(&ls, &val);
                 }
-                if !f.constraints.is_empty() && !failed(self) && !crate::interp::disabled("pydconstraints") {
+                if !f.constraints.is_empty() && !failed(self) {
                     self.pyd_check_constraints(&f.constraints, &val, state);
                 }
             }
@@ -1051,7 +1048,7 @@ impl Analyzer {
         self.pyd_init_privates(cls, inst, state, node);
         // (`mode="after"` model validators run only when the fields validated: not after a
         // sure field error; after a maybe one, their own error is a maybe one)
-        let field_failed = self.pyd_errs.last().map(|es| es.iter().any(|e| e.sure)).unwrap_or(false) && !crate::interp::disabled("pydafterskip");
+        let field_failed = self.pyd_errs.last().map(|es| es.iter().any(|e| e.sure)).unwrap_or(false);
         let field_maybe = self.pyd_errs.last().map(|es| !es.is_empty()).unwrap_or(false);
         for v in pc.model_after.clone() {
             if field_failed {
@@ -1097,16 +1094,8 @@ impl Analyzer {
             outs.push(Value::obj(inst));
             return join_values(outs);
         }
-        if !report && self.fa_body_validation && !errs.is_empty() && state.reachable && !crate::interp::disabled("fabody422") {
-            if crate::interp::disabled("fadetail") {
-                if errs.iter().any(|e| e.sure) {
-                    self.raise_here("RequestValidationError", state);
-                } else {
-                    self.may_raise_here("RequestValidationError", state);
-                }
-            } else {
-                self.pyd_raise_errors_as(errs.clone(), state, node, "RequestValidationError");
-            }
+        if !report && self.fa_body_validation && !errs.is_empty() && state.reachable {
+            self.pyd_raise_errors_as(errs.clone(), state, node, "RequestValidationError");
         }
         if report && !errs.is_empty() && state.reachable {
             self.pyd_raise_errors(errs, state, node);
@@ -1133,13 +1122,13 @@ impl Analyzer {
             }
         };
         // (per call context: separate calls, unrolled rounds keep their own errors)
-        let ctx = if crate::interp::disabled("pydverrctx") { String::new() } else { self.frame().ctx.clone() };
+        let ctx = { self.frame().ctx.clone() };
         let eo = self.alloc_raw(Kind::Namespace, &format!("pydverr:{}", crate::interp::site_string(node)), &ctx, false, "ValidationError", Payload::Method(format!("pydverr.{}", idx), Value::new()));
         // (one object per raise site: a second raise there — another loop round, another
         // record — makes it either one's errors, in no known order)
         let mut use_idx = idx;
         if let Payload::Method(q, _) = &self.obj(eo).payload {
-            if let Some(old) = q.strip_prefix("pydverr.").and_then(|x| x.parse::<usize>().ok()).filter(|o| *o != idx && !crate::interp::disabled("pydverrmerge")) {
+            if let Some(old) = q.strip_prefix("pydverr.").and_then(|x| x.parse::<usize>().ok()).filter(|o| *o != idx) {
                 let mut both: Vec<PErr> = self.pyd_verrs.get(old).cloned().unwrap_or_default();
                 both.extend(self.pyd_verrs[idx].iter().cloned());
                 for e in both.iter_mut() {
@@ -1248,9 +1237,7 @@ impl Analyzer {
         self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
         self.try_sum_depth.push(self.sum_stack.len());
         // (run with the validated values: `v.strip()` of a str field is a str method there)
-        if !crate::interp::disabled("pydvaltab") {
-            self.force_tab_once = true;
-        }
+        self.force_tab_once = true;
         let out = self.call_user(f, Some(self_v), args, IndexMap::new(), vec![], vec![], state, node, None, false);
         self.force_tab_once = false;
         self.guards.pop();
@@ -1463,7 +1450,7 @@ impl Analyzer {
         let saved = self.verdict_guarded;
         self.verdict_guarded |= self.validation_caught();
         // (a missing field is pydantic's ValidationError, not a KeyError)
-        let saved_exc = std::mem::replace(&mut self.item_exc_force, if crate::interp::disabled("pydvalexc") { None } else { Some("ValidationError") });
+        let saved_exc = std::mem::replace(&mut self.item_exc_force, Some("ValidationError"));
         let v = if ns == Ns::Attr { self.load_attr(recv, &intern::key_py_str(k), node, state, true) } else { self.load_item(recv, Ns::Item, &Value::lit(k), node, state, true) };
         self.item_exc_force = saved_exc;
         self.verdict_guarded = saved;
@@ -1472,7 +1459,7 @@ impl Analyzer {
 
     /// A try around here catches a ValidationError.
     pub fn validation_caught(&self) -> bool {
-        !crate::interp::disabled("valguard") && self.guards.iter().any(|g| g.iter().any(|x| matches!(x.as_str(), "ValidationError" | "ValueError" | "Exception" | "BaseException" | "*")))
+        self.guards.iter().any(|g| g.iter().any(|x| matches!(x.as_str(), "ValidationError" | "ValueError" | "Exception" | "BaseException" | "*")))
     }
 
     /// A guarded read of `k` from the records (no verdict, no requirement): the values there.
@@ -1484,7 +1471,7 @@ impl Analyzer {
             if row.present.contains(k) {
                 out = out.join(&state.slot(o, ns, k));
                 // (a store under an unknown key may have written it)
-                if ns == Ns::Item && !crate::interp::disabled("pydstar") {
+                if ns == Ns::Item {
                     if let Some(sv) = state.slot_opt(o, ns, intern::STAR) {
                         out = out.join(&sv);
                     }
@@ -1507,9 +1494,6 @@ impl Analyzer {
             // a mutable default is copied per instance, here per construction site)
             Some(d) => {
                 let v = self.pyd_default_expr(d, state);
-                if crate::interp::disabled("pyddefaultcopy") {
-                    return v;
-                }
                 let mut out = Value::kv_only(v.kv.clone());
                 for o in v.pts.iter() {
                     if matches!(self.kind(o), Kind::List | Kind::Dict | Kind::Set) {
@@ -1583,7 +1567,7 @@ impl Analyzer {
     fn pyd_default_expr(&mut self, d: &'static ast::Expr, state: &mut State) -> Value {
         let here = self.module_info(self.frame().module).idx;
         let owner = crate::frontend::module_of_addr(d as *const ast::Expr as usize);
-        if let Some(idx) = owner.filter(|i| *i != here && !crate::interp::disabled("pyddefaultmodule")) {
+        if let Some(idx) = owner.filter(|i| *i != here) {
             if let Some(moid) = self.modules.values().copied().find(|m| self.module_info(*m).idx == idx) {
                 return self.eval_in_module(moid, d, state);
             }
@@ -1601,7 +1585,7 @@ impl Analyzer {
         // (an after validator of a scalar field gets the validated value: a `str` / `int` /
         // `float` / `bool` of the input, whatever placeholder it was read from)
         let mut val = val.clone();
-        if v.mode != "before" && v.mode != "wrap" && !crate::interp::disabled("pydvalscalar") && !val.pts.is_empty() && val.pts.iter().all(|o| self.kind(o) == Kind::Ph) {
+        if v.mode != "before" && v.mode != "wrap" && !val.pts.is_empty() && val.pts.iter().all(|o| self.kind(o) == Kind::Ph) {
             let pc = self.pyd_class(cls, state);
             if let Some(Ann::Scalar(s)) = pc.fields.iter().find(|f| f.name == field).map(|f| f.ann.clone()) {
                 val = Value::data(if s == "str" { "str" } else { s });
@@ -1724,7 +1708,7 @@ impl Analyzer {
                             }).collect();
                             if chosen.is_empty() {
                                 // no member has that tag: a ValidationError (union_tag_invalid)
-                                if self.pyd_errs.is_empty() && !crate::interp::disabled("uniontag") {
+                                if self.pyd_errs.is_empty() {
                                     let errs = vec![PErr { loc: Some(dk), typ: "union_tag_invalid", sure: val.pts.len() == 1 && val.kv.is_bot(), ctx: false }];
                                     self.pyd_raise_errors(errs, state, node);
                                     if !state.reachable {
@@ -1853,7 +1837,7 @@ impl Analyzer {
                 }
                 // an unknown value (a text from a file, any input) may not convert: a parsing error,
                 // or a type error when it may be no string either
-                if matches!(t, "int" | "float" | "bool") && !crate::interp::disabled("pydunkparse") {
+                if matches!(t, "int" | "float" | "bool") {
                     // (a value already of the type — validated before, `int(x)` — converts)
                     // (`len(x)`, a frame's row count: ints)
                     let int_label = |d: &str| matches!(d, "int" | "bool" | "len" | "rows");
@@ -1888,7 +1872,7 @@ impl Analyzer {
                 }
                 // objects validated as a scalar: the scalar (a container is an error; something
                 // unknown may be one)
-                if matches!(t, "str" | "int" | "float" | "bool") && !val.pts.is_empty() && !crate::interp::disabled("pydscalarobj") {
+                if matches!(t, "str" | "int" | "float" | "bool") && !val.pts.is_empty() {
                     let containers = val.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance)).count();
                     let total = val.pts.len() + usize::from(!val.kv.is_bot());
                     if containers > 0 || val.pts.iter().any(|o| matches!(self.kind(o), Kind::Unknown | Kind::Ph)) {
@@ -1990,7 +1974,7 @@ impl Analyzer {
             Ann::List(inner, kind) if !matches!(**inner, Ann::Other) => {
                 // a scalar is no container (str / bytes: an Iterable's items, a Sequence's
                 // sequence_str error)
-                if !val.kv.is_bot() && !crate::interp::disabled("pydseqscalar") {
+                if !val.kv.is_bot() {
                     let is_text = |k: KeyId| intern::key_is_str(k) || intern::with_key(k, |kk| matches!(kk, intern::Key::Bytes(_)));
                     let code_of = |text: bool| -> Option<&'static str> {
                         Some(match *kind {
@@ -2032,7 +2016,7 @@ impl Analyzer {
                     }
                     let it = self.iterate(&Value::obj(o), node, state);
                     // (one list per input list: nested lists in one validation stay apart)
-                    let ctx = match self.pyd_inst.filter(|_| !crate::interp::disabled("pylinst")) {
+                    let ctx = match self.pyd_inst {
                         Some(i) => format!("pyl{}i{}", o, i),
                         None => format!("pyl{}", o),
                     };
@@ -2599,11 +2583,11 @@ impl Analyzer {
             state.set_slot(did, Ns::Item, ok, dv, true);
         }
         // extra attributes (`extra="allow"`)
-        if pc.extra == Extra::Allow && (!ph || !crate::interp::disabled("phextra")) {
+        if pc.extra == Extra::Allow {
             let ir = state.row(oid, Ns::Attr);
             let fieldset: KeySet = KeySet::from_iter(pc.fields.iter().map(|f| key_str_lit(&f.name)));
             // (in the instance's insertion order when known: the fields, then the extras)
-            let ordered = ir.ordered_keys().filter(|_| !crate::interp::disabled("pydextraorder"));
+            let ordered = ir.ordered_keys();
             let keys: Vec<KeyId> = ordered.clone().unwrap_or_else(|| ir.present.iter().collect());
             for k in keys {
                 if fieldset.contains(k) || opts.exclude.as_ref().map(|e| e.contains(k)).unwrap_or(false) || opts.include.as_ref().map(|i| !i.contains(k)).unwrap_or(false) {
@@ -2653,7 +2637,7 @@ impl Analyzer {
         }
         for o in v.pts.iter() {
             // JSON mode: an Enum member is its value
-            if opts.json && self.member_key.contains_key(&o) && !crate::interp::disabled("pydenumjson") {
+            if opts.json && self.member_key.contains_key(&o) {
                 outs.push(state.slot(o, Ns::Attr, key_str_lit("value")));
                 continue;
             }
@@ -2667,13 +2651,13 @@ impl Analyzer {
                 Kind::Ph => self.ph_info(o).cls.get().filter(|c| !is_model(self, *c)),
                 _ => None,
             };
-            if !crate::interp::disabled("pyddcdump") && dc_cls.map(|c| !self.dataclass_fields_mro(c).is_empty()).unwrap_or(false) {
+            if dc_cls.map(|c| !self.dataclass_fields_mro(c).is_empty()).unwrap_or(false) {
                 outs.push(crate::models::asdict_of(self, state, node, &Value::obj(o)));
                 continue;
             }
             // a placeholder of no known class: what it dumps to is decided per call site (a
             // model, a dataclass, a container of them)
-            if self.kind(o) == Kind::Ph && self.ph_info(o).cls.get().is_none() && !crate::interp::disabled("pyddumpph") {
+            if self.kind(o) == Kind::Ph && self.ph_info(o).cls.get().is_none() {
                 self.record_event("concrete", o);
             }
             if self.kind(o) == Kind::Ph && self.ph_info(o).cls.get().map(|c| is_model(self, c)).unwrap_or(false) {
@@ -2762,7 +2746,7 @@ pub fn key_spec(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) -> Op
 fn item_spec(an: &mut Analyzer, st: &mut State, sub: &Value, node: &Node) -> Option<KeySet> {
     let (sk, nested) = key_spec(an, st, sub, node)?;
     let all = key_str_lit("__all__");
-    if sk.contains(all) && !crate::interp::disabled("pydallspec") {
+    if sk.contains(all) {
         if sk.len() != 1 {
             return None;
         }
@@ -2910,22 +2894,20 @@ pub fn m_instance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     }
                 }
                 // the copy's fields set: the original's, plus what `update=` sets
-                if !crate::interp::disabled("pydcopyset") {
-                    if let Some((mut sure, mut maybe)) = an.pyd_set.get(&o).cloned() {
-                        if let Some(u) = c.kwargs.get(&s("update")) {
-                            let one = u.pts.len() == 1;
-                            for x in u.pts.iter().filter(|x| an.kind(*x) == Kind::Dict) {
-                                let ur = st.row(x, Ns::Item);
-                                for k in ur.present.iter() {
-                                    if one && ur.definite.contains(k) {
-                                        sure = sure.insert(k);
-                                    }
-                                    maybe = maybe.insert(k);
+                if let Some((mut sure, mut maybe)) = an.pyd_set.get(&o).cloned() {
+                    if let Some(u) = c.kwargs.get(&s("update")) {
+                        let one = u.pts.len() == 1;
+                        for x in u.pts.iter().filter(|x| an.kind(*x) == Kind::Dict) {
+                            let ur = st.row(x, Ns::Item);
+                            for k in ur.present.iter() {
+                                if one && ur.definite.contains(k) {
+                                    sure = sure.insert(k);
                                 }
+                                maybe = maybe.insert(k);
                             }
                         }
-                        an.pyd_set.insert(cp, (sure, maybe));
                     }
+                    an.pyd_set.insert(cp, (sure, maybe));
                 }
                 outs.push(Value::obj(cp));
             }

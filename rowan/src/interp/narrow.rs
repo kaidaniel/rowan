@@ -74,7 +74,7 @@ impl Analyzer {
                             let ks = kv_literals(&rv.kv);
                             let ov = self.eval(&la.value, state);
                             let ak = key_str_lit(la.attr.id.as_str());
-                            if let Some(o) = ov.single().filter(|o| self.obj(*o).single && matches!(self.kind(*o), Kind::Instance | Kind::Namespace) && rv.pts.is_empty() && ks.len() == 1 && !super::disabled("attrnarrow")) {
+                            if let Some(o) = ov.single().filter(|o| self.obj(*o).single && matches!(self.kind(*o), Kind::Instance | Kind::Namespace) && rv.pts.is_empty() && ks.len() == 1) {
                                 let cur = state.slot_opt(o, Ns::Attr, ak);
                                 if let Some(cur) = cur.filter(|c| c.pts.is_empty() && c.kv.is_literal()) {
                                     let lits = kv_literals(&cur.kv);
@@ -91,7 +91,7 @@ impl Analyzer {
                             }
                         }
                     }
-                    ast::CmpOp::Is | ast::CmpOp::IsNot if !matches!(right, ast::Expr::NoneLiteral(_)) && !crate::interp::disabled("isobj") => {
+                    ast::CmpOp::Is | ast::CmpOp::IsNot if !matches!(right, ast::Expr::NoneLiteral(_)) => {
                         // `t is a` with `a` one object: on the true side t is a, on the false side
                         // a is not among t's objects
                         let same = if op == ast::CmpOp::Is { truth } else { !truth };
@@ -121,12 +121,10 @@ impl Analyzer {
                             }
                             // the name is None / is not None
                             if let ast::Expr::Name(l) = left {
-                                if !crate::interp::disabled("isnone") {
-                                    let cur = self.load_name(s(l.id.as_str()), &Node::none(), state);
-                                    let has_none = kv_literals(&cur.kv).contains(intern::key_none());
-                                    if has_none || is_none {
-                                        self.narrow_kv(s(l.id.as_str()), &KeySet::one(intern::key_none()), is_none, state);
-                                    }
+                                let cur = self.load_name(s(l.id.as_str()), &Node::none(), state);
+                                let has_none = kv_literals(&cur.kv).contains(intern::key_none());
+                                if has_none || is_none {
+                                    self.narrow_kv(s(l.id.as_str()), &KeySet::one(intern::key_none()), is_none, state);
                                 }
                             }
                         }
@@ -181,7 +179,7 @@ impl Analyzer {
                             }
                             // (an instance whose class defines the name has it whatever its own
                             // attributes are: its row says nothing about it)
-                            let by_class = |an: &Analyzer, o: u32| !super::disabled("hasattrcls") && intern::key_as_str(k).is_some_and(|n| an.class_resolves(o, &n));
+                            let by_class = |an: &Analyzer, o: u32| intern::key_as_str(k).is_some_and(|n| an.class_resolves(o, &n));
                             rec = Value::with_kv(rec.pts.filter(|o| !builtin(self, o) && !by_class(self, o)), KeyVal::Bot);
                             self.narrow_record(&rec, Ns::Attr, k, truth, state);
                         }
@@ -228,10 +226,10 @@ impl Analyzer {
             }
             // `if items:` / `if not items:` on a list of unknown length: on this path it has a
             // first element / is empty (this path's length only, not the object's)
-            ast::Expr::Name(n) if !super::disabled("lennarrow") => {
+            ast::Expr::Name(n) => {
                 let mut v = self.load_name(s(n.id.as_str()), &Node::none(), state);
                 // several containers: on the truthy path the ones known to be empty are not it
-                if truth && v.pts.len() > 1 && v.kv.is_bot() && !super::disabled("emptydrop") {
+                if truth && v.pts.len() > 1 && v.kv.is_bot() {
                     let keep: Vec<u32> = v.pts.iter().filter(|o| !(matches!(self.kind(*o), Kind::List | Kind::Tuple | Kind::Set) && self.llen(*o, state) == Some(0))).collect();
                     if !keep.is_empty() && keep.len() < v.pts.len() {
                         v = Value::objs(crate::domain::ObjSet::from_vec(keep));
@@ -253,13 +251,13 @@ impl Analyzer {
                         }
                     }
                     // a falsy dict is empty on this path (`while queue:` ends with no keys)
-                    if !truth && self.kind(o) == Kind::Dict && self.obj(o).single && !super::disabled("dictfalsy") {
+                    if !truth && self.kind(o) == Kind::Dict && self.obj(o).single {
                         state.set_row(o, Ns::Item, crate::domain::Row::new());
                         state.drop_obj_ns(o, Ns::Item);
                     }
                     // a falsy unknown value (a JSON document, an input): an empty container if
                     // len() or a key read accepts it at all (a falsy number makes them raise)
-                    if !truth && self.kind(o) == Kind::Unknown && self.obj(o).single && v.kv.is_bot() && !super::disabled("unkfalsy") {
+                    if !truth && self.kind(o) == Kind::Unknown && self.obj(o).single && v.kv.is_bot() {
                         state.set_row(o, Ns::Item, crate::domain::Row::new());
                         state.drop_obj_ns(o, Ns::Item);
                         state.drop_obj_ns(o, Ns::Pos);
@@ -405,7 +403,7 @@ impl Analyzer {
                 _ => return,
             }
         }
-        if star && (star_structural || crate::interp::disabled("extinst")) {
+        if star && (star_structural) {
             return;
         }
         let mut keep: Vec<u32> = Vec::new();
@@ -424,7 +422,7 @@ impl Analyzer {
                     let ph = self.ph_info(oid);
                     if let (Some(pc), false) = (ph.cls.get(), classes.is_empty()) {
                         Some(classes.iter().any(|c| self.is_subclass(pc, *c)))
-                    } else if let Some(pc) = ph.cls.get().filter(|pc| classes.is_empty() && !star && self.class_info_opt(*pc).is_some() && !self.user_subclass_has_external_base(*pc) && !crate::interp::disabled("phbuiltin")) {
+                    } else if let Some(pc) = ph.cls.get().filter(|pc| classes.is_empty() && !star && self.class_info_opt(*pc).is_some() && !self.user_subclass_has_external_base(*pc)) {
                         // (a placeholder of a user class tested against builtin classes only: no
                         // subclass of its class in the program derives from an external class)
                         let _ = pc;
@@ -432,7 +430,7 @@ impl Analyzer {
                     } else {
                         if truth && classes.len() == 1 && kinds.is_empty() && in_summary {
                             narrowed.push((oid, classes[0]));
-                        } else if truth && classes.is_empty() && !star && ext_classes.len() == 1 && in_summary && ph.cls.get().is_none() && !crate::interp::disabled("narrowbuiltin") {
+                        } else if truth && classes.is_empty() && !star && ext_classes.len() == 1 && in_summary && ph.cls.get().is_none() {
                             narrowed.push((oid, ext_classes[0]));
                         }
                         None
@@ -529,7 +527,7 @@ impl Analyzer {
                         }
                         // a name holding several dicts: those that surely lack the key are not it
                         if let ast::Expr::Name(n) = &*a.value {
-                            if rec.pts.len() > 1 && !crate::interp::disabled("getfilter") {
+                            if rec.pts.len() > 1 {
                                 let keep: Vec<u32> = rec.pts.iter().filter(|o| !(self.kind(*o) == Kind::Dict && { let r = state.row(*o, Ns::Item); !r.open() && !r.present.contains(k) })).collect();
                                 if !keep.is_empty() && keep.len() < rec.pts.len() {
                                     let nv = Value::with_kv(ObjSet::from_vec(keep), rec.kv.clone());
@@ -597,7 +595,7 @@ impl Analyzer {
             match &lv.kv {
                 KeyVal::Lit(k) => {
                     // whichever object the name holds has the key (several objects: none narrows)
-                    if member && recs.len() > 1 && !crate::interp::disabled("innamekey") {
+                    if member && recs.len() > 1 {
                         if let ast::Expr::Name(nm) = rec_expr {
                             state.add_name_key(s(nm.id.as_str()), *k);
                         }
@@ -610,10 +608,10 @@ impl Analyzer {
                     let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
                     // (a module-level dict read in a summary is a placeholder: maybe closed)
                     let global_ph = |an: &Analyzer, o: u32| an.kind(o) == Kind::Ph && an.ph_info(o).parent.map(|p| an.kind(p) == Kind::Module).unwrap_or(false);
-                    let closed = recs.iter().zip(rows.iter()).all(|(o, r)| global_ph(self, *o) || self.is_entry_object(*o) || (r.closed() && !r.symbolic() && r.present.iter().all(intern::key_is_str))) && !crate::interp::disabled("keysofin");
+                    let closed = recs.iter().zip(rows.iter()).all(|(o, r)| global_ph(self, *o) || self.is_entry_object(*o) || (r.closed() && !r.symbolic() && r.present.iter().all(intern::key_is_str)));
                     self.record_event(if closed && member { "keynarrow" } else { "narrow" }, *ph);
                 }
-                _ if lv.pts.iter().any(|o| self.kind(o) == Kind::Ph) && !crate::interp::disabled("keysofin") => {
+                _ if lv.pts.iter().any(|o| self.kind(o) == Kind::Ph) => {
                     // (closed dicts of string keys: the key is one of theirs at any call site)
                     let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
                     let closed = rows.iter().all(|r| r.closed() && !r.symbolic() && r.present.iter().all(intern::key_is_str));
@@ -625,7 +623,7 @@ impl Analyzer {
                 }
                 // an unknown key (data, or an unknown value's object) in closed dicts of string
                 // keys: one of those keys
-                KeyVal::KeysOf(_) | KeyVal::Data(_) | KeyVal::Bot if member && !crate::interp::disabled("keysofin") && (lv.pts.is_empty() || lv.pts.iter().all(|o| self.kind(o) == Kind::Unknown)) && !(lv.pts.is_empty() && lv.kv.is_bot()) => {
+                KeyVal::KeysOf(_) | KeyVal::Data(_) | KeyVal::Bot if member && (lv.pts.is_empty() || lv.pts.iter().all(|o| self.kind(o) == Kind::Unknown)) && !(lv.pts.is_empty() && lv.kv.is_bot()) => {
                     let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
                     if rows.iter().all(|r| r.closed() && !r.symbolic()) {
                         let mut may = KeySet::new();
@@ -738,7 +736,7 @@ impl Analyzer {
         // its own __eq__)
         let maybe_eq = cur.pts.filter(|o| matches!(self.kind(o), Kind::Unknown | Kind::Ph | Kind::Instance | Kind::External));
         match new {
-            None if !maybe_eq.is_empty() && !crate::interp::disabled("narrowobjs") => {
+            None if !maybe_eq.is_empty() => {
                 // none of the literals is left: the objects are what remains (one of the keys)
                 let v = if restrict {
                     Value::with_kv(maybe_eq.filter(|o| self.kind(o) == Kind::Instance), KeyVal::lits(keys.clone()))
@@ -760,7 +758,7 @@ impl Analyzer {
             }
             Some(nk) => {
                 // equal to one of the literals: an unknown value is that literal now
-                let pts = if restrict && !crate::interp::disabled("restrictpts") { cur.pts.filter(|o| self.kind(o) != Kind::Unknown) } else { cur.pts.clone() };
+                let pts = if restrict { cur.pts.filter(|o| self.kind(o) != Kind::Unknown) } else { cur.pts.clone() };
                 if nk != cur.kv || pts != cur.pts {
                     self.rebind_name(name, Value::with_kv(pts, nk), state);
                 }

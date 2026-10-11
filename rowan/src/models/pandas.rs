@@ -1256,7 +1256,7 @@ pub fn lit_key_seq(an: &Analyzer, st: &State, v: &Value) -> Option<Vec<KeyId>> {
         return None;
     }
     let n = an.llen(o, st)?;
-    (0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64)).kv.as_lit().filter(|_| true)).collect()
+    (0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64)).kv.as_lit()).collect()
 }
 
 /// The keys a list of column names surely holds and those it may hold (one appended on
@@ -1549,17 +1549,12 @@ fn item_columns(an: &Analyzer, st: &State, v: &Value) -> Option<Vec<Result<Row, 
     for x in v.pts.iter() {
         match an.kind(x) {
             Kind::Dict | Kind::Frame => {
-                let mut d = Row::new().copy_from(&st.row(x, Ns::Item), true, &KeySet::new(), EMPTY_LENS).data();
+                let d = Row::new().copy_from(&st.row(x, Ns::Item), true, &KeySet::new(), EMPTY_LENS).data();
                 // a key the record surely has is a column of the frame; one it may have, maybe
-                if crate::interp::disabled("recmaybe") {
-                    d.definite = d.present.clone();
-                    d.likely = d.likely.union(&d.present);
-                }
                 let r = Row::from_data(d);
                 rec = Some(match rec {
                     None => r,
-                    Some(cur) if !crate::interp::disabled("recalts") => cur.join(&r),
-                    Some(cur) => cur.copy_from(&r, true, &KeySet::new(), EMPTY_LENS),
+                    Some(cur) => cur.join(&r),
                 });
             }
             Kind::List | Kind::Tuple => out.push(Err(an.llen(x, st)?)),
@@ -1596,7 +1591,7 @@ fn pd_dataframe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let data = c.arg(0, Some("data"));
     // (records — a list of dicts, `columns=` selecting among their keys — or nothing never
     // fail; other data may: lengths that differ, scalars without an index)
-    if c.qual == "pandas.DataFrame" && !crate::interp::disabled("dfctorraise") {
+    if c.qual == "pandas.DataFrame" {
         let records = match &data {
             None => true,
             Some(d) => {
@@ -1714,7 +1709,7 @@ fn pd_dataframe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     // first row known to exist, the keys every possible row surely has are
                     let mut d = r.data();
                     let mut sure = KeySet::new();
-                    if an.prefix(x, st).is_some() && !crate::interp::disabled("nonemptyrows") {
+                    if an.prefix(x, st).is_some() {
                         if let Elem::One(e) = &it.elem {
                             if !e.pts.is_empty() && e.kv.is_bot() && e.pts.iter().all(|o| an.kind(o) == Kind::Dict) {
                                 let mut acc: Option<KeySet> = None;
@@ -2188,7 +2183,7 @@ fn combine_overlap(lrow: &Row, rrow: &Row, keys: &KeySet, lsuf: &str, rsuf: &str
         let kill_for = |other: &Row| -> KeySet { other.definite.difference(keys) };
         let mark = |r: &Row, other: &Row| {
             let k = kill_for(other);
-            if k.is_empty() || crate::interp::disabled("mergekill") {
+            if k.is_empty() {
                 r.sources.clone()
             } else {
                 r.sources.map(|(s0, l)| (s0, crate::domain::lens_push(l, Step::Kill(k.clone()))))
@@ -2941,7 +2936,7 @@ fn set_index(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn groupby(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // one of several known column names (`by = "name" if … else "host"`): a groupby per name
-    if let Some(b) = c.arg(0, Some("by")).filter(|b| b.pts.is_empty() && !crate::interp::disabled("gbalts")) {
+    if let Some(b) = c.arg(0, Some("by")).filter(|b| b.pts.is_empty()) {
         if let KeyVal::Lits(ks) = &b.kv {
             if (2..=8).contains(&ks.len()) && ks.iter().all(intern::key_is_str) {
                 let mut outs: Vec<Value> = Vec::new();
@@ -3423,11 +3418,8 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// A row of a frame (iterrows / itertuples / apply / records): accesses on it narrow the
 /// row, not the frame (a frame without rows never runs them).
-fn mark_view(an: &mut Analyzer, vrow: u32, fs: &[u32]) {
+fn mark_view(an: &mut Analyzer, vrow: u32, _fs: &[u32]) {
     an.obj_mut(vrow).iter_elem = true;
-    if fs.len() == 1 && crate::interp::disabled("framerowsound") {
-        an.obj_mut(vrow).derived_from = Some(fs[0]);
-    }
 }
 
 fn df_apply(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -5276,7 +5268,7 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
         if !is_tuple_key(k) && row.present.iter().any(is_tuple_key) {
             let top = top_level(&row);
             let cls = classify(&top, k);
-            if guarded && !crate::interp::disabled("guardedverdicts") {
+            if guarded {
                 an.verdict_guarded(node, k, &cls, oid, Ns::Item);
             }
             if !guarded {
@@ -5296,7 +5288,7 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
             return Value::obj(nid);
         }
         let cls = classify(&row, k);
-        if guarded && !crate::interp::disabled("guardedverdicts") {
+        if guarded {
             an.verdict_guarded(node, k, &cls, oid, Ns::Item);
         }
         if !guarded {
@@ -5385,7 +5377,7 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
         Kind::View => matches!(&an.obj(x).payload, Payload::View(ViewKind::Keys, r) if r.pts == ObjSet::one(oid)),
         _ => false,
     });
-    if own_keys && !key.pts.is_empty() && !crate::interp::disabled("ownkeys") {
+    if own_keys && !key.pts.is_empty() {
         let nid = an.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(row.clone()), Ns::Item, None, None);
         derive(state, oid, nid, Rows::Same, &row.present);
         return Value::obj(nid);
