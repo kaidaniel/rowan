@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791721777237,
+  "lastUpdate": 1791723177187,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -1342,6 +1342,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: objects",
             "value": 179884,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "587fad44c62c19018a4b524cfab7cf1d75c07cb9",
+          "message": "Performance: an unknown call's result allocated again at its site is taken as still in use without a liveness walk, and merged (its rows are open anyway): rich's pretty printer made 350k such walks, 517M visited objects in 30 s. A recursive call answered by its running activation joins the activation's footprint only where a structural diff of the two states differs (rows, slots, element keys, lengths, requirements), instead of looking up every footprint entry at every call.\n\nGolden JSON and the `work:` line carry `visits` (heap entries visited by liveness walks and footprint joins, deterministic); directive `#@visits <= N`. y462 (new: a recursive walk over unknown values in a module with a 400-record table, 8.3M visits before, under 100k now), y463 (new: a recursion whose footprint is 150 records, 16k visits before, under 15k now); each fails with its switch off. ROWAN_NO=unkwalk / fpdiff: off.\n\nBench: rich in 60 s without deadlines runs 1.43M statements (0.91M before), 218M visits (736M), 285k objects (420k). At work=550000 (units count walk visits, so the budget now buys more statements): stdlib12k proven 1601 -> 2384, schema 424 -> 472; email proven 365 -> 374; rich schema 77 -> 81, 5.6 s -> 138 s and 3 GB (1.33M statements instead of 46k). Snapshots reviewed: verdicts renamed and two schema entries more (no new `missing`). Golden 1042/1042, oracle 880/880, cargo test pass. AGENTS.md: measurements and known problems as they stand.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T13:19:50+01:00",
+          "tree_id": "f9b4b652a9fb33dcd8d7fe6c8b8f20f3a1f8bc40",
+          "url": "https://github.com/kaidaniel/rowan/commit/587fad44c62c19018a4b524cfab7cf1d75c07cb9"
+        },
+        "date": 1791723176608,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 1807.23,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1189,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 1805.38,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 8088,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 90.55,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 2126,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 1251443,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 12650939,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 34481,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 191973,
             "unit": "count",
             "extra": "finished"
           }
