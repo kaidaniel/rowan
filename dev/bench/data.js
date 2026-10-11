@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791732930325,
+  "lastUpdate": 1791733178782,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -1738,6 +1738,66 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: peak memory",
             "value": 876,
+            "unit": "MB",
+            "extra": "cut at the 600 s timeout"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "215917723c2785c9faebf6b4dcf10113fb6194ae",
+          "message": "SUBAGENTS.md: instructions for a subagent making one iteration of improvements (objectives, workflow on its own branch with a draft PR for benchmarks, final summary).\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T16:27:02+01:00",
+          "tree_id": "4d0806385438dbb1ab57d8eb533b073502f3782b",
+          "url": "https://github.com/kaidaniel/rowan/commit/215917723c2785c9faebf6b4dcf10113fb6194ae"
+        },
+        "date": 1791733178219,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 602.12,
+            "unit": "s",
+            "extra": "cut at the 600 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1539,
+            "unit": "MB",
+            "extra": "cut at the 600 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 602.07,
+            "unit": "s",
+            "extra": "cut at the 600 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 5708,
+            "unit": "MB",
+            "extra": "cut at the 600 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 601.12,
+            "unit": "s",
+            "extra": "cut at the 600 s timeout"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 1068,
             "unit": "MB",
             "extra": "cut at the 600 s timeout"
           }
