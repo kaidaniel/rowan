@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791723177187,
+  "lastUpdate": 1791725964377,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -1426,6 +1426,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: objects",
             "value": 191973,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "6bb839c1b16ac7555658f0b2c89a8b927280d1a7",
+          "message": "Soundness: what a callee did before it raised is in the caller's handler; a with statement is a try whose finally is the managers' `__exit__` (run however the body ends: return, break / continue, an exception); break / continue run the finally blocks they leave; a `return` inside `with` on a `@contextmanager` returns from the function; `\"k%d\" % k` with `k` one of several literals is each of them formatted.\n\n* Raises from summaries: a summary keeps what its raising paths change in objects from before the call (`raise_fp`: keys from a structural diff against its entry at each raise leaving the function, after finally blocks / `__exit__`). A caller's handler starts from the state before the call with those objects weakened (rows mutated, slots joined with unknown); a call under a try that catches it runs per call site instead, within a budget (`ROWAN_LIMITS=raisetab=16` per function code). It started from the state before the call: the callee's effects were lost (`d[\"a\"]` definitely missing after `f` set it and raised).\n* `Finally` (a block, or `__exit__` of with managers) and `stmt_try_parts`: try and with share the machinery; `finally_stack` holds the running finally blocks for break / continue (saved with `loop_stack` in summary runs).\n* `CmHook` keeps the caller's exits and return values from the with body (`body_exits`, `body_ret`).\n* `format_percent_alternatives`: every combination of literal arguments (at most 64), exactly as Python formats them (`\"%s-%s\" % (\"a\", k)` was `0 | 1`).\n\ny464-y468 (new, expectations by hand; the oracle agrees; each failed before; y466's second call was corrected before commit: with `[0, 0]` `kept` is never set). ROWAN_NO=percentalts / cmreturn / jumpfinally / withexit / raisefp / raisetab: off.\n\nBench, work=550000 (loaded machine): email proven 374 -> 359, 6 s -> 8 s alone; stdlib12k proven 2384 -> 1760 (747 verdicts move to other call chains under the budget, 59 become possibly); rich unchanged. Golden 1047/1047, oracle 885/885, cargo test, snapshots (no new `missing`), hover test pass.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T14:06:03+01:00",
+          "tree_id": "1a63593b926ed11d0bb27f3da83defece48ac8fd",
+          "url": "https://github.com/kaidaniel/rowan/commit/6bb839c1b16ac7555658f0b2c89a8b927280d1a7"
+        },
+        "date": 1791725963468,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 1804.88,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1494,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 1805.23,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 6740,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 356.88,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 2086,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 2753008,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 42967931,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 38926,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 272634,
             "unit": "count",
             "extra": "finished"
           }
