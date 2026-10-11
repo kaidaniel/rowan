@@ -80,8 +80,7 @@ ruff and walks the syntax tree directly, running the program on abstract values.
 * **Soundness first.** Where the runtime oracle and this file disagree, the oracle wins. Golden
   cases matter; snapshot changes are fine when sound.
 * **Commits.** Commit when a round of work is complete and golden, snapshots and `cargo test`
-  pass; never commit a failing state. Review snapshot diffs before `--update`. Messages end
-  with `Co-Authored-By: Claude <model> <noreply@anthropic.com>`.
+  pass; never commit a failing state. Review snapshot diffs before `--update`.
 * **Plans.** When a request mixes several things, write the plan first, then work it in order.
 * `SUGGESTED_CHANGES.md` is the owner's list of open items. It is untracked: never commit it.
   Keep it to things still to do.
