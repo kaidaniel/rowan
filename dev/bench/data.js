@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791721187562,
+  "lastUpdate": 1791721777237,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -1258,6 +1258,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: objects",
             "value": 179890,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "724672b59eb241e3b39752ffdb6f45ec41160886",
+          "message": "Soundness: `*args` in a call of a dataclass / NamedTuple class supplies positional fields (a list / tuple of known length its positions in order; one of unknown length its element to each further positional field, which is then definitely there when the call returns), and a function / class / lambda defined in an `except` handler has its own scope (the scope pass walked a copy of each handler: scopes are keyed by node address, so such a function took the module's scope and every module name it read was an unbound local). Both were reported definitely missing (rich: `ColorTriplet(*background)`'s fields, `WindowsConsoleFeatures` in `get_windows_console_features`).\n\ny460, y461 (new, expectations by hand; the oracle agrees; each failed before). ROWAN_NO=dcstarargs: off.\n\nBench, work=550000: rich missing 36 -> 0 (see the bench line in the round's notes); email / stdlib12k unchanged. Golden 1040/1040, oracle 878/878, cargo test, snapshots (unchanged) pass.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T12:56:39+01:00",
+          "tree_id": "7b4f6ecf5dcbd311061cebb385b74f39c69eca8d",
+          "url": "https://github.com/kaidaniel/rowan/commit/724672b59eb241e3b39752ffdb6f45ec41160886"
+        },
+        "date": 1791721776031,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 1804.22,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1700,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 1805.22,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 9960,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 100.49,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 2057,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 1218061,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 22624869,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 34477,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 179884,
             "unit": "count",
             "extra": "finished"
           }
