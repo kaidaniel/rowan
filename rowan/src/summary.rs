@@ -20,7 +20,6 @@ use crate::state::{Kind, State};
 pub const MAX_SUMMARY_ROUNDS: usize = 3;
 pub const MAX_REL_CHAIN: usize = 1;
 pub const MAX_TABULATIONS: usize = 256;
-pub const MAX_CALL_TABULATIONS: usize = 256;
 
 pub fn is_code_kind(k: Kind) -> bool {
     matches!(k, Kind::Function | Kind::Class | Kind::Bound | Kind::External | Kind::Partial | Kind::Method)
@@ -885,6 +884,7 @@ impl Analyzer {
                 }
             }
             // run the body
+            let mut yield_states: Vec<State> = Vec::new();
             match fnode {
                 FuncNode::Lambda(l) => {
                     let v = self.eval(&l.body, &mut st);
@@ -897,7 +897,10 @@ impl Analyzer {
                     // back after it)
                     let saved_yields = std::mem::take(&mut self.gen_yield_states);
                     self.exec_block(&f.body, &mut st);
-                    self.gen_yield_states = saved_yields;
+                    let ys = std::mem::replace(&mut self.gen_yield_states, saved_yields);
+                    if crate::interp::is_generator(&f.body) {
+                        yield_states = ys.into_values().flat_map(|v| v.list.into_iter().map(|(_, s)| s)).collect();
+                    }
                 }
             }
             let mut ret = st.ret.clone().unwrap_or_default();
@@ -912,11 +915,11 @@ impl Analyzer {
                 st = if st.reachable { st.join(&mut exs) } else { exs };
                 st.exits = None;
             }
+            let end_reachable = st.reachable;
             st.reachable = true;
-            // (a generator's items in this run's own object, cloned per call: a simple one always;
-            // any generator with `genfull=1` (off by default: email lost most proven accesses) — a call whose generator changes objects
-            // from before the call keeps the concrete run, `Summary::changes_outside`)
-            let simple_gen = matches!(fnode, FuncNode::Def(f) if crate::interp::is_generator(&f.body) && (crate::interp::is_simple_generator(&f.body) || crate::interp::limit("genfull", 0) > 0));
+            // (a generator's items in this run's own object, cloned per call: a simple generator
+            // always, another once its budget of runs per call site is spent)
+            let simple_gen = matches!(fnode, FuncNode::Def(f) if crate::interp::is_generator(&f.body));
             if simple_gen {
                 // (a simple generator: its items, in this run's own object — cloned per call)
                 let ctx = self.frame().ctx.clone();
@@ -1016,6 +1019,22 @@ impl Analyzer {
                 completes,
             };
             summ.compute_footprint(self, &base);
+            // (a generator that changes objects from before its call is instantiated weakly past
+            // its budget, as the effects happen while it is consumed: its caller may stop at any
+            // yield for good, so the exit covers the state at each one, not only its end)
+            if !yield_states.is_empty() && summ.changes_outside(self) {
+                let ret = summ.exit.ret.clone();
+                let mut ex = summ.exit.copy_ref();
+                ex.reachable = end_reachable;
+                for mut y in yield_states {
+                    y.exits = None;
+                    y.ret = ret.clone();
+                    ex = if ex.reachable { ex.join(&mut y) } else { y };
+                }
+                ex.reachable = true;
+                summ.exit = ex;
+                summ.compute_footprint(self, &base);
+            }
             if self.sum_hit.contains(&foid) {
                 let prev = self.sum_partial.get(&foid).cloned();
                 if let Some(prev) = &prev {
@@ -1262,21 +1281,30 @@ impl Analyzer {
             }
             return false;
         };
-        let kkey: &'static str = if ev.kind == "call" || ev.kind == "dispatch" { ev.kind } else { "lit" };
-        let key = (self.func_info(summary.foid).node.addr(), kkey);
-        let n = self.tab_count.get(&key).copied().unwrap_or(0);
-        let budget = if kkey == "call" || kkey == "dispatch" { crate::interp::limit("call", MAX_CALL_TABULATIONS) } else { crate::interp::limit("tab", MAX_TABULATIONS) };
-        let over_time = self.over_deadline();
-        if n >= budget || over_time {
+        if !self.tab_budget(summary.foid) {
             if debug_enabled() {
-                eprintln!("budget: summary used for {} ({} on {}; {})", self.func_info(summary.foid).qualname, ev.kind, self.obj(ev.ph).label, if over_time { "deadline" } else { kkey });
+                eprintln!("budget: summary used for {} ({} on {})", self.func_info(summary.foid).qualname, ev.kind, self.obj(ev.ph).label);
             }
             return false;
         }
         if debug_enabled() {
             eprintln!("tabulate {} because of {} on {} [{}] chain={:?} frames={} loop={} sum={}", self.func_info(summary.foid).qualname, ev.kind, self.obj(ev.ph).label, summary.desc, self.call_chain, self.frames.len(), self.frame().loop_depth, self.sum_stack.len());
         }
-        self.tab_count.insert(key, n + 1);
+        true
+    }
+
+    /// One more run of `foid`'s body per call site, if its budget allows: every such run
+    /// counts, whatever its reason (an event the arguments decide, a generator, a call a
+    /// model makes, a raise a handler here catches), against one budget per function code
+    /// (every closure made from one `def` shares it).
+    pub fn tab_budget(&mut self, foid: ObjId) -> bool {
+        let key = self.func_info(foid).node.addr();
+        let over = self.over_deadline();
+        let n = self.tab_count.entry(key).or_default();
+        if *n >= crate::interp::limit("tab", MAX_TABULATIONS) || over {
+            return false;
+        }
+        *n += 1;
         true
     }
 
@@ -2302,7 +2330,10 @@ impl Inst {
         let tsite: String = tsite.strip_suffix("#recent").map(|x| x.to_string()).unwrap_or_else(|| tsite.to_string());
         // templates allocated at one line in different inner contexts (two objects built by
         // one constructor inside the body) stay distinct in the clone
-        let tsite = if tctx.is_empty() { tsite } else { format!("{}|{}", tsite, tctx) };
+        // (the contexts of nested clones are kept to the innermost `chain` call sites, like a
+        // frame's context: with the whole chain every level of calls made new sites, and a
+        // summary held fan-out^depth templates, all cloned at each instantiation)
+        let tsite = if tctx.is_empty() { tsite } else { truncate_ctx(&format!("{}|{}", tsite, tctx), 2 + crate::interp::limit("chain", 2)) };
         let ns = if matches!(tkind, Kind::Instance | Kind::Namespace) { Ns::Attr } else { Ns::Item };
         let nid = an.alloc_in_frame(tkind, &tsite, state, &tlabel, Payload::None, None, ns, tsingle, &self.call_ctx, self.ctx_single);
         if let Some(o) = an.origins.get(&t).cloned() {
@@ -2534,5 +2565,14 @@ impl Inst {
             parts.push(v);
         }
         crate::domain::join_values(parts)
+    }
+}
+
+/// The first `n` `|`-separated parts of a clone's site (its allocation site, the summary
+/// context it was made in, the innermost call sites).
+fn truncate_ctx(site: &str, n: usize) -> String {
+    match site.match_indices('|').nth(n.saturating_sub(1)) {
+        Some((i, _)) => site[..i].to_string(),
+        None => site.to_string(),
     }
 }

@@ -1275,11 +1275,11 @@ impl Analyzer {
         // (a generator runs per call site: its caller sees only its suspension points, see below)
         // (not a `@contextmanager` / yield-dependency body: it runs around its with block)
         let under_cm = self.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth == self.frames.len());
-        // (a simple generator — straight-line yields, no calls — is summarised like a function)
-        let gen_fn = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body) && !super::is_simple_generator(&f.body)) && !under_cm && super::limit("genfull", 0) == 0;
+        // (a simple generator — straight-line yields, no calls — is summarised like a function;
+        // another runs per call site while its function's budget lasts)
+        let gen_fn = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body) && !super::is_simple_generator(&f.body)) && !under_cm;
         let gen_summ = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body)) && !under_cm;
         let once = std::mem::take(&mut self.force_tab_once);
-        let forced = once || self.torch_modules.contains(&fi.module) || gen_fn;
         // (why the body runs per call site: `ROWAN_DEBUG=1` prints it with each tabulated run)
         let mut why: &'static str = if !self.use_summaries {
             "nosummaries"
@@ -1287,14 +1287,23 @@ impl Analyzer {
             "once"
         } else if gen_fn {
             "generator"
-        } else if forced {
+        } else if self.torch_modules.contains(&fi.module) {
             "torch"
         } else if self.model_call > 0 {
             "model"
         } else {
             "event"
         };
-        if self.use_summaries && self.model_call == 0 && !forced {
+        // (every per-call-site run counts against the function's one budget, whatever its
+        // reason: past it, the summary; except a call a model makes, whose effects on the
+        // model's own tables a summary does not replay — the calls in its body are ordinary
+        // calls again, see `saved_model_call`)
+        let forced = match why {
+            "once" | "model" => true,
+            "generator" | "torch" => self.tab_budget(foid),
+            _ => false,
+        };
+        if self.use_summaries && !forced {
             let bound = self.compute_bindings(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
             // the classes of the arguments: the summary is specialised on them
             let mut sig: Vec<(String, ObjId)> = Vec::new();
@@ -1361,7 +1370,10 @@ impl Analyzer {
             }
             // (a generator whose body changes objects from before the call: its concrete run
             // orders those effects between the items)
-            let gen_concrete = gen_summ && summ.changes_outside(self);
+            // (past the budget its summary is applied weakly: the effects happen while it is
+            // consumed, so before and after the call the objects may or may not have them yet)
+            let gen_outside = gen_summ && summ.changes_outside(self);
+            let gen_concrete = gen_outside && self.tab_budget(foid);
             if gen_concrete {
                 why = "genconcrete";
             }
@@ -1378,16 +1390,10 @@ impl Analyzer {
             // state before the call is the handler's; past a small budget those objects are
             // made unknown for the handler instead, see `summary_raise_state`)
             let raise_fp = !summ.raise_fp.rows.is_empty() || !summ.raise_fp.slots.is_empty() || !summ.raise_fp.elems.is_empty();
-            let tab_raise = raise_caught && raise_fp && {
-                let key = (fi.node.addr(), "raise");
-                let n = self.tab_count.get(&key).copied().unwrap_or(0);
-                let ok = n < super::limit("raisetab", 16) && !self.over_deadline();
-                if ok {
-                    self.tab_count.insert(key, n + 1);
-                    why = "raise";
-                }
-                ok
-            };
+            let tab_raise = !gen_concrete && raise_caught && raise_fp && self.tab_budget(foid);
+            if tab_raise {
+                why = "raise";
+            }
             if !gen_concrete && !tab_raise && !self.should_tabulate_at(&summ, &bind, state, node) {
                 // (outside databases the summary did not simulate: their rows are unknown now)
                 if let Some(cons) = self.sql_touched.get(&foid).cloned() {
@@ -1439,7 +1445,12 @@ impl Analyzer {
                         }
                     }
                 }
+                let pre_gen = if gen_outside { Some(state.copy()) } else { None };
                 let r = self.instantiate(&summ, &bind, state, node, &call_ctx, ctx_single);
+                if let Some(pre) = pre_gen {
+                    let fp = state.footprint(&pre);
+                    state.join_heap_fp(&pre, &fp);
+                }
                 self.call_chain = saved_chain;
                 // (a generator / coroutine function's call does not run its body)
                 let runs_body = match fi.node {
@@ -1671,6 +1682,9 @@ impl Analyzer {
         // (the caller's recorded returns are not the callee's: its end must not join them in)
         let saved_exits = { state.exits.take() };
         let mut saved_yields: Option<(ObjId, Option<super::YieldStates>)> = None;
+        // (a call a model makes runs here, per call site; the calls in its body are ordinary
+        // calls again: summaries, budgets)
+        let saved_model_call = std::mem::replace(&mut self.model_call, 0);
         self.frames.push(new_fr);
         if let FuncNode::Def(f) = fnode {
             if is_generator(&f.body) {
@@ -1972,6 +1986,7 @@ impl Analyzer {
         self.rec_widened.remove(&key);
         self.call_chain = saved_chain;
         self.frames.pop();
+        self.model_call = saved_model_call;
         self.env_stack.pop();
         let raised = self.raise_stack.pop().unwrap_or(false);
         let callee_cls = self.esc_cls.pop().flatten();

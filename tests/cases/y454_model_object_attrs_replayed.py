@@ -3,8 +3,8 @@ and replays them on the objects a call passes. A stdlib object the models simula
 compiled pattern) has its methods from the model, not from its attribute row (which holds the
 model's own state): replayed on one, the reads were classified against that row and reported
 `write` / `seek` / `read` / `match` definitely missing (email's `BufferedSubFile.push`, once the
-call budget was spent). With the call budget at 0 every call here uses its summary."""
-#@limits call=0
+call budget was spent). With the budget at 0 every call here uses its summary."""
+#@limits tab=0
 import re
 from io import StringIO
 

@@ -36,9 +36,12 @@ ruff and walks the syntax tree directly, running the program on abstract values.
   * **tabulation**: the body runs again at the call site. This happens when the summary run
     recorded an *event* the call's arguments decide (a call through a parameter, `isinstance`,
     iteration, a known text a model parses…), or when a callee that may raise is caught by
-    the caller (the handler needs the state at each raise). Budgets: 256 runs per function
-    code and event kind, 16 per callee for raises. The call cache replays a run when the same
-    input recurs.
+    the caller (the handler needs the state at each raise), or for a generator that calls
+    code. One budget per function code counts every such run (256); past it, the summary (a
+    generator's applied weakly when it changes older objects). A call a model makes always
+    runs at its site; its body's calls are ordinary again. Clones of a callee's allocations
+    keep the innermost `chain` call sites of their context. The call cache replays a run
+    when the same input recurs.
   * **Recursion:** the inner call uses the running activation's partial result; it iterates
     to a fixpoint (3 rounds, 8 when tabulated), then widens.
   * **Unknown calls** add a mutator to every record they reach, return an unknown, and may
@@ -125,7 +128,7 @@ Run the oracle on the cases you touched, and in full before a commit that change
 * `ROWAN_DEBUG=1`: tabulation reasons (`tabrun F (why)`), summaries, budgets, and a final
   `work:` line (units, body runs, objects, row joins, visits). `2`: also every event, raise and
   try decision. With it, `ROWAN_GCDBG=1` prints what each collection drops.
-* `ROWAN_LIMITS=ms=2000,hard=10000,tab=256,call=256,clones=256,chain=2,path=3`. `work=550000`
+* `ROWAN_LIMITS=ms=2000,hard=10000,tab=256,clones=256,chain=2,path=3`. `work=550000`
   (about 2 s) gives reproducible runs for comparisons. A change that removes liveness walks
   spends a `work=N` budget on more statements: compare progress in equal time
   (`ms=60000,hard=60000`) too.

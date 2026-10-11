@@ -729,7 +729,7 @@ pub struct Analyzer {
     pub key_variants: FxHashMap<ObjId, Vec<(Vec<(ObjId, Vec<ObjId>)>, Vec<(ObjId, ObjId)>, Vec<(String, ObjId)>)>>,
     /// tabulations decided by a summary's events, per function code (`FuncNode::addr`: every
     /// closure object made from one `def` shares the budget) and kind
-    pub tab_count: FxHashMap<(usize, &'static str), usize>,
+    pub tab_count: FxHashMap<usize, usize>,
     /// every tabulated body run (forced ones included): the golden `#@tabulations <= N` bound
     pub tab_runs: usize,
     /// tabulations of one callee at one call site under the same callers (loop rounds that
