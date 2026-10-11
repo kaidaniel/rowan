@@ -1247,11 +1247,29 @@ impl Analyzer {
         true
     }
 
+    /// Does attribute `name` of `oid` resolve without the object's own row: through its class
+    /// (an instance), for a class object through its MRO and `type` (every class has the
+    /// dunders of `type` and `object`, and `mro`, whatever its body defines), for an object a
+    /// model simulates through the model.
     pub(crate) fn class_resolves(&self, oid: ObjId, name: &str) -> bool {
+        if self.kind(oid) == Kind::Class && !crate::interp::disabled("classdunders") {
+            return (name.starts_with("__") && name.ends_with("__")) || name == "mro" || self.class_lookup(oid, name).is_some();
+        }
+        // (an object a model simulates — a StringIO, a pattern, a pydantic error: its attributes
+        // are the model's, its row holds the model's own state)
+        if self.kind(oid) == Kind::Namespace && !crate::interp::disabled("modelattrs") {
+            if let crate::interp::Payload::Method(q, _) = &self.obj(oid).payload {
+                if ["stdobj.", "pydverr.", "typeadapter.", "fastapi."].iter().any(|p| q.starts_with(p)) {
+                    return true;
+                }
+            }
+        }
         if self.kind(oid) != Kind::Instance {
             return false;
         }
         match self.instance_class(oid) {
+            // (`__getattr__` / `__getattribute__` answer any name)
+            Some(c) if !crate::interp::disabled("getattrcls") && (self.class_lookup(c, "__getattr__").is_some() || self.class_lookup(c, "__getattribute__").is_some()) => true,
             // (a field's class-level default is shadowed by the instance's attribute)
             Some(c) => self.class_lookup(c, name).is_some() && !self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name),
             None => false,
@@ -1402,6 +1420,15 @@ impl Analyzer {
             };
         }
         true
+    }
+
+    /// An instance whose class defines `__getitem__` (a subscript calls it).
+    fn indexes_by_getitem(&self, oid: ObjId) -> bool {
+        if self.kind(oid) != Kind::Instance || crate::interp::disabled("getitemcls") {
+            return false;
+        }
+        let Some(c) = self.instance_class(oid) else { return false };
+        self.class_info_opt(c).is_some() && self.class_lookup(c, "__getitem__").is_some()
     }
 
     fn indexes_without_getitem(&self, oid: ObjId) -> bool {
@@ -1664,7 +1691,9 @@ impl Analyzer {
                     }
                 }
             } else if sr.ns == Ns::Item {
-                tg = tg.filter(|a| !self.indexes_without_getitem(a));
+                // (an instance without `__getitem__` raises TypeError, one with it calls the
+                // method: its item row decides neither)
+                tg = tg.filter(|a| !self.indexes_without_getitem(a) && !self.indexes_by_getitem(a));
             }
             if tg.is_empty() {
                 continue;
