@@ -1,4 +1,4 @@
-//! Symbolic function summaries (SPECIFICATION.md §6.1, §6.2); port of `rowan/summary.py`.
+//! Symbolic function summaries; port of `rowan/summary.py`.
 //! See that file's module docstring for the design.
 
 use std::cell::Cell;

@@ -307,10 +307,37 @@ requirements, with failing accesses as diagnostics. Its source is in `vscode-row
 `.vsix` packages of each version are attached to the
 [GitHub releases](https://github.com/kaidaniel/rowan/releases).
 
+## What rowan models
+
+* **Standard library**, exact on known values: builtins; str / bytes / dict / list / set
+  methods and formatting; `collections`, `itertools`, `functools`, `operator`, `heapq`,
+  `bisect`; dataclasses, enum, NamedTuple, TypedDict; `re`, `string.Template`, `textwrap`,
+  `shlex`, `html`, `base64`, `urllib.parse`; `json`, `csv`, `configparser`, `sqlite3` (in-memory
+  SQL); `math`, `statistics`, `decimal`, `fractions`, `datetime`; `os.environ`, `os.path`,
+  `pathlib`, `argparse`, `contextlib`, `threading` / `concurrent.futures`, `copy`, `logging`.
+* **pandas:** a frame's columns through construction, projection, stores, drops and renames,
+  `merge` / `join`, `concat`, `groupby` aggregates, pivots and reshapes. Readers give open
+  frames whose columns become a schema.
+* **pydantic** (v2 and v1 spellings): fields and aliases, lax validation, nested models,
+  validators, dumps and their options, `ValidationError.errors()`, `BaseSettings`.
+* **FastAPI:** routes, parameters converted by annotation, dependencies, middlewares,
+  exception handlers, `response_model`, and what `TestClient` reads back.
+* **PyTorch and numpy:** symbolic shapes through creation, broadcasting, `matmul` / `einsum`,
+  shape ops, reductions, indexing and `nn` layers. dtype and device are not modelled.
+
+Anything else from an installed package is an unknown call: it may change what it is given.
+
+## What is sound
+
+`proven`, `possibly` and `missing`, and the values and key sets shown, hold for every run,
+relative to the models and to annotations (an entry point's `x: Foo` is taken to be a `Foo`).
+`exec` / `eval` of non-literal code, `setattr` / `getattr` with unknown names, metaclasses and
+monkey-patching are unknown or ignored. The `likely` readings (`✓~`, `⚠~`) assume unknown code
+removed no keys, and say so. A run cut by a deadline is still sound, but less precise.
+
 ## More
 
-* `SPECIFICATION.md` covers how rowan works: the value domain, the models, how calls,
-  loops, exceptions and generators are interpreted, what is sound and what isn't.
-* `AGENTS.md` holds notes for working on the engine: tests, conventions, known problems.
+* `AGENTS.md`: how the engine works, and notes for working on it (tests, conventions,
+  debugging).
 * `tests/` has about a thousand example programs, each annotated with what rowan must infer
   and checked against real Python, pandas, pydantic, FastAPI and PyTorch runs.

@@ -1,4 +1,4 @@
-//! Abstract interpreter over the Python AST (SPECIFICATION.md §3–§10).  Port of
+//! Abstract interpreter over the Python AST.  Port of
 //! `rowan/interp.py`; the statement/expression/narrowing/access/call parts live in the
 //! sibling files of this module.
 

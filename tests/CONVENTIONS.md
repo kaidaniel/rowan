@@ -22,7 +22,7 @@ engine passes them. File names: `tests/pydantic/small/y001_…`, `models/ym01_�
 
 ## What rowan claims
 
-A value is a set of possibilities (SPECIFICATION §2): literals, objects, `?` unknown. Rowan
+A value is a set of possibilities: literals, objects, `?` unknown. Rowan
 tracks **which keys** a record has — dict keys, instance attributes, DataFrame columns, model
 fields — and the **values** of names when they follow from the program text.
 
@@ -48,7 +48,7 @@ fields — and the **values** of names when they follow from the program text.
   `only ∪ sometimes ∪ always` must not.
 
 The precise answer is what holds for **every** run of the program, as written (the driver's
-inputs are examples). Rules of thumb (SPECIFICATION §2, §4, §6.4, §9):
+inputs are examples). Rules of thumb (the overview is in AGENTS.md):
 
 * Literals are tracked through arithmetic, comparisons, string methods, formatting, `len` of
   known containers, comprehensions over known values, `sorted` / `min` / `max` of literals.

@@ -1,4 +1,4 @@
-//! Abstract domains (SPECIFICATION.md §2, §4.1): `KeyVal`, `Lens`, `Source`, `Row`,
+//! Abstract domains: `KeyVal`, `Lens`, `Source`, `Row`,
 //! `ReqInfo`, `Value`, `classify`.  Port of `rowan/domain.py` over interned ids.
 
 use std::fmt;

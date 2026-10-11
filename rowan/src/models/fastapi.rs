@@ -1,4 +1,4 @@
-//! FastAPI (SPECIFICATION §11.3): apps and routers record their routes; a handler is an entry
+//! FastAPI: apps and routers record their routes; a handler is an entry
 //! point whose parameters are bound the way FastAPI binds them (a pydantic model: validated
 //! from an open request body; `dict` / `Body()`: the open body; `Depends(g)`: g's result, g's
 //! own parameters bound the same way; `Query` / `Path` / `Header` and plain scalars: open

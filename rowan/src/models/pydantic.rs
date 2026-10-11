@@ -1,4 +1,4 @@
-//! pydantic (SPECIFICATION §11.3): a `BaseModel` subclass is a class with declared fields.
+//! pydantic: a `BaseModel` subclass is a class with declared fields.
 //! Construction (`M(**kw)`, `M.model_validate(d)`, `parse_obj`, `TypeAdapter`) reads each
 //! field from the input by its alias / name: a required field is a read (a missing one fails,
 //! an open input gets a requirement), a field with a default is a guarded read; values are

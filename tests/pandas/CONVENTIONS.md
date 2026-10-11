@@ -26,7 +26,7 @@ Notation in `#@row NAME: present={…} definite={…} [absent={…}] closed|open
 * `closed` — no other columns possible; `open` — other columns may exist (data from input,
   unknown code).
 
-Rowan's model (SPECIFICATION §11.2) — use it to decide what rowan *should* say:
+Rowan's model — use it to decide what rowan *should* say:
 * `pd.read_csv(…)` (also `read_json/excel/parquet`): **open**, nothing known; with
   `usecols=[…]` or `names=[…]` closed with exactly those.
 * `pd.DataFrame({"a": …, "b": …})`: closed {a, b}; from a list of record dicts: present =

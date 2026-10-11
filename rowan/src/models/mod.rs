@@ -1,4 +1,4 @@
-//! Library models (SPECIFICATION.md §11); port of `rowan/models.py`.  A model is
+//! Library models; port of `rowan/models.py`.  A model is
 //! `fn(&mut Analyzer, &mut State, &Call) -> Value`; models are keyed by qualified name with
 //! prefix fallbacks.
 

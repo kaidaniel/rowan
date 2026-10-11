@@ -1,4 +1,4 @@
-//! PyTorch model (SPECIFICATION.md §11.4): tensors carry symbolic shapes (`shape.rs`), torch functions,
+//! PyTorch model: tensors carry symbolic shapes (`shape.rs`), torch functions,
 //! tensor methods, `nn` layers and `nn.Module` subclasses compute them; operations check
 //! their conditions: decided false → a shape error (the op raises), undecided → a
 //! requirement recorded at the line and learned as a fact on the path.

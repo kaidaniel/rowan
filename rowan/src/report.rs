@@ -398,7 +398,7 @@ fn row_json(r: &crate::domain::Row) -> J {
 
 /// The `--facts` document for editor integration: per (line, name) the value and the rows
 /// of the objects it may point to, the verdicts, and the schema table.
-/// A value as the user would write it, as far as it is known (SPECIFICATION.md §2.1): literals (`1`,
+/// A value as the user would write it, as far as it is known: literals (`1`,
 /// `"a"`, several as `1 | 2 | ?`), dicts with their keys and values (`{"a": 1, "b"?: ?, **?}`),
 /// lists / tuples by position when known (`[1, 2]`, `(1,)`), else `list[X]` /
 /// `tuple[X, ...]`, instances as `Cls(a=1, **?)`, functions / classes by name, `?` for

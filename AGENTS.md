@@ -1,29 +1,90 @@
-# AGENTS.md: notes for working on rowan
+# AGENTS.md: working on rowan
 
-What rowan does and how to build it is in `README.md`, and how the engine works in
-`SPECIFICATION.md`. This file holds what neither covers: the owner's conventions, the test
-harnesses, debugging switches, where things are in the code, and what is open. It must be
-true at the last commit.
+`README.md` says what rowan does for a user. This file is for working on the engine: how it
+works, the owner's conventions, the tests, the debugging switches, and where things are. It
+must be true at the last commit. The details live in the code's doc comments.
+
+## How rowan works
+
+rowan is a whole-program **abstract interpreter** for Python (Rust, `rowan/`). It parses with
+ruff and walks the syntax tree directly, running the program on abstract values.
+
+* **Values** (`Value`, `domain.rs`) are a set of object ids plus a scalar part (`KeyVal`): a
+  literal, up to 64 literals, the keys of some objects, or `Data(label)`, an unknown named by
+  where it comes from (`row["id"]`, `x.shape[0]`). A label can also hold a tensor shape.
+* **Objects** (`Obj`, `interp/mod.rs`) are identified by allocation site and context (the call
+  chain, 2 deep). A *single* object stands for one runtime object: stores into it are strong.
+  Allocating a site again while its earlier object is live gives a variant (up to 8), then a
+  *merged* object (stores only join). Garbage collection at returns drops dead objects' state.
+* **State** (`State`, `state.rs`) is one point on one path: names → values, and per object
+  its **rows** (`(object, namespace)` → `Row`), slots (the value under each key), elements,
+  lengths, and the requirements recorded so far. The maps are persistent Patricia tries
+  (`layered.rs`): a copy is O(1), and a join or diff costs what two states differ in.
+* **Rows** are the key-set model: `present` (may be there) ⊇ `likely` (there unless unknown
+  code removed it) ⊇ `definite` (there on every path), plus `absent`, open `sources` (inputs),
+  and `mutators` (unknown calls). A row without sources or mutators is *closed*. A successful
+  read narrows the key in.
+* **Statements.** Both sides of a branch run, narrowed by the test (`narrow.rs`), and join.
+  Loops over at most 16 known items are unrolled; other loops run to a fixpoint (40 rounds,
+  then widened). `try` collects the state at each point that may raise; handlers start from
+  those states. `with` is a `try` whose `finally` is `__exit__`. `finally` runs on every way
+  out, `break` / `continue` / `return` included.
+* **Calls** (`calls.rs`, `summary.rs`) go one of two ways:
+  * a **summary**: the body runs once per signature (classes of the arguments) against
+    placeholders, and is instantiated at each call (bind, apply the footprint, clone
+    allocations, translate requirements and verdicts);
+  * **tabulation**: the body runs again at the call site. This happens when the summary run
+    recorded an *event* the call's arguments decide (a call through a parameter, `isinstance`,
+    iteration, a known text a model parses…), or when a callee that may raise is caught by
+    the caller (the handler needs the state at each raise). Budgets: 256 runs per function
+    code and event kind, 16 per callee for raises. The call cache replays a run when the same
+    input recurs.
+  * **Recursion:** the inner call uses the running activation's partial result; it iterates
+    to a fixpoint (3 rounds, 8 when tabulated), then widens.
+  * **Unknown calls** add a mutator to every record they reach, return an unknown, and may
+    raise anything.
+  * **Entry points:** functions nothing calls run with open parameters; their requirements
+    become `param F.x` schemas.
+* **Generators** run eagerly at the call. A consumer of item *k* sees the effects up to yield
+  *k* (`GenEffects`). A `@contextmanager`'s `with` body runs at each yield.
+* **Requirements and schemas:** reading a key from a row open through an input records a
+  requirement on that input. A key read on every path is `always`, on some paths `sometimes`.
+  A read guarded by a handler for its `KeyError` still counts.
+* **Verdicts:** every read, `del` and `pop` gets a tier per object from its row (`classify`):
+  `proven`, `possibly`, `missing` and `input` are sound; `likely` / `likely-missing` are
+  optimistic (they assume unknown code removed nothing).
+* **Models** (`models/`, by qualified name in `Registry`) compute CPython's result on known
+  values (str / bytes, formatting, json, re, datetime, decimal, sqlite, csv…), and simulate
+  pandas columns, pydantic / FastAPI validation and routing, and torch / numpy shapes (dims as
+  polynomials; an undecided condition is a requirement and then a fact on the path).
+* **Deadlines:** past the soft one (`ms`, 2 s) there is no new tabulation. Past the hard one
+  (5×), user calls become unknown calls and running calls stop where they are. With
+  `work=N` both deadlines count work units instead (statements, instantiations, walk visits
+  at 16 per unit; about 270k units per second).
+* **Soundness** holds relative to the models and to annotations of values whose class is
+  unknown. `exec`, `setattr` / `getattr` with unknown names, metaclasses and monkey-patching
+  are unknown or ignored. Accepted imprecision: lengths past 15, slices by unknown bounds,
+  weak stores through names holding several objects, runs cut by a deadline.
 
 ## Working conventions (the owner's standing instructions)
 
-* Python runs only through `uv run --no-project python` (`.python-version` pins 3.14), never
-  the system or a local interpreter. The Python side is only the test harnesses.
+* Python runs only through `uv run --no-project python` (`.python-version` pins 3.14). The
+  Python side is only the test harnesses.
 * **New test cases are specifications.** Write the expected rows and verdicts by hand from
-  the program text first, then make the engine produce them. Never derive an expectation
-  from engine output. When an expectation turns out wrong on re-reading, fix it with a comment
-  saying why, keeping the line count (schema directives name lines). Value analysis (which
-  keys, which columns, which values) matters more than bug-finding verdicts.
-* **Soundness first.** Where the runtime oracle and the spec disagree, the oracle wins; fix
-  the spec.
-* **Commits.** Commit without being asked when a round of fixes or a feature is complete and
-  the tests pass (golden, snapshots, `cargo test`), one commit per round. Never commit a
-  failing state. Review snapshot diffs before `--update`. Messages end with
-  `Co-Authored-By: Claude <model> <noreply@anthropic.com>`, naming the model at work.
+  the program text first, then make the engine produce them. Never derive an expectation from
+  engine output. When an expectation turns out wrong, fix it with a comment saying why,
+  keeping the line count. Value analysis matters more than bug-finding verdicts.
+* **Hypotheses need a repro.** For a suspected bug or slowdown, write a small program showing
+  it first (it becomes a golden case, with `#@work` / `#@tabulations` bounds for cost), fix
+  it, then measure on the big programs.
+* **Soundness first.** Where the runtime oracle and this file disagree, the oracle wins. Golden
+  cases matter; snapshot changes are fine when sound.
+* **Commits.** Commit when a round of work is complete and golden, snapshots and `cargo test`
+  pass; never commit a failing state. Review snapshot diffs before `--update`. Messages end
+  with `Co-Authored-By: Claude <model> <noreply@anthropic.com>`.
 * **Plans.** When a request mixes several things, write the plan first, then work it in order.
-  If time remains, write example programs that probe specific hypotheses about bugs.
-* `SUGGESTED_CHANGES.md` is the owner's working list of open items. It is untracked: never
-  commit it. Keep it to things still to do.
+* `SUGGESTED_CHANGES.md` is the owner's list of open items. It is untracked: never commit it.
+  Keep it to things still to do.
 * Keep this file under 200 lines and up to date with every change.
 
 ## Commands
@@ -34,167 +95,97 @@ uv run --no-project python tests/run_golden.py      # all suites, ~5 s; paths se
 uv run --no-project python tests/run_golden.py --pending [--prune]   # cases in tests/*/PENDING
 uv run --no-project python tests/run_snapshots.py   # --update only after reviewing the diff
 uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy \
-    python tests/oracle.py [--strict|--lenient] [-v] [-j N] [case…]  # expectations vs real runs, ~1.5 min
+    python tests/oracle.py [--strict|--lenient] [-v] [-j N] [case…]  # vs real runs, ~1.5 min
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py [case…]
-cd vscode-rowan && node test.js && npm run package  # hover rendering check; rebuilds rowan-0.1.0.vsix
-cargo install --path rowan                          # the installed binary (~/.cargo/bin/rowan)
+cd vscode-rowan && node test.js && npm run package  # hover rendering check; builds the .vsix
 uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"
-                                                    # benchmark (stdlib12k / email / rich), no deadlines; CI: bench.yml
+                                                    # benchmark (stdlib12k / email / rich), no deadlines
 ```
 
-The oracle runs one fresh Python process per case, plus one per key a `#@schema` checks, each
-under a line tracer, as many at a time as there are CPUs. Run it on the cases you touched while working,
-and in full before a commit that changes models. CI (`.github/workflows/ci.yml`) runs the
-build, `cargo test`, golden, pending (informational), snapshots and the hover test on Linux
-and macOS, then the oracle on Linux. The torch oracle runs only on a manual dispatch with
-`torch` set, and the `.vsix` is packaged on pushes to main.
+Run the oracle on the cases you touched, and in full before a commit that changes models. CI
+(`.github/workflows/ci.yml`) runs all of the above except torch and the benchmark (`bench.yml`).
 
-## Test suites
+## Tests
 
-* **Golden suites:** `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/`, about a
-  thousand programs.
-  * Each library suite has `small/` (one API area per file) and `models/` (realistic
-    programs). `apps/` holds small, medium and large package programs.
-  * Each suite has a `PENDING` list, for cases written before the engine passes them.
-* **Directives** (`tests/CONVENTIONS.md`; torch: `tests/torch/CONVENTIONS.md`; pandas:
-  `tests/pandas/CONVENTIONS.md`):
-  * `#@ tier key`;
-  * `#@row NAME: present= definite= absent= closed|open`;
-  * `#@value NAME: exactly= | unknown | includes=`;
-  * `#@schema src: always= sometimes= only=`;
-  * floors `possible=` / `definite_within=`; `#@todo …` for known imprecision; `#@argv …`;
-    `#@objects <= N` / `#@tabulations <= N` / `#@joins <= N` / `#@work <= N` /
-    `#@visits <= N` (bounds on the objects made, per-call-site body runs, joins of two
-    different rows, statements run, heap entries walks and footprint joins visit: for blow-up
-    cases, N by hand); `#@limits k=v,…` (the case's `ROWAN_LIMITS`);
-  * torch: `#@shape`.
-
-  A directive-only line applies to the code line above. `possibly k` also holds when rowan's
-  per-key verdicts differ between runs (the oracle reads it per line).
-* **Oracle** (`tests/oracle.py`): reruns each case under CPython with a tracer and checks
-  every directive against the real values. Schemas are checked by dropping keys from the
-  input. It is strict on the library suites.
-* **Snapshots** (`tests/snapshots/`): `--json` output on `examples/etl_report.py` and three
-  modules of the engine's original Python prototype (`tests/fixtures/proto_*.py`), with fixed
-  caps and no deadline. This is the regression guard for internals. Object ids may shift;
-  read the diff.
-* `rowan/src` unit tests: the CPython-exact value functions, the regex engine, the
-  Patricia-trie maps (model tests against `BTreeMap` with wide keys).
+* **Golden suites** `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/`, about a
+  thousand programs; library suites have `small/` and `models/`; each has a `PENDING` list.
+* **Directives** (full rules in `tests/CONVENTIONS.md`, also `tests/{torch,pandas}/`):
+  `#@ tier key`, `#@row NAME: present= definite= absent= closed|open`,
+  `#@value NAME: exactly= | unknown | includes=`, `#@schema src: always= sometimes= only=`,
+  `#@todo …`, `#@argv …`, `#@shape` (torch). Cost bounds for blow-up cases, N by hand:
+  `#@objects`, `#@tabulations`, `#@joins`, `#@work`, `#@visits <= N`; `#@limits k=v,…` sets the
+  case's `ROWAN_LIMITS`. A directive-only line applies to the code line above.
+* **Oracle** (`tests/oracle.py`): reruns each case under CPython with a tracer and checks every
+  directive; schemas by dropping keys from the input. Strict on the library suites.
+* **Snapshots** (`tests/snapshots/`): `--json` on `examples/etl_report.py` and
+  `tests/fixtures/proto_*.py`. The regression guard for internals; object ids may shift.
+* **Unit tests** in `rowan/src`: CPython-exact value functions, the regex engine, the tries.
 
 ## Debugging switches
 
-* `ROWAN_DEBUG=1|2`:
-  * `1`: tabulation reasons (`tabulate …`, and `tabrun F (why)` for every per-call-site run:
-    event / generator / model / torch / once / genconcrete), summaries, budgets, and a `work:`
-    line at the end with counts (statements, units, body runs, objects, row joins, visits);
-  * `2`: also every event, raise and try decision.
-* `ROWAN_NO=a,b` switches refinements off by name (`rg 'disabled\("' rowan/src` lists them).
-  Use it to bisect which refinement causes a result.
-* `ROWAN_LIMITS=ms=2000,hard=10000,tab=256,call=256,clones=256,chain=2,path=3`: the soft and
-  hard deadlines, budgets, call-string depth and access-path depth. `work=550000` (about 2 s
-  here) puts the deadlines on work units instead: reproducible runs of large programs for
-  comparisons and profiles (the `work:` line of `ROWAN_DEBUG=1` shows the units).
-* Experimental, off by default (measured not worth it, 1ba1df6):
-  `ROWAN_LIMITS=genfull=1` (summaries for every generator). Summary variants per decided
-  outcome were removed again (code in 96fa750).
-* `ROWAN_SUMMARIES=0`: the old per-call-site engine, with no summaries.
-* `ROWAN_GC=0`: garbage collection only for returns of values without objects.
-  With `ROWAN_DEBUG=1`, `ROWAN_GCDBG=1` prints what each collection drops.
-* `ROWAN_FOLLOW=pkg,…` is the same as `--follow`. `ROWAN_TODO=check` also checks `#@todo`s,
-  to see which to-dos the engine now meets.
-* Work units count liveness-walk visits too: a change removing walks spends a `work=N`
-  budget on more statements. Compare progress in equal time (`ms=60000,hard=60000`).
-* **Profiling:** use short runs (a few seconds), several in parallel, long ones in the
-  background. Use `sample <pid> 3` on the release binary (inclusive time per function from its
-  call tree), and `MallocStackLogging=lite` + `malloc_history <pid> -allBySize` for memory
-  (it slows the run: scale the deadlines). macOS has no `timeout`; use
-  `perl -e 'alarm N; exec @ARGV' rowan …`. Compare builds on results (proven / missing /
-  possibly / schema counts of `--json`), not only on counters, and with `work=N` when a
-  deadline cuts the run. `bench/` (the other agent's harness: `bench/run.py`, programs in
-  `bench/work/{stdlib12k,email,rich}`) runs without deadlines.
+* `ROWAN_DEBUG=1`: tabulation reasons (`tabrun F (why)`), summaries, budgets, and a final
+  `work:` line (units, body runs, objects, row joins, visits). `2`: also every event, raise and
+  try decision. With it, `ROWAN_GCDBG=1` prints what each collection drops.
+* `ROWAN_NO=a,b` switches refinements off by name (`rg 'disabled\("' rowan/src`), to bisect.
+* `ROWAN_LIMITS=ms=2000,hard=10000,tab=256,call=256,clones=256,chain=2,path=3`. `work=550000`
+  (about 2 s) gives reproducible runs for comparisons. A change that removes liveness walks
+  spends a `work=N` budget on more statements: compare progress in equal time
+  (`ms=60000,hard=60000`) too.
+* `ROWAN_SUMMARIES=0`: per-call-site only. `ROWAN_GC=0`: almost no collection.
+  `ROWAN_FOLLOW=pkg,…` = `--follow`. `ROWAN_TODO=check` checks `#@todo`s too.
+* **Profiling:** short runs, several in parallel. `sample <pid> 3` for time,
+  `MallocStackLogging=lite` + `malloc_history <pid> -allBySize` for memory. macOS has no
+  `timeout`: `perl -e 'alarm N; exec @ARGV' rowan …`. Compare builds on results (proven /
+  missing / possibly / schema counts of `--json`), not only on counters.
 
-## Layout (Rust engine `rowan/src/`, ~64k lines)
+## Layout (`rowan/src/`, ~64k lines)
 
 | file | role |
 | --- | --- |
-| `intern.rs` | interners: keys (incl. `Member`, `Frozen`, `Dec` / `Frac`, `Chrono`), sources, lenses; `IdSet<T>` |
-| `domain.rs` | `Row`, `KeyVal`, `Value`, `Lens`, `Source`, transfers, `classify` (tiers), requirements |
-| `layered.rs` | persistent maps: `LayerMap` (Patricia trie, `PKey`, `Merge`), `TwoLevel` (copy-on-write inner hash maps) |
-| `state.rs` | `State`, joins (`join_env`, rows, lens), `diff_keys` |
-| `frontend.rs`, `scopes.rs` | ruff parsing, leaked `&'static` trees, node→module registry, parse cache, `site_prefix`; lexical scopes |
-| `interp/mod.rs` | `Analyzer` and its side tables (enums, argparse, csv, futures, singledispatch, identity keys, cookie jars…), `Obj`, allocation (`alloc_full`, `alloc_raw`, variants, `live_among`), `llen` / `set_llen`, `copy_side_tables`, budgets, GC (`drop_garbage_at_return`, `obj_edges`, `gc_pinned`), entry runs |
-| `interp/stmts.rs` | statements, loops (unroll, fixpoint, widening), try / with / match |
-| `interp/exprs.rs` | expressions, comprehensions, yields |
-| `interp/funcs.rs` | functions, iteration, generators (`GenEffects`, `YieldKey`) |
-| `interp/narrow.rs` | narrowing, `CondFact`s, `flag_facts` |
-| `interp/access.rs` | record and attribute access, verdicts, requirements |
-| `interp/calls.rs` | calls: tabulation vs summary, call cache, dataclass init, singledispatch, exception objects, `strip_annotation` |
-| `summary.rs` | placeholders, events, `summarise_sig`, `Inst` (instantiation), `propagate_events`, `should_tabulate` |
-| `shape.rs` | tensor shapes: dims as polynomials, rests, broadcasting |
-| `report.rs`, `main.rs` | outputs (text, JSON, facts, value rendering); CLI, `serve_loop`, site-packages discovery (runs on a 1 GiB-stack thread) |
-| `models/mod.rs` | `Registry`; builtins, dict / list / set / str methods, `copy`, `dataclasses`, `collections`, `json`, `slice`, enum hooks |
-| `models/{pyvalues,pure,pytext,pynum,chrono,pathtext}.rs` | CPython-exact values: str / bytes methods, formatting, math / operator / statistics, base64, shlex, html, urllib quoting; Decimal / Fraction; datetime; os.path / pathlib / textwrap |
-| `models/{pyre,remodel,minire}.rs` | a Python-`re` backtracking engine and the `re` model; a small matcher for pandas `regex=` |
-| `models/{counter,csvio,argparse,concurrency,itertools,stdfuncs,configparser,sqlite}.rs` | the rest of the stdlib (§11.1 of the spec); `stdobj.*` objects dispatch through `m_stdobj` |
-| `models/{pandas,pydantic,fastapi,torch}.rs` | the library models |
+| `intern.rs`, `domain.rs` | interned keys, sources, lenses; `Row`, `KeyVal`, `Value`, transfers, `classify` |
+| `layered.rs`, `state.rs` | persistent maps (`LayerMap`, `TwoLevel`); `State`, joins, `diff_keys` |
+| `frontend.rs`, `scopes.rs` | ruff parsing, leaked `&'static` trees, module registry; lexical scopes |
+| `interp/mod.rs` | `Analyzer`, side tables, `Obj`, allocation (`alloc_full`, `live_among`), lengths, GC, entry runs |
+| `interp/stmts.rs` | statements, loops, try / with / match, `finally` |
+| `interp/exprs.rs`, `interp/funcs.rs` | expressions, comprehensions, yields; functions, iteration, generators |
+| `interp/narrow.rs`, `interp/access.rs` | narrowing, `CondFact`s; attribute and item access, verdicts, requirements |
+| `interp/calls.rs`, `summary.rs` | calls: tabulation vs summary, call cache, `__new__`, dataclass init; placeholders, events, instantiation |
+| `shape.rs` | tensor shapes |
+| `report.rs`, `main.rs` | text / JSON / facts output; CLI, `rowan serve` (runs on a 1 GiB-stack thread) |
+| `models/` | `mod.rs` (`Registry`, builtins, containers); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib; `pandas`, `pydantic`, `fastapi`, `torch` |
 
-`rowan/py/` is a PyO3 binding (does not load on macOS 26 / Xcode 26); `vscode-rowan/` the
-editor extension (talks to `rowan serve`).
+`rowan/py/` is a PyO3 binding (does not load on macOS 26); `vscode-rowan/` the editor
+extension (talks to `rowan serve`).
 
 ## Implementation rules that are easy to break
 
-* **Models that allocate several objects at one node** in a Rust loop must give each object
-  its own context (pydantic: per input record / container; `executor.map`, `object_hook`:
-  column offsets). Otherwise the second allocation overwrites the first. A context passed to
-  `alloc_at` is a suffix of the frame's, so the same code run from two callers makes two
-  objects.
+* **Models allocating several objects at one node** must give each its own context, or the
+  second overwrites the first.
 * **Narrowing never re-runs a call:** each call node's last value is read back (`call_memo`).
-* **Module containers.** Module dicts, lists and sets that functions mutate are deferred loads
-  in summaries (`deferred_global`), also when met through a callee's summary.
-* **Tabulated callees and exits.** A tabulated callee runs with the caller's `state.exits`
-  taken out and restored. Joining them made a caller's finished paths come back (y438).
+* **Module containers** that functions mutate are deferred loads in summaries
+  (`deferred_global`).
+* **Tabulated callees** run with the caller's `state.exits` taken out and restored (y438).
 * **GC roots.** Anything a side table refers to must be in `gc_pinned` or reachable through
-  `obj_edges`. A collected object that is later read gives a silently empty row. Parts of an
-  input are never collected.
-* **Generator yields** use `alloc_raw` for their per-yield states (`gen_yield_states`); `alloc`
-  adds a pid key that does not match.
-* **Text labels decide events:** a known text label (`csvhdr:`, `pyjsontext:`) is a `concrete`
-  event, so a reader's call site tabulates.
-* **Stdlib objects** (`stdobj.<kind>`: StringIO, csv readers / writers, ExitStack, Template,
-  Pattern / Match, paths, sqlite connections / cursors) keep attributes in Attr slots. A
-  parameter whose attribute is named like one of a family the program uses decides per call
-  site (`stdobj_attr_name`).
-* Small generated modules stand in for namedtuple, itemgetter / attrgetter, UserDict and
-  urllib.parse (ported from CPython).
+  `obj_edges`; otherwise a later read gives a silently empty row.
+* **Generator yields** use `alloc_raw` for their per-yield states, not `alloc`.
+* **Known text labels** (`csvhdr:`, `pyjsontext:`) are `concrete` events: the call tabulates.
+* **Stdlib objects** (`stdobj.<kind>`) keep attributes in Attr slots and dispatch through
+  `m_stdobj`.
+* **Summary replay** classifies a read only against rows that decide it (`class_resolves`):
+  class objects, model objects and `__getattr__` classes have more than their rows show.
 
 ## Measured (release build, Apple M-series)
 
-| input | time | notes |
-| --- | --- | --- |
-| golden (all suites) | ~5 s | one process per case |
-| oracle | ~1.5 min | cases in parallel (one thread per CPU) |
-| `j93` (830 lines) / `m96_pkg` (1,716) | 0.09 / 0.10 s | |
-| `proto_summary.py` (1.2k, self-referential) | 2.1 s (`--facts` 3.2 s, 13.6 MB) | |
-| email (stdlib, 10k lines) / stdlib12k / rich (38k), `work=550000` | ~6 / ~11 / ~140 s | rich 3 GB |
-| stdlib12k without deadlines | ~80 s, 2 GB | email / rich do not finish without deadlines (3.0) |
+| input | time |
+| --- | --- |
+| golden / oracle | ~5 s / ~1.5 min |
+| email (10k lines) / stdlib12k / rich (38k), `work=550000` | ~8 / ~11 / ~140 s (rich 3 GB) |
+| stdlib12k without deadlines | ~80 s, 2 GB; email and rich do not finish |
 
-## Known problems
+## Known problems and next steps
 
-The soundness stance and accepted imprecision are in SPECIFICATION §13. The bugs, performance
-items and precision to-dos are listed, each with how to reproduce it,
-in `SUGGESTED_CHANGES.md`. The main ones:
-
-* runs cut by the clock deadlines depend on machine load (`ROWAN_LIMITS=work=N` does not);
-* email and rich do not finish without deadlines: no global bound on work (`SUGGESTED_CHANGES`
-  3.0); liveness walks and generator / recursion joins dominate.
-
-Other limits:
-
-* the PyO3 wheel fails to load on macOS 26;
-* the branch `slotmap-trie` (inner slot maps as tries) is parked: same answers, no gain.
-
-## Where to go next
-
-Work `SUGGESTED_CHANGES.md` in order (it lists only avenues not yet tried): rich without
-deadlines and the liveness walks, the precision lost by cost cuts, the on-demand server, and
-the precision to-dos (`#@todo`s in the suites).
+Open bugs, performance items and precision to-dos are in `SUGGESTED_CHANGES.md`, each with a
+repro; work it in order. The main ones: email and rich do not finish without deadlines (§3.0:
+recursive activations' footprint joins on rich), runs cut by clock deadlines depend on load,
+and the precision to-dos (`#@todo`s in the suites). The branch `slotmap-trie` is parked (same
+answers, no gain).
