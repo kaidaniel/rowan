@@ -1151,6 +1151,15 @@ fn getattr_hook_outcome(an: &mut Analyzer, st: &mut State, o: u32, k: KeyId, nod
     }
 }
 
+/// The attributes of `str` other than dunders (CPython 3.14 `dir(str)`).
+const STR_ATTRS: &[&str] = &[
+    "capitalize", "casefold", "center", "count", "encode", "endswith", "expandtabs", "find", "format", "format_map", "index",
+    "isalnum", "isalpha", "isascii", "isdecimal", "isdigit", "isidentifier", "islower", "isnumeric", "isprintable", "isspace",
+    "istitle", "isupper", "join", "ljust", "lower", "lstrip", "maketrans", "partition", "removeprefix", "removesuffix", "replace",
+    "rfind", "rindex", "rjust", "rpartition", "rsplit", "rstrip", "split", "splitlines", "startswith", "strip", "swapcase", "title",
+    "translate", "upper", "zfill",
+];
+
 fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let unknown = Value::data("hasattr");
     if c.args.len() < 2 {
@@ -1163,8 +1172,9 @@ fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let k = key_str_lit(&name);
     let v0 = &c.args[0];
-    if v0.pts.is_empty() && v0.kv.is_literal() && crate::domain::kv_literals(&v0.kv).iter().all(intern::key_is_str) && crate::interp::STR_METHOD_NAMES.contains(&&*name) {
-        return Value::lit(intern::key_bool(true));
+    // (a str literal: its type's attributes are known exactly — CPython 3.14's `dir(str)`)
+    if v0.pts.is_empty() && v0.kv.is_literal() && crate::domain::kv_literals(&v0.kv).iter().all(intern::key_is_str) && !name.starts_with("__") {
+        return Value::lit(intern::key_bool(STR_ATTRS.contains(&&*name)));
     }
     let objs: Vec<u32> = c.args[0].pts.iter().collect();
     if objs.is_empty() || !c.args[0].kv.is_bot() {
