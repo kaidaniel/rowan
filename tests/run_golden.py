@@ -18,6 +18,8 @@ Row checks beyond present/definite/closed/open: `possible={..}` (each key is pre
 row is open) and `definite_within={..}` (every definite key is listed): soundness floors for
 cases whose precise answer is a `#@todo`.  Keys are bare words or Python literals.
 Tensor shapes (`#@shape`, `#@dim`, `#@requires`, `#@shape-error`): see tests/shapes.py.
+`#@objects <= N` (anywhere in the entry file): the analysis makes at most N abstract objects, a
+bound on the work for cases about blow-ups (N by hand: what the program needs, with a margin).
 A verdict matches a line if it was recorded at that line or while a call made from that line was
 active.  A `#@` directive must be the last thing on its line (the key runs to its end).
 
@@ -312,6 +314,9 @@ def run_case(path: str, verbose: bool = False) -> Tuple[bool, List[str]]:
     except json.JSONDecodeError as e:
         return False, [f"bad JSON from rowan: {e}: {out.stdout[:200]}"]
     failures: List[str] = []
+    m = re.search(r"^#@objects\s*<=\s*(\d+)\s*$", src, re.M)
+    if m and res.get("objects", 0) > int(m.group(1)):
+        failures.append(f"{res['objects']} objects, want at most {m.group(1)}")
     for rel, fsrc in case_files(path):
         fails = check_file(fsrc, rel, res)
         failures += [f"{rel}: {f}" if rel else f for f in fails]

@@ -296,6 +296,13 @@ no effect.
   attributes.
   A class with an external base (`list`, a library class), directly or through user classes,
   has instances whose attribute and item rows are open: the base's code is not seen.
+* **Duck typing.** A method read on an unknown value or a class-less placeholder is the method
+  of each user class defining the name (up to eight; past them, unknown code), with a `dispatch`
+  event. A part of a value duck-typed as several classes (an attribute, item or element at any
+  depth, the result of an unknown call on one, a parameter bound to one) is not duck-typed in
+  turn, and a recursive call with such an argument inside the function's own summary run is
+  unknown code: otherwise every part of every part is read as every class, up to the
+  access-path depth (a pretty printer over unknown values).
 * **Dataclasses** (field specs, `InitVar`, `KW_ONLY`, `frozen`, `order`, `replace`), Enum
   (members are keys), NamedTuple and TypedDict.
 * **Closures** capture cells: two closures from one factory call have their own cells.

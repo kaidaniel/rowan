@@ -66,6 +66,9 @@ pub struct PH {
     pub exact: Cell<bool>,
 }
 
+/// A signature entry: the parameter is bound to a part of a duck-typed value (`duck_part`).
+pub const DUCK_PART_PREFIX: &str = "~duckpart:";
+
 #[derive(Clone, Debug)]
 pub struct SymReq {
     /// a guarded access whose handlers all re-raise: the input still needs the key
@@ -809,6 +812,15 @@ impl Analyzer {
             for ph in ph_by_name.values() {
                 st.set_row(*ph, Ns::Item, Row::entry(rho(*ph, Ns::Item)));
                 st.set_row(*ph, Ns::Attr, Row::entry(rho(*ph, Ns::Attr)));
+            }
+            // (a parameter bound to a part of a duck-typed value at the call: not duck-typed in
+            // the body either — `duck_part`)
+            for (n, _) in sig.iter() {
+                if let Some(pn) = n.strip_prefix(DUCK_PART_PREFIX) {
+                    if let Some(ph) = ph_by_name.get(&s(pn)) {
+                        self.duck_parts.borrow_mut().insert(*ph);
+                    }
+                }
             }
             {
                 let mi = self.module_info(fi.module);

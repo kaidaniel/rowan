@@ -1122,6 +1122,7 @@ impl Analyzer {
                             self.set_symbol(eid, sym, scope);
                         }
                     }
+                    self.note_part(oid, eid);
                     self.obj_mut(eid).iter_elem = true;
                     let d = self.obj(oid).depth + 1;
                     self.obj_mut(eid).depth = d;

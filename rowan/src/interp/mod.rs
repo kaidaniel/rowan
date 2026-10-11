@@ -765,6 +765,12 @@ pub struct Analyzer {
     pub raise_last: FxHashMap<usize, (State, Option<ExcNames>, Value)>,
     /// user classes defining an attribute name, for the class table's size it was computed at
     pub classes_by_attr: std::cell::RefCell<((usize, usize), FxHashMap<KeyId, Vec<ObjId>>)>,
+    /// unknown objects and placeholders duck-typed as several user classes: their parts are
+    /// not (`duck_part`)
+    pub duck_seen: std::cell::RefCell<FxHashSet<ObjId>>,
+    /// parts of those (attributes, items, elements, results of unknown calls on them): not
+    /// duck-typed either
+    pub duck_parts: std::cell::RefCell<FxHashSet<ObjId>>,
     pub module_done: bool,
     pub fresh_init: FxHashSet<ObjId>,
     pub cell_classes: FxHashMap<ObjId, ObjId>,
@@ -1176,6 +1182,8 @@ impl Analyzer {
             no_unroll_next: FxHashSet::default(),
             raise_last: FxHashMap::default(),
             classes_by_attr: Default::default(),
+            duck_seen: Default::default(),
+            duck_parts: Default::default(),
             module_done: false,
             fresh_init: FxHashSet::default(),
             cell_classes: FxHashMap::default(),
@@ -2839,6 +2847,18 @@ impl Analyzer {
                     e.rows.insert(oid, (item, attr));
                 }
             }
+        }
+    }
+
+    /// `child` is a part of `parent` (an unknown call's result of its receiver): a part of a
+    /// duck-typed object is not duck-typed (`duck_part`).
+    pub fn note_part(&self, parent: ObjId, child: ObjId) {
+        if disabled("duckparts") {
+            return;
+        }
+        let from_duck = self.duck_seen.borrow().contains(&parent) || self.duck_parts.borrow().contains(&parent);
+        if from_duck {
+            self.duck_parts.borrow_mut().insert(child);
         }
     }
 

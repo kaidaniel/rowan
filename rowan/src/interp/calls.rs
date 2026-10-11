@@ -437,6 +437,16 @@ impl Analyzer {
         }
         let arg_recs: Vec<(u32, Ns)> = touched.iter().copied().filter(|(oid, _)| vals.iter().any(|v| v.pts.contains(*oid))).collect();
         let rid = self.alloc(Kind::Unknown, &format!("ret:{}", site), state, &format!("result of {}", site), Payload::None, None, Ns::Item, Some(true), None);
+        if let Some(r) = recv {
+            for o in r.pts.iter() {
+                self.note_part(o, rid);
+                if let Payload::Method(_, mr) = &self.obj(o).payload {
+                    for m in mr.pts.iter() {
+                        self.note_part(m, rid);
+                    }
+                }
+            }
+        }
         // for people: the call as written and the known objects it was given (unknown code may
         // return one of them; given unknowns add nothing to `?`)
         {
@@ -1216,8 +1226,19 @@ impl Analyzer {
                     if let Some(c) = one_class(self, v) {
                         sig.push((intern::str_get(*name).to_string(), c));
                     }
+                    if !v.pts.is_empty() && v.pts.iter().all(|o| self.duck_part(o)) {
+                        sig.push((format!("{}{}", crate::summary::DUCK_PART_PREFIX, intern::str_get(*name)), 0));
+                    }
                 }
                 sig.sort();
+            }
+            // (a recursive call whose argument is a part of a duck-typed value, inside the
+            // function's own summary run: the partial summary at hand duck-types its parameter,
+            // applied to the part it reads every class's attributes of it, one level deeper per
+            // round — unknown code instead, as an argument past duck typing is)
+            if sig.iter().any(|(n, _)| n.starts_with(crate::summary::DUCK_PART_PREFIX)) && self.sum_stack.contains(&foid) && !super::disabled("duckrec") {
+                let qual = self.func_info(foid).qualname.clone();
+                return self.unknown_call(&qual, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
             }
             let summ = self.summarise_sig(foid, state, sig);
             let Some(summ) = summ else {

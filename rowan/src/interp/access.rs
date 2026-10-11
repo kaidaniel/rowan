@@ -1162,6 +1162,7 @@ impl Analyzer {
                 self.set_symbol(pid, sym, scope);
             }
         }
+        self.note_part(oid, pid);
         let d = self.obj(oid).depth + 1;
         self.obj_mut(pid).depth = d;
         if !state.has_row(pid, Ns::Item) {
@@ -2397,8 +2398,10 @@ impl Analyzer {
             return self.method_value(&q, &Value::kv_only(KeyVal::Param(oid)));
         }
         // (a declared builtin container is that container: no user-class candidates)
-        if !has_cls && builtin_cls.is_none() {
+        // (a part of a placeholder duck-typed already is not: `duck_part`)
+        if !has_cls && builtin_cls.is_none() && !self.duck_part(oid) {
             let cands: Vec<u32> = self.classes_defining(nk);
+            self.note_duck_typed(oid, cands.len());
             if !cands.is_empty() {
                 let mut outs: Vec<Value> = Vec::new();
                 for c in &cands {
@@ -2640,6 +2643,60 @@ impl Analyzer {
         Value::new()
     }
 
+    /// A part of a value duck-typed as several classes: an unknown object or a placeholder below
+    /// one that was (an attribute, item or element, at any depth; the result of an unknown call
+    /// on one), or a summary's parameter bound to such a part. Duck-typing it too fed the parts
+    /// a duck-typed method reads back into duck typing: every part of every part read as every
+    /// class, up to the access-path depth (rich's pretty printer: 1.3M objects).
+    pub fn duck_part(&self, oid: u32) -> bool {
+        if super::disabled("duckparts") {
+            return false;
+        }
+        if self.duck_parts.borrow().contains(&oid) {
+            return true;
+        }
+        let seen = self.duck_seen.borrow();
+        match self.kind(oid) {
+            Kind::Unknown => {
+                let mut o = oid;
+                for _ in 0..16 {
+                    let site: &str = &self.obj(o).site;
+                    let parent = site.strip_prefix("path:").or_else(|| site.strip_prefix("elem:")).and_then(|r| r.split(':').next()).and_then(|p| p.parse::<u32>().ok());
+                    match parent {
+                        Some(p) if (p as usize) < self.objects.len() => {
+                            if seen.contains(&p) {
+                                return true;
+                            }
+                            o = p;
+                        }
+                        _ => break,
+                    }
+                }
+                false
+            }
+            Kind::Ph => {
+                let parts = self.duck_parts.borrow();
+                let mut p = self.ph_info_opt(oid).and_then(|i| i.parent);
+                while let Some(q) = p {
+                    if seen.contains(&q) || parts.contains(&q) {
+                        return true;
+                    }
+                    p = self.ph_info_opt(q).and_then(|i| i.parent);
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// `oid` is duck-typed as `ncands` classes: with several (whose attributes differ) its parts
+    /// are not duck-typed in turn (`duck_part`); one class reads one class's attributes.
+    fn note_duck_typed(&self, oid: u32, ncands: usize) {
+        if ncands >= 2 && !super::disabled("duckparts") {
+            self.duck_seen.borrow_mut().insert(oid);
+        }
+    }
+
     pub fn load_unknown_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool) -> Value {
         let nk = key_str_lit(name);
         if DICT_METHOD_NAMES.contains(&name) {
@@ -2656,11 +2713,15 @@ impl Analyzer {
         let cands: Vec<u32> = self.classes_defining(nk);
         // (a name many classes define — `render`, `get_style` — says little about which one an
         // unknown value is: past `duck` classes it is unknown code, not a call of every one)
-        if !cands.is_empty() && (cands.len() <= super::limit("duck", 8) || super::disabled("duck")) {
+        if !self.duck_part(oid) && !cands.is_empty() && (cands.len() <= super::limit("duck", 8) || super::disabled("duck")) {
             // (a receiver value of many objects: the bound methods are the same for each of its
             // unknown objects — made once per attribute read)
             if let Some((_, _, Some(done))) = &self.many_receivers {
                 return done.clone();
+            }
+            match self.many_receivers.clone() {
+                Some((all, _, _)) => all.pts.iter().filter(|o| self.kind(*o) == Kind::Unknown).for_each(|o| self.note_duck_typed(o, cands.len())),
+                None => self.note_duck_typed(oid, cands.len()),
             }
             let mut outs: Vec<Value> = Vec::new();
             for c in &cands {
@@ -2671,6 +2732,8 @@ impl Analyzer {
                         // receiver the whole value, not one per object — thousands in a recursion
                         // over unknown values, each run on its own)
                         if let Some((all, key, _)) = self.many_receivers.clone() {
+                            // (only the objects duck typing applies to: not the parts of others)
+                            let all = Value::with_kv(all.pts.filter(|o| self.kind(o) != Kind::Unknown || !self.duck_part(o)), all.kv.clone());
                             let label = format!("{} bound to one of {} values", self.obj(f).label, all.pts.len());
                             outs.push(Value::obj(self.alloc_raw(Kind::Bound, &format!("bound:{}:set:{}", f, key), "", true, &label, Payload::Bound(f, all))));
                             continue;
