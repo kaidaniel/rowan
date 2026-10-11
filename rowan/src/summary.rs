@@ -104,6 +104,18 @@ pub const OBJECT_ATTRS: &[&str] = &[
     "__class__", "__delattr__", "__dir__", "__doc__", "__eq__", "__format__", "__ge__", "__getattribute__", "__getstate__", "__gt__", "__hash__", "__init__", "__init_subclass__", "__le__", "__lt__", "__ne__", "__new__", "__reduce__", "__reduce_ex__", "__repr__", "__setattr__", "__sizeof__", "__str__", "__subclasshook__", "__module__", "__dict__", "__weakref__",
 ];
 
+/// What the raises leaving a function being summarised changed (keys only: the handlers of
+/// its callers see those objects as changed in unknown ways).
+#[derive(Default)]
+pub struct RaiseAcc {
+    pub base: Option<State>,
+    /// the state at the last raise noted
+    pub last: Option<State>,
+    pub rows: FxHashSet<(ObjId, Ns)>,
+    pub slots: FxHashSet<(ObjId, crate::state::SlotKey)>,
+    pub elems: FxHashSet<ObjId>,
+}
+
 pub type SummaryKey = (ObjId, Vec<(ObjId, Vec<ObjId>)>, Vec<(ObjId, ObjId)>, Vec<(String, ObjId)>);
 
 /// How many distinct argument-class signatures one function is summarised for; beyond
@@ -139,6 +151,9 @@ pub struct FactObs {
 
 pub struct Summary {
     pub foid: ObjId,
+    /// what the raises leaving the function changed in objects from before the call (see
+    /// `Analyzer::summary_raise_state`)
+    pub raise_fp: crate::state::Footprint,
     /// hover facts inside the body (--facts)
     pub fact_obs: Vec<FactObs>,
     /// row checks inside the body (golden harness)
@@ -644,6 +659,7 @@ impl Analyzer {
         let saved_frames = std::mem::take(&mut self.frames);
         let saved_chain = std::mem::take(&mut self.call_chain);
         let saved_loops = std::mem::take(&mut self.loop_stack);
+        let saved_finally = std::mem::take(&mut self.finally_stack);
         let saved_guards = std::mem::take(&mut self.guards);
         let saved_may_raise = std::mem::take(&mut self.may_raise);
         let saved_cond = self.cond_depth;
@@ -669,6 +685,7 @@ impl Analyzer {
         self.raise_stack.push(false);
         self.esc_cls.push(Some(Vec::new()));
         self.sum_obj_mark.push(self.objects.len() as ObjId);
+        self.sum_raise_acc.push(RaiseAcc::default());
         self.sum_deps.push(FxHashSet::default());
         let verdict_mark = self.verdicts.len();
         let notes_mark = self.notes.len();
@@ -865,6 +882,9 @@ impl Analyzer {
                 Some(b) => b,
                 None => st.copy(),
             };
+            if let Some(acc) = self.sum_raise_acc.last_mut() {
+                acc.base = Some(base.copy_ref());
+            }
             // (the collector at returns runs in summary runs too, against the state after
             // binding the parameters)
             if crate::interp::gc_on() && !matches!(fnode, FuncNode::Def(f) if crate::interp::is_generator(&f.body)) {
@@ -962,7 +982,26 @@ impl Analyzer {
                 }
                 d
             };
+            // what the raises leaving the function changed in objects from before it: their
+            // rows / slots / elements (a caller's handler sees them changed)
+            let raise_fp = {
+                let mark = self.sum_obj_mark.last().copied().unwrap_or(0);
+                let old = |o: ObjId| o < mark || self.kind(o) == Kind::Ph;
+                match self.sum_raise_acc.last() {
+                    Some(acc) => {
+                        let mut rows: Vec<(ObjId, Ns)> = acc.rows.iter().copied().filter(|(o, _)| old(*o)).collect();
+                        let mut slots: Vec<(ObjId, crate::state::SlotKey)> = acc.slots.iter().copied().filter(|(o, _)| old(*o)).collect();
+                        let mut elems: Vec<ObjId> = acc.elems.iter().copied().filter(|o| old(*o)).collect();
+                        rows.sort_unstable();
+                        slots.sort_unstable();
+                        elems.sort_unstable();
+                        crate::state::Footprint { rows, slots, elems }
+                    }
+                    None => Default::default(),
+                }
+            };
             let mut summ = Summary {
+                raise_fp,
                 foid,
                 desc,
                 ph_by_name: ph_by_name.clone(),
@@ -1034,6 +1073,7 @@ impl Analyzer {
         self.raise_stack.pop();
         self.esc_cls.pop();
         self.sum_obj_mark.pop();
+        self.sum_raise_acc.pop();
         let deps = self.sum_deps.pop().unwrap_or_default();
         self.sum_hit.remove(&foid);
         self.sum_partial.remove(&foid);
@@ -1044,6 +1084,7 @@ impl Analyzer {
         self.frames = saved_frames;
         self.call_chain = saved_chain;
         self.loop_stack = saved_loops;
+        self.finally_stack = saved_finally;
         self.guards = saved_guards;
         self.may_raise = saved_may_raise;
         self.cond_depth = saved_cond;
@@ -1257,6 +1298,66 @@ impl Analyzer {
     /// (an instance), for a class object through its MRO and `type` (every class has the
     /// dunders of `type` and `object`, and `mro`, whatever its body defines), for an object a
     /// model simulates through the model.
+    /// A raise leaving the function being summarised (no try of its own catches it): its
+    /// state is kept for the summary's raise footprint.
+    pub fn note_summary_raise(&mut self, state: &State) {
+        if self.sum_stack.is_empty() || crate::interp::disabled("raisefp") {
+            return;
+        }
+        let Some(acc) = self.sum_raise_acc.last_mut() else { return };
+        let Some(base) = &acc.base else { return };
+        // (the heap unchanged since the last raise: nothing new)
+        if let Some(last) = &acc.last {
+            if last.rows.ptr_eq(&state.rows) && last.slots.m.ptr_eq(&state.slots.m) && last.elems.ptr_eq(&state.elems) {
+                return;
+            }
+        }
+        // (a structural diff: the state shares most of its structure with the entry)
+        let fp = state.footprint(base);
+        acc.last = Some(state.copy_ref());
+        acc.rows.extend(fp.rows);
+        acc.slots.extend(fp.slots);
+        acc.elems.extend(fp.elems);
+    }
+
+    /// The state a handler of the caller starts from when a summarised callee raises: the
+    /// state before the call, with what the callee's raising paths changed made unknown (its
+    /// rows may hold other keys, its slots other values).
+    pub fn summary_raise_state(&mut self, summary: &Summary, bind: &IndexMap<ObjId, Value>, state: &mut State) -> State {
+        let mut out = state.copy();
+        if summary.raise_fp.rows.is_empty() && summary.raise_fp.slots.is_empty() && summary.raise_fp.elems.is_empty() {
+            return out;
+        }
+        let mut memo: FxHashMap<ObjId, Value> = FxHashMap::default();
+        let site = s(&format!("raise@{}", self.func_info(summary.foid).qualname));
+        let mut targets = |an: &mut Analyzer, o: ObjId, st: &mut State| -> Vec<ObjId> {
+            if an.kind(o) == Kind::Ph {
+                an.binding_of(summary, o, bind, st, &mut memo).pts.iter().filter(|t| an.kind(*t) != Kind::Ph).collect()
+            } else {
+                vec![o]
+            }
+        };
+        for (o, ns) in summary.raise_fp.rows.clone() {
+            for t in targets(self, o, state) {
+                let r = out.row(t, ns).mutate(site);
+                out.set_row(t, ns, r);
+            }
+        }
+        for (o, sk) in summary.raise_fp.slots.clone() {
+            for t in targets(self, o, state) {
+                let v = out.slot(t, sk.0, sk.1).join(&Value::data("raise"));
+                out.set_slot(t, sk.0, sk.1, v, false);
+            }
+        }
+        for o in summary.raise_fp.elems.clone() {
+            for t in targets(self, o, state) {
+                let kv = crate::domain::kv_join(&out.elems.get(&t).unwrap_or(DATA), &DATA);
+                out.elems.insert(t, kv);
+            }
+        }
+        out
+    }
+
     pub(crate) fn class_resolves(&self, oid: ObjId, name: &str) -> bool {
         if self.kind(oid) == Kind::Class && !crate::interp::disabled("classdunders") {
             return (name.starts_with("__") && name.ends_with("__")) || name == "mro" || self.class_lookup(oid, name).is_some();

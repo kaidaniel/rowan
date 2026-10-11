@@ -1366,7 +1366,31 @@ impl Analyzer {
             if gen_concrete {
                 why = "genconcrete";
             }
-            if !gen_concrete && !self.should_tabulate_at(&summ, &bind, state, node) {
+            // (a callee that may raise into a handler of this function: its run per call site
+            // records the state at each raise, which the handler starts from; the summary knows
+            // only that it raises, and the state before the call lost its effects)
+            let raise_caught = summ.raises
+                && !super::disabled("raisetab")
+                && self.try_sum_depth.last() == Some(&self.sum_stack.len())
+                && match summ.raise_classes.as_ref() {
+                    Some(cs) if !cs.is_empty() => cs.iter().any(|c| self.class_guarded(c)),
+                    _ => self.guards.iter().any(|g| !g.is_empty()),
+                };
+            // (only a callee whose raising paths change objects from before the call: else the
+            // state before the call is the handler's; past a small budget those objects are
+            // made unknown for the handler instead, see `summary_raise_state`)
+            let raise_fp = !summ.raise_fp.rows.is_empty() || !summ.raise_fp.slots.is_empty() || !summ.raise_fp.elems.is_empty();
+            let tab_raise = raise_caught && raise_fp && {
+                let key = (fi.node.addr(), "raise");
+                let n = self.tab_count.get(&key).copied().unwrap_or(0);
+                let ok = n < super::limit("raisetab", 16) && !self.over_deadline();
+                if ok {
+                    self.tab_count.insert(key, n + 1);
+                    why = "raise";
+                }
+                ok
+            };
+            if !gen_concrete && !tab_raise && !self.should_tabulate_at(&summ, &bind, state, node) {
                 // (outside databases the summary did not simulate: their rows are unknown now)
                 if let Some(cons) = self.sql_touched.get(&foid).cloned() {
                     for c in cons {
@@ -1395,16 +1419,28 @@ impl Analyzer {
                     }
                     // raises of known classes: each reaches a handler that catches it (from the
                     // state before the call), else leaves this call
+                    // (the handler's state: before the call, with what the raising paths
+                    // changed made unknown)
+                    let mut handler_state = self.summary_raise_state(&summ, &bind, state);
                     match summ.raise_classes.clone().filter(|cs| !cs.is_empty() && !super::disabled("esccls")) {
                         Some(cs) => {
                             for c in cs {
                                 let name = c.0.first().cloned().unwrap_or_default();
                                 self.cur_exc_cls = Some(c.clone());
-                                self.may_raise_here(&name, &mut state.copy());
+                                self.may_raise_here(&name, &mut handler_state.copy());
                                 self.cur_exc_cls = None;
                             }
                         }
-                        None => self.note_raise(),
+                        None => {
+                            self.note_raise();
+                            // (a class not known: a handler of anything may catch it)
+                            if raise_fp && !self.raise_states.is_empty() && !super::disabled("raisefp") {
+                                self.record_raise_state(&mut handler_state);
+                            }
+                            if self.guards.iter().all(|g| !g.contains("*") && !g.contains("Exception") && !g.contains("BaseException")) {
+                                self.note_summary_raise(&handler_state);
+                            }
+                        }
                     }
                 }
                 let r = self.instantiate(&summ, &bind, state, node, &call_ctx, ctx_single);
@@ -2277,6 +2313,9 @@ impl Analyzer {
         }
         let recorded = caught && self.record_raise_state(state);
         self.cur_exc_cls = None;
+        if !caught && state.reachable {
+            self.note_summary_raise(state);
+        }
         if recorded {
             return;
         }

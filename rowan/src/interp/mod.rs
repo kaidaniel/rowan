@@ -325,6 +325,11 @@ pub struct CmHook {
     pub env_before: Option<IndexMap<StrId, Value>>,
     /// the body may run again at another reachable yield (not a `then` callback: it runs once)
     pub multi: bool,
+    /// the caller's exits from the body (its `return`s), joined over the runs: the caller's
+    /// once the with statement ends (the generator's own are restored after each run)
+    pub body_exits: Option<State>,
+    /// the values the body returned (with `body_exits`)
+    pub body_ret: Option<Value>,
 }
 
 /// An exception class's name and its bases' names; `true`: that is the whole MRO.
@@ -821,6 +826,10 @@ pub struct Analyzer {
     pub sum_hit: FxHashSet<ObjId>,
     pub sum_partial: FxHashMap<ObjId, Rc<Summary>>,
     pub sum_obj_mark: Vec<ObjId>,
+    /// per summary run: what the raises leaving the function changed since its entry (the
+    /// entry state, and the keys that differ from it at those raises), for the handlers of its
+    /// callers (`Summary::raise_fp`)
+    pub sum_raise_acc: Vec<crate::summary::RaiseAcc>,
     /// per summary on the stack: functions further down the stack whose *partial* summary
     /// this computation used (the result is then provisional, re-done per round of theirs)
     pub sum_deps: Vec<FxHashSet<ObjId>>,
@@ -852,6 +861,9 @@ pub struct Analyzer {
     pub rec_entry: FxHashMap<(ObjId, String), (Option<Value>, Vec<Value>, IndexMap<StrId, Value>)>,
     pub rec_widened: FxHashSet<(ObjId, String)>,
     pub loop_stack: Vec<LoopCtx>,
+    /// the finally blocks of the running `try` statements: (`loop_stack` depth at the try,
+    /// the block, not running yet): a `break` / `continue` runs those of its loop first
+    pub finally_stack: Vec<(usize, std::rc::Rc<crate::interp::stmts::Finally>, bool)>,
     pub guards: Vec<FxHashSet<String>>,
     pub may_raise: Vec<bool>,
     /// per enclosing try (or swallowing with): the joined state at the guarded accesses
@@ -1272,6 +1284,8 @@ impl Analyzer {
             rec_entry: FxHashMap::default(),
             rec_widened: FxHashSet::default(),
             loop_stack: Vec::new(),
+            sum_raise_acc: Vec::new(),
+            finally_stack: Vec::new(),
             guards: Vec::new(),
             may_raise: Vec::new(),
             raise_states: Vec::new(),

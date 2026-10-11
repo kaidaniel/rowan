@@ -582,6 +582,20 @@ impl Analyzer {
             None => self.exec_block(h.body, state),
         }
         h.body_died = !state.reachable && (!h.ran || h.body_died);
+        // (the body's `return`s are the caller's: kept for when the with statement ends)
+        if let Some(ex) = state.exits.take().filter(|_| !crate::interp::disabled("cmreturn")) {
+            let mut ex = ex.copy_ref();
+            h.body_exits = Some(match h.body_exits.take() {
+                Some(mut prev) => prev.join(&mut ex),
+                None => ex,
+            });
+        }
+        if let Some(r) = state.ret.take().filter(|_| !crate::interp::disabled("cmreturn")) {
+            h.body_ret = Some(match h.body_ret.take() {
+                Some(prev) => prev.join(&r),
+                None => r,
+            });
+        }
         self.cm_frames.pop();
         let after = std::mem::replace(&mut state.env, callee_env);
         // (another yield's run: the caller's names after the with are either run's)
@@ -1861,6 +1875,11 @@ impl Analyzer {
                     if let Some(r) = format_percent_literal(&sx, b, state, self) {
                         return Value::lit(key_str_lit(&r));
                     }
+                    // (arguments that are each one of a few literals: every combination, as
+                    // Python formats it)
+                    if let Some(rs) = format_percent_alternatives(&sx, b, state, self) {
+                        return Value::kv_only(KeyVal::Lits(crate::intern::KeySet::from_iter(rs.iter().map(|r| key_str_lit(r)))));
+                    }
                     let sx2 = sx.replace("%d", "%s");
                     let n = sx2.matches("%s").count();
                     if n >= 1 && !sx2.replace("%s", "").contains('%') {
@@ -1880,9 +1899,12 @@ impl Analyzer {
                                 }
                             }
                             let to_str = |kv: &KeyVal| -> KeyVal {
-                                match kv.as_lit() {
-                                    Some(k) if !intern::key_is_str(k) => KeyVal::Lit(key_str_lit(&intern::key_py_str(k))),
-                                    _ => kv.clone(),
+                                match kv {
+                                    KeyVal::Lits(ks) if ks.iter().any(|k| !intern::key_is_str(k)) => KeyVal::Lits(crate::intern::KeySet::from_iter(ks.iter().map(|k| if intern::key_is_str(k) { k } else { key_str_lit(&intern::key_py_str(k)) }))),
+                                    _ => match kv.as_lit() {
+                                        Some(k) if !intern::key_is_str(k) => KeyVal::Lit(key_str_lit(&intern::key_py_str(k))),
+                                        _ => kv.clone(),
+                                    },
                                 }
                             };
                             let args: Vec<KeyVal> = args.iter().map(to_str).collect();
@@ -1907,7 +1929,7 @@ impl Analyzer {
                                         let post = {
                                             let mut s = String::new();
                                             for i in (h + 1)..(n + 1) {
-                                                if i <= n && i > h + 1 - 1 && i - 1 > h {
+                                                if i > h + 1 {
                                                     s.push_str(&intern::key_py_str(args[i - 1].as_lit().unwrap()));
                                                 }
                                                 s.push_str(&segs[i]);
@@ -2366,6 +2388,49 @@ pub fn cond_is_exclusion(cond: &ast::Expr, target: &ast::Expr) -> bool {
 }
 
 /// `"%03d-%s|%.2f" % args` with literal arguments only: the formatted string.
+/// `fmt % args` when each argument is one of a few literals: the texts of every combination
+/// (at most 64), exactly as Python formats them; None when an argument is not literal or a
+/// combination does not format.
+fn format_percent_alternatives(fmt: &str, b: &Value, state: &State, an: &Analyzer) -> Option<Vec<String>> {
+    if super::disabled("pure") || super::disabled("percentalts") {
+        return None;
+    }
+    let lits = |v: &Value| -> Option<Vec<KeyId>> { if v.pts.is_empty() && v.kv.is_literal() { Some(crate::domain::kv_literals(&v.kv).iter().collect()) } else { None } };
+    let alts: Vec<Vec<KeyId>> = if b.pts.is_empty() {
+        vec![lits(b)?]
+    } else {
+        let o = b.single().filter(|o| an.kind(*o) == Kind::Tuple)?;
+        let n = an.llen(o, state)?;
+        (0..n).map(|i| lits(&state.slot(o, Ns::Pos, key_int(i as i64)))).collect::<Option<Vec<_>>>()?
+    };
+    let total: usize = alts.iter().map(|a| a.len()).product();
+    if total == 0 || total > 64 {
+        return None;
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut idx = vec![0usize; alts.len()];
+    loop {
+        let args: Vec<KeyId> = alts.iter().zip(&idx).map(|(a, i)| a[*i]).collect();
+        let s = crate::models::pyvalues::percent_format(fmt, crate::models::pyvalues::PercentArgs::Positional(&args))?;
+        if !out.contains(&s) {
+            out.push(s);
+        }
+        let mut p = 0;
+        while p < idx.len() {
+            idx[p] += 1;
+            if idx[p] < alts[p].len() {
+                break;
+            }
+            idx[p] = 0;
+            p += 1;
+        }
+        if p == idx.len() {
+            break;
+        }
+    }
+    Some(out)
+}
+
 fn format_percent_literal(fmt: &str, b: &Value, state: &State, an: &Analyzer) -> Option<String> {
     // every argument a literal: exactly as Python formats it
     if !super::disabled("pure") {

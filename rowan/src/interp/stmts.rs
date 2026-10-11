@@ -206,6 +206,11 @@ impl Analyzer {
                 self.cur_exc = None;
                 self.cur_exc_cls = None;
                 if !caught {
+                    // (in a summary run: a raise leaving the function, its state for the
+                    // summary's raise footprint)
+                    if state.reachable {
+                        self.note_summary_raise(state);
+                    }
                     // (the class leaving the call: known, or not)
                     self.merge_esc(raised_cls.map(|c| vec![c]));
                     if crate::interp::debug_level() == 2 {
@@ -299,8 +304,21 @@ impl Analyzer {
             }
             ast::Stmt::Break(_) => {
                 self.exit_count += 1;
+                let mut st = state.copy();
+                // (the finally blocks of the trys this leaves run first)
+                let n = self.loop_stack.len();
+                let pending: Vec<std::rc::Rc<Finally>> = if crate::interp::disabled("jumpfinally") { Vec::new() } else { self.finally_stack.iter().rev().take_while(|(l, _, _)| *l == n).filter(|(_, _, a)| *a).map(|(_, b, _)| b.clone()).collect() };
+                for fin in pending {
+                    self.run_finally(&fin, &mut st, false);
+                    if !st.reachable {
+                        break;
+                    }
+                }
+                if !st.reachable {
+                    state.reachable = false;
+                    return;
+                }
                 if let Some(ctx) = self.loop_stack.last_mut() {
-                    let mut st = state.copy();
                     ctx.breaks = Some(match ctx.breaks.take() {
                         None => st,
                         Some(mut b) => b.join(&mut st),
@@ -310,8 +328,21 @@ impl Analyzer {
             }
             ast::Stmt::Continue(_) => {
                 self.exit_count += 1;
+                let mut st = state.copy();
+                // (the finally blocks of the trys this leaves run first)
+                let n = self.loop_stack.len();
+                let pending: Vec<std::rc::Rc<Finally>> = if crate::interp::disabled("jumpfinally") { Vec::new() } else { self.finally_stack.iter().rev().take_while(|(l, _, _)| *l == n).filter(|(_, _, a)| *a).map(|(_, b, _)| b.clone()).collect() };
+                for fin in pending {
+                    self.run_finally(&fin, &mut st, false);
+                    if !st.reachable {
+                        break;
+                    }
+                }
+                if !st.reachable {
+                    state.reachable = false;
+                    return;
+                }
                 if let Some(ctx) = self.loop_stack.last_mut() {
-                    let mut st = state.copy();
                     ctx.continues = Some(match ctx.continues.take() {
                         None => st,
                         Some(mut b) => b.join(&mut st),
@@ -372,21 +403,29 @@ impl Analyzer {
                         after = if after.reachable { after.join(&mut r) } else { r };
                     }
                     state.replace_with(after);
+                    for _ in 0..n_redirects {
+                        self.stdout_redirect.pop();
+                    }
+                    // the managers' __exit__ runs on the way out (innermost first)
+                    let fin = std::rc::Rc::new(Finally::Exit(managers));
+                    if state.reachable {
+                        self.run_finally(&fin, state, false);
+                    }
+                } else if !crate::interp::disabled("withexit") {
+                    // a try whose finally is the managers' `__exit__`: it runs however the body
+                    // ends (normally, by return / break / continue, or by an exception)
+                    self.stmt_try_parts(&w.body, &[], &[], std::rc::Rc::new(Finally::Exit(managers)), state);
+                    for _ in 0..n_redirects {
+                        self.stdout_redirect.pop();
+                    }
                 } else {
                     self.exec_block(&w.body, state);
-                }
-                for _ in 0..n_redirects {
-                    self.stdout_redirect.pop();
-                }
-                // the managers' __exit__ runs on the way out (innermost first)
-                if state.reachable {
-                    for (v, n) in managers.iter().rev() {
-                        // the body is analysed as not raising: __exit__(None, None, None)
-                        let none = self.none_v.clone();
-                        self.call_method_with(v, "__exit__", vec![none.clone(), none.clone(), none], n, state);
-                        // an ExitStack: its callbacks, last registered first; closing(x): x.close()
-                        crate::models::csvio::exitstack_close(self, state, v, n);
-                        crate::models::csvio::closing_exit(self, state, v, n);
+                    for _ in 0..n_redirects {
+                        self.stdout_redirect.pop();
+                    }
+                    let fin = std::rc::Rc::new(Finally::Exit(managers));
+                    if state.reachable {
+                        self.run_finally(&fin, state, false);
                     }
                 }
             }
@@ -526,7 +565,7 @@ impl Analyzer {
         if self.kind(f) != Kind::Function || !self.func_info(f).is_contextmanager.get() {
             return false;
         }
-        let prev = self.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.frames.len(), env_after: None, ran: false, then: None, body_died: false, env_before: None, multi: true });
+        let prev = self.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.frames.len(), env_after: None, ran: false, then: None, body_died: false, env_before: None, multi: true, body_exits: None, body_ret: None });
         self.force_tab_once = true;
         let n = frontend::node(&item.context_expr);
         let fv = self.eval(&call.func, state);
@@ -534,9 +573,24 @@ impl Analyzer {
         self.force_tab_once = false;
         let h = std::mem::replace(&mut self.cm_hook, prev);
         match h {
-            Some(h) if h.ran => {
-                if let Some(env) = h.env_after {
+            Some(mut h) if h.ran => {
+                if let Some(env) = h.env_after.take() {
                     state.env = env;
+                }
+                // the body's returns: the caller's exits
+                if let Some(mut bx) = h.body_exits.take() {
+                    bx.reachable = true;
+                    let joined = match state.exits.take() {
+                        Some(cur) => cur.copy_ref().join(&mut bx),
+                        None => bx,
+                    };
+                    state.exits = Some(std::sync::Arc::new(joined));
+                }
+                if let Some(r) = h.body_ret.take() {
+                    state.ret = Some(match state.ret.take() {
+                        Some(cur) => cur.join(&r),
+                        None => r,
+                    });
                 }
                 if !state.reachable && !h.body_died && !crate::interp::disabled("cmdied") {
                     // the generator did not finish normally after a body that did: still go on
@@ -1507,9 +1561,57 @@ impl Analyzer {
         false
     }
 
+    /// A finally block run on the way out of its try (not again by a `break` / `continue`
+    /// inside it); for a with statement, the managers' `__exit__` (innermost first), with an
+    /// unknown exception on an exceptional way out.
+    pub fn run_finally(&mut self, fin: &std::rc::Rc<Finally>, st: &mut State, exc: bool) {
+        let idx: Vec<usize> = self.finally_stack.iter().enumerate().filter(|(_, (_, b, a))| *a && std::rc::Rc::ptr_eq(b, fin)).map(|(i, _)| i).collect();
+        for i in &idx {
+            self.finally_stack[*i].2 = false;
+        }
+        match &**fin {
+            Finally::Block(body) => self.exec_block(body, st),
+            Finally::Exit(managers) => {
+                for (v, n) in managers.iter().rev() {
+                    if !st.reachable {
+                        break;
+                    }
+                    let a = if exc { Value::data("exc") } else { self.none_v.clone() };
+                    self.call_method_with(v, "__exit__", vec![a.clone(), a.clone(), a], n, st);
+                    // an ExitStack: its callbacks, last registered first; closing(x): x.close()
+                    crate::models::csvio::exitstack_close(self, st, v, n);
+                    crate::models::csvio::closing_exit(self, st, v, n);
+                }
+            }
+        }
+        for i in idx {
+            if let Some(e) = self.finally_stack.get_mut(i) {
+                e.2 = true;
+            }
+        }
+    }
+
     fn stmt_try(&mut self, t: &'static ast::StmtTry, state: &mut State) {
+        let fin = std::rc::Rc::new(Finally::Block(&t.finalbody));
+        self.stmt_try_parts(&t.body, &t.handlers, &t.orelse, fin, state);
+    }
+
+    /// A try statement from its parts (a with statement is one: its finally is `__exit__`).
+    pub fn stmt_try_parts(&mut self, body: &'static [ast::Stmt], handlers: &'static [ast::ExceptHandler], orelse: &'static [ast::Stmt], fin: std::rc::Rc<Finally>, state: &mut State) {
+        let pushed = !fin.is_empty();
+        if pushed {
+            self.finally_stack.push((self.loop_stack.len(), fin.clone(), true));
+        }
+        let depth = self.finally_stack.len();
+        self.stmt_try_inner(body, handlers, orelse, &fin, state);
+        if pushed {
+            self.finally_stack.truncate(depth - 1);
+        }
+    }
+
+    fn stmt_try_inner(&mut self, body: &'static [ast::Stmt], handlers: &'static [ast::ExceptHandler], orelse: &'static [ast::Stmt], fin: &std::rc::Rc<Finally>, state: &mut State) {
         let mut caught: FxHashSet<String> = FxHashSet::default();
-        for h in &t.handlers {
+        for h in handlers {
             let ast::ExceptHandler::ExceptHandler(h) = h;
             match &h.type_ {
                 None => {
@@ -1529,7 +1631,7 @@ impl Analyzer {
         // a handler for a class catches its subclasses too
         let mut caught = expand_caught(caught);
         // handlers that all end by re-raising: the body's reads are still required
-        let reraise = !t.handlers.is_empty() && t.handlers.iter().all(|h| {
+        let reraise = !handlers.is_empty() && handlers.iter().all(|h| {
             let ast::ExceptHandler::ExceptHandler(h) = h;
             matches!(h.body.last(), Some(ast::Stmt::Raise(_)))
         });
@@ -1538,7 +1640,7 @@ impl Analyzer {
         }
         // returns inside the try are collected apart from the earlier ones: the finally runs
         // on their way out
-        let has_finally = !t.finalbody.is_empty() && !crate::interp::disabled("finally");
+        let has_finally = !fin.is_empty() && !crate::interp::disabled("finally");
         let outer_exits = if has_finally { state.exits.take() } else { None };
         let raise_before = self.raise_stack.last().copied().unwrap_or(false);
         let mut pre = state.copy();
@@ -1554,7 +1656,7 @@ impl Analyzer {
         let exits_before = self.exit_count;
         let fl_mark = self.flag_reqs.len();
         let fl_depth = self.may_raise.len();
-        self.exec_block(&t.body, state);
+        self.exec_block(body, state);
         self.guards.pop();
         self.try_marks.pop();
         self.try_sum_depth.pop();
@@ -1567,7 +1669,7 @@ impl Analyzer {
         let mut recs = self.raise_cls.pop().map(|(_, r)| r).unwrap_or_default();
         // the handlers' classes: which recorded raise each one catches (Python takes the
         // first handler that matches)
-        let hclasses: Vec<(FxHashSet<String>, bool)> = t.handlers.iter().map(|h| {
+        let hclasses: Vec<(FxHashSet<String>, bool)> = handlers.iter().map(|h| {
             let ast::ExceptHandler::ExceptHandler(h) = h;
             let elts: Vec<&ast::Expr> = match h.type_.as_deref() {
                 None => vec![],
@@ -1602,21 +1704,21 @@ impl Analyzer {
                 None
             }
         };
-        let per_class = !crate::interp::disabled("excclass") && !t.handlers.is_empty();
+        let per_class = !crate::interp::disabled("excclass") && !handlers.is_empty();
         // raises no handler surely catches go on to the enclosing try (or out of the call),
         // through the finally (unless a return / jump in it swallows them)
-        let swallowing = !t.finalbody.is_empty() && (contains_return(&t.finalbody) || contains_jump(&t.finalbody));
-        if (per_class || (t.handlers.is_empty() && !crate::interp::disabled("excclass"))) && !swallowing {
+        let swallowing = !fin.is_empty() && fin.swallows();
+        if (per_class || (handlers.is_empty() && !crate::interp::disabled("excclass"))) && !swallowing {
             for (cls, st, ev) in recs.iter_mut() {
                 if hclasses.iter().any(|hc| hmatch(hc, cls) == Some(true)) {
                     continue;
                 }
                 let mut st2 = st.copy();
-                if !t.finalbody.is_empty() && !crate::interp::disabled("finally") {
+                if !fin.is_empty() && !crate::interp::disabled("finally") {
                     st2.reachable = true;
                     st2.ret = None;
                     st2.exits = None;
-                    self.exec_block(&t.finalbody, &mut st2);
+                    self.run_finally(fin, &mut st2, true);
                     if !st2.reachable {
                         continue;
                     }
@@ -1628,6 +1730,11 @@ impl Analyzer {
                 self.cur_exc_cls = None;
                 if !recorded {
                     self.note_raise();
+                    // (leaving the function after the finally: its state for the summary's
+                    // raise footprint)
+                    if st2.reachable && !fin.is_empty() {
+                        self.note_summary_raise(&st2);
+                    }
                 }
             }
         }
@@ -1636,7 +1743,7 @@ impl Analyzer {
         let body_may_raise = generic || raised_at.is_some();
         // where an exception leaves the body (for a finally without handlers)
         let mut finally_escape: Option<State> = None;
-        if has_finally && t.handlers.is_empty() && body_may_raise && (contains_return(&t.finalbody) || contains_jump(&t.finalbody)) {
+        if has_finally && handlers.is_empty() && body_may_raise && fin.swallows() {
             let mut e = if generic { pre.copy() } else { State::bottom() };
             if let Some(r) = raised_at.as_mut() {
                 let mut r2 = r.copy();
@@ -1645,7 +1752,7 @@ impl Analyzer {
             finally_escape = Some(e);
         }
         if crate::interp::debug_level() == 2 {
-            eprintln!("  try at L{}: may_raise={} at_access={} reachable={} exited={}", frontend::node(t).line, flagged, raised_at.is_some(), state.reachable, self.exit_count != exits_before);
+            eprintln!("  try at L{}: may_raise={} at_access={} reachable={} exited={}", body.first().map(|s| frontend::node(s).line).unwrap_or(0), flagged, raised_at.is_some(), state.reachable, self.exit_count != exits_before);
         }
         let mut body_end = state.copy();
         // (where a raise from anywhere in the body enters a handler)
@@ -1660,7 +1767,7 @@ impl Analyzer {
         };
         // the handler starts from the states at the accesses that may raise; anything else
         // that may raise (unknown calls, raise statements, callees) can happen anywhere
-        let mut handler_entry: Option<State> = if !t.handlers.is_empty() {
+        let mut handler_entry: Option<State> = if !handlers.is_empty() {
             let mut e = if generic {
                 let mut g = pre.copy();
                 if let Some(r) = flag_reqs.as_mut() {
@@ -1677,15 +1784,15 @@ impl Analyzer {
         } else {
             None
         };
-        if !body_may_raise && !t.handlers.is_empty() {
+        if !body_may_raise && !handlers.is_empty() {
             handler_entry = Some(State::bottom());
         }
         let mut results: Vec<State> = Vec::new();
-        if !t.orelse.is_empty() && body_end.reachable {
-            self.exec_block(&t.orelse, &mut body_end);
+        if !orelse.is_empty() && body_end.reachable {
+            self.exec_block(orelse, &mut body_end);
         }
         results.push(body_end);
-        for (hi, h) in t.handlers.iter().enumerate() {
+        for (hi, h) in handlers.iter().enumerate() {
             let ast::ExceptHandler::ExceptHandler(h) = h;
             // the exceptions raised at the recorded points (anything else: unknown)
             let hn = frontend::node(h);
@@ -1752,10 +1859,10 @@ impl Analyzer {
         }
         if let Some((a, b)) = pair {
             let mut assigned: Vec<intern::StrId> = Vec::new();
-            for st in t.body.iter().chain(t.orelse.iter()) {
+            for st in body.iter().chain(orelse.iter()) {
                 collect_assigned(st, &mut assigned);
             }
-            for h in &t.handlers {
+            for h in handlers {
                 let ast::ExceptHandler::ExceptHandler(h) = h;
                 h.body.iter().for_each(|x| collect_assigned(x, &mut assigned));
             }
@@ -1778,7 +1885,7 @@ impl Analyzer {
             };
             // the normal way out
             if out.reachable {
-                self.exec_block(&t.finalbody, &mut out);
+                self.run_finally(fin, &mut out, false);
             }
             add_exits(out.exits.take(), &mut exits_acc);
             if let Some(r) = out.ret.take() {
@@ -1793,7 +1900,7 @@ impl Analyzer {
             // swallows
             let n_exit_ways = ways.len();
             // (a `break` / `continue` in the finally swallows it as well)
-            if t.handlers.is_empty() && (contains_return(&t.finalbody) || contains_jump(&t.finalbody)) && body_may_raise {
+            if handlers.is_empty() && fin.swallows() && body_may_raise {
                 if let Some(esc) = finally_escape.take() {
                     ways.push(esc);
                 }
@@ -1803,7 +1910,10 @@ impl Analyzer {
                 w.reachable = true;
                 w.ret = None;
                 w.exits = None;
-                self.exec_block(&t.finalbody, &mut w);
+                self.run_finally(fin, &mut w, is_escape);
+                if is_escape && w.reachable {
+                    self.note_summary_raise(&w);
+                }
                 if is_escape {
                     if !w.reachable && !flagged {
                         // the finally returned on every path: the exception does not leave
@@ -1824,11 +1934,11 @@ impl Analyzer {
             add_exits(outer_exits, &mut exits_acc);
             out.exits = exits_acc.map(std::sync::Arc::new);
             out.ret = ret_acc;
-        } else if !t.finalbody.is_empty() {
+        } else if !fin.is_empty() {
             if !out.reachable {
                 out = pre.copy();
             }
-            self.exec_block(&t.finalbody, &mut out);
+            self.run_finally(fin, &mut out, false);
         }
         state.replace_with(out);
     }
@@ -2573,4 +2683,28 @@ pub fn expand_caught(mut caught: FxHashSet<String>) -> FxHashSet<String> {
     }
     caught.extend(more);
     caught
+}
+
+/// What runs on the way out of a try statement: its finally block, or for a with statement its
+/// managers' `__exit__`.
+pub enum Finally {
+    Block(&'static [ast::Stmt]),
+    Exit(Vec<(Value, Node)>),
+}
+
+impl Finally {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Finally::Block(b) => b.is_empty(),
+            Finally::Exit(m) => m.is_empty(),
+        }
+    }
+
+    /// A `return` / `break` / `continue` in it ends an exception passing through.
+    pub fn swallows(&self) -> bool {
+        match self {
+            Finally::Block(b) => contains_return(b) || contains_jump(b),
+            Finally::Exit(_) => false,
+        }
+    }
 }
