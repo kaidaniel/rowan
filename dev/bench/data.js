@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791720201256,
+  "lastUpdate": 1791721187562,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -1174,6 +1174,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: objects",
             "value": 180171,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "54ae9089b0bb35933e42af8713cce8f6fe33a07b",
+          "message": "Soundness: `self.x = v` in a method's summary, on a placeholder of a class with `__setattr__`, calls it (the hook was looked up on instances only: the store was dropped, and what `__init__` set through `__setattr__` read as definitely missing: `_pydecimal.Context.prec`); a placeholder of a user class tested by `isinstance` against builtin classes only is not one of them when no subclass of its class in the program has an external base (the branch's accesses were replayed on its instances: `value.strip` on a `Decimal`); a class-less placeholder tested against a single builtin class is narrowed to it (its branch's accesses replay only on its instances).\n\ny458, y459 (new, expectations by hand; the oracle agrees; each failed before). ROWAN_NO=phmethod / phbuiltin / narrowbuiltin: off.\n\nBench, work=550000: stdlib12k missing 153 -> 17, proven 1422 -> 1601; email / rich unchanged. Snapshots reviewed: proto_domain / proto_summary verdicts renamed (same tiers, no new `missing`). Golden 1038/1038, oracle 876/876, cargo test, hover test pass.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T12:46:50+01:00",
+          "tree_id": "2e2f7213f361592b39a18d0d9b19f38847343faf",
+          "url": "https://github.com/kaidaniel/rowan/commit/54ae9089b0bb35933e42af8713cce8f6fe33a07b"
+        },
+        "date": 1791721186790,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 1805.28,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1625,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 1805.42,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 8444,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 167.59,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 2063,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 1218064,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 22624872,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 34477,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 179890,
             "unit": "count",
             "extra": "finished"
           }
