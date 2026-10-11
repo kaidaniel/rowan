@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791708699714,
+  "lastUpdate": 1791709563046,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -388,6 +388,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: wall time",
             "value": 33.38,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 1323,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 688892,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 3483606,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 41664,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 154320,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "6b0d36710e1f074307f637d8f4aa89df0e72deb1",
+          "message": "hasattr on a str value is decided by str's attributes (CPython 3.14 `dir(str)` without dunders): a name str does not have is False instead of unknown, and `decode` (bytes', not str's) is no longer True. y449 (new; the oracle agrees). email / stdlib12k / rich unchanged. Golden 1027/1027, snapshots same, oracle 865/865, hover test passes\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T09:58:15+01:00",
+          "tree_id": "1333b154b79e9ce668ae78ada68b27cb8fb445dd",
+          "url": "https://github.com/kaidaniel/rowan/commit/6b0d36710e1f074307f637d8f4aa89df0e72deb1"
+        },
+        "date": 1791709562232,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 300.77,
+            "unit": "s",
+            "extra": "cut at the 300 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1601,
+            "unit": "MB",
+            "extra": "cut at the 300 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 301.77,
+            "unit": "s",
+            "extra": "cut at the 300 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 12744,
+            "unit": "MB",
+            "extra": "cut at the 300 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 50.61,
             "unit": "s",
             "extra": "finished"
           },
