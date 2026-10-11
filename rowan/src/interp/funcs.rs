@@ -326,6 +326,23 @@ impl Analyzer {
     pub fn call_method_with(&mut self, v: &Value, name: &str, args: Vec<Value>, node: &Node, state: &mut State) -> Option<Value> {
         let mut outs: Vec<Value> = Vec::new();
         for oid in v.pts.iter() {
+            // (a placeholder of a class, in a summary: the class's method; a subclass may
+            // override it, decided per call site)
+            let ph_cls = if self.kind(oid) == Kind::Ph && !super::disabled("phmethod") { self.ph_info(oid).cls.get().filter(|c| self.class_info_opt(*c).is_some()) } else { None };
+            if let Some(cls) = ph_cls {
+                if !self.ph_info(oid).exact.get() {
+                    self.record_event("hint", oid);
+                }
+                if let Some(m) = self.class_lookup(cls, name) {
+                    let fv = self.cls_slots.get(&(m, Ns::Attr, key_str_lit(name))).cloned().unwrap_or_default();
+                    for f in fv.pts.iter() {
+                        if self.kind(f) == Kind::Function {
+                            outs.push(self.call_user(f, Some(Value::obj(oid)), args.clone(), IndexMap::new(), vec![], vec![], state, node, None, false));
+                        }
+                    }
+                }
+                continue;
+            }
             if self.kind(oid) == Kind::Instance {
                 if let Some(cls) = self.instance_class(oid) {
                     if let Some(m) = self.class_lookup(cls, name) {

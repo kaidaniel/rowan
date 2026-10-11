@@ -359,10 +359,14 @@ impl Analyzer {
         let mut star_structural = false;
         let in_summary = !self.sum_stack.is_empty();
         let mut narrowed: Vec<(u32, u32)> = Vec::new();
+        // (builtin classes tested: a placeholder narrowed by one of them alone is a placeholder
+        // of it, so what the branch reads replays only on its instances)
+        let mut ext_classes: Vec<u32> = Vec::new();
         for c in cv.pts.iter() {
             match self.kind(c) {
                 Kind::Class => classes.push(c),
                 Kind::External => {
+                    ext_classes.push(c);
                     let q = self.external_qual(c);
                     let q = q.rsplit('.').next().unwrap_or("").to_string();
                     let full = self.external_qual(c);
@@ -420,9 +424,16 @@ impl Analyzer {
                     let ph = self.ph_info(oid);
                     if let (Some(pc), false) = (ph.cls.get(), classes.is_empty()) {
                         Some(classes.iter().any(|c| self.is_subclass(pc, *c)))
+                    } else if let Some(pc) = ph.cls.get().filter(|pc| classes.is_empty() && !star && self.class_info_opt(*pc).is_some() && !self.user_subclass_has_external_base(*pc) && !crate::interp::disabled("phbuiltin")) {
+                        // (a placeholder of a user class tested against builtin classes only: no
+                        // subclass of its class in the program derives from an external class)
+                        let _ = pc;
+                        Some(false)
                     } else {
                         if truth && classes.len() == 1 && kinds.is_empty() && in_summary {
                             narrowed.push((oid, classes[0]));
+                        } else if truth && classes.is_empty() && !star && ext_classes.len() == 1 && in_summary && ph.cls.get().is_none() && !crate::interp::disabled("narrowbuiltin") {
+                            narrowed.push((oid, ext_classes[0]));
                         }
                         None
                     }
@@ -460,6 +471,12 @@ impl Analyzer {
             }
         }
         self.store_narrowed(&store, Value::with_kv(new_pts, cur.kv.clone()), state);
+    }
+
+    /// Does `cls` or some user class deriving from it have an external base (`str`, `dict`, a
+    /// library class), so that its instances may be instances of a builtin class?
+    pub fn user_subclass_has_external_base(&self, cls: u32) -> bool {
+        self.user_classes.iter().any(|c| self.is_subclass(*c, cls) && self.class_info_opt(*c).map(|ci| ci.open_base || ci.dict_base).unwrap_or(true))
     }
 
     /// A user class whose bases are all user classes (or `object`), transitively.
