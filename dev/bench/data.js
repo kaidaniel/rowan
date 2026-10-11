@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791712374727,
+  "lastUpdate": 1791712402077,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -670,6 +670,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: objects",
             "value": 135638,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "6a14143be925c804258e67914aaa2c06981f2142",
+          "message": "An unknown call's result object is keyed by the last call site of its context only (k = 1) instead of the whole frame context (call strings of up to three call sites, receiver contexts): every context made its own result and its own tree of parts (rich's pretty printer over unknown values). ROWAN_LIMITS=unkretk=0: no context, =2 (any value >= 2): the whole context, the old behaviour.\n\nMeasured at work=550000 (whole context / k = 1 / k = 0):\n  rich       objects 291k / 146k / 183k; 13.2 / 9.4 / 10.4 s; 1.6 / 1.0 / 1.1 GB; proven 603 / 603 / 603, verdicts identical\n  stdlib12k  objects 51.0k / 43.5k / 42.8k; proven 1478 / 1220 / 1084; missing 788 / 577 / 619; input 3643 / 3574 / 3219; possibly 4313 / 4347 / 4225\n  email      objects 38.4k / 37.5k / 37.3k; proven 317 / 317 / 317; input 472 / 490 / 487\n  standalone copy of rich's pretty.py (554 lines, entry runs): objects 21.0k / 16.4k / 8.5k\nstdlib12k loses 17 % of its proven accesses at k = 1 (not investigated). Golden 1028/1028 at every k (no case depends on this context), snapshots: objects renamed only (proto_domain 27, proto_summary 40 records; same verdicts, keys, tiers and lines), oracle 866/866, cargo test and hover test pass.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T10:20:08+01:00",
+          "tree_id": "a92bfc7f703eb0c3e3909715459676436c9127f5",
+          "url": "https://github.com/kaidaniel/rowan/commit/6a14143be925c804258e67914aaa2c06981f2142"
+        },
+        "date": 1791712401491,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 1805.43,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 2310,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 1807.19,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 13891,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 30.43,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 961,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 567946,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 2480950,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 37120,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 126077,
             "unit": "count",
             "extra": "finished"
           }
