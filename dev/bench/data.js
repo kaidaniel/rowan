@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791712555160,
+  "lastUpdate": 1791715897530,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -838,6 +838,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: objects",
             "value": 126077,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "65d65d3e70892d78abc3c2d04f91707d849c4931",
+          "message": "The tabulation budget belongs to a function's code (`FuncNode::addr`), not to each function object: a `def` inside a generator or another tabulated function is a new closure object at every run of its parent, and each object had a 256 budget of its own (email without deadlines: `FeedParser._parsegen.boundarymatch` as 12 objects, 3,072 tabulations and counting). Every tabulated body run is counted (`tab_runs`, forced ones included): the `work:` line reports it as `tabulations` (the budgeted ones after `budgeted tabulations`), golden JSON as `tabulations`.\n\nGolden directives `#@tabulations <= N` (a bound on the per-call-site body runs) and `#@limits k=v,…` (the case's ROWAN_LIMITS). y450 (new, expectations by hand: a closure made by a generator, tab=4: at most 20 tabulations, 37+ before; the oracle agrees).\n\nBench, work=550000: email / stdlib12k / rich results unchanged (email 9,855 tabulations of which 2,927 budgeted: the forced ones are next). Snapshots reviewed: proto_summary loses \"sometimes\" schema entries on results of a closure's calls (`SummaryMixin()['alloc']`) and gains verdicts by other call chains, as its closures now share one budget. Golden 1029/1029, cargo test, snapshots, hover test pass.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T11:18:55+01:00",
+          "tree_id": "d0ef92427702eb3e384336ffe5f992bcce391dd2",
+          "url": "https://github.com/kaidaniel/rowan/commit/65d65d3e70892d78abc3c2d04f91707d849c4931"
+        },
+        "date": 1791715897126,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 1805.28,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 2137,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 1807.58,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 14026,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 35.53,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 946,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 560904,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 2416484,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 37452,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 123883,
             "unit": "count",
             "extra": "finished"
           }
