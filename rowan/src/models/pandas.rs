@@ -5325,13 +5325,12 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
                     continue;
                 }
                 // in the list on some paths only: read (and needed of an input) on those only
-                let before: Vec<(crate::domain::SourceId, bool)> = classify(&state.row(oid, Ns::Item), k).providers.iter().map(|(src, _)| (*src, state.reqs.inner(src).map(|d| d.contains_key(&k)).unwrap_or(false))).collect();
+                let before: Vec<(crate::domain::SourceId, bool)> = classify(&state.row(oid, Ns::Item), k).providers.iter().map(|(src, _)| (*src, state.reqs.contains(src, &k))).collect();
                 frame_getitem_n(an, oid, &Value::lit(k), node, state, guarded, false);
                 for (src, had) in before {
                     if !had {
-                        let tgt = state.reqs.writable(&src);
-                        if let Some(cur) = tgt.get(&k).cloned() {
-                            tgt.insert(k, crate::domain::ReqInfo { always: false, ..cur });
+                        if let Some(cur) = state.reqs.get(&src, &k) {
+                            state.reqs.set(&src, k, crate::domain::ReqInfo { always: false, ..cur });
                         }
                     }
                 }

@@ -479,12 +479,11 @@ impl State {
         }
         for (src, k) in o.reqs.diff_keys(&self.reqs) {
             let Some(info) = o.reqs.get(&src, &k) else { continue };
-            let tgt = self.reqs.writable(&src);
-            let nv = match tgt.get(&k) {
+            let nv = match self.reqs.get(&src, &k) {
                 Some(cur) => cur.join(&info),
                 None => info.demote(),
             };
-            tgt.insert(k, nv);
+            self.reqs.set(&src, k, nv);
         }
     }
 
@@ -630,15 +629,14 @@ impl State {
             caveats,
             alt_keys: if alt_keys.len() > 1 { alt_keys } else { IdSet::new() },
         };
-        let d = self.reqs.writable(&src);
-        let nv = match d.get(&term) {
+        let nv = match self.reqs.get(&src, &term) {
             Some(cur) => cur.seq(&info),
             None => {
                 REQ_LOG.with(|l| l.borrow_mut().push((src, term)));
                 info
             }
         };
-        d.insert(term, nv);
+        self.reqs.set(&src, term, nv);
     }
 
     pub fn require_simple(&mut self, src: SourceId, term: KeyId, site: StrId) {

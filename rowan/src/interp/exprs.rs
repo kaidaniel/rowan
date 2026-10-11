@@ -150,19 +150,29 @@ impl Analyzer {
                                 let iv = self.eval(idx, state);
                                 match iv.kv.as_lit().filter(|_| iv.pts.is_empty()).and_then(intern::key_as_int) {
                                     Some(i) => {
+                                        // (an index out of range raises IndexError: on every string
+                                        // the value may be, or on some)
+                                        let mut outside = 0;
                                         for st0 in &strs {
                                             let cs: Vec<char> = st0.chars().collect();
                                             let j = if i < 0 { i + cs.len() as i64 } else { i };
                                             if j < 0 || j as usize >= cs.len() {
-                                                out = None;
-                                                break;
-                                            }
-                                            if let Some(o) = out.as_mut() {
+                                                outside += 1;
+                                            } else if let Some(o) = out.as_mut() {
                                                 *o = o.insert(key_str_lit(&cs[j as usize].to_string()));
                                             }
                                         }
+                                        if outside == strs.len() {
+                                            self.raise_here("IndexError", state);
+                                            return Value::new();
+                                        } else if outside > 0 {
+                                            self.may_raise_here("IndexError", state);
+                                        }
                                     }
-                                    None => out = None,
+                                    None => {
+                                        self.may_raise_here("IndexError", state);
+                                        out = None;
+                                    }
                                 }
                             }
                         }

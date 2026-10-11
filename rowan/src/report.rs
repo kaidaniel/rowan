@@ -132,7 +132,7 @@ pub fn schema_rows(an: &Analyzer) -> IndexMap<String, IndexMap<String, SchemaEnt
         let label = source_label(src);
         let entry = out.entry(label).or_default();
         let mut keys: Vec<_> = d.iter().collect();
-        keys.sort_by_key(|(k, _)| key_repr(**k));
+        keys.sort_by_key(|(k, _)| key_repr(*k));
         for (k, info) in keys {
             let mut sites: Vec<String> = info.sites.iter().map(|s| s.to_string()).collect();
             sites.sort();

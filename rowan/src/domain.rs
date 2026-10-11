@@ -1710,7 +1710,7 @@ pub fn kv_restrict(kv: &KeyVal, keys: &KeySet) -> Option<KeyVal> {
 // requirements (§9)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct ReqInfo {
     pub always: bool,
     pub sites: StrSet,

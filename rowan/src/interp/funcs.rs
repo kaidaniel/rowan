@@ -1153,9 +1153,7 @@ impl Analyzer {
                         // (an element was taken on this path: its source's requirements are
                         // known here, none so far — see the nested-source join)
                         for (cs, _) in srcs.iter() {
-                            if state.reqs.inner(&cs).is_none() {
-                                state.reqs.writable(&cs);
-                            }
+                            state.reqs.mark(&cs, crate::domain::ReqInfo::default());
                         }
                         let r = Row::from_data(crate::domain::RowData { sources: srcs, mutators: row.mutators.clone(), ..Default::default() });
                         state.set_row(eid, Ns::Item, r.clone());
@@ -1240,14 +1238,11 @@ impl Analyzer {
             }
         }
         for src in srcs {
-            let Some(d) = body_s.reqs.inner(&src) else { continue };
-            for (k, info) in d.iter() {
-                let Some(cur_d) = exit_s.reqs.inner(&src) else { continue };
+            for (k, info) in body_s.reqs.for_key(&src) {
                 if info.always {
-                    if let Some(cur) = cur_d.get(k) {
+                    if let Some(cur) = exit_s.reqs.get(&src, &k) {
                         if !cur.always {
-                            let nv = crate::domain::ReqInfo { always: true, ..cur.clone() };
-                            exit_s.reqs.writable(&src).insert(*k, nv);
+                            exit_s.reqs.set(&src, k, crate::domain::ReqInfo { always: true, ..cur });
                         }
                     }
                 }

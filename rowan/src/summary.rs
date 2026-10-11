@@ -719,9 +719,7 @@ impl Analyzer {
             for moid in module_oids {
                 // (the module's slot table is shared with the caller's state, not copied: every
                 // summary would otherwise keep its own copy of every module's attributes)
-                if let Some(inner) = state.slots.m.get_ref(&moid) {
-                    st.slots.m.insert(moid, inner.clone());
-                }
+                st.slots.graft(&state.slots, &moid);
                 for (_, v) in state.obj_slots(moid, Ns::Attr) {
                     let mut work: Vec<ObjId> = v.pts.iter().collect();
                     while let Some(x) = work.pop() {
@@ -1322,7 +1320,7 @@ impl Analyzer {
         let Some(base) = &acc.base else { return };
         // (the heap unchanged since the last raise: nothing new)
         if let Some(last) = &acc.last {
-            if last.rows.ptr_eq(&state.rows) && last.slots.m.ptr_eq(&state.slots.m) && last.elems.ptr_eq(&state.elems) {
+            if last.rows.ptr_eq(&state.rows) && last.slots.ptr_eq(&state.slots) && last.elems.ptr_eq(&state.elems) {
                 return;
             }
         }
@@ -1789,14 +1787,15 @@ impl Analyzer {
                 let site = info.sites.first().unwrap_or_else(|| s(&format!("L{}", node.line)));
                 state.require(src, *k, site, info.alternatives.clone(), info.caveats.clone(), info.alt_keys.clone());
                 if !info.always {
-                    let tgt = state.reqs.writable(&src);
-                    if let Some(cur) = tgt.get(k).cloned() {
-                        tgt.insert(*k, crate::domain::ReqInfo { always: false, ..cur });
+                    if let Some(cur) = state.reqs.get(&src, k) {
+                        state.reqs.set(&src, *k, crate::domain::ReqInfo { always: false, ..cur });
                     }
                 }
             }
         }
         // 6. symbolic requirements → verdicts / requirements now
+        let mut handler_reqs = pre.reqs.copy();
+        let mut req_seen = req_mark;
         let mut failed: Vec<(ObjId, Ns, KeyId)> = Vec::new();
         let mut sure_fail = false;
         for sr in &summary.symreqs {
@@ -1873,6 +1872,13 @@ impl Analyzer {
                 if tiers.is_empty() || tiers.iter().any(|(_, t)| *t != Tier::Missing) {
                     all_missing = false;
                 }
+                // (a key not known here — a parameter bound to data: it may be one the record
+                // lacks, the call may raise)
+                if !sr.guarded && !kv.is_literal() && !matches!(kv, KeyVal::KeysOf(_)) && !row_c.symbolic() {
+                    let exc = if sr.ns == Ns::Attr { "AttributeError" } else { "KeyError" };
+                    self.cur_exc = None;
+                    self.may_raise_here(exc, &mut pre.copy());
+                }
                 for (k, tier) in tiers {
                     if tier == Tier::Missing {
                         for a in &members {
@@ -1890,15 +1896,19 @@ impl Analyzer {
                         }
                         // (the handler's path needs the key too — its exception fired for it — and
                         // what the callee read before it)
-                        // (what this call required so far: the requirement log since its start, not
-                        // a scan of every requirement — per access that was quadratic)
-                        let mut p2 = pre.copy();
-                        for (src, k2) in crate::state::req_log_since(req_mark) {
+                        // (what this call required so far: the requirement log since its start,
+                        // taken in once per entry — a scan of every requirement per access was
+                        // quadratic)
+                        let new = crate::state::req_log_since(req_seen);
+                        req_seen += new.len();
+                        for (src, k2) in new {
                             let had = pre.reqs.get(&src, &k2).is_some();
                             if let (false, Some(info)) = (had, state.reqs.get(&src, &k2)) {
-                                p2.reqs.writable(&src).insert(k2, info);
+                                handler_reqs.set(&src, k2, info);
                             }
                         }
+                        let mut p2 = pre.copy();
+                        p2.reqs = handler_reqs.copy();
                         self.may_raise_here(exc, &mut p2);
                         self.cur_exc = None;
                     }
@@ -2072,12 +2082,11 @@ impl Analyzer {
                 self.verdict(node, k, &cls, oid, ns, Some(file), Some(text));
                 if cls.tier == Tier::Proven && ns == Ns::Item {
                     if let Some(src) = self.td_param_src.get(&oid).copied() {
-                        let fresh = !state.reqs.inner(&src).map(|d| d.contains_key(&k)).unwrap_or(false);
+                        let fresh = !state.reqs.contains(&src, &k);
                         state.require(src, k, intern::s(&site), intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
                         if conditional && fresh {
-                            let tgt = state.reqs.writable(&src);
-                            if let Some(cur) = tgt.get(&k).cloned() {
-                                tgt.insert(k, crate::domain::ReqInfo { always: false, ..cur });
+                            if let Some(cur) = state.reqs.get(&src, &k) {
+                                state.reqs.set(&src, k, crate::domain::ReqInfo { always: false, ..cur });
                             }
                         }
                     }
@@ -2086,10 +2095,9 @@ impl Analyzer {
                     self.require_providers_k(&cls, row, &site, true, state, Some(k));
                     if conditional {
                         for (src, terms) in &cls.providers {
-                            let tgt = state.reqs.writable(src);
                             for t in terms.iter() {
-                                if let Some(cur) = tgt.get(&t).cloned() {
-                                    tgt.insert(t, crate::domain::ReqInfo { always: false, ..cur });
+                                if let Some(cur) = state.reqs.get(src, &t) {
+                                    state.reqs.set(src, t, crate::domain::ReqInfo { always: false, ..cur });
                                 }
                             }
                         }

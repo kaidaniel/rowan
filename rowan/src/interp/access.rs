@@ -139,7 +139,7 @@ impl Analyzer {
         let sometimes = key.map(|k| row.stored.contains(k)).unwrap_or(false);
         for (src, terms) in &cls.providers {
             for t in terms.iter() {
-                let fresh = !state.reqs.inner(src).map(|d| d.contains_key(&t)).unwrap_or(false);
+                let fresh = !state.reqs.contains(src, &t);
                 if with_alts {
                     let alts = intern::IdSet::from_iter(srcs.iter().copied().filter(|x| x != src));
                     state.require(*src, t, site_id, alts, row.mutators.clone(), terms.clone());
@@ -147,9 +147,8 @@ impl Analyzer {
                     state.require(*src, t, site_id, intern::IdSet::new(), row.mutators.clone(), intern::IdSet::new());
                 }
                 if sometimes && fresh {
-                    let tgt = state.reqs.writable(src);
-                    if let Some(cur) = tgt.get(&t).cloned() {
-                        tgt.insert(t, crate::domain::ReqInfo { always: false, ..cur });
+                    if let Some(cur) = state.reqs.get(src, &t) {
+                        state.reqs.set(src, t, crate::domain::ReqInfo { always: false, ..cur });
                     }
                 }
             }
@@ -938,10 +937,15 @@ impl Analyzer {
                                 // out of range on a list of known length
                                 self.raise_here("IndexError", state);
                             } else {
+                                self.may_raise_here("IndexError", state);
                                 parts.push(state.slot(oid, Ns::Pos, intern::key_int(i)).join(&state.slot(oid, Ns::Elem, STAR)));
                             }
                         }
                         _ => {
+                            // (an index or a length not known: it may be out of range)
+                            if kind != Kind::Set {
+                                self.may_raise_here("IndexError", state);
+                            }
                             let e = state.slot(oid, Ns::Elem, STAR);
                             parts.push(Value::with_kv(e.pts, DATA));
                         }
@@ -967,6 +971,18 @@ impl Analyzer {
                         self.load_record(oid, ns, key, node, state, guarded, single_target, try_guard)
                     };
                     parts.push(v);
+                }
+                // a library object rowan does not model (`sys.argv`): its subscript runs code
+                // rowan cannot see, which may raise anything
+                Kind::External if ns == Ns::Item => {
+                    if let Some(t) = self.raise_stack.last_mut() {
+                        *t = true;
+                    }
+                    if let Some(e) = self.esc_cls.last_mut() {
+                        *e = None;
+                    }
+                    self.flag_may_raise(state);
+                    parts.push(line_data.clone());
                 }
                 _ => parts.push(line_data.clone()),
             }
@@ -1094,6 +1110,12 @@ impl Analyzer {
                                 *m = true;
                             }
                         }
+                        // (an object of unknown kind indexed by a number may be a sequence: an
+                        // IndexError then)
+                        if ns == Ns::Item && intern::key_as_int(k).is_some() && matches!(kind, Kind::Unknown | Kind::Ph | Kind::External) {
+                            self.cur_exc = None;
+                            self.may_raise_here("IndexError", state);
+                        }
                     }
                     if model_read {
                     } else if try_guard && cls.tier == Tier::Missing && is_lit && single_target && !row.symbolic() {
@@ -1120,12 +1142,11 @@ impl Analyzer {
                     }
                     if cls.tier == Tier::Proven && ns == Ns::Item {
                         if let Some(src) = self.td_param_src.get(&oid).copied() {
-                            let fresh = !state.reqs.inner(&src).map(|d| d.contains_key(&k)).unwrap_or(false);
+                            let fresh = !state.reqs.contains(&src, &k);
                             state.require(src, k, s(&site), intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
                             if fresh && (self.branch_depth > 0 || self.cond_depth > 0) {
-                                let tgt = state.reqs.writable(&src);
-                                if let Some(cur) = tgt.get(&k).cloned() {
-                                    tgt.insert(k, crate::domain::ReqInfo { always: false, ..cur });
+                                if let Some(cur) = state.reqs.get(&src, &k) {
+                                    state.reqs.set(&src, k, crate::domain::ReqInfo { always: false, ..cur });
                                 }
                             }
                         }
@@ -1172,7 +1193,11 @@ impl Analyzer {
             }
             return self.all_values(oid, ns, state).join(&Value::kv_only(DATA));
         }
-        // Data key
+        // Data key: it may be one the record lacks (KeyError), unless the read cannot fail
+        if !guarded || try_guard {
+            self.cur_exc = None;
+            self.may_raise_here(if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" }, state);
+        }
         if !guarded && row.symbolic() {
             self.record_symreq(node, kv.clone(), &row, oid, ns, guarded, "load");
         } else if !guarded && row.closed() && !row.is_map() && !row.present.is_empty() && matches!(kind, Kind::Dict | Kind::Frame) {
@@ -1228,9 +1253,7 @@ impl Analyzer {
             // (the parent's value was read on this path: its requirements are known here, none
             // so far — a path without the entry never read it)
             for (cs, _) in srcs.iter() {
-                if state.reqs.inner(&cs).is_none() {
-                    state.reqs.writable(&cs);
-                }
+                state.reqs.mark(&cs, crate::domain::ReqInfo::default());
             }
             let r = if srcs.is_empty() && row.mutators.is_empty() {
                 Row::top()

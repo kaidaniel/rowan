@@ -2197,12 +2197,11 @@ impl Analyzer {
                 self.frames.pop();
                 for (src, k) in st.reqs.diff_keys(&state.reqs) {
                     let Some(info) = st.reqs.get(&src, &k) else { continue };
-                    let tgt = state.reqs.writable(&src);
-                    let nv = match tgt.get(&k) {
+                    let nv = match state.reqs.get(&src, &k) {
                         Some(cur) => cur.join(&info),
                         None => info,
                     };
-                    tgt.insert(k, nv);
+                    state.reqs.set(&src, k, nv);
                 }
                 continue;
             }
@@ -2365,12 +2364,11 @@ impl Analyzer {
                     continue;
                 }
                 let Some(info) = st.reqs.get(&src, &k) else { continue };
-                let tgt = state.reqs.writable(&src);
-                let nv = match tgt.get(&k) {
+                let nv = match state.reqs.get(&src, &k) {
                     Some(cur) => cur.join(&info),
                     None => info,
                 };
-                tgt.insert(k, nv);
+                state.reqs.set(&src, k, nv);
             }
         }
     }
@@ -2844,7 +2842,7 @@ impl Analyzer {
     /// an object's facts: an object without them was never made on this path or was
     /// collected, and needs no reachability walk.
     pub fn has_facts(&self, oid: ObjId, state: &State) -> bool {
-        state.lens.get(&oid).is_some() || state.has_row(oid, Ns::Item) || state.has_row(oid, Ns::Attr) || state.slots.m.get_ref(&oid).is_some()
+        state.lens.get(&oid).is_some() || state.has_row(oid, Ns::Item) || state.has_row(oid, Ns::Attr) || state.slots.has_key(&oid)
     }
 
     /// The budget of a liveness walk for objects of `kind`: an unknown call's result (its records
@@ -2928,11 +2926,7 @@ impl Analyzer {
             }
         }
         // (the slot table in place: a walk visits the whole reachable heap)
-        if let Some(d) = state.slots.m.get_ref(&o) {
-            for v in d.values() {
-                push_value(v, work);
-            }
-        }
+        state.slots.each(&o, &mut |_, v| push_value(v, work));
         match state.elems.get_ref(&o) {
             Some(KeyVal::KeysOf(ko)) => work.extend(ko.objs.iter()),
             Some(KeyVal::Param(p)) => work.push(*p),

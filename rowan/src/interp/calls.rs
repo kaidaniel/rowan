@@ -25,35 +25,6 @@ pub struct DcSpec {
     pub kw_only: bool,
 }
 
-/// An object's slots in a call signature: the state's own shared table (no copy), equal by
-/// pointer or contents, hashed independently of order.
-#[derive(Clone)]
-pub struct SigSlots(Option<std::sync::Arc<rustc_hash::FxHashMap<crate::state::SlotKey, Value>>>);
-
-impl PartialEq for SigSlots {
-    fn eq(&self, o: &Self) -> bool {
-        match (&self.0, &o.0) {
-            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b) || **a == **b,
-            (None, None) => true,
-            (Some(a), None) | (None, Some(a)) => a.is_empty(),
-        }
-    }
-}
-impl Eq for SigSlots {}
-impl std::hash::Hash for SigSlots {
-    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        use std::hash::BuildHasher;
-        let Some(m) = &self.0 else { return 0usize.hash(h) };
-        let bh = rustc_hash::FxBuildHasher;
-        let mut acc: u64 = 0;
-        for e in m.iter() {
-            acc = acc.wrapping_add(bh.hash_one(e));
-        }
-        m.len().hash(h);
-        acc.hash(h);
-    }
-}
-
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Sig {
     foid: u32,
@@ -64,7 +35,7 @@ pub struct Sig {
     kwargs: Vec<(StrId, Value)>,
     star_args: Vec<Value>,
     star_kwargs: Vec<Value>,
-    heap: Vec<(u32, Option<Row>, Option<Row>, SigSlots, Option<KeyVal>, bool)>,
+    heap: Vec<(u32, Option<Row>, Option<Row>, Vec<(crate::state::SlotKey, Value)>, Option<KeyVal>, bool)>,
     guards: Vec<Vec<String>>,
     fr_single: bool,
     ctx: String,
@@ -1626,9 +1597,8 @@ impl Analyzer {
                         let site_id = info.sites.first().unwrap_or(s(&site));
                         state.require(src, *k, site_id, info.alternatives.clone(), info.caveats.clone(), info.alt_keys.clone());
                         if !info.always {
-                            let tgt = state.reqs.writable(&src);
-                            if let Some(cur) = tgt.get(k).cloned() {
-                                tgt.insert(*k, ReqInfo { always: false, ..cur });
+                            if let Some(cur) = state.reqs.get(&src, k) {
+                                state.reqs.set(&src, *k, ReqInfo { always: false, ..cur });
                             }
                         }
                     }
@@ -1819,7 +1789,7 @@ impl Analyzer {
                 for (src, k) in st.reqs.diff_keys(&pre_bind.reqs) {
                     if let Some(info) = st.reqs.get(&src, &k) {
                         if pre_bind.reqs.get(&src, &k).as_ref() != Some(&info) {
-                            rel.reqs.writable(&src).insert(k, info);
+                            rel.reqs.set(&src, k, info);
                         }
                     }
                 }
@@ -1840,14 +1810,12 @@ impl Analyzer {
                             fp.rows.push((o, ns));
                         }
                     }
-                    if let Some(d) = st.slots.m.get_ref(&o) {
-                        for (sk, v) in d.iter() {
-                            if !slots_have.contains(&(o, *sk)) {
-                                fp.slots.push((o, *sk));
-                            }
-                            work.extend(v.pts.iter().filter(|x| *x >= obj_mark_call));
+                    st.slots.each(&o, &mut |sk, v| {
+                        if !slots_have.contains(&(o, *sk)) {
+                            fp.slots.push((o, *sk));
                         }
-                    }
+                        work.extend(v.pts.iter().filter(|x| *x >= obj_mark_call));
+                    });
                     if st.elems.get(&o).is_some() && !elems_have.contains(&o) {
                         fp.elems.push(o);
                     }
@@ -2483,7 +2451,7 @@ impl Analyzer {
         seen.sort_unstable();
         let mut heap = Vec::with_capacity(seen.len());
         for oid in seen {
-            heap.push((oid, state.rows.get(&(oid, Ns::Item)), state.rows.get(&(oid, Ns::Attr)), SigSlots(state.slots.m.get_ref(&oid).cloned()), state.elems.get(&oid), self.obj(oid).single));
+            heap.push((oid, state.rows.get(&(oid, Ns::Item)), state.rows.get(&(oid, Ns::Attr)), state.slots.for_key(&oid), state.elems.get(&oid), self.obj(oid).single));
         }
         let guards: Vec<Vec<String>> = self
             .guards
