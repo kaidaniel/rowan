@@ -377,7 +377,9 @@ branches, and a known prefix for endless generators.
 * A bare `yield` yields `None`. A `yield` expression's value is `None` (iteration sends nothing),
   or unknown when the program calls `.send(` anywhere.
 * **Iterator protocol.** An iterator class whose `__iter__` returns `self` is iterated through
-  `__next__`.
+  `__next__`. While every call is decided (an item, or surely `StopIteration`) and changes only
+  the iterator's own state, the items are known in order; otherwise they are any number of what
+  `__next__` gives.
 
 ## 9. Requirements and schemas
 
