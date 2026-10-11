@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791707916526,
+  "lastUpdate": 1791708699714,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -304,6 +304,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: wall time",
             "value": 48.59,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 1323,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 688892,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 3483606,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 41664,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 154320,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "19003d40ad66bb5c149a0028f9b0465ed651452a",
+          "message": "Classes deriving from an external base through user classes (email's `Atom(TokenList(list))`) are open like direct subclasses, and instances of such classes have open item rows: `a.append(...)` and `a[0]` on them were \"definitely missing\" (email: 297 such verdicts once the hasattr fix let rowan reach that code; now none). email proven 118 -> 318 at work=550000, stdlib12k / rich unchanged. y448 (new; the oracle agrees). Golden 1026/1026, snapshots same, oracle 864/864, hover test passes. ROWAN_NO=openbaseinherit / openbaseitems: off\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T09:40:32+01:00",
+          "tree_id": "5b87f2d6d80e6b2ff60395a494cee8eac144be9b",
+          "url": "https://github.com/kaidaniel/rowan/commit/19003d40ad66bb5c149a0028f9b0465ed651452a"
+        },
+        "date": 1791708699081,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 301.82,
+            "unit": "s",
+            "extra": "cut at the 300 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1510,
+            "unit": "MB",
+            "extra": "cut at the 300 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 301.72,
+            "unit": "s",
+            "extra": "cut at the 300 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 12998,
+            "unit": "MB",
+            "extra": "cut at the 300 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 33.38,
             "unit": "s",
             "extra": "finished"
           },
