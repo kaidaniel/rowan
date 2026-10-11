@@ -1864,6 +1864,12 @@ impl Analyzer {
                     // (a builtin base answers nothing here: its own methods are not user code)
                     let found = found.filter(|fc| self.kind(*fc) != Kind::External || super::disabled("excinit"));
                     match found {
+                        // (`__new__` is a static method: `super().__new__(cls)` passes the class)
+                        Some(fc) if name == "__new__" && !super::disabled("usernew") => self.cls_slots.get(&(fc, Ns::Attr, nk)).cloned().unwrap_or_default(),
+                        None if name == "__new__" && !super::disabled("usernew") => {
+                            let q = "builtins.object.__new__";
+                            Value::obj(self.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, q, Payload::Str(q.to_string())))
+                        }
                         Some(fc) => {
                             let fv = self.cls_slots.get(&(fc, Ns::Attr, nk)).cloned().unwrap_or_default();
                             let mut out = Value::new();
@@ -2155,6 +2161,21 @@ impl Analyzer {
                 }
                 state.set_row(did, Ns::Item, row);
                 return Value::obj(did);
+            }
+        }
+        // what every instance has from `object` and its class (`__module__`, `__repr__`, …),
+        // when neither the class nor the instance defines it
+        if crate::summary::OBJECT_ATTRS.contains(&name) && name != "__dict__" && name != "__class__" && !super::disabled("objectattrs") {
+            if let Some(cls) = self.instance_class(oid) {
+                if self.class_lookup(cls, name).is_none() && state.slot_opt(oid, Ns::Attr, nk).is_none() {
+                    if !guarded {
+                        self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
+                    }
+                    return match name {
+                        "__module__" | "__doc__" | "__weakref__" => Value::data(&format!("{}@L{}", name, node.line)),
+                        _ => self.method_value(&format!("object.{}", name), &Value::obj(oid)),
+                    };
+                }
             }
         }
         // pydantic's API on a model instance (`model_dump`, `model_copy`, …)

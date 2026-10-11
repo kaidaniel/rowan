@@ -757,18 +757,32 @@ impl Analyzer {
                 return m(self, state, &call);
             }
         }
-        let row = if ci.open_base { Row::with_source(Source::new(&format!("instance {}@L{}", ci.name, node.line), SourceKind::Class)) } else { Row::new() };
-        // the allocation site includes the class: `cls()` with several possible classes must
-        // not collapse onto one instance (prototype: same site, last class wins)
-        let site = format!("{}:{}", super::site_string(node), ci.name);
-        let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", ci.name, node.line), Payload::Cls(cls), Some(row), Ns::Attr, None, None);
-        if ci.typed_dict {
-            state.set_row(inst, Ns::Item, Row::new());
-        } else if ci.open_base && !ci.dict_base && !super::disabled("openbaseitems") {
-            // (an external base — `list`, a library class — may hold items the program's code
-            // does not show: `append` / `super().__init__(items)` run there)
-            state.set_row(inst, Ns::Item, Row::with_source(Source::new(&format!("items of {}@L{}", ci.name, node.line), SourceKind::Class)));
+        // a class with its own `__new__`: the instance is what it returns, and `__init__` runs
+        // on it when it is an instance of the class
+        if let Some(owner) = self.class_lookup(cls, "__new__").filter(|_| !super::disabled("usernew")) {
+            let fv = self.cls_slots.get(&(owner, Ns::Attr, key_str_lit("__new__"))).cloned().unwrap_or_default();
+            let fns: Vec<ObjId> = fv.pts.iter().filter(|f| self.kind(*f) == Kind::Function).collect();
+            if !fns.is_empty() {
+                let mut nargs = vec![Value::obj(cls)];
+                nargs.extend(args.iter().cloned());
+                let mut out = Value::new();
+                for f in fns {
+                    let r = self.call_user(f, None, nargs.clone(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, None, false);
+                    out = out.join(&r);
+                }
+                if let Some(init) = self.class_lookup(cls, "__init__") {
+                    let iv = self.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
+                    let insts: Vec<ObjId> = out.pts.iter().filter(|o| self.kind(*o) == Kind::Instance && self.instance_class(*o).is_some_and(|c| self.mro(c).contains(&cls))).collect();
+                    for inst in insts {
+                        for f in iv.pts.iter().filter(|f| self.kind(*f) == Kind::Function).collect::<Vec<_>>() {
+                            self.call_user(f, Some(Value::obj(inst)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, None, false);
+                        }
+                    }
+                }
+                return out;
+            }
         }
+        let inst = self.alloc_instance(cls, node, state);
         // a pydantic model (without its own `__init__`): validation of the keyword input
         if crate::models::pydantic::is_validated(self, cls) && !super::disabled("pydantic") {
             let own_init = self.class_lookup(cls, "__init__").map(|c| crate::models::pydantic::is_validated(self, c) && self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__")))).unwrap_or(false);
@@ -844,6 +858,25 @@ impl Analyzer {
             self.exc_objs.insert(inst, name);
         }
         Value::obj(inst)
+    }
+
+    /// A fresh instance of user class `cls` allocated at `node`, without attributes (an
+    /// external base's may come from outside the program).
+    pub fn alloc_instance(&mut self, cls: ObjId, node: &Node, state: &mut State) -> ObjId {
+        let ci = self.class_info(cls);
+        let row = if ci.open_base { Row::with_source(Source::new(&format!("instance {}@L{}", ci.name, node.line), SourceKind::Class)) } else { Row::new() };
+        // the allocation site includes the class: `cls()` with several possible classes must
+        // not collapse onto one instance (prototype: same site, last class wins)
+        let site = format!("{}:{}", super::site_string(node), ci.name);
+        let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", ci.name, node.line), Payload::Cls(cls), Some(row), Ns::Attr, None, None);
+        if ci.typed_dict {
+            state.set_row(inst, Ns::Item, Row::new());
+        } else if ci.open_base && !ci.dict_base && !super::disabled("openbaseitems") {
+            // (an external base — `list`, a library class — may hold items the program's code
+            // does not show: `append` / `super().__init__(items)` run there)
+            state.set_row(inst, Ns::Item, Row::with_source(Source::new(&format!("items of {}@L{}", ci.name, node.line), SourceKind::Class)));
+        }
+        inst
     }
 
     /// The generated `__init__` of a dataclass / TypedDict / NamedTuple `cls` run on `inst`

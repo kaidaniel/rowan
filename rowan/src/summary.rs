@@ -98,6 +98,12 @@ pub struct Event {
 }
 
 /// (function, code held by its cells, classes of instance cells, classes of the arguments)
+/// The attributes every instance of a user class has (`dir(object())` with the class's
+/// `__module__`, `__doc__`, `__dict__`, `__weakref__`).
+pub const OBJECT_ATTRS: &[&str] = &[
+    "__class__", "__delattr__", "__dir__", "__doc__", "__eq__", "__format__", "__ge__", "__getattribute__", "__getstate__", "__gt__", "__hash__", "__init__", "__init_subclass__", "__le__", "__lt__", "__ne__", "__new__", "__reduce__", "__reduce_ex__", "__repr__", "__setattr__", "__sizeof__", "__str__", "__subclasshook__", "__module__", "__dict__", "__weakref__",
+];
+
 pub type SummaryKey = (ObjId, Vec<(ObjId, Vec<ObjId>)>, Vec<(ObjId, ObjId)>, Vec<(String, ObjId)>);
 
 /// How many distinct argument-class signatures one function is summarised for; beyond
@@ -1266,6 +1272,11 @@ impl Analyzer {
         }
         if self.kind(oid) != Kind::Instance {
             return false;
+        }
+        // (every instance has `object`'s attributes, and its class's `__module__` / `__doc__`;
+        // `__dict__` / `__weakref__` unless `__slots__` drop them: taken as there)
+        if OBJECT_ATTRS.contains(&name) && !crate::interp::disabled("objectattrs") {
+            return true;
         }
         match self.instance_class(oid) {
             // (`__getattr__` / `__getattribute__` answer any name)

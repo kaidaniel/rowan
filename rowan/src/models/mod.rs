@@ -72,6 +72,7 @@ impl Registry {
         r(&["builtins.getattr"], m_getattr);
         r(&["builtins.setattr"], m_setattr);
         r(&["builtins.object.__setattr__"], m_object_setattr);
+        r(&["builtins.object.__new__"], m_object_new);
         r(&["builtins.delattr"], m_delattr);
         r(&["builtins.hasattr"], m_hasattr);
         r(&["builtins.vars", "attr.asdict", "attrs.asdict"], m_vars);
@@ -1069,6 +1070,29 @@ fn m_object_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     m_setattr(an, st, c);
     an.bypass_setattr = saved;
     an.none_v.clone()
+}
+
+/// `object.__new__(cls)`: a fresh instance of each user class `cls` may be, without attributes;
+/// anything else (a class only a call site knows, an external class) is unknown.
+fn m_object_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let Some(cv) = c.args.first().cloned() else { return Value::new() };
+    let mut out = Value::new();
+    let mut other = !cv.kv.is_bot();
+    for o in cv.pts.iter() {
+        if an.kind(o) == Kind::Class && an.class_info_opt(o).is_some() {
+            let inst = an.alloc_instance(o, &c.node, st);
+            out = out.join(&Value::obj(inst));
+        } else {
+            if an.kind(o) == Kind::Ph {
+                an.record_event("concrete", o);
+            }
+            other = true;
+        }
+    }
+    if other {
+        out = out.join(&an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node));
+    }
+    out
 }
 
 fn m_delattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
