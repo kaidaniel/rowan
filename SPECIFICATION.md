@@ -180,7 +180,8 @@ each key, a key present only on some paths both run and skipped.
 Both branches of an `if` run on copies of the state unless the test is decided. The test
 narrows each branch:
 
-* `k in d` / `k not in d`, `d.get(k) is None`, `hasattr` narrow the row;
+* `k in d` / `k not in d`, `d.get(k) is None`, `hasattr` narrow the row (`hasattr` leaves out
+  instances whose class defines the name: they have it whatever their own attributes);
 * `x is None` and comparisons with literals narrow the name;
 * `isinstance(x, C)` narrows to objects of `C` (an unknown class keeps everything);
 * truthiness drops `None`, `0`, `""` and known-empty containers on the true branch;

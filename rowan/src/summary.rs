@@ -1235,7 +1235,7 @@ impl Analyzer {
         true
     }
 
-    fn class_resolves(&self, oid: ObjId, name: &str) -> bool {
+    pub(crate) fn class_resolves(&self, oid: ObjId, name: &str) -> bool {
         if self.kind(oid) != Kind::Instance {
             return false;
         }
