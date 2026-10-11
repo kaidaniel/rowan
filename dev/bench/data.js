@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791718155556,
+  "lastUpdate": 1791719533893,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -1006,6 +1006,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: objects",
             "value": 123883,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "ad57ae45b42495e11e7223e22a4a6cb08d33377f",
+          "message": "Soundness: a summary's attribute and item reads replayed on the objects a call passes are no longer classified against rows that do not decide them: a class object has the dunders of `type` and `object` and `mro` (and what its MRO defines); an object a model simulates (StringIO, compiled pattern, pydantic error, FastAPI objects) has the model's attributes, its row holds the model's own state; an instance whose class defines `__getattr__` / `__getattribute__` answers any attribute; a subscript of an instance whose class defines `__getitem__` calls it. Each was reported \"definitely missing\" (email: `cls.__name__` in `HeaderRegistry.__getitem__`, `StringIO.write` / `seek` / `readlines` / `truncate` in `BufferedSubFile.push`, `self[name]` in `HeaderRegistry.__call__`, met once the budgets were spent).\n\ny453-y455 (new, expectations by hand; the oracle agrees; each failed before). ROWAN_NO=classdunders / modelattrs / getattrcls / getitemcls: off.\n\nBench, work=550000: email missing 6 -> 0; stdlib12k missing 577 -> 567; rich objects 146k -> 44k, 981 -> 440 MB, verdicts unchanged. Golden 1034/1034, oracle 872/872, cargo test, snapshots (unchanged) pass.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T12:18:53+01:00",
+          "tree_id": "10275537835f7f3db735efae3be0588362e3be8f",
+          "url": "https://github.com/kaidaniel/rowan/commit/ad57ae45b42495e11e7223e22a4a6cb08d33377f"
+        },
+        "date": 1791719533270,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 1805.42,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1672,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 1805.38,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 7353,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 32.66,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 947,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 560904,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 2416464,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 28301,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 123839,
             "unit": "count",
             "extra": "finished"
           }
