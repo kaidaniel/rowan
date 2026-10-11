@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791719533893,
+  "lastUpdate": 1791720201256,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -1090,6 +1090,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: objects",
             "value": 123839,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "44edd3a7258808d71bd572eea4d5a23be8fb0421",
+          "message": "Soundness: a class's own `__new__` is called: `Cls(args)` is what `__new__(Cls, args)` returns, with `__init__` run on it when it is an instance of `Cls`; `object.__new__(cls)` (also `super().__new__(cls)`, a static method: not bound) is a fresh instance of each user class `cls` may be. `__new__` was ignored: the instance was a fresh empty one, and what `__new__` set read as definitely missing (`_pydecimal.Decimal` builds itself in `__new__`). Every instance has `object`'s attributes and its class's `__module__` / `__doc__` / `__dict__` / `__weakref__` (`OBJECT_ATTRS`), at module level and replayed from summaries (they were definitely missing; `__class__` / `__dict__` were already handled live).\n\ny456, y457 (new, expectations by hand; the oracle agrees; each failed before). ROWAN_NO=usernew / objectattrs: off.\n\nBench, work=550000: stdlib12k missing 567 -> 153 (all 412 were `Decimal` attributes set in `__new__` and instance dunders). Golden 1036/1036, oracle 874/874, cargo test, snapshots (unchanged) pass.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T12:29:53+01:00",
+          "tree_id": "4108117c23705c20c8fa2c0246ee4a8e64d37865",
+          "url": "https://github.com/kaidaniel/rowan/commit/44edd3a7258808d71bd572eea4d5a23be8fb0421"
+        },
+        "date": 1791720200305,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 1805.22,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1794,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 1805.27,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 9940,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 139.65,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 2239,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 1203429,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 21233474,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 34329,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 180171,
             "unit": "count",
             "extra": "finished"
           }
