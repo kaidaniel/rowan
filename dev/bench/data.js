@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791725964377,
+  "lastUpdate": 1791726861309,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -1510,6 +1510,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: objects",
             "value": 272634,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "12002d4955ece26db027d603c45a17d9d5d5b378",
+          "message": "Soundness: `rowan serve` starts every analysis with fresh thread state (the merged-object set, which made objects of a new analysis weak by the ids of an earlier one, the shape tables keyed by object ids, the cost counters); a call-cache hit replays what the run did more faithfully: deletions of rows / slots / element keys, length changes on their own, the whole facts of what the call made and its result reaches (they may have been collected meanwhile), lists' last elements cleared, an unreachable state after a run that never completes, and no hit for a run that raised while a try is active (its handlers need the state at each raise); deep call contexts are hashed on 64 bits (32 could merge two activations' strong objects).\n\nServe checked by hand (a torch case, another case, the first again: equal to the CLI's --facts); unit test merged_reset_between_analyses. The cache fixes were read in code: no small program reproducing them was found (hits need a run per call site repeated with the same observable input). ROWAN_NO=cacheborn / cacheraise / cachecompletes: off. The `\"print\"` allowlist entry is matched as `builtins.print` (the suggested-changes item was wrong; removed).\n\nBench, work=550000: stdlib12k's four false `Decimal._exp` / `_sign` / `_int` / `_is_special` missing are gone (coverage moved; no new `missing`; proven 1760 -> 1037 as cache hits under trys now run); email / rich unchanged. Golden 1047/1047, oracle 885/885, cargo test 25/25, snapshots (no new `missing`) pass.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-11T14:21:08+01:00",
+          "tree_id": "8923e3bebd23c0683851d63ae63ea15d4924ab2b",
+          "url": "https://github.com/kaidaniel/rowan/commit/12002d4955ece26db027d603c45a17d9d5d5b378"
+        },
+        "date": 1791726860698,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 1805.23,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1580,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 1805.33,
+            "unit": "s",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 6297,
+            "unit": "MB",
+            "extra": "cut at the 1800 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 1079.52,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 1387,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 4224694,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 82949019,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 53341,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 284160,
             "unit": "count",
             "extra": "finished"
           }
