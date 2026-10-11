@@ -163,6 +163,22 @@ thread_local! {
     static PARAM_ORDER: RefCell<FxHashMap<Sym, u32>> = RefCell::new(FxHashMap::default());
 }
 
+/// A new analysis on this thread: symbols are keyed by object ids, which start again.
+pub fn reset() {
+    T.with(|t| {
+        let mut t = t.borrow_mut();
+        t.syms.clear();
+        t.sym_map.clear();
+        t.atoms.clear();
+        t.atom_map.clear();
+        t.dims.clear();
+        t.dim_map.clear();
+        t.shapes.clear();
+        t.shape_map.clear();
+    });
+    PARAM_ORDER.with(|m| m.borrow_mut().clear());
+}
+
 /// `s` is the `i`-th parameter of its function (orients facts between parameters' dims).
 pub fn note_param(s: Sym, i: u32) {
     PARAM_ORDER.with(|m| {

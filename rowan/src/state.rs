@@ -758,6 +758,14 @@ mod tests2 {
     }
 
     #[test]
+    fn merged_reset_between_analyses() {
+        mark_merged(7);
+        assert!(is_merged(7));
+        reset_thread_state();
+        assert!(!is_merged(7));
+    }
+
+    #[test]
     fn reqs_survive_many_returns() {
         let src1 = Source::new("param f.x", SourceKind::Param);
         let src2 = Source::new("param g.a", SourceKind::Param);
@@ -814,6 +822,15 @@ pub fn mark_merged(oid: ObjId) {
 
 pub fn is_merged(oid: ObjId) -> bool {
     MERGED.with(|m| m.borrow().contains(&oid))
+}
+
+/// A new analysis on this thread (`rowan serve` runs every request on one): object ids start
+/// again, so the merged set and the cost counters do too.
+pub fn reset_thread_state() {
+    MERGED.with(|m| m.borrow_mut().clear());
+    FP_VISITS.with(|c| c.set(0));
+    crate::domain::reset_row_joins();
+    crate::shape::reset();
 }
 
 /// Lengths join to the one both sides have, else to unknown with the shorter known prefix and

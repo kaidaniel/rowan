@@ -72,6 +72,10 @@ pub struct Sig {
 
 pub struct CacheHit {
     pub raises: bool,
+    /// some path of the run returned (else the call never completes)
+    pub completes: bool,
+    /// the lengths the run changed
+    pub lens: Vec<ObjId>,
     pub ret: Value,
     pub fp_state: State,
     pub fp: Footprint,
@@ -1253,7 +1257,7 @@ impl Analyzer {
                     // the tabulation budgets), while the context string stays short
                     let mut h = rustc_hash::FxHasher::default();
                     std::hash::Hash::hash(&fr.ctx, &mut h);
-                    format!("h{:x}/{}", std::hash::Hasher::finish(&h) & 0xffff_ffff, site)
+                    format!("h{:x}/{}", std::hash::Hasher::finish(&h), site)
                 }
             } else {
                 site
@@ -1547,31 +1551,50 @@ impl Analyzer {
         // summary cache: same callee, same call site, same observable input → replay the effects
         let sig = self.call_signature(foid, &site, entry, &self_v, &args, &kwargs, &star_args, &star_kwargs, state);
         if let Some(sig) = sig.as_ref().filter(|_| !super::disabled("callcache")) {
-            if let Some(hit) = self.call_cache.get(sig).cloned() {
+            // (a run that raised, under a try that may catch it: the handlers need the state at
+            // each raise, which only a run records)
+            let hit = self.call_cache.get(sig).cloned().filter(|h| !(h.raises && !self.guards.is_empty() && !super::disabled("cacheraise")));
+            if let Some(hit) = hit {
                 if super::debug_enabled() {
                     eprintln!("cache hit for {} at {}", self.func_info(foid).qualname, site);
                 }
                 if hit.raises {
                     self.note_raise();
                 }
+                // (the facts the run changed, deletions too)
                 for k in &hit.fp.rows {
-                    if let Some(r) = hit.fp_state.rows.get(k) {
-                        state.rows.insert(*k, r);
+                    match hit.fp_state.rows.get(k) {
+                        Some(r) => state.rows.insert(*k, r),
+                        None => {
+                            state.rows.remove(k);
+                        }
                     }
                 }
                 for (oid, sk) in &hit.fp.slots {
-                    if let Some(v) = hit.fp_state.slots.get(oid, sk) {
-                        state.slots.set(oid, *sk, v);
+                    if matches!(sk.0, Ns::Pos | Ns::Elem) {
+                        state.clear_last(*oid);
+                    }
+                    match hit.fp_state.slots.get(oid, sk) {
+                        Some(v) => state.slots.set(oid, *sk, v),
+                        None => {
+                            state.slots.remove(oid, sk);
+                        }
                     }
                 }
                 for k in &hit.fp.elems {
-                    if let Some(v) = hit.fp_state.elems.get(k) {
-                        state.elems.insert(*k, v);
+                    match hit.fp_state.elems.get(k) {
+                        Some(v) => state.elems.insert(*k, v),
+                        None => {
+                            state.elems.remove(k);
+                        }
                     }
                 }
-                for k in hit.fp.slots.iter().map(|(o, _)| o).chain(hit.fp.elems.iter()) {
-                    if let Some(v) = hit.fp_state.lens.get(k) {
-                        state.lens.insert(*k, v);
+                for k in &hit.lens {
+                    match hit.fp_state.lens.get(k) {
+                        Some(v) => state.lens.insert(*k, v),
+                        None => {
+                            state.lens.remove(k);
+                        }
                     }
                 }
                 // recent objects the replayed call allocated: folded at the loop's back-edge
@@ -1623,6 +1646,9 @@ impl Analyzer {
                 let ret = hit.ret.clone();
                 let rows: Vec<(u32, Row)> = ret.pts.iter().filter(|o| self.is_record_like(*o)).map(|o| (o, state.row(o, Ns::Item))).collect();
                 self.summaries.entry((fi.qualname.clone(), site.clone())).or_insert((ret.clone(), rows));
+                if !hit.completes && !super::disabled("cachecompletes") {
+                    state.reachable = false;
+                }
                 return ret;
             }
         }
@@ -1797,7 +1823,38 @@ impl Analyzer {
                         }
                     }
                 }
-                let fp = st.footprint(&pre_bind);
+                let mut fp = st.footprint(&pre_bind);
+                // (what the call made that its result reaches, whole: a later hit replays it
+                // into a state where those objects may have been collected meanwhile)
+                if !super::disabled("cacheborn") {
+                    let mut work: Vec<ObjId> = ret.pts.iter().filter(|o| *o >= obj_mark_call).collect();
+                    let mut seen: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
+                    let rows_have: rustc_hash::FxHashSet<(ObjId, Ns)> = fp.rows.iter().copied().collect();
+                    let slots_have: rustc_hash::FxHashSet<(ObjId, crate::state::SlotKey)> = fp.slots.iter().copied().collect();
+                    let elems_have: rustc_hash::FxHashSet<ObjId> = fp.elems.iter().copied().collect();
+                    while let Some(o) = work.pop() {
+                        if !seen.insert(o) || seen.len() > 4096 {
+                            continue;
+                        }
+                        for ns in [Ns::Item, Ns::Attr] {
+                            if st.has_row(o, ns) && !rows_have.contains(&(o, ns)) {
+                                fp.rows.push((o, ns));
+                            }
+                        }
+                        if let Some(d) = st.slots.m.get_ref(&o) {
+                            for (sk, v) in d.iter() {
+                                if !slots_have.contains(&(o, *sk)) {
+                                    fp.slots.push((o, *sk));
+                                }
+                                work.extend(v.pts.iter().filter(|x| *x >= obj_mark_call));
+                            }
+                        }
+                        if st.elems.get(&o).is_some() && !elems_have.contains(&o) {
+                            fp.elems.push(o);
+                        }
+                    }
+                }
+                let lens_changed: Vec<ObjId> = st.lens.diff_keys(&pre_bind.lens);
                 let mut fp_state = State::new();
                 for k in &fp.rows {
                     if let Some(r) = st.rows.get(k) {
@@ -1814,6 +1871,11 @@ impl Analyzer {
                         fp_state.elems.insert(*k, v);
                     }
                 }
+                for k in &lens_changed {
+                    if let Some(v) = st.lens.get(k) {
+                        fp_state.lens.insert(*k, v);
+                    }
+                }
                 fp_state.reqs = rel.reqs;
                 let cur_chain = self.call_chain.clone();
                 let rel_verdicts: Vec<Verdict> = self.verdicts[verdict_mark..]
@@ -1827,7 +1889,7 @@ impl Analyzer {
                     })
                     .collect();
                 let raises = self.raise_stack.last().copied().unwrap_or(false);
-                self.call_cache.insert(sig, Rc::new(CacheHit { raises, ret: ret.clone(), fp_state, fp, verdicts: rel_verdicts }));
+                self.call_cache.insert(sig, Rc::new(CacheHit { raises, completes: st.reachable, lens: lens_changed, ret: ret.clone(), fp_state, fp, verdicts: rel_verdicts }));
             }
         }
         // the generator's body runs here, eagerly, but its caller sees the heap only where the

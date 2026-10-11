@@ -606,6 +606,10 @@ pub fn row_joins() -> usize {
     ROW_JOINS.with(|c| c.get())
 }
 
+pub fn reset_row_joins() {
+    ROW_JOINS.with(|c| c.set(0));
+}
+
 impl Default for Row {
     fn default() -> Self {
         EMPTY_ROW.with(|r| r.clone())

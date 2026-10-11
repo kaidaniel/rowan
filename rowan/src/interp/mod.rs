@@ -1211,6 +1211,7 @@ pub fn site_string(n: &Node) -> String {
 
 impl Analyzer {
     pub fn new(source: String, filename: &str, search_paths: Vec<String>, analyse_entry_points: bool, follow_imports: bool, use_summaries: Option<bool>) -> Result<Analyzer, String> {
+        crate::state::reset_thread_state();
         crate::models::pynum::set_opaque(false);
         crate::models::pynum::reset_used();
         crate::models::chrono::reset_used();
