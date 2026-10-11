@@ -63,9 +63,10 @@ and macOS, then the oracle on Linux. The torch oracle runs only on a manual disp
   * `#@value NAME: exactly= | unknown | includes=`;
   * `#@schema src: always= sometimes= only=`;
   * floors `possible=` / `definite_within=`; `#@todo …` for known imprecision; `#@argv …`;
-    `#@objects <= N` / `#@tabulations <= N` / `#@joins <= N` / `#@work <= N` (bounds on the
-    objects made, per-call-site body runs, joins of two different rows, statements run: for
-    blow-up cases, N by hand); `#@limits k=v,…` (the case's `ROWAN_LIMITS`);
+    `#@objects <= N` / `#@tabulations <= N` / `#@joins <= N` / `#@work <= N` /
+    `#@visits <= N` (bounds on the objects made, per-call-site body runs, joins of two
+    different rows, statements run, heap entries walks and footprint joins visit: for blow-up
+    cases, N by hand); `#@limits k=v,…` (the case's `ROWAN_LIMITS`);
   * torch: `#@shape`.
 
   A directive-only line applies to the code line above. `possibly k` also holds when rowan's
@@ -85,7 +86,7 @@ and macOS, then the oracle on Linux. The torch oracle runs only on a manual disp
 * `ROWAN_DEBUG=1|2`:
   * `1`: tabulation reasons (`tabulate …`, and `tabrun F (why)` for every per-call-site run:
     event / generator / model / torch / once / genconcrete), summaries, budgets, and a `work:`
-    line at the end with counts (statements, units, body runs, objects, row joins);
+    line at the end with counts (statements, units, body runs, objects, row joins, visits);
   * `2`: also every event, raise and try decision.
 * `ROWAN_NO=a,b` switches refinements off by name (`rg 'disabled\("' rowan/src` lists them).
   Use it to bisect which refinement causes a result.
@@ -101,6 +102,8 @@ and macOS, then the oracle on Linux. The torch oracle runs only on a manual disp
   With `ROWAN_DEBUG=1`, `ROWAN_GCDBG=1` prints what each collection drops.
 * `ROWAN_FOLLOW=pkg,…` is the same as `--follow`. `ROWAN_TODO=check` also checks `#@todo`s,
   to see which to-dos the engine now meets.
+* Work units count liveness-walk visits too: a change removing walks spends a `work=N`
+  budget on more statements. Compare progress in equal time (`ms=60000,hard=60000`).
 * **Profiling:** use short runs (a few seconds), several in parallel, long ones in the
   background. Use `sample <pid> 3` on the release binary (inclusive time per function from its
   call tree), and `MallocStackLogging=lite` + `malloc_history <pid> -allBySize` for memory
@@ -172,11 +175,8 @@ editor extension (talks to `rowan serve`).
 | oracle | ~1.5 min | cases in parallel (one thread per CPU) |
 | `j93` (830 lines) / `m96_pkg` (1,716) | 0.09 / 0.10 s | |
 | `proto_summary.py` (1.2k, self-referential) | 2.1 s (`--facts` 3.2 s, 13.6 MB) | |
-| email (stdlib, 10k lines) / rich (38k) | ~10 / ~11 s | cut by the hard deadline; rich 1.1 GB |
-| stdlib12k without deadlines | ~20 s | `bench/`; rich does not finish without deadlines (3.0) |
-
-Large programs are not yet run to completion, and precision on real repositories has not
-been measured.
+| email (stdlib, 10k lines) / stdlib12k / rich (38k), `work=550000` | ~6 / ~11 / ~140 s | rich 3 GB |
+| stdlib12k without deadlines | ~80 s, 2 GB | email / rich do not finish without deadlines (3.0) |
 
 ## Known problems
 
@@ -185,8 +185,8 @@ items and precision to-dos are listed, each with how to reproduce it,
 in `SUGGESTED_CHANGES.md`. The main ones:
 
 * runs cut by the clock deadlines depend on machine load (`ROWAN_LIMITS=work=N` does not);
-* rich does not finish without deadlines (146k objects at `work=550000`, mostly from the
-  pretty printer's walk over unknown values).
+* email and rich do not finish without deadlines: no global bound on work (`SUGGESTED_CHANGES`
+  3.0); liveness walks and generator / recursion joins dominate.
 
 Other limits:
 

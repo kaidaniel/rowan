@@ -1765,7 +1765,9 @@ impl Analyzer {
             }
             // (past the hard deadline no walk: the site's object is taken as still in use,
             // so it is merged — weak, always sound)
-            let hard = existed == Some(oid) && self.over_hard_deadline();
+            // (an unknown call's result allocated again: taken as still in use without a walk,
+            // and merged — its rows are open anyway; walking for it dominated large runs)
+            let hard = existed == Some(oid) && (self.over_hard_deadline() || (kind == Kind::Unknown && !disabled("unkwalk")));
             if existed == Some(oid) && (hard || model_held || self.is_live(oid, state)) {
                 // allocated again while the earlier object is still reachable (a method run
                 // twice on one receiver, a call repeated in a loop)

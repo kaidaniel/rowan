@@ -393,7 +393,32 @@ impl State {
         if !o.reachable {
             return;
         }
-        for k in &fp.rows {
+        // Only where `o` differs from `self` can a join change anything: a structural diff of
+        // the two (they descend from one another and share structure: the diff costs what
+        // differs), restricted to the footprint. A recursive call answered by its running
+        // activation joins that activation's footprint at every call: per key it was calls ×
+        // footprint lookups.
+        let diff = !crate::interp::disabled("fpdiff");
+        let rows: Vec<(ObjId, Ns)> = if diff {
+            let s: rustc_hash::FxHashSet<(ObjId, Ns)> = fp.rows.iter().copied().collect();
+            o.rows.diff_keys(&self.rows).into_iter().filter(|k| s.contains(k)).collect()
+        } else {
+            fp.rows.clone()
+        };
+        let slots: Vec<(ObjId, SlotKey)> = if diff {
+            let s: rustc_hash::FxHashSet<(ObjId, SlotKey)> = fp.slots.iter().copied().collect();
+            o.slots.diff_keys(&self.slots).into_iter().filter(|k| s.contains(k)).collect()
+        } else {
+            fp.slots.clone()
+        };
+        let elems: Vec<ObjId> = if diff {
+            let s: rustc_hash::FxHashSet<ObjId> = fp.elems.iter().copied().collect();
+            o.elems.diff_keys(&self.elems).into_iter().filter(|k| s.contains(k)).collect()
+        } else {
+            fp.elems.clone()
+        };
+        FP_VISITS.with(|c| c.set(c.get() + rows.len() + slots.len() + elems.len()));
+        for k in &rows {
             let Some(v) = o.rows.get(k) else { continue };
             match self.rows.get(k) {
                 None => self.rows.insert(*k, v),
@@ -404,10 +429,15 @@ impl State {
                 }
             }
         }
-        for (oid, sk) in &fp.slots {
-            if matches!(sk.0, Ns::Pos | Ns::Elem) {
-                self.clear_last(*oid);
+        // (the callee changed these lists' elements: their last element is not known here)
+        if !self.lasts.is_empty() {
+            for (oid, sk) in &fp.slots {
+                if matches!(sk.0, Ns::Pos | Ns::Elem) {
+                    self.clear_last(*oid);
+                }
             }
+        }
+        for (oid, sk) in &slots {
             let Some(v) = o.slots.get(oid, sk) else { continue };
             match self.slots.get(oid, sk) {
                 None => self.slots.set(oid, *sk, v),
@@ -422,6 +452,12 @@ impl State {
         let mut touched: Vec<ObjId> = fp.slots.iter().map(|(o, _)| *o).chain(fp.elems.iter().copied()).collect();
         touched.sort_unstable();
         touched.dedup();
+        let touched: Vec<ObjId> = if diff {
+            let s: rustc_hash::FxHashSet<ObjId> = touched.into_iter().collect();
+            o.lens.diff_keys(&self.lens).into_iter().filter(|k| s.contains(k)).collect()
+        } else {
+            touched
+        };
         for k in touched {
             if let Some(v) = o.lens.get(&k) {
                 match self.lens.get(&k) {
@@ -434,7 +470,7 @@ impl State {
                 }
             }
         }
-        for k in &fp.elems {
+        for k in &elems {
             let Some(v) = o.elems.get(k) else { continue };
             match self.elems.get(k) {
                 None => self.elems.insert(*k, v),
@@ -444,6 +480,18 @@ impl State {
                     }
                 }
             }
+        }
+        if diff {
+            for (src, k) in o.reqs.diff_keys(&self.reqs) {
+                let Some(info) = o.reqs.get(&src, &k) else { continue };
+                let tgt = self.reqs.writable(&src);
+                let nv = match tgt.get(&k) {
+                    Some(cur) => cur.join(&info),
+                    None => info.demote(),
+                };
+                tgt.insert(k, nv);
+            }
+            return;
         }
         for (src, d) in o.reqs.items() {
             if let Some(cur) = self.reqs.inner(&src) {
@@ -786,4 +834,15 @@ pub fn join_len(a: &(Option<usize>, usize, u16), b: &(Option<usize>, usize, u16)
     let (ma, mb) = (mask(a), mask(b));
     let m = if ma != 0 && mb != 0 && !crate::interp::disabled("lenalts") { ma | mb } else { 0 };
     (None, pa.min(pb), m)
+}
+
+thread_local! {
+    /// footprint entries visited by `join_heap_fp` (a deterministic cost measure: golden
+    /// `#@visits <= N`, with the liveness walks' visits)
+    static FP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Footprint entries visited by `join_heap_fp` so far.
+pub fn fp_visits() -> usize {
+    FP_VISITS.with(|c| c.get())
 }
