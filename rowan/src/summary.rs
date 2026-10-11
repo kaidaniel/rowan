@@ -1889,13 +1889,12 @@ impl Analyzer {
                         }
                         // (the handler's path needs the key too — its exception fired for it — and
                         // what the callee read before it)
+                        // (a structural diff: it costs what the call added, not all requirements)
                         let mut p2 = pre.copy();
-                        for (src, d) in state.reqs.items() {
-                            for (k2, info) in d.iter() {
-                                let had = pre.reqs.inner(&src).map(|x| x.contains_key(k2)).unwrap_or(false);
-                                if !had {
-                                    p2.reqs.writable(&src).insert(*k2, info.clone());
-                                }
+                        for (src, k2) in state.reqs.diff_keys(&pre.reqs) {
+                            let had = pre.reqs.get(&src, &k2).is_some();
+                            if let (false, Some(info)) = (had, state.reqs.get(&src, &k2)) {
+                                p2.reqs.writable(&src).insert(k2, info);
                             }
                         }
                         self.may_raise_here(exc, &mut p2);

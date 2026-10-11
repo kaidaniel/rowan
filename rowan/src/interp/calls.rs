@@ -1816,12 +1816,10 @@ impl Analyzer {
         if let Some(sig) = sig {
             if !self.rec_hit.contains(&key) {
                 let mut rel = State::new();
-                for (src, d) in st.reqs.items() {
-                    let base = pre_bind.reqs.inner(&src);
-                    for (k, info) in d.iter() {
-                        let same = base.as_ref().and_then(|b| b.get(k)).map(|b| b == info).unwrap_or(false);
-                        if !same {
-                            rel.reqs.writable(&src).insert(*k, info.clone());
+                for (src, k) in st.reqs.diff_keys(&pre_bind.reqs) {
+                    if let Some(info) = st.reqs.get(&src, &k) {
+                        if pre_bind.reqs.get(&src, &k).as_ref() != Some(&info) {
+                            rel.reqs.writable(&src).insert(k, info);
                         }
                     }
                 }

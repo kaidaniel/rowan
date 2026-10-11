@@ -2194,15 +2194,14 @@ impl Analyzer {
                 self.entry_scope = None;
                 self.entry_run = saved_entry;
                 self.frames.pop();
-                for (src, d) in st.reqs.items() {
+                for (src, k) in st.reqs.diff_keys(&state.reqs) {
+                    let Some(info) = st.reqs.get(&src, &k) else { continue };
                     let tgt = state.reqs.writable(&src);
-                    for (k, info) in d.iter() {
-                        let nv = match tgt.get(k) {
-                            Some(cur) => cur.join(info),
-                            None => info.clone(),
-                        };
-                        tgt.insert(*k, nv);
-                    }
+                    let nv = match tgt.get(&k) {
+                        Some(cur) => cur.join(&info),
+                        None => info,
+                    };
+                    tgt.insert(k, nv);
                 }
                 continue;
             }
@@ -2360,18 +2359,17 @@ impl Analyzer {
             let own = format!("param {}.", fi.py_qualname());
             let span = (fi.node.node().line, fi.node.node().end_line);
             let in_main = fi.module == self.main_module;
-            for (src, d) in st.reqs.items() {
+            for (src, k) in st.reqs.diff_keys(&state.reqs) {
                 if quiet && !own_source(&crate::domain::source_label(src), &own, span, in_main) {
                     continue;
                 }
+                let Some(info) = st.reqs.get(&src, &k) else { continue };
                 let tgt = state.reqs.writable(&src);
-                for (k, info) in d.iter() {
-                    let nv = match tgt.get(k) {
-                        Some(cur) => cur.join(info),
-                        None => info.clone(),
-                    };
-                    tgt.insert(*k, nv);
-                }
+                let nv = match tgt.get(&k) {
+                    Some(cur) => cur.join(&info),
+                    None => info,
+                };
+                tgt.insert(k, nv);
             }
         }
     }
