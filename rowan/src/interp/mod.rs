@@ -1721,7 +1721,7 @@ impl Analyzer {
             // (an unknown call's result allocated again: taken as still in use without a walk,
             // and merged — its rows are open anyway; walking for it dominated large runs)
             let hard = existed == Some(oid) && (self.over_hard_deadline() || (kind == Kind::Unknown));
-            if existed == Some(oid) && (hard || model_held || self.is_live(oid, state)) {
+            if existed == Some(oid) && (hard || model_held || (self.has_facts(oid, state) && self.is_live(oid, state))) {
                 // allocated again while the earlier object is still reachable (a method run
                 // twice on one receiver, a call repeated in a loop)
                 if single && !self.recent_stack.is_empty() && !hard {
@@ -1748,6 +1748,7 @@ impl Analyzer {
                         }).collect();
                         let first_free = made.iter().position(|(_, v)| v.is_none()).unwrap_or(made.len());
                         let olds: Vec<ObjId> = made[..first_free].iter().filter_map(|(_, v)| *v).collect();
+                        let olds: Vec<ObjId> = olds.into_iter().filter(|o| self.has_facts(*o, state)).collect();
                         let live = if olds.is_empty() { FxHashSet::default() } else { self.live_among(&olds, state) };
                         let pick = made.iter().position(|(_, v)| match v { None => true, Some(o) => !live.contains(o) });
                         if let Some(i) = pick {
@@ -2836,6 +2837,14 @@ impl Analyzer {
     /// active frame, loop overlays, cells, module objects, narrowed values, the return value?
     pub fn is_live(&self, oid: ObjId, state: &State) -> bool {
         !self.live_among(&[oid], state).is_empty()
+    }
+
+    /// May the program still hold `oid` on this path? Every allocation records the object's
+    /// length entry in the state, and only the collector (at returns and loop exits) forgets
+    /// an object's facts: an object without them was never made on this path or was
+    /// collected, and needs no reachability walk.
+    pub fn has_facts(&self, oid: ObjId, state: &State) -> bool {
+        state.lens.get(&oid).is_some() || state.has_row(oid, Ns::Item) || state.has_row(oid, Ns::Attr) || state.slots.m.get_ref(&oid).is_some()
     }
 
     /// The budget of a liveness walk for objects of `kind`: an unknown call's result (its records

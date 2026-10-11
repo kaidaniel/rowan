@@ -1585,6 +1585,7 @@ impl Analyzer {
 
     fn instantiate_inner(&mut self, summary: &Rc<Summary>, bind: &IndexMap<ObjId, Value>, state: &mut State, node: &Node, call_ctx: &str, ctx_single: bool) -> Value {
         let mut pre = state.copy();
+        let req_mark = crate::state::req_log_mark();
         let mut chain = self.call_chain.clone();
         if summary.partial.get() && !chain.is_empty() {
             chain.pop();
@@ -1889,9 +1890,10 @@ impl Analyzer {
                         }
                         // (the handler's path needs the key too — its exception fired for it — and
                         // what the callee read before it)
-                        // (a structural diff: it costs what the call added, not all requirements)
+                        // (what this call required so far: the requirement log since its start, not
+                        // a scan of every requirement — per access that was quadratic)
                         let mut p2 = pre.copy();
-                        for (src, k2) in state.reqs.diff_keys(&pre.reqs) {
+                        for (src, k2) in crate::state::req_log_since(req_mark) {
                             let had = pre.reqs.get(&src, &k2).is_some();
                             if let (false, Some(info)) = (had, state.reqs.get(&src, &k2)) {
                                 p2.reqs.writable(&src).insert(k2, info);
