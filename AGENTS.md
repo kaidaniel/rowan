@@ -89,7 +89,7 @@ and macOS, then the oracle on Linux. The torch oracle runs only on a manual disp
   hard deadlines, budgets, call-string depth and access-path depth. `work=550000` (about 2 s
   here) puts the deadlines on work units instead: reproducible runs of large programs for
   comparisons and profiles (the `work:` line of `ROWAN_DEBUG=1` shows the units).
-* Experimental, off by default (measured not worth it, SUGGESTED_CHANGES 3.1):
+* Experimental, off by default (measured not worth it, 1ba1df6):
   `ROWAN_LIMITS=genfull=1` (summaries for every generator). Summary variants per decided
   outcome were removed again (code in 96fa750).
 * `ROWAN_SUMMARIES=0`: the old per-call-site engine, with no summaries.
@@ -182,7 +182,8 @@ items and precision to-dos are listed, each with how to reproduce it,
 in `SUGGESTED_CHANGES.md`. The main ones:
 
 * runs cut by the clock deadlines depend on machine load (`ROWAN_LIMITS=work=N` does not);
-* the `exits` fix doubled the objects on rich.
+* rich does not finish without deadlines (146k objects at `work=550000`, mostly from the
+  pretty printer's walk over unknown values).
 
 Other limits:
 
@@ -191,6 +192,6 @@ Other limits:
 
 ## Where to go next
 
-Work `SUGGESTED_CHANGES.md` in order:
-the performance items (the rich object doubling, the `summarise_sig` tables, a work-based
-budget), the on-demand server experiment, and the precision to-dos (`#@todo`s in the suites).
+Work `SUGGESTED_CHANGES.md` in order (it lists only avenues not yet tried): rich without
+deadlines and the liveness walks, the precision lost by cost cuts, the on-demand server, and
+the precision to-dos (`#@todo`s in the suites).
