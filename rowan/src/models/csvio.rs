@@ -475,7 +475,7 @@ pub fn m_stdobj(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             Some(items) => items,
                             None => {
                                 // rows of unknown count
-                                let e = c.args.first().map(|a| an.iterate(a, &c.node, st).elem.one_or_empty()).unwrap_or_default();
+                                let e = c.args.first().map(|a| { let it_ = an.iterate(a, &c.node, st); an.elem_value(&it_.elem, &c.node, "el") }).unwrap_or_default();
                                 vec![e, Value::data("rows")]
                             }
                         }
@@ -823,7 +823,7 @@ fn m_exitstack(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, recv: &V
                         let it = an.iterate(&Value::obj(o), &c.node, st);
                         outs.push(match it.items {
                             Some(items) if !items.is_empty() => items[0].clone(),
-                            _ => it.elem.one_or_empty(),
+                            _ => an.elem_value(&it.elem, &c.node, "el"),
                         });
                     }
                     Kind::Instance => {

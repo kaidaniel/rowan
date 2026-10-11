@@ -155,7 +155,7 @@ impl Analyzer {
 
 fn items(an: &mut Analyzer, v: &Value, node: &Node, st: &mut State) -> (Option<Vec<Value>>, Value) {
     let it = an.iterate(v, node, st);
-    let e = it.elem.one_or_empty();
+    let e = an.elem_value(&it.elem, node, "el");
     (it.items, e)
 }
 

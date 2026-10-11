@@ -802,7 +802,7 @@ impl Analyzer {
             let it = self.iterate(&l, node, state);
             let markers: Vec<Value> = match it.items {
                 Some(items) => items,
-                None => vec![it.elem.one_or_empty()],
+                None => vec![self.elem_value(&it.elem, node, "el")],
             };
             for m in markers {
                 for o in m.pts.iter() {

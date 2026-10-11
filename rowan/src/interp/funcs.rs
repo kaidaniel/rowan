@@ -42,13 +42,6 @@ impl Elem {
             Elem::Pair(k, v) => k.join(v),
         }
     }
-    /// The element as a plain value; a pair degrades to nothing (the prototype's `Value()`).
-    pub fn one_or_empty(&self) -> Value {
-        match self {
-            Elem::One(v) => v.clone(),
-            Elem::Pair(..) => Value::new(),
-        }
-    }
 }
 
 pub struct Iteration {
@@ -836,6 +829,19 @@ impl Analyzer {
         None
     }
 
+    /// An iteration's element as one value: a (key, value) pair is a pair object (what
+    /// `enumerate` / `zip` / a starred item hand on, unpacked later).
+    pub fn elem_value(&mut self, e: &Elem, node: &Node, tag: &str) -> Value {
+        match e {
+            Elem::One(v) => v.clone(),
+            Elem::Pair(k, v) => {
+                let ctx = self.frame().ctx.clone();
+                let pid = self.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), tag), &ctx, false, "pair", Payload::Pair(k.clone(), v.clone()));
+                Value::obj(pid)
+            }
+        }
+    }
+
     pub fn iterate(&mut self, v: &Value, node: &Node, state: &mut State) -> Iteration {
         // one of several containers (or strings): their items are alternatives, not one
         // sequence — joined position by position when every one is a sequence of one known
@@ -993,12 +999,12 @@ impl Analyzer {
                     let strict = self.zip_strict.contains(&oid);
                     let (ki_items, vi_items) = match (ki.items.clone(), vi.items.clone()) {
                         (Some(k), None) if strict => {
-                            let e = vi.elem.flat_or_one();
+                            let e = self.elem_value(&vi.elem, node, "zv");
                             let n = k.len();
                             (Some(k), Some(vec![e; n]))
                         }
                         (None, Some(v)) if strict => {
-                            let e = ki.elem.flat_or_one();
+                            let e = self.elem_value(&ki.elem, node, "zk");
                             let n = v.len();
                             (Some(vec![e; n]), Some(v))
                         }
@@ -1017,7 +1023,8 @@ impl Analyzer {
                         _ => items = None,
                     }
                     pair = true;
-                    pairs.push((ki.elem.flat_or_one(), vi.elem.flat_or_one()));
+                    let (kv1, vv1) = (self.elem_value(&ki.elem, node, "zk"), self.elem_value(&vi.elem, node, "zv"));
+                    pairs.push((kv1, vv1));
                 }
                 Kind::Enumerate => {
                     let Payload::Enumerate(inner, start) = self.obj(oid).payload.clone() else { continue };
@@ -1036,7 +1043,8 @@ impl Analyzer {
                         _ => items = None,
                     }
                     pair = true;
-                    pairs.push((Value::data("index"), ii.elem.one_or_empty()));
+                    let iv = self.elem_value(&ii.elem, node, "en");
+                    pairs.push((Value::data("index"), iv));
                 }
                 Kind::Class if self.enum_members.contains_key(&oid) => {
                     // an Enum class: its members in order
@@ -1518,13 +1526,3 @@ fn tuple_key_columns(kv: &KeyVal, n: usize) -> Option<Vec<Value>> {
     Some(cols)
 }
 
-impl Elem {
-    /// For zip: the element of the inner iteration as one value (a pair's key joined with
-    /// its value — the prototype uses the key part for pairs, `kelem`).
-    pub fn flat_or_one(&self) -> Value {
-        match self {
-            Elem::One(v) => v.clone(),
-            Elem::Pair(k, _) => k.clone(),
-        }
-    }
-}

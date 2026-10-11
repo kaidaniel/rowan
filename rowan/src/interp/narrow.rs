@@ -61,7 +61,8 @@ impl Analyzer {
                             // (Decimal / Fraction / datetime literals equal others by value, not
                             // as keys: no narrowing by key identity)
                             let lv0 = self.load_name(s(l.id.as_str()), &Node::none(), state);
-                            let valued = |k: KeyId| crate::models::pynum::is_num_key(k) || crate::models::chrono::is_chrono_key(k);
+                            // (numbers too: `1 == 1.0 == True` though their keys differ)
+                            let valued = |k: KeyId| crate::models::pynum::is_num_key(k) || crate::models::chrono::is_chrono_key(k) || intern::key_is_number(k) || intern::with_key(k, |kk| matches!(kk, intern::Key::Bool(_)));
                             let by_value = ks.iter().any(valued) || kv_literals(&lv0.kv).iter().any(valued);
                             if !ks.is_empty() && !by_value {
                                 self.narrow_kv(s(l.id.as_str()), &ks, eq, state);

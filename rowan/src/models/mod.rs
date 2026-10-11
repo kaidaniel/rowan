@@ -896,7 +896,7 @@ fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     if c.args.len() == 1 {
         let it = an.iterate(&c.args[0], &c.node, st);
-        let elem = it.elem.one_or_empty();
+        let elem = an.elem_value(&it.elem, &c.node, "el");
         if let Some(kf) = c.kw("key") {
             if !kf.pts.is_empty() {
                 an.call_value(&kf, &c.node, None, st, Some(vec![elem.clone()]));
@@ -1424,7 +1424,7 @@ fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
             }
         }
-        let elem = it.elem.one_or_empty();
+        let elem = an.elem_value(&it.elem, &c.node, "el");
         let res = if c.qual.ends_with("filter") {
             // the predicate still runs on the items (its reads are the program's)
             if !c.args[0].pts.is_empty() {
@@ -1433,7 +1433,7 @@ fn m_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             elem
         } else {
             let mut call_args = vec![elem];
-            call_args.extend(others.iter().map(|o| o.elem.one_or_empty()));
+            call_args.extend(others.iter().map(|o| an.elem_value(&o.elem, &c.node, "el")));
             an.call_value(&c.args[0], &c.node, None, st, Some(call_args))
         };
         st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(res.pts.clone(), crate::models::torch::elem_kv(&res.kv)), true);
@@ -1467,7 +1467,7 @@ fn m_reduce(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         return acc;
     }
-    let elem = it.elem.one_or_empty();
+    let elem = an.elem_value(&it.elem, &c.node, "el");
     let start = init.unwrap_or_else(|| elem.clone());
     let r = an.call_value(&f, &c.node, None, st, Some(vec![start.clone(), elem]));
     r.join(&start)
@@ -2548,7 +2548,7 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             if name == "extend" {
                 ext_items = it.items.clone();
             }
-            it.elem.one_or_empty()
+            an.elem_value(&it.elem, &c.node, "el")
         } else {
             c.args.last().cloned().unwrap_or_default()
         };
@@ -2702,7 +2702,7 @@ fn m_set(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let srcs: Vec<Value> = std::iter::once(recv.clone()).chain(if name == "union" { c.args.clone() } else { vec![] }).collect();
             for v in &srcs {
                 let it = an.iterate(v, &c.node, st);
-                let e = it.elem.one_or_empty();
+                let e = an.elem_value(&it.elem, &c.node, "el");
                 kv = kv_join(&kv, &e.kv);
                 elem = elem.join(&e);
             }
@@ -2745,7 +2745,7 @@ fn m_set(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         let mut kv = st.elems.get(&oid).unwrap_or(KeyVal::Bot);
                         if matches!(name.as_str(), "add" | "update") {
                             for a in &c.args {
-                                let e = if name == "add" { a.clone() } else { an.iterate(a, &c.node, st).elem.one_or_empty() };
+                                let e = if name == "add" { a.clone() } else { { let it_ = an.iterate(a, &c.node, st); an.elem_value(&it_.elem, &c.node, "el") } };
                                 kv = kv_join(&kv, &e.kv);
                                 let cur = st.slot(oid, Ns::Elem, STAR);
                                 st.set_slot(oid, Ns::Elem, STAR, cur.join(&Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv))), true);
@@ -3358,7 +3358,7 @@ fn m_view(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("{}@L{}", name, c.line));
             an.set_llen(oid, st, None);
             let it = an.iterate(recv, &c.node, st);
-            let elem = it.elem.one_or_empty();
+            let elem = an.elem_value(&it.elem, &c.node, "el");
             st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(elem.pts.clone(), crate::models::torch::elem_kv(&elem.kv)), true);
             st.elems.insert(oid, elem.kv);
             return Value::obj(oid);

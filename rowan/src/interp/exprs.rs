@@ -9,7 +9,7 @@ use crate::intern::{self, key_float, key_int, key_str_lit, s, KeyId, STAR};
 use crate::state::{Kind, State};
 
 use super::funcs::Elem;
-use super::{is_constant, names_in, Analyzer, ObjId, Payload, ViewKind, UNROLL_MAX};
+use super::{is_constant, names_in, Analyzer, ObjId, Payload, ViewKind, LOOP_MAX_ITER, UNROLL_MAX};
 
 /// Python's `s[lo:hi:step]` on characters.
 fn py_slice(cs: &[char], lo: Option<i64>, hi: Option<i64>, step: Option<i64>) -> Option<String> {
@@ -747,7 +747,7 @@ impl Analyzer {
                 }
                 let en = frontend::node(e);
                 let it = self.iterate(&inner, &en, state);
-                vals.push(it.elem.one_or_empty());
+                vals.push(self.elem_value(&it.elem, &en, "star"));
             } else {
                 let v = self.eval(e, state);
                 if let Some(p) = size_parts.as_mut() {
@@ -1128,7 +1128,10 @@ impl Analyzer {
                                 sv.kv.as_lit().filter(|_| sv.pts.is_empty())
                             }).collect();
                             if let Some(items) = items {
-                                let hits = lits.iter().filter(|k| items.contains(k)).count();
+                                // (by Python's equality: `1.0 in [1, 2]`)
+                                let eqs: Option<Vec<bool>> = lits.iter().map(|k| items.iter().map(|x| lit_eq(*x, k)).collect::<Option<Vec<bool>>>().map(|v| v.contains(&true))).collect();
+                                let Some(eqs) = eqs else { return None };
+                                let hits = eqs.iter().filter(|b| **b).count();
                                 if hits == lits.len() || hits == 0 {
                                     let found = hits > 0;
                                     return Some(if op == ast::CmpOp::In { found } else { !found });
@@ -1176,10 +1179,10 @@ impl Analyzer {
                                 let mut found = false;
                                 for i in 0..n {
                                     let sv = state.slot(o, Ns::Pos, key_int(i as i64));
-                                    match sv.kv.as_lit().filter(|_| sv.pts.is_empty()) {
-                                        Some(x) if x == k => found = true,
-                                        Some(_) => {}
-                                        None => {
+                                    match sv.kv.as_lit().filter(|_| sv.pts.is_empty()).map(|x| lit_eq(x, k)) {
+                                        Some(Some(true)) => found = true,
+                                        Some(Some(false)) => {}
+                                        _ => {
                                             all_lit = false;
                                             break;
                                         }
@@ -1268,7 +1271,15 @@ impl Analyzer {
                 if (container(self, &a) && scalar(&b)) || (container(self, &b) && scalar(&a)) {
                     return Some(op == ast::CmpOp::NotEq);
                 }
-                if !a.pts.is_empty() || !b.pts.is_empty() || !a.kv.is_literal() || !b.kv.is_literal() || lits.len() != 1 || bl.len() != 1 {
+                // (by Python's equality: `1 == 1.0 == True`; several literals decide when every
+                // pair agrees)
+                let decided = if a.pts.is_empty() && b.pts.is_empty() && a.kv.is_literal() && b.kv.is_literal() {
+                    let eqs: Option<Vec<bool>> = lits.iter().flat_map(|x| bl.iter().map(move |y| lit_eq(x, y))).collect();
+                    eqs.filter(|e| !e.is_empty() && e.iter().all(|x| *x == e[0])).map(|e| e[0])
+                } else {
+                    None
+                };
+                let Some(eq) = decided else {
                     for v in [&a, &b] {
                         for o in v.pts.iter() {
                             if self.kind(o) == Kind::Ph {
@@ -1280,8 +1291,7 @@ impl Analyzer {
                         }
                     }
                     return None;
-                }
-                let eq = lits == bl;
+                };
                 Some(if op == ast::CmpOp::Eq { eq } else { !eq })
             }
             ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE => {
@@ -2140,15 +2150,37 @@ impl Analyzer {
         self.frame_mut().overlays.push(IndexMap::new());
         self.comp_run_one(g, gens, i, &elem, &mut s2, body, understood);
         self.frame_mut().overlays.pop();
-        self.comp_known.pop();
         if it.exhaustive && understood && s2.reachable {
+            self.comp_known.pop();
             state.replace_with(s2);
-        } else {
-            let mut joined = state.join(&mut s2);
-            let ev = elem.value_part();
-            self.promote_elem_reqs(&mut joined, &s2, &ev, state);
-            state.replace_with(joined);
+            return;
         }
+        // items of unknown number: what one iteration did, the next one sees too (a walrus
+        // accumulator, a `pop` from a dict): rounds to a fixpoint, as a `for` loop has
+        let mut pre = state.copy();
+        let mut head = pre.copy().join(&mut s2.copy());
+        let mut converged = false;
+        let mut prev_head = head.copy();
+        for _ in 0..LOOP_MAX_ITER {
+            let mut body_s = head.copy();
+            self.frame_mut().overlays.push(IndexMap::new());
+            self.comp_run_one(g, gens, i, &elem, &mut body_s, body, understood);
+            self.frame_mut().overlays.pop();
+            let new_head = pre.copy().join_loop(&mut body_s);
+            s2 = body_s;
+            if new_head.same(&head) {
+                converged = true;
+                break;
+            }
+            prev_head = std::mem::replace(&mut head, new_head);
+        }
+        if !converged {
+            self.widen_unconverged(&mut head, &prev_head);
+        }
+        self.comp_known.pop();
+        let ev = elem.value_part();
+        self.promote_elem_reqs(&mut head, &s2, &ev, state);
+        state.replace_with(head);
     }
 
     /// Runs one iteration of generator `i`; returns whether every filter was decided (then
@@ -2930,4 +2962,14 @@ fn gen_copy_facts(dst: &mut State, src: &State, ge: &crate::interp::GenEffects) 
             dst.clear_last(*o);
         }
     }
+}
+
+/// Python's `==` on two literals (`1 == 1.0 == True`); Enum members and identity-hashed
+/// objects compare by identity (their keys), as the engine keys them.
+fn lit_eq(a: KeyId, b: KeyId) -> Option<bool> {
+    let by_id = |k: KeyId| intern::with_key(k, |kk| matches!(kk, intern::Key::Member(..) | intern::Key::Inv(..)));
+    if a == b || by_id(a) || by_id(b) {
+        return Some(a == b);
+    }
+    crate::models::pyvalues::py_eq(a, b)
 }

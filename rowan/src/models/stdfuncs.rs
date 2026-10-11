@@ -130,7 +130,7 @@ pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     let heap = c.args.first().cloned().unwrap_or_default();
     let h = heap.single().filter(|o| an.kind(*o) == Kind::List && an.obj(*o).single);
-    let elem_of = |an: &mut Analyzer, st: &mut State, v: &Value| an.iterate(v, &c.node, st).elem.one_or_empty();
+    let elem_of = |an: &mut Analyzer, st: &mut State, v: &Value| { let it_ = an.iterate(v, &c.node, st); an.elem_value(&it_.elem, &c.node, "el") };
     match name.as_str() {
         "heappush" => {
             let x = c.args.get(1).cloned().unwrap_or_default();
@@ -267,10 +267,10 @@ pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
             }
             if let Some(f) = &key {
-                let e = it.elem.one_or_empty();
+                let e = an.elem_value(&it.elem, &c.node, "el");
                 an.call_value(f, &c.node, None, st, Some(vec![e]));
             }
-            let e = it.elem.one_or_empty();
+            let e = an.elem_value(&it.elem, &c.node, "el");
             let l = an.it_list(None, e, &c.node, st, "heapn");
             plain_list(an, l)
         }
@@ -279,7 +279,7 @@ pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let mut elem = Value::new();
             for s in &c.args {
                 let it = an.iterate(s, &c.node, st);
-                elem = elem.join(&it.elem.one_or_empty());
+                elem = elem.join(&an.elem_value(&it.elem, &c.node, "el"));
                 if let Some(its) = it.items {
                     all.extend(its);
                 }

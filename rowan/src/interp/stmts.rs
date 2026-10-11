@@ -1097,7 +1097,7 @@ impl Analyzer {
     /// A loop fixpoint cut off at `LOOP_MAX_ITER`: what still changed between the last two
     /// heads is widened to unknown (names and slots get unknown data, rows open, lengths
     /// unknown), so the exit state covers every later iteration.
-    fn widen_unconverged(&mut self, head: &mut State, prev: &State) {
+    pub(crate) fn widen_unconverged(&mut self, head: &mut State, prev: &State) {
         if crate::interp::debug_level() >= 1 {
             let fp0 = head.footprint(prev);
             let nn: Vec<String> = head.env.iter().filter(|(k, v)| prev.env.get(*k) != Some(*v)).map(|(k, _)| intern::str_get(*k).to_string()).collect();
