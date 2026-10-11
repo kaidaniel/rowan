@@ -763,6 +763,8 @@ pub struct Analyzer {
     pub assume: Vec<(String, String)>,
     /// `__next__` functions whose calls were not decided once (`unroll_next`)
     pub no_unroll_next: FxHashSet<ObjId>,
+    /// the last raise recorded per try depth (state before collection, class, exception)
+    pub raise_last: FxHashMap<usize, (State, Option<ExcNames>, Value)>,
     pub module_done: bool,
     pub fresh_init: FxHashSet<ObjId>,
     pub cell_classes: FxHashMap<ObjId, ObjId>,
@@ -1173,6 +1175,7 @@ impl Analyzer {
             many_receivers: None,
             assume: Vec::new(),
             no_unroll_next: FxHashSet::default(),
+            raise_last: FxHashMap::default(),
             module_done: false,
             fresh_init: FxHashSet::default(),
             cell_classes: FxHashMap::default(),

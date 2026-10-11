@@ -1845,6 +1845,19 @@ impl Analyzer {
             here.exits = pre.exits.clone();
         }
         let exc = self.cur_exc.take().unwrap_or_else(|| Value::data("exception"));
+        let cls = self.cur_exc_cls.take().or_else(|| self.exc_value_names(&exc));
+        // (the same state, class and exception as the last raise recorded in this try — a loop
+        // of summarised calls raising at one call site: nothing to add)
+        let depth = self.raise_states.len();
+        if !crate::interp::disabled("raisededup") && depth > 0 {
+            let open = self.raise_states.last().is_some_and(|s| s.is_some());
+            if let Some((ls, lc, le)) = self.raise_last.get(&depth) {
+                if open && *lc == cls && *le == exc && ls.same(&here) {
+                    return true;
+                }
+            }
+            self.raise_last.insert(depth, (here.copy_ref(), cls.clone(), exc.clone()));
+        }
         // (what callees made since the try began and nothing reaches after the unwind — the
         // try's names, the frames above it, the exception — is garbage in the raise state: a
         // try around a large recursion otherwise joins every callee's objects at every raise)
@@ -1891,8 +1904,6 @@ impl Analyzer {
             push(&exc, &mut roots);
             self.collect_since(tmark, &pre_try, roots, true, &mut here);
         }
-        let cls = self.cur_exc_cls.take().or_else(|| self.exc_value_names(&exc));
-        let depth = self.raise_states.len();
         if let Some((d, recs)) = self.raise_cls.last_mut() {
             if *d == depth {
                 recs.push((cls, here.copy(), exc.clone()));
