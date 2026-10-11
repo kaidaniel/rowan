@@ -744,6 +744,10 @@ impl Analyzer {
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", ci.name, node.line), Payload::Cls(cls), Some(row), Ns::Attr, None, None);
         if ci.typed_dict {
             state.set_row(inst, Ns::Item, Row::new());
+        } else if ci.open_base && !ci.dict_base && !super::disabled("openbaseitems") {
+            // (an external base — `list`, a library class — may hold items the program's code
+            // does not show: `append` / `super().__init__(items)` run there)
+            state.set_row(inst, Ns::Item, Row::with_source(Source::new(&format!("items of {}@L{}", ci.name, node.line), SourceKind::Class)));
         }
         // a pydantic model (without its own `__init__`): validation of the keyword input
         if crate::models::pydantic::is_validated(self, cls) && !super::disabled("pydantic") {

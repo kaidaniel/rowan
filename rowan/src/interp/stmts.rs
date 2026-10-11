@@ -2014,6 +2014,11 @@ impl Analyzer {
                                 ek.repr_value |= k.repr_value;
                                 ek.flag |= k.flag;
                             }
+                            // (a base that derives from an external class — `list`, an unseen
+                            // library class — makes this one's instances open too)
+                            if self.class_info_opt(oid).is_some_and(|ci| ci.open_base) && !crate::interp::disabled("openbaseinherit") {
+                                open_base = true;
+                            }
                             bases.push(oid)
                         }
                         Kind::External => {

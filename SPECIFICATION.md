@@ -294,6 +294,8 @@ no effect.
 * **Classes:** C3 MRO, properties and descriptors, `__getattr__`, `__getitem__` / `__iter__` /
   `__missing__` / `__eq__` / `__lt__` and the other protocol methods, `super()`, class
   attributes.
+  A class with an external base (`list`, a library class), directly or through user classes,
+  has instances whose attribute and item rows are open: the base's code is not seen.
 * **Dataclasses** (field specs, `InitVar`, `KW_ONLY`, `frozen`, `order`, `replace`), Enum
   (members are keys), NamedTuple and TypedDict.
 * **Closures** capture cells: two closures from one factory call have their own cells.
