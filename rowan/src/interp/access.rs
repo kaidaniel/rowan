@@ -1140,10 +1140,6 @@ impl Analyzer {
         }
         if !self.sum_stack.is_empty() && self.is_entry_object(oid) {
             let pid = self.path_placeholder(oid, ns, k, state, None, "");
-            // (a variant that assumes this path's literals)
-            if let Some(v) = self.assumed_value(pid) {
-                return v;
-            }
             return Value::with_kv(ObjSet::one(pid), KeyVal::Param(pid));
         }
         if !self.sum_stack.is_empty() && row.sources.is_empty() && row.mutators.is_empty() && !row.top {

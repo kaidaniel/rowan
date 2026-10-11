@@ -101,18 +101,6 @@ pub type SummaryKey = (ObjId, Vec<(ObjId, Vec<ObjId>)>, Vec<(ObjId, ObjId)>, Vec
 /// that the unspecialised summary is used.
 pub const MAX_SIGNATURES: usize = 8;
 
-/// Signature entries of a summary variant: `?a:PATH=T|F|Lk1,k2` (the placeholder at PATH is
-/// truthy / falsy / one of these literals at the calls that use the variant).
-pub const VARIANT_PREFIX: &str = "?a:";
-
-/// The assumptions of a signature: (placeholder path, outcome code).
-pub fn parse_assumptions(sig: &[(String, ObjId)]) -> Vec<(String, String)> {
-    sig.iter()
-        .filter_map(|(s, _)| s.strip_prefix(VARIANT_PREFIX))
-        .filter_map(|r| r.rsplit_once('=').map(|(p, a)| (p.to_string(), a.to_string())))
-        .collect()
-}
-
 /// What a row check inside a function body saw during the summary run (relative to the
 /// summary's entry); resolved at every instantiation.
 #[derive(Clone, Debug)]
@@ -545,12 +533,7 @@ impl Analyzer {
                 (sig, 0)
             } else if let Some(i) = n.iter().position(|x| *x == sig) {
                 (sig, i + 1)
-            } else if {
-                // (class signatures and outcome variants have caps of their own)
-                let is_var = |s: &Vec<(String, ObjId)>| s.iter().any(|(x, _)| x.starts_with(VARIANT_PREFIX));
-                let v = is_var(&sig);
-                n.iter().filter(|x| is_var(x) == v).count() < if v { crate::interp::limit("variants", 16) } else { MAX_SIGNATURES }
-            } {
+            } else if n.len() < MAX_SIGNATURES {
                 n.push(sig.clone());
                 (sig, n.len())
             } else {
@@ -703,9 +686,6 @@ impl Analyzer {
                 *e = Some(Vec::new());
             }
             let obj_mark = *self.sum_obj_mark.last().unwrap();
-            // (a variant's assumed outcomes — `?a:` entries of the signature — hold in this run
-            // only, not in the summaries made inside it)
-            let saved_assume = std::mem::replace(&mut self.assume, parse_assumptions(&sig));
             let mut st = State::new();
             st.symbolic = true;
             // module bindings and the contents of module-level literal containers are entry facts
@@ -807,7 +787,7 @@ impl Analyzer {
                     self.ph_info(ph).exact.set(true);
                 }
                 ph_by_name.insert(s(p.name.id.as_str()), ph);
-                args.push(self.assumed_value(ph).unwrap_or_else(|| Value::with_kv(ObjSet::one(ph), KeyVal::Param(ph))));
+                args.push(Value::with_kv(ObjSet::one(ph), KeyVal::Param(ph)));
             }
             let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
             for p in &kwonly {
@@ -824,7 +804,7 @@ impl Analyzer {
                     self.ph_info(ph).exact.set(true);
                 }
                 ph_by_name.insert(s(p.name.id.as_str()), ph);
-                kwargs.insert(s(p.name.id.as_str()), self.assumed_value(ph).unwrap_or_else(|| Value::with_kv(ObjSet::one(ph), KeyVal::Param(ph))));
+                kwargs.insert(s(p.name.id.as_str()), Value::with_kv(ObjSet::one(ph), KeyVal::Param(ph)));
             }
             for ph in ph_by_name.values() {
                 st.set_row(*ph, Ns::Item, Row::entry(rho(*ph, Ns::Item)));
@@ -891,7 +871,6 @@ impl Analyzer {
                     self.gen_yield_states = saved_yields;
                 }
             }
-            self.assume = saved_assume;
             let mut ret = st.ret.clone().unwrap_or_default();
             if st.reachable {
                 ret = ret.join(&self.none_v);
@@ -1401,147 +1380,6 @@ impl Analyzer {
             }
         }
         None
-    }
-
-    /// A stable name for a placeholder across summary runs: the parameter, then each access
-    /// below it (`self/attr:'bold'`); a narrowed placeholder is its parent's value.
-    pub fn ph_path(&self, ph: ObjId) -> Option<String> {
-        if self.kind(ph) != Kind::Ph {
-            return None;
-        }
-        let p = self.ph_info(ph);
-        match p.kind {
-            PhKind::Param | PhKind::SelfPh => Some(p.name.clone()),
-            PhKind::Path => {
-                let parent = self.ph_path(p.parent?)?;
-                Some(format!("{}/{}:{}", parent, p.ns, intern::key_repr(p.key?)))
-            }
-            PhKind::Narrow => self.ph_path(p.parent?),
-            _ => None,
-        }
-    }
-
-    /// The outcome a variant assumes for this placeholder: `T` / `F` / `L…`.
-    pub fn assumption(&self, ph: ObjId) -> Option<String> {
-        if self.assume.is_empty() {
-            return None;
-        }
-        let path = self.ph_path(ph)?;
-        self.assume.iter().find(|(p, _)| *p == path).map(|(_, a)| a.clone())
-    }
-
-    /// The value a variant assumes for a placeholder: its literals (`L…`).
-    pub fn assumed_value(&self, ph: ObjId) -> Option<Value> {
-        let a = self.assumption(ph)?;
-        let ids = a.strip_prefix('L')?;
-        let ks: Vec<KeyId> = ids.split(',').filter_map(|x| x.parse::<u32>().ok()).map(KeyId).collect();
-        if ks.is_empty() {
-            return None;
-        }
-        Some(Value::kv_only(KeyVal::lits(crate::intern::KeySet::from_vec(ks))))
-    }
-
-    /// The truth a variant assumes for a placeholder (`T` / `F`).
-    pub fn assumed_truth(&self, ph: ObjId) -> Option<bool> {
-        match self.assumption(ph)?.as_str() {
-            "T" => Some(true),
-            "F" => Some(false),
-            _ => None,
-        }
-    }
-
-    /// The outcomes this call decides for the summary's truth / narrowing events: literals
-    /// (one to four) for any of them, a truth value for a `truth` event on objects whose
-    /// truthiness is known. Encoded as signature entries of a variant (§6.2).
-    pub fn variant_assumptions(&mut self, summary: &Summary, bind: &IndexMap<ObjId, Value>, state: &mut State) -> Vec<(String, ObjId)> {
-        if summary.partial.get() || crate::interp::disabled("variants") || summary.events.is_empty() {
-            return Vec::new();
-        }
-        // (a summary is as exact as a re-analysis only where no exception decides the flow: a
-        // read or `del` of a key missing at this call raises in the callee, which its handler
-        // or a `with` sees in a re-analysis only; and not in a recursion)
-        if self.active_by_func.get(&summary.foid).is_some_and(|v| !v.is_empty()) || self.sum_stack.contains(&summary.foid) {
-            return Vec::new();
-        }
-        if let FuncNode::Def(f) = self.func_info(summary.foid).node {
-            if crate::interp::has_exception_flow(&f.body) {
-                return Vec::new();
-            }
-        }
-        let mut memo: FxHashMap<ObjId, Value> = FxHashMap::default();
-        let mut out: std::collections::BTreeMap<String, String> = Default::default();
-        for ev in &summary.events {
-            if !matches!(ev.kind, "truth" | "narrow") || self.kind(ev.ph) != Kind::Ph {
-                continue;
-            }
-            let Some(path) = self.ph_path(ev.ph) else { continue };
-            let v = self.binding_of(summary, ev.ph, bind, state, &mut memo);
-            if v.empty() || v.kv.as_param().is_some() || v.pts.iter().any(|o| matches!(self.kind(o), Kind::Ph | Kind::Unknown)) {
-                continue;
-            }
-            if v.pts.is_empty() && v.kv.is_literal() {
-                // (literal outcomes are off unless asked for: a re-analysis with literal arguments
-                // also follows model side tables — an exception's message — which a summary's
-                // instantiation does not replay)
-                if crate::interp::limit("variantlits", 0) == 0 {
-                    continue;
-                }
-                let ls = crate::domain::kv_literals(&v.kv);
-                if !ls.is_empty() && ls.len() <= 4 {
-                    let ids: Vec<String> = ls.iter().map(|k| k.0.to_string()).collect();
-                    out.insert(path, format!("L{}", ids.join(",")));
-                }
-                continue;
-            }
-            // (a truth that cannot change in the body: a mutable container — a dict a loop
-            // drains — tests differently later)
-            let fixed = v.pts.iter().all(|o| match self.kind(o) {
-                Kind::Tuple | Kind::Function | Kind::Bound | Kind::Class | Kind::Module | Kind::Namespace => true,
-                Kind::Instance => !self.has_truth_dunder(o),
-                _ => false,
-            });
-            if ev.kind == "truth" && v.kv.is_bot() && fixed && !crate::interp::disabled("varianttruth") {
-                if let Some(b) = self.truthiness(&v, state) {
-                    out.insert(path, if b { "T".into() } else { "F".into() });
-                }
-            }
-        }
-        out.into_iter().take(4).map(|(p, a)| (format!("{}{}={}", VARIANT_PREFIX, p, a), 0)).collect()
-    }
-
-    /// Room for this variant under the function's cap (or it exists already).
-    /// Is a variant as exact as a re-analysis at this call? It may not raise, and every key it
-    /// reads from the call's own objects is definitely there (else the read raises in the
-    /// callee, which only a re-analysis follows: its handler, the exception's message).
-    pub fn variant_exact_here(&mut self, v: &Summary, bind: &IndexMap<ObjId, Value>, state: &mut State) -> bool {
-        if v.raises || v.partial.get() {
-            return false;
-        }
-        let mut memo: FxHashMap<ObjId, Value> = FxHashMap::default();
-        for sr in &v.symreqs {
-            let tg = self.binding_of(v, sr.oid, bind, state, &mut memo);
-            for o in tg.pts.iter() {
-                if matches!(self.kind(o), Kind::Ph | Kind::Unknown) {
-                    continue;
-                }
-                let Some(k) = sr.key_kv.as_lit() else { return false };
-                if state.row(o, sr.ns).definite.contains(k) {
-                    continue;
-                }
-                if sr.ns == Ns::Attr && intern::key_as_str(k).is_some_and(|n| self.class_resolves(o, &n)) {
-                    continue;
-                }
-                return false;
-            }
-        }
-        true
-    }
-
-    pub fn variant_slot_free(&self, foid: ObjId, sig: &[(String, ObjId)]) -> bool {
-        match self.sig_count.get(&foid) {
-            None => true,
-            Some(n) => n.iter().any(|x| x.as_slice() == sig) || n.iter().filter(|x| x.iter().any(|(s, _)| s.starts_with(VARIANT_PREFIX))).count() < crate::interp::limit("variants", 16),
-        }
     }
 
     pub fn may_be_instance(&self, oid: ObjId, cls: ObjId) -> bool {

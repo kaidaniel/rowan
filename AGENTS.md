@@ -89,8 +89,8 @@ and macOS, then the oracle on Linux. The torch oracle runs only on a manual disp
   here) puts the deadlines on work units instead: reproducible runs of large programs for
   comparisons and profiles (the `work:` line of `ROWAN_DEBUG=1` shows the units).
 * Experimental, off by default (measured not worth it, SUGGESTED_CHANGES 3.1):
-  `ROWAN_LIMITS=variantmode=1|2` (summary variants per decided outcome; `variantlits=1` for
-  literal outcomes) and `genfull=1` (summaries for every generator).
+  `ROWAN_LIMITS=genfull=1` (summaries for every generator). Summary variants per decided
+  outcome were removed again (code in 96fa750).
 * `ROWAN_SUMMARIES=0`: the old per-call-site engine, with no summaries.
 * `ROWAN_GC=0`: garbage collection only for returns of values without objects.
   With `ROWAN_DEBUG=1`, `ROWAN_GCDBG=1` prints what each
