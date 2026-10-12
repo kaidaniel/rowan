@@ -2871,16 +2871,6 @@ impl Analyzer {
         state.lens.get(&oid).is_some() || state.has_row(oid, Ns::Item) || state.has_row(oid, Ns::Attr) || state.slots.has_key(&oid)
     }
 
-    /// The budget of a liveness walk for objects of `kind`: an unknown call's result (its records
-    /// open anyway) is taken as live sooner than a record the program builds.
-    fn walk_budget(&self, targets: &[ObjId]) -> usize {
-        if targets.iter().all(|o| self.kind(*o) == Kind::Unknown) {
-            limit("livewalkunk", 2_000)
-        } else {
-            limit("livewalk", 20_000)
-        }
-    }
-
     /// Which of `targets` the program can still reach (one walk from the roots for all; it
     /// stops when every one is found).
     pub fn live_among(&self, targets: &[ObjId], state: &State) -> FxHashSet<ObjId> {
@@ -2918,8 +2908,11 @@ impl Analyzer {
             }
         }
         // (a walk over a large heap is bounded: past the budget the targets not found yet are
-        // taken as live, which is always sound: their site makes a recent / variant object)
-        let budget = self.walk_budget(targets);
+        // taken as live, which is always sound: their site makes a recent / variant object; a
+        // walk that proves an object dead on a large heap visits all of it, and on email's 20k
+        // visits per walk gave the same verdicts as 500)
+        const WALK_BUDGET: usize = 500;
+        let budget = WALK_BUDGET;
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
         while let Some(o) = work.pop() {
             if !seen.insert(o) {
