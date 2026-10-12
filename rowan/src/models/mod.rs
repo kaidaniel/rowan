@@ -769,6 +769,11 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             return Value::data("bool");
         }
+        // (an instance of a class deriving from a builtin / library class — `class C(dict)` —
+        // is an instance of it too: not decided against those)
+        if k == Kind::Instance && classes.iter().any(|cls| builtin(an, *cls).is_some_and(|b| b != "object")) && an.instance_class(o).is_some_and(|ic| an.mro(ic).iter().any(|c| an.class_info_opt(*c).is_some_and(|ci| ci.open_base || ci.dict_base))) {
+            return Value::data("bool");
+        }
         let hit = classes.iter().any(|cls| match builtin(an, *cls) {
             Some(b) => match b.as_str() {
                 "dict" | "defaultdict" | "OrderedDict" | "Counter" => matches!(k, Kind::Dict),

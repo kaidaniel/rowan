@@ -361,11 +361,14 @@ impl Analyzer {
         // (builtin classes tested: a placeholder narrowed by one of them alone is a placeholder
         // of it, so what the branch reads replays only on its instances)
         let mut ext_classes: Vec<u32> = Vec::new();
+        // (some builtin / library class is tested, alone or in a tuple)
+        let mut ext_tested = false;
         for c in cv.pts.iter() {
             match self.kind(c) {
                 Kind::Class => classes.push(c),
                 Kind::External => {
                     ext_classes.push(c);
+                    ext_tested = true;
                     let q = self.external_qual(c);
                     let q = q.rsplit('.').next().unwrap_or("").to_string();
                     let full = self.external_qual(c);
@@ -385,6 +388,7 @@ impl Analyzer {
                             match self.kind(c2) {
                                 Kind::Class => classes.push(c2),
                                 Kind::External => {
+                                    ext_tested = true;
                                     let q = self.external_qual(c2);
                                     let q = q.rsplit('.').next().unwrap_or("").to_string();
                                     let full = self.external_qual(c2);
@@ -414,6 +418,9 @@ impl Analyzer {
                     None => None,
                     Some(pc) if classes.iter().any(|c| self.is_subclass(pc, *c)) || classes.contains(&pc) => Some(true),
                     Some(pc) if star && !self.hierarchy_closed(pc) => None,
+                    // (a class deriving from a builtin / library class — `class C(dict)` — is an
+                    // instance of it: undecided against such classes)
+                    Some(pc) if ext_tested && self.mro(pc).iter().any(|c| self.class_info_opt(*c).is_some_and(|ci| ci.open_base || ci.dict_base)) => None,
                     Some(_) => Some(false),
                 },
                 _ if star => None,

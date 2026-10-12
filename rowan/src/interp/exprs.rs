@@ -1531,6 +1531,12 @@ impl Analyzer {
     }
 
     /// An instance whose class (or a base) defines `__bool__` or `__len__`.
+    /// An instance of a class deriving from a class rowan does not see (a builtin, a library
+    /// class): the base may define what the class body does not.
+    pub fn external_based(&self, oid: u32) -> bool {
+        self.instance_class(oid).is_some_and(|c| self.mro(c).iter().any(|x| self.class_info_opt(*x).is_some_and(|ci| ci.open_base || ci.dict_base)))
+    }
+
     pub fn has_truth_dunder(&self, oid: u32) -> bool {
         match self.instance_class(oid) {
             Some(c) => self.class_lookup(c, "__bool__").is_some() || self.class_lookup(c, "__len__").is_some(),
@@ -1620,7 +1626,9 @@ impl Analyzer {
                     None => return None,
                     Some(n) => verdicts.push(n > 0),
                 },
-                Kind::Instance if self.has_truth_dunder(oid) => return None,
+                // (a class deriving from a builtin / library class — `class C(list)` — may have
+                // its `__len__` / `__bool__`)
+                Kind::Instance if self.has_truth_dunder(oid) || self.external_based(oid) => return None,
                 Kind::Instance | Kind::Function | Kind::Bound | Kind::Class | Kind::Module | Kind::Namespace => verdicts.push(true),
                 _ => return None,
             }
