@@ -20,7 +20,7 @@ def run(h: Base):
 run(A())["a"]                        #@ ok a
 run(B())["a"]                        #@ missing a
 run(B())["b"]                        #@ ok b
-xs = [h.enrich({"id": 1}) for h in hs]
-y = xs[0]                            #@row y: present={id,a,b} definite={id} closed
-y["a"]                               #@ possibly a
-y["id"]                              #@ ok id
+xs = [h.enrich({"id": 1}) for h in hs]  # (hs is unknown: its items need not be A / B — once taken as one of the classes defining enrich)
+y = xs[0]                            #@row y: present={id} open
+y["a"]                               #@ input a
+y["id"]                              #@ input id

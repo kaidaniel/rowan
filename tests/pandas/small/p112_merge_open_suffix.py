@@ -19,7 +19,7 @@ def join(text):
     return m
 
 
-#@schema read_csv@L12: always={cust,amount} sometimes={name_y} only={cust,amount,name_y}
+#@schema read_csv@L12: always={cust,amount} only={cust,amount,name_y}
 
 
 def plain(m):
@@ -41,5 +41,5 @@ if __name__ == "__main__":
                 fn(m)
             except KeyError as e:
                 kept.append(e)
-# (L22 corrected: `name_y` added — the caught read in suffixed() raises for it when the file has
-#  no name column; a caught KeyError still counts as required, the oracle's rule)
+# (L22: `name_y` was in sometimes=; the read in suffixed() is behind its caller's try, a probe as in
+#  pm05's loop of probes: required of no input; the oracle skips keys raised without dropping)

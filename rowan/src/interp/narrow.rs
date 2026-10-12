@@ -280,7 +280,7 @@ impl Analyzer {
             }
             NarrowTarget::Attr(a, whole) => {
                 let base = self.eval(&a.value, state);
-                let recs: Vec<u32> = base.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Instance | Kind::Ph | Kind::Namespace)).collect();
+                let recs: Vec<u32> = base.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Instance | Kind::Namespace)).collect();
                 if recs.len() != 1 || base.pts.len() != 1 || !self.strongable(recs[0]) {
                     let Some(key) = chain_text(whole) else { return };
                     if !truth {
@@ -296,15 +296,6 @@ impl Analyzer {
                 let bo = recs[0];
                 let attr = key_str_lit(a.attr.id.as_str());
                 let cur = state.slot(bo, Ns::Attr, attr);
-                if self.kind(bo) == Kind::Ph && truth && !self.sum_stack.is_empty() {
-                    let cv0 = self.eval(cls_expr, state);
-                    let cl: Vec<u32> = cv0.pts.iter().filter(|c| self.kind(*c) == Kind::Class).collect();
-                    if cl.len() == 1 && cv0.pts.len() == 1 {
-                        let pid = self.path_placeholder(bo, Ns::Attr, attr, state, Some(cl[0]), &format!(":is{}", cl[0]));
-                        state.set_slot(bo, Ns::Attr, attr, Value::with_kv(ObjSet::one(pid), KeyVal::Param(pid)), true);
-                    }
-                    return;
-                }
                 (cur, StoreTarget::Slot(bo, Ns::Attr, attr))
             }
         };
@@ -356,8 +347,6 @@ impl Analyzer {
         // an external class we know nothing about: still never a base of a user class whose
         // whole hierarchy is known (unless it is an ABC / protocol checked by structure)
         let mut star_structural = false;
-        let in_summary = !self.sum_stack.is_empty();
-        let mut narrowed: Vec<(u32, u32)> = Vec::new();
         // (builtin classes tested: a placeholder narrowed by one of them alone is a placeholder
         // of it, so what the branch reads replays only on its instances)
         let mut ext_classes: Vec<u32> = Vec::new();
@@ -425,46 +414,11 @@ impl Analyzer {
                 },
                 _ if star => None,
                 Kind::Unknown => None,
-                Kind::Ph => {
-                    self.record_event("isinstance", oid);
-                    let ph = self.ph_info(oid);
-                    if let (Some(pc), false) = (ph.cls.get(), classes.is_empty()) {
-                        Some(classes.iter().any(|c| self.is_subclass(pc, *c)))
-                    } else if let Some(pc) = ph.cls.get().filter(|pc| classes.is_empty() && !star && self.class_info_opt(*pc).is_some() && !self.user_subclass_has_external_base(*pc)) {
-                        // (a placeholder of a user class tested against builtin classes only: no
-                        // subclass of its class in the program derives from an external class)
-                        let _ = pc;
-                        Some(false)
-                    } else {
-                        if truth && classes.len() == 1 && kinds.is_empty() && in_summary {
-                            narrowed.push((oid, classes[0]));
-                        } else if truth && classes.is_empty() && !star && ext_classes.len() == 1 && in_summary && ph.cls.get().is_none() {
-                            narrowed.push((oid, ext_classes[0]));
-                        }
-                        None
-                    }
-                }
                 k => Some(kinds.contains(&k)),
             };
             if m.is_none() || m == Some(truth) {
                 keep.push(oid);
             }
-        }
-        if !narrowed.is_empty() {
-            let mut repl: IndexMap<u32, u32> = IndexMap::new();
-            for (ph, c) in &narrowed {
-                let np = self.narrowed_placeholder(*ph, *c, state);
-                repl.insert(*ph, np);
-            }
-            let keep: Vec<u32> = keep.into_iter().map(|o| *repl.get(&o).unwrap_or(&o)).collect();
-            let mut kv = cur.kv.clone();
-            if let KeyVal::Param(p) = &kv {
-                if let Some(r) = repl.get(p) {
-                    kv = KeyVal::Param(*r);
-                }
-            }
-            self.store_narrowed(&store, Value::with_kv(ObjSet::from_vec(keep), kv), state);
-            return;
         }
         let new_pts = ObjSet::from_vec(keep);
         if new_pts == cur.pts {
@@ -477,12 +431,6 @@ impl Analyzer {
             }
         }
         self.store_narrowed(&store, Value::with_kv(new_pts, cur.kv.clone()), state);
-    }
-
-    /// Does `cls` or some user class deriving from it have an external base (`str`, `dict`, a
-    /// library class), so that its instances may be instances of a builtin class?
-    pub fn user_subclass_has_external_base(&self, cls: u32) -> bool {
-        self.user_classes.iter().any(|c| self.is_subclass(*c, cls) && self.class_info_opt(*c).map(|ci| ci.open_base || ci.dict_base).unwrap_or(true))
     }
 
     /// A user class whose bases are all user classes (or `object`), transitively.
@@ -599,8 +547,12 @@ impl Analyzer {
             }
         }
         let recs: Vec<u32> = rv.pts.iter().filter(|o| self.is_record_like(*o)).collect();
+        // (a value that is a literal or an unknown object may be any key: no narrowing by its
+        // literal part)
+        let lit_only = lv.pts.iter().all(|o| !matches!(self.kind(o), Kind::Unknown | Kind::Instance | Kind::External));
         if !recs.is_empty() {
             match &lv.kv {
+                KeyVal::Lit(_) | KeyVal::Lits(_) if !lit_only => {}
                 KeyVal::Lit(k) => {
                     // whichever object the name holds has the key (several objects: none narrows)
                     if member && recs.len() > 1 {
@@ -610,30 +562,11 @@ impl Analyzer {
                     }
                     self.narrow_record(&rv, Ns::Item, *k, member, state)
                 }
-                KeyVal::Param(ph) => {
-                    // `k in d` with k a parameter: decided per call site when k is a literal there
-                    // (closed dicts of string keys: the key is one of theirs at any call site)
-                    let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
-                    // (a module-level dict read in a summary is a placeholder: maybe closed)
-                    let global_ph = |an: &Analyzer, o: u32| an.kind(o) == Kind::Ph && an.ph_info(o).parent.map(|p| an.kind(p) == Kind::Module).unwrap_or(false);
-                    let closed = recs.iter().zip(rows.iter()).all(|(o, r)| global_ph(self, *o) || self.is_entry_object(*o) || (r.closed() && !r.symbolic() && r.present.iter().all(intern::key_is_str)));
-                    self.record_event(if closed && member { "keynarrow" } else { "narrow" }, *ph);
-                }
-                _ if lv.pts.iter().any(|o| self.kind(o) == Kind::Ph) => {
-                    // (closed dicts of string keys: the key is one of theirs at any call site)
-                    let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
-                    let closed = rows.iter().all(|r| r.closed() && !r.symbolic() && r.present.iter().all(intern::key_is_str));
-                    for o in lv.pts.iter() {
-                        if self.kind(o) == Kind::Ph {
-                            self.record_event(if closed && member { "keynarrow" } else { "narrow" }, o);
-                        }
-                    }
-                }
                 // an unknown key (data, or an unknown value's object) in closed dicts of string
                 // keys: one of those keys
                 KeyVal::KeysOf(_) | KeyVal::Data(_) | KeyVal::Bot if member && (lv.pts.is_empty() || lv.pts.iter().all(|o| self.kind(o) == Kind::Unknown)) && !(lv.pts.is_empty() && lv.kv.is_bot()) => {
                     let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
-                    if rows.iter().all(|r| r.closed() && !r.symbolic()) {
+                    if rows.iter().all(|r| r.closed()) {
                         let mut may = KeySet::new();
                         for r in &rows {
                             may = may.union(&r.present);
@@ -655,11 +588,6 @@ impl Analyzer {
                         let ks = ks.clone();
                         self.narrow_key_expr(left, &lv, &ks, &may, state);
                     } else {
-                        for (o, r) in recs.iter().zip(rows.iter()) {
-                            if r.symbolic() {
-                                self.record_event("narrow", *o);
-                            }
-                        }
                     }
                 }
                 _ => {}
@@ -735,14 +663,10 @@ impl Analyzer {
             return;
         }
         let cur = self.load_name(name, &Node::none(), state);
-        if let Some(ph) = cur.kv.as_param() {
-            self.record_event("narrow", ph);
-            return;
-        }
         let new = if restrict { kv_restrict(&cur.kv, keys) } else { kv_exclude(&cur.kv, keys) };
         // objects that may equal a literal (an unknown value, a placeholder, an instance with
         // its own __eq__)
-        let maybe_eq = cur.pts.filter(|o| matches!(self.kind(o), Kind::Unknown | Kind::Ph | Kind::Instance | Kind::External));
+        let maybe_eq = cur.pts.filter(|o| matches!(self.kind(o), Kind::Unknown | Kind::Instance | Kind::External));
         match new {
             None if !maybe_eq.is_empty() => {
                 // none of the literals is left: the objects are what remains (one of the keys)
@@ -778,9 +702,6 @@ impl Analyzer {
         let targets: Vec<u32> = rec.pts.iter().filter(|o| self.is_record_like(*o)).collect();
         let single = targets.len() == 1;
         for oid in targets {
-            if self.kind(oid) == Kind::Ph {
-                self.record_event("narrow", oid);
-            }
             let row = state.row(oid, ns);
             if member {
                 if single && row.closed() && !row.present.contains(k) {

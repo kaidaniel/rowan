@@ -200,24 +200,20 @@ function describeRow(row, ns, withText) {
     if (row.sources && row.sources.length) lines.push(`- other ${label} may come from ${row.sources.join(", ")}`);
     if (row.mutators && row.mutators.length) lines.push(`- unknown code may have changed it: ${row.mutators.join(", ")}`);
     if (row.top) lines.push("- nothing is known about its contents");
-    if (row.symbolic) lines.push("- plus whatever the caller passes in (summary analysis)");
   }
   return lines;
 }
 
 /**
- * Markdown for one name.  `facts`: the entries for (line, name) (concrete first);
+ * Markdown for one name.  `facts`: the entries for (line, name);
  * `verdicts`: the verdicts on that line mentioning the name's text.
  */
 function renderHover(name, facts, verdicts) {
   const out = [];
-  const concrete = facts.filter((f) => !f.symbolic);
-  const symbolic = facts.filter((f) => f.symbolic);
-  const main = concrete.length ? concrete : symbolic;
+  const main = facts;
   if (!main.length && !verdicts.length) return null;
   out.push(`**rowan** · \`${name}\``);
   for (const f of main) {
-    if (f.symbolic) out.push("_inside a function analysed symbolically: facts are relative to its entry_");
     // the value as far as it is known, in the program's terms: unknowns by their symbol
     // (`a`, `a(b)`, `cfg["db"]`), else `?`
     const text = (f.text || "").trim() || "?";

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
 
-use crate::domain::{kv_join, rho, KeyVal, Ns, ObjId, ReqInfo, Row, Value};
+use crate::domain::{kv_join, KeyVal, Ns, ObjId, ReqInfo, Row, Value};
 use crate::intern::{IdSet, KeyId, SourceId, StrId, STAR};
 use crate::layered::{LayerMap, TwoLevel};
 
@@ -18,7 +18,6 @@ pub enum Kind {
     Module,
     Class,
     Namespace,
-    Ph,
     List,
     Tuple,
     Set,
@@ -50,7 +49,6 @@ impl Kind {
             Kind::Module => "module",
             Kind::Class => "class",
             Kind::Namespace => "namespace",
-            Kind::Ph => "ph",
             Kind::List => "list",
             Kind::Tuple => "tuple",
             Kind::Set => "set",
@@ -73,7 +71,7 @@ impl Kind {
         }
     }
     pub fn is_record(self) -> bool {
-        matches!(self, Kind::Dict | Kind::Frame | Kind::Instance | Kind::Unknown | Kind::Module | Kind::Class | Kind::Namespace | Kind::Ph)
+        matches!(self, Kind::Dict | Kind::Frame | Kind::Instance | Kind::Unknown | Kind::Module | Kind::Class | Kind::Namespace)
     }
     pub fn is_container(self) -> bool {
         matches!(self, Kind::List | Kind::Tuple | Kind::Set)
@@ -85,20 +83,6 @@ impl Kind {
 }
 
 pub type SlotKey = (Ns, KeyId);
-
-thread_local! {
-    /// Every (source, key) `require` added to some state, in order: what a stretch of the
-    /// analysis required is the log since a mark (`req_log_mark` / `req_log_since`).
-    static REQ_LOG: std::cell::RefCell<Vec<(SourceId, KeyId)>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-pub fn req_log_mark() -> usize {
-    REQ_LOG.with(|l| l.borrow().len())
-}
-
-pub fn req_log_since(mark: usize) -> Vec<(SourceId, KeyId)> {
-    REQ_LOG.with(|l| l.borrow().get(mark..).map(|s| s.to_vec()).unwrap_or_default())
-}
 
 /// Mutable analysis state at one program point.
 pub struct State {
@@ -120,8 +104,6 @@ pub struct State {
     pub ret: Option<Value>,
     pub reachable: bool,
     pub exits: Option<Arc<State>>,
-    /// rows of untouched objects are entry rows (summary analysis)
-    pub symbolic: bool,
     /// what a test that was joined over said about rows (see `CondFact`)
     pub facts: Arc<Vec<Arc<CondFact>>>,
     /// (name, key): the object the name is bound to has the key, whichever of its possible
@@ -131,7 +113,7 @@ pub struct State {
     /// their elements): `lst[-1]` after appends of unknown count
     pub lasts: Arc<Vec<(ObjId, Value)>>,
     /// tensor-shape facts on this path: ranks and dim equalities (shape.rs)
-    pub tf: Arc<crate::shape::TFacts>,
+    pub tf: Arc<crate::models::shape::TFacts>,
     /// locals bound on some paths only (a join of a path that bound the name with one that did
     /// not): reading one may raise UnboundLocalError
     pub unbound: Arc<Vec<StrId>>,
@@ -201,11 +183,10 @@ impl State {
             ret: None,
             reachable: true,
             exits: None,
-            symbolic: false,
             facts: Arc::new(Vec::new()),
             name_keys: Arc::new(Vec::new()),
             lasts: Arc::new(Vec::new()),
-            tf: Arc::new(crate::shape::TFacts::default()),
+            tf: Arc::new(crate::models::shape::TFacts::default()),
             unbound: Arc::new(Vec::new()),
         }
     }
@@ -230,7 +211,6 @@ impl State {
             ret: self.ret.clone(),
             reachable: self.reachable,
             exits: self.exits.clone(),
-            symbolic: self.symbolic,
             facts: self.facts.clone(),
             name_keys: self.name_keys.clone(),
             lasts: self.lasts.clone(),
@@ -267,7 +247,6 @@ impl State {
         self.ret = o.ret.clone();
         self.reachable = o.reachable;
         self.exits = o.exits.clone();
-        self.symbolic = o.symbolic;
         self.facts = o.facts.clone();
         self.name_keys = o.name_keys.clone();
         self.lasts = o.lasts.clone();
@@ -341,7 +320,6 @@ impl State {
         s.ret = ret;
         s.exits = exits;
         s.reachable = true;
-        s.symbolic = self.symbolic || o.symbolic;
         s.facts = Arc::new(facts);
         s.tf = if Arc::ptr_eq(&self.tf, &o.tf) || self.tf == o.tf { self.tf.clone() } else { Arc::new(self.tf.join(&o.tf)) };
         s.name_keys = if Arc::ptr_eq(&self.name_keys, &o.name_keys) { self.name_keys.clone() } else { Arc::new(self.name_keys.iter().filter(|x| o.name_keys.contains(x)).copied().collect()) };
@@ -485,9 +463,6 @@ impl State {
         if let Some(r) = self.rows.get(&(oid, ns)) {
             return r;
         }
-        if self.symbolic {
-            return Row::entry(rho(oid, ns));
-        }
         Row::new()
     }
 
@@ -601,10 +576,7 @@ impl State {
         };
         let nv = match self.reqs.get(&src, &term) {
             Some(cur) => cur.seq(&info),
-            None => {
-                REQ_LOG.with(|l| l.borrow_mut().push((src, term)));
-                info
-            }
+            None => info,
         };
         self.reqs.set(&src, term, nv);
     }
@@ -773,9 +745,8 @@ pub fn is_merged(oid: ObjId) -> bool {
 pub fn reset_thread_state() {
     MERGED.with(|m| m.borrow_mut().clear());
     FP_VISITS.with(|c| c.set(0));
-    REQ_LOG.with(|l| l.borrow_mut().clear());
     crate::domain::reset_row_joins();
-    crate::shape::reset();
+    crate::models::shape::reset();
 }
 
 /// Lengths join to the one both sides have, else to unknown with the shorter known prefix and

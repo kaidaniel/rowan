@@ -38,7 +38,7 @@ def main() -> None:
     cmd = [a.rowan, a.file, "--no-rows"]
     if a.perf:
         cmd = ["perf", "record", "-F", "199", "-g", "-o", a.perf, "--"] + cmd
-    env = dict(os.environ, ROWAN_DEBUG="1", ROWAN_LIMITS="work=0,ms=100000000,hard=100000000")
+    env = dict(os.environ, ROWAN_DEBUG="1", ROWAN_LIMITS="ms=100000000")
     stdout_path, stderr_path = out / f"{a.name}.out", out / f"{a.name}.err"
     t0 = time.monotonic()
     with open(stdout_path, "w") as so, open(stderr_path, "w") as se:

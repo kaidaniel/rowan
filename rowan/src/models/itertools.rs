@@ -69,7 +69,7 @@ impl Analyzer {
         if self.kind(o) != Kind::Namespace || !matches!(&self.obj(o).payload, Payload::Method(q, _) if q == "stdobj.infinite") {
             return None;
         }
-        self.infinites.get(&o).cloned()
+        self.m.infinites.get(&o).cloned()
     }
 
     /// The next `n` items of an iterator whose items are known that far: an infinite one, or
@@ -121,7 +121,7 @@ impl Analyzer {
     fn new_infinite(&mut self, inf: Infinite, node: &Node, st: &mut State) -> Value {
         let oid = self.alloc_at(Kind::Namespace, node, st, "itertools iterator", Payload::Method("stdobj.infinite".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
         self.obj_mut(oid).payload = Payload::Method("stdobj.infinite".into(), Value::new());
-        self.infinites.insert(oid, inf);
+        self.m.infinites.insert(oid, inf);
         Value::obj(oid)
     }
 

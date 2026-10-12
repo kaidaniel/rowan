@@ -4,7 +4,7 @@ access replays only on its instances), but narrowed by a builtin class it stayed
 the access replayed on every object a call passed, and `value.strip` read as definitely
 missing on an instance of a user class (`_pydecimal.Decimal.__new__`'s string branch, given a
 Decimal). With the tabulation budget at 0 every call uses its summary."""
-#@limits tab=0
+# (summaries are gone since: every call runs at its call site)
 
 
 class D:

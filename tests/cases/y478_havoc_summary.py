@@ -2,7 +2,7 @@
 instantiated: a call is an unknown call on its arguments, and what the function changed of
 objects from outside (a global registry) is changed in unknown ways there. Instantiating
 summaries of hundreds of thousands of entries per call made rich take hours."""
-#@limits summary=4
+# (summaries are gone since: every call runs at its call site, within its budget)
 import sys
 
 REGISTRY = {"base": 1}

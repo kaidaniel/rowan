@@ -105,7 +105,7 @@ fn lit_bool(v: &Value) -> Option<bool> {
 fn new_parser_obj(an: &mut Analyzer, st: &mut State, node: &Node, label: &str, ctx: &str, spec: ArgObj) -> ObjId {
     let oid = an.alloc_at(Kind::Parser, node, st, label, Payload::None, None, Ns::Attr, None, Some(ctx));
     st.set_row(oid, Ns::Attr, Row::new());
-    an.argp.insert(oid, spec);
+    an.m.argp.insert(oid, spec);
     oid
 }
 
@@ -131,7 +131,7 @@ pub fn parser_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         match it.items {
             Some(items) => {
                 for p in items {
-                    match p.single().and_then(|o| an.argp.get(&o).cloned()) {
+                    match p.single().and_then(|o| an.m.argp.get(&o).cloned()) {
                         Some(ArgObj::Parser(ps)) => {
                             spec.args.extend(ps.args.iter().filter(|a| a.action != Action::Help).cloned());
                             spec.defaults.extend(ps.defaults.iter().cloned());
@@ -153,7 +153,7 @@ pub fn parser_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// The parser a parser / group object adds arguments to.
 fn target_parser(an: &Analyzer, o: ObjId) -> Option<ObjId> {
-    match an.argp.get(&o)? {
+    match an.m.argp.get(&o)? {
         ArgObj::Parser(_) => Some(o),
         ArgObj::Group(p) => target_parser(an, *p),
         ArgObj::Subs(_) => None,
@@ -161,7 +161,7 @@ fn target_parser(an: &Analyzer, o: ObjId) -> Option<ObjId> {
 }
 
 fn spec_mut(an: &mut Analyzer, p: ObjId) -> Option<&mut ParserSpec> {
-    match an.argp.get_mut(&p)? {
+    match an.m.argp.get_mut(&p)? {
         ArgObj::Parser(s) => Some(s),
         _ => None,
     }
@@ -266,7 +266,6 @@ fn read_arg(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<ArgSpec> {
             let it = an.iterate(&ch, &c.node, st);
             if it.items.is_none() {
                 // (choices from a parameter or a global: decided per call site)
-                an.concrete_args([&ch, &it.elem.flat()], st);
             }
             Some(it.items.unwrap_or_else(|| vec![Value::data("choice")]))
         }
@@ -282,7 +281,7 @@ fn read_arg(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<ArgSpec> {
 pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     let recv = c.recv.clone().unwrap_or_default();
-    let objs: Vec<ObjId> = recv.pts.iter().filter(|o| an.argp.contains_key(o)).collect();
+    let objs: Vec<ObjId> = recv.pts.iter().filter(|o| an.m.argp.contains_key(o)).collect();
     if objs.is_empty() {
         return Value::data(&format!("L{}", c.line));
     }
@@ -322,7 +321,7 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         "add_parser" => {
             let o = objs[0];
-            let Some(ArgObj::Subs(p)) = an.argp.get(&o).cloned() else { return Value::data("parser") };
+            let Some(ArgObj::Subs(p)) = an.m.argp.get(&o).cloned() else { return Value::data("parser") };
             let Some(cmd) = c.args.first().and_then(lit_str) else {
                 if let Some(s) = spec_mut(an, p) {
                     s.opaque = true;
@@ -369,7 +368,7 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         "get_default" => {
             let Some(dest) = c.args.first().and_then(lit_str) else { return Value::data("default") };
-            let Some(ArgObj::Parser(s)) = an.argp.get(&objs[0]).cloned() else { return Value::data("default") };
+            let Some(ArgObj::Parser(s)) = an.m.argp.get(&objs[0]).cloned() else { return Value::data("default") };
             if let Some((_, v)) = s.defaults.iter().find(|(n, _)| *n == dest) {
                 return v.clone();
             }
@@ -378,9 +377,6 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "parse_args" | "parse_known_args" | "parse_intermixed_args" | "parse_known_intermixed_args" => {
             let known = name.contains("known");
             let argv = c.arg(0, Some("args"));
-            if let Some(p) = argv.as_ref().and_then(|a| a.kv.as_param().or_else(|| a.single().filter(|o| an.kind(*o) == Kind::Ph))) {
-                an.record_event("concrete", p);
-            }
             let tokens: Option<Vec<String>> = match &argv {
                 Some(a) if !(a.pts.is_empty() && a.kv.as_lit() == Some(intern::key_none())) => {
                     let it = an.iterate(a, &c.node, st);
@@ -470,7 +466,7 @@ fn take_values(a: &ArgSpec, vals: &[String]) -> Result<Value, ()> {
 
 /// Python's `argparse` on a known argv (None: a parse this model cannot follow exactly).
 fn parse_known(an: &mut Analyzer, st: &mut State, c: &Call, p: ObjId, tokens: &[String], known_args: bool) -> Option<Value> {
-    let Some(ArgObj::Parser(spec)) = an.argp.get(&p).cloned() else { return None };
+    let Some(ArgObj::Parser(spec)) = an.m.argp.get(&p).cloned() else { return None };
     if spec.opaque {
         return None;
     }
@@ -768,7 +764,7 @@ fn parse_into(an: &mut Analyzer, st: &mut State, c: &Call, spec: &ParserSpec, to
                 if let Some(d) = &sub.dest {
                     ns.insert(d.clone(), Value::lit_str(&names[0]));
                 }
-                let Some(ArgObj::Parser(cspec)) = an.argp.get(child).cloned() else { return None };
+                let Some(ArgObj::Parser(cspec)) = an.m.argp.get(child).cloned() else { return None };
                 let mut cextras = Vec::new();
                 match parse_into(an, st, c, &cspec, &tokens[k + 1..], ns, &mut cextras, known_args, depth + 1)? {
                     Ok(()) => {}
@@ -854,7 +850,7 @@ fn any_value(an: &mut Analyzer, st: &mut State, c: &Call, a: &ArgSpec) -> Value 
 fn parse_unknown(an: &mut Analyzer, st: &mut State, c: &Call, p: ObjId, known_args: bool) -> Value {
     // (any parse may fail)
     an.may_raise_here("SystemExit", st);
-    let Some(ArgObj::Parser(spec)) = an.argp.get(&p).cloned() else { return Value::data("args") };
+    let Some(ArgObj::Parser(spec)) = an.m.argp.get(&p).cloned() else { return Value::data("args") };
     let mut base: IndexMap<String, Value> = IndexMap::new();
     let mut maybe: Vec<String> = Vec::new();
     unknown_into(an, st, c, &spec, &mut base, &mut maybe);
@@ -886,7 +882,7 @@ fn parse_unknown(an: &mut Analyzer, st: &mut State, c: &Call, p: ObjId, known_ar
                 if let Some(d) = &sub.dest {
                     ns.insert(d.clone(), Value::lit_str(&names[0]));
                 }
-                let opaque = match an.argp.get(child).cloned() {
+                let opaque = match an.m.argp.get(child).cloned() {
                     Some(ArgObj::Parser(cs)) => {
                         unknown_into(an, st, c, &cs, &mut ns, &mut mb);
                         cs.opaque

@@ -49,7 +49,7 @@ pub fn make(an: &mut Analyzer, st: &mut State, node: &Node, entries: &[(KeyId, i
     }
     st.set_slot(oid, Ns::Item, intern::STAR, Value::lit(intern::key_int(0)), false);
     st.set_row(oid, Ns::Item, row.with_order(order));
-    an.counters.insert(oid);
+    an.m.counters.insert(oid);
     Value::obj(oid)
 }
 
@@ -66,7 +66,7 @@ fn make_unknown(an: &mut Analyzer, st: &mut State, node: &Node, present: &[KeyId
     }
     st.set_slot(oid, Ns::Item, intern::STAR, Value::lit(intern::key_int(0)), false);
     st.set_row(oid, Ns::Item, row);
-    an.counters.insert(oid);
+    an.m.counters.insert(oid);
     Value::obj(oid)
 }
 
@@ -75,7 +75,7 @@ fn contribution(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) -> Op
     let o = v.single();
     if let Some(o) = o {
         if an.kind(o) == Kind::Dict {
-            if an.counters.contains(&o) {
+            if an.m.counters.contains(&o) {
                 return counts(an, o, st);
             }
             // a mapping: its values are the counts
@@ -193,7 +193,7 @@ fn combine(op: char, a: &[(KeyId, i64)], b: &[(KeyId, i64)]) -> Vec<(KeyId, i64)
 
 /// `a + b`, `a - b`, `a & b`, `a | b` with a Counter operand: Some(result).
 pub fn binop(an: &mut Analyzer, st: &mut State, op: char, a: &Value, b: &Value, node: &Node) -> Option<Value> {
-    let is_counter = |an: &Analyzer, v: &Value| !v.pts.is_empty() && v.pts.iter().all(|o| an.counters.contains(&o));
+    let is_counter = |an: &Analyzer, v: &Value| !v.pts.is_empty() && v.pts.iter().all(|o| an.m.counters.contains(&o));
     if !(is_counter(an, a) && is_counter(an, b)) {
         return None;
     }
@@ -220,7 +220,7 @@ pub fn binop(an: &mut Analyzer, st: &mut State, op: char, a: &Value, b: &Value, 
 
 /// Unary `+c` / `-c`: the positive counts (of c / of -c).
 pub fn unary(an: &mut Analyzer, st: &mut State, neg: bool, v: &Value, node: &Node) -> Option<Value> {
-    let o = v.single().filter(|o| an.counters.contains(o))?;
+    let o = v.single().filter(|o| an.m.counters.contains(o))?;
     match counts(an, o, st) {
         Some(cs) => {
             let r: Vec<(KeyId, i64)> = cs.into_iter().map(|(k, n)| (k, if neg { -n } else { n })).filter(|(_, n)| *n > 0).collect();
@@ -284,7 +284,7 @@ pub fn m_counter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             None => {
                 let v = Value::obj(an.copy_object(oid, &c.node, st, false, &mut IndexMap::new()));
                 for o in v.pts.iter() {
-                    an.counters.insert(o);
+                    an.m.counters.insert(o);
                 }
                 v
             }
@@ -388,7 +388,7 @@ fn set_items(an: &mut Analyzer, o: ObjId, items: Vec<Value>, st: &mut State) {
 pub fn deque_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let maxlen = c.arg(1, Some("maxlen")).and_then(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).and_then(intern::key_as_int);
     let oid = an.alloc_at(Kind::List, &c.node, st, &format!("deque@L{}", c.line), Payload::None, None, Ns::Item, None, None);
-    an.deques.insert(oid, maxlen);
+    an.m.deques.insert(oid, maxlen);
     let items = match c.arg(0, Some("iterable")) {
         Some(it) => an.iterate(&it, &c.node, st).items,
         None => Some(Vec::new()),
@@ -417,7 +417,7 @@ pub fn deque_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 pub fn m_deque(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     let Some(oid) = c.recv.as_ref().and_then(|r| r.single()) else { return Value::data("deque") };
-    let maxlen = an.deques.get(&oid).copied().flatten();
+    let maxlen = an.m.deques.get(&oid).copied().flatten();
     let strong = an.obj(oid).single && an.frame().loop_depth == 0 && an.cond_depth == 0;
     let cur = known_items(an, oid, st).filter(|_| strong);
     let arg = c.args.first().cloned().unwrap_or_default();
@@ -495,7 +495,7 @@ pub fn m_deque(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         ("copy", Some(items)) => {
             let nid = an.alloc_at(Kind::List, &c.node, st, &format!("deque@L{}", c.line), Payload::None, None, Ns::Item, None, Some("dequecopy"));
-            an.deques.insert(nid, maxlen);
+            an.m.deques.insert(nid, maxlen);
             set_items(an, nid, items, st);
             Value::obj(nid)
         }

@@ -82,24 +82,6 @@ fn is_stringio(an: &Analyzer, o: ObjId) -> bool {
     an.kind(o) == Kind::Namespace && matches!(&an.obj(o).payload, Payload::Method(q, _) if q == "stdobj.stringio")
 }
 
-/// A csv reader over a parameter's text: decided where the caller passes a known one.
-fn text_event(an: &mut Analyzer, st: &State, f: &Value) {
-    let mut ps = Vec::new();
-    if let Some(p) = f.kv.as_param() {
-        ps.push(p);
-    }
-    for o in f.pts.iter() {
-        if is_stringio(an, o) {
-            if let Some(p) = st.slot(o, Ns::Attr, text_key()).kv.as_param() {
-                ps.push(p);
-            }
-        }
-    }
-    for p in ps {
-        an.record_event("concrete", p);
-    }
-}
-
 /// The text a value of StringIO objects / strings holds (joined over the objects).
 fn text_in(an: &Analyzer, st: &State, f: &Value) -> Text {
     if f.pts.is_empty() {
@@ -311,7 +293,7 @@ pub fn stringio_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, &format!("StringIO@L{}", c.line), Payload::Method("stdobj.stringio".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
     an.obj_mut(oid).payload = Payload::Method("stdobj.stringio".into(), Value::new());
     // (the text as given: a literal, or a library's text label such as pandas' to_json)
-    let t = if init.pts.is_empty() || init.kv.as_param().is_some() || init.pts.iter().all(|o| an.kind(o) == Kind::Ph) { init } else { Value::data(&format!("text@L{}", c.line)) };
+    let t = if init.pts.is_empty() { init } else { Value::data(&format!("text@L{}", c.line)) };
     st.set_slot(oid, Ns::Attr, text_key(), t, true);
     Value::obj(oid)
 }
@@ -328,9 +310,6 @@ pub fn writer_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     };
     // (other dialect options: the texts are not known)
     let plain = c.kwargs.keys().all(|k| matches!(&*intern::str_get(*k), "delimiter" | "quotechar" | "lineterminator" | "fieldnames" | "restval" | "extrasaction"));
-    if let Some(p) = c.arg(1, Some("fieldnames")).and_then(|f| f.kv.as_param().or_else(|| f.single().filter(|o| an.kind(*o) == Kind::Ph))) {
-        an.record_event("concrete", p);
-    }
     let fields = if dict { c.arg(1, Some("fieldnames")).and_then(|f| str_seq(an, st, &f, &c.node)) } else { None };
     let restval = c.arg(2, Some("restval")).unwrap_or_else(|| Value::lit_str(""));
     let raise_extras = match c.arg(3, Some("extrasaction")).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_str) {
@@ -340,7 +319,7 @@ pub fn writer_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, &format!("{}@L{}", if dict { "DictWriter" } else { "writer" }, c.line), Payload::Method("stdobj.csvwriter".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
     an.obj_mut(oid).payload = Payload::Method("stdobj.csvwriter".into(), Value::new());
     let known = plain && delim.is_some() && quote.is_some() && term.is_some();
-    an.csv_writers.insert(
+    an.m.csv_writers.insert(
         oid,
         CsvWriter { file: if known { file.clone() } else { Value::new() }, delim: delim.unwrap_or(','), quote: quote.unwrap_or('"'), term: term.unwrap_or_default(), dict, fields: if known { fields } else { None }, restval, raise_extras },
     );
@@ -446,7 +425,7 @@ pub fn m_stdobj(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         };
     }
     if q.starts_with("stdobj.csvwriter.") {
-        let ws: Vec<(ObjId, CsvWriter)> = recv.pts.iter().filter_map(|o| an.csv_writers.get(&o).cloned().map(|w| (o, w))).collect();
+        let ws: Vec<(ObjId, CsvWriter)> = recv.pts.iter().filter_map(|o| an.m.csv_writers.get(&o).cloned().map(|w| (o, w))).collect();
         for (_, w) in &ws {
             match name {
                 "writeheader" => {
@@ -570,7 +549,6 @@ fn dict_row_text(an: &mut Analyzer, st: &mut State, r: &Value, w: &CsvWriter, _c
 /// `csv.reader(f, delimiter=…)`: on a known text its rows (lists of str), in order.
 pub fn reader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let f = c.arg(0, Some("csvfile")).unwrap_or_default();
-    text_event(an, st, &f);
     let delim = single_char(an, c, "delimiter", ',');
     let quote = single_char(an, c, "quotechar", '"');
     let plain = c.kwargs.keys().all(|k| matches!(&*intern::str_get(*k), "delimiter" | "quotechar"));
@@ -599,7 +577,6 @@ pub fn reader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// `csv.DictReader(f, fieldnames=None, restkey=None, restval=None, …)`.
 pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let f = c.arg(0, Some("f")).unwrap_or_default();
-    text_event(an, st, &f);
     let fieldnames = c.arg(1, Some("fieldnames"));
     let restkey = c.arg(2, Some("restkey")).unwrap_or_else(|| an.none_v.clone());
     let restval = c.arg(3, Some("restval")).unwrap_or_else(|| an.none_v.clone());
@@ -652,7 +629,7 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             Some(fs) => an.csv_str_list(fs, &c.node, st, "csvfields"),
                             None => an.none_v.clone(),
                         };
-                        an.csv_readers.insert(o, fv);
+                        an.m.csv_readers.insert(o, fv);
                     }
                     return lv;
                 }
@@ -688,7 +665,7 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         (_, None, Some(fv)) => fv.clone(),
         _ => Value::data("fieldnames"),
     };
-    an.csv_readers.insert(vid, fv);
+    an.m.csv_readers.insert(vid, fv);
     Value::obj(vid)
 }
 
@@ -697,7 +674,7 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 pub fn print_into(an: &mut Analyzer, st: &mut State, c: &Call) {
     let f = match c.kw("file") {
         Some(f) => f,
-        None => match an.stdout_redirect.last() {
+        None => match an.m.stdout_redirect.last() {
             Some(f) => f.clone(),
             None => return,
         },
@@ -780,15 +757,15 @@ pub fn closing_exit(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) {
 pub fn exitstack_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, "ExitStack", Payload::Method("stdobj.exitstack".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
     an.obj_mut(oid).payload = Payload::Method("stdobj.exitstack".into(), Value::new());
-    an.exit_callbacks.insert(oid, Vec::new());
+    an.m.exit_callbacks.insert(oid, Vec::new());
     Value::obj(oid)
 }
 
 /// An ExitStack's exit: its callbacks, last registered first.
 pub fn exitstack_close(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) {
     for o in v.pts.iter() {
-        let Some(cbs) = an.exit_callbacks.get(&o).cloned() else { continue };
-        an.exit_callbacks.insert(o, Vec::new());
+        let Some(cbs) = an.m.exit_callbacks.get(&o).cloned() else { continue };
+        an.m.exit_callbacks.insert(o, Vec::new());
         for (i, (f, args, kwargs)) in cbs.into_iter().enumerate().collect::<Vec<_>>().into_iter().rev() {
             let mut nd = *node;
             nd.col = node.col.wrapping_add(3_000_000 + i as u32);
@@ -809,7 +786,7 @@ fn m_exitstack(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, recv: &V
             let Some(f) = c.args.first().cloned() else { return an.none_v.clone() };
             let args: Vec<Value> = if name == "push" { vec![an.none_v.clone(), an.none_v.clone(), an.none_v.clone()] } else { c.args.iter().skip(1).cloned().collect() };
             for o in recv.pts.iter() {
-                an.exit_callbacks.entry(o).or_default().push((f.clone(), args.clone(), c.kwargs.clone()));
+                an.m.exit_callbacks.entry(o).or_default().push((f.clone(), args.clone(), c.kwargs.clone()));
             }
             f
         }
@@ -832,7 +809,7 @@ fn m_exitstack(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, recv: &V
                         let none = an.none_v.clone();
                         let ex = an.load_attr(&Value::obj(o), "__exit__", &c.node, st, false);
                         for s in recv.pts.iter() {
-                            an.exit_callbacks.entry(s).or_default().push((ex.clone(), vec![none.clone(), none.clone(), none.clone()], IndexMap::new()));
+                            an.m.exit_callbacks.entry(s).or_default().push((ex.clone(), vec![none.clone(), none.clone(), none.clone()], IndexMap::new()));
                         }
                         outs.push(v);
                     }

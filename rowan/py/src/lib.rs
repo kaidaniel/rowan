@@ -1,5 +1,5 @@
 //! PyO3 binding: `rowan.analyse(source, filename, search_paths, entry_points, follow_imports,
-//! use_summaries, row_checks)` returns the analysis as a JSON string (the same document the
+//! row_checks)` returns the analysis as a JSON string (the same document the
 //! CLI's `--golden` mode prints), so the engine can be driven from Python without the CLI (the wheel builds; loading it fails on macOS 26, see AGENTS.md).
 
 use pyo3::exceptions::PyRuntimeError;
@@ -9,16 +9,16 @@ use ::rowan::interp::Analyzer;
 use ::rowan::report;
 
 #[pyfunction]
-#[pyo3(signature = (source, filename="<module>", search_paths=vec![], entry_points=true, follow_imports=true, use_summaries=None, row_checks=vec![]))]
+#[pyo3(signature = (source, filename="<module>", search_paths=vec![], entry_points=true, follow_imports=true, row_checks=vec![]))]
 #[allow(clippy::too_many_arguments)]
-fn analyse(py: Python<'_>, source: String, filename: &str, search_paths: Vec<String>, entry_points: bool, follow_imports: bool, use_summaries: Option<bool>, row_checks: Vec<(u32, String)>) -> PyResult<String> {
+fn analyse(py: Python<'_>, source: String, filename: &str, search_paths: Vec<String>, entry_points: bool, follow_imports: bool, row_checks: Vec<(u32, String)>) -> PyResult<String> {
     let filename = filename.to_string();
     let result = py.allow_threads(move || {
         std::thread::Builder::new()
             .stack_size(1 << 30)
             .spawn(move || -> Result<String, String> {
-                let mut an = Analyzer::new(source, &filename, search_paths, entry_points, follow_imports, use_summaries)?;
-                an.row_check_requests = row_checks;
+                let mut an = Analyzer::new(source, &filename, search_paths, entry_points, follow_imports)?;
+                an.row_check_requests = row_checks.into_iter().map(|(l, n)| (String::new(), l, n)).collect();
                 an.run();
                 Ok(serde_json::to_string(&report::golden_json(&an)).unwrap())
             })
@@ -35,7 +35,7 @@ fn analyse_file(py: Python<'_>, path: String, entry_points: bool, follow_imports
     let src = std::fs::read_to_string(&path).map_err(|e| PyRuntimeError::new_err(format!("{}: {}", path, e)))?;
     let dir = std::path::Path::new(&path).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".into());
     let dir = std::fs::canonicalize(&dir).map(|p| p.to_string_lossy().to_string()).unwrap_or(dir);
-    analyse(py, src, &path, vec![dir], entry_points, follow_imports, None, vec![])
+    analyse(py, src, &path, vec![dir], entry_points, follow_imports, vec![])
 }
 
 #[pymodule]

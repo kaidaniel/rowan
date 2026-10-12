@@ -34,12 +34,7 @@ impl Analyzer {
     /// what it raised; the state after is the join of the normal end and the raising points.
     pub fn call_catching(&mut self, f: &Value, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, state: &mut State, node: &Node) -> (Value, Raised) {
         let mut pre = state.copy();
-        self.guards.push(rustc_hash::FxHashSet::from_iter(["*".to_string()]));
-        self.may_raise.push(false);
-        self.raise_states.push(None);
-        self.raise_values.push(None);
-        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
-        self.try_sum_depth.push(self.sum_stack.len());
+        self.enter_try(rustc_hash::FxHashSet::from_iter(["*".to_string()]), &mut pre);
         self.catching_depth += 1;
         let mut outs = Vec::new();
         for fo in f.pts.iter() {
@@ -50,12 +45,8 @@ impl Analyzer {
             outs.push(v);
         }
         self.catching_depth -= 1;
-        self.guards.pop();
-        self.try_marks.pop();
-        self.try_sum_depth.pop();
-        let flagged = self.may_raise.pop().unwrap_or(false);
-        let raised_at = self.raise_states.pop().flatten();
-        let raised_v = self.raise_values.pop().flatten().unwrap_or_default();
+        let out = self.leave_try();
+        let (flagged, raised_at, raised_v) = (out.flagged, out.raised(), out.value.clone().unwrap_or_default());
         let died = !state.reachable;
         let raised = flagged || raised_at.is_some() || died;
         let level = if died && raised { 2 } else if raised { 1 } else { 0 };
@@ -185,7 +176,7 @@ fn future_of(an: &mut Analyzer, st: &mut State, node: &Node, ctx: &str, v: Value
         _ => none.join(&Value::data("exception")),
     };
     st.set_slot(o, Ns::Attr, slot_key("exc"), exc, true);
-    an.future_excs.insert(o, r.names.clone());
+    an.m.future_excs.insert(o, r.names.clone());
     Value::obj(o)
 }
 
@@ -271,7 +262,7 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let mut outs = Vec::new();
                 for o in objs {
                     let lvl = st.slot(o, Ns::Attr, slot_key("raised")).kv.as_lit().and_then(intern::key_as_int).unwrap_or(1) as u8;
-                    let names = an.future_excs.get(&o).cloned().unwrap_or_default();
+                    let names = an.m.future_excs.get(&o).cloned().unwrap_or_default();
                     outs.push(st.slot(o, Ns::Attr, slot_key("result")));
                     an.reraise(lvl, &names, st);
                 }

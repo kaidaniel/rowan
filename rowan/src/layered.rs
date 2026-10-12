@@ -142,27 +142,6 @@ fn insert<K: Clone, V: Clone>(t: &mut Tree<K, V>, h: u64, k: K, v: V) {
     }
 }
 
-/// The value of `h` for writing (path copied); None when absent.
-fn get_mut<K: Clone, V: Clone>(t: &mut Tree<K, V>, h: u64) -> Option<&mut V> {
-    let fits = match &**t {
-        Node::Leaf { h: j, .. } => *j == h,
-        Node::Branch { p, m, .. } => match_prefix(h, *p, *m),
-    };
-    if !fits {
-        return None;
-    }
-    match Arc::make_mut(t) {
-        Node::Leaf { v, .. } => Some(v),
-        Node::Branch { m, l, r, .. } => {
-            if zero_bit(h, *m) {
-                get_mut(l, h)
-            } else {
-                get_mut(r, h)
-            }
-        }
-    }
-}
-
 /// `t` without `h`: None when nothing changes, Some(rest) otherwise (rest None: empty).
 fn remove<K: Clone, V: Clone>(t: &Tree<K, V>, h: u64) -> Option<(Option<Tree<K, V>>, V)> {
     match &**t {
@@ -489,14 +468,6 @@ impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
         Some(v)
     }
 
-    /// The value of `k` for writing, `default()` inserted first when absent.
-    pub fn entry_mut(&mut self, k: &K, default: impl FnOnce() -> V) -> &mut V {
-        if !self.contains_key(k) {
-            self.insert(k.clone(), default());
-        }
-        get_mut(self.root.as_mut().unwrap(), k.key64()).unwrap()
-    }
-
     pub fn copy(&mut self) -> LayerMap<K, V> {
         self.clone()
     }
@@ -618,6 +589,30 @@ fn find_hi<K, V>(t: &Tree<K, V>, hi: u64) -> Option<&Tree<K, V>> {
 /// A map of maps (object -> slot -> value, source -> key -> requirement), stored as one
 /// persistent trie on (outer, inner) pairs: a write copies a path, not an object's whole
 /// inner map, and joins / diffs cost what two maps differ in.
+/// A key's entries in a `TwoLevel`, as the subtree that holds them: equal when it is the very
+/// same subtree (so the same entries; equal entries in another subtree compare unequal). It
+/// keeps the subtree alive, so its address is never another subtree's.
+#[derive(Clone)]
+pub struct SubRef(Option<std::sync::Arc<dyn std::any::Any>>);
+
+impl PartialEq for SubRef {
+    fn eq(&self, o: &SubRef) -> bool {
+        match (&self.0, &o.0) {
+            (None, None) => true,
+            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for SubRef {}
+
+impl std::hash::Hash for SubRef {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        h.write_usize(self.0.as_ref().map(|a| std::sync::Arc::as_ptr(a) as *const () as usize).unwrap_or(0));
+    }
+}
+
 pub struct TwoLevel<K, IK, V> {
     m: LayerMap<Pair<K, IK>, V>,
 }
@@ -648,6 +643,16 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
 
     fn sub(&self, key: &K) -> Option<&Tree<Pair<K, IK>, V>> {
         self.m.root.as_ref().and_then(|t| find_hi(t, key.key64()))
+    }
+
+    /// A key's entries as the shared subtree that holds them (`SubRef`).
+    pub fn sub_ref(&self, key: &K) -> SubRef
+    where
+        K: 'static,
+        IK: 'static,
+        V: 'static,
+    {
+        SubRef(self.sub(key).map(|t| t.clone() as std::sync::Arc<dyn std::any::Any>))
     }
 
     /// Does `key` have any inner entry (or its marker)?
@@ -740,18 +745,6 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         for ik in gone {
             self.remove(key, &ik);
         }
-    }
-
-    /// Take `key`'s entries from `o` (self has none of its own): the subtree is shared, not
-    /// copied.
-    pub fn graft(&mut self, o: &Self, key: &K) {
-        let Some(t) = o.sub(key) else { return };
-        let add = LayerMap { root: Some(t.clone()) };
-        let mut both = |_: &Pair<K, IK>, _: &V, b: &V| Some(b.clone());
-        let mut keep = |_: &Pair<K, IK>, v: &V| Some(v.clone());
-        let mut keep2 = |_: &Pair<K, IK>, v: &V| Some(v.clone());
-        let mut g = Merge { both: &mut both, left: &mut keep, right: &mut keep2, one_side_identity: true, equal_identity: true };
-        self.m = self.m.merge_with(&add, &mut g);
     }
 
     pub fn join(&mut self, o: &mut Self, f: &mut dyn FnMut(&V, &V) -> V) -> Self {

@@ -196,7 +196,7 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
         lines.push(String::new());
         lines.push("== tensor shapes ==".into());
         let mut seen: Vec<(u32, String)> = Vec::new();
-        let mut errs: Vec<&crate::models::torch::ShapeNote> = an.shape_errors.iter().collect();
+        let mut errs: Vec<&crate::models::torch::ShapeNote> = an.m.shape_errors.iter().collect();
         errs.sort_by_key(|e| (e.line, e.chain.len()));
         for e in errs {
             if seen.contains(&(e.line, e.text.clone())) {
@@ -206,7 +206,7 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
             let chain = if e.chain.is_empty() { String::new() } else { format!("  via {}", e.chain.iter().map(|c| format!("L{}", c)).collect::<Vec<_>>().join(">")) };
             lines.push(format!("  L{:<4} ✗     shape mismatch: {}{}", e.line, e.text, chain));
         }
-        let mut reqs: Vec<(u32, String)> = an.shape_reqs.iter().filter(|r| r.chain.is_empty()).map(|r| (r.line, r.text.clone())).collect();
+        let mut reqs: Vec<(u32, String)> = an.m.shape_reqs.iter().filter(|r| r.chain.is_empty()).map(|r| (r.line, r.text.clone())).collect();
         reqs.sort();
         reqs.dedup();
         for (line, text) in &reqs {
@@ -217,55 +217,90 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
         }
     }
     let sch = schema_rows(an);
-    lines.push(String::new());
-    lines.push("== inferred schemas (requirements on external inputs) ==".into());
-    if sch.is_empty() {
-        lines.push("  (none)".into());
-    }
+    // what the program needs of its inputs, then what each function needs of its parameters
+    // (`param F.x`: the function's contract, whoever calls it)
     let mut labels: Vec<&String> = sch.keys().collect();
     labels.sort();
-    for label in labels {
-        let entry = &sch[label];
-        let grouped = group_alt_keys(entry);
-        let always: Vec<String> = grouped.iter().filter(|(_, e)| e.always).map(|(k, _)| k.clone()).collect();
-        let sometimes: Vec<String> = grouped.iter().filter(|(_, e)| !e.always).map(|(k, _)| k.clone()).collect();
-        lines.push(format!("  {}:", label));
-        if !always.is_empty() {
-            lines.push(format!("      always   : {}", always.join(", ")));
+    let (params, inputs): (Vec<&String>, Vec<&String>) = labels.into_iter().partition(|l| l.starts_with("param "));
+    for (title, group) in [("== inferred schemas (requirements on external inputs) ==", &inputs), ("== function contracts (what each function needs of its parameters) ==", &params)] {
+        // (no section for what nothing needs; "(none)" for inputs only when nothing is listed)
+        if group.is_empty() && (title.contains("contracts") || !params.is_empty()) {
+            continue;
         }
-        if !sometimes.is_empty() {
-            lines.push(format!("      sometimes: {}", sometimes.join(", ")));
+        lines.push(String::new());
+        lines.push(title.into());
+        if group.is_empty() {
+            lines.push("  (none)".into());
         }
-        for (k, e) in &grouped {
-            let mut extra = Vec::new();
-            if !e.alternatives.is_empty() {
-                extra.push(format!("or provided by {}", e.alternatives.join(", ")));
+        for label in group.iter() {
+            let entry = &sch[*label];
+            let grouped = group_alt_keys(entry);
+            let always: Vec<String> = grouped.iter().filter(|(_, e)| e.always).map(|(k, _)| k.clone()).collect();
+            let sometimes: Vec<String> = grouped.iter().filter(|(_, e)| !e.always).map(|(k, _)| k.clone()).collect();
+            // (`param F.x[...]` reads as `F: x[...]`)
+            let shown = match label.strip_prefix("param ").and_then(|r| r.split_once('.')) {
+                Some((f, rest)) if !f.contains('[') => format!("{}: {}", f, rest),
+                _ => label.to_string(),
+            };
+            lines.push(format!("  {}:", shown));
+            if !always.is_empty() {
+                lines.push(format!("      always   : {}", always.join(", ")));
             }
-            if !e.caveats.is_empty() {
-                extra.push(format!("unless added by {}", e.caveats.join(", ")));
+            if !sometimes.is_empty() {
+                lines.push(format!("      sometimes: {}", sometimes.join(", ")));
             }
-            if !extra.is_empty() {
-                lines.push(format!("      {}: {}", k, extra.join("; ")));
+            for (k, e) in &grouped {
+                let mut extra = Vec::new();
+                if !e.alternatives.is_empty() {
+                    extra.push(format!("or provided by {}", e.alternatives.join(", ")));
+                }
+                if !e.caveats.is_empty() {
+                    extra.push(format!("unless added by {}", e.caveats.join(", ")));
+                }
+                if !extra.is_empty() {
+                    lines.push(format!("      {}: {}", k, extra.join("; ")));
+                }
             }
         }
     }
     if show_summaries && !an.summaries.is_empty() {
+        // one line per function and result (the same result from several call sites once,
+        // with the lines it is called from)
+        let mut groups: indexmap::IndexMap<String, Vec<String>> = indexmap::IndexMap::new();
         let mut entries: Vec<(&(String, String), &(crate::domain::Value, Vec<(u32, crate::domain::Row)>))> = an.summaries.iter().collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
-        let mut out: Vec<String> = Vec::new();
         for ((qual, ctx), (_, rows)) in entries {
             for (oid, row) in rows {
                 // (a result nothing is known about says nothing)
                 if row.present.is_empty() && row.open() {
                     continue;
                 }
-                out.push(format!("  {} [{}] -> {}: {}", qual, ctx, an.obj(*oid).label, row));
+                let line = format!("  {} -> {}: {}", qual.replace("class ", ""), an.obj(*oid).label, row);
+                let site = call_site_text(an, ctx);
+                let e = groups.entry(line).or_default();
+                if !e.contains(&site) {
+                    e.push(site);
+                }
             }
         }
-        if !out.is_empty() {
+        if !groups.is_empty() {
             lines.push(String::new());
-            lines.push("== function results (per call context) ==".into());
-            lines.extend(out);
+            lines.push("== function results ==".into());
+            for (line, sites) in groups {
+                let calls: Vec<String> = sites.iter().filter(|s| !s.is_empty() && *s != "entry").cloned().collect();
+                let mut parts: Vec<String> = Vec::new();
+                if !calls.is_empty() {
+                    parts.push(format!("called from {}", calls.join(", ")));
+                }
+                if sites.iter().any(|s| s == "entry") {
+                    parts.push("with any arguments".into());
+                }
+                if parts.is_empty() {
+                    lines.push(line);
+                } else {
+                    lines.push(format!("{}  ({})", line, parts.join("; ")));
+                }
+            }
         }
     }
     if show_rows {
@@ -303,6 +338,28 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
         return body;
     }
     format!("{}\n\n== legend ==\n{}", body, legend.join("\n"))
+}
+
+/// A call context as a person reads it: the line of its innermost call site (`L103`, with
+/// the module's file for another module); "" for a function's own run.
+fn call_site_text(an: &Analyzer, ctx: &str) -> String {
+    if ctx == "entry" {
+        return "entry".into();
+    }
+    let last = ctx.rsplit('/').next().unwrap_or("");
+    let last = last.split('#').next().unwrap_or("");
+    let (module, rest) = match last.strip_prefix('M').and_then(|r| r.split_once(':')) {
+        Some((m, rest)) if m.chars().all(|c| c.is_ascii_digit()) => (m.parse::<u32>().ok(), rest),
+        _ => (None, last),
+    };
+    let Some(line) = rest.strip_prefix('L').map(|r| r.split(':').next().unwrap_or("")) else { return String::new() };
+    if line.is_empty() || !line.chars().all(|c| c.is_ascii_digit()) {
+        return String::new();
+    }
+    match module.map(|m| an.rel_file(m)).filter(|f| !f.is_empty()) {
+        Some(f) => format!("{}:L{}", f, line),
+        None => format!("L{}", line),
+    }
 }
 
 /// What each mark the report uses means (only the marks it uses).
@@ -419,8 +476,8 @@ pub fn golden_json(an: &Analyzer) -> J {
         })
         .collect();
     let note = |n: &crate::models::torch::ShapeNote| json!({"line": n.line, "chain": n.chain, "entry": n.entry, "text": n.text, "message": n.text});
-    let requires: Vec<J> = an.shape_reqs.iter().map(note).collect();
-    let shape_errors: Vec<J> = an.shape_errors.iter().map(note).collect();
+    let requires: Vec<J> = an.m.shape_reqs.iter().map(note).collect();
+    let shape_errors: Vec<J> = an.m.shape_errors.iter().map(note).collect();
     json!({"verdicts": verdicts, "schemas": schemas, "rows": rows, "notes": an.notes, "report": format_text(an, true, true), "requires": requires, "shape_errors": shape_errors, "objects": an.objects.len(), "tabulations": an.tab_runs, "joins": crate::domain::row_joins(), "work": an.work, "visits": an.walked.get() + crate::state::fp_visits()})
 }
 
@@ -442,7 +499,6 @@ fn row_json(r: &crate::domain::Row) -> J {
         "absent": intern::sorted_by_str(r.absent.iter()).iter().map(|k| key_repr(*k)).collect::<Vec<_>>(),
         "closed": r.closed(),
         "top": r.top,
-        "symbolic": r.symbolic(),
         "sources": srcs,
         "source_ids": r.sources.iter().map(|(s, _)| source_label(s)).collect::<Vec<_>>(),
         "mutators": muts,
@@ -482,14 +538,12 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
     for o in v.pts.iter() {
         parts.push(render_object(an, state, o, depth, seen));
     }
-    // a part nothing is known about (data, a parameter, keys of something): `?` (not for a
-    // placeholder's own key-value: the placeholder is printed already)
-    let own_param = matches!(&v.kv, KeyVal::Param(ph) if v.pts.contains(*ph));
+    // a part nothing is known about (data, keys of something): `?`
     if let Some(t) = an.t_render(v, state) {
         parts.push(t);
     } else if let Some(expr) = data_expr(&v.kv) {
         parts.push(expr);
-    } else if !v.kv.is_literal() && !v.kv.is_bot() && !own_param {
+    } else if !v.kv.is_literal() && !v.kv.is_bot() {
         parts.push("?".into());
     }
     if parts.is_empty() {
@@ -612,7 +666,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         Kind::Class => an.obj(o).label.to_string(),
         Kind::Module => an.obj(o).label.to_string(),
         // an unknown named in the program's terms (`a`, `a(b)`, `cfg["db"]`), else `?`
-        Kind::Unknown | Kind::Ph => an.symbol_for(o).cloned().unwrap_or_else(|| "?".into()),
+        Kind::Unknown => an.symbol_for(o).cloned().unwrap_or_else(|| "?".into()),
         Kind::External => an.external_qual(o).trim_start_matches("builtins.").to_string(),
         _ => "?".into(),
     }
@@ -689,60 +743,6 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
     }
 }
 
-/// The contents (slots) of the objects a value reaches, within the printing depth.
-pub fn reachable_slots(an: &Analyzer, state: &State, v: &Value) -> Vec<(ObjId, Ns, KeyId, Value)> {
-    let max = VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed);
-    let mut out: Vec<(ObjId, Ns, KeyId, Value)> = Vec::new();
-    let mut seen: Vec<ObjId> = Vec::new();
-    let mut work: Vec<(Value, u32)> = vec![(v.clone(), 0)];
-    while let Some((val, d)) = work.pop() {
-        if d > max || out.len() > 256 {
-            continue;
-        }
-        for o in val.pts.iter() {
-            if seen.contains(&o) || matches!(an.kind(o), Kind::Function | Kind::Class | Kind::Module | Kind::External) {
-                continue;
-            }
-            seen.push(o);
-            if matches!(an.kind(o), Kind::Unknown | Kind::Ph) {
-                // unknowns: only their rows matter (`reachable_rows`)
-                continue;
-            }
-            for ns in [Ns::Item, Ns::Attr, Ns::Pos, Ns::Elem] {
-                for (k, sv) in state.obj_slots(o, ns) {
-                    work.push((sv.clone(), d + 1));
-                    out.push((o, ns, k, sv));
-                }
-            }
-        }
-    }
-    out
-}
-
-/// The rows (keys / attributes) of every object a value reaches within the printing depth.
-pub fn reachable_rows(an: &Analyzer, state: &State, v: &Value) -> Vec<(ObjId, Option<Row>, Option<Row>)> {
-    let max = VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed);
-    let mut out: Vec<(ObjId, Option<Row>, Option<Row>)> = Vec::new();
-    let mut work: Vec<(Value, u32)> = vec![(v.clone(), 0)];
-    while let Some((val, d)) = work.pop() {
-        if d > max || out.len() > 128 {
-            continue;
-        }
-        for o in val.pts.iter() {
-            if out.iter().any(|(x, _, _)| *x == o) || matches!(an.kind(o), Kind::Function | Kind::Class | Kind::Module | Kind::External) {
-                continue;
-            }
-            out.push((o, state.has_row(o, Ns::Item).then(|| state.row(o, Ns::Item)), state.has_row(o, Ns::Attr).then(|| state.row(o, Ns::Attr))));
-            for ns in [Ns::Item, Ns::Attr, Ns::Pos, Ns::Elem] {
-                for (_, sv) in state.obj_slots(o, ns) {
-                    work.push((sv, d + 1));
-                }
-            }
-        }
-    }
-    out
-}
-
 /// The symbols a value mentions (unknown objects printed by name) with what is known about
 /// each: the keys / attributes seen on it, what an unknown call may return, else `?`.
 pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, String)> {
@@ -761,7 +761,7 @@ pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, Str
             }
             seen.push(o);
             match an.kind(o) {
-                Kind::Unknown | Kind::Ph => {
+                Kind::Unknown => {
                     let Some(sym) = an.symbol_for(o) else { continue };
                     if out.iter().any(|(s, _)| s == sym) {
                         continue;
@@ -817,7 +817,7 @@ pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, Str
 pub fn facts_json(an: &Analyzer) -> J {
     let sch = schema_rows(an);
     let mut facts: Vec<J> = Vec::new();
-    for ((line, name, symbolic), f) in &an.facts {
+    for ((line, name), f) in &an.facts {
         // (a hover lists the objects a name may hold: past `MAX_FACT_OBJECTS` only the count —
         // a name holding hundreds of objects made the document hundreds of MB)
         let objects_total = f.rows.len();
@@ -844,7 +844,6 @@ pub fn facts_json(an: &Analyzer) -> J {
             crate::domain::KeyVal::Lits(ks) => json!(intern::sorted_by_str(ks.iter()).iter().map(|k| key_repr(*k)).collect::<Vec<_>>()),
             crate::domain::KeyVal::KeysOf(ko) => json!([format!("{}", crate::domain::KeyVal::KeysOf(ko.clone()))]),
             crate::domain::KeyVal::Data(_) => json!(["<data>"]),
-            crate::domain::KeyVal::Param(_) => json!(["<parameter>"]),
             crate::domain::KeyVal::Bot => json!([]),
         };
         // requirements recorded on the open sources of these objects
@@ -864,7 +863,7 @@ pub fn facts_json(an: &Analyzer) -> J {
         // the dim names of this fact
         let mut requires: Vec<String> = Vec::new();
         let mut extra_legend: Vec<(String, String)> = Vec::new();
-        for n in &an.shape_reqs {
+        for n in &an.m.shape_reqs {
             if n.line != *line || !n.chain.is_empty() {
                 continue;
             }
@@ -872,7 +871,7 @@ pub fn facts_json(an: &Analyzer) -> J {
                 Some((c, ctx)) => {
                     let mut ctx = ctx.clone();
                     ctx.atom_names = f.t_names.clone();
-                    crate::shape::with_ctx(ctx, || crate::shape::cons_text(c))
+                    crate::models::shape::with_ctx(ctx, || crate::models::shape::cons_text(c))
                 }
                 None => n.text.clone(),
             };
@@ -881,8 +880,8 @@ pub fn facts_json(an: &Analyzer) -> J {
                 let mut atoms = Vec::new();
                 cons_atoms(c, &mut atoms);
                 for a in atoms {
-                    if let (Some(nm), crate::shape::Atom::Dim(sy, i)) = (f.t_names.get(&a), crate::shape::atom_get(a)) {
-                        let base = crate::shape::with_ctx(ctx.clone(), || crate::shape::sym_print(sy));
+                    if let (Some(nm), crate::models::shape::Atom::Dim(sy, i)) = (f.t_names.get(&a), crate::models::shape::atom_get(a)) {
+                        let base = crate::models::shape::with_ctx(ctx.clone(), || crate::models::shape::sym_print(sy));
                         if let Some(b) = base {
                             let entry = (nm.clone(), format!("{}.shape[{}]", b, i));
                             if !extra_legend.contains(&entry) && !f.legend.iter().any(|(s0, _)| s0.split(", ").any(|x| x == nm)) {
@@ -900,7 +899,7 @@ pub fn facts_json(an: &Analyzer) -> J {
             Some(p) => (p.clone(), f.texts.iter().filter(|t| *t != p).cloned().collect()),
             None => (f.texts.join(" | "), vec![]),
         };
-        facts.push(json!({"line": line, "name": name.to_string(), "symbolic": symbolic, "values": values, "text": text, "examples": examples, "legend": f.legend.iter().filter(|(s0, d)| !(d == "?" && f.texts.iter().all(|t| t.starts_with("Tensor[")) && an.facts_sym_is_tensor(s0))).chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "required": required, "requires": requires}));
+        facts.push(json!({"line": line, "name": name.to_string(), "values": values, "text": text, "examples": examples, "legend": f.legend.iter().filter(|(s0, d)| !(d == "?" && f.texts.iter().all(|t| t.starts_with("Tensor[")) && an.facts_sym_is_tensor(s0))).chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "required": required, "requires": requires}));
     }
     let verdicts: Vec<J> = reported(an).iter().map(|v| verdict_json(an, v)).collect();
     let mut schemas = serde_json::Map::new();
@@ -908,18 +907,18 @@ pub fn facts_json(an: &Analyzer) -> J {
         let keys: serde_json::Map<String, J> = entry.iter().map(|(k, e)| (k.clone(), json!({"always": e.always, "sites": e.sites}))).collect();
         schemas.insert(label, J::Object(keys));
     }
-    let shape_errors: Vec<J> = an.shape_errors.iter().map(|n| json!({"line": n.line, "chain": n.chain, "message": n.text})).collect();
+    let shape_errors: Vec<J> = an.m.shape_errors.iter().map(|n| json!({"line": n.line, "chain": n.chain, "message": n.text})).collect();
     json!({"file": an.filename, "facts": facts, "verdicts": verdicts, "schemas": schemas, "notes": an.notes, "shape_errors": shape_errors})
 }
 
-fn cons_atoms(c: &crate::shape::Cons, out: &mut Vec<crate::shape::AtomId>) {
+fn cons_atoms(c: &crate::models::shape::Cons, out: &mut Vec<crate::models::shape::AtomId>) {
     match c {
-        crate::shape::Cons::Eq(a, b) => {
-            crate::shape::dim_atoms(*a, out);
-            crate::shape::dim_atoms(*b, out);
+        crate::models::shape::Cons::Eq(a, b) => {
+            crate::models::shape::dim_atoms(*a, out);
+            crate::models::shape::dim_atoms(*b, out);
         }
-        crate::shape::Cons::Rank(..) => {}
-        crate::shape::Cons::If(m, g) => {
+        crate::models::shape::Cons::Rank(..) => {}
+        crate::models::shape::Cons::If(m, g) => {
             cons_atoms(m, out);
             g.iter().for_each(|x| cons_atoms(x, out));
         }

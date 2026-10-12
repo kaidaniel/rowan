@@ -147,7 +147,6 @@ pub fn m_ospath(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     let args: Option<Vec<String>> = c.args.iter().map(|a| text_of(an, a)).collect();
     let Some(args) = args.filter(|_| c.kwargs.is_empty() && c.star_args.is_empty()) else {
-        an.concrete_args(c.args.iter(), st);
         return unknown_ospath(an, st, c, &name);
     };
     let one = args.first().cloned();
@@ -226,7 +225,7 @@ pub fn is_path(an: &Analyzer, o: u32) -> bool {
 
 /// The class a path object was made with (`PurePosixPath`, `PosixPath`, …).
 fn path_class(an: &Analyzer, o: u32) -> String {
-    an.path_classes.get(&o).cloned().unwrap_or_else(|| "PurePosixPath".into())
+    an.m.path_classes.get(&o).cloned().unwrap_or_else(|| "PurePosixPath".into())
 }
 
 /// pathlib's normalisation: `//` and `.` parts collapse, a trailing `/` goes, `..` stays.
@@ -258,7 +257,7 @@ fn new_path(an: &mut Analyzer, st: &mut State, node: &Node, text: &str, cls: &st
     let oid = an.alloc_at(Kind::Namespace, node, st, &format!("{}('{}')", cls, text), p.clone(), Some(Row::new()), Ns::Attr, None, Some(&format!("path:{}:{}", ctx, text)));
     an.obj_mut(oid).payload = p;
     st.set_row(oid, Ns::Attr, Row::new());
-    an.path_classes.insert(oid, cls.to_string());
+    an.m.path_classes.insert(oid, cls.to_string());
     Value::obj(oid)
 }
 
@@ -346,7 +345,6 @@ pub fn m_path_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             new_path(an, st, &c.node, &t, &cls, "new")
         }
         None => {
-            an.concrete_args(c.args.iter(), st);
             Value::data("path")
         }
     }
@@ -410,7 +408,6 @@ pub fn m_path_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let cls = path_class(an, o);
     let args: Option<Vec<String>> = c.args.iter().map(|a| text_of(an, a)).collect();
     let Some(args) = args else {
-        an.concrete_args(c.args.iter(), st);
         return Value::data("path");
     };
     let nm = name_of(&t);
@@ -744,7 +741,6 @@ pub fn m_textwrap(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     let text = c.args.first().and_then(lit_str);
     let Some(text) = text else {
-        an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
         return unknown_tw(an, st, c, &name);
     };
     match name.as_str() {

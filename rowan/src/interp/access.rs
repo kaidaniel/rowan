@@ -10,30 +10,7 @@ use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, STAR};
 use crate::state::{Kind, State};
 
-use super::{is_scalar_method, Analyzer, ClassInfo, Payload, ViewKind, ATTR_GUARDS, DICT_METHOD_NAMES, ITEM_GUARDS, LIST_METHOD_NAMES, PATH_DEPTH, STR_METHOD_NAMES};
-
-pub fn param_slot_key(ph: u32) -> KeyId {
-    intern::key_tuple(vec![key_str_lit("@"), intern::key_int(ph as i64)])
-}
-
-/// Slot key of the i-th `append` through a placeholder list (`-1`: an append or extend whose
-/// position is unknown); applied to the actual list's positions at instantiation.
-pub fn append_slot_key(i: i64) -> KeyId {
-    intern::key_tuple(vec![key_str_lit("+"), intern::key_int(i)])
-}
-
-pub fn append_slot_of(k: KeyId) -> Option<i64> {
-    intern::with_key(k, |kk| match kk {
-        intern::Key::Tuple(items) if items.len() == 2 => {
-            let a = intern::key_as_str(items[0])?;
-            if &*a != "+" {
-                return None;
-            }
-            intern::key_as_int(items[1])
-        }
-        _ => None,
-    })
-}
+use super::{is_scalar_method, Analyzer, ClassInfo, Payload, ViewKind, ATTR_GUARDS, DICT_METHOD_NAMES, ITEM_GUARDS, PATH_DEPTH, STR_METHOD_NAMES};
 
 /// `("@", ph)` slot keys: the placeholder, if the key is one.
 pub fn param_slot_of(k: KeyId) -> Option<u32> {
@@ -49,7 +26,42 @@ pub fn param_slot_of(k: KeyId) -> Option<u32> {
     })
 }
 
+/// The attributes every instance has (`object`'s, and its class's `__module__` / `__doc__`;
+/// `__dict__` / `__weakref__` unless `__slots__` drop them: taken as there).
+pub const OBJECT_ATTRS: &[&str] = &[
+    "__class__", "__delattr__", "__dir__", "__doc__", "__eq__", "__format__", "__ge__", "__getattribute__", "__getstate__", "__gt__", "__hash__", "__init__", "__init_subclass__", "__le__", "__lt__", "__ne__", "__new__", "__reduce__", "__reduce_ex__", "__repr__", "__setattr__", "__sizeof__", "__str__", "__subclasshook__", "__module__", "__dict__", "__weakref__",
+];
+
 impl Analyzer {
+    /// Does attribute `name` of `oid` resolve without the object's own row: through its class
+    /// (an instance), for a class object through its MRO and `type`, for an object a model
+    /// simulates through the model?
+    pub(crate) fn class_resolves(&self, oid: u32, name: &str) -> bool {
+        if self.kind(oid) == Kind::Class {
+            return (name.starts_with("__") && name.ends_with("__")) || name == "mro" || self.class_lookup(oid, name).is_some();
+        }
+        if self.kind(oid) == Kind::Namespace {
+            if let Payload::Method(q, _) = &self.obj(oid).payload {
+                if ["stdobj.", "pydverr.", "typeadapter.", "fastapi."].iter().any(|p| q.starts_with(p)) {
+                    return true;
+                }
+            }
+        }
+        if self.kind(oid) != Kind::Instance {
+            return false;
+        }
+        if OBJECT_ATTRS.contains(&name) {
+            return true;
+        }
+        match self.instance_class(oid) {
+            // (`__getattr__` / `__getattribute__` answer any name)
+            Some(c) if self.class_lookup(c, "__getattr__").is_some() || self.class_lookup(c, "__getattribute__").is_some() => true,
+            // (a field's class-level default is shadowed by the instance's attribute)
+            Some(c) => self.class_lookup(c, name).is_some() && !self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name),
+            None => false,
+        }
+    }
+
     /// The innermost handler that catches this namespace's error re-raises it.
     pub fn guard_reraises(&self, ns: Ns) -> bool {
         let want: &[&str] = if ns == Ns::Item { match self.item_exc { Some("ValueError") => super::VALUE_GUARDS, Some("ValidationError") => super::VALIDATION_GUARDS, _ => ITEM_GUARDS } } else { ATTR_GUARDS };
@@ -160,7 +172,7 @@ impl Analyzer {
     /// has (or may have) is that key.
     /// A mixed-in Enum member (`StrEnum`, `IntEnum`) and its value are one key too.
     pub fn canon_key(&self, oid: u32, ns: Ns, k: KeyId, state: &State) -> KeyId {
-        if !self.ci_dicts.is_empty() && self.ci_dicts.contains(&oid) {
+        if !self.m.ci_dicts.is_empty() && self.m.ci_dicts.contains(&oid) {
             if let Some(s) = intern::key_as_str(k) {
                 return key_str_lit(&s.to_lowercase());
             }
@@ -213,7 +225,7 @@ impl Analyzer {
             let c = self.instance_class(o)?;
             let ci = self.class_info_opt(c)?;
             // a frozen pydantic model hashes by its fields too
-            let pyd_fields: Option<Vec<(String, Option<&'static ast::Expr>)>> = self.pyd_classes.get(&c).filter(|p| p.frozen).map(|p| p.fields.iter().map(|f| (f.name.clone(), None)).collect());
+            let pyd_fields: Option<Vec<(String, Option<&'static ast::Expr>)>> = self.m.pyd_classes.get(&c).filter(|p| p.frozen).map(|p| p.fields.iter().map(|f| (f.name.clone(), None)).collect());
             if (!ci.dc_frozen.get() && pyd_fields.is_none()) || self.class_lookup(c, "__hash__").is_some() || self.class_lookup(c, "__eq__").is_some() {
                 return None;
             }
@@ -342,9 +354,6 @@ impl Analyzer {
     pub fn identity_key(&self, o: u32) -> Option<KeyId> {
         if let Some(k) = self.identity_keys.borrow().get(&o) {
             return Some(*k);
-        }
-        if !self.sum_stack.is_empty() {
-            return None;
         }
         let ob = self.obj(o);
         if !ob.single || ob.site.ends_with("#recent") {
@@ -557,13 +566,9 @@ impl Analyzer {
         crate::domain::join_values(outs)
     }
 
-    /// The class of an instance (or of a placeholder of a user class), when it is a user class.
+    /// The class of an instance, when it is a user class.
     fn user_class_of(&self, o: u32) -> Option<u32> {
-        let c = match self.kind(o) {
-            Kind::Instance => self.instance_class(o),
-            Kind::Ph => self.ph_info(o).cls.get(),
-            _ => None,
-        }?;
+        let c = self.instance_class(o)?;
         self.class_info_opt(c).map(|_| c)
     }
 
@@ -590,57 +595,32 @@ impl Analyzer {
             return self.per_receiver(obj, state, &mut |an, o, st| an.load_item(o, ns, key, node, st, report));
         }
         // a numpy structured array's missing field raises ValueError
-        let exc = if ns == Ns::Item && !obj.pts.is_empty() && !self.np_struct.is_empty() && obj.pts.iter().all(|o| self.np_struct.contains(&o)) { Some("ValueError") } else { None };
+        let exc = if ns == Ns::Item && !obj.pts.is_empty() && !self.m.np_struct.is_empty() && obj.pts.iter().all(|o| self.m.np_struct.contains(&o)) { Some("ValueError") } else { None };
         let exc = if ns == Ns::Item { self.item_exc_force.or(exc) } else { exc };
         let saved = std::mem::replace(&mut self.item_exc, exc);
+        let scalar = self.may_be_scalar(obj);
+        let saved_scalar = std::mem::replace(&mut self.recv_scalar, scalar);
         let v = self.load_item_inner(obj, ns, key, node, state, report);
+        self.recv_scalar = saved_scalar;
         self.item_exc = saved;
         v
     }
 
     fn load_item_inner(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
-        // (a parameter indexed by a position or a slice: a literal string there decides it)
-        if ns == Ns::Item && key.pts.is_empty() {
-            let positional = key.kv.as_lit().is_some_and(|k| intern::key_as_int(k).is_some() && !intern::key_is_str(k)) || matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice"));
-            if positional {
-                let phs: Vec<u32> = obj.pts.iter().filter(|o| self.kind(*o) == Kind::Ph).collect();
-                for ph in phs {
-                    self.record_event("strlit", ph);
-                }
-            }
-        }
         // (objects in the key: an unknown key; lists / tuples are indexed by their own rules)
-        let okey = if ns == Ns::Item && !key.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Dict | Kind::Ph | Kind::Unknown)) && !obj.pts.is_empty() {
-            self.note_key_params(key, state);
+        let okey = if ns == Ns::Item && !key.pts.is_empty() && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Dict | Kind::Unknown)) && !obj.pts.is_empty() {
             self.opaque_key(key, state)
         } else {
             key.clone()
         };
         let key = &okey;
-        // in a summary: a value read from a dict copied from a parameter's record (its slot not
-        // set here) is known only at the call site: decided there
-        if !self.sum_stack.is_empty() {
-            if let Some(k) = key.kv.as_lit().filter(|_| key.pts.is_empty()) {
-                for o in obj.pts.iter() {
-                    if !(self.kind(o) == Kind::Dict || (self.kind(o) == Kind::Instance && ns == Ns::Item)) || state.has_slot(o, ns, k) {
-                        continue;
-                    }
-                    let refs = state.row(o, ns).refs();
-                    for r in refs.iter() {
-                        let (p, _) = crate::domain::unrho(r);
-                        if self.has_obj(p) && self.kind(p) == Kind::Ph {
-                            self.record_event("concrete", p);
-                        }
-                    }
-                }
-            }
-        }
         let mut acc = Value::new();
         let guarded = self.is_guarded(ns) || !report;
         // a real try/except guard (as opposed to a model's unreported load): no exception
         // means the key was present from here on
         let try_guard = report && self.is_guarded(ns);
-        let single_target = obj.pts.len() == 1;
+        let scalar = self.may_be_scalar(obj);
+        let single_target = obj.pts.len() == 1 && !scalar;
         let line_data = Value::data(&format!("L{}", node.line));
         // a frame column read raises KeyError when the column is missing
         let frame_tiers: Option<Vec<Tier>> = if try_guard && ns == Ns::Item && !obj.pts.is_empty() && obj.pts.iter().all(|o| self.kind(o) == Kind::Frame) {
@@ -655,31 +635,8 @@ impl Analyzer {
                 self.may_raise_here("KeyError", state);
             }
         }
-        // a slice of a placeholder (a parameter's list): a list of its elements (decided per
-        // call site where the list is known)
-        if ns == Ns::Item && key.pts.is_empty() && matches!(&key.kv, KeyVal::Data(d) if intern::str_get(*d).starts_with("slice")) {
-            let phs: Vec<u32> = obj.pts.iter().filter(|o| self.kind(*o) == Kind::Ph).collect();
-            if !phs.is_empty() {
-                let mut acc = Value::new();
-                for ph in &phs {
-                    self.record_event("concrete", *ph);
-                    let e = self.elem_of(&Value::obj(*ph), node, state);
-                    let lid = self.alloc_at(Kind::List, node, state, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, Some(&format!("slice{}", ph)));
-                    state.set_slot(lid, Ns::Elem, STAR, Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv)), true);
-                    state.elems.insert(lid, e.kv.clone());
-                    self.set_llen(lid, state, None);
-                    acc = acc.join(&Value::obj(lid));
-                }
-                let rest: Vec<u32> = obj.pts.iter().filter(|o| self.kind(*o) != Kind::Ph).collect();
-                if rest.is_empty() {
-                    return acc;
-                }
-                let others = Value::with_kv(crate::domain::ObjSet::from_vec(rest), obj.kv.clone());
-                return acc.join(&self.load_item(&others, ns, key, node, state, report));
-            }
-        }
         // `lst[-1]` right after `lst.append(x)`: x
-        if ns == Ns::Item && !state.lasts.is_empty() && key.pts.is_empty() && key.kv.as_lit() == Some(intern::key_int(-1)) && !obj.pts.is_empty() && (obj.kv.is_bot() || obj.kv.as_param().map(|p| obj.pts.contains(p)).unwrap_or(false)) {
+        if ns == Ns::Item && !state.lasts.is_empty() && key.pts.is_empty() && key.kv.as_lit() == Some(intern::key_int(-1)) && !obj.pts.is_empty() && obj.kv.is_bot() {
             let vs: Option<Vec<Value>> = obj.pts.iter().map(|o| state.last_of(o)).collect();
             if let Some(vs) = vs {
                 return join_values(vs);
@@ -687,13 +644,6 @@ impl Analyzer {
         }
         // a summary reading the last element of a module list (that functions append to): the
         // call site may know it
-        if ns == Ns::Item && !self.sum_stack.is_empty() && key.pts.is_empty() && key.kv.as_lit() == Some(intern::key_int(-1)) {
-            for o in obj.pts.iter() {
-                if self.kind(o) == Kind::Ph && state.last_of(o).is_none() && self.ph_info(o).parent.map(|p| self.has_obj(p) && self.kind(p) == Kind::Module).unwrap_or(false) {
-                    self.record_event("concrete", o);
-                }
-            }
-        }
         // `Color["RED"]`: an Enum's member by name
         if ns == Ns::Item && !obj.pts.is_empty() && obj.pts.iter().all(|o| self.enum_members.contains_key(&o)) {
             let mut out = Value::new();
@@ -716,9 +666,6 @@ impl Analyzer {
                         }
                     },
                     None => {
-                        if let Some(p) = key.kv.as_param() {
-                            self.record_event("concrete", p);
-                        }
                         self.may_raise_here("KeyError", state);
                         out = out.join(&join_values(ms.iter().map(|(_, m)| Value::obj(*m)).collect::<Vec<_>>()));
                     }
@@ -733,20 +680,6 @@ impl Analyzer {
             // a Counter reads a missing key as 0 without inserting it: the row is put back
             // after the (never failing) access
             let mut counter_restore: Option<Row> = None;
-            if kind == Kind::Ph && ns == Ns::Item && self.pandas_on && !key.pts.is_empty() {
-                // `df[[...]]`, `df[mask]`: a frame selection, decided per call site
-                self.record_event("concrete", oid);
-            }
-            if kind == Kind::Ph && ns == Ns::Item {
-                // a placeholder declared as a defaultdict: insertion is decided per call site
-                if let Payload::Ph(p) = &self.obj(oid).payload {
-                    if let Some(c) = p.cls.get() {
-                        if self.class_info_opt(c).is_none() && self.obj(c).label.ends_with("defaultdict") {
-                            self.record_event("narrow", oid);
-                        }
-                    }
-                }
-            }
             if kind == Kind::Dict && ns == Ns::Item && (self.obj(oid).label.starts_with("defaultdict@") || self.obj(oid).label.starts_with("Counter@")) {
                 // `dd[k]` inserts the factory's value when `k` is absent (a fresh one per key)
                 let row = state.row(oid, ns);
@@ -759,13 +692,13 @@ impl Analyzer {
                     let mut r = row.clone();
                     for k in ks.iter() {
                         if !r.definite.contains(k) {
-                            let dflt = match self.dd_factories.get(&oid).cloned() {
+                            let dflt = match self.m.dd_factories.get(&oid).cloned() {
                                 Some(f) => self.call_value(&f, node, None, state, Some(vec![])),
                                 None => state.slot(oid, Ns::Item, STAR),
                             };
                             // (a key the closed row surely lacks: no earlier value to keep; in an
                             // open one a key not known may be there already, with any value)
-                            let absent = r.closed() && !r.present.contains(k) && !r.symbolic();
+                            let absent = r.closed() && !r.present.contains(k);
                             let dflt = if r.open() && !r.present.contains(k) && state.slot_opt(oid, ns, k).is_none() { dflt.join(&Value::data(&format!("{}[*]", self.obj(oid).label))) } else { dflt };
                             r = r.store(k, strong);
                             state.set_slot(oid, ns, k, dflt, absent);
@@ -786,9 +719,9 @@ impl Analyzer {
                     } else {
                         state.set_row(oid, ns, r);
                     }
-                } else if key.kv.as_param().is_none() {
+                } else {
                     // an unknown key: some key gets the factory's value
-                    if let Some(f) = self.dd_factories.get(&oid).cloned() {
+                    if let Some(f) = self.m.dd_factories.get(&oid).cloned() {
                         let dflt = self.call_value(&f, node, None, state, Some(vec![]));
                         state.set_slot(oid, ns, STAR, Value::with_kv(dflt.pts, DATA), false);
                     }
@@ -835,7 +768,7 @@ impl Analyzer {
                                         parts.push(state.slot(oid, Ns::Item, k));
                                     }
                                     // an open / symbolic dict may hold it (never a missing key)
-                                    if !row.present.contains(k) && (row.open() || row.symbolic()) {
+                                    if !row.present.contains(k) && (row.open()) {
                                         parts.push(line_data.clone());
                                     }
                                     continue;
@@ -875,14 +808,14 @@ impl Analyzer {
                     }
                 }
                 // an sqlite3.Row indexed by position
-                Kind::Dict if self.sql_rows.contains_key(&oid) && key.kv.as_lit().and_then(intern::key_as_int).is_some() => match crate::models::sqlite::row_index(self, state, oid, key) {
+                Kind::Dict if self.m.sql_rows.contains_key(&oid) && key.kv.as_lit().and_then(intern::key_as_int).is_some() => match crate::models::sqlite::row_index(self, state, oid, key) {
                     Some(v) => parts.push(v),
                     None => {
                         self.raise_here("IndexError", state);
                     }
                 },
                 // a regex match: `m[g]` is its group
-                Kind::Namespace if self.re_matches.contains_key(&oid) => match crate::models::remodel::match_item(self, oid, key) {
+                Kind::Namespace if self.m.re_matches.contains_key(&oid) => match crate::models::remodel::match_item(self, oid, key) {
                     Some(v) => parts.push(v),
                     None => parts.push(line_data.clone()),
                 },
@@ -949,8 +882,9 @@ impl Analyzer {
                             if kind != Kind::Set {
                                 self.may_raise_here("IndexError", state);
                             }
+                            // (the elements' objects and scalars: `elems`, nothing known when unset)
                             let e = state.slot(oid, Ns::Elem, STAR);
-                            parts.push(Value::with_kv(e.pts, DATA));
+                            parts.push(Value::with_kv(e.pts, state.elems.get(&oid).unwrap_or(DATA)));
                         }
                     }
                 }
@@ -1019,68 +953,18 @@ impl Analyzer {
     #[allow(clippy::too_many_arguments)]
     fn load_record_inner(&mut self, oid: u32, ns: Ns, key: &Value, node: &Node, state: &mut State, guarded: bool, single_target: bool, try_guard: bool) -> Value {
         let kind = self.kind(oid);
-        let mut row = state.row(oid, ns);
+        let mut row = if kind == Kind::Unknown { self.unknown_row(oid, ns, state) } else { state.row(oid, ns) };
         // (the row before this read narrows it)
         let row0 = row.clone();
         let kv = &key.kv;
         let site = self.access_site(node);
-        if let Some(ph) = kv.as_param() {
-            if !guarded {
-                self.record_symreq(node, kv.clone(), &row, oid, ns, guarded, "load");
-            } else if try_guard {
-                if let Some(m) = self.may_raise.last_mut() {
-                    *m = true;
-                }
-            }
-            let mut v = self.all_values(oid, ns, state);
-            // the key's value is unknown: the content may also come from the object's open
-            // sources / entry content — not from a closed record the function built itself
-            let content_unknown = !row.sources.is_empty() || !row.mutators.is_empty() || row.top || !row.terms.is_empty() || !row.dterms.is_empty() || !row.lterms.is_empty();
-            if content_unknown {
-                let p = self.path_placeholder_value(oid, ns, param_slot_key(ph), &row, state);
-                v = v.join(&p);
-            }
-            // which entry is read is decided per call site, when the key is a literal there
-            if content_unknown || !row.present.is_empty() {
-                self.record_event("narrow", ph);
-            }
-            let kv2 = match v.single() {
-                Some(o) if self.is_ph(o) => KeyVal::Param(o),
-                _ => DATA,
-            };
-            return Value::with_kv(v.pts, kv2);
-        }
         if kv.is_literal() {
             let mut acc = Value::new();
             let ks = crate::domain::kv_literals(kv);
             let is_lit = matches!(kv, KeyVal::Lit(_));
             for k in intern::sorted_by_str(ks.iter()) {
                 let cls = classify(&row, k);
-                if cls.tier == Tier::Sym {
-                    if guarded {
-                        // (a `.get`-like read never raises; a try-guarded one may)
-                        if try_guard {
-                            if let Some(m) = self.may_raise.last_mut() {
-                                *m = true;
-                            }
-                        }
-                        self.record_event("guarded", oid);
-                        // (a thread / future keeps the exception for the caller, a handler that
-                        // re-raises lets it go on: still required)
-                        if self.catching_depth > 0 || self.guard_reraises(ns) || self.caught_load {
-                            self.record_symreq(node, KeyVal::Lit(k), &row, oid, ns, false, "load");
-                        }
-                    } else {
-                        self.record_symreq(node, KeyVal::Lit(k), &row, oid, ns, guarded, "load");
-                    }
-                    // the element placeholder of a loop stands for every element: what one
-                    // iteration's access proved is not known of the next one
-                    let elem_ph = self.kind(oid) == Kind::Ph && self.ph_info(oid).key == Some(STAR) && self.frame().loop_depth > 0;
-                    if is_lit && single_target && self.strongable(oid) && !elem_ph {
-                        row = row.narrow_in(k, true);
-                        state.set_row(oid, ns, row.clone());
-                    }
-                } else if guarded && cls.tier != Tier::Proven && (try_guard) {
+                if guarded && cls.tier != Tier::Proven && (try_guard) {
                     if crate::interp::debug_level() == 2 {
                         eprintln!("  guarded access may raise: {:?} tier {:?} at L{}", intern::key_repr(k), cls.tier, node.line);
                     }
@@ -1115,13 +999,13 @@ impl Analyzer {
                         }
                         // (an object of unknown kind indexed by a number may be a sequence: an
                         // IndexError then)
-                        if ns == Ns::Item && intern::key_as_int(k).is_some() && matches!(kind, Kind::Unknown | Kind::Ph | Kind::External) {
+                        if ns == Ns::Item && intern::key_as_int(k).is_some() && matches!(kind, Kind::Unknown | Kind::External) {
                             self.cur_exc = None;
                             self.may_raise_here("IndexError", state);
                         }
                     }
                     if model_read {
-                    } else if try_guard && cls.tier == Tier::Missing && is_lit && single_target && !row.symbolic() {
+                    } else if try_guard && cls.tier == Tier::Missing && is_lit && single_target {
                         // the access raises here: the rest of the try body is unreachable
                         state.reachable = false;
                     }
@@ -1131,14 +1015,14 @@ impl Analyzer {
                         state.set_row(oid, ns, row.clone());
                     }
                 }
-                if guarded && cls.tier != Tier::Sym {
+                if guarded {
                     self.verdict_guarded(node, k, &cls, oid, ns);
                 }
                 // (a handler that re-raises, a thread / future: the input still needs the key)
                 if guarded && cls.tier == Tier::Input && (self.catching_depth > 0 || self.guard_reraises(ns) || self.caught_load) {
                     self.require_providers_k(&cls, &row, &site, true, state, Some(k));
                 }
-                if !guarded && cls.tier != Tier::Sym {
+                if !guarded {
                     self.verdict(node, k, &cls, oid, ns, None, None);
                     if cls.tier == Tier::Input {
                         self.require_providers_k(&cls, &row, &site, true, state, Some(k));
@@ -1201,15 +1085,15 @@ impl Analyzer {
             self.cur_exc = None;
             self.may_raise_here(if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" }, state);
         }
-        if !guarded && row.symbolic() {
-            self.record_symreq(node, kv.clone(), &row, oid, ns, guarded, "load");
-        } else if !guarded && row.closed() && !row.is_map() && !row.present.is_empty() && matches!(kind, Kind::Dict | Kind::Frame) {
+        if !guarded && row.closed() && !row.is_map() && !row.present.is_empty() && matches!(kind, Kind::Dict | Kind::Frame) {
             let k = key_str_lit(&format!("<data {}>", kv));
             self.verdict(node, k, &Classification::with_note(Tier::DataKey, "data-derived key into a closed record"), oid, ns, None, None);
         }
         let mut v = self.all_values(oid, ns, state);
-        // (a closed record: the unknown key is one of its keys — one of their values)
-        if row.closed() && !row.symbolic() && !row.top {
+        // (a closed record: the unknown key is one of its keys — one of their values; a map the
+        // program filled under data keys: its values are all in its slots)
+        let own_map = !row.top && row.mutators.is_empty() && row.sources.iter().all(|(src, _)| crate::domain::source_is_data(src));
+        if (row.closed() || own_map) && !row.top {
             return v;
         }
         if v.pts.is_empty() && row.open() {
@@ -1221,22 +1105,8 @@ impl Analyzer {
 
     /// `_path_placeholder`: the (unknown) content of an open object's slot.
     pub fn path_placeholder_value(&mut self, oid: u32, ns: Ns, k: KeyId, row: &Row, state: &mut State) -> Value {
-        if self.obj(oid).depth >= super::limit("path", PATH_DEPTH as usize) as u32 {
+        if self.obj(oid).depth >= PATH_DEPTH {
             return Value::data("deep");
-        }
-        if !self.sum_stack.is_empty() && self.is_entry_object(oid) {
-            let pid = self.path_placeholder(oid, ns, k, state, None, "");
-            return Value::with_kv(ObjSet::one(pid), KeyVal::Param(pid));
-        }
-        if !self.sum_stack.is_empty() && row.sources.is_empty() && row.mutators.is_empty() && !row.top {
-            if let Some(src) = self.obj(oid).copied_from {
-                if self.is_entry_object(src) {
-                    // a copy of an entry object, not updated from elsewhere since: the content
-                    // comes from the original
-                    let pid = self.path_placeholder(src, ns, k, state, None, "");
-                    return Value::with_kv(ObjSet::one(pid), KeyVal::Param(pid));
-                }
-            }
         }
         let label = format!("{}[{}]", self.obj(oid).label, intern::key_repr(k));
         // the content under an unknown key stands for many values: stores on it are weak
@@ -1248,7 +1118,6 @@ impl Analyzer {
                 self.set_symbol(pid, sym, scope);
             }
         }
-        self.note_part(oid, pid);
         let d = self.obj(oid).depth + 1;
         self.obj_mut(pid).depth = d;
         if !state.has_row(pid, Ns::Item) {
@@ -1269,29 +1138,6 @@ impl Analyzer {
         Value::obj(pid)
     }
 
-    /// A tuple key with parameters among its items (`d.get((kind, name))` in a summary): an
-    /// unknown key here, a literal one at a call site that passes literals — decided there.
-    pub fn note_key_params(&mut self, key: &Value, state: &State) {
-        if key.pts.is_empty() {
-            return;
-        }
-        let mut phs: Vec<u32> = Vec::new();
-        for o in key.pts.iter() {
-            if self.kind(o) != Kind::Tuple {
-                continue;
-            }
-            let Some(n) = self.llen(o, state) else { continue };
-            for i in 0..n {
-                let p = state.slot(o, Ns::Pos, intern::key_int(i as i64));
-                if let Some(ph) = p.kv.as_param() {
-                    phs.push(ph);
-                }
-            }
-        }
-        for ph in phs {
-            self.record_event("narrow", ph);
-        }
-    }
 
     /// A key whose value includes objects (an unknown value, a non-literal tuple, an instance):
     /// for the record model an unknown key (its literal part kept in the join).
@@ -1301,15 +1147,6 @@ impl Analyzer {
         }
         let key = self.keyify_in(key, state);
         if key.pts.is_empty() {
-            return key;
-        }
-        // a placeholder standing for its own value (`Param(ph)`): decided per call site
-        if let Some(p) = key.kv.as_param() {
-            if key.pts.len() == 1 && key.pts.contains(p) {
-                return key;
-            }
-        }
-        if key.kv.is_bot() && key.pts.iter().all(|o| self.kind(o) == Kind::Ph) {
             return key;
         }
         Value::with_kv(key.pts.clone(), crate::domain::kv_join(&key.kv, &DATA))
@@ -1369,14 +1206,14 @@ impl Analyzer {
                     }
                     continue;
                 }
-                Kind::Dict if self.chainmaps.contains_key(&oid) => {
+                Kind::Dict if self.m.chainmaps.contains_key(&oid) => {
                     // a ChainMap: the write lands in its first map too
-                    let first = self.chainmaps[&oid].first().cloned().unwrap_or_default();
+                    let first = self.m.chainmaps[&oid].first().cloned().unwrap_or_default();
                     for m in self.record_objects(&first) {
                         let s1 = strong && first.pts.len() == 1 && self.strongable(m);
                         self.store_key(m, Ns::Item, &key.kv, v, s1, node, state);
                     }
-                    if self.chainmaps[&oid].len() > 1 {
+                    if self.m.chainmaps[&oid].len() > 1 {
                         self.refresh_chainmap(oid, state);
                     } else {
                         let s1 = strong && self.strongable(oid);
@@ -1412,10 +1249,6 @@ impl Analyzer {
         let kv = &self.canon_kv(oid, ns, kv, state);
         let row = state.row(oid, ns);
         match kv {
-            KeyVal::Param(ph) => {
-                state.set_row(oid, ns, row.param_store(*ph, strong));
-                state.set_slot(oid, ns, param_slot_key(*ph), v.clone(), strong);
-            }
             KeyVal::Lit(k) => {
                 state.set_row(oid, ns, row.store(*k, strong));
                 state.set_slot(oid, ns, *k, v.clone(), strong);
@@ -1445,12 +1278,12 @@ impl Analyzer {
                         }
                     }
                 }
-                state.set_slot(oid, ns, STAR, Value::with_kv(v.pts.clone(), DATA), false);
+                state.set_slot(oid, ns, STAR, v.clone(), false);
             }
             _ => {
                 let site = format!("store@L{}", node.line);
                 state.set_row(oid, ns, row.data_store(Source::new(&site, SourceKind::Data)));
-                state.set_slot(oid, ns, STAR, Value::with_kv(v.pts.clone(), DATA), false);
+                state.set_slot(oid, ns, STAR, v.clone(), false);
                 // the unknown key may be any of the keys there: each may hold the value now
                 let keys: Vec<KeyId> = state.slot_keys(oid, ns).into_iter().filter(|k| *k != STAR).collect();
                 for k in keys {
@@ -1465,9 +1298,6 @@ impl Analyzer {
         let recs = self.record_objects(src);
         // an unknown value copied in (`{**entry}` with entry unknown): any keys
         if recs.is_empty() && src.pts.is_empty() && !src.kv.is_bot() && !src.kv.is_literal() {
-            if let Some(ph) = src.kv.as_param() {
-                self.record_event("concrete", ph);
-            }
             let n = state.rows.len();
             let r = state.row(oid, ns).data_store(Source::new(&format!("copy@{}", n), SourceKind::Data));
             state.set_row(oid, ns, r);
@@ -1519,7 +1349,7 @@ impl Analyzer {
 
     /// A ChainMap's merged keys and values, rebuilt from its maps (the first one wins).
     pub fn refresh_chainmap(&mut self, oid: u32, state: &mut State) {
-        let maps = self.chainmaps.get(&oid).cloned().unwrap_or_default();
+        let maps = self.m.chainmaps.get(&oid).cloned().unwrap_or_default();
         state.set_row(oid, Ns::Item, Row::new());
         state.drop_obj_ns(oid, Ns::Item);
         for sa in maps.iter().rev() {
@@ -1551,14 +1381,10 @@ impl Analyzer {
                 crate::models::pandas::frame_delitem(self, oid, key, node, state, strong, report);
                 continue;
             }
-            if kind == Kind::Ph && ns == Ns::Item && !self.chainmaps.is_empty() {
-                // (a ChainMap passed in deletes from its first map: decided per call site)
-                self.record_event("concrete", oid);
-            }
             // a ChainMap: the first map loses the key (KeyError when only a later map has it);
             // the view is the maps' again
-            if kind == Kind::Dict && ns == Ns::Item && self.chainmaps.contains_key(&oid) {
-                let first = self.chainmaps[&oid].first().cloned().unwrap_or_default();
+            if kind == Kind::Dict && ns == Ns::Item && self.m.chainmaps.contains_key(&oid) {
+                let first = self.m.chainmaps[&oid].first().cloned().unwrap_or_default();
                 self.delete_item(&first, ns, key, node, state, report);
                 self.refresh_chainmap(oid, state);
                 continue;
@@ -1580,10 +1406,6 @@ impl Analyzer {
             let key = &ckey;
             let mut row = state.row(oid, ns);
             let is_lit = matches!(key.kv, KeyVal::Lit(_));
-            if let KeyVal::Param(ph) = &key.kv {
-                // `del d[k]` with k a parameter: decided per call site when k is a literal there
-                self.record_event("narrow", *ph);
-            }
             let mut raise: Option<(bool, KeyId)> = None;
             for k in intern::sorted_by_str(crate::domain::kv_literals(&key.kv).iter()) {
                 let cls = classify(&row, k);
@@ -1595,7 +1417,7 @@ impl Analyzer {
                     }
                 }
                 // (a `del` of a key that is not there raises KeyError)
-                if !matches!(cls.tier, Tier::Proven | Tier::Map | Tier::Sym) && kind != Kind::Ph {
+                if !matches!(cls.tier, Tier::Proven | Tier::Map) {
                     let surely = cls.tier == Tier::Missing && is_lit && strong;
                     raise = Some((surely || raise.map(|r| r.0).unwrap_or(false), k));
                 }
@@ -1620,7 +1442,7 @@ impl Analyzer {
                 }
             }
             // an unknown key: any key may be the one deleted
-            if !key.kv.is_literal() && key.kv.as_param().is_none() {
+            if !key.kv.is_literal() {
                 row = row.mutate(s(&format!("del@L{}", node.line)));
             }
             state.set_row(oid, ns, row);
@@ -1641,16 +1463,12 @@ impl Analyzer {
         // (one k-way union of all targets' values: a receiver of many objects, joined pairwise,
         // costs the product of their sizes)
         let mut parts: Vec<Value> = Vec::new();
-        let saved_many = std::mem::replace(&mut self.many_receivers, if obj.pts.len() > 32 {
-            use std::hash::BuildHasher;
-            let ids = obj.pts.to_vec();
-            let key = format!("{:x}.{}", rustc_hash::FxBuildHasher.hash_one(&ids), ids.len());
-            Some((obj.clone(), key, None))
-        } else {
-            None
-        });
         let guarded = self.is_guarded(Ns::Attr) || !report;
-        let single = obj.pts.len() == 1;
+        // (a value that may also be a scalar — a str, a number — may have the attribute: no
+        // object's lack of it makes the read fail for sure)
+        let scalar = self.may_be_scalar(obj);
+        let single = obj.pts.len() == 1 && !scalar;
+        let saved_scalar = std::mem::replace(&mut self.recv_scalar, scalar);
         let nk = key_str_lit(name);
         for oid in obj.pts.iter() {
             let k = self.kind(oid);
@@ -1706,7 +1524,7 @@ impl Analyzer {
                                 row = row.store(kk, true);
                                 state.set_slot(did, Ns::Item, kk, v.clone(), true);
                             }
-                            if let Some(st2) = self.partial_star.get(&oid).cloned() {
+                            if let Some(st2) = self.m.partial_star.get(&oid).cloned() {
                                 for sk in st2 {
                                     self.copy_into(did, Ns::Item, &sk, state, false, &KeySet::new());
                                     row = state.row(did, Ns::Item).join(&row);
@@ -1722,7 +1540,7 @@ impl Analyzer {
                     Some(c) => Value::obj(c),
                     None => Value::data(&format!("L{}", node.line)),
                 },
-                Kind::Namespace | Kind::Instance | Kind::Ph if name == "__dict__" => {
+                Kind::Namespace | Kind::Instance if name == "__dict__" => {
                     let vid = self.alloc_raw(Kind::View, &format!("view:attrs:{}", oid), "", true, "__dict__", Payload::View(ViewKind::Attrs, Value::obj(oid)));
                     self.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(oid));
                     Value::obj(vid)
@@ -1742,8 +1560,8 @@ impl Analyzer {
                     }
                 }
                 // a csv reader's fieldnames / line_num
-                Kind::List | Kind::View if self.csv_readers.contains_key(&oid) && matches!(name, "fieldnames" | "line_num" | "dialect" | "restkey" | "restval") => match name {
-                    "fieldnames" => self.csv_readers[&oid].clone(),
+                Kind::List | Kind::View if self.m.csv_readers.contains_key(&oid) && matches!(name, "fieldnames" | "line_num" | "dialect" | "restkey" | "restval") => match name {
+                    "fieldnames" => self.m.csv_readers[&oid].clone(),
                     _ => Value::data(name),
                 },
                 Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("pydverr.")) => {
@@ -1761,7 +1579,7 @@ impl Analyzer {
                         }
                     }
                 }
-                Kind::Namespace | Kind::Instance => self.load_instance_attr(oid, name, node, state, guarded, single),
+                Kind::Namespace | Kind::Instance => self.load_instance_attr(oid, name, node, state, guarded, report && guarded, single),
                 Kind::Class if name == "__annotations__" && self.class_lookup(oid, name).is_none() && self.class_info_opt(oid).is_some() => {
                     let names = crate::models::annotated_names(self, oid, false).unwrap_or_default();
                     crate::models::names_dict(self, state, node, &names, None, "annotation")
@@ -1851,24 +1669,24 @@ impl Analyzer {
                     }
                 }
                 Kind::Dict if crate::models::pandas::is_series_obj(self, oid) => crate::models::pandas::series_getattr(self, oid, name, node, state),
-                Kind::Dict if self.cfg_parsers.contains_key(&oid) && crate::models::configparser::PARSER_METHODS.contains(&name) => self.method_value(&format!("cfgparser.{}", name), &Value::obj(oid)),
-                Kind::Dict if self.cfg_sections.contains_key(&oid) && crate::models::configparser::SECTION_METHODS.contains(&name) => self.method_value(&format!("cfgsection.{}", name), &Value::obj(oid)),
-                Kind::Dict if self.cfg_sections.contains_key(&oid) && name == "name" => Value::lit_str(&self.cfg_sections[&oid].1),
-                Kind::Dict if self.counters.contains(&oid) && crate::models::counter::COUNTER_METHODS.contains(&name) => self.method_value(&format!("counter.{}", name), &Value::obj(oid)),
-                Kind::Dict if self.chainmaps.contains_key(&oid) && matches!(name, "maps" | "parents") => {
+                Kind::Dict if self.m.cfg_parsers.contains_key(&oid) && crate::models::configparser::PARSER_METHODS.contains(&name) => self.method_value(&format!("cfgparser.{}", name), &Value::obj(oid)),
+                Kind::Dict if self.m.cfg_sections.contains_key(&oid) && crate::models::configparser::SECTION_METHODS.contains(&name) => self.method_value(&format!("cfgsection.{}", name), &Value::obj(oid)),
+                Kind::Dict if self.m.cfg_sections.contains_key(&oid) && name == "name" => Value::lit_str(&self.m.cfg_sections[&oid].1),
+                Kind::Dict if self.m.counters.contains(&oid) && crate::models::counter::COUNTER_METHODS.contains(&name) => self.method_value(&format!("counter.{}", name), &Value::obj(oid)),
+                Kind::Dict if self.m.chainmaps.contains_key(&oid) && matches!(name, "maps" | "parents") => {
                     let c = super::Call { qual: format!("chainmap.{}", name), recv: Some(Value::obj(oid)), args: vec![], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
                     match self.models.lookup(&c.qual) {
                         Some(m) => m(self, state, &c),
                         None => Value::data("chainmap"),
                     }
                 }
-                Kind::Dict if self.chainmaps.contains_key(&oid) && name == "new_child" => self.method_value("chainmap.new_child", &Value::obj(oid)),
+                Kind::Dict if self.m.chainmaps.contains_key(&oid) && name == "new_child" => self.method_value("chainmap.new_child", &Value::obj(oid)),
                 // a TestClient cookie jar's set / delete
-                Kind::Dict if matches!(name, "set" | "delete") && self.cookie_jars.contains(&oid) => self.method_value(&format!("fastapi.cookies.{}", name), &Value::obj(oid)),
+                Kind::Dict if matches!(name, "set" | "delete") && self.m.cookie_jars.contains(&oid) => self.method_value(&format!("fastapi.cookies.{}", name), &Value::obj(oid)),
                 Kind::Dict => self.method_value(&format!("dict.{}", name), &Value::obj(oid)),
-                Kind::List if self.deques.contains_key(&oid) && crate::models::counter::DEQUE_METHODS.contains(&name) => {
+                Kind::List if self.m.deques.contains_key(&oid) && crate::models::counter::DEQUE_METHODS.contains(&name) => {
                     if name == "maxlen" {
-                        match self.deques[&oid] {
+                        match self.m.deques[&oid] {
                             Some(m) => Value::lit(intern::key_int(m)),
                             None => self.none_v.clone(),
                         }
@@ -1892,7 +1710,6 @@ impl Analyzer {
                     }
                 }
                 Kind::Unknown => self.load_unknown_attr(oid, name, node, state, guarded),
-                Kind::Ph => self.load_ph_attr(oid, name, node, state, guarded, single),
                 // an lru_cache'd function's cache_info / cache_clear
                 Kind::Function if matches!(name, "cache_info" | "cache_clear") && self.func_info(oid).is_memo.get() => self.method_value(&format!("memo.{}", name), &Value::obj(oid)),
                 // a function's names (a `@wraps(fn)` wrapper: fn's)
@@ -1956,7 +1773,6 @@ impl Analyzer {
                         .filter_map(|o| match self.kind(o) {
                             Kind::Instance => self.instance_class(o),
                             Kind::Class => Some(o),
-                            Kind::Ph => self.ph_info(o).cls.get(),
                             _ => None,
                         })
                         .collect();
@@ -2013,7 +1829,7 @@ impl Analyzer {
             };
             parts.push(v);
         }
-        self.many_receivers = saved_many;
+        self.recv_scalar = saved_scalar;
         acc = acc.join(&crate::domain::join_values(parts));
         if obj.pts.is_empty() {
             if name == "str" && matches!(obj.kv, KeyVal::KeysOf(_)) {
@@ -2204,7 +2020,7 @@ impl Analyzer {
                 let fi = self.func_info(f);
                 if fi.is_property.get() {
                     let r = self.call_user(f, Some(Value::obj(oid)), vec![], IndexMap::new(), vec![], vec![], state, node, None, false);
-                    if fi.is_cached.get() && matches!(self.kind(oid), Kind::Instance | Kind::Ph) {
+                    if fi.is_cached.get() && matches!(self.kind(oid), Kind::Instance) {
                         // stored on the instance: later accesses find this value
                         let strong = self.strongable(oid);
                         self.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit(name)), &r, strong, node, state);
@@ -2247,7 +2063,7 @@ impl Analyzer {
         false
     }
 
-    pub fn load_instance_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool, single_target: bool) -> Value {
+    pub fn load_instance_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool, try_guard: bool, single_target: bool) -> Value {
         let nk = key_str_lit(name);
         // a pydantic private attribute: its hidden slot
         if let Some(cls) = self.instance_class(oid) {
@@ -2273,7 +2089,7 @@ impl Analyzer {
         }
         // what every instance has from `object` and its class (`__module__`, `__repr__`, …),
         // when neither the class nor the instance defines it
-        if crate::summary::OBJECT_ATTRS.contains(&name) && name != "__dict__" && name != "__class__" {
+        if OBJECT_ATTRS.contains(&name) && name != "__dict__" && name != "__class__" {
             if let Some(cls) = self.instance_class(oid) {
                 if self.class_lookup(cls, name).is_none() && state.slot_opt(oid, Ns::Attr, nk).is_none() {
                     if !guarded {
@@ -2377,16 +2193,6 @@ impl Analyzer {
             }
         }
         let cls = classify(&row, nk);
-        if cls.tier == Tier::Sym {
-            if !guarded {
-                self.record_symreq(node, KeyVal::Lit(nk), &row, oid, Ns::Attr, guarded, "attr");
-            }
-            // (a read that cannot fail, `getattr(o, k, None)`, proves nothing)
-            if single_target && self.strongable(oid) && (!guarded || self.is_guarded(Ns::Attr)) {
-                state.set_row(oid, Ns::Attr, row.narrow_in(nk, true));
-            }
-            return self.path_placeholder_value(oid, Ns::Attr, nk, &row, state);
-        }
         if !guarded {
             self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
             if cls.tier == Tier::Input {
@@ -2399,9 +2205,10 @@ impl Analyzer {
             }
         } else {
             self.verdict_guarded(node, nk, &cls, oid, Ns::Attr);
-            if self.is_guarded(Ns::Attr) && !matches!(cls.tier, Tier::Proven | Tier::Likely | Tier::Map) {
+            // (a read that cannot fail, `getattr(o, k, None)`, raises nothing; a try-guarded one may)
+            if try_guard && !matches!(cls.tier, Tier::Proven | Tier::Likely | Tier::Map) {
                 // an AttributeError the enclosing try handles
-                if cls.tier == Tier::Missing && single_target && !row.symbolic() && self.instance_class(oid).is_none() {
+                if cls.tier == Tier::Missing && single_target && !self.class_resolves(oid, name) {
                     self.raise_here("AttributeError", state);
                 } else {
                     self.may_raise_here("AttributeError", state);
@@ -2412,218 +2219,6 @@ impl Analyzer {
             return self.path_placeholder_value(oid, Ns::Attr, nk, &row, state);
         }
         Value::data(&format!("L{}", node.line))
-    }
-
-    /// Does a user class refuse or intercept attribute stores (frozen, `__setattr__`)?
-    pub fn has_guarded_setattr(&self) -> bool {
-        self.user_classes.iter().any(|c| {
-            self.class_info_opt(*c).map(|ci| ci.dc_frozen.get()).unwrap_or(false)
-                || self.pyd_classes.get(c).map(|p| p.frozen || p.validate_assignment).unwrap_or(false)
-                || self.cls_slots.contains_key(&(*c, Ns::Attr, key_str_lit("__setattr__")))
-                || self.is_named_tuple_class(*c)
-        })
-    }
-
-    /// Is `name` an attribute / method of a modelled stdlib object of a family this program
-    /// has made objects of?
-    pub fn stdobj_attr_name(&self, name: &str) -> bool {
-        const SQL: &[&str] = &["execute", "executemany", "executescript", "cursor", "fetchone", "fetchall", "fetchmany", "description", "row_factory", "rowcount", "lastrowid", "commit", "connection"];
-        const RE: &[&str] = &["group", "groups", "groupdict", "start", "end", "span", "lastgroup", "lastindex", "expand", "match", "search", "fullmatch", "findall", "finditer", "sub", "subn", "split", "pattern", "groupindex"];
-        const PATH: &[&str] = &["stem", "suffix", "suffixes", "parent", "parents", "parts", "with_suffix", "with_name", "with_stem", "relative_to", "joinpath", "as_posix", "is_absolute"];
-        const CFG: &[&str] = &["sections", "getint", "getfloat", "getboolean", "has_section", "has_option", "options", "read_string", "read_dict"];
-        (crate::models::chrono::used() && crate::models::chrono::NAMES.contains(&name))
-            || (crate::models::pynum::used() && crate::models::pynum::NAMES.contains(&name))
-            || (!self.sql_dbs.is_empty() && SQL.contains(&name))
-            || ((!self.re_patterns.is_empty() || !self.re_matches.is_empty()) && RE.contains(&name))
-            || (!self.path_classes.is_empty() && PATH.contains(&name))
-            || (!self.cfg_parsers.is_empty() && CFG.contains(&name))
-    }
-
-    /// Does any user subclass of `base` (other than `except`) define `name`?
-    fn subclass_overrides(&self, base: u32, except: Option<u32>, name: &str) -> bool {
-        let nk = key_str_lit(name);
-        self.user_classes.iter().any(|&sc| Some(sc) != except && self.is_subclass(sc, base) && self.cls_slots.contains_key(&(sc, Ns::Attr, nk)))
-    }
-
-    pub fn load_ph_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool, single_target: bool) -> Value {
-        let ph = self.ph_info(oid);
-        let nk = key_str_lit(name);
-        if let Some(v) = state.slot_opt(oid, Ns::Attr, nk) {
-            // set in this function: the read succeeds where it was set on every path; set on
-            // some only, the others have the argument's own attribute
-            let row = state.row(oid, Ns::Attr);
-            if row.definite.contains(nk) && row.stored.contains(nk) {
-                if !guarded {
-                    self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
-                }
-                return v;
-            }
-            if !guarded {
-                self.record_symreq(node, KeyVal::Lit(nk), &row, oid, Ns::Attr, guarded, "attr");
-            }
-            if single_target {
-                state.set_row(oid, Ns::Attr, row.narrow_in(nk, true));
-            }
-            // (from here on the slot holds both: a later read, and the call's effect on the
-            // argument, see either)
-            let v = v.join(&self.path_placeholder_value(oid, Ns::Attr, nk, &row, state));
-            state.set_slot(oid, Ns::Attr, nk, v.clone(), true);
-            return v;
-        }
-        if self.pandas_on && (crate::models::pandas::FRAME_ONLY_ATTRS.contains(&name) || crate::models::pandas::DF_METHODS.contains(&name) || matches!(name, "str" | "dt" | "cat")) {
-            // a frame's indexers / columns / a Series accessor: decided per call site
-            self.concrete_root(oid);
-        }
-        // an attribute of a modelled stdlib object the program makes (a cursor's
-        // `description`, a match's `group`): decided per call site where the object is known
-        if ph.cls.get().is_none() && self.stdobj_attr_name(name) {
-            self.concrete_root(oid);
-        }
-        // declared class (annotation / self): resolve methods and class attributes (a
-        // dataclass field's default is instance data, not a class attribute)
-        let is_field = ph.cls.get().map(|c| self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name)).unwrap_or(false);
-        // a NamedTuple's API on a placeholder of the class; a class-less one decides per call
-        if matches!(name, "_asdict" | "_replace") {
-            match ph.cls.get() {
-                Some(pc) if self.class_lookup(pc, name).is_none() && self.is_named_tuple_class(pc) => {
-                    return self.method_value(&format!("namedtuple.{}", name), &Value::obj(oid));
-                }
-                None if self.user_classes.iter().any(|c| self.is_named_tuple_class(*c)) => self.record_event("concrete", oid),
-                _ => {}
-            }
-        }
-        // pydantic's API on a placeholder typed with a model class (and its private attributes)
-        if let Some(pcls) = ph.cls.get() {
-            if name.starts_with('_') && self.pyd_is_private(pcls, name, state) {
-                let pk = crate::models::pydantic::priv_key(name);
-                if let Some(v) = state.slot_opt(oid, Ns::Attr, pk) {
-                    return v;
-                }
-                let row = state.row(oid, Ns::Attr);
-                return self.path_placeholder_value(oid, Ns::Attr, pk, &row, state);
-            }
-            if !is_field && crate::models::pydantic::PYD_ATTRS.contains(&name) && self.class_lookup(pcls, name).is_none() && crate::models::pydantic::is_model(self, pcls) {
-                return crate::models::pydantic::attr_value(self, state, oid, name, node);
-            }
-            if !is_field && crate::models::pydantic::PYD_METHODS.contains(&name) && self.class_lookup(pcls, name).is_none() && crate::models::pydantic::is_model(self, pcls) {
-                return self.method_value(&format!("pydantic.{}", name), &Value::obj(oid));
-            }
-        }
-        // (a class only from the annotation: a call site passing an instance of another class
-        // runs the body concretely, hints are not trusted over known classes)
-        if !ph.exact.get() && ph.cls.get().is_some_and(|c| self.class_info_opt(c).is_some()) {
-            self.record_event("hint", oid);
-        }
-        if let (Some(pcls), false) = (ph.cls.get(), is_field) {
-            if let Some(c) = self.class_lookup(pcls, name) {
-                let cv = self.cls_slots.get(&(c, Ns::Attr, nk)).cloned().unwrap_or_default();
-                let out = self.bound_outs(&cv, oid, pcls, name, node, state);
-                if !ph.exact.get() && self.subclass_overrides(pcls, Some(c), name) {
-                    self.record_event("dispatch", oid);
-                }
-                // a data attribute of the class: an instance with its own attribute of the
-                // name shadows it (decided per call site)
-                if !cv.pts.is_empty() && !cv.pts.iter().any(|o| matches!(self.kind(o), Kind::Function | Kind::Bound | Kind::Method | Kind::Class | Kind::External)) || !cv.kv.is_bot() {
-                    self.record_event("clsattr", oid);
-                }
-                return out;
-            }
-            if !ph.exact.get() && self.subclass_overrides(pcls, Some(pcls), name) {
-                self.record_event("dispatch", oid);
-            }
-        }
-        // a declared builtin class (`isinstance(x, dict)`, `self.xs = []`) selects a model
-        // family; only a user class counts as "has a class" for method lookup
-        let builtin_cls: Option<String> = { ph.cls.get().filter(|c| self.class_info_opt(*c).is_none()).map(|c| self.obj(c).label.rsplit('.').next().unwrap_or("").to_string()) };
-        let has_cls = ph.cls.get().is_some() && builtin_cls.is_none();
-        let dictish = builtin_cls.as_deref().map(|b| matches!(b, "dict" | "defaultdict" | "OrderedDict" | "Counter")).unwrap_or(true);
-        let listish = builtin_cls.as_deref().map(|b| matches!(b, "list" | "set" | "frozenset" | "deque")).unwrap_or(true);
-        // a builtin container model for the name, and / or the user classes defining it: a
-        // class-less placeholder may be either, so both are kept and the call site decides
-        let model: Option<Value> = if !has_cls && DICT_METHOD_NAMES.contains(&name) && dictish {
-            Some(self.method_value(&format!("dict.{}", name), &Value::obj(oid)))
-        } else if !has_cls && (LIST_METHOD_NAMES.contains(&name) || matches!(name, "add" | "discard")) && listish {
-            Some(self.method_value(&format!("list.{}", name), &Value::obj(oid)))
-        } else {
-            None
-        };
-        if let Some(m) = &model {
-            // a dict / list method name on a class-less placeholder: the model, with a dispatch
-            // event so a call site whose receiver turns out to be a user instance tabulates
-            // (user classes defining the same name are not run here: that spread `Config.get`
-            // over every `row.get` in a multi-module program and made it recurse)
-            if self.user_classes.iter().any(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, nk))) {
-                self.record_event("dispatch", oid);
-            }
-            return m.clone();
-        }
-        if model.is_none() && is_scalar_method(name) && !has_cls {
-            let q = if STR_METHOD_NAMES.contains(&name) { format!("str.{}", name) } else { format!("unknown.{}", name) };
-            return self.method_value(&q, &Value::kv_only(KeyVal::Param(oid)));
-        }
-        // (a declared builtin container is that container: no user-class candidates)
-        // (a part of a placeholder duck-typed already is not: `duck_part`)
-        if !has_cls && builtin_cls.is_none() && !self.duck_part(oid) {
-            let cands: Vec<u32> = self.classes_defining(nk);
-            self.note_duck_typed(oid, cands.len());
-            if !cands.is_empty() {
-                let mut outs: Vec<Value> = Vec::new();
-                for c in &cands {
-                    let fv = self.cls_slots.get(&(*c, Ns::Attr, nk)).cloned().unwrap_or_default();
-                    for f in fv.pts.iter() {
-                        if self.kind(f) == Kind::Function {
-                            let label = format!("{} bound to {}", self.obj(f).label, self.obj(oid).label);
-                            outs.push(Value::obj(self.alloc_raw(Kind::Bound, &format!("bound:{}:{}", f, oid), "", true, &label, Payload::Bound(f, Value::obj(oid)))));
-                        }
-                    }
-                }
-                if !outs.is_empty() {
-                    // the receiver's class decides (also between the model and the user method)
-                    self.record_event("dispatch", oid);
-                    if model.is_some() {
-                        self.record_event("narrow", oid);
-                    }
-                    let mut v = join_values(outs);
-                    if let Some(m) = model {
-                        v = v.join(&m);
-                    }
-                    return v;
-                }
-            }
-        }
-        if let Some(m) = model {
-            return m;
-        }
-        if is_scalar_method(name) && !has_cls {
-            let q = if STR_METHOD_NAMES.contains(&name) { format!("str.{}", name) } else { format!("unknown.{}", name) };
-            return self.method_value(&q, &Value::kv_only(KeyVal::Param(oid)));
-        }
-        let row = state.row(oid, Ns::Attr);
-        if self.pandas_on && ph.cls.get().is_none() {
-            // a frame's attributes are its columns: decided where the argument is known
-            self.concrete_root(oid);
-        }
-        if !guarded {
-            self.record_symreq(node, KeyVal::Lit(nk), &row, oid, Ns::Attr, guarded, "attr");
-        }
-        if single_target {
-            state.set_row(oid, Ns::Attr, row.narrow_in(nk, true));
-        }
-        let mut v = self.path_placeholder_value(oid, Ns::Attr, nk, &row, state);
-        if let Some(pcls) = ph.cls.get() {
-            if let Some(p) = v.single() {
-                if self.is_ph(p) {
-                    if let Some(fc) = self.field_class(pcls, name, state) {
-                        self.ph_info(p).cls.set(Some(fc));
-                    }
-                }
-            }
-            if self.field_is_any(pcls, name) {
-                let label = format!("{}.{}", self.obj(oid).label, name);
-                v = v.join(&self.dynamic_value(&label, state));
-            }
-        }
-        v
     }
 
     /// A value declared dynamically typed (`Any`): accesses on it are not checkable (§6.6).
@@ -2805,54 +2400,22 @@ impl Analyzer {
         Value::new()
     }
 
-    /// A part of a value duck-typed as several classes: an unknown object or a placeholder below
-    /// one that was (an attribute, item or element, at any depth; the result of an unknown call
-    /// on one), or a summary's parameter bound to such a part. Duck-typing it too fed the parts
-    /// a duck-typed method reads back into duck typing: every part of every part read as every
-    /// class, up to the access-path depth (rich's pretty printer: 1.3M objects).
-    pub fn duck_part(&self, oid: u32) -> bool {
-        if self.duck_parts.borrow().contains(&oid) {
-            return true;
-        }
-        let seen = self.duck_seen.borrow();
-        match self.kind(oid) {
-            Kind::Unknown => {
-                let mut o = oid;
-                for _ in 0..16 {
-                    let site: &str = &self.obj(o).site;
-                    let parent = site.strip_prefix("path:").or_else(|| site.strip_prefix("elem:")).and_then(|r| r.split(':').next()).and_then(|p| p.parse::<u32>().ok());
-                    match parent {
-                        Some(p) if (p as usize) < self.objects.len() => {
-                            if seen.contains(&p) {
-                                return true;
-                            }
-                            o = p;
-                        }
-                        _ => break,
-                    }
-                }
-                false
-            }
-            Kind::Ph => {
-                let parts = self.duck_parts.borrow();
-                let mut p = self.ph_info_opt(oid).and_then(|i| i.parent);
-                while let Some(q) = p {
-                    if seen.contains(&q) || parts.contains(&q) {
-                        return true;
-                    }
-                    p = self.ph_info_opt(q).and_then(|i| i.parent);
-                }
-                false
-            }
-            _ => false,
-        }
+
+
+    /// Does the value have a scalar part besides its objects (other than None, which has no
+    /// keys or attributes of its own)?
+    pub fn may_be_scalar(&self, v: &Value) -> bool {
+        // (an unknown object stands for any value, scalars too: its scalar part adds nothing)
+        !v.pts.is_empty() && !v.kv.is_bot() && v.kv.as_lit() != Some(intern::key_none()) && v.pts.iter().any(|o| self.kind(o) != Kind::Unknown)
     }
 
-    /// `oid` is duck-typed as `ncands` classes: with several (whose attributes differ) its parts
-    /// are not duck-typed in turn (`duck_part`); one class reads one class's attributes.
-    fn note_duck_typed(&self, oid: u32, ncands: usize) {
-        if ncands >= 2 {
-            self.duck_seen.borrow_mut().insert(oid);
+    /// An unknown object's row; none on this path (collected, or never made here): nothing is
+    /// known of it (an empty, closed row would claim every key missing).
+    pub fn unknown_row(&self, oid: u32, ns: Ns, state: &State) -> Row {
+        if state.has_row(oid, ns) {
+            state.row(oid, ns)
+        } else {
+            Row::top()
         }
     }
 
@@ -2869,48 +2432,7 @@ impl Analyzer {
             let q = if STR_METHOD_NAMES.contains(&name) { format!("str.{}", name) } else { format!("unknown.{}", name) };
             return self.method_value(&q, &Value::data(&format!("L{}", node.line)));
         }
-        let cands: Vec<u32> = self.classes_defining(nk);
-        // (a name many classes define — `render`, `get_style` — says little about which one an
-        // unknown value is: past `duck` classes it is unknown code, not a call of every one)
-        if !self.duck_part(oid) && !cands.is_empty() && (cands.len() <= super::limit("duck", 8)) {
-            // (a receiver value of many objects: the bound methods are the same for each of its
-            // unknown objects — made once per attribute read)
-            if let Some((_, _, Some(done))) = &self.many_receivers {
-                return done.clone();
-            }
-            match self.many_receivers.clone() {
-                Some((all, _, _)) => all.pts.iter().filter(|o| self.kind(*o) == Kind::Unknown).for_each(|o| self.note_duck_typed(o, cands.len())),
-                None => self.note_duck_typed(oid, cands.len()),
-            }
-            let mut outs: Vec<Value> = Vec::new();
-            for c in &cands {
-                let fv = self.cls_slots.get(&(*c, Ns::Attr, nk)).cloned().unwrap_or_default();
-                for f in fv.pts.iter() {
-                    if self.kind(f) == Kind::Function {
-                        // (a receiver value of many objects: one bound method for all of them, its
-                        // receiver the whole value, not one per object — thousands in a recursion
-                        // over unknown values, each run on its own)
-                        if let Some((all, key, _)) = self.many_receivers.clone() {
-                            // (only the objects duck typing applies to: not the parts of others)
-                            let all = Value::with_kv(all.pts.filter(|o| self.kind(o) != Kind::Unknown || !self.duck_part(o)), all.kv.clone());
-                            let label = format!("{} bound to one of {} values", self.obj(f).label, all.pts.len());
-                            outs.push(Value::obj(self.alloc_raw(Kind::Bound, &format!("bound:{}:set:{}", f, key), "", true, &label, Payload::Bound(f, all))));
-                            continue;
-                        }
-                        let label = format!("{} bound to {}", self.obj(f).label, self.obj(oid).label);
-                        outs.push(Value::obj(self.alloc_raw(Kind::Bound, &format!("bound:{}:{}", f, oid), "", true, &label, Payload::Bound(f, Value::obj(oid)))));
-                    }
-                }
-            }
-            if !outs.is_empty() {
-                let v = join_values(outs);
-                if let Some(m) = self.many_receivers.as_mut() {
-                    m.2 = Some(v.clone());
-                }
-                return v;
-            }
-        }
-        let row = state.row(oid, Ns::Attr);
+        let row = self.unknown_row(oid, Ns::Attr, state);
         if let Some(v) = state.slot_opt(oid, Ns::Attr, nk) {
             return v;
         }
@@ -2920,7 +2442,8 @@ impl Analyzer {
         }
         if !guarded && cls.tier != Tier::Map {
             self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
-            if cls.tier == Tier::Input {
+            // (a method called on an input — `df.groupby(…)` — is not a key the input must have)
+            if cls.tier == Tier::Input && !self.callee_nodes.contains(&node.addr) {
                 let site = self.access_site(node);
                 self.require_providers_k(&cls, &row, &site, false, state, Some(nk));
             }
@@ -2953,44 +2476,15 @@ impl Analyzer {
                 crate::models::pandas::view_setattr(self, o, name, v, state);
             }
         }
-        let targets: Vec<u32> = obj.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Instance | Kind::Module | Kind::Class | Kind::Unknown | Kind::Frame | Kind::Namespace | Kind::Ph | Kind::Function)).collect();
+        let targets: Vec<u32> = obj.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Instance | Kind::Module | Kind::Class | Kind::Unknown | Kind::Frame | Kind::Namespace | Kind::Function)).collect();
         for &oid in &targets {
             let kind = self.kind(oid);
             let strong = targets.len() == 1 && self.obj(oid).single;
-            if kind == Kind::Ph && self.pandas_on && crate::models::pandas::FRAME_ONLY_ATTRS.contains(&name) {
-                self.record_event("concrete", oid);
-            }
             // a store that may raise on some classes (a frozen model / dataclass, a
             // `__setattr__`): decided per call site, where the class is known
-            if kind == Kind::Ph && self.ph_info(oid).cls.get().is_none() && self.has_guarded_setattr() {
-                self.record_event("concrete", oid);
-            }
             if kind == Kind::Frame {
                 crate::models::pandas::frame_setattr(self, oid, name, v, node, state, strong);
                 continue;
-            }
-            // a placeholder of a frozen class (an exact signature class, or one the call site
-            // decides): the assignment raises there too
-            if kind == Kind::Ph {
-                if let Some(cls) = self.ph_info(oid).cls.get() {
-                    let exact = self.ph_info(oid).exact.get();
-                    let dc = self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|ci| ci.dc_frozen.get()).unwrap_or(false));
-                    let pyd = crate::models::pydantic::is_model(self, cls) && !name.starts_with('_') && self.pyd_class(cls, state).frozen;
-                    if dc || pyd {
-                        if exact {
-                            self.raise_here(if dc { "FrozenInstanceError" } else { "ValidationError" }, state);
-                            continue;
-                        }
-                        self.record_event("concrete", oid);
-                    }
-                    if self.is_named_tuple_class(cls) && self.class_lookup(cls, "__setattr__").is_none() {
-                        if exact {
-                            self.raise_here("AttributeError", state);
-                            continue;
-                        }
-                        self.record_event("concrete", oid);
-                    }
-                }
             }
             // a frozen dataclass: assignment raises FrozenInstanceError (an AttributeError)
             if kind == Kind::Instance {
@@ -3017,9 +2511,9 @@ impl Analyzer {
                             continue;
                         }
                         if pc.fields.iter().any(|f| f.name == name) {
-                            if let Some((sure, maybe)) = self.pyd_set.get(&oid).cloned() {
+                            if let Some((sure, maybe)) = self.m.pyd_set.get(&oid).cloned() {
                                 let ns = if strong { sure.insert(nk) } else { sure };
-                                self.pyd_set.insert(oid, (ns, maybe.insert(nk)));
+                                self.m.pyd_set.insert(oid, (ns, maybe.insert(nk)));
                             }
                         }
                         match self.pyd_assign(oid, cls, name, v, node, state) {
@@ -3035,15 +2529,8 @@ impl Analyzer {
                     }
                 }
             }
-            if kind == Kind::Ph && !name.starts_with('_') {
-                if let Some(cls) = self.ph_info(oid).cls.get().filter(|c| crate::models::pydantic::is_model(self, *c)) {
-                    if self.pyd_assign(oid, cls, name, v, node, state).is_none() {
-                        continue;
-                    }
-                }
-            }
-            if matches!(kind, Kind::Instance | Kind::Ph) && name.starts_with('_') {
-                let cls = if kind == Kind::Ph { self.ph_info(oid).cls.get() } else { self.instance_class(oid) };
+            if matches!(kind, Kind::Instance) && name.starts_with('_') {
+                let cls = self.instance_class(oid);
                 if let Some(cls) = cls {
                     if self.pyd_is_private(cls, name, state) {
                         state.set_slot(oid, Ns::Attr, crate::models::pydantic::priv_key(name), v.clone(), strong);
@@ -3054,10 +2541,6 @@ impl Analyzer {
             // a property with a setter: the setter runs instead of the store
             let cls_of = match kind {
                 Kind::Instance => self.instance_class(oid),
-                Kind::Ph => match &self.obj(oid).payload {
-                    Payload::Ph(p) => p.cls.get(),
-                    _ => None,
-                },
                 _ => None,
             };
             if let Some(cls) = cls_of {

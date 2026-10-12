@@ -306,11 +306,6 @@ pub fn m_bisect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let right = !name.ends_with("_left");
     let insort = name.starts_with("insort");
     // a parameter's value: decided at the call site
-    for v in [&x, &a] {
-        if let Some(p) = v.kv.as_param() {
-            an.record_event("concrete", p);
-        }
-    }
     let o = a.single().filter(|o| matches!(an.kind(*o), Kind::List | Kind::Tuple));
     let items = o.and_then(|o| list_items(an, st, o));
     if let Some(its) = items {
@@ -475,9 +470,6 @@ pub fn m_seq_index(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let count = c.qual.ends_with("count");
     let recv = c.recv.clone().unwrap_or_default();
     let x = c.args.first().cloned().unwrap_or_default();
-    if let Some(p) = x.kv.as_param() {
-        an.record_event("concrete", p);
-    }
     if let Some(o) = recv.single().filter(|o| matches!(an.kind(*o), Kind::List | Kind::Tuple)) {
         if let Some(its) = list_items(an, st, o) {
             let eqs: Vec<Option<bool>> = its.iter().map(|it| value_eq(an, st, it, &x)).collect();
@@ -608,7 +600,6 @@ pub fn m_template(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         _ => None,
     });
     let Some(text) = text else {
-        an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
         return Value::data("template");
     };
     let pieces = template_pieces(&text);
@@ -684,7 +675,6 @@ pub fn m_template(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             match out {
                 Some(s) => Value::lit_str(&s),
                 None => {
-                    an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
                     Value::data("template")
                 }
             }

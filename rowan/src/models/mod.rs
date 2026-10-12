@@ -3,6 +3,9 @@
 //! prefix fallbacks.
 
 pub mod minire;
+pub mod shape;
+pub mod singledispatch;
+pub mod dataclasses;
 pub mod pyre;
 pub mod chrono;
 pub mod sqlite;
@@ -29,7 +32,6 @@ use ruff_python_ast as ast;
 use rustc_hash::FxHashMap;
 
 use crate::domain::{join_values, kv_join, FnKind, KeyVal, Ns, RenameFn, Row, RowData, Source, SourceKind, Value, DATA};
-use crate::interp::access::append_slot_key;
 use crate::interp::funcs::Elem;
 use crate::interp::{Analyzer, Call, Payload, ViewKind};
 use crate::intern::{KeyId, self, key_str_lit, s, KeySet, STAR};
@@ -244,6 +246,12 @@ impl Registry {
                 }
             }
         }
+        // (functions of those modules that change what they are given are unknown calls)
+        const MUTATING: &[&str] = &["random.shuffle", "operator.setitem", "operator.delitem", "struct.pack_into", "heapq.heapreplace", "heapq.heappushpop", "bisect.insort_right"];
+        let in_place_op = qual.strip_prefix("operator.i").is_some_and(|r| !matches!(r, "ndex" | "s_" | "s_not" | "temgetter" | "nv" | "nvert"));
+        if MUTATING.contains(&qual) || in_place_op || qual.starts_with("array.") {
+            return None;
+        }
         for prefix in ALLOWLIST_PREFIXES {
             if qual.starts_with(prefix) || qual.starts_with(&format!("builtins.{}", prefix)) {
                 return Some(noeffect);
@@ -302,7 +310,7 @@ fn m_round_abs(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if c.qual == "builtins.abs" && an.torch_on {
         if let Some(d) = crate::models::torch::dim_of_label(a) {
             // dims are not negative
-            if crate::shape::poly(d).iter().all(|(_, k)| *k > 0) {
+            if crate::models::shape::poly(d).iter().all(|(_, k)| *k > 0) {
                 return a.clone();
             }
         }
@@ -325,8 +333,8 @@ fn m_math(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 return Value::lit(intern::key_int(r as i64));
             }
             if let Some((d, k)) = crate::models::torch::quotient_of(a) {
-                let r = if c.qual == "math.ceil" { crate::shape::ceildiv(d, crate::shape::lit(k)) } else { crate::shape::floordiv(d, crate::shape::lit(k)) };
-                return crate::models::torch::dim_value(crate::shape::norm(r, &st.tf));
+                let r = if c.qual == "math.ceil" { crate::models::shape::ceildiv(d, crate::models::shape::lit(k)) } else { crate::models::shape::floordiv(d, crate::models::shape::lit(k)) };
+                return crate::models::torch::dim_value(crate::models::shape::norm(r, &st.tf));
             }
         }
     }
@@ -418,20 +426,10 @@ fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("dict@L{}", c.line));
     if let Some(src) = c.args.first() {
         // a parameter: a mapping or pairs, decided per call site
-        for x in src.pts.iter() {
-            if an.kind(x) == Kind::Ph {
-                an.record_event("concrete", x);
-            }
-        }
         let recs = an.record_objects(src);
         if !recs.is_empty() {
             an.copy_into(oid, Ns::Item, src, st, true, &KeySet::new());
-            if let Some(s1) = src.single() {
-                if an.is_entry_object(s1) {
-                    an.obj_mut(oid).copied_from = Some(s1);
-                }
-            }
-        } else if let Some(items) = src.single().filter(|_| src.kv.is_bot()).and_then(|x| an.sorted_items.get(&x).cloned()) {
+        } else if let Some(items) = src.single().filter(|_| src.kv.is_bot()).and_then(|x| an.m.sorted_items.get(&x).cloned()) {
             // `dict(sorted(d.items()))`: d's keys (the sure ones sure) in sorted order
             let mut d = st.row(oid, Ns::Item).data();
             let mut order = d.order.to_vec();
@@ -570,10 +568,10 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     };
     let oid = an.alloc_simple(kind, &c.node, st, &format!("{}@L{}", last(&c.qual), c.line));
     an.set_llen(oid, st, None);
-    an.sorted_items.remove(&oid);
+    an.m.sorted_items.remove(&oid);
     if c.qual == "builtins.sorted" && c.kw("key").is_none() && an.obj(oid).single {
         if let Some(items) = c.args.first().and_then(|a| sorted_dict_items(an, st, a, c)) {
-            an.sorted_items.insert(oid, std::rc::Rc::new(items));
+            an.m.sorted_items.insert(oid, std::rc::Rc::new(items));
         }
     }
     if let Some(a) = c.args.first() {
@@ -742,9 +740,6 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if v.pts.is_empty() || (v.kv.is_literal() && !crate::domain::kv_literals(&v.kv).is_empty()) {
         let lits = crate::domain::kv_literals(&v.kv);
         if !v.kv.is_literal() || lits.is_empty() {
-            if let Some(ph) = v.kv.as_param() {
-                an.record_event("isinstance", ph);
-            }
             return Value::data("bool");
         }
         for k in lits.iter() {
@@ -775,10 +770,7 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     for o in v.pts.iter() {
         let k = an.kind(o);
-        if matches!(k, Kind::Ph | Kind::Unknown) {
-            if k == Kind::Ph {
-                an.record_event("isinstance", o);
-            }
+        if matches!(k, Kind::Unknown) {
             return Value::data("bool");
         }
         // (an instance of a class deriving from a builtin / library class — `class C(dict)` —
@@ -959,7 +951,7 @@ fn m_zip(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // `strict=True`: lengths that differ raise ValueError; otherwise both have the known one
     let strict = c.kwargs.get(&intern::s("strict")).and_then(|v| v.kv.as_lit()) == Some(intern::key_bool(true));
     if strict {
-        an.zip_strict.insert(oid);
+        an.m.zip_strict.insert(oid);
         let la = an.iterate(&a, &c.node, st).items.map(|x| x.len());
         let lb = an.iterate(&b, &c.node, st).items.map(|x| x.len());
         match (la, lb) {
@@ -1048,7 +1040,6 @@ fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn m_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // (setattr reports its own raises: frozen classes, slots, setter-less properties raise in
     // the store; an object of unknown class may)
-    an.concrete_args(c.args.iter().take(2), st);
     if let Some(o) = c.args.first() {
         if o.pts.is_empty() || o.pts.iter().any(|x| !matches!(an.kind(x), Kind::Instance | Kind::Namespace | Kind::Class | Kind::Module | Kind::Function)) || c.args.get(1).map(|k| k.kv.as_lit().is_none()).unwrap_or(true) {
             an.may_raise_here("AttributeError", st);
@@ -1094,9 +1085,6 @@ fn m_object_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let inst = an.alloc_instance(o, &c.node, st);
             out = out.join(&Value::obj(inst));
         } else {
-            if an.kind(o) == Kind::Ph {
-                an.record_event("concrete", o);
-            }
             other = true;
         }
     }
@@ -1148,25 +1136,14 @@ fn getattr_hook_outcome(an: &mut Analyzer, st: &mut State, o: u32, k: KeyId, nod
     let mut s2 = st.copy();
     let mark = an.objects.len() as u32;
     let caught: rustc_hash::FxHashSet<String> = ["AttributeError".to_string()].into_iter().collect();
-    an.guards.push(caught);
-    an.may_raise.push(false);
-    an.raise_states.push(None);
-    an.raise_values.push(None);
-    an.raise_cls.push((an.raise_states.len(), Vec::new()));
-    an.try_marks.push((an.frames.len(), an.env_stack.len(), s2.copy(), an.objects.len() as u32));
-    an.try_sum_depth.push(an.sum_stack.len());
+    an.enter_try(caught, &mut s2);
     an.raise_stack.push(false);
     an.esc_cls.push(Some(Vec::new()));
     an.call_method_with(&Value::obj(o), "__getattr__", vec![Value::lit(k)], node, &mut s2);
     let escaped = an.raise_stack.pop().unwrap_or(false);
     an.esc_cls.pop();
-    an.try_sum_depth.pop();
-    an.try_marks.pop();
-    let recs = an.raise_cls.pop().map(|(_, r)| r).unwrap_or_default();
-    an.raise_values.pop();
-    let raised = an.raise_states.pop().flatten();
-    let flagged = an.may_raise.pop().unwrap_or(false);
-    an.guards.pop();
+    let out = an.leave_try();
+    let (flagged, raised, recs) = (out.flagged, out.raised(), out.recs);
     if flagged || escaped {
         return None;
     }
@@ -1214,10 +1191,6 @@ fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let mut verdicts: Vec<bool> = Vec::new();
     for o in objs {
-        if an.kind(o) == Kind::Ph {
-            an.record_event("narrow", o);
-            return unknown;
-        }
         if let Some(b) = builtin_has_attr(an, o, &name) {
             verdicts.push(b);
             continue;
@@ -1280,7 +1253,6 @@ fn m_asdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         for o in v.pts.iter() {
             let cls_of = match an.kind(o) {
                 Kind::Instance => an.instance_class(o),
-                Kind::Ph => an.ph_info(o).cls.get(),
                 _ => None,
             };
             let is_dc = cls_of.map(|cl| !an.dataclass_fields_mro(cl).is_empty()).unwrap_or(false);
@@ -1289,18 +1261,6 @@ fn m_asdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 continue;
             }
             let cls = cls_of.unwrap();
-            if an.kind(o) == Kind::Ph {
-                // a placeholder typed with a dataclass: its fields read through it
-                let d = an.alloc_at(Kind::Dict, &c.node, st, &format!("asdict@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("asdict{}:{}", depth, o)));
-                st.set_row(d, Ns::Item, Row::new());
-                for (f, _) in an.dataclass_fields_mro(cls) {
-                    let fv = an.load_attr(&Value::obj(o), &f, &c.node, st, false);
-                    let cv = conv(an, st, c, &fv, depth + 1);
-                    an.store_key(d, Ns::Item, &KeyVal::Lit(key_str_lit(&f)), &cv, true, &c.node, st);
-                }
-                out = out.join(&Value::obj(d));
-                continue;
-            }
             // one dict per converted instance (siblings at one depth must not share it)
             let d = an.alloc_at(Kind::Dict, &c.node, st, &format!("asdict@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("asdict{}:{}", depth, o)));
             st.set_row(d, Ns::Item, Row::new());
@@ -1319,9 +1279,6 @@ fn m_asdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         out
     }
     if a.pts.iter().all(|o| an.kind(o) == Kind::Instance && an.instance_class(o).map(|cl| !an.dataclass_fields_mro(cl).is_empty()).unwrap_or(false)) && !a.pts.is_empty() {
-        return conv(an, st, c, &a, 0);
-    }
-    if a.pts.iter().all(|o| an.kind(o) == Kind::Ph && an.ph_info(o).cls.get().map(|cl| !an.dataclass_fields_mro(cl).is_empty()).unwrap_or(false)) && !a.pts.is_empty() {
         return conv(an, st, c, &a, 0);
     }
     m_vars(an, st, c)
@@ -1351,13 +1308,7 @@ fn m_dc_fields(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn m_vars(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first() else { return Value::data("vars") };
-    // a parameter's vars(): the live view of its attributes (as `obj.__dict__`)
     if c.qual == "builtins.vars" {
-        if let Some(p) = a.single().filter(|o| an.kind(*o) == Kind::Ph) {
-            let vid = an.alloc_raw(Kind::View, &format!("view:attrs:{}", p), "", true, "__dict__", Payload::View(ViewKind::Attrs, Value::obj(p)));
-            an.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(p));
-            return Value::obj(vid);
-        }
     }
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("vars@L{}", c.line));
     if c.qual == "builtins.vars" {
@@ -1549,11 +1500,6 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 Kind::List => "list",
                 Kind::Tuple => "tuple",
                 Kind::Set => "set",
-                Kind::Ph => {
-                    an.record_event("concrete", o);
-                    known = false;
-                    continue;
-                }
                 _ => {
                     known = false;
                     continue;
@@ -1581,10 +1527,6 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         outs.push(builtin(an, n));
                     }
                 }
-            }
-            KeyVal::Param(p) => {
-                an.record_event("concrete", *p);
-                known = false;
             }
             _ => known = false,
         }
@@ -1639,7 +1581,7 @@ fn m_int(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // int(d / k) of a (non-negative) dim: d // k
     if !is_float {
         if let Some((d, k)) = crate::models::torch::quotient_of(a) {
-            return crate::models::torch::dim_value(crate::shape::norm(crate::shape::floordiv(d, crate::shape::lit(k)), &st.tf));
+            return crate::models::torch::dim_value(crate::models::shape::norm(crate::models::shape::floordiv(d, crate::models::shape::lit(k)), &st.tf));
         }
         if crate::models::torch::dim_of_label(a).is_some() {
             return a.clone();
@@ -1676,15 +1618,6 @@ fn m_int(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 None => {}
             }
         }
-    }
-    for o in a.pts.iter() {
-        if an.kind(o) == Kind::Ph {
-            // decided per call site when the argument is a literal there
-            an.record_event("narrow", o);
-        }
-    }
-    if let KeyVal::Param(ph) = &a.kv {
-        an.record_event("narrow", *ph);
     }
     an.may_raise_here("ValueError", st);
     Value::data(&format!("L{}", c.line))
@@ -1984,9 +1917,6 @@ fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
                 return Value::kv_only(KeyVal::lits(out.into_iter().collect()));
             }
-            if let Some(ph) = kv.as_param() {
-                an.record_event("narrow", ph);
-            }
             Value::data("str")
         }
         "startswith" | "endswith" if c.args.len() == 1 && kv.as_lit().and_then(intern::key_as_str).is_some() && c.args[0].kv.as_lit().and_then(intern::key_as_str).is_some() => {
@@ -1995,9 +1925,6 @@ fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             Value::lit(intern::key_bool(if name == "startswith" { s.starts_with(&*p) } else { s.ends_with(&*p) }))
         }
         "startswith" | "endswith" if c.args.len() == 1 => {
-            if let Some(ph) = kv.as_param() {
-                an.record_event("narrow", ph);
-            }
             Value::data("bool")
         }
         "partition" | "rpartition" if c.args.len() == 1 && kv.as_lit().and_then(intern::key_as_str).is_some() && c.args[0].kv.as_lit().and_then(intern::key_as_str).is_some() => {
@@ -2034,16 +1961,11 @@ fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 return Value::data(&format!("L{}", c.line));
             }
             // a template from a parameter: decided per call site (with its fields)
-            if let Some(ph) = kv.as_param() {
-                an.record_event("concrete", ph);
-                an.concrete_args(c.args.iter().chain(c.kwargs.values()).chain(c.star_kwargs.iter()), st);
-            }
             if let Some(t) = kv.as_lit().and_then(intern::key_as_str) {
                 if let Some(out) = format_fields(an, st, &t, c, mapping.as_ref()) {
                     return Value::lit(key_str_lit(&out));
                 }
                 // fields from parameters: decided per call site
-                an.concrete_args(c.args.iter().chain(c.kwargs.values()).chain(c.star_kwargs.iter()), st);
             }
             if name == "format_map" {
                 return Value::data(&format!("L{}", c.line));
@@ -2106,9 +2028,6 @@ fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         return Value::lit(key_str_lit(&parts.join(&*sep)));
                     }
                 }
-                if let Some(ph) = arg.kv.as_param() {
-                    an.record_event("narrow", ph);
-                }
             }
             Value::data(&format!("L{}", c.line))
         }
@@ -2117,9 +2036,6 @@ fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             an.set_llen(oid, st, None);
             // a literal string split by a literal separator: the parts, in order; a parameter
             // string is decided per call site
-            if let Some(ph) = kv.as_param() {
-                an.record_event("narrow", ph);
-            }
             let sep: Option<Option<String>> = match c.args.first() {
                 None => Some(None),
                 Some(a) => a.kv.as_lit().and_then(intern::key_as_str).map(|s| Some(s.to_string())),
@@ -2163,26 +2079,12 @@ fn dict_recv(an: &Analyzer, c: &Call) -> Vec<u32> {
 fn m_get(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(key) = c.args.first() else { return Value::data("get") };
     // (a key that may be an object: an unknown key)
-    an.note_key_params(key, st);
     let okey = an.opaque_key(key, st);
     let key = &okey;
     let default = c.args.get(1).cloned().unwrap_or_else(|| an.none_v.clone());
     let recv = c.recv.clone().unwrap_or_default();
-    if key.kv.as_lit().is_some() {
-        // whether the default applies is decided per call site when the receiver is concrete there
-        for o in recv.pts.iter() {
-            if an.kind(o) == Kind::Ph {
-                an.record_event("narrow", o);
-            } else if let Some(src) = an.obj(o).copied_from {
-                an.record_event("narrow", src);
-            }
-        }
-    } else if let Some(ph) = key.kv.as_param() {
-        an.record_event("narrow", ph);
-    }
     if let Some(k) = key.kv.as_lit() {
         let recs = an.record_objects(&recv);
-        an.entry_key_events(&recs, k, st);
         if !recs.is_empty() && recs.len() == recv.pts.len() && recs.iter().all(|o| an.kind(*o) != Kind::Frame) {
             // absent from every closed target: the default alone, no load
             if recs.iter().all(|o| { let r = st.row(*o, Ns::Item); r.lacks(k) }) {
@@ -2221,15 +2123,6 @@ fn m_setdefault(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 return default;
             }
         }
-        // a record from outside the function (`os.environ`, a global): decided per call site
-        for o in &recs {
-            if an.is_entry_object(*o) && !st.row(*o, Ns::Item).definite.contains(k) {
-                an.record_event("concrete", *o);
-            }
-        }
-    } else if let Some(ph) = key.kv.as_param() {
-        // presence of a parameter key: decided per call site
-        an.record_event("narrow", ph);
     }
     let cur = an.load_item(&recv, Ns::Item, key, &c.node, st, false);
     let nv = if !cur.empty() { cur.join(&default) } else { default };
@@ -2278,7 +2171,6 @@ fn update_from_instances(an: &mut Analyzer, st: &mut State, oid: u32, src: &Valu
 
 fn m_update(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // a parameter's mapping (or keywords): decided per call site
-    an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
     let recs = dict_recv(an, c);
     let strong = recs.len() == 1 && an.obj(recs[0]).single;
     for oid in recs {
@@ -2349,7 +2241,7 @@ fn m_pop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     st.drop_name_keys(None);
     let recv = c.recv.clone().unwrap_or_default();
     let int_key = c.args.first().and_then(|a| a.kv.as_lit()).map(|k| intern::key_as_int(k).is_some()).unwrap_or(false);
-    let listy = recv.pts.iter().all(|o| matches!(an.kind(o), Kind::Ph | Kind::List | Kind::Tuple));
+    let listy = recv.pts.iter().all(|o| matches!(an.kind(o), Kind::List | Kind::Tuple));
     if !recv.pts.is_empty() && listy && (c.args.is_empty() || int_key) {
         // list.pop through a placeholder (or with no key): an element
         let mut outs = Vec::new();
@@ -2357,10 +2249,6 @@ fn m_pop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let mut maybe_raise = false;
         for oid in recv.pts.iter() {
             match an.kind(oid) {
-                Kind::Ph => {
-                    maybe_raise = true;
-                    outs.push(an.iterate(&Value::obj(oid), &c.node, st).elem.flat())
-                }
                 _ => {
                     let before = an.llen(oid, st);
                     let idx = c.args.first().and_then(|a| a.kv.as_lit()).and_then(intern::key_as_int);
@@ -2383,19 +2271,8 @@ fn m_pop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let Some(key) = c.args.first() else { return Value::data("pop") };
     let has_default = c.args.len() > 1;
-    if key.kv.as_lit().is_some() {
-        // presence on a placeholder (or a copy of one): decided per call site
-        for o in recv.pts.iter() {
-            if an.kind(o) == Kind::Ph {
-                an.record_event("narrow", o);
-            } else if let Some(src) = an.obj(o).copied_from {
-                an.record_event("narrow", src);
-            }
-        }
-    }
     if let Some(k) = key.kv.as_lit() {
         let recs = an.record_objects(&recv);
-        an.entry_key_events(&recs, k, st);
         if !recs.is_empty() && recs.len() == recv.pts.len() && recs.iter().all(|o| an.kind(*o) != Kind::Frame) {
             let rows: Vec<Row> = recs.iter().map(|o| st.row(*o, Ns::Item)).collect();
             if has_default && rows.iter().all(|r| r.lacks(k)) {
@@ -2556,7 +2433,7 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual);
     let recv = c.recv.clone().unwrap_or_default();
     for oid in recv.pts.iter() {
-        if !matches!(an.kind(oid), Kind::List | Kind::Set | Kind::Tuple | Kind::Ph) {
+        if !matches!(an.kind(oid), Kind::List | Kind::Set | Kind::Tuple) {
             continue;
         }
         let mut ext_items: Option<Vec<Value>> = None;
@@ -2595,13 +2472,6 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             None => elem.kv.clone(),
         };
         st.elems.insert(oid, nk);
-        if an.kind(oid) == Kind::Ph {
-            // through a placeholder: the i-th append, positional at instantiation
-            let positional = name == "append" && an.frame().loop_depth == 0 && an.cond_depth == 0;
-            let i = if positional { (0..16).find(|i| !st.has_slot(oid, Ns::Pos, append_slot_key(*i))).unwrap_or(-1) } else { -1 };
-            st.set_slot(oid, Ns::Pos, append_slot_key(i), elem.clone(), true);
-            continue;
-        }
         let ll = an.llen(oid, st);
         let single = an.obj(oid).single;
         if let Some(n) = ll {
@@ -2625,7 +2495,7 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // the last element after an append (whatever the length)
     if name == "append" {
         if let (Some(oid), Some(x)) = (recv.single(), c.args.last()) {
-            if (an.kind(oid) == Kind::List && an.obj(oid).single) || an.kind(oid) == Kind::Ph {
+            if an.kind(oid) == Kind::List && an.obj(oid).single {
                 st.set_last(oid, x.clone());
             }
         }
@@ -2635,14 +2505,9 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// `slice(stop)` / `slice(start, stop[, step])`: the label a `a:b:c` subscript makes (known
 /// int / None bounds), else an unknown slice.
-fn m_slice(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
+fn m_slice(_an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
     let none = intern::key_none();
     // a parameter bound: known at the call site
-    for a in &c.args {
-        if let Some(p) = a.kv.as_param() {
-            an.record_event("concrete", p);
-        }
-    }
     let b = |v: &Value| -> Option<String> {
         if !v.pts.is_empty() {
             return None;
@@ -2784,7 +2649,7 @@ fn m_set(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn m_chainmap(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual).to_string();
     let Some(oid) = c.recv.as_ref().and_then(|r| r.single()) else { return Value::data("chainmap") };
-    let maps = an.chainmaps.get(&oid).cloned().unwrap_or_default();
+    let maps = an.m.chainmaps.get(&oid).cloned().unwrap_or_default();
     match name.as_str() {
         "maps" => an.alloc_positional(Kind::List, &c.node, Some(maps), Value::new(), DATA, st),
         "parents" | "new_child" => {
@@ -2835,7 +2700,7 @@ pub fn generated_class(an: &mut Analyzer, st: &mut State, qual: &str) -> Option<
     let v = st.slot(moid, Ns::Attr, key_str_lit(cname));
     if cname == "UserDict" {
         if let Some(c) = v.single() {
-            an.userdict_classes.insert(c);
+            an.m.userdict_classes.insert(c);
         }
     }
     Some(v)
@@ -3236,10 +3101,6 @@ fn m_lpop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let recv = c.recv.clone().unwrap_or_default();
     let mut outs = Vec::new();
     for oid in recv.pts.iter() {
-        if an.kind(oid) == Kind::Ph {
-            outs.push(an.iterate(&Value::obj(oid), &c.node, st).elem.flat());
-            continue;
-        }
         outs.push(list_pop_one(an, st, oid, c));
     }
     if outs.is_empty() {
@@ -3253,6 +3114,8 @@ fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual);
     let recv = c.recv.clone().unwrap_or_default();
     match name {
+        // (a generator's `__next__` / `send`: the next item, as `next(g)`)
+        "__next__" | "send" if recv.pts.iter().all(|o| an.obj(o).iterator) => m_next(an, st, &Call { args: vec![recv], ..c.clone() }),
         "copy" => join_values(recv.pts.iter().map(|o| Value::obj(an.copy_object(o, &c.node, st, false, &mut IndexMap::new()))).collect::<Vec<_>>()),
         "remove" | "discard" | "clear" | "sort" | "reverse" | "insert" => {
             // `clear` on one list, whatever its length: empty
@@ -3451,11 +3314,7 @@ fn m_json_dumps(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(x) = c.args.first() else { return fallback };
     let json = c.qual == "json.dumps";
     // a parameter's value: known at the call site
-    if let Some(p) = x.kv.as_param() {
-        an.record_event("concrete", p);
-    }
     // (placeholders inside the containers too: `{"meta": meta, …}`)
-    an.concrete_events(x, st, 3);
     // fully known data: the exact text
     if json {
         if let Some(opts) = JsonOpts::of(c) {
@@ -3828,16 +3687,6 @@ fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     if c.qual == "json.loads" {
         // a parameter's text: decided where the caller passes a literal one
-        if let Some(a) = c.args.first() {
-            if let KeyVal::Param(p) = &a.kv {
-                an.record_event("concrete", *p);
-            }
-            for o in a.pts.iter() {
-                if an.kind(o) == Kind::Ph {
-                    an.record_event("concrete", o);
-                }
-            }
-        }
         // the text of a model's model_dump_json(): its dump
         let ms = c.args.first().map(pydantic::json_models).unwrap_or_default();
         if !ms.is_empty() {
@@ -3939,11 +3788,6 @@ fn m_copy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         // (an object from input is a new object too: stores into the copy do not reach it)
         if matches!(an.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance | Kind::Frame) || (an.kind(o) == Kind::Unknown) {
             outs.push(Value::obj(an.copy_object(o, &c.node, st, deep, &mut IndexMap::new())));
-        } else if an.kind(o) == Kind::Ph {
-            // a parameter's object: decided per call site, where the copy is a new object
-            // (the summary's own answer stands for the parameter)
-            an.record_event("concrete", o);
-            outs.push(Value::obj(o));
         } else {
             outs.push(Value::obj(o));
         }
@@ -4159,35 +4003,16 @@ fn m_nt_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(recv) = c.recv.clone() else { return Value::data("namedtuple") };
     let mut outs: Vec<Value> = Vec::new();
     for o in recv.pts.iter() {
-        if an.kind(o) == Kind::Ph {
-            // (the tuple's fields are known per call site)
-            an.record_event("concrete", o);
-        }
-        let cls = an.instance_class(o).or_else(|| if an.kind(o) == Kind::Ph { an.ph_info(o).cls.get() } else { None });
+        let cls = an.instance_class(o);
         let Some(cls) = cls.filter(|cl| an.is_named_tuple_class(*cl)) else { continue };
         let fields: Vec<String> = an.dataclass_fields_mro(cls).into_iter().map(|(f, _)| f).collect();
         if c.qual.ends_with("_asdict") {
             let d = an.alloc_simple(Kind::Dict, &c.node, st, &format!("dict@L{}", c.line));
             for f in &fields {
-                let v = if an.kind(o) == Kind::Ph { an.load_attr(&Value::obj(o), f, &c.node, st, false) } else { st.slot(o, Ns::Attr, key_str_lit(f)) };
+                let v = st.slot(o, Ns::Attr, key_str_lit(f));
                 an.store_key(d, Ns::Item, &KeyVal::Lit(key_str_lit(f)), &v, true, &c.node, st);
             }
             outs.push(Value::obj(d));
-        } else if an.kind(o) == Kind::Ph {
-            // (a new tuple of the class: the fields read from the placeholder, then the changes)
-            let mut kw: IndexMap<intern::StrId, Value> = IndexMap::new();
-            for f in &fields {
-                let v = match c.kwargs.get(&intern::s(f)) {
-                    Some(v) => v.clone(),
-                    None => an.load_attr(&Value::obj(o), f, &c.node, st, false),
-                };
-                kw.insert(intern::s(f), v);
-            }
-            if c.kwargs.keys().any(|k| !fields.iter().any(|f| *f == *intern::str_get(*k))) {
-                an.raise_here("TypeError", st);
-                continue;
-            }
-            outs.push(an.construct(cls, &[], &kw, &[], &[], st, &c.node));
         } else {
             if c.kwargs.keys().any(|k| !fields.iter().any(|f| *f == *intern::str_get(*k))) {
                 // `_replace` with an unknown field name: TypeError (ValueError before 3.14)
@@ -4217,7 +4042,6 @@ fn m_astuple(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         for o in v.pts.iter() {
             let cls = match an.kind(o) {
                 Kind::Instance => an.instance_class(o),
-                Kind::Ph => an.ph_info(o).cls.get(),
                 _ => None,
             };
             let Some(cls) = cls.filter(|cl| !an.dataclass_fields_mro(*cl).is_empty()).filter(|_| depth < 4) else {
@@ -4227,7 +4051,7 @@ fn m_astuple(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let fields: Vec<String> = an.dataclass_fields_mro(cls).into_iter().map(|(f, _)| f).collect();
             let mut vals = Vec::new();
             for f in fields {
-                let x = if an.kind(o) == Kind::Ph { an.load_attr(&Value::obj(o), &f, &c.node, st, false) } else { st.slot(o, Ns::Attr, key_str_lit(&f)) };
+                let x = st.slot(o, Ns::Attr, key_str_lit(&f));
                 vals.push(conv(an, st, c, &x, depth + 1));
             }
             an.frame_mut().unroll.push(9200 + depth as usize);
@@ -4302,14 +4126,13 @@ fn m_dc_replace(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         // win); non-init fields and attributes added later are not carried over
         let cls = match an.kind(o) {
             Kind::Instance => an.instance_class(o),
-            Kind::Ph => an.ph_info(o).cls.get(),
             _ => None,
         };
         if let Some(cls) = cls.filter(|cl| an.class_info_opt(*cl).map(|ci| ci.has_fields() && !ci.named_tuple).unwrap_or(false)) {
             let specs = an.dc_specs(cls);
             let mut kw: IndexMap<intern::StrId, Value> = IndexMap::new();
             for sp in specs.iter().filter(|sp| sp.init && !sp.initvar) {
-                let v = if an.kind(o) == Kind::Ph { an.load_attr(&Value::obj(o), &sp.name, &c.node, st, false) } else { st.slot(o, Ns::Attr, key_str_lit(&sp.name)) };
+                let v = st.slot(o, Ns::Attr, key_str_lit(&sp.name));
                 kw.insert(intern::s(&sp.name), v);
             }
             for (k, v) in c.kwargs.iter() {
@@ -4382,7 +4205,7 @@ fn m_defaultdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         if name == "defaultdict" && !c.args.is_empty() {
             if !c.args[0].pts.is_empty() {
                 // the factory runs per inserted key (see `load_item`); no shared default
-                an.dd_factories.insert(oid, c.args[0].clone());
+                an.m.dd_factories.insert(oid, c.args[0].clone());
             } else if !c.args[0].pts.is_empty() {
                 let dflt = an.call_value(&c.args[0], &c.node, None, st, Some(vec![]));
                 st.set_slot(oid, Ns::Item, STAR, Value::with_kv(dflt.pts, DATA), false);
@@ -4400,9 +4223,8 @@ fn m_defaultdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         } else {
             c.args.clone()
         };
-        an.chainmaps.insert(oid, maps.clone());
+        an.m.chainmaps.insert(oid, maps.clone());
         // (built from parameters: the maps are known per call site)
-        an.concrete_args(c.args.iter(), st);
         // every map, the first one winning: copied from the last to the first
         for sa in maps.iter().rev() {
             if !an.record_objects(sa).is_empty() {
@@ -4569,7 +4391,7 @@ fn m_partial(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 k.insert(*kk, v.clone());
             }
             kw = k;
-            let mut s0 = an.partial_star.get(&inner).cloned().unwrap_or_default();
+            let mut s0 = an.m.partial_star.get(&inner).cloned().unwrap_or_default();
             s0.extend(star);
             star = s0;
         }
@@ -4594,9 +4416,9 @@ fn m_partial(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_at(Kind::Partial, &c.node, st, &format!("partial@L{}", c.line), payload.clone(), None, Ns::Item, None, None);
     an.obj_mut(oid).payload = payload;
     if !rest_star.is_empty() {
-        an.partial_star.insert(oid, rest_star);
+        an.m.partial_star.insert(oid, rest_star);
     } else {
-        an.partial_star.remove(&oid);
+        an.m.partial_star.remove(&oid);
     }
     Value::obj(oid)
 }
@@ -4636,7 +4458,7 @@ fn m_partial_call(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let mut fake_args = bound_args.clone();
         fake_args.extend(c.args.iter().cloned());
         // (bound `**opts` of unknown keys: passed on before the call's own)
-        let mut star = an.partial_star.get(&x).cloned().unwrap_or_default();
+        let mut star = an.m.partial_star.get(&x).cloned().unwrap_or_default();
         star.extend(c.star_kwargs.iter().cloned());
         for fo in f.pts.iter() {
             outs.push(an.call_one(fo, &fake_args, &kw, &c.star_args, &star, st, &c.node, c.call_ast));
@@ -4743,7 +4565,7 @@ fn m_type_hints(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// `MappingProxyType(d)`: a live read-only view of d.
 fn m_mappingproxy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(d) = c.args.first().cloned() else { return Value::data("proxy") };
-    if d.pts.is_empty() || !d.pts.iter().all(|o| matches!(an.kind(o), Kind::Dict | Kind::Ph | Kind::Unknown)) {
+    if d.pts.is_empty() || !d.pts.iter().all(|o| matches!(an.kind(o), Kind::Dict | Kind::Unknown)) {
         return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
     }
     let _ = st;
@@ -4772,7 +4594,6 @@ fn m_number_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             return Value::new();
         }
     }
-    an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
     Value::data(if dec { "Decimal" } else { "Fraction" })
 }
 
@@ -4793,7 +4614,6 @@ fn m_chrono_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             None => {}
         }
     }
-    an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
     Value::data(&class)
 }
 
@@ -4813,7 +4633,6 @@ fn m_chrono_class(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             None => {}
         }
     }
-    an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
     Value::data(if class == "date" { "date" } else { "datetime" })
 }
 
@@ -4836,7 +4655,6 @@ fn m_num_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let args: Option<Vec<KeyId>> = c.args.iter().map(lit).collect();
     let kwargs: Option<Vec<(String, KeyId)>> = c.kwargs.iter().map(|(k, v)| lit(v).map(|x| (intern::str_get(*k).to_string(), x))).collect();
     let (Some(args), Some(kwargs)) = (args, kwargs) else {
-        an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
         return Value::data("number");
     };
     let kw: Vec<(&str, KeyId)> = kwargs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
@@ -4878,11 +4696,10 @@ fn m_range(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         _ => None,
     };
     let Some((lo, hi, step)) = bounds.filter(|_| c.kwargs.is_empty()) else {
-        an.concrete_args(c.args.iter(), st);
         let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("range@L{}", c.line));
         an.set_llen(oid, st, None);
         // (for the tensor model: an int of unknown value)
-        st.elems.insert(oid, if an.torch_on { KeyVal::data(&crate::shape::dim_label(crate::shape::unknown())) } else { DATA });
+        st.elems.insert(oid, if an.torch_on { KeyVal::data(&crate::models::shape::dim_label(crate::models::shape::unknown())) } else { DATA });
         return Value::obj(oid);
     };
     let len = if step > 0 { (hi - lo + step - 1).max(0) / step } else { (lo - hi - step - 1).max(0) / -step };
@@ -4928,11 +4745,6 @@ fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     // the length of a placeholder: decided per call site where it is a known container
-    for o in v.pts.iter() {
-        if an.kind(o) == Kind::Ph {
-            an.record_event("iter", o);
-        }
-    }
     if v.pts.is_empty() {
         if let Some(k) = v.kv.as_lit() {
             if let Some(s) = intern::key_as_str(k) {
@@ -4965,11 +4777,11 @@ fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         if let Payload::View(ViewKind::Keys | ViewKind::Values | ViewKind::Items | ViewKind::Proxy, inner) = an.obj(o).payload.clone() {
             if let Some(d) = inner.single().filter(|d| matches!(an.kind(*d), Kind::Dict | Kind::Frame)) {
                 let row = st.row(d, Ns::Item);
-                if row.closed() && row.present == row.definite && !row.symbolic() {
+                if row.closed() && row.present == row.definite {
                     return Value::lit(intern::key_int(row.definite.len() as i64));
                 }
                 // a closed frame: between its definite and its possible columns
-                if an.kind(d) == Kind::Frame && row.closed() && !row.symbolic() && row.present.len() - row.definite.len() <= 8 {
+                if an.kind(d) == Kind::Frame && row.closed() && row.present.len() - row.definite.len() <= 8 {
                     let ks = intern::KeySet::from_iter((row.definite.len()..=row.present.len()).map(|n| intern::key_int(n as i64)));
                     return Value::kv_only(crate::domain::KeyVal::lits(ks));
                 }
@@ -4981,18 +4793,11 @@ fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         if matches!(an.kind(o), Kind::Dict) {
             let row = st.row(o, Ns::Item);
-            if row.closed() && row.present == row.definite && !row.symbolic() {
+            if row.closed() && row.present == row.definite {
                 return Value::lit(intern::key_int(row.definite.len() as i64));
             }
-            // keys from a parameter (`d.update(rec)`): decided per call site
-            if row.symbolic() {
-                for r in row.refs().to_vec() {
-                    let (p, _) = crate::domain::unrho(r);
-                    an.record_event("concrete", p);
-                }
-            }
             // keys set on some paths: between the sure and the possible count
-            if row.closed() && !row.symbolic() && row.present.len() - row.definite.len() <= 8 {
+            if row.closed() && row.present.len() - row.definite.len() <= 8 {
                 let ks = intern::KeySet::from_iter((row.definite.len()..=row.present.len()).map(|n| intern::key_int(n as i64)));
                 return Value::kv_only(crate::domain::KeyVal::lits(ks));
             }
@@ -5011,7 +4816,7 @@ fn m_sum(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let e = it.elem.flat();
         if crate::models::torch::is_tensor(&e) {
             if let Some(s) = an.t_shape(&e, st) {
-                let start = c.args.get(1).and_then(|x| an.t_shape(x, st)).unwrap_or_else(|| crate::shape::Shape::known(vec![]));
+                let start = c.args.get(1).and_then(|x| an.t_shape(x, st)).unwrap_or_else(|| crate::models::shape::Shape::known(vec![]));
                 return an.t_broadcast(&s, &start, &c.node, st, "sum");
             }
         }
@@ -5142,7 +4947,7 @@ fn sorted_dict_items(an: &Analyzer, st: &State, a: &Value, c: &Call) -> Option<V
     let Payload::View(ViewKind::Items, recv) = &an.obj(v).payload else { return None };
     let d = recv.single().filter(|r| recv.kv.is_bot() && an.kind(*r) == Kind::Dict)?;
     let row = st.row(d, Ns::Item);
-    if !row.closed() || row.symbolic() || row.present == row.definite || row.present.len() > 64 || st.has_slot(d, Ns::Item, STAR) || an.counters.contains(&d) {
+    if !row.closed() || row.present == row.definite || row.present.len() > 64 || st.has_slot(d, Ns::Item, STAR) || an.m.counters.contains(&d) {
         return None;
     }
     let mut keys: Vec<KeyId> = row.present.iter().collect();
@@ -5208,4 +5013,121 @@ fn literal_sort_order(an: &mut Analyzer, st: &mut State, c: &Call, items: &[Valu
         if reverse { o.reverse() } else { o }
     });
     Some(idx)
+}
+
+
+use crate::domain::ObjId;
+use rustc_hash::FxHashSet;
+use crate::intern::StrId;
+use std::rc::Rc;
+
+/// What the library models keep beside the state, per object (side tables), and the flags
+/// of a running model. Keyed by objects, these are edges the collector follows
+/// (`Analyzer::obj_edges`).
+#[derive(Default)]
+pub struct Tables {
+    /// validating a FastAPI test request's body (errors are a 422)
+    pub fa_body_validation: bool,
+    /// unknown call results named by the variable they were bound to (tensor dims)
+    pub t_var_names: FxHashMap<ObjId, crate::models::shape::Sym>,
+    /// function objects by qualname (a closure's printing sees its factory's symbols)
+    pub t_funcs_by_qual: FxHashMap<String, Vec<ObjId>>,
+    /// running a call that stands for "some module": no shape errors / requirements / facts
+    pub t_quiet: bool,
+    /// reading an attribute without the tensor model / without the user-class check
+    pub t_getattr_plain: bool,
+    pub t_skip_user: bool,
+    /// the node of the function expression of the call being evaluated
+    pub t_called_attr: usize,
+    /// tensor-shape requirements / definite mismatches (models/torch.rs)
+    pub shape_reqs: Vec<crate::models::torch::ShapeNote>,
+    pub shape_errors: Vec<crate::models::torch::ShapeNote>,
+    /// dicts with case-insensitive str keys (request headers): keys are lower-cased
+    pub ci_dicts: FxHashSet<ObjId>,
+    /// csv writers (their file and dialect), csv readers (their fieldnames)
+    pub csv_writers: FxHashMap<ObjId, crate::models::csvio::CsvWriter>,
+    pub csv_readers: FxHashMap<ObjId, Value>,
+    /// argparse parsers, their subparsers and groups
+    pub argp: FxHashMap<ObjId, crate::models::argparse::ArgObj>,
+    /// futures: the exception classes their call raised (empty: any)
+    pub future_excs: FxHashMap<ObjId, Vec<String>>,
+    /// the StringIO objects `redirect_stdout` sends prints to (innermost last)
+    pub stdout_redirect: Vec<Value>,
+    /// ExitStack callbacks: (callable, positional, keyword arguments), in registration order
+    pub exit_callbacks: FxHashMap<ObjId, Vec<(Value, Vec<Value>, IndexMap<StrId, Value>)>>,
+    /// TestClient cookie jars (dicts with `set`)
+    pub cookie_jars: FxHashSet<ObjId>,
+    /// configparser parsers and their sections (models::configparser)
+    pub cfg_parsers: FxHashMap<ObjId, crate::models::configparser::CfgSpec>,
+    pub cfg_sections: FxHashMap<ObjId, (crate::models::configparser::CfgSpec, String)>,
+    /// compiled patterns (text, flags) and match objects (models::remodel)
+    pub re_patterns: FxHashMap<ObjId, (String, u32)>,
+    pub re_matches: FxHashMap<ObjId, crate::models::remodel::ReMatch>,
+    /// pathlib path objects' classes (models::pathtext)
+    pub path_classes: FxHashMap<ObjId, String>,
+    /// sqlite3 connections (their databases), cursors (their connection), Row dicts (columns)
+    pub sql_dbs: FxHashMap<ObjId, crate::models::sqlite::Db>,
+    pub sql_cursors: FxHashMap<ObjId, ObjId>,
+    pub sql_rows: FxHashMap<ObjId, Vec<String>>,
+    /// itertools.count / cycle / repeat(x) objects
+    pub infinites: FxHashMap<ObjId, crate::models::itertools::Infinite>,
+    /// partials' bound `**mapping`s of unknown keys
+    pub partial_star: FxHashMap<ObjId, Vec<Value>>,
+    /// pydantic model classes described (`pyd_class`), `TypeAdapter` types by index
+    pub pyd_classes: FxHashMap<ObjId, Rc<crate::models::pydantic::PClass>>,
+    pub pyd_adapters: Vec<crate::models::pydantic::Ann>,
+    pub pyd_depth: u32,
+    pub pyd_ann_depth: u32,
+    /// validation problems found per running validation; raised ValidationErrors' problems;
+    /// the field being validated
+    pub pyd_errs: Vec<Vec<crate::models::pydantic::PErr>>,
+    pub pyd_verrs: Vec<Vec<crate::models::pydantic::PErr>>,
+    pub pyd_field: Option<KeyId>,
+    /// a nested model being validated for this field of the enclosing one (its errors' loc
+    /// starts with it)
+    pub pyd_nest_prefix: Option<KeyId>,
+    /// the instance whose field is being validated (containers made for it are its own)
+    pub pyd_inst: Option<ObjId>,
+    /// numpy structured arrays (fields are Item keys); the exception a missing item raises
+    /// when every target is one (`ValueError`, not KeyError)
+    pub np_struct: FxHashSet<ObjId>,
+    pub pyd_last_failed: bool,
+    /// pydantic instances: the fields their input surely / maybe gave (`model_fields_set`)
+    pub pyd_set: FxHashMap<ObjId, (KeySet, KeySet)>,
+    /// specialisations of generic models: their type variables' bindings
+    pub pyd_generic: FxHashMap<ObjId, Vec<(String, crate::models::pydantic::Ann)>>,
+    /// FastAPI: routes, `include_router` edges (app, router, prefix), router prefixes, handlers
+    pub fa_routes: Vec<crate::models::fastapi::FaRoute>,
+    pub fa_includes: Vec<(ObjId, ObjId, String)>,
+    pub fa_prefix: FxHashMap<ObjId, String>,
+    pub fa_handlers: FxHashSet<ObjId>,
+    /// FastAPI hooks: (app, "exc" / "mw", exception class, function); requests a middleware's
+    /// call_next dispatches (route, request)
+    pub fa_hooks: Vec<(ObjId, String, Value, Option<ObjId>)>,
+    pub fa_pending: Vec<(usize, crate::models::fastapi::Req)>,
+    /// the status code of the last dispatched request; the injected `Response` objects of the
+    /// requests being dispatched
+    pub fa_status: Value,
+    pub fa_out_resp: Vec<Vec<ObjId>>,
+    /// per request being dispatched: the dependencies' values (each runs once)
+    /// the handler's return value from inside yield dependencies
+    pub fa_gen_ret: Option<Value>,
+    pub fa_dep_cache: Vec<FxHashMap<ObjId, Value>>,
+    /// `dependencies=[…]` of apps / routers (also given at include_router)
+    pub fa_app_deps: FxHashMap<ObjId, Vec<Value>>,
+    /// zip objects made with `strict=True`
+    pub zip_strict: FxHashSet<ObjId>,
+    /// dicts that are `collections.Counter`s
+    pub counters: FxHashSet<ObjId>,
+    /// `sorted(d.items())` of a closed dict whose keys are known literals (some maybe there):
+    /// the items in sorted order with their sureness, for `dict(...)` of the list
+    pub sorted_items: FxHashMap<ObjId, Rc<Vec<(KeyId, Value, bool)>>>,
+    /// ChainMaps: the maps they look through (the first takes the writes)
+    pub chainmaps: FxHashMap<ObjId, Vec<Value>>,
+    /// deques and their maxlen
+    pub deques: FxHashMap<ObjId, Option<i64>>,
+    /// the generated `UserDict` classes (their instances' keys are `self.data`'s)
+    pub userdict_classes: FxHashSet<ObjId>,
+    /// `defaultdict(factory)`: the factory, called once per inserted key
+    pub dd_factories: FxHashMap<ObjId, Value>,
 }

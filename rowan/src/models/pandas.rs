@@ -30,9 +30,6 @@ pub const DF_METHODS: &[&str] = &[
 ];
 pub const DF_ATTRS: &[&str] = &["columns", "index", "shape", "values", "dtypes", "T", "empty", "size", "ndim", "axes", "style", "plot", "iloc", "loc", "at", "iat", "str", "dt", "cat", "attrs", "flags"];
 
-/// Attributes that make a placeholder a frame for the summary (tabulated where it is one).
-pub const FRAME_ONLY_ATTRS: &[&str] = &["loc", "iloc", "at", "iat", "columns", "shape", "dtypes", "T", "empty", "ndim", "axes"];
-
 pub fn frame_producer(q: &str) -> Option<&'static str> {
     Some(match q {
         "pandas.read_csv" => "read_csv",
@@ -111,39 +108,11 @@ pub fn install(r: &mut dyn FnMut(&[&'static str], Model)) {
     r(&["groupby.*"], groupby_method);
 }
 
-/// Inside a summary a frame made before the call has a symbolic row: the models build
-/// concrete rows, so such a call is decided where the frame is known (a "concrete" event).
-pub fn symbolic_frames_event(an: &mut Analyzer, st: &State, vals: &[&Value]) {
-    if an.sum_stack.is_empty() {
-        return;
-    }
-    for v in vals {
-        for o in v.pts.iter() {
-            let k = an.kind(o);
-            if (k == Kind::Frame || is_series_obj(an, o)) && st.row(o, Ns::Item).symbolic() {
-                an.record_event("concrete", o);
-            }
-            if k == Kind::Groupby {
-                if let Payload::Groupby(fs, ..) = an.obj(o).payload.clone() {
-                    for f in fs {
-                        if st.row(f, Ns::Item).symbolic() {
-                            an.record_event("concrete", f);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 
-fn call_values(c: &Call) -> Vec<&Value> {
-    c.recv.iter().chain(c.args.iter()).chain(c.kwargs.values()).chain(c.star_args.iter()).collect()
-}
 
 /// Every `DataFrame.<m>(…)`: the op's model; with `inplace=True` its result replaces the
 /// receiver's columns (and what is known of its rows) and the call returns None.
 fn df_dispatch(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    symbolic_frames_event(an, st, &call_values(c));
     let name = last(&c.qual).to_string();
     let m: Model = match name.as_str() {
         "merge" => df_merge,
@@ -483,7 +452,6 @@ fn series_ctor(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    symbolic_frames_event(an, st, &call_values(c));
     let name = last(&c.qual).to_string();
     let ss = recv_series(an, c);
     if ss.is_empty() {
@@ -1211,29 +1179,12 @@ fn fresh_index(st: &mut State, v: &Value) {
     }
 }
 
-/// A frame's columns for a model: a symbolic row (a frame from before the call, inside a
-/// summary) is open beyond its concrete part.
-fn frame_row(st: &State, f: u32) -> Row {
-    let r = st.row(f, Ns::Item);
-    if !r.symbolic() {
-        return r;
-    }
-    Row::from_data(RowData {
-        present: r.present.clone(),
-        definite: r.definite.clone(),
-        likely: r.likely.clone(),
-        sources: r.sources.insert((Source::new("frame before the call", SourceKind::Call), EMPTY_LENS)),
-        mutators: r.mutators.clone(),
-        ..Default::default()
-    })
-}
-
 fn recv_row(an: &Analyzer, st: &State, c: &Call) -> Row {
     let fs = frames(an, c.recv.as_ref());
     if fs.is_empty() {
         Row::top()
     } else {
-        join_rows(fs.iter().map(|f| frame_row(st, *f)))
+        join_rows(fs.iter().map(|f| st.row(*f, Ns::Item)))
     }
 }
 
@@ -1441,7 +1392,7 @@ pub fn json_of_frame(an: &mut Analyzer, st: &mut State, c: &Call, f: u32, orient
                 }
             }
             st.set_slot(lid, Ns::Elem, intern::STAR, Value::obj(vrow), true);
-            st.elems.insert(lid, DATA);
+            st.elems.insert(lid, crate::domain::BOT);
             Value::obj(lid)
         }
         "index" => {
@@ -1627,12 +1578,10 @@ fn pd_dataframe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     };
     // `columns=` names (sequences) or selects (dicts, frames): the frame has exactly those
     if let Some(ks) = &cols {
-        if c.kw("columns").map(|v| v.pts.iter().all(|x| an.kind(x) != Kind::Ph)).unwrap_or(true) {
-            return finish(an, st, match &col_seq {
-                Some(seq) => closed_ordered(seq),
-                None => Row::closed_with(ks.clone()),
-            });
-        }
+        return finish(an, st, match &col_seq {
+            Some(seq) => closed_ordered(seq),
+            None => Row::closed_with(ks.clone()),
+        });
     }
     // `DataFrame(**df.to_dict("split"))`: the columns entry
     for sk in &c.star_kwargs {
@@ -2094,7 +2043,7 @@ fn rows_of(st: &State, fs: &[u32]) -> Row {
     if fs.is_empty() {
         Row::top()
     } else {
-        join_rows(fs.iter().map(|f| frame_row(st, *f)))
+        join_rows(fs.iter().map(|f| st.row(*f, Ns::Item)))
     }
 }
 
@@ -2649,7 +2598,7 @@ fn reset_index(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     // (a moved level whose name is a column already, or columns not all known: ValueError)
-    if !drop && (!row.closed() || row.symbolic() || new_cols.iter().any(|k| row.present.contains(*k))) {
+    if !drop && (!row.closed() || new_cols.iter().any(|k| row.present.contains(*k))) {
         an.may_raise_here("ValueError", st);
     }
     // the new columns come first
@@ -3082,7 +3031,6 @@ fn agg_names(an: &mut Analyzer, st: &State, v: &Value) -> Option<(Vec<KeyId>, bo
 }
 
 fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    symbolic_frames_event(an, st, &call_values(c));
     let mut name = last(&c.qual).to_string();
     let recv = c.recv.clone().unwrap_or_default();
     let gids: Vec<u32> = recv.pts.iter().filter(|o| an.kind(*o) == Kind::Groupby).collect();
@@ -3565,10 +3513,7 @@ fn df_agg(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             v
         }
         _ => {
-            let mut d = row.data();
-            d.terms = Default::default();
-            d.dterms = Default::default();
-            d.lterms = Default::default();
+            let d = row.data();
             let sid = new_series(an, st, &c.node, Row::from_data(d), None, "agg");
             Value::obj(sid)
         }
@@ -3596,9 +3541,6 @@ fn df_corr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             None => return open_frame_call(an, st, c),
         }
     }
-    d.terms = Default::default();
-    d.dterms = Default::default();
-    d.lterms = Default::default();
     let r = Row::from_data(d);
     let lab = Known { may: r.present.clone(), sure: r.definite.clone() };
     let v = new_frame(an, st, c, r, None, None);
@@ -3892,7 +3834,7 @@ fn to_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     }
                 }
                 st.set_slot(lid, Ns::Elem, intern::STAR, Value::obj(vrow), true);
-                st.elems.insert(lid, DATA);
+                st.elems.insert(lid, crate::domain::BOT);
                 Value::obj(lid)
             }
             "dict" | "list" | "series" => {
@@ -4651,9 +4593,6 @@ fn df_filter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 d.absent = d.absent.insert(k);
             }
         }
-        d.terms = Default::default();
-        d.dterms = Default::default();
-        d.lterms = Default::default();
         if row.open() {
             // a matching column the input may have is not known: open, nothing new definite
             d.sources = row.sources.insert((Source::new(&format!("filter@L{}", c.line), SourceKind::Call), EMPTY_LENS));
@@ -4765,9 +4704,6 @@ fn select_dtypes(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
     }
-    d.terms = Default::default();
-    d.dterms = Default::default();
-    d.lterms = Default::default();
     let present = d.present.clone();
     let v = new_frame(an, st, c, Row::from_data(d), None, None);
     if let Some(nid) = v.single() {
@@ -4902,10 +4838,7 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 idx = Row::from_data(d);
             }
         }
-        let mut d = idx.data();
-        d.terms = Default::default();
-        d.dterms = Default::default();
-        d.lterms = Default::default();
+        let d = idx.data();
         let sid = new_series(an, st, &c.node, Row::from_data(d), None, "r");
         return Value::obj(sid);
     }
@@ -5107,10 +5040,7 @@ pub fn frame_getattr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, state
             }
             if name == "dtypes" {
                 let row = state.row(oid, Ns::Item);
-                let mut d = row.data();
-                d.terms = Default::default();
-                d.dterms = Default::default();
-                d.lterms = Default::default();
+                let d = row.data();
                 let sid = new_series(an, state, node, Row::from_data(d), None, "dt");
                 return Value::obj(sid);
             }
@@ -5123,7 +5053,7 @@ pub fn frame_getattr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, state
                     Some(n) => Value::lit(intern::key_int(n)),
                     None => Value::data("rows"),
                 };
-                let ncols = if row.closed() && !row.symbolic() && row.present.len() - row.definite.len() <= 8 {
+                let ncols = if row.closed() && row.present.len() - row.definite.len() <= 8 {
                     Value::kv_only(KeyVal::lits(KeySet::from_iter((row.definite.len()..=row.present.len()).map(|x| intern::key_int(x as i64)))))
                 } else {
                     Value::data("columns")
@@ -5290,12 +5220,12 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
         let cls = classify(&row, k);
         if guarded {
             an.verdict_guarded(node, k, &cls, oid, Ns::Item);
-        }
-        if !guarded {
+        } else {
             an.verdict(node, k, &cls, oid, Ns::Item, None, None);
-            if cls.tier == Tier::Input {
-                an.require_providers_k(&cls, &row, &site, true, state, Some(k));
-            }
+        }
+        // (a read behind a try is a probe: an input need not have the column)
+        if cls.tier == Tier::Input && !guarded {
+            an.require_providers_k(&cls, &row, &site, true, state, Some(k));
         }
         // the program went on: the column was there (also under a try that handles the miss)
         if narrow && cls.tier != Tier::Missing && an.obj(oid).single {

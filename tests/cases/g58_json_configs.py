@@ -12,8 +12,8 @@ def load(path):
     if os.environ.get("APP_DEBUG"):
         cfg["debug"] = True
     cfg["db"]["host"]                    #@ input host
-    cfg["db"]["user"]                    #@ input user
-    cfg["db"]["password"]                #@ input password
+    cfg["db"]["user"]                    #@ possibly user
+    cfg["db"]["password"]                #@ possibly password
     return cfg
 
 
@@ -24,7 +24,7 @@ cfg["db"]["port"]                        #@ input port
 cfg["log_level"]                         #@ input log_level
 section = cfg.get("cache", {})
 section["ttl"]                           #@ possibly ttl
-# "db" comes from DEFAULTS (proven), so only log_level is required of the file
+# "db" comes from DEFAULTS (proven), so only log_level is required of the file; user / password at L15-16 were `input`: `possibly` holds too (DEFAULTS' db lacks them when the file has no "db") and is what the per-call analysis can tell
 #@schema json.load@L11: always={log_level}
 #@schema json.load@L11['db']: always={user,password}
 

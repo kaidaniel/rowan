@@ -133,6 +133,50 @@ jobs:
           path: results/
           retention-days: 30
 
+  # Soundness without per-call-site runs: the golden suites with `tab=0` (main before the
+  # summaries were removed: every call used its function's summary) and `budget=0` (every call
+  # past its function's budget: an unknown call, and a reporting run with open parameters).
+  # Informational: the step never fails the job.
+  golden-fallback:
+    name: golden (tab=0 / budget=0)
+    needs: build
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          cache-dependency-glob: .python-version
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: bench-rowan
+          path: rowan/target/release
+
+      - name: Golden suites, every call past its budget
+        continue-on-error: true
+        run: |
+          chmod +x rowan/target/release/rowan
+          mkdir -p results
+          ROWAN_LIMITS=tab=0,budget=0 uv run --no-project python tests/run_golden.py > golden.txt 2>&1 || true
+          line=$(grep -E '^ *[0-9]+/[0-9]+ passed' golden.txt | tail -1)
+          pass=$(echo "$line" | sed -E 's|^ *([0-9]+)/([0-9]+).*|\1|')
+          total=$(echo "$line" | sed -E 's|^ *([0-9]+)/([0-9]+).*|\2|')
+          echo "{\"name\": \"golden tab=0\", \"golden_passing\": ${pass:-0}, \"golden_failing\": $(( ${total:-0} - ${pass:-0} ))}" > results/golden-tab0.json
+          {
+            echo "### golden suites with ROWAN_LIMITS=tab=0,budget=0 (informational)"
+            echo
+            echo "${line:-no result}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bench-golden
+          path: results/
+          retention-days: 30
+
   summary:
     name: summary
     needs: bench
@@ -167,7 +211,7 @@ jobs:
   # Actions): https://kaidaniel.github.io/rowan/dev/bench/
   history:
     name: history
-    needs: bench
+    needs: [bench, golden-fallback]
     if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     continue-on-error: true

@@ -1282,10 +1282,6 @@ pub fn with_ctx<R>(ctx: PrintCtx, f: impl FnOnce() -> R) -> R {
     r
 }
 
-pub fn with_scope<R>(scope: u32, f: impl FnOnce() -> R) -> R {
-    with_ctx(PrintCtx { all: false, scope, ..Default::default() }, f)
-}
-
 pub fn sym_visible(s: Sym) -> bool {
     CTX.with(|c| {
         let c = c.borrow();

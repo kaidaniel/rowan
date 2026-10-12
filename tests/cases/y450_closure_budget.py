@@ -1,11 +1,11 @@
 """A function defined inside a generator is a new closure object at every run of the
-generator. The tabulation budget belongs to the function's code, not to each closure object:
-with a budget of 4, `is_sep` runs per call site 4 times in all (here: the 3 lines of the first
-loop and the first line of the second), and every later call uses its summary (True or
-False). Keyed by closure object, each of the 8 loops' closures had a budget of its own (up to
-24 runs of `is_sep`). The work: 8 generator runs (a generator with calls runs per call site)
-plus 4 runs each of `is_sep` and `shape`, with a margin."""
-#@limits tab=4
+generator. The budget belongs to the function's code, not to each closure object: with a
+budget of 8 statements, `is_sep` (2-3 statements a call) runs for the 3 lines of the first
+loop and the first line of the second, and every later call is unknown code (True or False).
+Keyed by closure object, each of the 8 loops' closures had a budget of its own. The work: 2
+runs of `parse` (8 + 6 statements), 4 of `is_sep`, 9 of `shape` (1 statement), and the
+requirement-only runs of the functions, with a margin."""
+#@limits budget=8
 #@tabulations <= 20
 
 
