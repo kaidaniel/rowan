@@ -284,6 +284,8 @@ pub fn verdict_message(an: &Analyzer, v: &Verdict) -> String {
         // (a key computed from data: no name to show)
         _ if v.tier == Tier::DataKey => "the key".to_string(),
         _ if an.has_obj(v.oid) && an.kind(v.oid) == Kind::Frame => format!("column {}", crate::domain::key_display(v.key)),
+        // (an index or a dict key alike: `xs[0]`)
+        _ if intern::key_as_int(v.key).is_some() => format!("item {}", key_repr(v.key)),
         _ => format!("key {}", crate::domain::key_display(v.key)),
     };
     let unknown_code = || code_list(an, &v.mutators);
