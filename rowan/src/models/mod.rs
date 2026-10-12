@@ -1134,23 +1134,14 @@ fn getattr_hook_outcome(an: &mut Analyzer, st: &mut State, o: u32, k: KeyId, nod
     let mut s2 = st.copy();
     let mark = an.objects.len() as u32;
     let caught: rustc_hash::FxHashSet<String> = ["AttributeError".to_string()].into_iter().collect();
-    an.guards.push(caught);
-    an.may_raise.push(false);
-    an.raise_states.push(None);
-    an.raise_values.push(None);
-    an.raise_cls.push((an.raise_states.len(), Vec::new()));
-    an.try_marks.push((an.frames.len(), an.env_stack.len(), s2.copy(), an.objects.len() as u32));
+    an.enter_try(caught, &mut s2);
     an.raise_stack.push(false);
     an.esc_cls.push(Some(Vec::new()));
     an.call_method_with(&Value::obj(o), "__getattr__", vec![Value::lit(k)], node, &mut s2);
     let escaped = an.raise_stack.pop().unwrap_or(false);
     an.esc_cls.pop();
-    an.try_marks.pop();
-    let recs = an.raise_cls.pop().map(|(_, r)| r).unwrap_or_default();
-    an.raise_values.pop();
-    let raised = an.raise_states.pop().flatten();
-    let flagged = an.may_raise.pop().unwrap_or(false);
-    an.guards.pop();
+    let out = an.leave_try();
+    let (flagged, raised, recs) = (out.flagged, out.raised(), out.recs);
     if flagged || escaped {
         return None;
     }

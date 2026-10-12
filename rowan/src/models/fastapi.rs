@@ -826,12 +826,7 @@ impl Analyzer {
             caught.insert(n.clone());
         }
         let caught_names = crate::interp::stmts::expand_caught(caught);
-        self.guards.push(caught_names.clone());
-        self.may_raise.push(false);
-        self.raise_states.push(None);
-        self.raise_values.push(None);
-        self.raise_cls.push((self.raise_states.len(), Vec::new()));
-        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
+        self.enter_try(caught_names.clone(), &mut pre);
         self.m.fa_dep_cache.push(rustc_hash::FxHashMap::default());
         self.m.fa_out_resp.push(Vec::new());
         self.fa_route_deps(route, Some(req), state, node);
@@ -839,15 +834,12 @@ impl Analyzer {
         let ret = self.fa_run_handler(func, gens, Some(req.clone()), false, state, node);
         let out_resps = self.m.fa_out_resp.pop().unwrap_or_default();
         self.m.fa_dep_cache.pop();
-        self.guards.pop();
-        self.try_marks.pop();
-        let flagged = self.may_raise.pop().unwrap_or(false);
-        let raised_any = self.raise_states.pop().flatten().is_some();
-        let mut raised_v = self.raise_values.pop().flatten().unwrap_or_default();
-        let recs = self.raise_cls.pop().map(|(_, r)| r).unwrap_or_default();
+        let out_try = self.leave_try();
+        let flagged = out_try.flagged;
+        let mut raised_v = out_try.value.clone().unwrap_or_default();
+        let recs = out_try.recs;
         // (the raises are kept one by one: their states joined)
-        let mut raised_at: Option<State> = if raised_any { crate::interp::join_raise_recs(&recs) } else { None };
-        let _ = &mut pre;
+        let mut raised_at: Option<State> = crate::interp::join_raise_recs(&recs);
         // exceptions of known classes that FastAPI does not answer (a KeyError, …) are
         // re-raised by the TestClient at the call: they go on to the enclosing try
         if !recs.is_empty() {

@@ -8,7 +8,7 @@ use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeySet};
 use crate::state::{Kind, State};
 
-use super::{contains_jump, dotted_last, is_constant, is_main_guard, Analyzer, ClassInfo, Frame, FrameKind, FuncNode, LoopCtx, Payload, LOOP_MAX_ITER, UNROLL_MAX};
+use super::{TryExit, contains_jump, dotted_last, is_constant, is_main_guard, Analyzer, ClassInfo, Frame, FrameKind, FuncNode, LoopCtx, Payload, LOOP_MAX_ITER, UNROLL_MAX};
 use super::funcs::Elem;
 
 impl Analyzer {
@@ -377,18 +377,11 @@ impl Analyzer {
                 let swallows = managers.iter().any(|(v, _)| self.exit_swallows(v, state));
                 if swallows {
                     let mut pre = state.copy();
-                    self.guards.push(FxHashSet::from_iter(["*".to_string()]));
-                    self.may_raise.push(false);
-                    self.raise_states.push(None);
-                    self.raise_values.push(None);
-                    self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
+                    self.enter_try(FxHashSet::from_iter(["*".to_string()]), &mut pre);
                     let exits_before = self.exit_count;
                     self.exec_block(&w.body, state);
-                    self.guards.pop();
-                    self.try_marks.pop();
-                    let flagged = self.may_raise.pop().unwrap_or(false);
-                    let raised_at = self.raise_states.pop().flatten();
-                    self.raise_values.pop();
+                    let out = self.leave_try();
+                    let (flagged, raised_at) = (out.flagged, out.raised());
                     let died = !state.reachable && self.exit_count == exits_before;
                     let generic = flagged || (died && raised_at.is_none());
                     let mut after = state.copy();
@@ -496,20 +489,13 @@ impl Analyzer {
     pub fn exec_handled(&mut self, body: &'static [ast::Stmt], names: FxHashSet<String>, state: &mut State) {
         let caught = expand_caught(names);
         let mut pre = state.copy();
-        self.guards.push(caught);
-        self.may_raise.push(false);
-        self.raise_states.push(None);
-        self.raise_values.push(None);
-        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
+        self.enter_try(caught, &mut pre);
         self.cond_depth += 1;
         self.branch_depth += 1;
         let exits_before = self.exit_count;
         self.exec_block(body, state);
-        self.guards.pop();
-        self.try_marks.pop();
-        let flagged = self.may_raise.pop().unwrap_or(false);
-        let raised_at = self.raise_states.pop().flatten();
-        self.raise_values.pop();
+        let out = self.leave_try();
+        let (flagged, raised_at) = (out.flagged, out.raised());
         self.branch_depth -= 1;
         self.cond_depth -= 1;
         let died = !state.reachable && self.exit_count == exits_before;
@@ -1031,30 +1017,13 @@ impl Analyzer {
                         if !w.orelse.is_empty() {
                             self.exec_block(&w.orelse, state);
                         }
-                        if let Some(mut b) = breaks {
-                            let j = if state.reachable { state.join(&mut b) } else { b };
-                            state.replace_with(j);
-                        }
+                        join_breaks(state, breaks);
                         return;
                     }
                     Some(true) if idx < UNROLL_MAX => {
                         state.replace_with(probe);
                         self.narrow(&w.test, true, state);
-                        self.frame_mut().unroll.push(1000 + idx);
-                        self.loop_stack.push(LoopCtx::default());
-                        self.exec_block(&w.body, state);
-                        let ctx = self.loop_stack.pop().unwrap();
-                        self.frame_mut().unroll.pop();
-                        if let Some(mut c) = ctx.continues {
-                            let j = if state.reachable { state.join(&mut c) } else { c };
-                            state.replace_with(j);
-                        }
-                        if let Some(mut b) = ctx.breaks {
-                            breaks = Some(match breaks.take() {
-                                None => b,
-                                Some(mut e) => e.join(&mut b),
-                            });
-                        }
+                        self.unrolled_iteration(1000 + idx, &w.body, state, &mut breaks, &mut |_, _| {});
                         idx += 1;
                     }
                     _ => break,
@@ -1068,10 +1037,7 @@ impl Analyzer {
             }
         }
         self.stmt_while_loop(w, state);
-        if let Some(mut b) = breaks {
-            let j = if state.reachable { state.join(&mut b) } else { b };
-            state.replace_with(j);
-        }
+        join_breaks(state, breaks);
     }
 
     /// A loop fixpoint cut off at `LOOP_MAX_ITER`: what still changed between the last two
@@ -1121,9 +1087,39 @@ impl Analyzer {
     }
 
     fn stmt_while_loop(&mut self, w: &'static ast::StmtWhile, state: &mut State) {
+        let (mut head, exit_acc, _) = self.loop_fixpoint(state, &mut |an, body_s| {
+            let tv = an.eval(&w.test, body_s);
+            // a test decided at the loop head prunes: false means no iteration from here
+            if an.truthiness(&tv, body_s) == Some(false) {
+                body_s.reachable = false;
+            }
+            an.narrow(&w.test, true, body_s);
+            if body_s.reachable {
+                an.exec_block(&w.body, body_s);
+            }
+        });
+        let mut exit_s = head.copy();
+        // a test that is true at the head never falls through (the loop leaves by break)
+        let tv = self.eval(&w.test, &mut exit_s);
+        if self.truthiness(&tv, &exit_s) == Some(true) {
+            exit_s.reachable = false;
+        }
+        self.narrow(&w.test, false, &mut exit_s);
+        if !w.orelse.is_empty() && exit_s.reachable {
+            self.exec_block(&w.orelse, &mut exit_s);
+        }
+        join_breaks(&mut exit_s, exit_acc);
+        state.replace_with(exit_s);
+    }
+
+    /// A loop run to a fixpoint (at most `LOOP_MAX_ITER` rounds, then widened): `round` runs
+    /// one iteration from the head. Returns the head at the fixpoint, the states at the
+    /// `break`s, and the last round's state at the back edge.
+    pub(crate) fn loop_fixpoint(&mut self, state: &mut State, round: &mut dyn FnMut(&mut Analyzer, &mut State)) -> (State, Option<State>, State) {
         let mut pre = state.copy();
         let mut head = state.copy();
-        let mut exit_acc: Option<State> = None;
+        let mut breaks: Option<State> = None;
+        let mut back = State::bottom();
         self.frame_mut().loop_depth += 1;
         self.cond_depth += 1;
         let mut converged = false;
@@ -1132,24 +1128,13 @@ impl Analyzer {
             let mut body_s = head.copy();
             let mark = self.objects.len() as u32;
             self.recent_stack.push(Vec::new());
-            let tv = self.eval(&w.test, &mut body_s);
-            // a test decided at the loop head prunes: false means no iteration from here
-            if self.truthiness(&tv, &body_s) == Some(false) {
-                body_s.reachable = false;
-            }
-            self.narrow(&w.test, true, &mut body_s);
             self.loop_stack.push(LoopCtx::default());
-            if body_s.reachable {
-                self.exec_block(&w.body, &mut body_s);
-            }
+            round(self, &mut body_s);
             let ctx = self.loop_stack.pop().unwrap();
-            if let Some(mut b) = ctx.breaks {
-                exit_acc = Some(match exit_acc.take() {
-                    None => b,
-                    Some(mut e) => e.join(&mut b),
-                });
+            if let Some(b) = ctx.breaks {
+                join_into(&mut breaks, b);
             }
-            let mut back = match ctx.continues {
+            back = match ctx.continues {
                 None => body_s,
                 Some(mut c) => body_s.join(&mut c),
             };
@@ -1167,20 +1152,24 @@ impl Analyzer {
         }
         self.cond_depth -= 1;
         self.frame_mut().loop_depth -= 1;
-        let mut exit_s = head.copy();
-        // a test that is true at the head never falls through (the loop leaves by break)
-        let tv = self.eval(&w.test, &mut exit_s);
-        if self.truthiness(&tv, &exit_s) == Some(true) {
-            exit_s.reachable = false;
+        (head, breaks, back)
+    }
+
+    /// One unrolled iteration (`idx`: its place in the call context): `bind` the item, run the
+    /// body; a `continue` rejoins here, a `break` joins `breaks`.
+    fn unrolled_iteration(&mut self, idx: usize, body: &'static [ast::Stmt], state: &mut State, breaks: &mut Option<State>, bind: &mut dyn FnMut(&mut Analyzer, &mut State)) {
+        self.frame_mut().unroll.push(idx);
+        bind(self, state);
+        self.loop_stack.push(LoopCtx::default());
+        self.exec_block(body, state);
+        let ctx = self.loop_stack.pop().unwrap();
+        self.frame_mut().unroll.pop();
+        if let Some(c) = ctx.continues {
+            join_breaks(state, Some(c));
         }
-        self.narrow(&w.test, false, &mut exit_s);
-        if !w.orelse.is_empty() && exit_s.reachable {
-            self.exec_block(&w.orelse, &mut exit_s);
+        if let Some(b) = ctx.breaks {
+            join_into(breaks, b);
         }
-        if let Some(mut e) = exit_acc {
-            exit_s = exit_s.join(&mut e);
-        }
-        state.replace_with(exit_s);
     }
 
     fn stmt_for(&mut self, f: &'static ast::StmtFor, state: &mut State) {
@@ -1204,31 +1193,13 @@ impl Analyzer {
                             break;
                         }
                         self.set_cursor(o, Some(c0 + idx + 1), state);
-                        self.frame_mut().unroll.push(idx);
-                        self.bind_iter_target(&f.target, &Elem::One(item.clone()), state);
-                        self.loop_stack.push(LoopCtx::default());
-                        self.exec_block(&f.body, state);
-                        let ctx = self.loop_stack.pop().unwrap();
-                        if let Some(mut c) = ctx.continues {
-                            let j = if state.reachable { state.join(&mut c) } else { c };
-                            state.replace_with(j);
-                        }
-                        if let Some(mut b) = ctx.breaks {
-                            breaks = Some(match breaks.take() {
-                                None => b,
-                                Some(mut e) => e.join(&mut b),
-                            });
-                        }
-                        self.frame_mut().unroll.pop();
+                        self.unrolled_iteration(idx, &f.body, state, &mut breaks, &mut |an, st| an.bind_iter_target(&f.target, &Elem::One(item.clone()), st));
                     }
                     if state.reachable {
                         // (the rest: from the end of the known items)
                         self.stmt_for(f, state);
                     }
-                    if let Some(mut b) = breaks {
-                        let j = if state.reachable { state.join(&mut b) } else { b };
-                        state.replace_with(j);
-                    }
+                    join_breaks(state, breaks);
                     return;
                 }
             }
@@ -1252,26 +1223,7 @@ impl Analyzer {
                     if let (Some(o), true) = (once, has_jump) {
                         self.set_cursor(o, Some(c0 + idx + 1), state);
                     }
-                    self.frame_mut().unroll.push(idx);
-                    self.bind_iter_target(&f.target, &Elem::One(item.clone()), state);
-                    if has_jump {
-                        self.loop_stack.push(LoopCtx::default());
-                        self.exec_block(&f.body, state);
-                        let ctx = self.loop_stack.pop().unwrap();
-                        if let Some(mut c) = ctx.continues {
-                            let j = state.join(&mut c);
-                            state.replace_with(j);
-                        }
-                        if let Some(mut b) = ctx.breaks {
-                            breaks = Some(match breaks.take() {
-                                None => b,
-                                Some(mut e) => e.join(&mut b),
-                            });
-                        }
-                    } else {
-                        self.exec_block(&f.body, state);
-                    }
-                    self.frame_mut().unroll.pop();
+                    self.unrolled_iteration(idx, &f.body, state, &mut breaks, &mut |an, st| an.bind_iter_target(&f.target, &Elem::One(item.clone()), st));
                 }
                 if !f.orelse.is_empty() && state.reachable {
                     self.exec_block(&f.orelse, state);
@@ -1282,10 +1234,7 @@ impl Analyzer {
                         self.exhaust(&itv, state);
                     }
                 }
-                if let Some(mut b) = breaks {
-                    let j = state.join(&mut b);
-                    state.replace_with(j);
-                }
+                join_breaks(state, breaks);
                 return;
             }
         }
@@ -1298,35 +1247,14 @@ impl Analyzer {
                     if !state.reachable {
                         break;
                     }
-                    let mut skipped = if *sure { None } else { Some(state.copy()) };
-                    self.frame_mut().unroll.push(idx);
-                    self.bind_iter_target(&f.target, &Elem::One(item.clone()), state);
-                    self.loop_stack.push(LoopCtx::default());
-                    self.exec_block(&f.body, state);
-                    let ctx = self.loop_stack.pop().unwrap();
-                    self.frame_mut().unroll.pop();
-                    if let Some(mut c) = ctx.continues {
-                        let j = if state.reachable { state.join(&mut c) } else { c };
-                        state.replace_with(j);
-                    }
-                    if let Some(mut b) = ctx.breaks {
-                        breaks = Some(match breaks.take() {
-                            None => b,
-                            Some(mut e) => e.join(&mut b),
-                        });
-                    }
-                    if let Some(mut s0) = skipped.take() {
-                        let j = if state.reachable { state.join(&mut s0) } else { s0 };
-                        state.replace_with(j);
-                    }
+                    let skipped = if *sure { None } else { Some(state.copy()) };
+                    self.unrolled_iteration(idx, &f.body, state, &mut breaks, &mut |an, st| an.bind_iter_target(&f.target, &Elem::One(item.clone()), st));
+                    join_breaks(state, skipped);
                 }
                 if !f.orelse.is_empty() && state.reachable {
                     self.exec_block(&f.orelse, state);
                 }
-                if let Some(mut b) = breaks {
-                    let j = if state.reachable { state.join(&mut b) } else { b };
-                    state.replace_with(j);
-                }
+                join_breaks(state, breaks);
                 return;
             }
         }
@@ -1343,22 +1271,7 @@ impl Analyzer {
                         if !state.reachable {
                             break;
                         }
-                        self.frame_mut().unroll.push(idx);
-                        self.bind_iter_target(&f.target, &Elem::One(item.clone()), state);
-                        self.loop_stack.push(LoopCtx::default());
-                        self.exec_block(&f.body, state);
-                        let ctx = self.loop_stack.pop().unwrap();
-                        self.frame_mut().unroll.pop();
-                        if let Some(mut c) = ctx.continues {
-                            let j = if state.reachable { state.join(&mut c) } else { c };
-                            state.replace_with(j);
-                        }
-                        if let Some(mut b) = ctx.breaks {
-                            prefix_breaks = Some(match prefix_breaks.take() {
-                                None => b,
-                                Some(mut e) => e.join(&mut b),
-                            });
-                        }
+                        self.unrolled_iteration(idx, &f.body, state, &mut prefix_breaks, &mut |an, st| an.bind_iter_target(&f.target, &Elem::One(item.clone()), st));
                     }
                     if !state.reachable {
                         if let Some(b) = prefix_breaks.take() {
@@ -1373,7 +1286,7 @@ impl Analyzer {
         if let (Some(o), true) = (once, has_jump) {
             self.set_cursor(o, None, state);
         }
-        let mut pre = state.copy();
+        let pre = state.copy();
         // dry run for exhaustive key iteration (§5.2)
         let mut exh_ops: Vec<(u32, Ns, Row, KeySet, intern::LensId)> = Vec::new();
         let key_part = it.elem.key_part();
@@ -1404,45 +1317,10 @@ impl Analyzer {
                 self.exh_log = saved_log;
             }
         }
-        let mut head = state.copy();
-        let mut exit_acc: Option<State> = None;
-        self.frame_mut().loop_depth += 1;
-        self.cond_depth += 1;
-        let mut back = State::bottom();
-        let mut converged = false;
-        let mut prev_head = head.copy();
-        for _ in 0..LOOP_MAX_ITER {
-            let mut body_s = head.copy();
-            let mark = self.objects.len() as u32;
-            self.recent_stack.push(Vec::new());
-            self.loop_stack.push(LoopCtx::default());
-            self.bind_iter_target(&f.target, &it.elem, &mut body_s);
-            self.exec_block(&f.body, &mut body_s);
-            let ctx = self.loop_stack.pop().unwrap();
-            if let Some(mut b) = ctx.breaks {
-                exit_acc = Some(match exit_acc.take() {
-                    None => b,
-                    Some(mut e) => e.join(&mut b),
-                });
-            }
-            back = match ctx.continues {
-                None => body_s,
-                Some(mut c) => body_s.join(&mut c),
-            };
-            let recs = self.recent_stack.pop().unwrap_or_default();
-            self.rename_recent(&mut back, &head, recs, mark);
-            let new_head = pre.join_loop(&mut back);
-            if new_head.same(&head) {
-                converged = true;
-                break;
-            }
-            prev_head = std::mem::replace(&mut head, new_head);
-        }
-        if !converged {
-            self.widen_unconverged(&mut head, &prev_head);
-        }
-        self.cond_depth -= 1;
-        self.frame_mut().loop_depth -= 1;
+        let (mut head, exit_acc, back) = self.loop_fixpoint(state, &mut |an, body_s| {
+            an.bind_iter_target(&f.target, &it.elem, body_s);
+            an.exec_block(&f.body, body_s);
+        });
         let mut exit_s = head.copy();
         let elem_v = it.elem.value_part();
         self.promote_elem_reqs(&mut exit_s, &back, &elem_v, state);
@@ -1467,9 +1345,7 @@ impl Analyzer {
         if !f.orelse.is_empty() && exit_s.reachable {
             self.exec_block(&f.orelse, &mut exit_s);
         }
-        if let Some(mut e) = exit_acc {
-            exit_s = exit_s.join(&mut e);
-        }
+        join_breaks(&mut exit_s, exit_acc);
         // the loop ran at least once exactly when its iterable was non-empty: a later test of
         // that (`if xs:`, `if n > 0:` for `range(n)`) gets the rows the iterations left
         if f.orelse.is_empty() && !has_jump && !prefixed && back.reachable && pre.reachable && exit_s.reachable {
@@ -1497,9 +1373,7 @@ impl Analyzer {
             }
             add_facts(&mut exit_s, new);
         }
-        if let Some(mut b) = prefix_breaks {
-            exit_s = if exit_s.reachable { exit_s.join(&mut b) } else { b };
-        }
+        join_breaks(&mut exit_s, prefix_breaks);
         state.replace_with(exit_s);
     }
 
@@ -1626,28 +1500,18 @@ impl Analyzer {
         let outer_exits = if has_finally { state.exits.take() } else { None };
         let raise_before = self.raise_stack.last().copied().unwrap_or(false);
         let mut pre = state.copy();
-        self.guards.push(caught);
-        self.may_raise.push(false);
-        self.raise_states.push(None);
-        self.raise_values.push(None);
-        self.raise_cls.push((self.raise_states.len(), Vec::new()));
-        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
+        self.enter_try(caught, &mut pre);
         self.cond_depth += 1;
         self.branch_depth += 1;
         let exits_before = self.exit_count;
         let fl_mark = self.flag_reqs.len();
         let fl_depth = self.may_raise.len();
         self.exec_block(body, state);
-        self.guards.pop();
-        self.try_marks.pop();
         // the requirements known where the body first may have raised anywhere
         let mut flag_reqs = self.flag_reqs.drain(fl_mark..).find(|(d, _)| *d == fl_depth).map(|(_, r)| r);
         // a body that ended because it returned (or broke out) did not raise
-        let flagged = self.may_raise.pop().unwrap_or(false);
-        // (Some: something was recorded; the states themselves are in `recs`)
-        let raised_at = self.raise_states.pop().flatten();
-        self.raise_values.pop();
-        let mut recs = self.raise_cls.pop().map(|(_, r)| r).unwrap_or_default();
+        let TryExit { flagged, mut recs, .. } = self.leave_try();
+        let raised_at: Option<()> = if recs.is_empty() { None } else { Some(()) };
         // the handlers' classes: which recorded raise each one catches (Python takes the
         // first handler that matches)
         let hclasses: Vec<(FxHashSet<String>, bool)> = handlers.iter().map(|h| {
@@ -2629,4 +2493,20 @@ impl Finally {
             Finally::Exit(_) => false,
         }
     }
+}
+
+/// `state` joined with `other` (its replacement when `state` is unreachable).
+fn join_breaks(state: &mut State, other: Option<State>) {
+    if let Some(mut o) = other {
+        let j = if state.reachable { state.join(&mut o) } else { o };
+        state.replace_with(j);
+    }
+}
+
+/// `acc` joined with `s`.
+fn join_into(acc: &mut Option<State>, mut s: State) {
+    *acc = Some(match acc.take() {
+        None => s,
+        Some(mut a) => a.join(&mut s),
+    });
 }

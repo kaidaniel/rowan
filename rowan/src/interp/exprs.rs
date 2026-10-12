@@ -9,7 +9,7 @@ use crate::intern::{self, key_float, key_int, key_str_lit, s, KeyId, STAR};
 use crate::state::{Kind, State};
 
 use super::funcs::Elem;
-use super::{is_constant, names_in, Analyzer, ObjId, Payload, ViewKind, LOOP_MAX_ITER, UNROLL_MAX};
+use super::{is_constant, names_in, Analyzer, ObjId, Payload, ViewKind, UNROLL_MAX};
 
 /// Python's `s[lo:hi:step]` on characters.
 fn py_slice(cs: &[char], lo: Option<i64>, hi: Option<i64>, step: Option<i64>) -> Option<String> {
@@ -2073,34 +2073,11 @@ impl Analyzer {
         }
         // items of unknown number: what one iteration did, the next one sees too (a walrus
         // accumulator, a `pop` from a dict): rounds to a fixpoint, as a `for` loop has
-        let mut pre = state.copy();
-        let mut head = pre.copy().join(&mut s2.copy());
-        let mut converged = false;
-        let mut prev_head = head.copy();
-        // (objects made in the body: recent ones folded at the back edge, as in a `for` loop,
-        // so the rounds converge)
-        self.frame_mut().loop_depth += 1;
-        for _ in 0..LOOP_MAX_ITER {
-            let mut body_s = head.copy();
-            let mark = self.objects.len() as u32;
-            self.recent_stack.push(Vec::new());
-            self.frame_mut().overlays.push(IndexMap::new());
-            self.comp_run_one(g, gens, i, &elem, &mut body_s, body, understood, own);
-            self.frame_mut().overlays.pop();
-            let recs = self.recent_stack.pop().unwrap_or_default();
-            self.rename_recent(&mut body_s, &head, recs, mark);
-            let new_head = pre.copy().join_loop(&mut body_s);
-            s2 = body_s;
-            if new_head.same(&head) {
-                converged = true;
-                break;
-            }
-            prev_head = std::mem::replace(&mut head, new_head);
-        }
-        self.frame_mut().loop_depth -= 1;
-        if !converged {
-            self.widen_unconverged(&mut head, &prev_head);
-        }
+        let (mut head, _, s2) = self.loop_fixpoint(state, &mut |an, body_s| {
+            an.frame_mut().overlays.push(IndexMap::new());
+            an.comp_run_one(g, gens, i, &elem, body_s, body, understood, own);
+            an.frame_mut().overlays.pop();
+        });
         self.comp_known.pop();
         let ev = elem.value_part();
         self.promote_elem_reqs(&mut head, &s2, &ev, state);

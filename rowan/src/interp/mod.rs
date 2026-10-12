@@ -308,6 +308,23 @@ pub fn join_raise_recs(recs: &[RaiseRec]) -> Option<State> {
     out
 }
 
+/// What a try context recorded while its body ran (`Analyzer::leave_try`).
+pub struct TryExit {
+    /// the body may have raised somewhere not recorded (a call that may raise anything)
+    pub flagged: bool,
+    /// the states and exceptions at the raises recorded one by one
+    pub recs: Vec<RaiseRec>,
+    /// the exceptions raised at the recorded points
+    pub value: Option<Value>,
+}
+
+impl TryExit {
+    /// The join of the states at the recorded raises (None: none recorded).
+    pub fn raised(&self) -> Option<State> {
+        join_raise_recs(&self.recs)
+    }
+}
+
 /// Builtin (and modelled library) exception classes and their bases.
 pub const EXC_BASES: &[(&str, &str)] = &[
     ("Exception", "BaseException"), ("SystemExit", "BaseException"), ("KeyboardInterrupt", "BaseException"), ("GeneratorExit", "BaseException"),
@@ -1026,6 +1043,28 @@ impl Analyzer {
         let oid = self.alloc_global(Kind::Module, &format!("module:{}", name), &format!("module {}", name), Payload::Module(Rc::new(info)));
         self.modules.insert(name.to_string(), oid);
         oid
+    }
+
+    /// A try context begins: raises of `caught` classes (or that may be one) record the state
+    /// there for the handlers; `pre` is the state before the body.
+    pub fn enter_try(&mut self, caught: FxHashSet<String>, pre: &mut State) {
+        self.guards.push(caught);
+        self.may_raise.push(false);
+        self.raise_states.push(None);
+        self.raise_values.push(None);
+        self.raise_cls.push((self.raise_states.len(), Vec::new()));
+        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
+    }
+
+    /// The try context ends: what it recorded.
+    pub fn leave_try(&mut self) -> TryExit {
+        self.guards.pop();
+        self.try_marks.pop();
+        let flagged = self.may_raise.pop().unwrap_or(false);
+        self.raise_states.pop();
+        let value = self.raise_values.pop().flatten();
+        let recs = self.raise_cls.pop().map(|(_, r)| r).unwrap_or_default();
+        TryExit { flagged, recs, value }
     }
 
     pub fn frame(&self) -> &Frame {

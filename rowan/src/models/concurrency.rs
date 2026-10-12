@@ -34,11 +34,7 @@ impl Analyzer {
     /// what it raised; the state after is the join of the normal end and the raising points.
     pub fn call_catching(&mut self, f: &Value, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, state: &mut State, node: &Node) -> (Value, Raised) {
         let mut pre = state.copy();
-        self.guards.push(rustc_hash::FxHashSet::from_iter(["*".to_string()]));
-        self.may_raise.push(false);
-        self.raise_states.push(None);
-        self.raise_values.push(None);
-        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
+        self.enter_try(rustc_hash::FxHashSet::from_iter(["*".to_string()]), &mut pre);
         self.catching_depth += 1;
         let mut outs = Vec::new();
         for fo in f.pts.iter() {
@@ -49,11 +45,8 @@ impl Analyzer {
             outs.push(v);
         }
         self.catching_depth -= 1;
-        self.guards.pop();
-        self.try_marks.pop();
-        let flagged = self.may_raise.pop().unwrap_or(false);
-        let raised_at = self.raise_states.pop().flatten();
-        let raised_v = self.raise_values.pop().flatten().unwrap_or_default();
+        let out = self.leave_try();
+        let (flagged, raised_at, raised_v) = (out.flagged, out.raised(), out.value.clone().unwrap_or_default());
         let died = !state.reachable;
         let raised = flagged || raised_at.is_some() || died;
         let level = if died && raised { 2 } else if raised { 1 } else { 0 };

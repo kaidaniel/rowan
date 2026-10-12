@@ -1198,19 +1198,11 @@ impl Analyzer {
     /// value and whether the validator surely / maybe raised such an error.
     fn pyd_catching(&mut self, f: ObjId, self_v: Value, args: Vec<Value>, state: &mut State, node: &Node) -> (Value, bool, bool) {
         let mut pre = state.copy();
-        self.guards.push(rustc_hash::FxHashSet::from_iter(["ValueError", "AssertionError", "PydanticCustomError", "PydanticKnownError", "ValidationError"].iter().map(|x| x.to_string())));
-        self.may_raise.push(false);
-        self.raise_states.push(None);
-        self.raise_values.push(None);
-        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
+        self.enter_try(rustc_hash::FxHashSet::from_iter(["ValueError", "AssertionError", "PydanticCustomError", "PydanticKnownError", "ValidationError"].iter().map(|x| x.to_string())), &mut pre);
         // (run with the validated values: `v.strip()` of a str field is a str method there)
         let out = self.call_user(f, Some(self_v), args, IndexMap::new(), vec![], vec![], state, node, None, false);
-        self.guards.pop();
-        self.try_marks.pop();
-        let flagged = self.may_raise.pop().unwrap_or(false);
-        let raised_at = self.raise_states.pop().flatten();
-        self.raise_values.pop();
-        let _ = &mut pre;
+        let out_try = self.leave_try();
+        let (flagged, raised_at) = (out_try.flagged, out_try.raised());
         // an exception pydantic does not catch (KeyError, …) escapes: the enclosing try / call
         // learns it may raise
         if flagged {
