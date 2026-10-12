@@ -1779,18 +1779,14 @@ impl Analyzer {
             }
             if let Some(x) = a.kv.as_lit() {
                 if let Some(sx) = intern::key_as_str(x) {
-                    // "%s ... %d" with the arguments: literal segments around at most one
-                    // non-literal argument (a parameter: decided per call site); width and
-                    // precision specs are applied when every argument is a literal
-                    if let Some(r) = format_percent_literal(&sx, b, state, self) {
-                        return Value::lit(key_str_lit(&r));
-                    }
-                    // (arguments that are each one of a few literals: every combination, as
-                    // Python formats it)
+                    // arguments that are each one of a few literals: every combination, as
+                    // Python formats it
                     if let Some(rs) = format_percent_alternatives(&sx, b, state, self) {
-                        return Value::kv_only(KeyVal::Lits(crate::intern::KeySet::from_iter(rs.iter().map(|r| key_str_lit(r)))));
+                        return Value::kv_only(KeyVal::lits(crate::intern::KeySet::from_iter(rs.iter().map(|r| key_str_lit(r)))));
                     }
-                    let sx2 = sx.replace("%d", "%s");
+                    // "a%sb%s" with one argument not a literal: the literal text around it (a
+                    // key built from a parameter keeps its prefix and suffix)
+                    let sx2 = sx.to_string();
                     let n = sx2.matches("%s").count();
                     if n >= 1 && !sx2.replace("%s", "").contains('%') {
                         let segs: Vec<String> = sx2.split("%s").map(|s| s.to_string()).collect();
@@ -1828,7 +1824,8 @@ impl Analyzer {
                                     out
                                 };
                                 match hole {
-                                    None => return Value::lit(key_str_lit(&text(0, n + 1))),
+                                    // (every argument a literal and Python did not format them: an error)
+                                    None => {}
                                     Some(h) => {
                                         let pre = format!("{}{}", text(0, h), segs[h]);
                                         let post = {
@@ -2307,7 +2304,6 @@ pub fn cond_is_exclusion(cond: &ast::Expr, target: &ast::Expr) -> bool {
     }
 }
 
-/// `"%03d-%s|%.2f" % args` with literal arguments only: the formatted string.
 /// `fmt % args` when each argument is one of a few literals: the texts of every combination
 /// (at most 64), exactly as Python formats them; None when an argument is not literal or a
 /// combination does not format.
@@ -2348,112 +2344,6 @@ fn format_percent_alternatives(fmt: &str, b: &Value, state: &State, an: &Analyze
     Some(out)
 }
 
-fn format_percent_literal(fmt: &str, b: &Value, state: &State, an: &Analyzer) -> Option<String> {
-    // every argument a literal: exactly as Python formats it
-    let args: Option<Vec<KeyId>> = if b.pts.is_empty() {
-        b.kv.as_lit().map(|k| vec![k])
-    } else {
-        b.single().filter(|o| an.kind(*o) == Kind::Tuple).and_then(|o| {
-            let n = an.llen(o, state)?;
-            (0..n).map(|i| {
-                let x = state.slot(o, Ns::Pos, key_int(i as i64));
-                x.kv.as_lit().filter(|_| x.pts.is_empty())
-            }).collect()
-        })
-    };
-    if let Some(args) = args {
-        if let Some(s0) = crate::models::pyvalues::percent_format(fmt, crate::models::pyvalues::PercentArgs::Positional(&args)) {
-            return Some(s0);
-        }
-    }
-    // collect the conversion specs
-    let bytes: Vec<char> = fmt.chars().collect();
-    let mut specs: Vec<(usize, usize, String, char)> = Vec::new(); // (start, end, flags+width+prec, conv)
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == '%' {
-            let start = i;
-            i += 1;
-            if i < bytes.len() && bytes[i] == '%' {
-                i += 1;
-                continue;
-            }
-            let mut spec = String::new();
-            while i < bytes.len() && (bytes[i].is_ascii_digit() || matches!(bytes[i], '-' | '+' | ' ' | '0' | '.' | '#')) {
-                spec.push(bytes[i]);
-                i += 1;
-            }
-            if i >= bytes.len() {
-                return None;
-            }
-            let conv = bytes[i];
-            if !matches!(conv, 'd' | 'i' | 's' | 'f' | 'r' | 'x') {
-                return None;
-            }
-            specs.push((start, i + 1, spec, conv));
-            i += 1;
-        } else {
-            i += 1;
-        }
-    }
-    if specs.is_empty() || specs.iter().all(|s| s.2.is_empty()) {
-        return None; // the plain path handles these (it also records events)
-    }
-    let n = specs.len();
-    let args: Vec<KeyId> = if n == 1 {
-        vec![b.kv.as_lit().filter(|_| b.pts.is_empty())?]
-    } else {
-        let t = b.single()?;
-        if !matches!(an.kind(t), Kind::Tuple) || an.llen(t, state) != Some(n) {
-            return None;
-        }
-        let mut v = Vec::new();
-        for i in 0..n {
-            let s = state.slot(t, Ns::Pos, key_int(i as i64));
-            v.push(s.kv.as_lit().filter(|_| s.pts.is_empty())?);
-        }
-        v
-    };
-    let mut out = String::new();
-    let mut pos = 0;
-    for (k, (start, end, spec, conv)) in specs.iter().enumerate() {
-        out.push_str(&bytes[pos..*start].iter().collect::<String>().replace("%%", "%"));
-        let zero = spec.starts_with('0');
-        let left = spec.starts_with('-');
-        let (wpart, prec) = match spec.split_once('.') {
-            Some((w, p)) => (w.trim_start_matches(['-', '0', '+', ' ', '#']).to_string(), p.parse::<usize>().ok()),
-            None => (spec.trim_start_matches(['-', '0', '+', ' ', '#']).to_string(), None),
-        };
-        let width: usize = wpart.parse().unwrap_or(0);
-        let text = intern::with_key(args[k], |kk| match (conv, kk) {
-            ('d' | 'i', intern::Key::Int(v)) => Some(v.to_string()),
-            ('d' | 'i', intern::Key::Bool(v)) => Some((*v as i64).to_string()),
-            ('d' | 'i', intern::Key::Float(v)) => Some((f64::from_bits(*v).trunc() as i64).to_string()),
-            ('f', intern::Key::Int(v)) => Some(format!("{:.*}", prec.unwrap_or(6), *v as f64)),
-            ('f', intern::Key::Float(v)) => Some(format!("{:.*}", prec.unwrap_or(6), f64::from_bits(*v))),
-            ('x', intern::Key::Int(v)) => Some(format!("{:x}", v)),
-            ('s' | 'r', _) => Some(intern::key_py_str(args[k])),
-            _ => None,
-        })?;
-        let padded = if text.chars().count() >= width {
-            text
-        } else if left {
-            format!("{:<w$}", text, w = width)
-        } else if zero && matches!(conv, 'd' | 'i' | 'f' | 'x') {
-            let neg = text.starts_with('-');
-            let body = text.trim_start_matches('-');
-            let fill = width - text.chars().count();
-            format!("{}{}{}", if neg { "-" } else { "" }, "0".repeat(fill), body)
-        } else {
-            format!("{:>w$}", text, w = width)
-        };
-        out.push_str(&padded);
-        pos = *end;
-    }
-    out.push_str(&bytes[pos..].iter().collect::<String>().replace("%%", "%"));
-    Some(out)
-}
-
 /// builtins whose calls do not raise for the values this analysis sees
 /// A builtin exception class: constructing one does not raise.
 pub fn is_exception_name(n: &str) -> bool {
@@ -2464,86 +2354,9 @@ const SAFE_BUILTINS: &[&str] = &["len", "str", "repr", "bool", "int", "float", "
 
 /// `format(value, spec)` for a known literal and a plain spec: `[[fill]align][0][width][.prec][type]`.
 pub(crate) fn format_spec_literal(k: KeyId, spec: &str) -> Option<String> {
-    if let Some(s0) = crate::models::pyvalues::format_value(k, spec) {
-        return Some(s0);
-    }
-    format_spec_literal_old(k, spec)
+    crate::models::pyvalues::format_value(k, spec)
 }
 
-fn format_spec_literal_old(k: KeyId, spec: &str) -> Option<String> {
-    let chars: Vec<char> = spec.chars().collect();
-    let mut i = 0;
-    let mut fill = ' ';
-    let mut align: Option<char> = None;
-    if chars.len() >= 2 && matches!(chars[1], '<' | '>' | '^') {
-        fill = chars[0];
-        align = Some(chars[1]);
-        i = 2;
-    } else if !chars.is_empty() && matches!(chars[0], '<' | '>' | '^') {
-        align = Some(chars[0]);
-        i = 1;
-    }
-    let mut zero = false;
-    if i < chars.len() && chars[i] == '0' {
-        zero = true;
-        i += 1;
-    }
-    let mut width = 0usize;
-    while i < chars.len() && chars[i].is_ascii_digit() {
-        width = width * 10 + chars[i].to_digit(10).unwrap() as usize;
-        i += 1;
-    }
-    let mut prec: Option<usize> = None;
-    if i < chars.len() && chars[i] == '.' {
-        i += 1;
-        let mut p = 0usize;
-        let mut any = false;
-        while i < chars.len() && chars[i].is_ascii_digit() {
-            p = p * 10 + chars[i].to_digit(10).unwrap() as usize;
-            i += 1;
-            any = true;
-        }
-        if !any {
-            return None;
-        }
-        prec = Some(p);
-    }
-    let ty = if i < chars.len() { chars[i] } else { ' ' };
-    if i + 1 < chars.len() {
-        return None;
-    }
-    let text = intern::with_key(k, |kk| match (ty, kk) {
-        (' ' | 's', intern::Key::Str(s)) => Some(match prec {
-            Some(p) => s.chars().take(p).collect(),
-            None => s.to_string(),
-        }),
-        (' ' | 'd', intern::Key::Int(v)) => Some(v.to_string()),
-        ('d', intern::Key::Bool(b)) => Some((*b as i64).to_string()),
-        (' ' | 'f', intern::Key::Float(b)) => Some(format!("{:.*}", prec.unwrap_or(6), f64::from_bits(*b))),
-        ('f', intern::Key::Int(v)) => Some(format!("{:.*}", prec.unwrap_or(6), *v as f64)),
-        ('x', intern::Key::Int(v)) => Some(format!("{:x}", v)),
-        (' ', intern::Key::Bool(b)) => Some(if *b { "True".into() } else { "False".into() }),
-        _ => None,
-    })?;
-    let numeric = intern::with_key(k, |kk| matches!(kk, intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_)));
-    let n = text.chars().count();
-    if n >= width {
-        return Some(text);
-    }
-    let pad = width - n;
-    Some(match align {
-        Some('<') => format!("{}{}", text, fill.to_string().repeat(pad)),
-        Some('^') => format!("{}{}{}", fill.to_string().repeat(pad / 2), text, fill.to_string().repeat(pad - pad / 2)),
-        Some('>') => format!("{}{}", fill.to_string().repeat(pad), text),
-        None if zero && numeric => {
-            let neg = text.starts_with('-');
-            format!("{}{}{}", if neg { "-" } else { "" }, "0".repeat(pad), text.trim_start_matches('-'))
-        }
-        None if numeric => format!("{}{}", " ".repeat(pad), text),
-        None => format!("{}{}", text, " ".repeat(pad)),
-        Some(_) => return None,
-    })
-}
 
 impl Analyzer {
     /// `a op b` where every object `a` (or else `b`) may be is an instance of a class defining
