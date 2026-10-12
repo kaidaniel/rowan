@@ -15,6 +15,8 @@ and write down what you chose and why.
    * well formatted;
    * every special symbol explained;
    * not so many insights that they overwhelm.
+   * This objective is easy to put off behind the others, so make at least one improvement to
+     it in every iteration, and check it against real hovers on real programs.
 2. **Correct (sound).** What rowan claims must hold for every run of the program. Soundness
    beats everything else on this list.
    * The golden suites must pass at every commit. Also count how many pass with
