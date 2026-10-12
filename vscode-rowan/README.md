@@ -5,35 +5,14 @@ values* instead of real ones. **Hover over any variable** to see what it can hol
 literals, which dict keys, which are certain and which only maybe there.
 
 ```python
-def make_user(name, admin):
-    user = {"name": name, "active": True}
+def add_admin(user, admin):
     if admin:
         user["role"] = "admin"
-    return user
+    return user                               # hover: {"name": "Anna"} | {"name": "Bert", "role": "admin"}
 
-ana = make_user("ana", True)    # hover: {"active": True, "name": "ana", "role": "admin"}
-bo = make_user("bo", False)     # hover: {"active": True, "name": "bo"}
+anna = add_admin({"name": "Anna"}, True)      # hover: {"name": "Anna", "role": "admin"}
+bert = make_user({"name": "Bert"}, False)     # hover: {"name": "Bert"}
 ```
-
-A hover shows the value as Python, where the object was created, what the code reads of a
-value that comes from outside (an argument, `json.loads(…)`), the accesses on the line, and a
-one-line legend of the marks it uses. For `u = make_user(...)` followed by `u["role"]`:
-
-````
-rowan · u
-
-```python
-{"id": 7, "name": "Ada Lovelace", "role"?: "admin"}
-```
-
-- created on line 4
-- ⚠ u["role"]: key "role" is only set on some paths
-
-"k"?: set on some paths only · ⚠ fails on some paths
-````
-
-Accesses that may fail are also diagnostics: `✗` (fails on every path) as errors, `⚠` (fails
-on some paths) as warnings.
 
 Besides python builtins, rowan also has models for pytorch, pandas, pydantic, and a few other libraries. Local imports are resolved but other external dependencies are not analysed.
 
