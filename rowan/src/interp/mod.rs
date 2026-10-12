@@ -1258,12 +1258,8 @@ impl Analyzer {
     /// Allocate an object at `site` (string) in the current frame's context.  `single`:
     /// explicit strength; `None` = the frame decides (strong outside loops; inside a loop a
     /// strong *recent* object with the recency abstraction, else the weak per-site object).
-    pub fn alloc(&mut self, kind: Kind, site: &str, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, single: Option<bool>, ctx: Option<&str>) -> ObjId {
-        self.alloc_full(kind, site, state, label, payload, row, ns, single, ctx, true)
-    }
-
     #[allow(clippy::too_many_arguments)]
-    fn alloc_full(&mut self, kind: Kind, site: &str, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, single: Option<bool>, ctx: Option<&str>, _reserved: bool) -> ObjId {
+    pub fn alloc(&mut self, kind: Kind, site: &str, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, single: Option<bool>, ctx: Option<&str>) -> ObjId {
         let fr = self.frame();
         let ctx = ctx.map(|c| c.to_string()).unwrap_or_else(|| fr.ctx.clone());
         let label = if label.is_empty() { format!("{}@{}", kind.name(), site) } else { label.to_string() };

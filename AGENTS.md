@@ -148,7 +148,7 @@ budget; informational, into the history on gh-pages).
 | `intern.rs`, `domain.rs` | interned keys, sources, lenses; `Row`, `KeyVal`, `Value`, transfers, `classify` |
 | `layered.rs`, `state.rs` | persistent maps (`LayerMap`, `TwoLevel`); `State`, joins, `diff_keys` |
 | `frontend.rs`, `scopes.rs` | ruff parsing, leaked `&'static` trees, module registry; lexical scopes |
-| `interp/mod.rs` | `Analyzer`, side tables, `Obj`, allocation (`alloc_full`, `live_among`), lengths, GC, entry runs |
+| `interp/mod.rs` | `Analyzer`, side tables, `Obj`, allocation (`alloc`, `live_among`), lengths, GC, entry runs |
 | `interp/stmts.rs` | statements, loops, try / with / match, `finally` |
 | `interp/exprs.rs`, `interp/funcs.rs` | expressions, comprehensions, yields; functions, iteration, generators |
 | `interp/narrow.rs`, `interp/access.rs` | narrowing, `CondFact`s; attribute and item access, verdicts, requirements |
