@@ -47,8 +47,10 @@ ruff and walks the syntax tree directly, running the program on abstract values.
     that change their arguments (`random.shuffle`, `operator.setitem`, …).
   * **Entry points:** functions nothing calls run with open parameters; their requirements
     become `param F.x` schemas.
-* **Generators** run eagerly at the call. A consumer of item *k* sees the effects up to yield
-  *k* (`GenEffects`). A `@contextmanager`'s `with` body runs at each yield.
+* **Generators** run whole at their first consumption (iteration, unpacking, a call taking
+  them, `g.__next__()`; `force_gen`), in the creating call's context. A consumer of item *k*
+  sees the effects up to yield *k* (`GenEffects`). A `@contextmanager`'s `with` body runs at
+  each yield.
 * **Requirements and schemas:** reading a key from a row open through an input records a
   requirement on that input. A key read on every path is `always`, on some paths `sometimes`.
   A read guarded by a handler for its `KeyError` still counts (a frame column read behind a

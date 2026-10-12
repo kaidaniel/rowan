@@ -83,6 +83,16 @@ impl Analyzer {
         if !state.reachable {
             return Value::new();
         }
+        // (generators passed or called through a method run now)
+        for o in fv.pts.iter() {
+            if let Payload::Method(_, r) | Payload::Bound(_, r) = &self.obj(o).payload {
+                let r = r.clone();
+                self.force_gen(&r, state);
+            }
+        }
+        for a in args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()) {
+            self.force_gen(a, state);
+        }
         if fv.pts.is_empty() {
             return self.unknown_call("?", None, &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
@@ -927,14 +937,121 @@ impl Analyzer {
         (site.to_string(), true)
     }
 
+    /// The context of a call's allocations: its site (line and column), chained to the
+    /// calling frame's context (bounded depth; beyond it a hash of the prefix).
+    fn callee_site(&self, node: &Node) -> String {
+        // the call context: per call site (line and column) with `fixes`; the prototype used
+        // the line only, so two calls on one line shared their clones
+        let site = if node.addr != 0 { format!("{}L{}:{}", crate::frontend::site_prefix(node.module), node.line, node.col) } else { format!("{}L{}", crate::frontend::site_prefix(node.module), node.line) };
+        // inside a tabulated frame the context is chained to the frame's, so two activations
+        // of the caller give distinct objects (bounded depth; beyond it the site alone)
+        {
+            let fr = self.frame();
+            let mut site = site;
+            for i in &fr.unroll {
+                site.push_str(&format!("#{}", i));
+            }
+            if fr.kind != FrameKind::Module && !fr.ctx.is_empty() && !fr.ctx.starts_with("entry") {
+                if fr.ctx.matches('/').count() < super::CHAIN {
+                    format!("{}/{}", fr.ctx, site)
+                } else {
+                    // deeper chains stay distinct through a hash of the prefix: two activations
+                    // of the caller keep allocating distinct objects at any depth (bounded by
+                    // the tabulation budgets), while the context string stays short
+                    let mut h = rustc_hash::FxHasher::default();
+                    std::hash::Hash::hash(&fr.ctx, &mut h);
+                    format!("h{:x}/{}", std::hash::Hasher::finish(&h), site)
+                }
+            } else {
+                site
+            }
+        }
+    }
+
+    /// A generator call: the generator object (the one its run returns), its body not run yet.
+    /// Its slot `\u{1}lazy` is 1 while not run, 0 after (both: run on some paths). Two calls at
+    /// one site before either is consumed: one run with their arguments joined.
+    fn make_lazy_gen(&mut self, foid: u32, self_v: Option<Value>, mut args: Vec<Value>, mut kwargs: IndexMap<StrId, Value>, state: &mut State, node: &Node) -> Value {
+        let site = self.callee_site(node);
+        let ctx = self.receiver_ctx(&self_v, &site);
+        let q = self.func_info(foid).qualname.clone();
+        let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx.0, true, &format!("generator {}", q), Payload::None);
+        self.obj_mut(gid).iterator = true;
+        let mut self_v = self_v;
+        if let Some(old) = self.lazy_gens.get(&gid).filter(|_| lazy_state(state, gid).0) {
+            self_v = match (&self_v, &old.self_v) {
+                (Some(a), Some(b)) => Some(a.join(b)),
+                (a, b) => a.clone().or_else(|| b.clone()),
+            };
+            for (i, a) in old.args.iter().enumerate() {
+                match args.get_mut(i) {
+                    Some(x) => *x = x.join(a),
+                    None => args.push(a.clone()),
+                }
+            }
+            for (k, v) in old.kwargs.iter() {
+                let nv = kwargs.get(k).map_or_else(|| v.clone(), |x| x.join(v));
+                kwargs.insert(*k, nv);
+            }
+        }
+        // (what the run will read, reachable from the generator for the collector)
+        let keep = join_values(self_v.iter().chain(args.iter()).chain(kwargs.values()).cloned().collect::<Vec<Value>>());
+        state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}lazyargs"), keep, true);
+        state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}lazy"), Value::lit(intern::key_int(1)), true);
+        let lg = super::LazyGen { foid, self_v, args, kwargs, node: *node, site, ctx, chain: self.call_chain.clone() };
+        self.lazy_gens.insert(gid, Rc::new(lg));
+        Value::obj(gid)
+    }
+
+    /// Runs the bodies of the generators among `v` not run yet, from this state.
+    pub fn force_gen(&mut self, v: &Value, state: &mut State) {
+        for o in v.pts.iter() {
+            let (lazy, run) = lazy_state(state, o);
+            if !state.reachable || !lazy {
+                continue;
+            }
+            let Some(lg) = self.lazy_gens.get(&o).cloned() else { continue };
+            // (run already on some of the paths joined here: those keep their state)
+            let before = if run { Some(state.copy()) } else { None };
+            self.force_at = Some((lg.site.clone(), lg.ctx.0.clone(), lg.ctx.1));
+            let saved = std::mem::replace(&mut self.call_chain, lg.chain.clone());
+            self.call_user(lg.foid, lg.self_v.clone(), lg.args.clone(), lg.kwargs.clone(), vec![], vec![], state, &lg.node, None, false);
+            self.call_chain = saved;
+            if let Some(mut b) = before {
+                let j = state.join(&mut b);
+                state.replace_with(j);
+                // (how far it has run differs by path: not known, its effects any of its steps')
+                if let Some(ge) = self.gen_eff.get(&o).cloned() {
+                    crate::interp::exprs::gen_copy_facts_pub(state, &ge.join, &ge);
+                    state.set_slot(o, Ns::Attr, key_str_lit("\u{1}effpos"), Value::lit(key_str_lit("join")), true);
+                }
+                self.set_cursor(o, None, state);
+            }
+            state.slots.remove(&o, &(Ns::Attr, key_str_lit("\u{1}lazyargs")));
+            state.set_slot(o, Ns::Attr, key_str_lit("\u{1}lazy"), Value::lit(intern::key_int(0)), true);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn call_user(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, _call_ast: Option<&'static ast::ExprCall>, entry: bool) -> Value {
         // past the hard deadline a user function is unknown code (its result unknown, its
         // arguments possibly changed, it may raise): the run ends in bounded time
         if self.over_hard_deadline() {
+            self.force_at = None;
             let q = self.func_info(foid).qualname.clone();
             self.note(format!("analysis cut at the deadline ({} ms): later calls are unknown code", super::limit("ms", super::DEADLINE_MS)));
             return self.unknown_call(&q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
+        }
+        // a generator's body runs when it is consumed (`force_gen`), not here
+        let lazy = !entry
+            && self.force_at.is_none()
+            && self.model_depth == 0
+            && star_args.is_empty()
+            && star_kwargs.is_empty()
+            && !self.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth == self.frames.len())
+            && matches!(self.func_info(foid).node, FuncNode::Def(f) if is_generator(&f.body));
+        if lazy {
+            return self.make_lazy_gen(foid, self_v, args, kwargs, state, node);
         }
         // (user code called back by a model allocates as user code)
         let saved_md = std::mem::replace(&mut self.model_depth, 0);
@@ -955,6 +1072,7 @@ impl Analyzer {
 
     #[allow(clippy::too_many_arguments)]
     fn call_user_inner(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, _call_ast: Option<&'static ast::ExprCall>, entry: bool) -> Value {
+        let forced = self.force_at.take();
         // a singledispatch function: the implementation for the first argument's type
         if self.sdispatch.contains_key(&foid) && self.sd_bypass.take() != Some(foid) && !args.is_empty() && star_args.is_empty() {
             return self.sdispatch_call(foid, self_v, args, kwargs, star_kwargs, state, node, entry);
@@ -964,31 +1082,9 @@ impl Analyzer {
         }
         let fi = self.func_info(foid);
         let fnode = fi.node;
-        // the call context: per call site (line and column) with `fixes`; the prototype used
-        // the line only, so two calls on one line shared their clones
-        let site = if node.addr != 0 { format!("{}L{}:{}", crate::frontend::site_prefix(node.module), node.line, node.col) } else { format!("{}L{}", crate::frontend::site_prefix(node.module), node.line) };
-        // inside a tabulated frame the context is chained to the frame's, so two activations
-        // of the caller give distinct objects (bounded depth; beyond it the site alone)
-        let site = {
-            let fr = self.frame();
-            let mut site = site;
-            for i in &fr.unroll {
-                site.push_str(&format!("#{}", i));
-            }
-            if fr.kind != FrameKind::Module && !fr.ctx.is_empty() && !fr.ctx.starts_with("entry") {
-                if fr.ctx.matches('/').count() < super::CHAIN {
-                    format!("{}/{}", fr.ctx, site)
-                } else {
-                    // deeper chains stay distinct through a hash of the prefix: two activations
-                    // of the caller keep allocating distinct objects at any depth (bounded by
-                    // the tabulation budgets), while the context string stays short
-                    let mut h = rustc_hash::FxHasher::default();
-                    std::hash::Hash::hash(&fr.ctx, &mut h);
-                    format!("h{:x}/{}", std::hash::Hasher::finish(&h), site)
-                }
-            } else {
-                site
-            }
+        let site = match forced.as_ref() {
+            Some((site, _, _)) => site.clone(),
+            None => self.callee_site(node),
         };
         self.analysed_funcs.insert(foid);
         let mut key = (foid, if !entry { site.clone() } else { format!("entry:{}", site) });
@@ -1177,7 +1273,10 @@ impl Analyzer {
             eprintln!("run {} at {} frames={} chain={:?}", fi.qualname, site, self.frames.len(), self.call_chain);
         }
         // context for allocations inside the callee (§3)
-        let (ctx, ctx_single) = self.receiver_ctx(&self_v, &site);
+        let (ctx, ctx_single) = match forced {
+            Some((_, ctx, single)) => (ctx, single),
+            None => self.receiver_ctx(&self_v, &site),
+        };
         let fr_single = self.frame().single && self.frame().loop_depth == 0 && ctx_single;
         let fr_single_nl = self.frame().single_nl && ctx_single;
         let mut new_fr = Frame::new(FrameKind::Function, fi.scope, fi.module, &ctx, fr_single, &fi.qualname);
@@ -2140,5 +2239,16 @@ impl Analyzer {
             bound.insert(s(kw.name.id.as_str()), Value::obj(did));
         }
         bound
+    }
+}
+
+/// (not run on some path, run on some path) for a generator `make_lazy_gen` made
+fn lazy_state(state: &State, o: ObjId) -> (bool, bool) {
+    match state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}lazy")) {
+        Some(v) => {
+            let ks = crate::domain::kv_literals(&v.kv);
+            (ks.contains(intern::key_int(1)), ks.contains(intern::key_int(0)))
+        }
+        None => (false, false),
     }
 }

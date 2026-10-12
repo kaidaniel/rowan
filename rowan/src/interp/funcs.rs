@@ -603,6 +603,7 @@ impl Analyzer {
     }
 
     pub fn unpack(&mut self, v: &Value, n: usize, state: &mut State, node: &Node) -> Vec<Value> {
+        self.force_gen(v, state);
         let mut parts: Vec<Value> = (0..n).map(|_| Value::new()).collect();
         for oid in v.pts.iter() {
             let kind = self.kind(oid);
@@ -783,6 +784,7 @@ impl Analyzer {
     }
 
     pub fn iterate(&mut self, v: &Value, node: &Node, state: &mut State) -> Iteration {
+        self.force_gen(v, state);
         // one of several containers (or strings): their items are alternatives, not one
         // sequence — joined position by position when every one is a sequence of one known
         // length, else not known (the elements are still the join)

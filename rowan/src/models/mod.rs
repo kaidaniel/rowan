@@ -3114,6 +3114,8 @@ fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual);
     let recv = c.recv.clone().unwrap_or_default();
     match name {
+        // (a generator's `__next__` / `send`: the next item, as `next(g)`)
+        "__next__" | "send" if recv.pts.iter().all(|o| an.obj(o).iterator) => m_next(an, st, &Call { args: vec![recv], ..c.clone() }),
         "copy" => join_values(recv.pts.iter().map(|o| Value::obj(an.copy_object(o, &c.node, st, false, &mut IndexMap::new()))).collect::<Vec<_>>()),
         "remove" | "discard" | "clear" | "sort" | "reverse" | "insert" => {
             // `clear` on one list, whatever its length: empty

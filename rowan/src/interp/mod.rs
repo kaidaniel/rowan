@@ -500,6 +500,19 @@ pub struct GenEffects {
     pub join: State,
 }
 
+/// A generator call whose body has not run: it runs at the first consumption, from the state
+/// there (`force_gen`), in the call's own site and context, so the generator object is the same.
+pub struct LazyGen {
+    pub foid: ObjId,
+    pub self_v: Option<Value>,
+    pub args: Vec<Value>,
+    pub kwargs: IndexMap<StrId, Value>,
+    pub node: Node,
+    pub site: String,
+    pub ctx: (String, bool),
+    pub chain: Vec<u32>,
+}
+
 /// (see `Frame::pre_call`)
 #[derive(Clone)]
 pub struct PreCall(pub ObjId, pub std::rc::Rc<State>);
@@ -806,6 +819,10 @@ pub struct Analyzer {
     pub handling_values: Vec<Value>,
     /// inside a call whose exceptions a thread / future keeps: reads still require their keys
     pub catching_depth: u32,
+    /// generators made but not run yet: the call that made each (`force_gen`)
+    pub lazy_gens: FxHashMap<ObjId, std::rc::Rc<LazyGen>>,
+    /// the call site and context of the generator `force_gen` is running
+    pub force_at: Option<(String, String, bool)>,
     /// a generator's effects on older objects, per item: see `set_cursor`
     pub gen_eff: FxHashMap<ObjId, std::rc::Rc<GenEffects>>,
     /// the state at each positioned yield of the running generator activations
