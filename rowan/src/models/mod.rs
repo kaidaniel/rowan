@@ -4,6 +4,8 @@
 
 pub mod minire;
 pub mod shape;
+pub mod singledispatch;
+pub mod dataclasses;
 pub mod pyre;
 pub mod chrono;
 pub mod sqlite;
