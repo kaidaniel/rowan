@@ -1397,7 +1397,8 @@ impl Analyzer {
                     // state before the call), else leaves this call
                     // (the handler's state: before the call, with what the raising paths
                     // changed made unknown)
-                    let mut handler_state = self.summary_raise_state(&summ, &bind, state);
+                    // (only a try around the call or the summary being built reads it)
+                    let mut handler_state = if self.raise_states.is_empty() && self.sum_stack.is_empty() { state.copy() } else { self.summary_raise_state(&summ, &bind, state) };
                     match summ.raise_classes.clone().filter(|cs| !cs.is_empty()) {
                         Some(cs) => {
                             for c in cs {
@@ -2308,14 +2309,14 @@ impl Analyzer {
                 }
                 let (bn, full) = super::builtin_exc_names(&n);
                 complete &= full;
-                for b in bn {
-                    if !names.contains(&b) {
-                        names.push(b);
+                for b in bn.iter() {
+                    if !names.contains(b) {
+                        names.push(b.clone());
                     }
                 }
             }
         }
-        Some((names, complete))
+        Some((std::rc::Rc::new(names), complete))
     }
 
     /// A builtin exception (`KeyError(key)`, …) as a value: open attributes, known `args`.

@@ -1362,8 +1362,13 @@ impl Analyzer {
                 return;
             }
         }
-        // (a structural diff: the state shares most of its structure with the entry)
-        let fp = state.footprint(base);
+        // (what changed since the last raise noted: a key that differs from the entry here
+        // differs from it at the last raise too, or changed since — a diff from the entry at
+        // every raise cost what the body had changed so far, per raise)
+        let fp = match &acc.last {
+            Some(last) => state.footprint(last),
+            None => state.footprint(base),
+        };
         acc.last = Some(state.copy_ref());
         acc.rows.extend(fp.rows);
         acc.slots.extend(fp.slots);

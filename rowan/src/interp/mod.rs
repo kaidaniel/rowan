@@ -316,7 +316,7 @@ pub struct CmHook {
 }
 
 /// An exception class's name and its bases' names; `true`: that is the whole MRO.
-pub type ExcNames = (Vec<String>, bool);
+pub type ExcNames = (std::rc::Rc<Vec<String>>, bool);
 pub type RaiseRec = (Option<ExcNames>, State, Value);
 
 /// The states of a try's recorded raises, joined (None: no raise recorded).
@@ -369,12 +369,13 @@ pub fn builtin_exc_names(name: &str) -> ExcNames {
     if let Some(e) = CACHE.with(|c| c.borrow().get(name).cloned()) {
         return e;
     }
-    let e = builtin_exc_names_uncached(name);
+    let (names, full) = builtin_exc_names_uncached(name);
+    let e: ExcNames = (Rc::new(names), full);
     CACHE.with(|c| c.borrow_mut().insert(name.to_string(), e.clone()));
     e
 }
 
-fn builtin_exc_names_uncached(name: &str) -> ExcNames {
+fn builtin_exc_names_uncached(name: &str) -> (Vec<String>, bool) {
     // a module-qualified class of the table: its chain, by the classes' own names
     if EXC_BASES.iter().any(|(c, _)| *c == name && c.contains('.')) {
         let mut out: Vec<String> = Vec::new();
