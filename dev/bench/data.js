@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791733463595,
+  "lastUpdate": 1791775478956,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -2004,6 +2004,114 @@ window.BENCHMARK_DATA = {
             "value": 876,
             "unit": "MB",
             "extra": "cut at the 600 s timeout"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e50b933ef0feabfc5a954c62f0fb8430a74a86a5",
+          "message": "Merge pull request #1 from kaidaniel/iter/bounded-cost\n\nIteration: bounded cost, fewer knobs, soundness fixes",
+          "timestamp": "2026-10-12T04:11:45+01:00",
+          "tree_id": "506b4bad1a747a6e97eb88fc72982d03b2bdc324",
+          "url": "https://github.com/kaidaniel/rowan/commit/e50b933ef0feabfc5a954c62f0fb8430a74a86a5"
+        },
+        "date": 1791775478470,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 195.72,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1794,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "email: work",
+            "value": 1176255,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "email: work units",
+            "value": 15847576,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "email: tabulations",
+            "value": 19371,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "email: objects",
+            "value": 153556,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 602.17,
+            "unit": "s",
+            "extra": "cut at the 600 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 8608,
+            "unit": "MB",
+            "extra": "cut at the 600 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 89.64,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 2082,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 1409718,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 1991048,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 36410,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 173724,
+            "unit": "count",
+            "extra": "finished"
           }
         ]
       }
