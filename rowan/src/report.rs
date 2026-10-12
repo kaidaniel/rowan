@@ -166,12 +166,13 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
     }
     let oks = all.iter().filter(|v| v.tier == Tier::Proven).count();
     let likely = all.iter().filter(|v| v.tier == Tier::Likely).count();
-    if oks + likely > 0 {
-        let mut ok_line = format!("  ({}{} access{} always succeed{}", oks, if none { "" } else { " other" }, if oks == 1 { "" } else { "es" }, if oks == 1 { "s" } else { "" });
-        if likely > 0 {
-            ok_line += &format!("; {} more unless code rowan cannot see removed the key", likely);
-        }
-        problems.push(ok_line + ")");
+    // ("(3 other accesses always succeed; 1 more unless code rowan cannot see removed the key)")
+    let n_acc = |n: usize| format!("{} {}access{}", n, if none { "" } else { "other " }, if n == 1 { "" } else { "es" });
+    let ok = (oks > 0).then(|| format!("{} always succeed{}", n_acc(oks), if oks == 1 { "s" } else { "" }));
+    let lk = (likely > 0).then(|| format!("{} unless code rowan cannot see removed the key", if oks > 0 { format!("{} more", likely) } else { format!("{} succeed{}", n_acc(likely), if likely == 1 { "s" } else { "" }) }));
+    let counts: Vec<String> = ok.into_iter().chain(lk).collect();
+    if !counts.is_empty() {
+        problems.push(format!("  ({})", counts.join("; ")));
     }
     section(&mut lines, "accesses that may fail", problems);
     // tensor shapes: definite mismatches, then what each line needs of its inputs
