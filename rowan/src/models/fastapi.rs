@@ -874,6 +874,7 @@ impl Analyzer {
                         self.cur_exc = if ev.pts.is_empty() { None } else { Some(ev.clone()) };
                         self.cur_exc_cls = c.clone();
                         let mut s2 = st.copy();
+                        self.note_summary_raise(&s2);
                         let recorded = self.record_raise_state(&mut s2);
                         self.cur_exc = None;
                         self.cur_exc_cls = None;

@@ -540,7 +540,7 @@ impl Analyzer {
             sr.rel_chain.truncate(MAX_REL_CHAIN);
         }
         let key: SymKey = (sr.node, sr.key_kv.clone(), sr.oid, sr.ns, sr.guarded, sr.rel_chain.clone(), sr.kind, sr.cls);
-        let reqs = self.sum_reqs.last_mut().unwrap();
+        let Some(reqs) = self.sum_reqs.last_mut() else { return };
         match reqs.get_mut(&key) {
             None => {
                 reqs.insert(key, sr);
@@ -1350,7 +1350,72 @@ impl Analyzer {
     /// model simulates through the model.
     /// A raise leaving the function being summarised (no try of its own catches it): its
     /// state is kept for the summary's raise footprint.
+    /// The exception a joined run's body may raise to its caller (`note_summary_raise`).
+    pub fn js_note_exc(&mut self, v: Option<&Value>) {
+        if let (Some(top), Some(v)) = (self.js_raise_vals.last_mut(), v) {
+            *top = top.join(v);
+        }
+    }
+
     pub fn note_summary_raise(&mut self, state: &State) {
+        // a run on joined inputs: the state where its body may raise to its caller (joined only
+        // where it changed since the last one noted: raises are many, their states alike)
+        if let Some(slot) = self.js_raise.last_mut() {
+            if state.reachable {
+                match slot.take() {
+                    None => {
+                        let mut s2 = state.copy_ref();
+                        s2.exits = None;
+                        s2.ret = None;
+                        *slot = Some((s2.copy_ref(), s2));
+                    }
+                    Some((last, mut acc)) => {
+                        if !(last.rows.ptr_eq(&state.rows) && last.slots.ptr_eq(&state.slots) && last.elems.ptr_eq(&state.elems) && last.lens.ptr_eq(&state.lens)) {
+                            crate::layered::journal_paused(|| {
+                                for k in state.rows.diff_keys(&last.rows) {
+                                    if let Some(v) = state.rows.get(&k) {
+                                        let nv = match acc.rows.get(&k) {
+                                            Some(cur) if cur != v => cur.join(&v),
+                                            Some(cur) => cur,
+                                            None => v,
+                                        };
+                                        acc.rows.insert(k, nv);
+                                    }
+                                }
+                                for (o, sk) in state.slots.diff_keys(&last.slots) {
+                                    if let Some(v) = state.slots.get(&o, &sk) {
+                                        let nv = match acc.slots.get(&o, &sk) {
+                                            Some(cur) => cur.join(&v),
+                                            None => v,
+                                        };
+                                        acc.slots.set(&o, sk, nv);
+                                    }
+                                }
+                                for o in state.elems.diff_keys(&last.elems) {
+                                    if let Some(v) = state.elems.get(&o) {
+                                        let nv = match acc.elems.get(&o) {
+                                            Some(cur) => crate::domain::kv_join(&cur, &v),
+                                            None => v,
+                                        };
+                                        acc.elems.insert(o, nv);
+                                    }
+                                }
+                                for o in state.lens.diff_keys(&last.lens) {
+                                    if let Some(v) = state.lens.get(&o) {
+                                        let nv = match acc.lens.get(&o) {
+                                            Some(cur) => crate::state::join_len(&cur, &v),
+                                            None => v,
+                                        };
+                                        acc.lens.insert(o, nv);
+                                    }
+                                }
+                            });
+                        }
+                        *slot = Some((state.copy_ref(), acc));
+                    }
+                }
+            }
+        }
         if self.sum_stack.is_empty() {
             return;
         }

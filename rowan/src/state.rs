@@ -193,11 +193,11 @@ impl State {
         State {
             env: IndexMap::new(),
             narrowed: FxHashMap::default(),
-            rows: LayerMap::new(),
-            slots: TwoLevel::new(),
-            elems: LayerMap::new(),
-            lens: LayerMap::new(),
-            reqs: TwoLevel::new(),
+            rows: LayerMap::tagged(crate::layered::T_ROWS),
+            slots: TwoLevel::tagged(crate::layered::T_SLOTS),
+            elems: LayerMap::tagged(crate::layered::T_ELEMS),
+            lens: LayerMap::tagged(crate::layered::T_LENS),
+            reqs: TwoLevel::tagged(crate::layered::T_REQS),
             ret: None,
             reachable: true,
             exits: None,
@@ -273,6 +273,15 @@ impl State {
         self.lasts = o.lasts.clone();
         self.tf = o.tf.clone();
         self.unbound = o.unbound.clone();
+    }
+
+    /// A container's items changed: its length is written too, changed or not (a joined
+    /// summary's replay puts the run's value of every fact it wrote: an append to a list of
+    /// unknown length leaves the length as it was, but not the caller's known one).
+    pub fn touch_len(&mut self, oid: ObjId) {
+        if let Some(l) = self.lens.get(&oid) {
+            self.lens.insert(oid, l);
+        }
     }
 
     pub fn clear_last(&mut self, oid: ObjId) {
@@ -499,10 +508,9 @@ impl State {
         // (an object several runtime objects share: what is installed joins what is there)
         if is_merged(oid) {
             if let Some(cur) = self.rows.get(&(oid, ns)) {
-                if cur != row {
-                    let j = cur.join(&row);
-                    self.rows.insert((oid, ns), j);
-                }
+                // (written even when the join is the row there: the write is journaled)
+                let j = if cur != row { cur.join(&row) } else { cur };
+                self.rows.insert((oid, ns), j);
                 return;
             }
         }
@@ -524,6 +532,7 @@ impl State {
     pub fn set_slot(&mut self, oid: ObjId, ns: Ns, key: KeyId, v: Value, strong: bool) {
         if matches!(ns, Ns::Pos | Ns::Elem) {
             self.clear_last(oid);
+            self.touch_len(oid);
         }
         let strong = strong && !is_merged(oid);
         if strong {
@@ -537,6 +546,7 @@ impl State {
     pub fn pop_slot(&mut self, oid: ObjId, ns: Ns, key: KeyId) -> Option<Value> {
         if matches!(ns, Ns::Pos | Ns::Elem) {
             self.clear_last(oid);
+            self.touch_len(oid);
         }
         self.slots.remove(&oid, &(ns, key))
     }
@@ -587,6 +597,7 @@ impl State {
     pub fn drop_obj_ns(&mut self, oid: ObjId, ns: Ns) {
         if matches!(ns, Ns::Pos | Ns::Elem) {
             self.clear_last(oid);
+            self.touch_len(oid);
         }
         self.slots.drop_where(&oid, |(n, _)| *n == ns);
     }

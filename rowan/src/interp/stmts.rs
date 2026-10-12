@@ -200,6 +200,7 @@ impl Analyzer {
                 // (a handler of a base class catches it too)
                 let caught = caught || self.cur_exc_cls.as_ref().is_some_and(|(ns, _)| self.guards.iter().any(|g| ns.iter().any(|n| g.contains(n))));
                 let raised_cls = self.cur_exc_cls.clone();
+                let exc_now = self.cur_exc.clone();
                 let recorded = state.reachable && self.record_raise_state(state);
                 self.cur_exc = None;
                 self.cur_exc_cls = None;
@@ -208,6 +209,7 @@ impl Analyzer {
                     // summary's raise footprint)
                     if state.reachable {
                         self.note_summary_raise(state);
+                        self.js_note_exc(exc_now.as_ref());
                     }
                     // (the class leaving the call: known, or not)
                     self.merge_esc(raised_cls.map(|c| vec![c]));
@@ -1985,6 +1987,7 @@ impl Analyzer {
                 continue;
             }
             self.walked.set(self.walked.get() + 1);
+            self.count_visit(3, 1);
             self.obj_edges(o, state, &mut work);
         }
         for o in fresh {

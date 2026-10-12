@@ -5,10 +5,97 @@
 //! two maps share, so they cost what the maps differ in, whatever their history. `TwoLevel`
 //! adds a copy-on-write inner map per key (object slots, source requirements).
 
+use std::cell::{Cell, RefCell};
 use std::hash::Hash;
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+
+// ---------------------------------------------------------------------------------------
+// The journal of a joined-summary run (`interp::joined`): which entries of the tagged maps (a
+// `State`'s rows, slots, elements, lengths and requirements) the run read and wrote. Entries
+// are (map tag, key image); `WHOLE` in the low half of a slot key stands for all of an
+// object's slots (a listing of them).
+
+pub const T_ROWS: u8 = 1;
+pub const T_SLOTS: u8 = 2;
+pub const T_ELEMS: u8 = 3;
+pub const T_LENS: u8 = 4;
+/// requirements: their writes are journaled (a summary adds them at each call), their reads
+/// are bookkeeping, not inputs
+pub const T_REQS: u8 = 5;
+pub const WHOLE: u32 = u32::MAX;
+
+#[derive(Default, Debug)]
+pub struct Journal {
+    pub reads: FxHashSet<(u8, u64)>,
+    pub writes: FxHashSet<(u8, u64)>,
+}
+
+thread_local! {
+    static JOURNALS: RefCell<Vec<Journal>> = const { RefCell::new(Vec::new()) };
+    static JOURNAL_PAUSE: Cell<u32> = const { Cell::new(0) };
+    /// a journal is open and not paused (the fast test on every access)
+    static JOURNAL_ON: Cell<bool> = const { Cell::new(false) };
+}
+
+fn journal_refresh() {
+    let on = JOURNALS.with(|j| !j.borrow().is_empty()) && JOURNAL_PAUSE.with(|p| p.get()) == 0;
+    JOURNAL_ON.with(|o| o.set(on));
+}
+
+/// Start recording (nested journals: an inner one's entries are its parent's too).
+pub fn journal_open() {
+    JOURNALS.with(|j| j.borrow_mut().push(Journal::default()));
+    journal_refresh();
+}
+
+/// Stop recording the innermost journal and return it.
+pub fn journal_close() -> Journal {
+    let out = JOURNALS.with(|j| {
+        let mut j = j.borrow_mut();
+        let top = j.pop().unwrap_or_default();
+        if let Some(parent) = j.last_mut() {
+            parent.reads.extend(top.reads.iter().copied());
+            parent.writes.extend(top.writes.iter().copied());
+        }
+        top
+    });
+    journal_refresh();
+    out
+}
+
+/// Run `f` without recording (walks that decide nothing a run computes: liveness, garbage
+/// collection, reporting).
+pub fn journal_paused<R>(f: impl FnOnce() -> R) -> R {
+    JOURNAL_PAUSE.with(|p| p.set(p.get() + 1));
+    journal_refresh();
+    let r = f();
+    JOURNAL_PAUSE.with(|p| p.set(p.get() - 1));
+    journal_refresh();
+    r
+}
+
+/// Record a read of `k` (a fact looked at through a key image, not through the maps).
+pub fn journal_read(k: (u8, u64)) {
+    note(k.0, k.1, false);
+}
+
+#[inline]
+fn note(tag: u8, h: u64, write: bool) {
+    if tag == 0 || !JOURNAL_ON.with(|o| o.get()) || (!write && tag == T_REQS) {
+        return;
+    }
+    JOURNALS.with(|j| {
+        if let Some(top) = j.borrow_mut().last_mut() {
+            if write {
+                top.writes.insert((tag, h));
+            } else {
+                top.reads.insert((tag, h));
+            }
+        }
+    });
+}
 
 /// A key that is a small integer: its `u64` image orders the trie.
 pub trait PKey: Clone + Eq + Hash {
@@ -183,6 +270,20 @@ fn remove<K: Clone, V: Clone>(t: &Tree<K, V>, h: u64) -> Option<(Option<Tree<K, 
             } else {
                 let (nr, v) = remove(r, h)?;
                 Some((branch(*p, *m, Some(l.clone()), nr, None), v))
+            }
+        }
+    }
+}
+
+fn get_leaf<'a, K, V>(mut t: &'a Tree<K, V>, h: u64) -> Option<(&'a K, &'a V)> {
+    loop {
+        match &**t {
+            Node::Leaf { h: j, k, v } => return if *j == h { Some((k, v)) } else { None },
+            Node::Branch { p, m, l, r } => {
+                if !match_prefix(h, *p, *m) {
+                    return None;
+                }
+                t = if zero_bit(h, *m) { l } else { r };
             }
         }
     }
@@ -395,6 +496,8 @@ fn all_keys_where<K, V>(t: &Tree<K, V>, f: &mut dyn FnMut(&K, u64, &V) -> bool) 
 /// A persistent map (the historical name: it was a chain of layers).
 pub struct LayerMap<K, V> {
     root: Option<Tree<K, V>>,
+    /// which map of a `State` this is (journal), 0: none
+    tag: u8,
 }
 
 impl<K, V> LayerMap<K, V> {
@@ -410,13 +513,13 @@ impl<K, V> LayerMap<K, V> {
 
 impl<K, V> Clone for LayerMap<K, V> {
     fn clone(&self) -> Self {
-        LayerMap { root: self.root.clone() }
+        LayerMap { root: self.root.clone(), tag: self.tag }
     }
 }
 
 impl<K: PKey, V: Clone + PartialEq> Default for LayerMap<K, V> {
     fn default() -> Self {
-        LayerMap { root: None }
+        LayerMap { root: None, tag: 0 }
     }
 }
 
@@ -425,13 +528,25 @@ impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
         Self::default()
     }
 
+    /// A map whose reads and writes are journaled under `tag`.
+    pub fn tagged(tag: u8) -> Self {
+        LayerMap { root: None, tag }
+    }
+
     pub fn get(&self, k: &K) -> Option<V> {
-        self.root.as_ref().and_then(|t| get(t, k.key64())).cloned()
+        self.get_ref(k).cloned()
     }
 
     /// The value without a clone.
     pub fn get_ref(&self, k: &K) -> Option<&V> {
-        self.root.as_ref().and_then(|t| get(t, k.key64()))
+        let h = k.key64();
+        note(self.tag, h, false);
+        self.root.as_ref().and_then(|t| get(t, h))
+    }
+
+    /// The entry under a key image (not journaled: replaying a journal).
+    pub fn get_h(&self, h: u64) -> Option<(&K, &V)> {
+        self.root.as_ref().and_then(|t| get_leaf(t, h))
     }
 
     pub fn contains_key(&self, k: &K) -> bool {
@@ -476,6 +591,7 @@ impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
 
     pub fn insert(&mut self, k: K, v: V) {
         let h = k.key64();
+        note(self.tag, h, true);
         match &mut self.root {
             None => self.root = Some(Arc::new(Node::Leaf { h, k, v })),
             Some(t) => insert(t, h, k, v),
@@ -483,6 +599,7 @@ impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
     }
 
     pub fn remove(&mut self, k: &K) -> Option<V> {
+        note(self.tag, k.key64(), true);
         let t = self.root.as_ref()?;
         let (rest, v) = remove(t, k.key64())?;
         self.root = rest;
@@ -491,6 +608,7 @@ impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
 
     /// The value of `k` for writing, `default()` inserted first when absent.
     pub fn entry_mut(&mut self, k: &K, default: impl FnOnce() -> V) -> &mut V {
+        note(self.tag, k.key64(), true);
         if !self.contains_key(k) {
             self.insert(k.clone(), default());
         }
@@ -522,7 +640,7 @@ impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
             (None, Some(b)) => map_side(b, false, g),
             (Some(a), Some(b)) => merge(a, b, g),
         };
-        LayerMap { root }
+        LayerMap { root, tag: self.tag }
     }
 
     pub fn same(&self, o: &LayerMap<K, V>) -> bool {
@@ -633,6 +751,40 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         Self::default()
     }
 
+    /// A map whose reads and writes are journaled under `tag`.
+    pub fn tagged(tag: u8) -> Self {
+        TwoLevel { m: LayerMap::tagged(tag) }
+    }
+
+    /// The entry under a (outer, inner) key image (not journaled).
+    pub fn get_h(&self, h: u64) -> Option<(&Pair<K, IK>, &V)> {
+        self.m.get_h(h)
+    }
+
+    /// Are `key`'s entries in `self` and `o` one shared subtree (unchanged between them)?
+    pub fn same_sub(&self, o: &Self, hi: u64) -> bool {
+        let a = self.m.root.as_ref().and_then(|t| find_hi(t, hi));
+        let b = o.m.root.as_ref().and_then(|t| find_hi(t, hi));
+        match (a, b) {
+            (None, None) => true,
+            (Some(x), Some(y)) => Arc::ptr_eq(x, y),
+            _ => false,
+        }
+    }
+
+    /// The entries of the outer key with image `hi` (not journaled), the marker excluded.
+    pub fn whole_h(&self, hi: u64) -> Vec<(Pair<K, IK>, V)> {
+        let mut out = Vec::new();
+        if let Some(t) = self.m.root.as_ref().and_then(|t| find_hi(t, hi)) {
+            for_each(t, &mut |k, v| {
+                if k.1.key32() != SENTINEL {
+                    out.push((k.clone(), v.clone()));
+                }
+            });
+        }
+        out
+    }
+
     pub fn copy(&mut self) -> Self {
         TwoLevel { m: self.m.copy() }
     }
@@ -647,6 +799,7 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
     }
 
     fn sub(&self, key: &K) -> Option<&Tree<Pair<K, IK>, V>> {
+        note(self.m.tag, (key.key64() << 32) | WHOLE as u64, false);
         self.m.root.as_ref().and_then(|t| find_hi(t, key.key64()))
     }
 
@@ -746,7 +899,7 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
     /// copied.
     pub fn graft(&mut self, o: &Self, key: &K) {
         let Some(t) = o.sub(key) else { return };
-        let add = LayerMap { root: Some(t.clone()) };
+        let add = LayerMap { root: Some(t.clone()), tag: 0 };
         let mut both = |_: &Pair<K, IK>, _: &V, b: &V| Some(b.clone());
         let mut keep = |_: &Pair<K, IK>, v: &V| Some(v.clone());
         let mut keep2 = |_: &Pair<K, IK>, v: &V| Some(v.clone());

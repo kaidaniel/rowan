@@ -281,19 +281,30 @@ impl Analyzer {
             }
             Kind::Method => {
                 let Payload::Method(qual, recv) = self.obj(oid).payload.clone() else { return Value::new() };
-                // several groupby objects (`groupby` over one of several columns): the model runs
-                // once per object, each making its own results
-                if qual.starts_with("groupby.") && recv.pts.len() > 1 && recv.pts.iter().all(|o| self.kind(o) == Kind::Groupby) {
+                // one of several receivers (a value joined over paths or calls): the model runs
+                // once per receiver, on a copy of the state, with results of its own (a model sees
+                // one object at a time); the outcomes are joined
+                if recv.pts.len() > 1 && recv.pts.len() <= 16 && recv.kv.is_bot() && self.models.lookup(&qual).is_some() && !matches!(qual.as_str(), "excinit") && !qual.starts_with("dcinit.") {
+                    let pre = state.copy();
                     let mut outs: Vec<Value> = Vec::new();
-                    for g in recv.pts.iter() {
-                        let mv = self.method_value(&qual, &Value::obj(g));
+                    let mut states: Vec<State> = Vec::new();
+                    for r in recv.pts.iter() {
+                        let mv = self.method_value(&qual, &Value::obj(r));
                         let Some(mo) = mv.single() else { continue };
-                        let saved = self.alloc_extra.replace(format!("gb{}", g));
-                        let r = self.call_one(mo, args, kwargs, star_args, star_kwargs, state, node, call_ast);
+                        let mut st = pre.copy_ref();
+                        let saved = self.alloc_extra.replace(format!("r{}", r));
+                        let out = self.call_one(mo, args, kwargs, star_args, star_kwargs, &mut st, node, call_ast);
                         self.alloc_extra = saved;
-                        outs.push(r);
+                        outs.push(out);
+                        states.push(st);
                     }
-                    return join_values(outs);
+                    if let Some(mut acc) = states.pop() {
+                        for mut st in states {
+                            acc = acc.join(&mut st);
+                        }
+                        state.replace_with(acc);
+                        return join_values(outs);
+                    }
                 }
                 // `super().__init__(…)` reaching a builtin exception base: args, str / repr
                 if qual == "excinit" {
@@ -396,6 +407,7 @@ impl Analyzer {
             *e = None;
         }
         self.flag_may_raise(state);
+        self.note_summary_raise(state);
         // unknown code may remove keys stored through names
         state.drop_name_keys(None);
         // unknown code may change what an earlier test read: facts about it no longer hold
@@ -1155,6 +1167,10 @@ impl Analyzer {
         out
     }
 
+    pub fn receiver_ctx_pub(&self, self_v: &Option<Value>, site: &str) -> (String, bool) {
+        self.receiver_ctx(self_v, site)
+    }
+
     fn receiver_ctx(&self, self_v: &Option<Value>, site: &str) -> (String, bool) {
         if let Some(sv) = self_v {
             if let Some(r) = sv.single() {
@@ -1190,7 +1206,7 @@ impl Analyzer {
         // (the arguments, for the unknown call that replaces this one when the hard deadline cuts it)
         let was_cut = self.hard_cut;
         let keep = (self_v.clone(), args.clone(), kwargs.clone(), star_args.clone(), star_kwargs.clone());
-        let r = self.call_user_inner(foid, self_v, args, kwargs, star_args, star_kwargs, state, node, _call_ast, entry);
+        let r = self.call_user_inner(foid, self_v, args, kwargs, star_args, star_kwargs, state, node, _call_ast, entry, None);
         self.model_depth = saved_md;
         if self.hard_cut && !was_cut {
             let q = self.func_info(foid).qualname.clone();
@@ -1202,10 +1218,19 @@ impl Analyzer {
         r
     }
 
+    /// The body of `foid` run on joined inputs (`joined`): the parameters bound to `jr.bound`,
+    /// its objects made in the context `jr.ctx`.
+    pub fn call_user_jrun(&mut self, foid: u32, state: &mut State, node: &Node, jr: super::joined::JsRun) -> Value {
+        let saved_md = std::mem::replace(&mut self.model_depth, 0);
+        let r = self.call_user_inner(foid, None, vec![], IndexMap::new(), vec![], vec![], state, node, None, false, Some(jr));
+        self.model_depth = saved_md;
+        r
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn call_user_inner(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, _call_ast: Option<&'static ast::ExprCall>, entry: bool) -> Value {
+    fn call_user_inner(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, _call_ast: Option<&'static ast::ExprCall>, entry: bool, jrun: Option<super::joined::JsRun>) -> Value {
         // a singledispatch function: the implementation for the first argument's type
-        if self.sdispatch.contains_key(&foid) && self.sd_bypass.take() != Some(foid) && !args.is_empty() && star_args.is_empty() {
+        if jrun.is_none() && self.sdispatch.contains_key(&foid) && self.sd_bypass.take() != Some(foid) && !args.is_empty() && star_args.is_empty() {
             return self.sdispatch_call(foid, self_v, args, kwargs, star_kwargs, state, node, entry);
         }
         if !state.narrowed.is_empty() {
@@ -1251,198 +1276,35 @@ impl Analyzer {
         let gen_fn = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body) && !super::is_simple_generator(&f.body)) && !under_cm;
         let gen_summ = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body)) && !under_cm;
         let once = std::mem::take(&mut self.force_tab_once);
-        // (why the body runs per call site: `ROWAN_DEBUG=1` prints it with each tabulated run)
-        let mut why: &'static str = if !self.use_summaries {
+        // (why the body runs per call site: `ROWAN_DEBUG=1` prints it with each run)
+        let why: &'static str = if jrun.is_some() {
+            "joined"
+        } else if !self.use_summaries {
             "nosummaries"
         } else if once {
             "once"
-        } else if gen_fn {
-            "generator"
-        } else if self.torch_modules.contains(&fi.module) {
-            "torch"
+        } else if under_cm {
+            "contextmanager"
         } else if self.model_call > 0 {
             "model"
         } else {
-            "event"
+            "budget"
         };
-        // (every per-call-site run counts against the function's one budget, whatever its
-        // reason: past it, the summary; except a call a model makes, whose effects on the
-        // model's own tables a summary does not replay — the calls in its body are ordinary
-        // calls again, see `saved_model_call`)
-        let forced = match why {
-            "once" | "model" => true,
-            "generator" | "torch" => self.tab_budget(foid),
-            _ => false,
-        };
-        if self.use_summaries && !forced {
-            let bound = self.compute_bindings(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
-            // the classes of the arguments: the summary is specialised on them
-            let mut sig: Vec<(String, ObjId)> = Vec::new();
-            // (a placeholder with a declared user class counts as an instance of it, so calls
-            // inside summaries specialise too)
-            let one_class = |an: &Analyzer, v: &Value| -> Option<ObjId> {
-                if v.pts.is_empty() {
-                    return None;
-                }
-                let mut cls: Option<ObjId> = None;
-                for o in v.pts.iter() {
-                    let c = match an.kind(o) {
-                        Kind::Instance => an.instance_class(o)?,
-                        Kind::Ph => an.ph_info(o).cls.get().filter(|c| an.class_info_opt(*c).is_some())?,
-                        _ => return None,
-                    };
-                    match cls {
-                        None => cls = Some(c),
-                        Some(x) if x == c => {}
-                        _ => return None,
-                    }
-                }
-                cls
-            };
-            if let Some(sv) = &self_v {
-                if let Some(c) = one_class(self, sv) {
-                    if let Some(FuncNode::Def(f)) = Some(fi.node) {
-                        if let Some(p0) = crate::scopes::all_params(&f.parameters).first() {
-                            sig.push((p0.name.id.to_string(), c));
-                        }
-                    }
-                }
-            }
-            for (name, v) in bound.iter() {
-                if let Some(c) = one_class(self, v) {
-                    sig.push((intern::str_get(*name).to_string(), c));
-                }
-                if !v.pts.is_empty() && v.pts.iter().all(|o| self.duck_part(o)) {
-                    sig.push((format!("{}{}", crate::summary::DUCK_PART_PREFIX, intern::str_get(*name)), 0));
-                }
-            }
-            sig.sort();
-            // (a recursive call whose argument is a part of a duck-typed value, inside the
-            // function's own summary run: the partial summary at hand duck-types its parameter,
-            // applied to the part it reads every class's attributes of it, one level deeper per
-            // round — unknown code instead, as an argument past duck typing is)
-            if sig.iter().any(|(n, _)| n.starts_with(crate::summary::DUCK_PART_PREFIX)) && self.sum_stack.contains(&foid) {
-                let qual = self.func_info(foid).qualname.clone();
-                return self.unknown_call(&qual, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
-            }
-            let summ = self.summarise_sig(foid, state, sig);
-            let Some(summ) = summ else {
-                return Value::new(); // recursion through the symbolic path: ⊥ summary
-            };
-            if summ.havoc {
-                return self.havoc_call(&summ, &fi.qualname, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
-            }
-            let (call_ctx, ctx_single) = self.receiver_ctx(&self_v, &site);
-            let mut bind: IndexMap<u32, Value> = IndexMap::new();
-            for (name, ph) in summ.ph_by_name.iter() {
-                if let Some(bv) = bound.get(name) {
-                    bind.insert(*ph, bv.clone());
-                }
-            }
-            if let (Some(ps), Some(sv)) = (summ.ph_self, &self_v) {
-                bind.insert(ps, sv.clone());
-            }
-            // (a generator whose body changes objects from before the call: its concrete run
-            // orders those effects between the items)
-            // (past the budget its summary is applied weakly: the effects happen while it is
-            // consumed, so before and after the call the objects may or may not have them yet)
-            let gen_outside = gen_summ && summ.changes_outside(self);
-            let gen_concrete = gen_outside && self.tab_budget(foid);
-            if gen_concrete {
-                why = "genconcrete";
-            }
-            // (a callee that may raise into a handler of this function: its run per call site
-            // records the state at each raise, which the handler starts from; the summary knows
-            // only that it raises, and the state before the call lost its effects)
-            let raise_caught = summ.raises
-                && self.try_sum_depth.last() == Some(&self.sum_stack.len())
-                && match summ.raise_classes.as_ref() {
-                    Some(cs) if !cs.is_empty() => cs.iter().any(|c| self.class_guarded(c)),
-                    _ => self.guards.iter().any(|g| !g.is_empty()),
-                };
-            // (only a callee whose raising paths change objects from before the call: else the
-            // state before the call is the handler's; past a small budget those objects are
-            // made unknown for the handler instead, see `summary_raise_state`)
-            let raise_fp = !summ.raise_fp.rows.is_empty() || !summ.raise_fp.slots.is_empty() || !summ.raise_fp.elems.is_empty();
-            let tab_raise = !gen_concrete && raise_caught && raise_fp && self.tab_budget(foid);
-            if tab_raise {
-                why = "raise";
-            }
-            if !gen_concrete && !tab_raise && !self.should_tabulate_at(&summ, &bind, state, node) {
-                // (outside databases the summary did not simulate: their rows are unknown now)
-                if let Some(cons) = self.sql_touched.get(&foid).cloned() {
-                    for c in cons {
-                        if let Some(db) = self.sql_dbs.get_mut(&c) {
-                            for t in db.tables.values_mut() {
-                                t.rows = None;
-                            }
-                        }
-                    }
-                }
-                if !self.sum_stack.is_empty() {
-                    self.propagate_events(&summ, &bind, state);
-                }
-                // (a one-shot iterator handed to a summarised call: how much it takes is not known)
-                let its: Vec<u32> = args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(self_v.iter()).filter_map(|v| v.single().filter(|o| self.obj(*o).iterator && self.obj(*o).single)).collect();
-                for o in its {
-                    self.set_cursor(o, None, state);
-                }
-                let saved_chain = std::mem::take(&mut self.call_chain);
-                self.call_chain = chain_extend(&saved_chain, &[node.line]);
-                if summ.raises {
-                    if crate::interp::debug_level() == 2 {
-                        eprintln!("  summary of {} raises (instantiated at L{} in {})", fi.qualname, node.line, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
-                    }
-                    // raises of known classes: each reaches a handler that catches it (from the
-                    // state before the call), else leaves this call
-                    // (the handler's state: before the call, with what the raising paths
-                    // changed made unknown)
-                    // (only a try around the call or the summary being built reads it)
-                    let mut handler_state = if self.raise_states.is_empty() && self.sum_stack.is_empty() { state.copy() } else { self.summary_raise_state(&summ, &bind, state) };
-                    match summ.raise_classes.clone().filter(|cs| !cs.is_empty()) {
-                        Some(cs) => {
-                            for c in cs {
-                                let name = c.0.first().cloned().unwrap_or_default();
-                                self.cur_exc_cls = Some(c.clone());
-                                self.may_raise_here(&name, &mut handler_state.copy());
-                                self.cur_exc_cls = None;
-                            }
-                        }
-                        None => {
-                            self.note_raise();
-                            // (a class not known: a handler of anything may catch it)
-                            if raise_fp && !self.raise_states.is_empty() {
-                                self.record_raise_state(&mut handler_state);
-                            }
-                            if self.guards.iter().all(|g| !g.contains("*") && !g.contains("Exception") && !g.contains("BaseException")) {
-                                self.note_summary_raise(&handler_state);
-                            }
-                        }
-                    }
-                }
-                let pre_gen = if gen_outside { Some(state.copy()) } else { None };
-                let r = self.instantiate(&summ, &bind, state, node, &call_ctx, ctx_single);
-                if let Some(pre) = pre_gen {
-                    let fp = state.footprint(&pre);
-                    state.join_heap_fp(&pre, &fp);
-                }
-                self.call_chain = saved_chain;
-                // (a generator / coroutine function's call does not run its body)
-                let runs_body = match fi.node {
-                    FuncNode::Def(f) => !f.is_async && !super::is_generator(&f.body),
-                    _ => true,
-                };
-                if !summ.completes && summ.raises && runs_body {
-                    state.reachable = false;
-                }
-                return r;
-            }
+        // (calls a model makes and `@contextmanager` bodies run per call site: a model calls
+        // back per item it knows, and a with body runs inside the generator; any other call past
+        // its site's budget of runs is a joined summary's)
+        if why == "budget" && !self.site_budget(foid, node) {
+            return self.joined_call(foid, self_v, args, kwargs, star_args, star_kwargs, state, node);
         }
+        let _ = (gen_fn, gen_summ);
         // --- per-call-site (tabulated) analysis ---
         if super::debug_enabled() {
             eprintln!("tabrun {} ({}) at {} frames={} sum={} chain={:?}", fi.qualname, why, site, self.frames.len(), self.sum_stack.len(), self.call_chain);
         }
-        let mut key = (foid, if !entry { site.clone() } else { format!("entry:{}", site) });
+        let mut key = match &jrun {
+            Some(jr) => (foid, jr.ctx.clone()),
+            None => (foid, if !entry { site.clone() } else { format!("entry:{}", site) }),
+        };
         // literal arguments that differ from the running activations': not the same activation
         // (fib(9) inside fib(10)), up to a depth
         let mut lit_key = false;
@@ -1525,7 +1387,8 @@ impl Analyzer {
             return Value::new();
         }
         // summary cache: same callee, same call site, same observable input → replay the effects
-        let sig = self.call_signature(foid, &site, entry, &self_v, &args, &kwargs, &star_args, &star_kwargs, state);
+        // (not in a run on joined inputs: a hit's inputs are not journaled)
+        let sig = if jrun.is_some() || self.js_active() { None } else { self.call_signature(foid, &site, entry, &self_v, &args, &kwargs, &star_args, &star_kwargs, state) };
         if let Some(sig) = sig.as_ref() {
             // (a run that raised, under a try that may catch it: the handlers need the state at
             // each raise, which only a run records)
@@ -1628,9 +1491,12 @@ impl Analyzer {
             }
         }
         // context for allocations inside the callee (§3)
-        let (ctx, ctx_single) = self.receiver_ctx(&self_v, &site);
-        let fr_single = self.frame().single && self.frame().loop_depth == 0 && ctx_single;
-        let fr_single_nl = self.frame().single_nl && ctx_single;
+        let (ctx, ctx_single) = match &jrun {
+            Some(jr) => (jr.ctx.clone(), true),
+            None => self.receiver_ctx(&self_v, &site),
+        };
+        let fr_single = jrun.is_some() || (self.frame().single && self.frame().loop_depth == 0 && ctx_single);
+        let fr_single_nl = jrun.is_some() || (self.frame().single_nl && ctx_single);
         let mut new_fr = Frame::new(FrameKind::Function, fi.scope, fi.module, &ctx, fr_single, &fi.qualname);
         new_fr.single_nl = fr_single_nl;
         new_fr.func = Some(foid);
@@ -1694,7 +1560,14 @@ impl Analyzer {
             }
         }
         let gen_cm = self.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth + 1 == self.frames.len());
-        self.bind_params(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
+        match &jrun {
+            Some(jr) => {
+                for (name, v) in jr.bound.iter() {
+                    self.store_name(*name, v.clone(), state);
+                }
+            }
+            None => self.bind_params(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node),
+        }
         let mut entry_state = state.copy();
         let mut ret = Value::new();
         let mut st_final: Option<State> = None;
@@ -1905,7 +1778,9 @@ impl Analyzer {
         if let Some((gid, ys)) = gen_yields {
             self.gen_suspension_join(&mut st, &pre_bind, &ys, gid, obj_mark_call);
             // the effects per item: before the first, the objects are as before the call
-            if st.reachable {
+            // (a run on joined inputs keeps the join over its suspension points: its per-item
+            // states are not the call's)
+            if st.reachable && jrun.is_none() {
                 let fp = st.footprint(&pre_bind);
                 let old = |o: ObjId| o < obj_mark_call && o != gid;
                 let rows: Vec<(ObjId, Ns)> = fp.rows.iter().copied().filter(|(o, _)| old(*o)).collect();
@@ -2391,10 +2266,14 @@ impl Analyzer {
                 }
             }
         }
+        // (the class, before recording takes it: what leaves the call when nothing catches it)
+        let cls = self.cur_exc_cls.clone().unwrap_or_else(|| super::builtin_exc_names(name));
         let recorded = caught && self.record_raise_state(state);
         self.cur_exc_cls = None;
         if !caught && state.reachable {
             self.note_summary_raise(state);
+            let e = self.cur_exc.clone();
+            self.js_note_exc(e.as_ref());
         }
         if recorded {
             return;
@@ -2402,7 +2281,6 @@ impl Analyzer {
         if let Some(t) = self.raise_stack.last_mut() {
             *t = true;
         }
-        let cls = self.cur_exc_cls.clone().unwrap_or_else(|| super::builtin_exc_names(name));
         let guarded = self.class_guarded(&cls);
         if let Some(Some(v)) = self.esc_cls.last_mut() {
             if !v.contains(&cls) {

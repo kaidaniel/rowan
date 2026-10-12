@@ -23,6 +23,7 @@ pub mod access;
 pub mod calls;
 pub mod exprs;
 pub mod funcs;
+pub mod joined;
 pub mod narrow;
 pub mod stmts;
 
@@ -725,6 +726,7 @@ pub struct Fact {
     pub written: bool,
 }
 
+#[derive(Clone)]
 pub struct RowCheck {
     /// the module's path relative to the main file's directory ("" for the main file)
     pub file: String,
@@ -804,6 +806,19 @@ pub struct Analyzer {
     /// objects allocated in it: (recent oid, kind, site, ctx)
     pub recent_stack: Vec<Vec<(ObjId, Kind, String, String)>>,
     pub summary_provisional: FxHashMap<crate::summary::SummaryKey, (Rc<Summary>, FxHashSet<ObjId>)>,
+    /// joined summaries (`joined`): per function (and receiver), the last one; the functions
+    /// whose runs are in progress, the states where each may raise
+    pub jsums: FxHashMap<usize, Vec<Rc<joined::JSum>>>,
+    /// per-call-site runs so far, by (call node, callee code)
+    pub site_runs: FxHashMap<(usize, usize), usize>,
+    pub js_frames: Vec<joined::JsFrame>,
+    /// per run on joined inputs: the objects it allocated (new or found again by site and
+    /// context; a replay copies them), context-free (global) ones aside
+    pub js_born: Vec<FxHashSet<ObjId>>,
+    /// (the last state noted, the join)
+    pub js_raise: Vec<Option<(State, State)>>,
+    /// the exceptions the running joined runs may raise to their callers, joined
+    pub js_raise_vals: Vec<Value>,
     pub model_call: u32,
     pub search_paths: Vec<String>,
     /// installed packages to follow into site-packages (top-level names; `*` for all)
@@ -1029,6 +1044,8 @@ pub struct Analyzer {
     pub work: usize,
     /// objects visited by reachability walks (liveness, GC): part of the work measure
     pub walked: std::cell::Cell<usize>,
+    /// (debug) visits by kind: summary comparisons, installs, liveness walks, collections
+    pub visit_kinds: std::cell::Cell<[usize; 4]>,
     /// return / break / continue statements executed (a try body that ends with one did not raise)
     pub exit_count: usize,
     /// when the analysis started (see `MAX_MS`)
@@ -1215,6 +1232,12 @@ impl Analyzer {
             sum_deps: Vec::new(),
             recent_stack: Vec::new(),
             summary_provisional: FxHashMap::default(),
+            jsums: FxHashMap::default(),
+            site_runs: FxHashMap::default(),
+            js_frames: Vec::new(),
+            js_born: Vec::new(),
+            js_raise: Vec::new(),
+            js_raise_vals: Vec::new(),
             model_call: 0,
             search_paths: if follow_imports { search_paths } else { Vec::new() },
             follow: Vec::new(),
@@ -1328,6 +1351,7 @@ impl Analyzer {
             site_clones: FxHashMap::default(),
             work: 0,
             walked: std::cell::Cell::new(0),
+            visit_kinds: std::cell::Cell::new([0; 4]),
             exit_count: 0,
             started: std::time::Instant::now(),
             hard_cut: false,
@@ -1536,6 +1560,16 @@ impl Analyzer {
     }
 
     pub fn alloc_raw(&mut self, kind: Kind, site: &str, ctx: &str, single: bool, label: &str, payload: Payload) -> ObjId {
+        let oid = self.alloc_raw_inner(kind, site, ctx, single, label, payload);
+        if !ctx.is_empty() {
+            if let Some(b) = self.js_born.last_mut() {
+                b.insert(oid);
+            }
+        }
+        oid
+    }
+
+    fn alloc_raw_inner(&mut self, kind: Kind, site: &str, ctx: &str, single: bool, label: &str, payload: Payload) -> ObjId {
         let key = (kind, intern::s(site), intern::s(ctx));
         if let Some(&oid) = self.obj_index.get(&key) {
             let o = &mut self.objects[oid as usize];
@@ -1748,7 +1782,9 @@ impl Analyzer {
             // (an unknown call's result allocated again: taken as still in use without a walk,
             // and merged — its rows are open anyway; walking for it dominated large runs)
             let hard = existed == Some(oid) && (self.over_hard_deadline() || (kind == Kind::Unknown));
-            if existed == Some(oid) && (hard || model_held || (self.has_facts(oid, state) && self.is_live(oid, state))) {
+            // (in a run on joined inputs an object with facts counts as live: a walk's result
+            // depends on the callers, which are not the run's inputs)
+            if existed == Some(oid) && (hard || model_held || (self.has_facts(oid, state) && (self.js_active() || self.is_live(oid, state)))) {
                 // allocated again while the earlier object is still reachable (a method run
                 // twice on one receiver, a call repeated in a loop)
                 if single && !self.recent_stack.is_empty() && !hard {
@@ -1776,7 +1812,7 @@ impl Analyzer {
                         let first_free = made.iter().position(|(_, v)| v.is_none()).unwrap_or(made.len());
                         let olds: Vec<ObjId> = made[..first_free].iter().filter_map(|(_, v)| *v).collect();
                         let olds: Vec<ObjId> = olds.into_iter().filter(|o| self.has_facts(*o, state)).collect();
-                        let live = if olds.is_empty() { FxHashSet::default() } else { self.live_among(&olds, state) };
+                        let live = if olds.is_empty() { FxHashSet::default() } else if self.js_active() { olds.iter().copied().collect() } else { self.live_among(&olds, state) };
                         let pick = made.iter().position(|(_, v)| match v { None => true, Some(o) => !live.contains(o) });
                         if let Some(i) = pick {
                             variant = Some(self.alloc_raw(kind, site, &made[i].0, single, &label, payload2.clone()));
@@ -2092,6 +2128,12 @@ impl Analyzer {
     /// by reachability walks (16 to a unit). `ROWAN_LIMITS=work=N` puts the deadlines on it
     /// (soft at N, hard at 5N, `hardwork=`) instead of the clock: a run cut by them gives the
     /// same result on any machine and under any load.
+    pub fn count_visit(&self, kind: usize, n: usize) {
+        let mut v = self.visit_kinds.get();
+        v[kind] += n;
+        self.visit_kinds.set(v);
+    }
+
     pub fn work_units(&self) -> usize {
         self.work + self.walked.get() / 16
     }
@@ -2153,6 +2195,10 @@ impl Analyzer {
 
     /// Entry-point rule (§6.4): functions never called get analysed with open parameters.
     fn analyse_uncalled(&mut self, state: &mut State) {
+        // (the functions' own runs on open inputs: per-call-site runs and joined summaries of
+        // their own, not those of the program's concrete calls)
+        self.site_runs.clear();
+        self.jsums.clear();
         // entry runs can make functions (closures, lambdas, inner defs) nobody calls either:
         // a few rounds, each over the functions made so far
         let mut start: ObjId = 1;
@@ -2920,6 +2966,7 @@ impl Analyzer {
                 continue;
             }
             self.walked.set(self.walked.get() + 1);
+            self.count_visit(2, 1);
             if seen.len() > budget {
                 return targets.iter().copied().collect();
             }

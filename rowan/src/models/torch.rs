@@ -352,6 +352,10 @@ impl Analyzer {
     }
 
     // ---------------------------------------------------------------- notes
+    pub fn t_note_ctx_pub(&self) -> (Vec<u32>, bool) {
+        self.t_note_ctx()
+    }
+
     fn t_note_ctx(&self) -> (Vec<u32>, bool) {
         let entry = self.entry_run.is_some();
         let mut chain = self.call_chain.clone();

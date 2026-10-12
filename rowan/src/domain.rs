@@ -35,6 +35,11 @@ pub enum Ns {
 }
 
 impl Ns {
+    /// The namespace with discriminant `i` (`ns as u64` in the maps' key images).
+    pub fn from_index(i: u64) -> Ns {
+        [Ns::Item, Ns::Attr, Ns::Cell, Ns::Pos, Ns::Elem, Ns::Meta, Ns::Name][i as usize % 7]
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Ns::Item => "item",

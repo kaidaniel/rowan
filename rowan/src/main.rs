@@ -279,7 +279,15 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
         }
     }
     if std::env::var("ROWAN_DEBUG").is_ok() {
-        eprintln!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {})", an.work, an.work_units(), an.tab_runs, an.objects.len(), an.started.elapsed().as_millis(), if an.over_deadline() { ", degraded after the deadline" } else { "" }, an.tab_count.values().sum::<usize>(), rowan::domain::row_joins(), an.walked.get() + rowan::state::fp_visits());
+        eprintln!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {})", an.work, an.work_units(), an.tab_runs, an.objects.len(), an.started.elapsed().as_millis(), if an.over_deadline() { ", degraded after the deadline" } else { "" }, an.site_runs.values().sum::<usize>(), rowan::domain::row_joins(), an.walked.get() + rowan::state::fp_visits());
+        eprintln!("visits by kind: summaries {:?}, footprint joins {}", an.visit_kinds.get(), rowan::state::fp_visits());
+        if std::env::var("ROWAN_JSDBG").is_ok() {
+            let mut v: Vec<(String, usize, usize, usize)> = rowan::interp::joined::JS_STATS.with(|m| m.borrow().values().cloned().collect());
+            v.sort_by(|a, b| b.2.cmp(&a.2));
+            for e in v.iter().take(15) {
+                eprintln!("  covers {}: checks {} compared {} max input {}", e.0, e.1, e.2, e.3);
+            }
+        }
     }
     if facts {
         return Ok((serde_json::to_string(&report::facts_json(&an)).unwrap(), deps));

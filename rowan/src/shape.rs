@@ -386,6 +386,10 @@ pub fn product(ds: &[DimId]) -> DimId {
 
 /// Exact division of polynomials when `b` is a monomial (or a constant) dividing every term.
 pub fn div_exact(a: DimId, b: DimId) -> Option<DimId> {
+    // (two unknown dims are not the same dim: nothing cancels one)
+    if has_unknown(b) {
+        return None;
+    }
     let pa = poly(a);
     let pb = poly(b);
     if pb.len() != 1 {
@@ -691,7 +695,9 @@ pub fn is_one(d: DimId, f: &TFacts) -> Option<bool> {
 pub fn learn_eq(f: &mut TFacts, a: DimId, b: DimId) {
     let a = norm(a, f);
     let b = norm(b, f);
-    if a == b || has_unknown(a) || has_unknown(b) {
+    // (an unknown dim, or one of several alternatives, is no one value: its atom stands for
+    // others elsewhere, which a fact must not pin down)
+    if a == b || is_vague(a) || is_vague(b) {
         return;
     }
     // the side that is a single atom (with coefficient 1) is rewritten into the other
