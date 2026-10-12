@@ -877,6 +877,9 @@ pub struct Analyzer {
     pub t_fact_write: bool,
     /// the verdict being recorded is on a guarded access
     pub verdict_guarded: bool,
+    /// expressions in call position (`x.m` of `x.m(…)`): a method read of an input is not a
+    /// key of it
+    pub callee_nodes: FxHashSet<usize>,
     /// the access being made is on a value that may also be a scalar (a str, a number): no
     /// object's lack of the key makes it fail for sure
     pub recv_scalar: bool,

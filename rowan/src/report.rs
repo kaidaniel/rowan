@@ -217,55 +217,90 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
         }
     }
     let sch = schema_rows(an);
-    lines.push(String::new());
-    lines.push("== inferred schemas (requirements on external inputs) ==".into());
-    if sch.is_empty() {
-        lines.push("  (none)".into());
-    }
+    // what the program needs of its inputs, then what each function needs of its parameters
+    // (`param F.x`: the function's contract, whoever calls it)
     let mut labels: Vec<&String> = sch.keys().collect();
     labels.sort();
-    for label in labels {
-        let entry = &sch[label];
-        let grouped = group_alt_keys(entry);
-        let always: Vec<String> = grouped.iter().filter(|(_, e)| e.always).map(|(k, _)| k.clone()).collect();
-        let sometimes: Vec<String> = grouped.iter().filter(|(_, e)| !e.always).map(|(k, _)| k.clone()).collect();
-        lines.push(format!("  {}:", label));
-        if !always.is_empty() {
-            lines.push(format!("      always   : {}", always.join(", ")));
+    let (params, inputs): (Vec<&String>, Vec<&String>) = labels.into_iter().partition(|l| l.starts_with("param "));
+    for (title, group) in [("== inferred schemas (requirements on external inputs) ==", &inputs), ("== function contracts (what each function needs of its parameters) ==", &params)] {
+        // (no section for what nothing needs; "(none)" for inputs only when nothing is listed)
+        if group.is_empty() && (title.contains("contracts") || !params.is_empty()) {
+            continue;
         }
-        if !sometimes.is_empty() {
-            lines.push(format!("      sometimes: {}", sometimes.join(", ")));
+        lines.push(String::new());
+        lines.push(title.into());
+        if group.is_empty() {
+            lines.push("  (none)".into());
         }
-        for (k, e) in &grouped {
-            let mut extra = Vec::new();
-            if !e.alternatives.is_empty() {
-                extra.push(format!("or provided by {}", e.alternatives.join(", ")));
+        for label in group.iter() {
+            let entry = &sch[*label];
+            let grouped = group_alt_keys(entry);
+            let always: Vec<String> = grouped.iter().filter(|(_, e)| e.always).map(|(k, _)| k.clone()).collect();
+            let sometimes: Vec<String> = grouped.iter().filter(|(_, e)| !e.always).map(|(k, _)| k.clone()).collect();
+            // (`param F.x[...]` reads as `F: x[...]`)
+            let shown = match label.strip_prefix("param ").and_then(|r| r.split_once('.')) {
+                Some((f, rest)) if !f.contains('[') => format!("{}: {}", f, rest),
+                _ => label.to_string(),
+            };
+            lines.push(format!("  {}:", shown));
+            if !always.is_empty() {
+                lines.push(format!("      always   : {}", always.join(", ")));
             }
-            if !e.caveats.is_empty() {
-                extra.push(format!("unless added by {}", e.caveats.join(", ")));
+            if !sometimes.is_empty() {
+                lines.push(format!("      sometimes: {}", sometimes.join(", ")));
             }
-            if !extra.is_empty() {
-                lines.push(format!("      {}: {}", k, extra.join("; ")));
+            for (k, e) in &grouped {
+                let mut extra = Vec::new();
+                if !e.alternatives.is_empty() {
+                    extra.push(format!("or provided by {}", e.alternatives.join(", ")));
+                }
+                if !e.caveats.is_empty() {
+                    extra.push(format!("unless added by {}", e.caveats.join(", ")));
+                }
+                if !extra.is_empty() {
+                    lines.push(format!("      {}: {}", k, extra.join("; ")));
+                }
             }
         }
     }
     if show_summaries && !an.summaries.is_empty() {
+        // one line per function and result (the same result from several call sites once,
+        // with the lines it is called from)
+        let mut groups: indexmap::IndexMap<String, Vec<String>> = indexmap::IndexMap::new();
         let mut entries: Vec<(&(String, String), &(crate::domain::Value, Vec<(u32, crate::domain::Row)>))> = an.summaries.iter().collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
-        let mut out: Vec<String> = Vec::new();
         for ((qual, ctx), (_, rows)) in entries {
             for (oid, row) in rows {
                 // (a result nothing is known about says nothing)
                 if row.present.is_empty() && row.open() {
                     continue;
                 }
-                out.push(format!("  {} [{}] -> {}: {}", qual, ctx, an.obj(*oid).label, row));
+                let line = format!("  {} -> {}: {}", qual.replace("class ", ""), an.obj(*oid).label, row);
+                let site = call_site_text(an, ctx);
+                let e = groups.entry(line).or_default();
+                if !e.contains(&site) {
+                    e.push(site);
+                }
             }
         }
-        if !out.is_empty() {
+        if !groups.is_empty() {
             lines.push(String::new());
-            lines.push("== function results (per call context) ==".into());
-            lines.extend(out);
+            lines.push("== function results ==".into());
+            for (line, sites) in groups {
+                let calls: Vec<String> = sites.iter().filter(|s| !s.is_empty() && *s != "entry").cloned().collect();
+                let mut parts: Vec<String> = Vec::new();
+                if !calls.is_empty() {
+                    parts.push(format!("called from {}", calls.join(", ")));
+                }
+                if sites.iter().any(|s| s == "entry") {
+                    parts.push("with any arguments".into());
+                }
+                if parts.is_empty() {
+                    lines.push(line);
+                } else {
+                    lines.push(format!("{}  ({})", line, parts.join("; ")));
+                }
+            }
         }
     }
     if show_rows {
@@ -303,6 +338,28 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
         return body;
     }
     format!("{}\n\n== legend ==\n{}", body, legend.join("\n"))
+}
+
+/// A call context as a person reads it: the line of its innermost call site (`L103`, with
+/// the module's file for another module); "" for a function's own run.
+fn call_site_text(an: &Analyzer, ctx: &str) -> String {
+    if ctx == "entry" {
+        return "entry".into();
+    }
+    let last = ctx.rsplit('/').next().unwrap_or("");
+    let last = last.split('#').next().unwrap_or("");
+    let (module, rest) = match last.strip_prefix('M').and_then(|r| r.split_once(':')) {
+        Some((m, rest)) if m.chars().all(|c| c.is_ascii_digit()) => (m.parse::<u32>().ok(), rest),
+        _ => (None, last),
+    };
+    let Some(line) = rest.strip_prefix('L').map(|r| r.split(':').next().unwrap_or("")) else { return String::new() };
+    if line.is_empty() || !line.chars().all(|c| c.is_ascii_digit()) {
+        return String::new();
+    }
+    match module.map(|m| an.rel_file(m)).filter(|f| !f.is_empty()) {
+        Some(f) => format!("{}:L{}", f, line),
+        None => format!("L{}", line),
+    }
 }
 
 /// What each mark the report uses means (only the marks it uses).

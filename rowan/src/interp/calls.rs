@@ -1482,7 +1482,7 @@ impl Analyzer {
             }
         }
         let rows: Vec<(u32, Row)> = ret.pts.iter().filter(|o| self.is_record_like(*o)).map(|o| (o, state.row(o, Ns::Item))).collect();
-        self.summaries.insert((fi.qualname.clone(), ctx.clone()), (ret.clone(), rows));
+        self.summaries.insert((fi.qualname.clone(), if entry { "entry".into() } else { ctx.clone() }), (ret.clone(), rows));
         // cleanup
         self.active.remove(&key);
         if let Some(lst) = self.active_by_func.get_mut(&foid) {

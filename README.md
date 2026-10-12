@@ -53,8 +53,8 @@ email = u["emial"]        # a typo
   L14   ⚠     u["role"]     item['role'] possibly missing  (set on some paths only)  [dict@L5]
   L15   ✗     u["emial"]    item['emial'] definitely missing  (all keys known)  [dict@L5]
 
-== inferred schemas (requirements on external inputs) ==
-  param make_user.row:
+== function contracts (what each function needs of its parameters) ==
+  make_user: row:
       always   : 'id', 'name'
 
 == module-level values at exit ==
@@ -135,8 +135,8 @@ dup_code, bad_code = dup.status_code, bad.status_code
   bad_code = 422
   ORDERS = {1: OrderIn(item="tea", qty=4, size="M")}
 
-== inferred schemas (requirements on external inputs) ==
-  param create.order:
+== function contracts (what each function needs of its parameters) ==
+  create: order:
       always   : 'item', 'qty'
 ```
 
@@ -175,8 +175,8 @@ def monthly(path):
   read_csv@L17:
       always   : 'category', 'price', 'ts'
 
-== function results (per call context) ==
-  monthly [L15] -> frame@L18: {"category": ?, "month": ?, "price": ?}
+== function results ==
+  monthly -> frame@L18: {"category": ?, "month": ?, "price": ?}  (with any arguments)
 
 == module-level values at exit ==
   joined = {"amount": ?, "customer": ?, "order_id": ?, "region_x": ?, "region_y": ?, "tier": ?}

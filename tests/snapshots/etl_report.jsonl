@@ -1,4 +1,3 @@
-["schema", "param summarise.orders['amount']", "'groupby'", true]
 ["schema", "param to_rows.summaries['*']", "'count'", true]
 ["schema", "param to_rows.summaries['*']", "'n_orders'", true]
 ["schema", "param to_rows.summaries['*']", "'region'", true]

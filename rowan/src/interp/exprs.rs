@@ -198,6 +198,7 @@ impl Analyzer {
             ast::Expr::Call(c) => {
                 // (the tensor model reads `x.dim` as a method only when it is called)
                 self.m.t_called_attr = frontend::node(&*c.func).addr;
+                self.callee_nodes.insert(self.m.t_called_attr);
                 let fv = self.eval(&c.func, state);
                 let mut flag = false;
                 if !self.may_raise.is_empty() {

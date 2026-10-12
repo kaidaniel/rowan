@@ -2442,7 +2442,8 @@ impl Analyzer {
         }
         if !guarded && cls.tier != Tier::Map {
             self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
-            if cls.tier == Tier::Input {
+            // (a method called on an input — `df.groupby(…)` — is not a key the input must have)
+            if cls.tier == Tier::Input && !self.callee_nodes.contains(&node.addr) {
                 let site = self.access_site(node);
                 self.require_providers_k(&cls, &row, &site, false, state, Some(nk));
             }
