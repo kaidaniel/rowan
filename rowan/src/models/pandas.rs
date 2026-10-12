@@ -5225,7 +5225,7 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
         }
         // (a read behind a try is a probe: an input need not have the column)
         if cls.tier == Tier::Input && !guarded {
-            an.require_providers_k(&cls, &row, &site, true, state, Some(k));
+            an.require_providers_k(&cls, &row, &site, true, state, Some(k), Ns::Item);
         }
         // the program went on: the column was there (also under a try that handles the miss)
         if narrow && cls.tier != Tier::Missing && an.obj(oid).single {

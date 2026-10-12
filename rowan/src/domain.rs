@@ -837,7 +837,24 @@ impl Row {
 /// A key as it appears in the compact row form: strings in double quotes, others as in Python.
 pub fn key_display(k: KeyId) -> String {
     match intern::key_as_str(k) {
-        Some(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        Some(s) => {
+            // (as Python would write it, double-quoted: escapes for quotes, backslashes and
+            // control characters, so a multi-line string stays on one line)
+            let mut out = String::from("\"");
+            for c in s.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\t' => out.push_str("\\t"),
+                    '\r' => out.push_str("\\r"),
+                    c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+            out
+        }
         None => intern::key_repr(k),
     }
 }
@@ -1062,21 +1079,20 @@ pub struct Classification {
     /// external sources that may provide k (sorted by source label)
     pub providers: Vec<(SourceId, KeySet)>,
     pub note: String,
+    /// the unknown code that may have added or removed the key (`likely` tiers, inputs)
+    pub mutators: Vec<StrId>,
 }
 
 impl Classification {
     pub fn new(tier: Tier) -> Self {
-        Classification { tier, providers: Vec::new(), note: String::new() }
+        Classification { tier, providers: Vec::new(), note: String::new(), mutators: Vec::new() }
     }
     pub fn with_note(tier: Tier, note: impl Into<String>) -> Self {
-        Classification { tier, providers: Vec::new(), note: note.into() }
+        Classification { tier, providers: Vec::new(), note: note.into(), mutators: Vec::new() }
     }
-}
-
-fn joined_mutators(row: &Row) -> String {
-    let mut v: Vec<String> = row.mutators.iter().map(|m| m.to_string()).collect();
-    v.sort();
-    v.join(", ")
+    fn by_unknown_code(tier: Tier, note: &str, row: &Row) -> Self {
+        Classification { mutators: row.mutators.iter().collect(), ..Classification::with_note(tier, note) }
+    }
 }
 
 pub fn classify(row: &Row, k: KeyId) -> Classification {
@@ -1087,7 +1103,7 @@ pub fn classify(row: &Row, k: KeyId) -> Classification {
         return Classification::with_note(Tier::Missing, "removed/excluded on every path");
     }
     if row.likely.contains(k) {
-        return Classification::with_note(Tier::Likely, format!("unknown code ran: {}", joined_mutators(row)));
+        return Classification::by_unknown_code(Tier::Likely, "unless unknown code removed it", row);
     }
     if row.top {
         return Classification::new(Tier::Unknown);
@@ -1103,14 +1119,8 @@ pub fn classify(row: &Row, k: KeyId) -> Classification {
     ext.sort_by_key(|(s, _)| source_label(*s));
     let data = prov.iter().any(|(s, _)| source_is_data(*s));
     if !ext.is_empty() {
-        let mut note = String::new();
-        if !row.mutators.is_empty() {
-            note = format!("unless {} adds it", joined_mutators(row));
-        }
-        if row.present.contains(k) {
-            note = if note.is_empty() { "also set on some paths".into() } else { format!("{}; also set on some paths", note) };
-        }
-        return Classification { tier: Tier::Input, providers: ext, note };
+        let note = if row.present.contains(k) { "also set on some paths" } else { "" };
+        return Classification { providers: ext, ..Classification::by_unknown_code(Tier::Input, note, row) };
     }
     if data {
         return Classification::new(Tier::Map);
@@ -1119,7 +1129,7 @@ pub fn classify(row: &Row, k: KeyId) -> Classification {
         return Classification::with_note(Tier::Possibly, "set on some paths only");
     }
     if !row.mutators.is_empty() {
-        return Classification::with_note(Tier::LikelyMissing, format!("only {} could have added it", joined_mutators(row)));
+        return Classification::by_unknown_code(Tier::LikelyMissing, "unless unknown code added it", row);
     }
     Classification::with_note(Tier::Missing, "no source can provide it")
 }
@@ -1363,6 +1373,8 @@ pub struct ReqInfo {
     pub caveats: StrSet,
     /// other key names of the same source that would also satisfy it
     pub alt_keys: KeySet,
+    /// read as an attribute (`x.k`), not as an item (`x["k"]`): for reports
+    pub attr: bool,
 }
 
 impl ReqInfo {
@@ -1373,6 +1385,7 @@ impl ReqInfo {
             alternatives: self.alternatives.union(&o.alternatives),
             caveats: self.caveats.union(&o.caveats),
             alt_keys: self.alt_keys.union(&o.alt_keys),
+            attr: self.attr || o.attr,
         }
     }
     /// Same path, second requirement on the same key: always if either is.
@@ -1387,6 +1400,7 @@ impl ReqInfo {
             },
             caveats: self.caveats.union(&o.caveats),
             alt_keys: if !self.alt_keys.is_empty() && !o.alt_keys.is_empty() { self.alt_keys.intersection(&o.alt_keys) } else { KeySet::new() },
+            attr: self.attr || o.attr,
         }
     }
     pub fn demote(&self) -> ReqInfo {

@@ -424,6 +424,7 @@ impl Analyzer {
             }
             if !text.is_empty() {
                 let t = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                self.site_names.entry(site_id).or_insert_with(|| (t.clone(), node.module, node.line));
                 let scope = self.frame().func.unwrap_or(0);
                 self.set_symbol(rid, t.clone(), scope);
                 self.origins.insert(rid, (t, node.line, given));
@@ -1233,6 +1234,11 @@ impl Analyzer {
                     for (k, info) in d.iter() {
                         let site_id = info.sites.first().unwrap_or(s(&site));
                         state.require(src, *k, site_id, info.alternatives.clone(), info.caveats.clone(), info.alt_keys.clone());
+                        if info.attr {
+                            if let Some(cur) = state.reqs.get(&src, k) {
+                                state.reqs.set(&src, *k, crate::domain::ReqInfo { attr: true, ..cur });
+                            }
+                        }
                         if !info.always {
                             if let Some(cur) = state.reqs.get(&src, k) {
                                 state.reqs.set(&src, *k, ReqInfo { always: false, ..cur });

@@ -573,6 +573,7 @@ impl State {
             alternatives,
             caveats,
             alt_keys: if alt_keys.len() > 1 { alt_keys } else { IdSet::new() },
+            attr: false,
         };
         let nv = match self.reqs.get(&src, &term) {
             Some(cur) => cur.seq(&info),

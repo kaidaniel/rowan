@@ -182,6 +182,8 @@ pub struct Verdict {
     pub chain: Chain,
     pub note: String,
     pub providers: Vec<String>,
+    /// unknown code that may have added or removed the key (its call sites)
+    pub mutators: Vec<String>,
     pub ns: Ns,
     pub text: String,
     pub oid: ObjId,
@@ -858,6 +860,9 @@ pub struct Analyzer {
     /// results of unknown calls: (the call as written, its line, what it was given — which
     /// unknown code may return)
     pub origins: FxHashMap<ObjId, (String, u32, Vec<String>)>,
+    /// unknown call sites (sources and mutators are named by them) as written: (the call's
+    /// text, its module, its line), for reports
+    pub site_names: FxHashMap<StrId, (String, u32, u32)>,
     /// unknown objects named in the program's own terms (`a`, `a(b)`, `cfg["db"]`,
     /// `rows[*]`, `json.loads(text)`): printed instead of `?`
     pub symbols: FxHashMap<ObjId, String>,
@@ -1537,6 +1542,7 @@ impl Analyzer {
             chain,
             note: cls.note.clone(),
             providers: cls.providers.iter().map(|(s, _)| crate::domain::source_label(*s)).collect(),
+            mutators: { let mut m: Vec<String> = cls.mutators.iter().map(|m| intern::str_get(*m).to_string()).collect(); m.sort(); m },
             ns,
             text,
             oid,

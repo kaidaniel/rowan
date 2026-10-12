@@ -49,15 +49,17 @@ email = u["emial"]        # a typo
 ```
 
 ```
-== diagnostics ==
-  L14   ⚠     u["role"]     item['role'] possibly missing  (set on some paths only)  [dict@L5]
-  L15   ✗     u["emial"]    item['emial'] definitely missing  (all keys known)  [dict@L5]
+== accesses that may fail ==
+  L14   ⚠  u["role"]   key "role" is only set on some paths
+  L15   ✗  u["emial"]  key "emial" is never set
 
-== function contracts (what each function needs of its parameters) ==
-  make_user: row:
-      always   : 'id', 'name'
+== what each function needs from its arguments ==
+  make_user  always:    row["id"], row["name"]
 
-== module-level values at exit ==
+== what functions return ==
+  make_user returns {"id": …, "name": …, "role"?: …}
+
+== module-level variables at the end ==
   before = {"id": 7, "name": "Ada Lovelace", "role"?: "admin"}
   greeting = "Hello, Ada Lovelace!"
 ```
@@ -83,14 +85,10 @@ def load_config():
 ```
 
 ```
-== inferred schemas (requirements on external inputs) ==
-  json.loads@L8:
-      always   : 'database'
-      sometimes: 'trace_level'
-  json.loads@L8['database']:
-      always   : 'host', 'name', 'user'
-  os.environ:
-      always   : 'APP_CONFIG'
+== what the code reads from its inputs ==
+  json.loads(…) (line 8)  always:    ["database"]["host"], ["database"]["name"], ["database"]["user"]
+                          sometimes: ["trace_level"]
+  os.environ              always:    ["APP_CONFIG"]
 ```
 
 Nested requirements are tracked to where the data came from. `.get` reads require nothing,
@@ -135,9 +133,8 @@ dup_code, bad_code = dup.status_code, bad.status_code
   bad_code = 422
   ORDERS = {1: OrderIn(item="tea", qty=4, size="M")}
 
-== function contracts (what each function needs of its parameters) ==
-  create: order:
-      always   : 'item', 'qty'
+== what each function needs from its arguments ==
+  create  always:    order["item"], order["qty"]
 ```
 
 Requests go through routing, parameter binding, pydantic validation (`"4"` is coerced to `4`,
@@ -168,19 +165,18 @@ def monthly(path):
 ```
 
 ```
-== diagnostics ==
-  L13   ✗     joined["region"]   item['region'] definitely missing  (removed/excluded on every path)
+== accesses that may fail ==
+  L13   ✗  joined["region"]  key "region" was removed or renamed on every path to here
 
-== inferred schemas (requirements on external inputs) ==
-  read_csv@L17:
-      always   : 'category', 'price', 'ts'
+== what the code reads from its inputs ==
+  read_csv(…) (line 17)  always:    ["category"], ["price"], ["ts"]
 
-== function results ==
-  monthly -> frame@L18: {"category": ?, "month": ?, "price": ?}  (with any arguments)
+== what functions return ==
+  monthly returns DataFrame["category", "month", "price"]
 
-== module-level values at exit ==
-  joined = {"amount": ?, "customer": ?, "order_id": ?, "region_x": ?, "region_y": ?, "tier": ?}
-  by_region = {"amount": ?, "region_x": ?}
+== module-level variables at the end ==
+  by_region = DataFrame["amount", "region_x"]
+  joined = DataFrame["amount", "customer", "order_id", "region_x", "region_y", "tier"]
 ```
 
 The merge suffixed the clashing `region` column on both sides, so `joined["region"]` can't
@@ -217,11 +213,11 @@ bad = attn(torch.randn(2, 10, 32))
 
 ```
 == tensor shapes ==
-  L15   ✗     shape mismatch: Linear(64 -> 192) given last dim 32  via L25
-  L14   needs x.dim() == 3
-  L15   needs x.shape[2] == n_embd
+  L15    ✗  shape mismatch: Linear(64 -> 192) given last dim 32  via L25
+  L14       needs x.dim() == 3
+  L15       needs x.shape[2] == n_embd
 
-== module-level values at exit ==
+== module-level variables at the end ==
   out = Tensor[2, 10, 64]
 ```
 
@@ -265,21 +261,26 @@ guesses a value it can't compute.
 
 ## Reading the report
 
+The report has a section for each of: the accesses that may fail, tensor shapes, what the
+code reads from its inputs, what each function needs from its arguments, what functions
+return, the module's variables at the end, and the limits of the analysis (calls into code
+rowan cannot see). It ends with a legend of the marks it uses:
+
 | mark | meaning |
 | --- | --- |
-| `✓` | the access always works (`✓~`: unless unknown code removed the key) |
-| `⚠` | possibly missing: set on some paths only, or on some of the objects the name may hold |
-| `✗` | definitely missing: all keys known, or the key was deleted / renamed / suffixed away |
-| `⚠~` | likely missing: only a call rowan can't see into could have added it |
-| `◌` | depends on the input: becomes part of the inferred schema |
+| `✗` | fails on every path that reaches it |
+| `⚠` | fails on some paths (a key set on some paths only, or missing from some of the objects a name may hold) |
+| `⚠~` | fails unless code rowan cannot see sets the key first |
+| `via L5→L9` | the calls (by line) through which the access was reached |
+| `always` / `sometimes` | a key read on every path / on some paths only |
 
 In values, `?` is something unknown; `a | b` is one of several values; `"k"?:` is a key present
-on some paths only; `**?` means other keys may exist; `list[X]` is any number of elements like
-`X`; `Tensor[B, T, 4*C]` is a tensor shape. Inside a function, unknowns are named by where they
-come from (`row["id"]`, `x.shape[0]`, `json.loads(text)`).
-
-The text report ends with a legend of the marks it uses. A finding on several objects names
-each allocation site once, with a count (`dict@L4 ×2`), and the first few only.
+on some paths only (`"k"~:` unless code rowan cannot see removed it); `**?` means other keys
+may exist; `list[X]` is any number of elements like `X`; `DataFrame["a", "b"]` a frame's
+columns; `<Match>` an object shown by its type; `Tensor[B, T, 4*C]` a tensor shape; `…` what
+is not shown. Inside a function, unknowns are named by where they come from (`row["id"]`,
+`x.shape[0]`, `json.loads(text)`). Accesses that always succeed are only counted, and so are
+those that succeed unless code rowan cannot see removed the key. `--json` has every finding.
 
 ## Building and running
 
@@ -293,7 +294,7 @@ cargo install --path .                      # optional: puts `rowan` on your PAT
 ```
 
 ```
-rowan prog.py                 # text report: diagnostics, schemas, function results, values
+rowan prog.py                 # text report: failing accesses, what inputs and arguments need, results, values
 rowan prog.py --json          # JSON lines (verdicts, schemas, summaries)
 rowan prog.py --facts         # per-name facts, as the editor integration uses them
 rowan serve                   # a long-running server speaking JSON lines over stdio
