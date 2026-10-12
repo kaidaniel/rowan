@@ -15,8 +15,16 @@ and write down what you chose and why.
    * well formatted;
    * every special symbol explained;
    * not so many insights that they overwhelm.
+   * This objective is easy to put off behind the others, so make at least one improvement to
+     it in every iteration, and check it against real hovers on real programs.
 2. **Correct (sound).** What rowan claims must hold for every run of the program. Soundness
    beats everything else on this list.
+   * The golden suites must pass at every commit. Also count how many pass with
+     `ROWAN_LIMITS=tab=0`. That setting makes every call use its function's summary instead
+     of re-running the body at the call site. Large programs end up in this mode once their
+     budgets run out, and many cases fail in it today. Raising that count is part of this
+     objective. It may also be a route to objectives 4-8: summaries that are sound on their
+     own could make the per-call-site runs, and the budgets that limit them, unnecessary.
 3. **Informative (precise).** Among sound answers, prefer the ones that say more.
 4. **Fast.** An analysis finishes in under 10 seconds.
 5. **Small.** An analysis takes at most 2 GB of memory.
@@ -28,6 +36,9 @@ and write down what you chose and why.
      can follow.
    * Today the engine outside `models/` is about 28k lines, so there is a long way to go.
      Measure with `wc -l` on `rowan/src/*.rs` and `rowan/src/interp/*.rs`.
+   * Fixes and features tend to add lines, so this one also slips easily. Leave the engine
+     smaller than you found it in every iteration: delete, merge or simplify something, not
+     just add.
 8. **Few knobs.** The interpreter should have few configs, limits and switches. Every
    `ROWAN_*` variable, `ROWAN_NO=` refinement and `ROWAN_LIMITS=` key is a cost. A simpler
    design that needs no knob is better than a tuned one.
@@ -113,6 +124,7 @@ Summarise what you changed, for the owner:
 * **Commits:** each commit, one line each, with its effect.
 * **Objectives:**
   * the benchmark numbers before and after (time, memory, verdict counts);
+  * the golden pass count with `ROWAN_LIMITS=tab=0`, before and after;
   * the interpreter's line count before and after;
   * the knobs removed;
   * any change to what users see.
