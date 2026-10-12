@@ -309,10 +309,6 @@ pub fn any_send_call() -> bool {
     })
 }
 
-pub fn module_source_lines(idx: u32) -> Vec<String> {
-    REG.with(|r| r.borrow().modules[idx as usize].source.lines().map(|s| s.to_string()).collect())
-}
-
 pub fn parse_expression(source: &str) -> Option<&'static ast::Expr> {
     let parsed = ruff_python_parser::parse_expression(source).ok()?;
     let e: &'static ast::ModExpression = Box::leak(Box::new(parsed.into_syntax()));

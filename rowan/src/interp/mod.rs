@@ -982,8 +982,6 @@ pub struct Analyzer {
     /// no record-access verdicts (shapes still reported): the own run of a called function
     /// of a torch / numpy module
     pub quiet_records: bool,
-    /// per module: global names a function body mutates (`mutated_in_functions`)
-    pub mutated_globals: std::cell::RefCell<FxHashMap<u32, FxHashSet<String>>>,
     /// locals of the callers of the running call (innermost last), for liveness
     pub env_stack: Vec<IndexMap<StrId, Value>>,
     /// `@name.setter` functions by (defining class, attribute)
@@ -1560,66 +1558,6 @@ impl Analyzer {
     }
 
     // ------------------------------------------------------------- entry
-    /// Whether a function body of module `m` calls a mutating method on the global `name`
-    /// (`LOG.append(…)`): a textual scan of the indented lines, cached per module.
-    pub fn mutated_in_functions(&self, m: ObjId, name: &str) -> bool {
-        let idx = self.module_info(m).idx;
-        if !self.mutated_globals.borrow().contains_key(&idx) {
-            let mut set: FxHashSet<String> = FxHashSet::default();
-            const MUT: &[&str] = &["append", "extend", "insert", "add", "update", "pop", "remove", "discard", "clear", "appendleft", "popleft", "extendleft", "sort", "reverse", "setdefault", "popitem", "move_to_end"];
-            for line in frontend::module_source_lines(idx) {
-                if !line.starts_with(' ') && !line.starts_with('\t') {
-                    continue;
-                }
-                // `NAME[k] = v` / `NAME[k] += v` / `del NAME[k]` in a function body
-                let t = line.trim_start();
-                let t2 = t.strip_prefix("del ").unwrap_or(t);
-                let name: String = t2.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-                if !name.is_empty() && t2[name.len()..].starts_with('[') {
-                    let rest = &t2[name.len()..];
-                    let mut depth = 0i32;
-                    let mut end = None;
-                    for (j, ch) in rest.char_indices() {
-                        match ch {
-                            '[' | '(' | '{' => depth += 1,
-                            ']' | ')' | '}' => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    end = Some(j);
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    if let Some(e) = end {
-                        let after = rest[e + 1..].trim_start();
-                        let assign = after.starts_with('=') && !after.starts_with("==") || ["+=", "-=", "*=", "/=", "|=", "&=", "//=", "%="].iter().any(|op| after.starts_with(op));
-                        if assign || t.starts_with("del ") {
-                            set.insert(name.clone());
-                        }
-                    }
-                }
-                let b = line.as_bytes();
-                let mut i = 0;
-                while let Some(p) = line[i..].find('.') {
-                    let dot = i + p;
-                    // the name before the dot
-                    let mut st = dot;
-                    while st > 0 && (b[st - 1].is_ascii_alphanumeric() || b[st - 1] == b'_') {
-                        st -= 1;
-                    }
-                    let after: String = line[dot + 1..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-                    if st < dot && (st == 0 || b[st - 1] != b'.') && MUT.contains(&after.as_str()) && line[dot + 1 + after.len()..].starts_with('(') {
-                        set.insert(line[st..dot].to_string());
-                    }
-                    i = dot + 1;
-                }
-            }
-            self.mutated_globals.borrow_mut().insert(idx, set);
-        }
-        self.mutated_globals.borrow().get(&idx).map(|s| s.contains(name)).unwrap_or(false)
-    }
 
     /// A module of the program itself: the main file's directory or below.
     pub fn is_local_module(&self, m: ObjId) -> bool {

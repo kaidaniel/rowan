@@ -84,20 +84,6 @@ impl Kind {
 
 pub type SlotKey = (Ns, KeyId);
 
-thread_local! {
-    /// Every (source, key) `require` added to some state, in order: what a stretch of the
-    /// analysis required is the log since a mark (`req_log_mark` / `req_log_since`).
-    static REQ_LOG: std::cell::RefCell<Vec<(SourceId, KeyId)>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-pub fn req_log_mark() -> usize {
-    REQ_LOG.with(|l| l.borrow().len())
-}
-
-pub fn req_log_since(mark: usize) -> Vec<(SourceId, KeyId)> {
-    REQ_LOG.with(|l| l.borrow().get(mark..).map(|s| s.to_vec()).unwrap_or_default())
-}
-
 /// Mutable analysis state at one program point.
 pub struct State {
     /// current frame's plain locals (small; copied eagerly)
@@ -590,10 +576,7 @@ impl State {
         };
         let nv = match self.reqs.get(&src, &term) {
             Some(cur) => cur.seq(&info),
-            None => {
-                REQ_LOG.with(|l| l.borrow_mut().push((src, term)));
-                info
-            }
+            None => info,
         };
         self.reqs.set(&src, term, nv);
     }
@@ -762,7 +745,6 @@ pub fn is_merged(oid: ObjId) -> bool {
 pub fn reset_thread_state() {
     MERGED.with(|m| m.borrow_mut().clear());
     FP_VISITS.with(|c| c.set(0));
-    REQ_LOG.with(|l| l.borrow_mut().clear());
     crate::domain::reset_row_joins();
     crate::models::shape::reset();
 }
