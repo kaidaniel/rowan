@@ -207,8 +207,6 @@ impl Analyzer {
                 self.cur_exc = None;
                 self.cur_exc_cls = None;
                 if !caught {
-                    // (in a summary run: a raise leaving the function, its state for the
-                    // summary's raise footprint)
                     // (the class leaving the call: known, or not)
                     self.merge_esc(raised_cls.map(|c| vec![c]));
                     if crate::interp::debug_level() == 2 {
@@ -1565,8 +1563,6 @@ impl Analyzer {
                 self.cur_exc_cls = None;
                 if !recorded {
                     self.note_raise();
-                    // (leaving the function after the finally: its state for the summary's
-                    // raise footprint)
                 }
             }
         }
@@ -1743,7 +1739,7 @@ impl Analyzer {
         state.replace_with(out);
     }
 
-    /// A `return` of a value without objects (`return None`) in a tabulated call: the call's
+    /// A `return` of a value without objects (`return None`) in a call: the call's
     /// own objects that nothing older can reach are garbage on this path; forgetting them
     /// lets the join of the exits keep what the other paths say of them (a record returned
     /// on another path keeps that path's keys).

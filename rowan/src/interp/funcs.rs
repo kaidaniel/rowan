@@ -842,8 +842,7 @@ impl Analyzer {
                     elems.push(self.elem_of(&Value::obj(oid), node, state));
                 }
                 Kind::Dict | Kind::Frame => {
-                    // (a dict from before a summarised call, a module constant: its items are
-                    // known where the call is)
+                    // (a dict with literal keys, a module constant: its items)
                     let lit = self.literal_dict_items(oid, state);
                     match (lit, items.as_mut()) {
                         (Some(l), Some(its)) => its.extend(l.into_iter().map(|(k, _)| Value::lit(k))),
@@ -1372,7 +1371,6 @@ impl Analyzer {
         // (the original's id in the site: a deep copy's nested copies are distinct objects; a
         // copy of a copy made at this node counts as a copy of the first original)
         let prefix = format!("{}:{}:", tag, self.site_of(node));
-        // (a clone of such a copy, made by a summary's instantiation, has the same site)
         let site_root = self.obj(oid).site.strip_prefix(&prefix).and_then(|rest| rest.split(['#', ':']).nth(1)).and_then(|r| r.parse::<u32>().ok());
         let root = match (self.copy_root.get(&oid), site_root) {
             (Some(&r), _) if self.obj(oid).site.starts_with(&prefix) => r,

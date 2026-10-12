@@ -860,33 +860,15 @@ pub fn key_display(k: KeyId) -> String {
 }
 
 impl Row {
-    /// `{"a": ?, "b"?: ?, "c"~: ?, **?}`: definite keys plain, keys set on some paths only
-    /// with `?`, keys that unknown code may have removed with `~`, `**?` when other keys may
-    /// exist (open; values are not part of the key set: `?`).  Attributes render as
-    /// `obj(a=?, b?=?, **?)`.
-    pub fn compact(&self, attrs: bool) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        for k in intern::sorted_by_str(self.present.iter()) {
-            let mark = if self.definite.contains(k) {
-                ""
-            } else if self.likely.contains(k) {
-                "~"
-            } else {
-                "?"
-            };
-            if attrs {
-                parts.push(format!("{}{}=?", intern::key_py_str(k), mark));
-            } else {
-                parts.push(format!("{}{}: ?", key_display(k), mark));
-            }
-        }
-        if !self.closed() {
-            parts.push("**?".into());
-        }
-        if attrs {
-            format!("obj({})", parts.join(", "))
+    /// How key `k` is marked where it is shown: "" (there on every path), "?" (on some paths
+    /// only), "~" (there unless unknown code removed it).
+    pub fn mark(&self, k: KeyId) -> &'static str {
+        if self.definite.contains(k) {
+            ""
+        } else if self.likely.contains(k) {
+            "~"
         } else {
-            format!("{{{}}}", parts.join(", "))
+            "?"
         }
     }
 
@@ -919,7 +901,12 @@ impl Row {
 
 impl fmt::Display for Row {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.compact(false))
+        // `{"a": ?, "b"?: ?, "c"~: ?, **?}` (values are not part of the key set)
+        let mut parts: Vec<String> = intern::sorted_by_str(self.present.iter()).into_iter().map(|k| format!("{}{}: ?", key_display(k), self.mark(k))).collect();
+        if !self.closed() {
+            parts.push("**?".into());
+        }
+        write!(f, "{{{}}}", parts.join(", "))
     }
 }
 

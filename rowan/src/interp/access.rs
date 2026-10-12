@@ -12,20 +12,6 @@ use crate::state::{Kind, State};
 
 use super::{is_scalar_method, Analyzer, ClassInfo, Payload, ViewKind, ATTR_GUARDS, DICT_METHOD_NAMES, ITEM_GUARDS, PATH_DEPTH, STR_METHOD_NAMES};
 
-/// `("@", ph)` slot keys: the placeholder, if the key is one.
-pub fn param_slot_of(k: KeyId) -> Option<u32> {
-    intern::with_key(k, |kk| match kk {
-        intern::Key::Tuple(items) if items.len() == 2 => {
-            let a = intern::key_as_str(items[0])?;
-            if &*a != "@" {
-                return None;
-            }
-            intern::key_as_int(items[1]).map(|i| i as u32)
-        }
-        _ => None,
-    })
-}
-
 /// The attributes every instance has (`object`'s, and its class's `__module__` / `__doc__`;
 /// `__dict__` / `__weakref__` unless `__slots__` drop them: taken as there).
 pub const OBJECT_ATTRS: &[&str] = &[
@@ -646,8 +632,6 @@ impl Analyzer {
                 return join_values(vs);
             }
         }
-        // a summary reading the last element of a module list (that functions append to): the
-        // call site may know it
         // `Color["RED"]`: an Enum's member by name
         if ns == Ns::Item && !obj.pts.is_empty() && obj.pts.iter().all(|o| self.enum_members.contains_key(&o)) {
             let mut out = Value::new();
@@ -1113,7 +1097,7 @@ impl Analyzer {
         }
         let label = format!("{}[{}]", self.obj(oid).label, intern::key_repr(k));
         // the content under an unknown key stands for many values: stores on it are weak
-        let single = !(k == STAR || param_slot_of(k).is_some());
+        let single = k != STAR;
         let pid = self.alloc_raw(Kind::Unknown, &format!("path:{}:{}:{}", oid, ns, intern::key_repr(k)), "", single, &label, Payload::None);
         if let Some(sym) = self.sym_access(oid, ns, k) {
             if !self.symbols.contains_key(&pid) {

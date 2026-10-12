@@ -522,7 +522,7 @@ fn result_lines(an: &Analyzer) -> Vec<String> {
     by_func.sort_keys();
     let mut out: IndexMap<String, Vec<String>> = IndexMap::new();
     for ((f, frame), row) in by_func {
-        let mut items: Vec<String> = intern::sorted_by_str(row.present.iter()).iter().filter(|k| !is_internal_key(**k)).map(|k| format!("{}{}{}", crate::domain::key_display(*k), row_mark(&row, *k), if frame { "" } else { ": …" })).collect();
+        let mut items: Vec<String> = intern::sorted_by_str(row.present.iter()).iter().filter(|k| !is_internal_key(**k)).map(|k| format!("{}{}{}", crate::domain::key_display(*k), row.mark(*k), if frame { "" } else { ": …" })).collect();
         if !row.closed() {
             items.push("**?".into());
         }
@@ -555,12 +555,8 @@ fn limit_lines(an: &Analyzer) -> Vec<String> {
     }
     let mut lines = Vec::new();
     if n_unknown > 0 {
-        let mut l = format!("  {} call{} into code rowan cannot see (it may return anything and change what it is given)", n_unknown, if n_unknown == 1 { " goes" } else { "s go" });
-        if !unknown.is_empty() {
-            let shown: Vec<String> = unknown.iter().take(6).map(|u| format!("`{}`", u)).collect();
-            l += &format!(", e.g. {}", shown.join(", "));
-        }
-        lines.push(l);
+        let eg = if unknown.is_empty() { String::new() } else { format!(", e.g. {}", unknown.iter().take(6).map(|u| format!("`{}`", u)).collect::<Vec<_>>().join(", ")) };
+        lines.push(format!("  {} call{} into code rowan cannot see (it may return anything and change what it is given){}", n_unknown, if n_unknown == 1 { " goes" } else { "s go" }, eg));
     }
     if !budget.is_empty() {
         let n = budget.len();
@@ -573,8 +569,7 @@ fn limit_lines(an: &Analyzer) -> Vec<String> {
 
 /// What each mark the report uses means (only the marks it uses).
 fn legend(text: &str) -> Vec<String> {
-    let diag = text.split("\n== ").next().unwrap_or("");
-    let has_mark = |sym: &str| diag.lines().any(|l| l.split_whitespace().nth(1) == Some(sym));
+    let has_mark = |sym: &str| text.lines().any(|l| l.split_whitespace().nth(1) == Some(sym));
     let mut out = Vec::new();
     let mut add = |used: bool, mark: &str, meaning: &str| {
         if used {
@@ -584,7 +579,7 @@ fn legend(text: &str) -> Vec<String> {
     add(has_mark("✗"), "✗", "fails on every path that reaches it");
     add(has_mark("⚠"), "⚠", "fails on some paths");
     add(has_mark("⚠~"), "⚠~", "fails unless code rowan cannot see sets the key first");
-    add(diag.contains("  via L") || text.contains("✗  shape mismatch") && text.contains("  via L"), "via L5→L9", "the calls (by line) through which the code was reached");
+    add(text.contains("  via L"), "via L5→L9", "the calls (by line) through which the code was reached");
     add(text.contains("  always:"), "always", "read on every path through the code");
     add(text.contains("  sometimes:"), "sometimes", "read on some paths only");
     add(text.contains("[*]"), "[*]", "any element");
@@ -751,7 +746,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
             let body = if depth >= max_depth {
                 if row.present.is_empty() && row.closed() { "{}".into() } else { "{…}".into() }
             } else if kind == Kind::Frame {
-                let mut cols: Vec<String> = intern::sorted_by_str(row.present.iter()).iter().map(|k| format!("{}{}", crate::domain::key_display(*k), row_mark(&row, *k))).collect();
+                let mut cols: Vec<String> = intern::sorted_by_str(row.present.iter()).iter().map(|k| format!("{}{}", crate::domain::key_display(*k), row.mark(*k))).collect();
                 if !row.closed() {
                     cols.push("**?".into());
                 }
@@ -930,17 +925,6 @@ fn is_internal_key(k: KeyId) -> bool {
     intern::key_as_str(k).map(|s| s.starts_with('\u{1}')).unwrap_or(false)
 }
 
-/// How a key is marked in a rendered record: present on every path (""), on some paths
-/// only ("?"), there unless unknown code removed it ("~").
-fn row_mark(r: &Row, k: KeyId) -> &'static str {
-    if r.definite.contains(k) {
-        ""
-    } else if r.likely.contains(k) {
-        "~"
-    } else {
-        "?"
-    }
-}
 
 thread_local! {
     /// The function whose names expressions are printed for (`expr:` data from elsewhere —
@@ -976,7 +960,6 @@ pub fn data_expr(kv: &KeyVal) -> Option<String> {
 fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&str>, depth: u32, seen: &mut Vec<ObjId>) -> String {
     const MAX_ITEMS: usize = 8;
     let row = state.row(o, ns);
-    let mark = row_mark;
     seen.push(o);
     let mut items: Vec<String> = Vec::new();
     let keys: Vec<KeyId> = intern::sorted_by_str(row.present.iter()).into_iter().filter(|k| !is_internal_key(*k)).collect();
@@ -986,14 +969,14 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
             None => "?".into(),
         };
         if ns == Ns::Attr {
-            items.push(format!("{}{}={}", intern::key_py_str(*k), mark(&row, *k), val));
+            items.push(format!("{}{}={}", intern::key_py_str(*k), row.mark(*k), val));
         } else {
             // (an object used as a key: the object, by name)
             let key = match an.identity_objs.borrow().get(k).copied() {
                 Some(ko) => render_object(an, state, ko, VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed), seen),
                 None => crate::domain::key_display(*k),
             };
-            items.push(format!("{}{}: {}", key, mark(&row, *k), val));
+            items.push(format!("{}{}: {}", key, row.mark(*k), val));
         }
     }
     if keys.len() > MAX_ITEMS {
@@ -1016,11 +999,6 @@ pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, Str
     fn walk(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &mut Vec<ObjId>, out: &mut Vec<(String, String)>) {
         if depth > VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed) || out.len() >= 8 {
             return;
-        }
-        if let Some(expr) = data_expr(&v.kv) {
-            if !out.iter().any(|(s0, _)| *s0 == expr) {
-                out.push((expr, "?".to_string()));
-            }
         }
         for o in v.pts.iter() {
             if seen.contains(&o) {
@@ -1051,22 +1029,12 @@ pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, Str
                     let desc = if parts.is_empty() { "?".to_string() } else if given { format!("{} | ?", parts.join(" | ")) } else { parts.join(" | ") };
                     out.push((sym.clone(), desc));
                 }
-                Kind::Dict | Kind::Frame | Kind::Namespace => {
-                    for (_, sv) in state.obj_slots(o, Ns::Item) {
-                        walk(an, state, &sv, depth + 1, seen, out);
-                    }
-                }
-                Kind::Instance => {
-                    for (_, sv) in state.obj_slots(o, Ns::Attr) {
-                        walk(an, state, &sv, depth + 1, seen, out);
-                    }
-                }
-                Kind::List | Kind::Tuple | Kind::Set => {
-                    for (_, sv) in state.obj_slots(o, Ns::Pos) {
-                        walk(an, state, &sv, depth + 1, seen, out);
-                    }
-                    if let Some(e) = state.slot_opt(o, Ns::Elem, STAR) {
-                        walk(an, state, &e, depth + 1, seen, out);
+                // (what a container holds: under its keys, attributes, positions, elements)
+                Kind::Dict | Kind::Frame | Kind::Namespace | Kind::Instance | Kind::List | Kind::Tuple | Kind::Set => {
+                    for ns in [Ns::Item, Ns::Attr, Ns::Pos, Ns::Elem] {
+                        for (_, sv) in state.obj_slots(o, ns) {
+                            walk(an, state, &sv, depth + 1, seen, out);
+                        }
                     }
                 }
                 _ => {}

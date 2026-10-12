@@ -347,8 +347,7 @@ impl Analyzer {
         // an external class we know nothing about: still never a base of a user class whose
         // whole hierarchy is known (unless it is an ABC / protocol checked by structure)
         let mut star_structural = false;
-        // (builtin classes tested: a placeholder narrowed by one of them alone is a placeholder
-        // of it, so what the branch reads replays only on its instances)
+        // (builtin classes tested, alone or in a tuple)
         let mut ext_classes: Vec<u32> = Vec::new();
         // (some builtin / library class is tested, alone or in a tuple)
         let mut ext_tested = false;

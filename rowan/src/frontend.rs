@@ -1,7 +1,6 @@
 //! Parsing and source positions.  Parsed modules are leaked (`&'static`) for the lifetime
 //! of the process: the interpreter walks them by reference from every frame, and a thread
-//! local registry maps any node's address back to its module so that a node carried across
-//! modules (a deferred access inside a summary) still knows its file and line.
+//! local registry maps any node's address back to its module and position.
 
 use std::cell::RefCell;
 

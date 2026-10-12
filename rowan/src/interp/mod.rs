@@ -152,7 +152,7 @@ pub const NOEFFECT_METHOD_NAMES: &[&str] = &[
     "assert_called_with",
 ];
 pub const DICT_METHOD_NAMES: &[&str] = &["get", "items", "keys", "values", "update", "pop", "setdefault", "copy", "popitem", "clear"];
-/// Methods that make a class-less placeholder a list (modelled by `list.*`).
+/// Methods that make a class-less unknown a list (modelled by `list.*`).
 pub const LIST_METHOD_NAMES: &[&str] = &["append", "extend", "insert", "remove", "sort", "reverse"];
 pub const VALUE_GUARDS: &[&str] = &["ValueError", "Exception", "BaseException", "*"];
 pub const VALIDATION_GUARDS: &[&str] = &["ValidationError", "ValueError", "Exception", "BaseException", "*"];
@@ -483,7 +483,7 @@ pub struct Frame {
     pub label: String,
     /// indices of the enclosing unrolled loop iterations (part of the call context)
     pub unroll: Vec<usize>,
-    /// a tabulated call: the objects allocated from here on are its own, and the state before
+    /// a call: the objects allocated from here on are its own, and the state before
     /// it (a `return` drops its own objects nothing can reach any more)
     pub pre_call: Option<PreCall>,
 }
@@ -675,13 +675,10 @@ pub struct Obj {
     pub literal_len: Option<usize>,
     /// after appends of unknown count: positions below this are still valid
     pub known_prefix: Option<usize>,
-    /// summary object standing for "the current element" of a loop
+    /// the object standing for "the current element" of a loop
     pub iter_elem: bool,
     /// record this object is a view of (virtual row -> frame)
     pub derived_from: Option<ObjId>,
-    /// for a `dict(x)` / `copy` of an entry object inside a summary: that object (its
-    /// unknown content stands for the copy's as long as the copy did not overwrite it)
-    pub copied_from: Option<ObjId>,
     /// access-path depth under an open source (placeholders, elements)
     pub depth: u32,
     /// a one-shot iterator (generator, generator expression, `iter(...)`): a full iteration
@@ -757,10 +754,10 @@ pub struct Analyzer {
     /// the library models' own tables (`models::Tables`)
     pub m: crate::models::Tables,
     pub filename: String,
-    /// tabulations decided by a summary's events, per function code (`FuncNode::addr`: every
-    /// closure object made from one `def` shares the budget) and kind
+    /// statements run per function code (`FuncNode::addr`: every closure object made from one
+    /// `def` shares the budget)
     pub tab_count: FxHashMap<usize, usize>,
-    /// every tabulated body run (forced ones included): the golden `#@tabulations <= N` bound
+    /// every body run of a call (the golden `#@tabulations <= N` bound)
     pub tab_runs: usize,
     /// `__next__` functions whose calls were not decided once (`unroll_next`)
     pub no_unroll_next: FxHashSet<ObjId>,
@@ -879,7 +876,7 @@ pub struct Analyzer {
     pub model_depth: u32,
     pub model_epoch: u64,
     pub model_born: FxHashMap<ObjId, u64>,
-    /// modules that import torch (their functions all get entry runs and are tabulated)
+    /// modules that import torch (their functions all get entry runs)
     pub torch_modules: FxHashSet<ObjId>,
     /// the function an entry run (open parameters) is analysing
     pub entry_run: Option<ObjId>,
@@ -1010,8 +1007,7 @@ pub struct Analyzer {
     /// `self.f = p` in `__init__` with `p` a parameter: the classes of the arguments seen for
     /// `p` at construction sites, by (class, field) — the field's class when there is one
     pub ctor_field_classes: FxHashMap<(ObjId, String), FxHashSet<ObjId>>,
-    /// per running call (tabulated body or summary): did it raise an uncaught exception /
-    /// call unknown code?
+    /// per running call: did it raise an uncaught exception / call unknown code?
     pub raise_stack: Vec<bool>,
     pub row_checks: Vec<RowCheck>,
     /// collect `facts` (the `--facts` mode)
@@ -1045,7 +1041,7 @@ impl Analyzer {
             filename: filename.to_string(),
             search_paths: if follow_imports { search_paths } else { Vec::new() },
             analyse_entry_points,
-            objects: vec![Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, literal_len: None, known_prefix: None, iter_elem: false, derived_from: None, copied_from: None, depth: 0, iterator: false }],
+            objects: vec![Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, literal_len: None, known_prefix: None, iter_elem: false, derived_from: None, depth: 0, iterator: false }],
             none_v: Value::lit(intern::key_none()),
             ..Default::default()
         };
@@ -1202,7 +1198,6 @@ impl Analyzer {
             known_prefix: None,
             iter_elem: false,
             derived_from: None,
-            copied_from: None,
             depth: 0,
             iterator: site.starts_with("gen:"),
         });
@@ -1241,8 +1236,8 @@ impl Analyzer {
         Some(p).filter(|p| *p > 0)
     }
 
-    /// (also the object's own field: what a state not descended from the one it was made in,
-    /// a summary's, reads)
+    /// (also the object's own field: what a state not descended from the one it was made in
+    /// reads)
     pub fn set_llen(&mut self, o: ObjId, st: &mut State, v: Option<usize>) {
         st.lens.insert(o, (v, v.unwrap_or(0), 0));
         self.objects[o as usize].literal_len = v;
@@ -1462,7 +1457,6 @@ impl Analyzer {
             Ns::Attr => format!("{}.{}", base, intern::key_py_str(key)),
             Ns::Cell => base.clone(),
             _ if key == intern::STAR => format!("{}[*]", base),
-            _ if crate::interp::access::param_slot_of(key).is_some() => format!("{}[?]", base),
             _ => format!("{}[{}]", base, crate::domain::key_display(key)),
         })
     }
@@ -1655,8 +1649,8 @@ impl Analyzer {
             self.analyse_uncalled_range(start, n, state, false);
             start = n;
         }
-        // then the requirement-only runs of the functions the program calls (last: summaries
-        // made while quiet hold no verdicts and must not be reused by a reporting run)
+        // then the requirement-only runs of the functions the program calls (last: runs made
+        // while quiet hold no verdicts)
         let n = self.objects.len() as ObjId;
         self.analyse_uncalled_range(1, n, state, true);
     }
