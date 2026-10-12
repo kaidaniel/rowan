@@ -391,7 +391,8 @@ fn path_steps(st: &State, site: &std::sync::Arc<str>, kind: crate::domain::Sourc
 /// a call of a call's result, a function past its budget)?
 fn named_call(site: &str) -> bool {
     let q = site.rsplit_once("@L").map(|(q, _)| q).unwrap_or(site);
-    !q.is_empty() && !q.starts_with("unknown.") && !q.starts_with("builtins.") && q.split('.').all(|p| !p.is_empty() && p.chars().all(|c| c.is_alphanumeric() || c == '_'))
+    let first = q.split('.').next().unwrap_or("");
+    !q.is_empty() && !["unknown", "builtins", "class", "view", "self", "cls"].contains(&first) && q.split('.').all(|p| !p.is_empty() && p.chars().all(|c| c.is_alphanumeric() || c == '_'))
 }
 
 /// What the code needs of its inputs and of each function's arguments, as Python access

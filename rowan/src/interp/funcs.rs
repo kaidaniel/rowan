@@ -303,7 +303,7 @@ impl Analyzer {
                 continue;
             }
             let txt = if q.is_empty() { frontend::text(&d.expression) } else { q.clone() };
-            self.note(format!("unknown decorator {} at L{}: treated as identity", txt, fnode.line));
+            self.note(format!("line {}: decorator `{}` is not modelled (taken to return the function unchanged)", fnode.line, txt));
         }
         fv
     }
