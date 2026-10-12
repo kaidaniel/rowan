@@ -2314,11 +2314,18 @@ impl Analyzer {
             if !name.starts_with("__") && self.class_lookup(cls, name).is_none() && self.class_lookup(cls, "__getattr__").is_some() {
                 let row = state.row(oid, Ns::Attr);
                 if !row.definite.contains(nk) {
-                    let fallback = self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, state).unwrap_or_default();
                     if !row.present.contains(nk) {
-                        return fallback;
+                        return self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, state).unwrap_or_default();
                     }
+                    // (set on some paths: `__getattr__` runs on the others only — when it raises
+                    // there, the paths that have the attribute go on)
+                    let mut missing = state.copy();
+                    let fallback = self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, &mut missing).unwrap_or_default();
                     let own = state.slot(oid, Ns::Attr, nk);
+                    if missing.reachable {
+                        let j = state.join(&mut missing);
+                        state.replace_with(j);
+                    }
                     return own.join(&fallback);
                 }
             }
