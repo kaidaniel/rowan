@@ -2309,6 +2309,19 @@ impl Analyzer {
         let row = state.row(oid, Ns::Attr);
         let cls_of = self.instance_class(oid);
         if let Some(mut v) = v {
+            // (set on some paths only, over a class attribute of the name: the others read the
+            // class's — the read cannot fail)
+            let class_attr = cls_of.filter(|c| !row.definite.contains(nk) && !self.dataclass_fields_mro(*c).iter().any(|(f, _)| f == name)).and_then(|c| self.class_lookup(c, name));
+            if let (true, Some(defc)) = (row.present.contains(nk), class_attr) {
+                let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
+                let plain = !cv.pts.iter().any(|f| matches!(self.kind(f), Kind::Function | Kind::Bound));
+                if plain {
+                    if !guarded {
+                        self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
+                    }
+                    return v.join(&cv);
+                }
+            }
             if row.present.contains(nk) {
                 let cls = classify(&row, nk);
                 if !guarded {
