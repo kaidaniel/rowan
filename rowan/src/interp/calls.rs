@@ -25,7 +25,7 @@ pub struct Sig {
     kwargs: Vec<(StrId, Value)>,
     star_args: Vec<Value>,
     star_kwargs: Vec<Value>,
-    heap: Vec<(u32, Option<Row>, Option<Row>, Vec<(crate::state::SlotKey, Value)>, Option<KeyVal>, bool)>,
+    heap: Vec<(u32, Option<Row>, Option<Row>, crate::layered::SubRef, Option<KeyVal>, bool)>,
     guards: Vec<Vec<String>>,
     fr_single: bool,
     ctx: String,
@@ -1976,18 +1976,18 @@ impl Analyzer {
             if d >= 3 {
                 continue;
             }
-            for (_, v) in state.slots_of(oid) {
+            state.slots.each(&oid, &mut |_, v| {
                 for x in v.pts.iter() {
                     if !seen_set.contains(&x) {
                         work.push((x, d + 1));
                     }
                 }
-            }
+            });
         }
         seen.sort_unstable();
         let mut heap = Vec::with_capacity(seen.len());
         for oid in seen {
-            heap.push((oid, state.rows.get(&(oid, Ns::Item)), state.rows.get(&(oid, Ns::Attr)), state.slots.for_key(&oid), state.elems.get(&oid), self.obj(oid).single));
+            heap.push((oid, state.rows.get(&(oid, Ns::Item)), state.rows.get(&(oid, Ns::Attr)), state.slots.sub_ref(&oid), state.elems.get(&oid), self.obj(oid).single));
         }
         let guards: Vec<Vec<String>> = self
             .guards
