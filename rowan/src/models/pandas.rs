@@ -1434,12 +1434,11 @@ fn read_frame(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let tag = frame_producer(&c.qual).unwrap_or_else(|| last(&c.qual)).to_string();
     let src = Source::new(&format!("{}@L{}", tag, c.line), SourceKind::External);
-    let site = intern::s(&an.access_site(&c.node));
     let mut row = Row::with_source(src);
     if let Some(ks) = c.kw("usecols").and_then(|u| an.lit_keys(&u, st)) {
         // the file must have every listed column (ValueError otherwise)
         for k in intern::sorted_by_str(ks.iter()) {
-            st.require(src, k, site, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
+            st.require(src, k, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
         }
         row = Row::closed_with(ks);
     }
@@ -1456,7 +1455,7 @@ fn read_frame(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             Some(ks) if ks.iter().all(intern::key_is_str) => {
                 for k in intern::sorted_by_str(ks.iter()) {
                     if row.open() {
-                        st.require(src, k, site, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
+                        st.require(src, k, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
                     }
                     row = row.delete(k, true);
                 }
@@ -2209,7 +2208,7 @@ fn merge_impl(an: &mut Analyzer, st: &mut State, c: &Call, left: Value, right: V
         // the common columns are the keys
         keys = lrow.present.intersection(&rrow.present);
         if lrow.open() || rrow.open() {
-            an.note(format!("merge@L{}: join keys unknown (no on=)", c.line));
+            an.note(format!("line {}: merge without on= (the join columns are not known)", c.line));
         }
     }
     let mut row = combine_overlap(&lrow, &rrow, &keys, &lsuf, &rsuf);
@@ -2305,7 +2304,7 @@ fn df_join(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         for col in intern::sorted_by_str(lrow.present.intersection(&rrow.present).iter()) {
             if lrow.definite.contains(col) && rrow.definite.contains(col) {
                 let target = lf.first().copied().unwrap_or(0);
-                an.verdict(&c.node, col, &Classification::with_note(Tier::Missing, "join: overlapping column without suffix raises ValueError"), target, Ns::Item, None, None);
+                an.verdict(&c.node, col, &Classification::with_note(Tier::Missing, "is in both frames and join was given no suffix (ValueError)"), target, Ns::Item, None, None);
             }
         }
     }
@@ -2416,7 +2415,7 @@ fn df_rename(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let row = rows_of(st, &fs);
     let steps = rename_step(an, st, &cols, c, &fs);
     let Some(steps) = steps else {
-        an.note(format!("rename@L{}: unknown column mapping", c.line));
+        an.note(format!("line {}: rename with a column mapping rowan cannot read", c.line));
         let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.insert((Source::new(&format!("rename@L{}", c.line), SourceKind::Call), EMPTY_LENS)), mutators: row.mutators.clone(), ..Default::default() });
         return new_frame(an, st, c, r, None, None);
     };
@@ -2495,7 +2494,7 @@ fn df_drop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.clone(), mutators: row.mutators.clone(), ..Default::default() });
             return new_frame(an, st, c, r, None, None);
         }
-        an.note(format!("drop@L{}: unknown columns", c.line));
+        an.note(format!("line {}: drop of columns rowan cannot read", c.line));
         let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.clone(), mutators: row.mutators.clone(), ..Default::default() });
         return new_frame(an, st, c, r, None, None);
     };
@@ -5001,7 +5000,7 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if matches!(name.as_str(), "xs") {
         return new_frame(an, st, c, row, None, None);
     }
-    an.note(format!("unmodelled DataFrame.{} at L{}: result treated as an open frame derived from the receiver", name, c.line));
+    an.note(format!("line {}: DataFrame.{} is not modelled (its result may have other columns)", c.line, name));
     let r = Row::from_data(RowData {
         present: row.present.clone(),
         likely: row.definite.clone(),
@@ -5153,7 +5152,7 @@ pub fn frame_setattr(an: &mut Analyzer, oid: u32, name: &str, v: &Value, node: &
             }
         }
         state.set_row(oid, Ns::Item, Row::with_source(Source::new(&format!("columns=@L{}", node.line), SourceKind::Call)));
-        an.note(format!("df.columns assigned from an unknown value at L{}", node.line));
+        an.note(format!("line {}: df.columns set from a value rowan cannot read", node.line));
         return;
     }
     // `df.x = v` sets column x when the frame has it, else an instance attribute (a pandas
@@ -5192,7 +5191,6 @@ pub fn frame_getitem(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, stat
 /// `narrow`: a failing access raises here (false for loads that never fail).
 pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, state: &mut State, guarded: bool, narrow: bool) -> Value {
     let row = state.row(oid, Ns::Item);
-    let site = an.access_site(node);
     if let (Some(k), true) = (key.kv.as_lit(), key.pts.is_empty()) {
         // MultiIndex columns (tuple keys): a plain key selects the top level
         if !is_tuple_key(k) && row.present.iter().any(is_tuple_key) {
@@ -5225,7 +5223,7 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
         }
         // (a read behind a try is a probe: an input need not have the column)
         if cls.tier == Tier::Input && !guarded {
-            an.require_providers_k(&cls, &row, &site, true, state, Some(k));
+            an.require_providers_k(&cls, &row, true, state, Some(k), Ns::Item);
         }
         // the program went on: the column was there (also under a try that handles the miss)
         if narrow && cls.tier != Tier::Missing && an.obj(oid).single {
@@ -5370,8 +5368,7 @@ pub fn frame_delitem(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, stat
             let cls = classify(&row, k);
             an.verdict(node, k, &cls, oid, Ns::Item, None, None);
             if cls.tier == Tier::Input {
-                let site = an.access_site(node);
-                an.require_providers(&cls, &row, &site, false, state);
+                an.require_providers(&cls, &row, false, state);
             }
         }
         row = row.delete(k, strong && is_lit);

@@ -207,8 +207,6 @@ impl Analyzer {
                 self.cur_exc = None;
                 self.cur_exc_cls = None;
                 if !caught {
-                    // (in a summary run: a raise leaving the function, its state for the
-                    // summary's raise footprint)
                     // (the class leaving the call: known, or not)
                     self.merge_esc(raised_cls.map(|c| vec![c]));
                     if crate::interp::debug_level() == 2 {
@@ -857,14 +855,13 @@ impl Analyzer {
                 _ => {}
             }
         }
-        let site = format!("L{}", frontend::node(test).line);
         for o in recs {
             let row = pre.row(o, Ns::Item);
             let cls = crate::domain::classify(&row, k);
             if cls.tier == crate::domain::Tier::Input {
                 for st in [&mut *then_s, &mut *else_s] {
                     if st.reachable {
-                        self.require_providers(&cls, &row, &site, true, st);
+                        self.require_providers(&cls, &row, true, st);
                     }
                 }
             }
@@ -1172,6 +1169,25 @@ impl Analyzer {
         }
     }
 
+    /// The iterations of a `for` over known items, unrolled: an item there on some paths only
+    /// (`false`) runs on one path and is skipped on the other; a one-shot iterator's cursor
+    /// (`cursor`: the object and where the items start) follows. Returns the `break` states.
+    fn unroll_for(&mut self, f: &'static ast::StmtFor, items: &[(Value, bool)], cursor: Option<(u32, usize)>, state: &mut State) -> Option<State> {
+        let mut breaks: Option<State> = None;
+        for (idx, (item, sure)) in items.iter().enumerate() {
+            if !state.reachable {
+                break;
+            }
+            if let Some((o, c0)) = cursor {
+                self.set_cursor(o, Some(c0 + idx + 1), state);
+            }
+            let skipped = if *sure { None } else { Some(state.copy()) };
+            self.unrolled_iteration(idx, &f.body, state, &mut breaks, &mut |an, st| an.bind_iter_target(&f.target, &Elem::One(item.clone()), st));
+            join_breaks(state, skipped);
+        }
+        breaks
+    }
+
     fn stmt_for(&mut self, f: &'static ast::StmtFor, state: &mut State) {
         let itv = self.eval(&f.iter, state);
         let iter_node = frontend::node(&*f.iter);
@@ -1186,15 +1202,8 @@ impl Analyzer {
         if let (Some(o), None, true) = (once, &it.items, matches!(&*f.iter, ast::Expr::Name(_))) {
             if let (None, Some(p)) = (self.llen(o, state), self.prefix(o, state)) {
                 if p > c0 && p - c0 <= UNROLL_MAX {
-                    let items: Vec<Value> = (c0..p).map(|i| state.slot(o, Ns::Pos, intern::key_int(i as i64))).collect();
-                    let mut breaks: Option<State> = None;
-                    for (idx, item) in items.iter().enumerate() {
-                        if !state.reachable {
-                            break;
-                        }
-                        self.set_cursor(o, Some(c0 + idx + 1), state);
-                        self.unrolled_iteration(idx, &f.body, state, &mut breaks, &mut |an, st| an.bind_iter_target(&f.target, &Elem::One(item.clone()), st));
-                    }
+                    let items: Vec<(Value, bool)> = (c0..p).map(|i| (state.slot(o, Ns::Pos, intern::key_int(i as i64)), true)).collect();
+                    let breaks = self.unroll_for(f, &items, Some((o, c0)), state);
                     if state.reachable {
                         // (the rest: from the end of the known items)
                         self.stmt_for(f, state);
@@ -1215,16 +1224,8 @@ impl Analyzer {
         if let Some(items) = &it.items {
             if items.len() <= UNROLL_MAX {
                 // unrolled: `continue` rejoins at the next iteration, `break` at the exit
-                let mut breaks: Option<State> = None;
-                for (idx, item) in items.iter().enumerate() {
-                    if !state.reachable {
-                        break;
-                    }
-                    if let (Some(o), true) = (once, has_jump) {
-                        self.set_cursor(o, Some(c0 + idx + 1), state);
-                    }
-                    self.unrolled_iteration(idx, &f.body, state, &mut breaks, &mut |an, st| an.bind_iter_target(&f.target, &Elem::One(item.clone()), st));
-                }
+                let items: Vec<(Value, bool)> = items.iter().map(|i| (i.clone(), true)).collect();
+                let breaks = self.unroll_for(f, &items, once.filter(|_| has_jump).map(|o| (o, c0)), state);
                 if !f.orelse.is_empty() && state.reachable {
                     self.exec_block(&f.orelse, state);
                 }
@@ -1242,15 +1243,7 @@ impl Analyzer {
         // on one path and skipped on the other
         if it.items.is_none() {
             if let Some(mitems) = self.maybe_dict_items(&itv, state) {
-                let mut breaks: Option<State> = None;
-                for (idx, (item, sure)) in mitems.iter().enumerate() {
-                    if !state.reachable {
-                        break;
-                    }
-                    let skipped = if *sure { None } else { Some(state.copy()) };
-                    self.unrolled_iteration(idx, &f.body, state, &mut breaks, &mut |an, st| an.bind_iter_target(&f.target, &Elem::One(item.clone()), st));
-                    join_breaks(state, skipped);
-                }
+                let breaks = self.unroll_for(f, &mitems, None, state);
                 if !f.orelse.is_empty() && state.reachable {
                     self.exec_block(&f.orelse, state);
                 }
@@ -1265,14 +1258,9 @@ impl Analyzer {
         if let (None, None, Some(o)) = (&it.items, once, itv.single().filter(|_| itv.kv.is_bot())) {
             if matches!(self.kind(o), Kind::List | Kind::Tuple) && !self.obj(o).iterator && self.obj(o).single && self.llen(o, state).is_none() {
                 if let Some(p) = self.prefix(o, state).filter(|p| *p <= UNROLL_MAX) {
-                    let items: Vec<Value> = (0..p).map(|i| state.slot(o, Ns::Pos, intern::key_int(i as i64))).collect();
+                    let items: Vec<(Value, bool)> = (0..p).map(|i| (state.slot(o, Ns::Pos, intern::key_int(i as i64)), true)).collect();
                     prefixed = true;
-                    for (idx, item) in items.iter().enumerate() {
-                        if !state.reachable {
-                            break;
-                        }
-                        self.unrolled_iteration(idx, &f.body, state, &mut prefix_breaks, &mut |an, st| an.bind_iter_target(&f.target, &Elem::One(item.clone()), st));
-                    }
+                    prefix_breaks = self.unroll_for(f, &items, None, state);
                     if !state.reachable {
                         if let Some(b) = prefix_breaks.take() {
                             state.replace_with(b);
@@ -1575,8 +1563,6 @@ impl Analyzer {
                 self.cur_exc_cls = None;
                 if !recorded {
                     self.note_raise();
-                    // (leaving the function after the finally: its state for the summary's
-                    // raise footprint)
                 }
             }
         }
@@ -1753,7 +1739,7 @@ impl Analyzer {
         state.replace_with(out);
     }
 
-    /// A `return` of a value without objects (`return None`) in a tabulated call: the call's
+    /// A `return` of a value without objects (`return None`) in a call: the call's
     /// own objects that nothing older can reach are garbage on this path; forgetting them
     /// lets the join of the exits keep what the other paths say of them (a record returned
     /// on another path keeps that path's keys).

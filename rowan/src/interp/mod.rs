@@ -152,7 +152,7 @@ pub const NOEFFECT_METHOD_NAMES: &[&str] = &[
     "assert_called_with",
 ];
 pub const DICT_METHOD_NAMES: &[&str] = &["get", "items", "keys", "values", "update", "pop", "setdefault", "copy", "popitem", "clear"];
-/// Methods that make a class-less placeholder a list (modelled by `list.*`).
+/// Methods that make a class-less unknown a list (modelled by `list.*`).
 pub const LIST_METHOD_NAMES: &[&str] = &["append", "extend", "insert", "remove", "sort", "reverse"];
 pub const VALUE_GUARDS: &[&str] = &["ValueError", "Exception", "BaseException", "*"];
 pub const VALIDATION_GUARDS: &[&str] = &["ValidationError", "ValueError", "Exception", "BaseException", "*"];
@@ -181,7 +181,9 @@ pub struct Verdict {
     /// call sites (lines) active when the access ran
     pub chain: Chain,
     pub note: String,
-    pub providers: Vec<String>,
+    pub providers: Vec<crate::domain::SourceId>,
+    /// unknown code that may have added or removed the key (its call sites)
+    pub mutators: Vec<String>,
     pub ns: Ns,
     pub text: String,
     pub oid: ObjId,
@@ -481,7 +483,7 @@ pub struct Frame {
     pub label: String,
     /// indices of the enclosing unrolled loop iterations (part of the call context)
     pub unroll: Vec<usize>,
-    /// a tabulated call: the objects allocated from here on are its own, and the state before
+    /// a call: the objects allocated from here on are its own, and the state before
     /// it (a `return` drops its own objects nothing can reach any more)
     pub pre_call: Option<PreCall>,
 }
@@ -673,13 +675,10 @@ pub struct Obj {
     pub literal_len: Option<usize>,
     /// after appends of unknown count: positions below this are still valid
     pub known_prefix: Option<usize>,
-    /// summary object standing for "the current element" of a loop
+    /// the object standing for "the current element" of a loop
     pub iter_elem: bool,
     /// record this object is a view of (virtual row -> frame)
     pub derived_from: Option<ObjId>,
-    /// for a `dict(x)` / `copy` of an entry object inside a summary: that object (its
-    /// unknown content stands for the copy's as long as the copy did not overwrite it)
-    pub copied_from: Option<ObjId>,
     /// access-path depth under an open source (placeholders, elements)
     pub depth: u32,
     /// a one-shot iterator (generator, generator expression, `iter(...)`): a full iteration
@@ -699,7 +698,6 @@ pub enum StoreTarget {
 /// the statement (hover support): the value it held and the rows of the objects it pointed to.
 #[derive(Clone)]
 pub struct Fact {
-    pub value: Value,
     /// object -> (item row, attr row) as they were when the name was read / written
     pub rows: IndexMap<ObjId, (Option<Row>, Option<Row>)>,
     /// the value rendered (`report::render_value`) at each recording, distinct texts
@@ -756,10 +754,10 @@ pub struct Analyzer {
     /// the library models' own tables (`models::Tables`)
     pub m: crate::models::Tables,
     pub filename: String,
-    /// tabulations decided by a summary's events, per function code (`FuncNode::addr`: every
-    /// closure object made from one `def` shares the budget) and kind
+    /// statements run per function code (`FuncNode::addr`: every closure object made from one
+    /// `def` shares the budget)
     pub tab_count: FxHashMap<usize, usize>,
-    /// every tabulated body run (forced ones included): the golden `#@tabulations <= N` bound
+    /// every body run of a call (the golden `#@tabulations <= N` bound)
     pub tab_runs: usize,
     /// `__next__` functions whose calls were not decided once (`unroll_next`)
     pub no_unroll_next: FxHashSet<ObjId>,
@@ -858,6 +856,9 @@ pub struct Analyzer {
     /// results of unknown calls: (the call as written, its line, what it was given — which
     /// unknown code may return)
     pub origins: FxHashMap<ObjId, (String, u32, Vec<String>)>,
+    /// unknown call sites (sources and mutators are named by them) as written: (the call's
+    /// text, its module, its line), for reports
+    pub site_names: FxHashMap<StrId, (String, u32, u32)>,
     /// unknown objects named in the program's own terms (`a`, `a(b)`, `cfg["db"]`,
     /// `rows[*]`, `json.loads(text)`): printed instead of `?`
     pub symbols: FxHashMap<ObjId, String>,
@@ -875,7 +876,7 @@ pub struct Analyzer {
     pub model_depth: u32,
     pub model_epoch: u64,
     pub model_born: FxHashMap<ObjId, u64>,
-    /// modules that import torch (their functions all get entry runs and are tabulated)
+    /// modules that import torch (their functions all get entry runs)
     pub torch_modules: FxHashSet<ObjId>,
     /// the function an entry run (open parameters) is analysing
     pub entry_run: Option<ObjId>,
@@ -1006,8 +1007,7 @@ pub struct Analyzer {
     /// `self.f = p` in `__init__` with `p` a parameter: the classes of the arguments seen for
     /// `p` at construction sites, by (class, field) — the field's class when there is one
     pub ctor_field_classes: FxHashMap<(ObjId, String), FxHashSet<ObjId>>,
-    /// per running call (tabulated body or summary): did it raise an uncaught exception /
-    /// call unknown code?
+    /// per running call: did it raise an uncaught exception / call unknown code?
     pub raise_stack: Vec<bool>,
     pub row_checks: Vec<RowCheck>,
     /// collect `facts` (the `--facts` mode)
@@ -1041,7 +1041,7 @@ impl Analyzer {
             filename: filename.to_string(),
             search_paths: if follow_imports { search_paths } else { Vec::new() },
             analyse_entry_points,
-            objects: vec![Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, literal_len: None, known_prefix: None, iter_elem: false, derived_from: None, copied_from: None, depth: 0, iterator: false }],
+            objects: vec![Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, literal_len: None, known_prefix: None, iter_elem: false, derived_from: None, depth: 0, iterator: false }],
             none_v: Value::lit(intern::key_none()),
             ..Default::default()
         };
@@ -1198,7 +1198,6 @@ impl Analyzer {
             known_prefix: None,
             iter_elem: false,
             derived_from: None,
-            copied_from: None,
             depth: 0,
             iterator: site.starts_with("gen:"),
         });
@@ -1237,8 +1236,8 @@ impl Analyzer {
         Some(p).filter(|p| *p > 0)
     }
 
-    /// (also the object's own field: what a state not descended from the one it was made in,
-    /// a summary's, reads)
+    /// (also the object's own field: what a state not descended from the one it was made in
+    /// reads)
     pub fn set_llen(&mut self, o: ObjId, st: &mut State, v: Option<usize>) {
         st.lens.insert(o, (v, v.unwrap_or(0), 0));
         self.objects[o as usize].literal_len = v;
@@ -1259,12 +1258,8 @@ impl Analyzer {
     /// Allocate an object at `site` (string) in the current frame's context.  `single`:
     /// explicit strength; `None` = the frame decides (strong outside loops; inside a loop a
     /// strong *recent* object with the recency abstraction, else the weak per-site object).
-    pub fn alloc(&mut self, kind: Kind, site: &str, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, single: Option<bool>, ctx: Option<&str>) -> ObjId {
-        self.alloc_full(kind, site, state, label, payload, row, ns, single, ctx, true)
-    }
-
     #[allow(clippy::too_many_arguments)]
-    fn alloc_full(&mut self, kind: Kind, site: &str, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, single: Option<bool>, ctx: Option<&str>, _reserved: bool) -> ObjId {
+    pub fn alloc(&mut self, kind: Kind, site: &str, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, single: Option<bool>, ctx: Option<&str>) -> ObjId {
         let fr = self.frame();
         let ctx = ctx.map(|c| c.to_string()).unwrap_or_else(|| fr.ctx.clone());
         let label = if label.is_empty() { format!("{}@{}", kind.name(), site) } else { label.to_string() };
@@ -1458,7 +1453,6 @@ impl Analyzer {
             Ns::Attr => format!("{}.{}", base, intern::key_py_str(key)),
             Ns::Cell => base.clone(),
             _ if key == intern::STAR => format!("{}[*]", base),
-            _ if crate::interp::access::param_slot_of(key).is_some() => format!("{}[?]", base),
             _ => format!("{}[{}]", base, crate::domain::key_display(key)),
         })
     }
@@ -1504,7 +1498,7 @@ impl Analyzer {
         }
         let weakened;
         let cls = if self.recv_scalar && cls.tier == Tier::Missing {
-            weakened = Classification::with_note(Tier::Possibly, format!("{}; the value may also be another kind of value", cls.note));
+            weakened = Classification::with_note(Tier::Possibly, format!("{}, unless the value is a plain one such as a str", cls.note));
             &weakened
         } else {
             cls
@@ -1536,7 +1530,8 @@ impl Analyzer {
             obj: self.obj(oid).label.to_string(),
             chain,
             note: cls.note.clone(),
-            providers: cls.providers.iter().map(|(s, _)| crate::domain::source_label(*s)).collect(),
+            providers: cls.providers.iter().map(|(s, _)| *s).collect(),
+            mutators: { let mut m: Vec<String> = cls.mutators.iter().map(|m| intern::str_get(*m).to_string()).collect(); m.sort(); m },
             ns,
             text,
             oid,
@@ -1570,9 +1565,6 @@ impl Analyzer {
         }
     }
 
-    pub fn access_site(&self, node: &Node) -> String {
-        format!("L{}", node.line)
-    }
 
     // ------------------------------------------------------------- entry
 
@@ -1653,8 +1645,8 @@ impl Analyzer {
             self.analyse_uncalled_range(start, n, state, false);
             start = n;
         }
-        // then the requirement-only runs of the functions the program calls (last: summaries
-        // made while quiet hold no verdicts and must not be reused by a reporting run)
+        // then the requirement-only runs of the functions the program calls (last: runs made
+        // while quiet hold no verdicts)
         let n = self.objects.len() as ObjId;
         self.analyse_uncalled_range(1, n, state, true);
     }
@@ -1684,11 +1676,6 @@ impl Analyzer {
                 continue;
             }
             self.entry_done.insert(oid);
-            // closures made inside a summary run stand for every call's closure (their cells
-            // are relative): they are reached through the real calls
-            if !fi.closure.is_empty() && (self.obj(oid).ctx.contains("sum")) {
-                continue;
-            }
             if fi.module != self.main_module && !handler && !((quiet || refused) && self.is_local_module(fi.module)) {
                 continue;
             }
@@ -2149,7 +2136,6 @@ impl Analyzer {
         if !self.torch_on {
             if let Some(e) = self.facts.get_mut(&(node.line, name)) {
                 if e.texts.len() >= 4 {
-                    e.value = e.value.join(v);
                     for (oid, item, attr) in rows {
                         match e.rows.get_mut(&oid) {
                             Some((ci, ca)) => {
@@ -2181,7 +2167,7 @@ impl Analyzer {
         };
         legend.extend(tlegend);
         let writing = std::mem::take(&mut self.t_fact_write);
-        let e = self.facts.entry((node.line, name)).or_insert_with(|| Fact { value: Value::new(), rows: IndexMap::new(), texts: Vec::new(), legend: Vec::new(), t_names: FxHashMap::default(), primary: None, written: false });
+        let e = self.facts.entry((node.line, name)).or_insert_with(|| Fact { rows: IndexMap::new(), texts: Vec::new(), legend: Vec::new(), t_names: FxHashMap::default(), primary: None, written: false });
         // in torch programs an assignment's value is what the hover shows (`y = f(y)`)
         if self.torch_on {
             if writing && !e.written {
@@ -2189,7 +2175,6 @@ impl Analyzer {
                 e.texts.clear();
                 e.legend.clear();
                 e.primary = None;
-                e.value = Value::new();
             } else if !writing && e.written {
                 return;
             }
@@ -2208,7 +2193,6 @@ impl Analyzer {
                 e.t_names.entry(a).or_insert(n);
             }
         }
-        e.value = e.value.join(v);
         if !e.texts.contains(&text) && e.texts.len() < 4 {
             e.texts.push(text);
         }

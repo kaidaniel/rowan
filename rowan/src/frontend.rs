@@ -1,7 +1,6 @@
 //! Parsing and source positions.  Parsed modules are leaked (`&'static`) for the lifetime
 //! of the process: the interpreter walks them by reference from every frame, and a thread
-//! local registry maps any node's address back to its module so that a node carried across
-//! modules (a deferred access inside a summary) still knows its file and line.
+//! local registry maps any node's address back to its module and position.
 
 use std::cell::RefCell;
 
@@ -328,5 +327,16 @@ pub fn text_at(n: &Node) -> String {
         let s = m.lines.line_start(start_line, &m.source).to_usize() + n.col as usize;
         let e = m.lines.line_start(end_line, &m.source).to_usize() + n.end_col as usize;
         m.source.get(s..e).map(|t| t.to_string()).unwrap_or_default()
+    })
+}
+
+/// A column in UTF-16 code units (what editors count) from a byte column on a 1-based line.
+pub fn utf16_col(module: u32, line: u32, col: u32) -> u32 {
+    REG.with(|r| {
+        let r = r.borrow();
+        let Some(m) = r.modules.get(module as usize) else { return col };
+        let Some(l) = ruff_source_file::OneIndexed::new(line as usize) else { return col };
+        let s = m.lines.line_start(l, &m.source).to_usize();
+        m.source.get(s..s + col as usize).map(|t| t.encode_utf16().count() as u32).unwrap_or(col)
     })
 }

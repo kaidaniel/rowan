@@ -789,24 +789,20 @@ impl Analyzer {
                 None
             }
         };
-        // `32 ** -0.5`: folded
-        if op == O::Pow {
-            let num = |v: &Value| -> Option<f64> {
-                if !v.pts.is_empty() {
-                    return None;
-                }
-                match intern::key_get(v.kv.as_lit()?) {
-                    intern::Key::Int(i) => Some(i as f64),
-                    intern::Key::Float(b) => Some(f64::from_bits(b)),
-                    _ => None,
-                }
+        // two literals: exactly as Python computes it (`32 ** -0.5`), else not here
+        if let (Some(x), Some(y), true, true) = (a.kv.as_lit(), b.kv.as_lit(), a.pts.is_empty(), b.pts.is_empty()) {
+            let name = match op {
+                O::Add => "add",
+                O::Sub => "sub",
+                O::Mult => "mul",
+                O::Div => "truediv",
+                O::FloorDiv => "floordiv",
+                O::Mod => "mod",
+                O::Pow => "pow",
+                _ => "",
             };
-            if let (Some(x), Some(y)) = (num(a), num(b)) {
-                let r = x.powf(y);
-                let both_int = matches!(intern::key_get(a.kv.as_lit().unwrap()), intern::Key::Int(_)) && matches!(intern::key_get(b.kv.as_lit().unwrap()), intern::Key::Int(_)) && y >= 0.0;
-                if r.is_finite() {
-                    return Some(if both_int && r.abs() < 9.0e15 { Value::lit(key_int(r as i64)) } else { Value::lit(intern::key_float(r)) });
-                }
+            if !name.is_empty() && [x, y].iter().all(|k| matches!(intern::key_get(*k), intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_))) {
+                return crate::models::pyvalues::operator_call(name, &[x, y]).map(Value::lit).or_else(|| Some(Value::data(&format!("L{}", node.line))));
             }
         }
         let (ka, kb) = (classify(self, a)?, classify(self, b)?);
@@ -4545,13 +4541,6 @@ pub fn tensor_text(s: &Shape) -> String {
         out.push_str(&format!(" (if {})", s.assume.iter().map(sh::cons_text).collect::<Vec<_>>().join(", ")));
     }
     out
-}
-
-impl Analyzer {
-    /// (hover legend) a symbol shown as a tensor needs no `x: ?` line
-    pub fn facts_sym_is_tensor(&self, _sym: &str) -> bool {
-        true
-    }
 }
 
 /// `x.split(…)` / `x.sort(…)` on an unknown: a string separator / list sort keywords make it

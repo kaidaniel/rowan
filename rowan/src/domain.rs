@@ -837,39 +837,38 @@ impl Row {
 /// A key as it appears in the compact row form: strings in double quotes, others as in Python.
 pub fn key_display(k: KeyId) -> String {
     match intern::key_as_str(k) {
-        Some(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        Some(s) => {
+            // (as Python would write it, double-quoted: escapes for quotes, backslashes and
+            // control characters, so a multi-line string stays on one line)
+            let mut out = String::from("\"");
+            for c in s.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\t' => out.push_str("\\t"),
+                    '\r' => out.push_str("\\r"),
+                    c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+            out
+        }
         None => intern::key_repr(k),
     }
 }
 
 impl Row {
-    /// `{"a": ?, "b"?: ?, "c"~: ?, **?}`: definite keys plain, keys set on some paths only
-    /// with `?`, keys that unknown code may have removed with `~`, `**?` when other keys may
-    /// exist (open; values are not part of the key set: `?`).  Attributes render as
-    /// `obj(a=?, b?=?, **?)`.
-    pub fn compact(&self, attrs: bool) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        for k in intern::sorted_by_str(self.present.iter()) {
-            let mark = if self.definite.contains(k) {
-                ""
-            } else if self.likely.contains(k) {
-                "~"
-            } else {
-                "?"
-            };
-            if attrs {
-                parts.push(format!("{}{}=?", intern::key_py_str(k), mark));
-            } else {
-                parts.push(format!("{}{}: ?", key_display(k), mark));
-            }
-        }
-        if !self.closed() {
-            parts.push("**?".into());
-        }
-        if attrs {
-            format!("obj({})", parts.join(", "))
+    /// How key `k` is marked where it is shown: "" (there on every path), "?" (on some paths
+    /// only), "~" (there unless unknown code removed it).
+    pub fn mark(&self, k: KeyId) -> &'static str {
+        if self.definite.contains(k) {
+            ""
+        } else if self.likely.contains(k) {
+            "~"
         } else {
-            format!("{{{}}}", parts.join(", "))
+            "?"
         }
     }
 
@@ -902,7 +901,12 @@ impl Row {
 
 impl fmt::Display for Row {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.compact(false))
+        // `{"a": ?, "b"?: ?, "c"~: ?, **?}` (values are not part of the key set)
+        let mut parts: Vec<String> = intern::sorted_by_str(self.present.iter()).into_iter().map(|k| format!("{}{}: ?", key_display(k), self.mark(k))).collect();
+        if !self.closed() {
+            parts.push("**?".into());
+        }
+        write!(f, "{{{}}}", parts.join(", "))
     }
 }
 
@@ -1062,21 +1066,20 @@ pub struct Classification {
     /// external sources that may provide k (sorted by source label)
     pub providers: Vec<(SourceId, KeySet)>,
     pub note: String,
+    /// the unknown code that may have added or removed the key (`likely` tiers, inputs)
+    pub mutators: Vec<StrId>,
 }
 
 impl Classification {
     pub fn new(tier: Tier) -> Self {
-        Classification { tier, providers: Vec::new(), note: String::new() }
+        Classification { tier, providers: Vec::new(), note: String::new(), mutators: Vec::new() }
     }
     pub fn with_note(tier: Tier, note: impl Into<String>) -> Self {
-        Classification { tier, providers: Vec::new(), note: note.into() }
+        Classification { tier, providers: Vec::new(), note: note.into(), mutators: Vec::new() }
     }
-}
-
-fn joined_mutators(row: &Row) -> String {
-    let mut v: Vec<String> = row.mutators.iter().map(|m| m.to_string()).collect();
-    v.sort();
-    v.join(", ")
+    fn by_unknown_code(tier: Tier, note: &str, row: &Row) -> Self {
+        Classification { mutators: row.mutators.iter().collect(), ..Classification::with_note(tier, note) }
+    }
 }
 
 pub fn classify(row: &Row, k: KeyId) -> Classification {
@@ -1084,44 +1087,38 @@ pub fn classify(row: &Row, k: KeyId) -> Classification {
         return Classification::new(Tier::Proven);
     }
     if row.absent.contains(k) {
-        return Classification::with_note(Tier::Missing, "removed/excluded on every path");
+        return Classification::with_note(Tier::Missing, "was removed or renamed on every path to here");
     }
     if row.likely.contains(k) {
-        return Classification::with_note(Tier::Likely, format!("unknown code ran: {}", joined_mutators(row)));
+        return Classification::by_unknown_code(Tier::Likely, "unless unknown code removed it", row);
     }
     if row.top {
         return Classification::new(Tier::Unknown);
     }
     if row.closed() {
         if row.present.contains(k) {
-            return Classification::with_note(Tier::Possibly, "set on some paths only");
+            return Classification::with_note(Tier::Possibly, "is only set on some paths");
         }
-        return Classification::with_note(Tier::Missing, "all keys known");
+        return Classification::with_note(Tier::Missing, "is never set");
     }
     let prov = row.provides(k);
     let mut ext: Vec<(SourceId, KeySet)> = prov.iter().filter(|(s, _)| !source_is_data(*s)).cloned().collect();
     ext.sort_by_key(|(s, _)| source_label(*s));
     let data = prov.iter().any(|(s, _)| source_is_data(*s));
     if !ext.is_empty() {
-        let mut note = String::new();
-        if !row.mutators.is_empty() {
-            note = format!("unless {} adds it", joined_mutators(row));
-        }
-        if row.present.contains(k) {
-            note = if note.is_empty() { "also set on some paths".into() } else { format!("{}; also set on some paths", note) };
-        }
-        return Classification { tier: Tier::Input, providers: ext, note };
+        let note = if row.present.contains(k) { "also set on some paths" } else { "" };
+        return Classification { providers: ext, ..Classification::by_unknown_code(Tier::Input, note, row) };
     }
     if data {
         return Classification::new(Tier::Map);
     }
     if row.present.contains(k) {
-        return Classification::with_note(Tier::Possibly, "set on some paths only");
+        return Classification::with_note(Tier::Possibly, "is only set on some paths");
     }
     if !row.mutators.is_empty() {
-        return Classification::with_note(Tier::LikelyMissing, format!("only {} could have added it", joined_mutators(row)));
+        return Classification::by_unknown_code(Tier::LikelyMissing, "unless unknown code added it", row);
     }
-    Classification::with_note(Tier::Missing, "no source can provide it")
+    Classification::with_note(Tier::Missing, "is never set")
 }
 
 // ---------------------------------------------------------------------------
@@ -1356,30 +1353,30 @@ pub fn kv_restrict(kv: &KeyVal, keys: &KeySet) -> Option<KeyVal> {
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct ReqInfo {
     pub always: bool,
-    pub sites: StrSet,
     /// other sources that could satisfy the same access
     pub alternatives: IdSet<SourceId>,
     /// mutators that might have added the key instead
     pub caveats: StrSet,
     /// other key names of the same source that would also satisfy it
     pub alt_keys: KeySet,
+    /// read as an attribute (`x.k`), not as an item (`x["k"]`): for reports
+    pub attr: bool,
 }
 
 impl ReqInfo {
     pub fn join(&self, o: &ReqInfo) -> ReqInfo {
         ReqInfo {
             always: self.always && o.always,
-            sites: self.sites.union(&o.sites),
             alternatives: self.alternatives.union(&o.alternatives),
             caveats: self.caveats.union(&o.caveats),
             alt_keys: self.alt_keys.union(&o.alt_keys),
+            attr: self.attr || o.attr,
         }
     }
     /// Same path, second requirement on the same key: always if either is.
     pub fn seq(&self, o: &ReqInfo) -> ReqInfo {
         ReqInfo {
             always: self.always || o.always,
-            sites: self.sites.union(&o.sites),
             alternatives: if !self.alternatives.is_empty() && !o.alternatives.is_empty() {
                 self.alternatives.intersection(&o.alternatives)
             } else {
@@ -1387,6 +1384,7 @@ impl ReqInfo {
             },
             caveats: self.caveats.union(&o.caveats),
             alt_keys: if !self.alt_keys.is_empty() && !o.alt_keys.is_empty() { self.alt_keys.intersection(&o.alt_keys) } else { KeySet::new() },
+            attr: self.attr || o.attr,
         }
     }
     pub fn demote(&self) -> ReqInfo {

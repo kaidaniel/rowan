@@ -424,6 +424,7 @@ impl Analyzer {
             }
             if !text.is_empty() {
                 let t = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                self.site_names.entry(site_id).or_insert_with(|| (t.clone(), node.module, node.line));
                 let scope = self.frame().func.unwrap_or(0);
                 self.set_symbol(rid, t.clone(), scope);
                 self.origins.insert(rid, (t, node.line, given));
@@ -497,7 +498,6 @@ impl Analyzer {
     /// removed), every slot of a mutable object may now hold the call's result `rid` (any value),
     /// lists and sets any items and any length. Modules, classes and functions are not entered.
     pub fn havoc_reachable(&mut self, vals: &[Value], rid: ObjId, site: StrId, state: &mut State) {
-        if std::env::var("T1").is_ok() { return; }
         let mut seen: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
         let mut work: Vec<ObjId> = vals.iter().flat_map(|v| v.pts.iter()).collect();
         // (one object stands for "anything unknown code stored": a value per call would pile
@@ -940,11 +940,9 @@ impl Analyzer {
     /// The context of a call's allocations: its site (line and column), chained to the
     /// calling frame's context (bounded depth; beyond it a hash of the prefix).
     fn callee_site(&self, node: &Node) -> String {
-        // the call context: per call site (line and column) with `fixes`; the prototype used
-        // the line only, so two calls on one line shared their clones
         let site = if node.addr != 0 { format!("{}L{}:{}", crate::frontend::site_prefix(node.module), node.line, node.col) } else { format!("{}L{}", crate::frontend::site_prefix(node.module), node.line) };
-        // inside a tabulated frame the context is chained to the frame's, so two activations
-        // of the caller give distinct objects (bounded depth; beyond it the site alone)
+        // chained to the calling frame's context, so two activations of the caller give
+        // distinct objects
         {
             let fr = self.frame();
             let mut site = site;
@@ -956,8 +954,8 @@ impl Analyzer {
                     format!("{}/{}", fr.ctx, site)
                 } else {
                     // deeper chains stay distinct through a hash of the prefix: two activations
-                    // of the caller keep allocating distinct objects at any depth (bounded by
-                    // the tabulation budgets), while the context string stays short
+                    // of the caller keep allocating distinct objects at any depth, while the
+                    // context string stays short
                     let mut h = rustc_hash::FxHasher::default();
                     std::hash::Hash::hash(&fr.ctx, &mut h);
                     format!("h{:x}/{}", std::hash::Hasher::finish(&h), site)
@@ -1157,7 +1155,7 @@ impl Analyzer {
             }
             return Value::new();
         }
-        // summary cache: same callee, same call site, same observable input → replay the effects
+        // call cache: same callee, same call site, same observable input → replay the effects
         let sig = self.call_signature(foid, &site, entry, &self_v, &args, &kwargs, &star_args, &star_kwargs, state);
         if let Some(sig) = sig.as_ref() {
             // (a run that raised, under a try that may catch it: the handlers need the state at
@@ -1229,15 +1227,12 @@ impl Analyzer {
                         }
                     }
                 }
+                // (the run's requirements: on top of what was required here, needed always
+                // exactly when the run needed them always)
                 for (src, d) in hit.fp_state.reqs.items() {
                     for (k, info) in d.iter() {
-                        let site_id = info.sites.first().unwrap_or(s(&site));
-                        state.require(src, *k, site_id, info.alternatives.clone(), info.caveats.clone(), info.alt_keys.clone());
-                        if !info.always {
-                            if let Some(cur) = state.reqs.get(&src, k) {
-                                state.reqs.set(&src, *k, ReqInfo { always: false, ..cur });
-                            }
-                        }
+                        let merged = state.reqs.get(&src, k).map(|cur| cur.seq(info)).unwrap_or_else(|| info.clone());
+                        state.reqs.set(&src, *k, ReqInfo { always: info.always, ..merged });
                     }
                 }
                 let chain = chain_extend(&self.call_chain, &[node.line]);
@@ -1402,7 +1397,7 @@ impl Analyzer {
         let mut st = match st_final {
             Some(s) => s,
             None => {
-                // did not converge: the last tabulated state, widened (its result may be any
+                // did not converge: the last state, widened (its result may be any
                 // value, the records it touched may hold other keys)
                 let mut s0 = match self.rec_table.get(&key) {
                     Some((_, pst, _)) => pst.copy_ref(),
@@ -1658,7 +1653,7 @@ impl Analyzer {
         let exc = self.cur_exc.take().unwrap_or_else(|| Value::data("exception"));
         let cls = self.cur_exc_cls.take().or_else(|| self.exc_value_names(&exc));
         // (the same state, class and exception as the last raise recorded in this try — a loop
-        // of summarised calls raising at one call site: nothing to add)
+        // of calls raising at one call site: nothing to add)
         let depth = self.raise_states.len();
         if depth > 0 {
             let open = self.raise_states.last().is_some_and(|s| s.is_some());
@@ -2138,8 +2133,7 @@ impl Analyzer {
                 args.insert(0, sv.clone());
             }
         }
-        // `f(*xs)` with known items: they are positional arguments; a placeholder `*args`
-        // forwarded from a summary is decided per call site
+        // `f(*xs)` with known items: they are positional arguments
         let mut star_args: Vec<Value> = star_args.to_vec();
         let mut expanded: Vec<Value> = Vec::new();
         star_args.retain(|sa| {

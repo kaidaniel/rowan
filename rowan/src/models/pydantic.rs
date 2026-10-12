@@ -862,7 +862,7 @@ impl Analyzer {
                             if row.definite.contains(kk) {
                                 self.verdict(node, kk, &Classification::new(Tier::Proven), o, Ns::Item, None, None);
                             } else if !row.open() && !keys.iter().any(|k| row.present.contains(*k)) {
-                                self.verdict(node, kk, &Classification::with_note(Tier::Missing, "pydantic field required"), o, Ns::Item, None, None);
+                                self.verdict(node, kk, &Classification::with_note(Tier::Missing, "is a required field that was not given"), o, Ns::Item, None, None);
                             }
                         }
                         let open: Vec<ObjId> = recs.iter().copied().filter(|o| state.row(*o, ns_of(self, *o)).open() && !keys.iter().any(|k| state.row(*o, ns_of(self, *o)).definite.contains(*k))).collect();
@@ -1278,7 +1278,7 @@ impl Analyzer {
                 Some(v.clone())
             }
             None => {
-                self.verdict(node, nk, &Classification::with_note(Tier::Missing, "pydantic model has no such field"), oid, Ns::Attr, None, None);
+                self.verdict(node, nk, &Classification::with_note(Tier::Missing, "is not a field of the model"), oid, Ns::Attr, None, None);
                 self.raise_here("ValueError", state);
                 None
             }
