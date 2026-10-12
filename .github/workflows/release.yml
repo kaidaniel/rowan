@@ -143,7 +143,7 @@ jobs:
         run: |
           printf 'd = {"a": 1}\nx = d["b"]\n' > smoke.py
           vscode-rowan/bin/rowan smoke.py | tee smoke.out
-          grep -q "definitely missing" smoke.out
+          grep -q 'key "b" is never set$' smoke.out
 
       - name: Package the .vsix
         working-directory: vscode-rowan
