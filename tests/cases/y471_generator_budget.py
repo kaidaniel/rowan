@@ -1,9 +1,9 @@
-"""A recursive generator that calls other code (not a simple one) runs per call site, and
-those runs count against its function's budget like every other per-call-site run; past
-the budget its summary stands for it. It ran per call site without any budget: rich's
-renderers made tens of thousands of such runs."""
-#@limits tab=4
-#@tabulations <= 20
+"""A recursive generator's runs count against its function's statement budget like every other
+run; past the budget its calls are unknown code. With 8 statements: `walk` runs for the first
+tree (4 + 2 + 2) and once more, `label` 4 times, `tree` (1 statement) 8-9 times, and the
+requirement-only runs of the 3 functions add 4: about 21, bounded at 24 (rich made 10k+)."""
+#@limits budget=8
+#@tabulations <= 24
 
 
 def label(t):

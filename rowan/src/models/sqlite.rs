@@ -1253,7 +1253,7 @@ fn params_of(an: &mut Analyzer, st: &mut State, node: &Node, p: Option<&Value>) 
     let Some(p) = p else { return Some((Vec::new(), IndexMap::new())) };
     if let Some(d) = p.single().filter(|o| an.kind(*o) == Kind::Dict) {
         let row = st.row(d, Ns::Item);
-        if row.open() || row.symbolic() || row.present != row.definite {
+        if row.open() || row.present != row.definite {
             return None;
         }
         let mut named = IndexMap::new();
@@ -1731,7 +1731,6 @@ fn exec_on(an: &mut Analyzer, st: &mut State, c: &Call, con: u32, existing: Opti
     let sql = c.arg(0, Some("sql")).and_then(|v| lit(&v)).and_then(intern::key_as_str).map(|s| s.to_string());
     let uncertain = an.cond_depth > 0 || an.frame().loop_depth as usize > an.frame().unroll.len();
     let Some(sql) = sql else {
-        an.concrete_args(c.args.iter(), st);
         // unknown SQL: every table may have changed
         if let Some(db) = an.sql_dbs.get_mut(&con) {
             for t in db.tables.values_mut() {
@@ -1751,9 +1750,6 @@ fn exec_on(an: &mut Analyzer, st: &mut State, c: &Call, con: u32, existing: Opti
                 let mut total: Option<i64> = Some(0);
                 for item in items {
                     let ps = params_of(an, st, &c.node, Some(&item));
-                    if ps.is_none() {
-                        an.concrete_args([&item], st);
-                    }
                     last = run(an, con, &sql, ps, uncertain).unwrap_or_default();
                     total = total.zip(last.rowcount).map(|(a, b)| a + b);
                 }
@@ -1764,15 +1760,11 @@ fn exec_on(an: &mut Analyzer, st: &mut State, c: &Call, con: u32, existing: Opti
             None => {
                 // unknown parameters (a parameter, a global read in a summary: decided per
                 // call site): the statement's tables lose their rows
-                an.concrete_args(c.args.iter(), st);
                 run(an, con, &sql, None, true).unwrap_or_default()
             }
         }
     } else {
         let ps = params_of(an, st, &c.node, pv.as_ref());
-        if ps.is_none() {
-            an.concrete_args(c.args.iter(), st);
-        }
         run(an, con, &sql, ps, uncertain).unwrap_or_default()
     };
     cursor_obj(an, st, &c.node, con, rs, existing)
@@ -1785,15 +1777,6 @@ pub fn m_sql(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let is_con = an.sql_dbs.contains_key(&o);
     let con = if is_con { Some(o) } else { an.sql_cursors.get(&o).copied() };
     let Some(con) = con else { return Value::data("sqlite") };
-    // a connection from outside the function met while summarising: the database is not the
-    // summary's to read or change; decided per call site
-    if !an.sum_stack.is_empty() && an.is_entry_object(con) {
-        an.record_event("concrete", con);
-        for f in an.sum_stack.clone() {
-            an.sql_touched.entry(f).or_default().insert(con);
-        }
-        return Value::data("sqlite");
-    }
     match (is_con, name.as_str()) {
         (_, "execute") => exec_on(an, st, c, con, if is_con { None } else { Some(o) }, false),
         (_, "executemany") => exec_on(an, st, c, con, if is_con { None } else { Some(o) }, true),
@@ -1854,9 +1837,6 @@ pub fn row_index(an: &Analyzer, st: &State, oid: u32, key: &Value) -> Option<Val
     let c = cols.get(usize::try_from(i).ok()?)?;
     Some(st.slot(oid, Ns::Item, key_str_lit(c)))
 }
-
-pub const CON_METHODS: &[&str] = &["execute", "executemany", "executescript", "cursor", "commit", "rollback", "close", "interrupt"];
-pub const CUR_METHODS: &[&str] = &["execute", "executemany", "executescript", "fetchone", "fetchall", "fetchmany", "close"];
 
 pub fn register(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {
     r(&["sqlite3.connect"], m_connect);

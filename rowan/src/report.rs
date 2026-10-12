@@ -442,7 +442,6 @@ fn row_json(r: &crate::domain::Row) -> J {
         "absent": intern::sorted_by_str(r.absent.iter()).iter().map(|k| key_repr(*k)).collect::<Vec<_>>(),
         "closed": r.closed(),
         "top": r.top,
-        "symbolic": r.symbolic(),
         "sources": srcs,
         "source_ids": r.sources.iter().map(|(s, _)| source_label(s)).collect::<Vec<_>>(),
         "mutators": muts,
@@ -482,14 +481,12 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
     for o in v.pts.iter() {
         parts.push(render_object(an, state, o, depth, seen));
     }
-    // a part nothing is known about (data, a parameter, keys of something): `?` (not for a
-    // placeholder's own key-value: the placeholder is printed already)
-    let own_param = matches!(&v.kv, KeyVal::Param(ph) if v.pts.contains(*ph));
+    // a part nothing is known about (data, keys of something): `?`
     if let Some(t) = an.t_render(v, state) {
         parts.push(t);
     } else if let Some(expr) = data_expr(&v.kv) {
         parts.push(expr);
-    } else if !v.kv.is_literal() && !v.kv.is_bot() && !own_param {
+    } else if !v.kv.is_literal() && !v.kv.is_bot() {
         parts.push("?".into());
     }
     if parts.is_empty() {
@@ -612,7 +609,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         Kind::Class => an.obj(o).label.to_string(),
         Kind::Module => an.obj(o).label.to_string(),
         // an unknown named in the program's terms (`a`, `a(b)`, `cfg["db"]`), else `?`
-        Kind::Unknown | Kind::Ph => an.symbol_for(o).cloned().unwrap_or_else(|| "?".into()),
+        Kind::Unknown => an.symbol_for(o).cloned().unwrap_or_else(|| "?".into()),
         Kind::External => an.external_qual(o).trim_start_matches("builtins.").to_string(),
         _ => "?".into(),
     }
@@ -689,60 +686,6 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
     }
 }
 
-/// The contents (slots) of the objects a value reaches, within the printing depth.
-pub fn reachable_slots(an: &Analyzer, state: &State, v: &Value) -> Vec<(ObjId, Ns, KeyId, Value)> {
-    let max = VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed);
-    let mut out: Vec<(ObjId, Ns, KeyId, Value)> = Vec::new();
-    let mut seen: Vec<ObjId> = Vec::new();
-    let mut work: Vec<(Value, u32)> = vec![(v.clone(), 0)];
-    while let Some((val, d)) = work.pop() {
-        if d > max || out.len() > 256 {
-            continue;
-        }
-        for o in val.pts.iter() {
-            if seen.contains(&o) || matches!(an.kind(o), Kind::Function | Kind::Class | Kind::Module | Kind::External) {
-                continue;
-            }
-            seen.push(o);
-            if matches!(an.kind(o), Kind::Unknown | Kind::Ph) {
-                // unknowns: only their rows matter (`reachable_rows`)
-                continue;
-            }
-            for ns in [Ns::Item, Ns::Attr, Ns::Pos, Ns::Elem] {
-                for (k, sv) in state.obj_slots(o, ns) {
-                    work.push((sv.clone(), d + 1));
-                    out.push((o, ns, k, sv));
-                }
-            }
-        }
-    }
-    out
-}
-
-/// The rows (keys / attributes) of every object a value reaches within the printing depth.
-pub fn reachable_rows(an: &Analyzer, state: &State, v: &Value) -> Vec<(ObjId, Option<Row>, Option<Row>)> {
-    let max = VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed);
-    let mut out: Vec<(ObjId, Option<Row>, Option<Row>)> = Vec::new();
-    let mut work: Vec<(Value, u32)> = vec![(v.clone(), 0)];
-    while let Some((val, d)) = work.pop() {
-        if d > max || out.len() > 128 {
-            continue;
-        }
-        for o in val.pts.iter() {
-            if out.iter().any(|(x, _, _)| *x == o) || matches!(an.kind(o), Kind::Function | Kind::Class | Kind::Module | Kind::External) {
-                continue;
-            }
-            out.push((o, state.has_row(o, Ns::Item).then(|| state.row(o, Ns::Item)), state.has_row(o, Ns::Attr).then(|| state.row(o, Ns::Attr))));
-            for ns in [Ns::Item, Ns::Attr, Ns::Pos, Ns::Elem] {
-                for (_, sv) in state.obj_slots(o, ns) {
-                    work.push((sv, d + 1));
-                }
-            }
-        }
-    }
-    out
-}
-
 /// The symbols a value mentions (unknown objects printed by name) with what is known about
 /// each: the keys / attributes seen on it, what an unknown call may return, else `?`.
 pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, String)> {
@@ -761,7 +704,7 @@ pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, Str
             }
             seen.push(o);
             match an.kind(o) {
-                Kind::Unknown | Kind::Ph => {
+                Kind::Unknown => {
                     let Some(sym) = an.symbol_for(o) else { continue };
                     if out.iter().any(|(s, _)| s == sym) {
                         continue;
@@ -817,7 +760,7 @@ pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, Str
 pub fn facts_json(an: &Analyzer) -> J {
     let sch = schema_rows(an);
     let mut facts: Vec<J> = Vec::new();
-    for ((line, name, symbolic), f) in &an.facts {
+    for ((line, name), f) in &an.facts {
         // (a hover lists the objects a name may hold: past `MAX_FACT_OBJECTS` only the count —
         // a name holding hundreds of objects made the document hundreds of MB)
         let objects_total = f.rows.len();
@@ -844,7 +787,6 @@ pub fn facts_json(an: &Analyzer) -> J {
             crate::domain::KeyVal::Lits(ks) => json!(intern::sorted_by_str(ks.iter()).iter().map(|k| key_repr(*k)).collect::<Vec<_>>()),
             crate::domain::KeyVal::KeysOf(ko) => json!([format!("{}", crate::domain::KeyVal::KeysOf(ko.clone()))]),
             crate::domain::KeyVal::Data(_) => json!(["<data>"]),
-            crate::domain::KeyVal::Param(_) => json!(["<parameter>"]),
             crate::domain::KeyVal::Bot => json!([]),
         };
         // requirements recorded on the open sources of these objects
@@ -900,7 +842,7 @@ pub fn facts_json(an: &Analyzer) -> J {
             Some(p) => (p.clone(), f.texts.iter().filter(|t| *t != p).cloned().collect()),
             None => (f.texts.join(" | "), vec![]),
         };
-        facts.push(json!({"line": line, "name": name.to_string(), "symbolic": symbolic, "values": values, "text": text, "examples": examples, "legend": f.legend.iter().filter(|(s0, d)| !(d == "?" && f.texts.iter().all(|t| t.starts_with("Tensor[")) && an.facts_sym_is_tensor(s0))).chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "required": required, "requires": requires}));
+        facts.push(json!({"line": line, "name": name.to_string(), "values": values, "text": text, "examples": examples, "legend": f.legend.iter().filter(|(s0, d)| !(d == "?" && f.texts.iter().all(|t| t.starts_with("Tensor[")) && an.facts_sym_is_tensor(s0))).chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "required": required, "requires": requires}));
     }
     let verdicts: Vec<J> = reported(an).iter().map(|v| verdict_json(an, v)).collect();
     let mut schemas = serde_json::Map::new();

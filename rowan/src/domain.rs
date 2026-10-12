@@ -20,7 +20,6 @@ pub const MAX_CHAIN: usize = 6;
 pub type ObjId = u32;
 pub type ObjSet = IdSet<ObjId>;
 /// entry-row id: oid * 2 + (1 if attr)
-pub type Rho = u32;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Ns {
@@ -52,14 +51,6 @@ impl fmt::Display for Ns {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
-}
-
-pub fn rho(oid: ObjId, ns: Ns) -> Rho {
-    oid * 2 + if ns == Ns::Attr { 1 } else { 0 }
-}
-
-pub fn unrho(r: Rho) -> (ObjId, Ns) {
-    (r / 2, if r % 2 == 1 { Ns::Attr } else { Ns::Item })
 }
 
 // ---------------------------------------------------------------------------
@@ -381,13 +372,6 @@ pub fn lens_apply_steps(steps: &[Step], mut k: KeyId) -> Option<KeyId> {
     Some(k)
 }
 
-pub fn lens_image(l: LensId, keys: &KeySet) -> KeySet {
-    if l == EMPTY_LENS {
-        return keys.clone();
-    }
-    KeySet::from_iter(keys.iter().filter_map(|k| lens_apply(l, k)))
-}
-
 pub fn lens_str(l: LensId) -> String {
     with_lens(l, |lens| lens.steps.iter().map(|s| format!("·{}", s)).collect::<String>())
 }
@@ -407,48 +391,6 @@ pub fn lens_concat(a: LensId, b: LensId) -> LensId {
 pub fn lens_push(a: LensId, s: Step) -> LensId {
     let la = lens_get(a);
     intern::lens(la.with_step(s))
-}
-
-fn lens_segments(l: &Lens) -> Vec<(KeySet, Option<Step>)> {
-    let mut segs = Vec::new();
-    let mut kills = KeySet::new();
-    for step in &l.steps {
-        match step {
-            Step::Kill(ks) => kills = kills.union(ks),
-            _ => {
-                segs.push((kills, Some(step.clone())));
-                kills = KeySet::new();
-            }
-        }
-    }
-    segs.push((kills, None));
-    segs
-}
-
-/// Lens whose definite image is contained in both: same renames, kills united; None when
-/// the renames differ.
-pub fn lens_join_definite(a: LensId, b: LensId) -> Option<LensId> {
-    if a == b {
-        return Some(a);
-    }
-    let la = lens_get(a);
-    let lb = lens_get(b);
-    let sa = lens_segments(&la);
-    let sb = lens_segments(&lb);
-    if sa.len() != sb.len() || sa.iter().zip(sb.iter()).any(|(x, y)| x.1 != y.1) {
-        return None;
-    }
-    let mut out = Vec::new();
-    for ((ka, r), (kb, _)) in sa.into_iter().zip(sb.into_iter()) {
-        let ks = ka.union(&kb);
-        if !ks.is_empty() {
-            out.push(Step::Kill(ks));
-        }
-        if let Some(r) = r {
-            out.push(r);
-        }
-    }
-    Some(intern::lens(Lens { steps: out }))
 }
 
 pub fn lens_add_kill(l: LensId, k: KeyId) -> LensId {
@@ -532,8 +474,6 @@ fn join_order(a: &Arc<[KeyId]>, b: &Arc<[KeyId]>) -> Arc<[KeyId]> {
 }
 
 pub type SrcSet = IdSet<(SourceId, LensId)>;
-pub type TermSet = IdSet<(Rho, LensId)>;
-pub type PStoreSet = IdSet<(Rho, bool, LensId)>;
 pub type StrSet = IdSet<StrId>;
 
 #[derive(Clone, Default, PartialEq, Eq, Hash)]
@@ -546,10 +486,6 @@ pub struct RowData {
     pub sources: SrcSet,
     pub mutators: StrSet,
     pub top: bool,
-    pub terms: TermSet,
-    pub dterms: TermSet,
-    pub lterms: TermSet,
-    pub pstores: PStoreSet,
     /// insertion order of the keys stored strongly (a dict iterates in this order); it
     /// describes the row only when it holds exactly the present keys (`ordered_keys`)
     pub order: Arc<[KeyId]>,
@@ -647,35 +583,13 @@ impl Row {
         Row::from_data(RowData { present: keys.clone(), definite: keys.clone(), likely: keys, ..Default::default() })
     }
 
-    /// The entry rows ρ this row's symbolic part refers to.
-    pub fn refs(&self) -> IdSet<Rho> {
-        IdSet::from_iter(
-            self.terms
-                .iter()
-                .map(|(r, _)| r)
-                .chain(self.dterms.iter().map(|(r, _)| r))
-                .chain(self.lterms.iter().map(|(r, _)| r))
-                .chain(self.pstores.iter().map(|(r, _, _)| r)),
-        )
-    }
-
-    pub fn mentions(&self, ph: ObjId) -> bool {
-        let (a, b) = (ph * 2, ph * 2 + 1);
-        let hit = |t: &TermSet| t.iter().any(|(r, _)| r == a || r == b);
-        hit(&self.terms) || hit(&self.dterms) || hit(&self.lterms) || self.pstores.iter().any(|(r, _, _)| r == a || r == b)
-    }
-
-    pub fn symbolic(&self) -> bool {
-        !self.terms.is_empty() || !self.dterms.is_empty() || !self.lterms.is_empty() || !self.pstores.is_empty()
-    }
-
     pub fn open(&self) -> bool {
-        !self.sources.is_empty() || !self.mutators.is_empty() || self.top || self.symbolic()
+        !self.sources.is_empty() || !self.mutators.is_empty() || self.top
     }
 
-    /// Content from an input or the function's entry (not only from unknown code run on it).
+    /// Content from an input (not only from unknown code run on it).
     pub fn has_input(&self) -> bool {
-        !self.sources.is_empty() || self.top || self.symbolic()
+        !self.sources.is_empty() || self.top
     }
 
     pub fn closed(&self) -> bool {
@@ -732,10 +646,6 @@ impl Row {
             sources,
             mutators: self.mutators.union(&o.mutators),
             top: self.top || o.top,
-            terms: if self.terms != o.terms { cap_terms(self.terms.union(&o.terms)) } else { self.terms.clone() },
-            dterms: join_dterms(&self.dterms, &o.dterms),
-            lterms: join_dterms(&self.lterms, &o.lterms),
-            pstores: join_pstores(&self.pstores, &o.pstores),
             order: join_order(&self.order, &o.order),
             stored: self.stored.union(&o.stored),
         }, &[self, o])
@@ -799,13 +709,6 @@ impl Row {
         Row::from_data(d)
     }
 
-    /// Store under the (unknown) key held by placeholder ph.
-    pub fn param_store(&self, ph: ObjId, strong: bool) -> Row {
-        let mut d = self.data();
-        d.pstores = d.pstores.insert((ph, strong, EMPTY_LENS));
-        Row::from_data(d)
-    }
-
     pub fn delete(&self, k: KeyId, strong: bool) -> Row {
         let mut d = self.data();
         if strong {
@@ -819,15 +722,9 @@ impl Row {
             d.absent_likely = d.absent_likely.insert(k);
             d.stored = d.stored.remove(k);
             d.sources = d.sources.map(|(s, l)| (s, lens_add_kill(l, k)));
-            d.terms = d.terms.map(|(r, l)| (r, lens_add_kill(l, k)));
-            d.dterms = d.dterms.map(|(r, l)| (r, lens_add_kill(l, k)));
-            d.lterms = d.lterms.map(|(r, l)| (r, lens_add_kill(l, k)));
-            d.pstores = d.pstores.map(|(r, st, l)| (r, st, lens_add_kill(l, k)));
         } else {
             d.definite = d.definite.remove(k);
             d.likely = d.likely.remove(k);
-            d.dterms = d.dterms.map(|(r, l)| (r, lens_add_kill(l, k)));
-            d.lterms = d.lterms.map(|(r, l)| (r, lens_add_kill(l, k)));
         }
         Row::from_data(d)
     }
@@ -852,10 +749,6 @@ impl Row {
             sources: self.sources.map(|(s, l)| (s, push(l))),
             mutators: self.mutators.clone(),
             top: self.top,
-            terms: self.terms.map(|(r, l)| (r, push(l))),
-            dterms: self.dterms.map(|(r, l)| (r, push(l))),
-            lterms: self.lterms.map(|(r, l)| (r, push(l))),
-            pstores: self.pstores.map(|(r, st, l)| (r, st, push(l))),
             order: self.order.iter().map(|k| step.apply(*k)).collect::<Vec<_>>().into(),
             stored: f(&self.stored),
         })
@@ -892,10 +785,6 @@ impl Row {
             sources: cap_sources(self.sources.union(&o.sources.map(|(s, l)| (s, lens_concat(l, pre))))),
             mutators: self.mutators.union(&o.mutators),
             top: self.top || o.top,
-            terms: cap_terms(self.terms.union(&o.terms.map(|(r, l)| (r, lens_concat(l, pre))))),
-            dterms: if strong { self.dterms.union(&o.dterms.map(|(r, l)| (r, lens_concat(l, pre)))) } else { self.dterms.clone() },
-            lterms: if strong { self.lterms.union(&o.lterms.map(|(r, l)| (r, lens_concat(l, pre)))) } else { self.lterms.clone() },
-            pstores: self.pstores.union(&o.pstores.map(|(r, st, l)| (r, st && strong, lens_concat(l, pre)))),
             order: {
                 // a strong copy of a row whose order is known appends its new keys in order
                 let mut ord = self.order.to_vec();
@@ -922,9 +811,6 @@ impl Row {
         d.absent_likely = d.absent_likely.union(&d.absent);
         d.absent = KeySet::new();
         d.mutators = d.mutators.insert(site);
-        d.lterms = d.lterms.union(&d.dterms);
-        d.dterms = TermSet::new();
-        d.pstores = d.pstores.map(|(r, _, l)| (r, false, l));
         Row::from_data(d)
     }
 
@@ -944,152 +830,6 @@ impl Row {
         self.delete(k, true)
     }
 
-    /// The symbolic row of an object as it is at function entry.
-    pub fn entry(ph: Rho) -> Row {
-        let t = TermSet::one((ph, EMPTY_LENS));
-        Row::from_data(RowData { terms: t.clone(), dterms: t.clone(), lterms: t, ..Default::default() })
-    }
-
-    /// Exactly `Row.entry(ρ)` for some ρ.
-    pub fn is_entry(&self) -> bool {
-        let t = &self.terms;
-        t.len() == 1
-            && *t == self.dterms
-            && *t == self.lterms
-            && self.pstores.is_empty()
-            && self.present.is_empty()
-            && self.absent.is_empty()
-            && self.absent_likely.is_empty()
-            && self.sources.is_empty()
-            && self.mutators.is_empty()
-            && !self.top
-            && t.first().unwrap().1 == EMPTY_LENS
-    }
-
-    pub fn entry_rho(&self) -> Option<Rho> {
-        self.terms.first().map(|(r, _)| r)
-    }
-
-    /// Replace the symbolic part by actual entry rows and actual key values of placeholders.
-    pub fn concretise(&self, entry_row_of: &mut dyn FnMut(Rho) -> Row, kv_of: &mut dyn FnMut(ObjId) -> KeyVal) -> Row {
-        self.concretise_opt(entry_row_of, kv_of, false)
-    }
-
-    /// `bot_is_data`: a parameter-keyed store whose key has no known value opens the row as
-    /// a data-keyed map instead of being dropped.
-    pub fn concretise_opt(&self, entry_row_of: &mut dyn FnMut(Rho) -> Row, kv_of: &mut dyn FnMut(ObjId) -> KeyVal, bot_is_data: bool) -> Row {
-        if !self.symbolic() {
-            return self.clone();
-        }
-        let mut present = self.present.clone();
-        let mut definite = self.definite.clone();
-        let mut likely = self.likely.clone();
-        let mut sources = self.sources.clone();
-        let mut mutators = self.mutators.clone();
-        let mut top = self.top;
-        let mut terms: Vec<(Rho, LensId)> = Vec::new();
-        let mut dterms: Vec<(Rho, LensId)> = Vec::new();
-        let mut lterms: Vec<(Rho, LensId)> = Vec::new();
-        let mut pstores: Vec<(Rho, bool, LensId)> = Vec::new();
-        // insertion order: the entry row's (one plain term), then the keys stored here
-        let mut order: Vec<KeyId> = Vec::new();
-        if self.terms.len() == 1 && self.terms.first().map(|(_, l)| l == EMPTY_LENS).unwrap_or(false) {
-            let e = entry_row_of(self.terms.first().unwrap().0);
-            if let Some(ks) = e.ordered_keys() {
-                order = ks;
-            }
-        }
-        for k in self.order.iter() {
-            if !order.contains(k) {
-                order.push(*k);
-            }
-        }
-        for (r, l) in self.terms.iter() {
-            let e = entry_row_of(r);
-            present = present.union(&lens_image(l, &e.present));
-            sources = sources.union(&e.sources.map(|(s, l2)| (s, lens_concat(l2, l))));
-            mutators = mutators.union(&e.mutators);
-            top = top || e.top;
-            terms.extend(e.terms.iter().map(|(r2, l2)| (r2, lens_concat(l2, l))));
-            pstores.extend(e.pstores.iter().map(|(r2, _, l2)| (r2, false, lens_concat(l2, l))));
-        }
-        for (r, l) in self.dterms.iter() {
-            let e = entry_row_of(r);
-            definite = definite.union(&lens_image(l, &e.definite));
-            dterms.extend(e.dterms.iter().map(|(r2, l2)| (r2, lens_concat(l2, l))));
-            pstores.extend(e.pstores.iter().map(|(r2, st, l2)| (r2, st, lens_concat(l2, l))));
-        }
-        for (r, l) in self.lterms.iter() {
-            let e = entry_row_of(r);
-            likely = likely.union(&lens_image(l, &e.likely.union(&e.definite)));
-            lterms.extend(e.lterms.union(&e.dterms).iter().map(|(r2, l2)| (r2, lens_concat(l2, l))));
-        }
-        present = present.union(&definite);
-        likely = likely.union(&definite);
-        let absent = self.absent.difference(&present);
-        let absent_likely = self.absent_likely.difference(&present);
-        let mut out = Row::from_data(RowData {
-            present,
-            definite,
-            likely,
-            absent,
-            absent_likely,
-            sources: cap_sources(sources),
-            mutators,
-            top,
-            terms: cap_terms(TermSet::from_vec(terms)),
-            dterms: TermSet::from_vec(dterms),
-            lterms: TermSet::from_vec(lterms),
-            pstores: PStoreSet::new(),
-            order: order.into(),
-            stored: self.stored.clone(),
-        });
-        let mut remaining: Vec<(Rho, bool, LensId)> = Vec::new();
-        // (several parameter-keyed stores, or one besides literal stores: their relative order
-        // is not recorded, so a new key among them leaves the order unknown)
-        let all_ps = self.pstores.union(&PStoreSet::from_vec(pstores));
-        let order_unsure = all_ps.len() > 1 || (!all_ps.is_empty() && !self.order.is_empty());
-        let known_before: KeySet = out.present.clone();
-        for (r, strong, l) in all_ps.iter() {
-            let kv = kv_of(r);
-            match kv {
-                KeyVal::Param(ph) => {
-                    remaining.push((ph, strong, l));
-                    continue;
-                }
-                _ => {}
-            }
-            let lits = kv_literals(&kv);
-            if !lits.is_empty() {
-                let one = lits.len() == 1;
-                for k in lits.iter() {
-                    if let Some(k2) = lens_apply(l, k) {
-                        out = out.store(k2, strong && one);
-                    }
-                }
-            } else if let KeyVal::KeysOf(_) = kv {
-                out = out.data_store(Source::new(&format!("keys-of-store@{}", r), SourceKind::Data));
-            } else if let KeyVal::Bot = kv {
-                if bot_is_data {
-                    out = out.data_store(Source::new(&format!("store@param{}", r), SourceKind::Data));
-                }
-                continue;
-            } else {
-                out = out.data_store(Source::new(&format!("store@param{}", r), SourceKind::Data));
-            }
-        }
-        if order_unsure && !out.present.difference(&known_before).is_empty() {
-            let mut d = out.data();
-            d.order = Vec::new().into();
-            out = Row::from_data(d);
-        }
-        if !remaining.is_empty() {
-            let mut d = out.data();
-            d.pstores = PStoreSet::from_vec(remaining);
-            out = Row::from_data(d);
-        }
-        out
-    }
 }
 
 /// A key as it appears in the compact row form: strings in double quotes, others as in Python.
@@ -1131,7 +871,7 @@ impl Row {
         }
     }
 
-    /// The full internal form (sets, sources, mutators, symbolic terms).
+    /// The full internal form (sets, sources, mutators).
     pub fn details(&self) -> String {
         let mut parts = vec![format!("present={}", keys_str(self.present.iter())), format!("definite={}", keys_str(self.definite.iter()))];
         if self.likely != self.definite {
@@ -1150,22 +890,6 @@ impl Row {
             v.sort();
             parts.push(format!("mutators={{{}}}", v.join(", ")));
         }
-        if !self.terms.is_empty() {
-            let mut v: Vec<String> = self.terms.iter().map(|(r, l)| format!("ρ{}{}", r, lens_str(l))).collect();
-            v.sort();
-            parts.push(format!("terms={{{}}}", v.join(", ")));
-        }
-        if !self.dterms.is_empty() && self.dterms != self.terms {
-            let mut v: Vec<String> = self.dterms.iter().map(|(r, l)| format!("ρ{}{}", r, lens_str(l))).collect();
-            v.sort();
-            parts.push(format!("dterms={{{}}}", v.join(", ")));
-        }
-        if !self.pstores.is_empty() {
-            let mut v: Vec<String> =
-                self.pstores.iter().map(|(r, st, l)| format!("ρ{}{}{}", r, if st { "!" } else { "?" }, lens_str(l))).collect();
-            v.sort();
-            parts.push(format!("pstores={{{}}}", v.join(", ")));
-        }
         if self.top {
             parts.push("TOP".into());
         }
@@ -1178,75 +902,6 @@ impl fmt::Display for Row {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.compact(false))
     }
-}
-
-fn cap_terms(ts: TermSet) -> TermSet {
-    // the set is sorted by (rho, lens), so the terms of one rho are contiguous: one pass
-    let items = ts.as_slice();
-    let runs = |f: &mut dyn FnMut(usize, usize)| {
-        let mut i = 0;
-        while i < items.len() {
-            let mut j = i + 1;
-            while j < items.len() && items[j].0 == items[i].0 {
-                j += 1;
-            }
-            f(i, j);
-            i = j;
-        }
-    };
-    let mut over = false;
-    runs(&mut |i, j| {
-        if j - i > MAX_LENSES {
-            over = true;
-        }
-    });
-    if !over {
-        return ts;
-    }
-    let mut out: Vec<(Rho, LensId)> = Vec::with_capacity(items.len());
-    runs(&mut |i, j| {
-        if j - i > MAX_LENSES {
-            out.push((items[i].0, EMPTY_LENS));
-        } else {
-            out.extend_from_slice(&items[i..j]);
-        }
-    });
-    TermSet::from_vec(out)
-}
-
-/// Definite terms common to both sides (same renames; kills united).
-fn join_dterms(a: &TermSet, b: &TermSet) -> TermSet {
-    if a == b {
-        return a.clone();
-    }
-    let mut out = Vec::new();
-    for (r, la) in a.iter() {
-        for (rb, lb) in b.iter() {
-            if rb != r {
-                continue;
-            }
-            if let Some(m) = lens_join_definite(la, lb) {
-                out.push((r, m));
-            }
-        }
-    }
-    TermSet::from_vec(out)
-}
-
-fn join_pstores(a: &PStoreSet, b: &PStoreSet) -> PStoreSet {
-    if a == b {
-        return a.clone();
-    }
-    let mut out: Vec<(Rho, bool, LensId)> = Vec::new();
-    let keys: Vec<(Rho, LensId)> = a.iter().map(|(r, _, l)| (r, l)).chain(b.iter().map(|(r, _, l)| (r, l))).collect();
-    let keys = IdSet::from_vec(keys);
-    for (r, l) in keys.iter() {
-        let sa = a.iter().find(|(x, _, y)| *x == r && *y == l).map(|(_, s, _)| s);
-        let sb = b.iter().find(|(x, _, y)| *x == r && *y == l).map(|(_, s, _)| s);
-        let strong = sa.unwrap_or(false) && sb.unwrap_or(false);
-        out.push((r, strong, l));
-    }
-    PStoreSet::from_vec(out)
 }
 
 fn cap_sources(ss: SrcSet) -> SrcSet {
@@ -1425,9 +1080,6 @@ pub fn classify(row: &Row, k: KeyId) -> Classification {
     if row.likely.contains(k) {
         return Classification::with_note(Tier::Likely, format!("unknown code ran: {}", joined_mutators(row)));
     }
-    if row.symbolic() {
-        return Classification::new(Tier::Sym);
-    }
     if row.top {
         return Classification::new(Tier::Unknown);
     }
@@ -1491,8 +1143,6 @@ pub enum KeyVal {
     /// site label ("" = plain DATA)
     Data(StrId),
     Bot,
-    /// the (unknown) value of placeholder object `ph`
-    Param(ObjId),
 }
 
 pub const DATA: KeyVal = KeyVal::Data(intern::EMPTY_STR);
@@ -1522,12 +1172,6 @@ impl KeyVal {
     pub fn as_lit(&self) -> Option<KeyId> {
         match self {
             KeyVal::Lit(k) => Some(*k),
-            _ => None,
-        }
-    }
-    pub fn as_param(&self) -> Option<ObjId> {
-        match self {
-            KeyVal::Param(p) => Some(*p),
             _ => None,
         }
     }
@@ -1563,7 +1207,6 @@ impl fmt::Display for KeyVal {
                 }
             }
             KeyVal::Bot => f.write_str("⊥"),
-            KeyVal::Param(p) => write!(f, "param(ρ{})", p),
         }
     }
 }
@@ -1578,9 +1221,6 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
     }
     if b.is_bot() || empty_lits(b) {
         return a.clone();
-    }
-    if matches!(a, KeyVal::Param(_)) || matches!(b, KeyVal::Param(_)) {
-        return DATA;
     }
     if a.is_literal() && b.is_literal() {
         let ks = kv_literals(a).union(&kv_literals(b));
@@ -1651,7 +1291,6 @@ pub fn kv_map(kv: &KeyVal, step: &RenameFn) -> KeyVal {
 /// Narrow a key value by `k not in keys`; None means the path is infeasible.
 pub fn kv_exclude(kv: &KeyVal, keys: &KeySet) -> Option<KeyVal> {
     match kv {
-        KeyVal::Param(_) => Some(kv.clone()),
         KeyVal::Lit(k) => {
             if keys.contains(*k) {
                 None

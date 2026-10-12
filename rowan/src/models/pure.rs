@@ -74,25 +74,8 @@ fn key_value(an: &mut Analyzer, st: &mut State, c: &Call, k: KeyId) -> Value {
 const BUILTINS: &[&str] = &["abs", "round", "pow", "divmod", "min", "max", "int", "float", "str", "bool", "chr", "ord", "hex", "oct", "bin", "len", "repr", "ascii", "format"];
 const SEQ_OK: &[&str] = &["min", "max", "len"];
 
-/// Some(value) when the call is on literals and computed exactly. A pure call on parameters
-/// is decided per call site (a concrete event on each).
+/// Some(value) when the call is on literals and computed exactly.
 pub fn try_pure(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
-    let r = try_pure_lits(an, st, c);
-    if r.is_none() && !an.sum_stack.is_empty() {
-        let q = c.qual.as_str();
-        let pure_family = match q.rsplit_once('.') {
-            Some(("builtins", n)) => BUILTINS.contains(&n),
-            Some((f, _)) => matches!(f, "math" | "operator" | "statistics" | "str") || crate::models::pytext::FAMILIES.contains(&f),
-            None => false,
-        };
-        if pure_family {
-            an.concrete_args(c.args.iter().chain(c.kwargs.values()).chain(c.recv.iter()), st);
-        }
-    }
-    r
-}
-
-fn try_pure_lits(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
     if !c.star_args.is_empty() || !c.star_kwargs.is_empty() {
         return None;
     }

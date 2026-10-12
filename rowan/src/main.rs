@@ -232,7 +232,7 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
         }
     }
     roots.extend(search);
-    let mut an = Analyzer::new(src.clone(), file, roots, entry, imports, None)?;
+    let mut an = Analyzer::new(src.clone(), file, roots, entry, imports)?;
     an.facts_on = facts;
     an.follow = follow;
     if !an.follow.is_empty() {

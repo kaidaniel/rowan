@@ -180,7 +180,7 @@ pub fn m_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn literal_mapping(an: &mut Analyzer, st: &State, v: &Value) -> Option<IndexMap<String, String>> {
     let d = v.single().filter(|o| an.kind(*o) == Kind::Dict)?;
     let row = st.row(d, Ns::Item);
-    if row.open() || row.present != row.definite || row.symbolic() {
+    if row.open() || row.present != row.definite {
         return None;
     }
     let mut out = IndexMap::new();
@@ -346,7 +346,6 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             };
             if !ok {
                 // text from a parameter: decided per call site
-                an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
                 spec.known = false;
                 // (a text that does not parse: MissingSectionHeaderError / ParsingError /
                 // DuplicateSectionError / DuplicateOptionError)
@@ -513,7 +512,7 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn nested_mapping(an: &mut Analyzer, st: &State, v: &Value) -> Option<IndexMap<String, IndexMap<String, String>>> {
     let d = v.single().filter(|o| an.kind(*o) == Kind::Dict)?;
     let row = st.row(d, Ns::Item);
-    if row.open() || row.present != row.definite || row.symbolic() {
+    if row.open() || row.present != row.definite {
         return None;
     }
     let mut out = IndexMap::new();

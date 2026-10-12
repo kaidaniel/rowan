@@ -624,13 +624,6 @@ impl Analyzer {
         let out = self.pyd_validate(cls, &Value::obj(did), state, node, true);
         if self.pyd_last_failed {
             // whether it fails depends on a parameter's input: decided per call site
-            for sk in star_kwargs {
-                for o in sk.pts.iter() {
-                    if self.kind(o) == Kind::Ph {
-                        self.record_event("concrete", o);
-                    }
-                }
-            }
         }
         out
     }
@@ -640,9 +633,6 @@ impl Analyzer {
     fn pyd_settings_env(&mut self, pc: &PClass, prefix: &str, delim: Option<&str>, did: ObjId, state: &mut State, node: &Node) {
         let Some(env) = crate::models::external_record(self, "os.environ", state) else { return };
         // (the environment as the call site has it)
-        if !self.sum_stack.is_empty() {
-            self.record_event("concrete", env);
-        }
         let er = state.row(env, Ns::Item);
         let up = |k: KeyId| intern::key_as_str(k).map(|x| x.to_uppercase());
         for f in pc.fields.iter() {
@@ -707,7 +697,7 @@ impl Analyzer {
         let data = &self.pyd_convert(&ann, data, state, node);
         // one instance per input record (nested models of one class in one validation stay apart)
         let site = {
-            let ins: Vec<ObjId> = data.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown | Kind::Ph | Kind::Instance | Kind::Namespace)).collect();
+            let ins: Vec<ObjId> = data.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown | Kind::Instance | Kind::Namespace)).collect();
             if ins.len() == 1 {
                 format!("{}:{}:in{}", crate::interp::site_string(node), self.class_info(cls).name, ins[0])
             } else {
@@ -775,7 +765,7 @@ impl Analyzer {
         }
         // one instance per input record (nested models of one class in one validation stay apart)
         let site = {
-            let ins: Vec<ObjId> = data.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown | Kind::Ph | Kind::Instance | Kind::Namespace)).collect();
+            let ins: Vec<ObjId> = data.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown | Kind::Instance | Kind::Namespace)).collect();
             if ins.len() == 1 {
                 format!("{}:{}:in{}", crate::interp::site_string(node), self.class_info(cls).name, ins[0])
             } else {
@@ -784,7 +774,7 @@ impl Analyzer {
         };
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", self.class_info(cls).name, node.line), Payload::Cls(cls), Some(Row::new()), Ns::Attr, None, None);
         state.set_row(inst, Ns::Attr, Row::new());
-        let recs: Vec<ObjId> = data.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown | Kind::Ph | Kind::Instance | Kind::Namespace)).collect();
+        let recs: Vec<ObjId> = data.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown | Kind::Instance | Kind::Namespace)).collect();
         let recv = Value::objs(crate::domain::ObjSet::from_vec(recs.clone()));
         let other_data = data.pts.is_empty() || data.pts.iter().any(|o| !recs.contains(&o));
         let mut field_keys: Vec<KeyId> = Vec::new();
@@ -819,19 +809,6 @@ impl Analyzer {
             field_keys.extend(f.alts.iter().map(|a| key_str_lit(a)));
             let mut val = Value::new();
             let mut dflt = Value::new();
-            // a value that depends on whether a parameter's input has the key: per call site
-            {
-                let nsf = |an: &Analyzer, o: ObjId| if matches!(an.kind(o), Kind::Instance | Kind::Namespace) { Ns::Attr } else { Ns::Item };
-                let uncertain = recs.iter().any(|o| {
-                    let r = state.row(*o, nsf(self, *o));
-                    !r.definite.contains(kk) && (r.present.contains(kk) || r.open())
-                });
-                if uncertain && !self.sum_stack.is_empty() {
-                    for ph in self.ph_sources(&recs, state) {
-                        self.record_event("concrete", ph);
-                    }
-                }
-            }
             if !recs.is_empty() {
                 // by name too when `populate_by_name` (the alias wins when both are there)
                 let mut keys = vec![kk];
@@ -972,10 +949,6 @@ impl Analyzer {
             _ => entry,
         };
         self.pyd_set.insert(inst, joined);
-        let phs: Vec<ObjId> = recs.iter().copied().filter(|o| self.kind(*o) == Kind::Ph).collect();
-        if !phs.is_empty() {
-            self.pyd_inputs.insert(inst, phs);
-        }
         self.pyd_field = None;
         // extra keys with `extra="forbid"`: an error per key
         if pc.extra == Extra::Forbid && report {
@@ -1064,11 +1037,6 @@ impl Analyzer {
         self.pyd_last_failed = !errs.is_empty();
         if !errs.is_empty() {
             // whether it fails depends on a parameter's input: decided per call site
-            for &o in &recs {
-                if self.kind(o) == Kind::Ph {
-                    self.record_event("concrete", o);
-                }
-            }
         }
         if nested {
             // the enclosing validation reports them: loc under the field (unknown when the
@@ -1197,7 +1165,7 @@ impl Analyzer {
                 Kind::List | Kind::Tuple | Kind::Set => self.llen(o, state),
                 Kind::Dict => {
                     let r = state.row(o, Ns::Item);
-                    (r.closed() && r.present == r.definite && !r.symbolic()).then(|| r.present.len())
+                    (r.closed() && r.present == r.definite).then(|| r.present.len())
                 }
                 _ => None,
             };
@@ -1235,14 +1203,10 @@ impl Analyzer {
         self.raise_states.push(None);
         self.raise_values.push(None);
         self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
-        self.try_sum_depth.push(self.sum_stack.len());
         // (run with the validated values: `v.strip()` of a str field is a str method there)
-        self.force_tab_once = true;
         let out = self.call_user(f, Some(self_v), args, IndexMap::new(), vec![], vec![], state, node, None, false);
-        self.force_tab_once = false;
         self.guards.pop();
         self.try_marks.pop();
-        self.try_sum_depth.pop();
         let flagged = self.may_raise.pop().unwrap_or(false);
         let raised_at = self.raise_states.pop().flatten();
         self.raise_values.pop();
@@ -1422,27 +1386,6 @@ impl Analyzer {
         out
     }
 
-    /// The placeholders a record stands for or was built from (a dict display spreading
-    /// parameters: the parameters whose rows its row refers to).
-    pub fn ph_sources(&self, recs: &[ObjId], state: &State) -> Vec<ObjId> {
-        let mut out: Vec<ObjId> = Vec::new();
-        for &o in recs {
-            if self.kind(o) == Kind::Ph {
-                out.push(o);
-                continue;
-            }
-            for ns in [Ns::Item, Ns::Attr] {
-                for r in state.row(o, ns).refs().iter() {
-                    let (p, _) = crate::domain::unrho(r);
-                    if self.has_obj(p) && self.kind(p) == Kind::Ph && !out.contains(&p) {
-                        out.push(p);
-                    }
-                }
-            }
-        }
-        out
-    }
-
     /// A required field's read: `d[k]` on a dict / input, `o.k` on an object (verdicts and
     /// requirements as for the program's own reads).
     fn load_item_or_attr(&mut self, recv: &Value, ns: Ns, k: KeyId, node: &Node, state: &mut State) -> Value {
@@ -1532,10 +1475,6 @@ impl Analyzer {
             // it decides)
             match self.kind(o) {
                 Kind::Unknown => out = out.join(&opts),
-                Kind::Ph => {
-                    self.record_event("concrete", o);
-                    out = out.join(&opts);
-                }
                 _ => out = out.join(&Value::obj(o)),
             }
         }
@@ -1584,13 +1523,7 @@ impl Analyzer {
         };
         // (an after validator of a scalar field gets the validated value: a `str` / `int` /
         // `float` / `bool` of the input, whatever placeholder it was read from)
-        let mut val = val.clone();
-        if v.mode != "before" && v.mode != "wrap" && !val.pts.is_empty() && val.pts.iter().all(|o| self.kind(o) == Kind::Ph) {
-            let pc = self.pyd_class(cls, state);
-            if let Some(Ann::Scalar(s)) = pc.fields.iter().find(|f| f.name == field).map(|f| f.ann.clone()) {
-                val = Value::data(if s == "str" { "str" } else { s });
-            }
-        }
+        let val = val.clone();
         let val = &val;
         let mut args = vec![val.clone()];
         if v.mode == "wrap" {
@@ -1683,7 +1616,7 @@ impl Analyzer {
                         outs.push(Value::obj(o));
                         continue;
                     }
-                    if !matches!(self.kind(o), Kind::Dict | Kind::Unknown | Kind::Ph) {
+                    if !matches!(self.kind(o), Kind::Dict | Kind::Unknown) {
                         outs.push(Value::obj(o));
                         continue;
                     }
@@ -1692,14 +1625,6 @@ impl Analyzer {
                         // the tag: a required read; it picks the member
                         let dk = key_str_lit(d);
                         let tag = self.load_item(&Value::obj(o), Ns::Item, &Value::lit(dk), node, state, true);
-                        if let KeyVal::Param(p) = &tag.kv {
-                            self.record_event("concrete", *p);
-                        }
-                        for x in tag.pts.iter() {
-                            if self.kind(x) == Kind::Ph {
-                                self.record_event("concrete", x);
-                            }
-                        }
                         if tag.pts.is_empty() && tag.kv.is_literal() {
                             let tl = crate::domain::kv_literals(&tag.kv);
                             chosen = models.iter().copied().filter(|m| {
@@ -1843,7 +1768,7 @@ impl Analyzer {
                     let int_label = |d: &str| matches!(d, "int" | "bool" | "len" | "rows");
                     let of_type = |d: &str| d == t || (t == "float" && int_label(d)) || (t == "int" && int_label(d)) || d.starts_with('\u{1}');
                     let data_part = !val.kv.is_bot() && !val.kv.is_literal() && !matches!(&val.kv, KeyVal::Data(d) if of_type(&intern::str_get(*d)));
-                    let obj_part = val.pts.iter().any(|o| matches!(self.kind(o), Kind::Unknown | Kind::Ph));
+                    let obj_part = val.pts.iter().any(|o| matches!(self.kind(o), Kind::Unknown));
                     if data_part || obj_part {
                         let loc = self.pyd_field;
                         let code = match t {
@@ -1875,7 +1800,7 @@ impl Analyzer {
                 if matches!(t, "str" | "int" | "float" | "bool") && !val.pts.is_empty() {
                     let containers = val.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance)).count();
                     let total = val.pts.len() + usize::from(!val.kv.is_bot());
-                    if containers > 0 || val.pts.iter().any(|o| matches!(self.kind(o), Kind::Unknown | Kind::Ph)) {
+                    if containers > 0 || val.pts.iter().any(|o| matches!(self.kind(o), Kind::Unknown)) {
                         let loc = self.pyd_field;
                         let code = match t {
                             "str" => "string_type",
@@ -1884,11 +1809,6 @@ impl Analyzer {
                             _ => "bool_type",
                         };
                         self.pyd_err(loc, code, containers == total, false);
-                    }
-                    for o in val.pts.iter() {
-                        if self.kind(o) == Kind::Ph {
-                            self.record_event("concrete", o);
-                        }
                     }
                     let rest = Value::kv_only(coerce_kv(t, &val.kv));
                     return if containers == total { rest } else { rest.join(&Value::data(t)) };
@@ -1942,7 +1862,7 @@ impl Analyzer {
             Ann::TypedDict(td) => {
                 let td = *td;
                 let fields = self.typed_dict_fields(td, state);
-                let recs: Vec<ObjId> = val.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown | Kind::Ph)).collect();
+                let recs: Vec<ObjId> = val.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown)).collect();
                 if recs.is_empty() {
                     return val.clone();
                 }
@@ -2010,7 +1930,7 @@ impl Analyzer {
                 }
                 let mut outs: Vec<Value> = Vec::new();
                 for o in val.pts.iter() {
-                    if !matches!(self.kind(o), Kind::List | Kind::Tuple | Kind::Set | Kind::Unknown | Kind::Ph) {
+                    if !matches!(self.kind(o), Kind::List | Kind::Tuple | Kind::Set | Kind::Unknown) {
                         outs.push(Value::obj(o));
                         continue;
                     }
@@ -2043,7 +1963,7 @@ impl Analyzer {
             Ann::Dict(inner) if !matches!(**inner, Ann::Other) => {
                 let mut outs: Vec<Value> = Vec::new();
                 for o in val.pts.iter() {
-                    if matches!(self.kind(o), Kind::Unknown | Kind::Ph) {
+                    if matches!(self.kind(o), Kind::Unknown) {
                         // an open mapping: any key, each value validated
                         let row = state.row(o, Ns::Item);
                         let e = self.path_placeholder_value(o, Ns::Item, intern::STAR, &row, state);
@@ -2457,7 +2377,6 @@ impl Analyzer {
     fn pyd_dump_inner(&mut self, oid: ObjId, opts: &DumpOpts, state: &mut State, node: &Node) -> Value {
         let cls = match self.kind(oid) {
             Kind::Instance => self.instance_class(oid),
-            Kind::Ph => self.ph_info(oid).cls.get(),
             _ => None,
         };
         // a root model dumps to its root
@@ -2492,7 +2411,6 @@ impl Analyzer {
         let pc = self.pyd_class(cls, state);
         let mut order: Vec<KeyId> = Vec::new();
         let mut row = Row::new();
-        let ph = self.kind(oid) == Kind::Ph;
         let mut names: Vec<(String, Option<String>, bool, Ann, bool)> = pc.fields.iter().map(|f| (f.name.clone(), f.ser_alias.clone(), f.optional, f.ann.clone(), f.required)).collect();
         for c in &pc.computed {
             names.push((c.clone(), None, false, Ann::Other, true));
@@ -2504,7 +2422,7 @@ impl Analyzer {
             }
             let out_key = if opts.by_alias { ser.clone().unwrap_or_else(|| name.clone()) } else { name.clone() };
             let ok = key_str_lit(&out_key);
-            let v = if ph || pc.computed.contains(&name) {
+            let v = if pc.computed.contains(&name) {
                 self.load_attr(&Value::obj(oid), &name, node, state, false)
             } else {
                 state.slot(oid, Ns::Attr, nk)
@@ -2528,7 +2446,7 @@ impl Analyzer {
             let none_lit = intern::key_none();
             let only_none = v.pts.is_empty() && v.kv.as_lit() == Some(none_lit);
             let kv_none = v.kv.as_lit() == Some(none_lit) || matches!(&v.kv, KeyVal::Lits(ks) if ks.contains(none_lit));
-            let unknown_part = (!v.kv.is_literal() && !v.kv.is_bot()) || v.pts.iter().any(|o| matches!(self.kind(o), Kind::Unknown | Kind::Ph | Kind::External));
+            let unknown_part = (!v.kv.is_literal() && !v.kv.is_bot()) || v.pts.iter().any(|o| matches!(self.kind(o), Kind::Unknown | Kind::External));
             let maybe_none = kv_none || (unknown_part && (optional || matches!(ann, Ann::Optional(_))));
             let mut keep: Option<bool> = Some(true);
             let mut meet = |x: Option<bool>| {
@@ -2543,7 +2461,7 @@ impl Analyzer {
             }
             if opts.exclude_unset && !pc.computed.contains(&name) {
                 meet(match self.pyd_set.get(&oid) {
-                    Some((sure, maybe)) if !ph => {
+                    Some((sure, maybe)) => {
                         if sure.contains(nk) {
                             Some(true)
                         } else if maybe.contains(nk) {
@@ -2570,10 +2488,6 @@ impl Analyzer {
             }
             if opts.unknown_sel {
                 meet(None);
-            }
-            if keep.is_none() && ph {
-                // which keys the dump has depends on the receiver's values: per call site
-                self.record_event("concrete", oid);
             }
             if keep == Some(false) {
                 continue;
@@ -2648,20 +2562,10 @@ impl Analyzer {
             // a dataclass (pydantic's or the standard one) dumps as the dict of its fields
             let dc_cls = match self.kind(o) {
                 Kind::Instance => self.instance_class(o),
-                Kind::Ph => self.ph_info(o).cls.get().filter(|c| !is_model(self, *c)),
                 _ => None,
             };
             if dc_cls.map(|c| !self.dataclass_fields_mro(c).is_empty()).unwrap_or(false) {
                 outs.push(crate::models::asdict_of(self, state, node, &Value::obj(o)));
-                continue;
-            }
-            // a placeholder of no known class: what it dumps to is decided per call site (a
-            // model, a dataclass, a container of them)
-            if self.kind(o) == Kind::Ph && self.ph_info(o).cls.get().is_none() {
-                self.record_event("concrete", o);
-            }
-            if self.kind(o) == Kind::Ph && self.ph_info(o).cls.get().map(|c| is_model(self, c)).unwrap_or(false) {
-                outs.push(self.pyd_dump(o, opts, state, node));
                 continue;
             }
             match (self.kind(o), ann) {
@@ -2795,18 +2699,6 @@ fn dump_opts(an: &mut Analyzer, st: &mut State, c: &Call) -> DumpOpts {
         }
     }
     // a parameter's selection: decided where the caller passes a literal one
-    for n in ["include", "exclude"] {
-        if let Some(v) = c.kwargs.get(&s(n)) {
-            if let KeyVal::Param(p) = &v.kv {
-                an.record_event("concrete", *p);
-            }
-            for x in v.pts.iter() {
-                if an.kind(x) == Kind::Ph {
-                    an.record_event("concrete", x);
-                }
-            }
-        }
-    }
     o
 }
 
@@ -2817,7 +2709,6 @@ fn recv_classes(an: &Analyzer, v: &Value) -> Vec<ObjId> {
         let c = match an.kind(o) {
             Kind::Class => Some(o),
             Kind::Instance => an.instance_class(o),
-            Kind::Ph => an.ph_info(o).cls.get(),
             _ => None,
         };
         if let Some(c) = c.filter(|c| is_model(an, *c)) {
@@ -2854,25 +2745,7 @@ pub fn m_instance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "model_copy" | "copy" => {
             let mut outs = Vec::new();
             for o in recv.pts.iter() {
-                let ph_cls = if an.kind(o) == Kind::Ph { an.ph_info(o).cls.get().filter(|c| is_model(an, *c)) } else { None };
-                let cp = match ph_cls {
-                    // a placeholder typed with a model: an instance with its fields
-                    Some(cls) => {
-                        let pc = an.pyd_class(cls, st);
-                        let site = format!("{}:copy:{}", crate::interp::site_string(&c.node), an.class_info(cls).name);
-                        let inst = an.alloc(Kind::Instance, &site, st, &format!("{}@L{}", an.class_info(cls).name, c.line), Payload::Cls(cls), Some(Row::new()), Ns::Attr, None, None);
-                        let mut row = Row::new();
-                        for f in pc.fields.iter() {
-                            let nk = key_str_lit(&f.name);
-                            let v = an.load_attr(&Value::obj(o), &f.name, &c.node, st, false);
-                            row = row.store(nk, true);
-                            st.set_slot(inst, Ns::Attr, nk, v, true);
-                        }
-                        st.set_row(inst, Ns::Attr, row);
-                        inst
-                    }
-                    None => an.copy_object(o, &c.node, st, matches!(c.kwargs.get(&s("deep")).and_then(|v| v.kv.as_lit()), Some(k) if k == intern::key_bool(true)), &mut IndexMap::new()),
-                };
+                let cp = an.copy_object(o, &c.node, st, matches!(c.kwargs.get(&s("deep")).and_then(|v| v.kv.as_lit()), Some(k) if k == intern::key_bool(true)), &mut IndexMap::new());
                 if let Some(u) = c.kwargs.get(&s("update")).cloned() {
                     // `update=` sets attributes without validation (on the fresh copy: strongly
                     // for a key the update surely has)
@@ -2917,9 +2790,6 @@ pub fn m_instance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let mut outs = Vec::new();
             for o in recv.pts.iter() {
                 // made from a parameter's input: decided where the caller passes a literal one
-                for ph in an.pyd_inputs.get(&o).cloned().unwrap_or_default() {
-                    an.record_event("concrete", ph);
-                }
                 match an.pyd_set.get(&o).cloned() {
                     Some((sure, maybe)) if sure == maybe => {
                         let items: Vec<Value> = intern::sorted_by_str(sure.iter()).into_iter().map(Value::lit).collect();

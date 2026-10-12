@@ -82,24 +82,6 @@ fn is_stringio(an: &Analyzer, o: ObjId) -> bool {
     an.kind(o) == Kind::Namespace && matches!(&an.obj(o).payload, Payload::Method(q, _) if q == "stdobj.stringio")
 }
 
-/// A csv reader over a parameter's text: decided where the caller passes a known one.
-fn text_event(an: &mut Analyzer, st: &State, f: &Value) {
-    let mut ps = Vec::new();
-    if let Some(p) = f.kv.as_param() {
-        ps.push(p);
-    }
-    for o in f.pts.iter() {
-        if is_stringio(an, o) {
-            if let Some(p) = st.slot(o, Ns::Attr, text_key()).kv.as_param() {
-                ps.push(p);
-            }
-        }
-    }
-    for p in ps {
-        an.record_event("concrete", p);
-    }
-}
-
 /// The text a value of StringIO objects / strings holds (joined over the objects).
 fn text_in(an: &Analyzer, st: &State, f: &Value) -> Text {
     if f.pts.is_empty() {
@@ -311,7 +293,7 @@ pub fn stringio_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, &format!("StringIO@L{}", c.line), Payload::Method("stdobj.stringio".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
     an.obj_mut(oid).payload = Payload::Method("stdobj.stringio".into(), Value::new());
     // (the text as given: a literal, or a library's text label such as pandas' to_json)
-    let t = if init.pts.is_empty() || init.kv.as_param().is_some() || init.pts.iter().all(|o| an.kind(o) == Kind::Ph) { init } else { Value::data(&format!("text@L{}", c.line)) };
+    let t = if init.pts.is_empty() { init } else { Value::data(&format!("text@L{}", c.line)) };
     st.set_slot(oid, Ns::Attr, text_key(), t, true);
     Value::obj(oid)
 }
@@ -328,9 +310,6 @@ pub fn writer_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     };
     // (other dialect options: the texts are not known)
     let plain = c.kwargs.keys().all(|k| matches!(&*intern::str_get(*k), "delimiter" | "quotechar" | "lineterminator" | "fieldnames" | "restval" | "extrasaction"));
-    if let Some(p) = c.arg(1, Some("fieldnames")).and_then(|f| f.kv.as_param().or_else(|| f.single().filter(|o| an.kind(*o) == Kind::Ph))) {
-        an.record_event("concrete", p);
-    }
     let fields = if dict { c.arg(1, Some("fieldnames")).and_then(|f| str_seq(an, st, &f, &c.node)) } else { None };
     let restval = c.arg(2, Some("restval")).unwrap_or_else(|| Value::lit_str(""));
     let raise_extras = match c.arg(3, Some("extrasaction")).and_then(|v| v.kv.as_lit()).and_then(intern::key_as_str) {
@@ -570,7 +549,6 @@ fn dict_row_text(an: &mut Analyzer, st: &mut State, r: &Value, w: &CsvWriter, _c
 /// `csv.reader(f, delimiter=…)`: on a known text its rows (lists of str), in order.
 pub fn reader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let f = c.arg(0, Some("csvfile")).unwrap_or_default();
-    text_event(an, st, &f);
     let delim = single_char(an, c, "delimiter", ',');
     let quote = single_char(an, c, "quotechar", '"');
     let plain = c.kwargs.keys().all(|k| matches!(&*intern::str_get(*k), "delimiter" | "quotechar"));
@@ -599,7 +577,6 @@ pub fn reader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// `csv.DictReader(f, fieldnames=None, restkey=None, restval=None, …)`.
 pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let f = c.arg(0, Some("f")).unwrap_or_default();
-    text_event(an, st, &f);
     let fieldnames = c.arg(1, Some("fieldnames"));
     let restkey = c.arg(2, Some("restkey")).unwrap_or_else(|| an.none_v.clone());
     let restval = c.arg(3, Some("restval")).unwrap_or_else(|| an.none_v.clone());

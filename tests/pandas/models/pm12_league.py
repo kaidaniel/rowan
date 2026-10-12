@@ -178,6 +178,6 @@ if __name__ == "__main__":
     best = both_seasons.sort_values(["points", "gd"], ascending=False).head(1)
     best["season"]                                              #@ ok season
 
-# (first written sometimes={round,attendance}: their reads are behind `in` tests; matchday is
-# needed where round is absent)
-#@schema read_csv@L35: always={home,away,home_goals,away_goals,date} sometimes={matchday} only={home,away,home_goals,away_goals,date,matchday}
+# (first written sometimes={round,attendance}: their reads are behind `in` tests; sometimes={matchday}
+# dropped: its read is behind matchdays' caller's try, a probe, as in pm03 / pm05)
+#@schema read_csv@L35: always={home,away,home_goals,away_goals,date} only={home,away,home_goals,away_goals,date,matchday}

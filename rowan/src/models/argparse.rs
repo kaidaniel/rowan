@@ -266,7 +266,6 @@ fn read_arg(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<ArgSpec> {
             let it = an.iterate(&ch, &c.node, st);
             if it.items.is_none() {
                 // (choices from a parameter or a global: decided per call site)
-                an.concrete_args([&ch, &it.elem.flat()], st);
             }
             Some(it.items.unwrap_or_else(|| vec![Value::data("choice")]))
         }
@@ -378,9 +377,6 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "parse_args" | "parse_known_args" | "parse_intermixed_args" | "parse_known_intermixed_args" => {
             let known = name.contains("known");
             let argv = c.arg(0, Some("args"));
-            if let Some(p) = argv.as_ref().and_then(|a| a.kv.as_param().or_else(|| a.single().filter(|o| an.kind(*o) == Kind::Ph))) {
-                an.record_event("concrete", p);
-            }
             let tokens: Option<Vec<String>> = match &argv {
                 Some(a) if !(a.pts.is_empty() && a.kv.as_lit() == Some(intern::key_none())) => {
                     let it = an.iterate(a, &c.node, st);

@@ -4,7 +4,7 @@ item read on its receiver's part; replayed on such an instance (once the tabulat
 spent: here 0), it was classified against the empty item row and reported `'To'` definitely
 missing (email's `HeaderRegistry`). Likewise an attribute read on an instance whose class
 defines `__getattr__`."""
-#@limits tab=0
+# (summaries are gone since: every call runs at its call site)
 class Registry:
     def __init__(self):
         self.registry = {"to": "address"}

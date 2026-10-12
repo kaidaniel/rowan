@@ -17,7 +17,6 @@ use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
 use crate::models::Registry;
 use crate::scopes::{self as scopemod, Scopes};
 use crate::state::{Kind, State};
-use crate::summary::{Summary, SymReq, Event, PH};
 
 pub mod access;
 pub mod calls;
@@ -71,6 +70,9 @@ impl YieldStates {
     }
 }
 pub const MAX_CLONES: usize = 256;
+/// Statements a function code may run in all its calls (`ROWAN_LIMITS=budget=N`): past them
+/// its calls are unknown code.
+pub const FN_BUDGET: usize = 4096;
 /// Milliseconds after which the analysis degrades gracefully: no new tabulations (summaries
 /// are used instead) and no new clones (allocation sites collapse onto their context-free
 /// object). The per-function caps above stay as hard limits. `ROWAN_LIMITS=ms=N`.
@@ -270,25 +272,6 @@ impl FuncInfo {
 }
 
 impl FuncInfo {
-    pub fn clone_with_closure(&self, closure: IndexMap<StrId, ObjId>) -> FuncInfo {
-        FuncInfo {
-            node: self.node,
-            name: self.name.clone(),
-            qualname: self.qualname.clone(),
-            module: self.module,
-            scope: self.scope,
-            closure,
-            defaults: self.defaults.clone(),
-            cls: self.cls,
-            is_property: Cell::new(self.is_property.get()),
-            is_static: Cell::new(self.is_static.get()),
-            is_classmethod: Cell::new(self.is_classmethod.get()),
-            is_contextmanager: Cell::new(self.is_contextmanager.get()),
-            is_cached: Cell::new(self.is_cached.get()),
-            is_memo: Cell::new(self.is_memo.get()),
-            generator: Cell::new(self.generator.get()),
-        }
-    }
 }
 
 /// The body of a `with` whose manager is a `@contextmanager` generator: run where the
@@ -479,12 +462,13 @@ pub struct Frame {
     /// a strong "recent" object when this holds
     pub single_nl: bool,
     pub func: Option<ObjId>,
+    /// the function's code (`FuncNode::addr`), whose statements count against its budget
+    pub code: usize,
     pub cells: IndexMap<StrId, ObjId>,
     pub class_oid: Option<ObjId>,
     pub overlays: Vec<IndexMap<StrId, Value>>,
     pub loop_depth: u32,
     pub label: String,
-    pub symbolic: bool,
     /// indices of the enclosing unrolled loop iterations (part of the call context)
     pub unroll: Vec<usize>,
     /// a tabulated call: the objects allocated from here on are its own, and the state before
@@ -526,12 +510,12 @@ impl Frame {
             single,
             single_nl: single,
             func: None,
+            code: 0,
             cells: IndexMap::new(),
             class_oid: None,
             overlays: Vec::new(),
             loop_depth: 0,
             label: label.to_string(),
-            symbolic: false,
             unroll: Vec::new(),
             pre_call: None,
         }
@@ -583,20 +567,6 @@ impl Call {
     pub fn kw(&self, name: &str) -> Option<Value> {
         self.kwargs.get(&s(name)).cloned()
     }
-    pub fn arg_node(&self, i: usize, name: Option<&str>) -> Option<&'static ast::Expr> {
-        let c = self.call_ast?;
-        if i < c.arguments.args.len() && !matches!(c.arguments.args[i], ast::Expr::Starred(_)) {
-            return Some(&c.arguments.args[i]);
-        }
-        if let Some(n) = name {
-            for kw in c.arguments.keywords.iter() {
-                if kw.arg.as_ref().map(|a| a.id.as_str()) == Some(n) {
-                    return Some(&kw.value);
-                }
-            }
-        }
-        None
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -641,7 +611,6 @@ pub enum Payload {
     Module(Rc<ModuleInfo>),
     Func(Rc<FuncInfo>),
     Class(Rc<ClassInfo>),
-    Ph(Rc<PH>),
     /// instance: its class
     Cls(ObjId),
     /// external qualname / response tag
@@ -707,8 +676,6 @@ pub enum StoreTarget {
 /// the statement (hover support): the value it held and the rows of the objects it pointed to.
 #[derive(Clone)]
 pub struct Fact {
-    /// recorded inside a summary body (rows are relative to the function's entry)
-    pub symbolic: bool,
     pub value: Value,
     /// object -> (item row, attr row) as they were when the name was read / written
     pub rows: IndexMap<ObjId, (Option<Row>, Option<Row>)>,
@@ -747,25 +714,11 @@ pub struct ValueInfo {
 
 pub struct Analyzer {
     pub filename: String,
-    pub use_summaries: bool,
-    pub summary_table: FxHashMap<crate::summary::SummaryKey, Rc<Summary>>,
-    /// argument-class signatures seen per function (capped, see `MAX_SIGNATURES`)
-    pub sig_count: FxHashMap<ObjId, Vec<Vec<(String, ObjId)>>>,
-    /// summary key variants (code cells, typed cells, signature) seen per function: each gets
-    /// its own allocation context
-    pub key_variants: FxHashMap<ObjId, Vec<(Vec<(ObjId, Vec<ObjId>)>, Vec<(ObjId, ObjId)>, Vec<(String, ObjId)>)>>,
     /// tabulations decided by a summary's events, per function code (`FuncNode::addr`: every
     /// closure object made from one `def` shares the budget) and kind
     pub tab_count: FxHashMap<usize, usize>,
     /// every tabulated body run (forced ones included): the golden `#@tabulations <= N` bound
     pub tab_runs: usize,
-    /// tabulations of one callee at one call site under the same callers (loop rounds that
-    /// re-run it): bounded, then the summary
-    pub tab_site_count: FxHashMap<(ObjId, u32, u32, usize, Vec<u32>), usize>,
-    /// tabulations of a recursive call below the outermost activation of its function
-    pub rec_tabs: FxHashMap<ObjId, usize>,
-    /// body runs of a recursive function below its outermost activation
-    pub rec_runs: FxHashMap<ObjId, usize>,
     /// the receiver value while `load_attr` goes over a value of many objects
     pub many_receivers: Option<(Value, String, Option<Value>)>,
     /// `__next__` functions whose calls were not decided once (`unroll_next`)
@@ -780,31 +733,12 @@ pub struct Analyzer {
     /// parts of those (attributes, items, elements, results of unknown calls on them): not
     /// duck-typed either
     pub duck_parts: std::cell::RefCell<FxHashSet<ObjId>>,
-    pub module_done: bool,
     pub fresh_init: FxHashSet<ObjId>,
-    pub cell_classes: FxHashMap<ObjId, ObjId>,
-    pub sum_stack: Vec<ObjId>,
-    /// allocation context of each summary on `sum_stack` (per argument signature)
-    pub sum_ctxs: Vec<String>,
     /// per comprehension generator level: whether its items are known (unrolled)
     pub comp_known: Vec<bool>,
-    pub sum_reqs: Vec<IndexMap<crate::summary::SymKey, SymReq>>,
-    pub sum_events: Vec<IndexMap<(&'static str, ObjId), Event>>,
-    pub sum_hit: FxHashSet<ObjId>,
-    pub sum_partial: FxHashMap<ObjId, Rc<Summary>>,
-    pub sum_obj_mark: Vec<ObjId>,
-    /// per summary run: what the raises leaving the function changed since its entry (the
-    /// entry state, and the keys that differ from it at those raises), for the handlers of its
-    /// callers (`Summary::raise_fp`)
-    pub sum_raise_acc: Vec<crate::summary::RaiseAcc>,
-    /// per summary on the stack: functions further down the stack whose *partial* summary
-    /// this computation used (the result is then provisional, re-done per round of theirs)
-    pub sum_deps: Vec<FxHashSet<ObjId>>,
     /// recency abstraction: per loop iteration being analysed (innermost last), the recent
     /// objects allocated in it: (recent oid, kind, site, ctx)
     pub recent_stack: Vec<Vec<(ObjId, Kind, String, String)>>,
-    pub summary_provisional: FxHashMap<crate::summary::SummaryKey, (Rc<Summary>, FxHashSet<ObjId>)>,
-    pub model_call: u32,
     pub search_paths: Vec<String>,
     /// installed packages to follow into site-packages (top-level names; `*` for all)
     pub follow: Vec<String>,
@@ -841,8 +775,6 @@ pub struct Analyzer {
     /// try frame's locals
     /// per active try: frame depth, env-stack depth, the state before it, the object mark
     pub try_marks: Vec<(usize, usize, State, ObjId)>,
-    /// summary depth at each try (a raise inside a callee's summary is not this try's)
-    pub try_sum_depth: Vec<usize>,
     /// per enclosing try (parallel to `raise_states`): the exceptions raised at those points
     /// (what the handler's `as` name holds)
     pub raise_values: Vec<Option<Value>>,
@@ -885,8 +817,6 @@ pub struct Analyzer {
     /// `@contextmanager` generators whose with body is running: (their frame depth, their env
     /// at the yield, the env stack's length then)
     pub cm_frames: Vec<(usize, IndexMap<StrId, Value>, usize)>,
-    /// the next user call is analysed concretely (no summary)
-    pub force_tab_once: bool,
     /// `vars(obj)` dicts: stores into them are stores of obj's attributes
     pub attr_mirrors: FxHashMap<ObjId, ObjId>,
     /// results of unknown calls: (the call as written, its line, what it was given — which
@@ -911,8 +841,6 @@ pub struct Analyzer {
     pub fa_body_validation: bool,
     pub model_epoch: u64,
     pub model_born: FxHashMap<ObjId, u64>,
-    /// pandas is imported: frame-style accesses on placeholders are decided per call site
-    pub pandas_on: bool,
     /// modules that import torch (their functions all get entry runs and are tabulated)
     pub torch_modules: FxHashSet<ObjId>,
     /// the function an entry run (open parameters) is analysing
@@ -943,9 +871,6 @@ pub struct Analyzer {
     /// tensor-shape requirements / definite mismatches (models/torch.rs)
     pub shape_reqs: Vec<crate::models::torch::ShapeNote>,
     pub shape_errors: Vec<crate::models::torch::ShapeNote>,
-    /// (class, symbol of an `__init__` value) → `self.attr` holding it
-    pub t_sym_alias: FxHashMap<(ObjId, crate::shape::Sym), String>,
-    pub t_dim_alias: FxHashMap<(ObjId, crate::shape::DimId), String>,
     /// Enum classes: their members in definition order
     pub enum_members: FxHashMap<ObjId, Vec<(String, ObjId)>>,
     /// every name of an Enum in definition order, aliases (a name whose value an earlier
@@ -993,9 +918,6 @@ pub struct Analyzer {
     pub path_classes: FxHashMap<ObjId, String>,
     /// sqlite3 connections (their databases), cursors (their connection), Row dicts (columns)
     pub sql_dbs: FxHashMap<ObjId, crate::models::sqlite::Db>,
-    /// functions whose summary met a connection from outside (left alone there): a summary
-    /// used without tabulating leaves those databases' rows unknown
-    pub sql_touched: FxHashMap<ObjId, FxHashSet<ObjId>>,
     pub sql_cursors: FxHashMap<ObjId, ObjId>,
     pub sql_rows: FxHashMap<ObjId, Vec<String>>,
     /// itertools.count / cycle / repeat(x) objects
@@ -1040,7 +962,6 @@ pub struct Analyzer {
     pub entry_instances: FxHashMap<ObjId, ObjId>,
     pub fresh_in_progress: FxHashSet<ObjId>,
     pub main_module: ObjId,
-    pub main_tree: &'static ast::ModModule,
     pub series: ObjId,
     pub none_v: Value,
     /// `#@row NAME:` checks requested by the golden harness: (file relative to the main
@@ -1093,8 +1014,6 @@ pub struct Analyzer {
     pub pyd_last_failed: bool,
     /// pydantic instances: the fields their input surely / maybe gave (`model_fields_set`)
     pub pyd_set: FxHashMap<ObjId, (KeySet, KeySet)>,
-    /// pydantic instances validated from placeholders: those inputs
-    pub pyd_inputs: FxHashMap<ObjId, Vec<ObjId>>,
     /// specialisations of generic models: their type variables' bindings
     pub pyd_generic: FxHashMap<ObjId, Vec<(String, crate::models::pydantic::Ann)>>,
     /// a requirement-only entry run (`param F.x` schemas of a called function): no verdicts,
@@ -1137,10 +1056,6 @@ pub struct Analyzer {
     pub userdict_classes: FxHashSet<ObjId>,
     /// per module: global names a function body mutates (`mutated_in_functions`)
     pub mutated_globals: std::cell::RefCell<FxHashMap<u32, FxHashSet<String>>>,
-    /// per summary being built: its row-check observations
-    pub sum_obs: Vec<Vec<crate::summary::Obs>>,
-    /// per summary being built: the hover facts recorded in its body (resolved per call)
-    pub sum_fact_obs: Vec<Vec<crate::summary::FactObs>>,
     /// locals of the callers of the running call (innermost last), for liveness
     pub env_stack: Vec<IndexMap<StrId, Value>>,
     /// `@name.setter` functions by (defining class, attribute)
@@ -1156,8 +1071,7 @@ pub struct Analyzer {
     pub row_checks: Vec<RowCheck>,
     /// collect `facts` (the `--facts` mode)
     pub facts_on: bool,
-    pub facts: IndexMap<(u32, StrId, bool), Fact>,
-    pub main_stmt_lines: FxHashSet<usize>,
+    pub facts: IndexMap<(u32, StrId), Fact>,
     pub t0: std::time::Instant,
 }
 
@@ -1176,46 +1090,26 @@ pub fn site_string(n: &Node) -> String {
 }
 
 impl Analyzer {
-    pub fn new(source: String, filename: &str, search_paths: Vec<String>, analyse_entry_points: bool, follow_imports: bool, use_summaries: Option<bool>) -> Result<Analyzer, String> {
+    pub fn new(source: String, filename: &str, search_paths: Vec<String>, analyse_entry_points: bool, follow_imports: bool) -> Result<Analyzer, String> {
         crate::state::reset_thread_state();
         crate::models::pynum::set_opaque(false);
         crate::models::pynum::reset_used();
         crate::models::chrono::reset_used();
-        let use_summaries = use_summaries.unwrap_or_else(|| std::env::var("ROWAN_SUMMARIES").map(|v| v != "0").unwrap_or(true));
         let (idx, tree) = frontend::parse("__main__", Some(filename), source)?;
         frontend::set_main(idx);
         let mut an = Analyzer {
             filename: filename.to_string(),
-            use_summaries,
-            summary_table: FxHashMap::default(),
-            sig_count: FxHashMap::default(),
-            key_variants: FxHashMap::default(),
             tab_count: FxHashMap::default(),
             tab_runs: 0,
-            tab_site_count: FxHashMap::default(),
-            rec_tabs: FxHashMap::default(),
-            rec_runs: FxHashMap::default(),
             many_receivers: None,
             no_unroll_next: FxHashSet::default(),
             raise_last: FxHashMap::default(),
             classes_by_attr: Default::default(),
             duck_seen: Default::default(),
             duck_parts: Default::default(),
-            module_done: false,
             fresh_init: FxHashSet::default(),
-            cell_classes: FxHashMap::default(),
-            sum_stack: Vec::new(),
-            sum_ctxs: Vec::new(),
             comp_known: Vec::new(),
-            sum_reqs: Vec::new(),
-            sum_events: Vec::new(),
-            sum_hit: FxHashSet::default(),
-            sum_partial: FxHashMap::default(),
-            sum_obj_mark: Vec::new(),
-            sum_deps: Vec::new(),
             recent_stack: Vec::new(),
-            summary_provisional: FxHashMap::default(),
-            model_call: 0,
             search_paths: if follow_imports { search_paths } else { Vec::new() },
             follow: Vec::new(),
             site_paths: Vec::new(),
@@ -1251,13 +1145,11 @@ impl Analyzer {
             rec_entry: FxHashMap::default(),
             rec_widened: FxHashSet::default(),
             loop_stack: Vec::new(),
-            sum_raise_acc: Vec::new(),
             finally_stack: Vec::new(),
             guards: Vec::new(),
             may_raise: Vec::new(),
             raise_states: Vec::new(),
             try_marks: Vec::new(),
-            try_sum_depth: Vec::new(),
             raise_values: Vec::new(),
             cur_exc: None,
             handling: Vec::new(),
@@ -1275,7 +1167,6 @@ impl Analyzer {
             key_alias: None,
             cm_hook: None,
             cm_frames: Vec::new(),
-            force_tab_once: false,
             attr_mirrors: FxHashMap::default(),
             origins: FxHashMap::default(),
             symbols: FxHashMap::default(),
@@ -1306,7 +1197,6 @@ impl Analyzer {
             re_matches: FxHashMap::default(),
             path_classes: FxHashMap::default(),
             sql_dbs: FxHashMap::default(),
-            sql_touched: FxHashMap::default(),
             sql_cursors: FxHashMap::default(),
             sql_rows: FxHashMap::default(),
             infinites: FxHashMap::default(),
@@ -1340,7 +1230,6 @@ impl Analyzer {
             fa_body_validation: false,
             model_epoch: 0,
             model_born: FxHashMap::default(),
-            pandas_on: false,
             torch_modules: FxHashSet::default(),
             entry_run: None,
             entry_done: FxHashSet::default(),
@@ -1357,11 +1246,8 @@ impl Analyzer {
             verdict_guarded: false,
             shape_reqs: Vec::new(),
             shape_errors: Vec::new(),
-            t_sym_alias: FxHashMap::default(),
-            t_dim_alias: FxHashMap::default(),
             fresh_in_progress: FxHashSet::default(),
             main_module: 0,
-            main_tree: tree,
             series: 0,
             none_v: Value::lit(intern::key_none()),
             row_check_requests: Vec::new(),
@@ -1388,7 +1274,6 @@ impl Analyzer {
             narrow_depth: 0,
             pyd_last_failed: false,
             pyd_set: FxHashMap::default(),
-            pyd_inputs: FxHashMap::default(),
             pyd_generic: FxHashMap::default(),
             quiet: false,
             quiet_records: false,
@@ -1410,8 +1295,6 @@ impl Analyzer {
             deques: FxHashMap::default(),
             userdict_classes: FxHashSet::default(),
             mutated_globals: Default::default(),
-            sum_obs: Vec::new(),
-            sum_fact_obs: Vec::new(),
             env_stack: Vec::new(),
             prop_setters: FxHashMap::default(),
             dd_factories: FxHashMap::default(),
@@ -1420,7 +1303,6 @@ impl Analyzer {
             row_checks: Vec::new(),
             facts_on: false,
             facts: IndexMap::new(),
-            main_stmt_lines: FxHashSet::default(),
             t0: std::time::Instant::now(),
         };
         an.main_module = an.make_module("__main__", Some(filename), idx, tree);
@@ -1504,18 +1386,6 @@ impl Analyzer {
             _ => None,
         }
     }
-    pub fn ph_info(&self, oid: ObjId) -> Rc<PH> {
-        match &self.obj(oid).payload {
-            Payload::Ph(p) => p.clone(),
-            _ => panic!("not a placeholder: {}", oid),
-        }
-    }
-    pub fn ph_info_opt(&self, oid: ObjId) -> Option<Rc<PH>> {
-        match &self.obj(oid).payload {
-            Payload::Ph(p) => Some(p.clone()),
-            _ => None,
-        }
-    }
     pub fn external_qual(&self, oid: ObjId) -> String {
         match &self.obj(oid).payload {
             Payload::Str(q) => q.clone(),
@@ -1572,68 +1442,6 @@ impl Analyzer {
         });
         self.obj_index.insert(key, oid);
         oid
-    }
-
-    /// What models keep about an object, for its clone (a summary's template instantiated).
-    pub fn copy_side_tables(&mut self, t: ObjId, nid: ObjId) {
-        // (an exception object, a numpy structured array)
-        if let Some(n) = self.exc_objs.get(&t).cloned() {
-            self.exc_objs.insert(nid, n);
-        }
-        if self.np_struct.contains(&t) {
-            self.np_struct.insert(nid);
-        }
-        if let Some(a) = self.argp.get(&t).cloned() {
-            self.argp.insert(nid, a);
-        }
-        if let Some(w) = self.csv_writers.get(&t).cloned() {
-            self.csv_writers.insert(nid, w);
-        }
-        if let Some(r) = self.csv_readers.get(&t).cloned() {
-            self.csv_readers.insert(nid, r);
-        }
-        if self.ci_dicts.contains(&t) {
-            self.ci_dicts.insert(nid);
-        }
-        if let Some(d) = self.deques.get(&t).cloned() {
-            self.deques.insert(nid, d);
-        }
-        if self.counters.contains(&t) {
-            self.counters.insert(nid);
-        }
-        if let Some(m) = self.chainmaps.get(&t).cloned() {
-            self.chainmaps.insert(nid, m);
-        }
-        if let Some(p) = self.partial_star.get(&t).cloned() {
-            self.partial_star.insert(nid, p);
-        }
-        if let Some(w) = self.wrapped.get(&t).cloned() {
-            self.wrapped.insert(nid, w);
-        }
-        if let Some(c) = self.cfg_parsers.get(&t).cloned() {
-            self.cfg_parsers.insert(nid, c);
-        }
-        if let Some(c) = self.cfg_sections.get(&t).cloned() {
-            self.cfg_sections.insert(nid, c);
-        }
-        if let Some(c) = self.re_patterns.get(&t).cloned() {
-            self.re_patterns.insert(nid, c);
-        }
-        if let Some(c) = self.re_matches.get(&t).cloned() {
-            self.re_matches.insert(nid, c);
-        }
-        if let Some(c) = self.path_classes.get(&t).cloned() {
-            self.path_classes.insert(nid, c);
-        }
-        if let Some(c) = self.sql_dbs.get(&t).cloned() {
-            self.sql_dbs.insert(nid, c);
-        }
-        if let Some(c) = self.sql_cursors.get(&t).cloned() {
-            self.sql_cursors.insert(nid, c);
-        }
-        if let Some(c) = self.sql_rows.get(&t).cloned() {
-            self.sql_rows.insert(nid, c);
-        }
     }
 
     /// The length of a list / tuple on this path (positions 0..n are its items), else None.
@@ -1693,15 +1501,6 @@ impl Analyzer {
         self.alloc_full(kind, site, state, label, payload, row, ns, single, ctx, true)
     }
 
-    /// `alloc` for an object cloned from a template: `tsingle` is the template's strength.
-    #[allow(clippy::too_many_arguments)]
-    pub fn alloc_in_frame(&mut self, kind: Kind, site: &str, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, tsingle: bool, ctx: &str, ctx_single: bool) -> ObjId {
-        if !tsingle || !ctx_single {
-            return self.alloc_full(kind, site, state, label, payload, row, ns, Some(false), Some(ctx), true);
-        }
-        self.alloc_full(kind, site, state, label, payload, row, ns, None, Some(ctx), true)
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn alloc_full(&mut self, kind: Kind, site: &str, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, single: Option<bool>, ctx: Option<&str>, _reserved: bool) -> ObjId {
         let fr = self.frame();
@@ -1709,7 +1508,7 @@ impl Analyzer {
         let label = if label.is_empty() { format!("{}@{}", kind.name(), site) } else { label.to_string() };
         // inside unrolled loop iterations each iteration is straight-line code: its own site
         let site_buf;
-        let site: &str = if !fr.unroll.is_empty() && !fr.symbolic {
+        let site: &str = if !fr.unroll.is_empty() {
             site_buf = format!("{}#{}", site, fr.unroll.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("."));
             &site_buf
         } else {
@@ -2006,10 +1805,6 @@ impl Analyzer {
         format!("L{}", node.line)
     }
 
-    pub fn access_site_id(&self, node: &Node) -> StrId {
-        s(&format!("L{}", node.line))
-    }
-
     // ------------------------------------------------------------- entry
     /// Past the time budget: the analysis keeps going but stops refining (see `MAX_MS`).
     /// Whether a function body of module `m` calls a mutating method on the global `name`
@@ -2134,7 +1929,6 @@ impl Analyzer {
         let mut state = State::new();
         let main = self.main_module;
         self.run_module(main, &mut state);
-        self.module_done = true;
         if self.analyse_entry_points {
             self.analyse_uncalled(&mut state);
         }
@@ -2247,12 +2041,11 @@ impl Analyzer {
             };
             if debug_enabled() {
                 eprintln!(
-                    "[rowan] entry {} L{} t={:.1}s objs={} summaries={} verdicts={} quiet={} torch={} analysed={}",
+                    "[rowan] entry {} L{} t={:.1}s objs={} verdicts={} quiet={} torch={} analysed={}",
                     fi.qualname,
                     fi.node.node().line,
                     self.now(),
                     self.objects.len(),
-                    self.summary_table.len(),
                     self.verdicts.len(),
                     quiet,
                     self.torch_modules.contains(&fi.module),
@@ -2632,22 +2425,6 @@ impl Analyzer {
         inst
     }
 
-    /// Hover facts: a name was read or written at `node` holding `v` (concrete analyses only;
-    /// the symbolic rows of a summary body are not meaningful to a reader).
-    /// A concrete hover fact for a line inside a function whose summary was instantiated:
-    /// `rows` are the rows resolved for this call; the text shows them with values unknown
-    /// (the caller's state after the call does not tell what the slots held at that line).
-    /// Does the fact at (line, name) of a concrete run show all the texts it can (4)?
-    pub fn fact_full(&self, line: u32, name: StrId) -> bool {
-        !self.torch_on && self.facts.get(&(line, name, false)).is_some_and(|e| e.texts.len() >= 4)
-    }
-
-    pub fn join_fact_value(&mut self, line: u32, name: StrId, v: &Value) {
-        if let Some(e) = self.facts.get_mut(&(line, name, false)) {
-            e.value = e.value.join(v);
-        }
-    }
-
     /// The user classes that define attribute `nk` (in definition order), cached while the
     /// class table does not grow: an unknown value's attribute is looked up in every class.
     pub fn classes_defining(&self, nk: KeyId) -> Vec<ObjId> {
@@ -2664,81 +2441,18 @@ impl Analyzer {
         v
     }
 
-    pub fn record_resolved_fact(&mut self, line: u32, name: StrId, v: &Value, rows: Vec<(ObjId, Option<Row>, Option<Row>)>, slots: Vec<(ObjId, Ns, KeyId, Value)>, scope: u32, state: &State) {
-        let mut scratch = state.copy_ref();
-        // contents as they were at that line (captured, resolved for this call); objects whose
-        // contents were not captured show `?` rather than what they hold after the call
-        let mut cleared: Vec<ObjId> = Vec::new();
-        for (o, _, _, _) in &slots {
-            if !cleared.contains(o) {
-                scratch.drop_obj(*o);
-                cleared.push(*o);
-            }
-        }
-        for (o, ns, k, sv) in &slots {
-            scratch.set_slot(*o, *ns, *k, sv.clone(), false);
-        }
-        for (o, item, attr) in &rows {
-            if !cleared.contains(o) {
-                scratch.drop_obj(*o);
-            }
-            if let Some(r) = item {
-                scratch.set_row(*o, Ns::Item, r.clone());
-            }
-            if let Some(r) = attr {
-                scratch.set_row(*o, Ns::Attr, r.clone());
-            }
-        }
-        let (text, legend) = crate::report::in_scope(scope, || (crate::report::render_value(self, &scratch, v, 0, &mut Vec::new()), crate::report::value_legend(self, &scratch, v)));
-        let e = self.facts.entry((line, name, false)).or_insert_with(|| Fact { symbolic: false, value: Value::new(), rows: IndexMap::new(), texts: Vec::new(), legend: Vec::new(), t_names: FxHashMap::default(), primary: None, written: false });
-        e.value = e.value.join(v);
-        if !e.texts.contains(&text) && e.texts.len() < 4 {
-            e.texts.push(text);
-        }
-        for (sym, desc) in legend {
-            match e.legend.iter_mut().find(|(s0, _)| *s0 == sym) {
-                Some((_, d)) if *d != desc && !d.split(" | ").any(|p| p == desc) => *d = format!("{} | {}", d, desc),
-                Some(_) => {}
-                None => e.legend.push((sym, desc)),
-            }
-        }
-        let join_opt = |a: &Option<Row>, b: &Option<Row>| -> Option<Row> {
-            match (a, b) {
-                (Some(x), Some(y)) => Some(x.join(y)),
-                (Some(x), None) | (None, Some(x)) => Some(x.clone()),
-                _ => None,
-            }
-        };
-        for (oid, item, attr) in rows {
-            // the objects the name holds (nested ones only shaped the text)
-            if !v.pts.contains(oid) {
-                continue;
-            }
-            match e.rows.get_mut(&oid) {
-                Some((ci, ca)) => {
-                    *ci = join_opt(ci, &item);
-                    *ca = join_opt(ca, &attr);
-                }
-                None => {
-                    e.rows.insert(oid, (item, attr));
-                }
-            }
-        }
-    }
-
     pub fn record_fact(&mut self, node: &Node, name: StrId, v: &Value, state: &State) {
         if !self.facts_on || node.addr == 0 || self.quiet {
             return;
         }
-        let symbolic = !self.sum_stack.is_empty();
         if node.module != self.module_info(self.main_module).idx {
             return;
         }
         let mut rows: Vec<(ObjId, Option<Row>, Option<Row>)> = Vec::new();
         for oid in v.pts.iter() {
             let k = self.kind(oid);
-            let item = if matches!(k, Kind::Dict | Kind::Frame | Kind::Unknown | Kind::Namespace | Kind::Ph | Kind::Module | Kind::Class) || state.has_row(oid, Ns::Item) { Some(state.row(oid, Ns::Item)) } else { None };
-            let attr = if matches!(k, Kind::Instance | Kind::Namespace | Kind::Unknown | Kind::Ph | Kind::Module | Kind::Class) || state.has_row(oid, Ns::Attr) { Some(state.row(oid, Ns::Attr)) } else { None };
+            let item = if matches!(k, Kind::Dict | Kind::Frame | Kind::Unknown | Kind::Namespace | Kind::Module | Kind::Class) || state.has_row(oid, Ns::Item) { Some(state.row(oid, Ns::Item)) } else { None };
+            let attr = if matches!(k, Kind::Instance | Kind::Namespace | Kind::Unknown | Kind::Module | Kind::Class) || state.has_row(oid, Ns::Attr) { Some(state.row(oid, Ns::Attr)) } else { None };
             rows.push((oid, item, attr));
         }
         let join_opt = |a: &Option<Row>, b: &Option<Row>| -> Option<Row> {
@@ -2748,23 +2462,12 @@ impl Analyzer {
                 _ => None,
             }
         };
-        if symbolic {
-            let full = self.sum_fact_obs.last().map(|t| t.len() >= 4096).unwrap_or(true);
-            let slots = if full { Vec::new() } else { crate::report::reachable_slots(self, state, v) };
-            let rows = if full { Vec::new() } else { crate::report::reachable_rows(self, state, v) };
-            let fscope = self.frame().func.unwrap_or(0);
-            if let Some(top) = self.sum_fact_obs.last_mut() {
-                if !full {
-                    top.push(crate::summary::FactObs { line: node.line, name, value: v.clone(), rows: rows.clone(), slots, scope: fscope });
-                }
-            }
-        }
         let scope = self.frame().func.unwrap_or(0);
         // (a fact that has all the texts it shows (4) only joins the value and rows: rendering a
         // large value at every run of the line is what costs — not in torch programs, whose
         // hover is the assignment's own value)
         if !self.torch_on {
-            if let Some(e) = self.facts.get_mut(&(node.line, name, symbolic)) {
+            if let Some(e) = self.facts.get_mut(&(node.line, name)) {
                 if e.texts.len() >= 4 {
                     e.value = e.value.join(v);
                     for (oid, item, attr) in rows {
@@ -2798,7 +2501,7 @@ impl Analyzer {
         };
         legend.extend(tlegend);
         let writing = std::mem::take(&mut self.t_fact_write);
-        let e = self.facts.entry((node.line, name, symbolic)).or_insert_with(|| Fact { symbolic, value: Value::new(), rows: IndexMap::new(), texts: Vec::new(), legend: Vec::new(), t_names: FxHashMap::default(), primary: None, written: false });
+        let e = self.facts.entry((node.line, name)).or_insert_with(|| Fact { value: Value::new(), rows: IndexMap::new(), texts: Vec::new(), legend: Vec::new(), t_names: FxHashMap::default(), primary: None, written: false });
         // in torch programs an assignment's value is what the hover shows (`y = f(y)`)
         if self.torch_on {
             if writing && !e.written {
@@ -2880,7 +2583,6 @@ impl Analyzer {
             work.extend(v.pts.iter());
             match &v.kv {
                 KeyVal::KeysOf(ko) => work.extend(ko.objs.iter()),
-                KeyVal::Param(p) => work.push(*p),
                 _ => {}
             }
         }
@@ -2941,7 +2643,6 @@ impl Analyzer {
             work.extend(v.pts.iter());
             match &v.kv {
                 KeyVal::KeysOf(ko) => work.extend(ko.objs.iter()),
-                KeyVal::Param(p) => work.push(*p),
                 _ => {}
             }
         }
@@ -2949,7 +2650,6 @@ impl Analyzer {
         state.slots.each(&o, &mut |_, v| push_value(v, work));
         match state.elems.get_ref(&o) {
             Some(KeyVal::KeysOf(ko)) => work.extend(ko.objs.iter()),
-            Some(KeyVal::Param(p)) => work.push(*p),
             _ => {}
         }
         for (lo, v) in state.lasts.iter() {
@@ -2962,11 +2662,6 @@ impl Analyzer {
         }
         match &self.obj(o).payload {
             Payload::Func(fi) => work.extend(fi.closure.values().copied()),
-            Payload::Ph(p) => {
-                if let Some(par) = p.parent {
-                    work.push(par);
-                }
-            }
             Payload::Cls(c) => work.push(*c),
             Payload::Method(_, v) | Payload::View(_, v) | Payload::Enumerate(v, _) => push_value(v, work),
             Payload::Bound(f, v) | Payload::Super(f, v) => {
@@ -3008,16 +2703,10 @@ impl Analyzer {
         if let Some(srcs) = self.lazy_src.get(&o) {
             work.extend(srcs.iter().map(|(s, _)| *s));
         }
-        for m in [&self.attr_mirrors, &self.entry_instances, &self.copy_root, &self.sql_cursors, &self.cell_classes] {
+        for m in [&self.attr_mirrors, &self.entry_instances, &self.copy_root, &self.sql_cursors] {
             if let Some(x) = m.get(&o) {
                 work.push(*x);
             }
-        }
-        if let Some(xs) = self.sql_touched.get(&o) {
-            work.extend(xs.iter().copied());
-        }
-        if let Some(xs) = self.pyd_inputs.get(&o) {
-            work.extend(xs.iter().copied());
         }
         if let Some(items) = self.sorted_items.get(&o) {
             items.iter().for_each(|(_, v, _)| push_value(v, work));
@@ -3047,12 +2736,11 @@ impl Analyzer {
             work.extend(v.pts.iter());
             match &v.kv {
                 KeyVal::KeysOf(ko) => work.extend(ko.objs.iter()),
-                KeyVal::Param(p) => work.push(*p),
                 _ => {}
             }
         }
         let st = State::new();
-        for o in self.chainmaps.keys().chain(self.dd_factories.keys()).chain(self.csv_readers.keys()).chain(self.wrapped.keys()).chain(self.partial_star.keys()).chain(self.lazy_src.keys()).chain(self.attr_mirrors.keys()).chain(self.entry_instances.keys()).chain(self.copy_root.keys()).chain(self.sql_cursors.keys()).chain(self.sql_touched.keys()).chain(self.pyd_inputs.keys()).chain(self.sorted_items.keys()).chain(self.exit_callbacks.keys()).chain(self.sdispatch.keys()).chain(self.fa_app_deps.keys()) {
+        for o in self.chainmaps.keys().chain(self.dd_factories.keys()).chain(self.csv_readers.keys()).chain(self.wrapped.keys()).chain(self.partial_star.keys()).chain(self.lazy_src.keys()).chain(self.attr_mirrors.keys()).chain(self.entry_instances.keys()).chain(self.copy_root.keys()).chain(self.sql_cursors.keys()).chain(self.sorted_items.keys()).chain(self.exit_callbacks.keys()).chain(self.sdispatch.keys()).chain(self.fa_app_deps.keys()) {
             // (the side-table edges only: the key itself may be dead)
             let mut w = Vec::new();
             self.obj_edges(*o, &st, &mut w);
@@ -3103,7 +2791,7 @@ impl Analyzer {
         }
         for o in v.pts.iter() {
             match self.kind(o) {
-                Kind::Unknown | Kind::Ph | Kind::External => info.unknown = true,
+                Kind::Unknown | Kind::External => info.unknown = true,
                 // a tuple of known literals is that literal (as Python prints it)
                 Kind::Tuple | Kind::Pair if self.literal_tuple(o, state, 0).is_some() => info.lits.push(self.literal_tuple(o, state, 0).unwrap()),
                 _ => info.objects.push(self.obj(o).label.to_string()),
@@ -3173,7 +2861,6 @@ impl Analyzer {
             let v = self.load_name(s(&name), &Node::none(), state);
             let mut rows: Vec<Row> = Vec::new();
             let mut ns_used = Ns::Item;
-            let mut obs_rows: Vec<(ObjId, Ns, Row)> = Vec::new();
             for oid in v.pts.iter() {
                 // a UserDict's keys are those of its `data`
                 if self.kind(oid) == Kind::Instance && self.instance_class(oid).map(|c| self.mro(c).iter().any(|m| self.userdict_classes.contains(m))).unwrap_or(false) {
@@ -3181,7 +2868,6 @@ impl Analyzer {
                     if let Some(dd) = d.single().filter(|x| self.kind(*x) == Kind::Dict) {
                         ns_used = Ns::Item;
                         rows.push(state.row(dd, Ns::Item));
-                        obs_rows.push((dd, Ns::Item, state.row(dd, Ns::Item)));
                         continue;
                     }
                 }
@@ -3189,37 +2875,17 @@ impl Analyzer {
                 if let Payload::View(ViewKind::Proxy, inner) = self.obj(oid).payload.clone() {
                     for dd in inner.pts.iter() {
                         rows.push(state.row(dd, Ns::Item));
-                        obs_rows.push((dd, Ns::Item, state.row(dd, Ns::Item)));
                     }
                     continue;
                 }
-                let typed = self.kind(oid) == Kind::Ph && self.ph_info(oid).cls.get().map(|c| self.class_info_opt(c).is_some()).unwrap_or(false);
                 // (a numpy structured array is keyed by its fields)
                 // (an instance of a dict subclass: its items)
                 let dict_sub = self.kind(oid) == Kind::Instance && self.instance_class(oid).is_some_and(|c| self.mro(c).iter().any(|x| self.class_info_opt(*x).map(|ci| ci.dict_base).unwrap_or(false)));
-                let ns = if (matches!(self.kind(oid), Kind::Instance | Kind::Namespace) || typed) && !self.np_struct.contains(&oid) && !dict_sub { Ns::Attr } else { Ns::Item };
+                let ns = if matches!(self.kind(oid), Kind::Instance | Kind::Namespace) && !self.np_struct.contains(&oid) && !dict_sub { Ns::Attr } else { Ns::Item };
                 ns_used = ns;
                 rows.push(state.row(oid, ns));
-                obs_rows.push((oid, ns, state.row(oid, ns)));
             }
             let must: Vec<KeyId> = state.name_keys.iter().filter(|(n, _)| *intern::str_get(*n) == *name).map(|(_, k)| *k).collect();
-            // inside a summary the rows are relative to its entry: kept with the summary and
-            // resolved per call
-            if !self.sum_stack.is_empty() {
-                // a tuple of literals is that literal (its positions are not kept with the summary)
-                let mut val = v.clone();
-                if val.kv.is_bot() {
-                    if let Some(o) = val.single().filter(|o| self.kind(*o) == Kind::Tuple) {
-                        if let Some(k) = self.literal_tuple(o, state, 0) {
-                            val = Value::lit(k);
-                        }
-                    }
-                }
-                if let Some(top) = self.sum_obs.last_mut() {
-                    top.push(crate::summary::Obs { file: file.clone(), line: ln, name, rows: obs_rows, must, value: val });
-                }
-                continue;
-            }
             let row = if rows.is_empty() { None } else { Some(must.iter().fold(crate::domain::join_rows(rows), |r, k| r.store(*k, true))) };
             let value = self.value_info(&v, state);
             let tensor = if self.torch_on {
@@ -3527,22 +3193,6 @@ pub fn contains_call(e: &ast::Expr) -> bool {
     v.0
 }
 
-pub fn literal_key_of(e: &ast::Expr) -> Option<KeyId> {
-    Some(match e {
-        ast::Expr::StringLiteral(sl) => key_str_lit(sl.value.to_str()),
-        ast::Expr::NumberLiteral(n) => match &n.value {
-            ast::Number::Int(i) => intern::key_int(i.as_i64()?),
-            ast::Number::Float(f) => intern::key_float(*f),
-            ast::Number::Complex { .. } => return None,
-        },
-        ast::Expr::BooleanLiteral(b) => intern::key_bool(b.value),
-        ast::Expr::NoneLiteral(_) => intern::key_none(),
-        ast::Expr::BytesLiteral(b) => intern::key(intern::Key::Bytes(b.value.bytes().collect())),
-        ast::Expr::EllipsisLiteral(_) => intern::key(intern::Key::Ellipsis),
-        _ => return None,
-    })
-}
-
 pub fn is_constant(e: &ast::Expr) -> bool {
     matches!(
         e,
@@ -3622,58 +3272,3 @@ fn own_source(label: &str, own: &str, span: (u32, u32), in_main: bool) -> bool {
     }
 }
 
-/// A generator whose body is straight-line code: `yield` statements, assignments to local
-/// names, `if` / `pass` / `return`, and expressions without calls (a call could change objects
-/// between two items, which a consumer of the first item must not see yet). Its items are a
-/// fixed list built from reads of its inputs, with no effects per item: it is summarised like
-/// an ordinary function returning that list, instead of re-run at every call site.
-pub fn is_simple_generator(body: &[ast::Stmt]) -> bool {
-    fn expr_ok(e: &ast::Expr) -> bool {
-        struct V(bool);
-        impl<'a> ast::visitor::source_order::SourceOrderVisitor<'a> for V {
-            fn visit_expr(&mut self, e: &'a ast::Expr) {
-                if matches!(
-                    e,
-                    ast::Expr::Call(_) | ast::Expr::Yield(_) | ast::Expr::YieldFrom(_) | ast::Expr::Await(_) | ast::Expr::Lambda(_) | ast::Expr::ListComp(_) | ast::Expr::SetComp(_) | ast::Expr::DictComp(_) | ast::Expr::Generator(_) | ast::Expr::Named(_)
-                ) {
-                    self.0 = false;
-                }
-                if self.0 {
-                    ast::visitor::source_order::walk_expr(self, e);
-                }
-            }
-        }
-        use ast::visitor::source_order::SourceOrderVisitor;
-        let mut v = V(true);
-        v.visit_expr(e);
-        v.0
-    }
-    fn target_ok(t: &ast::Expr) -> bool {
-        match t {
-            ast::Expr::Name(_) => true,
-            ast::Expr::Tuple(tu) => tu.elts.iter().all(target_ok),
-            ast::Expr::List(l) => l.elts.iter().all(target_ok),
-            _ => false,
-        }
-    }
-    fn stmt_ok(s: &ast::Stmt, yields: &mut usize) -> bool {
-        match s {
-            ast::Stmt::Expr(e) => match &*e.value {
-                ast::Expr::Yield(y) => {
-                    *yields += 1;
-                    y.value.as_deref().is_none_or(expr_ok)
-                }
-                other => expr_ok(other),
-            },
-            ast::Stmt::Assign(a) => a.targets.iter().all(target_ok) && expr_ok(&a.value),
-            ast::Stmt::AnnAssign(a) => target_ok(&a.target) && a.value.as_deref().is_none_or(expr_ok),
-            ast::Stmt::AugAssign(a) => matches!(&*a.target, ast::Expr::Name(_)) && expr_ok(&a.value),
-            ast::Stmt::If(i) => expr_ok(&i.test) && i.body.iter().all(|s| stmt_ok(s, yields)) && i.elif_else_clauses.iter().all(|c| c.test.as_ref().is_none_or(expr_ok) && c.body.iter().all(|s| stmt_ok(s, yields))),
-            ast::Stmt::Pass(_) => true,
-            ast::Stmt::Return(r) => r.value.as_deref().is_none_or(expr_ok),
-            _ => false,
-        }
-    }
-    let mut yields = 0;
-    body.iter().all(|s| stmt_ok(s, &mut yields)) && yields > 0
-}

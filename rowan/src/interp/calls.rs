@@ -65,16 +65,6 @@ fn widen_value(v: &Value) -> Value {
 impl Analyzer {
     // ---------------------------------------------------------------- calls
     pub fn call_value(&mut self, fv: &Value, node: &Node, call_ast: Option<&'static ast::ExprCall>, state: &mut State, override_args: Option<Vec<Value>>) -> Value {
-        if override_args.is_some() {
-            self.model_call += 1;
-            let r = self.call_value_inner(fv, node, call_ast, state, override_args);
-            self.model_call -= 1;
-            return r;
-        }
-        self.call_value_inner(fv, node, call_ast, state, None)
-    }
-
-    fn call_value_inner(&mut self, fv: &Value, node: &Node, call_ast: Option<&'static ast::ExprCall>, state: &mut State, override_args: Option<Vec<Value>>) -> Value {
         let mut args: Vec<Value> = Vec::new();
         let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
         let mut star_args: Vec<Value> = Vec::new();
@@ -187,7 +177,7 @@ impl Analyzer {
             }
         }
         match kind {
-            Kind::Function if self.func_info(oid).is_memo.get() && self.sum_stack.is_empty() && star_args.is_empty() && star_kwargs.is_empty() => {
+            Kind::Function if self.func_info(oid).is_memo.get() && star_args.is_empty() && star_kwargs.is_empty() => {
                 // a memoised function with known arguments: the first call's result is the
                 // result of every later call with the same arguments
                 let lit = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty());
@@ -267,14 +257,6 @@ impl Analyzer {
                     }
                 }
                 if let Some(m) = self.models.lookup(&qual) {
-                    if qual.starts_with("pandas.") && !self.sum_stack.is_empty() && crate::models::pandas::frame_producer(&qual).is_none() {
-                        // a frame built from a parameter's contents: decided per call site
-                        for v in args.iter().chain(kwargs.values()) {
-                            self.concrete_events(v, state, 2);
-                        }
-                        let vals: Vec<&Value> = args.iter().chain(kwargs.values()).collect();
-                        crate::models::pandas::symbolic_frames_event(self, state, &vals);
-                    }
                     return self.run_model(m, state, &call);
                 }
                 self.unknown_call(&qual, None, args, kwargs, star_args, star_kwargs, state, node)
@@ -316,7 +298,7 @@ impl Analyzer {
                     };
                     if cls != 0 {
                         for o in self_v.pts.iter() {
-                            if matches!(self.kind(o), Kind::Instance | Kind::Ph) {
+                            if matches!(self.kind(o), Kind::Instance) {
                                 self.dataclass_init(cls, o, &args, star_args, kwargs, star_kwargs, state, node);
                             }
                         }
@@ -347,11 +329,6 @@ impl Analyzer {
             Kind::Partial => {
                 let call = Call { qual: "partial.__call__".into(), recv: Some(Value::obj(oid)), args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
                 crate::models::partial_call(self, state, &call)
-            }
-            Kind::Ph => {
-                self.record_event("call", oid);
-                let q = format!("call of {}", self.obj(oid).label);
-                self.unknown_call(&q, Some(&Value::obj(oid)), args, kwargs, star_args, star_kwargs, state, node)
             }
             Kind::Instance => {
                 if let Some(cls) = self.instance_class(oid) {
@@ -454,7 +431,7 @@ impl Analyzer {
             let text = crate::frontend::text_at(node);
             let mut given: Vec<String> = Vec::new();
             for (o, _) in &arg_recs {
-                if matches!(self.kind(*o), Kind::Unknown | Kind::Ph) {
+                if matches!(self.kind(*o), Kind::Unknown) {
                     continue;
                 }
                 let g = self.obj(*o).label.to_string();
@@ -478,9 +455,6 @@ impl Analyzer {
             d.definite = KeySet::new();
             d.absent = KeySet::new();
             d.mutators = d.mutators.insert(site_id);
-            d.lterms = d.lterms.union(&d.dterms);
-            d.dterms = Default::default();
-            d.pstores = d.pstores.map(|(r, _, l)| (r, false, l));
             state.set_row(rid, Ns::Item, Row::from_data(d));
             // as an object the result is unknown: its attributes come from the call
             let src = Source::new(&site, SourceKind::Call);
@@ -509,10 +483,10 @@ impl Analyzer {
                 continue;
             }
             let k = self.kind(oid);
-            if matches!(k, Kind::Dict | Kind::Frame | Kind::Unknown | Kind::Ph) {
+            if matches!(k, Kind::Dict | Kind::Frame | Kind::Unknown) {
                 out.push((oid, Ns::Item));
             }
-            if matches!(k, Kind::Instance | Kind::Unknown | Kind::Ph) {
+            if matches!(k, Kind::Instance | Kind::Unknown) {
                 out.push((oid, Ns::Attr));
             }
             if d < depth {
@@ -719,9 +693,6 @@ impl Analyzer {
                     }
                 }
                 None => {
-                    if let Some(p) = a.kv.as_param() {
-                        self.record_event("concrete", p);
-                    }
                     // a member given: itself
                     let given: Vec<u32> = a.pts.iter().filter(|o| ms.iter().any(|(_, m)| m == o)).collect();
                     if !given.is_empty() && given.len() == a.pts.len() && a.kv.is_bot() {
@@ -944,15 +915,6 @@ impl Analyzer {
                     let present = star_kwargs.iter().any(|sk| sk.pts.iter().any(|x| state.row(x, Ns::Item).present.contains(fk)));
                     let definite = star_kwargs.iter().all(|sk| !sk.pts.is_empty() && sk.pts.iter().all(|x| state.row(x, Ns::Item).definite.contains(fk)));
                     // a parameter's mapping: whether it has the key is known at the call site
-                    if !definite {
-                        for sk in star_kwargs {
-                            for x in sk.pts.iter() {
-                                if self.kind(x) == Kind::Ph {
-                                    self.record_event("concrete", x);
-                                }
-                            }
-                        }
-                    }
                     let mut acc = join_values(star_kwargs.iter().flat_map(|sk| sk.pts.iter().map(|x| state.slot(x, Ns::Item, fk)).collect::<Vec<_>>()));
                     match default {
                         Some(d) if !definite => {
@@ -1221,12 +1183,10 @@ impl Analyzer {
         let site = {
             let fr = self.frame();
             let mut site = site;
-            if !fr.symbolic {
-                for i in &fr.unroll {
-                    site.push_str(&format!("#{}", i));
-                }
+            for i in &fr.unroll {
+                site.push_str(&format!("#{}", i));
             }
-            if fr.kind != FrameKind::Module && !fr.symbolic && !fr.ctx.is_empty() && !fr.ctx.starts_with("entry") {
+            if fr.kind != FrameKind::Module && !fr.ctx.is_empty() && !fr.ctx.starts_with("entry") {
                 if fr.ctx.matches('/').count() < super::limit("chain", 2) {
                     format!("{}/{}", fr.ctx, site)
                 } else {
@@ -1242,206 +1202,6 @@ impl Analyzer {
             }
         };
         self.analysed_funcs.insert(foid);
-        // --- symbolic summaries (§6.1/§6.2): analyse the body once, instantiate per call ---
-        // (a generator runs per call site: its caller sees only its suspension points, see below)
-        // (not a `@contextmanager` / yield-dependency body: it runs around its with block)
-        let under_cm = self.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth == self.frames.len());
-        // (a simple generator — straight-line yields, no calls — is summarised like a function;
-        // another runs per call site while its function's budget lasts)
-        let gen_fn = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body) && !super::is_simple_generator(&f.body)) && !under_cm;
-        let gen_summ = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body)) && !under_cm;
-        let once = std::mem::take(&mut self.force_tab_once);
-        // (why the body runs per call site: `ROWAN_DEBUG=1` prints it with each tabulated run)
-        let mut why: &'static str = if !self.use_summaries {
-            "nosummaries"
-        } else if once {
-            "once"
-        } else if gen_fn {
-            "generator"
-        } else if self.torch_modules.contains(&fi.module) {
-            "torch"
-        } else if self.model_call > 0 {
-            "model"
-        } else {
-            "event"
-        };
-        // (every per-call-site run counts against the function's one budget, whatever its
-        // reason: past it, the summary; except a call a model makes, whose effects on the
-        // model's own tables a summary does not replay — the calls in its body are ordinary
-        // calls again, see `saved_model_call`)
-        let forced = match why {
-            "once" | "model" => true,
-            "generator" | "torch" => self.tab_budget(foid),
-            _ => false,
-        };
-        if self.use_summaries && !forced {
-            let bound = self.compute_bindings(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
-            // the classes of the arguments: the summary is specialised on them
-            let mut sig: Vec<(String, ObjId)> = Vec::new();
-            // (a placeholder with a declared user class counts as an instance of it, so calls
-            // inside summaries specialise too)
-            let one_class = |an: &Analyzer, v: &Value| -> Option<ObjId> {
-                if v.pts.is_empty() {
-                    return None;
-                }
-                let mut cls: Option<ObjId> = None;
-                for o in v.pts.iter() {
-                    let c = match an.kind(o) {
-                        Kind::Instance => an.instance_class(o)?,
-                        Kind::Ph => an.ph_info(o).cls.get().filter(|c| an.class_info_opt(*c).is_some())?,
-                        _ => return None,
-                    };
-                    match cls {
-                        None => cls = Some(c),
-                        Some(x) if x == c => {}
-                        _ => return None,
-                    }
-                }
-                cls
-            };
-            if let Some(sv) = &self_v {
-                if let Some(c) = one_class(self, sv) {
-                    if let Some(FuncNode::Def(f)) = Some(fi.node) {
-                        if let Some(p0) = crate::scopes::all_params(&f.parameters).first() {
-                            sig.push((p0.name.id.to_string(), c));
-                        }
-                    }
-                }
-            }
-            for (name, v) in bound.iter() {
-                if let Some(c) = one_class(self, v) {
-                    sig.push((intern::str_get(*name).to_string(), c));
-                }
-                if !v.pts.is_empty() && v.pts.iter().all(|o| self.duck_part(o)) {
-                    sig.push((format!("{}{}", crate::summary::DUCK_PART_PREFIX, intern::str_get(*name)), 0));
-                }
-            }
-            sig.sort();
-            // (a recursive call whose argument is a part of a duck-typed value, inside the
-            // function's own summary run: the partial summary at hand duck-types its parameter,
-            // applied to the part it reads every class's attributes of it, one level deeper per
-            // round — unknown code instead, as an argument past duck typing is)
-            if sig.iter().any(|(n, _)| n.starts_with(crate::summary::DUCK_PART_PREFIX)) && self.sum_stack.contains(&foid) {
-                let qual = self.func_info(foid).qualname.clone();
-                return self.unknown_call(&qual, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
-            }
-            let summ = self.summarise_sig(foid, state, sig);
-            let Some(summ) = summ else {
-                return Value::new(); // recursion through the symbolic path: ⊥ summary
-            };
-            if summ.havoc {
-                return self.havoc_call(&summ, &fi.qualname, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
-            }
-            let (call_ctx, ctx_single) = self.receiver_ctx(&self_v, &site);
-            let mut bind: IndexMap<u32, Value> = IndexMap::new();
-            for (name, ph) in summ.ph_by_name.iter() {
-                if let Some(bv) = bound.get(name) {
-                    bind.insert(*ph, bv.clone());
-                }
-            }
-            if let (Some(ps), Some(sv)) = (summ.ph_self, &self_v) {
-                bind.insert(ps, sv.clone());
-            }
-            // (a generator whose body changes objects from before the call: its concrete run
-            // orders those effects between the items)
-            // (past the budget its summary is applied weakly: the effects happen while it is
-            // consumed, so before and after the call the objects may or may not have them yet)
-            let gen_outside = gen_summ && summ.changes_outside(self);
-            let gen_concrete = gen_outside && self.tab_budget(foid);
-            if gen_concrete {
-                why = "genconcrete";
-            }
-            // (a callee that may raise into a handler of this function: its run per call site
-            // records the state at each raise, which the handler starts from; the summary knows
-            // only that it raises, and the state before the call lost its effects)
-            let raise_caught = summ.raises
-                && self.try_sum_depth.last() == Some(&self.sum_stack.len())
-                && match summ.raise_classes.as_ref() {
-                    Some(cs) if !cs.is_empty() => cs.iter().any(|c| self.class_guarded(c)),
-                    _ => self.guards.iter().any(|g| !g.is_empty()),
-                };
-            // (only a callee whose raising paths change objects from before the call: else the
-            // state before the call is the handler's; past a small budget those objects are
-            // made unknown for the handler instead, see `summary_raise_state`)
-            let raise_fp = !summ.raise_fp.rows.is_empty() || !summ.raise_fp.slots.is_empty() || !summ.raise_fp.elems.is_empty();
-            let tab_raise = !gen_concrete && raise_caught && raise_fp && self.tab_budget(foid);
-            if tab_raise {
-                why = "raise";
-            }
-            if !gen_concrete && !tab_raise && !self.should_tabulate_at(&summ, &bind, state, node) {
-                // (outside databases the summary did not simulate: their rows are unknown now)
-                if let Some(cons) = self.sql_touched.get(&foid).cloned() {
-                    for c in cons {
-                        if let Some(db) = self.sql_dbs.get_mut(&c) {
-                            for t in db.tables.values_mut() {
-                                t.rows = None;
-                            }
-                        }
-                    }
-                }
-                if !self.sum_stack.is_empty() {
-                    self.propagate_events(&summ, &bind, state);
-                }
-                // (a one-shot iterator handed to a summarised call: how much it takes is not known)
-                let its: Vec<u32> = args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(self_v.iter()).filter_map(|v| v.single().filter(|o| self.obj(*o).iterator && self.obj(*o).single)).collect();
-                for o in its {
-                    self.set_cursor(o, None, state);
-                }
-                let saved_chain = std::mem::take(&mut self.call_chain);
-                self.call_chain = chain_extend(&saved_chain, &[node.line]);
-                if summ.raises {
-                    if crate::interp::debug_level() == 2 {
-                        eprintln!("  summary of {} raises (instantiated at L{} in {})", fi.qualname, node.line, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
-                    }
-                    // raises of known classes: each reaches a handler that catches it (from the
-                    // state before the call), else leaves this call
-                    // (the handler's state: before the call, with what the raising paths
-                    // changed made unknown)
-                    // (only a try around the call or the summary being built reads it)
-                    let mut handler_state = if self.raise_states.is_empty() && self.sum_stack.is_empty() { state.copy() } else { self.summary_raise_state(&summ, &bind, state) };
-                    match summ.raise_classes.clone().filter(|cs| !cs.is_empty()) {
-                        Some(cs) => {
-                            for c in cs {
-                                let name = c.0.first().cloned().unwrap_or_default();
-                                self.cur_exc_cls = Some(c.clone());
-                                self.may_raise_here(&name, &mut handler_state.copy());
-                                self.cur_exc_cls = None;
-                            }
-                        }
-                        None => {
-                            self.note_raise();
-                            // (a class not known: a handler of anything may catch it)
-                            if raise_fp && !self.raise_states.is_empty() {
-                                self.record_raise_state(&mut handler_state);
-                            }
-                            if self.guards.iter().all(|g| !g.contains("*") && !g.contains("Exception") && !g.contains("BaseException")) {
-                                self.note_summary_raise(&handler_state);
-                            }
-                        }
-                    }
-                }
-                let pre_gen = if gen_outside { Some(state.copy()) } else { None };
-                let r = self.instantiate(&summ, &bind, state, node, &call_ctx, ctx_single);
-                if let Some(pre) = pre_gen {
-                    let fp = state.footprint(&pre);
-                    state.join_heap_fp(&pre, &fp);
-                }
-                self.call_chain = saved_chain;
-                // (a generator / coroutine function's call does not run its body)
-                let runs_body = match fi.node {
-                    FuncNode::Def(f) => !f.is_async && !super::is_generator(&f.body),
-                    _ => true,
-                };
-                if !summ.completes && summ.raises && runs_body {
-                    state.reachable = false;
-                }
-                return r;
-            }
-        }
-        // --- per-call-site (tabulated) analysis ---
-        if super::debug_enabled() {
-            eprintln!("tabrun {} ({}) at {} frames={} sum={} chain={:?}", fi.qualname, why, site, self.frames.len(), self.sum_stack.len(), self.call_chain);
-        }
         let mut key = (foid, if !entry { site.clone() } else { format!("entry:{}", site) });
         // literal arguments that differ from the running activations': not the same activation
         // (fib(9) inside fib(10)), up to a depth
@@ -1474,18 +1234,6 @@ impl Analyzer {
         let act = self.active_by_func.get(&foid).cloned().unwrap_or_default();
         if !self.active.contains_key(&key) && act.len() >= MAX_ACTIVE && !lit_key {
             key = act.last().unwrap().clone();
-        }
-        // (several recursive call sites, each a new activation, multiply with every level of
-        // nesting: below the outermost activation at most `recact` new ones, then a recursive
-        // call joins the innermost running activation, as past MAX_ACTIVE)
-        if act.is_empty() {
-            self.rec_tabs.remove(&foid);
-        } else if !self.active.contains_key(&key) && !lit_key {
-            let n = self.rec_tabs.entry(foid).or_default();
-            *n += 1;
-            if *n > super::limit("recact", 64) {
-                key = act.last().unwrap().clone();
-            }
         }
         if self.active.contains_key(&key) {
             self.rec_hit.insert(key.clone());
@@ -1627,6 +1375,17 @@ impl Analyzer {
                 return ret;
             }
         }
+        // every statement a function code runs counts against its budget (entry runs aside: one
+        // per function); past it a call is unknown code, so the whole analysis is bounded by the
+        // number of functions times the budget
+        if !entry && self.tab_count.get(&fi.node.addr()).copied().unwrap_or(0) > super::limit("budget", super::FN_BUDGET) {
+            let q = fi.qualname.clone();
+            self.note(format!("{} ran out of its budget: later calls are unknown code", q));
+            return self.unknown_call(&q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
+        }
+        if super::debug_enabled() {
+            eprintln!("run {} at {} frames={} chain={:?}", fi.qualname, site, self.frames.len(), self.call_chain);
+        }
         // context for allocations inside the callee (§3)
         let (ctx, ctx_single) = self.receiver_ctx(&self_v, &site);
         let fr_single = self.frame().single && self.frame().loop_depth == 0 && ctx_single;
@@ -1634,6 +1393,7 @@ impl Analyzer {
         let mut new_fr = Frame::new(FrameKind::Function, fi.scope, fi.module, &ctx, fr_single, &fi.qualname);
         new_fr.single_nl = fr_single_nl;
         new_fr.func = Some(foid);
+        new_fr.code = fi.node.addr();
         {
             let mi = self.module_info(fi.module);
             let mut cells: Vec<String> = mi.scopes.get(fi.scope).cells.iter().cloned().collect();
@@ -1656,9 +1416,6 @@ impl Analyzer {
         // (the caller's recorded returns are not the callee's: its end must not join them in)
         let saved_exits = { state.exits.take() };
         let mut saved_yields: Option<(ObjId, Option<super::YieldStates>)> = None;
-        // (a call a model makes runs here, per call site; the calls in its body are ordinary
-        // calls again: summaries, budgets)
-        let saved_model_call = std::mem::replace(&mut self.model_call, 0);
         self.frames.push(new_fr);
         if let FuncNode::Def(f) = fnode {
             if is_generator(&f.body) {
@@ -1698,20 +1455,7 @@ impl Analyzer {
         let mut entry_state = state.copy();
         let mut ret = Value::new();
         let mut st_final: Option<State> = None;
-        // (below the outermost activation of a recursive function its bodies run at most `recruns`
-        // times in all: past that an activation stops iterating, and is widened as one that did
-        // not converge)
-        let nested = self.active_by_func.get(&foid).map(|v| v.len() > 1).unwrap_or(false);
-        for round in 0..REC_MAX_ITER {
-            if nested {
-                let n = self.rec_runs.entry(foid).or_default();
-                *n += 1;
-                if round > 0 && *n > super::limit("recruns", 256) {
-                    break;
-                }
-            } else if !nested && round == 0 {
-                self.rec_runs.remove(&foid);
-            }
+        for _round in 0..REC_MAX_ITER {
             self.tab_runs += 1;
             let mut st = entry_state.copy();
             match fnode {
@@ -1956,7 +1700,6 @@ impl Analyzer {
         self.rec_widened.remove(&key);
         self.call_chain = saved_chain;
         self.frames.pop();
-        self.model_call = saved_model_call;
         self.env_stack.pop();
         let raised = self.raise_stack.pop().unwrap_or(false);
         let callee_cls = self.esc_cls.pop().flatten();
@@ -1986,54 +1729,6 @@ impl Analyzer {
         ret
     }
 
-    /// A call of a havoc summary (too big to instantiate): an unknown call on its arguments
-    /// (they may change in any way, it returns anything, it may raise), and what it changed
-    /// of objects from outside (globals) changed in unknown ways.
-    #[allow(clippy::too_many_arguments)]
-    fn havoc_call(&mut self, summ: &crate::summary::Summary, qual: &str, self_v: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
-        let site = s(&format!("{}@L{}", qual, node.line));
-        let bind: IndexMap<ObjId, Value> = IndexMap::new();
-        let mut memo: rustc_hash::FxHashMap<ObjId, Value> = Default::default();
-        let mut targets = |an: &mut Analyzer, o: ObjId, st: &mut State| -> Vec<ObjId> {
-            if an.kind(o) == Kind::Ph {
-                an.binding_of(summ, o, &bind, st, &mut memo).pts.iter().filter(|t| an.kind(*t) != Kind::Ph).collect()
-            } else {
-                vec![o]
-            }
-        };
-        for (o, ns, _) in &summ.rows_fp {
-            for t in targets(self, *o, state) {
-                let r = state.row(t, *ns).mutate(site);
-                state.set_row(t, *ns, r);
-            }
-        }
-        for ((o, ns, k), _) in &summ.slots_fp {
-            if crate::interp::access::param_slot_of(*k).is_some() {
-                continue;
-            }
-            for t in targets(self, *o, state) {
-                let v = state.slot(t, *ns, *k).join(&Value::data(&format!("{}@L{}", qual, node.line)));
-                state.set_slot(t, *ns, *k, v, false);
-            }
-        }
-        for (o, _) in &summ.elems_fp {
-            for t in targets(self, *o, state) {
-                let kv = crate::domain::kv_join(&state.elems.get(&t).unwrap_or(crate::domain::DATA), &crate::domain::DATA);
-                state.elems.insert(t, kv);
-            }
-        }
-        for v in &summ.rel_verdicts {
-            let mut nv = v.clone();
-            nv.chain = chain_extend(&chain_extend(&self.call_chain, &[node.line]), &v.chain);
-            let dk = nv.dedupe_key();
-            if !self.verdict_keys.contains(&dk) && !self.quiet {
-                self.verdict_keys.insert(dk);
-                self.verdicts.push(nv);
-            }
-        }
-        self.unknown_call(qual, self_v, args, kwargs, star_args, star_kwargs, state, node)
-    }
-
     /// Drop the facts whose test read one of `objs`.
     pub fn kill_facts_on(&mut self, objs: &[u32], state: &mut State) {
         if objs.is_empty() || state.facts.is_empty() {
@@ -2050,11 +1745,6 @@ impl Analyzer {
     pub fn record_raise_state(&mut self, state: &mut State) -> bool {
         let Some((fl, el, pre, tmark)) = self.try_marks.last() else { return false };
         let tmark = *tmark;
-        if self.try_sum_depth.last().map(|d| self.sum_stack.len() > *d).unwrap_or(false) {
-            // inside a callee's summary: its rows are relative to that summary; the call's
-            // instantiation decides whether it raises here
-            return false;
-        }
         let mut here = state.copy();
         // the try is in a `@contextmanager` generator whose with body is running (also from a
         // callee of the body): the generator's names
@@ -2099,7 +1789,6 @@ impl Analyzer {
                 roots.extend(v.pts.iter());
                 match &v.kv {
                     KeyVal::KeysOf(ko) => roots.extend(ko.objs.iter()),
-                    KeyVal::Param(p) => roots.push(*p),
                     _ => {}
                 }
             };
@@ -2393,9 +2082,6 @@ impl Analyzer {
         }
         let recorded = caught && self.record_raise_state(state);
         self.cur_exc_cls = None;
-        if !caught && state.reachable {
-            self.note_summary_raise(state);
-        }
         if recorded {
             return;
         }
@@ -2565,11 +2251,6 @@ impl Analyzer {
         let mut star_args: Vec<Value> = star_args.to_vec();
         let mut expanded: Vec<Value> = Vec::new();
         star_args.retain(|sa| {
-            for o in sa.pts.iter() {
-                if self.kind(o) == Kind::Ph {
-                    self.record_event("iter", o);
-                }
-            }
             let it = self.iterate(sa, node, state);
             match it.items {
                 Some(items) if sa.pts.len() == 1 => {
@@ -2581,13 +2262,6 @@ impl Analyzer {
         });
         args.extend(expanded);
         let star_args = &star_args[..];
-        for sk in star_kwargs {
-            for o in sk.pts.iter() {
-                if self.kind(o) == Kind::Ph {
-                    self.record_event("iter", o);
-                }
-            }
-        }
         // the elements of `*xs` (an unknown iterable's are unknown, not none)
         let extra = if !star_args.is_empty() { join_values(star_args.iter().map(|sa| self.iterate(sa, node, state).elem.flat()).collect::<Vec<_>>()) } else { Value::new() };
         for (i, name) in positional.iter().enumerate() {
@@ -2669,16 +2343,6 @@ impl Analyzer {
             let kill: KeySet = KeySet::from_iter(positional.iter().chain(kwonly.iter()).map(|n| intern::key(intern::Key::Str(intern::str_get(*n)))));
             for sk in star_kwargs {
                 self.copy_into(did, Ns::Item, sk, state, true, &kill);
-                // `**kw` forwarded from a placeholder (or a copy of one): the new dict is not
-                // concrete either; its events reach the enclosing summary
-                if let Some(s1) = sk.single() {
-                    let src = if self.kind(s1) == Kind::Ph { Some(s1) } else { self.obj(s1).copied_from.filter(|c| self.kind(*c) == Kind::Ph) };
-                    if let Some(src) = src {
-                        if self.is_entry_object(src) {
-                            self.obj_mut(did).copied_from = Some(src);
-                        }
-                    }
-                }
             }
             bound.insert(s(kw.name.id.as_str()), Value::obj(did));
         }

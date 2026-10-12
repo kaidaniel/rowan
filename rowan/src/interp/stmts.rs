@@ -24,6 +24,9 @@ impl Analyzer {
 
     pub fn exec_stmt(&mut self, node: &'static ast::Stmt, state: &mut State) {
         self.work += 1;
+        if let Some(code) = self.frames.last().map(|f| f.code).filter(|c| *c != 0) {
+            *self.tab_count.entry(code).or_default() += 1;
+        }
         if self.cut_body(state) {
             return;
         }
@@ -206,9 +209,6 @@ impl Analyzer {
                 if !caught {
                     // (in a summary run: a raise leaving the function, its state for the
                     // summary's raise footprint)
-                    if state.reachable {
-                        self.note_summary_raise(state);
-                    }
                     // (the class leaving the call: known, or not)
                     self.merge_esc(raised_cls.map(|c| vec![c]));
                     if crate::interp::debug_level() == 2 {
@@ -382,12 +382,10 @@ impl Analyzer {
                     self.raise_states.push(None);
                     self.raise_values.push(None);
                     self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
-                    self.try_sum_depth.push(self.sum_stack.len());
                     let exits_before = self.exit_count;
                     self.exec_block(&w.body, state);
                     self.guards.pop();
                     self.try_marks.pop();
-                    self.try_sum_depth.pop();
                     let flagged = self.may_raise.pop().unwrap_or(false);
                     let raised_at = self.raise_states.pop().flatten();
                     self.raise_values.pop();
@@ -503,14 +501,12 @@ impl Analyzer {
         self.raise_states.push(None);
         self.raise_values.push(None);
         self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
-        self.try_sum_depth.push(self.sum_stack.len());
         self.cond_depth += 1;
         self.branch_depth += 1;
         let exits_before = self.exit_count;
         self.exec_block(body, state);
         self.guards.pop();
         self.try_marks.pop();
-        self.try_sum_depth.pop();
         let flagged = self.may_raise.pop().unwrap_or(false);
         let raised_at = self.raise_states.pop().flatten();
         self.raise_values.pop();
@@ -555,11 +551,9 @@ impl Analyzer {
             return false;
         }
         let prev = self.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.frames.len(), env_after: None, ran: false, then: None, body_died: false, env_before: None, multi: true, body_exits: None, body_ret: None });
-        self.force_tab_once = true;
         let n = frontend::node(&item.context_expr);
         let fv = self.eval(&call.func, state);
         self.call_value(&fv, &n, Some(call), state, None);
-        self.force_tab_once = false;
         let h = std::mem::replace(&mut self.cm_hook, prev);
         match h {
             Some(mut h) if h.ran => {
@@ -600,16 +594,6 @@ impl Analyzer {
 
     /// Whether `pat` matches `subj` (None: depends), binding its capture names in `state`.
     fn match_pattern(&mut self, pat: &'static ast::Pattern, subj: &Value, state: &mut State) -> Option<bool> {
-        let record_events = |an: &mut Analyzer, v: &Value, kind: &'static str| {
-            for o in v.pts.iter() {
-                if an.kind(o) == Kind::Ph {
-                    an.record_event(kind, o);
-                }
-            }
-            if let Some(ph) = v.kv.as_param() {
-                an.record_event(kind, ph);
-            }
-        };
         match pat {
             ast::Pattern::MatchAs(a) => {
                 let r = match &a.pattern {
@@ -650,7 +634,6 @@ impl Analyzer {
                     // containers / plain instances never equal a literal
                     return Some(false);
                 }
-                record_events(self, subj, "truth");
                 None
             }
             ast::Pattern::MatchSingleton(sg) => {
@@ -669,7 +652,6 @@ impl Analyzer {
                 if !subj.pts.is_empty() && subj.pts.iter().all(|o| self.kind(o).is_container() || self.kind(o) == Kind::Instance) {
                     return Some(false);
                 }
-                record_events(self, subj, "truth");
                 None
             }
             ast::Pattern::MatchMapping(mm) => {
@@ -684,7 +666,6 @@ impl Analyzer {
                     if subj.pts.iter().all(|o| matches!(self.kind(o), Kind::List | Kind::Tuple | Kind::Set)) {
                         return Some(false);
                     }
-                    record_events(self, subj, "narrow");
                     for p in &mm.patterns {
                         self.match_pattern(p, &Value::data("match"), state);
                     }
@@ -701,7 +682,7 @@ impl Analyzer {
                     let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
                     let present = if rows.iter().all(|r| r.definite.contains(k)) {
                         Some(true)
-                    } else if rows.iter().all(|r| r.closed() && !r.present.contains(k) && !r.symbolic()) {
+                    } else if rows.iter().all(|r| r.closed() && !r.present.contains(k)) {
                         Some(false)
                     } else {
                         None
@@ -729,7 +710,6 @@ impl Analyzer {
                 for kw in c.arguments.keywords.iter() {
                     self.match_pattern(&kw.pattern, &Value::data("match"), state);
                 }
-                record_events(self, subj, "isinstance");
                 None
             }
             ast::Pattern::MatchSequence(sq) => {
@@ -1523,8 +1503,32 @@ impl Analyzer {
         state.replace_with(exit_s);
     }
 
-    /// Does the manager's class define `__exit__` as returning True (a known literal)?
-    fn exit_swallows(&mut self, v: &Value, state: &mut State) -> bool {
+    /// May the manager's class's `__exit__` return a true value (a `return` of anything but
+    /// `None` / `False`)? Then it may swallow the body's exception.
+    fn exit_swallows(&mut self, v: &Value, _state: &mut State) -> bool {
+        fn may_return_true(body: &[ast::Stmt]) -> bool {
+            use ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
+            struct V(bool);
+            impl<'a> SourceOrderVisitor<'a> for V {
+                fn visit_stmt(&mut self, s: &'a ast::Stmt) {
+                    match s {
+                        ast::Stmt::FunctionDef(_) | ast::Stmt::ClassDef(_) => {}
+                        ast::Stmt::Return(r) => {
+                            let falsy = match r.value.as_deref() {
+                                None | Some(ast::Expr::NoneLiteral(_)) => true,
+                                Some(ast::Expr::BooleanLiteral(b)) => !b.value,
+                                _ => false,
+                            };
+                            self.0 |= !falsy;
+                        }
+                        _ => walk_stmt(self, s),
+                    }
+                }
+            }
+            let mut v = V(false);
+            body.iter().for_each(|s| v.visit_stmt(s));
+            v.0
+        }
         for oid in v.pts.iter() {
             if self.kind(oid) != Kind::Instance {
                 continue;
@@ -1532,19 +1536,8 @@ impl Analyzer {
             let Some(cls) = self.instance_class(oid) else { continue };
             let Some(m) = self.class_lookup(cls, "__exit__") else { continue };
             let fv = self.cls_slots.get(&(m, Ns::Attr, key_str_lit("__exit__"))).cloned().unwrap_or_default();
-            for f in fv.pts.iter() {
-                if self.kind(f) != Kind::Function {
-                    continue;
-                }
-                if let Some(summ) = self.summarise(f, state) {
-                    if summ.ret.pts.is_empty() {
-                        if let Some(k) = summ.ret.kv.as_lit() {
-                            if intern::with_key(k, |kk| matches!(kk, intern::Key::Bool(true))) {
-                                return true;
-                            }
-                        }
-                    }
-                }
+            if fv.pts.iter().any(|f| self.kind(f) == Kind::Function && may_return_true(self.func_info(f).node.body())) {
+                return true;
             }
         }
         false
@@ -1639,7 +1632,6 @@ impl Analyzer {
         self.raise_values.push(None);
         self.raise_cls.push((self.raise_states.len(), Vec::new()));
         self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
-        self.try_sum_depth.push(self.sum_stack.len());
         self.cond_depth += 1;
         self.branch_depth += 1;
         let exits_before = self.exit_count;
@@ -1648,7 +1640,6 @@ impl Analyzer {
         self.exec_block(body, state);
         self.guards.pop();
         self.try_marks.pop();
-        self.try_sum_depth.pop();
         // the requirements known where the body first may have raised anywhere
         let mut flag_reqs = self.flag_reqs.drain(fl_mark..).find(|(d, _)| *d == fl_depth).map(|(_, r)| r);
         // a body that ended because it returned (or broke out) did not raise
@@ -1722,9 +1713,6 @@ impl Analyzer {
                     self.note_raise();
                     // (leaving the function after the finally: its state for the summary's
                     // raise footprint)
-                    if st2.reachable && !fin.is_empty() {
-                        self.note_summary_raise(&st2);
-                    }
                 }
             }
         }
@@ -1872,9 +1860,6 @@ impl Analyzer {
                 w.ret = None;
                 w.exits = None;
                 self.run_finally(fin, &mut w, is_escape);
-                if is_escape && w.reachable {
-                    self.note_summary_raise(&w);
-                }
                 if is_escape {
                     if !w.reachable && !flagged {
                         // the finally returned on every path: the exception does not leave
@@ -1922,7 +1907,6 @@ impl Analyzer {
         roots.extend(v.pts.iter());
         match &v.kv {
             KeyVal::KeysOf(ko) => roots.extend(ko.objs.iter()),
-            KeyVal::Param(p) => roots.push(*p),
             _ => {}
         }
         self.collect_since(mark, &pre, roots, general, state);
@@ -1976,7 +1960,7 @@ impl Analyzer {
             self.gc_pinned(&mut work);
             // (placeholders and unknown objects stand for objects outside the call — a
             // parameter's record, an input's part: what they hold is reachable from there)
-            work.extend(fresh.iter().copied().filter(|o| matches!(self.kind(*o), Kind::Unknown | Kind::Ph)));
+            work.extend(fresh.iter().copied().filter(|o| matches!(self.kind(*o), Kind::Unknown)));
         }
         // (older objects reach fresh ones only through those roots: only fresh ones expand)
         let mut reached: rustc_hash::FxHashSet<u32> = Default::default();
@@ -1990,7 +1974,7 @@ impl Analyzer {
         for o in fresh {
             // (a part of an input — an unknown object, a placeholder — is found again by its
             // path whenever that path is read: its rows belong to the input, never garbage)
-            if matches!(self.kind(o), Kind::Unknown | Kind::Ph) && general {
+            if matches!(self.kind(o), Kind::Unknown) && general {
                 continue;
             }
             if !reached.contains(&o) {
@@ -2021,7 +2005,6 @@ impl Analyzer {
             roots.extend(v.pts.iter());
             match &v.kv {
                 KeyVal::KeysOf(ko) => roots.extend(ko.objs.iter()),
-                KeyVal::Param(p) => roots.push(*p),
                 _ => {}
             }
         };
@@ -2343,9 +2326,7 @@ impl Analyzer {
             for f in fv.pts.iter() {
                 if self.kind(f) == Kind::Function {
                     // concretely: the class's own attributes (`cls.__name__`) are known here
-                    self.force_tab_once = true;
                     self.call_user(f, Some(Value::obj(coid)), vec![], kwargs.clone(), vec![], vec![], state, &cnode, None, false);
-                    self.force_tab_once = false;
                 }
             }
         }
@@ -2405,9 +2386,6 @@ impl Analyzer {
             }
         }
         let _ = node;
-        if name == "pandas" || name.starts_with("pandas.") {
-            self.pandas_on = true;
-        }
         if name == "torch" || name.starts_with("torch.") {
             self.torch_on = true;
             self.torch_real = true;

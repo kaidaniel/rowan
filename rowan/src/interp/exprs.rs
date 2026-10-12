@@ -199,6 +199,7 @@ impl Analyzer {
                 // (the tensor model reads `x.dim` as a method only when it is called)
                 self.t_called_attr = frontend::node(&*c.func).addr;
                 let fv = self.eval(&c.func, state);
+                let mut flag = false;
                 if !self.may_raise.is_empty() {
                     let all_safe = fv.pts.iter().all(|o| match &self.obj(o).payload {
                         Payload::Method(q, _) if self.kind(o) == Kind::Method => super::safe_method(q) || SELF_REPORTING.iter().any(|p| q.starts_with(p)),
@@ -214,13 +215,18 @@ impl Analyzer {
                             let what: Vec<String> = fv.pts.iter().map(|o| match &self.obj(o).payload { Payload::Method(q, _) | Payload::Str(q) => q.clone(), _ => self.obj(o).label.to_string() }).collect();
                             eprintln!("  call may raise at L{}: {}", frontend::node(node).line, what.join(", "));
                         }
-                        self.flag_may_raise(state);
+                        flag = true;
                     }
                 }
                 let nd = frontend::node(node);
                 let saved_node = self.exc_node.replace(nd);
                 let r = self.call_value(&fv, &nd, Some(c), state, None);
                 self.exc_node = saved_node;
+                // (flagged after the call: what the call requires of its inputs, it requires on
+                // its raising paths too — a missing column is what makes `read_csv` raise)
+                if flag {
+                    self.flag_may_raise(state);
+                }
                 // `t.setdefault(k, …)` through a name: whichever object `t` is has k now
                 if let ast::Expr::Attribute(a) = &*c.func {
                     if let (ast::Expr::Name(nm), "setdefault", Some(first)) = (&*a.value, a.attr.id.as_str(), c.arguments.args.first()) {
@@ -354,7 +360,7 @@ impl Analyzer {
                     }
                     // a named unknown against a number / tensor (simple right operands only:
                     // the interpreter evaluates them again otherwise)
-                    if self.torch_on && a.kv.is_bot() && a.pts.len() == 1 && a.pts.iter().all(|o| matches!(self.kind(o), crate::state::Kind::Ph | crate::state::Kind::Unknown)) {
+                    if self.torch_on && a.kv.is_bot() && a.pts.len() == 1 && a.pts.iter().all(|o| matches!(self.kind(o), crate::state::Kind::Unknown)) {
                         // (the right operand is evaluated once here)
                         let b = self.eval(&c.comparators[0], state);
                         let nd = frontend::node(node);
@@ -432,18 +438,6 @@ impl Analyzer {
                         return Value::with_kv(ObjSet::one(self.series), DATA);
                     }
                     // tuples holding parameters: decided per call site
-                    for v in [&a, &b] {
-                        for o in v.pts.iter() {
-                            if self.kind(o) == Kind::Tuple {
-                                for (_, x) in state.slots_of(o) {
-                                    self.concrete_events(&x, state, 1);
-                                    if let Some(ph) = x.kv.as_param() {
-                                        self.record_event("concrete", ph);
-                                    }
-                                }
-                            }
-                        }
-                    }
                     let both = a.pts.union(&b.pts);
                     if both.iter().any(|o| self.kind(o) == Kind::Frame) {
                         return Value::with_kv(both.filter(|o| self.kind(o) == Kind::Frame), DATA);
@@ -869,9 +863,6 @@ impl Analyzer {
     /// `kv_map` that also records a narrowing event when the key is a parameter: the renamed
     /// key is only known once the parameter is bound to a literal (at the call site).
     pub fn rename_kv(&mut self, kv: &KeyVal, f: &RenameFn) -> KeyVal {
-        if let KeyVal::Param(ph) = kv {
-            self.record_event("narrow", *ph);
-        }
         kv_map(kv, f)
     }
 
@@ -891,17 +882,6 @@ impl Analyzer {
     }
 
     fn slice_positional(&mut self, obj: &Value, sl: &'static ast::ExprSlice, node: &'static ast::Expr, state: &mut State) -> Option<Value> {
-        // a bound that is a parameter (`xs[:limit]`): decided per call site
-        if !self.sum_stack.is_empty() {
-            for e in [&sl.lower, &sl.upper, &sl.step].into_iter().flatten() {
-                if let ast::Expr::Name(n) = &**e {
-                    let v = self.load_name(s(n.id.as_str()), &Node::none(), state);
-                    if let Some(p) = v.kv.as_param() {
-                        self.record_event("concrete", p);
-                    }
-                }
-            }
-        }
         if let Some(step_e) = sl.step.as_deref() {
             // a known step (positive or negative) with known or default bounds
             let step = self.int_value(step_e, state)?;
@@ -1033,7 +1013,7 @@ impl Analyzer {
     fn compare_const(&mut self, op: ast::CmpOp, a: &Value, right: &'static ast::Expr, state: &mut State) -> Option<bool> {
         let none = intern::key_none();
         let lits = crate::domain::kv_literals(&a.kv);
-        let has_ph = a.pts.iter().any(|o| self.kind(o) == Kind::Ph || self.kind(o) == Kind::Unknown);
+        let has_ph = a.pts.iter().any(|o| self.kind(o) == Kind::Unknown);
         let known_lits = a.kv.is_literal() || a.kv.is_bot();
         // an unknown length against 0 (or a negative number): `len(xs) >= 0` holds
         if let (true, KeyVal::Data(d), ast::Expr::NumberLiteral(nl)) = (a.pts.is_empty(), &a.kv, right) {
@@ -1060,14 +1040,6 @@ impl Analyzer {
                     false
                 } else {
                     // undecidable here: decided per call site when the operand is concrete there
-                    for o in a.pts.iter() {
-                        if self.kind(o) == Kind::Ph {
-                            self.record_event("truth", o);
-                        }
-                    }
-                    if let Some(ph) = a.kv.as_param() {
-                        self.record_event("truth", ph);
-                    }
                     return None;
                 };
                 Some(if op == ast::CmpOp::Is { is_none } else { !is_none })
@@ -1091,13 +1063,8 @@ impl Analyzer {
                         }
                     }
                 }
-                let opaque = |an: &Analyzer, v: &Value| v.pts.iter().any(|o| matches!(an.kind(o), Kind::Ph | Kind::Unknown | Kind::External | Kind::Class | Kind::Module | Kind::Function));
+                let opaque = |an: &Analyzer, v: &Value| v.pts.iter().any(|o| matches!(an.kind(o), Kind::Unknown | Kind::External | Kind::Class | Kind::Module | Kind::Function));
                 if opaque(self, &a) || opaque(self, &b) {
-                    for o in a.pts.iter().chain(b.pts.iter()) {
-                        if self.kind(o) == Kind::Ph {
-                            self.record_event("truth", o);
-                        }
-                    }
                     return None;
                 }
                 let same = if a.pts.intersection(&b.pts).is_empty() {
@@ -1110,9 +1077,6 @@ impl Analyzer {
                 Some(if op == ast::CmpOp::Is { same } else { !same })
             }
             ast::CmpOp::In | ast::CmpOp::NotIn => {
-                if let Some(ph) = a.kv.as_param() {
-                    self.record_event("narrow", ph);
-                }
                 // members of a Flag: bits; else a member is its key
                 if (!self.member_key.is_empty() || !self.identity_objs.borrow().is_empty()) && !a.pts.is_empty() {
                     let b = self.eval_right(right, state);
@@ -1158,19 +1122,6 @@ impl Analyzer {
                     if let (Some(needle), Some(hay)) = (intern::key_as_str(k), b.kv.as_lit().filter(|_| b.pts.is_empty()).and_then(intern::key_as_str)) {
                         let found = hay.contains(&*needle);
                         return Some(if op == ast::CmpOp::In { found } else { !found });
-                    }
-                    if b.pts.is_empty() {
-                        if let Some(ph) = b.kv.as_param() {
-                            self.record_event("narrow", ph);
-                        }
-                    }
-                    // membership in a placeholder record: decided per call site
-                    for o in b.pts.iter() {
-                        if self.kind(o) == Kind::Ph {
-                            self.record_event("narrow", o);
-                        } else if let Some(src) = self.obj(o).copied_from {
-                            self.record_event("narrow", src);
-                        }
                     }
                     // a range with known bounds: membership of a known int
                     if let Some(o) = b.single() {
@@ -1244,7 +1195,6 @@ impl Analyzer {
                         }
                     }
                     let recs = self.record_objects(&b);
-                    self.entry_key_events(&recs, k, state);
                     if !b.pts.is_empty() && recs.len() == b.pts.len() && recs.iter().all(|o| matches!(self.kind(*o), Kind::Dict | Kind::Frame)) {
                         let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
                         let member = if rows.iter().all(|r| r.definite.contains(k)) {
@@ -1290,16 +1240,6 @@ impl Analyzer {
                     None
                 };
                 let Some(eq) = decided else {
-                    for v in [&a, &b] {
-                        for o in v.pts.iter() {
-                            if self.kind(o) == Kind::Ph {
-                                self.record_event("truth", o);
-                            }
-                        }
-                        if let Some(ph) = v.kv.as_param() {
-                            self.record_event("truth", ph);
-                        }
-                    }
                     return None;
                 };
                 Some(if op == ast::CmpOp::Eq { eq } else { !eq })
@@ -1310,16 +1250,6 @@ impl Analyzer {
                 let b = self.eval_right(right, state);
                 let bl = crate::domain::kv_literals(&b.kv);
                 if !a.pts.is_empty() || !b.pts.is_empty() || !a.kv.is_literal() || !b.kv.is_literal() || lits.len() != 1 || bl.len() != 1 {
-                    for v in [&a, &b] {
-                        for o in v.pts.iter() {
-                            if self.kind(o) == Kind::Ph {
-                                self.record_event("truth", o);
-                            }
-                        }
-                        if let Some(ph) = v.kv.as_param() {
-                            self.record_event("truth", ph);
-                        }
-                    }
                     return None;
                 }
                 let x = lits.iter().next().unwrap();
@@ -1345,7 +1275,7 @@ impl Analyzer {
             (Kind::View, Payload::View(ViewKind::Keys | ViewKind::Proxy, inner)) => {
                 let d = inner.single().filter(|d| self.kind(*d) == Kind::Dict)?;
                 let row = state.row(d, Ns::Item);
-                (row.closed() && row.present == row.definite && !row.symbolic()).then(|| row.present.clone())
+                (row.closed() && row.present == row.definite).then(|| row.present.clone())
             }
             (Kind::Set | Kind::List | Kind::Tuple, _) => {
                 let n = self.llen(o, state)?;
@@ -1595,20 +1525,12 @@ impl Analyzer {
                 return None;
             }
         }
-        if let Some(ph) = v.kv.as_param() {
-            self.record_event("truth", ph);
-            return None;
-        }
         if !v.kv.is_bot() || v.pts.is_empty() {
             return None;
         }
         let mut verdicts: Vec<bool> = Vec::new();
         for oid in v.pts.iter() {
             match self.kind(oid) {
-                Kind::Ph => {
-                    self.record_event("truth", oid);
-                    return None;
-                }
                 Kind::List | Kind::Tuple | Kind::Set if self.llen(oid, state).is_some() => {
                     verdicts.push(self.llen(oid, state).unwrap() > 0);
                 }
@@ -1670,13 +1592,6 @@ impl Analyzer {
         }
         let both = a.pts.union(&b.pts);
         // arithmetic on a parameter (or a field of one): the result is decided per call site
-        if matches!(op, ast::Operator::Add | ast::Operator::Sub | ast::Operator::Mult | ast::Operator::FloorDiv | ast::Operator::Div | ast::Operator::Mod) {
-            for v in [a, b] {
-                if let Some(ph) = v.kv.as_param() {
-                    self.record_event("narrow", ph);
-                }
-            }
-        }
         // set operations on key views / sets with known members: a set of the result
         if matches!(op, ast::Operator::BitAnd | ast::Operator::BitOr | ast::Operator::Sub | ast::Operator::BitXor) {
             if let (Some(x), Some(y)) = (self.known_members(a, state), self.known_members(b, state)) {
@@ -1691,11 +1606,6 @@ impl Analyzer {
         }
         if op == ast::Operator::BitOr {
             // a parameter's `|` (a dict or a set): decided per call site
-            for o in both.iter() {
-                if self.kind(o) == Kind::Ph {
-                    self.record_event("concrete", o);
-                }
-            }
             let recs: Vec<u32> = both.iter().filter(|o| self.kind(*o) == Kind::Dict).collect();
             if !recs.is_empty() {
                 let oid = self.alloc_at(Kind::Dict, node, state, &format!("dict@L{}", node.line), Payload::None, None, Ns::Item, None, None);
@@ -1713,12 +1623,12 @@ impl Analyzer {
                 }
             }
             if let Some(x) = la {
-                if intern::key_is_str(x) && matches!(b.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_) | KeyVal::Param(_)) {
+                if intern::key_is_str(x) && matches!(b.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
                     return Value::kv_only(self.rename_kv(&b.kv, &RenameFn::with_arg(FnKind::Prefix, x)));
                 }
             }
             if let Some(y) = lb {
-                if intern::key_is_str(y) && matches!(a.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_) | KeyVal::Param(_)) {
+                if intern::key_is_str(y) && matches!(a.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
                     return Value::kv_only(self.rename_kv(&a.kv, &RenameFn::with_arg(FnKind::Suffix, y)));
                 }
             }
@@ -1868,21 +1778,6 @@ impl Analyzer {
             }
             if let Some(x) = a.kv.as_lit() {
                 if let Some(sx) = intern::key_as_str(x) {
-                    // the formatted text depends on the arguments: a parameter among them is
-                    // decided per call site
-                    let mut arg_kvs: Vec<KeyVal> = vec![b.kv.clone()];
-                    if let Some(tp) = b.single() {
-                        if matches!(self.kind(tp), Kind::Tuple) {
-                            if let Some(n) = self.llen(tp, state) {
-                                arg_kvs = (0..n).map(|i| state.slot(tp, Ns::Pos, key_int(i as i64)).kv).collect();
-                            }
-                        }
-                    }
-                    for kv in &arg_kvs {
-                        if let Some(ph) = kv.as_param() {
-                            self.record_event("narrow", ph);
-                        }
-                    }
                     // "%s ... %d" with the arguments: literal segments around at most one
                     // non-literal argument (a parameter: decided per call site); width and
                     // precision specs are applied when every argument is a literal
@@ -1907,11 +1802,6 @@ impl Analyzer {
                             }
                         };
                         if args.len() == n {
-                            for a in &args {
-                                if let Some(ph) = a.as_param() {
-                                    self.record_event("narrow", ph);
-                                }
-                            }
                             let to_str = |kv: &KeyVal| -> KeyVal {
                                 match kv {
                                     KeyVal::Lits(ks) if ks.iter().any(|k| !intern::key_is_str(k)) => KeyVal::Lits(crate::intern::KeySet::from_iter(ks.iter().map(|k| if intern::key_is_str(k) { k } else { key_str_lit(&intern::key_py_str(k)) }))),
@@ -2006,9 +1896,6 @@ impl Analyzer {
                                         match v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(|k| crate::models::pyvalues::builtin(name, &[k], &[])) {
                                             Some(t) => Value::lit(t),
                                             None => {
-                                                if let Some(ph) = v.kv.as_param() {
-                                                    self.record_event("narrow", ph);
-                                                }
                                                 Value::data("conv")
                                             }
                                         }
@@ -2029,9 +1916,6 @@ impl Analyzer {
                                                 }
                                             }
                                         }
-                                    }
-                                    if let Some(ph) = v.kv.as_param() {
-                                        self.record_event("narrow", ph);
                                     }
                                     match (literal_spec, v.kv.as_lit().filter(|_| v.pts.is_empty())) {
                                         (true, Some(k)) => match format_spec_literal(k, &spec_text) {
@@ -2082,9 +1966,6 @@ impl Analyzer {
             match p {
                 Part::Lit(l) => text.push_str(l),
                 Part::Hole(v) => {
-                    if let Some(ph) = v.kv.as_param() {
-                        self.record_event("narrow", ph);
-                    }
                     match v.kv.as_lit().filter(|_| v.pts.is_empty()) {
                         Some(k) => text.push_str(&intern::key_py_str(k)),
                         None => all_lit = false,

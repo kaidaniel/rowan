@@ -20,9 +20,6 @@ pub enum Elem {
 }
 
 impl Elem {
-    pub fn is_pair(&self) -> bool {
-        matches!(self, Elem::Pair(..))
-    }
     pub fn key_part(&self) -> Value {
         match self {
             Elem::One(v) => v.clone(),
@@ -319,23 +316,6 @@ impl Analyzer {
     pub fn call_method_with(&mut self, v: &Value, name: &str, args: Vec<Value>, node: &Node, state: &mut State) -> Option<Value> {
         let mut outs: Vec<Value> = Vec::new();
         for oid in v.pts.iter() {
-            // (a placeholder of a class, in a summary: the class's method; a subclass may
-            // override it, decided per call site)
-            let ph_cls = if self.kind(oid) == Kind::Ph { self.ph_info(oid).cls.get().filter(|c| self.class_info_opt(*c).is_some()) } else { None };
-            if let Some(cls) = ph_cls {
-                if !self.ph_info(oid).exact.get() {
-                    self.record_event("hint", oid);
-                }
-                if let Some(m) = self.class_lookup(cls, name) {
-                    let fv = self.cls_slots.get(&(m, Ns::Attr, key_str_lit(name))).cloned().unwrap_or_default();
-                    for f in fv.pts.iter() {
-                        if self.kind(f) == Kind::Function {
-                            outs.push(self.call_user(f, Some(Value::obj(oid)), args.clone(), IndexMap::new(), vec![], vec![], state, node, None, false));
-                        }
-                    }
-                }
-                continue;
-            }
             if self.kind(oid) == Kind::Instance {
                 if let Some(cls) = self.instance_class(oid) {
                     if let Some(m) = self.class_lookup(cls, name) {
@@ -384,9 +364,6 @@ impl Analyzer {
         if fr_kind == FrameKind::Function {
             if let Some(&cid) = self.frame().cells.get(&name) {
                 let v = state.slot(cid, Ns::Cell, cell_key());
-                if v.empty() && !self.sum_stack.is_empty() && self.is_entry_object(cid) {
-                    return self.path_placeholder_value(cid, Ns::Cell, cell_key(), &Row::new(), state);
-                }
                 return v;
             }
             let scope = self.frame().scope;
@@ -425,11 +402,6 @@ impl Analyzer {
                     state.set_row(fr_module, Ns::Attr, row.narrow_in(k, true));
                 }
             }
-            // a summary reading a module name that is rebound elsewhere: the value is the one at
-            // each call site (a deferred load), not the one when the summary was made
-            if fr_kind == FrameKind::Function && self.deferred_global(fr_module, &str_get(name), &v) {
-                return self.path_placeholder_value(fr_module, Ns::Attr, intern::key(intern::Key::Str(str_get(name))), &Row::new(), state);
-            }
             return v;
         }
         let nm = str_get(name);
@@ -441,17 +413,6 @@ impl Analyzer {
         Value::obj(oid)
     }
 
-    /// A module name a summary reads as a deferred load (its value at each call site): data
-    /// rebound elsewhere, or a list / set that functions mutate (their effects land at the
-    /// positions the call site has, not those of the state the summary was made in).
-    pub fn deferred_global(&self, module: u32, name: &str, v: &Value) -> bool {
-        if !self.is_entry_object(module) {
-            return false;
-        }
-        let data_only = v.pts.iter().all(|o| matches!(self.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance));
-        let mutable_seq = !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::List | Kind::Set) || (self.kind(o) == Kind::Dict)) && self.mutated_in_functions(module, name);
-        data_only && (mutable_seq || self.module_info(module).scopes.rebound.contains(name))
-    }
 
     /// A narrowed value for a name (a test on it): its value changes, not whether it is bound.
     pub fn rebind_name(&mut self, name: StrId, v: Value, state: &mut State) {
@@ -648,11 +609,7 @@ impl Analyzer {
             let ll = self.llen(oid, state);
             if matches!(kind, Kind::Tuple | Kind::List) && ll.is_some() {
                 for i in 0..n {
-                    let mut sv = state.slot(oid, Ns::Pos, key_int(i as i64));
-                    if sv.empty() && self.is_entry_object(oid) {
-                        // an entry tuple inside a summary: its positions are deferred loads
-                        sv = self.load_item(&Value::obj(oid), Ns::Item, &Value::lit(key_int(i as i64)), node, state, false);
-                    }
+                    let sv = state.slot(oid, Ns::Pos, key_int(i as i64));
                     parts[i] = parts[i].join(&sv);
                 }
             } else if let Some(cls) = self.instance_class(oid).filter(|c| kind == Kind::Instance && self.is_named_tuple_class(*c)) {
@@ -673,12 +630,6 @@ impl Analyzer {
                     if n >= 2 {
                         parts[1] = parts[1].join(&val);
                     }
-                }
-            } else if kind == Kind::Ph {
-                // unpacking a placeholder: its elements (an iteration event for the call site)
-                let e = self.iterate(&Value::obj(oid), node, state).elem.flat();
-                for i in 0..n {
-                    parts[i] = parts[i].join(&e);
                 }
             } else {
                 // an iterable whose items are known by position (zip / enumerate of known lists)
@@ -784,11 +735,9 @@ impl Analyzer {
             self.raise_values.push(None);
             self.raise_cls.push((self.raise_states.len(), Vec::new()));
             self.try_marks.push((self.frames.len(), self.env_stack.len(), pre, self.objects.len() as u32));
-            self.try_sum_depth.push(self.sum_stack.len());
             let v = self.call_value(&m, node, None, &mut probe, Some(Vec::new()));
             self.guards.pop();
             self.try_marks.pop();
-            self.try_sum_depth.pop();
             let flagged = self.may_raise.pop().unwrap_or(false);
             let raised_at = self.raise_states.pop().flatten();
             self.raise_values.pop();
@@ -902,9 +851,6 @@ impl Analyzer {
                 Kind::Dict | Kind::Frame => {
                     // (a dict from before a summarised call, a module constant: its items are
                     // known where the call is)
-                    if !self.sum_stack.is_empty() && self.is_entry_object(oid) && kind == Kind::Dict {
-                        self.record_event("concrete", oid);
-                    }
                     let lit = self.literal_dict_items(oid, state);
                     match (lit, items.as_mut()) {
                         (Some(l), Some(its)) => its.extend(l.into_iter().map(|(k, _)| Value::lit(k))),
@@ -924,13 +870,6 @@ impl Analyzer {
                             elems.push(recv);
                         }
                         continue;
-                    }
-                    if !self.sum_stack.is_empty() {
-                        for r in recv.pts.iter() {
-                            if self.is_entry_object(r) && self.kind(r) == Kind::Dict {
-                                self.record_event("concrete", r);
-                            }
-                        }
                     }
                     let kv = KeyVal::KeysOf(KeysOf::new(recv.pts.clone(), Ns::Item));
                     let vals = join_values(recv.pts.iter().map(|r| self.record_values(r, state)).collect::<Vec<_>>());
@@ -1117,17 +1056,6 @@ impl Analyzer {
                         }
                     }
                 }
-                Kind::Ph => {
-                    items = None;
-                    exhaustive = false;
-                    self.record_event("iter", oid);
-                    if self.obj(oid).depth >= super::limit("path", PATH_DEPTH as usize) as u32 {
-                        elems.push(Value::data("deep"));
-                        continue;
-                    }
-                    let eid = self.path_placeholder(oid, Ns::Item, STAR, state, None, "");
-                    elems.push(Value::with_kv(ObjSet::one(eid), KeyVal::Param(eid)));
-                }
                 Kind::Unknown => {
                     items = None;
                     exhaustive = false;
@@ -1228,7 +1156,26 @@ impl Analyzer {
             return;
         }
         let mut srcs: Vec<crate::domain::SourceId> = Vec::new();
-        for oid in elem.pts.iter() {
+        // (the element, and the items it holds two levels down: the group of a `groupby` pair
+        // iterated in its turn reads each of its rows once per element too)
+        let mut objs: Vec<ObjId> = elem.pts.iter().collect();
+        let mut level: Vec<ObjId> = objs.clone();
+        for _ in 0..2 {
+            let mut next: Vec<ObjId> = Vec::new();
+            for oid in level {
+                if matches!(self.kind(oid), Kind::List | Kind::Tuple) {
+                    state.slots.each(&oid, &mut |sk, v| {
+                        if matches!(sk.0, Ns::Elem | Ns::Pos) {
+                            next.extend(v.pts.iter());
+                        }
+                    });
+                }
+            }
+            next.retain(|o| !objs.contains(o));
+            objs.extend(next.iter().copied());
+            level = next;
+        }
+        for oid in objs {
             for ns in [Ns::Item, Ns::Attr] {
                 for (src, _) in state.row(oid, ns).sources.iter() {
                     if !crate::domain::source_is_data(src) && !srcs.contains(&src) {
@@ -1283,7 +1230,7 @@ impl Analyzer {
             _ => return None,
         };
         let row = state.row(d, Ns::Item);
-        if !row.closed() || row.symbolic() || row.present == row.definite || row.present.len() > UNROLL_MAX || state.has_slot(d, Ns::Item, STAR) || self.counters.contains(&d) {
+        if !row.closed() || row.present == row.definite || row.present.len() > UNROLL_MAX || state.has_slot(d, Ns::Item, STAR) || self.counters.contains(&d) {
             return None;
         }
         let keys = row.ordered_keys()?;
@@ -1306,10 +1253,6 @@ impl Analyzer {
     }
 
     pub fn literal_dict_items(&mut self, oid: u32, state: &State) -> Option<Vec<(KeyId, Value)>> {
-        if self.kind(oid) == Kind::Ph {
-            self.record_event("iter", oid);
-            return None;
-        }
         let row = state.row(oid, Ns::Item);
         // an empty closed dict iterates zero times (known), like an empty list
         if row.open() || row.present != row.definite || row.present.len() > UNROLL_MAX {
@@ -1358,8 +1301,8 @@ impl Analyzer {
         let row = state.row(oid, Ns::Item);
         // (keys stored under unknown names keep their values in the `*` slot: only content
         // from outside — a parameter, an input, unknown code — is not there)
-        let outside = row.top || row.symbolic() || row.sources.iter().any(|(src, _)| !crate::domain::source_is_data(src));
-        if self.kind(oid) == Kind::Ph || (row.open() && outside) {
+        let outside = row.top || row.sources.iter().any(|(src, _)| !crate::domain::source_is_data(src));
+        if row.open() && outside {
             return v.join(&self.path_placeholder_value(oid, Ns::Item, STAR, &row, state));
         }
         v
@@ -1373,16 +1316,9 @@ impl Analyzer {
         let mut out = KeySet::new();
         for oid in v.pts.iter() {
             match self.kind(oid) {
-                Kind::Ph => {
-                    self.record_event("concrete", oid);
-                    return None;
-                }
                 Kind::List | Kind::Tuple | Kind::Set => match state.elems.get(&oid) {
                     Some(kv) if kv.is_literal() => out = out.union(&crate::domain::kv_literals(&kv)),
                     _ => {
-                        if self.is_entry_object(oid) {
-                            self.record_event("concrete", oid);
-                        }
                         return None;
                     }
                 },
@@ -1407,19 +1343,10 @@ impl Analyzer {
     pub fn literal_mapping(&mut self, v: &Value, state: &State) -> Option<Vec<(KeyId, KeyId)>> {
         let mut out: Vec<(KeyId, KeyId)> = Vec::new();
         for oid in v.pts.iter() {
-            if self.kind(oid) == Kind::Ph {
-                self.record_event("concrete", oid);
-                return None;
-            }
             if self.kind(oid) != Kind::Dict {
                 return None;
             }
             let row = state.row(oid, Ns::Item);
-            if row.symbolic() && self.is_entry_object(oid) {
-                // a dict from before the call (a module constant): known at the call site
-                self.record_event("concrete", oid);
-                return None;
-            }
             if row.open() || row.present != row.definite {
                 return None;
             }
@@ -1460,9 +1387,6 @@ impl Analyzer {
         let nid = self.alloc(kind, &format!("{}{}:{}", prefix, kind.name(), root), state, &label, payload, None, if kind == Kind::Instance { Ns::Attr } else { Ns::Item }, None, None);
         self.copy_root.insert(nid, root);
         seen.insert(oid, nid);
-        if self.is_entry_object(oid) {
-            self.obj_mut(nid).copied_from = Some(oid);
-        }
         let ll = self.llen(oid, state);
         self.set_llen(nid, state, ll);
         let nsingle = self.obj(nid).single;

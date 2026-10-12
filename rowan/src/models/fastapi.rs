@@ -355,7 +355,7 @@ impl Analyzer {
                     Some(j) if embed => {
                         // the key in the JSON, else the default
                         let kk = key_str_lit(&pname);
-                        let recs: Vec<ObjId> = j.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown | Kind::Ph)).collect();
+                        let recs: Vec<ObjId> = j.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown)).collect();
                         let sure = !recs.is_empty() && recs.iter().all(|o| state.row(*o, Ns::Item).definite.contains(kk));
                         let maybe = recs.iter().any(|o| state.row(*o, Ns::Item).present.contains(kk) || state.row(*o, Ns::Item).open());
                         let mut v = if maybe { self.load_item(j, Ns::Item, &Value::lit(kk), node, state, false) } else { Value::new() };
@@ -737,9 +737,7 @@ impl Analyzer {
         });
         let prev = self.cm_hook.replace(crate::interp::CmHook { body: &[], target: None, depth: self.frames.len(), env_after: None, ran: false, then: Some(then), body_died: false, env_before: None, multi: false, body_exits: None, body_ret: None });
         let outer = self.fa_gen_ret.take();
-        self.force_tab_once = true;
         self.call_user(g, None, vec![], kwargs, vec![], vec![], state, node, None, false);
-        self.force_tab_once = false;
         let h = std::mem::replace(&mut self.cm_hook, prev);
         let ret = std::mem::replace(&mut self.fa_gen_ret, outer).unwrap_or_default();
         match h {
@@ -767,10 +765,7 @@ impl Analyzer {
         let n = self.fa_pending.len();
         self.fa_pending.push((idx, rq));
         let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
-        // (the middleware runs concretely: the handler's requirements are this run's)
-        self.force_tab_once = true;
         self.call_user(first, None, vec![robj, Value::obj(cn)], IndexMap::new(), vec![], vec![], state, node, None, false);
-        self.force_tab_once = false;
         Some(())
     }
 
@@ -837,7 +832,6 @@ impl Analyzer {
         self.raise_values.push(None);
         self.raise_cls.push((self.raise_states.len(), Vec::new()));
         self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
-        self.try_sum_depth.push(self.sum_stack.len());
         self.fa_dep_cache.push(rustc_hash::FxHashMap::default());
         self.fa_out_resp.push(Vec::new());
         self.fa_route_deps(route, Some(req), state, node);
@@ -847,7 +841,6 @@ impl Analyzer {
         self.fa_dep_cache.pop();
         self.guards.pop();
         self.try_marks.pop();
-        self.try_sum_depth.pop();
         let flagged = self.may_raise.pop().unwrap_or(false);
         let raised_any = self.raise_states.pop().flatten().is_some();
         let mut raised_v = self.raise_values.pop().flatten().unwrap_or_default();

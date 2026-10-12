@@ -4,7 +4,7 @@ compiled pattern) has its methods from the model, not from its attribute row (wh
 model's own state): replayed on one, the reads were classified against that row and reported
 `write` / `seek` / `read` / `match` definitely missing (email's `BufferedSubFile.push`, once the
 call budget was spent). With the budget at 0 every call here uses its summary."""
-#@limits tab=0
+# (summaries are gone since: every call runs at its call site)
 import re
 from io import StringIO
 

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
 
-use crate::domain::{kv_join, rho, KeyVal, Ns, ObjId, ReqInfo, Row, Value};
+use crate::domain::{kv_join, KeyVal, Ns, ObjId, ReqInfo, Row, Value};
 use crate::intern::{IdSet, KeyId, SourceId, StrId, STAR};
 use crate::layered::{LayerMap, TwoLevel};
 
@@ -18,7 +18,6 @@ pub enum Kind {
     Module,
     Class,
     Namespace,
-    Ph,
     List,
     Tuple,
     Set,
@@ -50,7 +49,6 @@ impl Kind {
             Kind::Module => "module",
             Kind::Class => "class",
             Kind::Namespace => "namespace",
-            Kind::Ph => "ph",
             Kind::List => "list",
             Kind::Tuple => "tuple",
             Kind::Set => "set",
@@ -73,7 +71,7 @@ impl Kind {
         }
     }
     pub fn is_record(self) -> bool {
-        matches!(self, Kind::Dict | Kind::Frame | Kind::Instance | Kind::Unknown | Kind::Module | Kind::Class | Kind::Namespace | Kind::Ph)
+        matches!(self, Kind::Dict | Kind::Frame | Kind::Instance | Kind::Unknown | Kind::Module | Kind::Class | Kind::Namespace)
     }
     pub fn is_container(self) -> bool {
         matches!(self, Kind::List | Kind::Tuple | Kind::Set)
@@ -120,8 +118,6 @@ pub struct State {
     pub ret: Option<Value>,
     pub reachable: bool,
     pub exits: Option<Arc<State>>,
-    /// rows of untouched objects are entry rows (summary analysis)
-    pub symbolic: bool,
     /// what a test that was joined over said about rows (see `CondFact`)
     pub facts: Arc<Vec<Arc<CondFact>>>,
     /// (name, key): the object the name is bound to has the key, whichever of its possible
@@ -201,7 +197,6 @@ impl State {
             ret: None,
             reachable: true,
             exits: None,
-            symbolic: false,
             facts: Arc::new(Vec::new()),
             name_keys: Arc::new(Vec::new()),
             lasts: Arc::new(Vec::new()),
@@ -230,7 +225,6 @@ impl State {
             ret: self.ret.clone(),
             reachable: self.reachable,
             exits: self.exits.clone(),
-            symbolic: self.symbolic,
             facts: self.facts.clone(),
             name_keys: self.name_keys.clone(),
             lasts: self.lasts.clone(),
@@ -267,7 +261,6 @@ impl State {
         self.ret = o.ret.clone();
         self.reachable = o.reachable;
         self.exits = o.exits.clone();
-        self.symbolic = o.symbolic;
         self.facts = o.facts.clone();
         self.name_keys = o.name_keys.clone();
         self.lasts = o.lasts.clone();
@@ -341,7 +334,6 @@ impl State {
         s.ret = ret;
         s.exits = exits;
         s.reachable = true;
-        s.symbolic = self.symbolic || o.symbolic;
         s.facts = Arc::new(facts);
         s.tf = if Arc::ptr_eq(&self.tf, &o.tf) || self.tf == o.tf { self.tf.clone() } else { Arc::new(self.tf.join(&o.tf)) };
         s.name_keys = if Arc::ptr_eq(&self.name_keys, &o.name_keys) { self.name_keys.clone() } else { Arc::new(self.name_keys.iter().filter(|x| o.name_keys.contains(x)).copied().collect()) };
@@ -484,9 +476,6 @@ impl State {
     pub fn row(&self, oid: ObjId, ns: Ns) -> Row {
         if let Some(r) = self.rows.get(&(oid, ns)) {
             return r;
-        }
-        if self.symbolic {
-            return Row::entry(rho(oid, ns));
         }
         Row::new()
     }

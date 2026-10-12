@@ -147,7 +147,6 @@ pub fn m_ospath(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     let args: Option<Vec<String>> = c.args.iter().map(|a| text_of(an, a)).collect();
     let Some(args) = args.filter(|_| c.kwargs.is_empty() && c.star_args.is_empty()) else {
-        an.concrete_args(c.args.iter(), st);
         return unknown_ospath(an, st, c, &name);
     };
     let one = args.first().cloned();
@@ -346,7 +345,6 @@ pub fn m_path_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             new_path(an, st, &c.node, &t, &cls, "new")
         }
         None => {
-            an.concrete_args(c.args.iter(), st);
             Value::data("path")
         }
     }
@@ -410,7 +408,6 @@ pub fn m_path_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let cls = path_class(an, o);
     let args: Option<Vec<String>> = c.args.iter().map(|a| text_of(an, a)).collect();
     let Some(args) = args else {
-        an.concrete_args(c.args.iter(), st);
         return Value::data("path");
     };
     let nm = name_of(&t);
@@ -744,7 +741,6 @@ pub fn m_textwrap(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     let text = c.args.first().and_then(lit_str);
     let Some(text) = text else {
-        an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
         return unknown_tw(an, st, c, &name);
     };
     match name.as_str() {

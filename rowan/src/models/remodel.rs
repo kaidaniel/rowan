@@ -170,13 +170,11 @@ pub fn m_re(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         return match lit_str(&pv) {
             Some(s) => Value::lit_str(&pyre::escape(&s)),
             None => {
-                an.concrete_args(c.args.iter(), st);
                 Value::data("escape")
             }
         };
     }
     let Some((pat, flags)) = pattern_of(an, &pv, flags_v.as_ref()) else {
-        an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
         return fallback(an, st, c, None);
     };
     let Some(re) = Regex::new(&pat, flags) else { return fallback(an, st, c, Some(pat)) };
@@ -188,7 +186,6 @@ pub fn m_re(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "match" | "search" | "fullmatch" | "findall" | "finditer" | "split" => {
             let sv = t.args.first().cloned().or_else(|| c.kw("string"));
             let Some(text) = sv.as_ref().and_then(lit_str) else {
-                an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
                 return unknown_string(an, st, c, &name, &t);
             };
             let s: Vec<char> = text.chars().collect();
@@ -260,7 +257,6 @@ pub fn m_re(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 None => 0,
             };
             let (Some(repl), Some(text)) = (repl, sv.as_ref().and_then(lit_str)) else {
-                an.concrete_args(c.args.iter().chain(c.kwargs.values()), st);
                 return unknown_sub(an, st, c, &name);
             };
             let s: Vec<char> = text.chars().collect();

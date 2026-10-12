@@ -3,7 +3,7 @@
 and the store was dropped, so what `__init__` set through `__setattr__` read as definitely
 missing (`_pydecimal.Context`, whose `__setattr__` checks each value and stores it with
 `object.__setattr__`). With the tabulation budget at 0 every call uses its summary."""
-#@limits tab=0
+# (summaries are gone since: every call runs at its call site)
 
 
 class Ctx:
