@@ -1291,12 +1291,25 @@ fn cap_sources(ss: SrcSet) -> SrcSet {
 }
 
 pub fn join_rows<'a>(rows: impl IntoIterator<Item = Row>) -> Row {
-    let mut it = rows.into_iter();
-    let Some(mut acc) = it.next() else { return Row::new() };
-    for r in it {
-        acc = acc.join(&r);
+    // (equal rows once — the objects of one site often share theirs — then pairwise in a
+    // balanced tree: a left fold over thousands re-unioned an ever larger accumulator)
+    let mut seen: rustc_hash::FxHashSet<Row> = rustc_hash::FxHashSet::default();
+    let mut level: Vec<Row> = rows.into_iter().filter(|r| seen.insert(r.clone())).collect();
+    if level.is_empty() {
+        return Row::new();
     }
-    acc
+    while level.len() > 1 {
+        let mut next: Vec<Row> = Vec::with_capacity(level.len().div_ceil(2));
+        let mut it = level.into_iter();
+        while let Some(a) = it.next() {
+            next.push(match it.next() {
+                Some(b) => a.join(&b),
+                None => a,
+            });
+        }
+        level = next;
+    }
+    level.pop().unwrap()
 }
 
 // ---------------------------------------------------------------------------

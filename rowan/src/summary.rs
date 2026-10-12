@@ -1643,6 +1643,7 @@ impl Analyzer {
             erow_cache: FxHashMap::default(),
             conc_cache: FxHashMap::default(),
             new_clones: FxHashSet::default(),
+            focus_cache: FxHashMap::default(),
         };
         // 1. clones for all templates
         let mut templates: Vec<ObjId> = summary.templates.iter().copied().collect();
@@ -2201,7 +2202,12 @@ struct Inst {
     new_clones: FxHashSet<ObjId>,
     /// rows of objects made while resolving paths, as made
     born: FxHashMap<(ObjId, Ns), Row>,
+    focus_cache: FxHashMap<(ObjId, ObjSet), Vec<(Focus, Vec<ObjId>)>>,
 }
+
+/// The most groups of distinct entry rows a placeholder's targets are concretised in; past
+/// it, one group with their rows joined.
+const MAX_FOCUS_GROUPS: usize = 16;
 
 impl Inst {
     fn kv_of(&mut self, an: &mut Analyzer, state: &mut State, pre: &State, ph: ObjId) -> KeyVal {
@@ -2285,8 +2291,11 @@ impl Inst {
         let targets = self.resolve(an, state, pre, oid);
         // (a placeholder standing for no object here: whatever value it is, its keys are not
         // known — an empty closed row would claim there are none)
-        let out = if targets.is_empty() {
-            if an.has_obj(oid) && an.kind(oid) == Kind::Ph {
+        // (a placeholder standing for many objects here — an argument duck-typed as every
+        // class: their rows joined would be a row of every key of every class, concretised
+        // at each deferred access; nothing is known of its keys instead)
+        let out = if targets.is_empty() || targets.len() > MAX_FOCUS_GROUPS * 2 {
+            if targets.len() > MAX_FOCUS_GROUPS * 2 || (an.has_obj(oid) && an.kind(oid) == Kind::Ph) {
                 Row::top()
             } else {
                 Row::new()
@@ -2346,6 +2355,9 @@ impl Inst {
     /// Targets of placeholder `ph` partitioned for concretisation: targets of one allocation
     /// site that share their entry rows form one group with one exact representative row.
     fn focus_groups(&mut self, an: &Analyzer, state: &State, pre: &State, ph: ObjId, tg: &ObjSet) -> Vec<(Focus, Vec<ObjId>)> {
+        if let Some(g) = self.focus_cache.get(&(ph, tg.clone())) {
+            return g.clone();
+        }
         // (groups indexed by kind and site, the focus compared within a site only: a target
         // set of thousands made this quadratic)
         let mut groups: Vec<(Focus, Vec<ObjId>)> = Vec::new();
@@ -2362,6 +2374,14 @@ impl Inst {
                 }
             }
         }
+        // (many distinct entry rows — an argument of many objects: one group with their rows
+        // joined, so a deferred access costs one concretisation, not one per object)
+        if groups.len() > MAX_FOCUS_GROUPS {
+            let (item, attr) = (Row::top(), Row::top());
+            let members: Vec<ObjId> = groups.into_iter().flat_map(|(_, m)| m).collect();
+            groups = vec![(Focus { ph, item, attr }, members)];
+        }
+        self.focus_cache.insert((ph, tg.clone()), groups.clone());
         groups
     }
 
