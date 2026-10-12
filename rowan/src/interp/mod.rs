@@ -731,20 +731,10 @@ pub struct Analyzer {
     pub tab_count: FxHashMap<usize, usize>,
     /// every tabulated body run (forced ones included): the golden `#@tabulations <= N` bound
     pub tab_runs: usize,
-    /// the receiver value while `load_attr` goes over a value of many objects
-    pub many_receivers: Option<(Value, String, Option<Value>)>,
     /// `__next__` functions whose calls were not decided once (`unroll_next`)
     pub no_unroll_next: FxHashSet<ObjId>,
     /// the last raise recorded per try depth (state before collection, class, exception)
     pub raise_last: FxHashMap<usize, (State, Option<ExcNames>, Value)>,
-    /// user classes defining an attribute name, for the class table's size it was computed at
-    pub classes_by_attr: std::cell::RefCell<((usize, usize), FxHashMap<KeyId, Vec<ObjId>>)>,
-    /// unknown objects and placeholders duck-typed as several user classes: their parts are
-    /// not (`duck_part`)
-    pub duck_seen: std::cell::RefCell<FxHashSet<ObjId>>,
-    /// parts of those (attributes, items, elements, results of unknown calls on them): not
-    /// duck-typed either
-    pub duck_parts: std::cell::RefCell<FxHashSet<ObjId>>,
     pub fresh_init: FxHashSet<ObjId>,
     /// per comprehension generator level: whether its items are known (unrolled)
     pub comp_known: Vec<bool>,
@@ -2134,22 +2124,6 @@ impl Analyzer {
         inst
     }
 
-    /// The user classes that define attribute `nk` (in definition order), cached while the
-    /// class table does not grow: an unknown value's attribute is looked up in every class.
-    pub fn classes_defining(&self, nk: KeyId) -> Vec<ObjId> {
-        let version = (self.cls_slots.len(), self.user_classes.len());
-        let mut c = self.classes_by_attr.borrow_mut();
-        if c.0 != version {
-            *c = (version, FxHashMap::default());
-        }
-        if let Some(v) = c.1.get(&nk) {
-            return v.clone();
-        }
-        let v: Vec<ObjId> = self.user_classes.iter().copied().filter(|cl| self.cls_slots.contains_key(&(*cl, Ns::Attr, nk))).collect();
-        c.1.insert(nk, v.clone());
-        v
-    }
-
     pub fn record_fact(&mut self, node: &Node, name: StrId, v: &Value, state: &State) {
         if !self.facts_on || node.addr == 0 || self.quiet {
             return;
@@ -2261,14 +2235,6 @@ impl Analyzer {
         }
     }
 
-    /// `child` is a part of `parent` (an unknown call's result of its receiver): a part of a
-    /// duck-typed object is not duck-typed (`duck_part`).
-    pub fn note_part(&self, parent: ObjId, child: ObjId) {
-        let from_duck = self.duck_seen.borrow().contains(&parent) || self.duck_parts.borrow().contains(&parent);
-        if from_duck {
-            self.duck_parts.borrow_mut().insert(child);
-        }
-    }
 
     /// Is `oid` reachable from a binding the program can still use: the locals of every
     /// active frame, loop overlays, cells, module objects, narrowed values, the return value?

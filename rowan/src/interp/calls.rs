@@ -405,16 +405,6 @@ impl Analyzer {
         // recursive walk over unknown values, rich's pretty printer)
         let rctx: String = self.frame().ctx.rsplit('/').next().unwrap_or("").to_string();
         let rid = self.alloc(Kind::Unknown, &format!("ret:{}", site), state, &format!("result of {}", site), Payload::None, None, Ns::Item, Some(true), Some(&rctx));
-        if let Some(r) = recv {
-            for o in r.pts.iter() {
-                self.note_part(o, rid);
-                if let Payload::Method(_, mr) = &self.obj(o).payload {
-                    for m in mr.pts.iter() {
-                        self.note_part(m, rid);
-                    }
-                }
-            }
-        }
         // everything it can reach through what it is given may have changed: keys, values,
         // items, lengths
         self.havoc_reachable(&vals, rid, site_id, state);

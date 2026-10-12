@@ -38,6 +38,8 @@ ruff and walks the syntax tree directly, running the program on abstract values.
   functions times the budget, not by a deadline.
   * **Recursion:** the inner call uses the running activation's partial result; it iterates
     to a fixpoint (8 rounds), then widens.
+  * **Unknown values** are not taken for instances of the program's classes: a method of an
+    unknown object is an unknown call (no duck typing; it was a closed-world assumption).
   * **Unknown calls** may change everything they reach through what they are given, at any
     depth: records get a mutator, slots may hold anything (one shared unknown object), lists
     and sets any items and length. They return an unknown and may raise anything. Library

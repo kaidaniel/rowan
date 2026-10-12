@@ -1118,7 +1118,6 @@ impl Analyzer {
                 self.set_symbol(pid, sym, scope);
             }
         }
-        self.note_part(oid, pid);
         let d = self.obj(oid).depth + 1;
         self.obj_mut(pid).depth = d;
         if !state.has_row(pid, Ns::Item) {
@@ -1464,14 +1463,6 @@ impl Analyzer {
         // (one k-way union of all targets' values: a receiver of many objects, joined pairwise,
         // costs the product of their sizes)
         let mut parts: Vec<Value> = Vec::new();
-        let saved_many = std::mem::replace(&mut self.many_receivers, if obj.pts.len() > 32 {
-            use std::hash::BuildHasher;
-            let ids = obj.pts.to_vec();
-            let key = format!("{:x}.{}", rustc_hash::FxBuildHasher.hash_one(&ids), ids.len());
-            Some((obj.clone(), key, None))
-        } else {
-            None
-        });
         let guarded = self.is_guarded(Ns::Attr) || !report;
         // (a value that may also be a scalar — a str, a number — may have the attribute: no
         // object's lack of it makes the read fail for sure)
@@ -1838,7 +1829,6 @@ impl Analyzer {
             };
             parts.push(v);
         }
-        self.many_receivers = saved_many;
         self.recv_scalar = saved_scalar;
         acc = acc.join(&crate::domain::join_values(parts));
         if obj.pts.is_empty() {
@@ -2410,45 +2400,7 @@ impl Analyzer {
         Value::new()
     }
 
-    /// A part of a value duck-typed as several classes: an unknown object or a placeholder below
-    /// one that was (an attribute, item or element, at any depth; the result of an unknown call
-    /// on one), or a summary's parameter bound to such a part. Duck-typing it too fed the parts
-    /// a duck-typed method reads back into duck typing: every part of every part read as every
-    /// class, up to the access-path depth (rich's pretty printer: 1.3M objects).
-    pub fn duck_part(&self, oid: u32) -> bool {
-        if self.duck_parts.borrow().contains(&oid) {
-            return true;
-        }
-        let seen = self.duck_seen.borrow();
-        match self.kind(oid) {
-            Kind::Unknown => {
-                let mut o = oid;
-                for _ in 0..16 {
-                    let site: &str = &self.obj(o).site;
-                    let parent = site.strip_prefix("path:").or_else(|| site.strip_prefix("elem:")).and_then(|r| r.split(':').next()).and_then(|p| p.parse::<u32>().ok());
-                    match parent {
-                        Some(p) if (p as usize) < self.objects.len() => {
-                            if seen.contains(&p) {
-                                return true;
-                            }
-                            o = p;
-                        }
-                        _ => break,
-                    }
-                }
-                false
-            }
-            _ => false,
-        }
-    }
 
-    /// `oid` is duck-typed as `ncands` classes: with several (whose attributes differ) its parts
-    /// are not duck-typed in turn (`duck_part`); one class reads one class's attributes.
-    fn note_duck_typed(&self, oid: u32, ncands: usize) {
-        if ncands >= 2 {
-            self.duck_seen.borrow_mut().insert(oid);
-        }
-    }
 
     /// Does the value have a scalar part besides its objects (other than None, which has no
     /// keys or attributes of its own)?
@@ -2479,47 +2431,6 @@ impl Analyzer {
             }
             let q = if STR_METHOD_NAMES.contains(&name) { format!("str.{}", name) } else { format!("unknown.{}", name) };
             return self.method_value(&q, &Value::data(&format!("L{}", node.line)));
-        }
-        let cands: Vec<u32> = self.classes_defining(nk);
-        // (a name many classes define — `render`, `get_style` — says little about which one an
-        // unknown value is: past `duck` classes it is unknown code, not a call of every one)
-        if !self.duck_part(oid) && !cands.is_empty() && cands.len() <= 8 {
-            // (a receiver value of many objects: the bound methods are the same for each of its
-            // unknown objects — made once per attribute read)
-            if let Some((_, _, Some(done))) = &self.many_receivers {
-                return done.clone();
-            }
-            match self.many_receivers.clone() {
-                Some((all, _, _)) => all.pts.iter().filter(|o| self.kind(*o) == Kind::Unknown).for_each(|o| self.note_duck_typed(o, cands.len())),
-                None => self.note_duck_typed(oid, cands.len()),
-            }
-            let mut outs: Vec<Value> = Vec::new();
-            for c in &cands {
-                let fv = self.cls_slots.get(&(*c, Ns::Attr, nk)).cloned().unwrap_or_default();
-                for f in fv.pts.iter() {
-                    if self.kind(f) == Kind::Function {
-                        // (a receiver value of many objects: one bound method for all of them, its
-                        // receiver the whole value, not one per object — thousands in a recursion
-                        // over unknown values, each run on its own)
-                        if let Some((all, key, _)) = self.many_receivers.clone() {
-                            // (only the objects duck typing applies to: not the parts of others)
-                            let all = Value::with_kv(all.pts.filter(|o| self.kind(o) != Kind::Unknown || !self.duck_part(o)), all.kv.clone());
-                            let label = format!("{} bound to one of {} values", self.obj(f).label, all.pts.len());
-                            outs.push(Value::obj(self.alloc_raw(Kind::Bound, &format!("bound:{}:set:{}", f, key), "", true, &label, Payload::Bound(f, all))));
-                            continue;
-                        }
-                        let label = format!("{} bound to {}", self.obj(f).label, self.obj(oid).label);
-                        outs.push(Value::obj(self.alloc_raw(Kind::Bound, &format!("bound:{}:{}", f, oid), "", true, &label, Payload::Bound(f, Value::obj(oid)))));
-                    }
-                }
-            }
-            if !outs.is_empty() {
-                let v = join_values(outs);
-                if let Some(m) = self.many_receivers.as_mut() {
-                    m.2 = Some(v.clone());
-                }
-                return v;
-            }
         }
         let row = self.unknown_row(oid, Ns::Attr, state);
         if let Some(v) = state.slot_opt(oid, Ns::Attr, nk) {
