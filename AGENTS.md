@@ -36,9 +36,15 @@ ruff and walks the syntax tree directly, running the program on abstract values.
   * **tabulation**: the body runs again at the call site. This happens when the summary run
     recorded an *event* the call's arguments decide (a call through a parameter, `isinstance`,
     iteration, a known text a model parses…), or when a callee that may raise is caught by
-    the caller (the handler needs the state at each raise). Budgets: 256 runs per function
-    code and event kind, 16 per callee for raises. The call cache replays a run when the same
-    input recurs.
+    the caller (the handler needs the state at each raise), or for a generator that calls
+    code. One budget per function code counts every such run (256); past it, the summary (a
+    generator's applied weakly when it changes older objects). A call a model makes always
+    runs at its site; its body's calls are ordinary again. Clones of a callee's allocations
+    keep the innermost `chain` call sites of their context. The call cache replays a run
+    when the same input recurs.
+  * **Havoc summaries:** a summary of more than 10,000 entries (`MAX_SUMMARY_SIZE`) is not
+    instantiated: the call is an unknown call on its arguments, and what it changed of
+    objects from outside (globals) becomes unknown.
   * **Recursion:** the inner call uses the running activation's partial result; it iterates
     to a fixpoint (3 rounds, 8 when tabulated), then widens.
   * **Unknown calls** add a mutator to every record they reach, return an unknown, and may
@@ -125,8 +131,7 @@ Run the oracle on the cases you touched, and in full before a commit that change
 * `ROWAN_DEBUG=1`: tabulation reasons (`tabrun F (why)`), summaries, budgets, and a final
   `work:` line (units, body runs, objects, row joins, visits). `2`: also every event, raise and
   try decision. With it, `ROWAN_GCDBG=1` prints what each collection drops.
-* `ROWAN_NO=a,b` switches refinements off by name (`rg 'disabled\("' rowan/src`), to bisect.
-* `ROWAN_LIMITS=ms=2000,hard=10000,tab=256,call=256,clones=256,chain=2,path=3`. `work=550000`
+* `ROWAN_LIMITS=ms=2000,hard=10000,tab=256,clones=256,chain=2,path=3,summary=10000`. `work=550000`
   (about 2 s) gives reproducible runs for comparisons. A change that removes liveness walks
   spends a `work=N` budget on more statements: compare progress in equal time
   (`ms=60000,hard=60000`) too.
@@ -178,13 +183,14 @@ extension (talks to `rowan serve`).
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| email (10k lines) / stdlib12k / rich (38k), `work=550000` | ~8 / ~11 / ~140 s (rich 3 GB) |
-| stdlib12k without deadlines | ~80 s, 2 GB; email and rich do not finish |
+| email (10k lines) / stdlib12k / rich (38k), `work=550000` | ~4 / ~10 / ~600 s (rich 4 GB: work units do not count instantiation) |
+| stdlib12k / email without deadlines | ~36 s / ~64 s, 2.4 GB each; rich does not finish (CI ~3x slower) |
 
 ## Known problems and next steps
 
 Open bugs, performance items and precision to-dos are in `SUGGESTED_CHANGES.md`, each with a
-repro; work it in order. The main ones: email and rich do not finish without deadlines (§3.0:
-recursive activations' footprint joins on rich), runs cut by clock deadlines depend on load,
-and the precision to-dos (`#@todo`s in the suites). The branch `slotmap-trie` is parked (same
+repro; work it in order. The main ones: summaries are much less sound than per-call-site runs
+(§0.1: `tab=0` fails ~650 golden expectations), rich does not finish without deadlines (§0.3:
+instantiation over arguments of many objects, recursive activations' joins), runs cut by clock
+deadlines depend on load, and the precision to-dos (`#@todo`s in the suites). The branch `slotmap-trie` is parked (same
 answers, no gain).

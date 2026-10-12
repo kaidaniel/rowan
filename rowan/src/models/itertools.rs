@@ -80,9 +80,6 @@ impl Analyzer {
             return self.infinite_take(&inf, n);
         }
         let o = v.single().filter(|o| v.kv.is_bot() && self.obj(*o).iterator && self.obj(*o).single && self.kind(*o) == Kind::List)?;
-        if crate::interp::disabled("genprefix") {
-            return None;
-        }
         let c = self.cursor_of(o, st)?;
         let end = match self.llen(o, st) {
             Some(len) => (c + n).min(len),
@@ -158,7 +155,7 @@ impl Analyzer {
 
 fn items(an: &mut Analyzer, v: &Value, node: &Node, st: &mut State) -> (Option<Vec<Value>>, Value) {
     let it = an.iterate(v, node, st);
-    let e = it.elem.one_or_empty();
+    let e = an.elem_value(&it.elem, node, "el");
     (it.items, e)
 }
 

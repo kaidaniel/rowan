@@ -505,9 +505,6 @@ impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
         self.clone()
     }
 
-    /// (kept for the callers of the layered implementation: nothing to freeze)
-    pub fn share(&mut self) {}
-
     /// Keys on one side only are kept; keys on both sides are combined with f (unless equal).
     pub fn join(&self, o: &LayerMap<K, V>, f: &mut dyn FnMut(&V, &V) -> V) -> LayerMap<K, V> {
         let mut both = |_: &K, a: &V, b: &V| Some(f(a, b));
@@ -545,17 +542,93 @@ impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
 
 // --------------------------------------------------------------------------------------
 
-pub struct TwoLevel<K, IK, V> {
-    pub m: LayerMap<K, Arc<FxHashMap<IK, V>>>,
+/// The 32-bit image of an inner key (`TwoLevel`).
+pub trait IKey: Clone + Eq + Hash {
+    fn key32(&self) -> u32;
+    /// The inner key whose image is `x` (for `SENTINEL`).
+    fn from32(x: u32) -> Self;
 }
 
-impl<K: PKey, IK: Clone + Eq + Hash, V: Clone + PartialEq> Default for TwoLevel<K, IK, V> {
+/// The inner key of the marker entry `TwoLevel::mark` writes: never a real key.
+pub const SENTINEL: u32 = (1 << 29) - 1;
+
+impl IKey for u32 {
+    fn key32(&self) -> u32 {
+        *self
+    }
+    fn from32(x: u32) -> Self {
+        x
+    }
+}
+
+impl IKey for crate::intern::KeyId {
+    fn key32(&self) -> u32 {
+        debug_assert!(self.0 < SENTINEL, "key id past 2^29");
+        self.0
+    }
+    fn from32(x: u32) -> Self {
+        crate::intern::KeyId(x)
+    }
+}
+
+impl IKey for (crate::domain::Ns, crate::intern::KeyId) {
+    fn key32(&self) -> u32 {
+        debug_assert!(self.1 .0 < SENTINEL, "key id past 2^29");
+        ((self.0 as u32) << 29) | self.1 .0
+    }
+    fn from32(x: u32) -> Self {
+        (crate::domain::Ns::Item, crate::intern::KeyId(x))
+    }
+}
+
+/// An (outer, inner) key of a `TwoLevel` map: the outer key's image in the high 32 bits, so
+/// the entries of one outer key are one subtree of the trie.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct Pair<K, IK>(pub K, pub IK);
+
+impl<K: PKey, IK: IKey> PKey for Pair<K, IK> {
+    fn key64(&self) -> u64 {
+        debug_assert!(self.0.key64() < 1 << 32, "outer key past 2^32");
+        (self.0.key64() << 32) | self.1.key32() as u64
+    }
+}
+
+/// The subtree holding exactly the keys whose high 32 bits are `hi` (big-endian Patricia
+/// tries keep keys with a common prefix together), if any.
+fn find_hi<K, V>(t: &Tree<K, V>, hi: u64) -> Option<&Tree<K, V>> {
+    let lo = hi << 32;
+    let mut t = t;
+    loop {
+        match &**t {
+            Node::Leaf { h, .. } => return if h >> 32 == hi { Some(t) } else { None },
+            Node::Branch { p, m, l, r } => {
+                if *m < 1 << 32 {
+                    // (every key below shares the high bits)
+                    return if p >> 32 == hi { Some(t) } else { None };
+                }
+                if !match_prefix(lo, *p, *m) {
+                    return None;
+                }
+                t = if zero_bit(lo, *m) { l } else { r };
+            }
+        }
+    }
+}
+
+/// A map of maps (object -> slot -> value, source -> key -> requirement), stored as one
+/// persistent trie on (outer, inner) pairs: a write copies a path, not an object's whole
+/// inner map, and joins / diffs cost what two maps differ in.
+pub struct TwoLevel<K, IK, V> {
+    m: LayerMap<Pair<K, IK>, V>,
+}
+
+impl<K: PKey, IK: IKey, V: Clone + PartialEq> Default for TwoLevel<K, IK, V> {
     fn default() -> Self {
         TwoLevel { m: LayerMap::new() }
     }
 }
 
-impl<K: PKey, IK: Clone + Eq + Hash, V: Clone + PartialEq> TwoLevel<K, IK, V> {
+impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -568,97 +641,121 @@ impl<K: PKey, IK: Clone + Eq + Hash, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         TwoLevel { m: self.m.copy_ref() }
     }
 
-    pub fn inner(&self, key: &K) -> Option<Arc<FxHashMap<IK, V>>> {
-        self.m.get(key)
+    /// The same trie (a copy not changed since).
+    pub fn ptr_eq(&self, o: &Self) -> bool {
+        self.m.ptr_eq(&o.m)
     }
 
-    /// Mutable access to the inner map of `key`, copying it when it is shared.
-    pub fn writable(&mut self, key: &K) -> &mut FxHashMap<IK, V> {
-        let slot = self.m.entry_mut(key, || Arc::new(FxHashMap::default()));
-        Arc::make_mut(slot)
+    fn sub(&self, key: &K) -> Option<&Tree<Pair<K, IK>, V>> {
+        self.m.root.as_ref().and_then(|t| find_hi(t, key.key64()))
     }
 
-    pub fn drop_key(&mut self, key: &K) {
-        self.m.remove(key);
+    /// Does `key` have any inner entry (or its marker)?
+    pub fn has_key(&self, key: &K) -> bool {
+        self.sub(key).is_some()
     }
 
-    pub fn outer_keys(&self) -> Vec<K> {
-        self.m.keys()
+    /// Mark `key` as present with no entries of its own (the marker entry is hidden from
+    /// every listing; it tells a join that this side has the key).
+    pub fn mark(&mut self, key: &K, v: V) {
+        if !self.has_key(key) {
+            self.m.insert(Pair(key.clone(), IK::from32(SENTINEL)), v);
+        }
     }
 
-    pub fn items(&self) -> Vec<(K, Arc<FxHashMap<IK, V>>)> {
-        self.m.items().into_iter().filter(|(_, d)| !d.is_empty()).collect()
+    /// Call `f` with every inner entry of `key`.
+    pub fn each(&self, key: &K, f: &mut dyn FnMut(&IK, &V)) {
+        if let Some(t) = self.sub(key) {
+            for_each(t, &mut |k, v| {
+                if k.1.key32() != SENTINEL {
+                    f(&k.1, v)
+                }
+            });
+        }
+    }
+
+    /// The inner entries of one key, as a vector (in inner-key order).
+    pub fn for_key(&self, key: &K) -> Vec<(IK, V)> {
+        let mut out = Vec::new();
+        self.each(key, &mut |ik, v| out.push((ik.clone(), v.clone())));
+        out
+    }
+
+    /// The inner entries of one key as a map (None: it has none).
+    pub fn inner(&self, key: &K) -> Option<FxHashMap<IK, V>> {
+        self.sub(key)?;
+        let mut out = FxHashMap::default();
+        self.each(key, &mut |ik, v| {
+            out.insert(ik.clone(), v.clone());
+        });
+        Some(out)
+    }
+
+    /// Every outer key with its inner entries, in key order.
+    pub fn items(&self) -> Vec<(K, Vec<(IK, V)>)> {
+        let mut out: Vec<(K, Vec<(IK, V)>)> = Vec::new();
+        if let Some(t) = &self.m.root {
+            for_each(t, &mut |k, v| match out.last_mut() {
+                _ if k.1.key32() == SENTINEL => {}
+                Some((o, d)) if *o == k.0 => d.push((k.1.clone(), v.clone())),
+                _ => out.push((k.0.clone(), vec![(k.1.clone(), v.clone())])),
+            });
+        }
+        out
     }
 
     pub fn get(&self, key: &K, ik: &IK) -> Option<V> {
-        self.m.get_ref(key).and_then(|d| d.get(ik).cloned())
+        self.m.get(&Pair(key.clone(), ik.clone()))
+    }
+
+    pub fn get_ref(&self, key: &K, ik: &IK) -> Option<&V> {
+        self.m.get_ref(&Pair(key.clone(), ik.clone()))
     }
 
     pub fn contains(&self, key: &K, ik: &IK) -> bool {
-        self.m.get_ref(key).map(|d| d.contains_key(ik)).unwrap_or(false)
+        self.get_ref(key, ik).is_some()
     }
 
     pub fn set(&mut self, key: &K, ik: IK, v: V) {
-        self.writable(key).insert(ik, v);
+        self.m.insert(Pair(key.clone(), ik), v);
     }
 
     pub fn remove(&mut self, key: &K, ik: &IK) -> Option<V> {
-        if !self.contains(key, ik) {
-            return None;
-        }
-        let d = self.writable(key);
-        let v = d.remove(ik);
-        if d.is_empty() {
-            self.drop_key(key);
-        }
-        v
+        self.m.remove(&Pair(key.clone(), ik.clone()))
     }
 
-    /// The inner entries of one key, as a vector (sorted by the caller if needed).
-    pub fn for_key(&self, key: &K) -> Vec<(IK, V)> {
-        match self.m.get_ref(key) {
-            Some(d) => d.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            None => Vec::new(),
-        }
+    pub fn drop_key(&mut self, key: &K) {
+        self.drop_where(key, |_| true);
     }
 
     pub fn drop_where(&mut self, key: &K, mut pred: impl FnMut(&IK) -> bool) {
-        let Some(d) = self.m.get_ref(key) else { return };
-        if !d.keys().any(|ik| pred(ik)) {
-            return;
+        let mut gone: Vec<IK> = Vec::new();
+        if let Some(t) = self.sub(key) {
+            for_each(t, &mut |k, _| {
+                if k.1.key32() == SENTINEL || pred(&k.1) {
+                    gone.push(k.1.clone());
+                }
+            });
         }
-        let w = self.writable(key);
-        w.retain(|ik, _| !pred(ik));
-        if w.is_empty() {
-            self.drop_key(key);
+        for ik in gone {
+            self.remove(key, &ik);
         }
     }
 
+    /// Take `key`'s entries from `o` (self has none of its own): the subtree is shared, not
+    /// copied.
+    pub fn graft(&mut self, o: &Self, key: &K) {
+        let Some(t) = o.sub(key) else { return };
+        let add = LayerMap { root: Some(t.clone()) };
+        let mut both = |_: &Pair<K, IK>, _: &V, b: &V| Some(b.clone());
+        let mut keep = |_: &Pair<K, IK>, v: &V| Some(v.clone());
+        let mut keep2 = |_: &Pair<K, IK>, v: &V| Some(v.clone());
+        let mut g = Merge { both: &mut both, left: &mut keep, right: &mut keep2, one_side_identity: true, equal_identity: true };
+        self.m = self.m.merge_with(&add, &mut g);
+    }
+
     pub fn join(&mut self, o: &mut Self, f: &mut dyn FnMut(&V, &V) -> V) -> Self {
-        let mut merge_inner = |d1: &Arc<FxHashMap<IK, V>>, d2: &Arc<FxHashMap<IK, V>>| -> Arc<FxHashMap<IK, V>> {
-            if Arc::ptr_eq(d1, d2) {
-                return d1.clone();
-            }
-            let mut merged: Option<FxHashMap<IK, V>> = None;
-            for (nk, v) in d2.iter() {
-                match d1.get(nk) {
-                    None => merged.get_or_insert_with(|| (**d1).clone()).insert(nk.clone(), v.clone()),
-                    Some(cur) => {
-                        if cur != v {
-                            let nv = f(cur, v);
-                            merged.get_or_insert_with(|| (**d1).clone()).insert(nk.clone(), nv)
-                        } else {
-                            None
-                        }
-                    }
-                };
-            }
-            match merged {
-                Some(m) => Arc::new(m),
-                None => d1.clone(),
-            }
-        };
-        TwoLevel { m: self.m.join(&o.m, &mut merge_inner) }
+        TwoLevel { m: self.m.join(&o.m, f) }
     }
 
     /// Join where inner entries present on one side only are transformed by `one_side`.
@@ -666,47 +763,22 @@ impl<K: PKey, IK: Clone + Eq + Hash, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         self.join_with_keep(o, both, one_side, &|_| false)
     }
 
-    /// `join_with`, but an outer key whose whole inner map one side lacks keeps the other
-    /// side's values unchanged when `keep_whole` says so.
+    /// `join_with`, but an outer key whose inner entries one side lacks entirely keeps the
+    /// other side's values unchanged when `keep_whole` says so.
     pub fn join_with_keep(&mut self, o: &mut Self, both: &mut dyn FnMut(&V, &V) -> V, one_side: &mut dyn FnMut(&V) -> V, keep_whole: &dyn Fn(&K) -> bool) -> Self {
         let one_side = std::cell::RefCell::new(one_side);
-        let mut inner_both = |_: &K, da: &Arc<FxHashMap<IK, V>>, db: &Arc<FxHashMap<IK, V>>| -> Option<Arc<FxHashMap<IK, V>>> {
-            if Arc::ptr_eq(da, db) {
-                return Some(da.clone());
+        let (a, b) = (&self.m, &o.m);
+        let mut inner_both = |_: &Pair<K, IK>, x: &V, y: &V| Some(if x == y { x.clone() } else { both(x, y) });
+        let side = |k: &Pair<K, IK>, v: &V, other: &LayerMap<Pair<K, IK>, V>| -> Option<V> {
+            if keep_whole(&k.0) && other.root.as_ref().and_then(|t| find_hi(t, k.0.key64())).is_none() {
+                return Some(v.clone());
             }
-            let mut os = one_side.borrow_mut();
-            let mut merged: FxHashMap<IK, V> = FxHashMap::default();
-            for nk in da.keys().chain(db.keys().filter(|nk| !da.contains_key(*nk))) {
-                let v = match (da.get(nk), db.get(nk)) {
-                    (Some(va), None) => os(va),
-                    (None, Some(vb)) => os(vb),
-                    (Some(va), Some(vb)) => {
-                        if va == vb {
-                            va.clone()
-                        } else {
-                            both(va, vb)
-                        }
-                    }
-                    (None, None) => unreachable!(),
-                };
-                merged.insert(nk.clone(), v);
-            }
-            Some(Arc::new(merged))
+            Some((one_side.borrow_mut())(v))
         };
-        let mut side = |k: &K, d: &Arc<FxHashMap<IK, V>>| -> Option<Arc<FxHashMap<IK, V>>> {
-            if keep_whole(k) {
-                return Some(d.clone());
-            }
-            let mut os = one_side.borrow_mut();
-            Some(Arc::new(d.iter().map(|(nk, v)| (nk.clone(), os(v))).collect()))
-        };
-        let side_cell = std::cell::RefCell::new(&mut side);
-        let mut left = |k: &K, d: &Arc<FxHashMap<IK, V>>| (side_cell.borrow_mut())(k, d);
-        let mut right = |k: &K, d: &Arc<FxHashMap<IK, V>>| (side_cell.borrow_mut())(k, d);
-        // (equal inner maps: a ptr-equal pair keeps its map; an equal pair is merged by
-        // `inner_both`, which keeps equal entries)
+        let mut left = |k: &Pair<K, IK>, v: &V| side(k, v, b);
+        let mut right = |k: &Pair<K, IK>, v: &V| side(k, v, a);
         let mut g = Merge { both: &mut inner_both, left: &mut left, right: &mut right, one_side_identity: false, equal_identity: true };
-        TwoLevel { m: self.m.merge_with(&o.m, &mut g) }
+        TwoLevel { m: a.merge_with(b, &mut g) }
     }
 
     pub fn same(&self, o: &Self) -> bool {
@@ -714,18 +786,7 @@ impl<K: PKey, IK: Clone + Eq + Hash, V: Clone + PartialEq> TwoLevel<K, IK, V> {
     }
 
     pub fn diff_keys(&self, base: &Self) -> Vec<(K, IK)> {
-        let mut out = Vec::new();
-        let empty = Arc::new(FxHashMap::default());
-        for key in self.m.diff_keys(&base.m) {
-            let d = self.m.get_ref(&key).unwrap_or(&empty);
-            let b = base.m.get_ref(&key).unwrap_or(&empty);
-            for nk in d.keys().chain(b.keys().filter(|nk| !d.contains_key(*nk))) {
-                if d.get(nk) != b.get(nk) {
-                    out.push((key.clone(), nk.clone()));
-                }
-            }
-        }
-        out
+        self.m.diff_keys(&base.m).into_iter().filter(|p| p.1.key32() != SENTINEL).map(|Pair(k, ik)| (k, ik)).collect()
     }
 }
 
@@ -827,7 +888,7 @@ mod prop_tests {
     type Model = FxHashMap<u32, FxHashMap<u32, u32>>;
 
     fn model_of(t: &TwoLevel<u32, u32, u32>) -> Model {
-        t.m.materialise().into_iter().map(|(k, d)| (k, (*d).clone())).collect()
+        t.items().into_iter().map(|(k, d)| (k, d.into_iter().collect())).collect()
     }
 
     fn model_join_with(a: &Model, b: &Model) -> Model {
@@ -921,7 +982,7 @@ mod prop_tests {
                     }
                     _ => {
                         let k = rng.below(4) as u32;
-                        let got = maps[i].inner(&k).map(|d| (*d).clone()).unwrap_or_default();
+                        let got = maps[i].inner(&k).unwrap_or_default();
                         let exp = models[i].get(&k).cloned().unwrap_or_default();
                         assert_eq!(got, exp, "round {} get mismatch", round);
                     }
@@ -1163,7 +1224,7 @@ mod wide_key_tests {
                                     exp.insert(*k, m);
                                 }
                             }
-                            let got: Model = joined.m.materialise().into_iter().map(|(k, d)| (k, (*d).clone())).filter(|(_, d)| !d.is_empty()).collect();
+                            let got: Model = joined.items().into_iter().map(|(k, d)| (k, d.into_iter().collect::<FxHashMap<u32, u32>>())).filter(|(_, d)| !d.is_empty()).collect();
                             assert_eq!(got, exp, "round {} join_with", round);
                             maps.push(joined);
                             models.push(exp);

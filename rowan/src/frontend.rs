@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use ruff_python_ast as ast;
 use ruff_python_ast::visitor::source_order::{self, SourceOrderVisitor};
 use ruff_source_file::LineIndex;
-use ruff_text_size::{Ranged, TextRange, TextSize};
+use ruff_text_size::{Ranged, TextRange};
 use rustc_hash::FxHashMap;
 
 pub struct ModuleSource {
@@ -267,13 +267,6 @@ pub fn node<T: Ranged>(n: &T) -> Node {
     Node { addr, module, line, end_line, col, end_col }
 }
 
-/// Locate a node whose module is known (cheaper; no registry lookup for the module).
-pub fn node_in<T: Ranged>(module: u32, n: &T) -> Node {
-    let addr = n as *const T as usize;
-    let (line, end_line, col, end_col) = locate(module, n.range());
-    Node { addr, module, line, end_line, col, end_col }
-}
-
 pub fn module_of_addr(addr: usize) -> Option<u32> {
     REG.with(|r| r.borrow().nodes.get(&addr).copied())
 }
@@ -318,14 +311,6 @@ pub fn any_send_call() -> bool {
 
 pub fn module_source_lines(idx: u32) -> Vec<String> {
     REG.with(|r| r.borrow().modules[idx as usize].source.lines().map(|s| s.to_string()).collect())
-}
-
-pub fn line_of_offset(module: u32, off: TextSize) -> u32 {
-    REG.with(|r| {
-        let r = r.borrow();
-        let m = &r.modules[module as usize];
-        m.lines.line_index(off).get() as u32
-    })
 }
 
 pub fn parse_expression(source: &str) -> Option<&'static ast::Expr> {

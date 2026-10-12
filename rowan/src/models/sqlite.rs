@@ -1787,7 +1787,7 @@ pub fn m_sql(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(con) = con else { return Value::data("sqlite") };
     // a connection from outside the function met while summarising: the database is not the
     // summary's to read or change; decided per call site
-    if !an.sum_stack.is_empty() && an.is_entry_object(con) && !crate::interp::disabled("sqlentry") {
+    if !an.sum_stack.is_empty() && an.is_entry_object(con) {
         an.record_event("concrete", con);
         for f in an.sum_stack.clone() {
             an.sql_touched.entry(f).or_default().insert(con);

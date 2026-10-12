@@ -204,7 +204,7 @@ impl Analyzer {
                 if i == 0 && skip_self {
                     continue;
                 }
-                let dep = crate::interp::disabled("fadepsfirst") || is_dep(self, p, state);
+                let dep = false || is_dep(self, p, state);
                 if (pass == 0) != dep {
                     continue;
                 }
@@ -324,14 +324,13 @@ impl Analyzer {
                 return fa_obj(self, state, node, "fastapi.request", body, &format!("req{}", func));
             }
             "BackgroundTasks" => return fa_obj(self, state, node, "fastapi.bg", Value::new(), &format!("bg{}", func)),
-            "Response" if !crate::interp::disabled("fastatus") => {
+            "Response" => {
                 let v = fa_obj(self, state, node, "fastapi.outresp", Value::new(), &format!("resp{}", func));
                 if let (Some(o), Some(top)) = (v.single(), self.fa_out_resp.last_mut()) {
                     top.push(o);
                 }
                 return v;
             }
-            "Response" => return Value::data("Response"),
             _ => {}
         }
         let route_path: Vec<(String, String)> = req.map(|r| r.path.clone()).unwrap_or_default();
@@ -405,7 +404,7 @@ impl Analyzer {
         if let Some(r) = req {
             if let Some((_, val)) = route_path.iter().find(|(n, _)| *n == pname) {
                 v = conv(&ann_name, val);
-            } else if matches!(&marker, Some((q, _)) if q.starts_with("fastapi.param.Cookie")) && !crate::interp::disabled("facookie") {
+            } else if matches!(&marker, Some((q, _)) if q.starts_with("fastapi.param.Cookie")) {
                 let ck = match &marker {
                     Some((q, _)) if q.contains(".alias=") => q.split(".alias=").nth(1).unwrap_or(&pname).to_string(),
                     _ => pname.clone(),
@@ -467,12 +466,12 @@ impl Analyzer {
                 if v.empty() || !surely_present {
                     match default.clone() {
                         Some(d) => v = v.join(&d),
-                        None if surely_absent && v.empty() && !crate::interp::disabled("faheadermissing") => {
+                        None if surely_absent && v.empty() => {
                             // a required header the request does not send: 422
                             self.raise_here("RequestValidationError", state);
                             return Value::new();
                         }
-                        None if !surely_present && !crate::interp::disabled("faheadermissing") => {
+                        None if !surely_present => {
                             self.may_raise_here("RequestValidationError", state);
                             if v.empty() {
                                 v = Value::data("header");
@@ -519,7 +518,7 @@ impl Analyzer {
                     v = default.clone().unwrap_or_else(|| Value::data("query"));
                 }
             }
-            if bad.get() && !crate::interp::disabled("fabadscalar") {
+            if bad.get() {
                 if v.empty() {
                     self.raise_here("RequestValidationError", state);
                     return Value::new();
@@ -529,7 +528,7 @@ impl Analyzer {
             // `Query(ge=1)` / `Path(gt=0)` constraints on the value the request gave (a default
             // is not validated)
             let cons = marker_constraints(p);
-            if !cons.is_empty() && !crate::interp::disabled("faconstraints") && default.as_ref() != Some(&v) {
+            if !cons.is_empty() && default.as_ref() != Some(&v) {
                 if v.pts.is_empty() && v.kv.is_literal() {
                     let lits = crate::domain::kv_literals(&v.kv);
                     let bad: Vec<KeyId> = lits.iter().filter(|k| *k != intern::key_none() && crate::models::pydantic::literal_breaks(&cons, *k).is_some()).collect();
@@ -575,9 +574,6 @@ impl Analyzer {
     /// A path / query value validated by its annotation: an Enum class makes it the member with
     /// that value, `Literal[...]` one of the literals; anything else is a 422 (raised here).
     fn fa_restrict(&mut self, fi: &crate::interp::FuncInfo, ann: &'static ast::Expr, v: Value, default: Option<&Value>, state: &mut State) -> Value {
-        if crate::interp::disabled("farestrict") {
-            return v;
-        }
         // (the default is not validated)
         if let Some(d) = default {
             if v == *d {
@@ -698,9 +694,6 @@ impl Analyzer {
 
     /// The handler's `Depends(g)` parameters whose `g` is a generator function (`yield` dependencies).
     pub fn fa_yield_deps(&mut self, func: ObjId, state: &mut State) -> Vec<ObjId> {
-        if crate::interp::disabled("yielddeps") {
-            return vec![];
-        }
         let fi = self.func_info(func);
         let FuncNode::Def(f) = &fi.node else { return vec![] };
         let mut out = Vec::new();
@@ -809,7 +802,7 @@ impl Analyzer {
             let it = self.iterate(&l, node, state);
             let markers: Vec<Value> = match it.items {
                 Some(items) => items,
-                None => vec![it.elem.one_or_empty()],
+                None => vec![self.elem_value(&it.elem, node, "el")],
             };
             for m in markers {
                 for o in m.pts.iter() {
@@ -834,9 +827,6 @@ impl Analyzer {
         // (a pydantic ValidationError the handler's own code raises is no request error: the
         // TestClient re-raises it, as any other exception FastAPI does not answer)
         let mut caught: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::from_iter(["HTTPException".to_string(), "RequestValidationError".to_string()]);
-        if crate::interp::disabled("faverrescape") {
-            caught.insert("ValidationError".to_string());
-        }
         for (n, _, _) in &hooks {
             caught.insert(n.clone());
         }
@@ -859,13 +849,15 @@ impl Analyzer {
         self.try_marks.pop();
         self.try_sum_depth.pop();
         let flagged = self.may_raise.pop().unwrap_or(false);
-        let mut raised_at = self.raise_states.pop().flatten();
+        let raised_any = self.raise_states.pop().flatten().is_some();
         let mut raised_v = self.raise_values.pop().flatten().unwrap_or_default();
         let recs = self.raise_cls.pop().map(|(_, r)| r).unwrap_or_default();
+        // (the raises are kept one by one: their states joined)
+        let mut raised_at: Option<State> = if raised_any { crate::interp::join_raise_recs(&recs) } else { None };
         let _ = &mut pre;
         // exceptions of known classes that FastAPI does not answer (a KeyError, …) are
         // re-raised by the TestClient at the call: they go on to the enclosing try
-        if !crate::interp::disabled("faescape") && !recs.is_empty() {
+        if !recs.is_empty() {
             let answered = |c: &Option<crate::interp::ExcNames>| match c {
                 Some((names, _)) => names.iter().any(|n| caught_names.contains(n)),
                 None => true,
@@ -986,7 +978,7 @@ impl Analyzer {
                 let mut verr = false;
                 for o in &rest {
                     let verr_idx = match &self.obj(*o).payload {
-                        Payload::Method(q, _) if !crate::interp::disabled("fadetail") => q.strip_prefix("pydverr.").and_then(|x| x.parse::<usize>().ok()),
+                        Payload::Method(q, _) => q.strip_prefix("pydverr.").and_then(|x| x.parse::<usize>().ok()),
                         _ => None,
                     };
                     if let Some(i) = verr_idx {
@@ -1021,7 +1013,7 @@ impl Analyzer {
             let mut after = if state.reachable { state.copy().join(&mut rs) } else { rs.copy() };
             // (an error response is an exceptional exit: what the handler needs on its normal
             // path stays needed — `always`)
-            if state.reachable && !crate::interp::disabled("faexcreqs") {
+            if state.reachable {
                 after.reqs = state.reqs.copy().join_with(&mut rs.reqs, &mut |a, b| a.join(b), &mut |a| a.clone());
             }
             state.replace_with(after);
@@ -1128,9 +1120,6 @@ impl Analyzer {
     /// The request object of a `TestClient` call: its method, headers (case-insensitive keys,
     /// with the client's own), query and path parameters as the call gives them.
     fn fa_fill_request(&mut self, robj: &Value, rq: &Req, method: &str, state: &mut State, node: &Node) {
-        if crate::interp::disabled("fareq") {
-            return;
-        }
         let Some(o) = robj.single() else { return };
         let lit_dict = |an: &mut Analyzer, st: &mut State, name: &str, items: Vec<(String, Value)>, ci: bool| -> Option<Value> {
             let d = an.alloc_at(Kind::Dict, node, st, &format!("request.{}", name), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("rq{}{}", o, name)));
@@ -1307,9 +1296,7 @@ impl Analyzer {
         state.replace_with(out);
         let body = join_values(outs);
         let v = fa_obj(self, state, &c.node, "fastapi.response", body, "faresp");
-        if !crate::interp::disabled("fastatus") {
-            set_status(state, &v, join_values(statuses));
-        }
+        set_status(state, &v, join_values(statuses));
         v
     }
 }
@@ -1422,7 +1409,7 @@ pub fn m_fastapi(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         // `HTTPException(status_code, detail=None, headers=None)`: raised, it becomes the
         // response `{"detail": detail}`
-        "HTTPException" if !crate::interp::disabled("httpexc") => {
+        "HTTPException" => {
             let code = c.arg(0, Some("status_code")).unwrap_or_default();
             let detail = c.arg(1, Some("detail")).unwrap_or_else(|| Value::data("detail"));
             let headers = c.arg(2, Some("headers")).unwrap_or_else(|| an.none_v.clone());
@@ -1524,11 +1511,11 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
         ("fastapi.app", "dependency_overrides") => Value::data("overrides"),
         ("fastapi.app", _) => an.none_v.clone(),
         // (the raw body of a known json= payload: its bytes as httpx sends them)
-        ("fastapi.request", "body") if !crate::interp::disabled("fabodytext") => match crate::models::json_body_text(an, st, &pv) {
+        ("fastapi.request", "body") => match crate::models::json_body_text(an, st, &pv) {
             Some(t) => Value::lit(intern::key(intern::Key::Bytes(t.into_bytes()))),
             None => pv.clone(),
         },
-        ("fastapi.request", "json" | "body" | "form") => pv.clone(),
+        ("fastapi.request", "json" | "form") => pv.clone(),
         ("fastapi.request", "query_params" | "headers" | "cookies" | "path_params") => {
             let oid = an.alloc_at(Kind::Dict, &c.node, st, &format!("request.{}", name), Payload::None, None, Ns::Item, None, Some(&format!("rq{}{}", o, name)));
             st.set_row(oid, Ns::Item, Row::with_source(Source::new(&format!("request.{}@L{}", name, c.line), SourceKind::External)));
@@ -1541,7 +1528,7 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
             for fo in f.pts.iter().collect::<Vec<_>>() {
                 if an.kind(fo) == Kind::Function {
                     an.call_user(fo, None, args.clone(), c.kwargs.clone(), vec![], vec![], st, &c.node, None, false);
-                } else if c.kwargs.is_empty() && !crate::interp::disabled("fabgany") {
+                } else if c.kwargs.is_empty() {
                     // (a bound method, a builtin's method, a partial: called as well)
                     an.call_value(&Value::obj(fo), &c.node, None, st, Some(args.clone()));
                 }

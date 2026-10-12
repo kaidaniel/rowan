@@ -118,7 +118,7 @@ fn maybe_keys(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) -> (Vec
             open |= row.open();
         } else {
             let it = an.iterate(&Value::obj(o), node, st);
-            let e = it.elem.one_or_empty();
+            let e = an.elem_value(&it.elem, node, "el");
             match &e.kv {
                 kv if kv.is_literal() && e.pts.is_empty() => ks.extend(crate::domain::kv_literals(kv).iter()),
                 _ => open = true,
@@ -404,7 +404,7 @@ pub fn deque_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             set_items(an, oid, items, st);
         }
         _ => {
-            let e = c.arg(0, Some("iterable")).map(|it| an.iterate(&it, &c.node, st).elem.one_or_empty()).unwrap_or_default();
+            let e = c.arg(0, Some("iterable")).map(|it| { let it_ = an.iterate(&it, &c.node, st); an.elem_value(&it_.elem, &c.node, "el") }).unwrap_or_default();
             st.set_slot(oid, Ns::Elem, intern::STAR, Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv)), false);
             st.elems.insert(oid, e.kv.clone());
             an.set_llen(oid, st, None);
@@ -517,7 +517,7 @@ pub fn m_deque(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// Positions no longer known: the elements it may hold.
 fn forget(an: &mut Analyzer, oid: ObjId, arg: &Value, c: &Call, st: &mut State) {
     let name = c.qual.rsplit('.').next().unwrap_or("");
-    let e = if matches!(name, "extend" | "extendleft") { an.iterate(arg, &c.node, st).elem.one_or_empty() } else { arg.clone() };
+    let e = if matches!(name, "extend" | "extendleft") { { let it_ = an.iterate(arg, &c.node, st); an.elem_value(&it_.elem, &c.node, "el") } } else { arg.clone() };
     let cur = st.slot(oid, Ns::Elem, intern::STAR);
     st.set_slot(oid, Ns::Elem, intern::STAR, cur.join(&Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv))), false);
     let kv = crate::domain::kv_join(&st.elems.get(&oid).unwrap_or(KeyVal::Bot), &e.kv);

@@ -25,35 +25,6 @@ pub struct DcSpec {
     pub kw_only: bool,
 }
 
-/// An object's slots in a call signature: the state's own shared table (no copy), equal by
-/// pointer or contents, hashed independently of order.
-#[derive(Clone)]
-pub struct SigSlots(Option<std::sync::Arc<rustc_hash::FxHashMap<crate::state::SlotKey, Value>>>);
-
-impl PartialEq for SigSlots {
-    fn eq(&self, o: &Self) -> bool {
-        match (&self.0, &o.0) {
-            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b) || **a == **b,
-            (None, None) => true,
-            (Some(a), None) | (None, Some(a)) => a.is_empty(),
-        }
-    }
-}
-impl Eq for SigSlots {}
-impl std::hash::Hash for SigSlots {
-    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        use std::hash::BuildHasher;
-        let Some(m) = &self.0 else { return 0usize.hash(h) };
-        let bh = rustc_hash::FxBuildHasher;
-        let mut acc: u64 = 0;
-        for e in m.iter() {
-            acc = acc.wrapping_add(bh.hash_one(e));
-        }
-        m.len().hash(h);
-        acc.hash(h);
-    }
-}
-
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Sig {
     foid: u32,
@@ -64,7 +35,7 @@ pub struct Sig {
     kwargs: Vec<(StrId, Value)>,
     star_args: Vec<Value>,
     star_kwargs: Vec<Value>,
-    heap: Vec<(u32, Option<Row>, Option<Row>, SigSlots, Option<KeyVal>, bool)>,
+    heap: Vec<(u32, Option<Row>, Option<Row>, Vec<(crate::state::SlotKey, Value)>, Option<KeyVal>, bool)>,
     guards: Vec<Vec<String>>,
     fr_single: bool,
     ctx: String,
@@ -129,7 +100,7 @@ impl Analyzer {
             }
         }
         // an argument raised: the call never happens
-        if !state.reachable && !crate::interp::disabled("deadcall") {
+        if !state.reachable {
             return Value::new();
         }
         if fv.pts.is_empty() {
@@ -149,7 +120,7 @@ impl Analyzer {
         for oid in targets {
             let mut st = pre.copy();
             // (a groupby method of one of several groupby objects: its results are its own)
-            let own = matches!(&self.obj(oid).payload, Payload::Method(q, r) if q.starts_with("groupby.") && r.pts.iter().all(|g| self.kind(g) == Kind::Groupby)) && !super::disabled("gbalts");
+            let own = matches!(&self.obj(oid).payload, Payload::Method(q, r) if q.starts_with("groupby.") && r.pts.iter().all(|g| self.kind(g) == Kind::Groupby));
             let saved = if own { self.alloc_extra.replace(format!("gbm{}", oid)) } else { self.alloc_extra.clone() };
             outs.push(self.call_one(oid, &args, &kwargs, &star_args, &star_kwargs, &mut st, node, call_ast));
             self.alloc_extra = saved;
@@ -175,7 +146,7 @@ impl Analyzer {
     /// Several definitions of one method (conditional ones): alternatives, one state each.
     #[allow(clippy::too_many_arguments)]
     fn call_alternatives(&mut self, fns: &[u32], recv: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
-        if fns.len() == 1 || super::disabled("splitdispatch") {
+        if fns.len() == 1 {
             let mut outs = Vec::new();
             for x in fns {
                 outs.push(self.call_user(*x, Some(Value::obj(recv)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, call_ast, false));
@@ -216,7 +187,7 @@ impl Analyzer {
             }
         }
         match kind {
-            Kind::Function if self.func_info(oid).is_memo.get() && self.sum_stack.is_empty() && star_args.is_empty() && star_kwargs.is_empty() && !super::disabled("memo") => {
+            Kind::Function if self.func_info(oid).is_memo.get() && self.sum_stack.is_empty() && star_args.is_empty() && star_kwargs.is_empty() => {
                 // a memoised function with known arguments: the first call's result is the
                 // result of every later call with the same arguments
                 let lit = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty());
@@ -290,7 +261,7 @@ impl Analyzer {
                 }
                 // a builtin exception class: an exception object with its args
                 if let Some(n) = qual.strip_prefix("builtins.").filter(|n| super::exprs::is_exception_name(n)) {
-                    if kwargs.is_empty() && star_args.is_empty() && !super::disabled("excobj") && !self.models.has_exact(&qual) {
+                    if kwargs.is_empty() && star_args.is_empty() && !self.models.has_exact(&qual) {
                         let n = n.to_string();
                         return self.exception_object(&n, args.to_vec(), node, state);
                     }
@@ -312,7 +283,7 @@ impl Analyzer {
                 let Payload::Method(qual, recv) = self.obj(oid).payload.clone() else { return Value::new() };
                 // several groupby objects (`groupby` over one of several columns): the model runs
                 // once per object, each making its own results
-                if qual.starts_with("groupby.") && recv.pts.len() > 1 && recv.pts.iter().all(|o| self.kind(o) == Kind::Groupby) && !super::disabled("gbalts") {
+                if qual.starts_with("groupby.") && recv.pts.len() > 1 && recv.pts.iter().all(|o| self.kind(o) == Kind::Groupby) {
                     let mut outs: Vec<Value> = Vec::new();
                     for g in recv.pts.iter() {
                         let mv = self.method_value(&qual, &Value::obj(g));
@@ -407,7 +378,7 @@ impl Analyzer {
         // (a call of the result of a call of the result of … : past two levels the result is
         // the call node's own object, as access paths below an input are bounded; otherwise
         // recursion over unknown values makes new objects without end)
-        let deep = qual.matches("result of").count() >= 2 && !crate::interp::disabled("unkdepth");
+        let deep = qual.matches("result of").count() >= 2;
         let site = if deep {
             let text: String = crate::frontend::text_at(node).chars().take(40).collect();
             format!("call {} at M{}:L{}:{}", text, node.module, node.line, node.col)
@@ -555,9 +526,6 @@ impl Analyzer {
 
     /// An ABC with abstract methods no class of its MRO implements: `cls()` raises TypeError.
     pub fn abstract_unimplemented(&self, cls: u32) -> bool {
-        if super::disabled("abstract") {
-            return false;
-        }
         let mro = self.mro(cls);
         let is_abc = mro.iter().any(|c| {
             self.class_info_opt(*c).map(|ci| {
@@ -605,9 +573,7 @@ impl Analyzer {
         self.model_depth += 1;
         let r = m(self, state, call);
         self.model_depth -= 1;
-        if !super::disabled("iterconsume") {
-            self.after_model_consume(call, &r, state);
-        }
+        self.after_model_consume(call, &r, state);
         r
     }
 
@@ -722,56 +688,54 @@ impl Analyzer {
         }
         // `Color(3)`: the Enum member with that value, else ValueError
         if let (Some(ms), Some(a)) = (self.enum_members.get(&cls).cloned(), args.first()) {
-            if !super::disabled("enumcall") {
-                let vk = key_str_lit("value");
-                let lits = if a.pts.is_empty() && a.kv.is_literal() { Some(crate::domain::kv_literals(&a.kv)) } else { None };
-                let mut out = Value::new();
-                match lits {
-                    Some(ls) => {
-                        let mut all_hit = true;
-                        let is_flag = self.enum_kind.get(&cls).map(|k| k.flag).unwrap_or(false) && !super::disabled("flagcall");
-                        let all_bits: i64 = ms.iter().filter_map(|(_, m)| state.slot(*m, Ns::Attr, vk).kv.as_lit().and_then(intern::key_as_int)).fold(0, |a, b| a | b);
-                        for l in ls.iter() {
-                            let hit = ms.iter().find(|(_, m)| state.slot(*m, Ns::Attr, vk).kv.as_lit() == Some(l));
-                            match hit {
-                                Some((_, m)) => out = out.join(&Value::obj(*m)),
-                                // a Flag: any combination of the members' bits (0 too)
-                                None => match intern::key_as_int(l).filter(|i| is_flag && *i >= 0 && i & !all_bits == 0) {
-                                    Some(i) => {
-                                        let fm = self.flag_member(cls, i, node, state);
-                                        out = out.join(&Value::obj(fm));
-                                    }
-                                    None => all_hit = false,
-                                },
-                            }
-                        }
-                        if out.empty() {
-                            self.raise_here("ValueError", state);
-                            return Value::new();
-                        }
-                        if !all_hit {
-                            self.may_raise_here("ValueError", state);
+            let vk = key_str_lit("value");
+            let lits = if a.pts.is_empty() && a.kv.is_literal() { Some(crate::domain::kv_literals(&a.kv)) } else { None };
+            let mut out = Value::new();
+            match lits {
+                Some(ls) => {
+                    let mut all_hit = true;
+                    let is_flag = self.enum_kind.get(&cls).map(|k| k.flag).unwrap_or(false);
+                    let all_bits: i64 = ms.iter().filter_map(|(_, m)| state.slot(*m, Ns::Attr, vk).kv.as_lit().and_then(intern::key_as_int)).fold(0, |a, b| a | b);
+                    for l in ls.iter() {
+                        let hit = ms.iter().find(|(_, m)| state.slot(*m, Ns::Attr, vk).kv.as_lit() == Some(l));
+                        match hit {
+                            Some((_, m)) => out = out.join(&Value::obj(*m)),
+                            // a Flag: any combination of the members' bits (0 too)
+                            None => match intern::key_as_int(l).filter(|i| is_flag && *i >= 0 && i & !all_bits == 0) {
+                                Some(i) => {
+                                    let fm = self.flag_member(cls, i, node, state);
+                                    out = out.join(&Value::obj(fm));
+                                }
+                                None => all_hit = false,
+                            },
                         }
                     }
-                    None => {
-                        if let Some(p) = a.kv.as_param() {
-                            self.record_event("concrete", p);
-                        }
-                        // a member given: itself
-                        let given: Vec<u32> = a.pts.iter().filter(|o| ms.iter().any(|(_, m)| m == o)).collect();
-                        if !given.is_empty() && given.len() == a.pts.len() && a.kv.is_bot() {
-                            return Value::objs(crate::domain::ObjSet::from_vec(given));
-                        }
+                    if out.empty() {
+                        self.raise_here("ValueError", state);
+                        return Value::new();
+                    }
+                    if !all_hit {
                         self.may_raise_here("ValueError", state);
-                        out = join_values(ms.iter().map(|(_, m)| Value::obj(*m)).collect::<Vec<_>>());
                     }
                 }
-                return out;
+                None => {
+                    if let Some(p) = a.kv.as_param() {
+                        self.record_event("concrete", p);
+                    }
+                    // a member given: itself
+                    let given: Vec<u32> = a.pts.iter().filter(|o| ms.iter().any(|(_, m)| m == o)).collect();
+                    if !given.is_empty() && given.len() == a.pts.len() && a.kv.is_bot() {
+                        return Value::objs(crate::domain::ObjSet::from_vec(given));
+                    }
+                    self.may_raise_here("ValueError", state);
+                    out = join_values(ms.iter().map(|(_, m)| Value::obj(*m)).collect::<Vec<_>>());
+                }
             }
+            return out;
         }
         let ci = self.class_info(cls);
         // a TypedDict class makes a plain dict
-        if ci.typed_dict && !super::disabled("typeddictcall") {
+        if ci.typed_dict {
             let call = Call { qual: "builtins.dict".into(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
             if let Some(m) = self.models.lookup("builtins.dict") {
                 return m(self, state, &call);
@@ -779,7 +743,7 @@ impl Analyzer {
         }
         // a class with its own `__new__`: the instance is what it returns, and `__init__` runs
         // on it when it is an instance of the class
-        if let Some(owner) = self.class_lookup(cls, "__new__").filter(|_| !super::disabled("usernew")) {
+        if let Some(owner) = self.class_lookup(cls, "__new__") {
             let fv = self.cls_slots.get(&(owner, Ns::Attr, key_str_lit("__new__"))).cloned().unwrap_or_default();
             let fns: Vec<ObjId> = fv.pts.iter().filter(|f| self.kind(*f) == Kind::Function).collect();
             if !fns.is_empty() {
@@ -804,7 +768,7 @@ impl Analyzer {
         }
         let inst = self.alloc_instance(cls, node, state);
         // a pydantic model (without its own `__init__`): validation of the keyword input
-        if crate::models::pydantic::is_validated(self, cls) && !super::disabled("pydantic") {
+        if crate::models::pydantic::is_validated(self, cls) {
             let own_init = self.class_lookup(cls, "__init__").map(|c| crate::models::pydantic::is_validated(self, c) && self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__")))).unwrap_or(false);
             if !own_init {
                 // a pydantic dataclass takes its fields positionally too
@@ -822,7 +786,7 @@ impl Analyzer {
         }
         // a dict subclass without its own `__init__`: dict's constructor fills its items
         let dict_based = self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|x| x.dict_base).unwrap_or(false));
-        if dict_based && self.class_lookup(cls, "__init__").is_none() && !super::disabled("dictsub") {
+        if dict_based && self.class_lookup(cls, "__init__").is_none() {
             state.set_row(inst, Ns::Item, Row::new());
             if let Some(a0) = args.first() {
                 if !self.record_objects(a0).is_empty() {
@@ -869,7 +833,7 @@ impl Analyzer {
                 }
             }
             self.fresh_init.remove(&inst);
-        } else if self.builtin_exc_base(cls) && !super::disabled("excinit") {
+        } else if self.builtin_exc_base(cls) {
             // an Exception subclass without its own `__init__`: args are the arguments
             let name = self.class_info(cls).name.clone();
             let t = self.alloc_positional(Kind::Tuple, node, Some(args.to_vec()), Value::new(), DATA, state);
@@ -891,7 +855,7 @@ impl Analyzer {
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", ci.name, node.line), Payload::Cls(cls), Some(row), Ns::Attr, None, None);
         if ci.typed_dict {
             state.set_row(inst, Ns::Item, Row::new());
-        } else if ci.open_base && !ci.dict_base && !super::disabled("openbaseitems") {
+        } else if ci.open_base && !ci.dict_base {
             // (an external base — `list`, a library class — may hold items the program's code
             // does not show: `append` / `super().__init__(items)` run there)
             state.set_row(inst, Ns::Item, Row::with_source(Source::new(&format!("items of {}@L{}", ci.name, node.line), SourceKind::Class)));
@@ -910,29 +874,27 @@ impl Analyzer {
         // one of unknown length every further positional field may come from it (its element)
         let mut args_full: Vec<Value> = args.to_vec();
         let mut star_rest: Option<Value> = None;
-        if !super::disabled("dcstarargs") {
-            for sa in star_args {
-                if star_rest.is_some() {
-                    break;
-                }
-                // (a list / tuple of known length: its positions)
-                if let Some(o) = sa.single().filter(|o| matches!(self.kind(*o), Kind::Tuple | Kind::List) && sa.kv.is_bot()) {
-                    if let Some(n) = self.llen(o, state) {
-                        for i in 0..n {
-                            args_full.push(state.slot(o, Ns::Pos, intern::key_int(i as i64)));
-                        }
-                        continue;
+        for sa in star_args {
+            if star_rest.is_some() {
+                break;
+            }
+            // (a list / tuple of known length: its positions)
+            if let Some(o) = sa.single().filter(|o| matches!(self.kind(*o), Kind::Tuple | Kind::List) && sa.kv.is_bot()) {
+                if let Some(n) = self.llen(o, state) {
+                    for i in 0..n {
+                        args_full.push(state.slot(o, Ns::Pos, intern::key_int(i as i64)));
                     }
+                    continue;
                 }
-                let it = self.iterate(sa, node, state);
-                match it.items {
-                    Some(items) if it.exhaustive => args_full.extend(items),
-                    _ => {
-                        star_rest = Some(match it.elem {
-                            super::funcs::Elem::One(v) => v,
-                            super::funcs::Elem::Pair(a, b) => a.join(&b),
-                        })
-                    }
+            }
+            let it = self.iterate(sa, node, state);
+            match it.items {
+                Some(items) if it.exhaustive => args_full.extend(items),
+                _ => {
+                    star_rest = Some(match it.elem {
+                        super::funcs::Elem::One(v) => v,
+                        super::funcs::Elem::Pair(a, b) => a.join(&b),
+                    })
                 }
             }
         }
@@ -941,7 +903,7 @@ impl Analyzer {
             let specs = self.dc_specs(cls);
             let mut pos = 0usize;
             let n_positional = specs.iter().filter(|f| f.init && !f.kw_only).count();
-            if args.len() > n_positional && !super::disabled("dcspecs") {
+            if args.len() > n_positional {
                 // more positional arguments than the __init__ takes
                 self.raise_here("TypeError", state);
                 return;
@@ -982,7 +944,7 @@ impl Analyzer {
                     let present = star_kwargs.iter().any(|sk| sk.pts.iter().any(|x| state.row(x, Ns::Item).present.contains(fk)));
                     let definite = star_kwargs.iter().all(|sk| !sk.pts.is_empty() && sk.pts.iter().all(|x| state.row(x, Ns::Item).definite.contains(fk)));
                     // a parameter's mapping: whether it has the key is known at the call site
-                    if !definite && !super::disabled("dcstar") {
+                    if !definite {
                         for sk in star_kwargs {
                             for x in sk.pts.iter() {
                                 if self.kind(x) == Kind::Ph {
@@ -998,7 +960,7 @@ impl Analyzer {
                             acc = if present { acc.join(&dv) } else { dv.join(&acc) };
                         }
                         Some(_) => {}
-                        None if !definite && !super::disabled("kwreq") => {
+                        None if !definite => {
                             for sk in star_kwargs {
                                 let recs: Vec<u32> = self.record_objects(sk).into_iter().filter(|o| state.row(*o, Ns::Item).open()).collect();
                                 if !recs.is_empty() {
@@ -1143,7 +1105,7 @@ impl Analyzer {
         // generated namedtuple): evaluated there
         let here = self.module_info(self.frame().module).idx;
         let owner = crate::frontend::module_of_addr(d as *const ast::Expr as usize);
-        if let Some(idx) = owner.filter(|i| *i != here && !super::disabled("defaultmodule")) {
+        if let Some(idx) = owner.filter(|i| *i != here) {
             if let Some(moid) = self.modules.values().copied().find(|m| self.module_info(*m).idx == idx) {
                 let mi = self.module_info(moid);
                 let (ctx, single) = (self.frame().ctx.clone(), self.frame().single);
@@ -1284,11 +1246,11 @@ impl Analyzer {
         // (a generator runs per call site: its caller sees only its suspension points, see below)
         // (not a `@contextmanager` / yield-dependency body: it runs around its with block)
         let under_cm = self.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth == self.frames.len());
-        // (a simple generator — straight-line yields, no calls — is summarised like a function)
-        let gen_fn = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body) && !super::is_simple_generator(&f.body)) && !under_cm && !super::disabled("genlazy") && super::limit("genfull", 0) == 0;
-        let gen_summ = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body)) && !under_cm && !super::disabled("genlazy");
+        // (a simple generator — straight-line yields, no calls — is summarised like a function;
+        // another runs per call site while its function's budget lasts)
+        let gen_fn = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body) && !super::is_simple_generator(&f.body)) && !under_cm;
+        let gen_summ = matches!(fi.node, FuncNode::Def(f) if is_generator(&f.body)) && !under_cm;
         let once = std::mem::take(&mut self.force_tab_once);
-        let forced = once || self.torch_modules.contains(&fi.module) || gen_fn;
         // (why the body runs per call site: `ROWAN_DEBUG=1` prints it with each tabulated run)
         let mut why: &'static str = if !self.use_summaries {
             "nosummaries"
@@ -1296,14 +1258,23 @@ impl Analyzer {
             "once"
         } else if gen_fn {
             "generator"
-        } else if forced {
+        } else if self.torch_modules.contains(&fi.module) {
             "torch"
         } else if self.model_call > 0 {
             "model"
         } else {
             "event"
         };
-        if self.use_summaries && self.model_call == 0 && !forced {
+        // (every per-call-site run counts against the function's one budget, whatever its
+        // reason: past it, the summary; except a call a model makes, whose effects on the
+        // model's own tables a summary does not replay — the calls in its body are ordinary
+        // calls again, see `saved_model_call`)
+        let forced = match why {
+            "once" | "model" => true,
+            "generator" | "torch" => self.tab_budget(foid),
+            _ => false,
+        };
+        if self.use_summaries && !forced {
             let bound = self.compute_bindings(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
             // the classes of the arguments: the summary is specialised on them
             let mut sig: Vec<(String, ObjId)> = Vec::new();
@@ -1328,31 +1299,29 @@ impl Analyzer {
                 }
                 cls
             };
-            if !super::disabled("sigsum") {
-                if let Some(sv) = &self_v {
-                    if let Some(c) = one_class(self, sv) {
-                        if let Some(FuncNode::Def(f)) = Some(fi.node) {
-                            if let Some(p0) = crate::scopes::all_params(&f.parameters).first() {
-                                sig.push((p0.name.id.to_string(), c));
-                            }
+            if let Some(sv) = &self_v {
+                if let Some(c) = one_class(self, sv) {
+                    if let Some(FuncNode::Def(f)) = Some(fi.node) {
+                        if let Some(p0) = crate::scopes::all_params(&f.parameters).first() {
+                            sig.push((p0.name.id.to_string(), c));
                         }
                     }
                 }
-                for (name, v) in bound.iter() {
-                    if let Some(c) = one_class(self, v) {
-                        sig.push((intern::str_get(*name).to_string(), c));
-                    }
-                    if !v.pts.is_empty() && v.pts.iter().all(|o| self.duck_part(o)) {
-                        sig.push((format!("{}{}", crate::summary::DUCK_PART_PREFIX, intern::str_get(*name)), 0));
-                    }
-                }
-                sig.sort();
             }
+            for (name, v) in bound.iter() {
+                if let Some(c) = one_class(self, v) {
+                    sig.push((intern::str_get(*name).to_string(), c));
+                }
+                if !v.pts.is_empty() && v.pts.iter().all(|o| self.duck_part(o)) {
+                    sig.push((format!("{}{}", crate::summary::DUCK_PART_PREFIX, intern::str_get(*name)), 0));
+                }
+            }
+            sig.sort();
             // (a recursive call whose argument is a part of a duck-typed value, inside the
             // function's own summary run: the partial summary at hand duck-types its parameter,
             // applied to the part it reads every class's attributes of it, one level deeper per
             // round — unknown code instead, as an argument past duck typing is)
-            if sig.iter().any(|(n, _)| n.starts_with(crate::summary::DUCK_PART_PREFIX)) && self.sum_stack.contains(&foid) && !super::disabled("duckrec") {
+            if sig.iter().any(|(n, _)| n.starts_with(crate::summary::DUCK_PART_PREFIX)) && self.sum_stack.contains(&foid) {
                 let qual = self.func_info(foid).qualname.clone();
                 return self.unknown_call(&qual, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
             }
@@ -1360,21 +1329,14 @@ impl Analyzer {
             let Some(summ) = summ else {
                 return Value::new(); // recursion through the symbolic path: ⊥ summary
             };
+            if summ.havoc {
+                return self.havoc_call(&summ, &fi.qualname, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
+            }
             let (call_ctx, ctx_single) = self.receiver_ctx(&self_v, &site);
             let mut bind: IndexMap<u32, Value> = IndexMap::new();
             for (name, ph) in summ.ph_by_name.iter() {
                 if let Some(bv) = bound.get(name) {
-                    let mut bv = bv.clone();
-                    let pcls = self.ph_info(*ph).cls.get();
-                    if let Some(pc) = pcls.filter(|_| super::disabled("hintsound")) {
-                        if !bv.pts.is_empty() {
-                            let kept = bv.pts.filter(|o| self.may_be_instance(o, pc));
-                            if kept != bv.pts {
-                                bv = Value::with_kv(kept, bv.kv.clone());
-                            }
-                        }
-                    }
-                    bind.insert(*ph, bv);
+                    bind.insert(*ph, bv.clone());
                 }
             }
             if let (Some(ps), Some(sv)) = (summ.ph_self, &self_v) {
@@ -1382,7 +1344,10 @@ impl Analyzer {
             }
             // (a generator whose body changes objects from before the call: its concrete run
             // orders those effects between the items)
-            let gen_concrete = gen_summ && summ.changes_outside(self);
+            // (past the budget its summary is applied weakly: the effects happen while it is
+            // consumed, so before and after the call the objects may or may not have them yet)
+            let gen_outside = gen_summ && summ.changes_outside(self);
+            let gen_concrete = gen_outside && self.tab_budget(foid);
             if gen_concrete {
                 why = "genconcrete";
             }
@@ -1390,7 +1355,6 @@ impl Analyzer {
             // records the state at each raise, which the handler starts from; the summary knows
             // only that it raises, and the state before the call lost its effects)
             let raise_caught = summ.raises
-                && !super::disabled("raisetab")
                 && self.try_sum_depth.last() == Some(&self.sum_stack.len())
                 && match summ.raise_classes.as_ref() {
                     Some(cs) if !cs.is_empty() => cs.iter().any(|c| self.class_guarded(c)),
@@ -1400,16 +1364,10 @@ impl Analyzer {
             // state before the call is the handler's; past a small budget those objects are
             // made unknown for the handler instead, see `summary_raise_state`)
             let raise_fp = !summ.raise_fp.rows.is_empty() || !summ.raise_fp.slots.is_empty() || !summ.raise_fp.elems.is_empty();
-            let tab_raise = raise_caught && raise_fp && {
-                let key = (fi.node.addr(), "raise");
-                let n = self.tab_count.get(&key).copied().unwrap_or(0);
-                let ok = n < super::limit("raisetab", 16) && !self.over_deadline();
-                if ok {
-                    self.tab_count.insert(key, n + 1);
-                    why = "raise";
-                }
-                ok
-            };
+            let tab_raise = !gen_concrete && raise_caught && raise_fp && self.tab_budget(foid);
+            if tab_raise {
+                why = "raise";
+            }
             if !gen_concrete && !tab_raise && !self.should_tabulate_at(&summ, &bind, state, node) {
                 // (outside databases the summary did not simulate: their rows are unknown now)
                 if let Some(cons) = self.sql_touched.get(&foid).cloned() {
@@ -1425,11 +1383,9 @@ impl Analyzer {
                     self.propagate_events(&summ, &bind, state);
                 }
                 // (a one-shot iterator handed to a summarised call: how much it takes is not known)
-                if !super::disabled("itercursor") {
-                    let its: Vec<u32> = args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(self_v.iter()).filter_map(|v| v.single().filter(|o| self.obj(*o).iterator && self.obj(*o).single)).collect();
-                    for o in its {
-                        self.set_cursor(o, None, state);
-                    }
+                let its: Vec<u32> = args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(self_v.iter()).filter_map(|v| v.single().filter(|o| self.obj(*o).iterator && self.obj(*o).single)).collect();
+                for o in its {
+                    self.set_cursor(o, None, state);
                 }
                 let saved_chain = std::mem::take(&mut self.call_chain);
                 self.call_chain = chain_extend(&saved_chain, &[node.line]);
@@ -1441,8 +1397,9 @@ impl Analyzer {
                     // state before the call), else leaves this call
                     // (the handler's state: before the call, with what the raising paths
                     // changed made unknown)
-                    let mut handler_state = self.summary_raise_state(&summ, &bind, state);
-                    match summ.raise_classes.clone().filter(|cs| !cs.is_empty() && !super::disabled("esccls")) {
+                    // (only a try around the call or the summary being built reads it)
+                    let mut handler_state = if self.raise_states.is_empty() && self.sum_stack.is_empty() { state.copy() } else { self.summary_raise_state(&summ, &bind, state) };
+                    match summ.raise_classes.clone().filter(|cs| !cs.is_empty()) {
                         Some(cs) => {
                             for c in cs {
                                 let name = c.0.first().cloned().unwrap_or_default();
@@ -1454,7 +1411,7 @@ impl Analyzer {
                         None => {
                             self.note_raise();
                             // (a class not known: a handler of anything may catch it)
-                            if raise_fp && !self.raise_states.is_empty() && !super::disabled("raisefp") {
+                            if raise_fp && !self.raise_states.is_empty() {
                                 self.record_raise_state(&mut handler_state);
                             }
                             if self.guards.iter().all(|g| !g.contains("*") && !g.contains("Exception") && !g.contains("BaseException")) {
@@ -1463,14 +1420,19 @@ impl Analyzer {
                         }
                     }
                 }
+                let pre_gen = if gen_outside { Some(state.copy()) } else { None };
                 let r = self.instantiate(&summ, &bind, state, node, &call_ctx, ctx_single);
+                if let Some(pre) = pre_gen {
+                    let fp = state.footprint(&pre);
+                    state.join_heap_fp(&pre, &fp);
+                }
                 self.call_chain = saved_chain;
                 // (a generator / coroutine function's call does not run its body)
                 let runs_body = match fi.node {
                     FuncNode::Def(f) => !f.is_async && !super::is_generator(&f.body),
                     _ => true,
                 };
-                if !summ.completes && summ.raises && runs_body && !super::disabled("sumnoreturn") {
+                if !summ.completes && summ.raises && runs_body {
                     state.reachable = false;
                 }
                 return r;
@@ -1484,7 +1446,7 @@ impl Analyzer {
         // literal arguments that differ from the running activations': not the same activation
         // (fib(9) inside fib(10)), up to a depth
         let mut lit_key = false;
-        if !entry && !super::disabled("litrec") && !args.is_empty() && kwargs.is_empty() && star_args.is_empty() && star_kwargs.is_empty() {
+        if !entry && !args.is_empty() && kwargs.is_empty() && star_args.is_empty() && star_kwargs.is_empty() {
             // (a tensor of a fully known shape counts like a literal: halving until length 1)
             let lits: Option<Vec<String>> = args
                 .iter()
@@ -1492,7 +1454,7 @@ impl Analyzer {
                     if let Some(k) = a.kv.as_lit().filter(|_| a.pts.is_empty()) {
                         return Some(intern::key_repr(k));
                     }
-                    if self.torch_on && !super::disabled("litrectensor") {
+                    if self.torch_on {
                         if let Some(sh) = crate::models::torch::tensor_shape(a) {
                             if sh.rest.is_none() && sh.suffix.is_empty() && sh.assume.is_empty() {
                                 let dims: Option<Vec<i64>> = sh.prefix.iter().map(|d| crate::shape::as_lit(*d)).collect();
@@ -1516,15 +1478,13 @@ impl Analyzer {
         // (several recursive call sites, each a new activation, multiply with every level of
         // nesting: below the outermost activation at most `recact` new ones, then a recursive
         // call joins the innermost running activation, as past MAX_ACTIVE)
-        if !super::disabled("recact") {
-            if act.is_empty() {
-                self.rec_tabs.remove(&foid);
-            } else if !self.active.contains_key(&key) && !lit_key {
-                let n = self.rec_tabs.entry(foid).or_default();
-                *n += 1;
-                if *n > super::limit("recact", 64) {
-                    key = act.last().unwrap().clone();
-                }
+        if act.is_empty() {
+            self.rec_tabs.remove(&foid);
+        } else if !self.active.contains_key(&key) && !lit_key {
+            let n = self.rec_tabs.entry(foid).or_default();
+            *n += 1;
+            if *n > super::limit("recact", 64) {
+                key = act.last().unwrap().clone();
             }
         }
         if self.active.contains_key(&key) {
@@ -1566,10 +1526,10 @@ impl Analyzer {
         }
         // summary cache: same callee, same call site, same observable input → replay the effects
         let sig = self.call_signature(foid, &site, entry, &self_v, &args, &kwargs, &star_args, &star_kwargs, state);
-        if let Some(sig) = sig.as_ref().filter(|_| !super::disabled("callcache")) {
+        if let Some(sig) = sig.as_ref() {
             // (a run that raised, under a try that may catch it: the handlers need the state at
             // each raise, which only a run records)
-            let hit = self.call_cache.get(sig).cloned().filter(|h| !(h.raises && !self.guards.is_empty() && !super::disabled("cacheraise")));
+            let hit = self.call_cache.get(sig).cloned().filter(|h| !(h.raises && !self.guards.is_empty()));
             if let Some(hit) = hit {
                 if super::debug_enabled() {
                     eprintln!("cache hit for {} at {}", self.func_info(foid).qualname, site);
@@ -1641,9 +1601,8 @@ impl Analyzer {
                         let site_id = info.sites.first().unwrap_or(s(&site));
                         state.require(src, *k, site_id, info.alternatives.clone(), info.caveats.clone(), info.alt_keys.clone());
                         if !info.always {
-                            let tgt = state.reqs.writable(&src);
-                            if let Some(cur) = tgt.get(k).cloned() {
-                                tgt.insert(*k, ReqInfo { always: false, ..cur });
+                            if let Some(cur) = state.reqs.get(&src, k) {
+                                state.reqs.set(&src, *k, ReqInfo { always: false, ..cur });
                             }
                         }
                     }
@@ -1662,7 +1621,7 @@ impl Analyzer {
                 let ret = hit.ret.clone();
                 let rows: Vec<(u32, Row)> = ret.pts.iter().filter(|o| self.is_record_like(*o)).map(|o| (o, state.row(o, Ns::Item))).collect();
                 self.summaries.entry((fi.qualname.clone(), site.clone())).or_insert((ret.clone(), rows));
-                if !hit.completes && !super::disabled("cachecompletes") {
+                if !hit.completes {
                     state.reachable = false;
                 }
                 return ret;
@@ -1695,8 +1654,11 @@ impl Analyzer {
         let raise_mark = self.raise_records;
         let saved_ret = state.ret.take();
         // (the caller's recorded returns are not the callee's: its end must not join them in)
-        let saved_exits = if super::disabled("callexits") { None } else { state.exits.take() };
+        let saved_exits = { state.exits.take() };
         let mut saved_yields: Option<(ObjId, Option<super::YieldStates>)> = None;
+        // (a call a model makes runs here, per call site; the calls in its body are ordinary
+        // calls again: summaries, budgets)
+        let saved_model_call = std::mem::replace(&mut self.model_call, 0);
         self.frames.push(new_fr);
         if let FuncNode::Def(f) = fnode {
             if is_generator(&f.body) {
@@ -1726,7 +1688,7 @@ impl Analyzer {
 
         let mut pre_bind = state.copy();
         let obj_mark_call = self.objects.len() as ObjId;
-        if !matches!(fnode, FuncNode::Def(f) if is_generator(&f.body)) && !super::disabled("retgarbage") {
+        if !matches!(fnode, FuncNode::Def(f) if is_generator(&f.body)) {
             if let Some(fr) = self.frames.last_mut() {
                 fr.pre_call = Some(super::PreCall(obj_mark_call, std::rc::Rc::new(pre_bind.copy())));
             }
@@ -1741,7 +1703,7 @@ impl Analyzer {
         // not converge)
         let nested = self.active_by_func.get(&foid).map(|v| v.len() > 1).unwrap_or(false);
         for round in 0..REC_MAX_ITER {
-            if nested && !super::disabled("recruns") {
+            if nested {
                 let n = self.rec_runs.entry(foid).or_default();
                 *n += 1;
                 if round > 0 && *n > super::limit("recruns", 256) {
@@ -1813,61 +1775,53 @@ impl Analyzer {
                     Some((_, pst, _)) => pst.copy_ref(),
                     None => entry_state.copy(),
                 };
-                if !super::disabled("recwiden") {
-                    let fp = s0.footprint(&entry_state);
-                    let site = s(&format!("recursion@{}", fi.qualname));
-                    for (o, ns) in fp.rows.iter().copied().collect::<Vec<_>>() {
-                        let r = s0.row(o, ns).mutate(site);
-                        s0.set_row(o, ns, r);
-                    }
+                let fp = s0.footprint(&entry_state);
+                let site = s(&format!("recursion@{}", fi.qualname));
+                for (o, ns) in fp.rows.iter().copied().collect::<Vec<_>>() {
+                    let r = s0.row(o, ns).mutate(site);
+                    s0.set_row(o, ns, r);
                 }
                 s0
             }
         };
-        if !converged && !ret_stable && !super::disabled("recwiden") {
+        if !converged && !ret_stable {
             ret = ret.join(&Value::data(&format!("recursion@{}", fi.qualname)));
         }
         if let Some(sig) = sig {
             if !self.rec_hit.contains(&key) {
                 let mut rel = State::new();
-                for (src, d) in st.reqs.items() {
-                    let base = pre_bind.reqs.inner(&src);
-                    for (k, info) in d.iter() {
-                        let same = base.as_ref().and_then(|b| b.get(k)).map(|b| b == info).unwrap_or(false);
-                        if !same {
-                            rel.reqs.writable(&src).insert(*k, info.clone());
+                for (src, k) in st.reqs.diff_keys(&pre_bind.reqs) {
+                    if let Some(info) = st.reqs.get(&src, &k) {
+                        if pre_bind.reqs.get(&src, &k).as_ref() != Some(&info) {
+                            rel.reqs.set(&src, k, info);
                         }
                     }
                 }
                 let mut fp = st.footprint(&pre_bind);
                 // (what the call made that its result reaches, whole: a later hit replays it
                 // into a state where those objects may have been collected meanwhile)
-                if !super::disabled("cacheborn") {
-                    let mut work: Vec<ObjId> = ret.pts.iter().filter(|o| *o >= obj_mark_call).collect();
-                    let mut seen: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
-                    let rows_have: rustc_hash::FxHashSet<(ObjId, Ns)> = fp.rows.iter().copied().collect();
-                    let slots_have: rustc_hash::FxHashSet<(ObjId, crate::state::SlotKey)> = fp.slots.iter().copied().collect();
-                    let elems_have: rustc_hash::FxHashSet<ObjId> = fp.elems.iter().copied().collect();
-                    while let Some(o) = work.pop() {
-                        if !seen.insert(o) || seen.len() > 4096 {
-                            continue;
+                let mut work: Vec<ObjId> = ret.pts.iter().filter(|o| *o >= obj_mark_call).collect();
+                let mut seen: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
+                let rows_have: rustc_hash::FxHashSet<(ObjId, Ns)> = fp.rows.iter().copied().collect();
+                let slots_have: rustc_hash::FxHashSet<(ObjId, crate::state::SlotKey)> = fp.slots.iter().copied().collect();
+                let elems_have: rustc_hash::FxHashSet<ObjId> = fp.elems.iter().copied().collect();
+                while let Some(o) = work.pop() {
+                    if !seen.insert(o) || seen.len() > 4096 {
+                        continue;
+                    }
+                    for ns in [Ns::Item, Ns::Attr] {
+                        if st.has_row(o, ns) && !rows_have.contains(&(o, ns)) {
+                            fp.rows.push((o, ns));
                         }
-                        for ns in [Ns::Item, Ns::Attr] {
-                            if st.has_row(o, ns) && !rows_have.contains(&(o, ns)) {
-                                fp.rows.push((o, ns));
-                            }
+                    }
+                    st.slots.each(&o, &mut |sk, v| {
+                        if !slots_have.contains(&(o, *sk)) {
+                            fp.slots.push((o, *sk));
                         }
-                        if let Some(d) = st.slots.m.get_ref(&o) {
-                            for (sk, v) in d.iter() {
-                                if !slots_have.contains(&(o, *sk)) {
-                                    fp.slots.push((o, *sk));
-                                }
-                                work.extend(v.pts.iter().filter(|x| *x >= obj_mark_call));
-                            }
-                        }
-                        if st.elems.get(&o).is_some() && !elems_have.contains(&o) {
-                            fp.elems.push(o);
-                        }
+                        work.extend(v.pts.iter().filter(|x| *x >= obj_mark_call));
+                    });
+                    if st.elems.get(&o).is_some() && !elems_have.contains(&o) {
+                        fp.elems.push(o);
                     }
                 }
                 let lens_changed: Vec<ObjId> = st.lens.diff_keys(&pre_bind.lens);
@@ -1912,7 +1866,7 @@ impl Analyzer {
         // body is suspended: before the first item, at a yield, or at its end. The objects that
         // existed before the call and that the body changed hold the join of those states.
         let gen_yields = match fnode {
-            FuncNode::Def(f) if is_generator(&f.body) && !gen_cm && !super::disabled("genlazy") => {
+            FuncNode::Def(f) if is_generator(&f.body) && !gen_cm => {
                 let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
                 Some((gid, self.gen_yield_states.get(&gid).map(|v| v.states().map(|s| s.copy_ref()).collect::<Vec<State>>()).unwrap_or_default()))
             }
@@ -1937,13 +1891,11 @@ impl Analyzer {
                     let mut p = self.prefix(gid, &ys).unwrap_or(0);
                     // (the yields joined: every position some yield made is there — the items
                     // the endless loop is known to give first)
-                    if !super::disabled("genprefix") {
-                        while ys.has_slot(gid, Ns::Pos, intern::key_int(p as i64)) {
-                            p += 1;
-                        }
-                        if p > 0 {
-                            self.objects[gid as usize].known_prefix = Some(p);
-                        }
+                    while ys.has_slot(gid, Ns::Pos, intern::key_int(p as i64)) {
+                        p += 1;
+                    }
+                    if p > 0 {
+                        self.objects[gid as usize].known_prefix = Some(p);
                     }
                     ys.lens.insert(gid, (None, p, 0));
                     st = ys;
@@ -1953,7 +1905,7 @@ impl Analyzer {
         if let Some((gid, ys)) = gen_yields {
             self.gen_suspension_join(&mut st, &pre_bind, &ys, gid, obj_mark_call);
             // the effects per item: before the first, the objects are as before the call
-            if !super::disabled("geneffects") && st.reachable {
+            if st.reachable {
                 let fp = st.footprint(&pre_bind);
                 let old = |o: ObjId| o < obj_mark_call && o != gid;
                 let rows: Vec<(ObjId, Ns)> = fp.rows.iter().copied().filter(|(o, _)| old(*o)).collect();
@@ -1986,13 +1938,9 @@ impl Analyzer {
             if is_generator(&f.body) {
                 let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
                 // what `yield from` the generator evaluates to: its return value
-                if !super::disabled("genret") {
-                    state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}genret"), ret.clone(), true);
-                }
+                state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}genret"), ret.clone(), true);
                 // (one-shot: what a consumer takes is gone for the next one)
-                if !super::disabled("geniter") {
-                    self.obj_mut(gid).iterator = true;
-                }
+                self.obj_mut(gid).iterator = true;
                 ret = Value::obj(gid);
             }
         }
@@ -2008,6 +1956,7 @@ impl Analyzer {
         self.rec_widened.remove(&key);
         self.call_chain = saved_chain;
         self.frames.pop();
+        self.model_call = saved_model_call;
         self.env_stack.pop();
         let raised = self.raise_stack.pop().unwrap_or(false);
         let callee_cls = self.esc_cls.pop().flatten();
@@ -2018,8 +1967,8 @@ impl Analyzer {
             // (a raise the enclosing try recorded, with its state and exception, needs no
             // "raised somewhere" flag: the handler gets that exception, not an unknown one; nor
             // do raises of known classes no guard here catches)
-            let known = callee_cls.as_ref().filter(|cs| !super::disabled("esccls") && !cs.is_empty() && !cs.iter().any(|c| self.class_guarded(c)));
-            if (self.raise_records > raise_mark && !super::disabled("recordedraise")) || known.is_some() {
+            let known = callee_cls.as_ref().filter(|cs| !cs.is_empty() && !cs.iter().any(|c| self.class_guarded(c)));
+            if self.raise_records > raise_mark || known.is_some() {
                 if let Some(t) = self.raise_stack.last_mut() {
                     *t = true;
                 }
@@ -2035,6 +1984,54 @@ impl Analyzer {
             state.exits = saved_exits;
         }
         ret
+    }
+
+    /// A call of a havoc summary (too big to instantiate): an unknown call on its arguments
+    /// (they may change in any way, it returns anything, it may raise), and what it changed
+    /// of objects from outside (globals) changed in unknown ways.
+    #[allow(clippy::too_many_arguments)]
+    fn havoc_call(&mut self, summ: &crate::summary::Summary, qual: &str, self_v: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
+        let site = s(&format!("{}@L{}", qual, node.line));
+        let bind: IndexMap<ObjId, Value> = IndexMap::new();
+        let mut memo: rustc_hash::FxHashMap<ObjId, Value> = Default::default();
+        let mut targets = |an: &mut Analyzer, o: ObjId, st: &mut State| -> Vec<ObjId> {
+            if an.kind(o) == Kind::Ph {
+                an.binding_of(summ, o, &bind, st, &mut memo).pts.iter().filter(|t| an.kind(*t) != Kind::Ph).collect()
+            } else {
+                vec![o]
+            }
+        };
+        for (o, ns, _) in &summ.rows_fp {
+            for t in targets(self, *o, state) {
+                let r = state.row(t, *ns).mutate(site);
+                state.set_row(t, *ns, r);
+            }
+        }
+        for ((o, ns, k), _) in &summ.slots_fp {
+            if crate::interp::access::param_slot_of(*k).is_some() {
+                continue;
+            }
+            for t in targets(self, *o, state) {
+                let v = state.slot(t, *ns, *k).join(&Value::data(&format!("{}@L{}", qual, node.line)));
+                state.set_slot(t, *ns, *k, v, false);
+            }
+        }
+        for (o, _) in &summ.elems_fp {
+            for t in targets(self, *o, state) {
+                let kv = crate::domain::kv_join(&state.elems.get(&t).unwrap_or(crate::domain::DATA), &crate::domain::DATA);
+                state.elems.insert(t, kv);
+            }
+        }
+        for v in &summ.rel_verdicts {
+            let mut nv = v.clone();
+            nv.chain = chain_extend(&chain_extend(&self.call_chain, &[node.line]), &v.chain);
+            let dk = nv.dedupe_key();
+            if !self.verdict_keys.contains(&dk) && !self.quiet {
+                self.verdict_keys.insert(dk);
+                self.verdicts.push(nv);
+            }
+        }
+        self.unknown_call(qual, self_v, args, kwargs, star_args, star_kwargs, state, node)
     }
 
     /// Drop the facts whose test read one of `objs`.
@@ -2053,7 +2050,7 @@ impl Analyzer {
     pub fn record_raise_state(&mut self, state: &mut State) -> bool {
         let Some((fl, el, pre, tmark)) = self.try_marks.last() else { return false };
         let tmark = *tmark;
-        if self.try_sum_depth.last().map(|d| self.sum_stack.len() > *d).unwrap_or(false) && !crate::interp::disabled("sumraise") {
+        if self.try_sum_depth.last().map(|d| self.sum_stack.len() > *d).unwrap_or(false) {
             // inside a callee's summary: its rows are relative to that summary; the call's
             // instantiation decides whether it raises here
             return false;
@@ -2062,7 +2059,7 @@ impl Analyzer {
         // the try is in a `@contextmanager` generator whose with body is running (also from a
         // callee of the body): the generator's names
         let in_cm = self.cm_frames.iter().rev().find(|(d, _, el0)| *d == *fl && *el <= *el0).map(|(_, env, _)| env.clone());
-        if let Some(env) = in_cm.filter(|_| !crate::interp::disabled("cmraise")) {
+        if let Some(env) = in_cm {
             here.env = env;
             here.narrowed = Default::default();
         } else if self.frames.len() < *fl {
@@ -2081,7 +2078,7 @@ impl Analyzer {
         // (the same state, class and exception as the last raise recorded in this try — a loop
         // of summarised calls raising at one call site: nothing to add)
         let depth = self.raise_states.len();
-        if !crate::interp::disabled("raisededup") && depth > 0 {
+        if depth > 0 {
             let open = self.raise_states.last().is_some_and(|s| s.is_some());
             if let Some((ls, lc, le)) = self.raise_last.get(&depth) {
                 if open && *lc == cls && *le == exc && ls.same(&here) {
@@ -2093,7 +2090,7 @@ impl Analyzer {
         // (what callees made since the try began and nothing reaches after the unwind — the
         // try's names, the frames above it, the exception — is garbage in the raise state: a
         // try around a large recursion otherwise joins every callee's objects at every raise)
-        if crate::interp::gc_on() && !crate::interp::disabled("raisegc") {
+        if crate::interp::gc_on() {
             let fl = *fl;
             let el = *el;
             let pre_try = pre.copy_ref();
@@ -2136,9 +2133,13 @@ impl Analyzer {
             push(&exc, &mut roots);
             self.collect_since(tmark, &pre_try, roots, true, &mut here);
         }
+        // (a try that keeps its raises one by one joins them where a handler needs them: the
+        // running join is only a mark that something was recorded)
+        let mut kept = false;
         if let Some((d, recs)) = self.raise_cls.last_mut() {
             if *d == depth {
                 recs.push((cls, here.copy(), exc.clone()));
+                kept = true;
             }
         }
         if let Some(rv) = self.raise_values.last_mut() {
@@ -2149,6 +2150,7 @@ impl Analyzer {
         }
         let Some(slot) = self.raise_states.last_mut() else { return false };
         *slot = Some(match slot.take() {
+            _ if kept => State::bottom(),
             None => here,
             Some(mut prev) => prev.join(&mut here),
         });
@@ -2307,14 +2309,14 @@ impl Analyzer {
                 }
                 let (bn, full) = super::builtin_exc_names(&n);
                 complete &= full;
-                for b in bn {
-                    if !names.contains(&b) {
-                        names.push(b);
+                for b in bn.iter() {
+                    if !names.contains(b) {
+                        names.push(b.clone());
                     }
                 }
             }
         }
-        Some((names, complete))
+        Some((std::rc::Rc::new(names), complete))
     }
 
     /// A builtin exception (`KeyError(key)`, …) as a value: open attributes, known `args`.
@@ -2330,7 +2332,7 @@ impl Analyzer {
 
     /// `str(e)` / `repr(e)` of exception objects with known args.
     pub fn exc_text(&self, v: &Value, repr: bool, state: &State) -> Option<Value> {
-        if v.pts.is_empty() || !v.kv.is_bot() || super::disabled("exctext") {
+        if v.pts.is_empty() || !v.kv.is_bot() {
             return None;
         }
         let mut out = Vec::new();
@@ -2376,7 +2378,7 @@ impl Analyzer {
         }
         let caught = self.guards.iter().any(|g| g.contains("*") || g.contains("Exception") || g.contains("BaseException") || g.contains(name)) || self.cur_exc_cls.as_ref().is_some_and(|c| self.class_guarded(c));
         // a builtin exception a model raises: an object of its class (its args not known)
-        if caught && self.cur_exc.is_none() && !self.raise_states.is_empty() && !super::disabled("implicitexc") {
+        if caught && self.cur_exc.is_none() && !self.raise_states.is_empty() {
             if let Some(nd) = self.exc_node {
                 let n = name.rsplit('.').next().unwrap_or(name);
                 if super::builtin_exc_names(n).1 && super::is_builtin_name(n) {
@@ -2401,7 +2403,7 @@ impl Analyzer {
             *t = true;
         }
         let cls = self.cur_exc_cls.clone().unwrap_or_else(|| super::builtin_exc_names(name));
-        let guarded = self.class_guarded(&cls) || super::disabled("esccls");
+        let guarded = self.class_guarded(&cls);
         if let Some(Some(v)) = self.esc_cls.last_mut() {
             if !v.contains(&cls) {
                 v.push(cls);
@@ -2420,7 +2422,7 @@ impl Analyzer {
     pub fn flag_may_raise(&mut self, state: &mut State) {
         let d = self.may_raise.len();
         if let Some(m) = self.may_raise.last_mut() {
-            if !*m && !super::disabled("flagreqs") {
+            if !*m {
                 self.flag_reqs.push((d, state.reqs.copy()));
             }
             *m = true;
@@ -2506,7 +2508,7 @@ impl Analyzer {
         seen.sort_unstable();
         let mut heap = Vec::with_capacity(seen.len());
         for oid in seen {
-            heap.push((oid, state.rows.get(&(oid, Ns::Item)), state.rows.get(&(oid, Ns::Attr)), SigSlots(state.slots.m.get_ref(&oid).cloned()), state.elems.get(&oid), self.obj(oid).single));
+            heap.push((oid, state.rows.get(&(oid, Ns::Item)), state.rows.get(&(oid, Ns::Attr)), state.slots.for_key(&oid), state.elems.get(&oid), self.obj(oid).single));
         }
         let guards: Vec<Vec<String>> = self
             .guards
@@ -2615,7 +2617,7 @@ impl Analyzer {
                 bound.insert(*name, d.clone());
             } else if !star_kwargs.is_empty() {
                 let mut vals: Vec<Value> = star_kwargs.iter().flat_map(|sk| sk.pts.iter().map(|x| state.slot(x, Ns::Item, nk)).collect::<Vec<_>>()).collect();
-                if fi.defaults.get(name).is_none() && !kw_definite && !super::disabled("kwreq") {
+                if fi.defaults.get(name).is_none() && !kw_definite {
                     // a required parameter only `**kw` can supply: read from it (a requirement on
                     // an input; a missing key is a TypeError at the call)
                     for sk in star_kwargs {

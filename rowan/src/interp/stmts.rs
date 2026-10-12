@@ -63,14 +63,14 @@ impl Analyzer {
                 let rhs = self.eval(&a.value, state);
                 let n = frontend::node(a);
                 // `xs += ys` on a list extends it in place (other names see it)
-                if a.op == ast::Operator::Add && !cur.pts.is_empty() && cur.pts.iter().all(|o| self.kind(o) == Kind::List) && !crate::interp::disabled("iadd") {
+                if a.op == ast::Operator::Add && !cur.pts.is_empty() && cur.pts.iter().all(|o| self.kind(o) == Kind::List) {
                     let m = self.method_value("list.extend", &cur);
                     self.call_value(&m, &n, None, state, Some(vec![rhs]));
                     self.bind_target(&a.target, &cur, state);
                     return;
                 }
                 // `d |= e` on a dict updates it in place; `s |= t` (`&=`, `-=`, `^=`) on a set too
-                if !cur.pts.is_empty() && !crate::interp::disabled("iupdate") {
+                if !cur.pts.is_empty() {
                     let all_dict = cur.pts.iter().all(|o| self.kind(o) == Kind::Dict);
                     let all_set = cur.pts.iter().all(|o| self.kind(o) == Kind::Set);
                     let m = match (a.op, all_dict, all_set) {
@@ -96,7 +96,7 @@ impl Analyzer {
                 // `d[k] += v` with an unknown key on a closed dict: the load raised unless k was
                 // one of its keys, so the store adds none
                 if let ast::Expr::Subscript(sub) = &*a.target {
-                    if matches!(&*sub.value, ast::Expr::Name(_) | ast::Expr::Attribute(_)) && matches!(&*sub.slice, ast::Expr::Name(_) | ast::Expr::Attribute(_) | ast::Expr::Subscript(_)) && !crate::interp::disabled("augkey") {
+                    if matches!(&*sub.value, ast::Expr::Name(_) | ast::Expr::Attribute(_)) && matches!(&*sub.slice, ast::Expr::Name(_) | ast::Expr::Attribute(_) | ast::Expr::Subscript(_)) {
                         let mut probe = state.copy();
                         let obj = self.eval(&sub.value, &mut probe);
                         let key = self.eval_key(&sub.slice, &mut probe);
@@ -152,16 +152,14 @@ impl Analyzer {
                 };
                 // `raise X from Y`: X.__cause__ is Y (None for `from None`)
                 if let (Some(xv), Some(ce)) = (&exc_v, &r.cause) {
-                    if !crate::interp::disabled("raisecause") {
-                        let cv = self.eval(ce, state);
-                        let ck = key_str_lit("__cause__");
-                        for o in xv.pts.iter() {
-                            if matches!(self.kind(o), Kind::Instance | Kind::Namespace) || self.exc_objs.contains_key(&o) {
-                                let strong = xv.pts.len() == 1 && self.obj(o).single;
-                                let row = state.row(o, Ns::Attr).store(ck, strong);
-                                state.set_row(o, Ns::Attr, row);
-                                state.set_slot(o, Ns::Attr, ck, cv.clone(), strong);
-                            }
+                    let cv = self.eval(ce, state);
+                    let ck = key_str_lit("__cause__");
+                    for o in xv.pts.iter() {
+                        if matches!(self.kind(o), Kind::Instance | Kind::Namespace) || self.exc_objs.contains_key(&o) {
+                            let strong = xv.pts.len() == 1 && self.obj(o).single;
+                            let row = state.row(o, Ns::Attr).store(ck, strong);
+                            state.set_row(o, Ns::Attr, row);
+                            state.set_slot(o, Ns::Attr, ck, cv.clone(), strong);
                         }
                     }
                 }
@@ -180,7 +178,7 @@ impl Analyzer {
                 });
                 self.cur_exc = exc_v.clone().filter(|v| v.pts.iter().any(|o| self.kind(o) == Kind::Instance || self.exc_objs.contains_key(&o) || matches!(&self.obj(o).payload, Payload::Method(q, _) if q == "fastapi.httpexc")));
                 // a bare raise: the exception the handler holds
-                if r.exc.is_none() && !crate::interp::disabled("reraisevalue") {
+                if r.exc.is_none() {
                     self.cur_exc = self.handling_values.last().cloned().filter(|v| !v.pts.is_empty());
                 }
                 // the class raised: of the exception object, of a raised class, or (a bare
@@ -202,7 +200,7 @@ impl Analyzer {
                 // (a handler of a base class catches it too)
                 let caught = caught || self.cur_exc_cls.as_ref().is_some_and(|(ns, _)| self.guards.iter().any(|g| ns.iter().any(|n| g.contains(n))));
                 let raised_cls = self.cur_exc_cls.clone();
-                let recorded = state.reachable && !crate::interp::disabled("raisestate") && self.record_raise_state(state);
+                let recorded = state.reachable && self.record_raise_state(state);
                 self.cur_exc = None;
                 self.cur_exc_cls = None;
                 if !caught {
@@ -307,7 +305,7 @@ impl Analyzer {
                 let mut st = state.copy();
                 // (the finally blocks of the trys this leaves run first)
                 let n = self.loop_stack.len();
-                let pending: Vec<std::rc::Rc<Finally>> = if crate::interp::disabled("jumpfinally") { Vec::new() } else { self.finally_stack.iter().rev().take_while(|(l, _, _)| *l == n).filter(|(_, _, a)| *a).map(|(_, b, _)| b.clone()).collect() };
+                let pending: Vec<std::rc::Rc<Finally>> = { self.finally_stack.iter().rev().take_while(|(l, _, _)| *l == n).filter(|(_, _, a)| *a).map(|(_, b, _)| b.clone()).collect() };
                 for fin in pending {
                     self.run_finally(&fin, &mut st, false);
                     if !st.reachable {
@@ -331,7 +329,7 @@ impl Analyzer {
                 let mut st = state.copy();
                 // (the finally blocks of the trys this leaves run first)
                 let n = self.loop_stack.len();
-                let pending: Vec<std::rc::Rc<Finally>> = if crate::interp::disabled("jumpfinally") { Vec::new() } else { self.finally_stack.iter().rev().take_while(|(l, _, _)| *l == n).filter(|(_, _, a)| *a).map(|(_, b, _)| b.clone()).collect() };
+                let pending: Vec<std::rc::Rc<Finally>> = { self.finally_stack.iter().rev().take_while(|(l, _, _)| *l == n).filter(|(_, _, a)| *a).map(|(_, b, _)| b.clone()).collect() };
                 for fin in pending {
                     self.run_finally(&fin, &mut st, false);
                     if !st.reachable {
@@ -411,21 +409,12 @@ impl Analyzer {
                     if state.reachable {
                         self.run_finally(&fin, state, false);
                     }
-                } else if !crate::interp::disabled("withexit") {
+                } else {
                     // a try whose finally is the managers' `__exit__`: it runs however the body
                     // ends (normally, by return / break / continue, or by an exception)
                     self.stmt_try_parts(&w.body, &[], &[], std::rc::Rc::new(Finally::Exit(managers)), state);
                     for _ in 0..n_redirects {
                         self.stdout_redirect.pop();
-                    }
-                } else {
-                    self.exec_block(&w.body, state);
-                    for _ in 0..n_redirects {
-                        self.stdout_redirect.pop();
-                    }
-                    let fin = std::rc::Rc::new(Finally::Exit(managers));
-                    if state.reachable {
-                        self.run_finally(&fin, state, false);
                     }
                 }
             }
@@ -445,7 +434,7 @@ impl Analyzer {
                 let mut matched = false;
                 for case in &m.cases {
                     let mut cs = state.copy();
-                    let decided = if crate::interp::disabled("matchpat") { None } else { self.match_pattern(&case.pattern, &subj, &mut cs) };
+                    let decided = { self.match_pattern(&case.pattern, &subj, &mut cs) };
                     if decided == Some(false) || !cs.reachable {
                         continue;
                     }
@@ -487,7 +476,7 @@ impl Analyzer {
     /// `with contextlib.suppress(E, …): body`: `try: body / except (E, …): pass`. False: not
     /// that case.
     fn with_suppress(&mut self, w: &'static ast::StmtWith, state: &mut State) -> bool {
-        if w.items.len() != 1 || crate::interp::disabled("suppress") {
+        if w.items.len() != 1 {
             return false;
         }
         let ast::Expr::Call(call) = &w.items[0].context_expr else { return false };
@@ -592,7 +581,7 @@ impl Analyzer {
                         None => r,
                     });
                 }
-                if !state.reachable && !h.body_died && !crate::interp::disabled("cmdied") {
+                if !state.reachable && !h.body_died {
                     // the generator did not finish normally after a body that did: still go on
                     // after the with (an exception there would be the body's)
                     state.reachable = true;
@@ -816,7 +805,7 @@ impl Analyzer {
             Some(false) => then_s.reachable = false,
             None => {}
         }
-        let cond = if decided.is_none() && !crate::interp::disabled("condfacts") { self.cond_key(test) } else { None };
+        let cond = if decided.is_none() { self.cond_key(test) } else { None };
         if let Some((key, pos, _)) = &cond {
             // an earlier join on the same test: each branch gets back the rows it had then
             self.apply_cond_facts(*key, *pos, &mut then_s);
@@ -842,11 +831,11 @@ impl Analyzer {
             self.cond_depth -= 1;
         }
         // `if k not in d: raise …`: the input must hold k (else the program raises)
-        if conditional && !crate::interp::disabled("raiserequire") {
+        if conditional {
             self.require_by_raise(test, body, rest, state, &mut then_s, &mut else_s);
         }
         let mut j = then_s.join(&mut else_s);
-        if then_s.reachable && else_s.reachable && conditional && !crate::interp::disabled("condfacts") {
+        if then_s.reachable && else_s.reachable && conditional {
             let mut new: Vec<std::sync::Arc<crate::state::CondFact>> = Vec::new();
             let mut assigned: Vec<intern::StrId> = Vec::new();
             for st in body.iter() {
@@ -939,7 +928,7 @@ impl Analyzer {
                 _ => false,
             }
         }
-        if crate::interp::disabled("flagfacts") || !state.reachable || !testlike(test) || (v.pts.is_empty() && v.kv.is_literal()) {
+        if !state.reachable || !testlike(test) || (v.pts.is_empty() && v.kv.is_literal()) {
             return;
         }
         let mut ts = state.copy();
@@ -1045,8 +1034,8 @@ impl Analyzer {
         // that takes a few items sees exactly those; only outside other loops and unrolled
         // iterations, as nested unrolling multiplies: email's `_parsegen` nests such loops)
         let outermost = self.frame().loop_depth == 0 && self.frame().unroll.is_empty();
-        let gen_body = is_constant(&w.test) && (outermost || crate::interp::disabled("genwhileouter")) && self.frame().func.map(|f| matches!(self.func_info(f).node, crate::interp::FuncNode::Def(d) if crate::interp::is_generator(&d.body))).unwrap_or(false) && !crate::interp::disabled("genwhileunroll");
-        if (!is_constant(&w.test) || gen_body) && !crate::interp::disabled("whileunroll") {
+        let gen_body = is_constant(&w.test) && outermost && self.frame().func.map(|f| matches!(self.func_info(f).node, crate::interp::FuncNode::Def(d) if crate::interp::is_generator(&d.body))).unwrap_or(false);
+        if !is_constant(&w.test) || gen_body {
             let mut idx = 0usize;
             loop {
                 if !state.reachable {
@@ -1108,7 +1097,7 @@ impl Analyzer {
     /// A loop fixpoint cut off at `LOOP_MAX_ITER`: what still changed between the last two
     /// heads is widened to unknown (names and slots get unknown data, rows open, lengths
     /// unknown), so the exit state covers every later iteration.
-    fn widen_unconverged(&mut self, head: &mut State, prev: &State) {
+    pub(crate) fn widen_unconverged(&mut self, head: &mut State, prev: &State) {
         if crate::interp::debug_level() >= 1 {
             let fp0 = head.footprint(prev);
             let nn: Vec<String> = head.env.iter().filter(|(k, v)| prev.env.get(*k) != Some(*v)).map(|(k, _)| intern::str_get(*k).to_string()).collect();
@@ -1193,7 +1182,7 @@ impl Analyzer {
             }
             prev_head = std::mem::replace(&mut head, new_head);
         }
-        if !converged && !crate::interp::disabled("loopwiden") {
+        if !converged {
             self.widen_unconverged(&mut head, &prev_head);
         }
         self.cond_depth -= 1;
@@ -1221,13 +1210,13 @@ impl Analyzer {
         let has_jump = contains_jump(&f.body);
         // a one-shot iterator is used up by the loop; a `break` leaves the rest: the cursor
         // follows the unrolled iterations, else it is not known after a loop that may break
-        let once = itv.single().filter(|o| self.obj(*o).iterator && self.obj(*o).single && !crate::interp::disabled("itercursor"));
+        let once = itv.single().filter(|o| self.obj(*o).iterator && self.obj(*o).single);
         let c0 = once.and_then(|o| self.cursor_of(o, state)).unwrap_or(0);
         // an endless generator with known first items: those iterations are unrolled (the
         // cursor follows), the rest of the loop runs on from there
         if let (Some(o), None, true) = (once, &it.items, matches!(&*f.iter, ast::Expr::Name(_))) {
             if let (None, Some(p)) = (self.llen(o, state), self.prefix(o, state)) {
-                if p > c0 && p - c0 <= UNROLL_MAX && !crate::interp::disabled("genprefix") {
+                if p > c0 && p - c0 <= UNROLL_MAX {
                     let items: Vec<Value> = (c0..p).map(|i| state.slot(o, Ns::Pos, intern::key_int(i as i64))).collect();
                     let mut breaks: Option<State> = None;
                     for (idx, item) in items.iter().enumerate() {
@@ -1366,7 +1355,7 @@ impl Analyzer {
         let mut prefix_breaks: Option<State> = None;
         let mut prefixed = false;
         if let (None, None, Some(o)) = (&it.items, once, itv.single().filter(|_| itv.kv.is_bot())) {
-            if matches!(self.kind(o), Kind::List | Kind::Tuple) && !self.obj(o).iterator && self.obj(o).single && self.llen(o, state).is_none() && !crate::interp::disabled("listprefix") {
+            if matches!(self.kind(o), Kind::List | Kind::Tuple) && !self.obj(o).iterator && self.obj(o).single && self.llen(o, state).is_none() {
                 if let Some(p) = self.prefix(o, state).filter(|p| *p <= UNROLL_MAX) {
                     let items: Vec<Value> = (0..p).map(|i| state.slot(o, Ns::Pos, intern::key_int(i as i64))).collect();
                     prefixed = true;
@@ -1469,7 +1458,7 @@ impl Analyzer {
             }
             prev_head = std::mem::replace(&mut head, new_head);
         }
-        if !converged && !crate::interp::disabled("loopwiden") {
+        if !converged {
             self.widen_unconverged(&mut head, &prev_head);
         }
         self.cond_depth -= 1;
@@ -1503,7 +1492,7 @@ impl Analyzer {
         }
         // the loop ran at least once exactly when its iterable was non-empty: a later test of
         // that (`if xs:`, `if n > 0:` for `range(n)`) gets the rows the iterations left
-        if f.orelse.is_empty() && !has_jump && !prefixed && back.reachable && pre.reachable && exit_s.reachable && !crate::interp::disabled("loopfacts") {
+        if f.orelse.is_empty() && !has_jump && !prefixed && back.reachable && pre.reachable && exit_s.reachable {
             let mut assigned: Vec<intern::StrId> = Vec::new();
             f.body.iter().for_each(|x| collect_assigned(x, &mut assigned));
             let func = self.frame().func.unwrap_or(0);
@@ -1635,12 +1624,12 @@ impl Analyzer {
             let ast::ExceptHandler::ExceptHandler(h) = h;
             matches!(h.body.last(), Some(ast::Stmt::Raise(_)))
         });
-        if reraise && !crate::interp::disabled("reraisereq") {
+        if reraise {
             caught.insert("!reraise".into());
         }
         // returns inside the try are collected apart from the earlier ones: the finally runs
         // on their way out
-        let has_finally = !fin.is_empty() && !crate::interp::disabled("finally");
+        let has_finally = !fin.is_empty();
         let outer_exits = if has_finally { state.exits.take() } else { None };
         let raise_before = self.raise_stack.last().copied().unwrap_or(false);
         let mut pre = state.copy();
@@ -1664,8 +1653,9 @@ impl Analyzer {
         let mut flag_reqs = self.flag_reqs.drain(fl_mark..).find(|(d, _)| *d == fl_depth).map(|(_, r)| r);
         // a body that ended because it returned (or broke out) did not raise
         let flagged = self.may_raise.pop().unwrap_or(false);
-        let mut raised_at = self.raise_states.pop().flatten();
-        let raised_exc = self.raise_values.pop().flatten();
+        // (Some: something was recorded; the states themselves are in `recs`)
+        let raised_at = self.raise_states.pop().flatten();
+        self.raise_values.pop();
         let mut recs = self.raise_cls.pop().map(|(_, r)| r).unwrap_or_default();
         // the handlers' classes: which recorded raise each one catches (Python takes the
         // first handler that matches)
@@ -1704,17 +1694,17 @@ impl Analyzer {
                 None
             }
         };
-        let per_class = !crate::interp::disabled("excclass") && !handlers.is_empty();
+        let per_class = !handlers.is_empty();
         // raises no handler surely catches go on to the enclosing try (or out of the call),
         // through the finally (unless a return / jump in it swallows them)
         let swallowing = !fin.is_empty() && fin.swallows();
-        if (per_class || (handlers.is_empty() && !crate::interp::disabled("excclass"))) && !swallowing {
+        if (per_class || handlers.is_empty()) && !swallowing {
             for (cls, st, ev) in recs.iter_mut() {
                 if hclasses.iter().any(|hc| hmatch(hc, cls) == Some(true)) {
                     continue;
                 }
                 let mut st2 = st.copy();
-                if !fin.is_empty() && !crate::interp::disabled("finally") {
+                if !fin.is_empty() {
                     st2.reachable = true;
                     st2.ret = None;
                     st2.exits = None;
@@ -1745,7 +1735,7 @@ impl Analyzer {
         let mut finally_escape: Option<State> = None;
         if has_finally && handlers.is_empty() && body_may_raise && fin.swallows() {
             let mut e = if generic { pre.copy() } else { State::bottom() };
-            if let Some(r) = raised_at.as_mut() {
+            for (_, r, _) in recs.iter_mut() {
                 let mut r2 = r.copy();
                 e = if e.reachable { e.join(&mut r2) } else { r2 };
             }
@@ -1765,28 +1755,6 @@ impl Analyzer {
         } else {
             State::bottom()
         };
-        // the handler starts from the states at the accesses that may raise; anything else
-        // that may raise (unknown calls, raise statements, callees) can happen anywhere
-        let mut handler_entry: Option<State> = if !handlers.is_empty() {
-            let mut e = if generic {
-                let mut g = pre.copy();
-                if let Some(r) = flag_reqs.as_mut() {
-                    g.reqs = r.copy();
-                }
-                g.join(&mut body_end)
-            } else {
-                State::bottom()
-            };
-            if let Some(mut r) = raised_at {
-                e = if e.reachable { e.join(&mut r) } else { r };
-            }
-            Some(e)
-        } else {
-            None
-        };
-        if !body_may_raise && !handlers.is_empty() {
-            handler_entry = Some(State::bottom());
-        }
         let mut results: Vec<State> = Vec::new();
         if !orelse.is_empty() && body_end.reachable {
             self.exec_block(orelse, &mut body_end);
@@ -1797,7 +1765,7 @@ impl Analyzer {
             // the exceptions raised at the recorded points (anything else: unknown)
             let hn = frontend::node(h);
             let unknown = Value::data(&format!("exc@L{}", hn.line));
-            let (mut hs, ev) = if per_class {
+            let (mut hs, ev) = {
                 // the raises this handler may catch that no earlier one surely catches
                 let mut e = generic_entry.copy();
                 let mut ev = if generic { Some(unknown.clone()) } else { None };
@@ -1814,13 +1782,6 @@ impl Analyzer {
                     e = State::bottom();
                 }
                 (e, ev.unwrap_or(unknown))
-            } else {
-                let ev = match &raised_exc {
-                    Some(v) if !generic => v.clone(),
-                    Some(v) => v.join(&unknown),
-                    None => unknown,
-                };
-                (handler_entry.as_mut().unwrap().copy(), ev)
             };
             if !hs.reachable {
                 continue;
@@ -1852,7 +1813,7 @@ impl Analyzer {
         // two ways out of the try (the body and one handler) that set a flag differently: a
         // later test of the flag tells which ran
         let two: Vec<usize> = (0..results.len()).filter(|i| results[*i].reachable).collect();
-        let pair = if two.len() == 2 && !crate::interp::disabled("condfacts") { Some((results[two[0]].copy(), results[two[1]].copy())) } else { None };
+        let pair = if two.len() == 2 { Some((results[two[0]].copy(), results[two[1]].copy())) } else { None };
         let mut out = results.remove(0);
         for mut r in results {
             out = out.join(&mut r);
@@ -2044,7 +2005,7 @@ impl Analyzer {
     /// Garbage collection at a loop's exit (in a function): objects the loop allocated that the
     /// frame's names, the enclosing frames and the analyzer no longer reach lose their state.
     fn loop_gc_begin(&mut self, state: &mut State) -> Option<(u32, State)> {
-        if !crate::interp::gc_on() || crate::interp::disabled("loopgc") || !matches!(self.frame().kind, FrameKind::Function) || self.frame().pre_call.is_none() {
+        if !crate::interp::gc_on() || !matches!(self.frame().kind, FrameKind::Function) || self.frame().pre_call.is_none() {
             return None;
         }
         Some((self.objects.len() as u32, state.copy()))
@@ -2128,7 +2089,7 @@ impl Analyzer {
                             }
                             // (a base that derives from an external class — `list`, an unseen
                             // library class — makes this one's instances open too)
-                            if self.class_info_opt(oid).is_some_and(|ci| ci.open_base) && !crate::interp::disabled("openbaseinherit") {
+                            if self.class_info_opt(oid).is_some_and(|ci| ci.open_base) {
                                 open_base = true;
                             }
                             bases.push(oid)
@@ -2167,8 +2128,8 @@ impl Analyzer {
                                 typed_dict = true;
                             } else if q.ends_with("NamedTuple") {
                                 named_tuple = true;
-                            } else if matches!(q.as_str(), "builtins.object" | "object" | "abc.ABC" | "typing.Protocol" | "typing.Generic") || q.ends_with("Generic") || (q.strip_prefix("builtins.").map(crate::interp::exprs::is_exception_name).unwrap_or(false) && !crate::interp::disabled("excbase"))
-                                || (q.starts_with("enum.") && !crate::interp::disabled("enumbase")) {
+                            } else if matches!(q.as_str(), "builtins.object" | "object" | "abc.ABC" | "typing.Protocol" | "typing.Generic") || q.ends_with("Generic") || (q.strip_prefix("builtins.").map(crate::interp::exprs::is_exception_name).unwrap_or(false))
+                                || (q.starts_with("enum.")) {
                                 // (a builtin exception base adds nothing to the instance's `vars()`)
                             } else {
                                 open_base = true;
@@ -2283,7 +2244,7 @@ impl Analyzer {
         // an Enum: each plain class-level `NAME = value` is a member, an instance of the class
         // with known `name` and `value`, in definition order
         let enum_base = info.bases.iter().any(|b| self.enum_members.contains_key(b));
-        if (is_enum || enum_base) && !crate::interp::disabled("enummembers") {
+        if is_enum || enum_base {
             let mut members: Vec<(String, u32)> = Vec::new();
             self.enum_kind.insert(coid, ek);
             // `auto()`: the lower-cased name (StrEnum), the next power of two (Flag), else the
@@ -2307,7 +2268,7 @@ impl Analyzer {
                     _ => false,
                 };
                 // (`class M(str, Enum)` with `auto()`: str of an int, deprecated: left unknown)
-                if is_auto && !(str_mixin && !ek.is_str) && !crate::interp::disabled("enumauto") {
+                if is_auto && !(str_mixin && !ek.is_str) {
                     let av = if ek.is_str && !ek.flag {
                         Value::lit(key_str_lit(&name.to_lowercase()))
                     } else if ek.flag {
@@ -2327,7 +2288,7 @@ impl Analyzer {
                 }
                 // a value an earlier member has: an alias of that member (not iterated)
                 let vlit = v.kv.as_lit().filter(|_| v.pts.is_empty());
-                if let Some(prev) = vlit.and_then(|l| member_vals.iter().find(|(x, _)| *x == l)).map(|(_, m)| *m).filter(|_| !crate::interp::disabled("enumalias")) {
+                if let Some(prev) = vlit.and_then(|l| member_vals.iter().find(|(x, _)| *x == l)).map(|(_, m)| *m) {
                     self.cls_slots.insert((coid, Ns::Attr, nk), Value::obj(prev));
                     self.enum_aliases.entry(coid).or_default().push((name, prev));
                     continue;
@@ -2354,41 +2315,37 @@ impl Analyzer {
             self.enum_members.insert(coid, members);
         }
         // `__set_name__(owner, name)` on descriptor objects assigned in the class body
-        if !crate::interp::disabled("descriptors") {
-            for st in &c.body {
-                let ast::Stmt::Assign(a) = st else { continue };
-                let [ast::Expr::Name(n)] = &a.targets[..] else { continue };
-                let v = self.cls_slots.get(&(coid, Ns::Attr, key_str_lit(n.id.as_str()))).cloned().unwrap_or_default();
-                for d in v.pts.iter() {
-                    if self.kind(d) == Kind::Instance && self.instance_class(d).and_then(|dc| self.class_lookup(dc, "__set_name__")).is_some() {
-                        self.call_method_with(&Value::obj(d), "__set_name__", vec![Value::obj(coid), Value::lit(key_str_lit(n.id.as_str()))], &cnode, state);
-                    }
+        for st in &c.body {
+            let ast::Stmt::Assign(a) = st else { continue };
+            let [ast::Expr::Name(n)] = &a.targets[..] else { continue };
+            let v = self.cls_slots.get(&(coid, Ns::Attr, key_str_lit(n.id.as_str()))).cloned().unwrap_or_default();
+            for d in v.pts.iter() {
+                if self.kind(d) == Kind::Instance && self.instance_class(d).and_then(|dc| self.class_lookup(dc, "__set_name__")).is_some() {
+                    self.call_method_with(&Value::obj(d), "__set_name__", vec![Value::obj(coid), Value::lit(key_str_lit(n.id.as_str()))], &cnode, state);
                 }
             }
         }
         // a base's `__init_subclass__` runs for the new class (an implicit classmethod)
-        if !crate::interp::disabled("initsubclass") {
-            let found = info.bases.iter().find_map(|b| self.class_lookup(*b, "__init_subclass__"));
-            if let Some(defc) = found {
-                let fv = self.cls_slots.get(&(defc, Ns::Attr, key_str_lit("__init_subclass__"))).cloned().unwrap_or_default();
-                let mut kwargs: indexmap::IndexMap<intern::StrId, Value> = indexmap::IndexMap::new();
-                if let Some(args) = &c.arguments {
-                    for kw in args.keywords.iter() {
-                        if let Some(a) = &kw.arg {
-                            if a.as_str() != "metaclass" {
-                                let v = self.eval(&kw.value, state);
-                                kwargs.insert(s(a.as_str()), v);
-                            }
+        let found = info.bases.iter().find_map(|b| self.class_lookup(*b, "__init_subclass__"));
+        if let Some(defc) = found {
+            let fv = self.cls_slots.get(&(defc, Ns::Attr, key_str_lit("__init_subclass__"))).cloned().unwrap_or_default();
+            let mut kwargs: indexmap::IndexMap<intern::StrId, Value> = indexmap::IndexMap::new();
+            if let Some(args) = &c.arguments {
+                for kw in args.keywords.iter() {
+                    if let Some(a) = &kw.arg {
+                        if a.as_str() != "metaclass" {
+                            let v = self.eval(&kw.value, state);
+                            kwargs.insert(s(a.as_str()), v);
                         }
                     }
                 }
-                for f in fv.pts.iter() {
-                    if self.kind(f) == Kind::Function {
-                        // concretely: the class's own attributes (`cls.__name__`) are known here
-                        self.force_tab_once = true;
-                        self.call_user(f, Some(Value::obj(coid)), vec![], kwargs.clone(), vec![], vec![], state, &cnode, None, false);
-                        self.force_tab_once = false;
-                    }
+            }
+            for f in fv.pts.iter() {
+                if self.kind(f) == Kind::Function {
+                    // concretely: the class's own attributes (`cls.__name__`) are known here
+                    self.force_tab_once = true;
+                    self.call_user(f, Some(Value::obj(coid)), vec![], kwargs.clone(), vec![], vec![], state, &cnode, None, false);
+                    self.force_tab_once = false;
                 }
             }
         }
@@ -2458,7 +2415,7 @@ impl Analyzer {
             self.torch_modules.insert(m);
         }
         // numpy arrays are tensors to the shape model
-        if (name == "numpy" || name.starts_with("numpy.")) && !crate::interp::disabled("numpyshapes") {
+        if name == "numpy" || name.starts_with("numpy.") {
             self.torch_on = true;
             let m = self.frame().module;
             self.torch_modules.insert(m);
@@ -2573,7 +2530,7 @@ fn cond_facts_for(key: intern::StrId, pos: bool, deps: Vec<(intern::StrId, Value
         std::sync::Arc::new(u)
     };
     let (ut, ue) = (branch_unbound(then_s), branch_unbound(else_s));
-    let unb = |b: std::sync::Arc<Vec<intern::StrId>>| if b != j.unbound && !crate::interp::disabled("unboundfact") { Some((b, j.unbound.clone())) } else { None };
+    let unb = |b: std::sync::Arc<Vec<intern::StrId>>| if b != j.unbound { Some((b, j.unbound.clone())) } else { None };
     let (ut, ue) = (unb(ut), unb(ue));
     if rt.is_empty() && ut.is_none() && ue.is_none() {
         return Vec::new();

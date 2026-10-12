@@ -76,23 +76,6 @@ pub const MAX_CLONES: usize = 256;
 /// object). The per-function caps above stay as hard limits. `ROWAN_LIMITS=ms=N`.
 pub const MAX_MS: usize = 2000;
 
-/// `ROWAN_ON=name,...` switches experimental refinements on (`sigsum`: summaries specialised
-/// by the classes of their arguments).
-pub fn enabled(name: &str) -> bool {
-    thread_local! {
-        static ON: std::collections::HashSet<String> = std::env::var("ROWAN_ON").map(|v| v.split(',').map(|s| s.trim().to_string()).collect()).unwrap_or_default();
-    }
-    ON.with(|s| s.contains(name))
-}
-
-/// `ROWAN_NO=name,...` also switches named engine refinements off (bisecting).
-pub fn disabled(name: &str) -> bool {
-    thread_local! {
-        static OFF: std::collections::HashSet<String> = std::env::var("ROWAN_NO").map(|v| v.split(',').map(|s| s.trim().to_string()).collect()).unwrap_or_default();
-    }
-    OFF.with(|s| s.contains(name))
-}
-
 /// Tunable limits: `ROWAN_LIMITS=tab=24,call=32,clones=8,chain=2,path=3,active=4` overrides
 /// the defaults (for bisecting precision / time trade-offs).
 /// Abstract garbage collection at returns (`ROWAN_GC=0` turns it off): objects a call made
@@ -150,8 +133,8 @@ pub fn safe_method(q: &str) -> bool {
         "tuple" => name == "count",
         // frame methods that cannot fail on a frame (reset_index reports its own ValueError)
         // (a string column's accessor: these do not fail on its values)
-        "Series" => name.strip_prefix("str.").is_some_and(|m| matches!(m, "slice" | "lower" | "upper" | "strip" | "lstrip" | "rstrip" | "len" | "startswith" | "endswith" | "title" | "capitalize" | "casefold" | "swapcase" | "zfill" | "get")) && !disabled("framesafe"),
-        "DataFrame" => matches!(name, "copy" | "head" | "tail" | "to_dict" | "isna" | "notna" | "isnull" | "notnull" | "nunique" | "count" | "keys" | "items" | "iterrows" | "itertuples" | "to_numpy" | "to_records" | "reset_index" | "memory_usage" | "info") && !disabled("framesafe"),
+        "Series" => name.strip_prefix("str.").is_some_and(|m| matches!(m, "slice" | "lower" | "upper" | "strip" | "lstrip" | "rstrip" | "len" | "startswith" | "endswith" | "title" | "capitalize" | "casefold" | "swapcase" | "zfill" | "get")),
+        "DataFrame" => matches!(name, "copy" | "head" | "tail" | "to_dict" | "isna" | "notna" | "isnull" | "notnull" | "nunique" | "count" | "keys" | "items" | "iterrows" | "itertuples" | "to_numpy" | "to_records" | "reset_index" | "memory_usage" | "info"),
         _ => false,
     }
 }
@@ -333,8 +316,21 @@ pub struct CmHook {
 }
 
 /// An exception class's name and its bases' names; `true`: that is the whole MRO.
-pub type ExcNames = (Vec<String>, bool);
+pub type ExcNames = (std::rc::Rc<Vec<String>>, bool);
 pub type RaiseRec = (Option<ExcNames>, State, Value);
+
+/// The states of a try's recorded raises, joined (None: no raise recorded).
+pub fn join_raise_recs(recs: &[RaiseRec]) -> Option<State> {
+    let mut out: Option<State> = None;
+    for (_, st, _) in recs {
+        let mut s2 = st.copy_ref();
+        out = Some(match out {
+            None => s2,
+            Some(mut o) => o.join(&mut s2),
+        });
+    }
+    out
+}
 
 /// Builtin (and modelled library) exception classes and their bases.
 pub const EXC_BASES: &[(&str, &str)] = &[
@@ -364,8 +360,22 @@ pub const EXC_BASES: &[(&str, &str)] = &[
     ("configparser.MissingSectionHeaderError", "configparser.ParsingError"),
 ];
 
-/// The names of a builtin exception class and its bases (`IOError` is `OSError`).
+/// The names of a builtin exception class and its bases (`IOError` is `OSError`), computed
+/// once per name.
 pub fn builtin_exc_names(name: &str) -> ExcNames {
+    thread_local! {
+        static CACHE: RefCell<FxHashMap<String, ExcNames>> = RefCell::new(FxHashMap::default());
+    }
+    if let Some(e) = CACHE.with(|c| c.borrow().get(name).cloned()) {
+        return e;
+    }
+    let (names, full) = builtin_exc_names_uncached(name);
+    let e: ExcNames = (Rc::new(names), full);
+    CACHE.with(|c| c.borrow_mut().insert(name.to_string(), e.clone()));
+    e
+}
+
+fn builtin_exc_names_uncached(name: &str) -> (Vec<String>, bool) {
     // a module-qualified class of the table: its chain, by the classes' own names
     if EXC_BASES.iter().any(|(c, _)| *c == name && c.contains('.')) {
         let mut out: Vec<String> = Vec::new();
@@ -377,7 +387,7 @@ pub fn builtin_exc_names(name: &str) -> ExcNames {
                 None => return (out, false),
             }
         }
-        let (rest, full) = builtin_exc_names(&n);
+        let (rest, full) = builtin_exc_names_uncached(&n);
         out.extend(rest);
         return (out, full);
     }
@@ -693,49 +703,6 @@ pub enum StoreTarget {
     Slot(ObjId, Ns, KeyId),
 }
 
-/// Engine options, all on by default; `ROWAN_NO=recency,scc,site,narrowed,positional`
-/// switches one off (for bisecting a change in results).
-#[derive(Clone, Copy, Debug)]
-pub struct Options {
-    /// resolve a placeholder to allocation sites with one representative row per distinct
-    /// entry row, instead of per object
-    pub site_resolution: bool,
-    /// `State::same` compares the path-sensitive `narrowed` facts too
-    pub narrowed_same: bool,
-    /// re-iterate summaries computed against a partial summary of a function still being
-    /// summarised (proper SCC iteration for mutual recursion)
-    pub scc: bool,
-    /// recency abstraction for objects allocated in loops
-    pub recency: bool,
-    /// positional unpacking of literal tuple keys
-    pub positional: bool,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Options { site_resolution: true, narrowed_same: true, scc: true, recency: true, positional: true }
-    }
-}
-
-impl Options {
-    pub fn from_env() -> Self {
-        let mut o = Options::default();
-        if let Ok(v) = std::env::var("ROWAN_NO") {
-            for name in v.split(',') {
-                match name.trim() {
-                    "site" | "site_resolution" => o.site_resolution = false,
-                    "narrowed" | "narrowed_same" => o.narrowed_same = false,
-                    "scc" => o.scc = false,
-                    "recency" => o.recency = false,
-                    "positional" => o.positional = false,
-                    _ => {}
-                }
-            }
-        }
-        o
-    }
-}
-
 /// Facts about one name at one line of the main module, joined over every execution of
 /// the statement (hover support): the value it held and the rows of the objects it pointed to.
 #[derive(Clone)]
@@ -789,7 +756,7 @@ pub struct Analyzer {
     pub key_variants: FxHashMap<ObjId, Vec<(Vec<(ObjId, Vec<ObjId>)>, Vec<(ObjId, ObjId)>, Vec<(String, ObjId)>)>>,
     /// tabulations decided by a summary's events, per function code (`FuncNode::addr`: every
     /// closure object made from one `def` shares the budget) and kind
-    pub tab_count: FxHashMap<(usize, &'static str), usize>,
+    pub tab_count: FxHashMap<usize, usize>,
     /// every tabulated body run (forced ones included): the golden `#@tabulations <= N` bound
     pub tab_runs: usize,
     /// tabulations of one callee at one call site under the same callers (loop rounds that
@@ -1192,7 +1159,6 @@ pub struct Analyzer {
     pub facts: IndexMap<(u32, StrId, bool), Fact>,
     pub main_stmt_lines: FxHashSet<usize>,
     pub t0: std::time::Instant,
-    pub opts: Options,
 }
 
 /// `ROWAN_DEBUG` as a number (0 when unset), read once.
@@ -1456,7 +1422,6 @@ impl Analyzer {
             facts: IndexMap::new(),
             main_stmt_lines: FxHashSet::default(),
             t0: std::time::Instant::now(),
-            opts: Options::from_env(),
         };
         an.main_module = an.make_module("__main__", Some(filename), idx, tree);
         an.series = an.alloc_global(Kind::Series, "builtin:Series", "Series", Payload::None);
@@ -1754,7 +1719,7 @@ impl Analyzer {
             Some(x) => (x, false),
             None => {
                 let strong = fr.single && fr.loop_depth == 0;
-                if !strong && self.opts.recency && fr.single_nl && !self.recent_stack.is_empty() {
+                if !strong && fr.single_nl && !self.recent_stack.is_empty() {
                     (true, true)
                 } else {
                     (strong, false)
@@ -1774,7 +1739,7 @@ impl Analyzer {
             let payload2 = payload.clone();
             let mut oid = self.alloc_raw(kind, site, &ctx, single, &label, payload);
             // (made earlier in the same model call: held by the model's own code)
-            let model_held = self.model_depth > 0 && self.model_born.get(&oid) == Some(&self.model_epoch) && !disabled("modelborn");
+            let model_held = self.model_depth > 0 && self.model_born.get(&oid) == Some(&self.model_epoch);
             if self.model_depth > 0 {
                 self.model_born.insert(oid, self.model_epoch);
             }
@@ -1782,11 +1747,11 @@ impl Analyzer {
             // so it is merged — weak, always sound)
             // (an unknown call's result allocated again: taken as still in use without a walk,
             // and merged — its rows are open anyway; walking for it dominated large runs)
-            let hard = existed == Some(oid) && (self.over_hard_deadline() || (kind == Kind::Unknown && !disabled("unkwalk")));
-            if existed == Some(oid) && (hard || model_held || self.is_live(oid, state)) {
+            let hard = existed == Some(oid) && (self.over_hard_deadline() || (kind == Kind::Unknown));
+            if existed == Some(oid) && (hard || model_held || (self.has_facts(oid, state) && self.is_live(oid, state))) {
                 // allocated again while the earlier object is still reachable (a method run
                 // twice on one receiver, a call repeated in a loop)
-                if self.opts.recency && single && !self.recent_stack.is_empty() && !hard {
+                if single && !self.recent_stack.is_empty() && !hard {
                     // inside a loop: a strong recent object, folded into the summary object
                     // at the loop's back-edge (the earlier object becomes that summary)
                     let rsite = format!("{}#recent", site);
@@ -1801,7 +1766,7 @@ impl Analyzer {
                     // of its own (a method run twice on one receiver keeps both records), up
                     // to a few; past them one summary object, weak (no longer one key)
                     let mut variant: Option<ObjId> = None;
-                    if !disabled("allocvariants") && single && !hard {
+                    if single && !hard {
                         // (the variants made so far, their liveness in one walk)
                         let made: Vec<(String, Option<ObjId>)> = (1..=8usize).map(|k| {
                             let vctx = format!("{}~{}", ctx, k);
@@ -1810,6 +1775,7 @@ impl Analyzer {
                         }).collect();
                         let first_free = made.iter().position(|(_, v)| v.is_none()).unwrap_or(made.len());
                         let olds: Vec<ObjId> = made[..first_free].iter().filter_map(|(_, v)| *v).collect();
+                        let olds: Vec<ObjId> = olds.into_iter().filter(|o| self.has_facts(*o, state)).collect();
                         let live = if olds.is_empty() { FxHashSet::default() } else { self.live_among(&olds, state) };
                         let pick = made.iter().position(|(_, v)| match v { None => true, Some(o) => !live.contains(o) });
                         if let Some(i) = pick {
@@ -1863,11 +1829,7 @@ impl Analyzer {
             (None, c) => c.map(|c| c.to_string()),
         };
         let ctx = joined.as_deref();
-        let full = match ctx {
-            Some(c) if !disabled("allocctx") => Some(format!("{}/{}", self.frame().ctx, c)),
-            Some(c) => Some(c.to_string()),
-            None => None,
-        };
+        let full = ctx.map(|c| format!("{}/{}", self.frame().ctx, c));
         self.alloc(kind, &site, state, label, payload, row, ns, single, full.as_deref())
     }
 
@@ -2144,9 +2106,6 @@ impl Analyzer {
     /// Past the hard deadline (`ROWAN_LIMITS=hard=N`, 5× the soft one): calls of user code
     /// are unknown code from there on.
     pub fn over_hard_deadline(&self) -> bool {
-        if disabled("harddeadline") {
-            return false;
-        }
         match limit("work", 0) {
             0 => self.started.elapsed().as_millis() as usize > limit("hard", 5 * limit("ms", MAX_MS)),
             w => self.work_units() > limit("hardwork", 5 * w),
@@ -2159,7 +2118,7 @@ impl Analyzer {
     pub fn cut_body(&mut self, state: &mut State) -> bool {
         if !self.hard_cut {
             self.cut_tick = self.cut_tick.wrapping_add(1);
-            if self.cut_tick % 64 != 0 || disabled("cutbodies") || !self.over_hard_deadline() {
+            if self.cut_tick % 64 != 0 || !self.over_hard_deadline() {
                 return false;
             }
             self.hard_cut = true;
@@ -2172,7 +2131,6 @@ impl Analyzer {
     }
 
     pub fn run(&mut self) {
-        crate::state::set_narrowed_same(self.opts.narrowed_same);
         let mut state = State::new();
         let main = self.main_module;
         self.run_module(main, &mut state);
@@ -2232,22 +2190,19 @@ impl Analyzer {
             if quiet != quiet_pass {
                 continue;
             }
-            if quiet && (disabled("paramschemas") || !fi.closure.is_empty() || !matches!(fi.node, FuncNode::Def(_)) || !self.is_local_module(fi.module) || self.over_deadline()) || self.t_concrete_closures.contains(&oid) {
+            if quiet && (!fi.closure.is_empty() || !matches!(fi.node, FuncNode::Def(_)) || !self.is_local_module(fi.module) || self.over_deadline()) || self.t_concrete_closures.contains(&oid) {
                 continue;
             }
             self.entry_done.insert(oid);
             // closures made inside a summary run stand for every call's closure (their cells
             // are relative): they are reached through the real calls
-            if !fi.closure.is_empty() && (self.obj(oid).ctx.contains("sum") || disabled("entryclosures")) {
-                continue;
-            }
-            if matches!(fi.node, FuncNode::Lambda(_)) && disabled("entryclosures") {
+            if !fi.closure.is_empty() && (self.obj(oid).ctx.contains("sum")) {
                 continue;
             }
             if fi.module != self.main_module && !handler && !(quiet && self.is_local_module(fi.module)) {
                 continue;
             }
-            if handler && !disabled("fastapi") {
+            if handler {
                 let mut st = state.copy();
                 st.ret = None;
                 let mi = self.module_info(fi.module);
@@ -2267,15 +2222,13 @@ impl Analyzer {
                 self.entry_scope = None;
                 self.entry_run = saved_entry;
                 self.frames.pop();
-                for (src, d) in st.reqs.items() {
-                    let tgt = state.reqs.writable(&src);
-                    for (k, info) in d.iter() {
-                        let nv = match tgt.get(k) {
-                            Some(cur) => cur.join(info),
-                            None => info.clone(),
-                        };
-                        tgt.insert(*k, nv);
-                    }
+                for (src, k) in st.reqs.diff_keys(&state.reqs) {
+                    let Some(info) = st.reqs.get(&src, &k) else { continue };
+                    let nv = match state.reqs.get(&src, &k) {
+                        Some(cur) => cur.join(&info),
+                        None => info,
+                    };
+                    state.reqs.set(&src, k, nv);
                 }
                 continue;
             }
@@ -2352,29 +2305,23 @@ impl Analyzer {
             let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
             for a in params {
                 // (keyword-only parameters are passed by keyword)
-                let kwonly = fparams.kwonlyargs.iter().any(|k| std::ptr::eq(&k.parameter, a)) && !disabled("entrykwonly");
+                let kwonly = fparams.kwonlyargs.iter().any(|k| std::ptr::eq(&k.parameter, a));
                 let n_before = args.len();
                 let is_vararg = fparams.vararg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);
                 let is_kwarg = fparams.kwarg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);
                 if is_vararg || is_kwarg {
                     // a caller may pass any arguments here
-                    if !disabled("entrystar") {
-                        let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
-                        if is_vararg {
-                            star_args.push(Value::obj(poid));
-                        } else {
-                            star_kwargs.push(Value::obj(poid));
-                        }
+                    let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
+                    if is_vararg {
+                        star_args.push(Value::obj(poid));
+                    } else {
+                        star_kwargs.push(Value::obj(poid));
                     }
                     continue;
                 }
                 let pname = s(a.name.id.as_str());
                 if let Some(d) = fi.defaults.get(&pname) {
                     // the default, or whatever a caller passes
-                    if disabled("entrydefaults") {
-                        args.push(d.clone());
-                        continue;
-                    }
                     let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
                     // a number default in a torch module: the parameter (whatever a caller
                     // passes, the default included) stays a name dims can be written in
@@ -2408,7 +2355,7 @@ impl Analyzer {
             let saved_entry = self.entry_run.replace(oid);
             let before = self.objects.len() as ObjId;
             let saved_quiet = std::mem::replace(&mut self.quiet, quiet);
-            let called_torch = self.analysed_funcs.contains(&oid) && self.torch_modules.contains(&fi.module) && !disabled("torchquietrec");
+            let called_torch = self.analysed_funcs.contains(&oid) && self.torch_modules.contains(&fi.module);
             let saved_qr = std::mem::replace(&mut self.quiet_records, called_torch);
             self.call_user(oid, self_val, args, kwargs, star_args, star_kwargs, &mut st, &fake, None, true);
             self.quiet_records = saved_qr;
@@ -2439,18 +2386,16 @@ impl Analyzer {
             let own = format!("param {}.", fi.py_qualname());
             let span = (fi.node.node().line, fi.node.node().end_line);
             let in_main = fi.module == self.main_module;
-            for (src, d) in st.reqs.items() {
+            for (src, k) in st.reqs.diff_keys(&state.reqs) {
                 if quiet && !own_source(&crate::domain::source_label(src), &own, span, in_main) {
                     continue;
                 }
-                let tgt = state.reqs.writable(&src);
-                for (k, info) in d.iter() {
-                    let nv = match tgt.get(k) {
-                        Some(cur) => cur.join(info),
-                        None => info.clone(),
-                    };
-                    tgt.insert(*k, nv);
-                }
+                let Some(info) = st.reqs.get(&src, &k) else { continue };
+                let nv = match state.reqs.get(&src, &k) {
+                    Some(cur) => cur.join(&info),
+                    None => info,
+                };
+                state.reqs.set(&src, k, nv);
             }
         }
     }
@@ -2478,14 +2423,13 @@ impl Analyzer {
                         "Optional" | "Annotated" | "Final" | "ClassVar" | "Required" | "NotRequired" | "ReadOnly" => node = elts.first()?,
                         "Union" => {
                             let rest: Vec<&'static ast::Expr> = elts.into_iter().filter(|e| !is_none(e)).collect();
-                            if rest.len() != 1 && !disabled("annunion") {
+                            if rest.len() != 1 {
                                 return None;
                             }
                             node = rest.first()?;
                         }
                         // (a container: its own class; the old rule took the element's)
-                        _ if !disabled("annelem") => return Some(&sub.value),
-                        _ => node = elts.first()?,
+                        _ => return Some(&sub.value),
                     }
                 }
                 ast::Expr::BinOp(b) if b.op == ast::Operator::BitOr => {
@@ -2502,7 +2446,7 @@ impl Analyzer {
                         }
                     }
                     let rest: Vec<&'static ast::Expr> = parts.into_iter().filter(|e| !is_none(e)).collect();
-                    if rest.len() != 1 && !disabled("annunion") {
+                    if rest.len() != 1 {
                         return None;
                     }
                     node = rest.first()?;
@@ -2526,7 +2470,7 @@ impl Analyzer {
                     let ns = if ci.typed_dict { Ns::Item } else { Ns::Attr };
                     // a TypedDict's `total=False` / `NotRequired` keys may be absent
                     let mut declared = Row::closed_with(fields.clone());
-                    if ci.typed_dict && !disabled("tdoptional") {
+                    if ci.typed_dict {
                         if let Some((req, opt)) = self.typed_dict_keys(oid) {
                             fields = req.union(&opt);
                             declared = Row::from_data(crate::domain::RowData { present: fields.clone(), definite: req.clone(), likely: req, ..Default::default() });
@@ -2547,7 +2491,7 @@ impl Analyzer {
                         let v = self.typed_field_value(oid, &intern::key_py_str(f), state, &format!("entry:{}", fi.qualname));
                         state.set_slot(inst, ns, f, v, true);
                     }
-                    if ci.typed_dict && !disabled("tdparam") {
+                    if ci.typed_dict {
                         let src = Source::new(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param);
                         self.td_param_src.insert(inst, src);
                     }
@@ -2695,7 +2639,7 @@ impl Analyzer {
     /// (the caller's state after the call does not tell what the slots held at that line).
     /// Does the fact at (line, name) of a concrete run show all the texts it can (4)?
     pub fn fact_full(&self, line: u32, name: StrId) -> bool {
-        !self.torch_on && !disabled("factcap") && self.facts.get(&(line, name, false)).is_some_and(|e| e.texts.len() >= 4)
+        !self.torch_on && self.facts.get(&(line, name, false)).is_some_and(|e| e.texts.len() >= 4)
     }
 
     pub fn join_fact_value(&mut self, line: u32, name: StrId, v: &Value) {
@@ -2804,7 +2748,7 @@ impl Analyzer {
                 _ => None,
             }
         };
-        if symbolic && !disabled("factobs") {
+        if symbolic {
             let full = self.sum_fact_obs.last().map(|t| t.len() >= 4096).unwrap_or(true);
             let slots = if full { Vec::new() } else { crate::report::reachable_slots(self, state, v) };
             let rows = if full { Vec::new() } else { crate::report::reachable_rows(self, state, v) };
@@ -2819,7 +2763,7 @@ impl Analyzer {
         // (a fact that has all the texts it shows (4) only joins the value and rows: rendering a
         // large value at every run of the line is what costs — not in torch programs, whose
         // hover is the assignment's own value)
-        if !self.torch_on && !disabled("factcap") {
+        if !self.torch_on {
             if let Some(e) = self.facts.get_mut(&(node.line, name, symbolic)) {
                 if e.texts.len() >= 4 {
                     e.value = e.value.join(v);
@@ -2908,9 +2852,6 @@ impl Analyzer {
     /// `child` is a part of `parent` (an unknown call's result of its receiver): a part of a
     /// duck-typed object is not duck-typed (`duck_part`).
     pub fn note_part(&self, parent: ObjId, child: ObjId) {
-        if disabled("duckparts") {
-            return;
-        }
         let from_duck = self.duck_seen.borrow().contains(&parent) || self.duck_parts.borrow().contains(&parent);
         if from_duck {
             self.duck_parts.borrow_mut().insert(child);
@@ -2923,14 +2864,12 @@ impl Analyzer {
         !self.live_among(&[oid], state).is_empty()
     }
 
-    /// The budget of a liveness walk for objects of `kind`: an unknown call's result (its records
-    /// open anyway) is taken as live sooner than a record the program builds.
-    fn walk_budget(&self, targets: &[ObjId]) -> usize {
-        if targets.iter().all(|o| self.kind(*o) == Kind::Unknown) {
-            limit("livewalkunk", 2_000)
-        } else {
-            limit("livewalk", 20_000)
-        }
+    /// May the program still hold `oid` on this path? Every allocation records the object's
+    /// length entry in the state, and only the collector (at returns and loop exits) forgets
+    /// an object's facts: an object without them was never made on this path or was
+    /// collected, and needs no reachability walk.
+    pub fn has_facts(&self, oid: ObjId, state: &State) -> bool {
+        state.lens.get(&oid).is_some() || state.has_row(oid, Ns::Item) || state.has_row(oid, Ns::Attr) || state.slots.has_key(&oid)
     }
 
     /// Which of `targets` the program can still reach (one walk from the roots for all; it
@@ -2970,15 +2909,18 @@ impl Analyzer {
             }
         }
         // (a walk over a large heap is bounded: past the budget the targets not found yet are
-        // taken as live, which is always sound: their site makes a recent / variant object)
-        let budget = self.walk_budget(targets);
+        // taken as live, which is always sound: their site makes a recent / variant object; a
+        // walk that proves an object dead on a large heap visits all of it, and on email's 20k
+        // visits per walk gave the same verdicts as 500)
+        const WALK_BUDGET: usize = 500;
+        let budget = WALK_BUDGET;
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
         while let Some(o) = work.pop() {
             if !seen.insert(o) {
                 continue;
             }
             self.walked.set(self.walked.get() + 1);
-            if seen.len() > budget && !disabled("livewalk") {
+            if seen.len() > budget {
                 return targets.iter().copied().collect();
             }
             if targets.contains(&o) {
@@ -3004,11 +2946,7 @@ impl Analyzer {
             }
         }
         // (the slot table in place: a walk visits the whole reachable heap)
-        if let Some(d) = state.slots.m.get_ref(&o) {
-            for v in d.values() {
-                push_value(v, work);
-            }
-        }
+        state.slots.each(&o, &mut |_, v| push_value(v, work));
         match state.elems.get_ref(&o) {
             Some(KeyVal::KeysOf(ko)) => work.extend(ko.objs.iter()),
             Some(KeyVal::Param(p)) => work.push(*p),
@@ -3258,7 +3196,7 @@ impl Analyzer {
                 let typed = self.kind(oid) == Kind::Ph && self.ph_info(oid).cls.get().map(|c| self.class_info_opt(c).is_some()).unwrap_or(false);
                 // (a numpy structured array is keyed by its fields)
                 // (an instance of a dict subclass: its items)
-                let dict_sub = self.kind(oid) == Kind::Instance && self.instance_class(oid).is_some_and(|c| self.mro(c).iter().any(|x| self.class_info_opt(*x).map(|ci| ci.dict_base).unwrap_or(false))) && !disabled("dictsubrow");
+                let dict_sub = self.kind(oid) == Kind::Instance && self.instance_class(oid).is_some_and(|c| self.mro(c).iter().any(|x| self.class_info_opt(*x).map(|ci| ci.dict_base).unwrap_or(false)));
                 let ns = if (matches!(self.kind(oid), Kind::Instance | Kind::Namespace) || typed) && !self.np_struct.contains(&oid) && !dict_sub { Ns::Attr } else { Ns::Item };
                 ns_used = ns;
                 rows.push(state.row(oid, ns));
@@ -3267,7 +3205,7 @@ impl Analyzer {
             let must: Vec<KeyId> = state.name_keys.iter().filter(|(n, _)| *intern::str_get(*n) == *name).map(|(_, k)| *k).collect();
             // inside a summary the rows are relative to its entry: kept with the summary and
             // resolved per call
-            if !self.sum_stack.is_empty() && !disabled("obs") {
+            if !self.sum_stack.is_empty() {
                 // a tuple of literals is that literal (its positions are not kept with the summary)
                 let mut val = v.clone();
                 if val.kv.is_bot() {
@@ -3311,6 +3249,9 @@ impl Analyzer {
             return;
         }
         let mut map: FxHashMap<ObjId, ObjId> = FxHashMap::default();
+        // (tuples of one length keep their positions in the summary object: each position
+        // the join of the tuples' — unpacking `a, b = t` then keeps them apart)
+        let mut keep_pos: FxHashSet<ObjId> = FxHashSet::default();
         for (r, kind, site, ctx) in &recs {
             let (label, payload, iter_elem, derived, depth) = {
                 let o = self.obj(*r);
@@ -3327,7 +3268,23 @@ impl Analyzer {
                     so.derived_from = derived;
                 }
             }
-            back.lens.insert(sid, (None, 0, 0));
+            let rlen = back.lens.get(r).and_then(|l| l.0);
+            let prev = back.lens.get(&sid);
+            let same_len = match (rlen, prev) {
+                (Some(n), None) => Some(n),
+                (Some(n), Some((Some(m), _, _))) if n == m => Some(n),
+                _ => None,
+            };
+            match same_len.filter(|_| *kind == Kind::Tuple) {
+                Some(n) => {
+                    back.lens.insert(sid, (Some(n), n, 0));
+                    keep_pos.insert(*r);
+                }
+                None => {
+                    back.lens.insert(sid, (None, 0, 0));
+                    back.drop_obj_ns(sid, Ns::Pos);
+                }
+            }
             map.insert(*r, sid);
         }
         let rename_value = |v: &Value, map: &FxHashMap<ObjId, ObjId>| -> Option<Value> {
@@ -3356,7 +3313,7 @@ impl Analyzer {
                 }
             }
             for ((ns, k), v) in back.slots_of(r) {
-                if ns == Ns::Pos {
+                if ns == Ns::Pos && !keep_pos.contains(&r) {
                     continue;
                 }
                 let v = rename_value(&v, &map).unwrap_or(v);
@@ -3718,5 +3675,5 @@ pub fn is_simple_generator(body: &[ast::Stmt]) -> bool {
         }
     }
     let mut yields = 0;
-    !disabled("gensimple") && body.iter().all(|s| stmt_ok(s, &mut yields)) && yields > 0
+    body.iter().all(|s| stmt_ok(s, &mut yields)) && yields > 0
 }

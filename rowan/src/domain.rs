@@ -639,10 +639,6 @@ impl Row {
         Row::with_sources(SrcSet::one((src, EMPTY_LENS)))
     }
 
-    pub fn with_mutators(m: StrSet) -> Row {
-        Row::from_data(RowData { mutators: m, ..Default::default() })
-    }
-
     pub fn top() -> Row {
         Row::from_data(RowData { top: true, ..Default::default() })
     }
@@ -677,6 +673,11 @@ impl Row {
         !self.sources.is_empty() || !self.mutators.is_empty() || self.top || self.symbolic()
     }
 
+    /// Content from an input or the function's entry (not only from unknown code run on it).
+    pub fn has_input(&self) -> bool {
+        !self.sources.is_empty() || self.top || self.symbolic()
+    }
+
     pub fn closed(&self) -> bool {
         !self.open()
     }
@@ -688,10 +689,6 @@ impl Row {
 
     pub fn is_map(&self) -> bool {
         self.sources.iter().any(|(s, _)| source_is_data(s))
-    }
-
-    pub fn external_sources(&self) -> SrcSet {
-        self.sources.filter(|(s, _)| !source_is_data(s))
     }
 
     /// Source -> source key terms that may surface as k (sorted by source id).
@@ -724,9 +721,8 @@ impl Row {
             cap_sources(self.sources.union(&o.sources))
         };
         // (a closed row lacks every key it does not have: absent there too)
-        let implicit = !crate::interp::disabled("closedabsent");
-        let absent_in = |x: &Row, y: &KeySet| -> KeySet { if implicit && x.closed() { x.absent.union(&y.difference(&x.present)) } else { x.absent.clone() } };
-        let absent_l_in = |x: &Row, y: &KeySet| -> KeySet { if implicit && x.closed() { x.absent_likely.union(&y.difference(&x.present)) } else { x.absent_likely.clone() } };
+        let absent_in = |x: &Row, y: &KeySet| -> KeySet { if x.closed() { x.absent.union(&y.difference(&x.present)) } else { x.absent.clone() } };
+        let absent_l_in = |x: &Row, y: &KeySet| -> KeySet { if x.closed() { x.absent_likely.union(&y.difference(&x.present)) } else { x.absent_likely.clone() } };
         Row::from_data_of(RowData {
             present: self.present.union(&o.present),
             definite: self.definite.intersection(&o.definite),
@@ -846,7 +842,7 @@ impl Row {
         let f = |ks: &KeySet| ks.map(|k| step.apply(k));
         let push = |l: LensId| lens_push(l, step.clone());
         // a key stays absent when every key renamed to it was absent
-        let absent = if crate::interp::disabled("renameabsent") { KeySet::new() } else { self.absent.filter(|k| step.inverse(k).iter().all(|c| self.absent.contains(c))) };
+        let absent = { self.absent.filter(|k| step.inverse(k).iter().all(|c| self.absent.contains(c))) };
         Row::from_data(RowData {
             present: f(&self.present),
             definite: f(&self.definite),
@@ -946,16 +942,6 @@ impl Row {
 
     pub fn narrow_out(&self, k: KeyId) -> Row {
         self.delete(k, true)
-    }
-
-    pub fn make_top(&self) -> Row {
-        let mut d = self.data();
-        d.definite = KeySet::new();
-        d.likely = KeySet::new();
-        d.absent = KeySet::new();
-        d.absent_likely = KeySet::new();
-        d.top = true;
-        Row::from_data(d)
     }
 
     /// The symbolic row of an object as it is at function entry.
@@ -1287,12 +1273,25 @@ fn cap_sources(ss: SrcSet) -> SrcSet {
 }
 
 pub fn join_rows<'a>(rows: impl IntoIterator<Item = Row>) -> Row {
-    let mut it = rows.into_iter();
-    let Some(mut acc) = it.next() else { return Row::new() };
-    for r in it {
-        acc = acc.join(&r);
+    // (equal rows once — the objects of one site often share theirs — then pairwise in a
+    // balanced tree: a left fold over thousands re-unioned an ever larger accumulator)
+    let mut seen: rustc_hash::FxHashSet<Row> = rustc_hash::FxHashSet::default();
+    let mut level: Vec<Row> = rows.into_iter().filter(|r| seen.insert(r.clone())).collect();
+    if level.is_empty() {
+        return Row::new();
     }
-    acc
+    while level.len() > 1 {
+        let mut next: Vec<Row> = Vec::with_capacity(level.len().div_ceil(2));
+        let mut it = level.into_iter();
+        while let Some(a) = it.next() {
+            next.push(match it.next() {
+                Some(b) => a.join(&b),
+                None => a,
+            });
+        }
+        level = next;
+    }
+    level.pop().unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -1706,7 +1705,7 @@ pub fn kv_restrict(kv: &KeyVal, keys: &KeySet) -> Option<KeyVal> {
 // requirements (§9)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct ReqInfo {
     pub always: bool,
     pub sites: StrSet,

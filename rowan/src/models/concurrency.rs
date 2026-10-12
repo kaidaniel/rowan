@@ -139,7 +139,7 @@ fn call_args(an: &mut Analyzer, st: &mut State, node: &Node, args: &Value, kwarg
         let it = an.iterate(args, node, st);
         match it.items {
             Some(items) => a = items,
-            None => a.push(it.elem.one_or_empty()),
+            None => a.push(an.elem_value(&it.elem, node, "el")),
         }
     }
     let mut kw = IndexMap::new();
@@ -239,7 +239,7 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         results.push(v);
                     }
                 } else {
-                    let args: Vec<Value> = iters.iter().map(|i| i.elem.one_or_empty()).collect();
+                    let args: Vec<Value> = iters.iter().map(|i| an.elem_value(&i.elem, &c.node, "el")).collect();
                     let (v, r) = an.call_catching(&f, args, IndexMap::new(), st, &c.node);
                     worst.level = r.level.min(1);
                     worst.names = r.names;
@@ -299,7 +299,7 @@ pub fn as_completed(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // (a dict of futures: its keys, the future objects)
     let e = match &it.items {
         Some(items) => join_values(items.iter().map(|x| an.unkey(x)).collect::<Vec<_>>()),
-        None => it.elem.one_or_empty(),
+        None => an.elem_value(&it.elem, &c.node, "el"),
     };
     let lid = an.alloc_at(Kind::List, &c.node, st, &format!("as_completed@L{}", c.line), Payload::None, None, Ns::Item, None, Some("asc"));
     st.set_slot(lid, Ns::Elem, intern::STAR, e.clone(), true);

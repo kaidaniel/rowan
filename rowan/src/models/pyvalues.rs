@@ -1374,7 +1374,7 @@ fn num_cmp(a: Num, b: Num) -> Option<Ordering> {
 }
 
 /// Python `a == b`; None when unknowable (NaN inside a tuple: identity matters).
-fn py_eq(a: KeyId, b: KeyId) -> Option<bool> {
+pub fn py_eq(a: KeyId, b: KeyId) -> Option<bool> {
     if let Some(r) = crate::models::pynum::binop("eq", a, b).or_else(|| crate::models::chrono::binop("eq", a, b)) {
         return r.and_then(|k| truthy(k));
     }

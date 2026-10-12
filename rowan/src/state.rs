@@ -87,12 +87,17 @@ impl Kind {
 pub type SlotKey = (Ns, KeyId);
 
 thread_local! {
-    /// `State::same` also compares `narrowed` (Options::narrowed_same); set by the analyser.
-    static NARROWED_SAME: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// Every (source, key) `require` added to some state, in order: what a stretch of the
+    /// analysis required is the log since a mark (`req_log_mark` / `req_log_since`).
+    static REQ_LOG: std::cell::RefCell<Vec<(SourceId, KeyId)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-pub fn set_narrowed_same(on: bool) {
-    NARROWED_SAME.with(|c| c.set(on));
+pub fn req_log_mark() -> usize {
+    REQ_LOG.with(|l| l.borrow().len())
+}
+
+pub fn req_log_since(mark: usize) -> Vec<(SourceId, KeyId)> {
+    REQ_LOG.with(|l| l.borrow().get(mark..).map(|s| s.to_vec()).unwrap_or_default())
 }
 
 /// Mutable analysis state at one program point.
@@ -235,24 +240,7 @@ impl State {
     }
 
     pub fn copy(&mut self) -> State {
-        State {
-            env: self.env.clone(),
-            narrowed: self.narrowed.clone(),
-            rows: self.rows.copy(),
-            slots: self.slots.copy(),
-            elems: self.elems.copy(),
-            lens: self.lens.copy(),
-            reqs: self.reqs.copy(),
-            ret: self.ret.clone(),
-            reachable: self.reachable,
-            exits: self.exits.clone(),
-            symbolic: self.symbolic,
-            facts: self.facts.clone(),
-            name_keys: self.name_keys.clone(),
-            lasts: self.lasts.clone(),
-            tf: self.tf.clone(),
-            unbound: self.unbound.clone(),
-        }
+        self.copy_ref()
     }
 
     /// Snapshot the heap at a `return` so the caller sees it joined over all return points.
@@ -375,19 +363,6 @@ impl State {
         s
     }
 
-    /// Join all heap facts (rows/slots/elems/reqs) of `o` into self, in place.
-    pub fn join_heap_all(&mut self, o: &mut State) {
-        if !o.reachable {
-            return;
-        }
-        self.rows = self.rows.join(&o.rows, &mut |a, b| a.join(b));
-        self.slots = self.slots.join(&mut o.slots, &mut |a, b| a.join(b));
-        self.elems = self.elems.join(&o.elems, &mut |a, b| kv_join(a, b));
-        self.lens = self.lens.join(&o.lens, &mut join_len);
-        self.reqs = self.reqs.join_with_keep(&mut o.reqs, &mut |a, b| a.join(b), &mut |a| a.demote(), &nested_keep);
-        self.lasts = join_lasts(&self.lasts, &o.lasts);
-    }
-
     /// Join the heap facts of `o` restricted to a footprint (the objects a callee touched).
     pub fn join_heap_fp(&mut self, o: &State, fp: &Footprint) {
         if !o.reachable {
@@ -398,24 +373,17 @@ impl State {
         // differs), restricted to the footprint. A recursive call answered by its running
         // activation joins that activation's footprint at every call: per key it was calls ×
         // footprint lookups.
-        let diff = !crate::interp::disabled("fpdiff");
-        let rows: Vec<(ObjId, Ns)> = if diff {
+        let rows: Vec<(ObjId, Ns)> = {
             let s: rustc_hash::FxHashSet<(ObjId, Ns)> = fp.rows.iter().copied().collect();
             o.rows.diff_keys(&self.rows).into_iter().filter(|k| s.contains(k)).collect()
-        } else {
-            fp.rows.clone()
         };
-        let slots: Vec<(ObjId, SlotKey)> = if diff {
+        let slots: Vec<(ObjId, SlotKey)> = {
             let s: rustc_hash::FxHashSet<(ObjId, SlotKey)> = fp.slots.iter().copied().collect();
             o.slots.diff_keys(&self.slots).into_iter().filter(|k| s.contains(k)).collect()
-        } else {
-            fp.slots.clone()
         };
-        let elems: Vec<ObjId> = if diff {
+        let elems: Vec<ObjId> = {
             let s: rustc_hash::FxHashSet<ObjId> = fp.elems.iter().copied().collect();
             o.elems.diff_keys(&self.elems).into_iter().filter(|k| s.contains(k)).collect()
-        } else {
-            fp.elems.clone()
         };
         FP_VISITS.with(|c| c.set(c.get() + rows.len() + slots.len() + elems.len()));
         for k in &rows {
@@ -452,11 +420,9 @@ impl State {
         let mut touched: Vec<ObjId> = fp.slots.iter().map(|(o, _)| *o).chain(fp.elems.iter().copied()).collect();
         touched.sort_unstable();
         touched.dedup();
-        let touched: Vec<ObjId> = if diff {
+        let touched: Vec<ObjId> = {
             let s: rustc_hash::FxHashSet<ObjId> = touched.into_iter().collect();
             o.lens.diff_keys(&self.lens).into_iter().filter(|k| s.contains(k)).collect()
-        } else {
-            touched
         };
         for k in touched {
             if let Some(v) = o.lens.get(&k) {
@@ -481,32 +447,13 @@ impl State {
                 }
             }
         }
-        if diff {
-            for (src, k) in o.reqs.diff_keys(&self.reqs) {
-                let Some(info) = o.reqs.get(&src, &k) else { continue };
-                let tgt = self.reqs.writable(&src);
-                let nv = match tgt.get(&k) {
-                    Some(cur) => cur.join(&info),
-                    None => info.demote(),
-                };
-                tgt.insert(k, nv);
-            }
-            return;
-        }
-        for (src, d) in o.reqs.items() {
-            if let Some(cur) = self.reqs.inner(&src) {
-                if Arc::ptr_eq(&cur, &d) {
-                    continue;
-                }
-            }
-            let tgt = self.reqs.writable(&src);
-            for (k, info) in d.iter() {
-                let nv = match tgt.get(k) {
-                    Some(cur) => cur.join(info),
-                    None => info.demote(),
-                };
-                tgt.insert(*k, nv);
-            }
+        for (src, k) in o.reqs.diff_keys(&self.reqs) {
+            let Some(info) = o.reqs.get(&src, &k) else { continue };
+            let nv = match self.reqs.get(&src, &k) {
+                Some(cur) => cur.join(&info),
+                None => info.demote(),
+            };
+            self.reqs.set(&src, k, nv);
         }
     }
 
@@ -518,7 +465,7 @@ impl State {
     pub fn same(&self, o: &State) -> bool {
         self.reachable == o.reachable
             && self.env == o.env
-            && (!NARROWED_SAME.with(|c| c.get()) || self.narrowed == o.narrowed)
+            && self.narrowed == o.narrowed
             && self.ret == o.ret
             && (Arc::ptr_eq(&self.tf, &o.tf) || self.tf == o.tf)
             && self.exits.is_none() == o.exits.is_none()
@@ -652,12 +599,14 @@ impl State {
             caveats,
             alt_keys: if alt_keys.len() > 1 { alt_keys } else { IdSet::new() },
         };
-        let d = self.reqs.writable(&src);
-        let nv = match d.get(&term) {
+        let nv = match self.reqs.get(&src, &term) {
             Some(cur) => cur.seq(&info),
-            None => info,
+            None => {
+                REQ_LOG.with(|l| l.borrow_mut().push((src, term)));
+                info
+            }
         };
-        d.insert(term, nv);
+        self.reqs.set(&src, term, nv);
     }
 
     pub fn require_simple(&mut self, src: SourceId, term: KeyId, site: StrId) {
@@ -675,9 +624,6 @@ pub struct Footprint {
 /// Locals possibly unbound after a join: those of either side, and the names bound on one side
 /// only.
 fn join_unbound(a: &State, b: &State) -> Arc<Vec<StrId>> {
-    if crate::interp::disabled("unbound") || crate::interp::disabled("unboundjoin") {
-        return Arc::new(Vec::new());
-    }
     let one_sided = a.env.keys().filter(|k| !b.env.contains_key(*k)).chain(b.env.keys().filter(|k| !a.env.contains_key(*k)));
     let mut out: Vec<StrId> = a.unbound.iter().chain(b.unbound.iter()).copied().chain(one_sided.copied()).collect();
     if out.is_empty() {
@@ -802,7 +748,7 @@ fn join_lasts(a: &Arc<Vec<(ObjId, Value)>>, b: &Arc<Vec<(ObjId, Value)>>) -> Arc
 /// (requirements on a nested source a path lacks entirely: that path never read the parent's
 /// value, so the requirement still holds wherever it was read)
 fn nested_keep(s: &crate::domain::SourceId) -> bool {
-    crate::domain::source_is_nested(*s) && !crate::interp::disabled("nestedreqjoin")
+    crate::domain::source_is_nested(*s)
 }
 
 thread_local! {
@@ -813,11 +759,9 @@ thread_local! {
 /// clone collapsed past the clone budget, a site re-allocated while live): no store into it
 /// replaces what is there.
 pub fn mark_merged(oid: ObjId) {
-    if !crate::interp::disabled("mergedobjs") {
-        MERGED.with(|m| {
-            m.borrow_mut().insert(oid);
-        });
-    }
+    MERGED.with(|m| {
+        m.borrow_mut().insert(oid);
+    });
 }
 
 pub fn is_merged(oid: ObjId) -> bool {
@@ -829,6 +773,7 @@ pub fn is_merged(oid: ObjId) -> bool {
 pub fn reset_thread_state() {
     MERGED.with(|m| m.borrow_mut().clear());
     FP_VISITS.with(|c| c.set(0));
+    REQ_LOG.with(|l| l.borrow_mut().clear());
     crate::domain::reset_row_joins();
     crate::shape::reset();
 }
@@ -849,7 +794,7 @@ pub fn join_len(a: &(Option<usize>, usize, u16), b: &(Option<usize>, usize, u16)
         }
     };
     let (ma, mb) = (mask(a), mask(b));
-    let m = if ma != 0 && mb != 0 && !crate::interp::disabled("lenalts") { ma | mb } else { 0 };
+    let m = if ma != 0 && mb != 0 { ma | mb } else { 0 };
     (None, pa.min(pb), m)
 }
 
