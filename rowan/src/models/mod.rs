@@ -464,7 +464,19 @@ fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         }
                         let lits = an.lit_keys(&ks, st);
                         let vel = an.elem_of(&vs, &c.node, st);
-                        if let Some(lits) = lits {
+                        // values that are one of several sequences of known lengths: the keys
+                        // the shortest pairs are definite, those of the longer ones possible
+                        let klist = an.iterate(&ks, &c.node, st).items.and_then(|its| its.iter().map(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).collect::<Option<Vec<KeyId>>>());
+                        let lens: Option<Vec<usize>> = if vs.pts.len() > 1 && vs.kv.is_bot() { vs.pts.iter().map(|o| if matches!(an.kind(o), Kind::List | Kind::Tuple) && !an.obj(o).iterator { an.llen(o, st) } else { None }).collect() } else { None };
+                        if let (Some(kl), Some(lens)) = (klist, lens) {
+                            let (lo, hi) = (lens.iter().copied().min().unwrap_or(0), lens.iter().copied().max().unwrap_or(0));
+                            let mut row = st.row(oid, Ns::Item);
+                            for (i, k) in kl.into_iter().enumerate().take(hi) {
+                                row = row.store(k, i < lo);
+                                st.set_slot(oid, Ns::Item, k, Value::with_kv(vel.pts.clone(), DATA), false);
+                            }
+                            st.set_row(oid, Ns::Item, row);
+                        } else if let Some(lits) = lits {
                             // the values' length is unknown: the header/row idiom pairs every
                             // key (design case d30), so the keys are definite
                             let mut row = st.row(oid, Ns::Item);

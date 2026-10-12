@@ -386,6 +386,10 @@ pub fn product(ds: &[DimId]) -> DimId {
 
 /// Exact division of polynomials when `b` is a monomial (or a constant) dividing every term.
 pub fn div_exact(a: DimId, b: DimId) -> Option<DimId> {
+    // (two unknown dims are not the same dim: nothing cancels one)
+    if has_unknown(b) {
+        return None;
+    }
     let pa = poly(a);
     let pb = poly(b);
     if pb.len() != 1 {

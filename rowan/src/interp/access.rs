@@ -139,14 +139,15 @@ impl Analyzer {
         let sometimes = key.map(|k| row.stored.contains(k)).unwrap_or(false);
         for (src, terms) in &cls.providers {
             for t in terms.iter() {
-                let fresh = !state.reqs.contains(src, &t);
+                // (an access needed on some paths only adds nothing to whether it is always)
+                let was_always = state.reqs.get(src, &t).map(|r| r.always).unwrap_or(false);
                 if with_alts {
                     let alts = intern::IdSet::from_iter(srcs.iter().copied().filter(|x| x != src));
                     state.require(*src, t, site_id, alts, row.mutators.clone(), terms.clone());
                 } else {
                     state.require(*src, t, site_id, intern::IdSet::new(), row.mutators.clone(), intern::IdSet::new());
                 }
-                if sometimes && fresh {
+                if sometimes && !was_always {
                     if let Some(cur) = state.reqs.get(src, &t) {
                         state.reqs.set(src, t, crate::domain::ReqInfo { always: false, ..cur });
                     }
@@ -762,8 +763,10 @@ impl Analyzer {
                                 Some(f) => self.call_value(&f, node, None, state, Some(vec![])),
                                 None => state.slot(oid, Ns::Item, STAR),
                             };
-                            // (a key the closed row surely lacks: no earlier value to keep)
+                            // (a key the closed row surely lacks: no earlier value to keep; in an
+                            // open one a key not known may be there already, with any value)
                             let absent = r.closed() && !r.present.contains(k) && !r.symbolic();
+                            let dflt = if r.open() && !r.present.contains(k) && state.slot_opt(oid, ns, k).is_none() { dflt.join(&Value::data(&format!("{}[*]", self.obj(oid).label))) } else { dflt };
                             r = r.store(k, strong);
                             state.set_slot(oid, ns, k, dflt, absent);
                         }
@@ -1489,6 +1492,22 @@ impl Analyzer {
                 if !kill.contains(k) {
                     let cur = vals.entry(k).or_default();
                     *cur = cur.join(&val);
+                }
+            }
+        }
+        // (a source with keys not known — an input — may replace the value under any key the
+        // record has: its value there joins in)
+        for k in state.slot_keys(oid, ns) {
+            if kill.contains(k) || vals.contains_key(&k) {
+                continue;
+            }
+            for &x in &recs {
+                let xns = ns_of(self, x);
+                let xr = state.row(x, xns);
+                if xr.open() && !xr.lacks(k) {
+                    let part = self.path_placeholder_value(x, xns, k, &xr, state);
+                    let cur = vals.entry(k).or_default();
+                    *cur = cur.join(&part);
                 }
             }
         }
@@ -2296,11 +2315,18 @@ impl Analyzer {
             if !name.starts_with("__") && self.class_lookup(cls, name).is_none() && self.class_lookup(cls, "__getattr__").is_some() {
                 let row = state.row(oid, Ns::Attr);
                 if !row.definite.contains(nk) {
-                    let fallback = self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, state).unwrap_or_default();
                     if !row.present.contains(nk) {
-                        return fallback;
+                        return self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, state).unwrap_or_default();
                     }
+                    // (set on some paths: `__getattr__` runs on the others only — when it raises
+                    // there, the paths that have the attribute go on)
+                    let mut missing = state.copy();
+                    let fallback = self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, &mut missing).unwrap_or_default();
                     let own = state.slot(oid, Ns::Attr, nk);
+                    if missing.reachable {
+                        let j = state.join(&mut missing);
+                        state.replace_with(j);
+                    }
                     return own.join(&fallback);
                 }
             }
