@@ -2449,8 +2449,8 @@ impl Analyzer {
         }
         for o in v.pts.iter() {
             let t = match self.kind(o) {
-                Kind::Dict if !self.counters.contains(&o) => Some(Ok("dict".to_string())),
-                Kind::List if !self.deques.contains_key(&o) => Some(Ok("list".to_string())),
+                Kind::Dict if !self.m.counters.contains(&o) => Some(Ok("dict".to_string())),
+                Kind::List if !self.m.deques.contains_key(&o) => Some(Ok("list".to_string())),
                 Kind::Tuple => Some(Ok("tuple".to_string())),
                 Kind::Set => Some(Ok("set".to_string())),
                 Kind::Instance => self.instance_class(o).map(Err),

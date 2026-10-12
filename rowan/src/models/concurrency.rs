@@ -183,7 +183,7 @@ fn future_of(an: &mut Analyzer, st: &mut State, node: &Node, ctx: &str, v: Value
         _ => none.join(&Value::data("exception")),
     };
     st.set_slot(o, Ns::Attr, slot_key("exc"), exc, true);
-    an.future_excs.insert(o, r.names.clone());
+    an.m.future_excs.insert(o, r.names.clone());
     Value::obj(o)
 }
 
@@ -269,7 +269,7 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let mut outs = Vec::new();
                 for o in objs {
                     let lvl = st.slot(o, Ns::Attr, slot_key("raised")).kv.as_lit().and_then(intern::key_as_int).unwrap_or(1) as u8;
-                    let names = an.future_excs.get(&o).cloned().unwrap_or_default();
+                    let names = an.m.future_excs.get(&o).cloned().unwrap_or_default();
                     outs.push(st.slot(o, Ns::Attr, slot_key("result")));
                     an.reraise(lvl, &names, st);
                 }

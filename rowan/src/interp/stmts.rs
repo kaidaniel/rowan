@@ -103,7 +103,7 @@ impl Analyzer {
                         let mut probe = state.copy();
                         let obj = self.eval(&sub.value, &mut probe);
                         let key = self.eval_key(&sub.slice, &mut probe);
-                        let plain = !obj.pts.is_empty() && obj.kv.is_bot() && obj.pts.iter().all(|o| self.kind(o) == Kind::Dict && !self.dd_factories.contains_key(&o) && !self.counters.contains(&o) && !crate::models::pandas::is_series_obj(self, o) && { let r = state.row(o, Ns::Item); r.closed() && !r.present.is_empty() });
+                        let plain = !obj.pts.is_empty() && obj.kv.is_bot() && obj.pts.iter().all(|o| self.kind(o) == Kind::Dict && !self.m.dd_factories.contains_key(&o) && !self.m.counters.contains(&o) && !crate::models::pandas::is_series_obj(self, o) && { let r = state.row(o, Ns::Item); r.closed() && !r.present.is_empty() });
                         if plain && !key.kv.is_literal() {
                             for o in obj.pts.iter() {
                                 for k in state.row(o, Ns::Item).present.iter() {
@@ -371,7 +371,7 @@ impl Analyzer {
                 // `redirect_stdout(buf)`: prints in the body go to buf
                 let redirects = crate::models::csvio::redirect_targets(self, state, &managers.iter().map(|m| m.0.clone()).collect::<Vec<_>>());
                 let n_redirects = redirects.len();
-                self.stdout_redirect.extend(redirects);
+                self.m.stdout_redirect.extend(redirects);
                 // a manager whose `__exit__` returns True swallows the body's exception: the
                 // body is a try whose catch-all handler continues after the with
                 let swallows = managers.iter().any(|(v, _)| self.exit_swallows(v, state));
@@ -400,7 +400,7 @@ impl Analyzer {
                     }
                     state.replace_with(after);
                     for _ in 0..n_redirects {
-                        self.stdout_redirect.pop();
+                        self.m.stdout_redirect.pop();
                     }
                     // the managers' __exit__ runs on the way out (innermost first)
                     let fin = std::rc::Rc::new(Finally::Exit(managers));
@@ -412,7 +412,7 @@ impl Analyzer {
                     // ends (normally, by return / break / continue, or by an exception)
                     self.stmt_try_parts(&w.body, &[], &[], std::rc::Rc::new(Finally::Exit(managers)), state);
                     for _ in 0..n_redirects {
-                        self.stdout_redirect.pop();
+                        self.m.stdout_redirect.pop();
                     }
                 }
             }

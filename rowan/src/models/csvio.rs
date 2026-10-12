@@ -319,7 +319,7 @@ pub fn writer_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, &format!("{}@L{}", if dict { "DictWriter" } else { "writer" }, c.line), Payload::Method("stdobj.csvwriter".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
     an.obj_mut(oid).payload = Payload::Method("stdobj.csvwriter".into(), Value::new());
     let known = plain && delim.is_some() && quote.is_some() && term.is_some();
-    an.csv_writers.insert(
+    an.m.csv_writers.insert(
         oid,
         CsvWriter { file: if known { file.clone() } else { Value::new() }, delim: delim.unwrap_or(','), quote: quote.unwrap_or('"'), term: term.unwrap_or_default(), dict, fields: if known { fields } else { None }, restval, raise_extras },
     );
@@ -425,7 +425,7 @@ pub fn m_stdobj(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         };
     }
     if q.starts_with("stdobj.csvwriter.") {
-        let ws: Vec<(ObjId, CsvWriter)> = recv.pts.iter().filter_map(|o| an.csv_writers.get(&o).cloned().map(|w| (o, w))).collect();
+        let ws: Vec<(ObjId, CsvWriter)> = recv.pts.iter().filter_map(|o| an.m.csv_writers.get(&o).cloned().map(|w| (o, w))).collect();
         for (_, w) in &ws {
             match name {
                 "writeheader" => {
@@ -629,7 +629,7 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             Some(fs) => an.csv_str_list(fs, &c.node, st, "csvfields"),
                             None => an.none_v.clone(),
                         };
-                        an.csv_readers.insert(o, fv);
+                        an.m.csv_readers.insert(o, fv);
                     }
                     return lv;
                 }
@@ -665,7 +665,7 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         (_, None, Some(fv)) => fv.clone(),
         _ => Value::data("fieldnames"),
     };
-    an.csv_readers.insert(vid, fv);
+    an.m.csv_readers.insert(vid, fv);
     Value::obj(vid)
 }
 
@@ -674,7 +674,7 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 pub fn print_into(an: &mut Analyzer, st: &mut State, c: &Call) {
     let f = match c.kw("file") {
         Some(f) => f,
-        None => match an.stdout_redirect.last() {
+        None => match an.m.stdout_redirect.last() {
             Some(f) => f.clone(),
             None => return,
         },
@@ -757,15 +757,15 @@ pub fn closing_exit(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) {
 pub fn exitstack_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, "ExitStack", Payload::Method("stdobj.exitstack".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
     an.obj_mut(oid).payload = Payload::Method("stdobj.exitstack".into(), Value::new());
-    an.exit_callbacks.insert(oid, Vec::new());
+    an.m.exit_callbacks.insert(oid, Vec::new());
     Value::obj(oid)
 }
 
 /// An ExitStack's exit: its callbacks, last registered first.
 pub fn exitstack_close(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) {
     for o in v.pts.iter() {
-        let Some(cbs) = an.exit_callbacks.get(&o).cloned() else { continue };
-        an.exit_callbacks.insert(o, Vec::new());
+        let Some(cbs) = an.m.exit_callbacks.get(&o).cloned() else { continue };
+        an.m.exit_callbacks.insert(o, Vec::new());
         for (i, (f, args, kwargs)) in cbs.into_iter().enumerate().collect::<Vec<_>>().into_iter().rev() {
             let mut nd = *node;
             nd.col = node.col.wrapping_add(3_000_000 + i as u32);
@@ -786,7 +786,7 @@ fn m_exitstack(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, recv: &V
             let Some(f) = c.args.first().cloned() else { return an.none_v.clone() };
             let args: Vec<Value> = if name == "push" { vec![an.none_v.clone(), an.none_v.clone(), an.none_v.clone()] } else { c.args.iter().skip(1).cloned().collect() };
             for o in recv.pts.iter() {
-                an.exit_callbacks.entry(o).or_default().push((f.clone(), args.clone(), c.kwargs.clone()));
+                an.m.exit_callbacks.entry(o).or_default().push((f.clone(), args.clone(), c.kwargs.clone()));
             }
             f
         }
@@ -809,7 +809,7 @@ fn m_exitstack(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, recv: &V
                         let none = an.none_v.clone();
                         let ex = an.load_attr(&Value::obj(o), "__exit__", &c.node, st, false);
                         for s in recv.pts.iter() {
-                            an.exit_callbacks.entry(s).or_default().push((ex.clone(), vec![none.clone(), none.clone(), none.clone()], IndexMap::new()));
+                            an.m.exit_callbacks.entry(s).or_default().push((ex.clone(), vec![none.clone(), none.clone(), none.clone()], IndexMap::new()));
                         }
                         outs.push(v);
                     }

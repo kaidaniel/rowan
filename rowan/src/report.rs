@@ -196,7 +196,7 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
         lines.push(String::new());
         lines.push("== tensor shapes ==".into());
         let mut seen: Vec<(u32, String)> = Vec::new();
-        let mut errs: Vec<&crate::models::torch::ShapeNote> = an.shape_errors.iter().collect();
+        let mut errs: Vec<&crate::models::torch::ShapeNote> = an.m.shape_errors.iter().collect();
         errs.sort_by_key(|e| (e.line, e.chain.len()));
         for e in errs {
             if seen.contains(&(e.line, e.text.clone())) {
@@ -206,7 +206,7 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
             let chain = if e.chain.is_empty() { String::new() } else { format!("  via {}", e.chain.iter().map(|c| format!("L{}", c)).collect::<Vec<_>>().join(">")) };
             lines.push(format!("  L{:<4} ✗     shape mismatch: {}{}", e.line, e.text, chain));
         }
-        let mut reqs: Vec<(u32, String)> = an.shape_reqs.iter().filter(|r| r.chain.is_empty()).map(|r| (r.line, r.text.clone())).collect();
+        let mut reqs: Vec<(u32, String)> = an.m.shape_reqs.iter().filter(|r| r.chain.is_empty()).map(|r| (r.line, r.text.clone())).collect();
         reqs.sort();
         reqs.dedup();
         for (line, text) in &reqs {
@@ -419,8 +419,8 @@ pub fn golden_json(an: &Analyzer) -> J {
         })
         .collect();
     let note = |n: &crate::models::torch::ShapeNote| json!({"line": n.line, "chain": n.chain, "entry": n.entry, "text": n.text, "message": n.text});
-    let requires: Vec<J> = an.shape_reqs.iter().map(note).collect();
-    let shape_errors: Vec<J> = an.shape_errors.iter().map(note).collect();
+    let requires: Vec<J> = an.m.shape_reqs.iter().map(note).collect();
+    let shape_errors: Vec<J> = an.m.shape_errors.iter().map(note).collect();
     json!({"verdicts": verdicts, "schemas": schemas, "rows": rows, "notes": an.notes, "report": format_text(an, true, true), "requires": requires, "shape_errors": shape_errors, "objects": an.objects.len(), "tabulations": an.tab_runs, "joins": crate::domain::row_joins(), "work": an.work, "visits": an.walked.get() + crate::state::fp_visits()})
 }
 
@@ -806,7 +806,7 @@ pub fn facts_json(an: &Analyzer) -> J {
         // the dim names of this fact
         let mut requires: Vec<String> = Vec::new();
         let mut extra_legend: Vec<(String, String)> = Vec::new();
-        for n in &an.shape_reqs {
+        for n in &an.m.shape_reqs {
             if n.line != *line || !n.chain.is_empty() {
                 continue;
             }
@@ -850,7 +850,7 @@ pub fn facts_json(an: &Analyzer) -> J {
         let keys: serde_json::Map<String, J> = entry.iter().map(|(k, e)| (k.clone(), json!({"always": e.always, "sites": e.sites}))).collect();
         schemas.insert(label, J::Object(keys));
     }
-    let shape_errors: Vec<J> = an.shape_errors.iter().map(|n| json!({"line": n.line, "chain": n.chain, "message": n.text})).collect();
+    let shape_errors: Vec<J> = an.m.shape_errors.iter().map(|n| json!({"line": n.line, "chain": n.chain, "message": n.text})).collect();
     json!({"file": an.filename, "facts": facts, "verdicts": verdicts, "schemas": schemas, "notes": an.notes, "shape_errors": shape_errors})
 }
 

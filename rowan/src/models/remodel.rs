@@ -43,7 +43,7 @@ fn pattern_of(an: &Analyzer, v: &Value, flags: Option<&Value>) -> Option<(String
         return Some((s, extra));
     }
     let o = v.single()?;
-    let (p, f) = an.re_patterns.get(&o)?.clone();
+    let (p, f) = an.m.re_patterns.get(&o)?.clone();
     Some((p, f | extra))
 }
 
@@ -73,7 +73,7 @@ fn group_index_dict(an: &mut Analyzer, st: &mut State, node: &Node, re: &Regex, 
 /// A Pattern object for a known pattern.
 fn pattern_obj(an: &mut Analyzer, st: &mut State, node: &Node, pat: &str, flags: u32, re: &Regex) -> Value {
     let oid = new_stdobj(an, st, node, "repattern", &format!("re.compile({})", intern::py_str_repr(pat)), None);
-    an.re_patterns.insert(oid, (pat.to_string(), flags));
+    an.m.re_patterns.insert(oid, (pat.to_string(), flags));
     set_attr(st, oid, "pattern", Value::lit_str(pat));
     set_attr(st, oid, "flags", Value::lit(intern::key_int((re.flags | 32) as i64)));
     set_attr(st, oid, "groups", Value::lit(intern::key_int(re.ngroups as i64)));
@@ -112,7 +112,7 @@ fn match_obj(an: &mut Analyzer, st: &mut State, node: &Node, re: &Regex, m: ReMa
     set_attr(st, oid, "endpos", Value::lit(intern::key_int(m.endpos as i64)));
     let pv = pattern_obj(an, st, node, &m.pat, m.flags, re);
     set_attr(st, oid, "re", pv);
-    an.re_matches.insert(oid, m);
+    an.m.re_matches.insert(oid, m);
     Value::obj(oid)
 }
 
@@ -383,7 +383,7 @@ fn fallback(an: &mut Analyzer, st: &mut State, c: &Call, pat: Option<String>) ->
 pub fn m_match(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     let Some(oid) = c.recv.as_ref().and_then(|r| r.single()) else { return Value::data("match") };
-    let Some(m) = an.re_matches.get(&oid).cloned() else { return Value::data("match") };
+    let Some(m) = an.m.re_matches.get(&oid).cloned() else { return Value::data("match") };
     let Some(re) = Regex::new(&m.pat, m.flags) else { return Value::data("match") };
     let none = an.none_v.clone();
     let gidx = |v: &Value| -> Option<usize> {
@@ -459,7 +459,7 @@ pub fn m_match(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// `m[g]`: the group.
 pub fn match_item(an: &mut Analyzer, oid: u32, key: &Value) -> Option<Value> {
-    let m = an.re_matches.get(&oid)?.clone();
+    let m = an.m.re_matches.get(&oid)?.clone();
     let re = Regex::new(&m.pat, m.flags)?;
     let g = if let Some(i) = lit_int(key) {
         (i >= 0 && (i as usize) <= re.ngroups).then_some(i as usize)?

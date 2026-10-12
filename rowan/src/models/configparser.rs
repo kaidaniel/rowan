@@ -144,7 +144,7 @@ fn lit_str(v: &Value) -> Option<String> {
 }
 
 fn parser_of(an: &Analyzer, c: &Call) -> Option<u32> {
-    c.recv.as_ref().and_then(|r| r.single()).filter(|o| an.cfg_parsers.contains_key(o))
+    c.recv.as_ref().and_then(|r| r.single()).filter(|o| an.m.cfg_parsers.contains_key(o))
 }
 
 /// `configparser.ConfigParser(...)` / `RawConfigParser(...)`.
@@ -171,7 +171,7 @@ pub fn m_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         spec.known = false;
     }
     let oid = an.alloc_at(Kind::Dict, &c.node, st, &format!("configparser.ConfigParser@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, None);
-    an.cfg_parsers.insert(oid, spec);
+    an.m.cfg_parsers.insert(oid, spec);
     rebuild(an, st, &c.node, oid);
     Value::obj(oid)
 }
@@ -195,7 +195,7 @@ fn literal_mapping(an: &mut Analyzer, st: &State, v: &Value) -> Option<IndexMap<
 
 /// Make the parser's rows and section dicts match its spec.
 pub fn rebuild(an: &mut Analyzer, st: &mut State, node: &Node, oid: u32) {
-    let Some(spec) = an.cfg_parsers.get(&oid).cloned() else { return };
+    let Some(spec) = an.m.cfg_parsers.get(&oid).cloned() else { return };
     if !spec.known {
         let src = Source::new(&format!("configparser.ConfigParser@L{}", spec.line), SourceKind::External);
         st.set_row(oid, Ns::Item, Row::with_source(src));
@@ -217,8 +217,8 @@ pub fn rebuild(an: &mut Analyzer, st: &mut State, node: &Node, oid: u32) {
             st.set_slot(sid, Ns::Item, kk, val, true);
         }
         st.set_row(sid, Ns::Item, srow);
-        an.ci_dicts.insert(sid);
-        an.cfg_sections.insert(sid, (spec.clone(), name.clone()));
+        an.m.ci_dicts.insert(sid);
+        an.m.cfg_sections.insert(sid, (spec.clone(), name.clone()));
         let k = key_str_lit(&name);
         row = row.store(k, true);
         st.set_slot(oid, Ns::Item, k, Value::obj(sid), true);
@@ -315,7 +315,7 @@ fn str_list(an: &mut Analyzer, st: &mut State, node: &Node, xs: &[String]) -> Va
 pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     let Some(oid) = parser_of(an, c) else { return Value::data("configparser") };
-    let mut spec = an.cfg_parsers.get(&oid).cloned().unwrap_or_default();
+    let mut spec = an.m.cfg_parsers.get(&oid).cloned().unwrap_or_default();
     let arg = |i: usize, kw: &str| c.arg(i, Some(kw));
     match name.as_str() {
         "read_string" | "read_file" | "read_dict" | "read" => {
@@ -354,7 +354,7 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     cfg_raise(an, st, "DuplicateSectionError", false);
                 }
             }
-            an.cfg_parsers.insert(oid, spec);
+            an.m.cfg_parsers.insert(oid, spec);
             rebuild(an, st, &c.node, oid);
             if name == "read" {
                 return Value::data("files");
@@ -421,7 +421,7 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
                 _ => spec.known = false,
             }
-            an.cfg_parsers.insert(oid, spec);
+            an.m.cfg_parsers.insert(oid, spec);
             rebuild(an, st, &c.node, oid);
             an.none_v.clone()
         }
@@ -436,7 +436,7 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
                 _ => spec.known = false,
             }
-            an.cfg_parsers.insert(oid, spec);
+            an.m.cfg_parsers.insert(oid, spec);
             rebuild(an, st, &c.node, oid);
             an.none_v.clone()
         }
@@ -465,7 +465,7 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     Value::data("bool")
                 }
             };
-            an.cfg_parsers.insert(oid, spec);
+            an.m.cfg_parsers.insert(oid, spec);
             rebuild(an, st, &c.node, oid);
             out
         }
@@ -527,7 +527,7 @@ fn nested_mapping(an: &mut Analyzer, st: &State, v: &Value) -> Option<IndexMap<S
 pub fn m_section(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     let Some(sid) = c.recv.as_ref().and_then(|r| r.single()) else { return Value::data("section") };
-    let Some((spec, sec)) = an.cfg_sections.get(&sid).cloned() else { return Value::data("section") };
+    let Some((spec, sec)) = an.m.cfg_sections.get(&sid).cloned() else { return Value::data("section") };
     let opt = c.arg(0, Some("option")).as_ref().and_then(lit_str);
     // (a section's `get` falls back to None)
     let fallback = c.arg(1, Some("fallback")).or_else(|| if name == "get" { Some(an.none_v.clone()) } else { None });

@@ -1224,7 +1224,7 @@ pub fn m_connect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let path = c.arg(0, Some("database")).and_then(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).and_then(intern::key_as_str);
     let memory = path.as_deref() == Some(":memory:");
     let oid = new_obj(an, st, &c.node, "sqlcon", &format!("sqlite3.connect@L{}", c.line), "con");
-    an.sql_dbs.insert(oid, Db { memory, tables: IndexMap::new(), line: c.line });
+    an.m.sql_dbs.insert(oid, Db { memory, tables: IndexMap::new(), line: c.line });
     let rf = key_str_lit("row_factory");
     st.set_row(oid, Ns::Attr, Row::new().store(rf, true));
     st.set_slot(oid, Ns::Attr, rf, an.none_v.clone(), true);
@@ -1301,7 +1301,7 @@ fn matches_conds(conds: &[Cond], cols: &[(String, String)], row: &[Option<KeyId>
 
 /// Run one statement on the connection's database; the result set of a SELECT.
 fn run(an: &mut Analyzer, con: u32, sql: &str, params: Option<(Vec<Value>, IndexMap<String, Value>)>, uncertain: bool) -> Option<Rs> {
-    let mut db = an.sql_dbs.get(&con).cloned()?;
+    let mut db = an.m.sql_dbs.get(&con).cloned()?;
     let src = format!("sqlite3.connect@L{}", db.line);
     let stmt = parse(sql);
     let unknown_rs = |cols: Option<Vec<String>>, table: &str| Rs { cols, rows: None, source: format!("{}:{}", src, table), rowcount: None };
@@ -1313,7 +1313,7 @@ fn run(an: &mut Analyzer, con: u32, sql: &str, params: Option<(Vec<Value>, Index
                 t.rows = None;
             }
         }
-        an.sql_dbs.insert(con, db);
+        an.m.sql_dbs.insert(con, db);
         return Some(unknown_rs(None, "?"));
     };
     let (params, named) = match params {
@@ -1442,7 +1442,7 @@ fn run(an: &mut Analyzer, con: u32, sql: &str, params: Option<(Vec<Value>, Index
             };
             out = unknown_rs(names.clone(), &table);
             let Some(t) = t else {
-                an.sql_dbs.insert(con, db);
+                an.m.sql_dbs.insert(con, db);
                 return Some(out);
             };
             let rows = (|| -> Option<Vec<Vec<Option<KeyId>>>> {
@@ -1603,7 +1603,7 @@ fn run(an: &mut Analyzer, con: u32, sql: &str, params: Option<(Vec<Value>, Index
             out.rows = rows;
         }
     }
-    an.sql_dbs.insert(con, db);
+    an.m.sql_dbs.insert(con, db);
     Some(out)
 }
 
@@ -1631,7 +1631,7 @@ fn row_value(an: &mut Analyzer, st: &mut State, node: &Node, factory: &Value, cu
                     st.set_slot(did, Ns::Item, k, v.clone(), true);
                 }
                 st.set_row(did, Ns::Item, r);
-                an.sql_rows.insert(did, cs.clone());
+                an.m.sql_rows.insert(did, cs.clone());
             }
             _ => {
                 st.set_row(did, Ns::Item, Row::with_source(Source::new(&rs.source, SourceKind::External)));
@@ -1702,13 +1702,13 @@ fn cursor_obj(an: &mut Analyzer, st: &mut State, node: &Node, con: u32, rs: Rs, 
         _ => Value::data("rowcount"),
     };
     set(st, "rowcount", rc);
-    an.sql_cursors.insert(cur, con);
+    an.m.sql_cursors.insert(cur, con);
     Value::obj(cur)
 }
 
 /// The rows a cursor still has (`fetchall`, iteration).
 pub fn cursor_rows(an: &mut Analyzer, st: &mut State, node: &Node, cur: u32) -> Option<Value> {
-    if !an.sql_cursors.contains_key(&cur) {
+    if !an.m.sql_cursors.contains_key(&cur) {
         return None;
     }
     let list = st.slot(cur, Ns::Attr, key_str_lit("\u{1}rows"));
@@ -1732,12 +1732,12 @@ fn exec_on(an: &mut Analyzer, st: &mut State, c: &Call, con: u32, existing: Opti
     let uncertain = an.cond_depth > 0 || an.frame().loop_depth as usize > an.frame().unroll.len();
     let Some(sql) = sql else {
         // unknown SQL: every table may have changed
-        if let Some(db) = an.sql_dbs.get_mut(&con) {
+        if let Some(db) = an.m.sql_dbs.get_mut(&con) {
             for t in db.tables.values_mut() {
                 t.rows = None;
             }
         }
-        let line = an.sql_dbs.get(&con).map(|d| d.line).unwrap_or(0);
+        let line = an.m.sql_dbs.get(&con).map(|d| d.line).unwrap_or(0);
         let rs = Rs { cols: None, rows: None, source: format!("sqlite3.connect@L{}:?", line), rowcount: None };
         return cursor_obj(an, st, &c.node, con, rs, existing);
     };
@@ -1774,8 +1774,8 @@ fn exec_on(an: &mut Analyzer, st: &mut State, c: &Call, con: u32, existing: Opti
 pub fn m_sql(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     let Some(o) = c.recv.as_ref().and_then(|r| r.single()) else { return Value::data("sqlite") };
-    let is_con = an.sql_dbs.contains_key(&o);
-    let con = if is_con { Some(o) } else { an.sql_cursors.get(&o).copied() };
+    let is_con = an.m.sql_dbs.contains_key(&o);
+    let con = if is_con { Some(o) } else { an.m.sql_cursors.get(&o).copied() };
     let Some(con) = con else { return Value::data("sqlite") };
     match (is_con, name.as_str()) {
         (_, "execute") => exec_on(an, st, c, con, if is_con { None } else { Some(o) }, false),
@@ -1788,7 +1788,7 @@ pub fn m_sql(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         run(an, con, part, Some((Vec::new(), IndexMap::new())), uncertain);
                     }
                 }
-            } else if let Some(db) = an.sql_dbs.get_mut(&con) {
+            } else if let Some(db) = an.m.sql_dbs.get_mut(&con) {
                 db.tables.clear();
             }
             Value::obj(o)
@@ -1831,7 +1831,7 @@ pub fn m_sql(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// `row[i]` on an sqlite3.Row: the i-th column.
 pub fn row_index(an: &Analyzer, st: &State, oid: u32, key: &Value) -> Option<Value> {
-    let cols = an.sql_rows.get(&oid)?;
+    let cols = an.m.sql_rows.get(&oid)?;
     let i = lit(key).and_then(intern::key_as_int)?;
     let i = if i < 0 { i + cols.len() as i64 } else { i };
     let c = cols.get(usize::try_from(i).ok()?)?;

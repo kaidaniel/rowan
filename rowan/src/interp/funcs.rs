@@ -136,7 +136,7 @@ impl Analyzer {
             self.t_concrete_closures.insert(oid);
         }
         if self.torch_on {
-            self.t_funcs_by_qual.entry(qual.clone()).or_default().push(oid);
+            self.m.t_funcs_by_qual.entry(qual.clone()).or_default().push(oid);
         }
         Value::obj(oid)
     }
@@ -900,7 +900,7 @@ impl Analyzer {
                     }
                 }
                 // an sqlite cursor: its remaining rows
-                Kind::Namespace if self.sql_cursors.contains_key(&oid) => {
+                Kind::Namespace if self.m.sql_cursors.contains_key(&oid) => {
                     if let Some(rows) = crate::models::sqlite::cursor_rows(self, state, node, oid) {
                         state.set_slot(oid, Ns::Attr, key_str_lit("\u{1}pos"), Value::data("pos"), true);
                         let it = self.iterate(&rows, node, state);
@@ -912,10 +912,10 @@ impl Analyzer {
                     }
                 }
                 // itertools.count / cycle / repeat: no end
-                Kind::Namespace if self.infinites.contains_key(&oid) => {
+                Kind::Namespace if self.m.infinites.contains_key(&oid) => {
                     items = None;
                     exhaustive = false;
-                    let inf = self.infinites[&oid].clone();
+                    let inf = self.m.infinites[&oid].clone();
                     elems.push(self.infinite_elem(&inf));
                 }
                 Kind::Zip => {
@@ -935,7 +935,7 @@ impl Analyzer {
                         }
                     }
                     // a strict zip that did not raise: both sides as long as the known one
-                    let strict = self.zip_strict.contains(&oid);
+                    let strict = self.m.zip_strict.contains(&oid);
                     let (ki_items, vi_items) = match (ki.items.clone(), vi.items.clone()) {
                         (Some(k), None) if strict => {
                             let e = self.elem_value(&vi.elem, node, "zv");
@@ -1235,7 +1235,7 @@ impl Analyzer {
             _ => return None,
         };
         let row = state.row(d, Ns::Item);
-        if !row.closed() || row.present == row.definite || row.present.len() > UNROLL_MAX || state.has_slot(d, Ns::Item, STAR) || self.counters.contains(&d) {
+        if !row.closed() || row.present == row.definite || row.present.len() > UNROLL_MAX || state.has_slot(d, Ns::Item, STAR) || self.m.counters.contains(&d) {
             return None;
         }
         let keys = row.ordered_keys()?;
@@ -1264,7 +1264,7 @@ impl Analyzer {
             return None;
         }
         // (a Counter's STAR slot is the count of a missing key, not a key)
-        if state.has_slot(oid, Ns::Item, STAR) && !self.counters.contains(&oid) {
+        if state.has_slot(oid, Ns::Item, STAR) && !self.m.counters.contains(&oid) {
             return None;
         }
         // insertion order when it is known (a guess would make order-dependent results wrong)

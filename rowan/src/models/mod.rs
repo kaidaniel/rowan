@@ -426,7 +426,7 @@ fn m_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let recs = an.record_objects(src);
         if !recs.is_empty() {
             an.copy_into(oid, Ns::Item, src, st, true, &KeySet::new());
-        } else if let Some(items) = src.single().filter(|_| src.kv.is_bot()).and_then(|x| an.sorted_items.get(&x).cloned()) {
+        } else if let Some(items) = src.single().filter(|_| src.kv.is_bot()).and_then(|x| an.m.sorted_items.get(&x).cloned()) {
             // `dict(sorted(d.items()))`: d's keys (the sure ones sure) in sorted order
             let mut d = st.row(oid, Ns::Item).data();
             let mut order = d.order.to_vec();
@@ -565,10 +565,10 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     };
     let oid = an.alloc_simple(kind, &c.node, st, &format!("{}@L{}", last(&c.qual), c.line));
     an.set_llen(oid, st, None);
-    an.sorted_items.remove(&oid);
+    an.m.sorted_items.remove(&oid);
     if c.qual == "builtins.sorted" && c.kw("key").is_none() && an.obj(oid).single {
         if let Some(items) = c.args.first().and_then(|a| sorted_dict_items(an, st, a, c)) {
-            an.sorted_items.insert(oid, std::rc::Rc::new(items));
+            an.m.sorted_items.insert(oid, std::rc::Rc::new(items));
         }
     }
     if let Some(a) = c.args.first() {
@@ -948,7 +948,7 @@ fn m_zip(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // `strict=True`: lengths that differ raise ValueError; otherwise both have the known one
     let strict = c.kwargs.get(&intern::s("strict")).and_then(|v| v.kv.as_lit()) == Some(intern::key_bool(true));
     if strict {
-        an.zip_strict.insert(oid);
+        an.m.zip_strict.insert(oid);
         let la = an.iterate(&a, &c.node, st).items.map(|x| x.len());
         let lb = an.iterate(&b, &c.node, st).items.map(|x| x.len());
         match (la, lb) {
@@ -2655,7 +2655,7 @@ fn m_set(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn m_chainmap(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual).to_string();
     let Some(oid) = c.recv.as_ref().and_then(|r| r.single()) else { return Value::data("chainmap") };
-    let maps = an.chainmaps.get(&oid).cloned().unwrap_or_default();
+    let maps = an.m.chainmaps.get(&oid).cloned().unwrap_or_default();
     match name.as_str() {
         "maps" => an.alloc_positional(Kind::List, &c.node, Some(maps), Value::new(), DATA, st),
         "parents" | "new_child" => {
@@ -2706,7 +2706,7 @@ pub fn generated_class(an: &mut Analyzer, st: &mut State, qual: &str) -> Option<
     let v = st.slot(moid, Ns::Attr, key_str_lit(cname));
     if cname == "UserDict" {
         if let Some(c) = v.single() {
-            an.userdict_classes.insert(c);
+            an.m.userdict_classes.insert(c);
         }
     }
     Some(v)
@@ -4209,7 +4209,7 @@ fn m_defaultdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         if name == "defaultdict" && !c.args.is_empty() {
             if !c.args[0].pts.is_empty() {
                 // the factory runs per inserted key (see `load_item`); no shared default
-                an.dd_factories.insert(oid, c.args[0].clone());
+                an.m.dd_factories.insert(oid, c.args[0].clone());
             } else if !c.args[0].pts.is_empty() {
                 let dflt = an.call_value(&c.args[0], &c.node, None, st, Some(vec![]));
                 st.set_slot(oid, Ns::Item, STAR, Value::with_kv(dflt.pts, DATA), false);
@@ -4227,7 +4227,7 @@ fn m_defaultdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         } else {
             c.args.clone()
         };
-        an.chainmaps.insert(oid, maps.clone());
+        an.m.chainmaps.insert(oid, maps.clone());
         // (built from parameters: the maps are known per call site)
         // every map, the first one winning: copied from the last to the first
         for sa in maps.iter().rev() {
@@ -4395,7 +4395,7 @@ fn m_partial(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 k.insert(*kk, v.clone());
             }
             kw = k;
-            let mut s0 = an.partial_star.get(&inner).cloned().unwrap_or_default();
+            let mut s0 = an.m.partial_star.get(&inner).cloned().unwrap_or_default();
             s0.extend(star);
             star = s0;
         }
@@ -4420,9 +4420,9 @@ fn m_partial(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_at(Kind::Partial, &c.node, st, &format!("partial@L{}", c.line), payload.clone(), None, Ns::Item, None, None);
     an.obj_mut(oid).payload = payload;
     if !rest_star.is_empty() {
-        an.partial_star.insert(oid, rest_star);
+        an.m.partial_star.insert(oid, rest_star);
     } else {
-        an.partial_star.remove(&oid);
+        an.m.partial_star.remove(&oid);
     }
     Value::obj(oid)
 }
@@ -4462,7 +4462,7 @@ fn m_partial_call(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let mut fake_args = bound_args.clone();
         fake_args.extend(c.args.iter().cloned());
         // (bound `**opts` of unknown keys: passed on before the call's own)
-        let mut star = an.partial_star.get(&x).cloned().unwrap_or_default();
+        let mut star = an.m.partial_star.get(&x).cloned().unwrap_or_default();
         star.extend(c.star_kwargs.iter().cloned());
         for fo in f.pts.iter() {
             outs.push(an.call_one(fo, &fake_args, &kw, &c.star_args, &star, st, &c.node, c.call_ast));
@@ -4951,7 +4951,7 @@ fn sorted_dict_items(an: &Analyzer, st: &State, a: &Value, c: &Call) -> Option<V
     let Payload::View(ViewKind::Items, recv) = &an.obj(v).payload else { return None };
     let d = recv.single().filter(|r| recv.kv.is_bot() && an.kind(*r) == Kind::Dict)?;
     let row = st.row(d, Ns::Item);
-    if !row.closed() || row.present == row.definite || row.present.len() > 64 || st.has_slot(d, Ns::Item, STAR) || an.counters.contains(&d) {
+    if !row.closed() || row.present == row.definite || row.present.len() > 64 || st.has_slot(d, Ns::Item, STAR) || an.m.counters.contains(&d) {
         return None;
     }
     let mut keys: Vec<KeyId> = row.present.iter().collect();
@@ -5017,4 +5017,121 @@ fn literal_sort_order(an: &mut Analyzer, st: &mut State, c: &Call, items: &[Valu
         if reverse { o.reverse() } else { o }
     });
     Some(idx)
+}
+
+
+use crate::domain::ObjId;
+use rustc_hash::FxHashSet;
+use crate::intern::StrId;
+use std::rc::Rc;
+
+/// What the library models keep beside the state, per object (side tables), and the flags
+/// of a running model. Keyed by objects, these are edges the collector follows
+/// (`Analyzer::obj_edges`).
+#[derive(Default)]
+pub struct Tables {
+    /// validating a FastAPI test request's body (errors are a 422)
+    pub fa_body_validation: bool,
+    /// unknown call results named by the variable they were bound to (tensor dims)
+    pub t_var_names: FxHashMap<ObjId, crate::shape::Sym>,
+    /// function objects by qualname (a closure's printing sees its factory's symbols)
+    pub t_funcs_by_qual: FxHashMap<String, Vec<ObjId>>,
+    /// running a call that stands for "some module": no shape errors / requirements / facts
+    pub t_quiet: bool,
+    /// reading an attribute without the tensor model / without the user-class check
+    pub t_getattr_plain: bool,
+    pub t_skip_user: bool,
+    /// the node of the function expression of the call being evaluated
+    pub t_called_attr: usize,
+    /// tensor-shape requirements / definite mismatches (models/torch.rs)
+    pub shape_reqs: Vec<crate::models::torch::ShapeNote>,
+    pub shape_errors: Vec<crate::models::torch::ShapeNote>,
+    /// dicts with case-insensitive str keys (request headers): keys are lower-cased
+    pub ci_dicts: FxHashSet<ObjId>,
+    /// csv writers (their file and dialect), csv readers (their fieldnames)
+    pub csv_writers: FxHashMap<ObjId, crate::models::csvio::CsvWriter>,
+    pub csv_readers: FxHashMap<ObjId, Value>,
+    /// argparse parsers, their subparsers and groups
+    pub argp: FxHashMap<ObjId, crate::models::argparse::ArgObj>,
+    /// futures: the exception classes their call raised (empty: any)
+    pub future_excs: FxHashMap<ObjId, Vec<String>>,
+    /// the StringIO objects `redirect_stdout` sends prints to (innermost last)
+    pub stdout_redirect: Vec<Value>,
+    /// ExitStack callbacks: (callable, positional, keyword arguments), in registration order
+    pub exit_callbacks: FxHashMap<ObjId, Vec<(Value, Vec<Value>, IndexMap<StrId, Value>)>>,
+    /// TestClient cookie jars (dicts with `set`)
+    pub cookie_jars: FxHashSet<ObjId>,
+    /// configparser parsers and their sections (models::configparser)
+    pub cfg_parsers: FxHashMap<ObjId, crate::models::configparser::CfgSpec>,
+    pub cfg_sections: FxHashMap<ObjId, (crate::models::configparser::CfgSpec, String)>,
+    /// compiled patterns (text, flags) and match objects (models::remodel)
+    pub re_patterns: FxHashMap<ObjId, (String, u32)>,
+    pub re_matches: FxHashMap<ObjId, crate::models::remodel::ReMatch>,
+    /// pathlib path objects' classes (models::pathtext)
+    pub path_classes: FxHashMap<ObjId, String>,
+    /// sqlite3 connections (their databases), cursors (their connection), Row dicts (columns)
+    pub sql_dbs: FxHashMap<ObjId, crate::models::sqlite::Db>,
+    pub sql_cursors: FxHashMap<ObjId, ObjId>,
+    pub sql_rows: FxHashMap<ObjId, Vec<String>>,
+    /// itertools.count / cycle / repeat(x) objects
+    pub infinites: FxHashMap<ObjId, crate::models::itertools::Infinite>,
+    /// partials' bound `**mapping`s of unknown keys
+    pub partial_star: FxHashMap<ObjId, Vec<Value>>,
+    /// pydantic model classes described (`pyd_class`), `TypeAdapter` types by index
+    pub pyd_classes: FxHashMap<ObjId, Rc<crate::models::pydantic::PClass>>,
+    pub pyd_adapters: Vec<crate::models::pydantic::Ann>,
+    pub pyd_depth: u32,
+    pub pyd_ann_depth: u32,
+    /// validation problems found per running validation; raised ValidationErrors' problems;
+    /// the field being validated
+    pub pyd_errs: Vec<Vec<crate::models::pydantic::PErr>>,
+    pub pyd_verrs: Vec<Vec<crate::models::pydantic::PErr>>,
+    pub pyd_field: Option<KeyId>,
+    /// a nested model being validated for this field of the enclosing one (its errors' loc
+    /// starts with it)
+    pub pyd_nest_prefix: Option<KeyId>,
+    /// the instance whose field is being validated (containers made for it are its own)
+    pub pyd_inst: Option<ObjId>,
+    /// numpy structured arrays (fields are Item keys); the exception a missing item raises
+    /// when every target is one (`ValueError`, not KeyError)
+    pub np_struct: FxHashSet<ObjId>,
+    pub pyd_last_failed: bool,
+    /// pydantic instances: the fields their input surely / maybe gave (`model_fields_set`)
+    pub pyd_set: FxHashMap<ObjId, (KeySet, KeySet)>,
+    /// specialisations of generic models: their type variables' bindings
+    pub pyd_generic: FxHashMap<ObjId, Vec<(String, crate::models::pydantic::Ann)>>,
+    /// FastAPI: routes, `include_router` edges (app, router, prefix), router prefixes, handlers
+    pub fa_routes: Vec<crate::models::fastapi::FaRoute>,
+    pub fa_includes: Vec<(ObjId, ObjId, String)>,
+    pub fa_prefix: FxHashMap<ObjId, String>,
+    pub fa_handlers: FxHashSet<ObjId>,
+    /// FastAPI hooks: (app, "exc" / "mw", exception class, function); requests a middleware's
+    /// call_next dispatches (route, request)
+    pub fa_hooks: Vec<(ObjId, String, Value, Option<ObjId>)>,
+    pub fa_pending: Vec<(usize, crate::models::fastapi::Req)>,
+    /// the status code of the last dispatched request; the injected `Response` objects of the
+    /// requests being dispatched
+    pub fa_status: Value,
+    pub fa_out_resp: Vec<Vec<ObjId>>,
+    /// per request being dispatched: the dependencies' values (each runs once)
+    /// the handler's return value from inside yield dependencies
+    pub fa_gen_ret: Option<Value>,
+    pub fa_dep_cache: Vec<FxHashMap<ObjId, Value>>,
+    /// `dependencies=[…]` of apps / routers (also given at include_router)
+    pub fa_app_deps: FxHashMap<ObjId, Vec<Value>>,
+    /// zip objects made with `strict=True`
+    pub zip_strict: FxHashSet<ObjId>,
+    /// dicts that are `collections.Counter`s
+    pub counters: FxHashSet<ObjId>,
+    /// `sorted(d.items())` of a closed dict whose keys are known literals (some maybe there):
+    /// the items in sorted order with their sureness, for `dict(...)` of the list
+    pub sorted_items: FxHashMap<ObjId, Rc<Vec<(KeyId, Value, bool)>>>,
+    /// ChainMaps: the maps they look through (the first takes the writes)
+    pub chainmaps: FxHashMap<ObjId, Vec<Value>>,
+    /// deques and their maxlen
+    pub deques: FxHashMap<ObjId, Option<i64>>,
+    /// the generated `UserDict` classes (their instances' keys are `self.data`'s)
+    pub userdict_classes: FxHashSet<ObjId>,
+    /// `defaultdict(factory)`: the factory, called once per inserted key
+    pub dd_factories: FxHashMap<ObjId, Value>,
 }

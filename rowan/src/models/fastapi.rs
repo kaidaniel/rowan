@@ -156,13 +156,13 @@ impl Analyzer {
             if depth > 8 {
                 continue;
             }
-            let own = format!("{}{}", prefix, self.fa_prefix.get(&a).cloned().unwrap_or_default());
-            for (i, r) in self.fa_routes.iter().enumerate() {
+            let own = format!("{}{}", prefix, self.m.fa_prefix.get(&a).cloned().unwrap_or_default());
+            for (i, r) in self.m.fa_routes.iter().enumerate() {
                 if r.app == a {
                     out.push((r.path.as_ref().map(|p| format!("{}{}", own, p)), i));
                 }
             }
-            for (parent, router, pfx) in &self.fa_includes {
+            for (parent, router, pfx) in &self.m.fa_includes {
                 if *parent == a {
                     work.push((*router, format!("{}{}", own, pfx), depth + 1));
                 }
@@ -326,7 +326,7 @@ impl Analyzer {
             "BackgroundTasks" => return fa_obj(self, state, node, "fastapi.bg", Value::new(), &format!("bg{}", func)),
             "Response" => {
                 let v = fa_obj(self, state, node, "fastapi.outresp", Value::new(), &format!("resp{}", func));
-                if let (Some(o), Some(top)) = (v.single(), self.fa_out_resp.last_mut()) {
+                if let (Some(o), Some(top)) = (v.single(), self.m.fa_out_resp.last_mut()) {
                     top.push(o);
                 }
                 return v;
@@ -375,9 +375,9 @@ impl Analyzer {
             let v = match &pann {
                 Ann::Model(c) => {
                     // (a test request's body: its validation errors are the 422 response)
-                    let saved = std::mem::replace(&mut self.fa_body_validation, !report);
+                    let saved = std::mem::replace(&mut self.m.fa_body_validation, !report);
                     let v = self.pyd_validate_opts(*c, &raw, state, node, report);
-                    self.fa_body_validation = saved;
+                    self.m.fa_body_validation = saved;
                     v
                 }
                 Ann::Other => raw,
@@ -642,7 +642,7 @@ impl Analyzer {
             return Value::data("depends");
         }
         // a dependency runs once per request: its value is reused
-        if let Some(v) = g.single().and_then(|o| self.fa_dep_cache.last().and_then(|c| c.get(&o).cloned())) {
+        if let Some(v) = g.single().and_then(|o| self.m.fa_dep_cache.last().and_then(|c| c.get(&o).cloned())) {
             return v;
         }
         let mut outs: Vec<Value> = Vec::new();
@@ -686,7 +686,7 @@ impl Analyzer {
             return Value::data("depends");
         }
         let v = join_values(outs);
-        if let (Some(o), Some(c)) = (g.single(), self.fa_dep_cache.last_mut()) {
+        if let (Some(o), Some(c)) = (g.single(), self.m.fa_dep_cache.last_mut()) {
             c.insert(o, v.clone());
         }
         v
@@ -729,17 +729,17 @@ impl Analyzer {
         let kwargs = self.fa_bind(g, req.as_ref(), state, node, 1);
         let nd = *node;
         let then: Box<dyn FnOnce(&mut Analyzer, Value, &mut State)> = Box::new(move |an: &mut Analyzer, v: Value, st: &mut State| {
-            if let Some(c) = an.fa_dep_cache.last_mut() {
+            if let Some(c) = an.m.fa_dep_cache.last_mut() {
                 c.insert(g, v);
             }
             let r = an.fa_run_handler(func, gens, req, entry, st, &nd);
-            an.fa_gen_ret = Some(an.fa_gen_ret.take().unwrap_or_default().join(&r));
+            an.m.fa_gen_ret = Some(an.m.fa_gen_ret.take().unwrap_or_default().join(&r));
         });
         let prev = self.cm_hook.replace(crate::interp::CmHook { body: &[], target: None, depth: self.frames.len(), env_after: None, ran: false, then: Some(then), body_died: false, env_before: None, multi: false, body_exits: None, body_ret: None });
-        let outer = self.fa_gen_ret.take();
+        let outer = self.m.fa_gen_ret.take();
         self.call_user(g, None, vec![], kwargs, vec![], vec![], state, node, None, false);
         let h = std::mem::replace(&mut self.cm_hook, prev);
-        let ret = std::mem::replace(&mut self.fa_gen_ret, outer).unwrap_or_default();
+        let ret = std::mem::replace(&mut self.m.fa_gen_ret, outer).unwrap_or_default();
         match h {
             Some(h) if h.ran => {
                 if let Some(env) = h.env_after {
@@ -755,15 +755,15 @@ impl Analyzer {
     /// The entry run of a handler when middlewares are registered: any request, through the
     /// first middleware (its `call_next` runs the handler). None without middlewares.
     pub fn fa_entry_through_middleware(&mut self, func: ObjId, state: &mut State, node: &Node) -> Option<()> {
-        let mws: Vec<ObjId> = self.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
+        let mws: Vec<ObjId> = self.m.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
         let first = *mws.first()?;
-        let idx = self.fa_routes.iter().position(|r| r.func == Some(func))?;
+        let idx = self.m.fa_routes.iter().position(|r| r.func == Some(func))?;
         let fi = self.func_info(func);
         let body = Value::obj(self.unknown_source(&format!("param {}.request", fi.py_qualname()), SourceKind::Param, state, "request.json()", "", Ns::Item, vec![]));
         let robj = fa_obj(self, state, node, "fastapi.request", body, &format!("entryreq{}", func));
         let rq = Req { obj: Some(robj.clone()), open: true, ..Default::default() };
-        let n = self.fa_pending.len();
-        self.fa_pending.push((idx, rq));
+        let n = self.m.fa_pending.len();
+        self.m.fa_pending.push((idx, rq));
         let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
         self.call_user(first, None, vec![robj, Value::obj(cn)], IndexMap::new(), vec![], vec![], state, node, None, false);
         Some(())
@@ -772,12 +772,12 @@ impl Analyzer {
     /// The dependencies a route runs before its handler's parameters: those of the apps /
     /// routers it belongs to (outermost first), then `dependencies=[…]` of the route.
     pub fn fa_route_deps(&mut self, idx: usize, req: Option<&Req>, state: &mut State, node: &Node) {
-        let r = self.fa_routes[idx].clone();
+        let r = self.m.fa_routes[idx].clone();
         // the chain of apps / routers above the route's
         let mut chain: Vec<ObjId> = vec![r.app];
         let mut cur = r.app;
         for _ in 0..8 {
-            match self.fa_includes.iter().find(|(_, ro, _)| *ro == cur) {
+            match self.m.fa_includes.iter().find(|(_, ro, _)| *ro == cur) {
                 Some((parent, _, _)) => {
                     chain.push(*parent);
                     cur = *parent;
@@ -787,7 +787,7 @@ impl Analyzer {
         }
         let mut lists: Vec<Value> = Vec::new();
         for a in chain.iter().rev() {
-            lists.extend(self.fa_app_deps.get(a).cloned().unwrap_or_default());
+            lists.extend(self.m.fa_app_deps.get(a).cloned().unwrap_or_default());
         }
         if let Some(e) = r.call.and_then(|c| kw(c, "dependencies")) {
             let e: &'static ast::Expr = e;
@@ -814,11 +814,11 @@ impl Analyzer {
     /// A route's handler called with a concrete request: an `HTTPException` (any exception the
     /// handler raises) ends in a response, so the call continues on those paths too.
     fn fa_dispatch(&mut self, route: usize, req: &Req, state: &mut State, node: &Node) -> Value {
-        let r = self.fa_routes[route].clone();
+        let r = self.m.fa_routes[route].clone();
         let Some(func) = r.func else { return Value::data("response") };
         let mut pre = state.copy();
         // exception handlers (`@app.exception_handler(E)`): E is caught too
-        let hooks: Vec<(String, Value, ObjId)> = self.fa_hooks.iter().filter(|h| h.1 == "exc").filter_map(|h| h.3.map(|f| (self.exc_name(&h.2), h.2.clone(), f))).collect();
+        let hooks: Vec<(String, Value, ObjId)> = self.m.fa_hooks.iter().filter(|h| h.1 == "exc").filter_map(|h| h.3.map(|f| (self.exc_name(&h.2), h.2.clone(), f))).collect();
         // (a pydantic ValidationError the handler's own code raises is no request error: the
         // TestClient re-raises it, as any other exception FastAPI does not answer)
         let mut caught: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::from_iter(["HTTPException".to_string(), "RequestValidationError".to_string()]);
@@ -832,13 +832,13 @@ impl Analyzer {
         self.raise_values.push(None);
         self.raise_cls.push((self.raise_states.len(), Vec::new()));
         self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
-        self.fa_dep_cache.push(rustc_hash::FxHashMap::default());
-        self.fa_out_resp.push(Vec::new());
+        self.m.fa_dep_cache.push(rustc_hash::FxHashMap::default());
+        self.m.fa_out_resp.push(Vec::new());
         self.fa_route_deps(route, Some(req), state, node);
         let gens = self.fa_yield_deps(func, state);
         let ret = self.fa_run_handler(func, gens, Some(req.clone()), false, state, node);
-        let out_resps = self.fa_out_resp.pop().unwrap_or_default();
-        self.fa_dep_cache.pop();
+        let out_resps = self.m.fa_out_resp.pop().unwrap_or_default();
+        self.m.fa_dep_cache.pop();
         self.guards.pop();
         self.try_marks.pop();
         let flagged = self.may_raise.pop().unwrap_or(false);
@@ -1011,7 +1011,7 @@ impl Analyzer {
             }
             state.replace_with(after);
         }
-        self.fa_status = if status.empty() { Value::data("status_code") } else { status };
+        self.m.fa_status = if status.empty() { Value::data("status_code") } else { status };
         out
     }
 
@@ -1124,7 +1124,7 @@ impl Analyzer {
             }
             st.set_row(d, Ns::Item, row);
             if ci {
-                an.ci_dicts.insert(d);
+                an.m.ci_dicts.insert(d);
             }
             Some(Value::obj(d))
         };
@@ -1204,7 +1204,7 @@ impl Analyzer {
         let mut pre = state.copy();
         for a in app.pts.iter() {
             for (full, idx) in self.fa_routes_of(a) {
-                if !self.fa_routes[idx].methods.iter().any(|m| m == method || m == "*") {
+                if !self.m.fa_routes[idx].methods.iter().any(|m| m == method || m == "*") {
                     continue;
                 }
                 let params = match (&full, &path) {
@@ -1223,15 +1223,15 @@ impl Analyzer {
                 let robj = fa_obj(self, &mut st, &c.node, "fastapi.request", body, &format!("req{}", c.line));
                 self.fa_fill_request(&robj, &rq, method, &mut st, &c.node);
                 rq.obj = Some(robj.clone());
-                let mws: Vec<ObjId> = self.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
+                let mws: Vec<ObjId> = self.m.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
                 let v = if mws.is_empty() {
                     let b = self.fa_dispatch(idx, &rq, &mut st, &c.node);
-                    statuses.push(self.fa_status.clone());
+                    statuses.push(self.m.fa_status.clone());
                     b
                 } else {
                     // the (first) middleware runs with call_next dispatching the route
-                    let n = self.fa_pending.len();
-                    self.fa_pending.push((idx, rq.clone()));
+                    let n = self.m.fa_pending.len();
+                    self.m.fa_pending.push((idx, rq.clone()));
                     let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
                     let resp = self.call_user(mws[0], None, vec![robj.clone(), Value::obj(cn)], IndexMap::new(), vec![], vec![], &mut st, &c.node, None, false);
                     let mut bodies: Vec<Value> = Vec::new();
@@ -1263,18 +1263,18 @@ impl Analyzer {
                 _ => false,
             }));
             let code = if !path_known { Value::data("status_code") } else { Value::lit(intern::key_int(if other_method { 405 } else { 404 })) };
-            self.fa_status = code.clone();
+            self.m.fa_status = code.clone();
             let did = self.alloc_at(Kind::Dict, &c.node, state, &format!("error@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, Some("fa404"));
             let dk = key_str_lit("detail");
             state.set_row(did, Ns::Item, Row::new().store(dk, true));
             state.set_slot(did, Ns::Item, dk, Value::data("detail"), true);
-            let mws: Vec<ObjId> = self.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
+            let mws: Vec<ObjId> = self.m.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
             if let Some(first) = mws.first().copied() {
                 let body = req.json.clone().unwrap_or_else(|| Value::data("concrete"));
                 let robj = fa_obj(self, state, &c.node, "fastapi.request", body, &format!("req{}", c.line));
                 self.fa_fill_request(&robj, &req, method, state, &c.node);
-                let n = self.fa_pending.len();
-                self.fa_pending.push((usize::MAX, Req { obj: Some(robj.clone()), json: Some(Value::obj(did)), ..Default::default() }));
+                let n = self.m.fa_pending.len();
+                self.m.fa_pending.push((usize::MAX, Req { obj: Some(robj.clone()), json: Some(Value::obj(did)), ..Default::default() }));
                 let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
                 self.call_user(first, None, vec![robj, Value::obj(cn)], IndexMap::new(), vec![], vec![], state, &c.node, None, false);
             }
@@ -1354,9 +1354,9 @@ pub fn m_fastapi(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     // a middleware's call_next(request): the route's response
     if let Some(n) = q.strip_prefix("fastapi.callnext.").and_then(|x| x.parse::<usize>().ok()) {
-        let Some((idx, rq)) = an.fa_pending.get(n).cloned() else { return Value::data("response") };
+        let Some((idx, rq)) = an.m.fa_pending.get(n).cloned() else { return Value::data("response") };
         // (no route: the 404 body)
-        let (body, status) = if idx == usize::MAX { (rq.json.clone().unwrap_or_default(), an.fa_status.clone()) } else { (an.fa_dispatch(idx, &rq, st, &c.node), an.fa_status.clone()) };
+        let (body, status) = if idx == usize::MAX { (rq.json.clone().unwrap_or_default(), an.m.fa_status.clone()) } else { (an.fa_dispatch(idx, &rq, st, &c.node), an.m.fa_status.clone()) };
         let v = fa_obj(an, st, &c.node, "fastapi.response", body, &format!("mwresp{}", n));
         set_status(st, &v, status);
         return v;
@@ -1373,10 +1373,10 @@ pub fn m_fastapi(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "FastAPI" | "APIRouter" => {
             let v = fa_obj(an, st, &c.node, "fastapi.app", Value::new(), "faapp");
             if let (Some(o), Some(p)) = (v.single(), c.kwargs.get(&s("prefix")).and_then(str_of)) {
-                an.fa_prefix.insert(o, p);
+                an.m.fa_prefix.insert(o, p);
             }
             if let (Some(o), Some(d)) = (v.single(), c.kwargs.get(&s("dependencies")).cloned()) {
-                an.fa_app_deps.entry(o).or_default().push(d);
+                an.m.fa_app_deps.entry(o).or_default().push(d);
             }
             v
         }
@@ -1459,18 +1459,18 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
                     None => vec!["get".into()],
                 }
             };
-            let idx = an.fa_routes.len();
+            let idx = an.m.fa_routes.len();
             let module = an.frame().module;
-            an.fa_routes.push(FaRoute { app: o, methods, path, func: None, call: c.call_ast, module });
+            an.m.fa_routes.push(FaRoute { app: o, methods, path, func: None, call: c.call_ast, module });
             fa_obj(an, st, &c.node, &format!("fastapi.route.{}", idx), Value::new(), &format!("route{}", idx))
         }
         ("fastapi.app", "include_router") => {
             let prefix = c.kwargs.get(&s("prefix")).and_then(str_of).unwrap_or_default();
             if let Some(r) = c.arg(0, Some("router")) {
                 for ro in r.pts.iter() {
-                    an.fa_includes.push((o, ro, prefix.clone()));
+                    an.m.fa_includes.push((o, ro, prefix.clone()));
                     if let Some(d) = c.kwargs.get(&s("dependencies")).cloned() {
-                        an.fa_app_deps.entry(ro).or_default().push(d);
+                        an.m.fa_app_deps.entry(ro).or_default().push(d);
                     }
                 }
             }
@@ -1488,16 +1488,16 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
             };
             let module = an.frame().module;
             for fo in f.pts.iter().filter(|x| an.kind(*x) == Kind::Function).collect::<Vec<_>>() {
-                an.fa_routes.push(FaRoute { app: o, methods: methods.clone(), path: path.clone(), func: Some(fo), call: c.call_ast, module });
-                an.fa_handlers.insert(fo);
+                an.m.fa_routes.push(FaRoute { app: o, methods: methods.clone(), path: path.clone(), func: Some(fo), call: c.call_ast, module });
+                an.m.fa_handlers.insert(fo);
             }
             an.none_v.clone()
         }
         // decorators that register a function the framework calls (identity)
         ("fastapi.app", "exception_handler" | "middleware") => {
             let exc = if name == "exception_handler" { c.arg(0, Some("exc_class_or_status_code")).unwrap_or_default() } else { Value::new() };
-            let idx = an.fa_hooks.len();
-            an.fa_hooks.push((o, if name == "middleware" { "mw".into() } else { "exc".into() }, exc, None));
+            let idx = an.m.fa_hooks.len();
+            an.m.fa_hooks.push((o, if name == "middleware" { "mw".into() } else { "exc".into() }, exc, None));
             fa_obj(an, st, &c.node, &format!("fastapi.hook.{}", idx), Value::new(), &format!("hook{}", idx))
         }
         ("fastapi.app", "on_event") => fa_obj(an, st, &c.node, "fastapi.hookx", Value::new(), &format!("hook{}", c.site)),
@@ -1562,7 +1562,7 @@ pub fn object_attr(an: &mut Analyzer, oid: ObjId, name: &str, node: &Node, state
         ("fastapi.client", "cookies") => {
             let d = an.alloc_at(Kind::Dict, node, state, "cookies", Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("jar{}", oid)));
             state.set_row(d, Ns::Item, Row::new());
-            an.cookie_jars.insert(d);
+            an.m.cookie_jars.insert(d);
             Some(Value::obj(d))
         }
         ("fastapi.response", "status_code") => Some(Value::data("status_code")),
@@ -1600,7 +1600,7 @@ pub fn apply_route(an: &mut Analyzer, dv: &Value, f: &Value) {
             if let Some(idx) = q.strip_prefix("fastapi.hook.").and_then(|x| x.parse::<usize>().ok()) {
                 for fo in f.pts.iter() {
                     if an.kind(fo) == Kind::Function {
-                        an.fa_hooks[idx].3 = Some(fo);
+                        an.m.fa_hooks[idx].3 = Some(fo);
                         // (run around each handler, not on its own)
                         an.entry_done.insert(fo);
                     }
@@ -1609,8 +1609,8 @@ pub fn apply_route(an: &mut Analyzer, dv: &Value, f: &Value) {
             if let Some(idx) = q.strip_prefix("fastapi.route.").and_then(|x| x.parse::<usize>().ok()) {
                 for fo in f.pts.iter() {
                     if an.kind(fo) == Kind::Function {
-                        an.fa_routes[idx].func = Some(fo);
-                        an.fa_handlers.insert(fo);
+                        an.m.fa_routes[idx].func = Some(fo);
+                        an.m.fa_handlers.insert(fo);
                     }
                 }
             }

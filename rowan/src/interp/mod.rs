@@ -705,7 +705,26 @@ pub struct ValueInfo {
     pub objects: Vec<String>,
 }
 
+/// When the analysis started (the deadline counts from it).
+#[derive(Clone, Copy)]
+pub struct Clock(std::time::Instant);
+
+impl Default for Clock {
+    fn default() -> Self {
+        Clock(std::time::Instant::now())
+    }
+}
+
+impl Clock {
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.0.elapsed()
+    }
+}
+
+#[derive(Default)]
 pub struct Analyzer {
+    /// the library models' own tables (`models::Tables`)
+    pub m: crate::models::Tables,
     pub filename: String,
     /// tabulations decided by a summary's events, per function code (`FuncNode::addr`: every
     /// closure object made from one `def` shares the budget) and kind
@@ -830,8 +849,6 @@ pub struct Analyzer {
     /// model calls running (`run_model`), the outermost one's number, and the objects
     /// allocated in it
     pub model_depth: u32,
-    /// validating a FastAPI test request's body (errors are a 422)
-    pub fa_body_validation: bool,
     pub model_epoch: u64,
     pub model_born: FxHashMap<ObjId, u64>,
     /// modules that import torch (their functions all get entry runs and are tabulated)
@@ -843,33 +860,19 @@ pub struct Analyzer {
     /// functions some call of which their budget refused: their own lines then need a reporting
     /// run with open parameters (it covers the calls that did not run)
     pub budget_out: FxHashSet<ObjId>,
-    /// unknown call results named by the variable they were bound to (tensor dims)
-    pub t_var_names: FxHashMap<ObjId, crate::shape::Sym>,
     /// closures made inside concrete calls in torch modules (no entry run of their own)
     pub t_concrete_closures: FxHashSet<ObjId>,
     /// the state a factory's entry run ended in, for the closures it made
     pub t_closure_states: FxHashMap<ObjId, std::rc::Rc<State>>,
-    /// function objects by qualname (a closure's printing sees its factory's symbols)
-    pub t_funcs_by_qual: FxHashMap<String, Vec<ObjId>>,
     /// golden rows: the joined value of (line, name, call chain, entry run) so far
     pub t_row_values: FxHashMap<(u32, String, Vec<u32>, bool), Value>,
     /// the next hover fact is an assignment's
     pub t_fact_write: bool,
-    /// running a call that stands for "some module": no shape errors / requirements / facts
-    pub t_quiet: bool,
-    /// reading an attribute without the tensor model / without the user-class check
-    pub t_getattr_plain: bool,
-    pub t_skip_user: bool,
-    /// the node of the function expression of the call being evaluated
-    pub t_called_attr: usize,
     /// the verdict being recorded is on a guarded access
     pub verdict_guarded: bool,
     /// the access being made is on a value that may also be a scalar (a str, a number): no
     /// object's lack of the key makes it fail for sure
     pub recv_scalar: bool,
-    /// tensor-shape requirements / definite mismatches (models/torch.rs)
-    pub shape_reqs: Vec<crate::models::torch::ShapeNote>,
-    pub shape_errors: Vec<crate::models::torch::ShapeNote>,
     /// Enum classes: their members in definition order
     pub enum_members: FxHashMap<ObjId, Vec<(String, ObjId)>>,
     /// every name of an Enum in definition order, aliases (a name whose value an earlier
@@ -881,48 +884,17 @@ pub struct Analyzer {
     /// members and Flag combinations ↔ their keys (`Key::Member`)
     pub member_key: FxHashMap<ObjId, intern::KeyId>,
     pub key_member: FxHashMap<intern::KeyId, ObjId>,
-    /// dicts with case-insensitive str keys (request headers): keys are lower-cased
-    pub ci_dicts: FxHashSet<ObjId>,
-    /// csv writers (their file and dialect), csv readers (their fieldnames)
-    pub csv_writers: FxHashMap<ObjId, crate::models::csvio::CsvWriter>,
-    pub csv_readers: FxHashMap<ObjId, Value>,
-    /// argparse parsers, their subparsers and groups
-    pub argp: FxHashMap<ObjId, crate::models::argparse::ArgObj>,
     /// singledispatch functions: (type, implementation) in registration order; the methods
     pub sdispatch: FxHashMap<ObjId, Vec<(Value, ObjId)>>,
     pub sdispatch_method: FxHashSet<ObjId>,
     pub sd_bypass: Option<ObjId>,
-    /// futures: the exception classes their call raised (empty: any)
-    pub future_excs: FxHashMap<ObjId, Vec<String>>,
     /// identity-hashed objects used as dict keys ↔ their keys
     pub identity_keys: RefCell<FxHashMap<ObjId, KeyId>>,
     /// builtin exception objects: their class names
     pub exc_objs: FxHashMap<ObjId, String>,
-    /// the StringIO objects `redirect_stdout` sends prints to (innermost last)
-    pub stdout_redirect: Vec<Value>,
-    /// ExitStack callbacks: (callable, positional, keyword arguments), in registration order
-    pub exit_callbacks: FxHashMap<ObjId, Vec<(Value, Vec<Value>, IndexMap<StrId, Value>)>>,
-    /// TestClient cookie jars (dicts with `set`)
-    pub cookie_jars: FxHashSet<ObjId>,
     /// entry parameters annotated with a TypedDict: the declared row's reads are still the
     /// input's schema (the parameter's source)
     pub td_param_src: FxHashMap<ObjId, crate::domain::SourceId>,
-    /// configparser parsers and their sections (models::configparser)
-    pub cfg_parsers: FxHashMap<ObjId, crate::models::configparser::CfgSpec>,
-    pub cfg_sections: FxHashMap<ObjId, (crate::models::configparser::CfgSpec, String)>,
-    /// compiled patterns (text, flags) and match objects (models::remodel)
-    pub re_patterns: FxHashMap<ObjId, (String, u32)>,
-    pub re_matches: FxHashMap<ObjId, crate::models::remodel::ReMatch>,
-    /// pathlib path objects' classes (models::pathtext)
-    pub path_classes: FxHashMap<ObjId, String>,
-    /// sqlite3 connections (their databases), cursors (their connection), Row dicts (columns)
-    pub sql_dbs: FxHashMap<ObjId, crate::models::sqlite::Db>,
-    pub sql_cursors: FxHashMap<ObjId, ObjId>,
-    pub sql_rows: FxHashMap<ObjId, Vec<String>>,
-    /// itertools.count / cycle / repeat(x) objects
-    pub infinites: FxHashMap<ObjId, crate::models::itertools::Infinite>,
-    /// partials' bound `**mapping`s of unknown keys
-    pub partial_star: FxHashMap<ObjId, Vec<Value>>,
     /// `@functools.wraps(fn)` wrappers: fn
     pub wrapped: FxHashMap<ObjId, Value>,
     /// classes decorated with functools.total_ordering
@@ -953,7 +925,7 @@ pub struct Analyzer {
     /// return / break / continue statements executed (a try body that ends with one did not raise)
     pub exit_count: usize,
     /// when the analysis started (see `DEADLINE_MS`)
-    pub started: std::time::Instant,
+    pub started: Clock,
     /// the hard deadline passed: function bodies stop, the calls they are in become unknown calls
     pub hard_cut: bool,
     cut_tick: u32,
@@ -970,26 +942,8 @@ pub struct Analyzer {
     pub row_check_requests: Vec<(String, u32, String)>,
     /// module index -> its path relative to the main file's directory (`rel_file`)
     pub rel_files: std::cell::RefCell<FxHashMap<u32, String>>,
-    /// pydantic model classes described (`pyd_class`), `TypeAdapter` types by index
-    pub pyd_classes: FxHashMap<ObjId, Rc<crate::models::pydantic::PClass>>,
-    pub pyd_adapters: Vec<crate::models::pydantic::Ann>,
-    pub pyd_depth: u32,
-    pub pyd_ann_depth: u32,
-    /// validation problems found per running validation; raised ValidationErrors' problems;
-    /// the field being validated
-    pub pyd_errs: Vec<Vec<crate::models::pydantic::PErr>>,
-    pub pyd_verrs: Vec<Vec<crate::models::pydantic::PErr>>,
-    pub pyd_field: Option<KeyId>,
-    /// a nested model being validated for this field of the enclosing one (its errors' loc
-    /// starts with it)
-    pub pyd_nest_prefix: Option<KeyId>,
-    /// the instance whose field is being validated (containers made for it are its own)
-    pub pyd_inst: Option<ObjId>,
     /// the last value of each call node, and whether a test is being narrowed (`eval`)
     pub call_memo: FxHashMap<usize, Value>,
-    /// numpy structured arrays (fields are Item keys); the exception a missing item raises
-    /// when every target is one (`ValueError`, not KeyError)
-    pub np_struct: FxHashSet<ObjId>,
     /// per generator object, the join of the states at its yields (a caller resumes from one
     /// of them when the body never ends)
     /// the states at the yields of a generator's running activation (copies, read per key
@@ -1012,57 +966,18 @@ pub struct Analyzer {
     /// ValidationError)
     pub item_exc_force: Option<&'static str>,
     pub narrow_depth: u32,
-    pub pyd_last_failed: bool,
-    /// pydantic instances: the fields their input surely / maybe gave (`model_fields_set`)
-    pub pyd_set: FxHashMap<ObjId, (KeySet, KeySet)>,
-    /// specialisations of generic models: their type variables' bindings
-    pub pyd_generic: FxHashMap<ObjId, Vec<(String, crate::models::pydantic::Ann)>>,
     /// a requirement-only entry run (`param F.x` schemas of a called function): no verdicts,
     /// row checks, facts or notes
     pub quiet: bool,
     /// no record-access verdicts (shapes still reported): the own run of a called function
     /// of a torch / numpy module
     pub quiet_records: bool,
-    /// FastAPI: routes, `include_router` edges (app, router, prefix), router prefixes, handlers
-    pub fa_routes: Vec<crate::models::fastapi::FaRoute>,
-    pub fa_includes: Vec<(ObjId, ObjId, String)>,
-    pub fa_prefix: FxHashMap<ObjId, String>,
-    pub fa_handlers: FxHashSet<ObjId>,
-    /// FastAPI hooks: (app, "exc" / "mw", exception class, function); requests a middleware's
-    /// call_next dispatches (route, request)
-    pub fa_hooks: Vec<(ObjId, String, Value, Option<ObjId>)>,
-    pub fa_pending: Vec<(usize, crate::models::fastapi::Req)>,
-    /// the status code of the last dispatched request; the injected `Response` objects of the
-    /// requests being dispatched
-    pub fa_status: Value,
-    pub fa_out_resp: Vec<Vec<ObjId>>,
-    /// per request being dispatched: the dependencies' values (each runs once)
-    /// the handler's return value from inside yield dependencies
-    pub fa_gen_ret: Option<Value>,
-    pub fa_dep_cache: Vec<FxHashMap<ObjId, Value>>,
-    /// `dependencies=[…]` of apps / routers (also given at include_router)
-    pub fa_app_deps: FxHashMap<ObjId, Vec<Value>>,
-    /// zip objects made with `strict=True`
-    pub zip_strict: FxHashSet<ObjId>,
-    /// dicts that are `collections.Counter`s
-    pub counters: FxHashSet<ObjId>,
-    /// `sorted(d.items())` of a closed dict whose keys are known literals (some maybe there):
-    /// the items in sorted order with their sureness, for `dict(...)` of the list
-    pub sorted_items: FxHashMap<ObjId, Rc<Vec<(KeyId, Value, bool)>>>,
-    /// ChainMaps: the maps they look through (the first takes the writes)
-    pub chainmaps: FxHashMap<ObjId, Vec<Value>>,
-    /// deques and their maxlen
-    pub deques: FxHashMap<ObjId, Option<i64>>,
-    /// the generated `UserDict` classes (their instances' keys are `self.data`'s)
-    pub userdict_classes: FxHashSet<ObjId>,
     /// per module: global names a function body mutates (`mutated_in_functions`)
     pub mutated_globals: std::cell::RefCell<FxHashMap<u32, FxHashSet<String>>>,
     /// locals of the callers of the running call (innermost last), for liveness
     pub env_stack: Vec<IndexMap<StrId, Value>>,
     /// `@name.setter` functions by (defining class, attribute)
     pub prop_setters: FxHashMap<(ObjId, KeyId), ObjId>,
-    /// `defaultdict(factory)`: the factory, called once per inserted key
-    pub dd_factories: FxHashMap<ObjId, Value>,
     /// `self.f = p` in `__init__` with `p` a parameter: the classes of the arguments seen for
     /// `p` at construction sites, by (class, field) — the field's class when there is one
     pub ctor_field_classes: FxHashMap<(ObjId, String), FxHashSet<ObjId>>,
@@ -1073,7 +988,6 @@ pub struct Analyzer {
     /// collect `facts` (the `--facts` mode)
     pub facts_on: bool,
     pub facts: IndexMap<(u32, StrId), Fact>,
-    pub t0: std::time::Instant,
 }
 
 /// `ROWAN_DEBUG` as a number (0 when unset), read once.
@@ -1100,214 +1014,11 @@ impl Analyzer {
         frontend::set_main(idx);
         let mut an = Analyzer {
             filename: filename.to_string(),
-            tab_count: FxHashMap::default(),
-            tab_runs: 0,
-            many_receivers: None,
-            no_unroll_next: FxHashSet::default(),
-            raise_last: FxHashMap::default(),
-            classes_by_attr: Default::default(),
-            duck_seen: Default::default(),
-            duck_parts: Default::default(),
-            fresh_init: FxHashSet::default(),
-            comp_known: Vec::new(),
-            recent_stack: Vec::new(),
             search_paths: if follow_imports { search_paths } else { Vec::new() },
-            follow: Vec::new(),
-            site_paths: Vec::new(),
             analyse_entry_points,
-            objects: vec![Obj {
-                id: 0,
-                kind: Kind::Unknown,
-                site: "".into(),
-                ctx: "".into(),
-                single: true,
-                label: "<none>".into(),
-                payload: Payload::None,
-                literal_len: None,
-            known_prefix: None,
-                iter_elem: false,
-                derived_from: None,
-                copied_from: None,
-                depth: 0,
-                iterator: false,
-            }],
-            obj_index: FxHashMap::default(),
-            verdicts: Vec::new(),
-            verdict_keys: FxHashSet::default(),
-            notes: Vec::new(),
-            notes_set: FxHashSet::default(),
-            summaries: IndexMap::new(),
-            models: Registry::new(),
-            frames: Vec::new(),
-            active: FxHashMap::default(),
-            active_by_func: FxHashMap::default(),
-            rec_table: FxHashMap::default(),
-            rec_hit: FxHashSet::default(),
-            rec_entry: FxHashMap::default(),
-            rec_widened: FxHashSet::default(),
-            loop_stack: Vec::new(),
-            finally_stack: Vec::new(),
-            guards: Vec::new(),
-            may_raise: Vec::new(),
-            raise_states: Vec::new(),
-            try_marks: Vec::new(),
-            raise_values: Vec::new(),
-            cur_exc: None,
-            handling: Vec::new(),
-            handling_values: Vec::new(),
-            catching_depth: 0,
-            gen_eff: FxHashMap::default(),
-            gen_pos_states: FxHashMap::default(),
-            gen_pos_conflict: Default::default(),
-            lazy_src: FxHashMap::default(),
-            alloc_extra: None,
-            esc_cls: Vec::new(),
-            caught_load: false,
-            cmp_right: None,
-            comp_cells: Vec::new(),
-            key_alias: None,
-            cm_hook: None,
-            cm_frames: Vec::new(),
-            attr_mirrors: FxHashMap::default(),
-            origins: FxHashMap::default(),
-            symbols: FxHashMap::default(),
-            symbol_scope: FxHashMap::default(),
-            entry_scope: None,
-            enum_members: FxHashMap::default(),
-            enum_aliases: FxHashMap::default(),
-            enum_kind: FxHashMap::default(),
-            member_key: FxHashMap::default(),
-            key_member: FxHashMap::default(),
-            ci_dicts: FxHashSet::default(),
-            csv_writers: FxHashMap::default(),
-            csv_readers: FxHashMap::default(),
-            argp: FxHashMap::default(),
-            sdispatch: FxHashMap::default(),
-            sdispatch_method: FxHashSet::default(),
-            sd_bypass: None,
-            future_excs: FxHashMap::default(),
-            identity_keys: RefCell::new(FxHashMap::default()),
-            exc_objs: FxHashMap::default(),
-            stdout_redirect: Vec::new(),
-            exit_callbacks: FxHashMap::default(),
-            cookie_jars: FxHashSet::default(),
-            td_param_src: FxHashMap::default(),
-            cfg_parsers: FxHashMap::default(),
-            cfg_sections: FxHashMap::default(),
-            re_patterns: FxHashMap::default(),
-            re_matches: FxHashMap::default(),
-            path_classes: FxHashMap::default(),
-            sql_dbs: FxHashMap::default(),
-            sql_cursors: FxHashMap::default(),
-            sql_rows: FxHashMap::default(),
-            infinites: FxHashMap::default(),
-            partial_star: FxHashMap::default(),
-            wrapped: FxHashMap::default(),
-            total_ordering: FxHashSet::default(),
-            flag_reqs: Vec::new(),
-            identity_objs: RefCell::new(FxHashMap::default()),
-            bypass_setattr: false,
-            cond_depth: 0,
-            branch_depth: 0,
-            call_chain: Vec::new(),
-            analysed_funcs: FxHashSet::default(),
-            modules: IndexMap::new(),
-            exh_log: None,
-            final_state: None,
-            user_classes: Vec::new(),
-            cls_slots: FxHashMap::default(),
-            site_clones: FxHashMap::default(),
-            work: 0,
-            walked: std::cell::Cell::new(0),
-            exit_count: 0,
-            started: std::time::Instant::now(),
-            hard_cut: false,
-            cut_tick: 0,
-            call_cache: FxHashMap::default(),
-            cache_count: FxHashMap::default(),
-            entry_instances: FxHashMap::default(),
-            torch_on: false,
-            torch_real: false,
-            model_depth: 0,
-            fa_body_validation: false,
-            model_epoch: 0,
-            model_born: FxHashMap::default(),
-            torch_modules: FxHashSet::default(),
-            entry_run: None,
-            entry_done: FxHashSet::default(),
-            budget_out: FxHashSet::default(),
-            t_var_names: FxHashMap::default(),
-            t_concrete_closures: FxHashSet::default(),
-            t_closure_states: FxHashMap::default(),
-            t_funcs_by_qual: FxHashMap::default(),
-            t_row_values: FxHashMap::default(),
-            t_fact_write: false,
-            t_quiet: false,
-            t_getattr_plain: false,
-            t_skip_user: false,
-            t_called_attr: 0,
-            verdict_guarded: false,
-            recv_scalar: false,
-            shape_reqs: Vec::new(),
-            shape_errors: Vec::new(),
-            fresh_in_progress: FxHashSet::default(),
-            main_module: 0,
-            series: 0,
+            objects: vec![Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, literal_len: None, known_prefix: None, iter_elem: false, derived_from: None, copied_from: None, depth: 0, iterator: false }],
             none_v: Value::lit(intern::key_none()),
-            row_check_requests: Vec::new(),
-            rel_files: Default::default(),
-            pyd_classes: FxHashMap::default(),
-            pyd_adapters: Vec::new(),
-            pyd_depth: 0,
-            pyd_ann_depth: 0,
-            pyd_errs: Vec::new(),
-            pyd_verrs: Vec::new(),
-            pyd_field: None,
-            pyd_nest_prefix: None,
-            pyd_inst: None,
-            call_memo: FxHashMap::default(),
-            np_struct: FxHashSet::default(),
-            gen_yield_states: FxHashMap::default(),
-            copy_root: FxHashMap::default(),
-            raise_records: 0,
-            raise_cls: Vec::new(),
-            cur_exc_cls: None,
-            exc_node: None,
-            item_exc: None,
-            item_exc_force: None,
-            narrow_depth: 0,
-            pyd_last_failed: false,
-            pyd_set: FxHashMap::default(),
-            pyd_generic: FxHashMap::default(),
-            quiet: false,
-            quiet_records: false,
-            fa_routes: Vec::new(),
-            fa_includes: Vec::new(),
-            fa_prefix: FxHashMap::default(),
-            fa_handlers: FxHashSet::default(),
-            fa_hooks: Vec::new(),
-            fa_pending: Vec::new(),
-            fa_status: Value::new(),
-            fa_out_resp: Vec::new(),
-            fa_gen_ret: None,
-            fa_dep_cache: Vec::new(),
-            fa_app_deps: FxHashMap::default(),
-            zip_strict: FxHashSet::default(),
-            counters: FxHashSet::default(),
-            sorted_items: FxHashMap::default(),
-            chainmaps: FxHashMap::default(),
-            deques: FxHashMap::default(),
-            userdict_classes: FxHashSet::default(),
-            mutated_globals: Default::default(),
-            env_stack: Vec::new(),
-            prop_setters: FxHashMap::default(),
-            dd_factories: FxHashMap::default(),
-            ctor_field_classes: FxHashMap::default(),
-            raise_stack: Vec::new(),
-            row_checks: Vec::new(),
-            facts_on: false,
-            facts: IndexMap::new(),
-            t0: std::time::Instant::now(),
+            ..Default::default()
         };
         an.main_module = an.make_module("__main__", Some(filename), idx, tree);
         an.series = an.alloc_global(Kind::Series, "builtin:Series", "Series", Payload::None);
@@ -1400,7 +1111,7 @@ impl Analyzer {
         self.kind(oid).is_record_like()
     }
     pub fn now(&self) -> f64 {
-        self.t0.elapsed().as_secs_f64()
+        self.started.elapsed().as_secs_f64()
     }
 
     // ------------------------------------------------------------ allocation
@@ -1974,7 +1685,7 @@ impl Analyzer {
             // inside, in terms of their own parameters)
             // a FastAPI handler: called by the framework with any request (also when the
             // program's own TestClient calls it), in any module
-            let handler = self.fa_handlers.contains(&oid);
+            let handler = self.m.fa_handlers.contains(&oid);
             // a function the program calls: a requirement-only run with open parameters gives
             // its own input contract (`param F.x` schemas)
             let refused = self.budget_out.contains(&oid);
@@ -2003,13 +1714,13 @@ impl Analyzer {
                 let fake = Node::synthetic(mi.idx, fi.node.node().line);
                 let saved_entry = self.entry_run.replace(oid);
                 if self.fa_entry_through_middleware(oid, &mut st, &fake).is_none() {
-                    self.fa_dep_cache.push(FxHashMap::default());
-                    if let Some(idx) = self.fa_routes.iter().position(|r| r.func == Some(oid)) {
+                    self.m.fa_dep_cache.push(FxHashMap::default());
+                    if let Some(idx) = self.m.fa_routes.iter().position(|r| r.func == Some(oid)) {
                         self.fa_route_deps(idx, None, &mut st, &fake);
                     }
                     let gens = self.fa_yield_deps(oid, &mut st);
                     self.fa_run_handler(oid, gens, None, true, &mut st, &fake);
-                    self.fa_dep_cache.pop();
+                    self.m.fa_dep_cache.pop();
                 }
                 self.entry_scope = None;
                 self.entry_run = saved_entry;
@@ -2683,33 +2394,33 @@ impl Analyzer {
             Payload::Locidx(_, f) => work.push(*f),
             _ => {}
         }
-        if let Some(ms) = self.chainmaps.get(&o) {
+        if let Some(ms) = self.m.chainmaps.get(&o) {
             ms.iter().for_each(|m| push_value(m, work));
         }
-        if let Some(v) = self.dd_factories.get(&o) {
+        if let Some(v) = self.m.dd_factories.get(&o) {
             push_value(v, work);
         }
-        if let Some(v) = self.csv_readers.get(&o) {
+        if let Some(v) = self.m.csv_readers.get(&o) {
             push_value(v, work);
         }
         if let Some(v) = self.wrapped.get(&o) {
             push_value(v, work);
         }
-        if let Some(vs) = self.partial_star.get(&o) {
+        if let Some(vs) = self.m.partial_star.get(&o) {
             vs.iter().for_each(|v| push_value(v, work));
         }
         if let Some(srcs) = self.lazy_src.get(&o) {
             work.extend(srcs.iter().map(|(s, _)| *s));
         }
-        for m in [&self.attr_mirrors, &self.entry_instances, &self.copy_root, &self.sql_cursors] {
+        for m in [&self.attr_mirrors, &self.entry_instances, &self.copy_root, &self.m.sql_cursors] {
             if let Some(x) = m.get(&o) {
                 work.push(*x);
             }
         }
-        if let Some(items) = self.sorted_items.get(&o) {
+        if let Some(items) = self.m.sorted_items.get(&o) {
             items.iter().for_each(|(_, v, _)| push_value(v, work));
         }
-        if let Some(cbs) = self.exit_callbacks.get(&o) {
+        if let Some(cbs) = self.m.exit_callbacks.get(&o) {
             for (f, args, kw) in cbs {
                 push_value(f, work);
                 args.iter().for_each(|a| push_value(a, work));
@@ -2722,7 +2433,7 @@ impl Analyzer {
                 work.push(*f);
             }
         }
-        if let Some(ds) = self.fa_app_deps.get(&o) {
+        if let Some(ds) = self.m.fa_app_deps.get(&o) {
             ds.iter().for_each(|v| push_value(v, work));
         }
     }
@@ -2738,19 +2449,19 @@ impl Analyzer {
             }
         }
         let st = State::new();
-        for o in self.chainmaps.keys().chain(self.dd_factories.keys()).chain(self.csv_readers.keys()).chain(self.wrapped.keys()).chain(self.partial_star.keys()).chain(self.lazy_src.keys()).chain(self.attr_mirrors.keys()).chain(self.entry_instances.keys()).chain(self.copy_root.keys()).chain(self.sql_cursors.keys()).chain(self.sorted_items.keys()).chain(self.exit_callbacks.keys()).chain(self.sdispatch.keys()).chain(self.fa_app_deps.keys()) {
+        for o in self.m.chainmaps.keys().chain(self.m.dd_factories.keys()).chain(self.m.csv_readers.keys()).chain(self.wrapped.keys()).chain(self.m.partial_star.keys()).chain(self.lazy_src.keys()).chain(self.attr_mirrors.keys()).chain(self.entry_instances.keys()).chain(self.copy_root.keys()).chain(self.m.sql_cursors.keys()).chain(self.m.sorted_items.keys()).chain(self.m.exit_callbacks.keys()).chain(self.sdispatch.keys()).chain(self.m.fa_app_deps.keys()) {
             // (the side-table edges only: the key itself may be dead)
             let mut w = Vec::new();
             self.obj_edges(*o, &st, &mut w);
             work.extend(w);
         }
-        for v in self.cur_exc.iter().chain(self.raise_values.iter().flatten()).chain(self.handling_values.iter()).chain(self.cmp_right.iter()).chain(self.stdout_redirect.iter()).chain(std::iter::once(&self.fa_status)).chain(self.fa_gen_ret.iter()) {
+        for v in self.cur_exc.iter().chain(self.raise_values.iter().flatten()).chain(self.handling_values.iter()).chain(self.cmp_right.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
             push_value(v, work);
         }
-        for c in &self.fa_dep_cache {
+        for c in &self.m.fa_dep_cache {
             c.values().for_each(|v| push_value(v, work));
         }
-        for (_, _, v, f) in &self.fa_hooks {
+        for (_, _, v, f) in &self.m.fa_hooks {
             push_value(v, work);
             work.extend(f.iter().copied());
         }
@@ -2766,7 +2477,7 @@ impl Analyzer {
         for rs in &self.recent_stack {
             work.extend(rs.iter().map(|(o, _, _, _)| *o));
         }
-        for rs in &self.fa_out_resp {
+        for rs in &self.m.fa_out_resp {
             work.extend(rs.iter().copied());
         }
         // (the value unknown code stores: values anywhere may hold it)
@@ -2865,7 +2576,7 @@ impl Analyzer {
             let mut ns_used = Ns::Item;
             for oid in v.pts.iter() {
                 // a UserDict's keys are those of its `data`
-                if self.kind(oid) == Kind::Instance && self.instance_class(oid).map(|c| self.mro(c).iter().any(|m| self.userdict_classes.contains(m))).unwrap_or(false) {
+                if self.kind(oid) == Kind::Instance && self.instance_class(oid).map(|c| self.mro(c).iter().any(|m| self.m.userdict_classes.contains(m))).unwrap_or(false) {
                     let d = state.slot(oid, Ns::Attr, key_str_lit("data"));
                     if let Some(dd) = d.single().filter(|x| self.kind(*x) == Kind::Dict) {
                         ns_used = Ns::Item;
@@ -2883,7 +2594,7 @@ impl Analyzer {
                 // (a numpy structured array is keyed by its fields)
                 // (an instance of a dict subclass: its items)
                 let dict_sub = self.kind(oid) == Kind::Instance && self.instance_class(oid).is_some_and(|c| self.mro(c).iter().any(|x| self.class_info_opt(*x).map(|ci| ci.dict_base).unwrap_or(false)));
-                let ns = if matches!(self.kind(oid), Kind::Instance | Kind::Namespace) && !self.np_struct.contains(&oid) && !dict_sub { Ns::Attr } else { Ns::Item };
+                let ns = if matches!(self.kind(oid), Kind::Instance | Kind::Namespace) && !self.m.np_struct.contains(&oid) && !dict_sub { Ns::Attr } else { Ns::Item };
                 ns_used = ns;
                 rows.push(state.row(oid, ns));
             }

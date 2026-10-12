@@ -86,7 +86,7 @@ impl Analyzer {
         if !matches!(self.kind(o), Kind::Unknown) {
             return None;
         }
-        if let Some(sy) = self.t_var_names.get(&o) {
+        if let Some(sy) = self.m.t_var_names.get(&o) {
             return Some(*sy);
         }
         // the result of an unknown call that no variable names: nothing to name its dims by
@@ -396,7 +396,7 @@ impl Analyzer {
             let mut q = self.func_info(scope).qualname.clone();
             while let Some(i) = q.rfind('.') {
                 q.truncate(i);
-                if let Some(fs) = self.t_funcs_by_qual.get(&q) {
+                if let Some(fs) = self.m.t_funcs_by_qual.get(&q) {
                     ctx.extra.extend(fs.iter().copied());
                 }
             }
@@ -455,19 +455,19 @@ impl Analyzer {
     pub fn t_require_note(&mut self, node: &Node, text: String, cons: Option<(Cons, sh::PrintCtx)>) {
         let (chain, entry) = self.t_note_ctx();
         let n = ShapeNote { line: node.line, chain, entry, text, cons };
-        if !self.shape_reqs.iter().any(|x| x.line == n.line && x.chain == n.chain && x.entry == n.entry && x.text == n.text) {
-            self.shape_reqs.push(n);
+        if !self.m.shape_reqs.iter().any(|x| x.line == n.line && x.chain == n.chain && x.entry == n.entry && x.text == n.text) {
+            self.m.shape_reqs.push(n);
         }
     }
 
     pub fn t_error(&mut self, node: &Node, msg: String, st: &mut State) {
-        if self.t_quiet {
+        if self.m.t_quiet {
             return;
         }
         let (chain, entry) = self.t_note_ctx();
         let n = ShapeNote { line: node.line, chain, entry, text: msg, cons: None };
-        if !self.shape_errors.iter().any(|x| x.line == n.line && x.chain == n.chain && x.text == n.text) {
-            self.shape_errors.push(n);
+        if !self.m.shape_errors.iter().any(|x| x.line == n.line && x.chain == n.chain && x.text == n.text) {
+            self.m.shape_errors.push(n);
         }
         self.raise_here("RuntimeError", st);
     }
@@ -475,7 +475,7 @@ impl Analyzer {
     /// Check a condition: true → fine; false → shape error (the op raises, the path ends);
     /// undecided → a requirement here, a fact from here on. Returns false on an error.
     pub fn t_require(&mut self, c: Cons, node: &Node, st: &mut State, msg: impl FnOnce() -> String) -> bool {
-        if self.t_quiet {
+        if self.m.t_quiet {
             return true;
         }
         match sh::decide(&c, &st.tf) {
@@ -507,7 +507,7 @@ impl Analyzer {
     /// The rank of `s` must be in `rel`. Unknown rank: a requirement on the symbol whose
     /// shape is the rest (`x.dim() …`), when expressible.
     pub fn t_require_rank(&mut self, s: &Shape, rel: RankRel, node: &Node, st: &mut State, what: &str) -> bool {
-        if self.t_quiet {
+        if self.m.t_quiet {
             return true;
         }
         let rel_text = |r: &RankRel| match r {
@@ -1007,7 +1007,7 @@ impl Analyzer {
 
     /// Attribute of a tensor (or of an unknown used as one); None: not ours.
     pub fn t_getattr(&mut self, obj: &Value, name: &str, node: &Node, st: &mut State) -> Option<Value> {
-        if self.t_getattr_plain {
+        if self.m.t_getattr_plain {
             return None;
         }
         // `torch.finfo(dt).min` & co.: numbers
@@ -1050,7 +1050,7 @@ impl Analyzer {
             return if tensor { Some(Value::data(&format!("L{}", node.line))) } else { None };
         }
         // a method name read without a call on an unknown: a plain attribute (`args.dim`)
-        if !tensor && !TENSOR_ATTRS.contains(&name) && self.t_called_attr != node.addr {
+        if !tensor && !TENSOR_ATTRS.contains(&name) && self.m.t_called_attr != node.addr {
             return None;
         }
         // an unknown that may be a str / list / dict: names those have keep their meaning
@@ -1067,13 +1067,13 @@ impl Analyzer {
         }
         // an unknown may be an instance of a user class defining this name, or a tensor:
         // both readings
-        if unknown_tensorish && !self.t_skip_user && self.user_classes.iter().any(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, key_str_lit(name)))) {
-            self.t_getattr_plain = true;
+        if unknown_tensorish && !self.m.t_skip_user && self.user_classes.iter().any(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, key_str_lit(name)))) {
+            self.m.t_getattr_plain = true;
             let plain = self.load_attr(obj, name, node, st, false);
-            self.t_getattr_plain = false;
-            self.t_skip_user = true;
+            self.m.t_getattr_plain = false;
+            self.m.t_skip_user = true;
             let tens = self.t_getattr(obj, name, node, st);
-            self.t_skip_user = false;
+            self.m.t_skip_user = false;
             return Some(match tens {
                 Some(t) => plain.join(&t),
                 None => plain,
@@ -3119,9 +3119,9 @@ impl Analyzer {
                         // this input, so nothing is an error, a requirement or a fact)
                         let e = self.t_list_elem(o, st);
                         let mut quiet_st = st.copy();
-                        let saved = std::mem::replace(&mut self.t_quiet, true);
+                        let saved = std::mem::replace(&mut self.m.t_quiet, true);
                         let once = self.t_call_module(&e, vec![cur.clone()], node, &mut quiet_st);
-                        self.t_quiet = saved;
+                        self.m.t_quiet = saved;
                         let a = self.t_shape(&cur, st);
                         let b = self.t_shape(&once, st);
                         match (a, b) {
@@ -4350,11 +4350,11 @@ impl Analyzer {
             return;
         }
         let o = v.pts.first().unwrap();
-        if self.kind(o) != Kind::Unknown || !self.origins.contains_key(&o) || self.t_var_names.contains_key(&o) {
+        if self.kind(o) != Kind::Unknown || !self.origins.contains_key(&o) || self.m.t_var_names.contains_key(&o) {
             return;
         }
         let scope = self.frames.iter().rev().find_map(|fr| fr.func).unwrap_or(0);
-        self.t_var_names.insert(o, sh::sym(scope, &intern::str_get(name)));
+        self.m.t_var_names.insert(o, sh::sym(scope, &intern::str_get(name)));
     }
 }
 
@@ -4677,7 +4677,7 @@ fn np_structured(an: &mut Analyzer, st: &mut State, c: &Call, q: &str) -> Option
     st.set_slot(did, Ns::Attr, nk, names_v, true);
     set(st, "dtype", Value::obj(did));
     st.set_row(oid, Ns::Attr, arow);
-    an.np_struct.insert(oid);
+    an.m.np_struct.insert(oid);
     Some(Value::obj(oid))
 }
 

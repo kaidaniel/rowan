@@ -172,7 +172,7 @@ impl Analyzer {
     /// has (or may have) is that key.
     /// A mixed-in Enum member (`StrEnum`, `IntEnum`) and its value are one key too.
     pub fn canon_key(&self, oid: u32, ns: Ns, k: KeyId, state: &State) -> KeyId {
-        if !self.ci_dicts.is_empty() && self.ci_dicts.contains(&oid) {
+        if !self.m.ci_dicts.is_empty() && self.m.ci_dicts.contains(&oid) {
             if let Some(s) = intern::key_as_str(k) {
                 return key_str_lit(&s.to_lowercase());
             }
@@ -225,7 +225,7 @@ impl Analyzer {
             let c = self.instance_class(o)?;
             let ci = self.class_info_opt(c)?;
             // a frozen pydantic model hashes by its fields too
-            let pyd_fields: Option<Vec<(String, Option<&'static ast::Expr>)>> = self.pyd_classes.get(&c).filter(|p| p.frozen).map(|p| p.fields.iter().map(|f| (f.name.clone(), None)).collect());
+            let pyd_fields: Option<Vec<(String, Option<&'static ast::Expr>)>> = self.m.pyd_classes.get(&c).filter(|p| p.frozen).map(|p| p.fields.iter().map(|f| (f.name.clone(), None)).collect());
             if (!ci.dc_frozen.get() && pyd_fields.is_none()) || self.class_lookup(c, "__hash__").is_some() || self.class_lookup(c, "__eq__").is_some() {
                 return None;
             }
@@ -595,7 +595,7 @@ impl Analyzer {
             return self.per_receiver(obj, state, &mut |an, o, st| an.load_item(o, ns, key, node, st, report));
         }
         // a numpy structured array's missing field raises ValueError
-        let exc = if ns == Ns::Item && !obj.pts.is_empty() && !self.np_struct.is_empty() && obj.pts.iter().all(|o| self.np_struct.contains(&o)) { Some("ValueError") } else { None };
+        let exc = if ns == Ns::Item && !obj.pts.is_empty() && !self.m.np_struct.is_empty() && obj.pts.iter().all(|o| self.m.np_struct.contains(&o)) { Some("ValueError") } else { None };
         let exc = if ns == Ns::Item { self.item_exc_force.or(exc) } else { exc };
         let saved = std::mem::replace(&mut self.item_exc, exc);
         let scalar = self.may_be_scalar(obj);
@@ -692,7 +692,7 @@ impl Analyzer {
                     let mut r = row.clone();
                     for k in ks.iter() {
                         if !r.definite.contains(k) {
-                            let dflt = match self.dd_factories.get(&oid).cloned() {
+                            let dflt = match self.m.dd_factories.get(&oid).cloned() {
                                 Some(f) => self.call_value(&f, node, None, state, Some(vec![])),
                                 None => state.slot(oid, Ns::Item, STAR),
                             };
@@ -721,7 +721,7 @@ impl Analyzer {
                     }
                 } else {
                     // an unknown key: some key gets the factory's value
-                    if let Some(f) = self.dd_factories.get(&oid).cloned() {
+                    if let Some(f) = self.m.dd_factories.get(&oid).cloned() {
                         let dflt = self.call_value(&f, node, None, state, Some(vec![]));
                         state.set_slot(oid, ns, STAR, Value::with_kv(dflt.pts, DATA), false);
                     }
@@ -808,14 +808,14 @@ impl Analyzer {
                     }
                 }
                 // an sqlite3.Row indexed by position
-                Kind::Dict if self.sql_rows.contains_key(&oid) && key.kv.as_lit().and_then(intern::key_as_int).is_some() => match crate::models::sqlite::row_index(self, state, oid, key) {
+                Kind::Dict if self.m.sql_rows.contains_key(&oid) && key.kv.as_lit().and_then(intern::key_as_int).is_some() => match crate::models::sqlite::row_index(self, state, oid, key) {
                     Some(v) => parts.push(v),
                     None => {
                         self.raise_here("IndexError", state);
                     }
                 },
                 // a regex match: `m[g]` is its group
-                Kind::Namespace if self.re_matches.contains_key(&oid) => match crate::models::remodel::match_item(self, oid, key) {
+                Kind::Namespace if self.m.re_matches.contains_key(&oid) => match crate::models::remodel::match_item(self, oid, key) {
                     Some(v) => parts.push(v),
                     None => parts.push(line_data.clone()),
                 },
@@ -1207,14 +1207,14 @@ impl Analyzer {
                     }
                     continue;
                 }
-                Kind::Dict if self.chainmaps.contains_key(&oid) => {
+                Kind::Dict if self.m.chainmaps.contains_key(&oid) => {
                     // a ChainMap: the write lands in its first map too
-                    let first = self.chainmaps[&oid].first().cloned().unwrap_or_default();
+                    let first = self.m.chainmaps[&oid].first().cloned().unwrap_or_default();
                     for m in self.record_objects(&first) {
                         let s1 = strong && first.pts.len() == 1 && self.strongable(m);
                         self.store_key(m, Ns::Item, &key.kv, v, s1, node, state);
                     }
-                    if self.chainmaps[&oid].len() > 1 {
+                    if self.m.chainmaps[&oid].len() > 1 {
                         self.refresh_chainmap(oid, state);
                     } else {
                         let s1 = strong && self.strongable(oid);
@@ -1350,7 +1350,7 @@ impl Analyzer {
 
     /// A ChainMap's merged keys and values, rebuilt from its maps (the first one wins).
     pub fn refresh_chainmap(&mut self, oid: u32, state: &mut State) {
-        let maps = self.chainmaps.get(&oid).cloned().unwrap_or_default();
+        let maps = self.m.chainmaps.get(&oid).cloned().unwrap_or_default();
         state.set_row(oid, Ns::Item, Row::new());
         state.drop_obj_ns(oid, Ns::Item);
         for sa in maps.iter().rev() {
@@ -1384,8 +1384,8 @@ impl Analyzer {
             }
             // a ChainMap: the first map loses the key (KeyError when only a later map has it);
             // the view is the maps' again
-            if kind == Kind::Dict && ns == Ns::Item && self.chainmaps.contains_key(&oid) {
-                let first = self.chainmaps[&oid].first().cloned().unwrap_or_default();
+            if kind == Kind::Dict && ns == Ns::Item && self.m.chainmaps.contains_key(&oid) {
+                let first = self.m.chainmaps[&oid].first().cloned().unwrap_or_default();
                 self.delete_item(&first, ns, key, node, state, report);
                 self.refresh_chainmap(oid, state);
                 continue;
@@ -1533,7 +1533,7 @@ impl Analyzer {
                                 row = row.store(kk, true);
                                 state.set_slot(did, Ns::Item, kk, v.clone(), true);
                             }
-                            if let Some(st2) = self.partial_star.get(&oid).cloned() {
+                            if let Some(st2) = self.m.partial_star.get(&oid).cloned() {
                                 for sk in st2 {
                                     self.copy_into(did, Ns::Item, &sk, state, false, &KeySet::new());
                                     row = state.row(did, Ns::Item).join(&row);
@@ -1569,8 +1569,8 @@ impl Analyzer {
                     }
                 }
                 // a csv reader's fieldnames / line_num
-                Kind::List | Kind::View if self.csv_readers.contains_key(&oid) && matches!(name, "fieldnames" | "line_num" | "dialect" | "restkey" | "restval") => match name {
-                    "fieldnames" => self.csv_readers[&oid].clone(),
+                Kind::List | Kind::View if self.m.csv_readers.contains_key(&oid) && matches!(name, "fieldnames" | "line_num" | "dialect" | "restkey" | "restval") => match name {
+                    "fieldnames" => self.m.csv_readers[&oid].clone(),
                     _ => Value::data(name),
                 },
                 Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("pydverr.")) => {
@@ -1678,24 +1678,24 @@ impl Analyzer {
                     }
                 }
                 Kind::Dict if crate::models::pandas::is_series_obj(self, oid) => crate::models::pandas::series_getattr(self, oid, name, node, state),
-                Kind::Dict if self.cfg_parsers.contains_key(&oid) && crate::models::configparser::PARSER_METHODS.contains(&name) => self.method_value(&format!("cfgparser.{}", name), &Value::obj(oid)),
-                Kind::Dict if self.cfg_sections.contains_key(&oid) && crate::models::configparser::SECTION_METHODS.contains(&name) => self.method_value(&format!("cfgsection.{}", name), &Value::obj(oid)),
-                Kind::Dict if self.cfg_sections.contains_key(&oid) && name == "name" => Value::lit_str(&self.cfg_sections[&oid].1),
-                Kind::Dict if self.counters.contains(&oid) && crate::models::counter::COUNTER_METHODS.contains(&name) => self.method_value(&format!("counter.{}", name), &Value::obj(oid)),
-                Kind::Dict if self.chainmaps.contains_key(&oid) && matches!(name, "maps" | "parents") => {
+                Kind::Dict if self.m.cfg_parsers.contains_key(&oid) && crate::models::configparser::PARSER_METHODS.contains(&name) => self.method_value(&format!("cfgparser.{}", name), &Value::obj(oid)),
+                Kind::Dict if self.m.cfg_sections.contains_key(&oid) && crate::models::configparser::SECTION_METHODS.contains(&name) => self.method_value(&format!("cfgsection.{}", name), &Value::obj(oid)),
+                Kind::Dict if self.m.cfg_sections.contains_key(&oid) && name == "name" => Value::lit_str(&self.m.cfg_sections[&oid].1),
+                Kind::Dict if self.m.counters.contains(&oid) && crate::models::counter::COUNTER_METHODS.contains(&name) => self.method_value(&format!("counter.{}", name), &Value::obj(oid)),
+                Kind::Dict if self.m.chainmaps.contains_key(&oid) && matches!(name, "maps" | "parents") => {
                     let c = super::Call { qual: format!("chainmap.{}", name), recv: Some(Value::obj(oid)), args: vec![], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
                     match self.models.lookup(&c.qual) {
                         Some(m) => m(self, state, &c),
                         None => Value::data("chainmap"),
                     }
                 }
-                Kind::Dict if self.chainmaps.contains_key(&oid) && name == "new_child" => self.method_value("chainmap.new_child", &Value::obj(oid)),
+                Kind::Dict if self.m.chainmaps.contains_key(&oid) && name == "new_child" => self.method_value("chainmap.new_child", &Value::obj(oid)),
                 // a TestClient cookie jar's set / delete
-                Kind::Dict if matches!(name, "set" | "delete") && self.cookie_jars.contains(&oid) => self.method_value(&format!("fastapi.cookies.{}", name), &Value::obj(oid)),
+                Kind::Dict if matches!(name, "set" | "delete") && self.m.cookie_jars.contains(&oid) => self.method_value(&format!("fastapi.cookies.{}", name), &Value::obj(oid)),
                 Kind::Dict => self.method_value(&format!("dict.{}", name), &Value::obj(oid)),
-                Kind::List if self.deques.contains_key(&oid) && crate::models::counter::DEQUE_METHODS.contains(&name) => {
+                Kind::List if self.m.deques.contains_key(&oid) && crate::models::counter::DEQUE_METHODS.contains(&name) => {
                     if name == "maxlen" {
-                        match self.deques[&oid] {
+                        match self.m.deques[&oid] {
                             Some(m) => Value::lit(intern::key_int(m)),
                             None => self.none_v.clone(),
                         }
@@ -2599,9 +2599,9 @@ impl Analyzer {
                             continue;
                         }
                         if pc.fields.iter().any(|f| f.name == name) {
-                            if let Some((sure, maybe)) = self.pyd_set.get(&oid).cloned() {
+                            if let Some((sure, maybe)) = self.m.pyd_set.get(&oid).cloned() {
                                 let ns = if strong { sure.insert(nk) } else { sure };
-                                self.pyd_set.insert(oid, (ns, maybe.insert(nk)));
+                                self.m.pyd_set.insert(oid, (ns, maybe.insert(nk)));
                             }
                         }
                         match self.pyd_assign(oid, cls, name, v, node, state) {
