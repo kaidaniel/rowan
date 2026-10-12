@@ -330,3 +330,14 @@ pub fn text_at(n: &Node) -> String {
         m.source.get(s..e).map(|t| t.to_string()).unwrap_or_default()
     })
 }
+
+/// A column in UTF-16 code units (what editors count) from a byte column on a 1-based line.
+pub fn utf16_col(module: u32, line: u32, col: u32) -> u32 {
+    REG.with(|r| {
+        let r = r.borrow();
+        let Some(m) = r.modules.get(module as usize) else { return col };
+        let Some(l) = ruff_source_file::OneIndexed::new(line as usize) else { return col };
+        let s = m.lines.line_start(l, &m.source).to_usize();
+        m.source.get(s..s + col as usize).map(|t| t.encode_utf16().count() as u32).unwrap_or(col)
+    })
+}

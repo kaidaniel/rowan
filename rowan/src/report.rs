@@ -4,7 +4,7 @@
 use indexmap::IndexMap;
 use serde_json::{json, Value as J};
 
-use crate::domain::{source_is_data, source_label, KeyVal, Ns, ObjId, Row, Tier, Value};
+use crate::domain::{source_is_data, source_label, KeyVal, Ns, ObjId, Row, SourceId, Tier, Value};
 use crate::intern::{KeyId, STAR};
 use crate::state::State;
 use crate::intern::{self, key_repr};
@@ -325,6 +325,7 @@ pub fn verdict_message(an: &Analyzer, v: &Verdict) -> String {
         Ns::Name => format!("name {}", intern::key_py_str(v.key)),
         Ns::Pos => format!("position {}", key_repr(v.key)),
         _ if v.key == STAR => "an element".to_string(),
+        _ if an.has_obj(v.oid) && an.kind(v.oid) == Kind::Frame => format!("column {}", crate::domain::key_display(v.key)),
         _ => format!("key {}", crate::domain::key_display(v.key)),
     };
     let unknown_code = || code_list(an, &v.mutators);
@@ -337,7 +338,7 @@ pub fn verdict_message(an: &Analyzer, v: &Verdict) -> String {
         (Tier::Likely, _) => format!("{} is there, unless {} removed it", what, unknown_code()),
         (Tier::Input, _) => {
             let from: Vec<String> = v.providers.iter().map(|p| source_text(an, p)).collect();
-            format!("{} must come from {}", what, from.join(" or "))
+            format!("{} must be provided by {}", what, from.join(" or "))
         }
         (Tier::LikelyMissing, _) => format!("{} is never set, unless {} added it", what, unknown_code()),
         (Tier::DataKey, _) => "the key is computed from data, and may not be one of the keys this object has".to_string(),
@@ -370,10 +371,11 @@ fn code_list(an: &Analyzer, sites: &[String]) -> String {
             names.push(t);
         }
     }
+    names.sort_by_key(|n| n == "other calls");
     let n = names.len();
     let mut out = names.into_iter().take(2).collect::<Vec<_>>().join(" or ");
     if n > 2 {
-        out += &format!(" (or {} other calls)", n - 2);
+        out += &format!(" (or {} other call{})", n - 2, if n == 3 { "" } else { "s" });
     }
     out
 }
@@ -389,6 +391,10 @@ pub fn site_text(an: &Analyzer, site: &str) -> String {
     if let Some((text, m, line)) = an.site_names.get(&intern::s(site)) {
         let t: String = if text.chars().count() > 50 { format!("{}…", text.chars().take(49).collect::<String>()) } else { text.clone() };
         return format!("`{}` ({})", t, in_file(*m, *line));
+    }
+    if site == "…" {
+        // (a row names its first few unknown calls, then this)
+        return "other calls".into();
     }
     let clean = |q: &str| q.trim_start_matches("class ").trim_start_matches("builtins.").to_string();
     if let Some(q) = site.strip_prefix("recursion@") {
@@ -415,8 +421,43 @@ fn source_text(an: &Analyzer, label: &str) -> String {
         Some(i) if !label[..i].ends_with("?") => (&label[..i], &label[i..]),
         _ => (label, ""),
     };
-    let path = path.replace("['*']", "[*]");
-    if path.is_empty() { site_text(an, site) } else { format!("{} {}", site_text(an, site), path) }
+    if path.is_empty() {
+        return site_text(an, site);
+    }
+    // (the path inside the code span: `json.loads(…)["db"]`, argument `items[*]` of `f`)
+    let path = path.replace("['*']", "[*]").replace("['", "[\"").replace("']", "\"]");
+    let t = site_text(an, site);
+    match t.find("` ").or_else(|| t.ends_with('`').then(|| t.len() - 1)) {
+        Some(i) if t[..i].contains('`') => format!("{}{}{}", &t[..i], path, &t[i..]),
+        _ => format!("{} {}", t, path),
+    }
+}
+
+/// An input for people, by id: its site and the path below it, each step written as the
+/// code read it (`argument `items[*].sku` of `f``).
+fn source_id_text(an: &Analyzer, src: SourceId) -> String {
+    let (site, kind, path) = intern::with_source(src, |s| (s.site.clone(), s.kind, s.path.clone()));
+    let t = site_text(an, &site);
+    let Some(st) = an.final_state.as_ref().filter(|_| !path.is_empty()) else { return t };
+    let (steps, _) = path_steps(st, &site, kind, 0, &path);
+    match t.find("` ").or_else(|| t.ends_with('`').then(|| t.len() - 1)) {
+        Some(i) if t[..i].contains('`') => format!("{}{}{}", &t[..i], steps, &t[i..]),
+        _ => format!("{} {}", t, steps),
+    }
+}
+
+/// The access path of `path[from..]` below an input (`.sku`, `["db"]`, `[*]`), each step as
+/// the parent's requirement says it was read; and whether a step is an attribute.
+fn path_steps(st: &State, site: &std::sync::Arc<str>, kind: crate::domain::SourceKind, from: usize, path: &[KeyId]) -> (String, bool) {
+    let mut out = String::new();
+    let mut attr_step = false;
+    for i in from..path.len() {
+        let parent = intern::source(crate::domain::Source { site: site.clone(), kind, path: path[..i].to_vec() });
+        let attr = st.reqs.get(&parent, &path[i]).map(|r| r.attr).unwrap_or(false);
+        attr_step |= attr;
+        out += &step_text(path[i], attr);
+    }
+    (out, attr_step)
 }
 
 /// Is an unknown call's result an input worth listing (a library function the program
@@ -432,10 +473,9 @@ fn named_call(site: &str) -> bool {
 fn needs_text(an: &Analyzer) -> (Vec<String>, Vec<String>) {
     use crate::domain::SourceKind;
     let Some(st) = &an.final_state else { return (vec![], vec![]) };
-    // root -> (path, always)
-    let mut groups: IndexMap<(bool, String), Vec<(String, bool)>> = IndexMap::new();
-    for (src, d) in st.reqs.items() {
-        let (site, kind, path) = intern::with_source(src, |s| (s.site.to_string(), s.kind, s.path.clone()));
+    let mut roots: Vec<(bool, String, SourceId, String)> = Vec::new();
+    for (src, _) in st.reqs.items() {
+        let (site, kind) = intern::with_source(src, |s| (s.site.to_string(), s.kind));
         let (param, header, base) = match kind {
             SourceKind::Param => match site.strip_prefix("param ").and_then(|r| r.rsplit_once('.')) {
                 Some((f, x)) => (true, f.trim_start_matches("class ").to_string(), x.to_string()),
@@ -446,44 +486,20 @@ fn needs_text(an: &Analyzer) -> (Vec<String>, Vec<String>) {
             SourceKind::Call if named_call(&site) && !an.notes.iter().any(|n| n.strip_suffix(" ran out of its budget: later calls are unknown code").map(|q| site.starts_with(&format!("{}@", q))).unwrap_or(false)) => (false, site_text(an, &site).replace('`', ""), String::new()),
             _ => continue,
         };
-        // the path below the root, step by step (each step read as the parent's requirement says)
-        let mut prefix = String::new();
-        for i in 0..path.len() {
-            let parent = intern::source(crate::domain::Source { site: site.as_str().into(), kind, path: path[..i].to_vec() });
-            prefix += &step_text(path[i], st.reqs.get(&parent, &path[i]).map(|r| r.attr).unwrap_or(false));
-        }
-        // (attributes of what a library call returned are its API, not data the code needs)
-        if !param && prefix.contains('.') {
-            continue;
-        }
-        let entry = groups.entry((param, header)).or_default();
-        for (k, info) in d.iter() {
-            let k = *k;
-            let attr = info.attr;
-            if !param && attr {
-                continue;
-            }
-            // (a key unknown code or another input may supply is needed only sometimes)
-            let always = info.always && info.caveats.is_empty() && info.alternatives.is_empty();
-            let mut text = format!("{}{}{}", base, prefix, step_text(k, attr));
-            for a in info.alt_keys.iter().filter(|a| *a != k) {
-                text += &format!(" or {}{}{}", base, prefix, step_text(a, attr));
-            }
-            entry.push((text, always));
+        let root = crate::domain::Source::new(&site, kind);
+        if !roots.iter().any(|r| r.2 == root) {
+            roots.push((param, header, root, base));
         }
     }
-    groups.sort_keys();
+    roots.sort_by(|a, b| (&a.1, &a.3).cmp(&(&b.1, &b.3)));
+    let mut groups: IndexMap<(bool, String), Vec<(String, bool)>> = IndexMap::new();
+    for (param, header, root, base) in roots {
+        // (attributes of what a library call returned are its API, not data the code needs)
+        groups.entry((param, header)).or_default().extend(reads_below(st, root, &base, !param));
+    }
     let (mut inputs, mut funcs) = (Vec::new(), Vec::new());
     let width = groups.keys().map(|(_, h)| h.chars().count()).max().unwrap_or(0).min(30);
-    for ((param, header), mut needs) in groups {
-        needs.sort();
-        needs.dedup_by(|a, b| a.0 == b.0 && {
-            b.1 = b.1 && a.1;
-            true
-        });
-        // (a path read below another needs that one too: only the longer is listed)
-        let all: Vec<String> = needs.iter().map(|(p, _)| p.clone()).collect();
-        needs.retain(|(p, _)| !all.iter().any(|q| q.len() > p.len() && q.starts_with(p.as_str()) && matches!(q.as_bytes()[p.len()], b'[' | b'.')));
+    for ((param, header), needs) in groups {
         let always: Vec<&str> = needs.iter().filter(|(_, a)| *a).map(|(p, _)| p.as_str()).collect();
         let sometimes: Vec<&str> = needs.iter().filter(|(_, a)| !*a).map(|(p, _)| p.as_str()).collect();
         if needs.is_empty() {
@@ -501,6 +517,45 @@ fn needs_text(an: &Analyzer) -> (Vec<String>, Vec<String>) {
         }
     }
     (inputs, funcs)
+}
+
+/// What the code reads of input `src` and of what lies below it, as access paths from
+/// `base` (`row["id"]`, `items[*].sku`): (path, read on every path), the longest paths only.
+/// `data_only`: keys and elements, not attributes.
+pub fn reads_below(st: &State, src: SourceId, base: &str, data_only: bool) -> Vec<(String, bool)> {
+    let (site, kind, top) = intern::with_source(src, |s| (s.site.clone(), s.kind, s.path.clone()));
+    let mut needs: Vec<(String, bool)> = Vec::new();
+    for (s2, d) in st.reqs.items() {
+        let (site2, kind2, path) = intern::with_source(s2, |s| (s.site.clone(), s.kind, s.path.clone()));
+        if site2 != site || kind2 != kind || !path.starts_with(&top) {
+            continue;
+        }
+        let (prefix, attr_step) = path_steps(st, &site, kind, top.len(), &path);
+        if data_only && attr_step {
+            continue;
+        }
+        for (k, info) in d.iter() {
+            if data_only && info.attr {
+                continue;
+            }
+            // (a key unknown code or another input may supply is needed only sometimes)
+            let always = info.always && info.caveats.is_empty() && info.alternatives.is_empty();
+            let mut text = format!("{}{}{}", base, prefix, step_text(*k, info.attr));
+            for a in info.alt_keys.iter().filter(|a| a != k) {
+                text += &format!(" or {}{}{}", base, prefix, step_text(a, info.attr));
+            }
+            needs.push((text, always));
+        }
+    }
+    needs.sort();
+    needs.dedup_by(|a, b| a.0 == b.0 && {
+        b.1 = b.1 && a.1;
+        true
+    });
+    // (a path read below another needs that one too: only the longer is listed)
+    let all: Vec<String> = needs.iter().map(|(p, _)| p.clone()).collect();
+    needs.retain(|(p, _)| !all.iter().any(|q| q.len() > p.len() && q.starts_with(p.as_str()) && matches!(q.as_bytes()[p.len()], b'[' | b'.')));
+    needs
 }
 
 /// One step of an access path: `.name` for an attribute, `["k"]` / `[0]` / `[*]` for an item.
@@ -1149,7 +1204,31 @@ pub fn facts_json(an: &Analyzer) -> J {
             .map(|(oid, (item, attr))| {
                 let o = an.obj(*oid);
                 let origin = an.origins.get(oid).map(|(t, l, g)| json!({"text": t, "line": l, "given": g}));
+                // for people: what may have changed it, what it never has, where it comes from
+                let rows = [item, attr].into_iter().flatten();
+                let mut changed_by: Vec<String> = Vec::new();
+                let mut from: Vec<String> = Vec::new();
+                let mut absent: Vec<String> = Vec::new();
+                for r in rows {
+                    for m in r.mutators.iter() {
+                        let t = site_text(an, &intern::str_get(m));
+                        if !changed_by.contains(&t) {
+                            changed_by.push(t);
+                        }
+                        changed_by.sort_by_key(|n| n == "other calls");
+                    }
+                    for (src, _) in r.sources.iter() {
+                        let t = source_id_text(an, src);
+                        if !from.contains(&t) {
+                            from.push(t);
+                        }
+                    }
+                    absent.extend(intern::sorted_by_str(r.absent.iter()).iter().map(|k| crate::domain::key_display(*k)));
+                }
                 json!({
+                    "changed_by": changed_by,
+                    "from": from,
+                    "absent": absent,
                     "id": oid,
                     "label": &*o.label,
                     "kind": o.kind.name(),
@@ -1167,19 +1246,25 @@ pub fn facts_json(an: &Analyzer) -> J {
             crate::domain::KeyVal::Data(_) => json!(["<data>"]),
             crate::domain::KeyVal::Bot => json!([]),
         };
-        // requirements recorded on the open sources of these objects
-        let mut required: serde_json::Map<String, J> = serde_json::Map::new();
-        for (_, (item, attr)) in &f.rows {
-            for r in [item, attr].into_iter().flatten() {
-                for (src, _) in r.sources.iter() {
-                    let label = source_label(src);
-                    if let Some(entry) = sch.get(&label) {
-                        let keys: serde_json::Map<String, J> = entry.iter().map(|(k, e)| (k.clone(), json!(e.always))).collect();
-                        required.insert(label, J::Object(keys));
+        // what the code reads of the inputs these objects come from, as access paths from the name
+        let mut required: Vec<(String, bool)> = Vec::new();
+        if let Some(st) = &an.final_state {
+            for (_, (item, attr)) in &f.rows {
+                for r in [item, attr].into_iter().flatten() {
+                    for (src, _) in r.sources.iter() {
+                        if source_is_data(src) {
+                            continue;
+                        }
+                        for need in reads_below(st, src, &intern::str_get(*name), false) {
+                            if !required.iter().any(|(p, _)| *p == need.0) {
+                                required.push(need);
+                            }
+                        }
                     }
                 }
             }
         }
+        let required: Vec<J> = required.into_iter().map(|(p, a)| json!({"path": p, "always": a})).collect();
         // tensor-shape requirements recorded on this line (in the line's own analysis), in
         // the dim names of this fact
         let mut requires: Vec<String> = Vec::new();
@@ -1220,9 +1305,21 @@ pub fn facts_json(an: &Analyzer) -> J {
             Some(p) => (p.clone(), f.texts.iter().filter(|t| *t != p).cloned().collect()),
             None => (f.texts.join(" | "), vec![]),
         };
-        facts.push(json!({"line": line, "name": name.to_string(), "values": values, "text": text, "examples": examples, "legend": f.legend.iter().filter(|(s0, d)| !(d == "?" && f.texts.iter().all(|t| t.starts_with("Tensor[")) && an.facts_sym_is_tensor(s0))).chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "required": required, "requires": requires}));
+        facts.push(json!({"line": line, "name": name.to_string(), "values": values, "text": text, "examples": examples, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "required": required, "requires": requires}));
     }
-    let verdicts: Vec<J> = reported(an).iter().map(|v| verdict_json(an, v)).collect();
+    // (columns in UTF-16 units, as editors count them; each finding with its message in words)
+    let main_idx = an.module_info(an.main_module).idx;
+    let verdicts: Vec<J> = reported(an)
+        .iter()
+        .map(|v| {
+            let mut j = verdict_json(an, v);
+            if v.file.is_empty() {
+                j["col"] = json!(crate::frontend::utf16_col(main_idx, v.line, v.col));
+            }
+            j["message"] = json!(verdict_message(an, v));
+            j
+        })
+        .collect();
     let mut schemas = serde_json::Map::new();
     for (label, entry) in sch {
         let keys: serde_json::Map<String, J> = entry.iter().map(|(k, e)| (k.clone(), json!({"always": e.always, "sites": e.sites}))).collect();

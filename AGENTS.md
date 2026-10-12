@@ -85,6 +85,10 @@ ruff and walks the syntax tree directly, running the program on abstract values.
 * **Commits.** Commit when a round of work is complete and golden, snapshots and `cargo test`
   pass; never commit a failing state. Review snapshot diffs before `--update`.
 * **Plans.** When a request mixes several things, write the plan first, then work it in order.
+* **Output is for Python engineers.** The text report, hovers and diagnostics use words and
+  Python access paths (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source,
+  placeholder) or internal site labels (`report::site_text` names unknown code by the call as
+  written); every mark has a legend entry. `vscode-rowan/test.js` checks this on real hovers.
 * `SUGGESTED_CHANGES.md` is the owner's list of open items. It is untracked: never commit it.
   Keep it to things still to do.
 * Keep this file under 200 lines and up to date with every change.
@@ -99,7 +103,7 @@ uv run --no-project python tests/run_snapshots.py   # --update only after review
 uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy \
     python tests/oracle.py [--strict|--lenient] [-v] [-j N] [case…]  # vs real runs, ~1.5 min
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py [case…]
-cd vscode-rowan && node test.js && npm run package  # hover rendering check; builds the .vsix
+cd vscode-rowan && node test.js && npm run package  # hover / diagnostic text checks; builds the .vsix
 uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"
                                                     # benchmark (stdlib12k / email / rich), no deadlines
 ```
