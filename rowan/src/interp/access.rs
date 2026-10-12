@@ -139,14 +139,15 @@ impl Analyzer {
         let sometimes = key.map(|k| row.stored.contains(k)).unwrap_or(false);
         for (src, terms) in &cls.providers {
             for t in terms.iter() {
-                let fresh = !state.reqs.contains(src, &t);
+                // (an access needed on some paths only adds nothing to whether it is always)
+                let was_always = state.reqs.get(src, &t).map(|r| r.always).unwrap_or(false);
                 if with_alts {
                     let alts = intern::IdSet::from_iter(srcs.iter().copied().filter(|x| x != src));
                     state.require(*src, t, site_id, alts, row.mutators.clone(), terms.clone());
                 } else {
                     state.require(*src, t, site_id, intern::IdSet::new(), row.mutators.clone(), intern::IdSet::new());
                 }
-                if sometimes && fresh {
+                if sometimes && !was_always {
                     if let Some(cur) = state.reqs.get(src, &t) {
                         state.reqs.set(src, t, crate::domain::ReqInfo { always: false, ..cur });
                     }
