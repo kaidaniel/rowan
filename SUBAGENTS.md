@@ -36,6 +36,9 @@ and write down what you chose and why.
      can follow.
    * Today the engine outside `models/` is about 28k lines, so there is a long way to go.
      Measure with `wc -l` on `rowan/src/*.rs` and `rowan/src/interp/*.rs`.
+   * Fixes and features tend to add lines, so this one also slips easily. Leave the engine
+     smaller than you found it in every iteration: delete, merge or simplify something, not
+     just add.
 8. **Few knobs.** The interpreter should have few configs, limits and switches. Every
    `ROWAN_*` variable, `ROWAN_NO=` refinement and `ROWAN_LIMITS=` key is a cost. A simpler
    design that needs no knob is better than a tuned one.
