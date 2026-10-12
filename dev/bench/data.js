@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791789826673,
+  "lastUpdate": 1791793279851,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -2188,6 +2188,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib12k: wall time",
             "value": 77.9,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 2083,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 1409718,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 1991048,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 36410,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 173724,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "distinct": true,
+          "id": "53a632bed1e183dfca8effe5f4998461e1051287",
+          "message": "SUBAGENTS.md: the golden pass count with every call summarised (tab=0) is part of the soundness objective, and reported before and after.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-12T09:08:27+01:00",
+          "tree_id": "dd79876f6115c79f6c1c63bde205b2af26e06053",
+          "url": "https://github.com/kaidaniel/rowan/commit/53a632bed1e183dfca8effe5f4998461e1051287"
+        },
+        "date": 1791793279178,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "email: wall time",
+            "value": 210.78,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 1794,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "email: work",
+            "value": 1176255,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "email: work units",
+            "value": 15847576,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "email: tabulations",
+            "value": 19371,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "email: objects",
+            "value": 153556,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 603.02,
+            "unit": "s",
+            "extra": "cut at the 600 s timeout"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 6407,
+            "unit": "MB",
+            "extra": "cut at the 600 s timeout"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 75.64,
             "unit": "s",
             "extra": "finished"
           },
