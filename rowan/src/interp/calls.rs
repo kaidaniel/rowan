@@ -1270,7 +1270,7 @@ impl Analyzer {
                     if self.torch_on {
                         if let Some(sh) = crate::models::torch::tensor_shape(a) {
                             if sh.rest.is_none() && sh.suffix.is_empty() && sh.assume.is_empty() {
-                                let dims: Option<Vec<i64>> = sh.prefix.iter().map(|d| crate::shape::as_lit(*d)).collect();
+                                let dims: Option<Vec<i64>> = sh.prefix.iter().map(|d| crate::models::shape::as_lit(*d)).collect();
                                 return dims.map(|ds| format!("T{:?}", ds));
                             }
                         }

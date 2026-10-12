@@ -297,7 +297,7 @@ impl Analyzer {
                         return v;
                     }
                     if let Some(d) = crate::models::torch::dim_of_label(&v) {
-                        return crate::models::torch::dim_value(if u.op == ast::UnaryOp::USub { crate::shape::scale(d, -1) } else { d });
+                        return crate::models::torch::dim_value(if u.op == ast::UnaryOp::USub { crate::models::shape::scale(d, -1) } else { d });
                     }
                     if u.op == ast::UnaryOp::USub {
                         if let Some(r) = self.t_neg_named(&v, state) {

@@ -814,7 +814,7 @@ pub fn facts_json(an: &Analyzer) -> J {
                 Some((c, ctx)) => {
                     let mut ctx = ctx.clone();
                     ctx.atom_names = f.t_names.clone();
-                    crate::shape::with_ctx(ctx, || crate::shape::cons_text(c))
+                    crate::models::shape::with_ctx(ctx, || crate::models::shape::cons_text(c))
                 }
                 None => n.text.clone(),
             };
@@ -823,8 +823,8 @@ pub fn facts_json(an: &Analyzer) -> J {
                 let mut atoms = Vec::new();
                 cons_atoms(c, &mut atoms);
                 for a in atoms {
-                    if let (Some(nm), crate::shape::Atom::Dim(sy, i)) = (f.t_names.get(&a), crate::shape::atom_get(a)) {
-                        let base = crate::shape::with_ctx(ctx.clone(), || crate::shape::sym_print(sy));
+                    if let (Some(nm), crate::models::shape::Atom::Dim(sy, i)) = (f.t_names.get(&a), crate::models::shape::atom_get(a)) {
+                        let base = crate::models::shape::with_ctx(ctx.clone(), || crate::models::shape::sym_print(sy));
                         if let Some(b) = base {
                             let entry = (nm.clone(), format!("{}.shape[{}]", b, i));
                             if !extra_legend.contains(&entry) && !f.legend.iter().any(|(s0, _)| s0.split(", ").any(|x| x == nm)) {
@@ -854,14 +854,14 @@ pub fn facts_json(an: &Analyzer) -> J {
     json!({"file": an.filename, "facts": facts, "verdicts": verdicts, "schemas": schemas, "notes": an.notes, "shape_errors": shape_errors})
 }
 
-fn cons_atoms(c: &crate::shape::Cons, out: &mut Vec<crate::shape::AtomId>) {
+fn cons_atoms(c: &crate::models::shape::Cons, out: &mut Vec<crate::models::shape::AtomId>) {
     match c {
-        crate::shape::Cons::Eq(a, b) => {
-            crate::shape::dim_atoms(*a, out);
-            crate::shape::dim_atoms(*b, out);
+        crate::models::shape::Cons::Eq(a, b) => {
+            crate::models::shape::dim_atoms(*a, out);
+            crate::models::shape::dim_atoms(*b, out);
         }
-        crate::shape::Cons::Rank(..) => {}
-        crate::shape::Cons::If(m, g) => {
+        crate::models::shape::Cons::Rank(..) => {}
+        crate::models::shape::Cons::If(m, g) => {
             cons_atoms(m, out);
             g.iter().for_each(|x| cons_atoms(x, out));
         }

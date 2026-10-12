@@ -127,7 +127,7 @@ pub struct State {
     /// their elements): `lst[-1]` after appends of unknown count
     pub lasts: Arc<Vec<(ObjId, Value)>>,
     /// tensor-shape facts on this path: ranks and dim equalities (shape.rs)
-    pub tf: Arc<crate::shape::TFacts>,
+    pub tf: Arc<crate::models::shape::TFacts>,
     /// locals bound on some paths only (a join of a path that bound the name with one that did
     /// not): reading one may raise UnboundLocalError
     pub unbound: Arc<Vec<StrId>>,
@@ -200,7 +200,7 @@ impl State {
             facts: Arc::new(Vec::new()),
             name_keys: Arc::new(Vec::new()),
             lasts: Arc::new(Vec::new()),
-            tf: Arc::new(crate::shape::TFacts::default()),
+            tf: Arc::new(crate::models::shape::TFacts::default()),
             unbound: Arc::new(Vec::new()),
         }
     }
@@ -764,7 +764,7 @@ pub fn reset_thread_state() {
     FP_VISITS.with(|c| c.set(0));
     REQ_LOG.with(|l| l.borrow_mut().clear());
     crate::domain::reset_row_joins();
-    crate::shape::reset();
+    crate::models::shape::reset();
 }
 
 /// Lengths join to the one both sides have, else to unknown with the shorter known prefix and

@@ -9,7 +9,7 @@ use crate::domain::{join_values, KeyVal, Ns, Value, DATA};
 use crate::frontend::Node;
 use crate::intern::{self, key_int, key_str_lit, s, KeyId, StrId, STAR};
 use crate::interp::{Analyzer, Call, Payload};
-use crate::shape::{self as sh, Cons, DimId, RankRel, Rest, Shape};
+use crate::models::shape::{self as sh, Cons, DimId, RankRel, Rest, Shape};
 use rustc_hash::FxHashMap;
 use crate::state::{Kind, State};
 

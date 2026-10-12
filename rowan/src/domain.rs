@@ -1244,7 +1244,7 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
         }
     }
     if let (KeyVal::Data(x), KeyVal::Data(y)) = (a, b) {
-        if let Some(j) = crate::shape::join_labels(&crate::intern::str_get(*x), &crate::intern::str_get(*y)) {
+        if let Some(j) = crate::models::shape::join_labels(&crate::intern::str_get(*x), &crate::intern::str_get(*y)) {
             return KeyVal::data(&j);
         }
         return DATA;
@@ -1254,15 +1254,15 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
     for (d, l) in [(a, b), (b, a)] {
         if let (KeyVal::Data(x), true) = (d, l.is_literal()) {
             let t = crate::intern::str_get(*x);
-            if crate::shape::parse_dim_label(&t).is_some() {
+            if crate::models::shape::parse_dim_label(&t).is_some() {
                 let lits = kv_literals(l);
-                let same = crate::shape::parse_dim_label(&t).and_then(crate::shape::as_lit).map(|n| lits.iter().all(|k| crate::intern::key_as_int(k) == Some(n))).unwrap_or(false);
-                return if same { d.clone() } else { KeyVal::data(&crate::shape::dim_label(crate::shape::unknown())) };
+                let same = crate::models::shape::parse_dim_label(&t).and_then(crate::models::shape::as_lit).map(|n| lits.iter().all(|k| crate::intern::key_as_int(k) == Some(n))).unwrap_or(false);
+                return if same { d.clone() } else { KeyVal::data(&crate::models::shape::dim_label(crate::models::shape::unknown())) };
             }
-            if let Some(sid) = crate::shape::parse_tensor_label(&t) {
+            if let Some(sid) = crate::models::shape::parse_tensor_label(&t) {
                 if kv_literals(l).iter().any(crate::intern::key_is_number) {
-                    let s = crate::shape::join_shapes(&crate::shape::shape_get(sid), &crate::shape::Shape::known(vec![]));
-                    return KeyVal::data(&crate::shape::tensor_label(crate::shape::shape_id(s)));
+                    let s = crate::models::shape::join_shapes(&crate::models::shape::shape_get(sid), &crate::models::shape::Shape::known(vec![]));
+                    return KeyVal::data(&crate::models::shape::tensor_label(crate::models::shape::shape_id(s)));
                 }
             }
         }

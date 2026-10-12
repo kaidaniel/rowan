@@ -145,7 +145,7 @@ budget; informational, into the history on gh-pages).
 | `interp/exprs.rs`, `interp/funcs.rs` | expressions, comprehensions, yields; functions, iteration, generators |
 | `interp/narrow.rs`, `interp/access.rs` | narrowing, `CondFact`s; attribute and item access, verdicts, requirements |
 | `interp/calls.rs` | calls: per-call-site runs, budget, call cache, recursion, `__new__`, dataclass init |
-| `shape.rs` | tensor shapes |
+| `models/shape.rs` | tensor shapes (dims as polynomials) for the torch and numpy models |
 | `report.rs`, `main.rs` | text / JSON / facts output; CLI, `rowan serve` (runs on a 1 GiB-stack thread) |
 | `models/` | `mod.rs` (`Registry`, builtins, containers); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib; `pandas`, `pydantic`, `fastapi`, `torch` |
 

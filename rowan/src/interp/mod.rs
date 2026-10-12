@@ -677,7 +677,7 @@ pub struct Fact {
     /// the symbols the texts mention, with what is known about each (`report::value_legend`)
     pub legend: Vec<(String, String)>,
     /// display names of the tensor dims the texts mention (`B` for x.shape[0])
-    pub t_names: FxHashMap<crate::shape::AtomId, String>,
+    pub t_names: FxHashMap<crate::models::shape::AtomId, String>,
     /// the text from the function's own analysis (open parameters), when there is one: the
     /// hover leads with it; `texts` then holds what calls gave
     pub primary: Option<String>,
@@ -1801,7 +1801,7 @@ impl Analyzer {
             let mut star_kwargs: Vec<Value> = Vec::new();
             if self.torch_modules.contains(&fi.module) {
                 for (i, a) in params.iter().enumerate() {
-                    crate::shape::note_param(crate::shape::sym(oid, a.name.id.as_str()), i as u32);
+                    crate::models::shape::note_param(crate::models::shape::sym(oid, a.name.id.as_str()), i as u32);
                 }
             }
             let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
@@ -2197,7 +2197,7 @@ impl Analyzer {
         // tensors: dims named by locals / letters, printed in the function's own terms
         let (pctx, tnames, tlegend) = if self.torch_on {
             let mut ctx = self.t_print_ctx(state);
-            let (names, legend) = crate::shape::with_ctx(ctx.clone(), || self.t_hover_names(v, state));
+            let (names, legend) = crate::models::shape::with_ctx(ctx.clone(), || self.t_hover_names(v, state));
             ctx.atom_names = names.clone();
             (Some(ctx), names, legend)
         } else {
@@ -2205,7 +2205,7 @@ impl Analyzer {
         };
         let render = |an: &Analyzer| crate::report::in_scope(scope, || (crate::report::render_value(an, state, v, 0, &mut Vec::new()), crate::report::value_legend(an, state, v)));
         let (text, mut legend) = match pctx {
-            Some(ctx) => crate::shape::with_ctx(ctx, || render(self)),
+            Some(ctx) => crate::models::shape::with_ctx(ctx, || render(self)),
             None => render(self),
         };
         legend.extend(tlegend);

@@ -3,6 +3,7 @@
 //! prefix fallbacks.
 
 pub mod minire;
+pub mod shape;
 pub mod pyre;
 pub mod chrono;
 pub mod sqlite;
@@ -307,7 +308,7 @@ fn m_round_abs(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if c.qual == "builtins.abs" && an.torch_on {
         if let Some(d) = crate::models::torch::dim_of_label(a) {
             // dims are not negative
-            if crate::shape::poly(d).iter().all(|(_, k)| *k > 0) {
+            if crate::models::shape::poly(d).iter().all(|(_, k)| *k > 0) {
                 return a.clone();
             }
         }
@@ -330,8 +331,8 @@ fn m_math(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 return Value::lit(intern::key_int(r as i64));
             }
             if let Some((d, k)) = crate::models::torch::quotient_of(a) {
-                let r = if c.qual == "math.ceil" { crate::shape::ceildiv(d, crate::shape::lit(k)) } else { crate::shape::floordiv(d, crate::shape::lit(k)) };
-                return crate::models::torch::dim_value(crate::shape::norm(r, &st.tf));
+                let r = if c.qual == "math.ceil" { crate::models::shape::ceildiv(d, crate::models::shape::lit(k)) } else { crate::models::shape::floordiv(d, crate::models::shape::lit(k)) };
+                return crate::models::torch::dim_value(crate::models::shape::norm(r, &st.tf));
             }
         }
     }
@@ -1587,7 +1588,7 @@ fn m_int(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // int(d / k) of a (non-negative) dim: d // k
     if !is_float {
         if let Some((d, k)) = crate::models::torch::quotient_of(a) {
-            return crate::models::torch::dim_value(crate::shape::norm(crate::shape::floordiv(d, crate::shape::lit(k)), &st.tf));
+            return crate::models::torch::dim_value(crate::models::shape::norm(crate::models::shape::floordiv(d, crate::models::shape::lit(k)), &st.tf));
         }
         if crate::models::torch::dim_of_label(a).is_some() {
             return a.clone();
@@ -4703,7 +4704,7 @@ fn m_range(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("range@L{}", c.line));
         an.set_llen(oid, st, None);
         // (for the tensor model: an int of unknown value)
-        st.elems.insert(oid, if an.torch_on { KeyVal::data(&crate::shape::dim_label(crate::shape::unknown())) } else { DATA });
+        st.elems.insert(oid, if an.torch_on { KeyVal::data(&crate::models::shape::dim_label(crate::models::shape::unknown())) } else { DATA });
         return Value::obj(oid);
     };
     let len = if step > 0 { (hi - lo + step - 1).max(0) / step } else { (lo - hi - step - 1).max(0) / -step };
@@ -4820,7 +4821,7 @@ fn m_sum(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let e = it.elem.flat();
         if crate::models::torch::is_tensor(&e) {
             if let Some(s) = an.t_shape(&e, st) {
-                let start = c.args.get(1).and_then(|x| an.t_shape(x, st)).unwrap_or_else(|| crate::shape::Shape::known(vec![]));
+                let start = c.args.get(1).and_then(|x| an.t_shape(x, st)).unwrap_or_else(|| crate::models::shape::Shape::known(vec![]));
                 return an.t_broadcast(&s, &start, &c.node, st, "sum");
             }
         }
@@ -5033,7 +5034,7 @@ pub struct Tables {
     /// validating a FastAPI test request's body (errors are a 422)
     pub fa_body_validation: bool,
     /// unknown call results named by the variable they were bound to (tensor dims)
-    pub t_var_names: FxHashMap<ObjId, crate::shape::Sym>,
+    pub t_var_names: FxHashMap<ObjId, crate::models::shape::Sym>,
     /// function objects by qualname (a closure's printing sees its factory's symbols)
     pub t_funcs_by_qual: FxHashMap<String, Vec<ObjId>>,
     /// running a call that stands for "some module": no shape errors / requirements / facts
