@@ -1492,6 +1492,22 @@ impl Analyzer {
                 }
             }
         }
+        // (a source with keys not known — an input — may replace the value under any key the
+        // record has: its value there joins in)
+        for k in state.slot_keys(oid, ns) {
+            if kill.contains(k) || vals.contains_key(&k) {
+                continue;
+            }
+            for &x in &recs {
+                let xns = ns_of(self, x);
+                let xr = state.row(x, xns);
+                if xr.open() && !xr.lacks(k) {
+                    let part = self.path_placeholder_value(x, xns, k, &xr, state);
+                    let cur = vals.entry(k).or_default();
+                    *cur = cur.join(&part);
+                }
+            }
+        }
         for (k, val) in vals {
             let sure = strong && self.obj(oid).single && k != intern::STAR && srcrow.definite.contains(k) && recs.iter().all(|x| state.row(*x, ns_of(self, *x)).definite.contains(k));
             state.set_slot(oid, ns, k, val, sure);
