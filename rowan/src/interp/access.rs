@@ -598,7 +598,10 @@ impl Analyzer {
         let exc = if ns == Ns::Item && !obj.pts.is_empty() && !self.np_struct.is_empty() && obj.pts.iter().all(|o| self.np_struct.contains(&o)) { Some("ValueError") } else { None };
         let exc = if ns == Ns::Item { self.item_exc_force.or(exc) } else { exc };
         let saved = std::mem::replace(&mut self.item_exc, exc);
+        let scalar = self.may_be_scalar(obj);
+        let saved_scalar = std::mem::replace(&mut self.recv_scalar, scalar);
         let v = self.load_item_inner(obj, ns, key, node, state, report);
+        self.recv_scalar = saved_scalar;
         self.item_exc = saved;
         v
     }
@@ -616,7 +619,8 @@ impl Analyzer {
         // a real try/except guard (as opposed to a model's unreported load): no exception
         // means the key was present from here on
         let try_guard = report && self.is_guarded(ns);
-        let single_target = obj.pts.len() == 1;
+        let scalar = self.may_be_scalar(obj);
+        let single_target = obj.pts.len() == 1 && !scalar;
         let line_data = Value::data(&format!("L{}", node.line));
         // a frame column read raises KeyError when the column is missing
         let frame_tiers: Option<Vec<Tier>> = if try_guard && ns == Ns::Item && !obj.pts.is_empty() && obj.pts.iter().all(|o| self.kind(o) == Kind::Frame) {
@@ -878,8 +882,9 @@ impl Analyzer {
                             if kind != Kind::Set {
                                 self.may_raise_here("IndexError", state);
                             }
+                            // (the elements' objects and scalars: `elems`, nothing known when unset)
                             let e = state.slot(oid, Ns::Elem, STAR);
-                            parts.push(Value::with_kv(e.pts, DATA));
+                            parts.push(Value::with_kv(e.pts, state.elems.get(&oid).unwrap_or(DATA)));
                         }
                     }
                 }
@@ -948,7 +953,7 @@ impl Analyzer {
     #[allow(clippy::too_many_arguments)]
     fn load_record_inner(&mut self, oid: u32, ns: Ns, key: &Value, node: &Node, state: &mut State, guarded: bool, single_target: bool, try_guard: bool) -> Value {
         let kind = self.kind(oid);
-        let mut row = state.row(oid, ns);
+        let mut row = if kind == Kind::Unknown { self.unknown_row(oid, ns, state) } else { state.row(oid, ns) };
         // (the row before this read narrows it)
         let row0 = row.clone();
         let kv = &key.kv;
@@ -1010,14 +1015,14 @@ impl Analyzer {
                         state.set_row(oid, ns, row.clone());
                     }
                 }
-                if guarded && cls.tier != Tier::Sym {
+                if guarded {
                     self.verdict_guarded(node, k, &cls, oid, ns);
                 }
                 // (a handler that re-raises, a thread / future: the input still needs the key)
                 if guarded && cls.tier == Tier::Input && (self.catching_depth > 0 || self.guard_reraises(ns) || self.caught_load) {
                     self.require_providers_k(&cls, &row, &site, true, state, Some(k));
                 }
-                if !guarded && cls.tier != Tier::Sym {
+                if !guarded {
                     self.verdict(node, k, &cls, oid, ns, None, None);
                     if cls.tier == Tier::Input {
                         self.require_providers_k(&cls, &row, &site, true, state, Some(k));
@@ -1085,8 +1090,10 @@ impl Analyzer {
             self.verdict(node, k, &Classification::with_note(Tier::DataKey, "data-derived key into a closed record"), oid, ns, None, None);
         }
         let mut v = self.all_values(oid, ns, state);
-        // (a closed record: the unknown key is one of its keys — one of their values)
-        if row.closed() && !row.top {
+        // (a closed record: the unknown key is one of its keys — one of their values; a map the
+        // program filled under data keys: its values are all in its slots)
+        let own_map = !row.top && row.mutators.is_empty() && row.sources.iter().all(|(src, _)| crate::domain::source_is_data(src));
+        if (row.closed() || own_map) && !row.top {
             return v;
         }
         if v.pts.is_empty() && row.open() {
@@ -1272,12 +1279,12 @@ impl Analyzer {
                         }
                     }
                 }
-                state.set_slot(oid, ns, STAR, Value::with_kv(v.pts.clone(), DATA), false);
+                state.set_slot(oid, ns, STAR, v.clone(), false);
             }
             _ => {
                 let site = format!("store@L{}", node.line);
                 state.set_row(oid, ns, row.data_store(Source::new(&site, SourceKind::Data)));
-                state.set_slot(oid, ns, STAR, Value::with_kv(v.pts.clone(), DATA), false);
+                state.set_slot(oid, ns, STAR, v.clone(), false);
                 // the unknown key may be any of the keys there: each may hold the value now
                 let keys: Vec<KeyId> = state.slot_keys(oid, ns).into_iter().filter(|k| *k != STAR).collect();
                 for k in keys {
@@ -1466,7 +1473,11 @@ impl Analyzer {
             None
         });
         let guarded = self.is_guarded(Ns::Attr) || !report;
-        let single = obj.pts.len() == 1;
+        // (a value that may also be a scalar — a str, a number — may have the attribute: no
+        // object's lack of it makes the read fail for sure)
+        let scalar = self.may_be_scalar(obj);
+        let single = obj.pts.len() == 1 && !scalar;
+        let saved_scalar = std::mem::replace(&mut self.recv_scalar, scalar);
         let nk = key_str_lit(name);
         for oid in obj.pts.iter() {
             let k = self.kind(oid);
@@ -1828,6 +1839,7 @@ impl Analyzer {
             parts.push(v);
         }
         self.many_receivers = saved_many;
+        self.recv_scalar = saved_scalar;
         acc = acc.join(&crate::domain::join_values(parts));
         if obj.pts.is_empty() {
             if name == "str" && matches!(obj.kv, KeyVal::KeysOf(_)) {
@@ -2438,6 +2450,23 @@ impl Analyzer {
         }
     }
 
+    /// Does the value have a scalar part besides its objects (other than None, which has no
+    /// keys or attributes of its own)?
+    pub fn may_be_scalar(&self, v: &Value) -> bool {
+        // (an unknown object stands for any value, scalars too: its scalar part adds nothing)
+        !v.pts.is_empty() && !v.kv.is_bot() && v.kv.as_lit() != Some(intern::key_none()) && v.pts.iter().any(|o| self.kind(o) != Kind::Unknown)
+    }
+
+    /// An unknown object's row; none on this path (collected, or never made here): nothing is
+    /// known of it (an empty, closed row would claim every key missing).
+    pub fn unknown_row(&self, oid: u32, ns: Ns, state: &State) -> Row {
+        if state.has_row(oid, ns) {
+            state.row(oid, ns)
+        } else {
+            Row::top()
+        }
+    }
+
     pub fn load_unknown_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool) -> Value {
         let nk = key_str_lit(name);
         if DICT_METHOD_NAMES.contains(&name) {
@@ -2492,7 +2521,7 @@ impl Analyzer {
                 return v;
             }
         }
-        let row = state.row(oid, Ns::Attr);
+        let row = self.unknown_row(oid, Ns::Attr, state);
         if let Some(v) = state.slot_opt(oid, Ns::Attr, nk) {
             return v;
         }

@@ -1392,7 +1392,7 @@ pub fn json_of_frame(an: &mut Analyzer, st: &mut State, c: &Call, f: u32, orient
                 }
             }
             st.set_slot(lid, Ns::Elem, intern::STAR, Value::obj(vrow), true);
-            st.elems.insert(lid, DATA);
+            st.elems.insert(lid, crate::domain::BOT);
             Value::obj(lid)
         }
         "index" => {
@@ -3834,7 +3834,7 @@ fn to_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     }
                 }
                 st.set_slot(lid, Ns::Elem, intern::STAR, Value::obj(vrow), true);
-                st.elems.insert(lid, DATA);
+                st.elems.insert(lid, crate::domain::BOT);
                 Value::obj(lid)
             }
             "dict" | "list" | "series" => {

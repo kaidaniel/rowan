@@ -999,7 +999,6 @@ pub enum Tier {
     LikelyMissing,
     Missing,
     Unknown,
-    Sym,
 }
 
 impl Tier {
@@ -1014,7 +1013,6 @@ impl Tier {
             Tier::LikelyMissing => 6,
             Tier::Missing => 7,
             Tier::Unknown => 8,
-            Tier::Sym => 9,
         }
     }
     pub fn name(self) -> &'static str {
@@ -1028,7 +1026,6 @@ impl Tier {
             Tier::DataKey => "datakey",
             Tier::Map => "map",
             Tier::Unknown => "unknown",
-            Tier::Sym => "symbolic",
         }
     }
     pub fn symbol(self) -> &'static str {
@@ -1042,7 +1039,6 @@ impl Tier {
             Tier::DataKey => "⚠data",
             Tier::Map => "·map",
             Tier::Unknown => "?",
-            Tier::Sym => "ρ",
         }
     }
     pub fn text(self) -> &'static str {
@@ -1056,7 +1052,6 @@ impl Tier {
             Tier::DataKey => "data-derived key into a closed record",
             Tier::Map => "map key",
             Tier::Unknown => "unknown",
-            Tier::Sym => "symbolic",
         }
     }
 }

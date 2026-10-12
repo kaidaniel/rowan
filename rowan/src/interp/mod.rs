@@ -870,6 +870,9 @@ pub struct Analyzer {
     pub t_called_attr: usize,
     /// the verdict being recorded is on a guarded access
     pub verdict_guarded: bool,
+    /// the access being made is on a value that may also be a scalar (a str, a number): no
+    /// object's lack of the key makes it fail for sure
+    pub recv_scalar: bool,
     /// tensor-shape requirements / definite mismatches (models/torch.rs)
     pub shape_reqs: Vec<crate::models::torch::ShapeNote>,
     pub shape_errors: Vec<crate::models::torch::ShapeNote>,
@@ -1247,6 +1250,7 @@ impl Analyzer {
             t_skip_user: false,
             t_called_attr: 0,
             verdict_guarded: false,
+            recv_scalar: false,
             shape_reqs: Vec::new(),
             shape_errors: Vec::new(),
             fresh_in_progress: FxHashSet::default(),
@@ -1740,9 +1744,16 @@ impl Analyzer {
     }
 
     pub fn verdict(&mut self, node: &Node, key: KeyId, cls: &Classification, oid: ObjId, ns: Ns, file_override: Option<&str>, text_override: Option<&str>) {
-        if matches!(cls.tier, Tier::Map | Tier::Sym) || self.quiet || self.quiet_records {
+        if matches!(cls.tier, Tier::Map) || self.quiet || self.quiet_records {
             return;
         }
+        let weakened;
+        let cls = if self.recv_scalar && cls.tier == Tier::Missing {
+            weakened = Classification::with_note(Tier::Possibly, format!("{}; the value may also be another kind of value", cls.note));
+            &weakened
+        } else {
+            cls
+        };
         // a key written as `True` that reached the dict's `1`: reported as written
         let key = match self.key_alias {
             Some((c, o)) if c == key => o,
