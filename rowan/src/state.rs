@@ -566,10 +566,9 @@ impl State {
         self.slots.drop_where(&oid, |(n, _)| *n == ns);
     }
 
-    pub fn require(&mut self, src: SourceId, term: KeyId, site: StrId, alternatives: IdSet<SourceId>, caveats: IdSet<StrId>, alt_keys: IdSet<KeyId>) {
+    pub fn require(&mut self, src: SourceId, term: KeyId, alternatives: IdSet<SourceId>, caveats: IdSet<StrId>, alt_keys: IdSet<KeyId>) {
         let info = ReqInfo {
             always: true,
-            sites: IdSet::one(site),
             alternatives,
             caveats,
             alt_keys: if alt_keys.len() > 1 { alt_keys } else { IdSet::new() },
@@ -582,8 +581,8 @@ impl State {
         self.reqs.set(&src, term, nv);
     }
 
-    pub fn require_simple(&mut self, src: SourceId, term: KeyId, site: StrId) {
-        self.require(src, term, site, IdSet::new(), IdSet::new(), IdSet::new());
+    pub fn require_simple(&mut self, src: SourceId, term: KeyId) {
+        self.require(src, term, IdSet::new(), IdSet::new(), IdSet::new());
     }
 }
 
@@ -639,11 +638,11 @@ mod tests {
         let src1 = Source::new("param f.x", SourceKind::Param);
         let src2 = Source::new("param g.a", SourceKind::Param);
         let mut state = State::new();
-        state.require_simple(src1, key_str_lit("k1"), s("L1"));
+        state.require_simple(src1, key_str_lit("k1"));
         let mut st = state.copy();
         let mut then_s = st.copy();
         let mut else_s = st.copy();
-        then_s.require_simple(src2, key_str_lit("objs"), s("L21"));
+        then_s.require_simple(src2, key_str_lit("objs"));
         then_s.record_exit();
         then_s.reachable = false;
         let mut j = then_s.join(&mut else_s);
@@ -668,7 +667,7 @@ mod tests2 {
         let mut then_s = st.copy();
         let mut else_s = st.copy();
         if let Some((src, k, site)) = req {
-            then_s.require_simple(src, key_str_lit(k), s(site));
+            then_s.require_simple(src, key_str_lit(k));
         }
         then_s.record_exit();
         then_s.reachable = false;
@@ -689,16 +688,16 @@ mod tests2 {
         let src1 = Source::new("param f.x", SourceKind::Param);
         let src2 = Source::new("param g.a", SourceKind::Param);
         let mut state = State::new();
-        state.require_simple(src1, key_str_lit("k1"), s("L1"));
+        state.require_simple(src1, key_str_lit("k1"));
         let mut st = state.copy();
-        st.require_simple(src2, key_str_lit("chain"), s("L20"));
+        st.require_simple(src2, key_str_lit("chain"));
         branch_return(&mut st, None);
         branch_return(&mut st, None);
         branch_return(&mut st, None);
         branch_return(&mut st, Some((src2, "objs", "L21")));
         branch_return(&mut st, None);
         branch_return(&mut st, None);
-        st.require_simple(src2, key_str_lit("ns"), s("L30"));
+        st.require_simple(src2, key_str_lit("ns"));
         let ex = st.exits.take().unwrap();
         let mut exs = ex.copy_ref();
         let fin = st.join(&mut exs);

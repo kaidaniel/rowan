@@ -1229,20 +1229,12 @@ impl Analyzer {
                         }
                     }
                 }
+                // (the run's requirements: on top of what was required here, needed always
+                // exactly when the run needed them always)
                 for (src, d) in hit.fp_state.reqs.items() {
                     for (k, info) in d.iter() {
-                        let site_id = info.sites.first().unwrap_or(s(&site));
-                        state.require(src, *k, site_id, info.alternatives.clone(), info.caveats.clone(), info.alt_keys.clone());
-                        if info.attr {
-                            if let Some(cur) = state.reqs.get(&src, k) {
-                                state.reqs.set(&src, *k, crate::domain::ReqInfo { attr: true, ..cur });
-                            }
-                        }
-                        if !info.always {
-                            if let Some(cur) = state.reqs.get(&src, k) {
-                                state.reqs.set(&src, *k, ReqInfo { always: false, ..cur });
-                            }
-                        }
+                        let merged = state.reqs.get(&src, k).map(|cur| cur.seq(info)).unwrap_or_else(|| info.clone());
+                        state.reqs.set(&src, *k, ReqInfo { always: info.always, ..merged });
                     }
                 }
                 let chain = chain_extend(&self.call_chain, &[node.line]);

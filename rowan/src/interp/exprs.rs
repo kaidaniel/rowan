@@ -1633,11 +1633,6 @@ impl Analyzer {
                     return Value::kv_only(self.rename_kv(&a.kv, &RenameFn::with_arg(FnKind::Suffix, y)));
                 }
             }
-            if let (Some(x), Some(y)) = (la, lb) {
-                if let Some(r) = num_binop(x, y, |p, q| p + q, |p, q| p + q) {
-                    return Value::lit(r);
-                }
-            }
             // two lists with known positions: the concatenation's positions
             if let (Some(x), Some(y)) = (a.single(), b.single()) {
                 if matches!((self.kind(x), self.kind(y)), (Kind::List, Kind::List) | (Kind::Tuple, Kind::Tuple)) {
@@ -1703,47 +1698,13 @@ impl Analyzer {
                 ast::Operator::BitAnd => "and_",
                 _ => "",
             };
-            if !name.is_empty() && !self.torch_real {
+            if !name.is_empty() {
                 if let Some(r) = crate::models::pyvalues::operator_call(name, &[x, y]) {
                     let is_tuple = intern::with_key(r, |k| matches!(k, intern::Key::Tuple(_)));
                     if !is_tuple {
                         return Value::lit(r);
                     }
                 }
-            }
-        }
-        if op == ast::Operator::Sub {
-            if let (Some(x), Some(y)) = (a.kv.as_lit(), b.kv.as_lit()) {
-                if let Some(r) = num_binop(x, y, |p, q| p - q, |p, q| p - q) {
-                    return Value::lit(r);
-                }
-            }
-        }
-        if let (Some(x), Some(y)) = (a.kv.as_lit(), b.kv.as_lit()) {
-            let nonzero = intern::with_key(y, |k| !matches!(k, intern::Key::Int(0)));
-            let r = match op {
-                ast::Operator::Mult => num_binop(x, y, |p, q| p.wrapping_mul(q), |p, q| p * q),
-                ast::Operator::FloorDiv if nonzero => num_binop(x, y, |p, q| p.div_euclid(q), |p, q| (p / q).floor()),
-                ast::Operator::Mod if nonzero && !intern::key_is_str(x) => num_binop(x, y, |p, q| p.rem_euclid(q), |p, q| p - (p / q).floor() * q),
-                // true division: a float (of the exact quotient, also for two ints)
-                ast::Operator::Div if nonzero => {
-                    let f = |k: KeyId| -> Option<f64> {
-                        match intern::key_get(k) {
-                            intern::Key::Int(i) => Some(i as f64),
-                            intern::Key::Float(b) => Some(f64::from_bits(b)),
-                            intern::Key::Bool(b) => Some(b as i64 as f64),
-                            _ => None,
-                        }
-                    };
-                    match (f(x), f(y)) {
-                        (Some(p), Some(q)) if q != 0.0 => Some(key_float(p / q)),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            };
-            if let Some(r) = r {
-                return Value::lit(r);
             }
         }
         if op == ast::Operator::Mod {
@@ -2239,15 +2200,6 @@ pub fn literal_order(x: KeyId, y: KeyId) -> Option<std::cmp::Ordering> {
         return Some(a.cmp(&b));
     }
     None
-}
-
-fn num_binop(x: KeyId, y: KeyId, fi: impl Fn(i64, i64) -> i64, ff: impl Fn(f64, f64) -> f64) -> Option<KeyId> {
-    let nx = intern::with_key(x, num_of);
-    let ny = intern::with_key(y, num_of);
-    match (nx?, ny?) {
-        (Num::I(a), Num::I(b)) => Some(key_int(fi(a, b))),
-        (a, b) => Some(key_float(ff(a.f(), b.f()))),
-    }
 }
 
 #[derive(Clone, Copy)]

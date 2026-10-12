@@ -1366,7 +1366,6 @@ pub fn kv_restrict(kv: &KeyVal, keys: &KeySet) -> Option<KeyVal> {
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct ReqInfo {
     pub always: bool,
-    pub sites: StrSet,
     /// other sources that could satisfy the same access
     pub alternatives: IdSet<SourceId>,
     /// mutators that might have added the key instead
@@ -1381,7 +1380,6 @@ impl ReqInfo {
     pub fn join(&self, o: &ReqInfo) -> ReqInfo {
         ReqInfo {
             always: self.always && o.always,
-            sites: self.sites.union(&o.sites),
             alternatives: self.alternatives.union(&o.alternatives),
             caveats: self.caveats.union(&o.caveats),
             alt_keys: self.alt_keys.union(&o.alt_keys),
@@ -1392,7 +1390,6 @@ impl ReqInfo {
     pub fn seq(&self, o: &ReqInfo) -> ReqInfo {
         ReqInfo {
             always: self.always || o.always,
-            sites: self.sites.union(&o.sites),
             alternatives: if !self.alternatives.is_empty() && !o.alternatives.is_empty() {
                 self.alternatives.intersection(&o.alternatives)
             } else {

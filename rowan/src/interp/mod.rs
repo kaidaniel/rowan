@@ -1575,9 +1575,6 @@ impl Analyzer {
         }
     }
 
-    pub fn access_site(&self, node: &Node) -> String {
-        format!("L{}", node.line)
-    }
 
     // ------------------------------------------------------------- entry
 
@@ -1689,11 +1686,6 @@ impl Analyzer {
                 continue;
             }
             self.entry_done.insert(oid);
-            // closures made inside a summary run stand for every call's closure (their cells
-            // are relative): they are reached through the real calls
-            if !fi.closure.is_empty() && (self.obj(oid).ctx.contains("sum")) {
-                continue;
-            }
             if fi.module != self.main_module && !handler && !((quiet || refused) && self.is_local_module(fi.module)) {
                 continue;
             }

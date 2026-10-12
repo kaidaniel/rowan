@@ -129,40 +129,18 @@ pub const MAX_FACT_OBJECTS: usize = 16;
 /// How many distinct call chains one finding is reported under (the shortest ones).
 pub const MAX_CHAINS_PER_FINDING: usize = 8;
 
-pub struct SchemaEntry {
-    pub always: bool,
-    pub sites: Vec<String>,
-    pub alternatives: Vec<String>,
-    pub caveats: Vec<String>,
-    pub alt_keys: Vec<String>,
-}
-
-/// Source label -> {key -> entry}
-pub fn schema_rows(an: &Analyzer) -> IndexMap<String, IndexMap<String, SchemaEntry>> {
-    let mut out: IndexMap<String, IndexMap<String, SchemaEntry>> = IndexMap::new();
+/// What the program reads of each input, by its label: {key -> read on every path}.
+pub fn schema_rows(an: &Analyzer) -> IndexMap<String, IndexMap<String, bool>> {
+    let mut out: IndexMap<String, IndexMap<String, bool>> = IndexMap::new();
     let Some(st) = &an.final_state else { return out };
-    let mut items = st.reqs.items();
-    items.sort_by_key(|(s, _)| source_label(*s));
-    for (src, d) in items {
-        if source_is_data(src) {
-            continue;
-        }
-        let label = source_label(src);
-        let entry = out.entry(label).or_default();
-        let mut keys: Vec<_> = d.iter().collect();
-        keys.sort_by_key(|(k, _)| key_repr(*k));
-        for (k, info) in keys {
-            let mut sites: Vec<String> = info.sites.iter().map(|s| s.to_string()).collect();
-            sites.sort();
-            let mut alts: Vec<String> = info.alternatives.iter().map(source_label).collect();
-            alts.sort();
-            let mut cav: Vec<String> = info.caveats.iter().map(|s| s.to_string()).collect();
-            cav.sort();
-            let mut ak: Vec<String> = info.alt_keys.iter().map(key_repr).collect();
-            ak.sort();
-            entry.insert(key_repr(*k), SchemaEntry { always: info.always, sites, alternatives: alts, caveats: cav, alt_keys: ak });
+    for (src, d) in st.reqs.items().into_iter().filter(|(s, _)| !source_is_data(*s)) {
+        let entry = out.entry(source_label(src)).or_default();
+        for (k, info) in d.iter() {
+            entry.insert(key_repr(*k), info.always);
         }
     }
+    out.sort_keys();
+    out.values_mut().for_each(|e| e.sort_keys());
     out
 }
 
@@ -728,10 +706,7 @@ pub fn to_json(an: &Analyzer) -> Vec<J> {
         out.push(verdict_json(an, &v));
     }
     for (label, entry) in schema_rows(an) {
-        let keys: serde_json::Map<String, J> = entry
-            .iter()
-            .map(|(k, e)| (k.clone(), json!({"always": e.always, "sites": e.sites, "alternatives": e.alternatives, "caveats": e.caveats, "alt_keys": e.alt_keys})))
-            .collect();
+        let keys: serde_json::Map<String, J> = entry.iter().map(|(k, a)| (k.clone(), json!({"always": a}))).collect();
         out.push(json!({"kind": "schema", "source": label, "keys": keys}));
     }
     out
@@ -747,7 +722,7 @@ pub fn golden_json(an: &Analyzer) -> J {
     let verdicts: Vec<J> = dedupe(an, &an.verdicts).iter().map(|v| verdict_json(an, v)).collect();
     let mut schemas = serde_json::Map::new();
     for (label, entry) in schema_rows(an) {
-        let keys: serde_json::Map<String, J> = entry.iter().map(|(k, e)| (k.clone(), json!({"always": e.always}))).collect();
+        let keys: serde_json::Map<String, J> = entry.iter().map(|(k, a)| (k.clone(), json!({"always": a}))).collect();
         schemas.insert(label, J::Object(keys));
     }
     let rows: Vec<J> = an

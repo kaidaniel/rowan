@@ -139,14 +139,13 @@ impl Analyzer {
         v.pts.iter().filter(|o| self.is_record_like(*o)).collect()
     }
 
-    pub fn require_providers(&mut self, cls: &Classification, row: &Row, site: &str, with_alts: bool, state: &mut State) {
-        self.require_providers_k(cls, row, site, with_alts, state, None, Ns::Item)
+    pub fn require_providers(&mut self, cls: &Classification, row: &Row, with_alts: bool, state: &mut State) {
+        self.require_providers_k(cls, row, with_alts, state, None, Ns::Item)
     }
 
     /// The access of `key` needs it of the inputs that may provide it; a key the program
     /// stored on some path is needed only on the others (sometimes).
-    pub fn require_providers_k(&mut self, cls: &Classification, row: &Row, site: &str, with_alts: bool, state: &mut State, key: Option<KeyId>, ns: Ns) {
-        let site_id = s(site);
+    pub fn require_providers_k(&mut self, cls: &Classification, row: &Row, with_alts: bool, state: &mut State, key: Option<KeyId>, ns: Ns) {
         let srcs: Vec<crate::domain::SourceId> = cls.providers.iter().map(|(s, _)| *s).collect();
         let sometimes = key.map(|k| row.stored.contains(k)).unwrap_or(false);
         for (src, terms) in &cls.providers {
@@ -155,9 +154,9 @@ impl Analyzer {
                 let was_always = state.reqs.get(src, &t).map(|r| r.always).unwrap_or(false);
                 if with_alts {
                     let alts = intern::IdSet::from_iter(srcs.iter().copied().filter(|x| x != src));
-                    state.require(*src, t, site_id, alts, row.mutators.clone(), terms.clone());
+                    state.require(*src, t, alts, row.mutators.clone(), terms.clone());
                 } else {
-                    state.require(*src, t, site_id, intern::IdSet::new(), row.mutators.clone(), intern::IdSet::new());
+                    state.require(*src, t, intern::IdSet::new(), row.mutators.clone(), intern::IdSet::new());
                 }
                 if ns == Ns::Attr {
                     if let Some(cur) = state.reqs.get(src, &t).filter(|r| !r.attr) {
@@ -962,7 +961,6 @@ impl Analyzer {
         // (the row before this read narrows it)
         let row0 = row.clone();
         let kv = &key.kv;
-        let site = self.access_site(node);
         if kv.is_literal() {
             let mut acc = Value::new();
             let ks = crate::domain::kv_literals(kv);
@@ -978,7 +976,7 @@ impl Analyzer {
                     let model_read = ns == Ns::Item && self.item_exc == Some("ValidationError");
                     if model_read {
                         if self.caught_load && cls.tier == Tier::Input {
-                            self.require_providers_k(&cls, &row, &site, true, state, Some(k), ns);
+                            self.require_providers_k(&cls, &row, true, state, Some(k), ns);
                         }
                     }
                     // the handler sees the state as it is here (and a KeyError / AttributeError
@@ -991,7 +989,7 @@ impl Analyzer {
                     }
                     // (required on the handler's path too: the exception fired for the key)
                     if !model_read && self.caught_load && cls.tier == Tier::Input {
-                        self.require_providers_k(&cls, &row, &site, true, state, Some(k), ns);
+                        self.require_providers_k(&cls, &row, true, state, Some(k), ns);
                     }
                     if !model_read {
                         self.cur_exc_cls = Some(super::builtin_exc_names(if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" }));
@@ -1025,17 +1023,17 @@ impl Analyzer {
                 }
                 // (a handler that re-raises, a thread / future: the input still needs the key)
                 if guarded && cls.tier == Tier::Input && (self.catching_depth > 0 || self.guard_reraises(ns) || self.caught_load) {
-                    self.require_providers_k(&cls, &row, &site, true, state, Some(k), ns);
+                    self.require_providers_k(&cls, &row, true, state, Some(k), ns);
                 }
                 if !guarded {
                     self.verdict(node, k, &cls, oid, ns, None, None);
                     if cls.tier == Tier::Input {
-                        self.require_providers_k(&cls, &row, &site, true, state, Some(k), ns);
+                        self.require_providers_k(&cls, &row, true, state, Some(k), ns);
                     }
                     if cls.tier == Tier::Proven && ns == Ns::Item {
                         if let Some(src) = self.td_param_src.get(&oid).copied() {
                             let fresh = !state.reqs.contains(&src, &k);
-                            state.require(src, k, s(&site), intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
+                            state.require(src, k, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
                             if fresh && (self.branch_depth > 0 || self.cond_depth > 0) {
                                 if let Some(cur) = state.reqs.get(&src, &k) {
                                     state.reqs.set(&src, k, crate::domain::ReqInfo { always: false, ..cur });
@@ -1417,8 +1415,7 @@ impl Analyzer {
                 if report && !self.is_guarded(ns) {
                     self.verdict(node, k, &cls, oid, ns, None, None);
                     if cls.tier == Tier::Input {
-                        let site = self.access_site(node);
-                        self.require_providers_k(&cls, &row, &site, false, state, Some(k), ns);
+                        self.require_providers_k(&cls, &row, false, state, Some(k), ns);
                     }
                 }
                 // (a `del` of a key that is not there raises KeyError)
@@ -2201,8 +2198,7 @@ impl Analyzer {
         if !guarded {
             self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
             if cls.tier == Tier::Input {
-                let site = self.access_site(node);
-                self.require_providers_k(&cls, &row, &site, false, state, Some(nk), Ns::Attr);
+                self.require_providers_k(&cls, &row, false, state, Some(nk), Ns::Attr);
             }
             if cls.tier != Tier::Missing && single_target && self.strongable(oid) {
                 state.set_row(oid, Ns::Attr, row.narrow_in(nk, true));
@@ -2449,8 +2445,7 @@ impl Analyzer {
             self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
             // (a method called on an input — `df.groupby(…)` — is not a key the input must have)
             if cls.tier == Tier::Input && !self.callee_nodes.contains(&node.addr) {
-                let site = self.access_site(node);
-                self.require_providers_k(&cls, &row, &site, false, state, Some(nk), Ns::Attr);
+                self.require_providers_k(&cls, &row, false, state, Some(nk), Ns::Attr);
             }
         }
         let ph = self.path_placeholder_value(oid, Ns::Attr, nk, &row, state);

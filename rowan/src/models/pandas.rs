@@ -1434,12 +1434,11 @@ fn read_frame(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let tag = frame_producer(&c.qual).unwrap_or_else(|| last(&c.qual)).to_string();
     let src = Source::new(&format!("{}@L{}", tag, c.line), SourceKind::External);
-    let site = intern::s(&an.access_site(&c.node));
     let mut row = Row::with_source(src);
     if let Some(ks) = c.kw("usecols").and_then(|u| an.lit_keys(&u, st)) {
         // the file must have every listed column (ValueError otherwise)
         for k in intern::sorted_by_str(ks.iter()) {
-            st.require(src, k, site, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
+            st.require(src, k, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
         }
         row = Row::closed_with(ks);
     }
@@ -1456,7 +1455,7 @@ fn read_frame(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             Some(ks) if ks.iter().all(intern::key_is_str) => {
                 for k in intern::sorted_by_str(ks.iter()) {
                     if row.open() {
-                        st.require(src, k, site, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
+                        st.require(src, k, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
                     }
                     row = row.delete(k, true);
                 }
@@ -5192,7 +5191,6 @@ pub fn frame_getitem(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, stat
 /// `narrow`: a failing access raises here (false for loads that never fail).
 pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, state: &mut State, guarded: bool, narrow: bool) -> Value {
     let row = state.row(oid, Ns::Item);
-    let site = an.access_site(node);
     if let (Some(k), true) = (key.kv.as_lit(), key.pts.is_empty()) {
         // MultiIndex columns (tuple keys): a plain key selects the top level
         if !is_tuple_key(k) && row.present.iter().any(is_tuple_key) {
@@ -5225,7 +5223,7 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
         }
         // (a read behind a try is a probe: an input need not have the column)
         if cls.tier == Tier::Input && !guarded {
-            an.require_providers_k(&cls, &row, &site, true, state, Some(k), Ns::Item);
+            an.require_providers_k(&cls, &row, true, state, Some(k), Ns::Item);
         }
         // the program went on: the column was there (also under a try that handles the miss)
         if narrow && cls.tier != Tier::Missing && an.obj(oid).single {
@@ -5370,8 +5368,7 @@ pub fn frame_delitem(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, stat
             let cls = classify(&row, k);
             an.verdict(node, k, &cls, oid, Ns::Item, None, None);
             if cls.tier == Tier::Input {
-                let site = an.access_site(node);
-                an.require_providers(&cls, &row, &site, false, state);
+                an.require_providers(&cls, &row, false, state);
             }
         }
         row = row.delete(k, strong && is_lit);
