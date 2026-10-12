@@ -505,9 +505,6 @@ impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
         self.clone()
     }
 
-    /// (kept for the callers of the layered implementation: nothing to freeze)
-    pub fn share(&mut self) {}
-
     /// Keys on one side only are kept; keys on both sides are combined with f (unless equal).
     pub fn join(&self, o: &LayerMap<K, V>, f: &mut dyn FnMut(&V, &V) -> V) -> LayerMap<K, V> {
         let mut both = |_: &K, a: &V, b: &V| Some(f(a, b));

@@ -240,24 +240,7 @@ impl State {
     }
 
     pub fn copy(&mut self) -> State {
-        State {
-            env: self.env.clone(),
-            narrowed: self.narrowed.clone(),
-            rows: self.rows.copy(),
-            slots: self.slots.copy(),
-            elems: self.elems.copy(),
-            lens: self.lens.copy(),
-            reqs: self.reqs.copy(),
-            ret: self.ret.clone(),
-            reachable: self.reachable,
-            exits: self.exits.clone(),
-            symbolic: self.symbolic,
-            facts: self.facts.clone(),
-            name_keys: self.name_keys.clone(),
-            lasts: self.lasts.clone(),
-            tf: self.tf.clone(),
-            unbound: self.unbound.clone(),
-        }
+        self.copy_ref()
     }
 
     /// Snapshot the heap at a `return` so the caller sees it joined over all return points.
@@ -378,19 +361,6 @@ impl State {
             s.reqs = a.join_with(&mut b, &mut |x, y| x.join(y), &mut |x| x.clone());
         }
         s
-    }
-
-    /// Join all heap facts (rows/slots/elems/reqs) of `o` into self, in place.
-    pub fn join_heap_all(&mut self, o: &mut State) {
-        if !o.reachable {
-            return;
-        }
-        self.rows = self.rows.join(&o.rows, &mut |a, b| a.join(b));
-        self.slots = self.slots.join(&mut o.slots, &mut |a, b| a.join(b));
-        self.elems = self.elems.join(&o.elems, &mut |a, b| kv_join(a, b));
-        self.lens = self.lens.join(&o.lens, &mut join_len);
-        self.reqs = self.reqs.join_with_keep(&mut o.reqs, &mut |a, b| a.join(b), &mut |a| a.demote(), &nested_keep);
-        self.lasts = join_lasts(&self.lasts, &o.lasts);
     }
 
     /// Join the heap facts of `o` restricted to a footprint (the objects a callee touched).

@@ -639,10 +639,6 @@ impl Row {
         Row::with_sources(SrcSet::one((src, EMPTY_LENS)))
     }
 
-    pub fn with_mutators(m: StrSet) -> Row {
-        Row::from_data(RowData { mutators: m, ..Default::default() })
-    }
-
     pub fn top() -> Row {
         Row::from_data(RowData { top: true, ..Default::default() })
     }
@@ -693,10 +689,6 @@ impl Row {
 
     pub fn is_map(&self) -> bool {
         self.sources.iter().any(|(s, _)| source_is_data(s))
-    }
-
-    pub fn external_sources(&self) -> SrcSet {
-        self.sources.filter(|(s, _)| !source_is_data(s))
     }
 
     /// Source -> source key terms that may surface as k (sorted by source id).
@@ -950,16 +942,6 @@ impl Row {
 
     pub fn narrow_out(&self, k: KeyId) -> Row {
         self.delete(k, true)
-    }
-
-    pub fn make_top(&self) -> Row {
-        let mut d = self.data();
-        d.definite = KeySet::new();
-        d.likely = KeySet::new();
-        d.absent = KeySet::new();
-        d.absent_likely = KeySet::new();
-        d.top = true;
-        Row::from_data(d)
     }
 
     /// The symbolic row of an object as it is at function entry.
