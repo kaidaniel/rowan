@@ -400,16 +400,10 @@ impl Analyzer {
         let touched = self.reachable_records(&vals, state, 0);
         let site_id = s(&site);
         let arg_recs: Vec<(u32, Ns)> = touched.iter().copied().filter(|(oid, _)| vals.iter().any(|v| v.pts.contains(*oid))).collect();
-        // (the result's object is keyed by the last call site of the context only, k = 1: with
-        // the whole call string every context made its own result and its own tree of parts —
-        // a recursive walk over unknown values, rich's pretty printer; `unkretk=0` no context,
-        // `=2` the whole call string)
-        let full_ctx = self.frame().ctx.clone();
-        let rctx: String = match super::limit("unkretk", 1) {
-            0 => String::new(),
-            1 => full_ctx.rsplit('/').next().unwrap_or("").to_string(),
-            _ => full_ctx.clone(),
-        };
+        // (the result's object is keyed by the last call site of the context only: with the
+        // whole call string every context made its own result and its own tree of parts — a
+        // recursive walk over unknown values, rich's pretty printer)
+        let rctx: String = self.frame().ctx.rsplit('/').next().unwrap_or("").to_string();
         let rid = self.alloc(Kind::Unknown, &format!("ret:{}", site), state, &format!("result of {}", site), Payload::None, None, Ns::Item, Some(true), Some(&rctx));
         if let Some(r) = recv {
             for o in r.pts.iter() {
@@ -447,7 +441,7 @@ impl Analyzer {
         }
         // (many records given — a value joined over many contexts: the result is any record,
         // an open row, rather than the join of them all and a copy of all their slots)
-        let joinable = arg_recs.len() <= crate::interp::limit("argjoin", MAX_ARG_JOIN);
+        let joinable = arg_recs.len() <= MAX_ARG_JOIN;
         if !arg_recs.is_empty() && joinable {
             let row = join_rows(arg_recs.iter().map(|(o, n)| state.row(*o, *n)));
             let mut d = row.data();
@@ -1185,7 +1179,7 @@ impl Analyzer {
                     // allocate distinct objects
                     let ctx = if !recv.single {
                         site.to_string()
-                    } else if self.site_clones.get(&*recv.site).copied().unwrap_or(0) >= super::limit("clones", MAX_CLONES) {
+                    } else if self.site_clones.get(&*recv.site).copied().unwrap_or(0) >= MAX_CLONES {
                         String::new()
                     } else {
                         format!("o{}/{}", recv.id, site)
@@ -1203,7 +1197,7 @@ impl Analyzer {
         // arguments possibly changed, it may raise): the run ends in bounded time
         if self.over_hard_deadline() {
             let q = self.func_info(foid).qualname.clone();
-            self.note(format!("analysis cut at the hard deadline ({} ms): later calls are unknown code", super::limit("hard", 5 * super::limit("ms", super::MAX_MS))));
+            self.note(format!("analysis cut at the deadline ({} ms): later calls are unknown code", super::limit("ms", super::DEADLINE_MS)));
             return self.unknown_call(&q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
         // (user code called back by a model allocates as user code)
@@ -1215,7 +1209,7 @@ impl Analyzer {
         self.model_depth = saved_md;
         if self.hard_cut && !was_cut {
             let q = self.func_info(foid).qualname.clone();
-            self.note(format!("analysis cut at the hard deadline ({} ms) inside {}: the call is unknown code", super::limit("hard", 5 * super::limit("ms", super::MAX_MS)), q));
+            self.note(format!("analysis cut at the deadline ({} ms) inside {}: the call is unknown code", super::limit("ms", super::DEADLINE_MS), q));
             state.reachable = true;
             let (sv, a, kw, sa, skw) = keep;
             return self.unknown_call(&q, sv.as_ref(), &a, &kw, &sa, &skw, state, node);
@@ -1246,7 +1240,7 @@ impl Analyzer {
                 site.push_str(&format!("#{}", i));
             }
             if fr.kind != FrameKind::Module && !fr.ctx.is_empty() && !fr.ctx.starts_with("entry") {
-                if fr.ctx.matches('/').count() < super::limit("chain", 2) {
+                if fr.ctx.matches('/').count() < super::CHAIN {
                     format!("{}/{}", fr.ctx, site)
                 } else {
                     // deeper chains stay distinct through a hash of the prefix: two activations
@@ -1591,8 +1585,11 @@ impl Analyzer {
         if !converged && !ret_stable {
             ret = ret.join(&Value::data(&format!("recursion@{}", fi.qualname)));
         }
-        if let Some(sig) = sig {
+        // (at most CACHE_PER_FN entries per function: the cache's memory is bounded too)
+        let room = self.cache_count.get(&fnode.addr()).copied().unwrap_or(0) < super::CACHE_PER_FN;
+        if let Some(sig) = sig.filter(|_| room) {
             if !self.rec_hit.contains(&key) {
+                *self.cache_count.entry(fnode.addr()).or_default() += 1;
                 let mut rel = State::new();
                 for (src, k) in st.reqs.diff_keys(&pre_bind.reqs) {
                     if let Some(info) = st.reqs.get(&src, &k) {
@@ -1840,7 +1837,7 @@ impl Analyzer {
         // (what callees made since the try began and nothing reaches after the unwind — the
         // try's names, the frames above it, the exception — is garbage in the raise state: a
         // try around a large recursion otherwise joins every callee's objects at every raise)
-        if crate::interp::gc_on() {
+        {
             let fl = *fl;
             let el = *el;
             let pre_try = pre.copy_ref();
@@ -1880,7 +1877,7 @@ impl Analyzer {
                 push(v, &mut roots);
             }
             push(&exc, &mut roots);
-            self.collect_since(tmark, &pre_try, roots, true, &mut here);
+            self.collect_since(tmark, &pre_try, roots, &mut here);
         }
         // (a try that keeps its raises one by one joins them where a handler needs them: the
         // running join is only a mark that something was recorded)

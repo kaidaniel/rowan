@@ -1898,23 +1898,18 @@ impl Analyzer {
         if !matches!(self.frame().kind, FrameKind::Function) {
             return;
         }
-        // (`ROWAN_GC=0`: only at a return of a value without objects, the old rule)
-        let general = crate::interp::gc_on();
-        if !general && (!v.pts.is_empty() || matches!(v.kv, KeyVal::KeysOf(_))) {
-            return;
-        }
         let mut roots: Vec<u32> = Vec::new();
         roots.extend(v.pts.iter());
         match &v.kv {
             KeyVal::KeysOf(ko) => roots.extend(ko.objs.iter()),
             _ => {}
         }
-        self.collect_since(mark, &pre, roots, general, state);
+        self.collect_since(mark, &pre, roots, state);
     }
 
     /// Objects allocated since `mark` that no root reaches lose their state (`drop_garbage_at_return`;
     /// at a loop's exit the roots are the frame's live names).
-    pub fn collect_since(&mut self, mark: u32, pre: &State, roots: Vec<u32>, general: bool, state: &mut State) {
+    pub fn collect_since(&mut self, mark: u32, pre: &State, roots: Vec<u32>, state: &mut State) {
         let fp = state.footprint(pre);
         let mut fresh: rustc_hash::FxHashSet<u32> = Default::default();
         for (o, _) in fp.rows.iter() {
@@ -1932,11 +1927,8 @@ impl Analyzer {
                 fresh.insert(*o);
             }
         }
-        if fresh.is_empty() || fresh.len() > if general { 4096 } else { 64 } {
+        if fresh.is_empty() || fresh.len() > 4096 {
             return;
-        }
-        if crate::interp::debug_level() >= 1 && std::env::var("ROWAN_GCDBG").is_ok() {
-            eprintln!("gc: in {} (L{}) roots {:?} fresh {:?}", self.frame().label, self.frame().ctx, roots, { let mut f: Vec<u32> = fresh.iter().copied().collect(); f.sort(); f });
         }
         // roots: the returned value, what older objects' changed slots hold (globals,
         // parameters, cells, …), and what the analyzer holds beyond the state
@@ -1956,12 +1948,10 @@ impl Analyzer {
                 work.extend(ko.objs.iter());
             }
         }
-        if general {
-            self.gc_pinned(&mut work);
-            // (placeholders and unknown objects stand for objects outside the call — a
-            // parameter's record, an input's part: what they hold is reachable from there)
-            work.extend(fresh.iter().copied().filter(|o| matches!(self.kind(*o), Kind::Unknown)));
-        }
+        self.gc_pinned(&mut work);
+        // (unknown objects stand for objects outside the call — a parameter's record, an
+        // input's part: what they hold is reachable from there)
+        work.extend(fresh.iter().copied().filter(|o| matches!(self.kind(*o), Kind::Unknown)));
         // (older objects reach fresh ones only through those roots: only fresh ones expand)
         let mut reached: rustc_hash::FxHashSet<u32> = Default::default();
         while let Some(o) = work.pop() {
@@ -1974,13 +1964,10 @@ impl Analyzer {
         for o in fresh {
             // (a part of an input — an unknown object, a placeholder — is found again by its
             // path whenever that path is read: its rows belong to the input, never garbage)
-            if matches!(self.kind(o), Kind::Unknown) && general {
+            if matches!(self.kind(o), Kind::Unknown) {
                 continue;
             }
             if !reached.contains(&o) {
-                if crate::interp::debug_level() >= 1 && std::env::var("ROWAN_GCDBG").is_ok() {
-                    eprintln!("gc: drop {} {} at the return of {} (L{})", o, self.obj(o).label, self.frame().label, self.frame().ctx);
-                }
                 state.forget_obj(o);
             }
         }
@@ -1989,7 +1976,7 @@ impl Analyzer {
     /// Garbage collection at a loop's exit (in a function): objects the loop allocated that the
     /// frame's names, the enclosing frames and the analyzer no longer reach lose their state.
     fn loop_gc_begin(&mut self, state: &mut State) -> Option<(u32, State)> {
-        if !crate::interp::gc_on() || !matches!(self.frame().kind, FrameKind::Function) || self.frame().pre_call.is_none() {
+        if !matches!(self.frame().kind, FrameKind::Function) || self.frame().pre_call.is_none() {
             return None;
         }
         Some((self.objects.len() as u32, state.copy()))
@@ -2035,7 +2022,7 @@ impl Analyzer {
             roots.push(*o);
             push(v, &mut roots);
         }
-        self.collect_since(mark, &pre, roots, true, state);
+        self.collect_since(mark, &pre, roots, state);
     }
 
     fn stmt_classdef(&mut self, c: &'static ast::StmtClassDef, state: &mut State) {

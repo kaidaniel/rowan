@@ -69,24 +69,18 @@ impl YieldStates {
     }
 }
 pub const MAX_CLONES: usize = 256;
+/// Call sites kept in an allocation context (deeper chains: a hash of the prefix).
+pub const CHAIN: usize = 2;
 /// Statements a function code may run in all its calls (`ROWAN_LIMITS=budget=N`): past them
 /// its calls are unknown code.
 pub const FN_BUDGET: usize = 4096;
-/// Milliseconds after which the analysis degrades gracefully: no new tabulations (summaries
-/// are used instead) and no new clones (allocation sites collapse onto their context-free
-/// object). The per-function caps above stay as hard limits. `ROWAN_LIMITS=ms=N`.
-pub const MAX_MS: usize = 2000;
+/// Cached runs kept per function code (`calls::CacheHit`).
+pub const CACHE_PER_FN: usize = 32;
+/// A safety net, not the bound on work (the budget is): past this many milliseconds
+/// (`ROWAN_LIMITS=ms=N`) calls of user code are unknown calls and running bodies stop.
+pub const DEADLINE_MS: usize = 10000;
 
-/// Tunable limits: `ROWAN_LIMITS=tab=24,call=32,clones=8,chain=2,path=3,active=4` overrides
-/// the defaults (for bisecting precision / time trade-offs).
-/// Abstract garbage collection at returns (`ROWAN_GC=0` turns it off): objects a call made
-/// that nothing reaches any more leave the state.
-pub fn gc_on() -> bool {
-    thread_local! {
-        static ON: bool = std::env::var("ROWAN_GC").map(|v| v != "0").unwrap_or(true);
-    }
-    ON.with(|o| *o)
-}
+/// `ROWAN_LIMITS=budget=N,ms=N`: the budget and the deadline (the only two knobs).
 
 pub fn limit(name: &str, default: usize) -> usize {
     thread_local! {
@@ -958,12 +952,14 @@ pub struct Analyzer {
     pub walked: std::cell::Cell<usize>,
     /// return / break / continue statements executed (a try body that ends with one did not raise)
     pub exit_count: usize,
-    /// when the analysis started (see `MAX_MS`)
+    /// when the analysis started (see `DEADLINE_MS`)
     pub started: std::time::Instant,
     /// the hard deadline passed: function bodies stop, the calls they are in become unknown calls
     pub hard_cut: bool,
     cut_tick: u32,
     pub call_cache: FxHashMap<calls::Sig, Rc<calls::CacheHit>>,
+    /// cached runs per function code (bounded by `CACHE_PER_FN`)
+    pub cache_count: FxHashMap<usize, usize>,
     pub entry_instances: FxHashMap<ObjId, ObjId>,
     pub fresh_in_progress: FxHashSet<ObjId>,
     pub main_module: ObjId,
@@ -1228,6 +1224,7 @@ impl Analyzer {
             hard_cut: false,
             cut_tick: 0,
             call_cache: FxHashMap::default(),
+            cache_count: FxHashMap::default(),
             entry_instances: FxHashMap::default(),
             torch_on: false,
             torch_real: false,
@@ -1423,7 +1420,7 @@ impl Analyzer {
             return oid;
         }
         let n = self.site_clones.get(site).copied().unwrap_or(0);
-        if (n >= limit("clones", MAX_CLONES) || self.over_deadline()) && !ctx.is_empty() {
+        if n >= MAX_CLONES && !ctx.is_empty() {
             // too many clones of one allocation site: collapse onto the context-free summary object
             let o = self.alloc_raw(kind, site, "", false, label, payload);
             crate::state::mark_merged(o);
@@ -1820,7 +1817,6 @@ impl Analyzer {
     }
 
     // ------------------------------------------------------------- entry
-    /// Past the time budget: the analysis keeps going but stops refining (see `MAX_MS`).
     /// Whether a function body of module `m` calls a mutating method on the global `name`
     /// (`LOG.append(…)`): a textual scan of the indented lines, cached per module.
     pub fn mutated_in_functions(&self, m: ObjId, name: &str) -> bool {
@@ -1897,31 +1893,18 @@ impl Analyzer {
         }
     }
 
-    /// The work done so far: statements run, summary templates instantiated, and objects visited
-    /// by reachability walks (16 to a unit). `ROWAN_LIMITS=work=N` puts the deadlines on it
-    /// (soft at N, hard at 5N, `hardwork=`) instead of the clock: a run cut by them gives the
-    /// same result on any machine and under any load.
+    /// The work done so far: statements run and objects visited by reachability walks (16 to a
+    /// unit): a deterministic cost measure (`ROWAN_DEBUG=1`, the golden `#@work` bound).
     pub fn work_units(&self) -> usize {
         self.work + self.walked.get() / 16
     }
 
-    pub fn over_deadline(&self) -> bool {
-        match limit("work", 0) {
-            0 => self.started.elapsed().as_millis() as usize > limit("ms", MAX_MS),
-            w => self.work_units() > w,
-        }
-    }
-
-    /// Past the hard deadline (`ROWAN_LIMITS=hard=N`, 5× the soft one): calls of user code
-    /// are unknown code from there on.
+    /// Past the deadline (`DEADLINE_MS`): calls of user code are unknown code from there on.
     pub fn over_hard_deadline(&self) -> bool {
-        match limit("work", 0) {
-            0 => self.started.elapsed().as_millis() as usize > limit("hard", 5 * limit("ms", MAX_MS)),
-            w => self.work_units() > limit("hardwork", 5 * w),
-        }
+        self.started.elapsed().as_millis() as usize > limit("ms", DEADLINE_MS)
     }
 
-    /// Past the hard deadline a statement in a function body does not run: its path ends, and
+    /// Past the deadline a statement in a function body does not run: its path ends, and
     /// the call it belongs to is replaced by an unknown call (`call_user`). Module code goes on
     /// (its calls are unknown calls). Checked every 64 statements.
     pub fn cut_body(&mut self, state: &mut State) -> bool {
@@ -1999,7 +1982,7 @@ impl Analyzer {
             if quiet != quiet_pass && !(quiet_pass && refused) {
                 continue;
             }
-            if quiet && (!fi.closure.is_empty() || !matches!(fi.node, FuncNode::Def(_)) || !self.is_local_module(fi.module) || self.over_deadline()) || self.t_concrete_closures.contains(&oid) {
+            if quiet && (!fi.closure.is_empty() || !matches!(fi.node, FuncNode::Def(_)) || !self.is_local_module(fi.module)) || self.t_concrete_closures.contains(&oid) {
                 continue;
             }
             self.entry_done.insert(oid);

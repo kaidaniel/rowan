@@ -1105,7 +1105,7 @@ impl Analyzer {
 
     /// `_path_placeholder`: the (unknown) content of an open object's slot.
     pub fn path_placeholder_value(&mut self, oid: u32, ns: Ns, k: KeyId, row: &Row, state: &mut State) -> Value {
-        if self.obj(oid).depth >= super::limit("path", PATH_DEPTH as usize) as u32 {
+        if self.obj(oid).depth >= PATH_DEPTH {
             return Value::data("deep");
         }
         let label = format!("{}[{}]", self.obj(oid).label, intern::key_repr(k));
@@ -2483,7 +2483,7 @@ impl Analyzer {
         let cands: Vec<u32> = self.classes_defining(nk);
         // (a name many classes define — `render`, `get_style` — says little about which one an
         // unknown value is: past `duck` classes it is unknown code, not a call of every one)
-        if !self.duck_part(oid) && !cands.is_empty() && (cands.len() <= super::limit("duck", 8)) {
+        if !self.duck_part(oid) && !cands.is_empty() && cands.len() <= 8 {
             // (a receiver value of many objects: the bound methods are the same for each of its
             // unknown objects — made once per attribute read)
             if let Some((_, _, Some(done))) = &self.many_receivers {

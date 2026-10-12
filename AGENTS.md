@@ -58,10 +58,8 @@ ruff and walks the syntax tree directly, running the program on abstract values.
   values (str / bytes, formatting, json, re, datetime, decimal, sqlite, csv…), and simulate
   pandas columns, pydantic / FastAPI validation and routing, and torch / numpy shapes (dims as
   polynomials; an undecided condition is a requirement and then a fact on the path).
-* **Deadlines:** a safety net only. Past the soft one (`ms`, 2 s) allocation sites stop
-  making new clones; past the hard one (5×) user calls become unknown calls and running calls
-  stop where they are. With `work=N` both count work units instead (statements and walk
-  visits at 16 per unit).
+* **Deadline:** a safety net only (`ms`, 10 s): past it user calls become unknown calls and
+  running calls stop where they are. The budget, not the deadline, bounds the work.
 * **Soundness** holds relative to the models and to annotations of values whose class is
   unknown. `exec`, `setattr` / `getattr` with unknown names, metaclasses and monkey-patching
   are unknown or ignored. Accepted imprecision: lengths past 15, slices by unknown bounds,
@@ -126,13 +124,10 @@ budget; informational, into the history on gh-pages).
 ## Debugging switches
 
 * `ROWAN_DEBUG=1`: every body run (`run F at SITE`), entry runs, and a final `work:` line
-  (units, body runs, objects, row joins, visits). `2`: also every raise and try decision. With it, `ROWAN_GCDBG=1` prints what each collection drops.
-* `ROWAN_LIMITS=ms=2000,hard=10000,budget=4096,clones=256,chain=2,path=3`. `work=550000`
-  (about 2 s) gives reproducible runs for comparisons. A change that removes liveness walks
-  spends a `work=N` budget on more statements: compare progress in equal time
-  (`ms=60000,hard=60000`) too.
-* `ROWAN_GC=0`: almost no collection.
-  `ROWAN_FOLLOW=pkg,…` = `--follow`. `ROWAN_TODO=check` checks `#@todo`s too.
+  (statements, units = statements + walk visits / 16, body runs, objects, row joins, visits):
+  deterministic counters to compare builds. `2`: also every raise and try decision.
+* `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (the golden `#@limits` sets them per
+  case). `ROWAN_FOLLOW=pkg,…` = `--follow`. `ROWAN_TODO=check` checks `#@todo`s too.
 * **Profiling:** short runs, several in parallel. `sample <pid> 3` for time,
   `MallocStackLogging=lite` + `malloc_history <pid> -allBySize` for memory. macOS has no
   `timeout`: `perl -e 'alarm N; exec @ARGV' rowan …`. Compare builds on results (proven /

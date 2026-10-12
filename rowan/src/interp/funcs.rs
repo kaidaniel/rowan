@@ -1059,7 +1059,7 @@ impl Analyzer {
                 Kind::Unknown => {
                     items = None;
                     exhaustive = false;
-                    if self.obj(oid).depth >= super::limit("path", PATH_DEPTH as usize) as u32 {
+                    if self.obj(oid).depth >= PATH_DEPTH {
                         elems.push(Value::data("deep"));
                         continue;
                     }
