@@ -347,8 +347,21 @@ pub const EXC_BASES: &[(&str, &str)] = &[
     ("configparser.MissingSectionHeaderError", "configparser.ParsingError"),
 ];
 
-/// The names of a builtin exception class and its bases (`IOError` is `OSError`).
+/// The names of a builtin exception class and its bases (`IOError` is `OSError`), computed
+/// once per name.
 pub fn builtin_exc_names(name: &str) -> ExcNames {
+    thread_local! {
+        static CACHE: RefCell<FxHashMap<String, ExcNames>> = RefCell::new(FxHashMap::default());
+    }
+    if let Some(e) = CACHE.with(|c| c.borrow().get(name).cloned()) {
+        return e;
+    }
+    let e = builtin_exc_names_uncached(name);
+    CACHE.with(|c| c.borrow_mut().insert(name.to_string(), e.clone()));
+    e
+}
+
+fn builtin_exc_names_uncached(name: &str) -> ExcNames {
     // a module-qualified class of the table: its chain, by the classes' own names
     if EXC_BASES.iter().any(|(c, _)| *c == name && c.contains('.')) {
         let mut out: Vec<String> = Vec::new();
@@ -360,7 +373,7 @@ pub fn builtin_exc_names(name: &str) -> ExcNames {
                 None => return (out, false),
             }
         }
-        let (rest, full) = builtin_exc_names(&n);
+        let (rest, full) = builtin_exc_names_uncached(&n);
         out.extend(rest);
         return (out, full);
     }
@@ -3229,6 +3242,9 @@ impl Analyzer {
             return;
         }
         let mut map: FxHashMap<ObjId, ObjId> = FxHashMap::default();
+        // (tuples of one length keep their positions in the summary object: each position
+        // the join of the tuples' — unpacking `a, b = t` then keeps them apart)
+        let mut keep_pos: FxHashSet<ObjId> = FxHashSet::default();
         for (r, kind, site, ctx) in &recs {
             let (label, payload, iter_elem, derived, depth) = {
                 let o = self.obj(*r);
@@ -3245,7 +3261,23 @@ impl Analyzer {
                     so.derived_from = derived;
                 }
             }
-            back.lens.insert(sid, (None, 0, 0));
+            let rlen = back.lens.get(r).and_then(|l| l.0);
+            let prev = back.lens.get(&sid);
+            let same_len = match (rlen, prev) {
+                (Some(n), None) => Some(n),
+                (Some(n), Some((Some(m), _, _))) if n == m => Some(n),
+                _ => None,
+            };
+            match same_len.filter(|_| *kind == Kind::Tuple) {
+                Some(n) => {
+                    back.lens.insert(sid, (Some(n), n, 0));
+                    keep_pos.insert(*r);
+                }
+                None => {
+                    back.lens.insert(sid, (None, 0, 0));
+                    back.drop_obj_ns(sid, Ns::Pos);
+                }
+            }
             map.insert(*r, sid);
         }
         let rename_value = |v: &Value, map: &FxHashMap<ObjId, ObjId>| -> Option<Value> {
@@ -3274,7 +3306,7 @@ impl Analyzer {
                 }
             }
             for ((ns, k), v) in back.slots_of(r) {
-                if ns == Ns::Pos {
+                if ns == Ns::Pos && !keep_pos.contains(&r) {
                     continue;
                 }
                 let v = rename_value(&v, &map).unwrap_or(v);
