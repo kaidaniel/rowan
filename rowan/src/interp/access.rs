@@ -662,7 +662,7 @@ impl Analyzer {
                             out = out.join(&Value::obj(*m));
                         }
                         None => {
-                            let cls = Classification::with_note(Tier::Missing, "no such Enum member");
+                            let cls = Classification::with_note(Tier::Missing, "is not a member of the Enum");
                             if !guarded { self.verdict(node, key_str_lit(&nm), &cls, oid, Ns::Item, None, None); } else { self.verdict_guarded(node, key_str_lit(&nm), &cls, oid, Ns::Item); }
                             if obj.pts.len() == 1 {
                                 self.raise_here("KeyError", state);
@@ -1078,7 +1078,7 @@ impl Analyzer {
                     }
                 }
                 for k in intern::sorted_by_str(missing) {
-                    self.verdict(node, k, &Classification::with_note(Tier::Possibly, "key from another record's key set"), oid, ns, None, None);
+                    self.verdict(node, k, &Classification::with_note(Tier::Possibly, "may be missing: the key comes from another object's keys"), oid, ns, None, None);
                 }
             }
             return self.all_values(oid, ns, state).join(&Value::kv_only(DATA));
@@ -1090,7 +1090,7 @@ impl Analyzer {
         }
         if !guarded && row.closed() && !row.is_map() && !row.present.is_empty() && matches!(kind, Kind::Dict | Kind::Frame) {
             let k = key_str_lit(&format!("<data {}>", kv));
-            self.verdict(node, k, &Classification::with_note(Tier::DataKey, "data-derived key into a closed record"), oid, ns, None, None);
+            self.verdict(node, k, &Classification::with_note(Tier::DataKey, "is computed from data and may not be one of this object's keys"), oid, ns, None, None);
         }
         let mut v = self.all_values(oid, ns, state);
         // (a closed record: the unknown key is one of its keys — one of their values; a map the
@@ -1479,7 +1479,7 @@ impl Analyzer {
                     Some(v) => v,
                     None => {
                         if !guarded {
-                            self.verdict(node, nk, &Classification::with_note(Tier::Missing, "module has no such attribute"), oid, Ns::Attr, None, None);
+                            self.verdict(node, nk, &Classification::with_note(Tier::Missing, "is not defined in the module"), oid, Ns::Attr, None, None);
                         }
                         Value::data(&format!("L{}", node.line))
                     }
@@ -1655,7 +1655,7 @@ impl Analyzer {
                         Value::obj(d)
                     } else if self.enum_members.contains_key(&oid) && !name.starts_with("__") && !self.class_info(oid).open_base {
                         // an Enum's attribute that is no member nor method: AttributeError
-                        let cls = Classification::with_note(Tier::Missing, "no such Enum member");
+                        let cls = Classification::with_note(Tier::Missing, "is not a member of the Enum");
                         if !guarded { self.verdict(node, nk, &cls, oid, Ns::Attr, None, None); } else { self.verdict_guarded(node, nk, &cls, oid, Ns::Attr); }
                         Value::data(&format!("L{}", node.line))
                     } else if crate::models::pydantic::PYD_ATTRS.contains(&name) && crate::models::pydantic::is_model(self, oid) {

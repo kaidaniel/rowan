@@ -1100,7 +1100,7 @@ pub fn classify(row: &Row, k: KeyId) -> Classification {
         return Classification::new(Tier::Proven);
     }
     if row.absent.contains(k) {
-        return Classification::with_note(Tier::Missing, "removed/excluded on every path");
+        return Classification::with_note(Tier::Missing, "was removed or renamed on every path to here");
     }
     if row.likely.contains(k) {
         return Classification::by_unknown_code(Tier::Likely, "unless unknown code removed it", row);
@@ -1110,9 +1110,9 @@ pub fn classify(row: &Row, k: KeyId) -> Classification {
     }
     if row.closed() {
         if row.present.contains(k) {
-            return Classification::with_note(Tier::Possibly, "set on some paths only");
+            return Classification::with_note(Tier::Possibly, "is only set on some paths");
         }
-        return Classification::with_note(Tier::Missing, "all keys known");
+        return Classification::with_note(Tier::Missing, "is never set");
     }
     let prov = row.provides(k);
     let mut ext: Vec<(SourceId, KeySet)> = prov.iter().filter(|(s, _)| !source_is_data(*s)).cloned().collect();
@@ -1126,12 +1126,12 @@ pub fn classify(row: &Row, k: KeyId) -> Classification {
         return Classification::new(Tier::Map);
     }
     if row.present.contains(k) {
-        return Classification::with_note(Tier::Possibly, "set on some paths only");
+        return Classification::with_note(Tier::Possibly, "is only set on some paths");
     }
     if !row.mutators.is_empty() {
         return Classification::by_unknown_code(Tier::LikelyMissing, "unless unknown code added it", row);
     }
-    Classification::with_note(Tier::Missing, "no source can provide it")
+    Classification::with_note(Tier::Missing, "is never set")
 }
 
 // ---------------------------------------------------------------------------

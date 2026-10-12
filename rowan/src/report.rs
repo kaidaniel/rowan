@@ -61,7 +61,7 @@ pub fn dedupe(an: &Analyzer, verdicts: &[Verdict]) -> Vec<Verdict> {
         } else {
             Tier::Possibly
         };
-        let mut provs: Vec<String> = by_obj.values().flat_map(|v| v.providers.clone()).collect();
+        let mut provs: Vec<SourceId> = by_obj.values().flat_map(|v| v.providers.clone()).collect();
         provs.sort();
         provs.dedup();
         out.push(Verdict {
@@ -71,7 +71,7 @@ pub fn dedupe(an: &Analyzer, verdicts: &[Verdict]) -> Vec<Verdict> {
             tier,
             obj: object_list(names.values()),
             chain: first.chain.clone(),
-            note: format!("depends on which object: {}", breakdown.join("; ")),
+            note: format!("is not on every object this may be ({})", breakdown.join("; ")),
             providers: provs,
             mutators: first.mutators.clone(),
             ns: first.ns,
@@ -148,98 +148,71 @@ pub fn schema_rows(an: &Analyzer) -> IndexMap<String, IndexMap<String, bool>> {
 /// functions return, the module's values, the limits of the analysis, and a legend of the
 /// marks used. Written for people who know Python, not static analysis.
 pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> String {
+    fn section(lines: &mut Vec<String>, title: &str, body: Vec<String>) {
+        if !body.is_empty() {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push(format!("== {} ==", title));
+            lines.extend(body);
+        }
+    }
     let mut lines: Vec<String> = Vec::new();
     let all = reported(an);
-    lines.push("== accesses that may fail ==".into());
-    let problems = problem_lines(an, &all);
-    if problems.is_empty() {
-        lines.push("  (none found)".into());
+    let mut problems = problem_lines(an, &all);
+    let none = problems.is_empty();
+    if none {
+        problems.push("  (none found)".into());
     }
-    lines.extend(problems);
     let oks = all.iter().filter(|v| v.tier == Tier::Proven).count();
     let likely = all.iter().filter(|v| v.tier == Tier::Likely).count();
     if oks + likely > 0 {
-        let mut ok_line = format!("  ({}{} access{} always succeed{}", oks, if lines.len() > 2 { " other" } else { "" }, if oks == 1 { "" } else { "es" }, if oks == 1 { "s" } else { "" });
+        let mut ok_line = format!("  ({}{} access{} always succeed{}", oks, if none { "" } else { " other" }, if oks == 1 { "" } else { "es" }, if oks == 1 { "s" } else { "" });
         if likely > 0 {
             ok_line += &format!("; {} more unless code rowan cannot see removed the key", likely);
         }
-        lines.push(ok_line + ")");
+        problems.push(ok_line + ")");
     }
+    section(&mut lines, "accesses that may fail", problems);
     // tensor shapes: definite mismatches, then what each line needs of its inputs
     if an.torch_on {
-        lines.push(String::new());
-        lines.push("== tensor shapes ==".into());
-        let mut seen: Vec<(u32, String)> = Vec::new();
+        let mut shapes: Vec<String> = Vec::new();
         let mut errs: Vec<&crate::models::torch::ShapeNote> = an.m.shape_errors.iter().collect();
         errs.sort_by_key(|e| (e.line, e.chain.len()));
-        for e in errs {
-            if seen.contains(&(e.line, e.text.clone())) {
-                continue;
-            }
-            seen.push((e.line, e.text.clone()));
-            lines.push(format!("  L{:<5} ✗  shape mismatch: {}{}", e.line, e.text, via_text(&e.chain, 0)));
-        }
+        errs.dedup_by(|a, b| (a.line, &a.text) == (b.line, &b.text));
+        shapes.extend(errs.iter().map(|e| format!("  L{:<5} ✗  shape mismatch: {}{}", e.line, e.text, via_text(&e.chain, 0))));
         let mut reqs: Vec<(u32, String)> = an.m.shape_reqs.iter().filter(|r| r.chain.is_empty()).map(|r| (r.line, r.text.clone())).collect();
         reqs.sort();
         reqs.dedup();
-        for (line, text) in &reqs {
-            lines.push(format!("  L{:<5}    needs {}", line, text));
+        shapes.extend(reqs.iter().map(|(line, text)| format!("  L{:<5}    needs {}", line, text)));
+        if shapes.is_empty() {
+            shapes.push("  (no mismatches, no requirements)".into());
         }
-        if seen.is_empty() && reqs.is_empty() {
-            lines.push("  (no mismatches, no requirements)".into());
-        }
+        section(&mut lines, "tensor shapes", shapes);
     }
     let (inputs, contracts) = needs_text(an);
-    for (title, group) in [("== what the code reads from its inputs ==", inputs), ("== what each function needs from its arguments ==", contracts)] {
-        if group.is_empty() {
-            continue;
-        }
-        lines.push(String::new());
-        lines.push(title.into());
-        lines.extend(group);
-    }
+    section(&mut lines, "what the code reads from its inputs", inputs);
+    section(&mut lines, "what each function needs from its arguments", contracts);
     if show_summaries {
-        let results = result_lines(an);
-        if !results.is_empty() {
-            lines.push(String::new());
-            lines.push("== what functions return ==".into());
-            lines.extend(results);
-        }
+        section(&mut lines, "what functions return", result_lines(an));
     }
-    if show_rows {
-        if let Some(st) = &an.final_state {
-            let m = an.main_module;
-            let mut names: Vec<(String, crate::domain::Value)> = st.obj_slots(m, Ns::Attr).into_iter().map(|(k, v)| (intern::key_py_str(k), v)).collect();
-            names.sort_by(|a, b| a.0.cmp(&b.0));
-            // definitions (functions, classes, imported modules) are not values worth listing
-            let vals: Vec<String> = names
-                .into_iter()
-                .filter(|(_, v)| v.pts.is_empty() || !v.pts.iter().all(|o| matches!(an.kind(o), Kind::Function | Kind::Class | Kind::Module | Kind::External)))
-                .map(|(name, v)| {
-                    // (one line each, cut at 150 characters: the hover has the rest)
-                    let line = format!("  {} = {}", name, render_value(an, st, &v, 0, &mut Vec::new()));
-                    if line.chars().count() > 150 { format!("{}…", line.chars().take(149).collect::<String>()) } else { line }
-                })
-                .collect();
-            if !vals.is_empty() {
-                lines.push(String::new());
-                lines.push("== module-level variables at the end ==".into());
-                lines.extend(vals);
-            }
-        }
+    if let Some(st) = an.final_state.as_ref().filter(|_| show_rows) {
+        let mut names: Vec<(String, crate::domain::Value)> = st.obj_slots(an.main_module, Ns::Attr).into_iter().map(|(k, v)| (intern::key_py_str(k), v)).collect();
+        names.sort_by(|a, b| a.0.cmp(&b.0));
+        // definitions (functions, classes, imported modules) are not values worth listing;
+        // one line each, cut at 150 characters (the hover has the rest)
+        let vals = names
+            .into_iter()
+            .filter(|(_, v)| v.pts.is_empty() || !v.pts.iter().all(|o| matches!(an.kind(o), Kind::Function | Kind::Class | Kind::Module | Kind::External)))
+            .map(|(name, v)| format!("  {} = {}", name, render_value(an, st, &v, 0, &mut Vec::new())))
+            .map(|l| if l.chars().count() > 150 { format!("{}…", l.chars().take(149).collect::<String>()) } else { l })
+            .collect();
+        section(&mut lines, "module-level variables at the end", vals);
     }
-    let limits = limit_lines(an);
-    if !limits.is_empty() {
-        lines.push(String::new());
-        lines.push("== limits of this analysis ==".into());
-        lines.extend(limits);
-    }
-    let body = lines.join("\n");
-    let legend = legend(&body);
-    if legend.is_empty() {
-        return body;
-    }
-    format!("{}\n\n== legend ==\n{}", body, legend.join("\n"))
+    section(&mut lines, "limits of this analysis", limit_lines(an));
+    let legend = legend(&lines.join("\n"));
+    section(&mut lines, "legend", legend);
+    lines.join("\n")
 }
 
 /// The mark of a verdict in reports: one per kind of finding.
@@ -307,37 +280,20 @@ pub fn verdict_message(an: &Analyzer, v: &Verdict) -> String {
         Ns::Name => format!("name {}", intern::key_py_str(v.key)),
         Ns::Pos => format!("position {}", key_repr(v.key)),
         _ if v.key == STAR => "an element".to_string(),
+        // (a key computed from data: no name to show)
+        _ if v.tier == Tier::DataKey => "the key".to_string(),
         _ if an.has_obj(v.oid) && an.kind(v.oid) == Kind::Frame => format!("column {}", crate::domain::key_display(v.key)),
         _ => format!("key {}", crate::domain::key_display(v.key)),
     };
     let unknown_code = || code_list(an, &v.mutators);
-    let (note, other_kind) = match v.note.strip_suffix("; the value may also be another kind of value") {
-        Some(n) => (n, true),
-        None => (v.note.as_str(), false),
-    };
-    let msg = match (v.tier, note) {
-        (Tier::Proven, _) => format!("{} is always there", what),
-        (Tier::Likely, _) => format!("{} is there, unless {} removed it", what, unknown_code()),
-        (Tier::Input, _) => {
-            let from: Vec<String> = v.providers.iter().map(|p| source_text(an, p)).collect();
-            format!("{} must be provided by {}", what, from.join(" or "))
-        }
-        (Tier::LikelyMissing, _) => format!("{} is never set, unless {} added it", what, unknown_code()),
-        (Tier::DataKey, _) => "the key is computed from data, and may not be one of the keys this object has".to_string(),
-        (_, "set on some paths only") => format!("{} is only set on some paths", what),
-        (_, "bound on some paths only") => format!("{} is only assigned on some paths", what),
-        (_, "bound on no path to here") => format!("{} is not assigned on any path to here", what),
-        (_, "all keys known") | (_, "no source can provide it") => format!("{} is never set", what),
-        (_, "removed/excluded on every path") => format!("{} was removed or renamed on every path to here", what),
-        (_, "key from another record's key set") => format!("{}: the key comes from another object's keys", what),
-        (_, n) if n.starts_with("depends on which object: ") => format!("{} is not on every object this may be ({})", what, &n["depends on which object: ".len()..]),
-        (_, "") => format!("{} may be missing", what),
-        (_, n) => format!("{}: {}", what, n),
-    };
-    if other_kind {
-        format!("{}, unless the value is a plain one such as a str", msg)
-    } else {
-        msg
+    // (the other notes are the reason in words: `is only set on some paths`)
+    match v.tier {
+        Tier::Proven => format!("{} is always there", what),
+        Tier::Likely => format!("{} is there, unless {} removed it", what, unknown_code()),
+        Tier::Input => format!("{} must be provided by {}", what, v.providers.iter().map(|p| source_id_text(an, *p)).collect::<Vec<_>>().join(" or ")),
+        Tier::LikelyMissing => format!("{} is never set, unless {} added it", what, unknown_code()),
+        _ if v.note.is_empty() => format!("{} may be missing", what),
+        _ => format!("{} {}", what, v.note),
     }
 }
 
@@ -397,24 +353,6 @@ pub fn site_text(an: &Analyzer, site: &str) -> String {
     format!("`{}`", site)
 }
 
-/// A source label (`json.loads@L6['db']`) for people: its site and the path below it.
-fn source_text(an: &Analyzer, label: &str) -> String {
-    let (site, path) = match label.find("['").or_else(|| label.find("[-")).or_else(|| label.find("[0")) {
-        Some(i) if !label[..i].ends_with("?") => (&label[..i], &label[i..]),
-        _ => (label, ""),
-    };
-    if path.is_empty() {
-        return site_text(an, site);
-    }
-    // (the path inside the code span: `json.loads(…)["db"]`, argument `items[*]` of `f`)
-    let path = path.replace("['*']", "[*]").replace("['", "[\"").replace("']", "\"]");
-    let t = site_text(an, site);
-    match t.find("` ").or_else(|| t.ends_with('`').then(|| t.len() - 1)) {
-        Some(i) if t[..i].contains('`') => format!("{}{}{}", &t[..i], path, &t[i..]),
-        _ => format!("{} {}", t, path),
-    }
-}
-
 /// An input for people, by id: its site and the path below it, each step written as the
 /// code read it (`argument `items[*].sku` of `f``).
 fn source_id_text(an: &Analyzer, src: SourceId) -> String {
@@ -467,7 +405,7 @@ fn needs_text(an: &Analyzer) -> (Vec<String>, Vec<String>) {
     let mut files: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for v in an.verdicts.iter().filter(|v| !v.file.is_empty()) {
         for p in &v.providers {
-            files.entry(p.split('[').next().unwrap_or(p).to_string()).or_insert_with(|| v.file.clone());
+            files.entry(intern::with_source(*p, |s| s.site.to_string())).or_insert_with(|| v.file.clone());
         }
     }
     let mut roots: Vec<(bool, String, SourceId, String)> = Vec::new();
@@ -571,44 +509,26 @@ fn step_text(k: KeyId, attr: bool) -> String {
 /// What functions return, when it is a dict or a frame with known keys: one line per
 /// function, joined over every call (`make_user returns {"id": …, "role"?: …}`).
 fn result_lines(an: &Analyzer) -> Vec<String> {
-    let mut by_func: IndexMap<String, IndexMap<String, Row>> = IndexMap::new();
-    for ((qual, _), (_, rows)) in &an.summaries {
-        for (oid, row) in rows {
-            let kind = an.kind(*oid);
-            if !matches!(kind, Kind::Dict | Kind::Frame) || row.present.is_empty() {
-                continue;
-            }
-            let shape = if kind == Kind::Frame { "frame" } else { "dict" };
-            let e = by_func.entry(qual.trim_start_matches("class ").to_string()).or_default();
-            match e.get_mut(shape) {
-                Some(r) => *r = r.join(row),
-                None => {
-                    e.insert(shape.to_string(), row.clone());
-                }
-            }
+    // (function of the program, a frame?) -> the rows of what it returned, joined
+    let program: std::collections::HashSet<String> = (0..an.objects.len() as ObjId).filter_map(|o| an.func_info_opt(o)).filter(|fi| an.is_local_module(fi.module)).map(|fi| fi.qualname.clone()).collect();
+    let mut by_func: IndexMap<(String, bool), Row> = IndexMap::new();
+    for ((qual, _), (_, rows)) in an.summaries.iter().filter(|((q, _), _)| program.contains(q)) {
+        for (oid, row) in rows.iter().filter(|(o, r)| matches!(an.kind(*o), Kind::Dict | Kind::Frame) && !r.present.is_empty()) {
+            let key = (qual.trim_start_matches("class ").to_string(), an.kind(*oid) == Kind::Frame);
+            let joined = by_func.get(&key).map(|r| r.join(row)).unwrap_or_else(|| row.clone());
+            by_func.insert(key, joined);
         }
     }
     by_func.sort_keys();
-    by_func
-        .into_iter()
-        .map(|(f, shapes)| {
-            let parts: Vec<String> = shapes
-                .iter()
-                .map(|(shape, row)| {
-                    let mut items: Vec<String> = intern::sorted_by_str(row.present.iter()).iter().filter(|k| !is_internal_key(**k)).map(|k| format!("{}{}", crate::domain::key_display(*k), row_mark(row, *k))).collect();
-                    if !row.closed() {
-                        items.push("**?".into());
-                    }
-                    if shape == "frame" {
-                        format!("DataFrame[{}]", items.join(", "))
-                    } else {
-                        format!("{{{}}}", items.iter().map(|i| if i == "**?" { i.clone() } else { i.replacen("\"?", "\"?: …", 1).replacen("\"~", "\"~: …", 1) }).map(|i| if i.ends_with('"') { format!("{}: …", i) } else { i }).collect::<Vec<_>>().join(", "))
-                    }
-                })
-                .collect();
-            format!("  {} returns {}", f, parts.join(" | "))
-        })
-        .collect()
+    let mut out: IndexMap<String, Vec<String>> = IndexMap::new();
+    for ((f, frame), row) in by_func {
+        let mut items: Vec<String> = intern::sorted_by_str(row.present.iter()).iter().filter(|k| !is_internal_key(**k)).map(|k| format!("{}{}{}", crate::domain::key_display(*k), row_mark(&row, *k), if frame { "" } else { ": …" })).collect();
+        if !row.closed() {
+            items.push("**?".into());
+        }
+        out.entry(f).or_default().push(if frame { format!("DataFrame[{}]", items.join(", ")) } else { format!("{{{}}}", items.join(", ")) });
+    }
+    out.into_iter().map(|(f, parts)| format!("  {} returns {}", f, parts.join(" | "))).collect()
 }
 
 /// The analysis' own limits, condensed: calls into code rowan cannot see, functions it
@@ -695,7 +615,7 @@ pub fn verdict_json(an: &Analyzer, v: &Verdict) -> J {
         "object": v.obj,
         "chain": v.chain,
         "note": v.note,
-        "providers": v.providers,
+        "providers": v.providers.iter().map(|p| source_label(*p)).collect::<Vec<_>>(),
         "text": v.text,
     })
 }
@@ -957,8 +877,8 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         }
         Kind::Bound => {
             let l = an.obj(o).label.clone();
-            let name = l.trim_start_matches("def ").split(" bound").next().unwrap_or(&l).to_string();
-            format!("{} (bound)", name)
+            let name = l.trim_start_matches("def ").trim_start_matches("class ").split(" bound").next().unwrap_or(&l).to_string();
+            format!("<bound method {}>", name)
         }
         Kind::Class => an.obj(o).label.trim_start_matches("class ").to_string(),
         Kind::Module => an.obj(o).label.to_string(),
@@ -987,7 +907,8 @@ fn opaque_name(label: &str) -> String {
         return label.to_string();
     }
     let base = label.split('@').next().unwrap_or(label).trim();
-    let name = match base {
+    let base = base.replace("stdobj.repattern.", "re.Pattern.").replace("stdobj.", "");
+    let name = match base.as_str() {
         "sqlite3.connect" => "sqlite3.Connection",
         "fastapi.app" => "FastAPI",
         "fastapi.client" => "TestClient",
@@ -1067,7 +988,12 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
         if ns == Ns::Attr {
             items.push(format!("{}{}={}", intern::key_py_str(*k), mark(&row, *k), val));
         } else {
-            items.push(format!("{}{}: {}", crate::domain::key_display(*k), mark(&row, *k), val));
+            // (an object used as a key: the object, by name)
+            let key = match an.identity_objs.borrow().get(k).copied() {
+                Some(ko) => render_object(an, state, ko, VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed), seen),
+                None => crate::domain::key_display(*k),
+            };
+            items.push(format!("{}{}: {}", key, mark(&row, *k), val));
         }
     }
     if keys.len() > MAX_ITEMS {

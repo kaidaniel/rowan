@@ -2304,7 +2304,7 @@ fn df_join(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         for col in intern::sorted_by_str(lrow.present.intersection(&rrow.present).iter()) {
             if lrow.definite.contains(col) && rrow.definite.contains(col) {
                 let target = lf.first().copied().unwrap_or(0);
-                an.verdict(&c.node, col, &Classification::with_note(Tier::Missing, "join: overlapping column without suffix raises ValueError"), target, Ns::Item, None, None);
+                an.verdict(&c.node, col, &Classification::with_note(Tier::Missing, "is in both frames and join was given no suffix (ValueError)"), target, Ns::Item, None, None);
             }
         }
     }

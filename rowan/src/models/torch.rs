@@ -4543,13 +4543,6 @@ pub fn tensor_text(s: &Shape) -> String {
     out
 }
 
-impl Analyzer {
-    /// (hover legend) a symbol shown as a tensor needs no `x: ?` line
-    pub fn facts_sym_is_tensor(&self, _sym: &str) -> bool {
-        true
-    }
-}
-
 /// `x.split(…)` / `x.sort(…)` on an unknown: a string separator / list sort keywords make it
 /// the str / list method, sizes or `dim=` the tensor one.
 pub fn m_tensor_or_builtin(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {

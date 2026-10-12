@@ -181,7 +181,7 @@ pub struct Verdict {
     /// call sites (lines) active when the access ran
     pub chain: Chain,
     pub note: String,
-    pub providers: Vec<String>,
+    pub providers: Vec<crate::domain::SourceId>,
     /// unknown code that may have added or removed the key (its call sites)
     pub mutators: Vec<String>,
     pub ns: Ns,
@@ -1508,7 +1508,7 @@ impl Analyzer {
         }
         let weakened;
         let cls = if self.recv_scalar && cls.tier == Tier::Missing {
-            weakened = Classification::with_note(Tier::Possibly, format!("{}; the value may also be another kind of value", cls.note));
+            weakened = Classification::with_note(Tier::Possibly, format!("{}, unless the value is a plain one such as a str", cls.note));
             &weakened
         } else {
             cls
@@ -1540,7 +1540,7 @@ impl Analyzer {
             obj: self.obj(oid).label.to_string(),
             chain,
             note: cls.note.clone(),
-            providers: cls.providers.iter().map(|(s, _)| crate::domain::source_label(*s)).collect(),
+            providers: cls.providers.iter().map(|(s, _)| *s).collect(),
             mutators: { let mut m: Vec<String> = cls.mutators.iter().map(|m| intern::str_get(*m).to_string()).collect(); m.sort(); m },
             ns,
             text,

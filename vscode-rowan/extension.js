@@ -219,7 +219,7 @@ function objectLines(f) {
   const more = changed.length - 2;
   if (changed.length) out.push(`- may have been changed by ${changed.slice(0, 2).join(" or ")}${more > 0 ? ` (or ${more} other call${more > 1 ? "s" : ""})` : ""}`);
   const absent = [...new Set(made.flatMap((o) => o.absent || []))];
-  if (absent.length) out.push(`- never has ${absent.join(", ")} (removed)`);
+  if (absent.length) out.push(`- never has ${absent.join(", ")} here`);
   return out;
 }
 

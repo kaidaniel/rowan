@@ -127,7 +127,7 @@ impl Analyzer {
                 }
                 if v.is_none() && star_kwargs.is_empty() {
                     if !ci.typed_dict {
-                        self.verdict(node, fk, &Classification::with_note(Tier::Missing, "dataclass field not supplied"), inst, ns, None, None);
+                        self.verdict(node, fk, &Classification::with_note(Tier::Missing, "is a dataclass field that was not given"), inst, ns, None, None);
                     }
                     continue;
                 }

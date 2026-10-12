@@ -188,7 +188,7 @@ impl Analyzer {
                     if state.name_has_key(s(nm.id.as_str()), k) {
                         let v = self.load_item(&obj, Ns::Item, &key, &nd, state, false);
                         if let Some(o) = obj.pts.first() {
-                            self.verdict(&nd, k, &crate::domain::Classification::with_note(crate::domain::Tier::Proven, "stored through this name"), o, Ns::Item, None, None);
+                            self.verdict(&nd, k, &crate::domain::Classification::with_note(crate::domain::Tier::Proven, "is always there"), o, Ns::Item, None, None);
                         }
                         return v;
                     }

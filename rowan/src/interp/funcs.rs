@@ -344,7 +344,7 @@ impl Analyzer {
             return;
         }
         let key = intern::key(intern::Key::Str(str_get(name)));
-        let cls = crate::domain::Classification::with_note(crate::domain::Tier::Possibly, "bound on some paths only");
+        let cls = crate::domain::Classification::with_note(crate::domain::Tier::Possibly, "is only assigned on some paths");
         self.verdict(node, key, &cls, module, Ns::Name, None, None);
         self.may_raise_here(exc, state);
         if state.unbound.contains(&name) {
@@ -377,7 +377,7 @@ impl Analyzer {
                 }
                 if node.line > 0 {
                     let key = intern::key(intern::Key::Str(str_get(name)));
-                    let cls = crate::domain::Classification::with_note(crate::domain::Tier::Missing, "bound on no path to here");
+                    let cls = crate::domain::Classification::with_note(crate::domain::Tier::Missing, "is not assigned on any path to here");
                     self.verdict(node, key, &cls, fr_module, Ns::Name, None, None);
                     self.raise_here("UnboundLocalError", state);
                 }
