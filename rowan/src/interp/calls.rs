@@ -498,7 +498,6 @@ impl Analyzer {
     /// removed), every slot of a mutable object may now hold the call's result `rid` (any value),
     /// lists and sets any items and any length. Modules, classes and functions are not entered.
     pub fn havoc_reachable(&mut self, vals: &[Value], rid: ObjId, site: StrId, state: &mut State) {
-        if std::env::var("T1").is_ok() { return; }
         let mut seen: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
         let mut work: Vec<ObjId> = vals.iter().flat_map(|v| v.pts.iter()).collect();
         // (one object stands for "anything unknown code stored": a value per call would pile

@@ -237,7 +237,11 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
             let vals: Vec<String> = names
                 .into_iter()
                 .filter(|(_, v)| v.pts.is_empty() || !v.pts.iter().all(|o| matches!(an.kind(o), Kind::Function | Kind::Class | Kind::Module | Kind::External)))
-                .map(|(name, v)| format!("  {} = {}", name, render_value(an, st, &v, 0, &mut Vec::new())))
+                .map(|(name, v)| {
+                    // (one line each, cut at 150 characters: the hover has the rest)
+                    let line = format!("  {} = {}", name, render_value(an, st, &v, 0, &mut Vec::new()));
+                    if line.chars().count() > 150 { format!("{}…", line.chars().take(149).collect::<String>()) } else { line }
+                })
                 .collect();
             if !vals.is_empty() {
                 lines.push(String::new());
@@ -439,7 +443,7 @@ fn source_id_text(an: &Analyzer, src: SourceId) -> String {
     let (site, kind, path) = intern::with_source(src, |s| (s.site.clone(), s.kind, s.path.clone()));
     let t = site_text(an, &site);
     let Some(st) = an.final_state.as_ref().filter(|_| !path.is_empty()) else { return t };
-    let (steps, _) = path_steps(st, &site, kind, 0, &path);
+    let steps = path_steps(st, &site, kind, 0, &path).map(|(p, _)| p).unwrap_or_else(|| "…".into());
     match t.find("` ").or_else(|| t.ends_with('`').then(|| t.len() - 1)) {
         Some(i) if t[..i].contains('`') => format!("{}{}{}", &t[..i], steps, &t[i..]),
         _ => format!("{} {}", t, steps),
@@ -447,17 +451,23 @@ fn source_id_text(an: &Analyzer, src: SourceId) -> String {
 }
 
 /// The access path of `path[from..]` below an input (`.sku`, `["db"]`, `[*]`), each step as
-/// the parent's requirement says it was read; and whether a step is an attribute.
-fn path_steps(st: &State, site: &std::sync::Arc<str>, kind: crate::domain::SourceKind, from: usize, path: &[KeyId]) -> (String, bool) {
+/// the parent's requirement says it was read; whether a step is an attribute; None for a
+/// path through what a method returned (`df.groupby(…)["amount"]`: a step the code called,
+/// with no requirement of its own).
+fn path_steps(st: &State, site: &std::sync::Arc<str>, kind: crate::domain::SourceKind, from: usize, path: &[KeyId]) -> Option<(String, bool)> {
     let mut out = String::new();
     let mut attr_step = false;
     for i in from..path.len() {
         let parent = intern::source(crate::domain::Source { site: site.clone(), kind, path: path[..i].to_vec() });
-        let attr = st.reqs.get(&parent, &path[i]).map(|r| r.attr).unwrap_or(false);
+        let attr = match st.reqs.get(&parent, &path[i]) {
+            Some(r) => r.attr,
+            None if path[i] != STAR && intern::key_as_str(path[i]).is_some() => return None,
+            None => false,
+        };
         attr_step |= attr;
         out += &step_text(path[i], attr);
     }
-    (out, attr_step)
+    Some((out, attr_step))
 }
 
 /// Is an unknown call's result an input worth listing (a library function the program
@@ -473,6 +483,15 @@ fn named_call(site: &str) -> bool {
 fn needs_text(an: &Analyzer) -> (Vec<String>, Vec<String>) {
     use crate::domain::SourceKind;
     let Some(st) = &an.final_state else { return (vec![], vec![]) };
+    // (functions of the program that rowan did not follow are not inputs)
+    let program: std::collections::HashSet<String> = (0..an.objects.len() as ObjId).filter_map(|o| an.func_info_opt(o)).map(|fi| fi.py_qualname()).collect();
+    // (an input made in another module: its file, from the reads that needed it)
+    let mut files: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for v in an.verdicts.iter().filter(|v| !v.file.is_empty()) {
+        for p in &v.providers {
+            files.entry(p.split('[').next().unwrap_or(p).to_string()).or_insert_with(|| v.file.clone());
+        }
+    }
     let mut roots: Vec<(bool, String, SourceId, String)> = Vec::new();
     for (src, _) in st.reqs.items() {
         let (site, kind) = intern::with_source(src, |s| (s.site.to_string(), s.kind));
@@ -481,9 +500,11 @@ fn needs_text(an: &Analyzer) -> (Vec<String>, Vec<String>) {
                 Some((f, x)) => (true, f.trim_start_matches("class ").to_string(), x.to_string()),
                 None => continue,
             },
-            SourceKind::External | SourceKind::Name => (false, site_text(an, &site).replace('`', ""), String::new()),
-            // (not a function of the program that rowan stopped following)
-            SourceKind::Call if named_call(&site) && !an.notes.iter().any(|n| n.strip_suffix(" ran out of its budget: later calls are unknown code").map(|q| site.starts_with(&format!("{}@", q))).unwrap_or(false)) => (false, site_text(an, &site).replace('`', ""), String::new()),
+            SourceKind::External | SourceKind::Name => {
+                let t = site_text(an, &site).replace('`', "");
+                (false, match files.get(&site) { Some(f) => t.replace("(line ", &format!("({} line ", f)), None => t }, String::new())
+            }
+            SourceKind::Call if named_call(&site) && !program.contains(site.rsplit_once("@L").map(|(q, _)| q).unwrap_or(&site)) => (false, site_text(an, &site).replace('`', ""), String::new()),
             _ => continue,
         };
         let root = crate::domain::Source::new(&site, kind);
@@ -530,7 +551,7 @@ pub fn reads_below(st: &State, src: SourceId, base: &str, data_only: bool) -> Ve
         if site2 != site || kind2 != kind || !path.starts_with(&top) {
             continue;
         }
-        let (prefix, attr_step) = path_steps(st, &site, kind, top.len(), &path);
+        let Some((prefix, attr_step)) = path_steps(st, &site, kind, top.len(), &path) else { continue };
         if data_only && attr_step {
             continue;
         }
@@ -713,10 +734,6 @@ pub fn to_json(an: &Analyzer) -> Vec<J> {
             .collect();
         out.push(json!({"kind": "schema", "source": label, "keys": keys}));
     }
-    for ((qual, ctx), (_, rows)) in &an.summaries {
-        let returns: serde_json::Map<String, J> = rows.iter().map(|(o, r)| (an.obj(*o).label.to_string(), J::String(r.to_string()))).collect();
-        out.push(json!({"kind": "summary", "function": qual, "context": ctx, "returns": returns}));
-    }
     out
 }
 
@@ -766,34 +783,7 @@ pub fn golden_json(an: &Analyzer) -> J {
     json!({"verdicts": verdicts, "schemas": schemas, "rows": rows, "notes": an.notes, "report": format_text(an, true, true), "requires": requires, "shape_errors": shape_errors, "objects": an.objects.len(), "tabulations": an.tab_runs, "joins": crate::domain::row_joins(), "work": an.work, "visits": an.walked.get() + crate::state::fp_visits()})
 }
 
-fn row_json(r: &crate::domain::Row) -> J {
-    let srcs: Vec<String> = {
-        let mut v: Vec<String> = r.sources.iter().map(|(s, l)| format!("{}{}", source_label(s), crate::domain::lens_str(l))).collect();
-        v.sort();
-        v
-    };
-    let muts: Vec<String> = {
-        let mut v: Vec<String> = r.mutators.iter().map(|m| m.to_string()).collect();
-        v.sort();
-        v
-    };
-    json!({
-        "present": intern::sorted_by_str(r.present.iter()).iter().map(|k| key_repr(*k)).collect::<Vec<_>>(),
-        "definite": intern::sorted_by_str(r.definite.iter()).iter().map(|k| key_repr(*k)).collect::<Vec<_>>(),
-        "likely": intern::sorted_by_str(r.likely.iter()).iter().map(|k| key_repr(*k)).collect::<Vec<_>>(),
-        "absent": intern::sorted_by_str(r.absent.iter()).iter().map(|k| key_repr(*k)).collect::<Vec<_>>(),
-        "closed": r.closed(),
-        "top": r.top,
-        "sources": srcs,
-        "source_ids": r.sources.iter().map(|(s, _)| source_label(s)).collect::<Vec<_>>(),
-        "mutators": muts,
-        "text": r.to_string(),
-        "details": r.details(),
-    })
-}
 
-/// The `--facts` document for editor integration: per (line, name) the value and the rows
-/// of the objects it may point to, the verdicts, and the schema table.
 /// A value as the user would write it, as far as it is known: literals (`1`,
 /// `"a"`, several as `1 | 2 | ?`), dicts with their keys and values (`{"a": 1, "b"?: ?, **?}`),
 /// lists / tuples by position when known (`[1, 2]`, `(1,)`), else `list[X]` /
@@ -1190,8 +1180,10 @@ pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, Str
     out
 }
 
+/// The `--facts` document for the editor: per (line, name) the value as text, the names it
+/// mentions, the objects it may be (for people: where they were made and changed), what the
+/// code reads of it, and the findings in words.
 pub fn facts_json(an: &Analyzer) -> J {
-    let sch = schema_rows(an);
     let mut facts: Vec<J> = Vec::new();
     for ((line, name), f) in &an.facts {
         // (a hover lists the objects a name may hold: past `MAX_FACT_OBJECTS` only the count —
@@ -1229,23 +1221,13 @@ pub fn facts_json(an: &Analyzer) -> J {
                     "changed_by": changed_by,
                     "from": from,
                     "absent": absent,
-                    "id": oid,
                     "label": &*o.label,
                     "kind": o.kind.name(),
-                    "item": item.as_ref().map(row_json),
-                    "attr": attr.as_ref().map(row_json),
                     "origin": origin,
                     "symbol": an.symbols.get(oid).filter(|_| f.legend.iter().any(|(s0, _)| Some(s0) == an.symbols.get(oid))),
                 })
             })
             .collect();
-        let values: J = match &f.value.kv {
-            crate::domain::KeyVal::Lit(k) => json!([key_repr(*k)]),
-            crate::domain::KeyVal::Lits(ks) => json!(intern::sorted_by_str(ks.iter()).iter().map(|k| key_repr(*k)).collect::<Vec<_>>()),
-            crate::domain::KeyVal::KeysOf(ko) => json!([format!("{}", crate::domain::KeyVal::KeysOf(ko.clone()))]),
-            crate::domain::KeyVal::Data(_) => json!(["<data>"]),
-            crate::domain::KeyVal::Bot => json!([]),
-        };
         // what the code reads of the inputs these objects come from, as access paths from the name
         let mut required: Vec<(String, bool)> = Vec::new();
         if let Some(st) = &an.final_state {
@@ -1305,7 +1287,7 @@ pub fn facts_json(an: &Analyzer) -> J {
             Some(p) => (p.clone(), f.texts.iter().filter(|t| *t != p).cloned().collect()),
             None => (f.texts.join(" | "), vec![]),
         };
-        facts.push(json!({"line": line, "name": name.to_string(), "values": values, "text": text, "examples": examples, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "required": required, "requires": requires}));
+        facts.push(json!({"line": line, "name": name.to_string(), "text": text, "examples": examples, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "required": required, "requires": requires}));
     }
     // (columns in UTF-16 units, as editors count them; each finding with its message in words)
     let main_idx = an.module_info(an.main_module).idx;
@@ -1320,13 +1302,8 @@ pub fn facts_json(an: &Analyzer) -> J {
             j
         })
         .collect();
-    let mut schemas = serde_json::Map::new();
-    for (label, entry) in sch {
-        let keys: serde_json::Map<String, J> = entry.iter().map(|(k, e)| (k.clone(), json!({"always": e.always, "sites": e.sites}))).collect();
-        schemas.insert(label, J::Object(keys));
-    }
     let shape_errors: Vec<J> = an.m.shape_errors.iter().map(|n| json!({"line": n.line, "chain": n.chain, "message": n.text})).collect();
-    json!({"file": an.filename, "facts": facts, "verdicts": verdicts, "schemas": schemas, "notes": an.notes, "shape_errors": shape_errors})
+    json!({"file": an.filename, "facts": facts, "verdicts": verdicts, "shape_errors": shape_errors})
 }
 
 fn cons_atoms(c: &crate::models::shape::Cons, out: &mut Vec<crate::models::shape::AtomId>) {

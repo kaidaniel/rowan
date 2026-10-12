@@ -701,7 +701,6 @@ pub enum StoreTarget {
 /// the statement (hover support): the value it held and the rows of the objects it pointed to.
 #[derive(Clone)]
 pub struct Fact {
-    pub value: Value,
     /// object -> (item row, attr row) as they were when the name was read / written
     pub rows: IndexMap<ObjId, (Option<Row>, Option<Row>)>,
     /// the value rendered (`report::render_value`) at each recording, distinct texts
@@ -2155,7 +2154,6 @@ impl Analyzer {
         if !self.torch_on {
             if let Some(e) = self.facts.get_mut(&(node.line, name)) {
                 if e.texts.len() >= 4 {
-                    e.value = e.value.join(v);
                     for (oid, item, attr) in rows {
                         match e.rows.get_mut(&oid) {
                             Some((ci, ca)) => {
@@ -2187,7 +2185,7 @@ impl Analyzer {
         };
         legend.extend(tlegend);
         let writing = std::mem::take(&mut self.t_fact_write);
-        let e = self.facts.entry((node.line, name)).or_insert_with(|| Fact { value: Value::new(), rows: IndexMap::new(), texts: Vec::new(), legend: Vec::new(), t_names: FxHashMap::default(), primary: None, written: false });
+        let e = self.facts.entry((node.line, name)).or_insert_with(|| Fact { rows: IndexMap::new(), texts: Vec::new(), legend: Vec::new(), t_names: FxHashMap::default(), primary: None, written: false });
         // in torch programs an assignment's value is what the hover shows (`y = f(y)`)
         if self.torch_on {
             if writing && !e.written {
@@ -2195,7 +2193,6 @@ impl Analyzer {
                 e.texts.clear();
                 e.legend.clear();
                 e.primary = None;
-                e.value = Value::new();
             } else if !writing && e.written {
                 return;
             }
@@ -2214,7 +2211,6 @@ impl Analyzer {
                 e.t_names.entry(a).or_insert(n);
             }
         }
-        e.value = e.value.join(v);
         if !e.texts.contains(&text) && e.texts.len() < 4 {
             e.texts.push(text);
         }
