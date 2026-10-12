@@ -849,9 +849,11 @@ impl Analyzer {
         self.try_marks.pop();
         self.try_sum_depth.pop();
         let flagged = self.may_raise.pop().unwrap_or(false);
-        let mut raised_at = self.raise_states.pop().flatten();
+        let raised_any = self.raise_states.pop().flatten().is_some();
         let mut raised_v = self.raise_values.pop().flatten().unwrap_or_default();
         let recs = self.raise_cls.pop().map(|(_, r)| r).unwrap_or_default();
+        // (the raises are kept one by one: their states joined)
+        let mut raised_at: Option<State> = if raised_any { crate::interp::join_raise_recs(&recs) } else { None };
         let _ = &mut pre;
         // exceptions of known classes that FastAPI does not answer (a KeyError, …) are
         // re-raised by the TestClient at the call: they go on to the enclosing try

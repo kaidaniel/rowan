@@ -813,7 +813,7 @@ impl Analyzer {
                 }
                 2 if only_stop => {
                     // (the loop goes on from where StopIteration was raised)
-                    if let Some(mut rs) = raised_at {
+                    if let Some(mut rs) = raised_at.and_then(|_| crate::interp::join_raise_recs(&recs)) {
                         rs.reachable = true;
                         cur = rs;
                     }

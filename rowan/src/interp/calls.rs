@@ -2132,9 +2132,13 @@ impl Analyzer {
             push(&exc, &mut roots);
             self.collect_since(tmark, &pre_try, roots, true, &mut here);
         }
+        // (a try that keeps its raises one by one joins them where a handler needs them: the
+        // running join is only a mark that something was recorded)
+        let mut kept = false;
         if let Some((d, recs)) = self.raise_cls.last_mut() {
             if *d == depth {
                 recs.push((cls, here.copy(), exc.clone()));
+                kept = true;
             }
         }
         if let Some(rv) = self.raise_values.last_mut() {
@@ -2145,6 +2149,7 @@ impl Analyzer {
         }
         let Some(slot) = self.raise_states.last_mut() else { return false };
         *slot = Some(match slot.take() {
+            _ if kept => State::bottom(),
             None => here,
             Some(mut prev) => prev.join(&mut here),
         });

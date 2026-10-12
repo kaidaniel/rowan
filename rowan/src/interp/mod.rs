@@ -319,6 +319,19 @@ pub struct CmHook {
 pub type ExcNames = (Vec<String>, bool);
 pub type RaiseRec = (Option<ExcNames>, State, Value);
 
+/// The states of a try's recorded raises, joined (None: no raise recorded).
+pub fn join_raise_recs(recs: &[RaiseRec]) -> Option<State> {
+    let mut out: Option<State> = None;
+    for (_, st, _) in recs {
+        let mut s2 = st.copy_ref();
+        out = Some(match out {
+            None => s2,
+            Some(mut o) => o.join(&mut s2),
+        });
+    }
+    out
+}
+
 /// Builtin (and modelled library) exception classes and their bases.
 pub const EXC_BASES: &[(&str, &str)] = &[
     ("Exception", "BaseException"), ("SystemExit", "BaseException"), ("KeyboardInterrupt", "BaseException"), ("GeneratorExit", "BaseException"),

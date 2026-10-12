@@ -1653,8 +1653,9 @@ impl Analyzer {
         let mut flag_reqs = self.flag_reqs.drain(fl_mark..).find(|(d, _)| *d == fl_depth).map(|(_, r)| r);
         // a body that ended because it returned (or broke out) did not raise
         let flagged = self.may_raise.pop().unwrap_or(false);
-        let mut raised_at = self.raise_states.pop().flatten();
-        let raised_exc = self.raise_values.pop().flatten();
+        // (Some: something was recorded; the states themselves are in `recs`)
+        let raised_at = self.raise_states.pop().flatten();
+        self.raise_values.pop();
         let mut recs = self.raise_cls.pop().map(|(_, r)| r).unwrap_or_default();
         // the handlers' classes: which recorded raise each one catches (Python takes the
         // first handler that matches)
@@ -1693,7 +1694,7 @@ impl Analyzer {
                 None
             }
         };
-        let per_class = true && !handlers.is_empty();
+        let per_class = !handlers.is_empty();
         // raises no handler surely catches go on to the enclosing try (or out of the call),
         // through the finally (unless a return / jump in it swallows them)
         let swallowing = !fin.is_empty() && fin.swallows();
@@ -1734,7 +1735,7 @@ impl Analyzer {
         let mut finally_escape: Option<State> = None;
         if has_finally && handlers.is_empty() && body_may_raise && fin.swallows() {
             let mut e = if generic { pre.copy() } else { State::bottom() };
-            if let Some(r) = raised_at.as_mut() {
+            for (_, r, _) in recs.iter_mut() {
                 let mut r2 = r.copy();
                 e = if e.reachable { e.join(&mut r2) } else { r2 };
             }
@@ -1754,28 +1755,6 @@ impl Analyzer {
         } else {
             State::bottom()
         };
-        // the handler starts from the states at the accesses that may raise; anything else
-        // that may raise (unknown calls, raise statements, callees) can happen anywhere
-        let mut handler_entry: Option<State> = if !handlers.is_empty() {
-            let mut e = if generic {
-                let mut g = pre.copy();
-                if let Some(r) = flag_reqs.as_mut() {
-                    g.reqs = r.copy();
-                }
-                g.join(&mut body_end)
-            } else {
-                State::bottom()
-            };
-            if let Some(mut r) = raised_at {
-                e = if e.reachable { e.join(&mut r) } else { r };
-            }
-            Some(e)
-        } else {
-            None
-        };
-        if !body_may_raise && !handlers.is_empty() {
-            handler_entry = Some(State::bottom());
-        }
         let mut results: Vec<State> = Vec::new();
         if !orelse.is_empty() && body_end.reachable {
             self.exec_block(orelse, &mut body_end);
@@ -1786,7 +1765,7 @@ impl Analyzer {
             // the exceptions raised at the recorded points (anything else: unknown)
             let hn = frontend::node(h);
             let unknown = Value::data(&format!("exc@L{}", hn.line));
-            let (mut hs, ev) = if per_class {
+            let (mut hs, ev) = {
                 // the raises this handler may catch that no earlier one surely catches
                 let mut e = generic_entry.copy();
                 let mut ev = if generic { Some(unknown.clone()) } else { None };
@@ -1803,13 +1782,6 @@ impl Analyzer {
                     e = State::bottom();
                 }
                 (e, ev.unwrap_or(unknown))
-            } else {
-                let ev = match &raised_exc {
-                    Some(v) if !generic => v.clone(),
-                    Some(v) => v.join(&unknown),
-                    None => unknown,
-                };
-                (handler_entry.as_mut().unwrap().copy(), ev)
             };
             if !hs.reachable {
                 continue;
