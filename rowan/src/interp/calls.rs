@@ -1329,6 +1329,9 @@ impl Analyzer {
             let Some(summ) = summ else {
                 return Value::new(); // recursion through the symbolic path: ⊥ summary
             };
+            if summ.havoc {
+                return self.havoc_call(&summ, &fi.qualname, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
+            }
             let (call_ctx, ctx_single) = self.receiver_ctx(&self_v, &site);
             let mut bind: IndexMap<u32, Value> = IndexMap::new();
             for (name, ph) in summ.ph_by_name.iter() {
@@ -1980,6 +1983,54 @@ impl Analyzer {
             state.exits = saved_exits;
         }
         ret
+    }
+
+    /// A call of a havoc summary (too big to instantiate): an unknown call on its arguments
+    /// (they may change in any way, it returns anything, it may raise), and what it changed
+    /// of objects from outside (globals) changed in unknown ways.
+    #[allow(clippy::too_many_arguments)]
+    fn havoc_call(&mut self, summ: &crate::summary::Summary, qual: &str, self_v: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
+        let site = s(&format!("{}@L{}", qual, node.line));
+        let bind: IndexMap<ObjId, Value> = IndexMap::new();
+        let mut memo: rustc_hash::FxHashMap<ObjId, Value> = Default::default();
+        let mut targets = |an: &mut Analyzer, o: ObjId, st: &mut State| -> Vec<ObjId> {
+            if an.kind(o) == Kind::Ph {
+                an.binding_of(summ, o, &bind, st, &mut memo).pts.iter().filter(|t| an.kind(*t) != Kind::Ph).collect()
+            } else {
+                vec![o]
+            }
+        };
+        for (o, ns, _) in &summ.rows_fp {
+            for t in targets(self, *o, state) {
+                let r = state.row(t, *ns).mutate(site);
+                state.set_row(t, *ns, r);
+            }
+        }
+        for ((o, ns, k), _) in &summ.slots_fp {
+            if crate::interp::access::param_slot_of(*k).is_some() {
+                continue;
+            }
+            for t in targets(self, *o, state) {
+                let v = state.slot(t, *ns, *k).join(&Value::data(&format!("{}@L{}", qual, node.line)));
+                state.set_slot(t, *ns, *k, v, false);
+            }
+        }
+        for (o, _) in &summ.elems_fp {
+            for t in targets(self, *o, state) {
+                let kv = crate::domain::kv_join(&state.elems.get(&t).unwrap_or(crate::domain::DATA), &crate::domain::DATA);
+                state.elems.insert(t, kv);
+            }
+        }
+        for v in &summ.rel_verdicts {
+            let mut nv = v.clone();
+            nv.chain = chain_extend(&chain_extend(&self.call_chain, &[node.line]), &v.chain);
+            let dk = nv.dedupe_key();
+            if !self.verdict_keys.contains(&dk) && !self.quiet {
+                self.verdict_keys.insert(dk);
+                self.verdicts.push(nv);
+            }
+        }
+        self.unknown_call(qual, self_v, args, kwargs, star_args, star_kwargs, state, node)
     }
 
     /// Drop the facts whose test read one of `objs`.

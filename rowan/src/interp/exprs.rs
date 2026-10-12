@@ -2093,15 +2093,15 @@ impl Analyzer {
     }
 
     // comprehensions ---------------------------------------------------------
-    fn comp(&mut self, gens: &'static [ast::Comprehension], state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State)) {
+    fn comp(&mut self, gens: &'static [ast::Comprehension], state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
         self.frame_mut().overlays.push(IndexMap::new());
         self.comp_cells.push(Default::default());
-        self.comp_gen(gens, 0, state, body);
+        self.comp_gen(gens, 0, state, body, own);
         self.comp_cells.pop();
         self.frame_mut().overlays.pop();
     }
 
-    fn comp_gen(&mut self, gens: &'static [ast::Comprehension], i: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State)) {
+    fn comp_gen(&mut self, gens: &'static [ast::Comprehension], i: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
         if i == gens.len() {
             body(self, state);
             return;
@@ -2122,7 +2122,7 @@ impl Analyzer {
                     let mut s2 = state.copy();
                     self.frame_mut().overlays.push(IndexMap::new());
                     self.frame_mut().unroll.push(idx);
-                    let decided = self.comp_run_one(g, gens, i, &Elem::One(item.clone()), &mut s2, body, understood);
+                    let decided = self.comp_run_one(g, gens, i, &Elem::One(item.clone()), &mut s2, body, understood, own);
                     self.frame_mut().unroll.pop();
                     self.frame_mut().overlays.pop();
                     if s2.reachable {
@@ -2157,12 +2157,28 @@ impl Analyzer {
             }
         }
         let mut s2 = state.copy();
+        let mark0 = self.objects.len() as ObjId;
         self.frame_mut().overlays.push(IndexMap::new());
-        self.comp_run_one(g, gens, i, &elem, &mut s2, body, understood);
+        self.comp_run_one(g, gens, i, &elem, &mut s2, body, understood, own);
         self.frame_mut().overlays.pop();
         if it.exhaustive && understood && s2.reachable {
             self.comp_known.pop();
             state.replace_with(s2);
+            return;
+        }
+        // (an iteration that changed nothing an older object or a name holds, but the result
+        // it builds: the next one starts from the same state, one pass is the fixpoint)
+        // (the element itself narrowed by a read is not a change the next element sees)
+        let elem_objs = elem.flat().pts;
+        let older = |o: ObjId| o < mark0 && o != own && !elem_objs.contains(o) && !self.obj(o).iter_elem;
+        let fp = s2.footprint(state);
+        let quiet = s2.env == state.env && fp.rows.iter().all(|(o, _)| !older(*o)) && fp.slots.iter().all(|(o, _)| !older(*o)) && fp.elems.iter().all(|o| !older(*o)) && s2.lens.diff_keys(&state.lens).iter().all(|o| !older(*o));
+        if quiet {
+            self.comp_known.pop();
+            let mut joined = state.join(&mut s2);
+            let ev = elem.value_part();
+            self.promote_elem_reqs(&mut joined, &s2, &ev, state);
+            state.replace_with(joined);
             return;
         }
         // items of unknown number: what one iteration did, the next one sees too (a walrus
@@ -2171,11 +2187,18 @@ impl Analyzer {
         let mut head = pre.copy().join(&mut s2.copy());
         let mut converged = false;
         let mut prev_head = head.copy();
+        // (objects made in the body: recent ones folded at the back edge, as in a `for` loop,
+        // so the rounds converge)
+        self.frame_mut().loop_depth += 1;
         for _ in 0..LOOP_MAX_ITER {
             let mut body_s = head.copy();
+            let mark = self.objects.len() as u32;
+            self.recent_stack.push(Vec::new());
             self.frame_mut().overlays.push(IndexMap::new());
-            self.comp_run_one(g, gens, i, &elem, &mut body_s, body, understood);
+            self.comp_run_one(g, gens, i, &elem, &mut body_s, body, understood, own);
             self.frame_mut().overlays.pop();
+            let recs = self.recent_stack.pop().unwrap_or_default();
+            self.rename_recent(&mut body_s, &head, recs, mark);
             let new_head = pre.copy().join_loop(&mut body_s);
             s2 = body_s;
             if new_head.same(&head) {
@@ -2184,6 +2207,7 @@ impl Analyzer {
             }
             prev_head = std::mem::replace(&mut head, new_head);
         }
+        self.frame_mut().loop_depth -= 1;
         if !converged {
             self.widen_unconverged(&mut head, &prev_head);
         }
@@ -2195,7 +2219,7 @@ impl Analyzer {
 
     /// Runs one iteration of generator `i`; returns whether every filter was decided (then
     /// the iteration was straight-line code).
-    fn comp_run_one(&mut self, g: &'static ast::Comprehension, gens: &'static [ast::Comprehension], i: usize, it: &Elem, st: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool) -> bool {
+    fn comp_run_one(&mut self, g: &'static ast::Comprehension, gens: &'static [ast::Comprehension], i: usize, it: &Elem, st: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) -> bool {
         self.comp_bind(&g.target, it, st);
         let mut decided = true;
         for cond in &g.ifs {
@@ -2219,7 +2243,7 @@ impl Analyzer {
         if conditional {
             self.cond_depth += 1;
         }
-        self.comp_gen(gens, i + 1, st, body);
+        self.comp_gen(gens, i + 1, st, body, own);
         if conditional {
             self.cond_depth -= 1;
         }
@@ -2261,7 +2285,7 @@ impl Analyzer {
             let strong = an.obj(oid).single && an.cond_depth == base_depth;
             an.store_key(oid, Ns::Item, &k.kv, &v, strong, &nd, st);
         };
-        self.comp(&dc.generators, state, &mut body);
+        self.comp(&dc.generators, state, &mut body, oid);
         Value::obj(oid)
     }
 
@@ -2299,7 +2323,7 @@ impl Analyzer {
             _ => false,
         };
         let mark = self.comp_known.len();
-        self.comp(gens, state, &mut body);
+        self.comp(gens, state, &mut body, oid);
         self.comp_known.truncate(mark);
         if positional {
             self.set_llen(oid, state, Some(n));

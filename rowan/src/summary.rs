@@ -178,9 +178,36 @@ pub struct Summary {
     pub raise_classes: Option<Vec<crate::interp::ExcNames>>,
     /// some path returns (false: every path raises)
     pub completes: bool,
+    /// too big to instantiate (`MAX_SUMMARY_SIZE`): a call is an unknown call on its
+    /// arguments, and the objects from outside it changed (globals) are changed in unknown ways
+    pub havoc: bool,
 }
 
+/// The most entries (allocations, rows, slots, elements, deferred accesses) a summary keeps;
+/// past it the summary is a havoc summary (`Summary::havoc`). Instantiation costs what a
+/// summary holds, and nested instantiation made some hold hundreds of thousands (rich's
+/// `Console.print`).
+pub const MAX_SUMMARY_SIZE: usize = 10_000;
+
 impl Summary {
+    /// Keep of a summary too big to instantiate only what its callers need to stay sound:
+    /// the rows and slots of objects from outside the call it changed (not the arguments'
+    /// parts: the unknown call covers those), whether it raises, its verdicts.
+    fn make_havoc(&mut self, an: &Analyzer) {
+        // (placeholders too: a global the body read is a path below its module, resolved at the
+        // call; one below a parameter resolves to nothing there — the unknown call covers it)
+        let outside = |o: ObjId| !self.templates.contains(&o) && an.has_obj(o) && an.kind(o) != Kind::Unknown;
+        self.rows_fp.retain(|(o, _, _)| outside(*o));
+        self.slots_fp.retain(|((o, _, _), _)| outside(*o));
+        self.elems_fp.retain(|(o, _)| outside(*o));
+        self.templates.clear();
+        self.symreqs.clear();
+        self.obs.clear();
+        self.fact_obs.clear();
+        self.events.clear();
+        self.havoc = true;
+    }
+
     /// Exit facts that differ from the entry state `base` and are not the identity.
     /// Does the summary change objects that existed before the call (stores, deletions,
     /// unknown calls on them — not the narrowing of a parameter's row by a successful read)?
@@ -1015,6 +1042,7 @@ impl Analyzer {
                 raises: self.raise_stack.last().copied().unwrap_or(false),
                 raise_classes: self.esc_cls.last().cloned().flatten(),
                 completes,
+                havoc: false,
             };
             summ.compute_footprint(self, &base);
             // (a generator that changes objects from before its call is instantiated weakly past
@@ -1033,6 +1061,13 @@ impl Analyzer {
                 summ.exit = ex;
                 summ.compute_footprint(self, &base);
             }
+            let size = summ.templates.len() + summ.rows_fp.len() + summ.slots_fp.len() + summ.elems_fp.len() + summ.symreqs.len();
+            if size > crate::interp::limit("summary", MAX_SUMMARY_SIZE) {
+                if debug_enabled() {
+                    eprintln!("[rowan] havoc summary {} round {}: templates={} rows={} slots={} symreqs={} events={} [{}]", fi.qualname, rnd + 1, summ.templates.len(), summ.rows_fp.len(), summ.slots_fp.len(), summ.symreqs.len(), summ.events.len(), summ.desc);
+                }
+                summ.make_havoc(self);
+            }
             if self.sum_hit.contains(&foid) {
                 let prev = self.sum_partial.get(&foid).cloned();
                 if let Some(prev) = &prev {
@@ -1043,6 +1078,9 @@ impl Analyzer {
                         }
                         summ.ret = summ.ret.join(&prev.ret);
                         summ.compute_footprint(self, &base);
+                        if prev.havoc || summ.templates.len() + summ.rows_fp.len() + summ.slots_fp.len() + summ.elems_fp.len() + summ.symreqs.len() > crate::interp::limit("summary", MAX_SUMMARY_SIZE) {
+                            summ.make_havoc(self);
+                        }
                     }
                 }
                 let converged = match &prev {
