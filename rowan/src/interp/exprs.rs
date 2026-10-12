@@ -2134,7 +2134,8 @@ impl Analyzer {
                     self.frame_mut().unroll.pop();
                     self.frame_mut().overlays.pop();
                     if s2.reachable {
-                        if understood || decided {
+                        // (an undecided filter may skip this item: joined with skipping it)
+                        if decided {
                             state.replace_with(s2);
                         } else {
                             let j = state.join(&mut s2);
