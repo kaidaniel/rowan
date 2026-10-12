@@ -183,13 +183,14 @@ extension (talks to `rowan serve`).
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| email (10k lines) / stdlib12k / rich (38k), `work=550000` | ~8 / ~11 / ~140 s (rich 3 GB) |
-| stdlib12k without deadlines | ~80 s, 2 GB; email and rich do not finish |
+| email (10k lines) / stdlib12k / rich (38k), `work=550000` | ~4 / ~10 / ~600 s (rich 4 GB: work units do not count instantiation) |
+| stdlib12k / email without deadlines | ~36 s / ~64 s, 2.4 GB each; rich does not finish (CI ~3x slower) |
 
 ## Known problems and next steps
 
 Open bugs, performance items and precision to-dos are in `SUGGESTED_CHANGES.md`, each with a
-repro; work it in order. The main ones: email and rich do not finish without deadlines (§3.0:
-recursive activations' footprint joins on rich), runs cut by clock deadlines depend on load,
-and the precision to-dos (`#@todo`s in the suites). The branch `slotmap-trie` is parked (same
+repro; work it in order. The main ones: summaries are much less sound than per-call-site runs
+(§0.1: `tab=0` fails ~650 golden expectations), rich does not finish without deadlines (§0.3:
+instantiation over arguments of many objects, recursive activations' joins), runs cut by clock
+deadlines depend on load, and the precision to-dos (`#@todo`s in the suites). The branch `slotmap-trie` is parked (same
 answers, no gain).
