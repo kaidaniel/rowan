@@ -644,7 +644,7 @@ impl Row {
             absent: absent_in(self, &o.absent).intersection(&absent_in(o, &self.absent)),
             absent_likely: absent_l_in(self, &o.absent_likely).intersection(&absent_l_in(o, &self.absent_likely)),
             sources,
-            mutators: self.mutators.union(&o.mutators),
+            mutators: cap_mutators(self.mutators.union(&o.mutators)),
             top: self.top || o.top,
             order: join_order(&self.order, &o.order),
             stored: self.stored.union(&o.stored),
@@ -783,7 +783,7 @@ impl Row {
             absent,
             absent_likely,
             sources: cap_sources(self.sources.union(&o.sources.map(|(s, l)| (s, lens_concat(l, pre))))),
-            mutators: self.mutators.union(&o.mutators),
+            mutators: cap_mutators(self.mutators.union(&o.mutators)),
             top: self.top || o.top,
             order: {
                 // a strong copy of a row whose order is known appends its new keys in order
@@ -810,7 +810,9 @@ impl Row {
         d.definite = KeySet::new();
         d.absent_likely = d.absent_likely.union(&d.absent);
         d.absent = KeySet::new();
-        d.mutators = d.mutators.insert(site);
+        if !d.mutators.contains(site) {
+            d.mutators = cap_mutators(d.mutators.insert(site));
+        }
         Row::from_data(d)
     }
 
@@ -902,6 +904,18 @@ impl fmt::Display for Row {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.compact(false))
     }
+}
+
+/// The unknown calls a row names (only for people: any one of them makes the row open):
+/// past 4, the first 4 and "…".
+fn cap_mutators(ms: StrSet) -> StrSet {
+    if ms.len() <= 5 {
+        return ms;
+    }
+    let more = intern::s("…");
+    let mut v: Vec<StrId> = ms.iter().filter(|m| *m != more).take(4).collect();
+    v.push(more);
+    StrSet::from_vec(v)
 }
 
 fn cap_sources(ss: SrcSet) -> SrcSet {

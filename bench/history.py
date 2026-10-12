@@ -26,6 +26,10 @@ def main() -> None:
     entries = []
     for f in sorted(results.glob("*.json")):
         r = json.loads(f.read_text())
+        if "golden_failing" in r:
+            # the golden suites with every call past its budget (`tab=0,budget=0`): failing cases
+            entries.append({"name": "golden tab=0: failing cases", "unit": "cases", "value": r["golden_failing"], "extra": f"{r['golden_passing']} passing"})
+            continue
         if "name" not in r or "wall_s" not in r:
             continue
         note = "finished" if r.get("finished") else f"cut at the {r.get('timeout_s', 0):.0f} s timeout"

@@ -1083,7 +1083,12 @@ impl Analyzer {
                         for (cs, _) in srcs.iter() {
                             state.reqs.mark(&cs, crate::domain::ReqInfo::default());
                         }
-                        let r = Row::from_data(crate::domain::RowData { sources: srcs, mutators: row.mutators.clone(), ..Default::default() });
+                        // (nothing known of the unknown value's content: neither of its elements')
+                        let r = if srcs.is_empty() && row.mutators.is_empty() {
+                            Row::top()
+                        } else {
+                            Row::from_data(crate::domain::RowData { sources: srcs, mutators: row.mutators.clone(), top: row.top, ..Default::default() })
+                        };
                         state.set_row(eid, Ns::Item, r.clone());
                         state.set_row(eid, Ns::Attr, r);
                     }

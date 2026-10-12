@@ -243,6 +243,12 @@ impl Registry {
                 }
             }
         }
+        // (functions of those modules that change what they are given are unknown calls)
+        const MUTATING: &[&str] = &["random.shuffle", "operator.setitem", "operator.delitem", "struct.pack_into", "heapq.heapreplace", "heapq.heappushpop", "bisect.insort_right"];
+        let in_place_op = qual.strip_prefix("operator.i").is_some_and(|r| !matches!(r, "ndex" | "s_" | "s_not" | "temgetter" | "nv" | "nvert"));
+        if MUTATING.contains(&qual) || in_place_op || qual.starts_with("array.") {
+            return None;
+        }
         for prefix in ALLOWLIST_PREFIXES {
             if qual.starts_with(prefix) || qual.starts_with(&format!("builtins.{}", prefix)) {
                 return Some(noeffect);

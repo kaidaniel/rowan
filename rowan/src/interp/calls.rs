@@ -13,7 +13,7 @@ use crate::state::{Footprint, Kind, State};
 use crate::domain::ObjId;
 
 use super::funcs::cell_key;
-use super::{is_generator, Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, Payload, Verdict, MAX_ACTIVE, MAX_ARG_JOIN, MAX_CLONES, MAX_MUTATED, NOEFFECT_METHOD_NAMES, REC_MAX_ITER};
+use super::{is_generator, Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, Payload, Verdict, MAX_ACTIVE, MAX_ARG_JOIN, MAX_CLONES, NOEFFECT_METHOD_NAMES, REC_MAX_ITER};
 
 /// A dataclass field as `__init__` takes it (`dc_specs`).
 #[derive(Clone, Debug)]
@@ -397,12 +397,8 @@ impl Analyzer {
         if let Some(r) = recv {
             vals.push(r.clone());
         }
-        let touched = self.reachable_records(&vals, state, 1);
+        let touched = self.reachable_records(&vals, state, 0);
         let site_id = s(&site);
-        for (oid, ns) in touched.iter().take(MAX_MUTATED) {
-            let r = state.row(*oid, *ns).mutate(site_id);
-            state.set_row(*oid, *ns, r);
-        }
         let arg_recs: Vec<(u32, Ns)> = touched.iter().copied().filter(|(oid, _)| vals.iter().any(|v| v.pts.contains(*oid))).collect();
         // (the result's object is keyed by the last call site of the context only, k = 1: with
         // the whole call string every context made its own result and its own tree of parts —
@@ -425,6 +421,9 @@ impl Analyzer {
                 }
             }
         }
+        // everything it can reach through what it is given may have changed: keys, values,
+        // items, lengths
+        self.havoc_reachable(&vals, rid, site_id, state);
         // for people: the call as written and the known objects it was given (unknown code may
         // return one of them; given unknowns add nothing to `?`)
         {
@@ -496,6 +495,66 @@ impl Analyzer {
             }
         }
         out
+    }
+
+    /// The object standing for any value unknown code may have stored: nothing known about it.
+    pub fn any_object(&mut self, state: &mut State) -> ObjId {
+        let o = self.alloc_raw(Kind::Unknown, "any", "", false, "?", Payload::None);
+        for ns in [Ns::Item, Ns::Attr] {
+            if !state.has_row(o, ns) {
+                state.set_row(o, ns, Row::top());
+            }
+        }
+        o
+    }
+
+    /// Unknown code ran on `vals`: every object they reach (through slots, items, elements)
+    /// may have changed. Records get the call as a mutator (any key may have been added or
+    /// removed), every slot of a mutable object may now hold the call's result `rid` (any value),
+    /// lists and sets any items and any length. Modules, classes and functions are not entered.
+    pub fn havoc_reachable(&mut self, vals: &[Value], rid: ObjId, site: StrId, state: &mut State) {
+        if std::env::var("T1").is_ok() { return; }
+        let mut seen: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
+        let mut work: Vec<ObjId> = vals.iter().flat_map(|v| v.pts.iter()).collect();
+        // (one object stands for "anything unknown code stored": a value per call would pile
+        // up in every slot it reaches)
+        let any = Value::obj(self.any_object(state));
+        while let Some(o) = work.pop() {
+            if o == rid || o == any.pts.first().unwrap_or(0) || !seen.insert(o) {
+                continue;
+            }
+            let k = self.kind(o);
+            if matches!(k, Kind::Module | Kind::Class | Kind::Function | Kind::External | Kind::Method | Kind::Bound) {
+                continue;
+            }
+            let slots = state.slots_of(o);
+            for (_, v) in &slots {
+                work.extend(v.pts.iter());
+            }
+            // (a tuple cannot change; an unknown object's content is unknown already)
+            if k == Kind::Tuple || (k == Kind::Unknown && !state.has_row(o, Ns::Item) && !state.has_row(o, Ns::Attr)) {
+                continue;
+            }
+            for ns in [Ns::Item, Ns::Attr] {
+                if state.has_row(o, ns) || (ns == Ns::Item && matches!(k, Kind::Dict | Kind::Frame)) || (ns == Ns::Attr && k == Kind::Instance) {
+                    let r = state.row(o, ns).mutate(site);
+                    state.set_row(o, ns, r);
+                }
+            }
+            for (sk, v) in slots {
+                if matches!(sk.0, Ns::Item | Ns::Attr | Ns::Pos | Ns::Elem) {
+                    state.set_slot(o, sk.0, sk.1, v.join(&any), false);
+                }
+            }
+            if matches!(k, Kind::List | Kind::Set) && !self.obj(o).site.starts_with("gen:") {
+                let e = state.slot(o, Ns::Elem, intern::STAR).join(&any);
+                state.set_slot(o, Ns::Elem, intern::STAR, e, false);
+                let kv = crate::domain::kv_join(&state.elems.get(&o).unwrap_or(DATA), &DATA);
+                state.elems.insert(o, kv);
+                state.clear_last(o);
+                self.set_prefix(o, state, 0);
+            }
+        }
     }
 
     /// An ABC with abstract methods no class of its MRO implements: `cls()` raises TypeError.
@@ -1381,6 +1440,7 @@ impl Analyzer {
         if !entry && self.tab_count.get(&fi.node.addr()).copied().unwrap_or(0) > super::limit("budget", super::FN_BUDGET) {
             let q = fi.qualname.clone();
             self.note(format!("{} ran out of its budget: later calls are unknown code", q));
+            self.budget_out.insert(foid);
             return self.unknown_call(&q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
         if super::debug_enabled() {

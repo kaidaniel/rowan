@@ -32,13 +32,17 @@ ruff and walks the syntax tree directly, running the program on abstract values.
 * **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site,
   in a context of the innermost `chain` (2) call sites. The call cache replays a run when the
   same input recurs. **Budget:** each function code (all closures of one `def`) may run 4,096
-  statements in all (`budget`); past that its calls are unknown calls. Entry runs are not
-  counted (one per function). So the work is bounded by the number of functions times the
-  budget, not by a deadline.
+  statements in all (`budget`); past that its calls are unknown calls, and the function gets a
+  reporting run with open parameters (its lines then hold for the calls that did not run).
+  Entry runs are not counted (one per function). So the work is bounded by the number of
+  functions times the budget, not by a deadline.
   * **Recursion:** the inner call uses the running activation's partial result; it iterates
     to a fixpoint (8 rounds), then widens.
-  * **Unknown calls** add a mutator to every record they reach, return an unknown, and may
-    raise anything.
+  * **Unknown calls** may change everything they reach through what they are given, at any
+    depth: records get a mutator, slots may hold anything (one shared unknown object), lists
+    and sets any items and length. They return an unknown and may raise anything. Library
+    functions known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`), except the ones
+    that change their arguments (`random.shuffle`, `operator.setitem`, …).
   * **Entry points:** functions nothing calls run with open parameters; their requirements
     become `param F.x` schemas.
 * **Generators** run eagerly at the call. A consumer of item *k* sees the effects up to yield
@@ -99,7 +103,9 @@ uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv ru
 ```
 
 Run the oracle on the cases you touched, and in full before a commit that changes models. CI
-(`.github/workflows/ci.yml`) runs all of the above except torch and the benchmark (`bench.yml`).
+(`.github/workflows/ci.yml`) runs all of the above except torch and the benchmark (`bench.yml`,
+which also counts the golden passes with `ROWAN_LIMITS=tab=0,budget=0`: every call past its
+budget; informational, into the history on gh-pages).
 
 ## Tests
 

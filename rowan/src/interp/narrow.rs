@@ -547,8 +547,12 @@ impl Analyzer {
             }
         }
         let recs: Vec<u32> = rv.pts.iter().filter(|o| self.is_record_like(*o)).collect();
+        // (a value that is a literal or an unknown object may be any key: no narrowing by its
+        // literal part)
+        let lit_only = lv.pts.iter().all(|o| !matches!(self.kind(o), Kind::Unknown | Kind::Instance | Kind::External));
         if !recs.is_empty() {
             match &lv.kv {
+                KeyVal::Lit(_) | KeyVal::Lits(_) if !lit_only => {}
                 KeyVal::Lit(k) => {
                     // whichever object the name holds has the key (several objects: none narrows)
                     if member && recs.len() > 1 {

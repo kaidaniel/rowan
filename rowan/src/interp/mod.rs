@@ -30,7 +30,6 @@ pub const LOOP_MAX_ITER: usize = 40;
 pub const REC_MAX_ITER: usize = 8;
 pub const PATH_DEPTH: u32 = 3;
 pub const MAX_ACTIVE: usize = 4;
-pub const MAX_MUTATED: usize = 24;
 /// records an unknown call's result joins at most (past that: an open row)
 pub const MAX_ARG_JOIN: usize = 64;
 /// a generator's suspension point: the yield node, the `yield from` item, the unrolled loop
@@ -847,6 +846,9 @@ pub struct Analyzer {
     pub entry_run: Option<ObjId>,
     /// functions that had their entry run
     pub entry_done: FxHashSet<ObjId>,
+    /// functions some call of which their budget refused: their own lines then need a reporting
+    /// run with open parameters (it covers the calls that did not run)
+    pub budget_out: FxHashSet<ObjId>,
     /// unknown call results named by the variable they were bound to (tensor dims)
     pub t_var_names: FxHashMap<ObjId, crate::shape::Sym>,
     /// closures made inside concrete calls in torch modules (no entry run of their own)
@@ -1233,6 +1235,7 @@ impl Analyzer {
             torch_modules: FxHashSet::default(),
             entry_run: None,
             entry_done: FxHashSet::default(),
+            budget_out: FxHashSet::default(),
             t_var_names: FxHashMap::default(),
             t_concrete_closures: FxHashSet::default(),
             t_closure_states: FxHashMap::default(),
@@ -1980,8 +1983,9 @@ impl Analyzer {
             let handler = self.fa_handlers.contains(&oid);
             // a function the program calls: a requirement-only run with open parameters gives
             // its own input contract (`param F.x` schemas)
-            let quiet = self.analysed_funcs.contains(&oid) && !self.torch_modules.contains(&fi.module) && !handler;
-            if quiet != quiet_pass {
+            let refused = self.budget_out.contains(&oid);
+            let quiet = self.analysed_funcs.contains(&oid) && !self.torch_modules.contains(&fi.module) && !handler && !refused;
+            if quiet != quiet_pass && !(quiet_pass && refused) {
                 continue;
             }
             if quiet && (!fi.closure.is_empty() || !matches!(fi.node, FuncNode::Def(_)) || !self.is_local_module(fi.module) || self.over_deadline()) || self.t_concrete_closures.contains(&oid) {
@@ -1993,7 +1997,7 @@ impl Analyzer {
             if !fi.closure.is_empty() && (self.obj(oid).ctx.contains("sum")) {
                 continue;
             }
-            if fi.module != self.main_module && !handler && !(quiet && self.is_local_module(fi.module)) {
+            if fi.module != self.main_module && !handler && !((quiet || refused) && self.is_local_module(fi.module)) {
                 continue;
             }
             if handler {
@@ -2770,6 +2774,10 @@ impl Analyzer {
         }
         for rs in &self.fa_out_resp {
             work.extend(rs.iter().copied());
+        }
+        // (the value unknown code stores: values anywhere may hold it)
+        if let Some(&any) = self.obj_index.get(&(Kind::Unknown, intern::s("any"), intern::s(""))) {
+            work.push(any);
         }
         for fr in &self.frames {
             work.push(fr.module);
