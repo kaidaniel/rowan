@@ -2270,48 +2270,38 @@ impl Analyzer {
             Payload::Locidx(_, f) => work.push(*f),
             _ => {}
         }
-        if let Some(ms) = self.m.chainmaps.get(&o) {
-            ms.iter().for_each(|m| m.push_objs(work));
+        self.side_edges(Some(o), work);
+    }
+
+    /// What the analyzer's side tables keyed by an object refer to: `o`'s entries, or every
+    /// entry's (None: the collector's roots, `gc_pinned`).
+    fn side_edges(&self, o: Option<ObjId>, work: &mut Vec<ObjId>) {
+        fn each<'a, V>(m: &'a FxHashMap<ObjId, V>, o: Option<ObjId>) -> Box<dyn Iterator<Item = &'a V> + 'a> {
+            match o {
+                Some(o) => Box::new(m.get(&o).into_iter()),
+                None => Box::new(m.values()),
+            }
         }
-        if let Some(v) = self.m.dd_factories.get(&o) {
-            v.push_objs(work);
+        each(&self.m.chainmaps, o).flatten().for_each(|m| m.push_objs(work));
+        for m in [&self.m.dd_factories, &self.m.csv_readers, &self.wrapped] {
+            each(m, o).for_each(|v| v.push_objs(work));
         }
-        if let Some(v) = self.m.csv_readers.get(&o) {
-            v.push_objs(work);
-        }
-        if let Some(v) = self.wrapped.get(&o) {
-            v.push_objs(work);
-        }
-        if let Some(vs) = self.m.partial_star.get(&o) {
-            vs.iter().for_each(|v| v.push_objs(work));
-        }
-        if let Some(srcs) = self.lazy_src.get(&o) {
-            work.extend(srcs.iter().map(|(s, _)| *s));
-        }
+        each(&self.m.partial_star, o).flatten().for_each(|v| v.push_objs(work));
+        each(&self.lazy_src, o).flatten().for_each(|(s, _)| work.push(*s));
         for m in [&self.attr_mirrors, &self.entry_instances, &self.copy_root, &self.m.sql_cursors] {
-            if let Some(x) = m.get(&o) {
-                work.push(*x);
-            }
+            work.extend(each(m, o).copied());
         }
-        if let Some(items) = self.m.sorted_items.get(&o) {
-            items.iter().for_each(|(_, v, _)| v.push_objs(work));
+        each(&self.m.sorted_items, o).flat_map(|items| items.iter()).for_each(|(_, v, _)| v.push_objs(work));
+        for (f, args, kw) in each(&self.m.exit_callbacks, o).flatten() {
+            f.push_objs(work);
+            args.iter().for_each(|a| a.push_objs(work));
+            kw.values().for_each(|v| v.push_objs(work));
         }
-        if let Some(cbs) = self.m.exit_callbacks.get(&o) {
-            for (f, args, kw) in cbs {
-                f.push_objs(work);
-                args.iter().for_each(|a| a.push_objs(work));
-                kw.values().for_each(|v| v.push_objs(work));
-            }
+        for (v, f) in each(&self.sdispatch, o).flatten() {
+            v.push_objs(work);
+            work.push(*f);
         }
-        if let Some(ds) = self.sdispatch.get(&o) {
-            for (v, f) in ds {
-                v.push_objs(work);
-                work.push(*f);
-            }
-        }
-        if let Some(ds) = self.m.fa_app_deps.get(&o) {
-            ds.iter().for_each(|v| v.push_objs(work));
-        }
+        each(&self.m.fa_app_deps, o).flatten().for_each(|v| v.push_objs(work));
     }
 
     /// Objects the analyzer itself holds beyond the state: what side tables keyed by other
@@ -2319,13 +2309,8 @@ impl Analyzer {
     /// `unwind`: for a raise state, only the first `unwind` callers' names, and no loop's recent
     /// objects (those still in use are reachable from the names).
     pub fn gc_pinned(&self, work: &mut Vec<ObjId>, unwind: Option<usize>) {
-        let st = State::new();
-        for o in self.m.chainmaps.keys().chain(self.m.dd_factories.keys()).chain(self.m.csv_readers.keys()).chain(self.wrapped.keys()).chain(self.m.partial_star.keys()).chain(self.lazy_src.keys()).chain(self.attr_mirrors.keys()).chain(self.entry_instances.keys()).chain(self.copy_root.keys()).chain(self.m.sql_cursors.keys()).chain(self.m.sorted_items.keys()).chain(self.m.exit_callbacks.keys()).chain(self.sdispatch.keys()).chain(self.m.fa_app_deps.keys()) {
-            // (the side-table edges only: the key itself may be dead)
-            let mut w = Vec::new();
-            self.obj_edges(*o, &st, &mut w);
-            work.extend(w);
-        }
+        // (the side tables' entries: their keys themselves may be dead)
+        self.side_edges(None, work);
         for v in self.cur_exc.iter().chain(self.tries.iter().flat_map(|t| t.recs.iter().map(|r| &r.2))).chain(self.handling_values.iter()).chain(self.cmp_right.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
             v.push_objs(work);
         }
@@ -2338,6 +2323,12 @@ impl Analyzer {
         }
         for env in self.env_stack.iter().take(unwind.unwrap_or(usize::MAX)) {
             env.values().for_each(|v| v.push_objs(work));
+        }
+        // (the managers of the with statements running: their `__exit__` runs on the way out)
+        for (_, fin, _) in &self.finally_stack {
+            if let crate::interp::stmts::Finally::Exit(ms) = &**fin {
+                ms.iter().for_each(|(v, _)| v.push_objs(work));
+            }
         }
         for (_, env, _) in &self.cm_frames {
             env.values().for_each(|v| v.push_objs(work));
