@@ -20,6 +20,7 @@ use crate::state::{Kind, State};
 
 pub mod access;
 pub mod calls;
+pub mod effects;
 pub mod exprs;
 pub mod funcs;
 pub mod narrow;
@@ -74,8 +75,6 @@ pub const CHAIN: usize = 2;
 /// Statements a function code may run in all its calls (`ROWAN_LIMITS=budget=N`): past them
 /// its calls are unknown code.
 pub const FN_BUDGET: usize = 4096;
-/// Cached runs kept per function code (`calls::CacheHit`).
-pub const CACHE_PER_FN: usize = 32;
 /// A safety net, not the bound on work (the budget is): past this many milliseconds
 /// (`ROWAN_LIMITS=ms=N`) calls of user code are unknown calls and running bodies stop.
 pub const DEADLINE_MS: usize = 10000;
@@ -102,10 +101,7 @@ pub fn limit(name: &str, default: usize) -> usize {
 }
 
 pub fn debug_enabled() -> bool {
-    match Ok::<u8, ()>(debug_level()) {
-        Ok(v) => v > 0,
-        Err(_) => false,
-    }
+    debug_level() > 0
 }
 
 pub const SAFE_METHODS: &[&str] = &["dict.pop", "list.pop", 
@@ -327,83 +323,7 @@ impl TryExit {
     }
 }
 
-/// Builtin (and modelled library) exception classes and their bases.
-pub const EXC_BASES: &[(&str, &str)] = &[
-    ("Exception", "BaseException"), ("SystemExit", "BaseException"), ("KeyboardInterrupt", "BaseException"), ("GeneratorExit", "BaseException"),
-    ("BaseExceptionGroup", "BaseException"),
-    ("ArithmeticError", "Exception"), ("ZeroDivisionError", "ArithmeticError"), ("OverflowError", "ArithmeticError"), ("FloatingPointError", "ArithmeticError"),
-    ("LookupError", "Exception"), ("KeyError", "LookupError"), ("IndexError", "LookupError"),
-    ("ValueError", "Exception"), ("UnicodeError", "ValueError"), ("UnicodeDecodeError", "UnicodeError"), ("UnicodeEncodeError", "UnicodeError"),
-    ("UnicodeTranslateError", "UnicodeError"),
-    ("TypeError", "Exception"), ("AttributeError", "Exception"), ("NameError", "Exception"), ("UnboundLocalError", "NameError"),
-    ("RuntimeError", "Exception"), ("NotImplementedError", "RuntimeError"), ("RecursionError", "RuntimeError"), ("AssertionError", "Exception"),
-    ("ImportError", "Exception"), ("ModuleNotFoundError", "ImportError"), ("EOFError", "Exception"), ("MemoryError", "Exception"),
-    ("StopIteration", "Exception"), ("StopAsyncIteration", "Exception"), ("SyntaxError", "Exception"), ("IndentationError", "SyntaxError"),
-    ("SystemError", "Exception"), ("BufferError", "Exception"), ("ReferenceError", "Exception"), ("Warning", "Exception"),
-    ("OSError", "Exception"), ("IOError", "Exception"), ("EnvironmentError", "Exception"),
-    ("FileNotFoundError", "OSError"), ("PermissionError", "OSError"), ("TimeoutError", "OSError"), ("ConnectionError", "OSError"),
-    ("BlockingIOError", "OSError"), ("ChildProcessError", "OSError"), ("FileExistsError", "OSError"), ("InterruptedError", "OSError"),
-    ("IsADirectoryError", "OSError"), ("NotADirectoryError", "OSError"), ("ProcessLookupError", "OSError"),
-    ("BrokenPipeError", "ConnectionError"), ("ConnectionAbortedError", "ConnectionError"), ("ConnectionRefusedError", "ConnectionError"),
-    ("ConnectionResetError", "ConnectionError"),
-    // (library exceptions the models raise)
-    ("JSONDecodeError", "ValueError"), ("ValidationError", "ValueError"), ("FrozenInstanceError", "AttributeError"),
-    // (module-qualified: a bare `Error` names different classes in different modules)
-    ("configparser.Error", "Exception"), ("configparser.NoSectionError", "configparser.Error"), ("configparser.NoOptionError", "configparser.Error"),
-    ("configparser.DuplicateSectionError", "configparser.Error"), ("configparser.DuplicateOptionError", "configparser.Error"),
-    ("configparser.InterpolationError", "configparser.Error"), ("configparser.ParsingError", "configparser.Error"),
-    ("configparser.MissingSectionHeaderError", "configparser.ParsingError"),
-];
-
-/// The names of a builtin exception class and its bases (`IOError` is `OSError`), computed
-/// once per name.
-pub fn builtin_exc_names(name: &str) -> ExcNames {
-    thread_local! {
-        static CACHE: RefCell<FxHashMap<String, ExcNames>> = RefCell::new(FxHashMap::default());
-    }
-    if let Some(e) = CACHE.with(|c| c.borrow().get(name).cloned()) {
-        return e;
-    }
-    let (names, full) = builtin_exc_names_uncached(name);
-    let e: ExcNames = (Rc::new(names), full);
-    CACHE.with(|c| c.borrow_mut().insert(name.to_string(), e.clone()));
-    e
-}
-
-fn builtin_exc_names_uncached(name: &str) -> (Vec<String>, bool) {
-    // a module-qualified class of the table: its chain, by the classes' own names
-    if EXC_BASES.iter().any(|(c, _)| *c == name && c.contains('.')) {
-        let mut out: Vec<String> = Vec::new();
-        let mut n = name.to_string();
-        while n.contains('.') {
-            out.push(n.rsplit('.').next().unwrap_or("").to_string());
-            match EXC_BASES.iter().find(|(c, _)| *c == n) {
-                Some((_, b)) => n = b.to_string(),
-                None => return (out, false),
-            }
-        }
-        let (rest, full) = builtin_exc_names_uncached(&n);
-        out.extend(rest);
-        return (out, full);
-    }
-    let mut n = name.rsplit('.').next().unwrap_or(name).to_string();
-    let mut out: Vec<String> = Vec::new();
-    loop {
-        if n == "IOError" || n == "EnvironmentError" || n == "OSError" {
-            out.extend(["OSError", "IOError", "EnvironmentError"].iter().map(|s| s.to_string()));
-            n = "Exception".into();
-            continue;
-        }
-        out.push(n.clone());
-        if n == "BaseException" {
-            return (out, true);
-        }
-        match EXC_BASES.iter().find(|(c, _)| *c == n) {
-            Some((_, b)) => n = b.to_string(),
-            None => return (out, false),
-        }
-    }
-}
+pub use crate::models::exceptions::{builtin_exc_names, EXC_BASES};
 
 #[derive(Debug)]
 pub struct ClassInfo {
@@ -859,6 +779,8 @@ pub struct Analyzer {
     /// unknown call sites (sources and mutators are named by them) as written: (the call's
     /// text, its module, its line), for reports
     pub site_names: FxHashMap<StrId, (String, u32, u32)>,
+    /// the sites of calls of the program's code that did not run (`skipped_call`)
+    pub skipped_sites: FxHashSet<StrId>,
     /// unknown objects named in the program's own terms (`a`, `a(b)`, `cfg["db"]`,
     /// `rows[*]`, `json.loads(text)`): printed instead of `?`
     pub symbols: FxHashMap<ObjId, String>,
@@ -957,9 +879,12 @@ pub struct Analyzer {
     /// the hard deadline passed: function bodies stop, the calls they are in become unknown calls
     pub hard_cut: bool,
     cut_tick: u32,
-    pub call_cache: FxHashMap<calls::Sig, Rc<calls::CacheHit>>,
-    /// cached runs per function code (bounded by `CACHE_PER_FN`)
-    pub cache_count: FxHashMap<usize, usize>,
+    /// per function code (`FuncNode::addr`): the names it reads beyond its locals
+    pub code_uses: FxHashMap<usize, Rc<effects::CodeUses>>,
+    /// per code object: what it may change when a call of it does not run (`code_closure`)
+    pub closures: FxHashMap<Vec<ObjId>, Rc<effects::Closure>>,
+    /// the code objects the last `havoc_reachable` met (functions, classes, bound methods)
+    pub havoc_code: Vec<ObjId>,
     pub entry_instances: FxHashMap<ObjId, ObjId>,
     pub fresh_in_progress: FxHashSet<ObjId>,
     pub main_module: ObjId,
@@ -1542,6 +1467,13 @@ impl Analyzer {
 
     /// A verdict on an access the program guards (a try handling the failure): recorded for
     /// the golden harness and the hover, never a diagnostic.
+    /// Forget the verdicts recorded since `mark` (a run whose states a later run supersedes).
+    pub fn drop_verdicts_since(&mut self, mark: usize) {
+        for v in self.verdicts.drain(mark..) {
+            self.verdict_keys.remove(&v.dedupe_key());
+        }
+    }
+
     pub fn verdict_guarded(&mut self, node: &Node, key: KeyId, cls: &Classification, oid: ObjId, ns: Ns) {
         let saved = std::mem::replace(&mut self.verdict_guarded, true);
         self.verdict(node, key, cls, oid, ns, None, None);
@@ -1680,36 +1612,10 @@ impl Analyzer {
                 continue;
             }
             if handler {
-                let mut st = state.copy();
-                st.ret = None;
-                let mi = self.module_info(fi.module);
-                self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
-                self.entry_scope = Some(oid);
-                let fake = Node::synthetic(mi.idx, fi.node.node().line);
-                let saved_entry = self.entry_run.replace(oid);
-                if self.fa_entry_through_middleware(oid, &mut st, &fake).is_none() {
-                    self.m.fa_dep_cache.push(FxHashMap::default());
-                    if let Some(idx) = self.m.fa_routes.iter().position(|r| r.func == Some(oid)) {
-                        self.fa_route_deps(idx, None, &mut st, &fake);
-                    }
-                    let gens = self.fa_yield_deps(oid, &mut st);
-                    self.fa_run_handler(oid, gens, None, true, &mut st, &fake);
-                    self.m.fa_dep_cache.pop();
-                }
-                self.entry_scope = None;
-                self.entry_run = saved_entry;
-                self.frames.pop();
-                for (src, k) in st.reqs.diff_keys(&state.reqs) {
-                    let Some(info) = st.reqs.get(&src, &k) else { continue };
-                    let nv = match state.reqs.get(&src, &k) {
-                        Some(cur) => cur.join(&info),
-                        None => info,
-                    };
-                    state.reqs.set(&src, k, nv);
-                }
+                self.fa_entry_run(oid, &fi, state);
                 continue;
             }
-            let Some(fparams) = fi.node.params().or_else(|| None) else {
+            let Some(fparams) = fi.node.params() else {
                 // a lambda without parameters
                 if let FuncNode::Lambda(_) = fi.node {
                     let mut st = state.copy();
@@ -1723,17 +1629,7 @@ impl Analyzer {
                 continue;
             };
             if debug_enabled() {
-                eprintln!(
-                    "[rowan] entry {} L{} t={:.1}s objs={} verdicts={} quiet={} torch={} analysed={}",
-                    fi.qualname,
-                    fi.node.node().line,
-                    self.now(),
-                    self.objects.len(),
-                    self.verdicts.len(),
-                    quiet,
-                    self.torch_modules.contains(&fi.module),
-                    self.analysed_funcs.contains(&oid)
-                );
+                eprintln!("[rowan] entry {} L{} t={:.1}s objs={} verdicts={} quiet={}", fi.qualname, fi.node.node().line, self.now(), self.objects.len(), self.verdicts.len(), quiet);
             }
             // a closure made by a factory's entry run starts from that run's state (its cells)
             let mut st = match self.t_closure_states.get(&oid) {
@@ -2105,6 +2001,26 @@ impl Analyzer {
                 self.call_user(init, Some(Value::obj(inst)), args, IndexMap::new(), vec![], vec![], state, &fake, None, true);
             }
         }
+        // (an instance a caller made may have had any of its methods called since: what they
+        // set and `__init__` did not may be there too, holding anything; what they delete may
+        // be gone)
+        let (set, deleted) = self.attrs_set_by_methods(cls_oid, state);
+        if !(set.is_empty() && deleted.is_empty()) && state.has_row(inst, Ns::Attr) {
+            let any = Value::obj(self.any_object(state));
+            let mut row = state.row(inst, Ns::Attr);
+            // (a name the class itself defines — a property, a class-level default — reads
+            // through the class anyway)
+            let had = row.present.clone();
+            let by_class = |an: &Analyzer, k: KeyId| intern::key_as_str(k).is_some_and(|n| an.class_lookup(cls_oid, &n).is_some());
+            for k in set.into_iter().filter(|k| !had.contains(*k) && !by_class(self, *k)) {
+                row = row.store(k, false);
+                state.set_slot(inst, Ns::Attr, k, any.clone(), false);
+            }
+            for k in deleted {
+                row = row.delete(k, false);
+            }
+            state.set_row(inst, Ns::Attr, row);
+        }
         inst
     }
 
@@ -2231,41 +2147,27 @@ impl Analyzer {
         state.lens.get(&oid).is_some() || state.has_row(oid, Ns::Item) || state.has_row(oid, Ns::Attr) || state.slots.has_key(&oid)
     }
 
+    /// The roots of a reachability walk: the names, narrowed values and result of `state`, the
+    /// names of the first `envs` callers, and the modules, cells and loop overlays of the
+    /// first `frames` frames.
+    pub fn state_roots(&self, state: &State, envs: usize, frames: usize, work: &mut Vec<ObjId>) {
+        let callers = self.env_stack.iter().take(envs).flat_map(|e| e.values());
+        for v in state.env.values().chain(callers).chain(state.narrowed.values()).chain(state.ret.iter()) {
+            v.push_objs(work);
+        }
+        for fr in self.frames.iter().take(frames) {
+            work.push(fr.module);
+            work.extend(fr.cells.values().copied());
+            fr.overlays.iter().flat_map(|o| o.values()).for_each(|v| v.push_objs(work));
+        }
+    }
+
     /// Which of `targets` the program can still reach (one walk from the roots for all; it
     /// stops when every one is found).
     pub fn live_among(&self, targets: &[ObjId], state: &State) -> FxHashSet<ObjId> {
         let mut found: FxHashSet<ObjId> = FxHashSet::default();
-        fn push_value(v: &Value, work: &mut Vec<ObjId>) {
-            work.extend(v.pts.iter());
-            match &v.kv {
-                KeyVal::KeysOf(ko) => work.extend(ko.objs.iter()),
-                _ => {}
-            }
-        }
         let mut work: Vec<ObjId> = Vec::new();
-        for v in state.env.values() {
-            push_value(v, &mut work);
-        }
-        for env in &self.env_stack {
-            for v in env.values() {
-                push_value(v, &mut work);
-            }
-        }
-        for v in state.narrowed.values() {
-            push_value(v, &mut work);
-        }
-        if let Some(r) = &state.ret {
-            push_value(r, &mut work);
-        }
-        for fr in &self.frames {
-            work.push(fr.module);
-            work.extend(fr.cells.values().copied());
-            for ov in &fr.overlays {
-                for v in ov.values() {
-                    push_value(v, &mut work);
-                }
-            }
-        }
+        self.state_roots(state, usize::MAX, usize::MAX, &mut work);
         // (a walk over a large heap is bounded: past the budget the targets not found yet are
         // taken as live, which is always sound: their site makes a recent / variant object; a
         // walk that proves an object dead on a large heap visits all of it, and on email's 20k
@@ -2295,22 +2197,15 @@ impl Analyzer {
     /// The objects `o` refers to: its slots and element kinds in `state`, its payload, and what
     /// side tables keyed by it hold (a ChainMap's maps, a defaultdict's factory, …).
     pub fn obj_edges(&self, o: ObjId, state: &State, work: &mut Vec<ObjId>) {
-        fn push_value(v: &Value, work: &mut Vec<ObjId>) {
-            work.extend(v.pts.iter());
-            match &v.kv {
-                KeyVal::KeysOf(ko) => work.extend(ko.objs.iter()),
-                _ => {}
-            }
-        }
         // (the slot table in place: a walk visits the whole reachable heap)
-        state.slots.each(&o, &mut |_, v| push_value(v, work));
+        state.slots.each(&o, &mut |_, v| v.push_objs(work));
         match state.elems.get_ref(&o) {
             Some(KeyVal::KeysOf(ko)) => work.extend(ko.objs.iter()),
             _ => {}
         }
         for (lo, v) in state.lasts.iter() {
             if *lo == o {
-                push_value(v, work);
+                v.push_objs(work);
             }
         }
         if !self.has_obj(o) {
@@ -2319,22 +2214,22 @@ impl Analyzer {
         match &self.obj(o).payload {
             Payload::Func(fi) => work.extend(fi.closure.values().copied()),
             Payload::Cls(c) => work.push(*c),
-            Payload::Method(_, v) | Payload::View(_, v) | Payload::Enumerate(v, _) => push_value(v, work),
+            Payload::Method(_, v) | Payload::View(_, v) | Payload::Enumerate(v, _) => v.push_objs(work),
             Payload::Bound(f, v) | Payload::Super(f, v) => {
                 work.push(*f);
-                push_value(v, work);
+                v.push_objs(work);
             }
             Payload::Zip(a, b) | Payload::Pair(a, b) => {
-                push_value(a, work);
-                push_value(b, work);
+                a.push_objs(work);
+                b.push_objs(work);
             }
             Payload::Partial(f, args, kw) => {
-                push_value(f, work);
+                f.push_objs(work);
                 for a in args {
-                    push_value(a, work);
+                    a.push_objs(work);
                 }
                 for v in kw.values() {
-                    push_value(v, work);
+                    v.push_objs(work);
                 }
             }
             Payload::Groupby(fs, _, _, _) => work.extend(fs.iter().copied()),
@@ -2342,19 +2237,19 @@ impl Analyzer {
             _ => {}
         }
         if let Some(ms) = self.m.chainmaps.get(&o) {
-            ms.iter().for_each(|m| push_value(m, work));
+            ms.iter().for_each(|m| m.push_objs(work));
         }
         if let Some(v) = self.m.dd_factories.get(&o) {
-            push_value(v, work);
+            v.push_objs(work);
         }
         if let Some(v) = self.m.csv_readers.get(&o) {
-            push_value(v, work);
+            v.push_objs(work);
         }
         if let Some(v) = self.wrapped.get(&o) {
-            push_value(v, work);
+            v.push_objs(work);
         }
         if let Some(vs) = self.m.partial_star.get(&o) {
-            vs.iter().for_each(|v| push_value(v, work));
+            vs.iter().for_each(|v| v.push_objs(work));
         }
         if let Some(srcs) = self.lazy_src.get(&o) {
             work.extend(srcs.iter().map(|(s, _)| *s));
@@ -2365,36 +2260,29 @@ impl Analyzer {
             }
         }
         if let Some(items) = self.m.sorted_items.get(&o) {
-            items.iter().for_each(|(_, v, _)| push_value(v, work));
+            items.iter().for_each(|(_, v, _)| v.push_objs(work));
         }
         if let Some(cbs) = self.m.exit_callbacks.get(&o) {
             for (f, args, kw) in cbs {
-                push_value(f, work);
-                args.iter().for_each(|a| push_value(a, work));
-                kw.values().for_each(|v| push_value(v, work));
+                f.push_objs(work);
+                args.iter().for_each(|a| a.push_objs(work));
+                kw.values().for_each(|v| v.push_objs(work));
             }
         }
         if let Some(ds) = self.sdispatch.get(&o) {
             for (v, f) in ds {
-                push_value(v, work);
+                v.push_objs(work);
                 work.push(*f);
             }
         }
         if let Some(ds) = self.m.fa_app_deps.get(&o) {
-            ds.iter().for_each(|v| push_value(v, work));
+            ds.iter().for_each(|v| v.push_objs(work));
         }
     }
 
     /// Objects the analyzer itself holds beyond the state: what side tables keyed by other
     /// objects refer to, exceptions in flight, the callers' names, loop recency objects.
     pub fn gc_pinned(&self, work: &mut Vec<ObjId>) {
-        fn push_value(v: &Value, work: &mut Vec<ObjId>) {
-            work.extend(v.pts.iter());
-            match &v.kv {
-                KeyVal::KeysOf(ko) => work.extend(ko.objs.iter()),
-                _ => {}
-            }
-        }
         let st = State::new();
         for o in self.m.chainmaps.keys().chain(self.m.dd_factories.keys()).chain(self.m.csv_readers.keys()).chain(self.wrapped.keys()).chain(self.m.partial_star.keys()).chain(self.lazy_src.keys()).chain(self.attr_mirrors.keys()).chain(self.entry_instances.keys()).chain(self.copy_root.keys()).chain(self.m.sql_cursors.keys()).chain(self.m.sorted_items.keys()).chain(self.m.exit_callbacks.keys()).chain(self.sdispatch.keys()).chain(self.m.fa_app_deps.keys()) {
             // (the side-table edges only: the key itself may be dead)
@@ -2403,20 +2291,20 @@ impl Analyzer {
             work.extend(w);
         }
         for v in self.cur_exc.iter().chain(self.raise_values.iter().flatten()).chain(self.handling_values.iter()).chain(self.cmp_right.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
-            push_value(v, work);
+            v.push_objs(work);
         }
         for c in &self.m.fa_dep_cache {
-            c.values().for_each(|v| push_value(v, work));
+            c.values().for_each(|v| v.push_objs(work));
         }
         for (_, _, v, f) in &self.m.fa_hooks {
-            push_value(v, work);
+            v.push_objs(work);
             work.extend(f.iter().copied());
         }
         for env in &self.env_stack {
-            env.values().for_each(|v| push_value(v, work));
+            env.values().for_each(|v| v.push_objs(work));
         }
         for (_, env, _) in &self.cm_frames {
-            env.values().for_each(|v| push_value(v, work));
+            env.values().for_each(|v| v.push_objs(work));
         }
         for cells in &self.comp_cells {
             work.extend(cells.values().copied());
@@ -2435,7 +2323,7 @@ impl Analyzer {
             work.push(fr.module);
             work.extend(fr.cells.values().copied());
             for ov in &fr.overlays {
-                ov.values().for_each(|v| push_value(v, work));
+                ov.values().for_each(|v| v.push_objs(work));
             }
         }
     }

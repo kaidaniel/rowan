@@ -26,14 +26,18 @@ ruff and walks the syntax tree directly, running the program on abstract values.
   read narrows the key in.
 * **Statements.** Both sides of a branch run, narrowed by the test (`narrow.rs`), and join.
   Loops over at most 16 known items are unrolled; other loops run to a fixpoint (40 rounds,
-  then widened). `try` collects the state at each point that may raise; handlers start from
+  then widened; verdicts are the last round's: earlier rounds saw less). `try` collects the state at each point that may raise; handlers start from
   those states. `with` is a `try` whose `finally` is `__exit__`. `finally` runs on every way
   out, `break` / `continue` / `return` included.
 * **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site,
-  in a context of the innermost `chain` (2) call sites. The call cache replays a run when the
-  same input recurs. **Budget:** each function code (all closures of one `def`) may run 4,096
-  statements in all (`budget`); past that its calls are unknown calls, and the function gets a
-  reporting run with open parameters (its lines then hold for the calls that did not run).
+  in a context of the innermost `chain` (2) call sites (no call cache: a replay keyed by a
+  bounded view of the heap was unsound and rarely hit). **Budget:** each function code (all
+  closures of one `def`) may run 4,096 statements in all (`budget`); past that its calls are
+  unknown calls that may also change what its code reaches beyond its arguments
+  (`effects.rs`: the globals and cells its code, and the code it reaches by name, reads where
+  they may change or escape; class attributes by name; mutable defaults; cached per set of
+  code), and the function gets a reporting run with open parameters (its lines then hold for
+  the calls that did not run).
   Entry runs are not counted (one per function). So the work is bounded by the number of
   functions times the budget, not by a deadline.
   * **Recursion:** the inner call uses the running activation's partial result; it iterates
@@ -42,7 +46,8 @@ ruff and walks the syntax tree directly, running the program on abstract values.
     unknown object is an unknown call (no duck typing; it was a closed-world assumption).
   * **Unknown calls** may change everything they reach through what they are given, at any
     depth: records get a mutator, slots may hold anything (one shared unknown object), lists
-    and sets any items and length. They return an unknown and may raise anything. Library
+    and sets any items and length; the program's functions among it may run (`follow_code`).
+    They return an unknown and may raise anything. Library
     functions known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`), except the ones
     that change their arguments (`random.shuffle`, `operator.setitem`, …).
   * **Entry points:** functions nothing calls run with open parameters; their requirements
@@ -65,8 +70,9 @@ ruff and walks the syntax tree directly, running the program on abstract values.
 * **Deadline:** a safety net only (`ms`, 10 s): past it user calls become unknown calls and
   running calls stop where they are. The budget, not the deadline, bounds the work.
 * **Soundness** holds relative to the models and to annotations of values whose class is
-  unknown. `exec`, `setattr` / `getattr` with unknown names, metaclasses and monkey-patching
-  are unknown or ignored. Accepted imprecision: lengths past 15, slices by unknown bounds,
+  unknown. `exec`, `setattr` / `getattr` with unknown names (also in code a skipped call
+  reaches), metaclasses and monkey-patching (rebinding a function or class too) are unknown
+  or ignored. Accepted imprecision: lengths past 15, slices by unknown bounds,
   weak stores through names holding several objects, runs cut by a deadline.
 
 ## Working conventions (the owner's standing instructions)
@@ -141,7 +147,7 @@ budget; informational, into the history on gh-pages).
   `timeout`: `perl -e 'alarm N; exec @ARGV' rowan …`. Compare builds on results (proven /
   missing / possibly / schema counts of `--json`), not only on counters.
 
-## Layout (`rowan/src/`, ~64k lines)
+## Layout (`rowan/src/`, ~61k lines: the engine ~21k, the models ~40k)
 
 | file | role |
 | --- | --- |
@@ -152,10 +158,10 @@ budget; informational, into the history on gh-pages).
 | `interp/stmts.rs` | statements, loops, try / with / match, `finally` |
 | `interp/exprs.rs`, `interp/funcs.rs` | expressions, comprehensions, yields; functions, iteration, generators |
 | `interp/narrow.rs`, `interp/access.rs` | narrowing, `CondFact`s; attribute and item access, verdicts, requirements |
-| `interp/calls.rs` | calls: per-call-site runs, budget, call cache, recursion, `__new__`, dataclass init |
+| `interp/calls.rs`, `interp/effects.rs` | calls: per-call-site runs, budget, recursion, `__new__`, dataclass init; what skipped calls may change |
 | `models/shape.rs` | tensor shapes (dims as polynomials) for the torch and numpy models |
 | `report.rs`, `main.rs` | text / JSON / facts output; CLI, `rowan serve` (runs on a 1 GiB-stack thread) |
-| `models/` | `mod.rs` (`Registry`, builtins, containers); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib; `pandas`, `pydantic`, `fastapi`, `torch` |
+| `models/` | `mod.rs` (`Registry`, builtins, containers); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib (`enums`, `exceptions`, functools, itertools, …); `pandas`, `pydantic`, `fastapi`, `torch` |
 
 `rowan/py/` is a PyO3 binding (does not load on macOS 26); `vscode-rowan/` the editor
 extension (talks to `rowan serve`).
@@ -179,7 +185,7 @@ extension (talks to `rowan serve`).
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (38k), no deadlines | ~8 / ~6 / ~8 s; 0.1 / 0.9 / 0.6 GB |
+| stdlib12k (12k lines) / email (10k) / rich (38k), no deadlines | ~6 / ~4 / ~6 s; 0.09 / 0.07 / 0.14 GB |
 
 ## Known problems and next steps
 

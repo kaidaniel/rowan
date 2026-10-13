@@ -589,30 +589,6 @@ fn find_hi<K, V>(t: &Tree<K, V>, hi: u64) -> Option<&Tree<K, V>> {
 /// A map of maps (object -> slot -> value, source -> key -> requirement), stored as one
 /// persistent trie on (outer, inner) pairs: a write copies a path, not an object's whole
 /// inner map, and joins / diffs cost what two maps differ in.
-/// A key's entries in a `TwoLevel`, as the subtree that holds them: equal when it is the very
-/// same subtree (so the same entries; equal entries in another subtree compare unequal). It
-/// keeps the subtree alive, so its address is never another subtree's.
-#[derive(Clone)]
-pub struct SubRef(Option<std::sync::Arc<dyn std::any::Any>>);
-
-impl PartialEq for SubRef {
-    fn eq(&self, o: &SubRef) -> bool {
-        match (&self.0, &o.0) {
-            (None, None) => true,
-            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
-            _ => false,
-        }
-    }
-}
-
-impl Eq for SubRef {}
-
-impl std::hash::Hash for SubRef {
-    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        h.write_usize(self.0.as_ref().map(|a| std::sync::Arc::as_ptr(a) as *const () as usize).unwrap_or(0));
-    }
-}
-
 pub struct TwoLevel<K, IK, V> {
     m: LayerMap<Pair<K, IK>, V>,
 }
@@ -643,16 +619,6 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
 
     fn sub(&self, key: &K) -> Option<&Tree<Pair<K, IK>, V>> {
         self.m.root.as_ref().and_then(|t| find_hi(t, key.key64()))
-    }
-
-    /// A key's entries as the shared subtree that holds them (`SubRef`).
-    pub fn sub_ref(&self, key: &K) -> SubRef
-    where
-        K: 'static,
-        IK: 'static,
-        V: 'static,
-    {
-        SubRef(self.sub(key).map(|t| t.clone() as std::sync::Arc<dyn std::any::Any>))
     }
 
     /// Does `key` have any inner entry (or its marker)?

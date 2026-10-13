@@ -6,42 +6,13 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{chain_extend, join_rows, join_values, KeyVal, Ns, ReqInfo, Row, Source, SourceKind, Value, DATA};
+use crate::domain::{chain_extend, join_rows, join_values, KeyVal, Ns, Row, Source, SourceKind, Value, DATA};
 use crate::frontend::Node;
-use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
-use crate::state::{Footprint, Kind, State};
+use crate::intern::{self, key_str_lit, s, KeySet, StrId};
+use crate::state::{Kind, State};
 use crate::domain::ObjId;
 
-use super::funcs::cell_key;
-use super::{is_generator, Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, Payload, Verdict, MAX_ACTIVE, MAX_ARG_JOIN, MAX_CLONES, NOEFFECT_METHOD_NAMES, REC_MAX_ITER};
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct Sig {
-    foid: u32,
-    site: String,
-    entry: bool,
-    self_v: Option<Value>,
-    args: Vec<Value>,
-    kwargs: Vec<(StrId, Value)>,
-    star_args: Vec<Value>,
-    star_kwargs: Vec<Value>,
-    heap: Vec<(u32, Option<Row>, Option<Row>, crate::layered::SubRef, Option<KeyVal>, bool)>,
-    guards: Vec<Vec<String>>,
-    fr_single: bool,
-    ctx: String,
-}
-
-pub struct CacheHit {
-    pub raises: bool,
-    /// some path of the run returned (else the call never completes)
-    pub completes: bool,
-    /// the lengths the run changed
-    pub lens: Vec<ObjId>,
-    pub ret: Value,
-    pub fp_state: State,
-    pub fp: Footprint,
-    pub verdicts: Vec<Verdict>,
-}
+use super::{is_generator, Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, Payload, MAX_ACTIVE, MAX_ARG_JOIN, MAX_CLONES, NOEFFECT_METHOD_NAMES, REC_MAX_ITER};
 
 fn widen_value(v: &Value) -> Value {
     if let KeyVal::Lits(ks) = &v.kv {
@@ -177,53 +148,7 @@ impl Analyzer {
             }
         }
         match kind {
-            Kind::Function if self.func_info(oid).is_memo.get() && star_args.is_empty() && star_kwargs.is_empty() => {
-                // a memoised function with known arguments: the first call's result is the
-                // result of every later call with the same arguments
-                let lit = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty());
-                let pos: Option<Vec<KeyId>> = args.iter().map(lit).collect();
-                let kws: Option<Vec<(StrId, KeyId)>> = kwargs.iter().map(|(k, v)| lit(v).map(|x| (*k, x))).collect();
-                // the cache is a hidden dict in the (flow-sensitive) state: on paths where the
-                // first call happened the result is reused, elsewhere the call runs
-                let key = pos.zip(kws).map(|(p, k)| {
-                    let mut parts = p;
-                    for (n, v) in k {
-                        parts.push(intern::key_tuple(vec![key_str_lit(&intern::str_get(n)), v]));
-                    }
-                    intern::key_tuple(parts)
-                });
-                let Some(mk) = key else {
-                    return self.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, call_ast, false);
-                };
-                let memo = self.alloc_raw(Kind::Dict, &format!("memo:{}", oid), "", true, "lru_cache", Payload::None);
-                let row = state.row(memo, Ns::Item);
-                // the hit / miss counts (cache_info), known while every call's outcome is
-                let bump = |state: &mut State, name: &str, by_known: bool| {
-                    let k = key_str_lit(name);
-                    let cur = state.slot_opt(memo, Ns::Attr, k).unwrap_or_else(|| Value::lit(intern::key_int(0)));
-                    let nv = match (cur.kv.as_lit().and_then(intern::key_as_int), by_known) {
-                        (Some(n), true) => Value::lit(intern::key_int(n + 1)),
-                        _ => Value::data("count"),
-                    };
-                    state.set_slot(memo, Ns::Attr, k, nv, true);
-                };
-                if row.definite.contains(mk) {
-                    bump(state, "hits", true);
-                    return state.slot(memo, Ns::Item, mk);
-                }
-                if row.present.contains(mk) {
-                    bump(state, "hits", false);
-                    bump(state, "misses", false);
-                } else {
-                    bump(state, "misses", true);
-                }
-                let r = self.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, call_ast, false);
-                let out = if row.present.contains(mk) { r.join(&state.slot(memo, Ns::Item, mk)) } else { r };
-                let row = state.row(memo, Ns::Item).store(mk, true);
-                state.set_row(memo, Ns::Item, row);
-                state.set_slot(memo, Ns::Item, mk, out.clone(), true);
-                out
-            }
+            Kind::Function if self.func_info(oid).is_memo.get() && star_args.is_empty() && star_kwargs.is_empty() => self.memo_call(oid, args, kwargs, state, node, call_ast),
             Kind::Function => {
                 let fi = self.func_info(oid);
                 if fi.cls.is_some() && !fi.is_static.get() && !args.is_empty() && !fi.is_classmethod.get() {
@@ -406,8 +331,14 @@ impl Analyzer {
         let rctx: String = self.frame().ctx.rsplit('/').next().unwrap_or("").to_string();
         let rid = self.alloc(Kind::Unknown, &format!("ret:{}", site), state, &format!("result of {}", site), Payload::None, None, Ns::Item, Some(true), Some(&rctx));
         // everything it can reach through what it is given may have changed: keys, values,
-        // items, lengths
+        // items, lengths; and it may call the program's functions it is given
         self.havoc_reachable(&vals, rid, site_id, state);
+        let found = std::mem::take(&mut self.havoc_code);
+        let callables: Vec<ObjId> = found.iter().copied().filter(|o| matches!(self.kind(*o), Kind::Function | Kind::Bound | Kind::Partial)).collect();
+        if !callables.is_empty() {
+            self.follow_code(callables, rid, site_id, state);
+        }
+        self.havoc_code = found;
         // for people: the call as written and the known objects it was given (unknown code may
         // return one of them; given unknowns add nothing to `?`)
         {
@@ -432,9 +363,11 @@ impl Analyzer {
         }
         // (many records given — a value joined over many contexts: the result is any record,
         // an open row, rather than the join of them all and a copy of all their slots)
-        let joinable = arg_recs.len() <= MAX_ARG_JOIN;
-        if !arg_recs.is_empty() && joinable {
-            let row = join_rows(arg_recs.iter().map(|(o, n)| state.row(*o, *n)));
+        // (its items: those of the mappings it was given; an instance's attributes are not
+        // items)
+        let item_recs: Vec<ObjId> = arg_recs.iter().filter(|(_, ns)| *ns == Ns::Item).map(|(o, _)| *o).collect();
+        if !item_recs.is_empty() && item_recs.len() <= MAX_ARG_JOIN {
+            let row = join_rows(item_recs.iter().map(|o| state.row(*o, Ns::Item)));
             let mut d = row.data();
             d.definite = KeySet::new();
             d.absent = KeySet::new();
@@ -443,8 +376,8 @@ impl Analyzer {
             // as an object the result is unknown: its attributes come from the call
             let src = Source::new(&site, SourceKind::Call);
             state.set_row(rid, Ns::Attr, Row::with_source(src).mutate(site_id));
-            for (oid, ns) in &arg_recs {
-                for (k, v) in state.obj_slots(*oid, *ns) {
+            for oid in &item_recs {
+                for (k, v) in state.obj_slots(*oid, Ns::Item) {
                     state.set_slot(rid, Ns::Item, k, v, false);
                 }
             }
@@ -498,39 +431,68 @@ impl Analyzer {
     /// removed), every slot of a mutable object may now hold the call's result `rid` (any value),
     /// lists and sets any items and any length. Modules, classes and functions are not entered.
     pub fn havoc_reachable(&mut self, vals: &[Value], rid: ObjId, site: StrId, state: &mut State) {
-        let mut seen: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
+        self.havoc_code.clear();
+        self.havoc_with(vals, rid, site, state, &mut rustc_hash::FxHashSet::default());
+    }
+
+    /// `havoc_reachable` past the objects `seen` (and adding to them; the code met is added to
+    /// `havoc_code`).
+    pub fn havoc_with(&mut self, vals: &[Value], rid: ObjId, site: StrId, state: &mut State, seen: &mut rustc_hash::FxHashSet<ObjId>) {
         let mut work: Vec<ObjId> = vals.iter().flat_map(|v| v.pts.iter()).collect();
         // (one object stands for "anything unknown code stored": a value per call would pile
         // up in every slot it reaches)
-        let any = Value::obj(self.any_object(state));
+        let any_id = self.any_object(state);
+        let any = Value::obj(any_id);
         while let Some(o) = work.pop() {
-            if o == rid || o == any.pts.first().unwrap_or(0) || !seen.insert(o) {
+            if o == rid || o == any_id || !seen.insert(o) {
                 continue;
             }
             let k = self.kind(o);
-            if matches!(k, Kind::Module | Kind::Class | Kind::Function | Kind::External | Kind::Method | Kind::Bound) {
-                continue;
+            match (&k, &self.obj(o).payload) {
+                // (the code it meets, for `skipped_call`; a stored method may change its receiver)
+                (Kind::Class | Kind::Function | Kind::Bound | Kind::Partial, _) => {
+                    self.havoc_code.push(o);
+                    continue;
+                }
+                (Kind::Method, Payload::Method(_, recv)) => {
+                    work.extend(recv.pts.iter());
+                    continue;
+                }
+                (Kind::Instance, Payload::Cls(c)) => self.havoc_code.push(*c),
+                (Kind::Module | Kind::External | Kind::Method, _) => continue,
+                _ => {}
             }
-            let slots = state.slots_of(o);
-            for (_, v) in &slots {
+            let mut writes: Vec<(crate::state::SlotKey, Value)> = Vec::new();
+            state.slots.each(&o, &mut |sk, v| {
                 work.extend(v.pts.iter());
-            }
+                if matches!(sk.0, Ns::Item | Ns::Attr | Ns::Pos | Ns::Elem) && !v.pts.contains(any_id) {
+                    writes.push((*sk, v.join(&any)));
+                }
+            });
             // (a tuple cannot change; an unknown object's content is unknown already)
             if k == Kind::Tuple || (k == Kind::Unknown && !state.has_row(o, Ns::Item) && !state.has_row(o, Ns::Attr)) {
                 continue;
             }
+            // (what an earlier havoc by the same code did already is not written again: code
+            // past its budget is often called in a loop)
             for ns in [Ns::Item, Ns::Attr] {
                 if state.has_row(o, ns) || (ns == Ns::Item && matches!(k, Kind::Dict | Kind::Frame)) || (ns == Ns::Attr && k == Kind::Instance) {
-                    let r = state.row(o, ns).mutate(site);
-                    state.set_row(o, ns, r);
+                    let r0 = state.row(o, ns);
+                    if !(r0.definite.is_empty() && r0.absent.is_empty() && r0.mutators.contains(site)) {
+                        let r = r0.mutate(site);
+                        if r != r0 {
+                            state.set_row(o, ns, r);
+                        }
+                    }
                 }
             }
-            for (sk, v) in slots {
-                if matches!(sk.0, Ns::Item | Ns::Attr | Ns::Pos | Ns::Elem) {
-                    state.set_slot(o, sk.0, sk.1, v.join(&any), false);
-                }
+            for (sk, v) in writes {
+                state.set_slot(o, sk.0, sk.1, v, false);
             }
-            if matches!(k, Kind::List | Kind::Set) && !self.obj(o).site.starts_with("gen:") {
+            let havocked = |state: &State| {
+                state.slot(o, Ns::Elem, intern::STAR).pts.contains(any_id) && state.lens.get(&o) == Some((None, 0, 0)) && !state.lasts.iter().any(|(x, _)| *x == o) && state.elems.get(&o).is_some_and(|kv| crate::domain::kv_join(&kv, &DATA) == kv)
+            };
+            if matches!(k, Kind::List | Kind::Set) && !self.obj(o).site.starts_with("gen:") && !havocked(state) {
                 let e = state.slot(o, Ns::Elem, intern::STAR).join(&any);
                 state.set_slot(o, Ns::Elem, intern::STAR, e, false);
                 let kv = crate::domain::kv_join(&state.elems.get(&o).unwrap_or(DATA), &DATA);
@@ -539,46 +501,6 @@ impl Analyzer {
                 self.set_prefix(o, state, 0);
             }
         }
-    }
-
-    /// An ABC with abstract methods no class of its MRO implements: `cls()` raises TypeError.
-    pub fn abstract_unimplemented(&self, cls: u32) -> bool {
-        let mro = self.mro(cls);
-        let is_abc = mro.iter().any(|c| {
-            self.class_info_opt(*c).map(|ci| {
-                ci.node.arguments.as_ref().map(|a| a.args.iter().any(|b| super::dotted_last(b) == "ABC") || a.keywords.iter().any(|k| k.arg.as_ref().map(|x| x.as_str()) == Some("metaclass") && super::dotted_last(&k.value) == "ABCMeta")).unwrap_or(false)
-            }).unwrap_or(false)
-        });
-        if !is_abc {
-            return false;
-        }
-        // the first definition of each name along the MRO decides
-        let mut seen: Vec<String> = Vec::new();
-        for c in mro.iter() {
-            let Some(ci) = self.class_info_opt(*c) else { continue };
-            for st in &ci.node.body {
-                let (name, decos) = match st {
-                    ast::Stmt::FunctionDef(f) => (f.name.id.to_string(), &f.decorator_list),
-                    ast::Stmt::Assign(a) => {
-                        for t in &a.targets {
-                            if let ast::Expr::Name(n) = t {
-                                seen.push(n.id.to_string());
-                            }
-                        }
-                        continue;
-                    }
-                    _ => continue,
-                };
-                if seen.contains(&name) {
-                    continue;
-                }
-                seen.push(name);
-                if decos.iter().any(|d| super::dotted_last(&d.expression) == "abstractmethod" || matches!(&d.expression, ast::Expr::Call(cl) if super::dotted_last(&cl.func) == "abstractmethod")) {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     /// A model call: objects it allocates at one site stay distinct from each other (one
@@ -594,110 +516,6 @@ impl Analyzer {
         r
     }
 
-    /// What a model call does to the one-shot iterators it is given: a full consumer uses
-    /// them up; a lazy wrapper (zip, islice, map, …) takes from them when it is consumed
-    /// itself; anything else leaves their position unknown.
-    fn after_model_consume(&mut self, call: &Call, r: &Value, state: &mut State) {
-        // (one-shot iterators, and lazy iterators over them)
-        let its: Vec<(usize, u32)> = call.args.iter().chain(call.star_args.iter()).enumerate().filter_map(|(i, a)| a.single().filter(|o| a.kv.is_bot() && ((self.obj(*o).iterator && self.obj(*o).single && matches!(self.kind(*o), Kind::List)) || self.lazy_src.contains_key(o))).map(|o| (i, o))).collect();
-        if its.is_empty() {
-            return;
-        }
-        let q = call.qual.as_str();
-        const FULL: &[&str] = &[
-            "builtins.list", "builtins.tuple", "builtins.set", "builtins.frozenset", "builtins.dict", "builtins.sorted", "builtins.sum", "builtins.min", "builtins.max",
-            "str.join", "collections.Counter", "collections.deque", "collections.OrderedDict", "collections.defaultdict", "list.extend", "set.update", "dict.update",
-            "statistics.mean", "statistics.median", "statistics.fmean", "math.fsum", "math.prod", "bytes.join",
-        ];
-        const LAZY_ALL: &[&str] = &["builtins.map", "builtins.filter", "builtins.enumerate", "builtins.iter", "itertools.chain", "itertools.starmap", "itertools.takewhile", "itertools.dropwhile", "itertools.accumulate", "itertools.compress", "itertools.groupby", "itertools.pairwise", "itertools.batched"];
-        if matches!(q, "builtins.next" | "builtins.iter") && its.len() == 1 && r.single() == Some(its[0].1) {
-            return;
-        }
-        if q == "builtins.next" {
-            return;
-        }
-        if FULL.contains(&q) {
-            for (_, o) in its {
-                self.exhaust(&Value::obj(o), state);
-            }
-            return;
-        }
-        let robj = r.single().filter(|ro| !its.iter().any(|(_, o)| o == ro));
-        if q == "itertools.islice" {
-            // islice(it, stop) / islice(it, start, stop): start + the items it gives
-            let lit = |v: Option<&Value>| v.and_then(|x| x.kv.as_lit().filter(|_| x.pts.is_empty())).and_then(intern::key_as_int);
-            let n = match call.args.len() {
-                2 => lit(call.args.get(1)),
-                n if n >= 3 => lit(call.args.get(2)),
-                _ => None,
-            };
-            if let (Some(ro), Some(n)) = (robj, n) {
-                self.lazy_src.insert(ro, vec![(its[0].1, Some(n.max(0) as usize))]);
-                return;
-            }
-        }
-        if q == "builtins.zip" {
-            if let (Some(ro), Some(pulls)) = (robj, self.zip_pulls(call, state)) {
-                self.lazy_src.insert(ro, pulls);
-                return;
-            }
-        }
-        if LAZY_ALL.contains(&q) {
-            if let Some(ro) = robj {
-                self.lazy_src.insert(ro, its.iter().map(|(_, o)| (*o, None)).collect());
-                return;
-            }
-        }
-        for (_, o) in its {
-            if self.lazy_src.contains_key(&o) {
-                self.consume_lazy(&Value::obj(o), false, state);
-            } else {
-                self.set_cursor(o, None, state);
-            }
-        }
-    }
-
-    /// The items `zip(...)` takes from each one-shot iterator argument when it is consumed:
-    /// rounds = the shortest length; in the last round the arguments before the first that
-    /// ran out each gave one more.
-    fn zip_pulls(&mut self, call: &Call, state: &mut State) -> Option<Vec<(ObjId, Option<usize>)>> {
-        if !call.star_args.is_empty() || call.kwargs.keys().any(|k| &*intern::str_get(*k) != "strict") {
-            return None;
-        }
-        // (exact remaining length, or a lower bound)
-        let mut lens: Vec<(Option<usize>, usize, Option<u32>)> = Vec::new();
-        for a in &call.args {
-            let one = a.single().filter(|o| a.kv.is_bot() && self.obj(*o).iterator && self.obj(*o).single && matches!(self.kind(*o), Kind::List));
-            match one {
-                Some(o) => {
-                    let c = self.cursor_of(o, state)?;
-                    match self.llen(o, state) {
-                        Some(n) => lens.push((Some(n.saturating_sub(c)), n.saturating_sub(c), Some(o))),
-                        None => lens.push((None, self.prefix(o, state).unwrap_or(0).saturating_sub(c), Some(o))),
-                    }
-                }
-                None => {
-                    let it = self.iterate(a, &call.node, state);
-                    let n = it.items.map(|v| v.len())?;
-                    lens.push((Some(n), n, None));
-                }
-            }
-        }
-        let rounds = lens.iter().filter_map(|(e, _, _)| *e).min()?;
-        // (an argument of unknown length must surely outlast the shortest)
-        if lens.iter().any(|(e, lb, _)| e.is_none() && *lb <= rounds) {
-            return None;
-        }
-        let first_out = lens.iter().position(|(e, _, _)| *e == Some(rounds))?;
-        let mut out = Vec::new();
-        for (i, (_, _, o)) in lens.iter().enumerate() {
-            if let Some(o) = o {
-                out.push((*o, Some(if i < first_out { rounds + 1 } else { rounds })));
-            }
-        }
-        Some(out)
-    }
-
     pub fn construct(&mut self, cls: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
         if self.abstract_unimplemented(cls) {
             self.raise_here("TypeError", state);
@@ -705,47 +523,7 @@ impl Analyzer {
         }
         // `Color(3)`: the Enum member with that value, else ValueError
         if let (Some(ms), Some(a)) = (self.enum_members.get(&cls).cloned(), args.first()) {
-            let vk = key_str_lit("value");
-            let lits = if a.pts.is_empty() && a.kv.is_literal() { Some(crate::domain::kv_literals(&a.kv)) } else { None };
-            let mut out = Value::new();
-            match lits {
-                Some(ls) => {
-                    let mut all_hit = true;
-                    let is_flag = self.enum_kind.get(&cls).map(|k| k.flag).unwrap_or(false);
-                    let all_bits: i64 = ms.iter().filter_map(|(_, m)| state.slot(*m, Ns::Attr, vk).kv.as_lit().and_then(intern::key_as_int)).fold(0, |a, b| a | b);
-                    for l in ls.iter() {
-                        let hit = ms.iter().find(|(_, m)| state.slot(*m, Ns::Attr, vk).kv.as_lit() == Some(l));
-                        match hit {
-                            Some((_, m)) => out = out.join(&Value::obj(*m)),
-                            // a Flag: any combination of the members' bits (0 too)
-                            None => match intern::key_as_int(l).filter(|i| is_flag && *i >= 0 && i & !all_bits == 0) {
-                                Some(i) => {
-                                    let fm = self.flag_member(cls, i, node, state);
-                                    out = out.join(&Value::obj(fm));
-                                }
-                                None => all_hit = false,
-                            },
-                        }
-                    }
-                    if out.empty() {
-                        self.raise_here("ValueError", state);
-                        return Value::new();
-                    }
-                    if !all_hit {
-                        self.may_raise_here("ValueError", state);
-                    }
-                }
-                None => {
-                    // a member given: itself
-                    let given: Vec<u32> = a.pts.iter().filter(|o| ms.iter().any(|(_, m)| m == o)).collect();
-                    if !given.is_empty() && given.len() == a.pts.len() && a.kv.is_bot() {
-                        return Value::objs(crate::domain::ObjSet::from_vec(given));
-                    }
-                    self.may_raise_here("ValueError", state);
-                    out = join_values(ms.iter().map(|(_, m)| Value::obj(*m)).collect::<Vec<_>>());
-                }
-            }
-            return out;
+            return self.enum_lookup(cls, &ms, a, node, state);
         }
         let ci = self.class_info(cls);
         // a TypedDict class makes a plain dict
@@ -864,8 +642,9 @@ impl Analyzer {
         let ci = self.class_info(cls);
         let row = if ci.open_base { Row::with_source(Source::new(&format!("instance {}@L{}", ci.name, node.line), SourceKind::Class)) } else { Row::new() };
         // the allocation site includes the class: `cls()` with several possible classes must
-        // not collapse onto one instance (prototype: same site, last class wins)
-        let site = format!("{}:{}", super::site_string(node), ci.name);
+        // not collapse onto one instance (prototype: same site, last class wins); by the class
+        // object, as two classes may share a name (`type(name, bases, ns)` per choice of bases)
+        let site = format!("{}:{}", super::site_string(node), cls);
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", ci.name, node.line), Payload::Cls(cls), Some(row), Ns::Attr, None, None);
         if ci.typed_dict {
             state.set_row(inst, Ns::Item, Row::new());
@@ -1038,7 +817,7 @@ impl Analyzer {
             self.force_at = None;
             let q = self.func_info(foid).qualname.clone();
             self.note(format!("analysis cut at the deadline ({} ms): later calls are unknown code", super::limit("ms", super::DEADLINE_MS)));
-            return self.unknown_call(&q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
+            return self.skipped_call(foid, &q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
         // a generator's body runs when it is consumed (`force_gen`), not here
         let lazy = !entry
@@ -1063,7 +842,7 @@ impl Analyzer {
             self.note(format!("analysis cut at the deadline ({} ms) inside {}: the call is unknown code", super::limit("ms", super::DEADLINE_MS), q));
             state.reachable = true;
             let (sv, a, kw, sa, skw) = keep;
-            return self.unknown_call(&q, sv.as_ref(), &a, &kw, &sa, &skw, state, node);
+            return self.skipped_call(foid, &q, sv.as_ref(), &a, &kw, &sa, &skw, state, node);
         }
         r
     }
@@ -1155,106 +934,6 @@ impl Analyzer {
             }
             return Value::new();
         }
-        // call cache: same callee, same call site, same observable input → replay the effects
-        let sig = self.call_signature(foid, &site, entry, &self_v, &args, &kwargs, &star_args, &star_kwargs, state);
-        if let Some(sig) = sig.as_ref() {
-            // (a run that raised, under a try that may catch it: the handlers need the state at
-            // each raise, which only a run records)
-            let hit = self.call_cache.get(sig).cloned().filter(|h| !(h.raises && !self.guards.is_empty()));
-            if let Some(hit) = hit {
-                if super::debug_enabled() {
-                    eprintln!("cache hit for {} at {}", self.func_info(foid).qualname, site);
-                }
-                if hit.raises {
-                    self.note_raise();
-                }
-                // (the facts the run changed, deletions too)
-                for k in &hit.fp.rows {
-                    match hit.fp_state.rows.get(k) {
-                        Some(r) => state.rows.insert(*k, r),
-                        None => {
-                            state.rows.remove(k);
-                        }
-                    }
-                }
-                for (oid, sk) in &hit.fp.slots {
-                    if matches!(sk.0, Ns::Pos | Ns::Elem) {
-                        state.clear_last(*oid);
-                    }
-                    match hit.fp_state.slots.get(oid, sk) {
-                        Some(v) => state.slots.set(oid, *sk, v),
-                        None => {
-                            state.slots.remove(oid, sk);
-                        }
-                    }
-                }
-                for k in &hit.fp.elems {
-                    match hit.fp_state.elems.get(k) {
-                        Some(v) => state.elems.insert(*k, v),
-                        None => {
-                            state.elems.remove(k);
-                        }
-                    }
-                }
-                for k in &hit.lens {
-                    match hit.fp_state.lens.get(k) {
-                        Some(v) => state.lens.insert(*k, v),
-                        None => {
-                            state.lens.remove(k);
-                        }
-                    }
-                }
-                // recent objects the replayed call allocated: folded at the loop's back-edge
-                // like the originals, or a later activation resets them under live references
-                if !self.recent_stack.is_empty() {
-                    let mut oids: Vec<ObjId> = hit.fp.rows.iter().map(|(o, _)| *o).collect();
-                    oids.extend(hit.fp.slots.iter().map(|(o, _)| *o));
-                    oids.extend(hit.fp.elems.iter().copied());
-                    let mut recents: Vec<(ObjId, Kind, String, String)> = Vec::new();
-                    for o in oids {
-                        if !self.has_obj(o) {
-                            continue;
-                        }
-                        let ob = self.obj(o);
-                        if let Some(base) = ob.site.strip_suffix("#recent") {
-                            recents.push((o, ob.kind, base.to_string(), ob.ctx.to_string()));
-                        }
-                    }
-                    let top = self.recent_stack.last_mut().unwrap();
-                    for r in recents {
-                        if !top.iter().any(|(x, _, _, _)| *x == r.0) {
-                            top.push(r);
-                        }
-                    }
-                }
-                // (the run's requirements: on top of what was required here, needed always
-                // exactly when the run needed them always)
-                for (src, d) in hit.fp_state.reqs.items() {
-                    for (k, info) in d.iter() {
-                        let merged = state.reqs.get(&src, k).map(|cur| cur.seq(info)).unwrap_or_else(|| info.clone());
-                        state.reqs.set(&src, *k, ReqInfo { always: info.always, ..merged });
-                    }
-                }
-                let chain = chain_extend(&self.call_chain, &[node.line]);
-                for v in &hit.verdicts {
-                    let full = chain_extend(&chain, &v.chain);
-                    let mut nv = v.clone();
-                    nv.chain = full;
-                    let dk = nv.dedupe_key();
-                    if !self.verdict_keys.contains(&dk) && !self.quiet {
-                        self.verdict_keys.insert(dk);
-                        self.verdicts.push(nv);
-                    }
-                }
-                let ret = hit.ret.clone();
-                let rows: Vec<(u32, Row)> = ret.pts.iter().filter(|o| self.is_record_like(*o)).map(|o| (o, state.row(o, Ns::Item))).collect();
-                self.summaries.entry((fi.qualname.clone(), site.clone())).or_insert((ret.clone(), rows));
-                if !hit.completes {
-                    state.reachable = false;
-                }
-                return ret;
-            }
-        }
         // every statement a function code runs counts against its budget (entry runs aside: one
         // per function); past it a call is unknown code, so the whole analysis is bounded by the
         // number of functions times the budget
@@ -1262,7 +941,7 @@ impl Analyzer {
             let q = fi.qualname.clone();
             self.note(format!("{} ran out of its budget: later calls are unknown code", q));
             self.budget_out.insert(foid);
-            return self.unknown_call(&q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
+            return self.skipped_call(foid, &q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
         if super::debug_enabled() {
             eprintln!("run {} at {} frames={} chain={:?}", fi.qualname, site, self.frames.len(), self.call_chain);
@@ -1324,8 +1003,6 @@ impl Analyzer {
         self.active.insert(key.clone(), true);
         self.active_by_func.entry(foid).or_default().push(key.clone());
         self.rec_entry.insert(key.clone(), (self_v.clone(), args.clone(), kwargs.clone()));
-        let verdict_mark = self.verdicts.len();
-        let chain_len = self.call_chain.len();
 
         let mut pre_bind = state.copy();
         let obj_mark_call = self.objects.len() as ObjId;
@@ -1339,7 +1016,11 @@ impl Analyzer {
         let mut entry_state = state.copy();
         let mut ret = Value::new();
         let mut st_final: Option<State> = None;
+        let mut vmark = self.verdicts.len();
         for _round in 0..REC_MAX_ITER {
+            // (a round of a recursion before its fixpoint: its accesses' verdicts are superseded)
+            self.drop_verdicts_since(vmark);
+            vmark = self.verdicts.len();
             self.tab_runs += 1;
             let mut st = entry_state.copy();
             match fnode {
@@ -1414,84 +1095,6 @@ impl Analyzer {
         };
         if !converged && !ret_stable {
             ret = ret.join(&Value::data(&format!("recursion@{}", fi.qualname)));
-        }
-        // (at most CACHE_PER_FN entries per function: the cache's memory is bounded too)
-        let room = self.cache_count.get(&fnode.addr()).copied().unwrap_or(0) < super::CACHE_PER_FN;
-        if let Some(sig) = sig.filter(|_| room) {
-            if !self.rec_hit.contains(&key) {
-                *self.cache_count.entry(fnode.addr()).or_default() += 1;
-                let mut rel = State::new();
-                for (src, k) in st.reqs.diff_keys(&pre_bind.reqs) {
-                    if let Some(info) = st.reqs.get(&src, &k) {
-                        if pre_bind.reqs.get(&src, &k).as_ref() != Some(&info) {
-                            rel.reqs.set(&src, k, info);
-                        }
-                    }
-                }
-                let mut fp = st.footprint(&pre_bind);
-                // (what the call made that its result reaches, whole: a later hit replays it
-                // into a state where those objects may have been collected meanwhile)
-                let mut work: Vec<ObjId> = ret.pts.iter().filter(|o| *o >= obj_mark_call).collect();
-                let mut seen: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
-                let rows_have: rustc_hash::FxHashSet<(ObjId, Ns)> = fp.rows.iter().copied().collect();
-                let slots_have: rustc_hash::FxHashSet<(ObjId, crate::state::SlotKey)> = fp.slots.iter().copied().collect();
-                let elems_have: rustc_hash::FxHashSet<ObjId> = fp.elems.iter().copied().collect();
-                while let Some(o) = work.pop() {
-                    if !seen.insert(o) || seen.len() > 4096 {
-                        continue;
-                    }
-                    for ns in [Ns::Item, Ns::Attr] {
-                        if st.has_row(o, ns) && !rows_have.contains(&(o, ns)) {
-                            fp.rows.push((o, ns));
-                        }
-                    }
-                    st.slots.each(&o, &mut |sk, v| {
-                        if !slots_have.contains(&(o, *sk)) {
-                            fp.slots.push((o, *sk));
-                        }
-                        work.extend(v.pts.iter().filter(|x| *x >= obj_mark_call));
-                    });
-                    if st.elems.get(&o).is_some() && !elems_have.contains(&o) {
-                        fp.elems.push(o);
-                    }
-                }
-                let lens_changed: Vec<ObjId> = st.lens.diff_keys(&pre_bind.lens);
-                let mut fp_state = State::new();
-                for k in &fp.rows {
-                    if let Some(r) = st.rows.get(k) {
-                        fp_state.rows.insert(*k, r);
-                    }
-                }
-                for (oid, sk) in &fp.slots {
-                    if let Some(v) = st.slots.get(oid, sk) {
-                        fp_state.slots.set(oid, *sk, v);
-                    }
-                }
-                for k in &fp.elems {
-                    if let Some(v) = st.elems.get(k) {
-                        fp_state.elems.insert(*k, v);
-                    }
-                }
-                for k in &lens_changed {
-                    if let Some(v) = st.lens.get(k) {
-                        fp_state.lens.insert(*k, v);
-                    }
-                }
-                fp_state.reqs = rel.reqs;
-                let cur_chain = self.call_chain.clone();
-                let rel_verdicts: Vec<Verdict> = self.verdicts[verdict_mark..]
-                    .iter()
-                    .map(|v| {
-                        let mut nv = v.clone();
-                        if v.chain.len() >= chain_len && v.chain[..chain_len] == cur_chain[..] {
-                            nv.chain = v.chain[chain_len..].to_vec();
-                        }
-                        nv
-                    })
-                    .collect();
-                let raises = self.raise_stack.last().copied().unwrap_or(false);
-                self.call_cache.insert(sig, Rc::new(CacheHit { raises, completes: st.reachable, lens: lens_changed, ret: ret.clone(), fp_state, fp, verdicts: rel_verdicts }));
-            }
         }
         // the generator's body runs here, eagerly, but its caller sees the heap only where the
         // body is suspended: before the first item, at a yield, or at its end. The objects that
@@ -1616,6 +1219,46 @@ impl Analyzer {
         ret
     }
 
+    /// A call of user code whose body does not run (past its budget, cut at the deadline): an
+    /// unknown call that may also change what the code reaches beyond its arguments (the globals
+    /// and cells it, and the code it can call, reads where they may change).
+    #[allow(clippy::too_many_arguments)]
+    fn skipped_call(&mut self, foid: ObjId, q: &str, self_v: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
+        let r = self.unknown_call(q, self_v, args, kwargs, star_args, star_kwargs, state, node);
+        let site = s(&format!("{}@L{}", q, node.line));
+        self.skipped_sites.insert(site);
+        let mut roots = vec![foid];
+        roots.append(&mut self.havoc_code);
+        self.follow_code(roots, r.single().unwrap_or(0), site, state);
+        r
+    }
+
+    /// What the code `roots` hold may change when it runs where rowan does not run it: the
+    /// values at the slots its closure may change are havocked, the slots it rebinds may hold
+    /// anything, and the code the data they hold is followed too.
+    fn follow_code(&mut self, mut roots: Vec<ObjId>, rid: ObjId, site: StrId, state: &mut State) {
+        let any = Value::obj(self.any_object(state));
+        let mut seen: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
+        self.havoc_code.clear();
+        loop {
+            roots.append(&mut self.havoc_code);
+            roots.sort_unstable();
+            roots.dedup();
+            let cl = self.code_closure(&roots, state);
+            let mut vals: Vec<Value> = cl.locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).collect();
+            vals.extend(cl.values.iter().cloned());
+            self.havoc_with(&vals, rid, site, state, &mut seen);
+            for (o, ns, k) in &cl.rebound {
+                let v = state.slot(*o, *ns, *k).join(&any);
+                state.set_slot(*o, *ns, *k, v, false);
+            }
+            self.havoc_code.retain(|c| !cl.code.contains(c));
+            if self.havoc_code.is_empty() {
+                return;
+            }
+        }
+    }
+
     /// Drop the facts whose test read one of `objs`.
     pub fn kill_facts_on(&mut self, objs: &[u32], state: &mut State) {
         if objs.is_empty() || state.facts.is_empty() {
@@ -1672,41 +1315,12 @@ impl Analyzer {
             let el = *el;
             let pre_try = pre.copy_ref();
             let mut roots: Vec<ObjId> = Vec::new();
-            let push = |v: &Value, roots: &mut Vec<ObjId>| {
-                roots.extend(v.pts.iter());
-                match &v.kv {
-                    KeyVal::KeysOf(ko) => roots.extend(ko.objs.iter()),
-                    _ => {}
-                }
-            };
-            for v in here.env.values() {
-                push(v, &mut roots);
-            }
-            for v in here.narrowed.values() {
-                push(v, &mut roots);
-            }
-            if let Some(r) = &here.ret {
-                push(r, &mut roots);
-            }
-            for env in self.env_stack.iter().take(el) {
-                for v in env.values() {
-                    push(v, &mut roots);
-                }
-            }
-            for fr in self.frames.iter().take(fl) {
-                roots.push(fr.module);
-                roots.extend(fr.cells.values().copied());
-                for ov in &fr.overlays {
-                    for v in ov.values() {
-                        push(v, &mut roots);
-                    }
-                }
-            }
+            self.state_roots(&here, el, fl, &mut roots);
             for (o, v) in here.lasts.iter() {
                 roots.push(*o);
-                push(v, &mut roots);
+                v.push_objs(&mut roots);
             }
-            push(&exc, &mut roots);
+            exc.push_objs(&mut roots);
             self.collect_since(tmark, &pre_try, roots, &mut here);
         }
         // (a try that keeps its raises one by one joins them where a handler needs them: the
@@ -1895,51 +1509,6 @@ impl Analyzer {
         Some((std::rc::Rc::new(names), complete))
     }
 
-    /// A builtin exception (`KeyError(key)`, …) as a value: open attributes, known `args`.
-    pub fn exception_object(&mut self, cls_name: &str, args: Vec<Value>, node: &Node, state: &mut State) -> Value {
-        let t = self.alloc_positional(Kind::Tuple, node, Some(args), Value::new(), DATA, state);
-        let row = Row::with_source(crate::domain::Source::new(cls_name, crate::domain::SourceKind::Data));
-        let oid = self.alloc_at(Kind::Namespace, node, state, &format!("{}@L{}", cls_name, node.line), Payload::None, Some(row), Ns::Attr, None, None);
-        let strong = self.obj(oid).single;
-        self.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
-        self.exc_objs.insert(oid, cls_name.to_string());
-        Value::obj(oid)
-    }
-
-    /// `str(e)` / `repr(e)` of exception objects with known args.
-    pub fn exc_text(&self, v: &Value, repr: bool, state: &State) -> Option<Value> {
-        if v.pts.is_empty() || !v.kv.is_bot() {
-            return None;
-        }
-        let mut out = Vec::new();
-        for o in v.pts.iter() {
-            let name = self.exc_objs.get(&o)?;
-            let t = state.slot(o, Ns::Attr, key_str_lit("args"));
-            let tid = t.single()?;
-            let n = self.llen(tid, state)?;
-            let mut parts = Vec::new();
-            for i in 0..n {
-                let a = state.slot(tid, Ns::Pos, intern::key_int(i as i64));
-                parts.push(a.kv.as_lit().filter(|_| a.pts.is_empty())?);
-            }
-            let reprs: Vec<String> = parts.iter().map(|k| intern::key_repr(*k)).collect();
-            let s = if repr {
-                format!("{}({})", name, reprs.join(", "))
-            } else if parts.len() == 1 {
-                // (a KeyError shows its key's repr)
-                if name == "KeyError" { reprs[0].clone() } else { intern::key_py_str(parts[0]) }
-            } else if parts.is_empty() {
-                String::new()
-            } else if parts.len() == 1 {
-                reprs[0].clone()
-            } else {
-                format!("({})", reprs.join(", "))
-            };
-            out.push(Value::lit(key_str_lit(&s)));
-        }
-        Some(crate::domain::join_values(out))
-    }
-
     /// An exception named `name` is raised here (the rest of the path is dead).
     pub fn raise_here(&mut self, name: &str, state: &mut State) {
         self.may_raise_here(name, state);
@@ -2037,77 +1606,6 @@ impl Analyzer {
         self.env_stack.pop();
         state.env = saved_env;
         state.unbound = saved_unbound;
-    }
-
-    /// Hashable description of everything a callee can observe, or None if too large.
-    #[allow(clippy::too_many_arguments)]
-    pub fn call_signature(&self, foid: u32, site: &str, entry: bool, self_v: &Option<Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &State) -> Option<Sig> {
-        let fi = self.func_info(foid);
-        let mut vals: Vec<Value> = args.to_vec();
-        vals.extend(kwargs.values().cloned());
-        vals.extend(star_args.iter().cloned());
-        vals.extend(star_kwargs.iter().cloned());
-        if let Some(sv) = self_v {
-            vals.push(sv.clone());
-        }
-        for cid in fi.closure.values() {
-            vals.push(state.slot(*cid, Ns::Cell, cell_key()));
-        }
-        let mut roots: Vec<u32> = vals.iter().flat_map(|v| v.pts.to_vec()).collect();
-        roots.push(fi.module);
-        let mut seen: Vec<u32> = Vec::new();
-        let mut seen_set: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
-        let mut work: Vec<(u32, u32)> = roots.into_iter().map(|o| (o, 0)).collect();
-        while let Some((oid, d)) = work.pop() {
-            if seen_set.contains(&oid) {
-                continue;
-            }
-            if seen.len() > 400 {
-                return None;
-            }
-            seen_set.insert(oid);
-            seen.push(oid);
-            if d >= 3 {
-                continue;
-            }
-            state.slots.each(&oid, &mut |_, v| {
-                for x in v.pts.iter() {
-                    if !seen_set.contains(&x) {
-                        work.push((x, d + 1));
-                    }
-                }
-            });
-        }
-        seen.sort_unstable();
-        let mut heap = Vec::with_capacity(seen.len());
-        for oid in seen {
-            heap.push((oid, state.rows.get(&(oid, Ns::Item)), state.rows.get(&(oid, Ns::Attr)), state.slots.sub_ref(&oid), state.elems.get(&oid), self.obj(oid).single));
-        }
-        let guards: Vec<Vec<String>> = self
-            .guards
-            .iter()
-            .map(|g| {
-                let mut v: Vec<String> = g.iter().cloned().collect();
-                v.sort();
-                v
-            })
-            .collect();
-        let mut kw: Vec<(StrId, Value)> = kwargs.iter().map(|(k, v)| (*k, v.clone())).collect();
-        kw.sort_by_key(|(k, _)| intern::str_get(*k));
-        Some(Sig {
-            foid,
-            site: site.to_string(),
-            entry,
-            self_v: self_v.clone(),
-            args: args.to_vec(),
-            kwargs: kw,
-            star_args: star_args.to_vec(),
-            star_kwargs: star_kwargs.to_vec(),
-            heap,
-            guards,
-            fr_single: self.frame().single && self.frame().loop_depth == 0,
-            ctx: self.frame().ctx.clone(),
-        })
     }
 
     #[allow(clippy::too_many_arguments)]

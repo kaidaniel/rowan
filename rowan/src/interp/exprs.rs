@@ -2007,6 +2007,7 @@ impl Analyzer {
         }
         let mut s2 = state.copy();
         let mark0 = self.objects.len() as ObjId;
+        let vmark = self.verdicts.len();
         self.frame_mut().overlays.push(IndexMap::new());
         self.comp_run_one(g, gens, i, &elem, &mut s2, body, understood, own);
         self.frame_mut().overlays.pop();
@@ -2031,7 +2032,9 @@ impl Analyzer {
             return;
         }
         // items of unknown number: what one iteration did, the next one sees too (a walrus
-        // accumulator, a `pop` from a dict): rounds to a fixpoint, as a `for` loop has
+        // accumulator, a `pop` from a dict): rounds to a fixpoint, as a `for` loop has (whose
+        // verdicts supersede the first pass's)
+        self.drop_verdicts_since(vmark);
         let (mut head, _, s2) = self.loop_fixpoint(state, &mut |an, body_s| {
             an.frame_mut().overlays.push(IndexMap::new());
             an.comp_run_one(g, gens, i, &elem, body_s, body, understood, own);

@@ -58,6 +58,9 @@ pub fn dedupe(an: &Analyzer, verdicts: &[Verdict]) -> Vec<Verdict> {
             Tier::Likely
         } else if tiers.iter().all(|t| matches!(t, Tier::Input | Tier::Proven | Tier::Likely)) {
             Tier::Input
+        } else if tiers.iter().all(|t| matches!(t, Tier::Input | Tier::Proven | Tier::Likely | Tier::LikelyMissing)) {
+            // (missing on some objects only unless code rowan cannot see set it: as hedged)
+            Tier::LikelyMissing
         } else {
             Tier::Possibly
         };
@@ -331,7 +334,9 @@ pub fn site_text(an: &Analyzer, site: &str) -> String {
     };
     if let Some((text, m, line)) = an.site_names.get(&intern::s(site)) {
         let t: String = if text.chars().count() > 50 { format!("{}…", text.chars().take(49).collect::<String>()) } else { text.clone() };
-        return format!("`{}` ({})", t, in_file(*m, *line));
+        // (a call of the program's own code that rowan no longer follows: say why it is unknown)
+        let not_followed = if an.skipped_sites.contains(&intern::s(site)) { ", a call rowan no longer follows" } else { "" };
+        return format!("`{}` ({}{})", t, in_file(*m, *line), not_followed);
     }
     if site == "…" {
         // (a row names its first few unknown calls, then this)

@@ -1121,7 +1121,12 @@ impl Analyzer {
         self.cond_depth += 1;
         let mut converged = false;
         let mut prev_head = head.copy();
+        let mut vmark = self.verdicts.len();
         for _ in 0..LOOP_MAX_ITER {
+            // (a round before the fixpoint ran on less than the loop's states: what its accesses
+            // said is superseded by the next round's)
+            self.drop_verdicts_since(vmark);
+            vmark = self.verdicts.len();
             let mut body_s = head.copy();
             let mark = self.objects.len() as u32;
             self.recent_stack.push(Vec::new());
@@ -1146,6 +1151,13 @@ impl Analyzer {
         }
         if !converged {
             self.widen_unconverged(&mut head, &prev_head);
+            // (the accesses as the widened states make them)
+            self.drop_verdicts_since(vmark);
+            self.loop_stack.push(LoopCtx::default());
+            self.recent_stack.push(Vec::new());
+            round(self, &mut head.copy());
+            self.recent_stack.pop();
+            self.loop_stack.pop();
         }
         self.cond_depth -= 1;
         self.frame_mut().loop_depth -= 1;
@@ -1297,10 +1309,7 @@ impl Analyzer {
                 self.cond_depth -= 1;
                 self.frame_mut().loop_depth -= 1;
                 self.recent_stack.pop();
-                for v in self.verdicts[saved_verdicts..].iter() {
-                    self.verdict_keys.remove(&v.dedupe_key());
-                }
-                self.verdicts.truncate(saved_verdicts);
+                self.drop_verdicts_since(saved_verdicts);
                 exh_ops = self.exh_log.take().unwrap_or_default();
                 self.exh_log = saved_log;
             }
@@ -1749,11 +1758,7 @@ impl Analyzer {
             return;
         }
         let mut roots: Vec<u32> = Vec::new();
-        roots.extend(v.pts.iter());
-        match &v.kv {
-            KeyVal::KeysOf(ko) => roots.extend(ko.objs.iter()),
-            _ => {}
-        }
+        v.push_objs(&mut roots);
         self.collect_since(mark, &pre, roots, state);
     }
 
@@ -1811,13 +1816,10 @@ impl Analyzer {
             self.walked.set(self.walked.get() + 1);
             self.obj_edges(o, state, &mut work);
         }
+        // (a part of an input — an unknown object, a placeholder — is found again by its path
+        // whenever that path is read: its rows belong to the input, never garbage)
         for o in fresh {
-            // (a part of an input — an unknown object, a placeholder — is found again by its
-            // path whenever that path is read: its rows belong to the input, never garbage)
-            if matches!(self.kind(o), Kind::Unknown) {
-                continue;
-            }
-            if !reached.contains(&o) {
+            if !reached.contains(&o) && !matches!(self.kind(o), Kind::Unknown) {
                 state.forget_obj(o);
             }
         }
@@ -1838,39 +1840,10 @@ impl Analyzer {
             return;
         }
         let mut roots: Vec<u32> = Vec::new();
-        let push = |v: &Value, roots: &mut Vec<u32>| {
-            roots.extend(v.pts.iter());
-            match &v.kv {
-                KeyVal::KeysOf(ko) => roots.extend(ko.objs.iter()),
-                _ => {}
-            }
-        };
-        for v in state.env.values() {
-            push(v, &mut roots);
-        }
-        for v in state.narrowed.values() {
-            push(v, &mut roots);
-        }
-        if let Some(r) = &state.ret {
-            push(r, &mut roots);
-        }
-        for env in &self.env_stack {
-            for v in env.values() {
-                push(v, &mut roots);
-            }
-        }
-        for fr in &self.frames {
-            roots.push(fr.module);
-            roots.extend(fr.cells.values().copied());
-            for ov in &fr.overlays {
-                for v in ov.values() {
-                    push(v, &mut roots);
-                }
-            }
-        }
+        self.state_roots(state, usize::MAX, usize::MAX, &mut roots);
         for (o, v) in state.lasts.iter() {
             roots.push(*o);
-            push(v, &mut roots);
+            v.push_objs(&mut roots);
         }
         self.collect_since(mark, &pre, roots, state);
     }
@@ -2061,78 +2034,9 @@ impl Analyzer {
             self.exec_stmt(st, state);
         }
         self.frames.pop();
-        // an Enum: each plain class-level `NAME = value` is a member, an instance of the class
-        // with known `name` and `value`, in definition order
         let enum_base = info.bases.iter().any(|b| self.enum_members.contains_key(b));
         if is_enum || enum_base {
-            let mut members: Vec<(String, u32)> = Vec::new();
-            self.enum_kind.insert(coid, ek);
-            // `auto()`: the lower-cased name (StrEnum), the next power of two (Flag), else the
-            // last int value + 1
-            let mut last_int: i64 = 0;
-            let mut member_vals: Vec<(crate::intern::KeyId, u32)> = Vec::new();
-            for st in &c.body {
-                let ast::Stmt::Assign(a) = st else { continue };
-                let [ast::Expr::Name(n)] = &a.targets[..] else { continue };
-                let name = n.id.to_string();
-                if name.starts_with('_') {
-                    continue;
-                }
-                let nk = key_str_lit(&name);
-                let is_auto = match &*a.value {
-                    ast::Expr::Call(cl) => match &*cl.func {
-                        ast::Expr::Name(f) => f.id.as_str() == "auto",
-                        ast::Expr::Attribute(at) => at.attr.as_str() == "auto",
-                        _ => false,
-                    },
-                    _ => false,
-                };
-                // (`class M(str, Enum)` with `auto()`: str of an int, deprecated: left unknown)
-                if is_auto && !(str_mixin && !ek.is_str) {
-                    let av = if ek.is_str && !ek.flag {
-                        Value::lit(key_str_lit(&name.to_lowercase()))
-                    } else if ek.flag {
-                        let nx = if last_int <= 0 { 1 } else { 1i64 << (64 - (last_int as u64).leading_zeros()) };
-                        Value::lit(crate::intern::key_int(nx))
-                    } else {
-                        Value::lit(crate::intern::key_int(last_int + 1))
-                    };
-                    self.cls_slots.insert((coid, Ns::Attr, nk), av);
-                }
-                let Some(v) = self.cls_slots.get(&(coid, Ns::Attr, nk)).cloned() else { continue };
-                if v.pts.iter().any(|o| matches!(self.kind(o), Kind::Function | Kind::Class)) {
-                    continue;
-                }
-                if let Some(i) = v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(crate::intern::key_as_int) {
-                    last_int = last_int.max(i);
-                }
-                // a value an earlier member has: an alias of that member (not iterated)
-                let vlit = v.kv.as_lit().filter(|_| v.pts.is_empty());
-                if let Some(prev) = vlit.and_then(|l| member_vals.iter().find(|(x, _)| *x == l)).map(|(_, m)| *m) {
-                    self.cls_slots.insert((coid, Ns::Attr, nk), Value::obj(prev));
-                    self.enum_aliases.entry(coid).or_default().push((name, prev));
-                    continue;
-                }
-                let mid = self.alloc_raw(Kind::Instance, &format!("enum:{}:{}", coid, name), "", true, &format!("{}.{}", c.name.id, name), Payload::Cls(coid));
-                let mut row = Row::new();
-                for (k, val) in [("name", Value::lit(nk)), ("value", v.clone())] {
-                    let kk = key_str_lit(k);
-                    row = row.store(kk, true);
-                    state.set_slot(mid, Ns::Attr, kk, val, true);
-                }
-                state.set_row(mid, Ns::Attr, row);
-                self.cls_slots.insert((coid, Ns::Attr, nk), Value::obj(mid));
-                let mval = if ek.mixed { v.kv.as_lit().filter(|_| v.pts.is_empty()) } else { None };
-                let mk = crate::intern::key_member(&format!("{}.{}", c.name.id, name), mval);
-                self.member_key.insert(mid, mk);
-                self.key_member.insert(mk, mid);
-                if let Some(l) = vlit {
-                    member_vals.push((l, mid));
-                }
-                self.enum_aliases.entry(coid).or_default().push((name.clone(), mid));
-                members.push((name, mid));
-            }
-            self.enum_members.insert(coid, members);
+            self.make_enum_members(c, coid, ek, str_mixin, state);
         }
         // `__set_name__(owner, name)` on descriptor objects assigned in the class body
         for st in &c.body {

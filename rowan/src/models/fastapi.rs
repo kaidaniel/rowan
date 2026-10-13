@@ -1653,3 +1653,38 @@ fn scalar_ann_name(a: &ast::Expr) -> String {
         _ => dotted_last(a),
     }
 }
+
+impl crate::interp::Analyzer {
+    /// The entry run of a FastAPI handler: called by the framework with any request (also when
+    /// the program's own TestClient calls it), through its middlewares and dependencies; its
+    /// requirements join `state`'s.
+    pub(crate) fn fa_entry_run(&mut self, oid: ObjId, fi: &crate::interp::FuncInfo, state: &mut State) {
+        let mut st = state.copy();
+        st.ret = None;
+        let mi = self.module_info(fi.module);
+        self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
+        self.entry_scope = Some(oid);
+        let fake = Node::synthetic(mi.idx, fi.node.node().line);
+        let saved_entry = self.entry_run.replace(oid);
+        if self.fa_entry_through_middleware(oid, &mut st, &fake).is_none() {
+            self.m.fa_dep_cache.push(rustc_hash::FxHashMap::default());
+            if let Some(idx) = self.m.fa_routes.iter().position(|r| r.func == Some(oid)) {
+                self.fa_route_deps(idx, None, &mut st, &fake);
+            }
+            let gens = self.fa_yield_deps(oid, &mut st);
+            self.fa_run_handler(oid, gens, None, true, &mut st, &fake);
+            self.m.fa_dep_cache.pop();
+        }
+        self.entry_scope = None;
+        self.entry_run = saved_entry;
+        self.frames.pop();
+        for (src, k) in st.reqs.diff_keys(&state.reqs) {
+            let Some(info) = st.reqs.get(&src, &k) else { continue };
+            let nv = match state.reqs.get(&src, &k) {
+                Some(cur) => cur.join(&info),
+                None => info,
+            };
+            state.reqs.set(&src, k, nv);
+        }
+    }
+}

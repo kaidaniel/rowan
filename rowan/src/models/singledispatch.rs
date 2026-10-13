@@ -1,13 +1,13 @@
-//! `functools.singledispatch`: a call dispatches on its first argument's type to the
-//! implementation registered for the nearest class.
+//! functools: `singledispatch` (a call dispatches on its first argument's type to the
+//! implementation registered for the nearest class) and `lru_cache` / `cache` (`memo_call`).
 
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{join_values, ObjId, Value};
+use crate::domain::{join_values, Ns, ObjId, Value};
 use crate::frontend::Node;
-use crate::intern::{self, StrId};
-use crate::interp::Analyzer;
+use crate::intern::{self, key_str_lit, KeyId, StrId};
+use crate::interp::{Analyzer, Payload};
 use crate::state::{Kind, State};
 
 impl Analyzer {
@@ -155,5 +155,117 @@ impl Analyzer {
         }
         state.replace_with(out);
         join_values(outs)
+    }
+}
+
+impl crate::interp::Analyzer {
+    /// A call of a `functools.lru_cache` / `cache` function: with known arguments, the first
+    /// call's result is the result of every later call with the same arguments.
+    pub(crate) fn memo_call(&mut self, oid: ObjId, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+        // a memoised function with known arguments: the first call's result is the
+        // result of every later call with the same arguments
+        let lit = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty());
+        let pos: Option<Vec<KeyId>> = args.iter().map(lit).collect();
+        let kws: Option<Vec<(StrId, KeyId)>> = kwargs.iter().map(|(k, v)| lit(v).map(|x| (*k, x))).collect();
+        // the cache is a hidden dict in the (flow-sensitive) state: on paths where the
+        // first call happened the result is reused, elsewhere the call runs
+        let key = pos.zip(kws).map(|(p, k)| {
+            let mut parts = p;
+            for (n, v) in k {
+                parts.push(intern::key_tuple(vec![key_str_lit(&intern::str_get(n)), v]));
+            }
+            intern::key_tuple(parts)
+        });
+        let Some(mk) = key else {
+            return self.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, call_ast, false);
+        };
+        let memo = self.alloc_raw(Kind::Dict, &format!("memo:{}", oid), "", true, "lru_cache", Payload::None);
+        let row = state.row(memo, Ns::Item);
+        // the hit / miss counts (cache_info), known while every call's outcome is
+        let bump = |state: &mut State, name: &str, by_known: bool| {
+            let k = key_str_lit(name);
+            let cur = state.slot_opt(memo, Ns::Attr, k).unwrap_or_else(|| Value::lit(intern::key_int(0)));
+            let nv = match (cur.kv.as_lit().and_then(intern::key_as_int), by_known) {
+                (Some(n), true) => Value::lit(intern::key_int(n + 1)),
+                _ => Value::data("count"),
+            };
+            state.set_slot(memo, Ns::Attr, k, nv, true);
+        };
+        if row.definite.contains(mk) {
+            bump(state, "hits", true);
+            return state.slot(memo, Ns::Item, mk);
+        }
+        if row.present.contains(mk) {
+            bump(state, "hits", false);
+            bump(state, "misses", false);
+        } else {
+            bump(state, "misses", true);
+        }
+        let r = self.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, call_ast, false);
+        let out = if row.present.contains(mk) { r.join(&state.slot(memo, Ns::Item, mk)) } else { r };
+        let row = state.row(memo, Ns::Item).store(mk, true);
+        state.set_row(memo, Ns::Item, row);
+        state.set_slot(memo, Ns::Item, mk, out.clone(), true);
+        out
+    }
+}
+
+impl crate::interp::Analyzer {
+    /// A functools decorator (`singledispatch` and `.register`, `lru_cache` / `cache`, `wraps`)
+    /// on the function `fobj` (its `fi`): applied; false for any other decorator.
+    pub(crate) fn functools_decorator(&mut self, q: &str, d: &'static ast::Decorator, fobj: Option<ObjId>, fi: Option<&crate::interp::FuncInfo>, state: &mut State) -> bool {
+        // `@singledispatch`: implementations registered on it are chosen by the type of the
+        // first argument
+        if matches!(q, "functools.singledispatch" | "functools.singledispatchmethod") {
+            if let Some(f) = fobj.filter(|o| self.kind(*o) == Kind::Function) {
+                self.sdispatch.insert(f, Vec::new());
+                if q.ends_with("method") {
+                    self.sdispatch_method.insert(f);
+                }
+            }
+            return true;
+        }
+        if q == "sdispatch.register" {
+            let dv = match &d.expression {
+                ast::Expr::Call(c) => self.eval(&c.func, state),
+                other => self.eval(other, state),
+            };
+            let base = dv.pts.iter().find_map(|m| match &self.obj(m).payload {
+                Payload::Method(_, b) => b.single(),
+                _ => None,
+            });
+            let impl_f = fobj.filter(|o| self.kind(*o) == Kind::Function);
+            if let (Some(base), Some(impl_f)) = (base, impl_f) {
+                // the type: `@f.register(T)`, else the first parameter's annotation
+                let ty = match &d.expression {
+                    ast::Expr::Call(c) if !c.arguments.args.is_empty() => Some(self.eval(&c.arguments.args[0], state)),
+                    _ => self.sdispatch_annotation(impl_f, self.sdispatch_method.contains(&base), state),
+                };
+                if let (Some(ty), Some(reg)) = (ty, self.sdispatch.get_mut(&base)) {
+                    reg.push((ty, impl_f));
+                }
+            }
+            return true;
+        }
+        if matches!(q, "functools.lru_cache" | "functools.cache") {
+            if let (Some(fi), Some(f)) = (&fi, fobj) {
+                fi.is_memo.set(true);
+                // the (empty) cache exists from the definition on, on every path
+                let memo = self.alloc_raw(Kind::Dict, &format!("memo:{}", f), "", true, "lru_cache", Payload::None);
+                state.set_row(memo, Ns::Item, crate::domain::Row::new());
+            }
+            return true;
+        }
+        // `@functools.wraps(fn)`: the wrapper takes fn's name, qualname, doc, __wrapped__
+        if q == "functools.wraps" {
+            if let (ast::Expr::Call(cl), Some(f)) = (&d.expression, fobj) {
+                if let Some(a0) = cl.arguments.args.first() {
+                    let wv = self.eval(a0, state);
+                    self.wrapped.insert(f, wv);
+                }
+            }
+            return true;
+        }
+        false
     }
 }

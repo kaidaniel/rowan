@@ -215,62 +215,14 @@ impl Analyzer {
                 }
                 continue;
             }
-            // `@singledispatch`: implementations registered on it are chosen by the type of the
-            // first argument
-            if matches!(q.as_str(), "functools.singledispatch" | "functools.singledispatchmethod") {
-                if let Some(f) = fobj.filter(|o| self.kind(*o) == Kind::Function) {
-                    self.sdispatch.insert(f, Vec::new());
-                    if q.ends_with("method") {
-                        self.sdispatch_method.insert(f);
-                    }
-                }
-                continue;
-            }
-            if q == "sdispatch.register" {
-                let dv = match &d.expression {
-                    ast::Expr::Call(c) => self.eval(&c.func, state),
-                    other => self.eval(other, state),
-                };
-                let base = dv.pts.iter().find_map(|m| match &self.obj(m).payload {
-                    Payload::Method(_, b) => b.single(),
-                    _ => None,
-                });
-                let impl_f = fobj.filter(|o| self.kind(*o) == Kind::Function);
-                if let (Some(base), Some(impl_f)) = (base, impl_f) {
-                    // the type: `@f.register(T)`, else the first parameter's annotation
-                    let ty = match &d.expression {
-                        ast::Expr::Call(c) if !c.arguments.args.is_empty() => Some(self.eval(&c.arguments.args[0], state)),
-                        _ => self.sdispatch_annotation(impl_f, self.sdispatch_method.contains(&base), state),
-                    };
-                    if let (Some(ty), Some(reg)) = (ty, self.sdispatch.get_mut(&base)) {
-                        reg.push((ty, impl_f));
-                    }
-                }
-                continue;
-            }
-            if matches!(q.as_str(), "functools.lru_cache" | "functools.cache") {
-                if let (Some(fi), Some(f)) = (&fi, fobj) {
-                    fi.is_memo.set(true);
-                    // the (empty) cache exists from the definition on, on every path
-                    let memo = self.alloc_raw(Kind::Dict, &format!("memo:{}", f), "", true, "lru_cache", Payload::None);
-                    state.set_row(memo, Ns::Item, crate::domain::Row::new());
-                }
+            // functools: singledispatch (and its `register`), lru_cache / cache, wraps
+            if self.functools_decorator(&q, d, fobj, fi.as_deref(), state) {
                 continue;
             }
             if q.starts_with("fastapi.") {
                 // `@app.get("/x")`: the route decorator registers the handler
                 let dv = self.eval(&d.expression, state);
                 crate::models::fastapi::apply_route(self, &dv, &fv);
-                continue;
-            }
-            // `@functools.wraps(fn)`: the wrapper takes fn's name, qualname, doc, __wrapped__
-            if q == "functools.wraps" {
-                if let (ast::Expr::Call(cl), Some(f)) = (&d.expression, fobj) {
-                    if let Some(a0) = cl.arguments.args.first() {
-                        let wv = self.eval(a0, state);
-                        self.wrapped.insert(f, wv);
-                    }
-                }
                 continue;
             }
             // a decorator that is user code (a bound method of a user object, a function held in

@@ -57,6 +57,14 @@ const user2 = hover(a01idx, a01src, 2, "user");
 assert(user2.includes("```python\nu\n```") && user2.includes("- the code reads `user.id`"), user2);
 assert.strictEqual(renderHover("zzz", [], []), null);
 
+// ---- a call rowan no longer follows (past its function's budget): said where it changes a value
+{
+  const z440 = path.join(root, "tests", "cases", "z440_past_budget_changes_globals.py");
+  const res = JSON.parse(execFileSync(bin, [z440, "--facts"], { env: { ...process.env, ROWAN_LIMITS: "budget=2" }, maxBuffer: 64 * 1024 * 1024 }).toString());
+  const h = hover(indexResult(res), fs.readFileSync(z440, "utf8").split("\n"), 58, "STATE");
+  assert(h.includes("- may have been changed by `drop()` (line 57, a call rowan no longer follows)"), h);
+}
+
 // ---- diagnostics: only accesses that may fail, in words, with their call path
 assert.strictEqual(severityFor("missing"), "error");
 assert.strictEqual(severityFor("possibly"), "warning");
