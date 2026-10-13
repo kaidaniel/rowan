@@ -1333,8 +1333,12 @@ impl Analyzer {
                 Kind::Module => match state.slot_opt(oid, Ns::Attr, nk) {
                     Some(v) => v,
                     None => {
+                        // (a namespace changed by code rowan cannot see — `globals().update(…)`
+                        // with unknown names — may have it)
+                        let row = state.row(oid, Ns::Attr);
+                        let cls = if row.closed() { Classification::with_note(Tier::Missing, "is not defined in the module") } else { classify(&row, nk) };
                         if !guarded {
-                            self.verdict(node, nk, &Classification::with_note(Tier::Missing, "is not defined in the module"), oid, Ns::Attr, None, None);
+                            self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
                         }
                         Value::data(&format!("L{}", node.line))
                     }

@@ -387,6 +387,8 @@ pub fn external_constant(an: &Analyzer, qual: &str) -> Option<Value> {
         "re.A" | "re.ASCII" => int(256),
         "re.NOFLAG" => int(0),
         "sys.maxsize" => int(i64::MAX),
+        // (False when the program runs: what it imports only for type checkers is not imported)
+        "typing.TYPE_CHECKING" | "typing_extensions.TYPE_CHECKING" => Some(Value::lit(intern::key_bool(false))),
         "string.ascii_letters" => st("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"),
         "string.ascii_lowercase" => st("abcdefghijklmnopqrstuvwxyz"),
         "string.ascii_uppercase" => st("ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
