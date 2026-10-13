@@ -29,6 +29,9 @@ pub struct CodeUses {
     uses: Vec<Use>,
     imports: FxHashMap<StrId, String>,
     attrs: FxHashSet<StrId>,
+    /// the attribute names it assigns (`x.a = …`, `setattr(x, "a", …)`) and deletes
+    stored: FxHashSet<StrId>,
+    deleted: FxHashSet<StrId>,
     /// the attribute names it reads at all (a method of a class runs only when its name is
     /// read, or for a dunder)
     reads: FxHashSet<StrId>,
@@ -107,6 +110,11 @@ impl Collect<'_> {
                             match c.arguments.args.get(1) {
                                 Some(Expr::StringLiteral(l)) if f != "vars" => {
                                     self.out.reads.insert(s(l.value.to_str()));
+                                    match f {
+                                        "delattr" => drop(self.out.deleted.insert(s(l.value.to_str()))),
+                                        "setattr" => drop(self.out.stored.insert(s(l.value.to_str()))),
+                                        _ => {}
+                                    }
                                     if changes {
                                         self.attr(l.value.to_str());
                                     }
@@ -154,6 +162,7 @@ impl Collect<'_> {
             Expr::Name(n) => self.name(n.id.as_str(), None, false, true),
             Expr::Attribute(a) => {
                 self.out.reads.insert(s(a.attr.as_str()));
+                self.out.stored.insert(s(a.attr.as_str()));
                 self.attr(a.attr.as_str());
                 match &*a.value {
                     Expr::Name(n) => self.name(n.id.as_str(), Some(a.attr.as_str()), true, true),
@@ -205,7 +214,14 @@ impl<'a> Visitor<'a> for Collect<'_> {
                     self.target(&a.target);
                 }
             }
-            Stmt::Delete(d) => d.targets.iter().for_each(|t| self.target(t)),
+            Stmt::Delete(d) => {
+                for t in &d.targets {
+                    if let Expr::Attribute(a) = t {
+                        self.out.deleted.insert(s(a.attr.as_str()));
+                    }
+                    self.target(t);
+                }
+            }
             Stmt::For(f) => {
                 self.expr(&f.iter, true);
                 self.target(&f.target);
@@ -277,7 +293,7 @@ impl Analyzer {
         let mi = self.module_info(fi.module);
         let scope = mi.scopes.get(fi.scope);
         let locals = |n: &str| scope.is_local(n);
-        let mut c = Collect { locals: &locals, esc: true, out: CodeUses { uses: Vec::new(), imports: FxHashMap::default(), attrs: FxHashSet::default(), reads: FxHashSet::default() }, pkg: mi.pkg.clone() };
+        let mut c = Collect { locals: &locals, esc: true, out: CodeUses { uses: Vec::new(), imports: FxHashMap::default(), attrs: FxHashSet::default(), stored: FxHashSet::default(), deleted: FxHashSet::default(), reads: FxHashSet::default() }, pkg: mi.pkg.clone() };
         // (imports first: a use before the import statement in the text binds the same name)
         for st in super::access::walk_stmts(fi.node.body()) {
             if matches!(st, Stmt::Import(_) | Stmt::ImportFrom(_)) {
@@ -296,6 +312,33 @@ impl Analyzer {
         let u = std::rc::Rc::new(c.out);
         self.code_uses.insert(addr, u.clone());
         u
+    }
+
+    /// The attribute names the methods of `cls` (and its bases) other than `__init__` store on
+    /// some object, and those they delete.
+    pub fn attrs_set_by_methods(&mut self, cls: ObjId, state: &State) -> (Vec<KeyId>, Vec<KeyId>) {
+        let (mut out, mut del): (FxHashSet<StrId>, FxHashSet<StrId>) = Default::default();
+        for c in self.mro(cls) {
+            for (k, v) in state.obj_slots(c, Ns::Attr) {
+                if intern::key_as_str(k).as_deref() == Some("__init__") {
+                    continue;
+                }
+                for f in v.pts.iter() {
+                    if let Payload::Func(fi) = &self.obj(f).payload {
+                        let fi = fi.clone();
+                        let u = self.code_uses(&fi);
+                        out.extend(u.stored.iter().copied());
+                        del.extend(u.deleted.iter().copied());
+                    }
+                }
+            }
+        }
+        let keys = |set: FxHashSet<StrId>| {
+            let mut ks: Vec<KeyId> = set.into_iter().map(|a| key_str_lit(&str_get(a))).collect();
+            ks.sort_unstable();
+            ks
+        };
+        (keys(out), keys(del))
     }
 
     /// Where `name` (read in the code of `fi`) is bound — a cell, a module's global — or the

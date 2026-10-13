@@ -2001,6 +2001,23 @@ impl Analyzer {
                 self.call_user(init, Some(Value::obj(inst)), args, IndexMap::new(), vec![], vec![], state, &fake, None, true);
             }
         }
+        // (an instance a caller made may have had any of its methods called since: what they
+        // set and `__init__` did not may be there too, holding anything; what they delete may
+        // be gone)
+        let (set, deleted) = self.attrs_set_by_methods(cls_oid, state);
+        if !(set.is_empty() && deleted.is_empty()) && state.has_row(inst, Ns::Attr) {
+            let any = Value::obj(self.any_object(state));
+            let mut row = state.row(inst, Ns::Attr);
+            let had = row.present.clone();
+            for k in set.into_iter().filter(|k| !had.contains(*k)) {
+                row = row.store(k, false);
+                state.set_slot(inst, Ns::Attr, k, any.clone(), false);
+            }
+            for k in deleted {
+                row = row.delete(k, false);
+            }
+            state.set_row(inst, Ns::Attr, row);
+        }
         inst
     }
 
