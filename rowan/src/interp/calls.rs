@@ -6,42 +6,13 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{chain_extend, join_rows, join_values, KeyVal, Ns, ReqInfo, Row, Source, SourceKind, Value, DATA};
+use crate::domain::{chain_extend, join_rows, join_values, KeyVal, Ns, Row, Source, SourceKind, Value, DATA};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
-use crate::state::{Footprint, Kind, State};
+use crate::state::{Kind, State};
 use crate::domain::ObjId;
 
-use super::funcs::cell_key;
-use super::{is_generator, Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, Payload, Verdict, MAX_ACTIVE, MAX_ARG_JOIN, MAX_CLONES, NOEFFECT_METHOD_NAMES, REC_MAX_ITER};
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct Sig {
-    foid: u32,
-    site: String,
-    entry: bool,
-    self_v: Option<Value>,
-    args: Vec<Value>,
-    kwargs: Vec<(StrId, Value)>,
-    star_args: Vec<Value>,
-    star_kwargs: Vec<Value>,
-    heap: Vec<(u32, Option<Row>, Option<Row>, crate::layered::SubRef, Option<KeyVal>, bool)>,
-    guards: Vec<Vec<String>>,
-    fr_single: bool,
-    ctx: String,
-}
-
-pub struct CacheHit {
-    pub raises: bool,
-    /// some path of the run returned (else the call never completes)
-    pub completes: bool,
-    /// the lengths the run changed
-    pub lens: Vec<ObjId>,
-    pub ret: Value,
-    pub fp_state: State,
-    pub fp: Footprint,
-    pub verdicts: Vec<Verdict>,
-}
+use super::{is_generator, Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, Payload, MAX_ACTIVE, MAX_ARG_JOIN, MAX_CLONES, NOEFFECT_METHOD_NAMES, REC_MAX_ITER};
 
 fn widen_value(v: &Value) -> Value {
     if let KeyVal::Lits(ks) = &v.kv {
@@ -1155,106 +1126,6 @@ impl Analyzer {
             }
             return Value::new();
         }
-        // call cache: same callee, same call site, same observable input → replay the effects
-        let sig = self.call_signature(foid, &site, entry, &self_v, &args, &kwargs, &star_args, &star_kwargs, state);
-        if let Some(sig) = sig.as_ref() {
-            // (a run that raised, under a try that may catch it: the handlers need the state at
-            // each raise, which only a run records)
-            let hit = self.call_cache.get(sig).cloned().filter(|h| !(h.raises && !self.guards.is_empty()));
-            if let Some(hit) = hit {
-                if super::debug_enabled() {
-                    eprintln!("cache hit for {} at {}", self.func_info(foid).qualname, site);
-                }
-                if hit.raises {
-                    self.note_raise();
-                }
-                // (the facts the run changed, deletions too)
-                for k in &hit.fp.rows {
-                    match hit.fp_state.rows.get(k) {
-                        Some(r) => state.rows.insert(*k, r),
-                        None => {
-                            state.rows.remove(k);
-                        }
-                    }
-                }
-                for (oid, sk) in &hit.fp.slots {
-                    if matches!(sk.0, Ns::Pos | Ns::Elem) {
-                        state.clear_last(*oid);
-                    }
-                    match hit.fp_state.slots.get(oid, sk) {
-                        Some(v) => state.slots.set(oid, *sk, v),
-                        None => {
-                            state.slots.remove(oid, sk);
-                        }
-                    }
-                }
-                for k in &hit.fp.elems {
-                    match hit.fp_state.elems.get(k) {
-                        Some(v) => state.elems.insert(*k, v),
-                        None => {
-                            state.elems.remove(k);
-                        }
-                    }
-                }
-                for k in &hit.lens {
-                    match hit.fp_state.lens.get(k) {
-                        Some(v) => state.lens.insert(*k, v),
-                        None => {
-                            state.lens.remove(k);
-                        }
-                    }
-                }
-                // recent objects the replayed call allocated: folded at the loop's back-edge
-                // like the originals, or a later activation resets them under live references
-                if !self.recent_stack.is_empty() {
-                    let mut oids: Vec<ObjId> = hit.fp.rows.iter().map(|(o, _)| *o).collect();
-                    oids.extend(hit.fp.slots.iter().map(|(o, _)| *o));
-                    oids.extend(hit.fp.elems.iter().copied());
-                    let mut recents: Vec<(ObjId, Kind, String, String)> = Vec::new();
-                    for o in oids {
-                        if !self.has_obj(o) {
-                            continue;
-                        }
-                        let ob = self.obj(o);
-                        if let Some(base) = ob.site.strip_suffix("#recent") {
-                            recents.push((o, ob.kind, base.to_string(), ob.ctx.to_string()));
-                        }
-                    }
-                    let top = self.recent_stack.last_mut().unwrap();
-                    for r in recents {
-                        if !top.iter().any(|(x, _, _, _)| *x == r.0) {
-                            top.push(r);
-                        }
-                    }
-                }
-                // (the run's requirements: on top of what was required here, needed always
-                // exactly when the run needed them always)
-                for (src, d) in hit.fp_state.reqs.items() {
-                    for (k, info) in d.iter() {
-                        let merged = state.reqs.get(&src, k).map(|cur| cur.seq(info)).unwrap_or_else(|| info.clone());
-                        state.reqs.set(&src, *k, ReqInfo { always: info.always, ..merged });
-                    }
-                }
-                let chain = chain_extend(&self.call_chain, &[node.line]);
-                for v in &hit.verdicts {
-                    let full = chain_extend(&chain, &v.chain);
-                    let mut nv = v.clone();
-                    nv.chain = full;
-                    let dk = nv.dedupe_key();
-                    if !self.verdict_keys.contains(&dk) && !self.quiet {
-                        self.verdict_keys.insert(dk);
-                        self.verdicts.push(nv);
-                    }
-                }
-                let ret = hit.ret.clone();
-                let rows: Vec<(u32, Row)> = ret.pts.iter().filter(|o| self.is_record_like(*o)).map(|o| (o, state.row(o, Ns::Item))).collect();
-                self.summaries.entry((fi.qualname.clone(), site.clone())).or_insert((ret.clone(), rows));
-                if !hit.completes {
-                    state.reachable = false;
-                }
-                return ret;
-            }
-        }
         // every statement a function code runs counts against its budget (entry runs aside: one
         // per function); past it a call is unknown code, so the whole analysis is bounded by the
         // number of functions times the budget
@@ -1324,8 +1195,6 @@ impl Analyzer {
         self.active.insert(key.clone(), true);
         self.active_by_func.entry(foid).or_default().push(key.clone());
         self.rec_entry.insert(key.clone(), (self_v.clone(), args.clone(), kwargs.clone()));
-        let verdict_mark = self.verdicts.len();
-        let chain_len = self.call_chain.len();
 
         let mut pre_bind = state.copy();
         let obj_mark_call = self.objects.len() as ObjId;
@@ -1414,84 +1283,6 @@ impl Analyzer {
         };
         if !converged && !ret_stable {
             ret = ret.join(&Value::data(&format!("recursion@{}", fi.qualname)));
-        }
-        // (at most CACHE_PER_FN entries per function: the cache's memory is bounded too)
-        let room = self.cache_count.get(&fnode.addr()).copied().unwrap_or(0) < super::CACHE_PER_FN;
-        if let Some(sig) = sig.filter(|_| room) {
-            if !self.rec_hit.contains(&key) {
-                *self.cache_count.entry(fnode.addr()).or_default() += 1;
-                let mut rel = State::new();
-                for (src, k) in st.reqs.diff_keys(&pre_bind.reqs) {
-                    if let Some(info) = st.reqs.get(&src, &k) {
-                        if pre_bind.reqs.get(&src, &k).as_ref() != Some(&info) {
-                            rel.reqs.set(&src, k, info);
-                        }
-                    }
-                }
-                let mut fp = st.footprint(&pre_bind);
-                // (what the call made that its result reaches, whole: a later hit replays it
-                // into a state where those objects may have been collected meanwhile)
-                let mut work: Vec<ObjId> = ret.pts.iter().filter(|o| *o >= obj_mark_call).collect();
-                let mut seen: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
-                let rows_have: rustc_hash::FxHashSet<(ObjId, Ns)> = fp.rows.iter().copied().collect();
-                let slots_have: rustc_hash::FxHashSet<(ObjId, crate::state::SlotKey)> = fp.slots.iter().copied().collect();
-                let elems_have: rustc_hash::FxHashSet<ObjId> = fp.elems.iter().copied().collect();
-                while let Some(o) = work.pop() {
-                    if !seen.insert(o) || seen.len() > 4096 {
-                        continue;
-                    }
-                    for ns in [Ns::Item, Ns::Attr] {
-                        if st.has_row(o, ns) && !rows_have.contains(&(o, ns)) {
-                            fp.rows.push((o, ns));
-                        }
-                    }
-                    st.slots.each(&o, &mut |sk, v| {
-                        if !slots_have.contains(&(o, *sk)) {
-                            fp.slots.push((o, *sk));
-                        }
-                        work.extend(v.pts.iter().filter(|x| *x >= obj_mark_call));
-                    });
-                    if st.elems.get(&o).is_some() && !elems_have.contains(&o) {
-                        fp.elems.push(o);
-                    }
-                }
-                let lens_changed: Vec<ObjId> = st.lens.diff_keys(&pre_bind.lens);
-                let mut fp_state = State::new();
-                for k in &fp.rows {
-                    if let Some(r) = st.rows.get(k) {
-                        fp_state.rows.insert(*k, r);
-                    }
-                }
-                for (oid, sk) in &fp.slots {
-                    if let Some(v) = st.slots.get(oid, sk) {
-                        fp_state.slots.set(oid, *sk, v);
-                    }
-                }
-                for k in &fp.elems {
-                    if let Some(v) = st.elems.get(k) {
-                        fp_state.elems.insert(*k, v);
-                    }
-                }
-                for k in &lens_changed {
-                    if let Some(v) = st.lens.get(k) {
-                        fp_state.lens.insert(*k, v);
-                    }
-                }
-                fp_state.reqs = rel.reqs;
-                let cur_chain = self.call_chain.clone();
-                let rel_verdicts: Vec<Verdict> = self.verdicts[verdict_mark..]
-                    .iter()
-                    .map(|v| {
-                        let mut nv = v.clone();
-                        if v.chain.len() >= chain_len && v.chain[..chain_len] == cur_chain[..] {
-                            nv.chain = v.chain[chain_len..].to_vec();
-                        }
-                        nv
-                    })
-                    .collect();
-                let raises = self.raise_stack.last().copied().unwrap_or(false);
-                self.call_cache.insert(sig, Rc::new(CacheHit { raises, completes: st.reachable, lens: lens_changed, ret: ret.clone(), fp_state, fp, verdicts: rel_verdicts }));
-            }
         }
         // the generator's body runs here, eagerly, but its caller sees the heap only where the
         // body is suspended: before the first item, at a yield, or at its end. The objects that
@@ -2037,77 +1828,6 @@ impl Analyzer {
         self.env_stack.pop();
         state.env = saved_env;
         state.unbound = saved_unbound;
-    }
-
-    /// Hashable description of everything a callee can observe, or None if too large.
-    #[allow(clippy::too_many_arguments)]
-    pub fn call_signature(&self, foid: u32, site: &str, entry: bool, self_v: &Option<Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &State) -> Option<Sig> {
-        let fi = self.func_info(foid);
-        let mut vals: Vec<Value> = args.to_vec();
-        vals.extend(kwargs.values().cloned());
-        vals.extend(star_args.iter().cloned());
-        vals.extend(star_kwargs.iter().cloned());
-        if let Some(sv) = self_v {
-            vals.push(sv.clone());
-        }
-        for cid in fi.closure.values() {
-            vals.push(state.slot(*cid, Ns::Cell, cell_key()));
-        }
-        let mut roots: Vec<u32> = vals.iter().flat_map(|v| v.pts.to_vec()).collect();
-        roots.push(fi.module);
-        let mut seen: Vec<u32> = Vec::new();
-        let mut seen_set: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
-        let mut work: Vec<(u32, u32)> = roots.into_iter().map(|o| (o, 0)).collect();
-        while let Some((oid, d)) = work.pop() {
-            if seen_set.contains(&oid) {
-                continue;
-            }
-            if seen.len() > 400 {
-                return None;
-            }
-            seen_set.insert(oid);
-            seen.push(oid);
-            if d >= 3 {
-                continue;
-            }
-            state.slots.each(&oid, &mut |_, v| {
-                for x in v.pts.iter() {
-                    if !seen_set.contains(&x) {
-                        work.push((x, d + 1));
-                    }
-                }
-            });
-        }
-        seen.sort_unstable();
-        let mut heap = Vec::with_capacity(seen.len());
-        for oid in seen {
-            heap.push((oid, state.rows.get(&(oid, Ns::Item)), state.rows.get(&(oid, Ns::Attr)), state.slots.sub_ref(&oid), state.elems.get(&oid), self.obj(oid).single));
-        }
-        let guards: Vec<Vec<String>> = self
-            .guards
-            .iter()
-            .map(|g| {
-                let mut v: Vec<String> = g.iter().cloned().collect();
-                v.sort();
-                v
-            })
-            .collect();
-        let mut kw: Vec<(StrId, Value)> = kwargs.iter().map(|(k, v)| (*k, v.clone())).collect();
-        kw.sort_by_key(|(k, _)| intern::str_get(*k));
-        Some(Sig {
-            foid,
-            site: site.to_string(),
-            entry,
-            self_v: self_v.clone(),
-            args: args.to_vec(),
-            kwargs: kw,
-            star_args: star_args.to_vec(),
-            star_kwargs: star_kwargs.to_vec(),
-            heap,
-            guards,
-            fr_single: self.frame().single && self.frame().loop_depth == 0,
-            ctx: self.frame().ctx.clone(),
-        })
     }
 
     #[allow(clippy::too_many_arguments)]

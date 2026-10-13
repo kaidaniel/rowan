@@ -74,8 +74,6 @@ pub const CHAIN: usize = 2;
 /// Statements a function code may run in all its calls (`ROWAN_LIMITS=budget=N`): past them
 /// its calls are unknown code.
 pub const FN_BUDGET: usize = 4096;
-/// Cached runs kept per function code (`calls::CacheHit`).
-pub const CACHE_PER_FN: usize = 32;
 /// A safety net, not the bound on work (the budget is): past this many milliseconds
 /// (`ROWAN_LIMITS=ms=N`) calls of user code are unknown calls and running bodies stop.
 pub const DEADLINE_MS: usize = 10000;
@@ -957,9 +955,6 @@ pub struct Analyzer {
     /// the hard deadline passed: function bodies stop, the calls they are in become unknown calls
     pub hard_cut: bool,
     cut_tick: u32,
-    pub call_cache: FxHashMap<calls::Sig, Rc<calls::CacheHit>>,
-    /// cached runs per function code (bounded by `CACHE_PER_FN`)
-    pub cache_count: FxHashMap<usize, usize>,
     pub entry_instances: FxHashMap<ObjId, ObjId>,
     pub fresh_in_progress: FxHashSet<ObjId>,
     pub main_module: ObjId,
