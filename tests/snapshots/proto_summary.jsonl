@@ -526,7 +526,6 @@
 ["verdict", "", 1118, 51, "'_is_subclass'", "attr", "input", [581, 593, 600, 594], "SummaryMixin()"]
 ["verdict", "", 1118, 51, "'_is_subclass'", "attr", "input", [581, 594], "SummaryMixin()"]
 ["verdict", "", 1118, 51, "'_is_subclass'", "attr", "input", [581, 600, 593, 594], "SummaryMixin()"]
-["verdict", "", 1118, 51, "'_is_subclass'", "attr", "input", [581, 600, 593, 600, 594], "SummaryMixin()"]
 ["verdict", "", 1118, 51, "'_is_subclass'", "attr", "input", [581, 600, 594], "SummaryMixin()"]
 ["verdict", "", 1118, 51, "'_is_subclass'", "attr", "input", [689, 693, 972], "SummaryMixin()"]
 ["verdict", "", 1118, 69, "'payload'", "attr", "input", [1046, 1091], "SummaryMixin()['objects']['*']"]

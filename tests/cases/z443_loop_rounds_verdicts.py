@@ -32,6 +32,22 @@ def tree(entries):
     return out
 
 
+def comprehension(items):
+    d = {}
+    return [(d["k"] if x else None, d.setdefault("k", 1)) for x in items]  #@ possibly k
+
+
+def counted(n):
+    d = {}
+    i = 0
+    while i < n:
+        if i > 0:
+            print(d["k"])  #@ sound k
+            #@todo ok k  (i > 0: an earlier iteration stored it)
+        d["k"] = i
+        i += 1
+
+
 d = {}
 for arg in sys.argv:
     if arg == "--again":
