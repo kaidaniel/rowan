@@ -1287,7 +1287,7 @@
 ["verdict", "", 653, 25, "'payload'", "attr", "input", [621, 622], "SummaryMixin()['objects']['*']"]
 ["verdict", "", 655, 50, "'pts'", "attr", "input", [621, 622], "result of class SummaryMixin.binding_of@L654"]
 ["verdict", "", 655, 60, "'kind'", "attr", "input", [621, 622], "SummaryMixin()['objects']['*']"]
-["verdict", "", 655, 60, "'objects'", "attr", "likely", [621, 622], "SummaryMixin()"]
+["verdict", "", 655, 60, "'objects'", "attr", "proven", [621, 622], "SummaryMixin()"]
 ["verdict", "", 656, 24, "'kind'", "attr", "input", [621, 622], "SummaryMixin()['objects']['*']"]
 ["verdict", "", 656, 24, "'objects'", "attr", "proven", [621, 622], "SummaryMixin()"]
 ["verdict", "", 657, 38, "'kv'", "attr", "input", [621, 622], "result of class SummaryMixin.binding_of@L654"]

@@ -428,6 +428,15 @@ impl Analyzer {
         let any_id = self.any_object(state);
         let any = Value::obj(any_id);
         while let Some(o) = work.pop() {
+            // (a skipped method's receiver: what it holds is havocked, it is not, unless met
+            // again through something else)
+            if let Some((_, n)) = self.havoc_guard.as_mut().filter(|(g, _)| *g == o) {
+                *n += 1;
+                if *n == 1 {
+                    state.slots.each(&o, &mut |sk, v| if sk.0 == Ns::Attr { work.extend(v.pts.iter()) });
+                }
+                continue;
+            }
             if o == rid || o == any_id || !seen.insert(o) {
                 continue;
             }
@@ -1199,12 +1208,40 @@ impl Analyzer {
     /// and cells it, and the code it can call, reads where they may change).
     #[allow(clippy::too_many_arguments)]
     fn skipped_call(&mut self, foid: ObjId, q: &str, self_v: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
+        // a method whose code touches its receiver only by attribute names (`self.x`, methods
+        // run on it): the receiver's own attributes change only by those names, unless what
+        // the call reaches otherwise reaches the receiver too (`havoc_guard`)
+        let recv = self_v.and_then(|v| v.single()).filter(|o| self.kind(*o) == Kind::Instance);
+        let eff = recv.and_then(|o| Some((o, self.receiver_effects(foid, o)?)));
+        if let Some((o, _)) = &eff {
+            self.havoc_guard = Some((*o, 0));
+        }
         let r = self.unknown_call(q, self_v, args, kwargs, star_args, star_kwargs, state, node);
         let site = s(&format!("{}@L{}", q, node.line));
         self.skipped_sites.insert(site);
         let mut roots = vec![foid];
         roots.append(&mut self.havoc_code);
-        self.follow_code(roots, r.single().unwrap_or(0), site, state);
+        roots.extend(eff.as_ref().and_then(|(o, _)| self.instance_class(*o)));
+        let rid = r.single().unwrap_or(0);
+        self.follow_code(roots, rid, site, state);
+        if let Some((o, (stores, deletes))) = eff {
+            let reached_otherwise = self.havoc_guard.take().is_some_and(|(_, n)| n > 1);
+            if reached_otherwise {
+                self.havoc_with(&[Value::obj(o)], rid, site, state, &mut rustc_hash::FxHashSet::default());
+            } else {
+                let any = Value::obj(self.any_object(state));
+                let mut row = state.row(o, Ns::Attr);
+                for k in stores {
+                    let v = state.slot(o, Ns::Attr, k).join(&any);
+                    state.set_slot(o, Ns::Attr, k, v, false);
+                    row = row.store(k, false);
+                }
+                for k in deletes {
+                    row = row.delete(k, false);
+                }
+                state.set_row(o, Ns::Attr, row);
+            }
+        }
         // (a raise after the code's effects on what it reaches beyond its arguments)
         self.flag_may_raise(state);
         r

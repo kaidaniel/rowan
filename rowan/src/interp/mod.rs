@@ -902,6 +902,8 @@ pub struct Analyzer {
     pub closures: FxHashMap<Vec<ObjId>, Rc<effects::Closure>>,
     /// the code objects the last `havoc_reachable` met (functions, classes, bound methods)
     pub havoc_code: Vec<ObjId>,
+    /// the receiver of a skipped method call (`skipped_call`) and how often a havoc met it
+    pub havoc_guard: Option<(ObjId, u32)>,
     pub entry_instances: FxHashMap<ObjId, ObjId>,
     pub fresh_in_progress: FxHashSet<ObjId>,
     pub main_module: ObjId,

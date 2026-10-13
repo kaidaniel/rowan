@@ -40,9 +40,10 @@ ruff and walks the syntax tree directly, running the program on abstract values.
   all (`budget`); past that its calls are unknown calls that may also change what its code
   reaches beyond its arguments (`effects.rs`: the globals and cells its code, and the code it
   reaches by name, reads where they may change or escape; class attributes by name; mutable
-  defaults; cached per set of code), and the function gets a reporting run with open
-  parameters (its lines then hold for the calls that did not run). Entry runs are not counted
-  (one per function). So the work is bounded by the number of functions times the budget.
+  defaults; a method's receiver only by the names its code uses on it unless it escapes,
+  `receiver_effects`), and the function gets a reporting run with open parameters (its lines
+  then hold for the calls that did not run). Entry runs are not counted (one per function).
+  So the work is bounded by the number of functions times the budget.
   * **Recursion:** the inner call uses the running activation's partial result; it iterates
     to a fixpoint (8 rounds), then widens.
   * **Unknown values** are not taken for instances of the program's classes: a method of an
@@ -86,8 +87,7 @@ ruff and walks the syntax tree directly, running the program on abstract values.
   engine output. When an expectation turns out wrong, fix it with a comment saying why,
   keeping the line count. Value analysis matters more than bug-finding verdicts.
 * **Hypotheses need a repro.** For a suspected bug or slowdown, write a small program showing
-  it first (it becomes a golden case, with `#@work` / `#@tabulations` (body runs) bounds for cost), fix
-  it, then measure on the big programs.
+  it first (a golden case; `#@work` / `#@tabulations` bounds for cost), fix it, then measure.
 * **Soundness first.** Where the runtime oracle and this file disagree, the oracle wins. Golden
   cases matter; snapshot changes are fine when sound.
 * **Commits.** Commit when a round of work is complete and golden, snapshots and `cargo test`
