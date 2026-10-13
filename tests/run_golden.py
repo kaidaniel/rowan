@@ -22,7 +22,8 @@ Tensor shapes (`#@shape`, `#@dim`, `#@requires`, `#@shape-error`): see tests/sha
 bound on the work for cases about blow-ups (N by hand: what the program needs, with a margin).
 `#@tabulations <= N`: likewise for the per-call-site body runs (forced ones included);
 `#@joins <= N`: for the joins of two different rows; `#@work <= N`: for the statements run;
-`#@visits <= N`: for the heap entries walks and footprint joins visit.
+`#@visits <= N`: for the heap entries walks and footprint joins visit; `#@havoc <= N`: for
+the objects unknown code's havoc walks visit.
 `#@limits k=v,...`: the case runs with these `ROWAN_LIMITS` (budgets small enough to reach).
 A verdict matches a line if it was recorded at that line or while a call made from that line was
 active.  A `#@` directive must be the last thing on its line (the key runs to its end).
@@ -325,7 +326,7 @@ def run_case(path: str, verbose: bool = False) -> Tuple[bool, List[str]]:
     m = re.search(r"^#@objects\s*<=\s*(\d+)\s*$", src, re.M)
     if m and res.get("objects", 0) > int(m.group(1)):
         failures.append(f"{res['objects']} objects, want at most {m.group(1)}")
-    for name in ("tabulations", "joins", "work", "visits"):
+    for name in ("tabulations", "joins", "work", "visits", "havoc"):
         m = re.search(r"^#@" + name + r"\s*<=\s*(\d+)\s*$", src, re.M)
         if m and res.get(name, 0) > int(m.group(1)):
             failures.append(f"{res[name]} {name}, want at most {m.group(1)}")

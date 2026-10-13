@@ -129,8 +129,8 @@ budget; informational, into the history on gh-pages).
   `#@ tier key`, `#@row NAME: present= definite= absent= closed|open`,
   `#@value NAME: exactly= | unknown | includes=`, `#@schema src: always= sometimes= only=`,
   `#@todo …`, `#@argv …`, `#@shape` (torch). Cost bounds for blow-up cases, N by hand:
-  `#@objects`, `#@tabulations`, `#@joins`, `#@work`, `#@visits <= N`; `#@limits k=v,…` sets the
-  case's `ROWAN_LIMITS`. A directive-only line applies to the code line above.
+  `#@objects`, `#@tabulations`, `#@joins`, `#@work`, `#@visits`, `#@havoc <= N`; `#@limits
+  k=v,…` sets the case's `ROWAN_LIMITS`. A directive-only line applies to the code line above.
 * **Oracle** (`tests/oracle.py`): reruns each case under CPython with a tracer and checks every
   directive; schemas by dropping keys from the input. Strict on the library suites.
 * **Snapshots** (`tests/snapshots/`): `--json` on `examples/etl_report.py` and
@@ -140,8 +140,8 @@ budget; informational, into the history on gh-pages).
 ## Debugging switches
 
 * `ROWAN_DEBUG=1`: every body run (`run F at SITE`), entry runs, and a final `work:` line
-  (statements, units = statements + walk visits / 16, body runs, objects, row joins, visits):
-  deterministic counters to compare builds. `2`: also every raise and try decision.
+  (statements, units = statements + walk visits / 16, body runs, objects, row joins, visits,
+  havoc visits): deterministic counters to compare builds. `2`: also every raise and try.
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (the golden `#@limits` sets them per
   case). `ROWAN_FOLLOW=pkg,…` = `--follow`. `ROWAN_TODO=check` checks `#@todo`s too.
 * **Profiling:** short runs, several in parallel. `sample <pid> 3` for time,

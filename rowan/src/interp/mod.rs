@@ -886,6 +886,8 @@ pub struct Analyzer {
     pub work: usize,
     /// objects visited by reachability walks (liveness, GC): part of the work measure
     pub walked: std::cell::Cell<usize>,
+    /// objects visited by unknown code's havoc walks (`havoc_with`)
+    pub havoc_walked: usize,
     /// return / break / continue statements executed (a try body that ends with one did not raise)
     pub exit_count: usize,
     /// when the analysis started (see `DEADLINE_MS`)
@@ -901,6 +903,7 @@ pub struct Analyzer {
     pub havoc_code: Vec<ObjId>,
     /// the receiver of a skipped method call (`skipped_call`) and how often a havoc met it
     pub havoc_guard: Option<(ObjId, u32)>,
+
     pub entry_instances: FxHashMap<ObjId, ObjId>,
     pub fresh_in_progress: FxHashSet<ObjId>,
     pub main_module: ObjId,

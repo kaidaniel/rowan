@@ -99,6 +99,7 @@ impl Interners {
         };
         // fixed ids used all over the place
         it.strs.intern(Arc::from("")); // StrId(0) == ""
+        it.strs.intern(Arc::from("…")); // StrId(1) == "…"
         it.keys.intern(Key::Str(Arc::from("*"))); // KeyId(0) == "*"
         it.lenses.intern(Lens::default()); // LensId(0) == empty lens
         it
@@ -107,6 +108,8 @@ impl Interners {
 
 pub const STAR: KeyId = KeyId(0);
 pub const EMPTY_STR: StrId = StrId(0);
+/// The mutator standing for the ones a row no longer names (`domain::cap_mutators`).
+pub const MORE: StrId = StrId(1);
 pub const EMPTY_LENS: LensId = LensId(0);
 
 pub fn key(k: Key) -> KeyId {

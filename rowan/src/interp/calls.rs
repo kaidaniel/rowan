@@ -440,6 +440,7 @@ impl Analyzer {
             if o == rid || o == any_id || !seen.insert(o) {
                 continue;
             }
+            self.havoc_walked += 1;
             let k = self.kind(o);
             match (&k, &self.obj(o).payload) {
                 // (the code it meets, for `skipped_call`; a stored method may change its receiver)
@@ -471,11 +472,9 @@ impl Analyzer {
             for ns in [Ns::Item, Ns::Attr] {
                 if state.has_row(o, ns) || (ns == Ns::Item && matches!(k, Kind::Dict | Kind::Frame)) || (ns == Ns::Attr && k == Kind::Instance) {
                     let r0 = state.row(o, ns);
-                    if !(r0.definite.is_empty() && r0.absent.is_empty() && r0.mutators.contains(site)) {
-                        let r = r0.mutate(site);
-                        if r != r0 {
-                            state.set_row(o, ns, r);
-                        }
+                    let r = r0.mutate(site);
+                    if r != r0 {
+                        state.set_row(o, ns, r);
                     }
                 }
             }
