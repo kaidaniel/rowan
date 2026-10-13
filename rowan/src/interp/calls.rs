@@ -384,6 +384,27 @@ impl Analyzer {
         Value::obj(rid)
     }
 
+    /// The shared unknown object (`any_object`).
+    pub fn is_any(&self, o: ObjId) -> bool {
+        crate::state::is_any(o)
+    }
+
+    /// `v` passes to unknown code without a call (stored into an object only unknown code
+    /// holds): what it reaches may change, and the code it holds may run.
+    pub fn escape(&mut self, v: &Value, site: &str, state: &mut State) {
+        if v.pts.is_empty() {
+            return;
+        }
+        let any = self.any_object(state);
+        let site_id = s(site);
+        self.havoc_reachable(std::slice::from_ref(v), any, site_id, state);
+        let found = std::mem::take(&mut self.havoc_code);
+        let callables: Vec<ObjId> = found.into_iter().filter(|o| matches!(self.kind(*o), Kind::Function | Kind::Bound | Kind::Partial)).collect();
+        if !callables.is_empty() {
+            self.follow_code(callables, any, site_id, state);
+        }
+    }
+
     pub fn reachable_records(&self, vals: &[Value], state: &State, depth: u32) -> Vec<(u32, Ns)> {
         let mut out: Vec<(u32, Ns)> = Vec::new();
         let mut seen: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
@@ -409,13 +430,9 @@ impl Analyzer {
     }
 
     /// The object standing for any value unknown code may have stored: nothing known about it.
-    pub fn any_object(&mut self, state: &mut State) -> ObjId {
+    pub fn any_object(&mut self, _state: &mut State) -> ObjId {
         let o = self.alloc_raw(Kind::Unknown, "any", "", false, "?", Payload::None);
-        for ns in [Ns::Item, Ns::Attr] {
-            if !state.has_row(o, ns) {
-                state.set_row(o, ns, Row::top());
-            }
-        }
+        crate::state::set_any(o);
         o
     }
 

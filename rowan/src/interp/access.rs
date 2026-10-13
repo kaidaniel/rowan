@@ -1115,6 +1115,12 @@ impl Analyzer {
     }
 
     pub fn store_key(&mut self, oid: u32, ns: Ns, kv: &KeyVal, v: &Value, strong: bool, node: &Node, state: &mut State) {
+        // a store into what unknown code holds (the shared unknown object): the value goes to
+        // unknown code, as if given to it; the shared object stays "anything"
+        if self.is_any(oid) {
+            self.escape(v, &format!("store into unknown@L{}", node.line), state);
+            return;
+        }
         let kv = &self.canon_kv(oid, ns, kv, state);
         let row = state.row(oid, ns);
         match kv {
@@ -2225,6 +2231,10 @@ impl Analyzer {
         let targets: Vec<u32> = obj.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Instance | Kind::Module | Kind::Class | Kind::Unknown | Kind::Frame | Kind::Namespace | Kind::Function)).collect();
         for &oid in &targets {
             let kind = self.kind(oid);
+            if self.is_any(oid) {
+                self.escape(v, &format!("store into unknown@L{}", node.line), state);
+                continue;
+            }
             let strong = targets.len() == 1 && self.obj(oid).single;
             // a store that may raise on some classes (a frozen model / dataclass, a
             // `__setattr__`): decided per call site, where the class is known

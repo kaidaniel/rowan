@@ -7,7 +7,8 @@ must be true at the last commit. The details live in the code's doc comments.
 ## How rowan works
 
 rowan is a whole-program **abstract interpreter** for Python (Rust, `rowan/`). It parses with
-ruff and walks the syntax tree directly, running the program on abstract values.
+ruff (private names mangled as CPython does) and walks the syntax tree, running the program
+on abstract values. Imports run as Python runs them (`TYPE_CHECKING` is False, `import *`).
 
 * **Values** (`Value`, `domain.rs`) are a set of object ids plus a scalar part (`KeyVal`): a
   literal, up to 64 literals, the keys of some objects, or `Data(label)`, an unknown named by
@@ -49,8 +50,9 @@ ruff and walks the syntax tree directly, running the program on abstract values.
   * **Unknown values** are not taken for instances of the program's classes: a method of an
     unknown object is an unknown call (no duck typing; it was a closed-world assumption).
   * **Unknown calls** may change everything they reach through what they are given, at any
-    depth: records get a mutator, slots may hold anything (one shared unknown object), lists
-    and sets any items and length; the program's functions among it may run (`follow_code`).
+    depth: records get a mutator, slots may hold anything (one shared unknown object, which
+    no store changes: a value stored into it goes to unknown code, `escape`), lists and sets
+    any items and length; the program's functions among it may run (`follow_code`).
     They return an unknown and may raise anything. Library functions known to have no effect
     are `noeffect` (`ALLOWLIST_PREFIXES`), except those changing their arguments (`random.shuffle`).
   * **Entry points:** functions nothing calls run with open parameters; their requirements
@@ -192,8 +194,6 @@ extension (talks to `rowan serve`).
 ## Known problems and next steps
 
 Open bugs, performance items and precision to-dos are in `SUGGESTED_CHANGES.md`, each with a
-repro; work it in order. The main ones: the interpreter is still far from its 10k-line goal,
-precision lost where a function's budget runs out on large programs, and the precision to-dos
-(`#@todo`s in the suites). Symbolic summaries were removed (they were the main source of
-unsoundness and cost; the parked `parked/joined-summaries` branch tried to repair them). The branch `slotmap-trie` is parked (same
-answers, no gain).
+repro; work it in order. The main ones: the interpreter is far from its 10k-line goal, the
+frontier programs' cost, precision lost where budgets run out, the `#@todo`s. Parked branches:
+`parked/joined-summaries` (symbolic summaries, removed: unsound, costly), `slotmap-trie`.
