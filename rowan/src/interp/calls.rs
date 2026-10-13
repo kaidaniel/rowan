@@ -776,8 +776,21 @@ impl Analyzer {
             let before = if run { Some(state.copy()) } else { None };
             self.force_at = Some((lg.site.clone(), lg.ctx.0.clone(), lg.ctx.1));
             let saved = std::mem::replace(&mut self.call_chain, lg.chain.clone());
-            self.call_user(lg.foid, lg.self_v.clone(), lg.args.clone(), lg.kwargs.clone(), vec![], vec![], state, &lg.node, None, false);
+            let r = self.call_user(lg.foid, lg.self_v.clone(), lg.args.clone(), lg.kwargs.clone(), vec![], vec![], state, &lg.node, None, false);
             self.call_chain = saved;
+            if !r.pts.contains(o) && state.reachable {
+                // (its body did not run — past its budget, cut at the deadline: unknown code
+                // gives any number of unknown items, and returns something unknown)
+                let it = self.iterate(&r, &lg.node, state);
+                let e = self.elem_value(&it.elem, &lg.node, "gen");
+                let e = state.slot(o, Ns::Elem, intern::STAR).join(&e);
+                state.set_slot(o, Ns::Elem, intern::STAR, Value::objs(e.pts.clone()), false);
+                let kv = crate::domain::kv_join(&state.elems.get(&o).unwrap_or(DATA), &e.kv);
+                state.elems.insert(o, kv);
+                self.set_llen(o, state, None);
+                state.drop_obj_ns(o, Ns::Pos);
+                state.set_slot(o, Ns::Attr, key_str_lit("\u{1}genret"), Value::data("generator result"), true);
+            }
             if let Some(mut b) = before {
                 let j = state.join(&mut b);
                 state.replace_with(j);

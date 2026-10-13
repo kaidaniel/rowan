@@ -124,7 +124,6 @@ impl Analyzer {
             is_contextmanager: std::cell::Cell::new(false),
             is_cached: std::cell::Cell::new(false),
             is_memo: std::cell::Cell::new(false),
-            generator: std::cell::Cell::new(None),
         };
         let n = node.node();
         let has_closure = !info.closure.is_empty();

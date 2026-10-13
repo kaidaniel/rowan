@@ -252,7 +252,6 @@ pub struct FuncInfo {
     pub is_cached: Cell<bool>,
     /// `functools.lru_cache` / `cache`: repeated arguments give the cached result
     pub is_memo: Cell<bool>,
-    pub generator: Cell<Option<ObjId>>,
 }
 
 impl FuncInfo {
