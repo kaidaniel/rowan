@@ -2024,9 +2024,10 @@ impl Analyzer {
             let is_field = self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name);
             if let (Some(defc), false) = (self.class_lookup(c, name), is_field) {
                 let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
-                // a class attribute (not a method): the access succeeds
+                // a class attribute: the access succeeds (a method read counts only where the
+                // receiver may be other objects too, which may lack it)
                 let plain = !cv.pts.iter().any(|f| matches!(self.kind(f), Kind::Function | Kind::Bound) && !(self.kind(f) == Kind::Function && self.func_info(f).is_property.get()));
-                if !guarded && plain {
+                if !guarded && (plain || !single_target) {
                     self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
                 }
                 return self.bound_outs(&cv, oid, c, name, node, state);

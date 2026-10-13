@@ -1103,7 +1103,7 @@ pub fn classify(row: &Row, k: KeyId) -> Classification {
     }
     let prov = row.provides(k);
     let mut ext: Vec<(SourceId, KeySet)> = prov.iter().filter(|(s, _)| !source_is_data(*s)).cloned().collect();
-    ext.sort_by_key(|(s, _)| source_label(*s));
+    ext.sort_by_cached_key(|(s, _)| source_label(*s));
     let data = prov.iter().any(|(s, _)| source_is_data(*s));
     if !ext.is_empty() {
         let note = if row.present.contains(k) { "also set on some paths" } else { "" };
