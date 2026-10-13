@@ -1139,15 +1139,11 @@ fn getattr_hook_outcome(an: &mut Analyzer, st: &mut State, o: u32, k: KeyId, nod
     let mark = an.objects.len() as u32;
     let caught: rustc_hash::FxHashSet<String> = ["AttributeError".to_string()].into_iter().collect();
     an.enter_try(caught, &mut s2);
-    an.raise_stack.push(false);
-    an.esc_cls.push(Some(Vec::new()));
     an.call_method_with(&Value::obj(o), "__getattr__", vec![Value::lit(k)], node, &mut s2);
-    let escaped = an.raise_stack.pop().unwrap_or(false);
-    an.esc_cls.pop();
     let out = an.leave_try();
     let (flagged, raised) = (out.any(), out.raised());
     let recs = out.recs;
-    if flagged || escaped {
+    if flagged {
         return None;
     }
     // (objects it made, the exception among them, do not count)
@@ -1848,7 +1844,6 @@ fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // computed here may raise anywhere)
     if matches!(last(&c.qual), "format" | "format_map") && !(out.pts.is_empty() && out.kv.is_literal()) {
         an.flag_may_raise(st);
-        an.note_raise();
     }
     const STR_OUT: &[&str] = &["upper", "lower", "strip", "lstrip", "rstrip", "title", "capitalize", "casefold", "swapcase", "removeprefix", "removesuffix", "zfill", "center", "ljust", "rjust", "replace", "expandtabs", "join", "format"];
     if !STR_OUT.contains(&last(&c.qual)) || !out.pts.is_empty() {

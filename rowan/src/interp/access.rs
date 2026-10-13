@@ -771,12 +771,6 @@ impl Analyzer {
                 // a library object rowan does not model (`sys.argv`): its subscript runs code
                 // rowan cannot see, which may raise anything
                 Kind::External if ns == Ns::Item => {
-                    if let Some(t) = self.raise_stack.last_mut() {
-                        *t = true;
-                    }
-                    if let Some(e) = self.esc_cls.last_mut() {
-                        *e = None;
-                    }
                     self.flag_may_raise(state);
                     parts.push(line_data.clone());
                 }

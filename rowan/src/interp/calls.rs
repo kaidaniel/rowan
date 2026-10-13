@@ -969,9 +969,6 @@ impl Analyzer {
         let saved_env = std::mem::take(&mut state.env);
         let saved_unbound = std::mem::take(&mut state.unbound);
         self.env_stack.push(saved_env.clone());
-        self.raise_stack.push(false);
-        self.esc_cls.push(Some(Vec::new()));
-        let raise_mark = self.raise_records;
         let saved_ret = state.ret.take();
         // (the caller's recorded returns are not the callee's: its end must not join them in)
         let saved_exits = { state.exits.take() };
@@ -1188,25 +1185,6 @@ impl Analyzer {
         self.call_chain = saved_chain;
         self.frames.pop();
         self.env_stack.pop();
-        let raised = self.raise_stack.pop().unwrap_or(false);
-        let callee_cls = self.esc_cls.pop().flatten();
-        if raised {
-            if crate::interp::debug_level() == 2 {
-                eprintln!("  callee {} raised (tabulated at L{})", fi.qualname, node.line);
-            }
-            // (a raise the enclosing try recorded, with its state and exception, needs no
-            // "raised somewhere" flag: the handler gets that exception, not an unknown one; nor
-            // do raises of known classes no guard here catches)
-            let known = callee_cls.as_ref().filter(|cs| !cs.is_empty() && !cs.iter().any(|c| self.class_guarded(c)));
-            if self.raise_records > raise_mark || known.is_some() {
-                if let Some(t) = self.raise_stack.last_mut() {
-                    *t = true;
-                }
-                self.merge_esc(callee_cls.clone());
-            } else {
-                self.note_raise();
-            }
-        }
         state.env = saved_env;
         state.unbound = saved_unbound;
         state.ret = saved_ret;
@@ -1317,7 +1295,6 @@ impl Analyzer {
                 recs.push((cls, j, exc));
             }
         }
-        self.raise_records += 1;
         true
     }
 
@@ -1413,23 +1390,6 @@ impl Analyzer {
         self.guards().any(|g| g.contains("*") || c.0.iter().any(|n| g.contains(n)) || (!c.1 && (g.contains("Exception") || g.contains("BaseException"))))
     }
 
-    /// The running call may also raise these (None: something of unknown class).
-    pub fn merge_esc(&mut self, cls: Option<Vec<super::ExcNames>>) {
-        if let Some(e) = self.esc_cls.last_mut() {
-            match (e.as_mut(), cls) {
-                (Some(v), Some(cs)) => {
-                    for c in cs {
-                        if !v.contains(&c) {
-                            v.push(c);
-                        }
-                    }
-                }
-                (Some(_), None) => *e = None,
-                _ => {}
-            }
-        }
-    }
-
     /// The class names of an exception value (one class; None: not known).
     pub fn exc_value_names(&self, v: &Value) -> Option<super::ExcNames> {
         if !v.kv.is_bot() || v.pts.is_empty() {
@@ -1507,21 +1467,14 @@ impl Analyzer {
                 }
             }
         }
-        self.cur_exc_cls = Some(cls.clone());
-        if self.record_raise_state(state) {
-            return;
-        }
+        self.cur_exc_cls = Some(cls);
+        self.record_raise_state(state);
         self.cur_exc_cls = None;
-        self.merge_esc(Some(vec![cls]));
-        if let Some(t) = self.raise_stack.last_mut() {
-            *t = true;
-        }
     }
 
     /// Code that may raise anything ran here (unknown code, a model that does not say what it
-    /// raises): the running call may raise, and a running try records this state.
+    /// raises): a running try records this state.
     pub fn flag_may_raise(&mut self, state: &mut State) {
-        self.note_raise();
         self.cur_exc = None;
         self.cur_exc_cls = Some(super::any_exc());
         self.record_raise_state(state);
@@ -1529,29 +1482,14 @@ impl Analyzer {
     }
 
     /// A raise a try context recorded that leaves it (no handler of it surely catches it): the
-    /// enclosing try records it, or the running call raises it.
+    /// enclosing try records it (with no try running, it leaves the program).
     pub fn reraise_rec(&mut self, rec: super::RaiseRec) {
         let (cls, mut st, exc) = rec;
         self.cur_exc = if exc.pts.is_empty() { None } else { Some(exc) };
-        self.cur_exc_cls = cls.clone();
-        if !self.record_raise_state(&mut st) {
-            self.cur_exc = None;
-            self.cur_exc_cls = None;
-            self.merge_esc(cls.filter(|c| !super::is_any_exc(&Some(c.clone()))).map(|c| vec![c]));
-            if let Some(t) = self.raise_stack.last_mut() {
-                *t = true;
-            }
-        }
-    }
-
-    /// The call that just completed may raise something of unknown class.
-    pub fn note_raise(&mut self) {
-        if let Some(e) = self.esc_cls.last_mut() {
-            *e = None;
-        }
-        if let Some(t) = self.raise_stack.last_mut() {
-            *t = true;
-        }
+        self.cur_exc_cls = cls;
+        self.record_raise_state(&mut st);
+        self.cur_exc = None;
+        self.cur_exc_cls = None;
     }
 
     pub fn in_method_frame(&mut self, foid: u32, self_v: Value, args: Vec<Value>, state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &mut State)) {

@@ -775,9 +775,6 @@ pub struct Analyzer {
     pub lazy_src: FxHashMap<ObjId, Vec<(ObjId, Option<usize>)>>,
     /// a context part every allocation adds (a model run once per receiver)
     pub alloc_extra: Option<String>,
-    /// beside `raise_stack`: the classes of the exceptions that may leave the running call
-    /// (None: some of unknown class)
-    pub esc_cls: Vec<Option<Vec<ExcNames>>>,
     /// a load guarded by a `try` handler is running (its key is still required)
     pub caught_load: bool,
     /// the right operand of a comparison link already evaluated (chained comparisons)
@@ -925,8 +922,6 @@ pub struct Analyzer {
     /// a copy's original (through copies made at the same node: `out = deepcopy(out)` in a loop
     /// makes one copy site, not a new one per round)
     pub copy_root: FxHashMap<ObjId, ObjId>,
-    /// raises recorded by an enclosing try (`record_raise_state`), counted
-    pub raise_records: u64,
     /// the class of the exception being recorded (set beside `cur_exc`)
     pub cur_exc_cls: Option<ExcNames>,
     /// the call being evaluated: where an exception a model raises is allocated
@@ -949,8 +944,6 @@ pub struct Analyzer {
     /// `self.f = p` in `__init__` with `p` a parameter: the classes of the arguments seen for
     /// `p` at construction sites, by (class, field) — the field's class when there is one
     pub ctor_field_classes: FxHashMap<(ObjId, String), FxHashSet<ObjId>>,
-    /// per running call: did it raise an uncaught exception / call unknown code?
-    pub raise_stack: Vec<bool>,
     pub row_checks: Vec<RowCheck>,
     /// collect `facts` (the `--facts` mode)
     pub facts_on: bool,

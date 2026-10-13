@@ -166,19 +166,11 @@ impl Analyzer {
                         }
                     }
                 }
-                // uncaught here (no enclosing handler for it): the running call raises
-                let name = r.exc.as_ref().map(|e| match &**e {
-                    ast::Expr::Call(c) => dotted_last(&c.func),
-                    other => dotted_last(other),
-                });
                 // a bare `raise` re-raises what the running handler caught
-                let names: Vec<String> = match &name {
-                    Some(n) => vec![n.clone()],
+                let names: Vec<String> = match &r.exc {
+                    Some(_) => vec![],
                     None => self.handling.last().map(|h| h.iter().cloned().collect()).unwrap_or_default(),
                 };
-                let caught = self.guards().any(|g| {
-                    g.contains("*") || g.contains("Exception") || g.contains("BaseException") || names.iter().any(|n| g.contains(n) || n == "*" && !g.is_empty())
-                });
                 self.cur_exc = exc_v.clone().filter(|v| v.pts.iter().any(|o| self.kind(o) == Kind::Instance || self.exc_objs.contains_key(&o) || matches!(&self.obj(o).payload, Payload::Method(q, _) if q == "fastapi.httpexc")));
                 // a bare raise: the exception the handler holds
                 if r.exc.is_none() {
@@ -200,24 +192,12 @@ impl Analyzer {
                 if self.cur_exc_cls.is_none() && r.exc.is_none() && names.len() == 1 && names[0] != "*" {
                     self.cur_exc_cls = Some((crate::interp::builtin_exc_names(&names[0]).0, false));
                 }
-                // (a handler of a base class catches it too)
-                let caught = caught || self.cur_exc_cls.as_ref().is_some_and(|(ns, _)| self.guards().any(|g| ns.iter().any(|n| g.contains(n))));
-                let raised_cls = self.cur_exc_cls.clone();
+                // (the running try, if any, takes it with this state; else it leaves the program)
                 if state.reachable {
                     self.record_raise_state(state);
                 }
                 self.cur_exc = None;
                 self.cur_exc_cls = None;
-                if !caught {
-                    // (the class leaving the call: known, or not)
-                    self.merge_esc(raised_cls.map(|c| vec![c]));
-                    if crate::interp::debug_level() == 2 {
-                        eprintln!("  raise statement at L{} in {}", frontend::node(r).line, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
-                    }
-                    if let Some(t) = self.raise_stack.last_mut() {
-                        *t = true;
-                    }
-                }
                 state.reachable = false;
             }
             ast::Stmt::Assert(a) => {
@@ -1477,7 +1457,6 @@ impl Analyzer {
         // on their way out
         let has_finally = !fin.is_empty();
         let outer_exits = if has_finally { state.exits.take() } else { None };
-        let raise_before = self.raise_stack.last().copied().unwrap_or(false);
         let mut pre = state.copy();
         self.enter_try(caught, &mut pre);
         self.cond_depth += 1;
@@ -1661,12 +1640,6 @@ impl Analyzer {
                 w.exits = None;
                 self.run_finally(fin, &mut w, is_escape);
                 if is_escape {
-                    if !w.reachable {
-                        // the finally returned on every path: the exception does not leave
-                        if let Some(r) = self.raise_stack.last_mut() {
-                            *r = raise_before;
-                        }
-                    }
                     // a finally that completes re-raises: nothing continues from here
                     w.reachable = false;
                 } else if w.reachable {
