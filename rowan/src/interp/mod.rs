@@ -855,6 +855,8 @@ pub struct Analyzer {
     /// unknown call sites (sources and mutators are named by them) as written: (the call's
     /// text, its module, its line), for reports
     pub site_names: FxHashMap<StrId, (String, u32, u32)>,
+    /// the sites of calls of the program's code that did not run (`skipped_call`)
+    pub skipped_sites: FxHashSet<StrId>,
     /// unknown objects named in the program's own terms (`a`, `a(b)`, `cfg["db"]`,
     /// `rows[*]`, `json.loads(text)`): printed instead of `?`
     pub symbols: FxHashMap<ObjId, String>,

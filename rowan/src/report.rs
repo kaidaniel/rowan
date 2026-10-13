@@ -331,7 +331,9 @@ pub fn site_text(an: &Analyzer, site: &str) -> String {
     };
     if let Some((text, m, line)) = an.site_names.get(&intern::s(site)) {
         let t: String = if text.chars().count() > 50 { format!("{}…", text.chars().take(49).collect::<String>()) } else { text.clone() };
-        return format!("`{}` ({})", t, in_file(*m, *line));
+        // (a call of the program's own code that rowan no longer follows: say why it is unknown)
+        let not_followed = if an.skipped_sites.contains(&intern::s(site)) { ", a call rowan no longer follows" } else { "" };
+        return format!("`{}` ({}{})", t, in_file(*m, *line), not_followed);
     }
     if site == "…" {
         // (a row names its first few unknown calls, then this)

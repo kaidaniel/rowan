@@ -1440,6 +1440,7 @@ impl Analyzer {
     fn skipped_call(&mut self, foid: ObjId, q: &str, self_v: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
         let r = self.unknown_call(q, self_v, args, kwargs, star_args, star_kwargs, state, node);
         let (rid, site) = (r.single().unwrap_or(0), s(&format!("{}@L{}", q, node.line)));
+        self.skipped_sites.insert(site);
         let any = Value::obj(self.any_object(state));
         // (the code it holds, and the code the data it may change holds)
         let mut roots = vec![foid];
