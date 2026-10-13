@@ -331,8 +331,14 @@ impl Analyzer {
         let rctx: String = self.frame().ctx.rsplit('/').next().unwrap_or("").to_string();
         let rid = self.alloc(Kind::Unknown, &format!("ret:{}", site), state, &format!("result of {}", site), Payload::None, None, Ns::Item, Some(true), Some(&rctx));
         // everything it can reach through what it is given may have changed: keys, values,
-        // items, lengths
+        // items, lengths; and it may call the program's functions it is given
         self.havoc_reachable(&vals, rid, site_id, state);
+        let found = std::mem::take(&mut self.havoc_code);
+        let callables: Vec<ObjId> = found.iter().copied().filter(|o| matches!(self.kind(*o), Kind::Function | Kind::Bound | Kind::Partial)).collect();
+        if !callables.is_empty() {
+            self.follow_code(callables, rid, site_id, state);
+        }
+        self.havoc_code = found;
         // for people: the call as written and the known objects it was given (unknown code may
         // return one of them; given unknowns add nothing to `?`)
         {
@@ -1219,12 +1225,21 @@ impl Analyzer {
     #[allow(clippy::too_many_arguments)]
     fn skipped_call(&mut self, foid: ObjId, q: &str, self_v: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
         let r = self.unknown_call(q, self_v, args, kwargs, star_args, star_kwargs, state, node);
-        let (rid, site) = (r.single().unwrap_or(0), s(&format!("{}@L{}", q, node.line)));
+        let site = s(&format!("{}@L{}", q, node.line));
         self.skipped_sites.insert(site);
-        let any = Value::obj(self.any_object(state));
-        // (the code it holds, and the code the data it may change holds)
         let mut roots = vec![foid];
+        roots.append(&mut self.havoc_code);
+        self.follow_code(roots, r.single().unwrap_or(0), site, state);
+        r
+    }
+
+    /// What the code `roots` hold may change when it runs where rowan does not run it: the
+    /// values at the slots its closure may change are havocked, the slots it rebinds may hold
+    /// anything, and the code the data they hold is followed too.
+    fn follow_code(&mut self, mut roots: Vec<ObjId>, rid: ObjId, site: StrId, state: &mut State) {
+        let any = Value::obj(self.any_object(state));
         let mut seen: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
+        self.havoc_code.clear();
         loop {
             roots.append(&mut self.havoc_code);
             roots.sort_unstable();
@@ -1239,7 +1254,7 @@ impl Analyzer {
             }
             self.havoc_code.retain(|c| !cl.code.contains(c));
             if self.havoc_code.is_empty() {
-                return r;
+                return;
             }
         }
     }
