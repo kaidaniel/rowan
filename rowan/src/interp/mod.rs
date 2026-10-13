@@ -380,8 +380,6 @@ pub struct ClassInfo {
     pub dc_order: std::cell::Cell<bool>,
     /// subclasses something in `torch.nn` (`nn.Module`): calling an instance runs `forward`
     pub nn_module: bool,
-    /// attr → classes assigned to self.attr (lazy)
-    pub field_classes: RefCell<Option<FxHashMap<String, Vec<ObjId>>>>,
     pub any_fields: RefCell<Option<FxHashSet<String>>>,
 }
 
@@ -943,9 +941,6 @@ pub struct Analyzer {
     pub env_stack: Vec<IndexMap<StrId, Value>>,
     /// `@name.setter` functions by (defining class, attribute)
     pub prop_setters: FxHashMap<(ObjId, KeyId), ObjId>,
-    /// `self.f = p` in `__init__` with `p` a parameter: the classes of the arguments seen for
-    /// `p` at construction sites, by (class, field) — the field's class when there is one
-    pub ctor_field_classes: FxHashMap<(ObjId, String), FxHashSet<ObjId>>,
     pub row_checks: Vec<RowCheck>,
     /// collect `facts` (the `--facts` mode)
     pub facts_on: bool,
@@ -1888,8 +1883,7 @@ impl Analyzer {
                         Some(&format!("entry:{}", fi.qualname)),
                     );
                     for f in fields.iter() {
-                        let v = self.typed_field_value(oid, &intern::key_py_str(f), state, &format!("entry:{}", fi.qualname));
-                        state.set_slot(inst, ns, f, v, true);
+                        state.set_slot(inst, ns, f, Value::data(&format!("field {}", intern::key_py_str(f))), true);
                     }
                     if ci.typed_dict {
                         let src = Source::new(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param);
@@ -1917,18 +1911,6 @@ impl Analyzer {
             }
         }
         None
-    }
-
-    /// The value of a declared field: an instance of its annotated user class with `fixes`
-    /// (nested TypedDicts / dataclasses), otherwise opaque data.
-    pub fn typed_field_value(&mut self, cls: ObjId, field: &str, state: &mut State, ctx: &str) -> Value {
-        if let Some(fc) = self.field_class(cls, field, state) {
-            if self.class_info_opt(fc).is_some() && !self.fresh_in_progress.contains(&fc) {
-                let inst = self.fresh_instance(fc, state, &format!("{}.{}", ctx, field));
-                return Value::obj(inst);
-            }
-        }
-        Value::data(&format!("field {}", field))
     }
 
     pub fn fresh_instance(&mut self, cls_oid: ObjId, state: &mut State, ctx: &str) -> ObjId {
@@ -1975,8 +1957,7 @@ impl Analyzer {
                     let k = key_str_lit(&f);
                     let r = state.row(inst, ns).store(k, true);
                     state.set_row(inst, ns, r);
-                    let v = self.typed_field_value(c, &f, state, ctx);
-                    state.set_slot(inst, ns, k, v, true);
+                    state.set_slot(inst, ns, k, Value::data(&format!("field {}", f)), true);
                 }
             }
             order.extend(cinfo.bases.iter().copied());

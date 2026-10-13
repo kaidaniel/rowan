@@ -1789,7 +1789,6 @@ impl Analyzer {
             dc_kw_only: std::cell::Cell::new(false),
             dc_order: std::cell::Cell::new(false),
             nn_module,
-            field_classes: std::cell::RefCell::new(None),
             any_fields: std::cell::RefCell::new(None),
         };
         let info = std::rc::Rc::new(info);

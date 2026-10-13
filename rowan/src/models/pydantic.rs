@@ -1345,7 +1345,6 @@ impl Analyzer {
             dc_kw_only: std::cell::Cell::new(ci.dc_kw_only.get()),
             dc_order: std::cell::Cell::new(ci.dc_order.get()),
             nn_module: false,
-            field_classes: std::cell::RefCell::new(None),
             any_fields: std::cell::RefCell::new(None),
         });
         let spec = self.alloc_raw(Kind::Class, &site, "", true, &label, Payload::Class(info));
