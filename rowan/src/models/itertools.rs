@@ -4,7 +4,7 @@
 //! the right elements. `count`, `cycle` and `repeat(x)` are infinite iterator objects
 //! (`stdobj.infinite`) that `zip`, `islice` and `zip_longest` expand to the length needed.
 
-use crate::domain::{join_values, Ns, Row, Value};
+use crate::domain::{join_values, Ns, ObjId, Row, Value};
 use crate::frontend::Node;
 use crate::intern;
 use crate::interp::{Analyzer, Call, Payload};
@@ -601,4 +601,110 @@ pub fn register(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {
         ],
         m_itertools,
     );
+}
+
+impl crate::interp::Analyzer {
+    /// What a model call does to the one-shot iterators it is given: a full consumer uses
+    /// them up; a lazy wrapper (zip, islice, map, …) takes from them when it is consumed
+    /// itself; anything else leaves their position unknown.
+    pub(crate) fn after_model_consume(&mut self, call: &Call, r: &Value, state: &mut State) {
+        // (one-shot iterators, and lazy iterators over them)
+        let its: Vec<(usize, u32)> = call.args.iter().chain(call.star_args.iter()).enumerate().filter_map(|(i, a)| a.single().filter(|o| a.kv.is_bot() && ((self.obj(*o).iterator && self.obj(*o).single && matches!(self.kind(*o), Kind::List)) || self.lazy_src.contains_key(o))).map(|o| (i, o))).collect();
+        if its.is_empty() {
+            return;
+        }
+        let q = call.qual.as_str();
+        const FULL: &[&str] = &[
+            "builtins.list", "builtins.tuple", "builtins.set", "builtins.frozenset", "builtins.dict", "builtins.sorted", "builtins.sum", "builtins.min", "builtins.max",
+            "str.join", "collections.Counter", "collections.deque", "collections.OrderedDict", "collections.defaultdict", "list.extend", "set.update", "dict.update",
+            "statistics.mean", "statistics.median", "statistics.fmean", "math.fsum", "math.prod", "bytes.join",
+        ];
+        const LAZY_ALL: &[&str] = &["builtins.map", "builtins.filter", "builtins.enumerate", "builtins.iter", "itertools.chain", "itertools.starmap", "itertools.takewhile", "itertools.dropwhile", "itertools.accumulate", "itertools.compress", "itertools.groupby", "itertools.pairwise", "itertools.batched"];
+        if matches!(q, "builtins.next" | "builtins.iter") && its.len() == 1 && r.single() == Some(its[0].1) {
+            return;
+        }
+        if q == "builtins.next" {
+            return;
+        }
+        if FULL.contains(&q) {
+            for (_, o) in its {
+                self.exhaust(&Value::obj(o), state);
+            }
+            return;
+        }
+        let robj = r.single().filter(|ro| !its.iter().any(|(_, o)| o == ro));
+        if q == "itertools.islice" {
+            // islice(it, stop) / islice(it, start, stop): start + the items it gives
+            let lit = |v: Option<&Value>| v.and_then(|x| x.kv.as_lit().filter(|_| x.pts.is_empty())).and_then(intern::key_as_int);
+            let n = match call.args.len() {
+                2 => lit(call.args.get(1)),
+                n if n >= 3 => lit(call.args.get(2)),
+                _ => None,
+            };
+            if let (Some(ro), Some(n)) = (robj, n) {
+                self.lazy_src.insert(ro, vec![(its[0].1, Some(n.max(0) as usize))]);
+                return;
+            }
+        }
+        if q == "builtins.zip" {
+            if let (Some(ro), Some(pulls)) = (robj, self.zip_pulls(call, state)) {
+                self.lazy_src.insert(ro, pulls);
+                return;
+            }
+        }
+        if LAZY_ALL.contains(&q) {
+            if let Some(ro) = robj {
+                self.lazy_src.insert(ro, its.iter().map(|(_, o)| (*o, None)).collect());
+                return;
+            }
+        }
+        for (_, o) in its {
+            if self.lazy_src.contains_key(&o) {
+                self.consume_lazy(&Value::obj(o), false, state);
+            } else {
+                self.set_cursor(o, None, state);
+            }
+        }
+    }
+
+    /// The items `zip(...)` takes from each one-shot iterator argument when it is consumed:
+    /// rounds = the shortest length; in the last round the arguments before the first that
+    /// ran out each gave one more.
+    pub(crate) fn zip_pulls(&mut self, call: &Call, state: &mut State) -> Option<Vec<(ObjId, Option<usize>)>> {
+        if !call.star_args.is_empty() || call.kwargs.keys().any(|k| &*intern::str_get(*k) != "strict") {
+            return None;
+        }
+        // (exact remaining length, or a lower bound)
+        let mut lens: Vec<(Option<usize>, usize, Option<u32>)> = Vec::new();
+        for a in &call.args {
+            let one = a.single().filter(|o| a.kv.is_bot() && self.obj(*o).iterator && self.obj(*o).single && matches!(self.kind(*o), Kind::List));
+            match one {
+                Some(o) => {
+                    let c = self.cursor_of(o, state)?;
+                    match self.llen(o, state) {
+                        Some(n) => lens.push((Some(n.saturating_sub(c)), n.saturating_sub(c), Some(o))),
+                        None => lens.push((None, self.prefix(o, state).unwrap_or(0).saturating_sub(c), Some(o))),
+                    }
+                }
+                None => {
+                    let it = self.iterate(a, &call.node, state);
+                    let n = it.items.map(|v| v.len())?;
+                    lens.push((Some(n), n, None));
+                }
+            }
+        }
+        let rounds = lens.iter().filter_map(|(e, _, _)| *e).min()?;
+        // (an argument of unknown length must surely outlast the shortest)
+        if lens.iter().any(|(e, lb, _)| e.is_none() && *lb <= rounds) {
+            return None;
+        }
+        let first_out = lens.iter().position(|(e, _, _)| *e == Some(rounds))?;
+        let mut out = Vec::new();
+        for (i, (_, _, o)) in lens.iter().enumerate() {
+            if let Some(o) = o {
+                out.push((*o, Some(if i < first_out { rounds + 1 } else { rounds })));
+            }
+        }
+        Some(out)
+    }
 }

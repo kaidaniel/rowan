@@ -8,7 +8,7 @@ use ruff_python_ast as ast;
 
 use crate::domain::{chain_extend, join_rows, join_values, KeyVal, Ns, Row, Source, SourceKind, Value, DATA};
 use crate::frontend::Node;
-use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
+use crate::intern::{self, key_str_lit, s, KeySet, StrId};
 use crate::state::{Kind, State};
 use crate::domain::ObjId;
 
@@ -148,53 +148,7 @@ impl Analyzer {
             }
         }
         match kind {
-            Kind::Function if self.func_info(oid).is_memo.get() && star_args.is_empty() && star_kwargs.is_empty() => {
-                // a memoised function with known arguments: the first call's result is the
-                // result of every later call with the same arguments
-                let lit = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty());
-                let pos: Option<Vec<KeyId>> = args.iter().map(lit).collect();
-                let kws: Option<Vec<(StrId, KeyId)>> = kwargs.iter().map(|(k, v)| lit(v).map(|x| (*k, x))).collect();
-                // the cache is a hidden dict in the (flow-sensitive) state: on paths where the
-                // first call happened the result is reused, elsewhere the call runs
-                let key = pos.zip(kws).map(|(p, k)| {
-                    let mut parts = p;
-                    for (n, v) in k {
-                        parts.push(intern::key_tuple(vec![key_str_lit(&intern::str_get(n)), v]));
-                    }
-                    intern::key_tuple(parts)
-                });
-                let Some(mk) = key else {
-                    return self.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, call_ast, false);
-                };
-                let memo = self.alloc_raw(Kind::Dict, &format!("memo:{}", oid), "", true, "lru_cache", Payload::None);
-                let row = state.row(memo, Ns::Item);
-                // the hit / miss counts (cache_info), known while every call's outcome is
-                let bump = |state: &mut State, name: &str, by_known: bool| {
-                    let k = key_str_lit(name);
-                    let cur = state.slot_opt(memo, Ns::Attr, k).unwrap_or_else(|| Value::lit(intern::key_int(0)));
-                    let nv = match (cur.kv.as_lit().and_then(intern::key_as_int), by_known) {
-                        (Some(n), true) => Value::lit(intern::key_int(n + 1)),
-                        _ => Value::data("count"),
-                    };
-                    state.set_slot(memo, Ns::Attr, k, nv, true);
-                };
-                if row.definite.contains(mk) {
-                    bump(state, "hits", true);
-                    return state.slot(memo, Ns::Item, mk);
-                }
-                if row.present.contains(mk) {
-                    bump(state, "hits", false);
-                    bump(state, "misses", false);
-                } else {
-                    bump(state, "misses", true);
-                }
-                let r = self.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, call_ast, false);
-                let out = if row.present.contains(mk) { r.join(&state.slot(memo, Ns::Item, mk)) } else { r };
-                let row = state.row(memo, Ns::Item).store(mk, true);
-                state.set_row(memo, Ns::Item, row);
-                state.set_slot(memo, Ns::Item, mk, out.clone(), true);
-                out
-            }
+            Kind::Function if self.func_info(oid).is_memo.get() && star_args.is_empty() && star_kwargs.is_empty() => self.memo_call(oid, args, kwargs, state, node, call_ast),
             Kind::Function => {
                 let fi = self.func_info(oid);
                 if fi.cls.is_some() && !fi.is_static.get() && !args.is_empty() && !fi.is_classmethod.get() {
@@ -537,46 +491,6 @@ impl Analyzer {
         }
     }
 
-    /// An ABC with abstract methods no class of its MRO implements: `cls()` raises TypeError.
-    pub fn abstract_unimplemented(&self, cls: u32) -> bool {
-        let mro = self.mro(cls);
-        let is_abc = mro.iter().any(|c| {
-            self.class_info_opt(*c).map(|ci| {
-                ci.node.arguments.as_ref().map(|a| a.args.iter().any(|b| super::dotted_last(b) == "ABC") || a.keywords.iter().any(|k| k.arg.as_ref().map(|x| x.as_str()) == Some("metaclass") && super::dotted_last(&k.value) == "ABCMeta")).unwrap_or(false)
-            }).unwrap_or(false)
-        });
-        if !is_abc {
-            return false;
-        }
-        // the first definition of each name along the MRO decides
-        let mut seen: Vec<String> = Vec::new();
-        for c in mro.iter() {
-            let Some(ci) = self.class_info_opt(*c) else { continue };
-            for st in &ci.node.body {
-                let (name, decos) = match st {
-                    ast::Stmt::FunctionDef(f) => (f.name.id.to_string(), &f.decorator_list),
-                    ast::Stmt::Assign(a) => {
-                        for t in &a.targets {
-                            if let ast::Expr::Name(n) = t {
-                                seen.push(n.id.to_string());
-                            }
-                        }
-                        continue;
-                    }
-                    _ => continue,
-                };
-                if seen.contains(&name) {
-                    continue;
-                }
-                seen.push(name);
-                if decos.iter().any(|d| super::dotted_last(&d.expression) == "abstractmethod" || matches!(&d.expression, ast::Expr::Call(cl) if super::dotted_last(&cl.func) == "abstractmethod")) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     /// A model call: objects it allocates at one site stay distinct from each other (one
     /// weak object) even while only the model's own code holds them.
     pub fn run_model(&mut self, m: crate::models::Model, state: &mut State, call: &Call) -> Value {
@@ -590,110 +504,6 @@ impl Analyzer {
         r
     }
 
-    /// What a model call does to the one-shot iterators it is given: a full consumer uses
-    /// them up; a lazy wrapper (zip, islice, map, …) takes from them when it is consumed
-    /// itself; anything else leaves their position unknown.
-    fn after_model_consume(&mut self, call: &Call, r: &Value, state: &mut State) {
-        // (one-shot iterators, and lazy iterators over them)
-        let its: Vec<(usize, u32)> = call.args.iter().chain(call.star_args.iter()).enumerate().filter_map(|(i, a)| a.single().filter(|o| a.kv.is_bot() && ((self.obj(*o).iterator && self.obj(*o).single && matches!(self.kind(*o), Kind::List)) || self.lazy_src.contains_key(o))).map(|o| (i, o))).collect();
-        if its.is_empty() {
-            return;
-        }
-        let q = call.qual.as_str();
-        const FULL: &[&str] = &[
-            "builtins.list", "builtins.tuple", "builtins.set", "builtins.frozenset", "builtins.dict", "builtins.sorted", "builtins.sum", "builtins.min", "builtins.max",
-            "str.join", "collections.Counter", "collections.deque", "collections.OrderedDict", "collections.defaultdict", "list.extend", "set.update", "dict.update",
-            "statistics.mean", "statistics.median", "statistics.fmean", "math.fsum", "math.prod", "bytes.join",
-        ];
-        const LAZY_ALL: &[&str] = &["builtins.map", "builtins.filter", "builtins.enumerate", "builtins.iter", "itertools.chain", "itertools.starmap", "itertools.takewhile", "itertools.dropwhile", "itertools.accumulate", "itertools.compress", "itertools.groupby", "itertools.pairwise", "itertools.batched"];
-        if matches!(q, "builtins.next" | "builtins.iter") && its.len() == 1 && r.single() == Some(its[0].1) {
-            return;
-        }
-        if q == "builtins.next" {
-            return;
-        }
-        if FULL.contains(&q) {
-            for (_, o) in its {
-                self.exhaust(&Value::obj(o), state);
-            }
-            return;
-        }
-        let robj = r.single().filter(|ro| !its.iter().any(|(_, o)| o == ro));
-        if q == "itertools.islice" {
-            // islice(it, stop) / islice(it, start, stop): start + the items it gives
-            let lit = |v: Option<&Value>| v.and_then(|x| x.kv.as_lit().filter(|_| x.pts.is_empty())).and_then(intern::key_as_int);
-            let n = match call.args.len() {
-                2 => lit(call.args.get(1)),
-                n if n >= 3 => lit(call.args.get(2)),
-                _ => None,
-            };
-            if let (Some(ro), Some(n)) = (robj, n) {
-                self.lazy_src.insert(ro, vec![(its[0].1, Some(n.max(0) as usize))]);
-                return;
-            }
-        }
-        if q == "builtins.zip" {
-            if let (Some(ro), Some(pulls)) = (robj, self.zip_pulls(call, state)) {
-                self.lazy_src.insert(ro, pulls);
-                return;
-            }
-        }
-        if LAZY_ALL.contains(&q) {
-            if let Some(ro) = robj {
-                self.lazy_src.insert(ro, its.iter().map(|(_, o)| (*o, None)).collect());
-                return;
-            }
-        }
-        for (_, o) in its {
-            if self.lazy_src.contains_key(&o) {
-                self.consume_lazy(&Value::obj(o), false, state);
-            } else {
-                self.set_cursor(o, None, state);
-            }
-        }
-    }
-
-    /// The items `zip(...)` takes from each one-shot iterator argument when it is consumed:
-    /// rounds = the shortest length; in the last round the arguments before the first that
-    /// ran out each gave one more.
-    fn zip_pulls(&mut self, call: &Call, state: &mut State) -> Option<Vec<(ObjId, Option<usize>)>> {
-        if !call.star_args.is_empty() || call.kwargs.keys().any(|k| &*intern::str_get(*k) != "strict") {
-            return None;
-        }
-        // (exact remaining length, or a lower bound)
-        let mut lens: Vec<(Option<usize>, usize, Option<u32>)> = Vec::new();
-        for a in &call.args {
-            let one = a.single().filter(|o| a.kv.is_bot() && self.obj(*o).iterator && self.obj(*o).single && matches!(self.kind(*o), Kind::List));
-            match one {
-                Some(o) => {
-                    let c = self.cursor_of(o, state)?;
-                    match self.llen(o, state) {
-                        Some(n) => lens.push((Some(n.saturating_sub(c)), n.saturating_sub(c), Some(o))),
-                        None => lens.push((None, self.prefix(o, state).unwrap_or(0).saturating_sub(c), Some(o))),
-                    }
-                }
-                None => {
-                    let it = self.iterate(a, &call.node, state);
-                    let n = it.items.map(|v| v.len())?;
-                    lens.push((Some(n), n, None));
-                }
-            }
-        }
-        let rounds = lens.iter().filter_map(|(e, _, _)| *e).min()?;
-        // (an argument of unknown length must surely outlast the shortest)
-        if lens.iter().any(|(e, lb, _)| e.is_none() && *lb <= rounds) {
-            return None;
-        }
-        let first_out = lens.iter().position(|(e, _, _)| *e == Some(rounds))?;
-        let mut out = Vec::new();
-        for (i, (_, _, o)) in lens.iter().enumerate() {
-            if let Some(o) = o {
-                out.push((*o, Some(if i < first_out { rounds + 1 } else { rounds })));
-            }
-        }
-        Some(out)
-    }
-
     pub fn construct(&mut self, cls: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
         if self.abstract_unimplemented(cls) {
             self.raise_here("TypeError", state);
@@ -701,47 +511,7 @@ impl Analyzer {
         }
         // `Color(3)`: the Enum member with that value, else ValueError
         if let (Some(ms), Some(a)) = (self.enum_members.get(&cls).cloned(), args.first()) {
-            let vk = key_str_lit("value");
-            let lits = if a.pts.is_empty() && a.kv.is_literal() { Some(crate::domain::kv_literals(&a.kv)) } else { None };
-            let mut out = Value::new();
-            match lits {
-                Some(ls) => {
-                    let mut all_hit = true;
-                    let is_flag = self.enum_kind.get(&cls).map(|k| k.flag).unwrap_or(false);
-                    let all_bits: i64 = ms.iter().filter_map(|(_, m)| state.slot(*m, Ns::Attr, vk).kv.as_lit().and_then(intern::key_as_int)).fold(0, |a, b| a | b);
-                    for l in ls.iter() {
-                        let hit = ms.iter().find(|(_, m)| state.slot(*m, Ns::Attr, vk).kv.as_lit() == Some(l));
-                        match hit {
-                            Some((_, m)) => out = out.join(&Value::obj(*m)),
-                            // a Flag: any combination of the members' bits (0 too)
-                            None => match intern::key_as_int(l).filter(|i| is_flag && *i >= 0 && i & !all_bits == 0) {
-                                Some(i) => {
-                                    let fm = self.flag_member(cls, i, node, state);
-                                    out = out.join(&Value::obj(fm));
-                                }
-                                None => all_hit = false,
-                            },
-                        }
-                    }
-                    if out.empty() {
-                        self.raise_here("ValueError", state);
-                        return Value::new();
-                    }
-                    if !all_hit {
-                        self.may_raise_here("ValueError", state);
-                    }
-                }
-                None => {
-                    // a member given: itself
-                    let given: Vec<u32> = a.pts.iter().filter(|o| ms.iter().any(|(_, m)| m == o)).collect();
-                    if !given.is_empty() && given.len() == a.pts.len() && a.kv.is_bot() {
-                        return Value::objs(crate::domain::ObjSet::from_vec(given));
-                    }
-                    self.may_raise_here("ValueError", state);
-                    out = join_values(ms.iter().map(|(_, m)| Value::obj(*m)).collect::<Vec<_>>());
-                }
-            }
-            return out;
+            return self.enum_lookup(cls, &ms, a, node, state);
         }
         let ci = self.class_info(cls);
         // a TypedDict class makes a plain dict
@@ -1712,51 +1482,6 @@ impl Analyzer {
             }
         }
         Some((std::rc::Rc::new(names), complete))
-    }
-
-    /// A builtin exception (`KeyError(key)`, …) as a value: open attributes, known `args`.
-    pub fn exception_object(&mut self, cls_name: &str, args: Vec<Value>, node: &Node, state: &mut State) -> Value {
-        let t = self.alloc_positional(Kind::Tuple, node, Some(args), Value::new(), DATA, state);
-        let row = Row::with_source(crate::domain::Source::new(cls_name, crate::domain::SourceKind::Data));
-        let oid = self.alloc_at(Kind::Namespace, node, state, &format!("{}@L{}", cls_name, node.line), Payload::None, Some(row), Ns::Attr, None, None);
-        let strong = self.obj(oid).single;
-        self.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
-        self.exc_objs.insert(oid, cls_name.to_string());
-        Value::obj(oid)
-    }
-
-    /// `str(e)` / `repr(e)` of exception objects with known args.
-    pub fn exc_text(&self, v: &Value, repr: bool, state: &State) -> Option<Value> {
-        if v.pts.is_empty() || !v.kv.is_bot() {
-            return None;
-        }
-        let mut out = Vec::new();
-        for o in v.pts.iter() {
-            let name = self.exc_objs.get(&o)?;
-            let t = state.slot(o, Ns::Attr, key_str_lit("args"));
-            let tid = t.single()?;
-            let n = self.llen(tid, state)?;
-            let mut parts = Vec::new();
-            for i in 0..n {
-                let a = state.slot(tid, Ns::Pos, intern::key_int(i as i64));
-                parts.push(a.kv.as_lit().filter(|_| a.pts.is_empty())?);
-            }
-            let reprs: Vec<String> = parts.iter().map(|k| intern::key_repr(*k)).collect();
-            let s = if repr {
-                format!("{}({})", name, reprs.join(", "))
-            } else if parts.len() == 1 {
-                // (a KeyError shows its key's repr)
-                if name == "KeyError" { reprs[0].clone() } else { intern::key_py_str(parts[0]) }
-            } else if parts.is_empty() {
-                String::new()
-            } else if parts.len() == 1 {
-                reprs[0].clone()
-            } else {
-                format!("({})", reprs.join(", "))
-            };
-            out.push(Value::lit(key_str_lit(&s)));
-        }
-        Some(crate::domain::join_values(out))
     }
 
     /// An exception named `name` is raised here (the rest of the path is dead).

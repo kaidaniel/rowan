@@ -1,6 +1,6 @@
 //! `dataclasses` (and the classes built like them: NamedTuple, TypedDict): the generated
 //! `__init__` (fields in MRO order, defaults, `field(...)`, `InitVar`, `KW_ONLY`,
-//! `__post_init__`).
+//! `__post_init__`); abc: a class with abstract methods left unimplemented cannot be made.
 
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
@@ -269,5 +269,47 @@ impl Analyzer {
             }
         }
         out
+    }
+}
+
+impl crate::interp::Analyzer {
+    /// An ABC with abstract methods no class of its MRO implements: `cls()` raises TypeError.
+    pub fn abstract_unimplemented(&self, cls: u32) -> bool {
+        let mro = self.mro(cls);
+        let is_abc = mro.iter().any(|c| {
+            self.class_info_opt(*c).map(|ci| {
+                ci.node.arguments.as_ref().map(|a| a.args.iter().any(|b| crate::interp::dotted_last(b) == "ABC") || a.keywords.iter().any(|k| k.arg.as_ref().map(|x| x.as_str()) == Some("metaclass") && crate::interp::dotted_last(&k.value) == "ABCMeta")).unwrap_or(false)
+            }).unwrap_or(false)
+        });
+        if !is_abc {
+            return false;
+        }
+        // the first definition of each name along the MRO decides
+        let mut seen: Vec<String> = Vec::new();
+        for c in mro.iter() {
+            let Some(ci) = self.class_info_opt(*c) else { continue };
+            for st in &ci.node.body {
+                let (name, decos) = match st {
+                    ast::Stmt::FunctionDef(f) => (f.name.id.to_string(), &f.decorator_list),
+                    ast::Stmt::Assign(a) => {
+                        for t in &a.targets {
+                            if let ast::Expr::Name(n) = t {
+                                seen.push(n.id.to_string());
+                            }
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                };
+                if seen.contains(&name) {
+                    continue;
+                }
+                seen.push(name);
+                if decos.iter().any(|d| crate::interp::dotted_last(&d.expression) == "abstractmethod" || matches!(&d.expression, ast::Expr::Call(cl) if crate::interp::dotted_last(&cl.func) == "abstractmethod")) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }

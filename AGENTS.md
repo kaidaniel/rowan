@@ -146,7 +146,7 @@ budget; informational, into the history on gh-pages).
   `timeout`: `perl -e 'alarm N; exec @ARGV' rowan …`. Compare builds on results (proven /
   missing / possibly / schema counts of `--json`), not only on counters.
 
-## Layout (`rowan/src/`, ~64k lines)
+## Layout (`rowan/src/`, ~61k lines: the engine ~21k, the models ~40k)
 
 | file | role |
 | --- | --- |
@@ -160,7 +160,7 @@ budget; informational, into the history on gh-pages).
 | `interp/calls.rs`, `interp/effects.rs` | calls: per-call-site runs, budget, recursion, `__new__`, dataclass init; what skipped calls may change |
 | `models/shape.rs` | tensor shapes (dims as polynomials) for the torch and numpy models |
 | `report.rs`, `main.rs` | text / JSON / facts output; CLI, `rowan serve` (runs on a 1 GiB-stack thread) |
-| `models/` | `mod.rs` (`Registry`, builtins, containers); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib; `pandas`, `pydantic`, `fastapi`, `torch` |
+| `models/` | `mod.rs` (`Registry`, builtins, containers); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib (`enums`, `exceptions`, functools, itertools, …); `pandas`, `pydantic`, `fastapi`, `torch` |
 
 `rowan/py/` is a PyO3 binding (does not load on macOS 26); `vscode-rowan/` the editor
 extension (talks to `rowan serve`).

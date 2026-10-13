@@ -26,6 +26,8 @@ pub mod pyvalues;
 pub mod pure;
 pub mod pytext;
 pub mod torch;
+pub mod enums;
+pub mod exceptions;
 
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
