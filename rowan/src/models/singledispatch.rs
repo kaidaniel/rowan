@@ -209,3 +209,63 @@ impl crate::interp::Analyzer {
         out
     }
 }
+
+impl crate::interp::Analyzer {
+    /// A functools decorator (`singledispatch` and `.register`, `lru_cache` / `cache`, `wraps`)
+    /// on the function `fobj` (its `fi`): applied; false for any other decorator.
+    pub(crate) fn functools_decorator(&mut self, q: &str, d: &'static ast::Decorator, fobj: Option<ObjId>, fi: Option<&crate::interp::FuncInfo>, state: &mut State) -> bool {
+        // `@singledispatch`: implementations registered on it are chosen by the type of the
+        // first argument
+        if matches!(q, "functools.singledispatch" | "functools.singledispatchmethod") {
+            if let Some(f) = fobj.filter(|o| self.kind(*o) == Kind::Function) {
+                self.sdispatch.insert(f, Vec::new());
+                if q.ends_with("method") {
+                    self.sdispatch_method.insert(f);
+                }
+            }
+            return true;
+        }
+        if q == "sdispatch.register" {
+            let dv = match &d.expression {
+                ast::Expr::Call(c) => self.eval(&c.func, state),
+                other => self.eval(other, state),
+            };
+            let base = dv.pts.iter().find_map(|m| match &self.obj(m).payload {
+                Payload::Method(_, b) => b.single(),
+                _ => None,
+            });
+            let impl_f = fobj.filter(|o| self.kind(*o) == Kind::Function);
+            if let (Some(base), Some(impl_f)) = (base, impl_f) {
+                // the type: `@f.register(T)`, else the first parameter's annotation
+                let ty = match &d.expression {
+                    ast::Expr::Call(c) if !c.arguments.args.is_empty() => Some(self.eval(&c.arguments.args[0], state)),
+                    _ => self.sdispatch_annotation(impl_f, self.sdispatch_method.contains(&base), state),
+                };
+                if let (Some(ty), Some(reg)) = (ty, self.sdispatch.get_mut(&base)) {
+                    reg.push((ty, impl_f));
+                }
+            }
+            return true;
+        }
+        if matches!(q, "functools.lru_cache" | "functools.cache") {
+            if let (Some(fi), Some(f)) = (&fi, fobj) {
+                fi.is_memo.set(true);
+                // the (empty) cache exists from the definition on, on every path
+                let memo = self.alloc_raw(Kind::Dict, &format!("memo:{}", f), "", true, "lru_cache", Payload::None);
+                state.set_row(memo, Ns::Item, crate::domain::Row::new());
+            }
+            return true;
+        }
+        // `@functools.wraps(fn)`: the wrapper takes fn's name, qualname, doc, __wrapped__
+        if q == "functools.wraps" {
+            if let (ast::Expr::Call(cl), Some(f)) = (&d.expression, fobj) {
+                if let Some(a0) = cl.arguments.args.first() {
+                    let wv = self.eval(a0, state);
+                    self.wrapped.insert(f, wv);
+                }
+            }
+            return true;
+        }
+        false
+    }
+}
