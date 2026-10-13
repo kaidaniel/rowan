@@ -403,9 +403,11 @@ impl Analyzer {
         }
         // (many records given — a value joined over many contexts: the result is any record,
         // an open row, rather than the join of them all and a copy of all their slots)
-        let joinable = arg_recs.len() <= MAX_ARG_JOIN;
-        if !arg_recs.is_empty() && joinable {
-            let row = join_rows(arg_recs.iter().map(|(o, n)| state.row(*o, *n)));
+        // (its items: those of the mappings it was given; an instance's attributes are not
+        // items)
+        let item_recs: Vec<ObjId> = arg_recs.iter().filter(|(_, ns)| *ns == Ns::Item).map(|(o, _)| *o).collect();
+        if !item_recs.is_empty() && item_recs.len() <= MAX_ARG_JOIN {
+            let row = join_rows(item_recs.iter().map(|o| state.row(*o, Ns::Item)));
             let mut d = row.data();
             d.definite = KeySet::new();
             d.absent = KeySet::new();
@@ -414,8 +416,8 @@ impl Analyzer {
             // as an object the result is unknown: its attributes come from the call
             let src = Source::new(&site, SourceKind::Call);
             state.set_row(rid, Ns::Attr, Row::with_source(src).mutate(site_id));
-            for (oid, ns) in &arg_recs {
-                for (k, v) in state.obj_slots(*oid, *ns) {
+            for oid in &item_recs {
+                for (k, v) in state.obj_slots(*oid, Ns::Item) {
                     state.set_slot(rid, Ns::Item, k, v, false);
                 }
             }
