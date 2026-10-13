@@ -1121,7 +1121,12 @@ impl Analyzer {
         self.cond_depth += 1;
         let mut converged = false;
         let mut prev_head = head.copy();
+        let mut vmark = self.verdicts.len();
         for _ in 0..LOOP_MAX_ITER {
+            // (a round before the fixpoint ran on less than the loop's states: what its accesses
+            // said is superseded by the next round's)
+            self.drop_verdicts_since(vmark);
+            vmark = self.verdicts.len();
             let mut body_s = head.copy();
             let mark = self.objects.len() as u32;
             self.recent_stack.push(Vec::new());
@@ -1146,6 +1151,13 @@ impl Analyzer {
         }
         if !converged {
             self.widen_unconverged(&mut head, &prev_head);
+            // (the accesses as the widened states make them)
+            self.drop_verdicts_since(vmark);
+            self.loop_stack.push(LoopCtx::default());
+            self.recent_stack.push(Vec::new());
+            round(self, &mut head.copy());
+            self.recent_stack.pop();
+            self.loop_stack.pop();
         }
         self.cond_depth -= 1;
         self.frame_mut().loop_depth -= 1;
@@ -1297,10 +1309,7 @@ impl Analyzer {
                 self.cond_depth -= 1;
                 self.frame_mut().loop_depth -= 1;
                 self.recent_stack.pop();
-                for v in self.verdicts[saved_verdicts..].iter() {
-                    self.verdict_keys.remove(&v.dedupe_key());
-                }
-                self.verdicts.truncate(saved_verdicts);
+                self.drop_verdicts_since(saved_verdicts);
                 exh_ops = self.exh_log.take().unwrap_or_default();
                 self.exh_log = saved_log;
             }

@@ -1467,6 +1467,13 @@ impl Analyzer {
 
     /// A verdict on an access the program guards (a try handling the failure): recorded for
     /// the golden harness and the hover, never a diagnostic.
+    /// Forget the verdicts recorded since `mark` (a run whose states a later run supersedes).
+    pub fn drop_verdicts_since(&mut self, mark: usize) {
+        for v in self.verdicts.drain(mark..) {
+            self.verdict_keys.remove(&v.dedupe_key());
+        }
+    }
+
     pub fn verdict_guarded(&mut self, node: &Node, key: KeyId, cls: &Classification, oid: ObjId, ns: Ns) {
         let saved = std::mem::replace(&mut self.verdict_guarded, true);
         self.verdict(node, key, cls, oid, ns, None, None);

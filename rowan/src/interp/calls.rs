@@ -1010,7 +1010,11 @@ impl Analyzer {
         let mut entry_state = state.copy();
         let mut ret = Value::new();
         let mut st_final: Option<State> = None;
+        let mut vmark = self.verdicts.len();
         for _round in 0..REC_MAX_ITER {
+            // (a round of a recursion before its fixpoint: its accesses' verdicts are superseded)
+            self.drop_verdicts_since(vmark);
+            vmark = self.verdicts.len();
             self.tab_runs += 1;
             let mut st = entry_state.copy();
             match fnode {

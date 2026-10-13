@@ -26,7 +26,7 @@ ruff and walks the syntax tree directly, running the program on abstract values.
   read narrows the key in.
 * **Statements.** Both sides of a branch run, narrowed by the test (`narrow.rs`), and join.
   Loops over at most 16 known items are unrolled; other loops run to a fixpoint (40 rounds,
-  then widened). `try` collects the state at each point that may raise; handlers start from
+  then widened; verdicts are the last round's: earlier rounds saw less). `try` collects the state at each point that may raise; handlers start from
   those states. `with` is a `try` whose `finally` is `__exit__`. `finally` runs on every way
   out, `break` / `continue` / `return` included.
 * **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site,
