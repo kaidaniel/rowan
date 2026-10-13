@@ -20,6 +20,7 @@ use crate::state::{Kind, State};
 
 pub mod access;
 pub mod calls;
+pub mod effects;
 pub mod exprs;
 pub mod funcs;
 pub mod narrow;
@@ -955,6 +956,8 @@ pub struct Analyzer {
     /// the hard deadline passed: function bodies stop, the calls they are in become unknown calls
     pub hard_cut: bool,
     cut_tick: u32,
+    /// per function code (`FuncNode::addr`): the names it reads beyond its locals
+    pub code_uses: FxHashMap<usize, Rc<effects::CodeUses>>,
     pub entry_instances: FxHashMap<ObjId, ObjId>,
     pub fresh_in_progress: FxHashSet<ObjId>,
     pub main_module: ObjId,

@@ -31,9 +31,12 @@ ruff and walks the syntax tree directly, running the program on abstract values.
   out, `break` / `continue` / `return` included.
 * **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site,
   in a context of the innermost `chain` (2) call sites (no call cache: a replay keyed by a
-  bounded view of the heap was unsound and rarely hit). **Budget:** each function code (all closures of one `def`) may run 4,096
-  statements in all (`budget`); past that its calls are unknown calls, and the function gets a
-  reporting run with open parameters (its lines then hold for the calls that did not run).
+  bounded view of the heap was unsound and rarely hit). **Budget:** each function code (all
+  closures of one `def`) may run 4,096 statements in all (`budget`); past that its calls are
+  unknown calls that may also change what its code reaches beyond its arguments
+  (`effects.rs`: globals and cells the code, and the code it can call, reads where they may
+  change or escape; class attributes; mutable defaults), and the function gets a reporting
+  run with open parameters (its lines then hold for the calls that did not run).
   Entry runs are not counted (one per function). So the work is bounded by the number of
   functions times the budget, not by a deadline.
   * **Recursion:** the inner call uses the running activation's partial result; it iterates
@@ -152,7 +155,7 @@ budget; informational, into the history on gh-pages).
 | `interp/stmts.rs` | statements, loops, try / with / match, `finally` |
 | `interp/exprs.rs`, `interp/funcs.rs` | expressions, comprehensions, yields; functions, iteration, generators |
 | `interp/narrow.rs`, `interp/access.rs` | narrowing, `CondFact`s; attribute and item access, verdicts, requirements |
-| `interp/calls.rs` | calls: per-call-site runs, budget, recursion, `__new__`, dataclass init |
+| `interp/calls.rs`, `interp/effects.rs` | calls: per-call-site runs, budget, recursion, `__new__`, dataclass init; what skipped calls may change |
 | `models/shape.rs` | tensor shapes (dims as polynomials) for the torch and numpy models |
 | `report.rs`, `main.rs` | text / JSON / facts output; CLI, `rowan serve` (runs on a 1 GiB-stack thread) |
 | `models/` | `mod.rs` (`Registry`, builtins, containers); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib; `pandas`, `pydantic`, `fastapi`, `torch` |

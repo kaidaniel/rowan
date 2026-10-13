@@ -490,15 +490,21 @@ impl Analyzer {
             if k == Kind::Tuple || (k == Kind::Unknown && !state.has_row(o, Ns::Item) && !state.has_row(o, Ns::Attr)) {
                 continue;
             }
+            // (what an earlier havoc by the same code did already is not written again)
             for ns in [Ns::Item, Ns::Attr] {
                 if state.has_row(o, ns) || (ns == Ns::Item && matches!(k, Kind::Dict | Kind::Frame)) || (ns == Ns::Attr && k == Kind::Instance) {
-                    let r = state.row(o, ns).mutate(site);
-                    state.set_row(o, ns, r);
+                    let (r0, r) = { let r0 = state.row(o, ns); let r = r0.mutate(site); (r0, r) };
+                    if r != r0 {
+                        state.set_row(o, ns, r);
+                    }
                 }
             }
             for (sk, v) in slots {
                 if matches!(sk.0, Ns::Item | Ns::Attr | Ns::Pos | Ns::Elem) {
-                    state.set_slot(o, sk.0, sk.1, v.join(&any), false);
+                    let nv = v.join(&any);
+                    if nv != v {
+                        state.set_slot(o, sk.0, sk.1, nv, false);
+                    }
                 }
             }
             if matches!(k, Kind::List | Kind::Set) && !self.obj(o).site.starts_with("gen:") {
@@ -1009,7 +1015,7 @@ impl Analyzer {
             self.force_at = None;
             let q = self.func_info(foid).qualname.clone();
             self.note(format!("analysis cut at the deadline ({} ms): later calls are unknown code", super::limit("ms", super::DEADLINE_MS)));
-            return self.unknown_call(&q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
+            return self.skipped_call(foid, &q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
         // a generator's body runs when it is consumed (`force_gen`), not here
         let lazy = !entry
@@ -1034,7 +1040,7 @@ impl Analyzer {
             self.note(format!("analysis cut at the deadline ({} ms) inside {}: the call is unknown code", super::limit("ms", super::DEADLINE_MS), q));
             state.reachable = true;
             let (sv, a, kw, sa, skw) = keep;
-            return self.unknown_call(&q, sv.as_ref(), &a, &kw, &sa, &skw, state, node);
+            return self.skipped_call(foid, &q, sv.as_ref(), &a, &kw, &sa, &skw, state, node);
         }
         r
     }
@@ -1133,7 +1139,7 @@ impl Analyzer {
             let q = fi.qualname.clone();
             self.note(format!("{} ran out of its budget: later calls are unknown code", q));
             self.budget_out.insert(foid);
-            return self.unknown_call(&q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
+            return self.skipped_call(foid, &q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
         if super::debug_enabled() {
             eprintln!("run {} at {} frames={} chain={:?}", fi.qualname, site, self.frames.len(), self.call_chain);
@@ -1405,6 +1411,25 @@ impl Analyzer {
             state.exits = saved_exits;
         }
         ret
+    }
+
+    /// A call of user code whose body does not run (past its budget, cut at the deadline): an
+    /// unknown call that may also change what the code reaches beyond its arguments (the globals
+    /// and cells it, and the code it can call, reads where they may change).
+    #[allow(clippy::too_many_arguments)]
+    fn skipped_call(&mut self, foid: ObjId, q: &str, self_v: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
+        let r = self.unknown_call(q, self_v, args, kwargs, star_args, star_kwargs, state, node);
+        let mut roots = vec![Value::obj(foid)];
+        roots.extend(self_v.into_iter().chain(args).chain(kwargs.values()).chain(star_args).chain(star_kwargs).cloned());
+        let (changed, rebound) = self.code_effects(&roots, state);
+        let site = s(&format!("{}@L{}", q, node.line));
+        self.havoc_reachable(&changed, r.single().unwrap_or(0), site, state);
+        let any = Value::obj(self.any_object(state));
+        for (o, ns, k) in rebound {
+            let v = state.slot(o, ns, k).join(&any);
+            state.set_slot(o, ns, k, v, false);
+        }
+        r
     }
 
     /// Drop the facts whose test read one of `objs`.
