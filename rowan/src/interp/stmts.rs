@@ -1818,38 +1818,8 @@ impl Analyzer {
         }
         // (a part of an input — an unknown object, a placeholder — is found again by its path
         // whenever that path is read: its rows belong to the input, never garbage)
-        let garbage: rustc_hash::FxHashSet<u32> = fresh.into_iter().filter(|o| !reached.contains(o) && !matches!(self.kind(*o), Kind::Unknown)).collect();
-        if garbage.is_empty() {
-            return;
-        }
-        let kept = fp.rows.iter().filter(|k| !garbage.contains(&k.0)).count() + fp.slots.iter().filter(|k| !garbage.contains(&k.0)).count() + fp.elems.iter().filter(|o| !garbage.contains(o)).count();
-        if kept < 8 * garbage.len() {
-            // (fewer changes survive than the garbage holds: the changes that survive, on `pre`)
-            let (mut rows, mut slots, mut elems) = (pre.rows.copy_ref(), pre.slots.copy_ref(), pre.elems.copy_ref());
-            for k in fp.rows.iter().filter(|k| !garbage.contains(&k.0)) {
-                match state.rows.get(k) {
-                    Some(r) => rows.insert(*k, r),
-                    None => drop(rows.remove(k)),
-                }
-            }
-            for (o, sk) in fp.slots.iter().filter(|k| !garbage.contains(&k.0)) {
-                match state.slots.get(o, sk) {
-                    Some(v) => slots.set(o, *sk, v),
-                    None => drop(slots.remove(o, sk)),
-                }
-            }
-            for o in fp.elems.iter().filter(|o| !garbage.contains(o)) {
-                match state.elems.get(o) {
-                    Some(kv) => elems.insert(*o, kv),
-                    None => drop(elems.remove(o)),
-                }
-            }
-            (state.rows, state.slots, state.elems) = (rows, slots, elems);
-            for o in &garbage {
-                state.lens.remove(o);
-            }
-        } else {
-            for o in garbage {
+        for o in fresh {
+            if !reached.contains(&o) && !matches!(self.kind(o), Kind::Unknown) {
                 state.forget_obj(o);
             }
         }
