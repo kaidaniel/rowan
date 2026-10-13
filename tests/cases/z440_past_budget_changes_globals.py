@@ -1,7 +1,7 @@
 # A call past its function's budget runs as unknown code; that code may still change what
 # the function reaches beyond its arguments: module globals it changes or rebinds, closure
 # cells it rebinds, class attributes it changes through `self`. (Each function's second call
-# is past the budget.)
+# is past the budget; the code it calls, by name or as an argument, counts too.)
 #@limits budget=2
 
 STATE = {"n": 0, "tag": "x"}
@@ -70,3 +70,37 @@ r1 = Reg()
 r1.add(1)
 r1.add(2)
 m = len(Reg.items)  #@value m: includes={2}
+
+REGISTRY = {}
+
+
+def register(name):
+    REGISTRY[name] = True
+
+
+def setup(name):
+    a = 1
+    b = 2
+    register(name)
+
+
+setup("x")
+setup("y")
+ry = REGISTRY.get("y")  #@value ry: includes={True}
+
+HITS = []
+
+
+def on_hit():
+    HITS.append(1)
+
+
+def run(cb):
+    a = 1
+    b = 2
+    cb()
+
+
+run(on_hit)
+run(on_hit)
+h = len(HITS)  #@value h: includes={2}

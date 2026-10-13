@@ -34,9 +34,10 @@ ruff and walks the syntax tree directly, running the program on abstract values.
   bounded view of the heap was unsound and rarely hit). **Budget:** each function code (all
   closures of one `def`) may run 4,096 statements in all (`budget`); past that its calls are
   unknown calls that may also change what its code reaches beyond its arguments
-  (`effects.rs`: globals and cells the code, and the code it can call, reads where they may
-  change or escape; class attributes; mutable defaults), and the function gets a reporting
-  run with open parameters (its lines then hold for the calls that did not run).
+  (`effects.rs`: the globals and cells its code, and the code it reaches by name, reads where
+  they may change or escape; class attributes by name; mutable defaults; cached per set of
+  code), and the function gets a reporting run with open parameters (its lines then hold for
+  the calls that did not run).
   Entry runs are not counted (one per function). So the work is bounded by the number of
   functions times the budget, not by a deadline.
   * **Recursion:** the inner call uses the running activation's partial result; it iterates
@@ -68,8 +69,9 @@ ruff and walks the syntax tree directly, running the program on abstract values.
 * **Deadline:** a safety net only (`ms`, 10 s): past it user calls become unknown calls and
   running calls stop where they are. The budget, not the deadline, bounds the work.
 * **Soundness** holds relative to the models and to annotations of values whose class is
-  unknown. `exec`, `setattr` / `getattr` with unknown names, metaclasses and monkey-patching
-  are unknown or ignored. Accepted imprecision: lengths past 15, slices by unknown bounds,
+  unknown. `exec`, `setattr` / `getattr` with unknown names (also in code a skipped call
+  reaches), metaclasses and monkey-patching (rebinding a function or class too) are unknown
+  or ignored. Accepted imprecision: lengths past 15, slices by unknown bounds,
   weak stores through names holding several objects, runs cut by a deadline.
 
 ## Working conventions (the owner's standing instructions)

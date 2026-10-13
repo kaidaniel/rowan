@@ -471,7 +471,13 @@ impl Analyzer {
     /// removed), every slot of a mutable object may now hold the call's result `rid` (any value),
     /// lists and sets any items and any length. Modules, classes and functions are not entered.
     pub fn havoc_reachable(&mut self, vals: &[Value], rid: ObjId, site: StrId, state: &mut State) {
-        let mut seen: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
+        self.havoc_code.clear();
+        self.havoc_with(vals, rid, site, state, &mut rustc_hash::FxHashSet::default());
+    }
+
+    /// `havoc_reachable` past the objects `seen` (and adding to them; the code met is added to
+    /// `havoc_code`).
+    pub fn havoc_with(&mut self, vals: &[Value], rid: ObjId, site: StrId, state: &mut State, seen: &mut rustc_hash::FxHashSet<ObjId>) {
         let mut work: Vec<ObjId> = vals.iter().flat_map(|v| v.pts.iter()).collect();
         // (one object stands for "anything unknown code stored": a value per call would pile
         // up in every slot it reaches)
@@ -481,8 +487,19 @@ impl Analyzer {
                 continue;
             }
             let k = self.kind(o);
-            if matches!(k, Kind::Module | Kind::Class | Kind::Function | Kind::External | Kind::Method | Kind::Bound) {
-                continue;
+            match (&k, &self.obj(o).payload) {
+                // (the code it meets, for `skipped_call`; a stored method may change its receiver)
+                (Kind::Class | Kind::Function | Kind::Bound | Kind::Partial, _) => {
+                    self.havoc_code.push(o);
+                    continue;
+                }
+                (Kind::Method, Payload::Method(_, recv)) => {
+                    work.extend(recv.pts.iter());
+                    continue;
+                }
+                (Kind::Instance, Payload::Cls(c)) => self.havoc_code.push(*c),
+                (Kind::Module | Kind::External | Kind::Method, _) => continue,
+                _ => {}
             }
             let slots = state.slots_of(o);
             for (_, v) in &slots {
@@ -1422,17 +1439,28 @@ impl Analyzer {
     #[allow(clippy::too_many_arguments)]
     fn skipped_call(&mut self, foid: ObjId, q: &str, self_v: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
         let r = self.unknown_call(q, self_v, args, kwargs, star_args, star_kwargs, state, node);
-        let mut roots = vec![Value::obj(foid)];
-        roots.extend(self_v.into_iter().chain(args).chain(kwargs.values()).chain(star_args).chain(star_kwargs).cloned());
-        let (changed, rebound) = self.code_effects(&roots, state);
-        let site = s(&format!("{}@L{}", q, node.line));
-        self.havoc_reachable(&changed, r.single().unwrap_or(0), site, state);
+        let (rid, site) = (r.single().unwrap_or(0), s(&format!("{}@L{}", q, node.line)));
         let any = Value::obj(self.any_object(state));
-        for (o, ns, k) in rebound {
-            let v = state.slot(o, ns, k).join(&any);
-            state.set_slot(o, ns, k, v, false);
+        // (the code it holds, and the code the data it may change holds)
+        let mut roots = vec![foid];
+        let mut seen: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
+        loop {
+            roots.append(&mut self.havoc_code);
+            roots.sort_unstable();
+            roots.dedup();
+            let cl = self.code_closure(&roots, state);
+            let mut vals: Vec<Value> = cl.locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).collect();
+            vals.extend(cl.values.iter().cloned());
+            self.havoc_with(&vals, rid, site, state, &mut seen);
+            for (o, ns, k) in &cl.rebound {
+                let v = state.slot(*o, *ns, *k).join(&any);
+                state.set_slot(*o, *ns, *k, v, false);
+            }
+            self.havoc_code.retain(|c| !cl.code.contains(c));
+            if self.havoc_code.is_empty() {
+                return r;
+            }
         }
-        r
     }
 
     /// Drop the facts whose test read one of `objs`.

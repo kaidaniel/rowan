@@ -955,6 +955,10 @@ pub struct Analyzer {
     cut_tick: u32,
     /// per function code (`FuncNode::addr`): the names it reads beyond its locals
     pub code_uses: FxHashMap<usize, Rc<effects::CodeUses>>,
+    /// per code object: what it may change when a call of it does not run (`code_closure`)
+    pub closures: FxHashMap<Vec<ObjId>, Rc<effects::Closure>>,
+    /// the code objects the last `havoc_reachable` met (functions, classes, bound methods)
+    pub havoc_code: Vec<ObjId>,
     pub entry_instances: FxHashMap<ObjId, ObjId>,
     pub fresh_in_progress: FxHashSet<ObjId>,
     pub main_module: ObjId,
