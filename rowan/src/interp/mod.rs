@@ -1675,18 +1675,27 @@ impl Analyzer {
             let mut self_val: Option<Value> = None;
             if let Some(cls) = fi.cls {
                 if !fi.is_static.get() {
-                    let inst = match self.entry_instances.get(&cls) {
-                        Some(&i) => i,
-                        None => {
-                            let cname = self.class_info(cls).name.clone();
-                            let i = self.fresh_instance(cls, state, &format!("entry:{}", cname));
-                            self.entry_instances.insert(cls, i);
-                            st = state.copy();
-                            st.ret = None;
-                            i
-                        }
-                    };
-                    self_val = Some(Value::obj(inst));
+                    // (an instance of the class or of one of its subclasses: what their
+                    // `__init__`s set may be there; a torch module's method is analysed in
+                    // its own terms: its attributes as symbols)
+                    let torch = self.torch_modules.contains(&fi.module);
+                    let subs: Vec<ObjId> = self.user_classes.iter().copied().filter(|c| *c == cls || (!torch && self.mro(*c).contains(&cls))).collect();
+                    let mut insts: Vec<ObjId> = Vec::new();
+                    for c in subs {
+                        let inst = match self.entry_instances.get(&c) {
+                            Some(&i) => i,
+                            None => {
+                                let cname = self.class_info(c).name.clone();
+                                let i = self.fresh_instance(c, state, &format!("entry:{}", cname));
+                                self.entry_instances.insert(c, i);
+                                st = state.copy();
+                                st.ret = None;
+                                i
+                            }
+                        };
+                        insts.push(inst);
+                    }
+                    self_val = Some(Value::objs(crate::domain::ObjSet::from_vec(insts)));
                     if !params.is_empty() {
                         params.remove(0);
                     }
