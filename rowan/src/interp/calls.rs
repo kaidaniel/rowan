@@ -435,9 +435,10 @@ impl Analyzer {
         let mut work: Vec<ObjId> = vals.iter().flat_map(|v| v.pts.iter()).collect();
         // (one object stands for "anything unknown code stored": a value per call would pile
         // up in every slot it reaches)
-        let any = Value::obj(self.any_object(state));
+        let any_id = self.any_object(state);
+        let any = Value::obj(any_id);
         while let Some(o) = work.pop() {
-            if o == rid || o == any.pts.first().unwrap_or(0) || !seen.insert(o) {
+            if o == rid || o == any_id || !seen.insert(o) {
                 continue;
             }
             let k = self.kind(o);
@@ -455,32 +456,37 @@ impl Analyzer {
                 (Kind::Module | Kind::External | Kind::Method, _) => continue,
                 _ => {}
             }
-            let slots = state.slots_of(o);
-            for (_, v) in &slots {
+            let mut writes: Vec<(crate::state::SlotKey, Value)> = Vec::new();
+            state.slots.each(&o, &mut |sk, v| {
                 work.extend(v.pts.iter());
-            }
+                if matches!(sk.0, Ns::Item | Ns::Attr | Ns::Pos | Ns::Elem) && !v.pts.contains(any_id) {
+                    writes.push((*sk, v.join(&any)));
+                }
+            });
             // (a tuple cannot change; an unknown object's content is unknown already)
             if k == Kind::Tuple || (k == Kind::Unknown && !state.has_row(o, Ns::Item) && !state.has_row(o, Ns::Attr)) {
                 continue;
             }
-            // (what an earlier havoc by the same code did already is not written again)
+            // (what an earlier havoc by the same code did already is not written again: code
+            // past its budget is often called in a loop)
             for ns in [Ns::Item, Ns::Attr] {
                 if state.has_row(o, ns) || (ns == Ns::Item && matches!(k, Kind::Dict | Kind::Frame)) || (ns == Ns::Attr && k == Kind::Instance) {
-                    let (r0, r) = { let r0 = state.row(o, ns); let r = r0.mutate(site); (r0, r) };
-                    if r != r0 {
-                        state.set_row(o, ns, r);
+                    let r0 = state.row(o, ns);
+                    if !(r0.definite.is_empty() && r0.absent.is_empty() && r0.mutators.contains(site)) {
+                        let r = r0.mutate(site);
+                        if r != r0 {
+                            state.set_row(o, ns, r);
+                        }
                     }
                 }
             }
-            for (sk, v) in slots {
-                if matches!(sk.0, Ns::Item | Ns::Attr | Ns::Pos | Ns::Elem) {
-                    let nv = v.join(&any);
-                    if nv != v {
-                        state.set_slot(o, sk.0, sk.1, nv, false);
-                    }
-                }
+            for (sk, v) in writes {
+                state.set_slot(o, sk.0, sk.1, v, false);
             }
-            if matches!(k, Kind::List | Kind::Set) && !self.obj(o).site.starts_with("gen:") {
+            let havocked = |state: &State| {
+                state.slot(o, Ns::Elem, intern::STAR).pts.contains(any_id) && state.lens.get(&o) == Some((None, 0, 0)) && !state.lasts.iter().any(|(x, _)| *x == o) && state.elems.get(&o).is_some_and(|kv| crate::domain::kv_join(&kv, &DATA) == kv)
+            };
+            if matches!(k, Kind::List | Kind::Set) && !self.obj(o).site.starts_with("gen:") && !havocked(state) {
                 let e = state.slot(o, Ns::Elem, intern::STAR).join(&any);
                 state.set_slot(o, Ns::Elem, intern::STAR, e, false);
                 let kv = crate::domain::kv_join(&state.elems.get(&o).unwrap_or(DATA), &DATA);
