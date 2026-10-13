@@ -841,8 +841,9 @@ impl Analyzer {
         let ci = self.class_info(cls);
         let row = if ci.open_base { Row::with_source(Source::new(&format!("instance {}@L{}", ci.name, node.line), SourceKind::Class)) } else { Row::new() };
         // the allocation site includes the class: `cls()` with several possible classes must
-        // not collapse onto one instance (prototype: same site, last class wins)
-        let site = format!("{}:{}", super::site_string(node), ci.name);
+        // not collapse onto one instance (prototype: same site, last class wins); by the class
+        // object, as two classes may share a name (`type(name, bases, ns)` per choice of bases)
+        let site = format!("{}:{}", super::site_string(node), cls);
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", ci.name, node.line), Payload::Cls(cls), Some(row), Ns::Attr, None, None);
         if ci.typed_dict {
             state.set_row(inst, Ns::Item, Row::new());

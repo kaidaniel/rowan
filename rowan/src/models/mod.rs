@@ -1443,39 +1443,60 @@ fn m_reduce(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// `type(x)` with one argument: the class of an instance of a known class (else unknown).
 fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    // `type("Name", (), {...})`: a class whose attributes are the namespace's items
+    // `type(name, bases, {...})`: a class whose attributes are the namespace's items, made
+    // by a synthetic module per call site and choice of bases (`class N(__b0, __b1): pass`
+    // with `__bi` bound to the bases); a base that is one of several classes makes one class
+    // per choice
     if c.args.len() == 3 {
-        let name = c.args[0].kv.as_lit().filter(|_| c.args[0].pts.is_empty()).and_then(intern::key_as_str);
-        let no_bases = c.args[1].single().map(|o| an.llen(o, st) == Some(0)).unwrap_or(false);
-        let ns = c.args[2].single().filter(|o| an.kind(*o) == Kind::Dict);
-        if let (Some(name), true, Some(ns)) = (name.filter(|n| n.chars().all(|ch| ch.is_alphanumeric() || ch == '_')), no_bases, ns) {
-            let row = st.row(ns, Ns::Item);
-            if row.closed() && row.present == row.definite {
-                let modname = format!("<type {} {}>", name, c.site);
+        let lit_name = c.args[0].kv.as_lit().filter(|_| c.args[0].pts.is_empty()).and_then(intern::key_as_str).filter(|n| !n.is_empty() && n.chars().all(|ch| ch.is_alphanumeric() || ch == '_'));
+        let bases: Option<Vec<Vec<ObjId>>> = c.args[1].single().filter(|o| an.kind(*o) == Kind::Tuple && c.args[1].kv.is_bot()).and_then(|t| {
+            let n = an.llen(t, st)?;
+            (0..n)
+                .map(|i| {
+                    let b = st.slot(t, Ns::Pos, intern::key_int(i as i64));
+                    (b.kv.is_bot() && !b.pts.is_empty() && b.pts.iter().all(|o| matches!(an.kind(o), Kind::Class | Kind::External))).then(|| b.pts.to_vec())
+                })
+                .collect()
+        });
+        let ns = c.args[2].single().filter(|o| an.kind(*o) == Kind::Dict).map(|o| (o, st.row(o, Ns::Item)));
+        let mut choices: Vec<Vec<ObjId>> = vec![Vec::new()];
+        for alts in bases.iter().flatten() {
+            choices = choices.iter().flat_map(|ch| alts.iter().map(move |b| ch.iter().copied().chain([*b]).collect::<Vec<ObjId>>())).collect();
+        }
+        if let (Some(_), Some((ns, row))) = (bases.as_ref().filter(|_| choices.len() <= 32), ns.filter(|(_, r)| r.closed() && r.present == r.definite)) {
+            let name: String = lit_name.as_deref().unwrap_or("type").to_string();
+            let mut out = Value::new();
+            for ch in choices {
+                let names: Vec<String> = (0..ch.len()).map(|i| format!("__b{}", i)).collect();
+                let modname = format!("<type {} {:?}>", crate::interp::site_string(&c.node), ch);
                 let moid = match an.modules.get(&modname) {
                     Some(&m) => m,
                     None => {
-                        let Ok((idx, tree)) = crate::frontend::parse(&modname, None, format!("class {}:\n    pass\n", name)) else { return Value::data("type") };
-                        let m = an.make_module_pub(&modname, None, idx, tree);
-                        an.run_module(m, st);
-                        m
+                        let Ok((idx, tree)) = crate::frontend::parse(&modname, None, format!("class {}({}):\n    pass\n", name, names.join(", "))) else { return Value::data("type") };
+                        an.make_module_pub(&modname, None, idx, tree)
                     }
                 };
-                // (made in another state: run it in this one too)
+                // (made in another state, or not yet: run it in this one)
                 if st.slot_opt(moid, Ns::Attr, key_str_lit(&name)).is_none() {
+                    for (n, b) in names.iter().zip(&ch) {
+                        st.set_slot(moid, Ns::Attr, key_str_lit(n), Value::obj(*b), true);
+                    }
                     an.run_module(moid, st);
                 }
                 let cv = st.slot(moid, Ns::Attr, key_str_lit(&name));
                 if let Some(cls) = cv.single() {
-                    for k in row.present.iter() {
-                        if intern::key_as_str(k).is_some() {
-                            let v = st.slot(ns, Ns::Item, k);
-                            an.cls_slots.insert((cls, Ns::Attr, k), v);
+                    for k in row.present.iter().filter(|k| intern::key_as_str(*k).is_some()) {
+                        an.cls_slots.insert((cls, Ns::Attr, k), st.slot(ns, Ns::Item, k));
+                    }
+                    if lit_name.is_none() {
+                        for k in ["__name__", "__qualname__"] {
+                            an.cls_slots.insert((cls, Ns::Attr, key_str_lit(k)), c.args[0].clone());
                         }
                     }
                 }
-                return cv;
+                out = out.join(&cv);
             }
+            return out;
         }
         return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
     }
