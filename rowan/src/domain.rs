@@ -1413,6 +1413,14 @@ impl Default for Value {
 }
 
 impl Value {
+    /// Push the objects this value refers to (its own, and those whose keys it ranges over).
+    pub fn push_objs(&self, work: &mut Vec<ObjId>) {
+        work.extend(self.pts.iter());
+        if let KeyVal::KeysOf(ko) = &self.kv {
+            work.extend(ko.objs.iter());
+        }
+    }
+
     pub fn new() -> Value {
         Value::default()
     }

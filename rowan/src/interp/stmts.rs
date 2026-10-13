@@ -1749,11 +1749,7 @@ impl Analyzer {
             return;
         }
         let mut roots: Vec<u32> = Vec::new();
-        roots.extend(v.pts.iter());
-        match &v.kv {
-            KeyVal::KeysOf(ko) => roots.extend(ko.objs.iter()),
-            _ => {}
-        }
+        v.push_objs(&mut roots);
         self.collect_since(mark, &pre, roots, state);
     }
 
@@ -1838,39 +1834,10 @@ impl Analyzer {
             return;
         }
         let mut roots: Vec<u32> = Vec::new();
-        let push = |v: &Value, roots: &mut Vec<u32>| {
-            roots.extend(v.pts.iter());
-            match &v.kv {
-                KeyVal::KeysOf(ko) => roots.extend(ko.objs.iter()),
-                _ => {}
-            }
-        };
-        for v in state.env.values() {
-            push(v, &mut roots);
-        }
-        for v in state.narrowed.values() {
-            push(v, &mut roots);
-        }
-        if let Some(r) = &state.ret {
-            push(r, &mut roots);
-        }
-        for env in &self.env_stack {
-            for v in env.values() {
-                push(v, &mut roots);
-            }
-        }
-        for fr in &self.frames {
-            roots.push(fr.module);
-            roots.extend(fr.cells.values().copied());
-            for ov in &fr.overlays {
-                for v in ov.values() {
-                    push(v, &mut roots);
-                }
-            }
-        }
+        self.state_roots(state, usize::MAX, usize::MAX, &mut roots);
         for (o, v) in state.lasts.iter() {
             roots.push(*o);
-            push(v, &mut roots);
+            v.push_objs(&mut roots);
         }
         self.collect_since(mark, &pre, roots, state);
     }

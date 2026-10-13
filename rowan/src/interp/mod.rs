@@ -101,10 +101,7 @@ pub fn limit(name: &str, default: usize) -> usize {
 }
 
 pub fn debug_enabled() -> bool {
-    match Ok::<u8, ()>(debug_level()) {
-        Ok(v) => v > 0,
-        Err(_) => false,
-    }
+    debug_level() > 0
 }
 
 pub const SAFE_METHODS: &[&str] = &["dict.pop", "list.pop", 
@@ -2229,41 +2226,27 @@ impl Analyzer {
         state.lens.get(&oid).is_some() || state.has_row(oid, Ns::Item) || state.has_row(oid, Ns::Attr) || state.slots.has_key(&oid)
     }
 
+    /// The roots of a reachability walk: the names, narrowed values and result of `state`, the
+    /// names of the first `envs` callers, and the modules, cells and loop overlays of the
+    /// first `frames` frames.
+    pub fn state_roots(&self, state: &State, envs: usize, frames: usize, work: &mut Vec<ObjId>) {
+        let callers = self.env_stack.iter().take(envs).flat_map(|e| e.values());
+        for v in state.env.values().chain(callers).chain(state.narrowed.values()).chain(state.ret.iter()) {
+            v.push_objs(work);
+        }
+        for fr in self.frames.iter().take(frames) {
+            work.push(fr.module);
+            work.extend(fr.cells.values().copied());
+            fr.overlays.iter().flat_map(|o| o.values()).for_each(|v| v.push_objs(work));
+        }
+    }
+
     /// Which of `targets` the program can still reach (one walk from the roots for all; it
     /// stops when every one is found).
     pub fn live_among(&self, targets: &[ObjId], state: &State) -> FxHashSet<ObjId> {
         let mut found: FxHashSet<ObjId> = FxHashSet::default();
-        fn push_value(v: &Value, work: &mut Vec<ObjId>) {
-            work.extend(v.pts.iter());
-            match &v.kv {
-                KeyVal::KeysOf(ko) => work.extend(ko.objs.iter()),
-                _ => {}
-            }
-        }
         let mut work: Vec<ObjId> = Vec::new();
-        for v in state.env.values() {
-            push_value(v, &mut work);
-        }
-        for env in &self.env_stack {
-            for v in env.values() {
-                push_value(v, &mut work);
-            }
-        }
-        for v in state.narrowed.values() {
-            push_value(v, &mut work);
-        }
-        if let Some(r) = &state.ret {
-            push_value(r, &mut work);
-        }
-        for fr in &self.frames {
-            work.push(fr.module);
-            work.extend(fr.cells.values().copied());
-            for ov in &fr.overlays {
-                for v in ov.values() {
-                    push_value(v, &mut work);
-                }
-            }
-        }
+        self.state_roots(state, usize::MAX, usize::MAX, &mut work);
         // (a walk over a large heap is bounded: past the budget the targets not found yet are
         // taken as live, which is always sound: their site makes a recent / variant object; a
         // walk that proves an object dead on a large heap visits all of it, and on email's 20k
@@ -2293,22 +2276,15 @@ impl Analyzer {
     /// The objects `o` refers to: its slots and element kinds in `state`, its payload, and what
     /// side tables keyed by it hold (a ChainMap's maps, a defaultdict's factory, …).
     pub fn obj_edges(&self, o: ObjId, state: &State, work: &mut Vec<ObjId>) {
-        fn push_value(v: &Value, work: &mut Vec<ObjId>) {
-            work.extend(v.pts.iter());
-            match &v.kv {
-                KeyVal::KeysOf(ko) => work.extend(ko.objs.iter()),
-                _ => {}
-            }
-        }
         // (the slot table in place: a walk visits the whole reachable heap)
-        state.slots.each(&o, &mut |_, v| push_value(v, work));
+        state.slots.each(&o, &mut |_, v| v.push_objs(work));
         match state.elems.get_ref(&o) {
             Some(KeyVal::KeysOf(ko)) => work.extend(ko.objs.iter()),
             _ => {}
         }
         for (lo, v) in state.lasts.iter() {
             if *lo == o {
-                push_value(v, work);
+                v.push_objs(work);
             }
         }
         if !self.has_obj(o) {
@@ -2317,22 +2293,22 @@ impl Analyzer {
         match &self.obj(o).payload {
             Payload::Func(fi) => work.extend(fi.closure.values().copied()),
             Payload::Cls(c) => work.push(*c),
-            Payload::Method(_, v) | Payload::View(_, v) | Payload::Enumerate(v, _) => push_value(v, work),
+            Payload::Method(_, v) | Payload::View(_, v) | Payload::Enumerate(v, _) => v.push_objs(work),
             Payload::Bound(f, v) | Payload::Super(f, v) => {
                 work.push(*f);
-                push_value(v, work);
+                v.push_objs(work);
             }
             Payload::Zip(a, b) | Payload::Pair(a, b) => {
-                push_value(a, work);
-                push_value(b, work);
+                a.push_objs(work);
+                b.push_objs(work);
             }
             Payload::Partial(f, args, kw) => {
-                push_value(f, work);
+                f.push_objs(work);
                 for a in args {
-                    push_value(a, work);
+                    a.push_objs(work);
                 }
                 for v in kw.values() {
-                    push_value(v, work);
+                    v.push_objs(work);
                 }
             }
             Payload::Groupby(fs, _, _, _) => work.extend(fs.iter().copied()),
@@ -2340,19 +2316,19 @@ impl Analyzer {
             _ => {}
         }
         if let Some(ms) = self.m.chainmaps.get(&o) {
-            ms.iter().for_each(|m| push_value(m, work));
+            ms.iter().for_each(|m| m.push_objs(work));
         }
         if let Some(v) = self.m.dd_factories.get(&o) {
-            push_value(v, work);
+            v.push_objs(work);
         }
         if let Some(v) = self.m.csv_readers.get(&o) {
-            push_value(v, work);
+            v.push_objs(work);
         }
         if let Some(v) = self.wrapped.get(&o) {
-            push_value(v, work);
+            v.push_objs(work);
         }
         if let Some(vs) = self.m.partial_star.get(&o) {
-            vs.iter().for_each(|v| push_value(v, work));
+            vs.iter().for_each(|v| v.push_objs(work));
         }
         if let Some(srcs) = self.lazy_src.get(&o) {
             work.extend(srcs.iter().map(|(s, _)| *s));
@@ -2363,36 +2339,29 @@ impl Analyzer {
             }
         }
         if let Some(items) = self.m.sorted_items.get(&o) {
-            items.iter().for_each(|(_, v, _)| push_value(v, work));
+            items.iter().for_each(|(_, v, _)| v.push_objs(work));
         }
         if let Some(cbs) = self.m.exit_callbacks.get(&o) {
             for (f, args, kw) in cbs {
-                push_value(f, work);
-                args.iter().for_each(|a| push_value(a, work));
-                kw.values().for_each(|v| push_value(v, work));
+                f.push_objs(work);
+                args.iter().for_each(|a| a.push_objs(work));
+                kw.values().for_each(|v| v.push_objs(work));
             }
         }
         if let Some(ds) = self.sdispatch.get(&o) {
             for (v, f) in ds {
-                push_value(v, work);
+                v.push_objs(work);
                 work.push(*f);
             }
         }
         if let Some(ds) = self.m.fa_app_deps.get(&o) {
-            ds.iter().for_each(|v| push_value(v, work));
+            ds.iter().for_each(|v| v.push_objs(work));
         }
     }
 
     /// Objects the analyzer itself holds beyond the state: what side tables keyed by other
     /// objects refer to, exceptions in flight, the callers' names, loop recency objects.
     pub fn gc_pinned(&self, work: &mut Vec<ObjId>) {
-        fn push_value(v: &Value, work: &mut Vec<ObjId>) {
-            work.extend(v.pts.iter());
-            match &v.kv {
-                KeyVal::KeysOf(ko) => work.extend(ko.objs.iter()),
-                _ => {}
-            }
-        }
         let st = State::new();
         for o in self.m.chainmaps.keys().chain(self.m.dd_factories.keys()).chain(self.m.csv_readers.keys()).chain(self.wrapped.keys()).chain(self.m.partial_star.keys()).chain(self.lazy_src.keys()).chain(self.attr_mirrors.keys()).chain(self.entry_instances.keys()).chain(self.copy_root.keys()).chain(self.m.sql_cursors.keys()).chain(self.m.sorted_items.keys()).chain(self.m.exit_callbacks.keys()).chain(self.sdispatch.keys()).chain(self.m.fa_app_deps.keys()) {
             // (the side-table edges only: the key itself may be dead)
@@ -2401,20 +2370,20 @@ impl Analyzer {
             work.extend(w);
         }
         for v in self.cur_exc.iter().chain(self.raise_values.iter().flatten()).chain(self.handling_values.iter()).chain(self.cmp_right.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
-            push_value(v, work);
+            v.push_objs(work);
         }
         for c in &self.m.fa_dep_cache {
-            c.values().for_each(|v| push_value(v, work));
+            c.values().for_each(|v| v.push_objs(work));
         }
         for (_, _, v, f) in &self.m.fa_hooks {
-            push_value(v, work);
+            v.push_objs(work);
             work.extend(f.iter().copied());
         }
         for env in &self.env_stack {
-            env.values().for_each(|v| push_value(v, work));
+            env.values().for_each(|v| v.push_objs(work));
         }
         for (_, env, _) in &self.cm_frames {
-            env.values().for_each(|v| push_value(v, work));
+            env.values().for_each(|v| v.push_objs(work));
         }
         for cells in &self.comp_cells {
             work.extend(cells.values().copied());
@@ -2433,7 +2402,7 @@ impl Analyzer {
             work.push(fr.module);
             work.extend(fr.cells.values().copied());
             for ov in &fr.overlays {
-                ov.values().for_each(|v| push_value(v, work));
+                ov.values().for_each(|v| v.push_objs(work));
             }
         }
     }

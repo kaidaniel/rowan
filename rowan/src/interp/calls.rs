@@ -1491,41 +1491,12 @@ impl Analyzer {
             let el = *el;
             let pre_try = pre.copy_ref();
             let mut roots: Vec<ObjId> = Vec::new();
-            let push = |v: &Value, roots: &mut Vec<ObjId>| {
-                roots.extend(v.pts.iter());
-                match &v.kv {
-                    KeyVal::KeysOf(ko) => roots.extend(ko.objs.iter()),
-                    _ => {}
-                }
-            };
-            for v in here.env.values() {
-                push(v, &mut roots);
-            }
-            for v in here.narrowed.values() {
-                push(v, &mut roots);
-            }
-            if let Some(r) = &here.ret {
-                push(r, &mut roots);
-            }
-            for env in self.env_stack.iter().take(el) {
-                for v in env.values() {
-                    push(v, &mut roots);
-                }
-            }
-            for fr in self.frames.iter().take(fl) {
-                roots.push(fr.module);
-                roots.extend(fr.cells.values().copied());
-                for ov in &fr.overlays {
-                    for v in ov.values() {
-                        push(v, &mut roots);
-                    }
-                }
-            }
+            self.state_roots(&here, el, fl, &mut roots);
             for (o, v) in here.lasts.iter() {
                 roots.push(*o);
-                push(v, &mut roots);
+                v.push_objs(&mut roots);
             }
-            push(&exc, &mut roots);
+            exc.push_objs(&mut roots);
             self.collect_since(tmark, &pre_try, roots, &mut here);
         }
         // (a try that keeps its raises one by one joins them where a handler needs them: the
