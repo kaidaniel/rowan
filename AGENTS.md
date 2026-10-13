@@ -185,7 +185,7 @@ extension (talks to `rowan serve`).
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (38k), no deadlines | ~8 / ~6 / ~8 s; 0.1 / 0.9 / 0.6 GB |
+| stdlib12k (12k lines) / email (10k) / rich (38k), no deadlines | ~6 / ~4 / ~6 s; 0.09 / 0.07 / 0.14 GB |
 
 ## Known problems and next steps
 
