@@ -835,8 +835,7 @@ impl Analyzer {
         let out_resps = self.m.fa_out_resp.pop().unwrap_or_default();
         self.m.fa_dep_cache.pop();
         let out_try = self.leave_try();
-        let flagged = out_try.flagged;
-        let mut raised_v = out_try.value.clone().unwrap_or_default();
+        let mut raised_v = out_try.value();
         let recs = out_try.recs;
         // (the raises are kept one by one: their states joined)
         let mut raised_at: Option<State> = crate::interp::join_raise_recs(&recs);
@@ -856,31 +855,11 @@ impl Analyzer {
                         keep_st = Some(match keep_st { None => s2, Some(mut a) => a.join(&mut s2) });
                         keep_v = keep_v.join(&ev);
                     } else {
-                        self.cur_exc = if ev.pts.is_empty() { None } else { Some(ev.clone()) };
-                        self.cur_exc_cls = c.clone();
-                        let mut s2 = st.copy();
-                        let recorded = self.record_raise_state(&mut s2);
-                        self.cur_exc = None;
-                        self.cur_exc_cls = None;
-                        if !recorded {
-                            self.note_raise();
-                        } else if let Some(t) = self.raise_stack.last_mut() {
-                            *t = true;
-                        }
-                        self.merge_esc(c.map(|x| vec![x]));
+                        self.reraise_rec((c, st, ev));
                     }
                 }
                 raised_at = keep_st;
                 raised_v = keep_v;
-            }
-        }
-        // other exceptions (KeyError, …) escape: TestClient raises them at the call
-        if flagged {
-            if crate::interp::debug_level() == 2 {
-                eprintln!("  handler {} may raise (escapes the TestClient call at L{})", self.func_info(func).qualname, node.line);
-            }
-            if let Some(m) = self.may_raise.last_mut() {
-                *m = true;
             }
         }
         let mut out = if state.reachable { self.fa_response_value(&r, func, &ret, state, node) } else { Value::new() };

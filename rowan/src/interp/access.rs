@@ -51,7 +51,7 @@ impl Analyzer {
     /// The innermost handler that catches this namespace's error re-raises it.
     pub fn guard_reraises(&self, ns: Ns) -> bool {
         let want: &[&str] = if ns == Ns::Item { match self.item_exc { Some("ValueError") => super::VALUE_GUARDS, Some("ValidationError") => super::VALIDATION_GUARDS, _ => ITEM_GUARDS } } else { ATTR_GUARDS };
-        for g in self.guards.iter().rev() {
+        for g in self.guards().rev() {
             if g.iter().any(|x| want.contains(&x.as_str())) {
                 return g.contains("!reraise");
             }
@@ -118,7 +118,7 @@ impl Analyzer {
 
     pub fn is_guarded(&self, ns: Ns) -> bool {
         let want: &[&str] = if ns == Ns::Item { match self.item_exc { Some("ValueError") => super::VALUE_GUARDS, Some("ValidationError") => super::VALIDATION_GUARDS, _ => ITEM_GUARDS } } else { ATTR_GUARDS };
-        self.guards.iter().any(|g| g.iter().any(|x| want.contains(&x.as_str())))
+        self.guards().any(|g| g.iter().any(|x| want.contains(&x.as_str())))
     }
 
     pub fn record_objects(&self, v: &Value) -> Vec<u32> {
@@ -837,7 +837,7 @@ impl Analyzer {
                     // the handler sees the state as it is here (and a KeyError / AttributeError
                     // carrying the key)
                     if model_read {
-                    } else if !self.raise_states.is_empty() {
+                    } else if !self.tries.is_empty() {
                         let cname = if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" };
                         let e = self.exception_object(cname, vec![Value::lit(k)], node, state);
                         self.cur_exc = Some(e);
@@ -848,13 +848,8 @@ impl Analyzer {
                     }
                     if !model_read {
                         self.cur_exc_cls = Some(super::builtin_exc_names(if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" }));
-                        let recorded = self.record_raise_state(state);
+                        self.record_raise_state(state);
                         self.cur_exc_cls = None;
-                        if !recorded {
-                            if let Some(m) = self.may_raise.last_mut() {
-                                *m = true;
-                            }
-                        }
                         // (an object of unknown kind indexed by a number may be a sequence: an
                         // IndexError then)
                         if ns == Ns::Item && intern::key_as_int(k).is_some() && matches!(kind, Kind::Unknown | Kind::External) {
@@ -1284,7 +1279,7 @@ impl Analyzer {
             if let Some((surely, k)) = raise.filter(|_| ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) {
                 state.set_row(oid, ns, row.clone());
                 let exc = if ns == Ns::Item { "KeyError" } else { "AttributeError" };
-                if !self.raise_states.is_empty() {
+                if !self.tries.is_empty() {
                     let e = self.exception_object(exc, vec![Value::lit(k)], node, state);
                     self.cur_exc = Some(e);
                 }

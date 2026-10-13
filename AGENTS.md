@@ -15,7 +15,9 @@ ruff and walks the syntax tree directly, running the program on abstract values.
 * **Objects** (`Obj`, `interp/mod.rs`) are identified by allocation site and context (the call
   chain, 2 deep). A *single* object stands for one runtime object: stores into it are strong.
   Allocating a site again while its earlier object is live gives a variant (up to 8), then a
-  *merged* object (stores only join). Garbage collection at returns drops dead objects' state.
+  *merged* object (stores only join). Garbage collection at returns, loop exits and try exits
+  drops the state of objects made since (`Obj::born`, renewed by a strong re-allocation) that
+  nothing reaches.
 * **State** (`State`, `state.rs`) is one point on one path: names → values, and per object
   its **rows** (`(object, namespace)` → `Row`), slots (the value under each key), elements,
   lengths, and the requirements recorded so far. The maps are persistent Patricia tries
@@ -26,20 +28,21 @@ ruff and walks the syntax tree directly, running the program on abstract values.
   read narrows the key in.
 * **Statements.** Both sides of a branch run, narrowed by the test (`narrow.rs`), and join.
   Loops over at most 16 known items are unrolled; other loops run to a fixpoint (40 rounds,
-  then widened; verdicts are the last round's: earlier rounds saw less). `try` collects the state at each point that may raise; handlers start from
-  those states. `with` is a `try` whose `finally` is `__exit__`. `finally` runs on every way
+  then widened; verdicts are the last round's: earlier rounds saw less). A running `try`
+  (`TryCtx`) records the state at every point of its body and callees that may raise (a raise,
+  a failing read, a model's raise, any unknown call: class `any_exc`), joined per class;
+  handlers start from the raises they may catch, the rest go on through the `finally` to the
+  enclosing try. `with` is a `try` whose `finally` is `__exit__`. `finally` runs on every way
   out, `break` / `continue` / `return` included.
-* **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site,
-  in a context of the innermost `chain` (2) call sites (no call cache: a replay keyed by a
-  bounded view of the heap was unsound and rarely hit). **Budget:** each function code (all
-  closures of one `def`) may run 4,096 statements in all (`budget`); past that its calls are
-  unknown calls that may also change what its code reaches beyond its arguments
-  (`effects.rs`: the globals and cells its code, and the code it reaches by name, reads where
-  they may change or escape; class attributes by name; mutable defaults; cached per set of
-  code), and the function gets a reporting run with open parameters (its lines then hold for
-  the calls that did not run).
-  Entry runs are not counted (one per function). So the work is bounded by the number of
-  functions times the budget, not by a deadline.
+* **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site, in
+  a context of the innermost `chain` (2) call sites (no call cache: it was unsound and rarely
+  hit). **Budget:** each function code (all closures of one `def`) may run 4,096 statements in
+  all (`budget`); past that its calls are unknown calls that may also change what its code
+  reaches beyond its arguments (`effects.rs`: the globals and cells its code, and the code it
+  reaches by name, reads where they may change or escape; class attributes by name; mutable
+  defaults; cached per set of code), and the function gets a reporting run with open
+  parameters (its lines then hold for the calls that did not run). Entry runs are not counted
+  (one per function). So the work is bounded by the number of functions times the budget.
   * **Recursion:** the inner call uses the running activation's partial result; it iterates
     to a fixpoint (8 rounds), then widens.
   * **Unknown values** are not taken for instances of the program's classes: a method of an
@@ -47,9 +50,8 @@ ruff and walks the syntax tree directly, running the program on abstract values.
   * **Unknown calls** may change everything they reach through what they are given, at any
     depth: records get a mutator, slots may hold anything (one shared unknown object), lists
     and sets any items and length; the program's functions among it may run (`follow_code`).
-    They return an unknown and may raise anything. Library
-    functions known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`), except the ones
-    that change their arguments (`random.shuffle`, `operator.setitem`, …).
+    They return an unknown and may raise anything. Library functions known to have no effect
+    are `noeffect` (`ALLOWLIST_PREFIXES`), except those changing their arguments (`random.shuffle`).
   * **Entry points:** functions nothing calls run with open parameters; their requirements
     become `param F.x` schemas.
 * **Generators** run whole at their first consumption (iteration, unpacking, a call taking
@@ -71,9 +73,9 @@ ruff and walks the syntax tree directly, running the program on abstract values.
   running calls stop where they are. The budget, not the deadline, bounds the work.
 * **Soundness** holds relative to the models and to annotations of values whose class is
   unknown. `exec`, `setattr` / `getattr` with unknown names (also in code a skipped call
-  reaches), metaclasses and monkey-patching (rebinding a function or class too) are unknown
-  or ignored. Accepted imprecision: lengths past 15, slices by unknown bounds,
-  weak stores through names holding several objects, runs cut by a deadline.
+  reaches), metaclasses and monkey-patching (rebinding a function or class too) are unknown or
+  ignored. Accepted imprecision: lengths past 15, slices by unknown bounds, weak stores through
+  names holding several objects, runs cut by a deadline.
 
 ## Working conventions (the owner's standing instructions)
 

@@ -1145,7 +1145,8 @@ fn getattr_hook_outcome(an: &mut Analyzer, st: &mut State, o: u32, k: KeyId, nod
     let escaped = an.raise_stack.pop().unwrap_or(false);
     an.esc_cls.pop();
     let out = an.leave_try();
-    let (flagged, raised, recs) = (out.flagged, out.raised(), out.recs);
+    let (flagged, raised) = (out.any(), out.raised());
+    let recs = out.recs;
     if flagged || escaped {
         return None;
     }

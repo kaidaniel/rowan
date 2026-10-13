@@ -685,7 +685,8 @@ impl Analyzer {
             self.enter_try(rustc_hash::FxHashSet::from_iter(["StopIteration".to_string()]), &mut pre);
             let v = self.call_value(&m, node, None, &mut probe, Some(Vec::new()));
             let out = self.leave_try();
-            let (flagged, raised_at, recs) = (out.flagged, out.raised(), out.recs);
+            let (flagged, raised_at) = (out.any(), out.raised());
+            let recs = out.recs;
             let only_stop = !recs.is_empty() && recs.iter().all(|(c, _, _)| c.as_ref().is_some_and(|(names, _)| names.iter().any(|n| n == "StopIteration")));
             let level = if flagged { 1 } else if raised_at.is_none() && probe.reachable { 0 } else if !probe.reachable && raised_at.is_some() { 2 } else { 1 };
             // (effects only on the iterator, the objects its attributes hold — its own state,

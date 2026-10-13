@@ -87,20 +87,7 @@ impl Analyzer {
             self.alloc_extra = saved;
             states.push(st);
         }
-        // (pairwise: each round joins what the others wrote once, not the growing join again)
-        while states.len() > 1 {
-            let mut next: Vec<State> = Vec::with_capacity(states.len().div_ceil(2));
-            let mut it = states.into_iter();
-            while let Some(mut a) = it.next() {
-                match it.next() {
-                    Some(mut b) => next.push(a.join(&mut b)),
-                    None => next.push(a),
-                }
-            }
-            states = next;
-        }
-        let out = states.pop().unwrap();
-        state.replace_with(out);
+        state.replace_with(State::join_all(states).unwrap());
         join_values(outs)
     }
 
@@ -291,13 +278,6 @@ impl Analyzer {
         if crate::interp::debug_level() == 2 {
             eprintln!("  unknown call {} in {} (may raise)", site, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
         }
-        if let Some(t) = self.raise_stack.last_mut() {
-            *t = true;
-        }
-        if let Some(e) = self.esc_cls.last_mut() {
-            *e = None;
-        }
-        self.flag_may_raise(state);
         // unknown code may remove keys stored through names
         state.drop_name_keys(None);
         // unknown code may change what an earlier test read: facts about it no longer hold
@@ -310,6 +290,7 @@ impl Analyzer {
         }
         let name = qual.rsplit('.').next().unwrap_or(qual);
         if NOEFFECT_METHOD_NAMES.contains(&name) && recv.map(|r| self.record_objects(r).is_empty()).unwrap_or(true) {
+            self.flag_may_raise(state);
             return Value::data(&format!("L{}", node.line));
         }
         if !state.narrowed.is_empty() {
@@ -388,6 +369,9 @@ impl Analyzer {
             state.set_row(rid, Ns::Attr, mutated(Row::with_source(src)));
         }
         self.note(format!("unknown call {}", site));
+        // (it may raise anything, after any part of its effects: the state with all of them
+        // stands for those with some)
+        self.flag_may_raise(state);
         Value::obj(rid)
     }
 
@@ -1008,7 +992,7 @@ impl Analyzer {
         let obj_mark_call = self.objects.len() as ObjId;
         if !matches!(fnode, FuncNode::Def(f) if is_generator(&f.body)) {
             if let Some(fr) = self.frames.last_mut() {
-                fr.pre_call = Some(super::PreCall(obj_mark_call, std::rc::Rc::new(pre_bind.copy())));
+                fr.pre_call = Some(super::PreCall(self.serial, std::rc::Rc::new(pre_bind.copy())));
             }
         }
         let gen_cm = self.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth + 1 == self.frames.len());
@@ -1230,6 +1214,8 @@ impl Analyzer {
         let mut roots = vec![foid];
         roots.append(&mut self.havoc_code);
         self.follow_code(roots, r.single().unwrap_or(0), site, state);
+        // (a raise after the code's effects on what it reaches beyond its arguments)
+        self.flag_may_raise(state);
         r
     }
 
@@ -1270,80 +1256,54 @@ impl Analyzer {
         }
     }
 
-    /// An exception raised here is caught by the innermost enclosing try: its handler starts
-    /// from this state (with the try frame's locals when the raise is inside a callee).
+    /// An exception raised here (`cur_exc`, of class `cur_exc_cls`) enters the innermost
+    /// running try: its handlers and finally start from this state (with the try frame's
+    /// locals when the raise is inside a callee). False: no try is running.
     pub fn record_raise_state(&mut self, state: &mut State) -> bool {
-        let Some((fl, el, pre, tmark)) = self.try_marks.last() else { return false };
-        let tmark = *tmark;
+        let exc = self.cur_exc.take().unwrap_or_else(|| Value::data("exception"));
+        let cls = self.cur_exc_cls.take().or_else(|| self.exc_value_names(&exc));
+        let Some(t) = self.tries.last() else { return false };
+        let (fl, el) = (t.frames, t.envs);
         let mut here = state.copy();
         // the try is in a `@contextmanager` generator whose with body is running (also from a
         // callee of the body): the generator's names
-        let in_cm = self.cm_frames.iter().rev().find(|(d, _, el0)| *d == *fl && *el <= *el0).map(|(_, env, _)| env.clone());
+        let in_cm = self.cm_frames.iter().rev().find(|(d, _, el0)| *d == fl && el <= *el0).map(|(_, env, _)| env.clone());
         if let Some(env) = in_cm {
             here.env = env;
             here.narrowed = Default::default();
-        } else if self.frames.len() < *fl {
-            if let Some((_, env, _)) = self.cm_frames.iter().rev().find(|(d, _, _)| *d == *fl) {
+        } else if self.frames.len() < fl {
+            if let Some((_, env, _)) = self.cm_frames.iter().rev().find(|(d, _, _)| *d == fl) {
                 here.env = env.clone();
                 here.narrowed = Default::default();
             }
-        } else if self.frames.len() > *fl {
-            here.env = self.env_stack.get(*el).cloned().unwrap_or_else(|| pre.env.clone());
-            here.narrowed = pre.narrowed.clone();
-            here.ret = pre.ret.clone();
-            here.exits = pre.exits.clone();
+        } else if self.frames.len() > fl {
+            here.env = self.env_stack.get(el).cloned().unwrap_or_else(|| t.pre.env.clone());
+            here.narrowed = t.pre.narrowed.clone();
+            here.ret = t.pre.ret.clone();
+            here.exits = t.pre.exits.clone();
         }
-        let exc = self.cur_exc.take().unwrap_or_else(|| Value::data("exception"));
-        let cls = self.cur_exc_cls.take().or_else(|| self.exc_value_names(&exc));
         // (the same state, class and exception as the last raise recorded in this try — a loop
-        // of calls raising at one call site: nothing to add)
-        let depth = self.raise_states.len();
-        if depth > 0 {
-            let open = self.raise_states.last().is_some_and(|s| s.is_some());
-            if let Some((ls, lc, le)) = self.raise_last.get(&depth) {
-                if open && *lc == cls && *le == exc && ls.same(&here) {
-                    return true;
-                }
-            }
-            self.raise_last.insert(depth, (here.copy_ref(), cls.clone(), exc.clone()));
-        }
-        // (what callees made since the try began and nothing reaches after the unwind — the
-        // try's names, the frames above it, the exception — is garbage in the raise state: a
-        // try around a large recursion otherwise joins every callee's objects at every raise)
-        {
-            let fl = *fl;
-            let el = *el;
-            let pre_try = pre.copy_ref();
-            let mut roots: Vec<ObjId> = Vec::new();
-            self.state_roots(&here, el, fl, &mut roots);
-            for (o, v) in here.lasts.iter() {
-                roots.push(*o);
-                v.push_objs(&mut roots);
-            }
-            exc.push_objs(&mut roots);
-            self.collect_since(tmark, &pre_try, roots, &mut here);
-        }
-        // (a try that keeps its raises one by one joins them where a handler needs them: the
-        // running join is only a mark that something was recorded)
-        let mut kept = false;
-        if let Some((d, recs)) = self.raise_cls.last_mut() {
-            if *d == depth {
-                recs.push((cls, here.copy(), exc.clone()));
-                kept = true;
+        // of calls raising at one point: nothing to add)
+        if let Some((ls, lc, le)) = &t.last {
+            if *lc == cls && *le == exc && ls.same(&here) {
+                return true;
             }
         }
-        if let Some(rv) = self.raise_values.last_mut() {
-            *rv = Some(match rv.take() {
-                None => exc,
-                Some(prev) => prev.join(&exc),
-            });
+        self.tries.last_mut().unwrap().last = Some((here.copy_ref(), cls.clone(), exc.clone()));
+        // (joined per class: a handler takes every raise of a class or none of them; what
+        // callees made is collected when the try ends)
+        let recs = &mut self.tries.last_mut().unwrap().recs;
+        match recs.iter_mut().find(|r| r.0 == cls) {
+            Some(r) => {
+                r.1.add(here);
+                r.2 = r.2.join(&exc);
+            }
+            None => {
+                let mut j = crate::state::Joins::default();
+                j.add(here);
+                recs.push((cls, j, exc));
+            }
         }
-        let Some(slot) = self.raise_states.last_mut() else { return false };
-        *slot = Some(match slot.take() {
-            _ if kept => State::bottom(),
-            None => here,
-            Some(mut prev) => prev.join(&mut here),
-        });
         self.raise_records += 1;
         true
     }
@@ -1437,7 +1397,7 @@ impl Analyzer {
 
     /// Does some running try's guard catch exceptions of this class?
     pub fn class_guarded(&self, c: &super::ExcNames) -> bool {
-        self.guards.iter().any(|g| g.contains("*") || c.0.iter().any(|n| g.contains(n)) || (!c.1 && (g.contains("Exception") || g.contains("BaseException"))))
+        self.guards().any(|g| g.contains("*") || c.0.iter().any(|n| g.contains(n)) || (!c.1 && (g.contains("Exception") || g.contains("BaseException"))))
     }
 
     /// The running call may also raise these (None: something of unknown class).
@@ -1515,15 +1475,13 @@ impl Analyzer {
         state.reachable = false;
     }
 
-    /// An exception named `name` may be raised here: a handler that catches it starts from
-    /// this state; otherwise the enclosing call raises.
+    /// An exception named `name` may be raised here: a running try records this state for its
+    /// handlers and finally; otherwise the enclosing call raises.
     pub fn may_raise_here(&mut self, name: &str, state: &mut State) {
-        if self.cur_exc_cls.is_none() {
-            self.cur_exc_cls = Some(super::builtin_exc_names(name));
-        }
-        let caught = self.guards.iter().any(|g| g.contains("*") || g.contains("Exception") || g.contains("BaseException") || g.contains(name)) || self.cur_exc_cls.as_ref().is_some_and(|c| self.class_guarded(c));
-        // a builtin exception a model raises: an object of its class (its args not known)
-        if caught && self.cur_exc.is_none() && !self.raise_states.is_empty() {
+        let cls = self.cur_exc_cls.take().unwrap_or_else(|| super::builtin_exc_names(name));
+        // a builtin exception a model raises, for a handler that may catch it: an object of its
+        // class (its args not known)
+        if self.cur_exc.is_none() && self.class_guarded(&cls) {
             if let Some(nd) = self.exc_node {
                 let n = name.rsplit('.').next().unwrap_or(name);
                 if super::builtin_exc_names(n).1 && super::is_builtin_name(n) {
@@ -1536,54 +1494,50 @@ impl Analyzer {
                 }
             }
         }
-        let recorded = caught && self.record_raise_state(state);
-        self.cur_exc_cls = None;
-        if recorded {
+        self.cur_exc_cls = Some(cls.clone());
+        if self.record_raise_state(state) {
             return;
         }
+        self.cur_exc_cls = None;
+        self.merge_esc(Some(vec![cls]));
         if let Some(t) = self.raise_stack.last_mut() {
             *t = true;
         }
-        let cls = self.cur_exc_cls.clone().unwrap_or_else(|| super::builtin_exc_names(name));
-        let guarded = self.class_guarded(&cls);
-        if let Some(Some(v)) = self.esc_cls.last_mut() {
-            if !v.contains(&cls) {
-                v.push(cls);
-            }
-        }
-        // (the running try's handlers: only when one of them may catch it)
-        if guarded {
-            if let Some(m) = self.may_raise.last_mut() {
-                *m = true;
-            }
-        }
     }
 
-    /// The running try context may raise from here on (where exactly is not known): the
-    /// requirements recorded so far are its handler's too.
+    /// Code that may raise anything ran here (unknown code, a model that does not say what it
+    /// raises): the running call may raise, and a running try records this state.
     pub fn flag_may_raise(&mut self, state: &mut State) {
-        let d = self.may_raise.len();
-        if let Some(m) = self.may_raise.last_mut() {
-            if !*m {
-                self.flag_reqs.push((d, state.reqs.copy()));
+        self.note_raise();
+        self.cur_exc = None;
+        self.cur_exc_cls = Some(super::any_exc());
+        self.record_raise_state(state);
+        self.cur_exc_cls = None;
+    }
+
+    /// A raise a try context recorded that leaves it (no handler of it surely catches it): the
+    /// enclosing try records it, or the running call raises it.
+    pub fn reraise_rec(&mut self, rec: super::RaiseRec) {
+        let (cls, mut st, exc) = rec;
+        self.cur_exc = if exc.pts.is_empty() { None } else { Some(exc) };
+        self.cur_exc_cls = cls.clone();
+        if !self.record_raise_state(&mut st) {
+            self.cur_exc = None;
+            self.cur_exc_cls = None;
+            self.merge_esc(cls.filter(|c| !super::is_any_exc(&Some(c.clone()))).map(|c| vec![c]));
+            if let Some(t) = self.raise_stack.last_mut() {
+                *t = true;
             }
-            *m = true;
         }
     }
 
-    /// The call that just completed may raise: the enclosing call and try body learn it.
+    /// The call that just completed may raise something of unknown class.
     pub fn note_raise(&mut self) {
         if let Some(e) = self.esc_cls.last_mut() {
             *e = None;
         }
-        if crate::interp::debug_level() == 2 {
-            eprintln!("  raise noted in {} (chain {:?})", self.frames.last().map(|f| f.label.clone()).unwrap_or_default(), self.call_chain);
-        }
         if let Some(t) = self.raise_stack.last_mut() {
             *t = true;
-        }
-        if let Some(m) = self.may_raise.last_mut() {
-            *m = true;
         }
     }
 

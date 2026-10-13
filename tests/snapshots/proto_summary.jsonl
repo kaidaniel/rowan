@@ -1051,7 +1051,7 @@
 ["verdict", "", 540, 12, "'sum_events'", "attr", "proven", [316], "SummaryMixin()"]
 ["verdict", "", 541, 12, "'sum_obj_mark'", "attr", "proven", [316], "SummaryMixin()"]
 ["verdict", "", 542, 12, "'discard'", "attr", "input", [316], "SummaryMixin()['sum_hit']"]
-["verdict", "", 542, 12, "'sum_hit'", "attr", "proven", [316], "SummaryMixin()"]
+["verdict", "", 542, 12, "'sum_hit'", "attr", "input", [316], "SummaryMixin()"]
 ["verdict", "", 543, 12, "'sum_partial'", "attr", "input", [316], "SummaryMixin()"]
 ["verdict", "", 548, 12, "'summary_table'", "attr", "proven", [316], "SummaryMixin()"]
 ["verdict", "", 589, 17, "'objects'", "attr", "input", [581], "SummaryMixin()"]

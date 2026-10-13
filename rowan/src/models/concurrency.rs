@@ -46,7 +46,7 @@ impl Analyzer {
         }
         self.catching_depth -= 1;
         let out = self.leave_try();
-        let (flagged, raised_at, raised_v) = (out.flagged, out.raised(), out.value.clone().unwrap_or_default());
+        let (flagged, raised_at, raised_v) = (out.any(), out.raised(), out.value());
         let died = !state.reachable;
         let raised = flagged || raised_at.is_some() || died;
         let level = if died && raised { 2 } else if raised { 1 } else { 0 };
@@ -95,9 +95,7 @@ impl Analyzer {
             }
             if names.is_empty() {
                 // (any exception: any handler may run)
-                if let Some(m) = self.may_raise.last_mut() {
-                    *m = true;
-                }
+                self.flag_may_raise(state);
             }
             if level == 2 {
                 state.reachable = false;

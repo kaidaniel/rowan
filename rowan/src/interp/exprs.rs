@@ -201,7 +201,7 @@ impl Analyzer {
                 self.callee_nodes.insert(self.m.t_called_attr);
                 let fv = self.eval(&c.func, state);
                 let mut flag = false;
-                if !self.may_raise.is_empty() {
+                if !self.tries.is_empty() {
                     let all_safe = fv.pts.iter().all(|o| match &self.obj(o).payload {
                         Payload::Method(q, _) if self.kind(o) == Kind::Method => super::safe_method(q) || SELF_REPORTING.iter().any(|p| q.starts_with(p)),
                         // user code: whether it raises is reported by its own analysis

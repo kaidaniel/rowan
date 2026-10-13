@@ -176,7 +176,7 @@ impl Analyzer {
                     Some(n) => vec![n.clone()],
                     None => self.handling.last().map(|h| h.iter().cloned().collect()).unwrap_or_default(),
                 };
-                let caught = self.guards.iter().any(|g| {
+                let caught = self.guards().any(|g| {
                     g.contains("*") || g.contains("Exception") || g.contains("BaseException") || names.iter().any(|n| g.contains(n) || n == "*" && !g.is_empty())
                 });
                 self.cur_exc = exc_v.clone().filter(|v| v.pts.iter().any(|o| self.kind(o) == Kind::Instance || self.exc_objs.contains_key(&o) || matches!(&self.obj(o).payload, Payload::Method(q, _) if q == "fastapi.httpexc")));
@@ -201,9 +201,11 @@ impl Analyzer {
                     self.cur_exc_cls = Some((crate::interp::builtin_exc_names(&names[0]).0, false));
                 }
                 // (a handler of a base class catches it too)
-                let caught = caught || self.cur_exc_cls.as_ref().is_some_and(|(ns, _)| self.guards.iter().any(|g| ns.iter().any(|n| g.contains(n))));
+                let caught = caught || self.cur_exc_cls.as_ref().is_some_and(|(ns, _)| self.guards().any(|g| ns.iter().any(|n| g.contains(n))));
                 let raised_cls = self.cur_exc_cls.clone();
-                let recorded = state.reachable && self.record_raise_state(state);
+                if state.reachable {
+                    self.record_raise_state(state);
+                }
                 self.cur_exc = None;
                 self.cur_exc_cls = None;
                 if !caught {
@@ -214,12 +216,6 @@ impl Analyzer {
                     }
                     if let Some(t) = self.raise_stack.last_mut() {
                         *t = true;
-                    }
-                    // the enclosing try already has this state for its handlers / finally
-                    if !recorded {
-                        if let Some(m) = self.may_raise.last_mut() {
-                            *m = true;
-                        }
                     }
                 }
                 state.reachable = false;
@@ -376,16 +372,9 @@ impl Analyzer {
                 if swallows {
                     let mut pre = state.copy();
                     self.enter_try(FxHashSet::from_iter(["*".to_string()]), &mut pre);
-                    let exits_before = self.exit_count;
                     self.exec_block(&w.body, state);
-                    let out = self.leave_try();
-                    let (flagged, raised_at) = (out.flagged, out.raised());
-                    let died = !state.reachable && self.exit_count == exits_before;
-                    let generic = flagged || (died && raised_at.is_none());
+                    let raised_at = self.leave_try().raised();
                     let mut after = state.copy();
-                    if generic {
-                        after = pre.join(&mut after);
-                    }
                     if let Some(mut r) = raised_at {
                         after = if after.reachable { after.join(&mut r) } else { r };
                     }
@@ -490,19 +479,12 @@ impl Analyzer {
         self.enter_try(caught, &mut pre);
         self.cond_depth += 1;
         self.branch_depth += 1;
-        let exits_before = self.exit_count;
         self.exec_block(body, state);
-        let out = self.leave_try();
-        let (flagged, raised_at) = (out.flagged, out.raised());
+        let raised_at = self.leave_try().raised();
         self.branch_depth -= 1;
         self.cond_depth -= 1;
-        let died = !state.reachable && self.exit_count == exits_before;
-        let generic = flagged || (died && raised_at.is_none());
         let mut body_end = state.copy();
-        let mut handled = if generic { pre.join(&mut body_end) } else { State::bottom() };
-        if let Some(mut r) = raised_at {
-            handled = if handled.reachable { handled.join(&mut r) } else { r };
-        }
+        let mut handled = raised_at.unwrap_or_else(State::bottom);
         let out = match (body_end.reachable, handled.reachable) {
             (true, true) => body_end.join(&mut handled),
             (true, false) => body_end,
@@ -1432,7 +1414,7 @@ impl Analyzer {
                     let a = if exc { Value::data("exc") } else { self.none_v.clone() };
                     self.call_method_with(v, "__exit__", vec![a.clone(), a.clone(), a], n, st);
                     // an ExitStack: its callbacks, last registered first; closing(x): x.close()
-                    crate::models::csvio::exitstack_close(self, st, v, n);
+                    crate::models::csvio::exitstack_close(self, st, v, n, !exc);
                     crate::models::csvio::closing_exit(self, st, v, n);
                 }
             }
@@ -1500,15 +1482,8 @@ impl Analyzer {
         self.enter_try(caught, &mut pre);
         self.cond_depth += 1;
         self.branch_depth += 1;
-        let exits_before = self.exit_count;
-        let fl_mark = self.flag_reqs.len();
-        let fl_depth = self.may_raise.len();
         self.exec_block(body, state);
-        // the requirements known where the body first may have raised anywhere
-        let mut flag_reqs = self.flag_reqs.drain(fl_mark..).find(|(d, _)| *d == fl_depth).map(|(_, r)| r);
-        // a body that ended because it returned (or broke out) did not raise
-        let TryExit { flagged, mut recs, .. } = self.leave_try();
-        let raised_at: Option<()> = if recs.is_empty() { None } else { Some(()) };
+        let TryExit { mut recs } = self.leave_try();
         // the handlers' classes: which recorded raise each one catches (Python takes the
         // first handler that matches)
         let hclasses: Vec<(FxHashSet<String>, bool)> = handlers.iter().map(|h| {
@@ -1546,11 +1521,10 @@ impl Analyzer {
                 None
             }
         };
-        let per_class = !handlers.is_empty();
         // raises no handler surely catches go on to the enclosing try (or out of the call),
         // through the finally (unless a return / jump in it swallows them)
         let swallowing = !fin.is_empty() && fin.swallows();
-        if (per_class || handlers.is_empty()) && !swallowing {
+        if !swallowing {
             for (cls, st, ev) in recs.iter_mut() {
                 if hclasses.iter().any(|hc| hmatch(hc, cls) == Some(true)) {
                     continue;
@@ -1565,43 +1539,15 @@ impl Analyzer {
                         continue;
                     }
                 }
-                self.cur_exc = if ev.pts.is_empty() { None } else { Some(ev.clone()) };
-                self.cur_exc_cls = cls.clone();
-                let recorded = self.record_raise_state(&mut st2);
-                self.cur_exc = None;
-                self.cur_exc_cls = None;
-                if !recorded {
-                    self.note_raise();
-                }
+                self.reraise_rec((cls.clone(), st2, ev.clone()));
             }
         }
-        let died = !state.reachable && self.exit_count == exits_before;
-        let generic = flagged || (died && raised_at.is_none());
-        let body_may_raise = generic || raised_at.is_some();
         // where an exception leaves the body (for a finally without handlers)
-        let mut finally_escape: Option<State> = None;
-        if has_finally && handlers.is_empty() && body_may_raise && fin.swallows() {
-            let mut e = if generic { pre.copy() } else { State::bottom() };
-            for (_, r, _) in recs.iter_mut() {
-                let mut r2 = r.copy();
-                e = if e.reachable { e.join(&mut r2) } else { r2 };
-            }
-            finally_escape = Some(e);
-        }
+        let mut finally_escape = if has_finally && handlers.is_empty() && fin.swallows() { crate::interp::join_raise_recs(&recs) } else { None };
         if crate::interp::debug_level() == 2 {
-            eprintln!("  try at L{}: may_raise={} at_access={} reachable={} exited={}", body.first().map(|s| frontend::node(s).line).unwrap_or(0), flagged, raised_at.is_some(), state.reachable, self.exit_count != exits_before);
+            eprintln!("  try at L{}: raises recorded={} reachable={}", body.first().map(|s| frontend::node(s).line).unwrap_or(0), recs.len(), state.reachable);
         }
         let mut body_end = state.copy();
-        // (where a raise from anywhere in the body enters a handler)
-        let mut generic_entry = if generic && per_class {
-            let mut g = pre.copy();
-            if let Some(r) = flag_reqs.as_mut() {
-                g.reqs = r.copy();
-            }
-            g.join(&mut body_end.copy())
-        } else {
-            State::bottom()
-        };
         let mut results: Vec<State> = Vec::new();
         if !orelse.is_empty() && body_end.reachable {
             self.exec_block(orelse, &mut body_end);
@@ -1614,8 +1560,8 @@ impl Analyzer {
             let unknown = Value::data(&format!("exc@L{}", hn.line));
             let (mut hs, ev) = {
                 // the raises this handler may catch that no earlier one surely catches
-                let mut e = generic_entry.copy();
-                let mut ev = if generic { Some(unknown.clone()) } else { None };
+                let mut e = State::bottom();
+                let mut ev: Option<Value> = None;
                 for (cls, st, x) in recs.iter_mut() {
                     if hmatch(&hclasses[hi], cls) == Some(false) || hclasses[..hi].iter().any(|hc| hmatch(hc, cls) == Some(true)) {
                         continue;
@@ -1624,9 +1570,6 @@ impl Analyzer {
                     e = if e.reachable { e.join(&mut r) } else { r };
                     let x = if x.pts.is_empty() { unknown.clone() } else { x.clone() };
                     ev = Some(match ev { None => x, Some(p) => p.join(&x) });
-                }
-                if !body_may_raise {
-                    e = State::bottom();
                 }
                 (e, ev.unwrap_or(unknown))
             };
@@ -1708,10 +1651,8 @@ impl Analyzer {
             // swallows
             let n_exit_ways = ways.len();
             // (a `break` / `continue` in the finally swallows it as well)
-            if handlers.is_empty() && fin.swallows() && body_may_raise {
-                if let Some(esc) = finally_escape.take() {
-                    ways.push(esc);
-                }
+            if let Some(esc) = finally_escape.take() {
+                ways.push(esc);
             }
             for (wi, mut w) in ways.into_iter().enumerate() {
                 let is_escape = wi >= n_exit_ways;
@@ -1720,7 +1661,7 @@ impl Analyzer {
                 w.exits = None;
                 self.run_finally(fin, &mut w, is_escape);
                 if is_escape {
-                    if !w.reachable && !flagged {
+                    if !w.reachable {
                         // the finally returned on every path: the exception does not leave
                         if let Some(r) = self.raise_stack.last_mut() {
                             *r = raise_before;
@@ -1759,27 +1700,19 @@ impl Analyzer {
         }
         let mut roots: Vec<u32> = Vec::new();
         v.push_objs(&mut roots);
-        self.collect_since(mark, &pre, roots, state);
+        self.collect_since(mark, &pre, roots, state, None);
     }
 
-    /// Objects allocated since `mark` that no root reaches lose their state (`drop_garbage_at_return`;
-    /// at a loop's exit the roots are the frame's live names).
-    pub fn collect_since(&mut self, mark: u32, pre: &State, roots: Vec<u32>, state: &mut State) {
+    /// Objects made since the allocation serial `mark` that no root reaches lose their state
+    /// (`drop_garbage_at_return`; at a loop's exit the roots are the frame's live names).
+    /// `unwind`: a raise state, which only the first `unwind` callers' names outlive.
+    pub fn collect_since(&mut self, mark: u64, pre: &State, roots: Vec<u32>, state: &mut State, unwind: Option<usize>) {
+        let young = |an: &Analyzer, o: u32| an.objects[o as usize].born >= mark;
         let fp = state.footprint(pre);
         let mut fresh: rustc_hash::FxHashSet<u32> = Default::default();
-        for (o, _) in fp.rows.iter() {
-            if *o >= mark {
-                fresh.insert(*o);
-            }
-        }
-        for (o, _) in fp.slots.iter() {
-            if *o >= mark {
-                fresh.insert(*o);
-            }
-        }
-        for o in fp.elems.iter() {
-            if *o >= mark {
-                fresh.insert(*o);
+        for o in fp.rows.iter().map(|(o, _)| *o).chain(fp.slots.iter().map(|(o, _)| *o)).chain(fp.elems.iter().copied()) {
+            if young(self, o) {
+                fresh.insert(o);
             }
         }
         if fresh.is_empty() || fresh.len() > 4096 {
@@ -1789,7 +1722,7 @@ impl Analyzer {
         // parameters, cells, …), and what the analyzer holds beyond the state
         let mut work: Vec<u32> = roots;
         for (o, sk) in fp.slots.iter() {
-            if *o < mark {
+            if !young(self, *o) {
                 if let Some(val) = state.slots.get(o, sk) {
                     work.extend(val.pts.iter());
                     if let KeyVal::KeysOf(ko) = &val.kv {
@@ -1798,19 +1731,20 @@ impl Analyzer {
                 }
             }
         }
-        for o in fp.elems.iter().filter(|o| **o < mark) {
+        for o in fp.elems.iter().filter(|o| !young(self, **o)) {
             if let Some(KeyVal::KeysOf(ko)) = state.elems.get(o) {
                 work.extend(ko.objs.iter());
             }
         }
-        self.gc_pinned(&mut work);
+        self.gc_pinned(&mut work, unwind);
         // (unknown objects stand for objects outside the call — a parameter's record, an
         // input's part: what they hold is reachable from there)
         work.extend(fresh.iter().copied().filter(|o| matches!(self.kind(*o), Kind::Unknown)));
-        // (older objects reach fresh ones only through those roots: only fresh ones expand)
+        // (older objects reach young ones only through those roots: a young one was made
+        // since, so whatever refers to it was written since; only young ones expand)
         let mut reached: rustc_hash::FxHashSet<u32> = Default::default();
         while let Some(o) = work.pop() {
-            if !reached.insert(o) || o < mark {
+            if !reached.insert(o) || !young(self, o) {
                 continue;
             }
             self.walked.set(self.walked.get() + 1);
@@ -1827,14 +1761,14 @@ impl Analyzer {
 
     /// Garbage collection at a loop's exit (in a function): objects the loop allocated that the
     /// frame's names, the enclosing frames and the analyzer no longer reach lose their state.
-    fn loop_gc_begin(&mut self, state: &mut State) -> Option<(u32, State)> {
+    fn loop_gc_begin(&mut self, state: &mut State) -> Option<(u64, State)> {
         if !matches!(self.frame().kind, FrameKind::Function) || self.frame().pre_call.is_none() {
             return None;
         }
-        Some((self.objects.len() as u32, state.copy()))
+        Some((self.serial, state.copy()))
     }
 
-    fn loop_gc_end(&mut self, g: Option<(u32, State)>, state: &mut State) {
+    fn loop_gc_end(&mut self, g: Option<(u64, State)>, state: &mut State) {
         let Some((mark, pre)) = g else { return };
         if !state.reachable {
             return;
@@ -1845,7 +1779,7 @@ impl Analyzer {
             roots.push(*o);
             v.push_objs(&mut roots);
         }
-        self.collect_since(mark, &pre, roots, state);
+        self.collect_since(mark, &pre, roots, state, None);
     }
 
     fn stmt_classdef(&mut self, c: &'static ast::StmtClassDef, state: &mut State) {
