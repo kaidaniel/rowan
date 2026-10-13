@@ -346,34 +346,15 @@ impl Analyzer {
                 let redirects = crate::models::csvio::redirect_targets(self, state, &managers.iter().map(|m| m.0.clone()).collect::<Vec<_>>());
                 let n_redirects = redirects.len();
                 self.m.stdout_redirect.extend(redirects);
-                // a manager whose `__exit__` returns True swallows the body's exception: the
-                // body is a try whose catch-all handler continues after the with
+                // a try whose finally is the managers' `__exit__`: it runs however the body ends
+                // (normally, by return / break / continue, or by an exception); a manager whose
+                // `__exit__` returns True swallows the exception: a catch-all handler that does
+                // nothing
                 let swallows = managers.iter().any(|(v, _)| self.exit_swallows(v, state));
-                if swallows {
-                    let mut pre = state.copy();
-                    self.enter_try(FxHashSet::from_iter(["*".to_string()]), &mut pre);
-                    self.exec_block(&w.body, state);
-                    let raised_at = self.leave_try().raised();
-                    let mut after = state.copy();
-                    if let Some(mut r) = raised_at {
-                        after = if after.reachable { after.join(&mut r) } else { r };
-                    }
-                    state.replace_with(after);
-                    for _ in 0..n_redirects {
-                        self.m.stdout_redirect.pop();
-                    }
-                    // the managers' __exit__ runs on the way out (innermost first)
-                    let fin = std::rc::Rc::new(Finally::Exit(managers));
-                    if state.reachable {
-                        self.run_finally(&fin, state, false);
-                    }
-                } else {
-                    // a try whose finally is the managers' `__exit__`: it runs however the body
-                    // ends (normally, by return / break / continue, or by an exception)
-                    self.stmt_try_parts(&w.body, &[], &[], std::rc::Rc::new(Finally::Exit(managers)), state);
-                    for _ in 0..n_redirects {
-                        self.m.stdout_redirect.pop();
-                    }
+                let handlers = if swallows { vec![Handler { types: None, name: None, body: &[], line: frontend::node(w).line }] } else { vec![] };
+                self.stmt_try_parts(&w.body, handlers, &[], std::rc::Rc::new(Finally::Exit(managers)), state);
+                for _ in 0..n_redirects {
+                    self.m.stdout_redirect.pop();
                 }
             }
             ast::Stmt::FunctionDef(f) => {
@@ -447,35 +428,10 @@ impl Analyzer {
         if !is_suppress {
             return false;
         }
-        let names: FxHashSet<String> = call.arguments.args.iter().map(dotted_last).collect();
-        self.exec_handled(&w.body, names, state);
+        // `try: body / except (E, …): pass`
+        let h = Handler { types: Some(call.arguments.args.iter().collect()), name: None, body: &[], line: frontend::node(w).line };
+        self.stmt_try_parts(&w.body, vec![h], &[], std::rc::Rc::new(Finally::Block(&[])), state);
         true
-    }
-
-    /// `body` under a handler that catches `names` and does nothing (`suppress`).
-    pub fn exec_handled(&mut self, body: &'static [ast::Stmt], names: FxHashSet<String>, state: &mut State) {
-        let caught = expand_caught(names);
-        let mut pre = state.copy();
-        self.enter_try(caught, &mut pre);
-        self.cond_depth += 1;
-        self.branch_depth += 1;
-        self.exec_block(body, state);
-        let raised_at = self.leave_try().raised();
-        self.branch_depth -= 1;
-        self.cond_depth -= 1;
-        let mut body_end = state.copy();
-        let mut handled = raised_at.unwrap_or_else(State::bottom);
-        let out = match (body_end.reachable, handled.reachable) {
-            (true, true) => body_end.join(&mut handled),
-            (true, false) => body_end,
-            (false, _) => {
-                // (the body's returns stay recorded in `exits`)
-                handled.exits = body_end.exits.clone().or(handled.exits.clone());
-                handled.ret = body_end.ret.clone().or(handled.ret.clone());
-                handled
-            }
-        };
-        state.replace_with(out);
     }
 
     /// `with cm(...) as x: body` where `cm` is a `@contextmanager` generator function: the
@@ -1408,48 +1364,35 @@ impl Analyzer {
 
     fn stmt_try(&mut self, t: &'static ast::StmtTry, state: &mut State) {
         let fin = std::rc::Rc::new(Finally::Block(&t.finalbody));
-        self.stmt_try_parts(&t.body, &t.handlers, &t.orelse, fin, state);
+        let handlers = t.handlers.iter().map(|h| {
+            let ast::ExceptHandler::ExceptHandler(h) = h;
+            let types = h.type_.as_deref().map(|ty| match ty {
+                ast::Expr::Tuple(tup) => tup.elts.iter().collect(),
+                other => vec![other],
+            });
+            Handler { types, name: h.name.as_ref().map(|n| n.id.as_str()), body: &h.body, line: frontend::node(h).line }
+        });
+        self.stmt_try_parts(&t.body, handlers.collect(), &t.orelse, fin, state);
     }
 
     /// A try statement from its parts (a with statement is one: its finally is `__exit__`).
-    pub fn stmt_try_parts(&mut self, body: &'static [ast::Stmt], handlers: &'static [ast::ExceptHandler], orelse: &'static [ast::Stmt], fin: std::rc::Rc<Finally>, state: &mut State) {
+    pub fn stmt_try_parts(&mut self, body: &'static [ast::Stmt], handlers: Vec<Handler>, orelse: &'static [ast::Stmt], fin: std::rc::Rc<Finally>, state: &mut State) {
         let pushed = !fin.is_empty();
         if pushed {
             self.finally_stack.push((self.loop_stack.len(), fin.clone(), true));
         }
         let depth = self.finally_stack.len();
-        self.stmt_try_inner(body, handlers, orelse, &fin, state);
+        self.stmt_try_inner(body, &handlers, orelse, &fin, state);
         if pushed {
             self.finally_stack.truncate(depth - 1);
         }
     }
 
-    fn stmt_try_inner(&mut self, body: &'static [ast::Stmt], handlers: &'static [ast::ExceptHandler], orelse: &'static [ast::Stmt], fin: &std::rc::Rc<Finally>, state: &mut State) {
-        let mut caught: FxHashSet<String> = FxHashSet::default();
-        for h in handlers {
-            let ast::ExceptHandler::ExceptHandler(h) = h;
-            match &h.type_ {
-                None => {
-                    caught.insert("*".into());
-                }
-                Some(ty) => {
-                    if let ast::Expr::Tuple(tup) = &**ty {
-                        for e in &tup.elts {
-                            caught.insert(dotted_last(e));
-                        }
-                    } else {
-                        caught.insert(dotted_last(ty));
-                    }
-                }
-            }
-        }
-        // a handler for a class catches its subclasses too
-        let mut caught = expand_caught(caught);
+    fn stmt_try_inner(&mut self, body: &'static [ast::Stmt], handlers: &[Handler], orelse: &'static [ast::Stmt], fin: &std::rc::Rc<Finally>, state: &mut State) {
+        // (a handler for a class catches its subclasses too)
+        let mut caught = expand_caught(handlers.iter().flat_map(|h| h.names()).collect());
         // handlers that all end by re-raising: the body's reads are still required
-        let reraise = !handlers.is_empty() && handlers.iter().all(|h| {
-            let ast::ExceptHandler::ExceptHandler(h) = h;
-            matches!(h.body.last(), Some(ast::Stmt::Raise(_)))
-        });
+        let reraise = !handlers.is_empty() && handlers.iter().all(|h| matches!(h.body.last(), Some(ast::Stmt::Raise(_))));
         if reraise {
             caught.insert("!reraise".into());
         }
@@ -1466,15 +1409,7 @@ impl Analyzer {
         // the handlers' classes: which recorded raise each one catches (Python takes the
         // first handler that matches)
         let hclasses: Vec<(FxHashSet<String>, bool)> = handlers.iter().map(|h| {
-            let ast::ExceptHandler::ExceptHandler(h) = h;
-            let elts: Vec<&ast::Expr> = match h.type_.as_deref() {
-                None => vec![],
-                Some(ast::Expr::Tuple(tup)) => tup.elts.iter().collect(),
-                Some(other) => vec![other],
-            };
-            if h.type_.is_none() {
-                return (["*".to_string()].into_iter().collect(), true);
-            }
+            let Some(elts) = &h.types else { return (h.names(), true) };
             // (no decided miss unless every name is a known exception class)
             let known = elts.iter().all(|e| {
                 let n = dotted_last(e);
@@ -1533,10 +1468,8 @@ impl Analyzer {
         }
         results.push(body_end);
         for (hi, h) in handlers.iter().enumerate() {
-            let ast::ExceptHandler::ExceptHandler(h) = h;
             // the exceptions raised at the recorded points (anything else: unknown)
-            let hn = frontend::node(h);
-            let unknown = Value::data(&format!("exc@L{}", hn.line));
+            let unknown = Value::data(&format!("exc@L{}", h.line));
             let (mut hs, ev) = {
                 // the raises this handler may catch that no earlier one surely catches
                 let mut e = State::bottom();
@@ -1555,24 +1488,12 @@ impl Analyzer {
             if !hs.reachable {
                 continue;
             }
-            if let Some(name) = &h.name {
-                self.store_name(s(name.id.as_str()), ev.clone(), &mut hs);
+            if let Some(name) = h.name {
+                self.store_name(s(name), ev.clone(), &mut hs);
             }
-            let mut names: FxHashSet<String> = FxHashSet::default();
-            match &h.type_ {
-                None => {
-                    names.insert("*".into());
-                }
-                Some(ty) => match &**ty {
-                    ast::Expr::Tuple(tup) => names.extend(tup.elts.iter().map(dotted_last)),
-                    other => {
-                        names.insert(dotted_last(other));
-                    }
-                },
-            }
-            self.handling.push(names);
+            self.handling.push(h.names());
             self.handling_values.push(ev);
-            self.exec_block(&h.body, &mut hs);
+            self.exec_block(h.body, &mut hs);
             self.handling_values.pop();
             self.handling.pop();
             results.push(hs);
@@ -1593,7 +1514,6 @@ impl Analyzer {
                 collect_assigned(st, &mut assigned);
             }
             for h in handlers {
-                let ast::ExceptHandler::ExceptHandler(h) = h;
                 h.body.iter().for_each(|x| collect_assigned(x, &mut assigned));
             }
             let vals: Vec<(intern::StrId, Option<Value>, Option<Value>, Option<Value>)> = assigned.iter().map(|n| (*n, self.name_value(&a, *n), self.name_value(&b, *n), self.name_value(&out, *n))).collect();
@@ -2246,6 +2166,24 @@ fn collect_assigned(st: &ast::Stmt, out: &mut Vec<intern::StrId>) {
 /// The exception names a handler set catches, with the known subclasses of each
 /// (`except ValueError` catches pydantic's `ValidationError`, `except LookupError` a
 /// `KeyError`).
+/// An `except` clause: the classes it names (None: a bare `except`), the name it binds, its
+/// body (a `with` that swallows, `suppress(E)`: one that does nothing).
+pub struct Handler {
+    pub types: Option<Vec<&'static ast::Expr>>,
+    pub name: Option<&'static str>,
+    pub body: &'static [ast::Stmt],
+    pub line: u32,
+}
+
+impl Handler {
+    fn names(&self) -> FxHashSet<String> {
+        match &self.types {
+            None => ["*".to_string()].into_iter().collect(),
+            Some(es) => es.iter().map(|e| dotted_last(e)).collect(),
+        }
+    }
+}
+
 pub fn expand_caught(mut caught: FxHashSet<String>) -> FxHashSet<String> {
     const SUBS: &[(&str, &[&str])] = &[
         ("ValueError", &["ValidationError", "JSONDecodeError", "UnicodeDecodeError", "UnicodeEncodeError", "UnicodeError"]),
