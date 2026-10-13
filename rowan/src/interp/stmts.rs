@@ -3,9 +3,9 @@
 use ruff_python_ast as ast;
 use rustc_hash::FxHashSet;
 
-use crate::domain::{KeyVal, KeysOf, Ns, Row, Value};
+use crate::domain::{KeyVal, Ns, Row, Value};
 use crate::frontend::{self, Node};
-use crate::intern::{self, key_str_lit, s, KeySet};
+use crate::intern::{self, key_str_lit, s};
 use crate::state::{Kind, State};
 
 use super::{TryExit, contains_jump, dotted_last, is_constant, is_main_guard, Analyzer, ClassInfo, Frame, FrameKind, FuncNode, LoopCtx, Payload, LOOP_MAX_ITER, UNROLL_MAX};
@@ -49,10 +49,6 @@ impl Analyzer {
                 let v = self.eval(&a.value, state);
                 for t in &a.targets {
                     self.bind_target(t, &v, state);
-                }
-                // `flag = k in d`: a later `if flag:` narrows as the test would
-                if let [ast::Expr::Name(n)] = &a.targets[..] {
-                    self.flag_facts(n.id.as_str(), &a.value, &v, state);
                 }
             }
             ast::Stmt::AnnAssign(a) => {
@@ -788,48 +784,6 @@ impl Analyzer {
 
     /// The canonical text of a pure test (names, literals, comparisons, `in`, `is`, `not`,
     /// `and` / `or`), whether it is negated, and the names it reads.
-    /// `name = <test>` with an undecided test that narrows: facts for a later `if name:`
-    /// (the test's branch rows, restored while the rows are unchanged and name still holds v).
-    fn flag_facts(&mut self, name: &str, test: &'static ast::Expr, v: &Value, state: &mut State) {
-        fn simple(e: &ast::Expr) -> bool {
-            match e {
-                ast::Expr::Name(_) | ast::Expr::StringLiteral(_) | ast::Expr::NumberLiteral(_) | ast::Expr::BooleanLiteral(_) | ast::Expr::NoneLiteral(_) => true,
-                ast::Expr::Attribute(a) => simple(&a.value),
-                ast::Expr::Subscript(sb) => simple(&sb.value) && simple(&sb.slice),
-                ast::Expr::Tuple(t) => t.elts.iter().all(simple),
-                _ => false,
-            }
-        }
-        fn testlike(e: &ast::Expr) -> bool {
-            match e {
-                ast::Expr::Compare(c) => simple(&c.left) && c.comparators.iter().all(simple),
-                ast::Expr::UnaryOp(u) => u.op == ast::UnaryOp::Not && testlike(&u.operand),
-                ast::Expr::BoolOp(b) => b.values.iter().all(testlike),
-                ast::Expr::Call(c) => matches!(&*c.func, ast::Expr::Name(f) if matches!(f.id.as_str(), "isinstance" | "hasattr" | "callable")) && c.arguments.args.iter().all(simple) && c.arguments.keywords.is_empty(),
-                _ => false,
-            }
-        }
-        if !state.reachable || !testlike(test) || (v.pts.is_empty() && v.kv.is_literal()) {
-            return;
-        }
-        let mut ts = state.copy();
-        self.narrow(test, true, &mut ts);
-        let mut es = state.copy();
-        self.narrow(test, false, &mut es);
-        if !ts.reachable || !es.reachable {
-            return;
-        }
-        let nid = s(name);
-        let key = s(&format!("{}@{}", name, self.frame().func.unwrap_or(0)));
-        // (the flag's own narrowing is no fact about the records)
-        let facts: Vec<_> = cond_facts_for(key, true, vec![(nid, v.clone())], &ts, &es, state)
-            .into_iter()
-            .map(|f| std::sync::Arc::new(crate::state::CondFact { cond: f.cond, truth: f.truth, deps: f.deps.clone(), rows: f.rows.iter().filter(|((o, _), _, _)| !v.pts.contains(*o)).cloned().collect(), guards: f.guards.clone(), unbound: f.unbound.clone() }))
-            .filter(|f| !f.rows.is_empty())
-            .collect();
-        add_facts(state, facts);
-    }
-
     fn cond_key(&self, test: &'static ast::Expr) -> Option<(intern::StrId, bool, Vec<intern::StrId>)> {
         fn pure(e: &ast::Expr) -> bool {
             match e {
@@ -1205,33 +1159,6 @@ impl Analyzer {
             self.set_cursor(o, None, state);
         }
         let pre = state.copy();
-        // dry run for exhaustive key iteration (§5.2)
-        let mut exh_ops: Vec<(u32, Ns, Row, KeySet, intern::LensId)> = Vec::new();
-        let key_part = it.elem.key_part();
-        if it.exhaustive && !has_jump {
-            if let KeyVal::KeysOf(kk) = &key_part.kv {
-                let saved_log = self.exh_log.take();
-                self.exh_log = Some(Vec::new());
-                let saved_verdicts = self.verdicts.len();
-                let mut dry = state.copy();
-                self.recent_stack.push(Vec::new());
-                self.frame_mut().loop_depth += 1;
-                self.cond_depth += 1;
-                let ekv = KeyVal::KeysOf(KeysOf { objs: kk.objs.clone(), ns: kk.ns, exclude: kk.exclude.clone(), chain: kk.chain, exhaustive_depth: self.cond_depth });
-                let dry_elem = match &it.elem {
-                    Elem::Pair(_, v) => Elem::Pair(Value::with_kv(key_part.pts.clone(), ekv), v.clone()),
-                    Elem::One(_) => Elem::One(Value::with_kv(key_part.pts.clone(), ekv)),
-                };
-                self.bind_iter_target(&f.target, &dry_elem, &mut dry);
-                self.exec_block(&f.body, &mut dry);
-                self.cond_depth -= 1;
-                self.frame_mut().loop_depth -= 1;
-                self.recent_stack.pop();
-                self.drop_verdicts_since(saved_verdicts);
-                exh_ops = self.exh_log.take().unwrap_or_default();
-                self.exh_log = saved_log;
-            }
-        }
         let (mut head, exit_acc, back) = self.loop_fixpoint(state, &mut |an, body_s| {
             an.bind_iter_target(&f.target, &it.elem, body_s);
             an.exec_block(&f.body, body_s);
@@ -1239,7 +1166,6 @@ impl Analyzer {
         let mut exit_s = head.copy();
         let elem_v = it.elem.value_part();
         self.promote_elem_reqs(&mut exit_s, &back, &elem_v, state);
-        self.promote_elem_narrowing(&mut exit_s, &back, &elem_v);
         if exit_acc.is_none() && back.reachable {
             // every element of the iterable went through the body: its row after the loop is
             // the body's exit row, not the join with "not processed yet"
@@ -1252,10 +1178,6 @@ impl Analyzer {
                     }
                 }
             }
-        }
-        for (oid, ns, srcrow, kill, chain) in exh_ops {
-            let r = exit_s.row(oid, ns).copy_from(&srcrow, true, &kill, chain);
-            exit_s.set_row(oid, ns, r);
         }
         if !f.orelse.is_empty() && exit_s.reachable {
             self.exec_block(&f.orelse, &mut exit_s);

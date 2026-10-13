@@ -1108,11 +1108,6 @@ impl Analyzer {
             KeyVal::KeysOf(ko) => {
                 let srcrow = join_rows(ko.objs.iter().map(|x| state.row(x, ko.ns)));
                 let exhaustive = strong && ko.exhaustive_depth == self.cond_depth;
-                if exhaustive {
-                    if let Some(log) = self.exh_log.as_mut() {
-                        log.push((oid, ns, srcrow.clone(), ko.exclude.clone(), ko.chain));
-                    }
-                }
                 state.set_row(oid, ns, row.copy_from(&srcrow, exhaustive, &ko.exclude, ko.chain));
                 for x in ko.objs.iter() {
                     for k in state.slot_keys(x, ko.ns) {

@@ -877,7 +877,6 @@ pub struct Analyzer {
     pub call_chain: Vec<u32>,
     pub analysed_funcs: FxHashSet<ObjId>,
     pub modules: IndexMap<String, ObjId>,
-    pub exh_log: Option<Vec<(ObjId, Ns, Row, KeySet, intern::LensId)>>,
     pub final_state: Option<State>,
     pub user_classes: Vec<ObjId>,
     /// class attributes (flow-insensitive)

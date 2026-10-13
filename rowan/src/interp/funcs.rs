@@ -1145,27 +1145,6 @@ impl Analyzer {
         }
     }
 
-    /// Keys proven on a loop element that is a view of a record are proven on the record.
-    pub fn promote_elem_narrowing(&mut self, exit_s: &mut State, body_s: &State, elem: &Value) {
-        if !body_s.reachable {
-            return;
-        }
-        for oid in elem.pts.iter() {
-            let Some(src) = self.obj(oid).derived_from else { continue };
-            if !self.obj(src).single {
-                continue;
-            }
-            for ns in [Ns::Item, Ns::Attr] {
-                let proven = body_s.row(oid, ns).definite.intersection(&body_s.row(src, ns).definite);
-                let mut row = exit_s.row(src, ns);
-                for k in proven.difference(&row.definite).iter() {
-                    row = row.narrow_in(k, true);
-                }
-                exit_s.set_row(src, ns, row);
-            }
-        }
-    }
-
     /// [(key, value)] for a closed dict whose keys are all definite literals (unrollable).
     /// A loop over a closed dict (or a view of one) whose keys are known in their order but
     /// some only maybe there: its items, each with whether it surely comes (a `for` runs a
