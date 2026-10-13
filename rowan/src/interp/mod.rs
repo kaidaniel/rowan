@@ -903,6 +903,9 @@ pub struct Analyzer {
     pub havoc_code: Vec<ObjId>,
     /// the receiver of a skipped method call (`skipped_call`) and how often a havoc met it
     pub havoc_guard: Option<(ObjId, u32)>,
+    /// per object, the last havoc walk that met it (`havoc_walk`)
+    pub havoc_marks: Vec<u32>,
+    pub havoc_walks: u32,
 
     pub entry_instances: FxHashMap<ObjId, ObjId>,
     pub fresh_in_progress: FxHashSet<ObjId>,

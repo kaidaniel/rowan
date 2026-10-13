@@ -416,12 +416,19 @@ impl Analyzer {
     /// lists and sets any items and any length. Modules, classes and functions are not entered.
     pub fn havoc_reachable(&mut self, vals: &[Value], rid: ObjId, site: StrId, state: &mut State) {
         self.havoc_code.clear();
-        self.havoc_with(vals, rid, site, state, &mut rustc_hash::FxHashSet::default());
+        let walk = self.havoc_walk();
+        self.havoc_with(vals, rid, site, state, walk);
     }
 
-    /// `havoc_reachable` past the objects `seen` (and adding to them; the code met is added to
-    /// `havoc_code`).
-    pub fn havoc_with(&mut self, vals: &[Value], rid: ObjId, site: StrId, state: &mut State, seen: &mut rustc_hash::FxHashSet<ObjId>) {
+    /// A new havoc walk: the objects it meets are marked with its number (`havoc_with`).
+    fn havoc_walk(&mut self) -> u32 {
+        self.havoc_walks += 1;
+        self.havoc_walks
+    }
+
+    /// `havoc_reachable` past the objects walk `walk` met already (marking those it meets; the
+    /// code met is added to `havoc_code`).
+    pub fn havoc_with(&mut self, vals: &[Value], rid: ObjId, site: StrId, state: &mut State, walk: u32) {
         let mut work: Vec<ObjId> = vals.iter().flat_map(|v| v.pts.iter()).collect();
         // (one object stands for "anything unknown code stored": a value per call would pile
         // up in every slot it reaches)
@@ -437,9 +444,14 @@ impl Analyzer {
                 }
                 continue;
             }
-            if o == rid || o == any_id || !seen.insert(o) {
+            let i = o as usize;
+            if i >= self.havoc_marks.len() {
+                self.havoc_marks.resize(self.objects.len().max(i + 1), 0);
+            }
+            if o == rid || o == any_id || self.havoc_marks[i] == walk {
                 continue;
             }
+            self.havoc_marks[i] = walk;
             self.havoc_walked += 1;
             let k = self.kind(o);
             match (&k, &self.obj(o).payload) {
@@ -1188,7 +1200,8 @@ impl Analyzer {
         if let Some((o, (stores, deletes))) = eff {
             let reached_otherwise = self.havoc_guard.take().is_some_and(|(_, n)| n > 1);
             if reached_otherwise {
-                self.havoc_with(&[Value::obj(o)], rid, site, state, &mut rustc_hash::FxHashSet::default());
+                let walk = self.havoc_walk();
+                self.havoc_with(&[Value::obj(o)], rid, site, state, walk);
             } else {
                 let any = Value::obj(self.any_object(state));
                 let mut row = state.row(o, Ns::Attr);
@@ -1213,7 +1226,7 @@ impl Analyzer {
     /// anything, and the code the data they hold is followed too.
     fn follow_code(&mut self, mut roots: Vec<ObjId>, rid: ObjId, site: StrId, state: &mut State) {
         let any = Value::obj(self.any_object(state));
-        let mut seen: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
+        let walk = self.havoc_walk();
         self.havoc_code.clear();
         loop {
             roots.append(&mut self.havoc_code);
@@ -1222,7 +1235,7 @@ impl Analyzer {
             let cl = self.code_closure(&roots, state);
             let mut vals: Vec<Value> = cl.locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).collect();
             vals.extend(cl.values.iter().cloned());
-            self.havoc_with(&vals, rid, site, state, &mut seen);
+            self.havoc_with(&vals, rid, site, state, walk);
             for (o, ns, k) in &cl.rebound {
                 let v = state.slot(*o, *ns, *k).join(&any);
                 state.set_slot(*o, *ns, *k, v, false);
