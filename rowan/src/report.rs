@@ -486,11 +486,11 @@ pub fn reads_below(st: &State, src: SourceId, base: &str, data_only: bool) -> Ve
             }
             // (a key unknown code or another input may supply is needed only sometimes)
             let always = info.always && info.caveats.is_empty() && info.alternatives.is_empty();
-            let mut text = format!("{}{}{}", base, prefix, step_text(*k, info.attr));
-            for a in info.alt_keys.iter().filter(|a| a != k) {
-                text += &format!(" or {}{}{}", base, prefix, step_text(a, info.attr));
-            }
-            needs.push((text, always));
+            // (a group of alternatives reads the same from any of its keys: in one order)
+            let mut alts: Vec<String> = std::iter::once(*k).chain(info.alt_keys.iter()).map(|a| format!("{}{}{}", base, prefix, step_text(a, info.attr))).collect();
+            alts.sort();
+            alts.dedup();
+            needs.push((alts.join(" or "), always));
         }
     }
     needs.sort();
@@ -692,6 +692,43 @@ pub fn golden_json(an: &Analyzer) -> J {
 /// How deep rendered values go before nested containers are cut to `[…]` / `{…}` / `Name(…)`
 /// (`--value-depth N`; default 3).
 pub static VALUE_DEPTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(3);
+
+/// Values rendered at several runs of a line as one: their alternatives (split at the top
+/// level, outside brackets and strings), each once, the unknown `?` last.
+pub fn join_alternatives(texts: &[String]) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for t in texts {
+        let (mut depth, mut quote, mut start) = (0i32, None::<char>, 0usize);
+        let mut prev = ' ';
+        for (i, c) in t.char_indices() {
+            match (quote, c) {
+                (Some(q), _) if c == q && prev != '\\' => quote = None,
+                (Some(_), _) => {}
+                (None, '"' | '\'') => quote = Some(c),
+                (None, '(' | '[' | '{') => depth += 1,
+                (None, ')' | ']' | '}') => depth -= 1,
+                (None, '|') if depth == 0 && t[..i].ends_with(' ') && t[i + 1..].starts_with(' ') => {
+                    parts.push(t[start..i - 1].trim());
+                    start = i + 2;
+                }
+                _ => {}
+            }
+            prev = c;
+        }
+        parts.push(t[start..].trim());
+    }
+    let mut out: Vec<&str> = Vec::new();
+    for p in parts {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    if let Some(i) = out.iter().position(|p| *p == "?") {
+        let q = out.remove(i);
+        out.push(q);
+    }
+    out.join(" | ")
+}
 
 pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &mut Vec<ObjId>) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -1163,7 +1200,7 @@ pub fn facts_json(an: &Analyzer) -> J {
         }
         let (text, examples): (String, Vec<String>) = match &f.primary {
             Some(p) => (p.clone(), f.texts.iter().filter(|t| *t != p).cloned().collect()),
-            None => (f.texts.join(" | "), vec![]),
+            None => (join_alternatives(&f.texts), vec![]),
         };
         facts.push(json!({"line": line, "name": name.to_string(), "text": text, "examples": examples, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "required": required, "requires": requires}));
     }
@@ -1208,4 +1245,15 @@ fn set_members(state: &State, o: ObjId, n: usize) -> Option<Vec<crate::intern::K
     ms.sort_by(|a, b| crate::interp::exprs::literal_order(*a, *b).unwrap_or_else(|| intern::key_repr(*a).cmp(&intern::key_repr(*b))));
     ms.dedup();
     Some(ms)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn join_alternatives_dedupes_top_level() {
+        let t = |xs: &[&str]| super::join_alternatives(&xs.iter().map(|x| x.to_string()).collect::<Vec<_>>());
+        assert_eq!(t(&["{\"a\": 1} | None", "None | {\"a\": 1}"]), "{\"a\": 1} | None");
+        assert_eq!(t(&["{\"a\": 1 | 2}", "?", "3"]), "{\"a\": 1 | 2} | 3 | ?");
+        assert_eq!(t(&["\"x | y\" | ?", "\"x | y\""]), "\"x | y\" | ?");
+    }
 }
