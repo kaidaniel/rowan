@@ -771,6 +771,16 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if classes.is_empty() {
         return Value::data("bool");
     }
+    // a `Protocol` class (runtime_checkable): an instance whose class defines all its members
+    // is one; anything else may have them as attributes
+    let protocols: Vec<Vec<String>> = classes.iter().filter_map(|cls| protocol_members(an, *cls)).collect();
+    if !protocols.is_empty() {
+        let has_all = |an: &Analyzer, o: u32, ms: &Vec<String>| an.kind(o) == Kind::Instance && an.instance_class(o).is_some_and(|ic| ms.iter().all(|m| an.class_lookup(ic, m).is_some()));
+        if !v.kv.is_bot() || v.pts.is_empty() || !v.pts.iter().all(|o| protocols.iter().any(|ms| has_all(an, o, ms))) {
+            return Value::data("bool");
+        }
+        return Value::lit(intern::key_bool(true));
+    }
     let mut verdicts: Vec<bool> = Vec::new();
     let builtin = |an: &Analyzer, cls: u32| -> Option<String> { if an.kind(cls) == Kind::External { Some(an.external_qual(cls).rsplit('.').next().unwrap_or("").to_string()) } else { None } };
     // literal values (with or without objects: both parts count)
@@ -835,6 +845,40 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     } else {
         Value::data("bool")
     }
+}
+
+/// The members of a `typing.Protocol` class (its own and its protocol bases'), as
+/// `isinstance` checks them on a runtime-checkable one; None for any other class.
+pub fn protocol_members(an: &Analyzer, cls: u32) -> Option<Vec<String>> {
+    const SPECIAL: &[&str] = &["__init__", "__new__", "__module__", "__qualname__", "__doc__", "__dict__", "__weakref__", "__slots__", "__annotations__", "__class_getitem__", "__init_subclass__", "__subclasshook__", "__abstractmethods__", "__parameters__", "__orig_bases__", "__match_args__"];
+    let ci = an.class_info_opt(cls)?;
+    // (`Protocol` / `typing.Protocol` / `Protocol[T]` among the bases as written)
+    let is_proto = |e: &ast::Expr| match e {
+        ast::Expr::Subscript(sb) => matches!(&*sb.value, ast::Expr::Name(n) if n.id.as_str() == "Protocol") || matches!(&*sb.value, ast::Expr::Attribute(a) if a.attr.as_str() == "Protocol"),
+        ast::Expr::Name(n) => n.id.as_str() == "Protocol",
+        ast::Expr::Attribute(a) => a.attr.as_str() == "Protocol",
+        _ => false,
+    };
+    if !ci.node.bases().iter().any(is_proto) {
+        return None;
+    }
+    let proto_bases: Vec<u32> = ci.bases.clone();
+    let mut ms: Vec<String> = Vec::new();
+    for st in ci.node.body.iter() {
+        let name = match st {
+            ast::Stmt::FunctionDef(f) => Some(f.name.id.to_string()),
+            ast::Stmt::AnnAssign(a) => a.target.as_name_expr().map(|n| n.id.to_string()),
+            ast::Stmt::Assign(a) => a.targets.first().and_then(|t| t.as_name_expr()).map(|n| n.id.to_string()),
+            _ => None,
+        };
+        if let Some(n) = name.filter(|n| !SPECIAL.contains(&n.as_str()) && !n.starts_with("_abc_")) {
+            ms.push(n);
+        }
+    }
+    for b in proto_bases {
+        ms.extend(protocol_members(an, b).unwrap_or_default());
+    }
+    Some(ms)
 }
 
 /// `max(xs, key=f)` / `min(xs)`: an element of the container (the key function runs on it);

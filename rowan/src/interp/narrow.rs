@@ -396,7 +396,8 @@ impl Analyzer {
                 _ => return,
             }
         }
-        if star && (star_structural) {
+        // (a Protocol class is checked by structure too)
+        if star && (star_structural) || classes.iter().any(|c| crate::models::protocol_members(self, *c).is_some()) {
             return;
         }
         let mut keep: Vec<u32> = Vec::new();
