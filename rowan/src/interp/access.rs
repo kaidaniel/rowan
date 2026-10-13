@@ -1332,6 +1332,8 @@ impl Analyzer {
             let v: Value = match k {
                 Kind::Module => match state.slot_opt(oid, Ns::Attr, nk) {
                     Some(v) => v,
+                    // (inside a try that catches the AttributeError: the handler's way)
+                    None if report && guarded => self.load_record(oid, Ns::Attr, &Value::lit(nk), node, state, guarded, single, true),
                     None => {
                         // (a namespace changed by code rowan cannot see — `globals().update(…)`
                         // with unknown names — may have it)

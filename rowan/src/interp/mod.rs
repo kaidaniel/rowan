@@ -877,6 +877,8 @@ pub struct Analyzer {
     pub call_chain: Vec<u32>,
     pub analysed_funcs: FxHashSet<ObjId>,
     pub modules: IndexMap<String, ObjId>,
+    /// names imported under `if TYPE_CHECKING:` (module, name) -> (module imported, name in it)
+    pub type_only: FxHashMap<(ObjId, StrId), (String, Option<String>)>,
     pub final_state: Option<State>,
     pub user_classes: Vec<ObjId>,
     /// class attributes (flow-insensitive)
@@ -1586,10 +1588,13 @@ impl Analyzer {
         let info = self.module_info(moid);
         let fr = Frame::new(FrameKind::Module, info.scopes.module(), moid, "", true, &format!("<module {}>", info.name));
         self.frames.push(fr);
+        // (imported from inside a function: the function's returns so far are its own)
+        let (exits, ret) = (state.exits.take(), state.ret.take());
         self.exec_block(&info.tree.body, state);
         self.frames.pop();
         state.reachable = true;
-        state.exits = None;
+        state.exits = exits;
+        state.ret = ret;
     }
 
     /// Entry-point rule (§6.4): functions never called get analysed with open parameters.
@@ -1869,7 +1874,13 @@ impl Analyzer {
     /// A declared row for an annotated entry-point parameter (§6.6).
     pub fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
         let node = Self::strip_annotation(ann)?;
-        let v = self.eval(node, state);
+        let mut v = self.eval(node, state);
+        // (a class imported only for type checkers)
+        if let ast::Expr::Name(n) = node {
+            if !v.pts.iter().any(|o| self.kind(o) == Kind::Class) {
+                v = self.type_only_name(n.id.as_str(), state).unwrap_or(v);
+            }
+        }
         for oid in v.pts.iter() {
             let o = self.kind(oid);
             if o == Kind::Class {
