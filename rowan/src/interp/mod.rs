@@ -252,7 +252,6 @@ pub struct FuncInfo {
     pub is_cached: Cell<bool>,
     /// `functools.lru_cache` / `cache`: repeated arguments give the cached result
     pub is_memo: Cell<bool>,
-    pub generator: Cell<Option<ObjId>>,
 }
 
 impl FuncInfo {
@@ -295,31 +294,62 @@ pub type RaiseRec = (Option<ExcNames>, State, Value);
 
 /// The states of a try's recorded raises, joined (None: no raise recorded).
 pub fn join_raise_recs(recs: &[RaiseRec]) -> Option<State> {
-    let mut out: Option<State> = None;
-    for (_, st, _) in recs {
-        let mut s2 = st.copy_ref();
-        out = Some(match out {
-            None => s2,
-            Some(mut o) => o.join(&mut s2),
-        });
-    }
-    out
+    State::join_all(recs.iter().map(|r| r.1.copy_ref()).collect())
+}
+
+/// The class of an exception that code rowan cannot see (or a model that does not say which)
+/// may raise: any class, which no handler surely catches or surely misses.
+pub fn any_exc() -> ExcNames {
+    (std::rc::Rc::new(Vec::new()), false)
+}
+
+/// Is this the class `any_exc` stands for?
+pub fn is_any_exc(c: &Option<ExcNames>) -> bool {
+    c.as_ref().is_some_and(|(n, full)| n.is_empty() && !full)
+}
+
+/// A running try context. Every point of its body (and of the calls it makes) that may raise
+/// records the state there: a handler starts from the join of the states whose exceptions it
+/// may catch, a finally on an exceptional way out from those it does not.
+pub struct TryCtx {
+    /// the exception class names its handlers catch (`*`: a bare except; `!reraise`: every
+    /// handler ends by re-raising)
+    pub caught: FxHashSet<String>,
+    /// the frame depth and caller-env depth it runs in: a raise inside a callee hands the
+    /// handler the try frame's locals
+    pub frames: usize,
+    pub envs: usize,
+    /// the state before it and the allocation serial then (what was made since, and nothing
+    /// reaches after the unwind, is garbage in a raise state)
+    pub pre: State,
+    pub mark: u64,
+    /// the raises recorded, per class: (class, the states, the exceptions), joined when it ends
+    pub recs: Vec<(Option<ExcNames>, crate::state::Joins, Value)>,
+    /// the last raise recorded, before collection (a loop of calls raising at one point adds
+    /// nothing)
+    pub last: Option<(State, Option<ExcNames>, Value)>,
 }
 
 /// What a try context recorded while its body ran (`Analyzer::leave_try`).
 pub struct TryExit {
-    /// the body may have raised somewhere not recorded (a call that may raise anything)
-    pub flagged: bool,
-    /// the states and exceptions at the raises recorded one by one
+    /// the states and exceptions at the recorded raises, joined per class
     pub recs: Vec<RaiseRec>,
-    /// the exceptions raised at the recorded points
-    pub value: Option<Value>,
 }
 
 impl TryExit {
     /// The join of the states at the recorded raises (None: none recorded).
     pub fn raised(&self) -> Option<State> {
         join_raise_recs(&self.recs)
+    }
+
+    /// The exceptions raised at the recorded points.
+    pub fn value(&self) -> Value {
+        crate::domain::join_values(self.recs.iter().map(|r| r.2.clone()).collect::<Vec<_>>())
+    }
+
+    /// Code that may raise anything ran (a raise of `any_exc`).
+    pub fn any(&self) -> bool {
+        self.recs.iter().any(|r| is_any_exc(&r.0))
     }
 }
 
@@ -350,8 +380,6 @@ pub struct ClassInfo {
     pub dc_order: std::cell::Cell<bool>,
     /// subclasses something in `torch.nn` (`nn.Module`): calling an instance runs `forward`
     pub nn_module: bool,
-    /// attr → classes assigned to self.attr (lazy)
-    pub field_classes: RefCell<Option<FxHashMap<String, Vec<ObjId>>>>,
     pub any_fields: RefCell<Option<FxHashSet<String>>>,
 }
 
@@ -437,7 +465,7 @@ pub struct LazyGen {
 
 /// (see `Frame::pre_call`)
 #[derive(Clone)]
-pub struct PreCall(pub ObjId, pub std::rc::Rc<State>);
+pub struct PreCall(pub u64, pub std::rc::Rc<State>);
 
 impl std::fmt::Debug for PreCall {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -604,6 +632,9 @@ pub struct Obj {
     /// a one-shot iterator (generator, generator expression, `iter(...)`): a full iteration
     /// exhausts it
     pub iterator: bool,
+    /// when its state was last made new (`Analyzer::serial` then): a strong re-allocation of
+    /// its site starts it over, so it is younger than any mark taken before
+    pub born: u64,
 }
 
 /// Where a narrowed value is written back (`_narrow_isinstance`'s `store` closure).
@@ -681,8 +712,6 @@ pub struct Analyzer {
     pub tab_runs: usize,
     /// `__next__` functions whose calls were not decided once (`unroll_next`)
     pub no_unroll_next: FxHashSet<ObjId>,
-    /// the last raise recorded per try depth (state before collection, class, exception)
-    pub raise_last: FxHashMap<usize, (State, Option<ExcNames>, Value)>,
     pub fresh_init: FxHashSet<ObjId>,
     /// per comprehension generator level: whether its items are known (unrolled)
     pub comp_known: Vec<bool>,
@@ -715,19 +744,11 @@ pub struct Analyzer {
     /// the finally blocks of the running `try` statements: (`loop_stack` depth at the try,
     /// the block, not running yet): a `break` / `continue` runs those of its loop first
     pub finally_stack: Vec<(usize, std::rc::Rc<crate::interp::stmts::Finally>, bool)>,
-    pub guards: Vec<FxHashSet<String>>,
-    pub may_raise: Vec<bool>,
-    /// per enclosing try (or swallowing with): the joined state at the guarded accesses
-    /// that may raise inside it (the handler's entry, precisely)
-    pub raise_states: Vec<Option<State>>,
-    /// per enclosing try (parallel to `raise_states`): the frame depth and caller-env depth
-    /// it runs in and the state before it, so a raise inside a callee hands the handler the
-    /// try frame's locals
-    /// per active try: frame depth, env-stack depth, the state before it, the object mark
-    pub try_marks: Vec<(usize, usize, State, ObjId)>,
-    /// per enclosing try (parallel to `raise_states`): the exceptions raised at those points
-    /// (what the handler's `as` name holds)
-    pub raise_values: Vec<Option<Value>>,
+    /// allocations so far (`Obj::born`): the collectors' marks
+    pub serial: u64,
+    /// the running try contexts (innermost last): `try` statements, swallowing `with`s and the
+    /// models' own catching frames
+    pub tries: Vec<TryCtx>,
     /// the exception the next `record_raise_state` is about
     pub cur_exc: Option<Value>,
     /// exception names handled by the running `except` clauses (innermost last): what a bare
@@ -752,9 +773,6 @@ pub struct Analyzer {
     pub lazy_src: FxHashMap<ObjId, Vec<(ObjId, Option<usize>)>>,
     /// a context part every allocation adds (a model run once per receiver)
     pub alloc_extra: Option<String>,
-    /// beside `raise_stack`: the classes of the exceptions that may leave the running call
-    /// (None: some of unknown class)
-    pub esc_cls: Vec<Option<Vec<ExcNames>>>,
     /// a load guarded by a `try` handler is running (its key is still required)
     pub caught_load: bool,
     /// the right operand of a comparison link already evaluated (chained comparisons)
@@ -849,9 +867,6 @@ pub struct Analyzer {
     pub wrapped: FxHashMap<ObjId, Value>,
     /// classes decorated with functools.total_ordering
     pub total_ordering: FxHashSet<ObjId>,
-    /// the requirements known when a try context was first flagged as raising anywhere
-    /// (`may_raise` depth, requirements): its handler needs no less
-    pub flag_reqs: Vec<(usize, crate::layered::TwoLevel<crate::intern::SourceId, KeyId, crate::domain::ReqInfo>)>,
     pub identity_objs: RefCell<FxHashMap<KeyId, ObjId>>,
     /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
     pub bypass_setattr: bool,
@@ -862,7 +877,6 @@ pub struct Analyzer {
     pub call_chain: Vec<u32>,
     pub analysed_funcs: FxHashSet<ObjId>,
     pub modules: IndexMap<String, ObjId>,
-    pub exh_log: Option<Vec<(ObjId, Ns, Row, KeySet, intern::LensId)>>,
     pub final_state: Option<State>,
     pub user_classes: Vec<ObjId>,
     /// class attributes (flow-insensitive)
@@ -872,6 +886,8 @@ pub struct Analyzer {
     pub work: usize,
     /// objects visited by reachability walks (liveness, GC): part of the work measure
     pub walked: std::cell::Cell<usize>,
+    /// objects visited by unknown code's havoc walks (`havoc_with`)
+    pub havoc_walked: usize,
     /// return / break / continue statements executed (a try body that ends with one did not raise)
     pub exit_count: usize,
     /// when the analysis started (see `DEADLINE_MS`)
@@ -885,6 +901,12 @@ pub struct Analyzer {
     pub closures: FxHashMap<Vec<ObjId>, Rc<effects::Closure>>,
     /// the code objects the last `havoc_reachable` met (functions, classes, bound methods)
     pub havoc_code: Vec<ObjId>,
+    /// the receiver of a skipped method call (`skipped_call`) and how often a havoc met it
+    pub havoc_guard: Option<(ObjId, u32)>,
+    /// per object, the last havoc walk that met it (`havoc_walk`)
+    pub havoc_marks: Vec<u32>,
+    pub havoc_walks: u32,
+
     pub entry_instances: FxHashMap<ObjId, ObjId>,
     pub fresh_in_progress: FxHashSet<ObjId>,
     pub main_module: ObjId,
@@ -905,11 +927,6 @@ pub struct Analyzer {
     /// a copy's original (through copies made at the same node: `out = deepcopy(out)` in a loop
     /// makes one copy site, not a new one per round)
     pub copy_root: FxHashMap<ObjId, ObjId>,
-    /// raises recorded by an enclosing try (`record_raise_state`), counted
-    pub raise_records: u64,
-    /// the raises recorded for each running try (the depth of `raise_states` when it began):
-    /// the exception's class names (None: not known), the state, the exception value
-    pub raise_cls: Vec<(usize, Vec<RaiseRec>)>,
     /// the class of the exception being recorded (set beside `cur_exc`)
     pub cur_exc_cls: Option<ExcNames>,
     /// the call being evaluated: where an exception a model raises is allocated
@@ -929,11 +946,6 @@ pub struct Analyzer {
     pub env_stack: Vec<IndexMap<StrId, Value>>,
     /// `@name.setter` functions by (defining class, attribute)
     pub prop_setters: FxHashMap<(ObjId, KeyId), ObjId>,
-    /// `self.f = p` in `__init__` with `p` a parameter: the classes of the arguments seen for
-    /// `p` at construction sites, by (class, field) — the field's class when there is one
-    pub ctor_field_classes: FxHashMap<(ObjId, String), FxHashSet<ObjId>>,
-    /// per running call: did it raise an uncaught exception / call unknown code?
-    pub raise_stack: Vec<bool>,
     pub row_checks: Vec<RowCheck>,
     /// collect `facts` (the `--facts` mode)
     pub facts_on: bool,
@@ -966,7 +978,7 @@ impl Analyzer {
             filename: filename.to_string(),
             search_paths: if follow_imports { search_paths } else { Vec::new() },
             analyse_entry_points,
-            objects: vec![Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, literal_len: None, known_prefix: None, iter_elem: false, derived_from: None, depth: 0, iterator: false }],
+            objects: vec![Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, literal_len: None, known_prefix: None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0 }],
             none_v: Value::lit(intern::key_none()),
             ..Default::default()
         };
@@ -988,26 +1000,36 @@ impl Analyzer {
         oid
     }
 
-    /// A try context begins: raises of `caught` classes (or that may be one) record the state
-    /// there for the handlers; `pre` is the state before the body.
+    /// A try context begins: raises inside it record the state there for its handlers and
+    /// its finally; `pre` is the state before the body.
     pub fn enter_try(&mut self, caught: FxHashSet<String>, pre: &mut State) {
-        self.guards.push(caught);
-        self.may_raise.push(false);
-        self.raise_states.push(None);
-        self.raise_values.push(None);
-        self.raise_cls.push((self.raise_states.len(), Vec::new()));
-        self.try_marks.push((self.frames.len(), self.env_stack.len(), pre.copy(), self.objects.len() as u32));
+        let (frames, envs, mark) = (self.frames.len(), self.env_stack.len(), self.serial);
+        self.tries.push(TryCtx { caught, frames, envs, pre: pre.copy(), mark, recs: Vec::new(), last: None });
     }
 
-    /// The try context ends: what it recorded.
+    /// The try context ends: what it recorded. What callees made since the try began and
+    /// nothing reaches after the unwind (the try's names, the frames below it, the exception)
+    /// is garbage in a raise state: a try around a large recursion would otherwise join every
+    /// callee's objects into its handlers.
     pub fn leave_try(&mut self) -> TryExit {
-        self.guards.pop();
-        self.try_marks.pop();
-        let flagged = self.may_raise.pop().unwrap_or(false);
-        self.raise_states.pop();
-        let value = self.raise_values.pop().flatten();
-        let recs = self.raise_cls.pop().map(|(_, r)| r).unwrap_or_default();
-        TryExit { flagged, recs, value }
+        let Some(t) = self.tries.pop() else { return TryExit { recs: Vec::new() } };
+        let mut recs: Vec<RaiseRec> = t.recs.into_iter().filter_map(|(c, sts, e)| Some((c, sts.finish()?, e))).collect();
+        for (_, st, exc) in recs.iter_mut() {
+            let mut roots: Vec<ObjId> = Vec::new();
+            self.state_roots(st, t.envs, t.frames, &mut roots);
+            for (o, v) in st.lasts.iter() {
+                roots.push(*o);
+                v.push_objs(&mut roots);
+            }
+            exc.push_objs(&mut roots);
+            self.collect_since(t.mark, &t.pre, roots, st, Some(t.envs));
+        }
+        TryExit { recs }
+    }
+
+    /// The exception classes the running try contexts catch (innermost last).
+    pub fn guards(&self) -> impl DoubleEndedIterator<Item = &FxHashSet<String>> {
+        self.tries.iter().map(|t| &t.caught)
     }
 
     pub fn frame(&self) -> &Frame {
@@ -1125,7 +1147,9 @@ impl Analyzer {
             derived_from: None,
             depth: 0,
             iterator: site.starts_with("gen:"),
+            born: self.serial,
         });
+        self.serial += 1;
         self.obj_index.insert(key, oid);
         oid
     }
@@ -1278,6 +1302,10 @@ impl Analyzer {
             oid
         };
         let obj_single = self.obj(oid).single;
+        if obj_single {
+            self.objects[oid as usize].born = self.serial;
+            self.serial += 1;
+        }
         // born here: its length is unknown until the code making it says
         state.lens.insert(oid, (None, 0, 0));
         if kind.is_record() || kind == Kind::Frame {
@@ -1650,18 +1678,27 @@ impl Analyzer {
             let mut self_val: Option<Value> = None;
             if let Some(cls) = fi.cls {
                 if !fi.is_static.get() {
-                    let inst = match self.entry_instances.get(&cls) {
-                        Some(&i) => i,
-                        None => {
-                            let cname = self.class_info(cls).name.clone();
-                            let i = self.fresh_instance(cls, state, &format!("entry:{}", cname));
-                            self.entry_instances.insert(cls, i);
-                            st = state.copy();
-                            st.ret = None;
-                            i
-                        }
-                    };
-                    self_val = Some(Value::obj(inst));
+                    // (an instance of the class or of one of its subclasses: what their
+                    // `__init__`s set may be there; a torch module's method is analysed in
+                    // its own terms: its attributes as symbols)
+                    let torch = self.torch_modules.contains(&fi.module);
+                    let subs: Vec<ObjId> = self.user_classes.iter().copied().filter(|c| *c == cls || (!torch && self.mro(*c).contains(&cls))).collect();
+                    let mut insts: Vec<ObjId> = Vec::new();
+                    for c in subs {
+                        let inst = match self.entry_instances.get(&c) {
+                            Some(&i) => i,
+                            None => {
+                                let cname = self.class_info(c).name.clone();
+                                let i = self.fresh_instance(c, state, &format!("entry:{}", cname));
+                                self.entry_instances.insert(c, i);
+                                st = state.copy();
+                                st.ret = None;
+                                i
+                            }
+                        };
+                        insts.push(inst);
+                    }
+                    self_val = Some(Value::objs(crate::domain::ObjSet::from_vec(insts)));
                     if !params.is_empty() {
                         params.remove(0);
                     }
@@ -1860,8 +1897,7 @@ impl Analyzer {
                         Some(&format!("entry:{}", fi.qualname)),
                     );
                     for f in fields.iter() {
-                        let v = self.typed_field_value(oid, &intern::key_py_str(f), state, &format!("entry:{}", fi.qualname));
-                        state.set_slot(inst, ns, f, v, true);
+                        state.set_slot(inst, ns, f, Value::data(&format!("field {}", intern::key_py_str(f))), true);
                     }
                     if ci.typed_dict {
                         let src = Source::new(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param);
@@ -1889,18 +1925,6 @@ impl Analyzer {
             }
         }
         None
-    }
-
-    /// The value of a declared field: an instance of its annotated user class with `fixes`
-    /// (nested TypedDicts / dataclasses), otherwise opaque data.
-    pub fn typed_field_value(&mut self, cls: ObjId, field: &str, state: &mut State, ctx: &str) -> Value {
-        if let Some(fc) = self.field_class(cls, field, state) {
-            if self.class_info_opt(fc).is_some() && !self.fresh_in_progress.contains(&fc) {
-                let inst = self.fresh_instance(fc, state, &format!("{}.{}", ctx, field));
-                return Value::obj(inst);
-            }
-        }
-        Value::data(&format!("field {}", field))
     }
 
     pub fn fresh_instance(&mut self, cls_oid: ObjId, state: &mut State, ctx: &str) -> ObjId {
@@ -1947,8 +1971,7 @@ impl Analyzer {
                     let k = key_str_lit(&f);
                     let r = state.row(inst, ns).store(k, true);
                     state.set_row(inst, ns, r);
-                    let v = self.typed_field_value(c, &f, state, ctx);
-                    state.set_slot(inst, ns, k, v, true);
+                    state.set_slot(inst, ns, k, Value::data(&format!("field {}", f)), true);
                 }
             }
             order.extend(cinfo.bases.iter().copied());
@@ -2282,7 +2305,9 @@ impl Analyzer {
 
     /// Objects the analyzer itself holds beyond the state: what side tables keyed by other
     /// objects refer to, exceptions in flight, the callers' names, loop recency objects.
-    pub fn gc_pinned(&self, work: &mut Vec<ObjId>) {
+    /// `unwind`: for a raise state, only the first `unwind` callers' names, and no loop's recent
+    /// objects (those still in use are reachable from the names).
+    pub fn gc_pinned(&self, work: &mut Vec<ObjId>, unwind: Option<usize>) {
         let st = State::new();
         for o in self.m.chainmaps.keys().chain(self.m.dd_factories.keys()).chain(self.m.csv_readers.keys()).chain(self.wrapped.keys()).chain(self.m.partial_star.keys()).chain(self.lazy_src.keys()).chain(self.attr_mirrors.keys()).chain(self.entry_instances.keys()).chain(self.copy_root.keys()).chain(self.m.sql_cursors.keys()).chain(self.m.sorted_items.keys()).chain(self.m.exit_callbacks.keys()).chain(self.sdispatch.keys()).chain(self.m.fa_app_deps.keys()) {
             // (the side-table edges only: the key itself may be dead)
@@ -2290,7 +2315,7 @@ impl Analyzer {
             self.obj_edges(*o, &st, &mut w);
             work.extend(w);
         }
-        for v in self.cur_exc.iter().chain(self.raise_values.iter().flatten()).chain(self.handling_values.iter()).chain(self.cmp_right.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
+        for v in self.cur_exc.iter().chain(self.tries.iter().flat_map(|t| t.recs.iter().map(|r| &r.2))).chain(self.handling_values.iter()).chain(self.cmp_right.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
             v.push_objs(work);
         }
         for c in &self.m.fa_dep_cache {
@@ -2300,7 +2325,7 @@ impl Analyzer {
             v.push_objs(work);
             work.extend(f.iter().copied());
         }
-        for env in &self.env_stack {
+        for env in self.env_stack.iter().take(unwind.unwrap_or(usize::MAX)) {
             env.values().for_each(|v| v.push_objs(work));
         }
         for (_, env, _) in &self.cm_frames {
@@ -2309,7 +2334,7 @@ impl Analyzer {
         for cells in &self.comp_cells {
             work.extend(cells.values().copied());
         }
-        for rs in &self.recent_stack {
+        for rs in self.recent_stack.iter().filter(|_| unwind.is_none()) {
             work.extend(rs.iter().map(|(o, _, _, _)| *o));
         }
         for rs in &self.m.fa_out_resp {

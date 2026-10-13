@@ -89,7 +89,7 @@ impl Registry {
             &[
                 "builtins.print",
                 "builtins.id", "builtins.hash",
-                "builtins.format", "builtins.input", "builtins.callable", "builtins.issubclass", "builtins.hex",
+                "builtins.format", "builtins.input", "builtins.issubclass", "builtins.hex",
                 "builtins.chr", "builtins.ord", "builtins.open", "builtins.divmod", "builtins.pow",
                 "builtins.bytes", "builtins.object",
             ],
@@ -135,6 +135,7 @@ impl Registry {
         r(&["dict.pop"], m_pop);
         r(&["builtins.max", "builtins.min"], m_minmax);
         r(&["builtins.isinstance"], m_isinstance);
+        r(&["builtins.callable"], m_callable);
         r(&["dict.popitem"], m_popitem);
         r(&["dict.move_to_end"], m_move_to_end);
         r(&["dict.clear"], m_clear);
@@ -699,6 +700,38 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// `isinstance(x, C)`: decided when every object of `x` has a known kind / class; a
 /// placeholder records an event so the call site decides.
+/// `callable(x)`: decided where every value `x` may be is: functions, classes and bound
+/// methods are, literals are not, an instance is when its class defines `__call__`.
+fn m_callable(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
+    let Some(v) = c.args.first() else { return Value::data("callable") };
+    let mut seen: Vec<bool> = Vec::new();
+    if !v.kv.is_bot() {
+        if !v.kv.is_literal() || crate::domain::kv_literals(&v.kv).is_empty() {
+            return Value::data("callable");
+        }
+        seen.push(false);
+    }
+    for o in v.pts.iter() {
+        let b = match an.kind(o) {
+            Kind::Function | Kind::Bound | Kind::Class | Kind::Partial | Kind::Method => true,
+            Kind::Instance => match an.instance_class(o) {
+                Some(cls) if !an.mro(cls).iter().any(|x| an.class_info_opt(*x).is_none_or(|ci| ci.open_base)) => an.class_lookup(cls, "__call__").is_some(),
+                _ => return Value::data("callable"),
+            },
+            Kind::Dict | Kind::List | Kind::Tuple | Kind::Set => false,
+            // (a builtin function or class; other library names may be constants)
+            Kind::External if an.external_qual(o).strip_prefix("builtins.").is_some_and(|n| crate::interp::is_builtin_name(n) && !n.starts_with("__") && !matches!(n, "NotImplemented" | "Ellipsis" | "None" | "True" | "False")) => true,
+            _ => return Value::data("callable"),
+        };
+        seen.push(b);
+    }
+    match (seen.iter().all(|b| *b), seen.iter().all(|b| !*b)) {
+        (true, false) => Value::lit(intern::key_bool(true)),
+        (false, true) => Value::lit(intern::key_bool(false)),
+        _ => Value::data("callable"),
+    }
+}
+
 fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let (Some(v), Some(cv)) = (c.args.first(), c.args.get(1)) else { return Value::data("bool") };
     // isinstance(x, torch.Tensor): decided for tensors and for containers / literals
@@ -1139,14 +1172,11 @@ fn getattr_hook_outcome(an: &mut Analyzer, st: &mut State, o: u32, k: KeyId, nod
     let mark = an.objects.len() as u32;
     let caught: rustc_hash::FxHashSet<String> = ["AttributeError".to_string()].into_iter().collect();
     an.enter_try(caught, &mut s2);
-    an.raise_stack.push(false);
-    an.esc_cls.push(Some(Vec::new()));
     an.call_method_with(&Value::obj(o), "__getattr__", vec![Value::lit(k)], node, &mut s2);
-    let escaped = an.raise_stack.pop().unwrap_or(false);
-    an.esc_cls.pop();
     let out = an.leave_try();
-    let (flagged, raised, recs) = (out.flagged, out.raised(), out.recs);
-    if flagged || escaped {
+    let (flagged, raised) = (out.any(), out.raised());
+    let recs = out.recs;
+    if flagged {
         return None;
     }
     // (objects it made, the exception among them, do not count)
@@ -1847,7 +1877,6 @@ fn m_str_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // computed here may raise anywhere)
     if matches!(last(&c.qual), "format" | "format_map") && !(out.pts.is_empty() && out.kv.is_literal()) {
         an.flag_may_raise(st);
-        an.note_raise();
     }
     const STR_OUT: &[&str] = &["upper", "lower", "strip", "lstrip", "rstrip", "title", "capitalize", "casefold", "swapcase", "removeprefix", "removesuffix", "zfill", "center", "ljust", "rjust", "replace", "expandtabs", "join", "format"];
     if !STR_OUT.contains(&last(&c.qual)) || !out.pts.is_empty() {

@@ -3,9 +3,9 @@
 use ruff_python_ast as ast;
 use rustc_hash::FxHashSet;
 
-use crate::domain::{KeyVal, KeysOf, Ns, Row, Value};
+use crate::domain::{KeyVal, Ns, Row, Value};
 use crate::frontend::{self, Node};
-use crate::intern::{self, key_str_lit, s, KeySet};
+use crate::intern::{self, key_str_lit, s};
 use crate::state::{Kind, State};
 
 use super::{TryExit, contains_jump, dotted_last, is_constant, is_main_guard, Analyzer, ClassInfo, Frame, FrameKind, FuncNode, LoopCtx, Payload, LOOP_MAX_ITER, UNROLL_MAX};
@@ -49,10 +49,6 @@ impl Analyzer {
                 let v = self.eval(&a.value, state);
                 for t in &a.targets {
                     self.bind_target(t, &v, state);
-                }
-                // `flag = k in d`: a later `if flag:` narrows as the test would
-                if let [ast::Expr::Name(n)] = &a.targets[..] {
-                    self.flag_facts(n.id.as_str(), &a.value, &v, state);
                 }
             }
             ast::Stmt::AnnAssign(a) => {
@@ -166,19 +162,11 @@ impl Analyzer {
                         }
                     }
                 }
-                // uncaught here (no enclosing handler for it): the running call raises
-                let name = r.exc.as_ref().map(|e| match &**e {
-                    ast::Expr::Call(c) => dotted_last(&c.func),
-                    other => dotted_last(other),
-                });
                 // a bare `raise` re-raises what the running handler caught
-                let names: Vec<String> = match &name {
-                    Some(n) => vec![n.clone()],
+                let names: Vec<String> = match &r.exc {
+                    Some(_) => vec![],
                     None => self.handling.last().map(|h| h.iter().cloned().collect()).unwrap_or_default(),
                 };
-                let caught = self.guards.iter().any(|g| {
-                    g.contains("*") || g.contains("Exception") || g.contains("BaseException") || names.iter().any(|n| g.contains(n) || n == "*" && !g.is_empty())
-                });
                 self.cur_exc = exc_v.clone().filter(|v| v.pts.iter().any(|o| self.kind(o) == Kind::Instance || self.exc_objs.contains_key(&o) || matches!(&self.obj(o).payload, Payload::Method(q, _) if q == "fastapi.httpexc")));
                 // a bare raise: the exception the handler holds
                 if r.exc.is_none() {
@@ -200,28 +188,12 @@ impl Analyzer {
                 if self.cur_exc_cls.is_none() && r.exc.is_none() && names.len() == 1 && names[0] != "*" {
                     self.cur_exc_cls = Some((crate::interp::builtin_exc_names(&names[0]).0, false));
                 }
-                // (a handler of a base class catches it too)
-                let caught = caught || self.cur_exc_cls.as_ref().is_some_and(|(ns, _)| self.guards.iter().any(|g| ns.iter().any(|n| g.contains(n))));
-                let raised_cls = self.cur_exc_cls.clone();
-                let recorded = state.reachable && self.record_raise_state(state);
+                // (the running try, if any, takes it with this state; else it leaves the program)
+                if state.reachable {
+                    self.record_raise_state(state);
+                }
                 self.cur_exc = None;
                 self.cur_exc_cls = None;
-                if !caught {
-                    // (the class leaving the call: known, or not)
-                    self.merge_esc(raised_cls.map(|c| vec![c]));
-                    if crate::interp::debug_level() == 2 {
-                        eprintln!("  raise statement at L{} in {}", frontend::node(r).line, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
-                    }
-                    if let Some(t) = self.raise_stack.last_mut() {
-                        *t = true;
-                    }
-                    // the enclosing try already has this state for its handlers / finally
-                    if !recorded {
-                        if let Some(m) = self.may_raise.last_mut() {
-                            *m = true;
-                        }
-                    }
-                }
                 state.reachable = false;
             }
             ast::Stmt::Assert(a) => {
@@ -370,41 +342,15 @@ impl Analyzer {
                 let redirects = crate::models::csvio::redirect_targets(self, state, &managers.iter().map(|m| m.0.clone()).collect::<Vec<_>>());
                 let n_redirects = redirects.len();
                 self.m.stdout_redirect.extend(redirects);
-                // a manager whose `__exit__` returns True swallows the body's exception: the
-                // body is a try whose catch-all handler continues after the with
+                // a try whose finally is the managers' `__exit__`: it runs however the body ends
+                // (normally, by return / break / continue, or by an exception); a manager whose
+                // `__exit__` returns True swallows the exception: a catch-all handler that does
+                // nothing
                 let swallows = managers.iter().any(|(v, _)| self.exit_swallows(v, state));
-                if swallows {
-                    let mut pre = state.copy();
-                    self.enter_try(FxHashSet::from_iter(["*".to_string()]), &mut pre);
-                    let exits_before = self.exit_count;
-                    self.exec_block(&w.body, state);
-                    let out = self.leave_try();
-                    let (flagged, raised_at) = (out.flagged, out.raised());
-                    let died = !state.reachable && self.exit_count == exits_before;
-                    let generic = flagged || (died && raised_at.is_none());
-                    let mut after = state.copy();
-                    if generic {
-                        after = pre.join(&mut after);
-                    }
-                    if let Some(mut r) = raised_at {
-                        after = if after.reachable { after.join(&mut r) } else { r };
-                    }
-                    state.replace_with(after);
-                    for _ in 0..n_redirects {
-                        self.m.stdout_redirect.pop();
-                    }
-                    // the managers' __exit__ runs on the way out (innermost first)
-                    let fin = std::rc::Rc::new(Finally::Exit(managers));
-                    if state.reachable {
-                        self.run_finally(&fin, state, false);
-                    }
-                } else {
-                    // a try whose finally is the managers' `__exit__`: it runs however the body
-                    // ends (normally, by return / break / continue, or by an exception)
-                    self.stmt_try_parts(&w.body, &[], &[], std::rc::Rc::new(Finally::Exit(managers)), state);
-                    for _ in 0..n_redirects {
-                        self.m.stdout_redirect.pop();
-                    }
+                let handlers = if swallows { vec![Handler { types: None, name: None, body: &[], line: frontend::node(w).line }] } else { vec![] };
+                self.stmt_try_parts(&w.body, handlers, &[], std::rc::Rc::new(Finally::Exit(managers)), state);
+                for _ in 0..n_redirects {
+                    self.m.stdout_redirect.pop();
                 }
             }
             ast::Stmt::FunctionDef(f) => {
@@ -478,42 +424,10 @@ impl Analyzer {
         if !is_suppress {
             return false;
         }
-        let names: FxHashSet<String> = call.arguments.args.iter().map(dotted_last).collect();
-        self.exec_handled(&w.body, names, state);
+        // `try: body / except (E, …): pass`
+        let h = Handler { types: Some(call.arguments.args.iter().collect()), name: None, body: &[], line: frontend::node(w).line };
+        self.stmt_try_parts(&w.body, vec![h], &[], std::rc::Rc::new(Finally::Block(&[])), state);
         true
-    }
-
-    /// `body` under a handler that catches `names` and does nothing (`suppress`).
-    pub fn exec_handled(&mut self, body: &'static [ast::Stmt], names: FxHashSet<String>, state: &mut State) {
-        let caught = expand_caught(names);
-        let mut pre = state.copy();
-        self.enter_try(caught, &mut pre);
-        self.cond_depth += 1;
-        self.branch_depth += 1;
-        let exits_before = self.exit_count;
-        self.exec_block(body, state);
-        let out = self.leave_try();
-        let (flagged, raised_at) = (out.flagged, out.raised());
-        self.branch_depth -= 1;
-        self.cond_depth -= 1;
-        let died = !state.reachable && self.exit_count == exits_before;
-        let generic = flagged || (died && raised_at.is_none());
-        let mut body_end = state.copy();
-        let mut handled = if generic { pre.join(&mut body_end) } else { State::bottom() };
-        if let Some(mut r) = raised_at {
-            handled = if handled.reachable { handled.join(&mut r) } else { r };
-        }
-        let out = match (body_end.reachable, handled.reachable) {
-            (true, true) => body_end.join(&mut handled),
-            (true, false) => body_end,
-            (false, _) => {
-                // (the body's returns stay recorded in `exits`)
-                handled.exits = body_end.exits.clone().or(handled.exits.clone());
-                handled.ret = body_end.ret.clone().or(handled.ret.clone());
-                handled
-            }
-        };
-        state.replace_with(out);
     }
 
     /// `with cm(...) as x: body` where `cm` is a `@contextmanager` generator function: the
@@ -870,48 +784,6 @@ impl Analyzer {
 
     /// The canonical text of a pure test (names, literals, comparisons, `in`, `is`, `not`,
     /// `and` / `or`), whether it is negated, and the names it reads.
-    /// `name = <test>` with an undecided test that narrows: facts for a later `if name:`
-    /// (the test's branch rows, restored while the rows are unchanged and name still holds v).
-    fn flag_facts(&mut self, name: &str, test: &'static ast::Expr, v: &Value, state: &mut State) {
-        fn simple(e: &ast::Expr) -> bool {
-            match e {
-                ast::Expr::Name(_) | ast::Expr::StringLiteral(_) | ast::Expr::NumberLiteral(_) | ast::Expr::BooleanLiteral(_) | ast::Expr::NoneLiteral(_) => true,
-                ast::Expr::Attribute(a) => simple(&a.value),
-                ast::Expr::Subscript(sb) => simple(&sb.value) && simple(&sb.slice),
-                ast::Expr::Tuple(t) => t.elts.iter().all(simple),
-                _ => false,
-            }
-        }
-        fn testlike(e: &ast::Expr) -> bool {
-            match e {
-                ast::Expr::Compare(c) => simple(&c.left) && c.comparators.iter().all(simple),
-                ast::Expr::UnaryOp(u) => u.op == ast::UnaryOp::Not && testlike(&u.operand),
-                ast::Expr::BoolOp(b) => b.values.iter().all(testlike),
-                ast::Expr::Call(c) => matches!(&*c.func, ast::Expr::Name(f) if matches!(f.id.as_str(), "isinstance" | "hasattr" | "callable")) && c.arguments.args.iter().all(simple) && c.arguments.keywords.is_empty(),
-                _ => false,
-            }
-        }
-        if !state.reachable || !testlike(test) || (v.pts.is_empty() && v.kv.is_literal()) {
-            return;
-        }
-        let mut ts = state.copy();
-        self.narrow(test, true, &mut ts);
-        let mut es = state.copy();
-        self.narrow(test, false, &mut es);
-        if !ts.reachable || !es.reachable {
-            return;
-        }
-        let nid = s(name);
-        let key = s(&format!("{}@{}", name, self.frame().func.unwrap_or(0)));
-        // (the flag's own narrowing is no fact about the records)
-        let facts: Vec<_> = cond_facts_for(key, true, vec![(nid, v.clone())], &ts, &es, state)
-            .into_iter()
-            .map(|f| std::sync::Arc::new(crate::state::CondFact { cond: f.cond, truth: f.truth, deps: f.deps.clone(), rows: f.rows.iter().filter(|((o, _), _, _)| !v.pts.contains(*o)).cloned().collect(), guards: f.guards.clone(), unbound: f.unbound.clone() }))
-            .filter(|f| !f.rows.is_empty())
-            .collect();
-        add_facts(state, facts);
-    }
-
     fn cond_key(&self, test: &'static ast::Expr) -> Option<(intern::StrId, bool, Vec<intern::StrId>)> {
         fn pure(e: &ast::Expr) -> bool {
             match e {
@@ -1287,33 +1159,6 @@ impl Analyzer {
             self.set_cursor(o, None, state);
         }
         let pre = state.copy();
-        // dry run for exhaustive key iteration (§5.2)
-        let mut exh_ops: Vec<(u32, Ns, Row, KeySet, intern::LensId)> = Vec::new();
-        let key_part = it.elem.key_part();
-        if it.exhaustive && !has_jump {
-            if let KeyVal::KeysOf(kk) = &key_part.kv {
-                let saved_log = self.exh_log.take();
-                self.exh_log = Some(Vec::new());
-                let saved_verdicts = self.verdicts.len();
-                let mut dry = state.copy();
-                self.recent_stack.push(Vec::new());
-                self.frame_mut().loop_depth += 1;
-                self.cond_depth += 1;
-                let ekv = KeyVal::KeysOf(KeysOf { objs: kk.objs.clone(), ns: kk.ns, exclude: kk.exclude.clone(), chain: kk.chain, exhaustive_depth: self.cond_depth });
-                let dry_elem = match &it.elem {
-                    Elem::Pair(_, v) => Elem::Pair(Value::with_kv(key_part.pts.clone(), ekv), v.clone()),
-                    Elem::One(_) => Elem::One(Value::with_kv(key_part.pts.clone(), ekv)),
-                };
-                self.bind_iter_target(&f.target, &dry_elem, &mut dry);
-                self.exec_block(&f.body, &mut dry);
-                self.cond_depth -= 1;
-                self.frame_mut().loop_depth -= 1;
-                self.recent_stack.pop();
-                self.drop_verdicts_since(saved_verdicts);
-                exh_ops = self.exh_log.take().unwrap_or_default();
-                self.exh_log = saved_log;
-            }
-        }
         let (mut head, exit_acc, back) = self.loop_fixpoint(state, &mut |an, body_s| {
             an.bind_iter_target(&f.target, &it.elem, body_s);
             an.exec_block(&f.body, body_s);
@@ -1321,7 +1166,6 @@ impl Analyzer {
         let mut exit_s = head.copy();
         let elem_v = it.elem.value_part();
         self.promote_elem_reqs(&mut exit_s, &back, &elem_v, state);
-        self.promote_elem_narrowing(&mut exit_s, &back, &elem_v);
         if exit_acc.is_none() && back.reachable {
             // every element of the iterable went through the body: its row after the loop is
             // the body's exit row, not the join with "not processed yet"
@@ -1334,10 +1178,6 @@ impl Analyzer {
                     }
                 }
             }
-        }
-        for (oid, ns, srcrow, kill, chain) in exh_ops {
-            let r = exit_s.row(oid, ns).copy_from(&srcrow, true, &kill, chain);
-            exit_s.set_row(oid, ns, r);
         }
         if !f.orelse.is_empty() && exit_s.reachable {
             self.exec_block(&f.orelse, &mut exit_s);
@@ -1432,7 +1272,7 @@ impl Analyzer {
                     let a = if exc { Value::data("exc") } else { self.none_v.clone() };
                     self.call_method_with(v, "__exit__", vec![a.clone(), a.clone(), a], n, st);
                     // an ExitStack: its callbacks, last registered first; closing(x): x.close()
-                    crate::models::csvio::exitstack_close(self, st, v, n);
+                    crate::models::csvio::exitstack_close(self, st, v, n, !exc);
                     crate::models::csvio::closing_exit(self, st, v, n);
                 }
             }
@@ -1446,48 +1286,35 @@ impl Analyzer {
 
     fn stmt_try(&mut self, t: &'static ast::StmtTry, state: &mut State) {
         let fin = std::rc::Rc::new(Finally::Block(&t.finalbody));
-        self.stmt_try_parts(&t.body, &t.handlers, &t.orelse, fin, state);
+        let handlers = t.handlers.iter().map(|h| {
+            let ast::ExceptHandler::ExceptHandler(h) = h;
+            let types = h.type_.as_deref().map(|ty| match ty {
+                ast::Expr::Tuple(tup) => tup.elts.iter().collect(),
+                other => vec![other],
+            });
+            Handler { types, name: h.name.as_ref().map(|n| n.id.as_str()), body: &h.body, line: frontend::node(h).line }
+        });
+        self.stmt_try_parts(&t.body, handlers.collect(), &t.orelse, fin, state);
     }
 
     /// A try statement from its parts (a with statement is one: its finally is `__exit__`).
-    pub fn stmt_try_parts(&mut self, body: &'static [ast::Stmt], handlers: &'static [ast::ExceptHandler], orelse: &'static [ast::Stmt], fin: std::rc::Rc<Finally>, state: &mut State) {
+    pub fn stmt_try_parts(&mut self, body: &'static [ast::Stmt], handlers: Vec<Handler>, orelse: &'static [ast::Stmt], fin: std::rc::Rc<Finally>, state: &mut State) {
         let pushed = !fin.is_empty();
         if pushed {
             self.finally_stack.push((self.loop_stack.len(), fin.clone(), true));
         }
         let depth = self.finally_stack.len();
-        self.stmt_try_inner(body, handlers, orelse, &fin, state);
+        self.stmt_try_inner(body, &handlers, orelse, &fin, state);
         if pushed {
             self.finally_stack.truncate(depth - 1);
         }
     }
 
-    fn stmt_try_inner(&mut self, body: &'static [ast::Stmt], handlers: &'static [ast::ExceptHandler], orelse: &'static [ast::Stmt], fin: &std::rc::Rc<Finally>, state: &mut State) {
-        let mut caught: FxHashSet<String> = FxHashSet::default();
-        for h in handlers {
-            let ast::ExceptHandler::ExceptHandler(h) = h;
-            match &h.type_ {
-                None => {
-                    caught.insert("*".into());
-                }
-                Some(ty) => {
-                    if let ast::Expr::Tuple(tup) = &**ty {
-                        for e in &tup.elts {
-                            caught.insert(dotted_last(e));
-                        }
-                    } else {
-                        caught.insert(dotted_last(ty));
-                    }
-                }
-            }
-        }
-        // a handler for a class catches its subclasses too
-        let mut caught = expand_caught(caught);
+    fn stmt_try_inner(&mut self, body: &'static [ast::Stmt], handlers: &[Handler], orelse: &'static [ast::Stmt], fin: &std::rc::Rc<Finally>, state: &mut State) {
+        // (a handler for a class catches its subclasses too)
+        let mut caught = expand_caught(handlers.iter().flat_map(|h| h.names()).collect());
         // handlers that all end by re-raising: the body's reads are still required
-        let reraise = !handlers.is_empty() && handlers.iter().all(|h| {
-            let ast::ExceptHandler::ExceptHandler(h) = h;
-            matches!(h.body.last(), Some(ast::Stmt::Raise(_)))
-        });
+        let reraise = !handlers.is_empty() && handlers.iter().all(|h| matches!(h.body.last(), Some(ast::Stmt::Raise(_))));
         if reraise {
             caught.insert("!reraise".into());
         }
@@ -1495,32 +1322,16 @@ impl Analyzer {
         // on their way out
         let has_finally = !fin.is_empty();
         let outer_exits = if has_finally { state.exits.take() } else { None };
-        let raise_before = self.raise_stack.last().copied().unwrap_or(false);
         let mut pre = state.copy();
         self.enter_try(caught, &mut pre);
         self.cond_depth += 1;
         self.branch_depth += 1;
-        let exits_before = self.exit_count;
-        let fl_mark = self.flag_reqs.len();
-        let fl_depth = self.may_raise.len();
         self.exec_block(body, state);
-        // the requirements known where the body first may have raised anywhere
-        let mut flag_reqs = self.flag_reqs.drain(fl_mark..).find(|(d, _)| *d == fl_depth).map(|(_, r)| r);
-        // a body that ended because it returned (or broke out) did not raise
-        let TryExit { flagged, mut recs, .. } = self.leave_try();
-        let raised_at: Option<()> = if recs.is_empty() { None } else { Some(()) };
+        let TryExit { mut recs } = self.leave_try();
         // the handlers' classes: which recorded raise each one catches (Python takes the
         // first handler that matches)
         let hclasses: Vec<(FxHashSet<String>, bool)> = handlers.iter().map(|h| {
-            let ast::ExceptHandler::ExceptHandler(h) = h;
-            let elts: Vec<&ast::Expr> = match h.type_.as_deref() {
-                None => vec![],
-                Some(ast::Expr::Tuple(tup)) => tup.elts.iter().collect(),
-                Some(other) => vec![other],
-            };
-            if h.type_.is_none() {
-                return (["*".to_string()].into_iter().collect(), true);
-            }
+            let Some(elts) = &h.types else { return (h.names(), true) };
             // (no decided miss unless every name is a known exception class)
             let known = elts.iter().all(|e| {
                 let n = dotted_last(e);
@@ -1546,11 +1357,10 @@ impl Analyzer {
                 None
             }
         };
-        let per_class = !handlers.is_empty();
         // raises no handler surely catches go on to the enclosing try (or out of the call),
         // through the finally (unless a return / jump in it swallows them)
         let swallowing = !fin.is_empty() && fin.swallows();
-        if (per_class || handlers.is_empty()) && !swallowing {
+        if !swallowing {
             for (cls, st, ev) in recs.iter_mut() {
                 if hclasses.iter().any(|hc| hmatch(hc, cls) == Some(true)) {
                     continue;
@@ -1565,57 +1375,27 @@ impl Analyzer {
                         continue;
                     }
                 }
-                self.cur_exc = if ev.pts.is_empty() { None } else { Some(ev.clone()) };
-                self.cur_exc_cls = cls.clone();
-                let recorded = self.record_raise_state(&mut st2);
-                self.cur_exc = None;
-                self.cur_exc_cls = None;
-                if !recorded {
-                    self.note_raise();
-                }
+                self.reraise_rec((cls.clone(), st2, ev.clone()));
             }
         }
-        let died = !state.reachable && self.exit_count == exits_before;
-        let generic = flagged || (died && raised_at.is_none());
-        let body_may_raise = generic || raised_at.is_some();
         // where an exception leaves the body (for a finally without handlers)
-        let mut finally_escape: Option<State> = None;
-        if has_finally && handlers.is_empty() && body_may_raise && fin.swallows() {
-            let mut e = if generic { pre.copy() } else { State::bottom() };
-            for (_, r, _) in recs.iter_mut() {
-                let mut r2 = r.copy();
-                e = if e.reachable { e.join(&mut r2) } else { r2 };
-            }
-            finally_escape = Some(e);
-        }
+        let mut finally_escape = if has_finally && handlers.is_empty() && fin.swallows() { crate::interp::join_raise_recs(&recs) } else { None };
         if crate::interp::debug_level() == 2 {
-            eprintln!("  try at L{}: may_raise={} at_access={} reachable={} exited={}", body.first().map(|s| frontend::node(s).line).unwrap_or(0), flagged, raised_at.is_some(), state.reachable, self.exit_count != exits_before);
+            eprintln!("  try at L{}: raises recorded={} reachable={}", body.first().map(|s| frontend::node(s).line).unwrap_or(0), recs.len(), state.reachable);
         }
         let mut body_end = state.copy();
-        // (where a raise from anywhere in the body enters a handler)
-        let mut generic_entry = if generic && per_class {
-            let mut g = pre.copy();
-            if let Some(r) = flag_reqs.as_mut() {
-                g.reqs = r.copy();
-            }
-            g.join(&mut body_end.copy())
-        } else {
-            State::bottom()
-        };
         let mut results: Vec<State> = Vec::new();
         if !orelse.is_empty() && body_end.reachable {
             self.exec_block(orelse, &mut body_end);
         }
         results.push(body_end);
         for (hi, h) in handlers.iter().enumerate() {
-            let ast::ExceptHandler::ExceptHandler(h) = h;
             // the exceptions raised at the recorded points (anything else: unknown)
-            let hn = frontend::node(h);
-            let unknown = Value::data(&format!("exc@L{}", hn.line));
+            let unknown = Value::data(&format!("exc@L{}", h.line));
             let (mut hs, ev) = {
                 // the raises this handler may catch that no earlier one surely catches
-                let mut e = generic_entry.copy();
-                let mut ev = if generic { Some(unknown.clone()) } else { None };
+                let mut e = State::bottom();
+                let mut ev: Option<Value> = None;
                 for (cls, st, x) in recs.iter_mut() {
                     if hmatch(&hclasses[hi], cls) == Some(false) || hclasses[..hi].iter().any(|hc| hmatch(hc, cls) == Some(true)) {
                         continue;
@@ -1625,32 +1405,17 @@ impl Analyzer {
                     let x = if x.pts.is_empty() { unknown.clone() } else { x.clone() };
                     ev = Some(match ev { None => x, Some(p) => p.join(&x) });
                 }
-                if !body_may_raise {
-                    e = State::bottom();
-                }
                 (e, ev.unwrap_or(unknown))
             };
             if !hs.reachable {
                 continue;
             }
-            if let Some(name) = &h.name {
-                self.store_name(s(name.id.as_str()), ev.clone(), &mut hs);
+            if let Some(name) = h.name {
+                self.store_name(s(name), ev.clone(), &mut hs);
             }
-            let mut names: FxHashSet<String> = FxHashSet::default();
-            match &h.type_ {
-                None => {
-                    names.insert("*".into());
-                }
-                Some(ty) => match &**ty {
-                    ast::Expr::Tuple(tup) => names.extend(tup.elts.iter().map(dotted_last)),
-                    other => {
-                        names.insert(dotted_last(other));
-                    }
-                },
-            }
-            self.handling.push(names);
+            self.handling.push(h.names());
             self.handling_values.push(ev);
-            self.exec_block(&h.body, &mut hs);
+            self.exec_block(h.body, &mut hs);
             self.handling_values.pop();
             self.handling.pop();
             results.push(hs);
@@ -1671,7 +1436,6 @@ impl Analyzer {
                 collect_assigned(st, &mut assigned);
             }
             for h in handlers {
-                let ast::ExceptHandler::ExceptHandler(h) = h;
                 h.body.iter().for_each(|x| collect_assigned(x, &mut assigned));
             }
             let vals: Vec<(intern::StrId, Option<Value>, Option<Value>, Option<Value>)> = assigned.iter().map(|n| (*n, self.name_value(&a, *n), self.name_value(&b, *n), self.name_value(&out, *n))).collect();
@@ -1708,10 +1472,8 @@ impl Analyzer {
             // swallows
             let n_exit_ways = ways.len();
             // (a `break` / `continue` in the finally swallows it as well)
-            if handlers.is_empty() && fin.swallows() && body_may_raise {
-                if let Some(esc) = finally_escape.take() {
-                    ways.push(esc);
-                }
+            if let Some(esc) = finally_escape.take() {
+                ways.push(esc);
             }
             for (wi, mut w) in ways.into_iter().enumerate() {
                 let is_escape = wi >= n_exit_ways;
@@ -1720,12 +1482,6 @@ impl Analyzer {
                 w.exits = None;
                 self.run_finally(fin, &mut w, is_escape);
                 if is_escape {
-                    if !w.reachable && !flagged {
-                        // the finally returned on every path: the exception does not leave
-                        if let Some(r) = self.raise_stack.last_mut() {
-                            *r = raise_before;
-                        }
-                    }
                     // a finally that completes re-raises: nothing continues from here
                     w.reachable = false;
                 } else if w.reachable {
@@ -1759,27 +1515,19 @@ impl Analyzer {
         }
         let mut roots: Vec<u32> = Vec::new();
         v.push_objs(&mut roots);
-        self.collect_since(mark, &pre, roots, state);
+        self.collect_since(mark, &pre, roots, state, None);
     }
 
-    /// Objects allocated since `mark` that no root reaches lose their state (`drop_garbage_at_return`;
-    /// at a loop's exit the roots are the frame's live names).
-    pub fn collect_since(&mut self, mark: u32, pre: &State, roots: Vec<u32>, state: &mut State) {
+    /// Objects made since the allocation serial `mark` that no root reaches lose their state
+    /// (`drop_garbage_at_return`; at a loop's exit the roots are the frame's live names).
+    /// `unwind`: a raise state, which only the first `unwind` callers' names outlive.
+    pub fn collect_since(&mut self, mark: u64, pre: &State, roots: Vec<u32>, state: &mut State, unwind: Option<usize>) {
+        let young = |an: &Analyzer, o: u32| an.objects[o as usize].born >= mark;
         let fp = state.footprint(pre);
         let mut fresh: rustc_hash::FxHashSet<u32> = Default::default();
-        for (o, _) in fp.rows.iter() {
-            if *o >= mark {
-                fresh.insert(*o);
-            }
-        }
-        for (o, _) in fp.slots.iter() {
-            if *o >= mark {
-                fresh.insert(*o);
-            }
-        }
-        for o in fp.elems.iter() {
-            if *o >= mark {
-                fresh.insert(*o);
+        for o in fp.rows.iter().map(|(o, _)| *o).chain(fp.slots.iter().map(|(o, _)| *o)).chain(fp.elems.iter().copied()) {
+            if young(self, o) {
+                fresh.insert(o);
             }
         }
         if fresh.is_empty() || fresh.len() > 4096 {
@@ -1789,7 +1537,7 @@ impl Analyzer {
         // parameters, cells, …), and what the analyzer holds beyond the state
         let mut work: Vec<u32> = roots;
         for (o, sk) in fp.slots.iter() {
-            if *o < mark {
+            if !young(self, *o) {
                 if let Some(val) = state.slots.get(o, sk) {
                     work.extend(val.pts.iter());
                     if let KeyVal::KeysOf(ko) = &val.kv {
@@ -1798,19 +1546,20 @@ impl Analyzer {
                 }
             }
         }
-        for o in fp.elems.iter().filter(|o| **o < mark) {
+        for o in fp.elems.iter().filter(|o| !young(self, **o)) {
             if let Some(KeyVal::KeysOf(ko)) = state.elems.get(o) {
                 work.extend(ko.objs.iter());
             }
         }
-        self.gc_pinned(&mut work);
+        self.gc_pinned(&mut work, unwind);
         // (unknown objects stand for objects outside the call — a parameter's record, an
         // input's part: what they hold is reachable from there)
         work.extend(fresh.iter().copied().filter(|o| matches!(self.kind(*o), Kind::Unknown)));
-        // (older objects reach fresh ones only through those roots: only fresh ones expand)
+        // (older objects reach young ones only through those roots: a young one was made
+        // since, so whatever refers to it was written since; only young ones expand)
         let mut reached: rustc_hash::FxHashSet<u32> = Default::default();
         while let Some(o) = work.pop() {
-            if !reached.insert(o) || o < mark {
+            if !reached.insert(o) || !young(self, o) {
                 continue;
             }
             self.walked.set(self.walked.get() + 1);
@@ -1827,14 +1576,14 @@ impl Analyzer {
 
     /// Garbage collection at a loop's exit (in a function): objects the loop allocated that the
     /// frame's names, the enclosing frames and the analyzer no longer reach lose their state.
-    fn loop_gc_begin(&mut self, state: &mut State) -> Option<(u32, State)> {
+    fn loop_gc_begin(&mut self, state: &mut State) -> Option<(u64, State)> {
         if !matches!(self.frame().kind, FrameKind::Function) || self.frame().pre_call.is_none() {
             return None;
         }
-        Some((self.objects.len() as u32, state.copy()))
+        Some((self.serial, state.copy()))
     }
 
-    fn loop_gc_end(&mut self, g: Option<(u32, State)>, state: &mut State) {
+    fn loop_gc_end(&mut self, g: Option<(u64, State)>, state: &mut State) {
         let Some((mark, pre)) = g else { return };
         if !state.reachable {
             return;
@@ -1845,7 +1594,7 @@ impl Analyzer {
             roots.push(*o);
             v.push_objs(&mut roots);
         }
-        self.collect_since(mark, &pre, roots, state);
+        self.collect_since(mark, &pre, roots, state, None);
     }
 
     fn stmt_classdef(&mut self, c: &'static ast::StmtClassDef, state: &mut State) {
@@ -1962,7 +1711,6 @@ impl Analyzer {
             dc_kw_only: std::cell::Cell::new(false),
             dc_order: std::cell::Cell::new(false),
             nn_module,
-            field_classes: std::cell::RefCell::new(None),
             any_fields: std::cell::RefCell::new(None),
         };
         let info = std::rc::Rc::new(info);
@@ -2339,6 +2087,24 @@ fn collect_assigned(st: &ast::Stmt, out: &mut Vec<intern::StrId>) {
 /// The exception names a handler set catches, with the known subclasses of each
 /// (`except ValueError` catches pydantic's `ValidationError`, `except LookupError` a
 /// `KeyError`).
+/// An `except` clause: the classes it names (None: a bare `except`), the name it binds, its
+/// body (a `with` that swallows, `suppress(E)`: one that does nothing).
+pub struct Handler {
+    pub types: Option<Vec<&'static ast::Expr>>,
+    pub name: Option<&'static str>,
+    pub body: &'static [ast::Stmt],
+    pub line: u32,
+}
+
+impl Handler {
+    fn names(&self) -> FxHashSet<String> {
+        match &self.types {
+            None => ["*".to_string()].into_iter().collect(),
+            Some(es) => es.iter().map(|e| dotted_last(e)).collect(),
+        }
+    }
+}
+
 pub fn expand_caught(mut caught: FxHashSet<String>) -> FxHashSet<String> {
     const SUBS: &[(&str, &[&str])] = &[
         ("ValueError", &["ValidationError", "JSONDecodeError", "UnicodeDecodeError", "UnicodeEncodeError", "UnicodeError"]),

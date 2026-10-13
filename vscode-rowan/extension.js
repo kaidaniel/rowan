@@ -175,6 +175,27 @@ function cutDepth(text, depth) {
 }
 
 /**
+ * One alternative in at most `width` characters: a structure (`{…}`, `Name(…)`) keeps its first
+ * items whole and says `…` for the rest; otherwise the text is cut.
+ */
+function shorten(a, width) {
+  if (a.length <= width) return a;
+  const top = parseValue(a);
+  const parts = top.length === 1 ? top[0] : [];
+  const node = parts[parts.length - 1];
+  if (node && typeof node !== "string" && parts.slice(0, -1).every((p) => typeof p === "string")) {
+    const head = flatParts(parts.slice(0, -1));
+    for (let n = node.items.length - 1; n >= 1; n--) {
+      const s = head + node.open + node.items.slice(0, n).map(flatParts).join(", ") + ", …" + node.close;
+      if (s.length <= width) return s;
+    }
+    const cut = cutDepth(a, 1);
+    if (cut.length <= width) return cut;
+  }
+  return a.slice(0, width - 1) + "…";
+}
+
+/**
  * A value's lines for a hover: pretty-printed, nested levels cut until it fits in
  * `maxLines` (a hover should not fill the screen), else its first lines and how many more.
  */
@@ -184,7 +205,7 @@ function hoverValue(text, maxLines = 16) {
   // (several large alternatives: one line each, cut at the width)
   const alts = alternatives(text);
   if (lines.length > maxLines && alts.length > 1) {
-    lines = alts.map((a, k) => (k ? "| " : "  ") + (a.length > VALUE_WIDTH ? a.slice(0, VALUE_WIDTH - 1) + "…" : a));
+    lines = alts.map((a, k) => (k ? "| " : "  ") + shorten(a, VALUE_WIDTH));
   }
   if (lines.length > maxLines) lines = lines.slice(0, maxLines - 1).concat([`… (${lines.length - maxLines + 1} more lines)`]);
   return lines;
@@ -629,4 +650,5 @@ function deactivate() {
   stopServers();
 }
 
-module.exports = { activate, deactivate, renderHover, prettyValue, hoverValue, indexResult, severityFor, verdictsForWord, diagnosticMessage, findBinary };
+module.exports = {
+  shorten, activate, deactivate, renderHover, prettyValue, hoverValue, indexResult, severityFor, verdictsForWord, diagnosticMessage, findBinary };

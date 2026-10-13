@@ -124,7 +124,6 @@ impl Analyzer {
             is_contextmanager: std::cell::Cell::new(false),
             is_cached: std::cell::Cell::new(false),
             is_memo: std::cell::Cell::new(false),
-            generator: std::cell::Cell::new(None),
         };
         let n = node.node();
         let has_closure = !info.closure.is_empty();
@@ -685,7 +684,8 @@ impl Analyzer {
             self.enter_try(rustc_hash::FxHashSet::from_iter(["StopIteration".to_string()]), &mut pre);
             let v = self.call_value(&m, node, None, &mut probe, Some(Vec::new()));
             let out = self.leave_try();
-            let (flagged, raised_at, recs) = (out.flagged, out.raised(), out.recs);
+            let (flagged, raised_at) = (out.any(), out.raised());
+            let recs = out.recs;
             let only_stop = !recs.is_empty() && recs.iter().all(|(c, _, _)| c.as_ref().is_some_and(|(names, _)| names.iter().any(|n| n == "StopIteration")));
             let level = if flagged { 1 } else if raised_at.is_none() && probe.reachable { 0 } else if !probe.reachable && raised_at.is_some() { 2 } else { 1 };
             // (effects only on the iterator, the objects its attributes hold — its own state,
@@ -1141,27 +1141,6 @@ impl Analyzer {
                         }
                     }
                 }
-            }
-        }
-    }
-
-    /// Keys proven on a loop element that is a view of a record are proven on the record.
-    pub fn promote_elem_narrowing(&mut self, exit_s: &mut State, body_s: &State, elem: &Value) {
-        if !body_s.reachable {
-            return;
-        }
-        for oid in elem.pts.iter() {
-            let Some(src) = self.obj(oid).derived_from else { continue };
-            if !self.obj(src).single {
-                continue;
-            }
-            for ns in [Ns::Item, Ns::Attr] {
-                let proven = body_s.row(oid, ns).definite.intersection(&body_s.row(src, ns).definite);
-                let mut row = exit_s.row(src, ns);
-                for k in proven.difference(&row.definite).iter() {
-                    row = row.narrow_in(k, true);
-                }
-                exit_s.set_row(src, ns, row);
             }
         }
     }

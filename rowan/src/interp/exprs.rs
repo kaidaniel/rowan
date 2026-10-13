@@ -201,7 +201,7 @@ impl Analyzer {
                 self.callee_nodes.insert(self.m.t_called_attr);
                 let fv = self.eval(&c.func, state);
                 let mut flag = false;
-                if !self.may_raise.is_empty() {
+                if !self.tries.is_empty() {
                     let all_safe = fv.pts.iter().all(|o| match &self.obj(o).payload {
                         Payload::Method(q, _) if self.kind(o) == Kind::Method => super::safe_method(q) || SELF_REPORTING.iter().any(|p| q.starts_with(p)),
                         // user code: whether it raises is reported by its own analysis
@@ -522,13 +522,10 @@ impl Analyzer {
                         }
                     }
                     _ => {
-                        self.yield_value(it.elem.flat(), state, (y as *const _ as usize, 0));
                         // an unknown number of items: positions after this are unknown
-                        if let Some(foid) = self.frame().func {
-                            if let Some(gid) = self.func_info(foid).generator.get() {
-                                self.set_llen(gid, state, None);
-                                state.drop_obj_ns(gid, Ns::Pos);
-                            }
+                        if let Some(gid) = self.yield_value(it.elem.flat(), state, (y as *const _ as usize, 0)) {
+                            self.set_llen(gid, state, None);
+                            state.drop_obj_ns(gid, Ns::Pos);
                         }
                     }
                 }
@@ -617,8 +614,8 @@ impl Analyzer {
 
     /// `site`: the yield (and the item of a `yield from`), which with the unrolled loop
     /// positions names the suspension point.
-    fn yield_value(&mut self, v: Value, state: &mut State, site: (usize, usize)) {
-        let Some(foid) = self.frame().func else { return };
+    fn yield_value(&mut self, v: Value, state: &mut State, site: (usize, usize)) -> Option<ObjId> {
+        let foid = self.frame().func?;
         let ctx = self.frame().ctx.clone();
         let label = format!("generator {}", self.frame().label);
         let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &label, Payload::None);
@@ -677,10 +674,6 @@ impl Analyzer {
                 }
             }
         }
-        let fi = self.func_info(foid);
-        if fi.generator.get().is_none() {
-            fi.generator.set(Some(gid));
-        }
         const MAX_YIELD_STATES: usize = 4096;
         let key = (site.0, site.1, self.frame().unroll.clone());
         // (in a loop's fixpoint a later round's state at a suspension point covers the
@@ -697,6 +690,7 @@ impl Analyzer {
             let mut h = here;
             last.1 = last.1.join(&mut h);
         }
+        Some(gid)
     }
 
     pub fn eval_key(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {

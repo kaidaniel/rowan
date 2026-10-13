@@ -190,6 +190,9 @@ fn type_name(e: &ast::Expr) -> String {
     }
 }
 
+/// The exceptions pydantic turns into validation errors when a validator raises them.
+const PYD_CAUGHT: &[&str] = &["ValueError", "AssertionError", "PydanticCustomError", "PydanticKnownError", "ValidationError"];
+
 impl Analyzer {
     /// The pydantic description of model class `cls` (cached).
     pub fn pyd_class(&mut self, cls: ObjId, state: &State) -> Rc<PClass> {
@@ -1198,17 +1201,17 @@ impl Analyzer {
     /// value and whether the validator surely / maybe raised such an error.
     fn pyd_catching(&mut self, f: ObjId, self_v: Value, args: Vec<Value>, state: &mut State, node: &Node) -> (Value, bool, bool) {
         let mut pre = state.copy();
-        self.enter_try(rustc_hash::FxHashSet::from_iter(["ValueError", "AssertionError", "PydanticCustomError", "PydanticKnownError", "ValidationError"].iter().map(|x| x.to_string())), &mut pre);
+        self.enter_try(rustc_hash::FxHashSet::from_iter(PYD_CAUGHT.iter().map(|x| x.to_string())), &mut pre);
         // (run with the validated values: `v.strip()` of a str field is a str method there)
         let out = self.call_user(f, Some(self_v), args, IndexMap::new(), vec![], vec![], state, node, None, false);
-        let out_try = self.leave_try();
-        let (flagged, raised_at) = (out_try.flagged, out_try.raised());
-        // an exception pydantic does not catch (KeyError, …) escapes: the enclosing try / call
-        // learns it may raise
-        if flagged {
-            let mut pre2 = pre.copy();
-            self.flag_may_raise(&mut pre2);
+        // an exception of another class (a KeyError, one of code rowan cannot see) is no
+        // validation error: it escapes to the enclosing try / call
+        let validation = |c: &Option<crate::interp::ExcNames>| c.as_ref().is_some_and(|(n, _)| n.iter().any(|x| PYD_CAUGHT.contains(&x.as_str())));
+        let (recs, escaping): (Vec<_>, Vec<_>) = self.leave_try().recs.into_iter().partition(|r| validation(&r.0));
+        for r in escaping {
+            self.reraise_rec(r);
         }
+        let raised_at = crate::interp::join_raise_recs(&recs);
         let Some(mut r) = raised_at else { return (out, false, false) };
         let died = !state.reachable;
         let after = if state.reachable { state.copy().join(&mut r) } else { r };
@@ -1342,7 +1345,6 @@ impl Analyzer {
             dc_kw_only: std::cell::Cell::new(ci.dc_kw_only.get()),
             dc_order: std::cell::Cell::new(ci.dc_order.get()),
             nn_module: false,
-            field_classes: std::cell::RefCell::new(None),
             any_fields: std::cell::RefCell::new(None),
         });
         let spec = self.alloc_raw(Kind::Class, &site, "", true, &label, Payload::Class(info));
@@ -1394,7 +1396,7 @@ impl Analyzer {
 
     /// A try around here catches a ValidationError.
     pub fn validation_caught(&self) -> bool {
-        self.guards.iter().any(|g| g.iter().any(|x| matches!(x.as_str(), "ValidationError" | "ValueError" | "Exception" | "BaseException" | "*")))
+        self.guards().any(|g| g.iter().any(|x| matches!(x.as_str(), "ValidationError" | "ValueError" | "Exception" | "BaseException" | "*")))
     }
 
     /// A guarded read of `k` from the records (no verdict, no requirement): the values there.

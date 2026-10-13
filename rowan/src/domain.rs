@@ -805,6 +805,10 @@ impl Row {
     }
 
     pub fn mutate(&self, site: StrId) -> Row {
+        // (mutated already, by this site or by one of those no longer named: nothing changes)
+        if self.definite.is_empty() && self.absent.is_empty() && (self.mutators.contains(site) || self.mutators.contains(intern::MORE)) {
+            return self.clone();
+        }
         let mut d = self.data();
         d.likely = d.likely.union(&d.definite);
         d.definite = KeySet::new();
@@ -916,9 +920,8 @@ fn cap_mutators(ms: StrSet) -> StrSet {
     if ms.len() <= 5 {
         return ms;
     }
-    let more = intern::s("…");
-    let mut v: Vec<StrId> = ms.iter().filter(|m| *m != more).take(4).collect();
-    v.push(more);
+    let mut v: Vec<StrId> = ms.iter().filter(|m| *m != intern::MORE).take(4).collect();
+    v.push(intern::MORE);
     StrSet::from_vec(v)
 }
 
@@ -1103,7 +1106,7 @@ pub fn classify(row: &Row, k: KeyId) -> Classification {
     }
     let prov = row.provides(k);
     let mut ext: Vec<(SourceId, KeySet)> = prov.iter().filter(|(s, _)| !source_is_data(*s)).cloned().collect();
-    ext.sort_by_key(|(s, _)| source_label(*s));
+    ext.sort_by_cached_key(|(s, _)| source_label(*s));
     let data = prov.iter().any(|(s, _)| source_is_data(*s));
     if !ext.is_empty() {
         let note = if row.present.contains(k) { "also set on some paths" } else { "" };

@@ -7,7 +7,7 @@ const fs = require("fs");
 const os = require("os");
 const { execFileSync } = require("child_process");
 const path = require("path");
-const { renderHover, indexResult, prettyValue, verdictsForWord, severityFor, diagnosticMessage } = require("./extension.js");
+const { renderHover, indexResult, prettyValue, verdictsForWord, severityFor, diagnosticMessage, shorten } = require("./extension.js");
 
 const root = path.join(__dirname, "..");
 const bin = process.env.ROWAN_BIN || path.join(root, "rowan", "target", "release", "rowan");
@@ -56,6 +56,10 @@ assert(u8.includes("not defined in this file"), u8);
 const user2 = hover(a01idx, a01src, 2, "user");
 assert(user2.includes("```python\nu\n```") && user2.includes("- the code reads `user.id`"), user2);
 assert.strictEqual(renderHover("zzz", [], []), null);
+// an alternative too wide for its line keeps whole items (`…` for the rest), not a cut word
+assert.strictEqual(shorten('{"id": 1, "owner": "bo", "priority": 2, "tags": [], "title": "printer jam"}', 60), '{"id": 1, "owner": "bo", "priority": 2, "tags": [], …}');
+assert.strictEqual(shorten('Ticket(id=1, title="a very long title that goes on and on and on")', 30), "Ticket(id=1, …)");
+assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
 
 // ---- a call rowan no longer follows (past its function's budget): said where it changes a value
 {

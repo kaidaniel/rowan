@@ -143,6 +143,30 @@ impl Default for State {
     }
 }
 
+/// A join of states added one after the other, made pairwise as they come (a binary
+/// counter: two partial joins of as many states each are joined): the work of `join_all`,
+/// holding a logarithmic number of states.
+#[derive(Default)]
+pub struct Joins(Vec<(State, usize)>);
+
+impl Joins {
+    pub fn add(&mut self, s: State) {
+        let mut cur = (s, 1);
+        while let Some((mut prev, n)) = self.0.pop() {
+            if n != cur.1 {
+                self.0.push((prev, n));
+                break;
+            }
+            cur = (prev.join(&mut cur.0), n * 2);
+        }
+        self.0.push(cur);
+    }
+
+    pub fn finish(self) -> Option<State> {
+        State::join_all(self.0.into_iter().map(|(s, _)| s).collect())
+    }
+}
+
 impl State {
     /// The name's object has `k` from here on.
     pub fn add_name_key(&mut self, n: StrId, k: KeyId) {
@@ -326,6 +350,23 @@ impl State {
         s.lasts = join_lasts(&self.lasts, &o.lasts);
         s.unbound = join_unbound(self, o);
         s
+    }
+
+    /// The join of several states, pairwise: each round joins what two of them wrote, not a
+    /// growing join again (states made one after the other share most of their structure).
+    pub fn join_all(mut states: Vec<State>) -> Option<State> {
+        while states.len() > 1 {
+            let mut next: Vec<State> = Vec::with_capacity(states.len().div_ceil(2));
+            let mut it = states.into_iter();
+            while let Some(mut a) = it.next() {
+                match it.next() {
+                    Some(mut b) => next.push(a.join(&mut b)),
+                    None => next.push(a),
+                }
+            }
+            states = next;
+        }
+        states.pop()
     }
 
     /// The join at a loop head: like `join`, but a requirement recorded only in the loop body

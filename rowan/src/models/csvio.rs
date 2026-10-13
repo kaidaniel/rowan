@@ -762,10 +762,13 @@ pub fn exitstack_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 /// An ExitStack's exit: its callbacks, last registered first.
-pub fn exitstack_close(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) {
+pub fn exitstack_close(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node, consume: bool) {
     for o in v.pts.iter() {
         let Some(cbs) = an.m.exit_callbacks.get(&o).cloned() else { continue };
-        an.m.exit_callbacks.insert(o, Vec::new());
+        // (an exceptional way out leaves them to the normal one: the table is not per path)
+        if consume {
+            an.m.exit_callbacks.insert(o, Vec::new());
+        }
         for (i, (f, args, kwargs)) in cbs.into_iter().enumerate().collect::<Vec<_>>().into_iter().rev() {
             let mut nd = *node;
             nd.col = node.col.wrapping_add(3_000_000 + i as u32);
@@ -819,7 +822,7 @@ fn m_exitstack(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, recv: &V
             join_values(outs)
         }
         "close" => {
-            exitstack_close(an, st, recv, &c.node);
+            exitstack_close(an, st, recv, &c.node, true);
             an.none_v.clone()
         }
         "__enter__" => recv.clone(),

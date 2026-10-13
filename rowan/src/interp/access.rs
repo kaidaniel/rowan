@@ -3,14 +3,13 @@
 
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
-use rustc_hash::FxHashMap;
 
 use crate::domain::{classify, join_rows, join_values, lens_apply, Classification, KeyVal, Ns, ObjSet, Row, Source, SourceKind, Tier, Value, DATA};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, STAR};
 use crate::state::{Kind, State};
 
-use super::{is_scalar_method, Analyzer, ClassInfo, Payload, ViewKind, ATTR_GUARDS, DICT_METHOD_NAMES, ITEM_GUARDS, PATH_DEPTH, STR_METHOD_NAMES};
+use super::{is_scalar_method, Analyzer, Payload, ViewKind, ATTR_GUARDS, DICT_METHOD_NAMES, ITEM_GUARDS, PATH_DEPTH, STR_METHOD_NAMES};
 
 /// The attributes every instance has (`object`'s, and its class's `__module__` / `__doc__`;
 /// `__dict__` / `__weakref__` unless `__slots__` drop them: taken as there).
@@ -51,7 +50,7 @@ impl Analyzer {
     /// The innermost handler that catches this namespace's error re-raises it.
     pub fn guard_reraises(&self, ns: Ns) -> bool {
         let want: &[&str] = if ns == Ns::Item { match self.item_exc { Some("ValueError") => super::VALUE_GUARDS, Some("ValidationError") => super::VALIDATION_GUARDS, _ => ITEM_GUARDS } } else { ATTR_GUARDS };
-        for g in self.guards.iter().rev() {
+        for g in self.guards().rev() {
             if g.iter().any(|x| want.contains(&x.as_str())) {
                 return g.contains("!reraise");
             }
@@ -118,7 +117,7 @@ impl Analyzer {
 
     pub fn is_guarded(&self, ns: Ns) -> bool {
         let want: &[&str] = if ns == Ns::Item { match self.item_exc { Some("ValueError") => super::VALUE_GUARDS, Some("ValidationError") => super::VALIDATION_GUARDS, _ => ITEM_GUARDS } } else { ATTR_GUARDS };
-        self.guards.iter().any(|g| g.iter().any(|x| want.contains(&x.as_str())))
+        self.guards().any(|g| g.iter().any(|x| want.contains(&x.as_str())))
     }
 
     pub fn record_objects(&self, v: &Value) -> Vec<u32> {
@@ -771,12 +770,6 @@ impl Analyzer {
                 // a library object rowan does not model (`sys.argv`): its subscript runs code
                 // rowan cannot see, which may raise anything
                 Kind::External if ns == Ns::Item => {
-                    if let Some(t) = self.raise_stack.last_mut() {
-                        *t = true;
-                    }
-                    if let Some(e) = self.esc_cls.last_mut() {
-                        *e = None;
-                    }
                     self.flag_may_raise(state);
                     parts.push(line_data.clone());
                 }
@@ -837,7 +830,7 @@ impl Analyzer {
                     // the handler sees the state as it is here (and a KeyError / AttributeError
                     // carrying the key)
                     if model_read {
-                    } else if !self.raise_states.is_empty() {
+                    } else if !self.tries.is_empty() {
                         let cname = if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" };
                         let e = self.exception_object(cname, vec![Value::lit(k)], node, state);
                         self.cur_exc = Some(e);
@@ -848,13 +841,8 @@ impl Analyzer {
                     }
                     if !model_read {
                         self.cur_exc_cls = Some(super::builtin_exc_names(if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" }));
-                        let recorded = self.record_raise_state(state);
+                        self.record_raise_state(state);
                         self.cur_exc_cls = None;
-                        if !recorded {
-                            if let Some(m) = self.may_raise.last_mut() {
-                                *m = true;
-                            }
-                        }
                         // (an object of unknown kind indexed by a number may be a sequence: an
                         // IndexError then)
                         if ns == Ns::Item && intern::key_as_int(k).is_some() && matches!(kind, Kind::Unknown | Kind::External) {
@@ -1120,11 +1108,6 @@ impl Analyzer {
             KeyVal::KeysOf(ko) => {
                 let srcrow = join_rows(ko.objs.iter().map(|x| state.row(x, ko.ns)));
                 let exhaustive = strong && ko.exhaustive_depth == self.cond_depth;
-                if exhaustive {
-                    if let Some(log) = self.exh_log.as_mut() {
-                        log.push((oid, ns, srcrow.clone(), ko.exclude.clone(), ko.chain));
-                    }
-                }
                 state.set_row(oid, ns, row.copy_from(&srcrow, exhaustive, &ko.exclude, ko.chain));
                 for x in ko.objs.iter() {
                     for k in state.slot_keys(x, ko.ns) {
@@ -1284,7 +1267,7 @@ impl Analyzer {
             if let Some((surely, k)) = raise.filter(|_| ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) {
                 state.set_row(oid, ns, row.clone());
                 let exc = if ns == Ns::Item { "KeyError" } else { "AttributeError" };
-                if !self.raise_states.is_empty() {
+                if !self.tries.is_empty() {
                     let e = self.exception_object(exc, vec![Value::lit(k)], node, state);
                     self.cur_exc = Some(e);
                 }
@@ -2041,9 +2024,10 @@ impl Analyzer {
             let is_field = self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name);
             if let (Some(defc), false) = (self.class_lookup(c, name), is_field) {
                 let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
-                // a class attribute (not a method): the access succeeds
+                // a class attribute: the access succeeds (a method read counts only where the
+                // receiver may be other objects too, which may lack it)
                 let plain = !cv.pts.iter().any(|f| matches!(self.kind(f), Kind::Function | Kind::Bound) && !(self.kind(f) == Kind::Function && self.func_info(f).is_property.get()));
-                if !guarded && plain {
+                if !guarded && (plain || !single_target) {
                     self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
                 }
                 return self.bound_outs(&cv, oid, c, name, node, state);
@@ -2116,147 +2100,6 @@ impl Analyzer {
         }
         false
     }
-
-    /// The one user class an attribute of instances of `cls` is known to hold.
-    pub fn field_class(&mut self, cls: u32, name: &str, state: &State) -> Option<u32> {
-        // the classes of constructor arguments stored into the field (one class: that one)
-        for c in self.mro(cls) {
-            if let Some(set) = self.ctor_field_classes.get(&(c, name.to_string())) {
-                if set.len() == 1 && !set.contains(&u32::MAX) {
-                    return set.iter().next().copied();
-                }
-                if !set.is_empty() {
-                    return None;
-                }
-            }
-        }
-        for c in self.mro(cls) {
-            let Some(ci) = self.class_info_opt(c) else { continue };
-            if ci.field_classes.borrow().is_none() {
-                let fc = self.infer_field_classes(&ci, state);
-                *ci.field_classes.borrow_mut() = Some(fc);
-            }
-            let b = ci.field_classes.borrow();
-            if let Some(found) = b.as_ref().unwrap().get(name) {
-                if !found.is_empty() {
-                    return if found.len() == 1 { Some(found[0]) } else { None };
-                }
-            }
-        }
-        None
-    }
-
-    fn infer_field_classes(&mut self, ci: &ClassInfo, state: &State) -> FxHashMap<String, Vec<u32>> {
-        // (field, expression it is declared or assigned with) pairs from the class body and
-        // its methods' `self.f = …` / `self.f: T = …` statements
-        let mut pairs: Vec<(String, &'static ast::Expr)> = Vec::new();
-        for st in &ci.node.body {
-            match st {
-                ast::Stmt::AnnAssign(a) => {
-                    if let ast::Expr::Name(t) = &*a.target {
-                        pairs.push((t.id.to_string(), &a.annotation));
-                    }
-                }
-                ast::Stmt::FunctionDef(f) if !f.parameters.args.is_empty() => {
-                    let me = f.parameters.args[0].parameter.name.id.as_str();
-                    for sub in walk_stmts(&f.body) {
-                        match sub {
-                            ast::Stmt::Assign(asg) => {
-                                for t in &asg.targets {
-                                    if let ast::Expr::Attribute(ta) = t {
-                                        if let ast::Expr::Name(bn) = &*ta.value {
-                                            if bn.id.as_str() == me {
-                                                pairs.push((ta.attr.id.to_string(), &asg.value));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            ast::Stmt::AnnAssign(aa) => {
-                                if let ast::Expr::Attribute(ta) = &*aa.target {
-                                    if let ast::Expr::Name(bn) = &*ta.value {
-                                        if bn.id.as_str() == me {
-                                            pairs.push((ta.attr.id.to_string(), &aa.annotation));
-                                            if let Some(v) = aa.value.as_deref() {
-                                                pairs.push((ta.attr.id.to_string(), v));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        let mut out: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        for (name, expr) in pairs {
-            if let Some(c) = self.field_class_of_expr(expr, ci.module, state) {
-                let e = out.entry(name).or_default();
-                if !e.contains(&c) {
-                    e.push(c);
-                }
-            }
-        }
-        out
-    }
-
-    /// The class an annotation / assigned expression declares for a field: a user class
-    /// (`x: Cls`, `self.x = Cls(…)`) or a builtin container class (`self.x = {}`,
-    /// `self.x = defaultdict(list)`, `x: dict`), which selects a model family.
-    fn field_class_of_expr(&mut self, expr: &'static ast::Expr, module: u32, state: &State) -> Option<u32> {
-        // literal containers first (they are not annotations)
-        match expr {
-            ast::Expr::List(_) | ast::Expr::ListComp(_) => return Some(self.builtin_class_obj("list")),
-            ast::Expr::Dict(_) | ast::Expr::DictComp(_) => return Some(self.builtin_class_obj("dict")),
-            ast::Expr::Set(_) | ast::Expr::SetComp(_) => return Some(self.builtin_class_obj("set")),
-            _ => {}
-        }
-        let mut e = Analyzer::strip_annotation(expr)?;
-        if let ast::Expr::Call(c) = e {
-            e = &c.func;
-        }
-        let v = match e {
-            ast::Expr::Name(n) => state.slot(module, Ns::Attr, key_str_lit(n.id.as_str())),
-            ast::Expr::Attribute(a) => self.static_attr_value(a, module, state),
-            _ => return None,
-        };
-        if let Some(c) = v.pts.iter().find(|o| self.kind(*o) == Kind::Class) {
-            return Some(c);
-        }
-        if let Some(b) = v.pts.iter().find(|o| self.kind(*o) == Kind::External && BUILTIN_CONTAINER_CLASSES.contains(&self.external_qual(*o).rsplit('.').next().unwrap_or(""))) {
-            return Some(b);
-        }
-        if let ast::Expr::Name(n) = e {
-            if v.pts.is_empty() && BUILTIN_CONTAINER_CLASSES.contains(&n.id.as_str()) {
-                return Some(self.builtin_class_obj(n.id.as_str()));
-            }
-        }
-        None
-    }
-
-    /// The external object standing for a builtin class (`list`, `dict`, …).
-    pub fn builtin_class_obj(&mut self, nm: &str) -> u32 {
-        self.alloc_raw(Kind::External, &format!("ext:builtins.{}", nm), "", true, nm, Payload::Str(format!("builtins.{}", nm)))
-    }
-
-    fn static_attr_value(&self, e: &ast::ExprAttribute, module: u32, state: &State) -> Value {
-        if let ast::Expr::Name(n) = &*e.value {
-            let base = state.slot(module, Ns::Attr, key_str_lit(n.id.as_str()));
-            let mut acc = Value::new();
-            for o in base.pts.iter() {
-                if self.kind(o) == Kind::Module {
-                    acc = acc.join(&state.slot(o, Ns::Attr, key_str_lit(e.attr.id.as_str())));
-                }
-            }
-            return acc;
-        }
-        Value::new()
-    }
-
-
 
     /// Does the value have a scalar part besides its objects (other than None, which has no
     /// keys or attributes of its own)?
@@ -2457,7 +2300,6 @@ impl Analyzer {
 
 /// All statements nested in a body (ast.walk restricted to statements).
 /// builtin container classes a field may be declared with (they select a model family)
-pub const BUILTIN_CONTAINER_CLASSES: &[&str] = &["dict", "defaultdict", "OrderedDict", "Counter", "list", "set", "frozenset", "deque", "tuple"];
 
 pub fn walk_stmts(body: &'static [ast::Stmt]) -> Vec<&'static ast::Stmt> {
     let mut out: Vec<&'static ast::Stmt> = Vec::new();
