@@ -113,7 +113,7 @@ uv run --no-project --with pandas --with pydantic --with pydantic-settings --wit
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py [case…]
 cd vscode-rowan && node test.js && npm run package  # hover / diagnostic text checks; builds the .vsix
 uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"
-                                                    # benchmark (stdlib12k / email / rich / click)
+                       # benchmark: stdlib12k / email / rich / click; frontier pip / timm / sktime / functional
 ```
 
 Run the oracle on the cases you touched, and in full before a commit that changes models. CI
