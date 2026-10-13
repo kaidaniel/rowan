@@ -1,4 +1,4 @@
-# Benchmarks: rowan on three large real programs, without its deadlines, one job each in
+# Benchmarks: rowan on four large real programs, without its deadlines, one job each in
 # parallel, cut at 10 minutes. Records wall time, peak memory, rowan's deterministic work
 # counters and verdict counts, plus a `perf` profile (top functions in the job summary, a
 # flamegraph as an artifact). Informational only: every job has continue-on-error, and this
@@ -59,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        program: [stdlib12k, email, rich]
+        program: [stdlib12k, email, rich, click]
     steps:
       - uses: actions/checkout@v7
 
@@ -197,7 +197,7 @@ jobs:
             echo
             echo "| program | result | wall | peak memory | work | units | tabulations | objects | ✗/⚠ verdicts |"
             echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
-            for p in stdlib12k email rich; do
+            for p in stdlib12k email rich click; do
               cat "results/$p.md" 2>/dev/null || echo "| $p | no result | | | | | | | |"
             done
             echo
