@@ -46,7 +46,8 @@ ruff and walks the syntax tree directly, running the program on abstract values.
     unknown object is an unknown call (no duck typing; it was a closed-world assumption).
   * **Unknown calls** may change everything they reach through what they are given, at any
     depth: records get a mutator, slots may hold anything (one shared unknown object), lists
-    and sets any items and length. They return an unknown and may raise anything. Library
+    and sets any items and length; the program's functions among it may run (`follow_code`).
+    They return an unknown and may raise anything. Library
     functions known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`), except the ones
     that change their arguments (`random.shuffle`, `operator.setitem`, …).
   * **Entry points:** functions nothing calls run with open parameters; their requirements
