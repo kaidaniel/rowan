@@ -633,6 +633,23 @@ impl Analyzer {
                                 }
                             }
                         }
+                        // a NamedTuple by position: its fields in order, from either end
+                        if self.is_named_tuple_class(cls) {
+                            let fs = self.dataclass_fields_mro(cls);
+                            let n = fs.len() as i64;
+                            let field = |i: i64, state: &State| state.slot(oid, Ns::Attr, key_str_lit(&fs[(if i < 0 { n + i } else { i }) as usize].0));
+                            match key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int) {
+                                Some(i) if -n <= i && i < n => parts.push(field(i, state)),
+                                Some(_) if single_target => self.raise_here("IndexError", state),
+                                _ => {
+                                    // (an index not known: any field, or a slice of them)
+                                    self.may_raise_here("IndexError", state);
+                                    parts.extend((0..n).map(|i| field(i, state)));
+                                    parts.push(line_data.clone());
+                                }
+                            }
+                            continue;
+                        }
                         if let Some(ci) = self.class_info_opt(cls) {
                             if !ci.typed_dict && !ci.named_tuple && !ci.open_base {
                                 parts.push(line_data.clone());
