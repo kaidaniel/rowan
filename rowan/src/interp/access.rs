@@ -697,6 +697,12 @@ impl Analyzer {
                 Kind::Zip | Kind::Enumerate => {
                     parts.push(line_data.clone());
                 }
+                // `C[T]`: a generic class's alias, called like the class (a TypeError for a class
+                // that is not generic)
+                Kind::Class if ns == Ns::Item => {
+                    self.may_raise_here("TypeError", state);
+                    parts.push(Value::obj(oid));
+                }
                 Kind::List | Kind::Tuple | Kind::Set => {
                     let is_slice = matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice"));
                     // a slice object with known bounds (`xs[slice(0, n)]`) on known positions
@@ -1332,6 +1338,10 @@ impl Analyzer {
             let v: Value = match k {
                 Kind::Module => match state.slot_opt(oid, Ns::Attr, nk) {
                     Some(v) => v,
+                    // (what every module has)
+                    None if matches!(name, "__name__" | "__file__" | "__doc__" | "__package__" | "__spec__" | "__loader__" | "__path__" | "__cached__" | "__builtins__") => {
+                        if name == "__name__" { Value::lit_str(&self.module_info(oid).name) } else { Value::data(&format!("module {}", name)) }
+                    }
                     // (inside a try that catches the AttributeError: the handler's way)
                     None if report && guarded => self.load_record(oid, Ns::Attr, &Value::lit(nk), node, state, guarded, single, true),
                     None => {
@@ -1685,7 +1695,22 @@ impl Analyzer {
                             let ids: Vec<String> = self_v.pts.iter().map(|x| x.to_string()).collect();
                             Value::obj(self.alloc_raw(Kind::Method, &format!("excinit:{}", ids.join(",")), "", true, "Exception.__init__ via super", Payload::Method("excinit".to_string(), self_v.clone())))
                         }
-                        None => Value::data("super"),
+                        // `object`'s own method (or a library base's), run on the receiver:
+                        // `object.__setattr__` as modelled, a library base's as unknown code
+                        // given the receiver (it was a call given nothing)
+                        None => {
+                            let closed = match recv_cls[..] {
+                                [rc] => self.hierarchy_closed(rc),
+                                _ => self.hierarchy_closed(cls),
+                            };
+                            let q = if closed { format!("builtins.object.{}", name) } else { format!("super.{}", name) };
+                            let f = self.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, &q, Payload::Str(q.clone()));
+                            let ids: Vec<String> = self_v.pts.iter().map(|x| x.to_string()).collect();
+                            let payload = Payload::Partial(Value::obj(f), vec![self_v.clone()], IndexMap::new());
+                            let b = self.alloc_raw(Kind::Partial, &format!("super:{}:{}", q, ids.join(",")), "", true, &format!("super().{}", name), payload.clone());
+                            self.obj_mut(b).payload = payload;
+                            Value::obj(b)
+                        }
                     }
                 }
                 _ => Value::data(&format!("L{}", node.line)),

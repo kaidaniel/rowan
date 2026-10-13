@@ -2670,15 +2670,6 @@ pub fn chain_text(node: &ast::Expr) -> Option<String> {
     Some(parts.join("."))
 }
 
-pub fn is_main_guard(test: &ast::Expr) -> bool {
-    let ast::Expr::Compare(c) = test else { return false };
-    let ast::Expr::Name(l) = &*c.left else { return false };
-    if l.id.as_str() != "__name__" || c.ops.len() != 1 || c.ops[0] != ast::CmpOp::Eq {
-        return false;
-    }
-    matches!(&c.comparators[0], ast::Expr::StringLiteral(sl) if sl.value.to_str() == "__main__")
-}
-
 /// True if the loop body has a break/continue targeting this loop.
 pub fn contains_jump(body: &[ast::Stmt]) -> bool {
     fn visit(n: &ast::Stmt) -> bool {

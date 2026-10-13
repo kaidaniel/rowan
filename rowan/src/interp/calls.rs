@@ -168,6 +168,15 @@ impl Analyzer {
                         return self.exception_object(&n, args.to_vec(), node, state);
                     }
                 }
+                // `f.__get__(obj)` (a library function bound by hand: attrs's
+                // `object.__setattr__.__get__(self)`): f with obj as its first argument
+                if let Some(base) = qual.strip_suffix(".__get__").filter(|_| !args.is_empty() && kwargs.is_empty()) {
+                    let f = self.alloc_raw(Kind::External, &format!("ext:{}", base), "", true, base, Payload::Str(base.to_string()));
+                    let pc = Call { qual: "functools.partial".into(), args: vec![Value::obj(f), args[0].clone()], ..call.clone() };
+                    if let Some(m) = self.models.lookup("functools.partial") {
+                        return self.run_model(m, state, &pc);
+                    }
+                }
                 if let Some(m) = self.models.lookup(&qual) {
                     return self.run_model(m, state, &call);
                 }

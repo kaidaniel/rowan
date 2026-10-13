@@ -8,7 +8,7 @@ use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s};
 use crate::state::{Kind, State};
 
-use super::{TryExit, contains_jump, dotted_last, is_constant, is_main_guard, Analyzer, ClassInfo, Frame, FrameKind, FuncNode, LoopCtx, Payload, LOOP_MAX_ITER, UNROLL_MAX};
+use super::{TryExit, contains_jump, dotted_last, is_constant, Analyzer, ClassInfo, Frame, FrameKind, FuncNode, LoopCtx, Payload, LOOP_MAX_ITER, UNROLL_MAX};
 use super::funcs::Elem;
 
 impl Analyzer {
@@ -732,20 +732,6 @@ impl Analyzer {
     }
 
     fn stmt_if(&mut self, test: &'static ast::Expr, body: &'static [ast::Stmt], rest: &'static [ast::ElifElseClause], state: &mut State) {
-        if is_main_guard(test) {
-            if self.frame().module == self.main_module {
-                self.exec_block(body, state);
-                return;
-            }
-            // (an imported module's `__name__` is its own name: only the other branches run)
-            if let Some((c, more)) = rest.split_first() {
-                match &c.test {
-                    Some(t) => self.stmt_if(t, &c.body, more, state),
-                    None => self.exec_block(&c.body, state),
-                }
-            }
-            return;
-        }
         let tv = self.eval(test, state);
         if matches!(test, ast::Expr::Name(n) if n.id.as_str() == "TYPE_CHECKING") || matches!(test, ast::Expr::Attribute(a) if a.attr.as_str() == "TYPE_CHECKING") {
             self.note_type_only_imports(body);

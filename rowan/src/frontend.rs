@@ -6,6 +6,7 @@ use std::cell::RefCell;
 
 use ruff_python_ast as ast;
 use ruff_python_ast::visitor::source_order::{self, SourceOrderVisitor};
+use ruff_python_ast::visitor::transformer::{walk_except_handler, walk_expr, walk_keyword, walk_parameter, walk_stmt, Transformer};
 use ruff_source_file::LineIndex;
 use ruff_text_size::{Ranged, TextRange};
 use rustc_hash::FxHashMap;
@@ -87,7 +88,12 @@ pub fn parse(name: &str, path: Option<&str>, source: String) -> Result<(u32, &'s
         }
     }
     let parsed = ruff_python_parser::parse_module(&source).map_err(|e| format!("{}: {}", path.unwrap_or(name), e))?;
-    let module: &'static ast::ModModule = Box::leak(Box::new(parsed.into_syntax()));
+    let mut syntax = parsed.into_syntax();
+    let mangler = Mangler(std::cell::RefCell::new(Vec::new()));
+    for st in syntax.body.iter_mut() {
+        mangler.visit_stmt(st);
+    }
+    let module: &'static ast::ModModule = Box::leak(Box::new(syntax));
     let lines = LineIndex::from_source_text(&source);
     let idx = REG.with(|r| {
         let mut r = r.borrow_mut();
@@ -109,6 +115,71 @@ pub fn parse(name: &str, path: Option<&str>, source: String) -> Result<(u32, &'s
         PARSE_CACHE.with(|c| c.borrow_mut().insert(k, (idx, module)));
     }
     Ok((idx, module))
+}
+
+/// Python's private-name mangling, done at compile time as CPython does: an identifier
+/// `__x` (not ending in `__`) written inside a class `C` is `_C__x` (the innermost class,
+/// leading underscores of its name dropped).
+struct Mangler(std::cell::RefCell<Vec<String>>);
+
+impl Mangler {
+    fn mangle(&self, id: &mut ast::name::Name) {
+        let Some(cls) = self.0.borrow().last().cloned() else { return };
+        if id.starts_with("__") && !id.ends_with("__") && !id.contains('.') && !cls.is_empty() {
+            *id = ast::name::Name::new(format!("_{}{}", cls, id));
+        }
+    }
+}
+
+impl Transformer for Mangler {
+    fn visit_stmt(&self, stmt: &mut ast::Stmt) {
+        match stmt {
+            ast::Stmt::ClassDef(c) => {
+                self.mangle(&mut c.name.id);
+                for d in c.decorator_list.iter_mut() {
+                    self.visit_decorator(d);
+                }
+                if let Some(a) = c.arguments.as_deref_mut() {
+                    self.visit_arguments(a);
+                }
+                self.0.borrow_mut().push(c.name.id.trim_start_matches('_').to_string());
+                self.visit_body(&mut c.body);
+                self.0.borrow_mut().pop();
+            }
+            ast::Stmt::FunctionDef(f) => {
+                self.mangle(&mut f.name.id);
+                walk_stmt(self, stmt);
+            }
+            ast::Stmt::Global(g) => g.names.iter_mut().for_each(|n| self.mangle(&mut n.id)),
+            ast::Stmt::Nonlocal(g) => g.names.iter_mut().for_each(|n| self.mangle(&mut n.id)),
+            _ => walk_stmt(self, stmt),
+        }
+    }
+    fn visit_expr(&self, expr: &mut ast::Expr) {
+        match expr {
+            ast::Expr::Name(n) => self.mangle(&mut n.id),
+            ast::Expr::Attribute(a) => self.mangle(&mut a.attr.id),
+            _ => {}
+        }
+        walk_expr(self, expr);
+    }
+    fn visit_parameter(&self, p: &mut ast::Parameter) {
+        self.mangle(&mut p.name.id);
+        walk_parameter(self, p);
+    }
+    fn visit_keyword(&self, k: &mut ast::Keyword) {
+        if let Some(a) = k.arg.as_mut() {
+            self.mangle(&mut a.id);
+        }
+        walk_keyword(self, k);
+    }
+    fn visit_except_handler(&self, h: &mut ast::ExceptHandler) {
+        let ast::ExceptHandler::ExceptHandler(e) = h;
+        if let Some(n) = e.name.as_mut() {
+            self.mangle(&mut n.id);
+        }
+        walk_except_handler(self, h);
+    }
 }
 
 struct Registrar {
