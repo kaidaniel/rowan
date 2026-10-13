@@ -2008,8 +2008,11 @@ impl Analyzer {
         if !(set.is_empty() && deleted.is_empty()) && state.has_row(inst, Ns::Attr) {
             let any = Value::obj(self.any_object(state));
             let mut row = state.row(inst, Ns::Attr);
+            // (a name the class itself defines — a property, a class-level default — reads
+            // through the class anyway)
             let had = row.present.clone();
-            for k in set.into_iter().filter(|k| !had.contains(*k)) {
+            let by_class = |an: &Analyzer, k: KeyId| intern::key_as_str(k).is_some_and(|n| an.class_lookup(cls_oid, &n).is_some());
+            for k in set.into_iter().filter(|k| !had.contains(*k) && !by_class(self, *k)) {
                 row = row.store(k, false);
                 state.set_slot(inst, Ns::Attr, k, any.clone(), false);
             }

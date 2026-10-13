@@ -23,3 +23,22 @@ class Saver:
 
     def peek(self):
         return self.value  #@ ok value
+
+
+class Counter:
+    def __init__(self):
+        self._n = 0
+
+    @property
+    def n(self):
+        return self._n
+
+    @n.setter
+    def n(self, v):
+        self._n = v
+
+    def bump(self):
+        self.n += 1
+
+    def show(self):
+        return self.n  #@ ok n

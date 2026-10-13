@@ -58,6 +58,9 @@ pub fn dedupe(an: &Analyzer, verdicts: &[Verdict]) -> Vec<Verdict> {
             Tier::Likely
         } else if tiers.iter().all(|t| matches!(t, Tier::Input | Tier::Proven | Tier::Likely)) {
             Tier::Input
+        } else if tiers.iter().all(|t| matches!(t, Tier::Input | Tier::Proven | Tier::Likely | Tier::LikelyMissing)) {
+            // (missing on some objects only unless code rowan cannot see set it: as hedged)
+            Tier::LikelyMissing
         } else {
             Tier::Possibly
         };
