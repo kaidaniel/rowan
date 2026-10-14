@@ -1516,7 +1516,10 @@ impl Analyzer {
         if node.addr == 0 {
             return String::new();
         }
-        frontend::text_at(node)
+        // (an expression written over several lines, on one: the report's column and a hover
+        // keep their layout)
+        let t = frontend::text_at(node);
+        if t.contains('\n') { t.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ") } else { t }
     }
 
     pub fn note(&mut self, msg: String) {
