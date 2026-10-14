@@ -8,7 +8,8 @@ must be true at the last commit. The details live in the code's doc comments.
 
 rowan is a whole-program **abstract interpreter** for Python (Rust, `rowan/`). It parses with
 ruff (private names mangled as CPython does) and walks the syntax tree, running the program
-on abstract values. Imports run as Python runs them (`TYPE_CHECKING` is False, `import *`).
+on abstract values. Imports run as Python runs them (`TYPE_CHECKING` is False, `import *`,
+namespace packages).
 
 * **Values** (`Value`, `domain.rs`) are a set of object ids plus a scalar part (`KeyVal`): a
   literal, up to 64 literals, the keys of some objects, or `Data(label)`, an unknown named by
@@ -28,8 +29,8 @@ on abstract values. Imports run as Python runs them (`TYPE_CHECKING` is False, `
   and `mutators` (unknown calls). A row without sources or mutators is *closed*. A successful
   read narrows the key in.
 * **Statements.** Both sides of a branch run, narrowed by the test (`narrow.rs`), and join.
-  Loops over at most 16 known items are unrolled; other loops run to a fixpoint (40 rounds,
-  then widened; verdicts are the last round's: earlier rounds saw less). A running `try`
+  Loops over at most 16 known items are unrolled (comprehensions calling nothing per item: 64);
+  others run to a fixpoint (40 rounds, then widened; verdicts are the last round's). A running `try`
   (`TryCtx`) records the state at every point of its body and callees that may raise (a raise,
   a failing read, a model's raise, any unknown call: class `any_exc`), joined per class;
   handlers start from the raises they may catch, the rest go on through the `finally` to the
@@ -74,7 +75,8 @@ on abstract values. Imports run as Python runs them (`TYPE_CHECKING` is False, `
 * **Models** (`models/`, by qualified name in `Registry`) compute CPython's result on known
   values (str / bytes, formatting, json, re, datetime, decimal, sqlite, csv…), and simulate
   pandas columns, pydantic / FastAPI validation and routing, and torch / numpy shapes (dims as
-  polynomials; an undecided condition is a requirement and then a fact on the path).
+  polynomials; an undecided condition is a requirement and then a fact on the path; in torch
+  modules `int` / `Tensor` annotations hold; a module-level unknown number names its dims).
 * **Deadline:** a safety net only (`ms`, 10 s): past it user calls become unknown calls and
   running calls stop where they are. The budget, not the deadline, bounds the work.
 * **Soundness** holds relative to the models and to annotations of values whose class is
@@ -102,9 +104,8 @@ on abstract values. Imports run as Python runs them (`TYPE_CHECKING` is False, `
   Python access paths (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source,
   placeholder) or internal site labels (`report::site_text` names unknown code by the call as
   written); every mark has a legend entry. `vscode-rowan/test.js` checks this on real hovers.
-* `SUGGESTED_CHANGES.md` is the owner's list of open items. It is untracked: never commit it.
-  Keep it to things still to do.
-* Keep this file under 200 lines and up to date with every change.
+* `SUGGESTED_CHANGES.md` is the owner's list of open items, untracked: never commit it; keep it
+  to things still to do. Keep this file under 200 lines and up to date with every change.
 
 ## Commands
 
@@ -117,8 +118,7 @@ uv run --no-project --with pandas --with pydantic --with pydantic-settings --wit
     python tests/oracle.py [--strict|--lenient] [-v] [-j N] [case…]  # vs real runs, ~1.5 min
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py [case…]
 cd vscode-rowan && node test.js && npm run package  # hovers; the .vsix (test_package.js X.vsix TARGET)
-uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"
-                       # benchmark: stdlib12k / email / rich / click; frontier pip / timm / sktime / functional
+uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"  # also email, stdlib12k, click; pip, timm, sktime, functional
 ```
 
 Run the oracle on the cases you touched, and in full before a commit that changes models. CI
@@ -128,7 +128,8 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 ## Tests
 
 * **Golden suites** `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/`, about a
-  thousand programs; library suites have `small/` and `models/`; each has a `PENDING` list.
+  thousand programs; library suites have `small/` and `models/` (torch also `playground/`, the
+  owner's programs); each has a `PENDING` list.
 * **Directives** (full rules in `tests/CONVENTIONS.md`, also `tests/{torch,pandas}/`):
   `#@ tier key`, `#@row NAME: present= definite= absent= closed|open`,
   `#@value NAME: exactly= | unknown | includes=`, `#@schema src: always= sometimes= only=`,
@@ -180,8 +181,7 @@ extension (talks to `rowan serve`).
 * **GC roots.** A side table keyed by objects goes into `side_edges`; anything else the
   analyzer holds (a running with's managers) into `gc_pinned`: else a read gets an empty row.
 * **Generator yields** use `alloc_raw` for their per-yield states, not `alloc`.
-* **Stdlib objects** (`stdobj.<kind>`) keep attributes in Attr slots and dispatch through
-  `m_stdobj`.
+* **Stdlib objects** (`stdobj.<kind>`) keep attributes in Attr slots, dispatch via `m_stdobj`.
 * **Attributes resolved by class** (`class_resolves`): class objects, model objects and
   `__getattr__` classes have more than their rows show.
 

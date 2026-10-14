@@ -23,6 +23,10 @@ passes them.
   failing line carries `#@shape-error`.
 * `torch.manual_seed` is set by the oracle; cases must not depend on random values (no
   data-dependent shapes except where the case is about them: masks, `nonzero`).
+* `playground/` holds the owner's own programs (copied with a header saying what changed for
+  the oracle). A package case is a directory `p06_gpt/` with its entry `p06_gpt.py` and the
+  modules it imports; `#@shape` / `#@dim` / `#@requires` may sit in any of its modules (checked
+  in that module's own runs), `#@shape-error` only in the entry.
 
 ## Directives
 
