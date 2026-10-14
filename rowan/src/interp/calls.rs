@@ -29,6 +29,7 @@ fn widen_value(v: &Value) -> Value {
     v.clone()
 }
 
+
 impl Analyzer {
     // ---------------------------------------------------------------- calls
     pub fn call_value(&mut self, fv: &Value, node: &Node, call_ast: Option<&'static ast::ExprCall>, state: &mut State, override_args: Option<Vec<Value>>) -> Value {
@@ -60,15 +61,33 @@ impl Analyzer {
         if !state.reachable {
             return Value::new();
         }
-        // (generators passed or called through a method run now)
+        // (what a running generator reads through library code: its arguments, its receiver)
+        if self.gen_reads.iter().any(|r| r.1) && !fv.pts.iter().all(|o| matches!(self.kind(o), Kind::Function | Kind::Bound | Kind::Class)) {
+            let objs: Vec<ObjId> = fv.pts.iter().filter_map(|o| match &self.obj(o).payload {
+                Payload::Method(_, r) => Some(r.pts.to_vec()),
+                _ => None,
+            }).flatten().chain(args.iter().chain(kwargs.values()).chain(star_args.iter()).flat_map(|a| a.pts.iter())).collect();
+            for o in objs {
+                self.gen_read(o, None);
+            }
+        }
+        // (generators passed or called through a method run now; unless the callee takes all
+        // their items at once, code runs between the items)
+        let bulk = !fv.pts.is_empty() && fv.pts.iter().all(|o| match &self.obj(o).payload {
+            Payload::Str(q) if self.kind(o) == Kind::External => super::BULK_CONSUMERS.contains(&q.as_str()),
+            Payload::Method(q, _) => super::BULK_CONSUMERS.contains(&q.as_str()),
+            _ => false,
+        });
         for o in fv.pts.iter() {
             if let Payload::Method(_, r) | Payload::Bound(_, r) = &self.obj(o).payload {
                 let r = r.clone();
-                self.force_gen(&r, state);
+                self.force_gen(&r, state, true);
             }
         }
-        for a in args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()) {
-            self.force_gen(a, state);
+        // (the program's own code takes them as they are: its loops run them)
+        let user = !fv.pts.is_empty() && fv.pts.iter().all(|o| matches!(self.kind(o), Kind::Function | Kind::Bound | Kind::Class));
+        for a in args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).filter(|_| !user) {
+            self.force_gen(a, state, !bulk);
         }
         if fv.pts.is_empty() {
             return self.unknown_call("?", None, &args, &kwargs, &star_args, &star_kwargs, state, node);
@@ -623,13 +642,9 @@ impl Analyzer {
         if let (Some(ms), Some(a)) = (self.enum_members.get(&cls).cloned(), args.first()) {
             return self.enum_lookup(cls, &ms, a, node, state);
         }
-        let ci = self.class_info(cls);
         // a TypedDict class makes a plain dict
-        if ci.lib.typed_dict {
-            let call = Call { qual: "builtins.dict".into(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
-            if let Some(m) = self.models.lookup("builtins.dict") {
-                return m(self, state, &call);
-            }
+        if let Some(v) = self.typed_dict_construct(cls, args, kwargs, star_args, star_kwargs, state, node) {
+            return v;
         }
         // a class with its own `__new__`: the instance is what it returns, and `__init__` runs
         // on it when it is an instance of the class
@@ -657,61 +672,9 @@ impl Analyzer {
             }
         }
         let inst = self.alloc_instance(cls, node, state);
-        // a pydantic model (without its own `__init__`): validation of the keyword input
-        if crate::models::pydantic::is_validated(self, cls) {
-            let own_init = self.class_lookup(cls, "__init__").map(|c| crate::models::pydantic::is_validated(self, c) && self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__")))).unwrap_or(false);
-            if !own_init {
-                // a pydantic dataclass takes its fields positionally too
-                let mut kw = kwargs.clone();
-                if crate::models::pydantic::is_validated(self, cls) && !crate::models::pydantic::is_model(self, cls) {
-                    let names: Vec<String> = self.dataclass_fields_mro(cls).into_iter().map(|(n, _)| n).collect();
-                    for (i, a) in args.iter().enumerate() {
-                        if let Some(n) = names.get(i) {
-                            kw.insert(intern::s(n), a.clone());
-                        }
-                    }
-                }
-                return self.pyd_construct(cls, args, &kw, star_kwargs, state, node);
-            }
-        }
-        // a dict subclass without its own `__init__`: dict's constructor fills its items
-        let dict_based = self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|x| x.lib.dict_base).unwrap_or(false));
-        if dict_based && self.class_lookup(cls, "__init__").is_none() {
-            state.set_row(inst, Ns::Item, Row::new());
-            if let Some(a0) = args.first() {
-                if !self.record_objects(a0).is_empty() {
-                    self.copy_into(inst, Ns::Item, a0, state, true, &crate::intern::KeySet::new());
-                } else {
-                    let r = state.row(inst, Ns::Item).data_store(Source::new(&format!("{}@L{}", ci.name, node.line), SourceKind::Data));
-                    state.set_row(inst, Ns::Item, r);
-                }
-            }
-            for (k, v) in kwargs.iter() {
-                self.store_key(inst, Ns::Item, &KeyVal::Lit(intern::key(intern::Key::Str(intern::str_get(*k)))), v, true, node, state);
-            }
-            for sk in star_kwargs {
-                self.copy_into(inst, Ns::Item, sk, state, true, &crate::intern::KeySet::new());
-            }
-            return Value::obj(inst);
-        }
-        // the generated `__init__` of a dataclass base applies to a subclass without its own
-        let dc_init = ci.has_fields() || {
-            let mut owner: Option<bool> = None;
-            for c in self.mro(cls) {
-                if self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) {
-                    owner = Some(false);
-                    break;
-                }
-                if self.class_info_opt(c).map(|x| x.has_fields()).unwrap_or(false) {
-                    owner = Some(true);
-                    break;
-                }
-            }
-            owner == Some(true)
-        };
-        if dc_init {
-            self.dataclass_init(cls, inst, args, star_args, kwargs, star_kwargs, state, node);
-            return Value::obj(inst);
+        // library classes: TypedDict, pydantic models, dict subclasses, dataclasses
+        if let Some(v) = self.construct_library(cls, inst, args, kwargs, star_args, star_kwargs, state, node) {
+            return v;
         }
         if let Some(init) = self.class_lookup(cls, "__init__") {
             let fv = self.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
@@ -723,12 +686,7 @@ impl Analyzer {
             }
             self.fresh_init.remove(&inst);
         } else if self.builtin_exc_base(cls) {
-            // an Exception subclass without its own `__init__`: args are the arguments
-            let name = self.class_info(cls).name.clone();
-            let t = self.alloc_positional(Kind::Tuple, node, Some(args.to_vec()), Value::new(), DATA, state);
-            let strong = self.obj(inst).single;
-            self.store_key(inst, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
-            self.exc_objs.insert(inst, name);
+            self.exception_init(cls, inst, args, node, state);
         }
         Value::obj(inst)
     }
@@ -840,8 +798,10 @@ impl Analyzer {
         Value::obj(gid)
     }
 
-    /// Runs the bodies of the generators among `v` not run yet, from this state.
-    pub fn force_gen(&mut self, v: &Value, state: &mut State) {
+    /// Runs the bodies of the generators among `v` not run yet, from this state. `between`:
+    /// the consumer runs code between the items (a loop, `next`), which may change what the
+    /// generator reads after a yield: watched (`gen_watch`, `with_gen_restart`).
+    pub fn force_gen(&mut self, v: &Value, state: &mut State, between: bool) {
         for o in v.pts.iter() {
             let (lazy, run) = lazy_state(state, o);
             if !state.reachable || !lazy {
@@ -852,8 +812,28 @@ impl Analyzer {
             let before = if run { Some(state.copy()) } else { None };
             self.force_at = Some((lg.site.clone(), lg.ctx.0.clone(), lg.ctx.1));
             let saved = std::mem::replace(&mut self.call_chain, lg.chain.clone());
+            let pre = if between { Some((state.copy(), std::rc::Rc::new(self.tab_count.clone()))) } else { None };
+            self.gen_last_reads = None;
             let r = self.call_user(lg.foid, lg.self_v.clone(), lg.args.clone(), lg.kwargs.clone(), vec![], vec![], state, &lg.node, None, false);
             self.call_chain = saved;
+            if let (Some((pre, budget)), true) = (pre, state.reachable) {
+                let fp = state.footprint(&pre);
+                let mut own: FxHashSet<ObjId> = fp.rows.iter().map(|k| k.0).chain(fp.slots.iter().map(|k| k.0)).chain(fp.elems.iter().copied()).chain(state.lens.diff_keys(&pre.lens)).collect();
+                // (and those whose facts follow its items, installed as a consumer takes them)
+                if let Some(ge) = self.gen_eff.get(&o) {
+                    own.extend(ge.rows.iter().map(|k| k.0).chain(ge.slots.iter().map(|k| k.0)).chain(ge.elems.iter().copied()).chain(ge.lens.iter().copied()));
+                }
+                let reads = self.gen_last_reads.take().unwrap_or_default();
+                // (what it reads that the consumer can reach: from what it was given)
+                let roots: Vec<Value> = lg.self_v.iter().chain(lg.args.iter()).chain(lg.kwargs.values()).cloned().collect();
+                let mut targets: Vec<ObjId> = reads.iter().map(|r| r.0).collect();
+                targets.sort_unstable();
+                targets.dedup();
+                let reach = if targets.is_empty() { FxHashSet::default() } else { self.reach_among(&roots, &targets, state) };
+                let reads = reads.into_iter().filter(|r| reach.contains(&r.0)).collect();
+                let w = super::GenWatch { gid: o, own, after: state.copy(), reads, budget, born: self.serial };
+                self.gen_watch.push(w);
+            }
             if !r.pts.contains(o) && state.reachable {
                 // (its body did not run — past its budget, cut at the deadline: unknown code
                 // gives any number of unknown items, and returns something unknown)
@@ -1000,6 +980,34 @@ impl Analyzer {
                     self.rec_widened.insert(key.clone());
                 }
             }
+            // the heap of this call, where it differs from the activation's start on objects
+            // older than it that the call reaches: the activation starts from it too (else a
+            // deeper call's paths that the first heap rules out would never be analysed; the
+            // objects made since have no facts there, which reads as unknown)
+            if let Some((pre, grown, mark)) = self.rec_heap.get(&key) {
+                let (pre, mark) = (pre.clone(), *mark);
+                let had = grown.is_some();
+                let roots: Vec<Value> = self_v.iter().chain(args.iter()).chain(kwargs.values()).cloned().collect();
+                let fp = state.footprint(&pre);
+                let old = |o: ObjId| self.objects[o as usize].born < mark;
+                let mut targets: Vec<ObjId> = fp.rows.iter().map(|k| k.0).chain(fp.slots.iter().map(|k| k.0)).chain(fp.elems.iter().copied()).filter(|o| old(*o)).collect();
+                targets.sort_unstable();
+                targets.dedup();
+                let reach = if targets.is_empty() { FxHashSet::default() } else { self.reach_among(&roots, &targets, state) };
+                let fp = crate::state::Footprint { rows: fp.rows.into_iter().filter(|k| reach.contains(&k.0)).collect(), slots: fp.slots.into_iter().filter(|k| reach.contains(&k.0)).collect(), elems: fp.elems.into_iter().filter(|o| reach.contains(o)).collect() };
+                if !fp.rows.is_empty() || !fp.slots.is_empty() || !fp.elems.is_empty() {
+                    let mut g = self.rec_heap.get_mut(&key).and_then(|e| e.1.take()).unwrap_or_else(|| pre.copy());
+                    let before = g.copy();
+                    g.join_heap_fp(state, &fp);
+                    let d = g.footprint(&before);
+                    if !had || !d.rows.is_empty() || !d.slots.is_empty() || !d.elems.is_empty() {
+                        self.rec_widened.insert(key.clone());
+                    }
+                    if let Some(e) = self.rec_heap.get_mut(&key) {
+                        e.1 = Some(g);
+                    }
+                }
+            }
             if let Some((ret, exit_state, fp)) = self.rec_table.get(&key) {
                 let ret = ret.clone();
                 state.join_heap_fp(exit_state, fp);
@@ -1074,10 +1082,13 @@ impl Analyzer {
         self.rec_entry.insert(key.clone(), (self_v.clone(), args.clone(), kwargs.clone()));
 
         let pre_bind = state.copy();
-        let obj_mark_call = self.objects.len() as ObjId;
+        // (objects made from here on, by birth: a run again of code makes them anew)
+        let born_mark = self.serial;
+        let pre_rc = std::rc::Rc::new(pre_bind.copy());
+        self.rec_heap.insert(key.clone(), (pre_rc.clone(), None, born_mark));
         if gen_id.is_none() {
             if let Some(fr) = self.frames.last_mut() {
-                fr.pre_call = Some(super::PreCall(self.serial, std::rc::Rc::new(pre_bind.copy())));
+                fr.pre_call = Some(super::PreCall(self.serial, pre_rc));
             }
         }
         let gen_cm = self.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth + 1 == self.frames.len());
@@ -1092,6 +1103,9 @@ impl Analyzer {
             vmark = self.verdicts.len();
             self.tab_runs += 1;
             let mut st = entry_state.copy();
+            if let Some(g) = gen_id {
+                self.gen_reads.push((g, false, Default::default()));
+            }
             match fnode {
                 FuncNode::Lambda(l) => {
                     let v = self.eval(&l.body, &mut st);
@@ -1099,7 +1113,10 @@ impl Analyzer {
                     st.record_exit();
                     st.reachable = false;
                 }
-                FuncNode::Def(f) => self.exec_block(&f.body, &mut st),
+                FuncNode::Def(f) => self.with_gen_restart(&mut st, true, &mut |an, s| an.exec_block(&f.body, s)),
+            }
+            if gen_id.is_some() {
+                self.gen_last_reads = self.gen_reads.pop().map(|r| r.2);
             }
             ret = st.ret.clone().unwrap_or_default();
             if st.reachable {
@@ -1123,6 +1140,10 @@ impl Analyzer {
                 let fp = st.footprint(&entry_state);
                 self.rec_table.insert(key.clone(), (ret.clone(), st.copy(), fp));
                 state.replace_with(pre_bind.copy());
+                if let Some((p, Some(g), _)) = self.rec_heap.get(&key) {
+                    let fp = g.footprint(p);
+                    state.join_heap_fp(g, &fp);
+                }
                 self.bind_params(&fi, &w_self, &w_args, &w_kwargs, &star_args, &star_kwargs, state, node);
                 entry_state = state.copy();
                 continue;
@@ -1197,11 +1218,11 @@ impl Analyzer {
             }
         }
         if let Some((gid, ys)) = gen_yields {
-            self.gen_suspension_join(&mut st, &pre_bind, &ys, gid, obj_mark_call);
+            self.gen_suspension_join(&mut st, &pre_bind, &ys, gid, born_mark);
             // the effects per item: before the first, the objects are as before the call
             if st.reachable {
                 let fp = st.footprint(&pre_bind);
-                let old = |o: ObjId| o < obj_mark_call && o != gid;
+                let old = |o: ObjId| self.objects[o as usize].born < born_mark && o != gid;
                 let rows: Vec<(ObjId, Ns)> = fp.rows.iter().copied().filter(|(o, _)| old(*o)).collect();
                 let slots: Vec<(ObjId, crate::state::SlotKey)> = fp.slots.iter().copied().filter(|(o, _)| old(*o)).collect();
                 let elems: Vec<ObjId> = fp.elems.iter().copied().filter(|o| old(*o)).collect();
@@ -1245,6 +1266,8 @@ impl Analyzer {
         self.rec_hit.remove(&key);
         self.rec_entry.remove(&key);
         self.rec_widened.remove(&key);
+        self.rec_heap.remove(&key);
+        self.rec_table.remove(&key);
         self.call_chain = saved_chain;
         self.frames.pop();
         self.env_stack.pop();
@@ -1413,12 +1436,12 @@ impl Analyzer {
 
     /// The heap a generator's caller sees (see the call): the touched objects older than
     /// `mark` (but the generator's own item list) joined over `pre`, the yield states and `st`.
-    fn gen_suspension_join(&mut self, st: &mut State, pre: &State, yields: &[State], gid: ObjId, mark: ObjId) {
+    fn gen_suspension_join(&mut self, st: &mut State, pre: &State, yields: &[State], gid: ObjId, mark: u64) {
         if !st.reachable {
             return;
         }
         let fp = st.footprint(pre);
-        let old = |o: ObjId| o < mark && o != gid;
+        let old = |o: ObjId| self.objects[o as usize].born < mark && o != gid;
         let ys: Vec<&State> = yields.iter().filter(|y| y.reachable).collect();
         // Each fact of `st` is joined with `pre`'s and every yield state's. Yield states are
         // copies of one another changed by the body, sharing structure: each is diffed against
@@ -1761,4 +1784,145 @@ fn lazy_state(state: &State, o: ObjId) -> (bool, bool) {
         }
         None => (false, false),
     }
+}
+
+impl Analyzer {
+    /// Run `body` from `state`. A generator it ran whole for a consumer that runs code between
+    /// the items (`gen_watch`) did not see what that code changed: when the code changed objects
+    /// the generator reaches, `body` runs again, those objects changed for the generator at each
+    /// of its yields (`gen_havoc`; at most three rounds, then everything it reaches). `close`:
+    /// the generators run in `body` are used up or out of reach after it (a loop without
+    /// `break`, a call's end): no later code changes anything for them.
+    pub fn with_gen_restart(&mut self, state: &mut State, close: bool, body: &mut dyn FnMut(&mut Analyzer, &mut State)) {
+        let pre = state.copy();
+        let vmark = self.verdicts.len();
+        let mmark = self.modules.len();
+        for round in 0..4 {
+            let wmark = self.gen_watch.len();
+            body(self, state);
+            let found = self.gen_interference(wmark, state, round == 3);
+            if found.is_empty() || round == 3 {
+                if close {
+                    self.gen_watch.truncate(wmark);
+                }
+                return;
+            }
+            if super::debug_enabled() {
+                eprintln!("restart in {} (frames {}), round {}", self.frame().label, self.frames.len(), round);
+            }
+            for (gid, objs) in found {
+                self.gen_havoc.entry(gid).or_default().extend(objs);
+            }
+            self.drop_verdicts_since(vmark);
+            // (the budgets as before the first generator run: the run again spends them)
+            if let Some(w) = self.gen_watch.get(wmark) {
+                self.tab_count = (*w.budget).clone();
+            }
+            self.gen_watch.truncate(wmark);
+            // (modules it imported stay imported: their facts go on)
+            let mods: Vec<Value> = self.modules.values().skip(mmark).map(|m| Value::obj(*m)).collect();
+            let mut again = pre.copy();
+            if !mods.is_empty() {
+                let fp = state.footprint(&pre);
+                let mut targets: Vec<ObjId> = fp.rows.iter().map(|k| k.0).chain(fp.slots.iter().map(|k| k.0)).chain(fp.elems.iter().copied()).collect();
+                targets.sort_unstable();
+                targets.dedup();
+                let reach = self.reach_among(&mods, &targets, state);
+                let keep = crate::state::Footprint { rows: fp.rows.into_iter().filter(|k| reach.contains(&k.0)).collect(), slots: fp.slots.into_iter().filter(|k| reach.contains(&k.0)).collect(), elems: fp.elems.into_iter().filter(|o| reach.contains(o)).collect() };
+                again.join_heap_fp(state, &keep);
+            }
+            state.replace_with(again);
+        }
+    }
+
+    /// The watched generators since `wmark` and what later code changed by `fin` of the
+    /// objects they reach from what they were given (in the state after their run): a key
+    /// stored, or a whole object; beyond what is already changed for them (`all`: everything
+    /// they reach).
+    fn gen_interference(&self, wmark: usize, fin: &State, all: bool) -> Vec<(ObjId, Vec<super::Change>)> {
+        (wmark..self.gen_watch.len()).map(|i| (self.gen_watch[i].gid, self.gen_interference_of(i, fin, all))).filter(|(_, h)| !h.is_empty()).collect()
+    }
+
+    /// `gen_interference` for one watched generator: the keys / objects it reads after a
+    /// yield that later code changed (beyond those it changes itself, whose facts follow its
+    /// items, and what unknown code may have changed: nothing tells what such code does).
+    fn gen_interference_of(&self, i: usize, fin: &State, all: bool) -> Vec<super::Change> {
+        let w = &self.gen_watch[i];
+        if !fin.reachable {
+            return Vec::new();
+        }
+        let (f, fp) = (&w.after, fin.footprint(&w.after));
+        let mut changed: Vec<super::Change> = Vec::new();
+        let mut unknown: FxHashSet<ObjId> = FxHashSet::default();
+        // (a read that narrows a row is no change)
+        for k in fp.rows {
+            let (a, b) = (f.row(k.0, k.1), fin.row(k.0, k.1));
+            if a.mutators != b.mutators || a.top != b.top {
+                unknown.insert(k.0);
+            } else if a.absent != b.absent {
+                changed.push((k.0, None));
+            }
+        }
+        for (o, sk) in fp.slots {
+            if fin.slots.get(&o, &sk).is_some_and(|v| v.pts.iter().any(|p| self.is_any(p))) {
+                unknown.insert(o);
+            } else {
+                changed.push((o, (matches!(sk.0, Ns::Item | Ns::Attr) && sk.1 != intern::STAR).then_some(sk)));
+            }
+        }
+        changed.extend(fp.elems.into_iter().chain(fin.lens.diff_keys(&f.lens)).map(|o| (o, None)));
+        let read = |(o, k): &super::Change| w.reads.contains(&(*o, *k)) || w.reads.contains(&(*o, None)) || (k.is_none() && w.reads.iter().any(|r| r.0 == *o));
+        // (an object made since is not the one the generator read, whatever its site)
+        let older = |o: ObjId| self.objects[o as usize].born < w.born;
+        let mut hit: Vec<super::Change> = changed.into_iter().filter(|c| c.0 != w.gid && older(c.0) && !w.own.contains(&c.0) && !unknown.contains(&c.0) && read(c)).collect();
+        if all && !hit.is_empty() {
+            hit = w.reads.iter().map(|r| (r.0, None)).collect();
+        }
+        hit.sort_unstable();
+        hit.dedup();
+        let have = self.gen_havoc.get(&w.gid);
+        hit.retain(|c| !have.is_some_and(|h| h.contains(c) || h.contains(&(c.0, None))));
+        if !hit.is_empty() && super::debug_enabled() {
+            eprintln!("generator {} sees changes of {:?}", self.obj(w.gid).label, hit.iter().map(|(o, k)| format!("{}{:?}", self.obj(*o).label, k.map(|k| intern::key_repr(k.1)))).collect::<Vec<_>>());
+        }
+        hit
+    }
+
+    /// A loop used up the generators among `used`: no later code runs between their items. Those
+    /// that saw no change by `fin` are no longer watched; the others are left to the run that
+    /// made them, to run again.
+    pub fn gen_used_up(&mut self, used: &crate::domain::ObjSet, fin: &State) {
+        let mut i = 0;
+        while i < self.gen_watch.len() {
+            if used.contains(self.gen_watch[i].gid) && self.gen_interference_of(i, fin, false).is_empty() {
+                self.gen_watch.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Which of `targets` are reachable from `roots` in `st` (the walk ends when all are found).
+    fn reach_among(&self, roots: &[Value], targets: &[ObjId], st: &State) -> FxHashSet<ObjId> {
+        let mut found: FxHashSet<ObjId> = FxHashSet::default();
+        let mut seen: FxHashSet<ObjId> = FxHashSet::default();
+        let mut work: Vec<ObjId> = roots.iter().flat_map(|v| v.pts.iter()).collect();
+        while let Some(o) = work.pop() {
+            if !seen.insert(o) {
+                continue;
+            }
+            self.walked.set(self.walked.get() + 1);
+            if targets.binary_search(&o).is_ok() {
+                found.insert(o);
+                if found.len() == targets.len() {
+                    break;
+                }
+            }
+            if !matches!(self.kind(o), Kind::Module | Kind::Class | Kind::Function) {
+                self.obj_edges(o, st, &mut work);
+            }
+        }
+        found
+    }
+
 }

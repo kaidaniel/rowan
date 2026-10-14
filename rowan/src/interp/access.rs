@@ -209,38 +209,9 @@ impl Analyzer {
     /// The key a tuple / frozenset with known items hashes as (`(1, "a")`, `frozenset({"r"})`).
     pub fn value_key(&self, o: u32, state: &State, depth: usize) -> Option<KeyId> {
         let kind = self.kind(o);
-        // a frozen dataclass instance hashes by its fields: `Key(ns='a', name='b')`
+        // a frozen dataclass / pydantic instance hashes by its fields: `Key(ns='a', name='b')`
         if kind == Kind::Instance && depth <= 3 && self.obj(o).single {
-            let c = self.instance_class(o)?;
-            let ci = self.class_info_opt(c)?;
-            // a frozen pydantic model hashes by its fields too
-            let pyd_fields: Option<Vec<(String, Option<&'static ast::Expr>)>> = self.m.pyd_classes.get(&c).filter(|p| p.frozen).map(|p| p.fields.iter().map(|f| (f.name.clone(), None)).collect());
-            if (!ci.dc_frozen.get() && pyd_fields.is_none()) || self.class_lookup(c, "__hash__").is_some() || self.class_lookup(c, "__eq__").is_some() {
-                return None;
-            }
-            let fields = match pyd_fields {
-                Some(f) => f,
-                None => ci.dataclass_fields.borrow().clone()?,
-            };
-            let row = state.row(o, Ns::Attr);
-            let mut parts = Vec::new();
-            for (f, _) in &fields {
-                let fk = intern::key_str_lit(f);
-                if !row.definite.contains(fk) {
-                    return None;
-                }
-                let v = state.slot(o, Ns::Attr, fk);
-                let k = match (v.pts.is_empty(), v.kv.as_lit(), v.single()) {
-                    (true, Some(k), _) => k,
-                    (false, _, Some(x)) if v.kv.is_bot() => self.value_key(x, state, depth + 1)?,
-                    _ => return None,
-                };
-                parts.push(format!("{}={}", f, intern::key_repr(k)));
-            }
-            let name = self.obj(c).label.trim_start_matches("class ").to_string();
-            let k = intern::key_member(&format!("{}({})", name, parts.join(", ")), None);
-            self.identity_objs.borrow_mut().entry(k).or_insert(o);
-            return Some(k);
+            return self.frozen_instance_key(o, state, depth);
         }
         if !matches!(kind, Kind::Tuple | Kind::Set) || depth > 3 || !self.obj(o).single {
             return None;
@@ -282,61 +253,6 @@ impl Analyzer {
         out.join(&Value::kv_only(KeyVal::lits(KeySet::from_iter(ks))))
     }
 
-    /// A TypedDict's required and optional keys (`total=`, `Required[…]` / `NotRequired[…]`,
-    /// inherited from TypedDict bases).
-    pub fn typed_dict_keys(&self, cls: u32) -> Option<(KeySet, KeySet)> {
-        let ci = self.class_info_opt(cls)?;
-        if !ci.lib.typed_dict {
-            return None;
-        }
-        let (mut req, mut opt) = (KeySet::new(), KeySet::new());
-        for b in ci.bases.iter() {
-            if let Some((r, o)) = self.typed_dict_keys(*b) {
-                req = req.union(&r);
-                opt = opt.union(&o);
-            }
-        }
-        let c = ci.node;
-        let total = c.arguments.as_ref().and_then(|a| a.keywords.iter().find(|k| k.arg.as_ref().map(|x| x.as_str()) == Some("total"))).map(|k| !matches!(&k.value, ast::Expr::BooleanLiteral(b) if !b.value)).unwrap_or(true);
-        let last = |e: &ast::Expr| -> String {
-            match e {
-                ast::Expr::Name(n) => n.id.to_string(),
-                ast::Expr::Attribute(a) => a.attr.id.to_string(),
-                _ => String::new(),
-            }
-        };
-        for st in &c.body {
-            if let ast::Stmt::AnnAssign(a) = st {
-                if let ast::Expr::Name(n) = &*a.target {
-                    let mut required = total;
-                    let mut ann: &ast::Expr = &a.annotation;
-                    // `Annotated[Required[int], …]`
-                    loop {
-                        let ast::Expr::Subscript(sb) = ann else { break };
-                        match last(&sb.value).as_str() {
-                            "Required" => required = true,
-                            "NotRequired" => required = false,
-                            "Annotated" | "ReadOnly" => {}
-                            _ => break,
-                        }
-                        ann = match &*sb.slice {
-                            ast::Expr::Tuple(t) if !t.elts.is_empty() => &t.elts[0],
-                            other => other,
-                        };
-                    }
-                    let k = intern::key_str_lit(&n.id);
-                    if required {
-                        req = req.union(&KeySet::one(k));
-                        opt = opt.difference(&KeySet::one(k));
-                    } else {
-                        opt = opt.union(&KeySet::one(k));
-                        req = req.difference(&KeySet::one(k));
-                    }
-                }
-            }
-        }
-        Some((req, opt))
-    }
 
     /// A key standing for one object hashed by its identity (a future, a function, an instance
     /// of a class without `__eq__` / `__hash__`), while that object is one runtime object.
@@ -564,19 +480,8 @@ impl Analyzer {
                         }
                         // a NamedTuple by position: its fields in order, from either end
                         if self.is_named_tuple_class(cls) {
-                            let fs = self.dataclass_fields_mro(cls);
-                            let n = fs.len() as i64;
-                            let field = |i: i64, state: &State| state.slot(oid, Ns::Attr, key_str_lit(&fs[(if i < 0 { n + i } else { i }) as usize].0));
-                            match key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int) {
-                                Some(i) if -n <= i && i < n => parts.push(field(i, state)),
-                                Some(_) if single_target => self.raise_here("IndexError", state),
-                                _ => {
-                                    // (an index not known: any field, or a slice of them)
-                                    self.may_raise_here("IndexError", state);
-                                    parts.extend((0..n).map(|i| field(i, state)));
-                                    parts.push(line_data.clone());
-                                }
-                            }
+                            let v = self.named_tuple_item(oid, cls, key, single_target, node, state);
+                            parts.push(v);
                             continue;
                         }
                         if let Some(ci) = self.class_info_opt(cls) {
@@ -1354,24 +1259,8 @@ impl Analyzer {
                             }
                         }
                         if changed { Value::with_kv(out.pts, v.kv.clone()) } else { v }
-                    } else if name == "__members__" && self.enum_members.contains_key(&oid) {
-                        let ms = self.enum_aliases.get(&oid).cloned().unwrap_or_else(|| self.enum_members[&oid].clone());
-                        let d = self.alloc_raw(Kind::Dict, &format!("enum-members:{}", oid), "", true, "__members__", Payload::None);
-                        let mut row = Row::new();
-                        let mut order = Vec::new();
-                        for (n, m) in &ms {
-                            let k = key_str_lit(n);
-                            row = row.store(k, true);
-                            order.push(k);
-                            state.set_slot(d, Ns::Item, k, Value::obj(*m), true);
-                        }
-                        state.set_row(d, Ns::Item, row.with_order(order));
-                        Value::obj(d)
-                    } else if self.enum_members.contains_key(&oid) && !name.starts_with("__") && !self.class_info(oid).open_base {
-                        // an Enum's attribute that is no member nor method: AttributeError
-                        let cls = Classification::with_note(Tier::Missing, "is not a member of the Enum");
-                        if !guarded { self.verdict(node, nk, &cls, oid, Ns::Attr, None, None); } else { self.verdict_guarded(node, nk, &cls, oid, Ns::Attr); }
-                        Value::data(&format!("L{}", node.line))
+                    } else if self.enum_members.contains_key(&oid) && (name == "__members__" || (!name.starts_with("__") && !self.class_info(oid).open_base)) {
+                        crate::models::enums::class_attr(self, oid, name, node, guarded, state)
                     } else if crate::models::pydantic::PYD_ATTRS.contains(&name) && crate::models::pydantic::is_model(self, oid) {
                         crate::models::pydantic::attr_value(self, state, oid, name, node)
                     } else if crate::models::pydantic::PYD_METHODS.contains(&name) && crate::models::pydantic::is_model(self, oid) {
@@ -1560,70 +1449,7 @@ impl Analyzer {
         self.recv_scalar = saved_scalar;
         acc = acc.join(&crate::domain::join_values(parts));
         if obj.pts.is_empty() {
-            if name == "str" && matches!(obj.kv, KeyVal::KeysOf(_)) {
-                // `df.columns.str.strip().str.lower()`: the accessor of renamed column names
-                return obj.clone();
-            }
-            // a Decimal / Fraction: its attributes and methods
-            let numlike = |k: KeyId| crate::models::pynum::is_num_key(k) || crate::models::chrono::is_chrono_key(k);
-            if obj.kv.is_literal() && !crate::domain::kv_literals(&obj.kv).is_empty() && crate::domain::kv_literals(&obj.kv).iter().all(numlike) {
-                let ks = crate::domain::kv_literals(&obj.kv);
-                let attr_of = |k: KeyId, n: &str| if crate::models::chrono::is_chrono_key(k) { crate::models::chrono::attr(k, n) } else { crate::models::pynum::attr(k, n) };
-                let mut out: Option<Vec<Value>> = Some(Vec::new());
-                for k in ks.iter() {
-                    match (attr_of(k, name), out.as_mut()) {
-                        (Some(Some(v)), Some(o)) => o.push(Value::lit(v)),
-                        _ => out = None,
-                    }
-                }
-                if let Some(o) = out {
-                    return join_values(o);
-                }
-                if attr_of(ks.iter().next().unwrap(), name).is_some() {
-                    return Value::data(name);
-                }
-                return self.method_value(&format!("num.{}", name), obj);
-            }
-            // an attribute of None (but a dunder every object has): an AttributeError
-            let none_only = obj.kv.is_literal() && crate::domain::kv_literals(&obj.kv).iter().all(|k| k == intern::key_none()) && !crate::domain::kv_literals(&obj.kv).is_empty();
-            if none_only && report && !name.starts_with("__") {
-                self.raise_here("AttributeError", state);
-                return Value::new();
-            }
-            if matches!(obj.kv, KeyVal::Lit(_) | KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
-                return self.method_value(&format!("str.{}", name), obj);
-            }
-            if let KeyVal::Data(d) = &obj.kv {
-                let label = intern::str_get(*d);
-                if matches!(&*label, "datetime" | "date" | "time" | "timedelta" | "timezone") && crate::models::chrono::NAMES.contains(&name) {
-                    return match crate::models::chrono::attr(crate::models::chrono::chrono_key(crate::models::chrono::DELTA, 0, crate::models::chrono::NAIVE), name) {
-                        _ if matches!(name, "year" | "month" | "day" | "hour" | "minute" | "second" | "microsecond" | "days" | "seconds" | "microseconds" | "tzinfo") => Value::data(name),
-                        _ => self.method_value(&format!("num.{}", name), obj),
-                    };
-                }
-                // a string whose text is not known (a validated `str` field, a str method's result)
-                if &*label == "str" && super::STR_METHOD_NAMES.contains(&name) {
-                    return self.method_value(&format!("str.{}", name), obj);
-                }
-                if matches!(&*label, "Decimal" | "Fraction") && crate::models::pynum::NAMES.contains(&name) {
-                    return if matches!(name, "numerator" | "denominator") { Value::data(name) } else { self.method_value(&format!("num.{}", name), obj) };
-                }
-            }
-            // a slice object with known bounds
-            if let Some((lo, hi, st)) = Self::slice_label_bounds(&obj.kv) {
-                let lit = |b: Option<i64>, an: &Analyzer| match b {
-                    Some(i) => Value::lit(intern::key_int(i)),
-                    None => an.none_v.clone(),
-                };
-                match name {
-                    "start" => return lit(lo, self),
-                    "stop" => return lit(hi, self),
-                    "step" => return lit(st, self),
-                    "indices" => return self.method_value("slice.indices", obj),
-                    _ => {}
-                }
-            }
-            return self.method_value(&format!("unknown.{}", name), obj);
+            return crate::models::scalar_attr(self, obj, name, report, state);
         }
         acc
     }
@@ -1716,19 +1542,6 @@ impl Analyzer {
         None
     }
 
-    /// The dataclass whose generated `__init__` `cls` inherits (none when a user `__init__`
-    /// comes first in the MRO).
-    pub fn dataclass_init_owner(&self, cls: u32) -> Option<u32> {
-        for c in self.mro(cls) {
-            if self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) {
-                return None;
-            }
-            if self.class_info_opt(c).map(|x| x.has_fields()).unwrap_or(false) {
-                return Some(c);
-            }
-        }
-        None
-    }
 
     /// A class attribute's value: on this path when the path has it (a class attribute
     /// rebound after the class was made: `Cls.mode = "x"`), else what any path stored.
@@ -1779,24 +1592,6 @@ impl Analyzer {
             outs.push(cv.clone());
         }
         join_values(outs)
-    }
-
-    /// A class whose hierarchy includes a `NamedTuple` class.
-    pub fn is_named_tuple_class(&self, cls: u32) -> bool {
-        let mut work = vec![cls];
-        let mut seen: Vec<u32> = Vec::new();
-        while let Some(c) = work.pop() {
-            if seen.contains(&c) {
-                continue;
-            }
-            seen.push(c);
-            let Some(ci) = self.class_info_opt(c) else { continue };
-            if ci.lib.named_tuple {
-                return true;
-            }
-            work.extend(ci.bases.iter().copied());
-        }
-        false
     }
 
     pub fn load_instance_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool, try_guard: bool, single_target: bool) -> Value {

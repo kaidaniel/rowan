@@ -280,8 +280,8 @@ impl Analyzer {
                 state.reachable = false;
             }
             ast::Stmt::Assert(a) => {
-                self.eval(&a.test, state);
-                self.narrow(&a.test, true, state);
+                let sp = self.split(&a.test, state.copy());
+                state.replace_with(sp.t);
             }
             ast::Stmt::Delete(d) => self.stmt_delete(d, state),
             ast::Stmt::Import(i) => {
@@ -334,7 +334,13 @@ impl Analyzer {
             }
             ast::Stmt::For(f) => {
                 let g = self.loop_gc_begin(state);
-                self.stmt_for(f, state);
+                // (a generator the loop runs: what the body changes, it may read at its yields)
+                let depth = self.for_iters.len();
+                self.with_gen_restart(state, false, &mut |an, st| an.stmt_for(f, st));
+                if let Some(used) = self.for_iters.get(depth).cloned().filter(|_| !contains_jump(&f.body)) {
+                    self.gen_used_up(&used, state);
+                }
+                self.for_iters.truncate(depth);
                 self.loop_gc_end(g, state);
             }
             ast::Stmt::Break(_) | ast::Stmt::Continue(_) => {
@@ -357,7 +363,7 @@ impl Analyzer {
                 }
             }
             ast::Stmt::Try(t) => self.stmt_try(t, state),
-            ast::Stmt::With(w) if self.with_suppress(w, state) => {}
+            ast::Stmt::With(w) if crate::models::csvio::with_suppress(self, w, state) => {}
             ast::Stmt::With(w) if self.with_contextmanager(w, state) => {}
             ast::Stmt::With(w) => {
                 let mut managers: Vec<(Value, Node)> = Vec::new();
@@ -413,13 +419,12 @@ impl Analyzer {
                     }
                     let mut sure = decided == Some(true);
                     if let Some(g) = &case.guard {
-                        let gv = self.eval(g, &mut cs);
-                        match self.truthiness(&gv, &cs) {
-                            Some(false) => continue,
-                            Some(true) => {}
-                            None => sure = false,
+                        let sp = self.split(g, cs);
+                        if !sp.t.reachable {
+                            continue;
                         }
-                        self.narrow(g, true, &mut cs);
+                        sure &= !sp.f.reachable;
+                        cs = sp.t;
                     }
                     self.exec_block(&case.body, &mut cs);
                     outs.push(cs);
@@ -444,28 +449,6 @@ impl Analyzer {
                 self.note(format!("unsupported statement IpyEscapeCommand at L{}", n.line));
             }
         }
-    }
-
-    /// `with contextlib.suppress(E, …): body`: `try: body / except (E, …): pass`. False: not
-    /// that case.
-    fn with_suppress(&mut self, w: &'static ast::StmtWith, state: &mut State) -> bool {
-        if w.items.len() != 1 {
-            return false;
-        }
-        let ast::Expr::Call(call) = &w.items[0].context_expr else { return false };
-        if !matches!(&*call.func, ast::Expr::Name(_) | ast::Expr::Attribute(_)) || !call.arguments.keywords.is_empty() {
-            return false;
-        }
-        let mut probe = state.copy();
-        let fv = self.eval(&call.func, &mut probe);
-        let is_suppress = !fv.pts.is_empty() && fv.pts.iter().all(|o| self.kind(o) == Kind::External && self.external_qual(o) == "contextlib.suppress");
-        if !is_suppress {
-            return false;
-        }
-        // `try: body / except (E, …): pass`
-        let h = Handler { types: Some(call.arguments.args.iter().collect()), name: None, body: &[], line: frontend::node(w).line };
-        self.stmt_try_parts(&w.body, vec![h], &[], std::rc::Rc::new(Finally::Block(&[])), state);
-        true
     }
 
     /// `with cm(...) as x: body` where `cm` is a `@contextmanager` generator function: the
@@ -708,29 +691,22 @@ impl Analyzer {
     }
 
     fn stmt_if(&mut self, test: &'static ast::Expr, body: &'static [ast::Stmt], rest: &'static [ast::ElifElseClause], state: &mut State) {
-        let tv = self.eval(test, state);
         if matches!(test, ast::Expr::Name(n) if n.id.as_str() == "TYPE_CHECKING") || matches!(test, ast::Expr::Attribute(a) if a.attr.as_str() == "TYPE_CHECKING") {
             self.note_type_only_imports(body);
         }
-        let mut then_s = state.copy();
-        let mut else_s = state.copy();
-        let decided = self.truth_of(&tv, state, &frontend::node(test));
-        match decided {
-            Some(true) => else_s.reachable = false,
-            Some(false) => then_s.reachable = false,
-            None => {}
-        }
-        let cond = if decided.is_none() { self.cond_key(test) } else { None };
-        if let Some((key, pos, _)) = &cond {
-            // an earlier join on the same test: each branch gets back the rows it had then
-            self.apply_cond_facts(*key, *pos, &mut then_s);
-            self.apply_cond_facts(*key, !*pos, &mut else_s);
-        }
-        self.narrow(test, true, &mut then_s);
-        self.narrow(test, false, &mut else_s);
+        let mut pre = state.copy();
+        let sp = self.split(test, state.copy());
+        let (mut then_s, mut else_s) = (sp.t, sp.f);
         // a decided test leaves one branch: straight-line code, not a conditional (appends
         // stay positional, requirements stay "always")
-        let conditional = decided.is_none();
+        let conditional = then_s.reachable && else_s.reachable;
+        let cond = if conditional { self.cond_key(test) } else { None };
+        if let Some((key, pos, _)) = &cond {
+            // an earlier join on the same test: each branch gets back the rows it had then (the
+            // test is pure: the state before it is the one it was evaluated in)
+            self.apply_cond_facts(*key, *pos, &mut pre, &mut then_s);
+            self.apply_cond_facts(*key, !*pos, &mut pre, &mut else_s);
+        }
         if conditional {
             self.cond_depth += 1;
             self.branch_depth += 1;
@@ -746,8 +722,8 @@ impl Analyzer {
             self.cond_depth -= 1;
         }
         // `if k not in d: raise …`: the input must hold k (else the program raises)
-        if conditional {
-            self.require_by_raise(test, body, rest, state, &mut then_s, &mut else_s);
+        if let (true, Some((kv, target))) = (conditional, &sp.ops) {
+            self.require_by_raise(test, body, rest, kv, target, &pre, &mut then_s, &mut else_s);
         }
         let mut j = then_s.join(&mut else_s);
         if then_s.reachable && else_s.reachable && conditional {
@@ -779,7 +755,8 @@ impl Analyzer {
 
     /// `if k not in d: raise …` / `if k in d: … else: raise …`: the branch where the key is
     /// missing raises, so the key is required of the inputs that may provide it.
-    fn require_by_raise(&mut self, test: &'static ast::Expr, body: &'static [ast::Stmt], rest: &'static [ast::ElifElseClause], pre: &mut State, then_s: &mut State, else_s: &mut State) {
+    #[allow(clippy::too_many_arguments)]
+    fn require_by_raise(&mut self, test: &'static ast::Expr, body: &'static [ast::Stmt], rest: &'static [ast::ElifElseClause], kv: &Value, target: &Value, pre: &State, then_s: &mut State, else_s: &mut State) {
         let ast::Expr::Compare(c) = test else { return };
         if c.ops.len() != 1 {
             return;
@@ -795,9 +772,7 @@ impl Analyzer {
         if !matches!(missing_branch.last(), Some(ast::Stmt::Raise(_))) {
             return;
         }
-        let kv = self.eval(&c.left, pre);
         let Some(k) = kv.kv.as_lit().filter(|_| kv.pts.is_empty()) else { return };
-        let target = self.eval(&c.comparators[0], pre);
         let mut recs: Vec<u32> = Vec::new();
         for o in target.pts.iter() {
             match &self.obj(o).payload {
@@ -863,26 +838,27 @@ impl Analyzer {
         }
     }
 
-    /// Rows a branch of an earlier join on `key` had, put back where unchanged since.
-    fn apply_cond_facts(&mut self, key: intern::StrId, truth: bool, st: &mut State) {
+    /// Rows a branch of an earlier join on `key` had, put back into `st` where unchanged
+    /// since (in `pre`, the state before the test).
+    fn apply_cond_facts(&mut self, key: intern::StrId, truth: bool, pre: &mut State, st: &mut State) {
         if !st.reachable {
             return;
         }
-        let facts = st.facts.clone();
+        let facts = pre.facts.clone();
         for f in facts.iter().filter(|f| f.cond == key && f.truth == truth) {
-            if !f.deps.iter().all(|(n, v)| self.dep_value(st, *n) == *v) {
+            if !f.deps.iter().all(|(n, v)| self.dep_value(pre, *n) == *v) {
                 continue;
             }
-            if !f.guards.iter().all(|((o, ns), r)| st.row(*o, *ns) == *r) {
+            if !f.guards.iter().all(|((o, ns), r)| pre.row(*o, *ns) == *r) {
                 continue;
             }
             for (k, branch, joined) in &f.rows {
-                if st.row(k.0, k.1) == *joined {
+                if pre.row(k.0, k.1) == *joined {
                     st.set_row(k.0, k.1, branch.clone());
                 }
             }
             if let Some((branch, joined)) = &f.unbound {
-                if st.unbound == *joined {
+                if pre.unbound == *joined {
                     st.unbound = branch.clone();
                 }
             }
@@ -913,22 +889,18 @@ impl Analyzer {
                 if !state.reachable {
                     break;
                 }
-                let mut probe = state.copy();
-                let tv = self.eval(&w.test, &mut probe);
-                let decided = self.truth_of(&tv, &mut probe, &frontend::node(&*w.test));
-                match decided {
-                    Some(false) => {
-                        state.replace_with(probe);
-                        self.narrow(&w.test, false, state);
+                let sp = self.split(&w.test, state.copy());
+                match (sp.t.reachable, sp.f.reachable) {
+                    (false, _) => {
+                        state.replace_with(sp.f);
                         if !w.orelse.is_empty() {
                             self.exec_block(&w.orelse, state);
                         }
                         join_breaks(state, breaks);
                         return;
                     }
-                    Some(true) if idx < UNROLL_MAX => {
-                        state.replace_with(probe);
-                        self.narrow(&w.test, true, state);
+                    (true, false) if idx < UNROLL_MAX => {
+                        state.replace_with(sp.t);
                         self.unrolled_iteration(1000 + idx, &w.body, state, &mut breaks, &mut |_, _| {});
                         idx += 1;
                     }
@@ -994,23 +966,14 @@ impl Analyzer {
 
     fn stmt_while_loop(&mut self, w: &'static ast::StmtWhile, state: &mut State) {
         let (head, exit_acc, _) = self.loop_fixpoint(state, &mut |an, body_s| {
-            let tv = an.eval(&w.test, body_s);
-            // a test decided at the loop head prunes: false means no iteration from here
-            if an.truthiness(&tv, body_s) == Some(false) {
-                body_s.reachable = false;
-            }
-            an.narrow(&w.test, true, body_s);
+            let sp = an.split(&w.test, body_s.copy());
+            body_s.replace_with(sp.t);
             if body_s.reachable {
                 an.exec_block(&w.body, body_s);
             }
         });
-        let mut exit_s = head.copy();
-        // a test that is true at the head never falls through (the loop leaves by break)
-        let tv = self.eval(&w.test, &mut exit_s);
-        if self.truthiness(&tv, &exit_s) == Some(true) {
-            exit_s.reachable = false;
-        }
-        self.narrow(&w.test, false, &mut exit_s);
+        // (a test that is true at the head never falls through: the loop leaves by break)
+        let mut exit_s = self.split(&w.test, head).f;
         if !w.orelse.is_empty() && exit_s.reachable {
             self.exec_block(&w.orelse, &mut exit_s);
         }
@@ -1112,6 +1075,8 @@ impl Analyzer {
     fn stmt_for(&mut self, f: &'static ast::StmtFor, state: &mut State) {
         let itv = self.eval(&f.iter, state);
         let iter_node = frontend::node(&*f.iter);
+        self.force_gen(&itv, state, true);
+        self.for_iters.push(itv.pts.clone());
         let it = self.iterate(&itv, &iter_node, state);
         let has_jump = contains_jump(&f.body);
         // a one-shot iterator is used up by the loop; a `break` leaves the rest: the cursor
@@ -1349,7 +1314,7 @@ impl Analyzer {
 
     fn stmt_try_inner(&mut self, body: &'static [ast::Stmt], handlers: &[Handler], orelse: &'static [ast::Stmt], fin: &std::rc::Rc<Finally>, state: &mut State) {
         // (a handler for a class catches its subclasses too)
-        let mut caught = expand_caught(handlers.iter().flat_map(|h| h.names()).collect());
+        let mut caught = crate::models::exceptions::expand_caught(handlers.iter().flat_map(|h| h.names()).collect());
         // handlers that all end by re-raising: the body's reads are still required
         let reraise = !handlers.is_empty() && handlers.iter().all(|h| matches!(h.body.last(), Some(ast::Stmt::Raise(_))));
         if reraise {
@@ -2060,27 +2025,6 @@ impl Handler {
     }
 }
 
-pub fn expand_caught(mut caught: FxHashSet<String>) -> FxHashSet<String> {
-    const SUBS: &[(&str, &[&str])] = &[
-        ("ValueError", &["ValidationError", "JSONDecodeError", "UnicodeDecodeError", "UnicodeEncodeError", "UnicodeError"]),
-        ("LookupError", &["KeyError", "IndexError"]),
-        ("ArithmeticError", &["ZeroDivisionError", "OverflowError", "FloatingPointError"]),
-        ("OSError", &["FileNotFoundError", "PermissionError", "IsADirectoryError", "NotADirectoryError", "FileExistsError", "TimeoutError", "ConnectionError"]),
-        ("IOError", &["FileNotFoundError", "PermissionError"]),
-        ("EnvironmentError", &["FileNotFoundError", "PermissionError"]),
-        ("RuntimeError", &["NotImplementedError", "RecursionError"]),
-        ("ImportError", &["ModuleNotFoundError"]),
-        ("AttributeError", &["FrozenInstanceError"]),
-    ];
-    let mut more: Vec<String> = Vec::new();
-    for (p, subs) in SUBS {
-        if caught.contains(*p) {
-            more.extend(subs.iter().map(|x| x.to_string()));
-        }
-    }
-    caught.extend(more);
-    caught
-}
 
 /// What runs on the way out of a try statement: its finally block, or for a with statement its
 /// managers' `__exit__`.

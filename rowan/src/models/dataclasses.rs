@@ -7,7 +7,7 @@ use ruff_python_ast as ast;
 
 use crate::domain::{join_values, Classification, Ns, ObjId, Tier, Value};
 use crate::frontend::Node;
-use crate::intern::{self, key_str_lit, s, KeySet, StrId};
+use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
 use crate::interp::{Analyzer, Frame, FrameKind};
 use crate::state::{Kind, State};
 
@@ -379,4 +379,244 @@ pub fn declared_fields(c: &'static ast::StmtClassDef, pydantic: bool) -> Vec<(St
         fields.push((n.id.to_string(), a.value.as_deref()));
     }
     fields
+}
+
+impl Analyzer {
+    /// A class whose hierarchy includes a `NamedTuple` class.
+    pub fn is_named_tuple_class(&self, cls: u32) -> bool {
+        let mut work = vec![cls];
+        let mut seen: Vec<u32> = Vec::new();
+        while let Some(c) = work.pop() {
+            if seen.contains(&c) {
+                continue;
+            }
+            seen.push(c);
+            let Some(ci) = self.class_info_opt(c) else { continue };
+            if ci.lib.named_tuple {
+                return true;
+            }
+            work.extend(ci.bases.iter().copied());
+        }
+        false
+    }
+
+    /// A NamedTuple instance indexed by position (from either end; an unknown index: any
+    /// field, or a slice of them).
+    pub fn named_tuple_item(&mut self, oid: u32, cls: u32, key: &Value, single: bool, node: &Node, state: &mut State) -> Value {
+        let fs = self.dataclass_fields_mro(cls);
+        let n = fs.len() as i64;
+        let field = |i: i64, state: &State| state.slot(oid, Ns::Attr, key_str_lit(&fs[(if i < 0 { n + i } else { i }) as usize].0));
+        match key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int) {
+            Some(i) if -n <= i && i < n => field(i, state),
+            Some(_) if single => {
+                self.raise_here("IndexError", state);
+                Value::new()
+            }
+            _ => {
+                self.may_raise_here("IndexError", state);
+                let mut parts: Vec<Value> = (0..n).map(|i| field(i, state)).collect();
+                parts.push(Value::data(&format!("L{}", node.line)));
+                crate::domain::join_values(parts)
+            }
+        }
+    }
+    /// A TypedDict's required and optional keys (`total=`, `Required[…]` / `NotRequired[…]`,
+    /// inherited from TypedDict bases).
+    pub fn typed_dict_keys(&self, cls: u32) -> Option<(KeySet, KeySet)> {
+        let ci = self.class_info_opt(cls)?;
+        if !ci.lib.typed_dict {
+            return None;
+        }
+        let (mut req, mut opt) = (KeySet::new(), KeySet::new());
+        for b in ci.bases.iter() {
+            if let Some((r, o)) = self.typed_dict_keys(*b) {
+                req = req.union(&r);
+                opt = opt.union(&o);
+            }
+        }
+        let c = ci.node;
+        let total = c.arguments.as_ref().and_then(|a| a.keywords.iter().find(|k| k.arg.as_ref().map(|x| x.as_str()) == Some("total"))).map(|k| !matches!(&k.value, ast::Expr::BooleanLiteral(b) if !b.value)).unwrap_or(true);
+        let last = |e: &ast::Expr| -> String {
+            match e {
+                ast::Expr::Name(n) => n.id.to_string(),
+                ast::Expr::Attribute(a) => a.attr.id.to_string(),
+                _ => String::new(),
+            }
+        };
+        for st in &c.body {
+            if let ast::Stmt::AnnAssign(a) = st {
+                if let ast::Expr::Name(n) = &*a.target {
+                    let mut required = total;
+                    let mut ann: &ast::Expr = &a.annotation;
+                    // `Annotated[Required[int], …]`
+                    loop {
+                        let ast::Expr::Subscript(sb) = ann else { break };
+                        match last(&sb.value).as_str() {
+                            "Required" => required = true,
+                            "NotRequired" => required = false,
+                            "Annotated" | "ReadOnly" => {}
+                            _ => break,
+                        }
+                        ann = match &*sb.slice {
+                            ast::Expr::Tuple(t) if !t.elts.is_empty() => &t.elts[0],
+                            other => other,
+                        };
+                    }
+                    let k = intern::key_str_lit(&n.id);
+                    if required {
+                        req = req.union(&KeySet::one(k));
+                        opt = opt.difference(&KeySet::one(k));
+                    } else {
+                        opt = opt.union(&KeySet::one(k));
+                        req = req.difference(&KeySet::one(k));
+                    }
+                }
+            }
+        }
+        Some((req, opt))
+    }
+
+    /// The dataclass whose generated `__init__` `cls` inherits (none when a user `__init__`
+    /// comes first in the MRO).
+    pub fn dataclass_init_owner(&self, cls: u32) -> Option<u32> {
+        for c in self.mro(cls) {
+            if self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) {
+                return None;
+            }
+            if self.class_info_opt(c).map(|x| x.has_fields()).unwrap_or(false) {
+                return Some(c);
+            }
+        }
+        None
+    }
+
+    /// The key a frozen dataclass / pydantic instance hashes as (its fields), when known.
+    pub fn frozen_instance_key(&self, o: u32, state: &State, depth: usize) -> Option<KeyId> {
+        let c = self.instance_class(o)?;
+        let ci = self.class_info_opt(c)?;
+        // a frozen pydantic model hashes by its fields too
+        let pyd_fields: Option<Vec<(String, Option<&'static ast::Expr>)>> = self.m.pyd_classes.get(&c).filter(|p| p.frozen).map(|p| p.fields.iter().map(|f| (f.name.clone(), None)).collect());
+        if (!ci.dc_frozen.get() && pyd_fields.is_none()) || self.class_lookup(c, "__hash__").is_some() || self.class_lookup(c, "__eq__").is_some() {
+            return None;
+        }
+        let fields = match pyd_fields {
+            Some(f) => f,
+            None => ci.dataclass_fields.borrow().clone()?,
+        };
+        let row = state.row(o, Ns::Attr);
+        let mut parts = Vec::new();
+        for (f, _) in &fields {
+            let fk = intern::key_str_lit(f);
+            if !row.definite.contains(fk) {
+                return None;
+            }
+            let v = state.slot(o, Ns::Attr, fk);
+            let k = match (v.pts.is_empty(), v.kv.as_lit(), v.single()) {
+                (true, Some(k), _) => k,
+                (false, _, Some(x)) if v.kv.is_bot() => self.value_key(x, state, depth + 1)?,
+                _ => return None,
+            };
+            parts.push(format!("{}={}", f, intern::key_repr(k)));
+        }
+        let name = self.obj(c).label.trim_start_matches("class ").to_string();
+        let k = intern::key_member(&format!("{}({})", name, parts.join(", ")), None);
+        self.identity_objs.borrow_mut().entry(k).or_insert(o);
+        Some(k)
+    }
+
+    /// Two instances of an `@dataclass(order=True)` class: their fields (those not
+    /// `field(compare=False)`) compared as tuples, when known.
+    pub fn dataclass_order(&self, x: u32, y: u32, state: &State) -> Option<std::cmp::Ordering> {
+        let cx = self.instance_class(x)?;
+        if Some(cx) != self.instance_class(y) || !self.class_info_opt(cx).map(|ci| ci.dc_order.get()).unwrap_or(false) {
+            return None;
+        }
+        let compared = |d: &Option<&'static ast::Expr>| match d {
+            Some(ast::Expr::Call(fc)) if crate::interp::dotted_last(&fc.func) == "field" => !fc.arguments.keywords.iter().any(|k| k.arg.as_ref().map(|n| n.as_str()) == Some("compare") && matches!(&k.value, ast::Expr::BooleanLiteral(bl) if !bl.value)),
+            _ => true,
+        };
+        let fields: Vec<KeyId> = self.dataclass_fields_mro(cx).iter().filter(|(_, d)| compared(d)).map(|(f, _)| key_str_lit(f)).collect();
+        let (rx, ry) = (state.row(x, Ns::Attr), state.row(y, Ns::Attr));
+        if !fields.iter().all(|f| rx.definite.contains(*f) && ry.definite.contains(*f)) {
+            return None;
+        }
+        for f in &fields {
+            match crate::models::stdfuncs::value_order(self, state, &state.slot(x, Ns::Attr, *f), &state.slot(y, Ns::Attr, *f)) {
+                Some(std::cmp::Ordering::Equal) => continue,
+                o => return o,
+            }
+        }
+        Some(std::cmp::Ordering::Equal)
+    }
+
+    /// A TypedDict class called: a plain dict.
+    #[allow(clippy::too_many_arguments)]
+    pub fn typed_dict_construct(&mut self, cls: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Option<Value> {
+        if !self.class_info(cls).lib.typed_dict {
+            return None;
+        }
+        let call = crate::interp::Call { qual: "builtins.dict".into(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
+        let m = self.models.lookup("builtins.dict")?;
+        Some(m(self, state, &call))
+    }
+
+    /// A library class's instance `inst` of `cls` made: a pydantic model (without its own
+    /// `__init__`) validates its keyword input; a dict subclass without its own `__init__` is
+    /// filled by dict's constructor; a dataclass (or a subclass without its own `__init__`)
+    /// runs the generated `__init__`. None: none of these.
+    #[allow(clippy::too_many_arguments)]
+    pub fn construct_library(&mut self, cls: u32, inst: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Option<Value> {
+        let ci = self.class_info(cls);
+        if crate::models::pydantic::is_validated(self, cls) {
+            let own_init = self.class_lookup(cls, "__init__").map(|c| crate::models::pydantic::is_validated(self, c) && self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__")))).unwrap_or(false);
+            if !own_init {
+                // a pydantic dataclass takes its fields positionally too
+                let mut kw = kwargs.clone();
+                if !crate::models::pydantic::is_model(self, cls) {
+                    let names: Vec<String> = self.dataclass_fields_mro(cls).into_iter().map(|(n, _)| n).collect();
+                    for (i, a) in args.iter().enumerate() {
+                        if let Some(n) = names.get(i) {
+                            kw.insert(intern::s(n), a.clone());
+                        }
+                    }
+                }
+                return Some(self.pyd_construct(cls, args, &kw, star_kwargs, state, node));
+            }
+        }
+        let dict_based = self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|x| x.lib.dict_base).unwrap_or(false));
+        if dict_based && self.class_lookup(cls, "__init__").is_none() {
+            state.set_row(inst, Ns::Item, crate::domain::Row::new());
+            if let Some(a0) = args.first() {
+                if !self.record_objects(a0).is_empty() {
+                    self.copy_into(inst, Ns::Item, a0, state, true, &KeySet::new());
+                } else {
+                    let r = state.row(inst, Ns::Item).data_store(crate::domain::Source::new(&format!("{}@L{}", ci.name, node.line), crate::domain::SourceKind::Data));
+                    state.set_row(inst, Ns::Item, r);
+                }
+            }
+            for (k, v) in kwargs.iter() {
+                self.store_key(inst, Ns::Item, &crate::domain::KeyVal::Lit(intern::key(intern::Key::Str(intern::str_get(*k)))), v, true, node, state);
+            }
+            for sk in star_kwargs {
+                self.copy_into(inst, Ns::Item, sk, state, true, &KeySet::new());
+            }
+            return Some(Value::obj(inst));
+        }
+        // the generated `__init__` of a dataclass base applies to a subclass without its own
+        let owner = self.mro(cls).into_iter().find_map(|c| if self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) { Some(false) } else if self.class_info_opt(c).is_some_and(|x| x.has_fields()) { Some(true) } else { None });
+        if ci.has_fields() || owner == Some(true) {
+            self.dataclass_init(cls, inst, args, star_args, kwargs, star_kwargs, state, node);
+            return Some(Value::obj(inst));
+        }
+        None
+    }
+
+    /// An Exception subclass without its own `__init__` made: its `args` are the arguments.
+    pub fn exception_init(&mut self, cls: u32, inst: u32, args: &[Value], node: &Node, state: &mut State) {
+        let name = self.class_info(cls).name.clone();
+        let t = self.alloc_positional(Kind::Tuple, node, Some(args.to_vec()), Value::new(), crate::domain::DATA, state);
+        let strong = self.obj(inst).single;
+        self.store_key(inst, Ns::Attr, &crate::domain::KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
+        self.exc_objs.insert(inst, name);
+    }
 }

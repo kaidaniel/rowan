@@ -321,11 +321,8 @@ impl Analyzer {
     }
 
     pub fn load_name(&mut self, name: StrId, node: &Node, state: &mut State) -> Value {
-        let _ = node;
-        for ov in self.frame().overlays.iter().rev() {
-            if let Some(v) = ov.get(&name) {
-                return v.clone();
-            }
+        if self.frame().comp_names.iter().any(|ns| ns.contains(&name)) {
+            return state.env.get(&name).cloned().unwrap_or_default();
         }
         let fr_kind = self.frame().kind;
         let fr_module = self.frame().module;
@@ -431,14 +428,9 @@ impl Analyzer {
         let fr_kind = self.frame().kind;
         let fr_module = self.frame().module;
         let key = intern::key(intern::Key::Str(str_get(name)));
-        {
-            let fr = self.frame_mut();
-            for ov in fr.overlays.iter_mut().rev() {
-                if ov.contains_key(&name) {
-                    ov.insert(name, v);
-                    return;
-                }
-            }
+        if self.frame().comp_names.iter().any(|ns| ns.contains(&name)) {
+            state.env.insert(name, v);
+            return;
         }
         if fr_kind == FrameKind::Function {
             if let Some(&cid) = self.frame().cells.get(&name) {
@@ -578,7 +570,7 @@ impl Analyzer {
     }
 
     pub fn unpack(&mut self, v: &Value, n: usize, state: &mut State, node: &Node) -> Vec<Value> {
-        self.force_gen(v, state);
+        self.force_gen(v, state, false);
         let mut parts: Vec<Value> = (0..n).map(|_| Value::new()).collect();
         for oid in v.pts.iter() {
             let kind = self.kind(oid);
@@ -760,7 +752,10 @@ impl Analyzer {
     }
 
     pub fn iterate(&mut self, v: &Value, node: &Node, state: &mut State) -> Iteration {
-        self.force_gen(v, state);
+        self.force_gen(v, state, false);
+        for o in v.pts.iter() {
+            self.gen_read(o, None);
+        }
         // one of several containers (or strings): their items are alternatives, not one
         // sequence — joined position by position when every one is a sequence of one known
         // length, else not known (the elements are still the join)

@@ -19,21 +19,16 @@ fn py_slice(cs: &[char], lo: Option<i64>, hi: Option<i64>, step: Option<i64>) ->
 }
 
 impl Analyzer {
-    /// Evaluate an expression. A call's result is remembered per node: narrowing a test reads
-    /// it back instead of running the call (and its side effects) a second time.
+    /// Evaluate an expression (while a test is evaluated, each node's value is kept for its
+    /// narrowing: `split`).
     pub fn eval(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {
-        if let ast::Expr::Call(_) = node {
-            let addr = node as *const ast::Expr as usize;
-            if self.narrow_depth > 0 {
-                if let Some(v) = self.call_memo.get(&addr) {
-                    return v.clone();
-                }
+        let v = self.eval_inner(node, state);
+        if let Some((depth, vals)) = &mut self.trace {
+            if *depth == self.frames.len() {
+                vals.insert(node as *const ast::Expr as usize, v.clone());
             }
-            let v = self.eval_inner(node, state);
-            self.call_memo.insert(addr, v.clone());
-            return v;
         }
-        self.eval_inner(node, state)
+        v
     }
 
     fn eval_inner(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {
@@ -141,10 +136,10 @@ impl Analyzer {
                 let mut flag = false;
                 if !self.tries.is_empty() {
                     let all_safe = fv.pts.iter().all(|o| match &self.obj(o).payload {
-                        Payload::Method(q, _) if self.kind(o) == Kind::Method => super::safe_method(q) || SELF_REPORTING.iter().any(|p| q.starts_with(p)),
+                        Payload::Method(q, _) if self.kind(o) == Kind::Method => super::safe_method(q) || super::SELF_REPORTING.iter().any(|p| q.starts_with(p)),
                         // user code: whether it raises is reported by its own analysis
                         // builtins that raise only on wrong types (len, str, sorted, …)
-                        Payload::Str(q) if self.kind(o) == Kind::External => q.strip_prefix("builtins.").map(|n| SAFE_BUILTINS.contains(&n) || is_exception_name(n)).unwrap_or(false) || SELF_REPORTING_EXTERNALS.contains(&q.as_str())
+                        Payload::Str(q) if self.kind(o) == Kind::External => q.strip_prefix("builtins.").map(|n| super::SAFE_BUILTINS.contains(&n) || is_exception_name(n)).unwrap_or(false) || super::SELF_REPORTING_EXTERNALS.contains(&q.as_str())
                             // (making an exception object of a library class: `HTTPException(...)`)
                             || (q.rsplit('.').next().map(|n| n.ends_with("Error") || n.ends_with("Exception")).unwrap_or(false)),
                         _ => matches!(self.kind(o), Kind::Function | Kind::Bound | Kind::Class | Kind::Partial),
@@ -204,25 +199,23 @@ impl Analyzer {
                 v
             }
             ast::Expr::If(i) => {
-                let tv = self.eval(&i.test, state);
-                // a decided test: one branch only
-                let nd = frontend::node(node);
-                match self.truth_of(&tv, state, &nd) {
-                    Some(true) => return self.eval(&i.body, state),
-                    Some(false) => return self.eval(&i.orelse, state),
-                    None => {}
-                }
-                let mut a = state.copy();
-                let mut b = state.copy();
-                self.narrow(&i.test, true, &mut a);
-                self.narrow(&i.test, false, &mut b);
+                let sp = self.split(&i.test, state.copy());
+                let (mut a, mut b) = (sp.t, sp.f);
+                // (a branch that raises gives no value)
                 let va = if a.reachable { self.eval(&i.body, &mut a) } else { Value::new() };
                 let vb = if b.reachable { self.eval(&i.orelse, &mut b) } else { Value::new() };
-                let j = a.join(&mut b);
-                state.replace_with(j);
+                let (va, vb) = (if a.reachable { va } else { Value::new() }, if b.reachable { vb } else { Value::new() });
+                state.replace_with(a.join(&mut b));
                 va.join(&vb)
             }
-            ast::Expr::BoolOp(b) => self.expr_boolop(b, state),
+            ast::Expr::BoolOp(b) => {
+                let (v, mut st, stops) = self.boolop(b, state.copy(), false);
+                if let Some(mut s0) = stops {
+                    st = st.join(&mut s0);
+                }
+                state.replace_with(st);
+                v
+            }
             ast::Expr::UnaryOp(u) => {
                 let v = self.eval(&u.operand, state);
                 if matches!(u.op, ast::UnaryOp::UAdd | ast::UnaryOp::USub) {
@@ -286,129 +279,25 @@ impl Analyzer {
                 r
             }
             ast::Expr::Compare(c) => {
-                let a = self.eval(&c.left, state);
-                // a tensor is never None
-                if c.ops.len() == 1 && matches!(c.ops[0], ast::CmpOp::Is | ast::CmpOp::IsNot) && matches!(c.comparators[0], ast::Expr::NoneLiteral(_)) && crate::models::torch::is_tensor(&a) && a.pts.is_empty() {
-                    return Value::lit(intern::key_bool(c.ops[0] == ast::CmpOp::IsNot));
-                }
                 // (each comparator is evaluated once, as Python does; a false link of a chain ends it)
-                if c.ops.len() > 1 {
-                    let mut left = a.clone();
-                    let mut all_known = true;
-                    for (op, cmp) in c.ops.iter().zip(c.comparators.iter()) {
-                        let b = self.eval(cmp, state);
-                        match self.compare_values(*op, &left, &b, cmp, state) {
-                            Some(false) => return Value::lit(intern::key_bool(false)),
-                            Some(true) => {}
-                            None => all_known = false,
-                        }
-                        if crate::models::pandas::is_seriesish(self, &b) {
-                            return Value::with_kv(ObjSet::one(self.series), DATA);
-                        }
-                        left = b;
-                    }
-                    return if all_known { Value::lit(intern::key_bool(true)) } else { Value::data("bool") };
-                }
-                let b = self.eval(&c.comparators[0], state);
-                if matches!(c.ops[0], ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE | ast::CmpOp::Eq | ast::CmpOp::NotEq) {
-                    if crate::models::torch::is_tensor(&a) {
-                        let nd = frontend::node(node);
-                        return self.t_compare(&a, &b, &nd, state);
-                    }
-                    // a named unknown against a number / tensor (simple right operands only:
-                    // the interpreter evaluates them again otherwise)
-                    if self.torch_on && a.kv.is_bot() && a.pts.len() == 1 && a.pts.iter().all(|o| matches!(self.kind(o), crate::state::Kind::Unknown)) {
-                        let nd = frontend::node(node);
-                        if let Some(r) = self.t_compare_named(&a, &b, &nd, state) {
-                            return r;
-                        }
-                        if let Some(r) = self.compare_values(c.ops[0], &a, &b, &c.comparators[0], state) {
-                            return Value::lit(intern::key_bool(r));
-                        }
-                        return Value::data("bool");
-                    }
-                }
-                // instances: their comparison methods (`__lt__`, reflected, @total_ordering)
-                if !matches!(c.ops[0], ast::CmpOp::In | ast::CmpOp::NotIn | ast::CmpOp::Is | ast::CmpOp::IsNot) {
-                    let nd = frontend::node(node);
-                    // pathlib paths: equal when their texts are (never equal to a str)
-                    if matches!(c.ops[0], ast::CmpOp::Eq | ast::CmpOp::NotEq) {
-                        let pt = |an: &Analyzer, v: &Value| v.single().filter(|_| v.kv.is_bot()).and_then(|o| crate::models::pathtext::path_text(an, o));
-                        let (pa, pb) = (pt(self, &a), pt(self, &b));
-                        if pa.is_some() || pb.is_some() {
-                            let decided = match (&pa, &pb) {
-                                (Some(x), Some(y)) => Some(x == y),
-                                (Some(_), None) | (None, Some(_)) if (a.pts.is_empty() && a.kv.is_literal()) || (b.pts.is_empty() && b.kv.is_literal()) => Some(false),
-                                _ => None,
-                            };
-                            if let Some(eq) = decided {
-                                return Value::lit(intern::key_bool(if c.ops[0] == ast::CmpOp::Eq { eq } else { !eq }));
-                            }
-                        }
-                    }
-                    // Decimal / Fraction literals compare by value (`Decimal("1.0") == 1`)
-                    let has_num = |v: &Value| v.kv.is_literal() && crate::domain::kv_literals(&v.kv).iter().any(|k| crate::models::pynum::is_num_key(k) || crate::models::chrono::is_chrono_key(k));
-                    if (has_num(&a) || has_num(&b)) && a.pts.is_empty() && b.pts.is_empty() {
-                        let opn = match c.ops[0] {
-                            ast::CmpOp::Eq => "eq",
-                            ast::CmpOp::NotEq => "ne",
-                            ast::CmpOp::Lt => "lt",
-                            ast::CmpOp::LtE => "le",
-                            ast::CmpOp::Gt => "gt",
-                            _ => "ge",
-                        };
-                        let mut outs: Vec<bool> = Vec::new();
-                        for x in crate::domain::kv_literals(&a.kv).iter() {
-                            for y in crate::domain::kv_literals(&b.kv).iter() {
-                                match crate::models::pynum::binop(opn, x, y).or_else(|| crate::models::chrono::binop(opn, x, y)).flatten().and_then(|k| intern::with_key(k, |kk| if let intern::Key::Bool(t) = kk { Some(*t) } else { None })) {
-                                    Some(t) => outs.push(t),
-                                    None => return Value::data("bool"),
-                                }
-                            }
-                        }
-                        outs.dedup();
-                        return if outs.len() == 1 { Value::lit(intern::key_bool(outs[0])) } else { Value::data("bool") };
-                    }
-                    if let Some(r) = self.rich_compare(c.ops[0], &a, &b, &nd, state) {
+                let nd = frontend::node(node);
+                let mut left = self.eval(&c.left, state);
+                let mut all_true = true;
+                for (op, cmp) in c.ops.iter().zip(c.comparators.iter()) {
+                    let b = self.eval(cmp, state);
+                    let r = self.compare(*op, &left, &b, cmp, &nd, state);
+                    if c.ops.len() == 1 {
                         return r;
                     }
-                    // tuples: item by item
-                    if let Some(o) = self.tuple_order(&a, &b, state) {
-                        use std::cmp::Ordering::*;
-                        let r = match c.ops[0] {
-                            ast::CmpOp::Lt => o == Less,
-                            ast::CmpOp::LtE => o != Greater,
-                            ast::CmpOp::Gt => o == Greater,
-                            ast::CmpOp::GtE => o != Less,
-                            ast::CmpOp::Eq => o == Equal,
-                            _ => o != Equal,
-                        };
-                        return Value::lit(intern::key_bool(r));
+                    match r.kv.as_lit().filter(|_| r.pts.is_empty()) {
+                        Some(k) if k == intern::key_bool(false) => return r,
+                        Some(k) if k == intern::key_bool(true) => {}
+                        _ if crate::models::pandas::is_seriesish(self, &r) => return r,
+                        _ => all_true = false,
                     }
-                    if let Some(r) = self.compare_values(c.ops[0], &a, &b, &c.comparators[0], state) {
-                        return Value::lit(intern::key_bool(r));
-                    }
-                    if crate::models::pandas::is_seriesish(self, &a) || crate::models::pandas::is_seriesish(self, &b) {
-                        return Value::with_kv(ObjSet::one(self.series), DATA);
-                    }
-                    // tuples holding parameters: decided per call site
-                    let both = a.pts.union(&b.pts);
-                    if both.iter().any(|o| self.kind(o) == Kind::Frame) {
-                        return Value::with_kv(both.filter(|o| self.kind(o) == Kind::Frame), DATA);
-                    }
-                    return Value::data("bool");
+                    left = b;
                 }
-                if let Some(r) = self.compare_values(c.ops[0], &a, &b, &c.comparators[0], state) {
-                    return Value::lit(intern::key_bool(r));
-                }
-                if crate::models::pandas::is_seriesish(self, &a) || crate::models::pandas::is_seriesish(self, &b) {
-                    return Value::with_kv(ObjSet::one(self.series), DATA);
-                }
-                let both = a.pts.union(&b.pts);
-                if both.iter().any(|o| self.kind(o) == Kind::Frame) {
-                    return Value::with_kv(both.filter(|o| self.kind(o) == Kind::Frame), DATA);
-                }
-                Value::data("bool")
+                if all_true { Value::lit(intern::key_bool(true)) } else { Value::data("bool") }
             }
             ast::Expr::FString(f) => self.expr_fstring(f, node, state),
             ast::Expr::TString(_) => {
@@ -428,12 +317,7 @@ impl Analyzer {
                     return self.none_v.clone();
                 }
                 // (a bare `yield` yields None)
-                if y.value.is_some() {
-                    self.yield_value(v, state, (y as *const _ as usize, 0));
-                } else {
-                    let nv = self.none_v.clone();
-                    self.yield_value(nv, state, (y as *const _ as usize, 0));
-                }
+                self.yield_value(v, state, (y as *const _ as usize, 0));
                 // the value of the `yield` expression: what `send` passes, None when iterated
                 if crate::frontend::any_send_call() {
                     Value::data("yield")
@@ -543,6 +427,46 @@ impl Analyzer {
         self.cm_hook = Some(h);
     }
 
+    /// After a yield whose consumer runs code before it asks for the next item: what the
+    /// generator was given and has yielded may have changed (for the generator only: the
+    /// consumer's own run of that code is analysed where it is).
+    fn consumer_between(&mut self, gid: ObjId, state: &mut State) {
+        let Some(changes) = self.gen_havoc.get(&gid).cloned().filter(|c| !c.is_empty()) else { return };
+        let site = intern::s(&format!("consumer@{}", self.obj(gid).label.trim_start_matches("generator ")));
+        let rid = self.any_object(state);
+        // (an object that code changed in a way not one key: any of its facts, the objects
+        // it holds aside: those it changed are listed too)
+        let whole: Vec<ObjId> = changes.iter().filter(|c| c.1.is_none()).map(|c| c.0).collect();
+        self.change_objects(&whole, rid, site, state);
+        // (a key that code stored: any value, maybe stored)
+        for (o, sk) in changes.iter().filter_map(|(o, k)| k.map(|k| (*o, k))) {
+            let v = state.slot(o, sk.0, sk.1).join(&Value::obj(rid));
+            state.set_slot(o, sk.0, sk.1, v, false);
+            let r = state.row(o, sk.0).store(sk.1, false);
+            state.set_row(o, sk.0, r);
+        }
+    }
+
+    /// Code `site` may have changed these objects in any way (not the objects they hold): any
+    /// key, any value (`rid`), any length.
+    pub fn change_objects(&mut self, objs: &[ObjId], rid: ObjId, site: intern::StrId, state: &mut State) {
+        for &o in objs {
+            for ns in [Ns::Item, Ns::Attr] {
+                if state.has_row(o, ns) {
+                    let r = state.row(o, ns).mutate(site);
+                    state.set_row(o, ns, r);
+                }
+            }
+            for ((ns, k), v) in state.slots_of(o) {
+                state.set_slot(o, ns, k, v.join(&Value::obj(rid)), false);
+            }
+            if state.elems.get(&o).is_some() {
+                state.elems.insert(o, DATA);
+            }
+            self.set_llen(o, state, None);
+        }
+    }
+
     /// `site`: the yield (and the item of a `yield from`), which with the unrolled loop
     /// positions names the suspension point.
     fn yield_value(&mut self, v: Value, state: &mut State, site: (usize, usize)) -> Option<ObjId> {
@@ -550,6 +474,9 @@ impl Analyzer {
         let ctx = self.frame().ctx.clone();
         let label = format!("generator {}", self.frame().label);
         let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &label, Payload::None);
+        if let Some(r) = self.gen_reads.iter_mut().rev().find(|r| r.0 == gid) {
+            r.1 = true;
+        }
         // a fresh generator list (no yield yet in this activation) starts empty
         let fresh = !state.has_slot(gid, Ns::Elem, STAR);
         // (lengths that were one of a few: one more each, after this item)
@@ -621,6 +548,7 @@ impl Analyzer {
             let mut h = here;
             last.1 = last.1.join(&mut h);
         }
+        self.consumer_between(gid, state);
         Some(gid)
     }
 
@@ -729,65 +657,6 @@ impl Analyzer {
         Value::obj(oid)
     }
 
-    fn expr_boolop(&mut self, b: &'static ast::ExprBoolOp, state: &mut State) -> Value {
-        let mut acc = self.eval(&b.values[0], state);
-        let is_and = b.op == ast::BoolOp::And;
-        // the states where the evaluation may stop early (an undecided operand short-circuits)
-        let mut stops: Vec<State> = Vec::new();
-        let mut st = state.copy();
-        let mut prev: &'static ast::Expr = &b.values[0];
-        let mut depth_added = 0;
-        for v in b.values[1..].iter() {
-            let truth = self.truthiness(&acc, &st);
-            if (!is_and && truth == Some(true)) || (is_and && truth == Some(false)) {
-                break;
-            }
-            if truth.is_none() {
-                // (this operand may end it: its value, on the state it is false / true on)
-                let mut s0 = st.copy();
-                self.narrow(prev, !is_and, &mut s0);
-                if s0.reachable {
-                    stops.push(s0);
-                }
-                // the rest runs on some paths only
-                if depth_added == 0 {
-                    self.cond_depth += 1;
-                    self.branch_depth += 1;
-                    depth_added = 1;
-                }
-            }
-            self.narrow(prev, is_and, &mut st);
-            if !st.reachable {
-                break;
-            }
-            let rhs = self.eval(v, &mut st);
-            if (!is_and && truth == Some(false)) || (is_and && truth == Some(true)) {
-                acc = rhs;
-            } else {
-                // (what ends it here is a value of the other truth: `x and y` is x only when x
-                // is falsy)
-                acc = super::narrow::truth_narrowed(&acc, !is_and).unwrap_or(acc).join(&rhs);
-            }
-            prev = v;
-        }
-        if depth_added == 1 {
-            self.branch_depth -= 1;
-            self.cond_depth -= 1;
-        }
-        let mut out = if st.reachable { Some(st) } else { None };
-        for mut s0 in stops {
-            out = Some(match out {
-                None => s0,
-                Some(mut o) => o.join(&mut s0),
-            });
-        }
-        match out {
-            Some(o) => state.replace_with(o),
-            None => state.reachable = false,
-        }
-        acc
-    }
-
     /// `kv_map` that also records a narrowing event when the key is a parameter: the renamed
     /// key is only known once the parameter is bound to a literal (at the call site).
     pub fn rename_kv(&mut self, kv: &KeyVal, f: &RenameFn) -> KeyVal {
@@ -860,24 +729,62 @@ impl Analyzer {
         Value::obj(nid)
     }
 
-    /// `compare_const` on an already evaluated right operand `b` (written as `right`).
-    fn compare_values(&mut self, op: ast::CmpOp, a: &Value, b: &Value, right: &'static ast::Expr, state: &mut State) -> Option<bool> {
-        self.cmp_right = Some(b.clone());
-        let r = self.compare_const(op, a, right, state);
-        self.cmp_right = None;
-        r
-    }
-
-    fn eval_right(&mut self, right: &'static ast::Expr, state: &mut State) -> Value {
-        match self.cmp_right.take() {
-            Some(v) => v,
-            None => self.eval(right, state),
+    /// `a op b` for one comparison operator (`right`: b as written).
+    fn compare(&mut self, op: ast::CmpOp, a: &Value, b: &Value, right: &'static ast::Expr, nd: &Node, state: &mut State) -> Value {
+        let lit = |t: bool| Value::lit(intern::key_bool(t));
+        // a tensor is never None
+        if matches!(op, ast::CmpOp::Is | ast::CmpOp::IsNot) && matches!(right, ast::Expr::NoneLiteral(_)) && crate::models::torch::is_tensor(a) && a.pts.is_empty() {
+            return lit(op == ast::CmpOp::IsNot);
         }
+        let ordering = !matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn | ast::CmpOp::Is | ast::CmpOp::IsNot);
+        if ordering && crate::models::torch::is_tensor(a) {
+            return self.t_compare(a, b, nd, state);
+        }
+        // a named unknown against a number / tensor
+        if ordering && self.torch_on && a.kv.is_bot() && a.pts.len() == 1 && a.pts.iter().all(|o| self.kind(o) == Kind::Unknown) {
+            if let Some(r) = self.t_compare_named(a, b, nd, state) {
+                return r;
+            }
+            return self.compare_const(op, a, b, right, state).map(lit).unwrap_or_else(|| Value::data("bool"));
+        }
+        if ordering {
+            // library values (paths, Decimal, datetime); instances: their comparison methods
+            // (`__lt__`, reflected, @total_ordering); tuples item by item
+            if let Some(r) = crate::models::library_compare(self, op, a, b) {
+                return r;
+            }
+            if let Some(r) = self.rich_compare(op, a, b, nd, state) {
+                return r;
+            }
+            if let Some(o) = self.tuple_order(a, b, state) {
+                use std::cmp::Ordering::*;
+                return lit(match op {
+                    ast::CmpOp::Lt => o == Less,
+                    ast::CmpOp::LtE => o != Greater,
+                    ast::CmpOp::Gt => o == Greater,
+                    ast::CmpOp::GtE => o != Less,
+                    ast::CmpOp::Eq => o == Equal,
+                    _ => o != Equal,
+                });
+            }
+        }
+        if let Some(r) = self.compare_const(op, a, b, right, state) {
+            return lit(r);
+        }
+        if crate::models::pandas::is_seriesish(self, a) || crate::models::pandas::is_seriesish(self, b) {
+            return Value::with_kv(ObjSet::one(self.series), DATA);
+        }
+        // (tuples holding parameters: decided per call site)
+        let both = a.pts.union(&b.pts);
+        if both.iter().any(|o| self.kind(o) == Kind::Frame) {
+            return Value::with_kv(both.filter(|o| self.kind(o) == Kind::Frame), DATA);
+        }
+        Value::data("bool")
     }
 
     /// `a is None`, `a is not None`, `a == lit`, `a != lit` when the outcome is decidable
     /// from the value's literals: a value with only non-placeholder objects is never None.
-    fn compare_const(&mut self, op: ast::CmpOp, a: &Value, right: &'static ast::Expr, state: &mut State) -> Option<bool> {
+    fn compare_const(&mut self, op: ast::CmpOp, a: &Value, b: &Value, right: &'static ast::Expr, state: &mut State) -> Option<bool> {
         let none = intern::key_none();
         let lits = crate::domain::kv_literals(&a.kv);
         let has_ph = a.pts.iter().any(|o| self.kind(o) == Kind::Unknown);
@@ -914,7 +821,6 @@ impl Analyzer {
             // identity of objects: distinct abstract objects are distinct objects; one strong
             // object is itself
             ast::CmpOp::Is | ast::CmpOp::IsNot if !a.pts.is_empty() && a.kv.is_bot() => {
-                let b = self.eval_right(right, state);
                 if b.pts.is_empty() || !b.kv.is_bot() {
                     return None;
                 }
@@ -944,7 +850,6 @@ impl Analyzer {
                 Some(if op == ast::CmpOp::Is { same } else { !same })
             }
             ast::CmpOp::In | ast::CmpOp::NotIn => {
-                let b = self.eval_right(right, state);
                 let decide = |found: bool| Some(if op == ast::CmpOp::In { found } else { !found });
                 // members of a Flag: bits; else a member is its key
                 if (!self.member_key.is_empty() || !self.identity_objs.borrow().is_empty()) && !a.pts.is_empty() {
@@ -953,8 +858,7 @@ impl Analyzer {
                     }
                     let ka = self.keyify_in(a, state);
                     if ka.pts.is_empty() {
-                        self.cmp_right = Some(b);
-                        return self.compare_const(op, &ka, right, state);
+                        return self.compare_const(op, &ka, b, right, state);
                     }
                 }
                 if !a.pts.is_empty() || !a.kv.is_literal() || lits.is_empty() {
@@ -994,8 +898,7 @@ impl Analyzer {
                         // a view of a dict: its keys are the dict's (live); its values are decided
                         // when they are all known literals
                         Payload::View(ViewKind::Keys | ViewKind::Proxy, inner) => {
-                            self.cmp_right = Some(inner);
-                            return self.compare_const(op, a, right, state);
+                            return self.compare_const(op, a, &inner, right, state);
                         }
                         Payload::View(ViewKind::Values, inner) => {
                             let d = inner.single().filter(|d| self.kind(*d) == Kind::Dict)?;
@@ -1024,10 +927,9 @@ impl Analyzer {
                 rows.iter().all(|r| r.absent.contains(k)).then_some(op != ast::CmpOp::In)
             }
             ast::CmpOp::Eq | ast::CmpOp::NotEq => {
-                let b = self.eval_right(right, state);
                 // Enum members: their keys (a mixed-in one: its value)
                 let (a, b, lits) = if self.member_key.is_empty() {
-                    (a.clone(), b, lits)
+                    (a.clone(), b.clone(), lits)
                 } else {
                     let ka = self.member_base(&self.keyify(a));
                     let kb = self.member_base(&self.keyify(&b));
@@ -1057,7 +959,6 @@ impl Analyzer {
             ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE => {
                 // two single literals of one kind (numbers, or strings) are ordered here;
                 // anything else is decided per call site when it is concrete there
-                let b = self.eval_right(right, state);
                 let bl = crate::domain::kv_literals(&b.kv);
                 if !a.pts.is_empty() || !b.pts.is_empty() || !a.kv.is_literal() || !b.kv.is_literal() || lits.len() != 1 || bl.len() != 1 {
                     return None;
@@ -1710,11 +1611,30 @@ impl Analyzer {
     // comprehensions ---------------------------------------------------------
     /// Run a comprehension's generators (`limit`: the most known items a generator unrolls).
     fn comp(&mut self, gens: &'static [ast::Comprehension], limit: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
-        self.frame_mut().overlays.push(IndexMap::new());
+        self.with_gen_restart(state, true, &mut |an, st| an.comp_scoped(gens, limit, st, body, own));
+    }
+
+    fn comp_scoped(&mut self, gens: &'static [ast::Comprehension], limit: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
+        let mut names: Vec<intern::StrId> = gens.iter().flat_map(|g| names_in(&g.target)).map(|n| s(&n)).collect();
+        names.sort_unstable();
+        names.dedup();
+        let outer: Vec<Option<Value>> = names.iter().map(|n| state.env.get(n).cloned()).collect();
+        self.frame_mut().comp_names.push(names.clone());
         self.comp_cells.push(Default::default());
         self.comp_gen(gens, 0, limit, state, body, own);
         self.comp_cells.pop();
-        self.frame_mut().overlays.pop();
+        self.frame_mut().comp_names.pop();
+        // (the comprehension's variables are its own: the enclosing names are as before)
+        for (n, v) in names.into_iter().zip(outer) {
+            match v {
+                Some(v) => {
+                    state.env.insert(n, v);
+                }
+                None => {
+                    state.env.shift_remove(&n);
+                }
+            }
+        }
     }
 
     fn comp_gen(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
@@ -1726,6 +1646,7 @@ impl Analyzer {
         let itv = self.eval(&g.iter, state);
         let exhaust_after = itv.clone();
         let gn = frontend::node(&g.iter);
+        self.force_gen(&itv, state, true);
         let it = self.iterate(&itv, &gn, state);
         let understood = g.ifs.iter().all(|c| cond_is_exclusion(c, &g.target));
         if let Some(items) = &it.items {
@@ -1736,11 +1657,9 @@ impl Analyzer {
                 self.comp_known.push(true);
                 for (idx, item) in items.iter().enumerate() {
                     let mut s2 = state.copy();
-                    self.frame_mut().overlays.push(IndexMap::new());
                     self.frame_mut().unroll.push(idx);
                     let decided = self.comp_run_one(g, gens, i, limit, &Elem::One(item.clone()), &mut s2, body, understood, own);
                     self.frame_mut().unroll.pop();
-                    self.frame_mut().overlays.pop();
                     if s2.reachable {
                         // (an undecided filter may skip this item: joined with skipping it)
                         if decided {
@@ -1774,11 +1693,9 @@ impl Analyzer {
             }
         }
         let mut s2 = state.copy();
-        let mark0 = self.objects.len() as ObjId;
+        let mark0 = self.serial;
         let vmark = self.verdicts.len();
-        self.frame_mut().overlays.push(IndexMap::new());
         self.comp_run_one(g, gens, i, limit, &elem, &mut s2, body, understood, own);
-        self.frame_mut().overlays.pop();
         if it.exhaustive && understood && s2.reachable {
             self.comp_known.pop();
             state.replace_with(s2);
@@ -1788,9 +1705,12 @@ impl Analyzer {
         // it builds: the next one starts from the same state, one pass is the fixpoint)
         // (the element itself narrowed by a read is not a change the next element sees)
         let elem_objs = elem.flat().pts;
-        let older = |o: ObjId| o < mark0 && o != own && !elem_objs.contains(o) && !self.obj(o).iter_elem;
+        let older = |o: ObjId| self.objects[o as usize].born < mark0 && o != own && !elem_objs.contains(o) && !self.obj(o).iter_elem;
         let fp = s2.footprint(state);
-        let quiet = s2.env == state.env && fp.rows.iter().all(|(o, _)| !older(*o)) && fp.slots.iter().all(|(o, _)| !older(*o)) && fp.elems.iter().all(|o| !older(*o)) && s2.lens.diff_keys(&state.lens).iter().all(|o| !older(*o));
+        // (the comprehension's own variables aside)
+        let own_var = |n: &intern::StrId| self.frame().comp_names.iter().any(|ns| ns.contains(n));
+        let same_env = s2.env.iter().all(|(n, v)| own_var(n) || state.env.get(n) == Some(v)) && state.env.keys().all(|n| own_var(n) || s2.env.contains_key(n));
+        let quiet = same_env && fp.rows.iter().all(|(o, _)| !older(*o)) && fp.slots.iter().all(|(o, _)| !older(*o)) && fp.elems.iter().all(|o| !older(*o)) && s2.lens.diff_keys(&state.lens).iter().all(|o| !older(*o));
         if quiet {
             self.comp_known.pop();
             let mut joined = state.join(&mut s2);
@@ -1804,9 +1724,7 @@ impl Analyzer {
         // verdicts supersede the first pass's)
         self.drop_verdicts_since(vmark);
         let (mut head, _, s2) = self.loop_fixpoint(state, &mut |an, body_s| {
-            an.frame_mut().overlays.push(IndexMap::new());
             an.comp_run_one(g, gens, i, limit, &elem, body_s, body, understood, own);
-            an.frame_mut().overlays.pop();
         });
         self.comp_known.pop();
         let ev = elem.value_part();
@@ -1820,20 +1738,11 @@ impl Analyzer {
         self.comp_bind(&g.target, it, st);
         let mut decided = true;
         for cond in &g.ifs {
-            let cv = self.eval(cond, st);
-            match self.truth_of(&cv, st, &frontend::node(cond)) {
-                Some(true) => {}
-                Some(false) => {
-                    st.reachable = false;
-                    return decided;
-                }
-                None => {
-                    decided = false;
-                    self.narrow(cond, true, st);
-                    if !st.reachable {
-                        return decided;
-                    }
-                }
+            let sp = self.split(cond, st.copy());
+            decided &= !sp.f.reachable;
+            st.replace_with(sp.t);
+            if !st.reachable {
+                return decided;
             }
         }
         let conditional = !decided && !understood;
@@ -1848,13 +1757,6 @@ impl Analyzer {
     }
 
     fn comp_bind(&mut self, target: &'static ast::Expr, it: &Elem, state: &mut State) {
-        let names = names_in(target);
-        {
-            let ov = self.frame_mut().overlays.last_mut().unwrap();
-            for n in names {
-                ov.entry(s(&n)).or_insert_with(Value::new);
-            }
-        }
         self.bind_iter_target(target, it, state);
         if !self.comp_cells.is_empty() {
             // the variable's cell holds its latest value
@@ -1863,7 +1765,7 @@ impl Analyzer {
             for n in names_in(target) {
                 let sid = s(&n);
                 let cid = self.alloc_raw(Kind::Cell, &format!("compcell:{}:{}", addr, n), &ctx, true, &format!("cell {}", n), Payload::None);
-                let v = self.frame().overlays.iter().rev().find_map(|ov| ov.get(&sid).cloned()).unwrap_or_default();
+                let v = state.env.get(&sid).cloned().unwrap_or_default();
                 state.set_slot(cid, Ns::Cell, super::funcs::cell_key(), v, true);
                 self.comp_cells.last_mut().unwrap().insert(sid, cid);
             }
@@ -2052,7 +1954,6 @@ pub fn is_exception_name(n: &str) -> bool {
     n.ends_with("Error") || n.ends_with("Exception") || n.ends_with("Warning") || matches!(n, "StopIteration" | "KeyboardInterrupt" | "SystemExit" | "GeneratorExit")
 }
 
-pub const SAFE_BUILTINS: &[&str] = &["len", "str", "repr", "bool", "int", "float", "sorted", "reversed", "list", "dict", "set", "tuple", "frozenset", "min", "max", "sum", "abs", "round", "isinstance", "issubclass", "hasattr", "enumerate", "zip", "range", "print", "id", "hash", "type", "callable", "any", "all", "map", "filter", "format", "iter", "super"];
 
 /// `format(value, spec)` for a known literal and a plain spec: `[[fill]align][0][width][.prec][type]`.
 pub(crate) fn format_spec_literal(k: KeyId, spec: &str) -> Option<String> {
@@ -2111,24 +2012,7 @@ impl Analyzer {
     }
 }
 
-/// Models that say themselves where they raise (raise_here / may_raise_here): their calls are
-/// not "may raise anything".
-/// Library constructors whose models report their raises.
-const SELF_REPORTING_EXTERNALS: &[&str] = &[
-    // (simulated exactly: an exception is raised by the code they run, `__post_init__` …)
-    "configparser.ConfigParser", "configparser.RawConfigParser", "dataclasses.replace", "dataclasses.asdict", "dataclasses.astuple", "dataclasses.fields", "dataclasses.is_dataclass", "json.loads", "builtins.setattr",
-    "os.path.join", "os.path.basename", "os.path.dirname", "os.path.split", "os.path.splitext", "os.path.normpath", "os.path.isabs",
-    "pathlib.PurePosixPath", "pathlib.PurePath", "pathlib.Path", "pathlib.PosixPath",
-    "pandas.DataFrame", "io.StringIO", "csv.writer", "csv.DictWriter", "csv.reader", "csv.DictReader", "argparse.ArgumentParser", "threading.Thread",
-    "concurrent.futures.ThreadPoolExecutor", "concurrent.futures.ProcessPoolExecutor", "concurrent.futures.as_completed", "builtins.slice", "contextlib.ExitStack", "contextlib.redirect_stdout", "contextlib.redirect_stderr", "contextlib.closing", "contextlib.nullcontext", "itertools.count", "itertools.cycle", "itertools.repeat",
-    "itertools.islice", "itertools.chain", "itertools.chain.from_iterable", "itertools.product", "itertools.permutations",
-    "itertools.combinations", "itertools.combinations_with_replacement", "itertools.zip_longest", "itertools.tee", "itertools.pairwise",
-    "itertools.batched", "itertools.compress", "heapq.heappush", "heapq.heapify", "heapq.nlargest", "heapq.nsmallest", "heapq.merge",
-    "bisect.bisect", "bisect.bisect_left", "bisect.bisect_right", "bisect.insort", "bisect.insort_left", "bisect.insort_right",
-    "operator.methodcaller", "operator.itemgetter", "operator.attrgetter",
-];
 
-const SELF_REPORTING: &[&str] = &["excinit", "str.format", "cfgparser.", "cfgsection.", "pydantic.", "fieldinfo.", "pydverr.", "typeadapter.", "fastapi.client.", "fastapi.response.", "fastapi.request.", "stdobj.", "fastapi.bg.", "fastapi.app.", "fastapi.router.", "fastapi.state."];
 
 /// The positions `xs[lo:hi:step]` selects from a sequence of length `n` (`slice.indices`).
 pub fn slice_positions(n: i64, lo: Option<i64>, hi: Option<i64>, step: i64) -> Vec<i64> {
@@ -2266,33 +2150,9 @@ impl Analyzer {
                     return Some(lit(Some(decide(o))));
                 }
             }
-            // `@dataclass(order=True)`: two instances of the class compare their fields (those
-            // not `field(compare=False)`) as tuples
-            if let (Some(x), Some(y)) = (ai, bi) {
-                let cx = self.instance_class(x);
-                if cx.is_some() && cx == self.instance_class(y) && self.class_info_opt(cx.unwrap()).map(|ci| ci.dc_order.get()).unwrap_or(false) {
-                    let compared = |d: &Option<&'static ast::Expr>| match d {
-                        Some(ast::Expr::Call(fc)) if super::dotted_last(&fc.func) == "field" => !fc.arguments.keywords.iter().any(|k| k.arg.as_ref().map(|n| n.as_str()) == Some("compare") && matches!(&k.value, ast::Expr::BooleanLiteral(bl) if !bl.value)),
-                        _ => true,
-                    };
-                    let fields: Vec<KeyId> = self.dataclass_fields_mro(cx.unwrap()).iter().filter(|(_, d)| compared(d)).map(|(f, _)| key_str_lit(f)).collect();
-                    let (rx, ry) = (state.row(x, Ns::Attr), state.row(y, Ns::Attr));
-                    if fields.iter().all(|f| rx.definite.contains(*f) && ry.definite.contains(*f)) {
-                        let mut ord = Some(std::cmp::Ordering::Equal);
-                        for f in &fields {
-                            match crate::models::stdfuncs::value_order(self, state, &state.slot(x, Ns::Attr, *f), &state.slot(y, Ns::Attr, *f)) {
-                                Some(std::cmp::Ordering::Equal) => continue,
-                                o => {
-                                    ord = o;
-                                    break;
-                                }
-                            }
-                        }
-                        if let Some(o) = ord {
-                            return Some(lit(Some(decide(o))));
-                        }
-                    }
-                }
+            // `@dataclass(order=True)`: two instances of the class compare their fields
+            if let Some(o) = ai.zip(bi).and_then(|(x, y)| self.dataclass_order(x, y, state)) {
+                return Some(lit(Some(decide(o))));
             }
         }
         // no __eq__: identity

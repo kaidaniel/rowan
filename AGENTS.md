@@ -28,7 +28,8 @@ namespace packages).
   code removed it) ⊇ `definite` (there on every path), plus `absent`, open `sources` (inputs),
   and `mutators` (unknown calls). A row without sources or mutators is *closed*. A successful
   read narrows the key in.
-* **Statements.** Both sides of a branch run, narrowed by the test (`narrow.rs`), and join.
+* **Statements.** A test is evaluated once into the states where it is true and false
+  (`split`, `narrow.rs`: narrowing reads its parts' values, `traced`); both branches run, join.
   Loops over at most 16 known items are unrolled (comprehensions calling nothing per item: 64);
   others run to a fixpoint (40 rounds, then widened; verdicts are the last round's). A running `try`
   (`TryCtx`) records the state at every point of its body and callees that may raise (a raise,
@@ -45,8 +46,8 @@ namespace packages).
   its code uses on it unless it escapes, `receiver_effects`), and the function gets a reporting
   run with open parameters (its lines then hold for the calls that did not run). Entry runs
   are not counted (one per function). So the work is bounded by functions times the budget.
-  * **Recursion:** the inner call uses the running activation's partial result; it iterates
-    (8 rounds), then widens. An object a path has no facts of reads as unknown (`read_row`).
+  * **Recursion:** the inner call uses the running activation's partial result; the activation
+    reruns from the heaps of its recursive calls too (`rec_heap`), 8 rounds, then widened.
   * **Unknown values** are not taken for instances of the program's classes: a method of an
     unknown object is an unknown call (no duck typing; it was a closed-world assumption).
   * **Unknown calls** may change everything they reach through what they are given, at any
@@ -61,10 +62,10 @@ namespace packages).
     is unknown code. A TypeError may come from those taken to fail only on wrong types.
   * **Entry points:** functions nothing calls run with open parameters; their requirements
     become `param F.x` schemas.
-* **Generators** run whole at their first consumption (iteration, unpacking, a call taking
-  them, `g.__next__()`; `force_gen`), in the creating call's context. A consumer of item *k*
-  sees the effects up to yield *k* (`GenEffects`). A `@contextmanager`'s `with` body runs at
-  each yield.
+* **Generators** run whole at their first consumption (`force_gen`), in the creating call's
+  context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`). If code
+  between items changes what the generator reads after a yield (`gen_watch`), it runs again
+  with that changed at each yield (`with_gen_restart`). `@contextmanager` bodies run at yields.
 * **Requirements and schemas:** reading a key from a row open through an input records a
   requirement on that input. A key read on every path is `always`, on some paths `sometimes`.
   A read guarded by a handler for its `KeyError` still counts (a frame column read behind a
@@ -83,7 +84,8 @@ namespace packages).
   unknown. `exec`, `setattr` / `getattr` with unknown names (also in code a skipped call
   reaches), metaclasses and monkey-patching (rebinding a function or class too) are unknown or
   ignored. Accepted imprecision: lengths past 15, slices by unknown bounds, weak stores through
-  names holding several objects, runs cut by a deadline.
+  names holding several objects, runs cut by a deadline; a generator does not see what unknown
+  code changes between its items. An object a path has no facts of reads as unknown (`read_row`).
 
 ## Working conventions (the owner's standing instructions)
 
@@ -150,10 +152,10 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (the golden `#@limits` sets them per
   case; `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check` checks `#@todo`s too).
 * **Profiling:** the bench workflow's `perf` profiles (`sample` hangs on macOS 27). macOS has
-  no `timeout`: `perl -e 'alarm N; exec @ARGV' rowan …`. Compare builds on results (proven /
-  missing / possibly / schema counts of `--json`), not only on counters.
+  no `timeout`; time a run inside the guard (`.guard/run /usr/bin/time -l rowan …`: the guard
+  polls every 0.5 s). Compare builds on results (`--json` tier counts) and counters too.
 
-## Layout (`rowan/src/`, ~61k lines: the engine ~21k, the models ~40k)
+## Layout (`rowan/src/`, ~62k lines: the engine ~20.6k, the models ~41k)
 
 | file | role |
 | --- | --- |
@@ -163,20 +165,18 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 | `interp/mod.rs` | `Analyzer`, side tables, `Obj`, allocation (`alloc`, `live_among`), lengths, GC, entry runs |
 | `interp/stmts.rs` | statements, loops, try / with / match, `finally` |
 | `interp/exprs.rs`, `interp/funcs.rs` | expressions, comprehensions, yields; functions, iteration, generators |
-| `interp/narrow.rs`, `interp/access.rs` | narrowing, `CondFact`s; attribute and item access, verdicts, requirements |
+| `interp/narrow.rs`, `interp/access.rs` | tests (`split`), narrowing; attribute and item access, verdicts, requirements |
 | `interp/calls.rs`, `interp/effects.rs` | calls: per-call-site runs, budget, recursion, `__new__`, dataclass init; what skipped calls may change |
 | `models/shape.rs` | tensor shapes (dims as polynomials) for the torch and numpy models |
 | `report.rs`, `main.rs` | text / JSON / facts output; CLI, `rowan serve` (runs on a 1 GiB-stack thread) |
-| `models/` | `mod.rs` (`Registry`, builtins, containers); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib (`enums`, `exceptions`, functools, itertools, …); `pandas`, `pydantic`, `fastapi`, `torch` |
+| `models/` | `mod.rs` (`Registry`, builtins, containers); `tables` (what builtins / library calls raise, change, keep); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib (`enums`, `exceptions`, functools, itertools, …); `pandas`, `pydantic`, `fastapi`, `torch` |
 
 `rowan/py/` is a PyO3 binding (does not load on macOS 26); `vscode-rowan/` the editor
 extension (talks to `rowan serve`).
 
 ## Implementation rules that are easy to break
 
-* **Models allocating several objects at one node** must give each its own context, or the
-  second overwrites the first.
-* **Narrowing never re-runs a call:** each call node's last value is read back (`call_memo`).
+* **Models allocating several objects at one node** must give each its own context.
 * **Callees** run with the caller's `state.exits` taken out and restored (y438).
 * **GC roots.** A side table keyed by objects goes into `side_edges`; anything else the
   analyzer holds (a running with's managers) into `gc_pinned`: else a read gets an empty row.
@@ -190,8 +190,8 @@ extension (talks to `rowan serve`).
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.5 / ~3 / ~2.2 / ~8.3 s; 0.14 / 0.07 / 0.13 / 0.11 GB |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~12 / ~22 / ~81 / ~4.4 s; 0.33 / 0.9 / 1.1 / 0.3 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.6 / ~3 / ~2.2 / ~8 s; 0.13 / 0.07 / 0.13 / 0.09 GB |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10 / ~33 / ~67 / ~7.5 s; 0.28 / 1.6 / 1.2 / 0.31 GB |
 
 ## Known problems and next steps
 

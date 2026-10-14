@@ -24,6 +24,7 @@ pub mod effects;
 pub mod exprs;
 pub mod funcs;
 pub mod narrow;
+pub use crate::models::tables::*;
 pub mod stmts;
 
 pub const UNROLL_MAX: usize = 16;
@@ -119,64 +120,10 @@ pub fn debug_enabled() -> bool {
     debug_level() > 0
 }
 
-pub const SAFE_METHODS: &[&str] = &["dict.pop", "list.pop", 
-    "dict.get", "dict.keys", "dict.values", "dict.items", "dict.setdefault", "dict.copy", "list.append", "str.upper", "str.lower",
-    "str.strip", "str.title", "str.format", "str.join",
-];
-
-/// Builtin container / str methods that raise only on arguments of the wrong type (not on
-/// the values): their calls are not "may raise anything".
-pub fn safe_method(q: &str) -> bool {
-    if SAFE_METHODS.contains(&q) {
-        return true;
-    }
-    let Some((recv, name)) = q.split_once('.') else { return false };
-    match recv {
-        "str" => !matches!(name, "index" | "rindex" | "format" | "format_map" | "encode" | "decode"),
-        "list" => matches!(name, "append" | "extend" | "insert" | "sort" | "reverse" | "copy" | "count" | "clear"),
-        "dict" => matches!(name, "get" | "keys" | "values" | "items" | "setdefault" | "copy" | "update" | "clear" | "fromkeys"),
-        "set" | "frozenset" => matches!(name, "add" | "update" | "union" | "intersection" | "difference" | "symmetric_difference" | "copy" | "clear" | "discard" | "issubset" | "issuperset" | "isdisjoint" | "intersection_update" | "difference_update" | "symmetric_difference_update"),
-        "tuple" => name == "count",
-        // frame methods that cannot fail on a frame (reset_index reports its own ValueError)
-        // (a string column's accessor: these do not fail on its values)
-        "Series" => name.strip_prefix("str.").is_some_and(|m| matches!(m, "slice" | "lower" | "upper" | "strip" | "lstrip" | "rstrip" | "len" | "startswith" | "endswith" | "title" | "capitalize" | "casefold" | "swapcase" | "zfill" | "get")),
-        "DataFrame" => matches!(name, "copy" | "head" | "tail" | "to_dict" | "isna" | "notna" | "isnull" | "notnull" | "nunique" | "count" | "keys" | "items" | "iterrows" | "itertuples" | "to_numpy" | "to_records" | "reset_index" | "memory_usage" | "info"),
-        _ => false,
-    }
-}
-pub const STR_METHOD_NAMES: &[&str] = &[
-    "strip", "lower", "upper", "title", "split", "replace", "startswith", "endswith", "format", "join", "lstrip", "rstrip", "encode",
-    "decode", "isdigit", "isalpha", "zfill", "casefold", "capitalize", "partition", "rsplit", "splitlines", "find", "count", "ljust",
-    "rjust", "center", "rpartition", "rfind", "rindex", "isascii", "isalnum", "isspace", "islower", "isupper", "istitle", "isnumeric",
-    "isdecimal", "isidentifier", "isprintable", "removeprefix", "removesuffix", "swapcase", "expandtabs", "format_map", "translate",
-];
-pub const SCALAR_EXTRA_NAMES: &[&str] = &[
-    "append", "extend", "sort", "index", "insert", "remove", "isoformat", "strftime", "timestamp", "date", "time",
-    "total_seconds", "to_bytes", "bit_length", "as_integer_ratio", "is_integer", "hex", "conjugate", "real", "imag", "tolist",
-    "item", "copy", "clear", "reverse",
-];
-pub fn is_scalar_method(name: &str) -> bool {
-    STR_METHOD_NAMES.contains(&name) || SCALAR_EXTRA_NAMES.contains(&name)
-}
-pub const NOEFFECT_METHOD_NAMES: &[&str] = &[
-    "info", "debug", "warning", "warn", "error", "critical", "exception", "log", "write", "flush", "close", "print", "assert_called",
-    "assert_called_with", "equals",
-];
-pub const DICT_METHOD_NAMES: &[&str] = &["get", "items", "keys", "values", "update", "pop", "setdefault", "copy", "popitem", "clear"];
-/// Methods that make a class-less unknown a list (modelled by `list.*`).
-pub const LIST_METHOD_NAMES: &[&str] = &["append", "extend", "insert", "remove", "sort", "reverse"];
 pub const VALUE_GUARDS: &[&str] = &["ValueError", "Exception", "BaseException", "*"];
 pub const VALIDATION_GUARDS: &[&str] = &["ValidationError", "ValueError", "Exception", "BaseException", "*"];
 pub const ITEM_GUARDS: &[&str] = &["KeyError", "LookupError", "Exception", "BaseException", "IndexError", "*"];
 pub const ATTR_GUARDS: &[&str] = &["AttributeError", "Exception", "BaseException", "*"];
-pub const KNOWN_IDENTITY_DECORATORS: &[&str] = &[
-    "functools.lru_cache", "functools.cache", "functools.wraps", "contextlib.contextmanager", "abc.abstractmethod", "typing.overload",
-    "typing.final", "builtins.staticmethod", "builtins.classmethod", "pytest.fixture", "asyncio.coroutine", "dataclasses.dataclass",
-    "typing.no_type_check", "functools.total_ordering", "typing.runtime_checkable",
-    // pydantic registers these (models::pydantic reads them from the class body)
-    "pydantic.field_validator", "pydantic.model_validator", "pydantic.validator", "pydantic.root_validator", "pydantic.field_serializer",
-    "pydantic.model_serializer", "pydantic.computed_field", "pydantic.functional_validators.field_validator", "pydantic.dataclasses.dataclass",
-];
 
 // ---------------------------------------------------------------------------
 // records produced for the reporter
@@ -435,7 +382,9 @@ pub struct Frame {
     pub code: usize,
     pub cells: IndexMap<StrId, ObjId>,
     pub class_oid: Option<ObjId>,
-    pub overlays: Vec<IndexMap<StrId, Value>>,
+    /// the variables of the running comprehensions (innermost last): their values are in the
+    /// state's names, the enclosing ones' put back when the comprehension ends
+    pub comp_names: Vec<Vec<StrId>>,
     pub loop_depth: u32,
     pub label: String,
     /// indices of the enclosing unrolled loop iterations (part of the call context)
@@ -457,6 +406,22 @@ pub struct GenEffects {
     pub at: Vec<Option<State>>,
     pub end: Option<State>,
     pub join: State,
+}
+
+/// What code changed of an object: one stored key, or anything (None).
+pub type Change = (ObjId, Option<crate::state::SlotKey>);
+
+/// A generator run whole for a consumer that runs code between its items: the state after
+/// the run, the objects the run changed, what it read after a yield, the budgets before it.
+pub struct GenWatch {
+    pub gid: ObjId,
+    pub after: State,
+    pub own: rustc_hash::FxHashSet<ObjId>,
+    pub reads: rustc_hash::FxHashSet<Change>,
+    /// the budgets spent before the run (a run again of the code gets them back)
+    pub budget: std::rc::Rc<FxHashMap<usize, usize>>,
+    /// the birth mark after the run: objects born since are new
+    pub born: u64,
 }
 
 /// A generator call whose body has not run: it runs at the first consumption, from the state
@@ -495,7 +460,7 @@ impl Frame {
             code: 0,
             cells: IndexMap::new(),
             class_oid: None,
-            overlays: Vec::new(),
+            comp_names: Vec::new(),
             loop_depth: 0,
             label: label.to_string(),
             unroll: Vec::new(),
@@ -755,6 +720,9 @@ pub struct Analyzer {
     pub rec_hit: FxHashSet<(ObjId, String)>,
     pub rec_entry: FxHashMap<(ObjId, String), (Option<Value>, Vec<Value>, IndexMap<StrId, Value>)>,
     pub rec_widened: FxHashSet<(ObjId, String)>,
+    /// per running activation: the heap it started from, that heap grown by the heaps its
+    /// recursive calls were made in (on older objects they reach), and its birth mark
+    pub rec_heap: FxHashMap<(ObjId, String), (std::rc::Rc<State>, Option<State>, u64)>,
     pub loop_stack: Vec<LoopCtx>,
     /// the finally blocks of the running `try` statements: (`loop_stack` depth at the try,
     /// the block, not running yet): a `break` / `continue` runs those of its loop first
@@ -775,6 +743,19 @@ pub struct Analyzer {
     pub catching_depth: u32,
     /// generators made but not run yet: the call that made each (`force_gen`)
     pub lazy_gens: FxHashMap<ObjId, std::rc::Rc<LazyGen>>,
+    /// generators run whole for a consumer that runs code between their items: (generator,
+    /// the state after its run, what it was given and yields) — see `with_gen_restart`
+    pub gen_watch: Vec<GenWatch>,
+    /// what the running `for` statements iterate (`gen_used_up`)
+    pub for_iters: Vec<crate::domain::ObjSet>,
+    /// running generator activations: whether they yielded, and what they read since (an
+    /// object's key, or the whole object) — what code between their items may change for them
+    pub gen_reads: Vec<(ObjId, bool, rustc_hash::FxHashSet<Change>)>,
+    /// the reads of the last generator run (`force_gen` takes them)
+    pub gen_last_reads: Option<rustc_hash::FxHashSet<Change>>,
+    /// generators whose consumer changes objects they reach: those objects, changed for the
+    /// generator at each of its yields (`consumer_between`)
+    pub gen_havoc: FxHashMap<ObjId, Vec<Change>>,
     /// the call site and context of the generator `force_gen` is running
     pub force_at: Option<(String, String, bool)>,
     /// a generator's effects on older objects, per item: see `set_cursor`
@@ -790,8 +771,6 @@ pub struct Analyzer {
     pub alloc_extra: Option<String>,
     /// a load guarded by a `try` handler is running (its key is still required)
     pub caught_load: bool,
-    /// the right operand of a comparison link already evaluated (chained comparisons)
-    pub cmp_right: Option<Value>,
     /// per running comprehension: the cells of its variables (closed over by functions made
     /// inside it, which see the variable's latest value)
     pub comp_cells: Vec<FxHashMap<StrId, ObjId>>,
@@ -936,10 +915,10 @@ pub struct Analyzer {
     pub row_check_requests: Vec<(String, u32, String)>,
     /// module index -> its path relative to the main file's directory (`rel_file`)
     pub rel_files: std::cell::RefCell<FxHashMap<u32, String>>,
-    /// the last value of each call node, and whether a test is being narrowed (`eval`)
-    pub call_memo: FxHashMap<usize, Value>,
-    /// per generator object, the join of the states at its yields (a caller resumes from one
-    /// of them when the body never ends)
+    /// while a test is evaluated (`split`): its frame depth and the value each node of it had
+    pub trace: Option<(usize, FxHashMap<usize, Value>)>,
+    /// the values the test being narrowed had (`split`, read by `traced`)
+    pub traced: FxHashMap<usize, Value>,
     /// the states at the yields of a generator's running activation (copies, read per key
     /// where the caller needs them: joining whole heaps per yield was the cost)
     pub gen_yield_states: FxHashMap<ObjId, YieldStates>,
@@ -954,7 +933,6 @@ pub struct Analyzer {
     /// what a missing key raises in the reads a model makes (pydantic's field reads: a
     /// ValidationError)
     pub item_exc_force: Option<&'static str>,
-    pub narrow_depth: u32,
     /// a requirement-only entry run (`param F.x` schemas of a called function): no verdicts,
     /// row checks, facts or notes
     pub quiet: bool,
@@ -1466,6 +1444,7 @@ impl Analyzer {
     }
 
     pub fn verdict(&mut self, node: &Node, key: KeyId, cls: &Classification, oid: ObjId, ns: Ns, file_override: Option<&str>, text_override: Option<&str>) {
+        self.gen_read(oid, Some((ns, key)));
         if matches!(cls.tier, Tier::Map) || self.quiet || self.quiet_records {
             return;
         }
@@ -1516,6 +1495,15 @@ impl Analyzer {
     /// A verdict on an access the program guards (a try handling the failure): recorded for
     /// the golden harness and the hover, never a diagnostic.
     /// Forget the verdicts recorded since `mark` (a run whose states a later run supersedes).
+    /// A running generator that yielded reads `o` (one key, or all of it).
+    pub fn gen_read(&mut self, o: ObjId, k: Option<crate::state::SlotKey>) {
+        for (_, yielded, reads) in self.gen_reads.iter_mut() {
+            if *yielded {
+                reads.insert((o, k));
+            }
+        }
+    }
+
     pub fn drop_verdicts_since(&mut self, mark: usize) {
         for v in self.verdicts.drain(mark..) {
             self.verdict_keys.remove(&v.dedupe_key());
@@ -1612,7 +1600,7 @@ impl Analyzer {
         self.frames.push(fr);
         // (imported from inside a function: the function's returns so far are its own)
         let (exits, ret) = (state.exits.take(), state.ret.take());
-        self.exec_block(&info.tree.body, state);
+        self.with_gen_restart(state, true, &mut |an, s| an.exec_block(&info.tree.body, s));
         self.frames.pop();
         state.reachable = true;
         state.exits = exits;
@@ -2174,7 +2162,7 @@ impl Analyzer {
 
 
     /// Is `oid` reachable from a binding the program can still use: the locals of every
-    /// active frame, loop overlays, cells, module objects, narrowed values, the return value?
+    /// active frame, cells, module objects, narrowed values, the return value?
     pub fn is_live(&self, oid: ObjId, state: &State) -> bool {
         !self.live_among(&[oid], state).is_empty()
     }
@@ -2188,15 +2176,14 @@ impl Analyzer {
     }
 
     /// The roots of a reachability walk: the names, narrowed values and result of `state`, the
-    /// names of the first `envs` callers, and the modules, cells and loop overlays of the
-    /// first `frames` frames.
+    /// names of the first `envs` callers, and the modules and cells of the first `frames`
+    /// frames.
     pub fn state_roots(&self, state: &State, envs: usize, frames: usize, work: &mut Vec<ObjId>) {
         // (a walk takes the last pushed first: the running code's names before the modules'
         // globals, where an object made again is most often still held)
         for fr in self.frames.iter().take(frames) {
             work.push(fr.module);
             work.extend(fr.cells.values().copied());
-            fr.overlays.iter().flat_map(|o| o.values()).for_each(|v| v.push_objs(work));
         }
         let callers = self.env_stack.iter().take(envs).flat_map(|e| e.values());
         for v in callers.chain(state.ret.iter()).chain(state.narrowed.values()).chain(state.env.values()) {
@@ -2319,7 +2306,7 @@ impl Analyzer {
     pub fn gc_pinned(&self, work: &mut Vec<ObjId>, unwind: Option<usize>) {
         // (the side tables' entries: their keys themselves may be dead)
         self.side_edges(None, work);
-        for v in self.cur_exc.iter().chain(self.tries.iter().flat_map(|t| t.recs.iter().map(|r| &r.2))).chain(self.handling_values.iter()).chain(self.cmp_right.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
+        for v in self.cur_exc.iter().chain(self.tries.iter().flat_map(|t| t.recs.iter().map(|r| &r.2))).chain(self.handling_values.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
             v.push_objs(work);
         }
         for c in &self.m.fa_dep_cache {
@@ -2357,9 +2344,6 @@ impl Analyzer {
         for fr in &self.frames {
             work.push(fr.module);
             work.extend(fr.cells.values().copied());
-            for ov in &fr.overlays {
-                ov.values().for_each(|v| v.push_objs(work));
-            }
         }
     }
 
@@ -2614,12 +2598,6 @@ impl Analyzer {
                 back.ret = Some(nv);
             }
         }
-        for ov in self.frame_mut().overlays.iter_mut() {
-            let ups: Vec<(StrId, Value)> = ov.iter().filter_map(|(k, v)| rename_value(v, &map).map(|nv| (*k, nv))).collect();
-            for (k, nv) in ups {
-                ov.insert(k, nv);
-            }
-        }
         // 3. objects allocated during the iteration that hold references in their payloads
         let n = self.objects.len() as ObjId;
         for oid in mark..n {
@@ -2774,29 +2752,6 @@ pub fn is_constant(e: &ast::Expr) -> bool {
     )
 }
 
-pub const BUILTIN_NAMES: &[&str] = &[
-    "dict", "list", "set", "tuple", "len", "print", "str", "int", "float", "bool", "range", "enumerate", "zip", "sorted", "min", "max", "sum",
-    "any", "all", "isinstance", "type", "open", "getattr", "setattr", "hasattr", "repr", "iter", "next", "abs", "round", "map", "filter",
-    "reversed", "id", "hash", "object", "Exception", "KeyError", "ValueError", "TypeError", "AttributeError", "IndexError", "LookupError",
-    "RuntimeError", "property", "staticmethod", "classmethod", "super", "vars", "format", "frozenset", "bytes", "input",
-    "NotImplementedError", "StopIteration", "BaseException", "callable", "chr", "ord", "divmod", "pow", "slice", "issubclass", "memoryview",
-    "bytearray", "complex", "globals", "locals", "exec", "eval", "compile", "delattr", "help", "hex", "oct", "bin", "ascii", "breakpoint",
-    "FileNotFoundError", "OSError", "IOError", "ZeroDivisionError", "AssertionError", "NameError", "ImportError", "ModuleNotFoundError",
-    "PermissionError", "TimeoutError", "ConnectionError", "StopAsyncIteration", "GeneratorExit", "KeyboardInterrupt", "SystemExit", "Warning",
-    "UserWarning", "DeprecationWarning", "__name__", "__file__", "__doc__", "NotImplemented", "Ellipsis", "None", "True", "False", "anext",
-    "aiter", "__import__", "__build_class__", "__debug__", "__loader__", "__package__", "__spec__", "ArithmeticError", "BlockingIOError",
-    "BrokenPipeError", "BufferError", "BytesWarning", "ChildProcessError", "ConnectionAbortedError", "ConnectionRefusedError",
-    "ConnectionResetError", "EOFError", "EnvironmentError", "FloatingPointError", "FutureWarning", "ImportWarning", "IndentationError",
-    "InterruptedError", "IsADirectoryError", "MemoryError", "NotADirectoryError", "OverflowError", "PendingDeprecationWarning",
-    "ProcessLookupError", "RecursionError", "ReferenceError", "ResourceWarning", "RuntimeWarning", "SyntaxError", "SyntaxWarning",
-    "SystemError", "TabError", "UnboundLocalError", "UnicodeDecodeError", "UnicodeEncodeError", "UnicodeError", "UnicodeTranslateError",
-    "UnicodeWarning", "copyright", "credits", "exit", "license", "quit", "dir", "FileExistsError", "ExceptionGroup", "BaseExceptionGroup",
-    "EncodingWarning", "PythonFinalizationError",
-];
-
-pub fn is_builtin_name(n: &str) -> bool {
-    BUILTIN_NAMES.contains(&n)
-}
 
 /// The dotted package a file belongs to: the chain of enclosing directories that have an
 /// `__init__.py` (empty for a file outside any package).

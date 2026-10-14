@@ -28,6 +28,7 @@ pub mod pytext;
 pub mod torch;
 pub mod enums;
 pub mod exceptions;
+pub mod tables;
 
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
@@ -401,7 +402,7 @@ pub fn may_type_error(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &In
             })
     };
     let unknown = match qual.strip_prefix("builtins.") {
-        Some(n) if crate::interp::exprs::SAFE_BUILTINS.contains(&n) => {
+        Some(n) if crate::models::tables::SAFE_BUILTINS.contains(&n) => {
             if matches!(n, "str" | "repr" | "print" | "id" | "bool" | "callable" | "type" | "super") {
                 return;
             }
@@ -924,33 +925,9 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
     }
-    let mut classes: Vec<u32> = Vec::new();
-    for o in cv.pts.iter() {
-        match an.kind(o) {
-            Kind::Class | Kind::External => classes.push(o),
-            Kind::Tuple => {
-                for (_, cs) in st.slots_of(o) {
-                    classes.extend(cs.pts.iter().filter(|x| matches!(an.kind(*x), Kind::Class | Kind::External)));
-                }
-            }
-            _ => return Value::data("bool"),
-        }
-    }
-    if classes.is_empty() {
-        return Value::data("bool");
-    }
-    // a `Protocol` class (runtime_checkable): an instance whose class defines all its members
-    // is one; anything else may have them as attributes
-    let protocols: Vec<Vec<String>> = classes.iter().filter_map(|cls| protocol_members(an, *cls)).collect();
-    if !protocols.is_empty() {
-        let has_all = |an: &Analyzer, o: u32, ms: &Vec<String>| an.kind(o) == Kind::Instance && an.instance_class(o).is_some_and(|ic| ms.iter().all(|m| an.class_lookup(ic, m).is_some()));
-        if !v.kv.is_bot() || v.pts.is_empty() || !v.pts.iter().all(|o| protocols.iter().any(|ms| has_all(an, o, ms))) {
-            return Value::data("bool");
-        }
-        return Value::lit(intern::key_bool(true));
-    }
-    let mut verdicts: Vec<bool> = Vec::new();
+    let Some(classes) = an.isinstance_classes(cv, st) else { return Value::data("bool") };
     let builtin = |an: &Analyzer, cls: u32| -> Option<String> { if an.kind(cls) == Kind::External { Some(an.external_qual(cls).rsplit('.').next().unwrap_or("").to_string()) } else { None } };
+    let mut verdicts: Vec<bool> = Vec::new();
     // literal values (with or without objects: both parts count)
     if v.pts.is_empty() || (v.kv.is_literal() && !crate::domain::kv_literals(&v.kv).is_empty()) {
         let lits = crate::domain::kv_literals(&v.kv);
@@ -973,7 +950,7 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             });
             // (an abstract class like numbers.Number or collections.abc.Hashable: not decided)
             const KNOWN: &[&str] = &["str", "bool", "int", "float", "NoneType", "tuple", "bytes", "Decimal", "Fraction", "frozenset", "object", "list", "dict", "set", "complex", "bytearray", "type", "range", "defaultdict", "OrderedDict", "Counter", "deque"];
-            if kind == "?" || classes.iter().any(|cls| builtin(an, *cls).map(|b| !KNOWN.contains(&b.as_str())).unwrap_or(false)) {
+            if kind == "?" || classes.iter().any(|cls| builtin(an, *cls).map(|b| !KNOWN.contains(&b.as_str())).unwrap_or(false) || protocol_members(an, *cls).is_some()) {
                 return Value::data("bool");
             }
             let hit = classes.iter().any(|cls| match builtin(an, *cls) {
@@ -984,27 +961,10 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     for o in v.pts.iter() {
-        let k = an.kind(o);
-        if matches!(k, Kind::Unknown) {
-            return Value::data("bool");
+        match an.instance_of(o, &classes) {
+            Some(b) => verdicts.push(b),
+            None => return Value::data("bool"),
         }
-        // (an instance of a class deriving from a builtin / library class — `class C(dict)` —
-        // is an instance of it too: not decided against those)
-        if k == Kind::Instance && classes.iter().any(|cls| builtin(an, *cls).is_some_and(|b| b != "object")) && an.instance_class(o).is_some_and(|ic| an.mro(ic).iter().any(|c| an.class_info_opt(*c).is_some_and(|ci| ci.open_base || ci.lib.dict_base))) {
-            return Value::data("bool");
-        }
-        let hit = classes.iter().any(|cls| match builtin(an, *cls) {
-            Some(b) => match b.as_str() {
-                "dict" | "defaultdict" | "OrderedDict" | "Counter" => matches!(k, Kind::Dict),
-                "list" => k == Kind::List,
-                "tuple" => k == Kind::Tuple,
-                "set" | "frozenset" => k == Kind::Set,
-                "object" => true,
-                _ => false,
-            },
-            None => k == Kind::Instance && an.instance_class(o).map(|ic| an.is_subclass(ic, *cls)).unwrap_or(false),
-        });
-        verdicts.push(hit);
     }
     if verdicts.iter().all(|b| *b) {
         Value::lit(intern::key_bool(true))
@@ -1013,6 +973,117 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     } else {
         Value::data("bool")
     }
+}
+
+/// `a op b` (an ordering or equality) where a library value decides it: pathlib paths are
+/// equal when their texts are (never equal to a str); Decimal / Fraction / datetime literals
+/// compare by value (`Decimal("1.0") == 1`).
+pub fn library_compare(an: &Analyzer, op: ast::CmpOp, a: &Value, b: &Value) -> Option<Value> {
+    let lit = |t: bool| Value::lit(intern::key_bool(t));
+    if matches!(op, ast::CmpOp::Eq | ast::CmpOp::NotEq) {
+        let pt = |v: &Value| v.single().filter(|_| v.kv.is_bot()).and_then(|o| crate::models::pathtext::path_text(an, o));
+        let (pa, pb) = (pt(a), pt(b));
+        let decided = match (&pa, &pb) {
+            (Some(x), Some(y)) => Some(x == y),
+            (Some(_), None) | (None, Some(_)) if (a.pts.is_empty() && a.kv.is_literal()) || (b.pts.is_empty() && b.kv.is_literal()) => Some(false),
+            _ => None,
+        };
+        if let Some(eq) = decided {
+            return Some(lit(if op == ast::CmpOp::Eq { eq } else { !eq }));
+        }
+    }
+    let has_num = |v: &Value| v.kv.is_literal() && crate::domain::kv_literals(&v.kv).iter().any(|k| pynum::is_num_key(k) || chrono::is_chrono_key(k));
+    if !(has_num(a) || has_num(b)) || !a.pts.is_empty() || !b.pts.is_empty() {
+        return None;
+    }
+    let opn = match op {
+        ast::CmpOp::Eq => "eq",
+        ast::CmpOp::NotEq => "ne",
+        ast::CmpOp::Lt => "lt",
+        ast::CmpOp::LtE => "le",
+        ast::CmpOp::Gt => "gt",
+        _ => "ge",
+    };
+    let mut outs: Vec<bool> = Vec::new();
+    for x in crate::domain::kv_literals(&a.kv).iter() {
+        for y in crate::domain::kv_literals(&b.kv).iter() {
+            match pynum::binop(opn, x, y).or_else(|| chrono::binop(opn, x, y)).flatten().and_then(|k| intern::with_key(k, |kk| if let intern::Key::Bool(t) = kk { Some(*t) } else { None })) {
+                Some(t) => outs.push(t),
+                None => return Some(Value::data("bool")),
+            }
+        }
+    }
+    outs.dedup();
+    Some(if outs.len() == 1 { lit(outs[0]) } else { Value::data("bool") })
+}
+
+/// An attribute of a value without objects (a str, a number, a Decimal / Fraction / datetime,
+/// None, a slice, an unknown scalar): its value, or the bound method.
+pub fn scalar_attr(an: &mut Analyzer, obj: &Value, name: &str, report: bool, state: &mut State) -> Value {
+    if name == "str" && matches!(obj.kv, KeyVal::KeysOf(_)) {
+        // `df.columns.str.strip().str.lower()`: the accessor of renamed column names
+        return obj.clone();
+    }
+    // a Decimal / Fraction: its attributes and methods
+    let numlike = |k: KeyId| crate::models::pynum::is_num_key(k) || crate::models::chrono::is_chrono_key(k);
+    if obj.kv.is_literal() && !crate::domain::kv_literals(&obj.kv).is_empty() && crate::domain::kv_literals(&obj.kv).iter().all(numlike) {
+        let ks = crate::domain::kv_literals(&obj.kv);
+        let attr_of = |k: KeyId, n: &str| if crate::models::chrono::is_chrono_key(k) { crate::models::chrono::attr(k, n) } else { crate::models::pynum::attr(k, n) };
+        let mut out: Option<Vec<Value>> = Some(Vec::new());
+        for k in ks.iter() {
+            match (attr_of(k, name), out.as_mut()) {
+                (Some(Some(v)), Some(o)) => o.push(Value::lit(v)),
+                _ => out = None,
+            }
+        }
+        if let Some(o) = out {
+            return join_values(o);
+        }
+        if attr_of(ks.iter().next().unwrap(), name).is_some() {
+            return Value::data(name);
+        }
+        return an.method_value(&format!("num.{}", name), obj);
+    }
+    // an attribute of None (but a dunder every object has): an AttributeError
+    let none_only = obj.kv.is_literal() && crate::domain::kv_literals(&obj.kv).iter().all(|k| k == intern::key_none()) && !crate::domain::kv_literals(&obj.kv).is_empty();
+    if none_only && report && !name.starts_with("__") {
+        an.raise_here("AttributeError", state);
+        return Value::new();
+    }
+    if matches!(obj.kv, KeyVal::Lit(_) | KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
+        return an.method_value(&format!("str.{}", name), obj);
+    }
+    if let KeyVal::Data(d) = &obj.kv {
+        let label = intern::str_get(*d);
+        if matches!(&*label, "datetime" | "date" | "time" | "timedelta" | "timezone") && crate::models::chrono::NAMES.contains(&name) {
+            return match crate::models::chrono::attr(crate::models::chrono::chrono_key(crate::models::chrono::DELTA, 0, crate::models::chrono::NAIVE), name) {
+                _ if matches!(name, "year" | "month" | "day" | "hour" | "minute" | "second" | "microsecond" | "days" | "seconds" | "microseconds" | "tzinfo") => Value::data(name),
+                _ => an.method_value(&format!("num.{}", name), obj),
+            };
+        }
+        // a string whose text is not known (a validated `str` field, a str method's result)
+        if &*label == "str" && crate::interp::STR_METHOD_NAMES.contains(&name) {
+            return an.method_value(&format!("str.{}", name), obj);
+        }
+        if matches!(&*label, "Decimal" | "Fraction") && crate::models::pynum::NAMES.contains(&name) {
+            return if matches!(name, "numerator" | "denominator") { Value::data(name) } else { an.method_value(&format!("num.{}", name), obj) };
+        }
+    }
+    // a slice object with known bounds
+    if let Some((lo, hi, st)) = Analyzer::slice_label_bounds(&obj.kv) {
+        let lit = |b: Option<i64>, an: &Analyzer| match b {
+            Some(i) => Value::lit(intern::key_int(i)),
+            None => an.none_v.clone(),
+        };
+        match name {
+            "start" => return lit(lo, an),
+            "stop" => return lit(hi, an),
+            "step" => return lit(st, an),
+            "indices" => return an.method_value("slice.indices", obj),
+            _ => {}
+        }
+    }
+    an.method_value(&format!("unknown.{}", name), obj)
 }
 
 /// The members of a `typing.Protocol` class (its own and its protocol bases'), as

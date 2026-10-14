@@ -360,8 +360,14 @@ impl Analyzer {
                         let maybe = recs.iter().any(|o| state.row(*o, Ns::Item).present.contains(kk) || state.row(*o, Ns::Item).open());
                         let mut v = if maybe { self.load_item(j, Ns::Item, &Value::lit(kk), node, state, false) } else { Value::new() };
                         if !sure {
-                            if let Some(d) = &default {
-                                v = v.join(d);
+                            match &default {
+                                Some(d) => v = v.join(d),
+                                // a required body the JSON does not hold under its name: 422
+                                None if !maybe => {
+                                    self.raise_here("RequestValidationError", state);
+                                    return Value::new();
+                                }
+                                None => self.may_raise_here("RequestValidationError", state),
                             }
                         }
                         v
@@ -825,7 +831,7 @@ impl Analyzer {
         for (n, _, _) in &hooks {
             caught.insert(n.clone());
         }
-        let caught_names = crate::interp::stmts::expand_caught(caught);
+        let caught_names = crate::models::exceptions::expand_caught(caught);
         self.enter_try(caught_names.clone(), &mut pre);
         self.m.fa_dep_cache.push(rustc_hash::FxHashMap::default());
         self.m.fa_out_resp.push(Vec::new());
