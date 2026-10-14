@@ -291,17 +291,33 @@ impl Analyzer {
                 if c.ops.len() == 1 && matches!(c.ops[0], ast::CmpOp::Is | ast::CmpOp::IsNot) && matches!(c.comparators[0], ast::Expr::NoneLiteral(_)) && crate::models::torch::is_tensor(&a) && a.pts.is_empty() {
                     return Value::lit(intern::key_bool(c.ops[0] == ast::CmpOp::IsNot));
                 }
-                if c.ops.len() == 1 && matches!(c.ops[0], ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE | ast::CmpOp::Eq | ast::CmpOp::NotEq) {
+                // (each comparator is evaluated once, as Python does; a false link of a chain ends it)
+                if c.ops.len() > 1 {
+                    let mut left = a.clone();
+                    let mut all_known = true;
+                    for (op, cmp) in c.ops.iter().zip(c.comparators.iter()) {
+                        let b = self.eval(cmp, state);
+                        match self.compare_values(*op, &left, &b, cmp, state) {
+                            Some(false) => return Value::lit(intern::key_bool(false)),
+                            Some(true) => {}
+                            None => all_known = false,
+                        }
+                        if crate::models::pandas::is_seriesish(self, &b) {
+                            return Value::with_kv(ObjSet::one(self.series), DATA);
+                        }
+                        left = b;
+                    }
+                    return if all_known { Value::lit(intern::key_bool(true)) } else { Value::data("bool") };
+                }
+                let b = self.eval(&c.comparators[0], state);
+                if matches!(c.ops[0], ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE | ast::CmpOp::Eq | ast::CmpOp::NotEq) {
                     if crate::models::torch::is_tensor(&a) {
-                        let b = self.eval(&c.comparators[0], state);
                         let nd = frontend::node(node);
                         return self.t_compare(&a, &b, &nd, state);
                     }
                     // a named unknown against a number / tensor (simple right operands only:
                     // the interpreter evaluates them again otherwise)
                     if self.torch_on && a.kv.is_bot() && a.pts.len() == 1 && a.pts.iter().all(|o| matches!(self.kind(o), crate::state::Kind::Unknown)) {
-                        // (the right operand is evaluated once here)
-                        let b = self.eval(&c.comparators[0], state);
                         let nd = frontend::node(node);
                         if let Some(r) = self.t_compare_named(&a, &b, &nd, state) {
                             return r;
@@ -313,8 +329,7 @@ impl Analyzer {
                     }
                 }
                 // instances: their comparison methods (`__lt__`, reflected, @total_ordering)
-                if c.ops.len() == 1 && !matches!(c.ops[0], ast::CmpOp::In | ast::CmpOp::NotIn | ast::CmpOp::Is | ast::CmpOp::IsNot) {
-                    let b = self.eval(&c.comparators[0], state);
+                if !matches!(c.ops[0], ast::CmpOp::In | ast::CmpOp::NotIn | ast::CmpOp::Is | ast::CmpOp::IsNot) {
                     let nd = frontend::node(node);
                     // pathlib paths: equal when their texts are (never equal to a str)
                     if matches!(c.ops[0], ast::CmpOp::Eq | ast::CmpOp::NotEq) {
@@ -383,37 +398,15 @@ impl Analyzer {
                     }
                     return Value::data("bool");
                 }
-                if c.ops.len() == 1 {
-                    if let Some(b) = self.compare_const(c.ops[0], &a, &c.comparators[0], state) {
-                        return Value::lit(intern::key_bool(b));
-                    }
-                } else {
-                    // `a < b <= c`: each link on the operands' values; a false link decides
-                    // the chain (the rest is not evaluated), all true links make it true
-                    let mut left = a.clone();
-                    let mut all_known = true;
-                    for (op, cmp) in c.ops.iter().zip(c.comparators.iter()) {
-                        let b = self.eval(cmp, state);
-                        match self.compare_values(*op, &left, &b, cmp, state) {
-                            Some(false) => return Value::lit(intern::key_bool(false)),
-                            Some(true) => {}
-                            None => all_known = false,
-                        }
-                        left = b;
-                    }
-                    if all_known {
-                        return Value::lit(intern::key_bool(true));
-                    }
+                if let Some(r) = self.compare_values(c.ops[0], &a, &b, &c.comparators[0], state) {
+                    return Value::lit(intern::key_bool(r));
                 }
-                for cmp in c.comparators.iter() {
-                    let b = self.eval(cmp, state);
-                    if crate::models::pandas::is_seriesish(self, &a) || crate::models::pandas::is_seriesish(self, &b) {
-                        return Value::with_kv(ObjSet::one(self.series), DATA);
-                    }
-                    let both = a.pts.union(&b.pts);
-                    if both.iter().any(|o| self.kind(o) == Kind::Frame) {
-                        return Value::with_kv(both.filter(|o| self.kind(o) == Kind::Frame), DATA);
-                    }
+                if crate::models::pandas::is_seriesish(self, &a) || crate::models::pandas::is_seriesish(self, &b) {
+                    return Value::with_kv(ObjSet::one(self.series), DATA);
+                }
+                let both = a.pts.union(&b.pts);
+                if both.iter().any(|o| self.kind(o) == Kind::Frame) {
+                    return Value::with_kv(both.filter(|o| self.kind(o) == Kind::Frame), DATA);
                 }
                 Value::data("bool")
             }
