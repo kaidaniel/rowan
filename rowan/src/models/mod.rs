@@ -52,7 +52,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.str.", "Series.dt.", "Series.cat.", "Series.sparse.", "Series.list.", "Series.struct.", "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "num.", "dcinit.", "cfgparser.", "cfgsection.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "slice.", "memo.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
+    "parser.", "num.", "dcinit.", "statistics.", "cfgparser.", "cfgsection.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "slice.", "memo.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
 ];
 
 pub struct Registry {
