@@ -1274,7 +1274,7 @@ impl Analyzer {
     /// An instance of a class deriving from a class rowan does not see (a builtin, a library
     /// class): the base may define what the class body does not.
     pub fn external_based(&self, oid: u32) -> bool {
-        self.instance_class(oid).is_some_and(|c| self.mro(c).iter().any(|x| self.class_info_opt(*x).is_some_and(|ci| ci.open_base || ci.dict_base)))
+        self.instance_class(oid).is_some_and(|c| self.mro(c).iter().any(|x| self.class_info_opt(*x).is_some_and(|ci| ci.open_base || ci.lib.dict_base)))
     }
 
     pub fn has_truth_dunder(&self, oid: u32) -> bool {

@@ -2914,7 +2914,7 @@ const MODULE_METHODS: &[&str] = &[
 impl Analyzer {
     pub fn t_is_module_instance(&self, o: u32) -> bool {
         let Some(cls) = self.instance_class(o) else { return false };
-        self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|ci| ci.nn_module).unwrap_or(false))
+        self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|ci| ci.lib.nn_module).unwrap_or(false))
     }
 
     /// `self.register_buffer` & co. on a user module (None: a user attribute).

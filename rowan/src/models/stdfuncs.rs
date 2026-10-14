@@ -495,7 +495,7 @@ fn value_eq(an: &Analyzer, st: &State, a: &Value, b: &Value) -> Option<bool> {
     let plain = |v: &Value| {
         v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| {
             an.kind(o) == Kind::Instance && an.instance_class(o).is_some_and(|c| {
-                an.class_lookup(c, "__eq__").is_none() && an.mro(c).iter().all(|m| an.class_info_opt(*m).is_some_and(|ci| !ci.open_base && !ci.dict_base && !ci.typed_dict && !ci.named_tuple))
+                an.class_lookup(c, "__eq__").is_none() && an.mro(c).iter().all(|m| an.class_info_opt(*m).is_some_and(|ci| !ci.open_base && !ci.lib.dict_base && !ci.lib.typed_dict && !ci.lib.named_tuple))
             })
         })
     };

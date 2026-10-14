@@ -52,7 +52,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.str.", "Series.dt.", "Series.cat.", "Series.sparse.", "Series.list.", "Series.struct.", "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "num.", "dcinit.", "statistics.", "cfgparser.", "cfgsection.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "slice.", "memo.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
+    "parser.", "num.", "dcinit.", "statistics.", "cfgparser.", "cfgsection.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "threadsub.", "slice.", "memo.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
 ];
 
 pub struct Registry {
@@ -416,12 +416,14 @@ pub fn may_type_error(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &In
 
 /// A builtin Python carries out by a dunder of its argument, given instances of the
 /// program's classes that define it: `str` / `repr` / `format` / `print` (`__str__`,
-/// `__repr__`, `__format__`), `hash`, `len`, `int`, `float`, `abs`, `bool`. The dunders run
+/// `__repr__`, `__format__`), `hash`, `len`, `int`, `float`, `abs`, `bool`; `pprint`'s
+/// printers (`__repr__`). The dunders run
 /// (their effects happen) and give the result; the rest of the argument goes to the model.
 #[allow(clippy::too_many_arguments)]
 pub fn builtin_dunder(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &crate::frontend::Node) -> Option<Value> {
-    let names: &[&str] = match qual.strip_prefix("builtins.")? {
+    let names: &[&str] = match qual.strip_prefix("builtins.").unwrap_or(qual) {
         "str" | "print" => &["__str__", "__repr__"],
+        "pprint.pp" | "pprint.pprint" | "pprint.pformat" => &["__repr__"],
         "repr" | "ascii" => &["__repr__"],
         "format" => &["__format__"],
         "hash" => &["__hash__"],
@@ -453,7 +455,7 @@ pub fn builtin_dunder(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &In
     };
     match qual {
         // (each argument's text; the call writes those)
-        "builtins.print" => {
+        "builtins.print" | "pprint.pp" | "pprint.pprint" | "pprint.pformat" => {
             let mut texts = Vec::new();
             for a in args {
                 texts.push(match an.run_dunder(a, names, vec![], node, state) {
@@ -968,7 +970,7 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         // (an instance of a class deriving from a builtin / library class — `class C(dict)` —
         // is an instance of it too: not decided against those)
-        if k == Kind::Instance && classes.iter().any(|cls| builtin(an, *cls).is_some_and(|b| b != "object")) && an.instance_class(o).is_some_and(|ic| an.mro(ic).iter().any(|c| an.class_info_opt(*c).is_some_and(|ci| ci.open_base || ci.dict_base))) {
+        if k == Kind::Instance && classes.iter().any(|cls| builtin(an, *cls).is_some_and(|b| b != "object")) && an.instance_class(o).is_some_and(|ic| an.mro(ic).iter().any(|c| an.class_info_opt(*c).is_some_and(|ci| ci.open_base || ci.lib.dict_base))) {
             return Value::data("bool");
         }
         let hit = classes.iter().any(|cls| match builtin(an, *cls) {
@@ -2386,7 +2388,7 @@ fn update_from_instances(an: &mut Analyzer, st: &mut State, oid: u32, src: &Valu
     if src.pts.is_empty() {
         return false;
     }
-    let insts: Vec<u32> = src.pts.iter().filter(|o| an.kind(*o) == Kind::Instance && an.instance_class(*o).is_some_and(|cl| !an.class_info_opt(cl).map(|ci| ci.dict_base || ci.typed_dict || ci.pydantic).unwrap_or(true))).collect();
+    let insts: Vec<u32> = src.pts.iter().filter(|o| an.kind(*o) == Kind::Instance && an.instance_class(*o).is_some_and(|cl| !an.class_info_opt(cl).map(|ci| ci.lib.dict_base || ci.lib.typed_dict || ci.lib.pydantic).unwrap_or(true))).collect();
     if insts.is_empty() || insts.len() != src.pts.len() {
         return false;
     }
@@ -4166,8 +4168,9 @@ fn m_globals(an: &mut Analyzer, _st: &mut State, _c: &Call) -> Value {
     Value::obj(vid)
 }
 
-/// What a library base class makes of a class the program defines (`class C(Base)`).
-#[derive(Default)]
+/// What library base classes make of a class the program defines (`class C(Base)`): of one
+/// (`class_base`), or of its direct library bases together (`ClassInfo::lib`).
+#[derive(Default, Clone, Debug)]
 pub struct ClassBase {
     pub is_enum: bool,
     pub enum_kind: crate::interp::EnumKind,
@@ -4179,10 +4182,27 @@ pub struct ClassBase {
     pub named_tuple: bool,
     /// its instances may hold what the program does not show (a base rowan does not see)
     pub open: bool,
+    /// the bases' qualified names
+    pub quals: Vec<String>,
+}
+
+impl ClassBase {
+    pub fn join(&mut self, o: ClassBase) {
+        self.enum_kind.join(o.enum_kind);
+        self.is_enum |= o.is_enum;
+        self.str_mixin |= o.str_mixin;
+        self.dict_base |= o.dict_base;
+        self.nn_module |= o.nn_module;
+        self.pydantic |= o.pydantic;
+        self.typed_dict |= o.typed_dict;
+        self.named_tuple |= o.named_tuple;
+        self.open |= o.open;
+        self.quals.extend(o.quals);
+    }
 }
 
 pub fn class_base(q: &str) -> ClassBase {
-    let mut f = ClassBase { is_enum: (q.ends_with("Enum") || q.ends_with("Flag")) && q.starts_with("enum."), ..Default::default() };
+    let mut f = ClassBase { is_enum: (q.ends_with("Enum") || q.ends_with("Flag")) && q.starts_with("enum."), quals: vec![q.to_string()], ..Default::default() };
     match q {
         "enum.StrEnum" | "enum.IntEnum" | "enum.IntFlag" | "enum.ReprEnum" => {
             f.enum_kind.mixed = true;
@@ -4449,7 +4469,7 @@ fn m_dc_replace(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             Kind::Instance => an.instance_class(o),
             _ => None,
         };
-        if let Some(cls) = cls.filter(|cl| an.class_info_opt(*cl).map(|ci| ci.has_fields() && !ci.named_tuple).unwrap_or(false)) {
+        if let Some(cls) = cls.filter(|cl| an.class_info_opt(*cl).map(|ci| ci.has_fields() && !ci.lib.named_tuple).unwrap_or(false)) {
             let specs = an.dc_specs(cls);
             let mut kw: IndexMap<intern::StrId, Value> = IndexMap::new();
             for sp in specs.iter().filter(|sp| sp.init && !sp.initvar) {
@@ -5550,7 +5570,7 @@ pub fn record_class_attr(an: &mut Analyzer, oid: ObjId, name: &str, node: &crate
         }
         });
     }
-    if matches!(name, "__required_keys__" | "__optional_keys__" | "__total__") && an.class_info_opt(oid).is_some_and(|ci| ci.typed_dict) {
+    if matches!(name, "__required_keys__" | "__optional_keys__" | "__total__") && an.class_info_opt(oid).is_some_and(|ci| ci.lib.typed_dict) {
         return Some(match an.typed_dict_keys(oid) {
             Some((req, opt)) if name != "__total__" => {
                 let ks: Vec<Value> = intern::sorted_by_str(if name == "__required_keys__" { req } else { opt }.iter()).into_iter().map(Value::lit).collect();

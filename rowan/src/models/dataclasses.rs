@@ -27,7 +27,7 @@ impl Analyzer {
     /// `super().__init__(…)` from a subclass).
     pub fn dataclass_init(&mut self, cls: u32, inst: ObjId, args: &[Value], star_args: &[Value], kwargs: &IndexMap<StrId, Value>, star_kwargs: &[Value], state: &mut State, node: &Node) {
         let ci = self.class_info(cls);
-        let ns = if ci.typed_dict { Ns::Item } else { Ns::Attr };
+        let ns = if ci.lib.typed_dict { Ns::Item } else { Ns::Attr };
         let mut initvars: Vec<Value> = Vec::new();
         // `*seq` arguments: a sequence of known length gives positional arguments in order; past
         // one of unknown length every further positional field may come from it (its element)
@@ -126,7 +126,7 @@ impl Analyzer {
                     v = Some(self.dataclass_default(d, node, state));
                 }
                 if v.is_none() && star_kwargs.is_empty() {
-                    if !ci.typed_dict {
+                    if !ci.lib.typed_dict {
                         self.verdict(node, fk, &Classification::with_note(Tier::Missing, "is a dataclass field that was not given"), inst, ns, None, None);
                     }
                     continue;
@@ -141,7 +141,7 @@ impl Analyzer {
                 state.set_row(inst, ns, r);
                 state.set_slot(inst, ns, fk, v, true);
             }
-            if ci.typed_dict {
+            if ci.lib.typed_dict {
                 for sk in star_kwargs {
                     self.copy_into(inst, Ns::Item, sk, state, true, &KeySet::new());
                 }

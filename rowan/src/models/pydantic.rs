@@ -139,7 +139,7 @@ pub fn attr_value(an: &mut Analyzer, st: &mut State, recv: ObjId, name: &str, no
 
 /// Is `cls` a pydantic model class (a `BaseModel` / `BaseSettings` / `RootModel` above it)?
 pub fn is_model(an: &Analyzer, cls: ObjId) -> bool {
-    an.class_info_opt(cls).is_some() && an.mro(cls).iter().any(|c| an.class_info_opt(*c).map(|x| x.pydantic).unwrap_or(false))
+    an.class_info_opt(cls).is_some() && an.mro(cls).iter().any(|c| an.class_info_opt(*c).map(|x| x.lib.pydantic).unwrap_or(false))
 }
 
 /// Is `cls` validated by pydantic (a model or a pydantic dataclass)?
@@ -531,8 +531,8 @@ impl Analyzer {
                     found = cands.iter().copied().find(|c| self.class_info(*c).module == module).or_else(|| cands.first().copied());
                 }
                 if found.is_none() {
-                    let td = v.pts.iter().find(|o| self.kind(*o) == Kind::Class && self.class_info_opt(*o).map(|ci| ci.typed_dict).unwrap_or(false)).or_else(|| {
-                        let c: Vec<ObjId> = self.user_classes.iter().copied().filter(|c| self.class_info_opt(*c).map(|ci| ci.name == n && ci.typed_dict).unwrap_or(false)).collect();
+                    let td = v.pts.iter().find(|o| self.kind(*o) == Kind::Class && self.class_info_opt(*o).map(|ci| ci.lib.typed_dict).unwrap_or(false)).or_else(|| {
+                        let c: Vec<ObjId> = self.user_classes.iter().copied().filter(|c| self.class_info_opt(*c).map(|ci| ci.name == n && ci.lib.typed_dict).unwrap_or(false)).collect();
                         c.iter().copied().find(|x| self.class_info(*x).module == module).or_else(|| c.first().copied())
                     });
                     if let Some(t) = td {
@@ -1321,7 +1321,7 @@ impl Analyzer {
             let v = self.eval(e, state);
             let a = match v.pts.iter().find(|o| self.kind(*o) == Kind::Class) {
                 Some(c) if is_validated(self, c) => Ann::Model(c),
-                Some(c) if self.class_info_opt(c).map(|x| x.typed_dict).unwrap_or(false) => Ann::TypedDict(c),
+                Some(c) if self.class_info_opt(c).map(|x| x.lib.typed_dict).unwrap_or(false) => Ann::TypedDict(c),
                 _ => self.pyd_ann(e, module, state),
             };
             key.push_str(&format!("{:?};", a));
@@ -1336,15 +1336,11 @@ impl Analyzer {
             module: ci.module,
             open_base: false,
             dataclass_fields: std::cell::RefCell::new(Some(Vec::new())),
-            typed_dict: false,
-            named_tuple: false,
-            dict_base: false,
-            pydantic: ci.pydantic,
+            lib: crate::models::ClassBase { pydantic: ci.lib.pydantic, ..Default::default() },
             pyd_dataclass: std::cell::Cell::new(ci.pyd_dataclass.get()),
             dc_frozen: std::cell::Cell::new(ci.dc_frozen.get()),
             dc_kw_only: std::cell::Cell::new(ci.dc_kw_only.get()),
             dc_order: std::cell::Cell::new(ci.dc_order.get()),
-            nn_module: false,
             any_fields: std::cell::RefCell::new(None),
         });
         let spec = self.alloc_raw(Kind::Class, &site, "", true, &label, Payload::Class(info));
@@ -1359,7 +1355,7 @@ impl Analyzer {
         let mut out: Vec<(String, bool, Ann)> = Vec::new();
         for c in self.mro(cls).into_iter().rev() {
             let Some(ci) = self.class_info_opt(c) else { continue };
-            if !ci.typed_dict {
+            if !ci.lib.typed_dict {
                 continue;
             }
             let node: &'static ast::StmtClassDef = ci.node;

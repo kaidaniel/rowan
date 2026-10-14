@@ -104,16 +104,20 @@ impl Analyzer {
     }
 }
 
-/// `threading.Thread(group=None, target=None, name=None, args=(), kwargs=None, daemon=None)`.
+/// `threading.Thread(group=None, target=None, name=None, args=(), kwargs=None, daemon=None)`;
+/// `threading.Timer(interval, function, args=None, kwargs=None)` is a thread running `function`.
 pub fn thread_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let o = obj(an, st, &c.node, "stdobj.thread", &format!("th{}", c.site));
-    let target = c.arg(1, Some("target")).unwrap_or_else(|| an.none_v.clone());
-    let args = c.arg(3, Some("args")).unwrap_or_default();
-    let kwargs = c.arg(4, Some("kwargs")).unwrap_or_default();
-    for (k, v) in [("target", target), ("args", args), ("kwargs", kwargs)] {
+    let timer = c.qual == "threading.Timer";
+    let (target, args, kwargs) = if timer { (c.arg(1, Some("function")), c.arg(2, Some("args")), c.arg(3, Some("kwargs"))) } else { (c.arg(1, Some("target")), c.arg(3, Some("args")), c.arg(4, Some("kwargs"))) };
+    let target = target.unwrap_or_else(|| an.none_v.clone());
+    let (args, kwargs) = (args.unwrap_or_default(), kwargs.unwrap_or_default());
+    for (k, v) in [("target", target), ("args", args), ("kwargs", kwargs), ("timer", Value::lit(intern::key_bool(timer)))] {
         st.set_slot(o, Ns::Attr, slot_key(k), v, true);
     }
-    for (k, v) in [("name", c.arg(2, Some("name")).unwrap_or_else(|| Value::data("thread name"))), ("daemon", c.arg(5, Some("daemon")).unwrap_or_else(|| Value::lit(intern::key_bool(false))))] {
+    let name = if timer { None } else { c.arg(2, Some("name")) };
+    let daemon = if timer { None } else { c.arg(5, Some("daemon")) };
+    for (k, v) in [("name", name.unwrap_or_else(|| Value::data("thread name"))), ("daemon", daemon.unwrap_or_else(|| Value::lit(intern::key_bool(false))))] {
         let kk = key_str_lit(k);
         st.set_slot(o, Ns::Attr, kk, v, true);
         st.set_row(o, Ns::Attr, st.row(o, Ns::Attr).store(kk, true));
@@ -152,11 +156,29 @@ fn thread_start(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId) {
     let args = st.slot(o, Ns::Attr, slot_key("args"));
     let kwargs = st.slot(o, Ns::Attr, slot_key("kwargs"));
     let (a, kw) = call_args(an, st, &c.node, &args, &kwargs);
+    // (a timer's function runs unless it is cancelled first)
+    let mut cancelled = (st.slot(o, Ns::Attr, slot_key("timer")).kv.as_lit() != Some(intern::key_bool(false))).then(|| st.copy());
     an.call_catching(&target, a, kw, st, &c.node);
+    if let Some(c) = cancelled.as_mut() {
+        let j = st.join(c);
+        st.replace_with(j);
+    }
 }
 
-/// `ThreadPoolExecutor(max_workers=…)` / `ProcessPoolExecutor(…)`.
+/// `ThreadPoolExecutor(max_workers=…, thread_name_prefix=…, initializer=…, initargs=…)` /
+/// `ProcessPoolExecutor(…)`: a thread pool's initializer runs in its workers (with every
+/// exception caught; a process pool's runs in other processes).
 pub fn executor_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let threads = !c.qual.ends_with("ProcessPoolExecutor");
+    if let Some(f) = c.arg(2, Some("initializer")).filter(|f| threads && !f.pts.is_empty()) {
+        let args = c.arg(3, Some("initargs")).unwrap_or_default();
+        let (a, kw) = call_args(an, st, &c.node, &args, &Value::new());
+        // (when a worker starts: perhaps never)
+        let mut none = st.copy();
+        an.call_catching(&f, a, kw, st, &c.node);
+        let j = st.join(&mut none);
+        st.replace_with(j);
+    }
     Value::obj(obj(an, st, &c.node, "stdobj.executor", &format!("ex{}", c.site)))
 }
 
@@ -298,8 +320,24 @@ pub fn as_completed(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::obj(lid)
 }
 
+/// `t.start()` of a `threading.Thread` subclass: its `run()` runs (with every exception
+/// caught); `t.join()` waits.
+fn thread_sub(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    if c.qual == "threadsub.start" {
+        let recv = c.recv.clone().unwrap_or_default();
+        let mut pre = st.copy();
+        an.enter_try(rustc_hash::FxHashSet::from_iter(["*".to_string()]), &mut pre);
+        an.catching_depth += 1;
+        an.call_method_with(&recv, "run", vec![], &c.node, st);
+        an.catching_depth -= 1;
+        an.leave_try();
+    }
+    an.none_v.clone()
+}
+
 pub fn register(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {
-    r(&["threading.Thread"], thread_new);
+    r(&["threadsub.start", "threadsub.join"], thread_sub);
+    r(&["threading.Thread", "threading.Timer"], thread_new);
     r(&["concurrent.futures.ThreadPoolExecutor", "concurrent.futures.ProcessPoolExecutor", "concurrent.futures.thread.ThreadPoolExecutor"], executor_new);
     r(&["concurrent.futures.as_completed"], as_completed);
 }

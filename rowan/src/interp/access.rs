@@ -286,7 +286,7 @@ impl Analyzer {
     /// inherited from TypedDict bases).
     pub fn typed_dict_keys(&self, cls: u32) -> Option<(KeySet, KeySet)> {
         let ci = self.class_info_opt(cls)?;
-        if !ci.typed_dict {
+        if !ci.lib.typed_dict {
             return None;
         }
         let (mut req, mut opt) = (KeySet::new(), KeySet::new());
@@ -354,7 +354,7 @@ impl Analyzer {
             Kind::Instance => match self.instance_class(o) {
                 Some(c) => {
                     let ci = self.class_info(c);
-                    !ci.open_base && ci.dataclass_fields.borrow().is_none() && !ci.pydantic && !crate::models::pydantic::is_model(self, c) && !ci.named_tuple && !ci.dict_base && !ci.typed_dict && !ci.pyd_dataclass.get() && self.class_lookup(c, "__eq__").is_none() && self.class_lookup(c, "__hash__").is_none() && !self.enum_members.contains_key(&c)
+                    !ci.open_base && ci.dataclass_fields.borrow().is_none() && !ci.lib.pydantic && !crate::models::pydantic::is_model(self, c) && !ci.lib.named_tuple && !ci.lib.dict_base && !ci.lib.typed_dict && !ci.pyd_dataclass.get() && self.class_lookup(c, "__eq__").is_none() && self.class_lookup(c, "__hash__").is_none() && !self.enum_members.contains_key(&c)
                 }
                 None => false,
             },
@@ -580,7 +580,7 @@ impl Analyzer {
                             continue;
                         }
                         if let Some(ci) = self.class_info_opt(cls) {
-                            if !ci.typed_dict && !ci.named_tuple && !ci.open_base {
+                            if !ci.lib.typed_dict && !ci.lib.named_tuple && !ci.open_base {
                                 parts.push(line_data.clone());
                                 continue;
                             }
@@ -1788,7 +1788,7 @@ impl Analyzer {
             }
             seen.push(c);
             let Some(ci) = self.class_info_opt(c) else { continue };
-            if ci.named_tuple {
+            if ci.lib.named_tuple {
                 return true;
             }
             work.extend(ci.bases.iter().copied());
@@ -1843,6 +1843,14 @@ impl Analyzer {
                         return crate::models::pydantic::attr_value(self, state, oid, name, node);
                     }
                     return self.method_value(&format!("pydantic.{}", name), &Value::obj(oid));
+                }
+            }
+        }
+        // a `threading.Thread` subclass's `start()` runs its `run()`
+        if matches!(name, "start" | "join") {
+            if let Some(cls) = self.instance_class(oid).filter(|c| self.class_lookup(*c, name).is_none()) {
+                if self.mro(cls).iter().any(|c| self.class_info_opt(*c).is_some_and(|ci| ci.lib.quals.iter().any(|q| q == "threading.Thread"))) {
+                    return self.method_value(&format!("threadsub.{}", name), &Value::obj(oid));
                 }
             }
         }

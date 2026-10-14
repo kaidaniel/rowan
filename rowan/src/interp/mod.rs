@@ -379,13 +379,9 @@ pub struct ClassInfo {
     /// inherits from something we do not see
     pub open_base: bool,
     pub dataclass_fields: RefCell<Option<Vec<(String, Option<&'static ast::Expr>)>>>,
-    pub typed_dict: bool,
-    pub named_tuple: bool,
-    /// subclasses `dict` directly
-    pub dict_base: bool,
-    /// subclasses pydantic's `BaseModel`: annotated fields like a dataclass, validated
-    /// (models::pydantic)
-    pub pydantic: bool,
+    /// what its direct library bases make of it (`dict`, `TypedDict`, `NamedTuple`, pydantic's
+    /// `BaseModel`, `nn.Module`, …)
+    pub lib: crate::models::ClassBase,
     /// decorated with `pydantic.dataclasses.dataclass`: validated like a model, no model API
     pub pyd_dataclass: std::cell::Cell<bool>,
     /// `@dataclass(frozen=True)` / `@dataclass(kw_only=True)`
@@ -393,8 +389,6 @@ pub struct ClassInfo {
     pub dc_kw_only: std::cell::Cell<bool>,
     /// `@dataclass(order=True)`: instances of the class compare their fields as tuples
     pub dc_order: std::cell::Cell<bool>,
-    /// subclasses something in `torch.nn` (`nn.Module`): calling an instance runs `forward`
-    pub nn_module: bool,
     pub any_fields: RefCell<Option<FxHashSet<String>>>,
 }
 
@@ -523,6 +517,12 @@ pub struct EnumKind {
     pub flag: bool,
     /// str-based (`auto()` is the lower-cased name in a StrEnum)
     pub is_str: bool,
+}
+
+impl EnumKind {
+    pub fn join(&mut self, o: EnumKind) {
+        (self.mixed, self.repr_value, self.flag, self.is_str) = (self.mixed | o.mixed, self.repr_value | o.repr_value, self.flag | o.flag, self.is_str | o.is_str);
+    }
 }
 
 /// Everything a model needs about a call.
@@ -1909,10 +1909,10 @@ impl Analyzer {
                 let ci = self.class_info(oid);
                 if ci.has_fields() {
                     let mut fields: KeySet = KeySet::from_iter(ci.fields().iter().map(|(f, _)| key_str_lit(f)));
-                    let ns = if ci.typed_dict { Ns::Item } else { Ns::Attr };
+                    let ns = if ci.lib.typed_dict { Ns::Item } else { Ns::Attr };
                     // a TypedDict's `total=False` / `NotRequired` keys may be absent
                     let mut declared = Row::closed_with(fields.clone());
-                    if ci.typed_dict {
+                    if ci.lib.typed_dict {
                         if let Some((req, opt)) = self.typed_dict_keys(oid) {
                             fields = req.union(&opt);
                             declared = Row::from_data(crate::domain::RowData { present: fields.clone(), definite: req.clone(), likely: req, ..Default::default() });
@@ -1932,7 +1932,7 @@ impl Analyzer {
                     for f in fields.iter() {
                         state.set_slot(inst, ns, f, Value::data(&format!("field {}", intern::key_py_str(f))), true);
                     }
-                    if ci.typed_dict {
+                    if ci.lib.typed_dict {
                         let src = Source::new(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param);
                         self.td_param_src.insert(inst, src);
                     }
@@ -1999,7 +1999,7 @@ impl Analyzer {
             }
             let Some(cinfo) = self.class_info_opt(c) else { continue };
             if cinfo.has_fields() {
-                let ns = if cinfo.typed_dict { Ns::Item } else { Ns::Attr };
+                let ns = if cinfo.lib.typed_dict { Ns::Item } else { Ns::Attr };
                 for (f, _) in cinfo.fields() {
                     let k = key_str_lit(&f);
                     let r = state.row(inst, ns).store(k, true);
@@ -2479,7 +2479,7 @@ impl Analyzer {
                 }
                 // (a numpy structured array is keyed by its fields)
                 // (an instance of a dict subclass: its items)
-                let dict_sub = self.kind(oid) == Kind::Instance && self.instance_class(oid).is_some_and(|c| self.mro(c).iter().any(|x| self.class_info_opt(*x).map(|ci| ci.dict_base).unwrap_or(false)));
+                let dict_sub = self.kind(oid) == Kind::Instance && self.instance_class(oid).is_some_and(|c| self.mro(c).iter().any(|x| self.class_info_opt(*x).map(|ci| ci.lib.dict_base).unwrap_or(false)));
                 let ns = if matches!(self.kind(oid), Kind::Instance | Kind::Namespace) && !self.m.np_struct.contains(&oid) && !dict_sub { Ns::Attr } else { Ns::Item };
                 ns_used = ns;
                 rows.push(state.row(oid, ns));

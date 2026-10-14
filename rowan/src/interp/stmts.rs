@@ -1645,14 +1645,8 @@ impl Analyzer {
         let fr_cells = self.frame().cells.clone();
         let mut bases: Vec<u32> = Vec::new();
         let mut open_base = false;
-        let mut typed_dict = false;
-        let mut named_tuple = false;
-        let mut is_enum = false;
+        let mut lib = crate::models::ClassBase::default();
         let mut ek = crate::interp::EnumKind::default();
-        let mut str_mixin = false;
-        let mut dict_base = false;
-        let mut pydantic = false;
-        let mut nn_module = false;
         if let Some(args) = &c.arguments {
             for b in args.args.iter() {
                 // `RootModel[list[int]]`, `Generic[T]`: the subscripted class decides
@@ -1677,21 +1671,7 @@ impl Analyzer {
                             }
                             bases.push(oid)
                         }
-                        Kind::External => {
-                            let f = crate::models::class_base(&self.external_qual(oid));
-                            is_enum |= f.is_enum;
-                            ek.mixed |= f.enum_kind.mixed;
-                            ek.repr_value |= f.enum_kind.repr_value;
-                            ek.is_str |= f.enum_kind.is_str;
-                            ek.flag |= f.enum_kind.flag;
-                            str_mixin |= f.str_mixin;
-                            dict_base |= f.dict_base;
-                            nn_module |= f.nn_module;
-                            pydantic |= f.pydantic;
-                            typed_dict |= f.typed_dict;
-                            named_tuple |= f.named_tuple;
-                            open_base |= f.open;
-                        }
+                        Kind::External => lib.join(crate::models::class_base(&self.external_qual(oid))),
                         _ => open_base = true,
                     }
                 }
@@ -1710,6 +1690,11 @@ impl Analyzer {
                 }
             }
         }
+        open_base |= lib.open;
+        let mut lek = lib.enum_kind;
+        lek.join(ek);
+        let (is_enum, str_mixin) = (lib.is_enum, lib.str_mixin);
+        let (typed_dict, named_tuple, pydantic) = (lib.typed_dict, lib.named_tuple, lib.pydantic);
         let info = ClassInfo {
             name: c.name.id.to_string(),
             node: c,
@@ -1717,15 +1702,11 @@ impl Analyzer {
             module: fr_module,
             open_base,
             dataclass_fields: std::cell::RefCell::new(None),
-            typed_dict,
-            named_tuple,
-            dict_base,
-            pydantic,
+            lib,
             pyd_dataclass: std::cell::Cell::new(false),
             dc_frozen: std::cell::Cell::new(false),
             dc_kw_only: std::cell::Cell::new(false),
             dc_order: std::cell::Cell::new(false),
-            nn_module,
             any_fields: std::cell::RefCell::new(None),
         };
         let info = std::rc::Rc::new(info);
@@ -1756,7 +1737,7 @@ impl Analyzer {
         self.frames.pop();
         let enum_base = info.bases.iter().any(|b| self.enum_members.contains_key(b));
         if is_enum || enum_base {
-            self.make_enum_members(c, coid, ek, str_mixin, state);
+            self.make_enum_members(c, coid, lek, str_mixin, state);
         }
         // `__set_name__(owner, name)` on descriptor objects assigned in the class body
         for st in &c.body {

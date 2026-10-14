@@ -620,7 +620,7 @@ impl Analyzer {
         }
         let ci = self.class_info(cls);
         // a TypedDict class makes a plain dict
-        if ci.typed_dict {
+        if ci.lib.typed_dict {
             let call = Call { qual: "builtins.dict".into(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
             if let Some(m) = self.models.lookup("builtins.dict") {
                 return m(self, state, &call);
@@ -670,7 +670,7 @@ impl Analyzer {
             }
         }
         // a dict subclass without its own `__init__`: dict's constructor fills its items
-        let dict_based = self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|x| x.dict_base).unwrap_or(false));
+        let dict_based = self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|x| x.lib.dict_base).unwrap_or(false));
         if dict_based && self.class_lookup(cls, "__init__").is_none() {
             state.set_row(inst, Ns::Item, Row::new());
             if let Some(a0) = args.first() {
@@ -738,9 +738,9 @@ impl Analyzer {
         // object, as two classes may share a name (`type(name, bases, ns)` per choice of bases)
         let site = format!("{}:{}", super::site_string(node), cls);
         let inst = self.alloc(Kind::Instance, &site, state, &format!("{}@L{}", ci.name, node.line), Payload::Cls(cls), Some(row), Ns::Attr, None, None);
-        if ci.typed_dict {
+        if ci.lib.typed_dict {
             state.set_row(inst, Ns::Item, Row::new());
-        } else if ci.open_base && !ci.dict_base {
+        } else if ci.open_base && !ci.lib.dict_base {
             // (an external base — `list`, a library class — may hold items the program's code
             // does not show: `append` / `super().__init__(items)` run there)
             state.set_row(inst, Ns::Item, Row::with_source(Source::new(&format!("items of {}@L{}", ci.name, node.line), SourceKind::Class)));
