@@ -1038,6 +1038,17 @@ impl Analyzer {
             // a layer's attribute rowan does not set (`dropout.p`, `conv.bias` made with
             // unknown arguments): unknown; the nn.Module methods every layer has
             if self.t_layer_type(o).is_some() && st.slot_opt(o, Ns::Attr, key_str_lit(name)).is_none() {
+                // (a ModuleList / Sequential is a list, a ModuleDict a dict: their container
+                // methods — `append`, `extend`, `items`, … — are the list's / dict's)
+                let fam = match self.kind(o) {
+                    Kind::List => "list",
+                    Kind::Dict => "dict",
+                    _ => "",
+                };
+                let q = format!("{}.{}", fam, name);
+                if !fam.is_empty() && !MODULE_METHODS.contains(&name) && self.models.lookup(&q).is_some() {
+                    return Some(self.method_value(&q, obj));
+                }
                 return Some(if MODULE_METHODS.contains(&name) { self.method_value(&format!("nnmodule.{}", name), obj) } else { Value::data(&format!("{}.{}", self.obj(o).label, name)) });
             }
         }
