@@ -39,6 +39,12 @@ and write down what you chose and why.
    * Fixes and features tend to add lines, so this one also slips easily. Leave the engine
      smaller than you found it in every iteration: delete, merge or simplify something, not
      just add.
+   * The line count is a goal, not a gate. A bigger idea that adds code now but pays for itself
+     later (a simpler design that makes other mechanisms deletable, a sound fix that needs new
+     machinery) is welcome even if the engine grows this iteration. Don't drop such an idea
+     for its size; pursue it, or record it, and explain the trade-off in your final message.
+   * Don't move engine logic into `models/` to lower the count: only library behaviour
+     belongs there.
 8. **Few knobs.** The interpreter should have few configs, limits and switches. Every
    `ROWAN_*` variable, `ROWAN_NO=` refinement and `ROWAN_LIMITS=` key is a cost. A simpler
    design that needs no knob is better than a tuned one.
@@ -129,5 +135,8 @@ Summarise what you changed, for the owner:
   * the knobs removed;
   * any change to what users see.
 * **Trade-offs:** what you dropped or made less precise, and why.
+* **Ideas not pursued:** ideas you considered but didn't pursue or cut back, each with why
+  (unsound, too costly, too much code, no time). Include the ones you dropped because of their
+  size.
 * **Remaining:** what you found but didn't do, and where it is recorded.
 * **Not run:** what you did not verify (a test suite not run, a benchmark not finished).
