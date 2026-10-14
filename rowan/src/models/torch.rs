@@ -4428,10 +4428,9 @@ impl Analyzer {
         // `x.dim() >= n` / `> n` held: a lower bound on the rank
         if (matches!(c.ops[0], CmpOp::GtE | CmpOp::Gt) && truth) || (matches!(c.ops[0], CmpOp::Lt | CmpOp::LtE) && !truth) {
             if let Some(x) = Self::t_rank_operand(&c.left) {
-                let nv = self.eval(&c.comparators[0], st);
+                let (Some(nv), Some(xv)) = (self.traced(&c.comparators[0]), self.traced(x)) else { return };
                 if let Some(n) = self.t_int(&nv) {
                     let bound = if matches!(c.ops[0], CmpOp::Gt | CmpOp::LtE) { n + 1 } else { n };
-                    let xv = self.eval(x, st);
                     if let Some(s) = self.t_shape(&xv, st) {
                         if let Some(Rest::Slice(sym, from, back)) = &s.rest {
                             let k = bound - (s.prefix.len() + s.suffix.len()) as i64 + (*from + *back) as i64;
@@ -4458,16 +4457,14 @@ impl Analyzer {
         // rank: x.dim() == n
         for (re, ne) in [(l, r), (r, l)] {
             if let Some(x) = Self::t_rank_operand(re) {
-                let nv = self.eval(ne, st);
+                let (Some(nv), Some(xv)) = (self.traced(ne), self.traced(x)) else { return };
                 let Some(n) = self.t_int(&nv) else { return };
-                let xv = self.eval(x, st);
                 let Some(s) = self.t_shape(&xv, st) else { return };
                 self.t_assume_rank(&s, n as u32, st);
                 return;
             }
         }
-        let a = self.eval(l, st);
-        let b = self.eval(r, st);
+        let (Some(a), Some(b)) = (self.traced(l), self.traced(r)) else { return };
         let (Some(da), Some(db)) = (self.t_dim(&a, st), self.t_dim(&b, st)) else { return };
         // only facts about dims (a plain int comparison is the interpreter's business)
         let symbolic = |v: &Value| dim_of_label(v).is_some() || label(v).map(|l| sh::dual_dim(&l).is_some()).unwrap_or(false);

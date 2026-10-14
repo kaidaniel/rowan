@@ -435,7 +435,9 @@ pub struct Frame {
     pub code: usize,
     pub cells: IndexMap<StrId, ObjId>,
     pub class_oid: Option<ObjId>,
-    pub overlays: Vec<IndexMap<StrId, Value>>,
+    /// the variables of the running comprehensions (innermost last): their values are in the
+    /// state's names, the enclosing ones' put back when the comprehension ends
+    pub comp_names: Vec<Vec<StrId>>,
     pub loop_depth: u32,
     pub label: String,
     /// indices of the enclosing unrolled loop iterations (part of the call context)
@@ -495,7 +497,7 @@ impl Frame {
             code: 0,
             cells: IndexMap::new(),
             class_oid: None,
-            overlays: Vec::new(),
+            comp_names: Vec::new(),
             loop_depth: 0,
             label: label.to_string(),
             unroll: Vec::new(),
@@ -790,8 +792,6 @@ pub struct Analyzer {
     pub alloc_extra: Option<String>,
     /// a load guarded by a `try` handler is running (its key is still required)
     pub caught_load: bool,
-    /// the right operand of a comparison link already evaluated (chained comparisons)
-    pub cmp_right: Option<Value>,
     /// per running comprehension: the cells of its variables (closed over by functions made
     /// inside it, which see the variable's latest value)
     pub comp_cells: Vec<FxHashMap<StrId, ObjId>>,
@@ -936,10 +936,10 @@ pub struct Analyzer {
     pub row_check_requests: Vec<(String, u32, String)>,
     /// module index -> its path relative to the main file's directory (`rel_file`)
     pub rel_files: std::cell::RefCell<FxHashMap<u32, String>>,
-    /// the last value of each call node, and whether a test is being narrowed (`eval`)
-    pub call_memo: FxHashMap<usize, Value>,
-    /// per generator object, the join of the states at its yields (a caller resumes from one
-    /// of them when the body never ends)
+    /// while a test is evaluated (`split`): its frame depth and the value each node of it had
+    pub trace: Option<(usize, FxHashMap<usize, Value>)>,
+    /// the values the test being narrowed had (`split`, read by `traced`)
+    pub traced: FxHashMap<usize, Value>,
     /// the states at the yields of a generator's running activation (copies, read per key
     /// where the caller needs them: joining whole heaps per yield was the cost)
     pub gen_yield_states: FxHashMap<ObjId, YieldStates>,
@@ -954,7 +954,6 @@ pub struct Analyzer {
     /// what a missing key raises in the reads a model makes (pydantic's field reads: a
     /// ValidationError)
     pub item_exc_force: Option<&'static str>,
-    pub narrow_depth: u32,
     /// a requirement-only entry run (`param F.x` schemas of a called function): no verdicts,
     /// row checks, facts or notes
     pub quiet: bool,
@@ -2174,7 +2173,7 @@ impl Analyzer {
 
 
     /// Is `oid` reachable from a binding the program can still use: the locals of every
-    /// active frame, loop overlays, cells, module objects, narrowed values, the return value?
+    /// active frame, cells, module objects, narrowed values, the return value?
     pub fn is_live(&self, oid: ObjId, state: &State) -> bool {
         !self.live_among(&[oid], state).is_empty()
     }
@@ -2188,15 +2187,14 @@ impl Analyzer {
     }
 
     /// The roots of a reachability walk: the names, narrowed values and result of `state`, the
-    /// names of the first `envs` callers, and the modules, cells and loop overlays of the
-    /// first `frames` frames.
+    /// names of the first `envs` callers, and the modules and cells of the first `frames`
+    /// frames.
     pub fn state_roots(&self, state: &State, envs: usize, frames: usize, work: &mut Vec<ObjId>) {
         // (a walk takes the last pushed first: the running code's names before the modules'
         // globals, where an object made again is most often still held)
         for fr in self.frames.iter().take(frames) {
             work.push(fr.module);
             work.extend(fr.cells.values().copied());
-            fr.overlays.iter().flat_map(|o| o.values()).for_each(|v| v.push_objs(work));
         }
         let callers = self.env_stack.iter().take(envs).flat_map(|e| e.values());
         for v in callers.chain(state.ret.iter()).chain(state.narrowed.values()).chain(state.env.values()) {
@@ -2319,7 +2317,7 @@ impl Analyzer {
     pub fn gc_pinned(&self, work: &mut Vec<ObjId>, unwind: Option<usize>) {
         // (the side tables' entries: their keys themselves may be dead)
         self.side_edges(None, work);
-        for v in self.cur_exc.iter().chain(self.tries.iter().flat_map(|t| t.recs.iter().map(|r| &r.2))).chain(self.handling_values.iter()).chain(self.cmp_right.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
+        for v in self.cur_exc.iter().chain(self.tries.iter().flat_map(|t| t.recs.iter().map(|r| &r.2))).chain(self.handling_values.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
             v.push_objs(work);
         }
         for c in &self.m.fa_dep_cache {
@@ -2357,9 +2355,6 @@ impl Analyzer {
         for fr in &self.frames {
             work.push(fr.module);
             work.extend(fr.cells.values().copied());
-            for ov in &fr.overlays {
-                ov.values().for_each(|v| v.push_objs(work));
-            }
         }
     }
 
@@ -2612,12 +2607,6 @@ impl Analyzer {
         if let Some(r) = &back.ret {
             if let Some(nv) = rename_value(r, &map) {
                 back.ret = Some(nv);
-            }
-        }
-        for ov in self.frame_mut().overlays.iter_mut() {
-            let ups: Vec<(StrId, Value)> = ov.iter().filter_map(|(k, v)| rename_value(v, &map).map(|nv| (*k, nv))).collect();
-            for (k, nv) in ups {
-                ov.insert(k, nv);
             }
         }
         // 3. objects allocated during the iteration that hold references in their payloads

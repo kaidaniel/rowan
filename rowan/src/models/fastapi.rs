@@ -360,8 +360,14 @@ impl Analyzer {
                         let maybe = recs.iter().any(|o| state.row(*o, Ns::Item).present.contains(kk) || state.row(*o, Ns::Item).open());
                         let mut v = if maybe { self.load_item(j, Ns::Item, &Value::lit(kk), node, state, false) } else { Value::new() };
                         if !sure {
-                            if let Some(d) = &default {
-                                v = v.join(d);
+                            match &default {
+                                Some(d) => v = v.join(d),
+                                // a required body the JSON does not hold under its name: 422
+                                None if !maybe => {
+                                    self.raise_here("RequestValidationError", state);
+                                    return Value::new();
+                                }
+                                None => self.may_raise_here("RequestValidationError", state),
                             }
                         }
                         v

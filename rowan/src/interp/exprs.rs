@@ -19,21 +19,16 @@ fn py_slice(cs: &[char], lo: Option<i64>, hi: Option<i64>, step: Option<i64>) ->
 }
 
 impl Analyzer {
-    /// Evaluate an expression. A call's result is remembered per node: narrowing a test reads
-    /// it back instead of running the call (and its side effects) a second time.
+    /// Evaluate an expression (while a test is evaluated, each node's value is kept for its
+    /// narrowing: `split`).
     pub fn eval(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {
-        if let ast::Expr::Call(_) = node {
-            let addr = node as *const ast::Expr as usize;
-            if self.narrow_depth > 0 {
-                if let Some(v) = self.call_memo.get(&addr) {
-                    return v.clone();
-                }
+        let v = self.eval_inner(node, state);
+        if let Some((depth, vals)) = &mut self.trace {
+            if *depth == self.frames.len() {
+                vals.insert(node as *const ast::Expr as usize, v.clone());
             }
-            let v = self.eval_inner(node, state);
-            self.call_memo.insert(addr, v.clone());
-            return v;
         }
-        self.eval_inner(node, state)
+        v
     }
 
     fn eval_inner(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {
@@ -204,25 +199,21 @@ impl Analyzer {
                 v
             }
             ast::Expr::If(i) => {
-                let tv = self.eval(&i.test, state);
-                // a decided test: one branch only
-                let nd = frontend::node(node);
-                match self.truth_of(&tv, state, &nd) {
-                    Some(true) => return self.eval(&i.body, state),
-                    Some(false) => return self.eval(&i.orelse, state),
-                    None => {}
-                }
-                let mut a = state.copy();
-                let mut b = state.copy();
-                self.narrow(&i.test, true, &mut a);
-                self.narrow(&i.test, false, &mut b);
+                let sp = self.split(&i.test, state.copy());
+                let (mut a, mut b) = (sp.t, sp.f);
                 let va = if a.reachable { self.eval(&i.body, &mut a) } else { Value::new() };
                 let vb = if b.reachable { self.eval(&i.orelse, &mut b) } else { Value::new() };
-                let j = a.join(&mut b);
-                state.replace_with(j);
+                state.replace_with(a.join(&mut b));
                 va.join(&vb)
             }
-            ast::Expr::BoolOp(b) => self.expr_boolop(b, state),
+            ast::Expr::BoolOp(b) => {
+                let (v, mut st, stops) = self.boolop(b, state.copy(), false);
+                if let Some(mut s0) = stops {
+                    st = st.join(&mut s0);
+                }
+                state.replace_with(st);
+                v
+            }
             ast::Expr::UnaryOp(u) => {
                 let v = self.eval(&u.operand, state);
                 if matches!(u.op, ast::UnaryOp::UAdd | ast::UnaryOp::USub) {
@@ -297,7 +288,7 @@ impl Analyzer {
                     let mut all_known = true;
                     for (op, cmp) in c.ops.iter().zip(c.comparators.iter()) {
                         let b = self.eval(cmp, state);
-                        match self.compare_values(*op, &left, &b, cmp, state) {
+                        match self.compare_const(*op, &left, &b, cmp, state) {
                             Some(false) => return Value::lit(intern::key_bool(false)),
                             Some(true) => {}
                             None => all_known = false,
@@ -322,7 +313,7 @@ impl Analyzer {
                         if let Some(r) = self.t_compare_named(&a, &b, &nd, state) {
                             return r;
                         }
-                        if let Some(r) = self.compare_values(c.ops[0], &a, &b, &c.comparators[0], state) {
+                        if let Some(r) = self.compare_const(c.ops[0], &a, &b, &c.comparators[0], state) {
                             return Value::lit(intern::key_bool(r));
                         }
                         return Value::data("bool");
@@ -385,7 +376,7 @@ impl Analyzer {
                         };
                         return Value::lit(intern::key_bool(r));
                     }
-                    if let Some(r) = self.compare_values(c.ops[0], &a, &b, &c.comparators[0], state) {
+                    if let Some(r) = self.compare_const(c.ops[0], &a, &b, &c.comparators[0], state) {
                         return Value::lit(intern::key_bool(r));
                     }
                     if crate::models::pandas::is_seriesish(self, &a) || crate::models::pandas::is_seriesish(self, &b) {
@@ -398,7 +389,7 @@ impl Analyzer {
                     }
                     return Value::data("bool");
                 }
-                if let Some(r) = self.compare_values(c.ops[0], &a, &b, &c.comparators[0], state) {
+                if let Some(r) = self.compare_const(c.ops[0], &a, &b, &c.comparators[0], state) {
                     return Value::lit(intern::key_bool(r));
                 }
                 if crate::models::pandas::is_seriesish(self, &a) || crate::models::pandas::is_seriesish(self, &b) {
@@ -729,65 +720,6 @@ impl Analyzer {
         Value::obj(oid)
     }
 
-    fn expr_boolop(&mut self, b: &'static ast::ExprBoolOp, state: &mut State) -> Value {
-        let mut acc = self.eval(&b.values[0], state);
-        let is_and = b.op == ast::BoolOp::And;
-        // the states where the evaluation may stop early (an undecided operand short-circuits)
-        let mut stops: Vec<State> = Vec::new();
-        let mut st = state.copy();
-        let mut prev: &'static ast::Expr = &b.values[0];
-        let mut depth_added = 0;
-        for v in b.values[1..].iter() {
-            let truth = self.truthiness(&acc, &st);
-            if (!is_and && truth == Some(true)) || (is_and && truth == Some(false)) {
-                break;
-            }
-            if truth.is_none() {
-                // (this operand may end it: its value, on the state it is false / true on)
-                let mut s0 = st.copy();
-                self.narrow(prev, !is_and, &mut s0);
-                if s0.reachable {
-                    stops.push(s0);
-                }
-                // the rest runs on some paths only
-                if depth_added == 0 {
-                    self.cond_depth += 1;
-                    self.branch_depth += 1;
-                    depth_added = 1;
-                }
-            }
-            self.narrow(prev, is_and, &mut st);
-            if !st.reachable {
-                break;
-            }
-            let rhs = self.eval(v, &mut st);
-            if (!is_and && truth == Some(false)) || (is_and && truth == Some(true)) {
-                acc = rhs;
-            } else {
-                // (what ends it here is a value of the other truth: `x and y` is x only when x
-                // is falsy)
-                acc = super::narrow::truth_narrowed(&acc, !is_and).unwrap_or(acc).join(&rhs);
-            }
-            prev = v;
-        }
-        if depth_added == 1 {
-            self.branch_depth -= 1;
-            self.cond_depth -= 1;
-        }
-        let mut out = if st.reachable { Some(st) } else { None };
-        for mut s0 in stops {
-            out = Some(match out {
-                None => s0,
-                Some(mut o) => o.join(&mut s0),
-            });
-        }
-        match out {
-            Some(o) => state.replace_with(o),
-            None => state.reachable = false,
-        }
-        acc
-    }
-
     /// `kv_map` that also records a narrowing event when the key is a parameter: the renamed
     /// key is only known once the parameter is bound to a literal (at the call site).
     pub fn rename_kv(&mut self, kv: &KeyVal, f: &RenameFn) -> KeyVal {
@@ -860,24 +792,9 @@ impl Analyzer {
         Value::obj(nid)
     }
 
-    /// `compare_const` on an already evaluated right operand `b` (written as `right`).
-    fn compare_values(&mut self, op: ast::CmpOp, a: &Value, b: &Value, right: &'static ast::Expr, state: &mut State) -> Option<bool> {
-        self.cmp_right = Some(b.clone());
-        let r = self.compare_const(op, a, right, state);
-        self.cmp_right = None;
-        r
-    }
-
-    fn eval_right(&mut self, right: &'static ast::Expr, state: &mut State) -> Value {
-        match self.cmp_right.take() {
-            Some(v) => v,
-            None => self.eval(right, state),
-        }
-    }
-
     /// `a is None`, `a is not None`, `a == lit`, `a != lit` when the outcome is decidable
     /// from the value's literals: a value with only non-placeholder objects is never None.
-    fn compare_const(&mut self, op: ast::CmpOp, a: &Value, right: &'static ast::Expr, state: &mut State) -> Option<bool> {
+    fn compare_const(&mut self, op: ast::CmpOp, a: &Value, b: &Value, right: &'static ast::Expr, state: &mut State) -> Option<bool> {
         let none = intern::key_none();
         let lits = crate::domain::kv_literals(&a.kv);
         let has_ph = a.pts.iter().any(|o| self.kind(o) == Kind::Unknown);
@@ -914,7 +831,6 @@ impl Analyzer {
             // identity of objects: distinct abstract objects are distinct objects; one strong
             // object is itself
             ast::CmpOp::Is | ast::CmpOp::IsNot if !a.pts.is_empty() && a.kv.is_bot() => {
-                let b = self.eval_right(right, state);
                 if b.pts.is_empty() || !b.kv.is_bot() {
                     return None;
                 }
@@ -944,7 +860,6 @@ impl Analyzer {
                 Some(if op == ast::CmpOp::Is { same } else { !same })
             }
             ast::CmpOp::In | ast::CmpOp::NotIn => {
-                let b = self.eval_right(right, state);
                 let decide = |found: bool| Some(if op == ast::CmpOp::In { found } else { !found });
                 // members of a Flag: bits; else a member is its key
                 if (!self.member_key.is_empty() || !self.identity_objs.borrow().is_empty()) && !a.pts.is_empty() {
@@ -953,8 +868,7 @@ impl Analyzer {
                     }
                     let ka = self.keyify_in(a, state);
                     if ka.pts.is_empty() {
-                        self.cmp_right = Some(b);
-                        return self.compare_const(op, &ka, right, state);
+                        return self.compare_const(op, &ka, b, right, state);
                     }
                 }
                 if !a.pts.is_empty() || !a.kv.is_literal() || lits.is_empty() {
@@ -994,8 +908,7 @@ impl Analyzer {
                         // a view of a dict: its keys are the dict's (live); its values are decided
                         // when they are all known literals
                         Payload::View(ViewKind::Keys | ViewKind::Proxy, inner) => {
-                            self.cmp_right = Some(inner);
-                            return self.compare_const(op, a, right, state);
+                            return self.compare_const(op, a, &inner, right, state);
                         }
                         Payload::View(ViewKind::Values, inner) => {
                             let d = inner.single().filter(|d| self.kind(*d) == Kind::Dict)?;
@@ -1024,10 +937,9 @@ impl Analyzer {
                 rows.iter().all(|r| r.absent.contains(k)).then_some(op != ast::CmpOp::In)
             }
             ast::CmpOp::Eq | ast::CmpOp::NotEq => {
-                let b = self.eval_right(right, state);
                 // Enum members: their keys (a mixed-in one: its value)
                 let (a, b, lits) = if self.member_key.is_empty() {
-                    (a.clone(), b, lits)
+                    (a.clone(), b.clone(), lits)
                 } else {
                     let ka = self.member_base(&self.keyify(a));
                     let kb = self.member_base(&self.keyify(&b));
@@ -1057,7 +969,6 @@ impl Analyzer {
             ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE => {
                 // two single literals of one kind (numbers, or strings) are ordered here;
                 // anything else is decided per call site when it is concrete there
-                let b = self.eval_right(right, state);
                 let bl = crate::domain::kv_literals(&b.kv);
                 if !a.pts.is_empty() || !b.pts.is_empty() || !a.kv.is_literal() || !b.kv.is_literal() || lits.len() != 1 || bl.len() != 1 {
                     return None;
@@ -1710,11 +1621,26 @@ impl Analyzer {
     // comprehensions ---------------------------------------------------------
     /// Run a comprehension's generators (`limit`: the most known items a generator unrolls).
     fn comp(&mut self, gens: &'static [ast::Comprehension], limit: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
-        self.frame_mut().overlays.push(IndexMap::new());
+        let mut names: Vec<intern::StrId> = gens.iter().flat_map(|g| names_in(&g.target)).map(|n| s(&n)).collect();
+        names.sort_unstable();
+        names.dedup();
+        let outer: Vec<Option<Value>> = names.iter().map(|n| state.env.get(n).cloned()).collect();
+        self.frame_mut().comp_names.push(names.clone());
         self.comp_cells.push(Default::default());
         self.comp_gen(gens, 0, limit, state, body, own);
         self.comp_cells.pop();
-        self.frame_mut().overlays.pop();
+        self.frame_mut().comp_names.pop();
+        // (the comprehension's variables are its own: the enclosing names are as before)
+        for (n, v) in names.into_iter().zip(outer) {
+            match v {
+                Some(v) => {
+                    state.env.insert(n, v);
+                }
+                None => {
+                    state.env.shift_remove(&n);
+                }
+            }
+        }
     }
 
     fn comp_gen(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
@@ -1736,11 +1662,9 @@ impl Analyzer {
                 self.comp_known.push(true);
                 for (idx, item) in items.iter().enumerate() {
                     let mut s2 = state.copy();
-                    self.frame_mut().overlays.push(IndexMap::new());
                     self.frame_mut().unroll.push(idx);
                     let decided = self.comp_run_one(g, gens, i, limit, &Elem::One(item.clone()), &mut s2, body, understood, own);
                     self.frame_mut().unroll.pop();
-                    self.frame_mut().overlays.pop();
                     if s2.reachable {
                         // (an undecided filter may skip this item: joined with skipping it)
                         if decided {
@@ -1776,9 +1700,7 @@ impl Analyzer {
         let mut s2 = state.copy();
         let mark0 = self.objects.len() as ObjId;
         let vmark = self.verdicts.len();
-        self.frame_mut().overlays.push(IndexMap::new());
         self.comp_run_one(g, gens, i, limit, &elem, &mut s2, body, understood, own);
-        self.frame_mut().overlays.pop();
         if it.exhaustive && understood && s2.reachable {
             self.comp_known.pop();
             state.replace_with(s2);
@@ -1790,7 +1712,10 @@ impl Analyzer {
         let elem_objs = elem.flat().pts;
         let older = |o: ObjId| o < mark0 && o != own && !elem_objs.contains(o) && !self.obj(o).iter_elem;
         let fp = s2.footprint(state);
-        let quiet = s2.env == state.env && fp.rows.iter().all(|(o, _)| !older(*o)) && fp.slots.iter().all(|(o, _)| !older(*o)) && fp.elems.iter().all(|o| !older(*o)) && s2.lens.diff_keys(&state.lens).iter().all(|o| !older(*o));
+        // (the comprehension's own variables aside)
+        let own_var = |n: &intern::StrId| self.frame().comp_names.iter().any(|ns| ns.contains(n));
+        let same_env = s2.env.iter().all(|(n, v)| own_var(n) || state.env.get(n) == Some(v)) && state.env.keys().all(|n| own_var(n) || s2.env.contains_key(n));
+        let quiet = same_env && fp.rows.iter().all(|(o, _)| !older(*o)) && fp.slots.iter().all(|(o, _)| !older(*o)) && fp.elems.iter().all(|o| !older(*o)) && s2.lens.diff_keys(&state.lens).iter().all(|o| !older(*o));
         if quiet {
             self.comp_known.pop();
             let mut joined = state.join(&mut s2);
@@ -1804,9 +1729,7 @@ impl Analyzer {
         // verdicts supersede the first pass's)
         self.drop_verdicts_since(vmark);
         let (mut head, _, s2) = self.loop_fixpoint(state, &mut |an, body_s| {
-            an.frame_mut().overlays.push(IndexMap::new());
             an.comp_run_one(g, gens, i, limit, &elem, body_s, body, understood, own);
-            an.frame_mut().overlays.pop();
         });
         self.comp_known.pop();
         let ev = elem.value_part();
@@ -1820,20 +1743,11 @@ impl Analyzer {
         self.comp_bind(&g.target, it, st);
         let mut decided = true;
         for cond in &g.ifs {
-            let cv = self.eval(cond, st);
-            match self.truth_of(&cv, st, &frontend::node(cond)) {
-                Some(true) => {}
-                Some(false) => {
-                    st.reachable = false;
-                    return decided;
-                }
-                None => {
-                    decided = false;
-                    self.narrow(cond, true, st);
-                    if !st.reachable {
-                        return decided;
-                    }
-                }
+            let sp = self.split(cond, st.copy());
+            decided &= !sp.f.reachable;
+            st.replace_with(sp.t);
+            if !st.reachable {
+                return decided;
             }
         }
         let conditional = !decided && !understood;
@@ -1848,13 +1762,6 @@ impl Analyzer {
     }
 
     fn comp_bind(&mut self, target: &'static ast::Expr, it: &Elem, state: &mut State) {
-        let names = names_in(target);
-        {
-            let ov = self.frame_mut().overlays.last_mut().unwrap();
-            for n in names {
-                ov.entry(s(&n)).or_insert_with(Value::new);
-            }
-        }
         self.bind_iter_target(target, it, state);
         if !self.comp_cells.is_empty() {
             // the variable's cell holds its latest value
@@ -1863,7 +1770,7 @@ impl Analyzer {
             for n in names_in(target) {
                 let sid = s(&n);
                 let cid = self.alloc_raw(Kind::Cell, &format!("compcell:{}:{}", addr, n), &ctx, true, &format!("cell {}", n), Payload::None);
-                let v = self.frame().overlays.iter().rev().find_map(|ov| ov.get(&sid).cloned()).unwrap_or_default();
+                let v = state.env.get(&sid).cloned().unwrap_or_default();
                 state.set_slot(cid, Ns::Cell, super::funcs::cell_key(), v, true);
                 self.comp_cells.last_mut().unwrap().insert(sid, cid);
             }

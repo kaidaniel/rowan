@@ -1,10 +1,11 @@
-//! Narrowing (guards): port of `narrow` and its helpers.
+//! Tests: a test is evaluated once into the states where it is true and where it is false
+//! (`split`); narrowing reads the values its parts had then (`traced`), never evaluating
+//! them again.
 
-use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
 use crate::domain::{kv_exclude, kv_literals, kv_restrict, KeyVal, Ns, ObjSet, Value};
-use crate::frontend::Node;
+use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};
 
@@ -15,14 +16,110 @@ enum NarrowTarget {
     Attr(&'static ast::ExprAttribute, &'static ast::Expr),
 }
 
+/// A test evaluated: its value, the state where it is true and the one where it is false (a
+/// side it rules out is unreachable), and a comparison's operands.
+pub struct Split {
+    pub v: Value,
+    pub t: State,
+    pub f: State,
+    pub ops: Option<(Value, Value)>,
+}
+
 impl Analyzer {
-    pub fn narrow(&mut self, test: &'static ast::Expr, truth: bool, state: &mut State) {
-        self.narrow_depth += 1;
-        self.narrow_impl(test, truth, state);
-        self.narrow_depth -= 1;
+    /// Evaluate `test` once from `st`, splitting the state by its truth.
+    pub fn split(&mut self, test: &'static ast::Expr, mut st: State) -> Split {
+        match test {
+            ast::Expr::UnaryOp(u) if u.op == ast::UnaryOp::Not => {
+                let sp = self.split(&u.operand, st);
+                let v = match (sp.t.reachable, sp.f.reachable) {
+                    (true, false) => Value::lit(intern::key_bool(false)),
+                    (false, true) => Value::lit(intern::key_bool(true)),
+                    _ => Value::data("bool"),
+                };
+                Split { v, t: sp.f, f: sp.t, ops: None }
+            }
+            ast::Expr::BoolOp(b) => {
+                let (v, cont, stops) = self.boolop(b, st, true);
+                let stops = stops.unwrap_or_else(State::bottom);
+                let (t, f) = if b.op == ast::BoolOp::And { (cont, stops) } else { (stops, cont) };
+                Split { v, t, f, ops: None }
+            }
+            _ => {
+                let saved = self.trace.replace((self.frames.len(), Default::default()));
+                let v = self.eval(test, &mut st);
+                let vals = std::mem::replace(&mut self.trace, saved).map(|t| t.1).unwrap_or_default();
+                let truth = if st.reachable { self.truth_of(&v, &mut st, &frontend::node(test)) } else { None };
+                let saved = std::mem::replace(&mut self.traced, vals);
+                let ops = match test {
+                    ast::Expr::Compare(c) if c.ops.len() == 1 => self.traced(&c.left).zip(self.traced(&c.comparators[0])),
+                    _ => None,
+                };
+                let mut t = st.copy();
+                let mut f = st;
+                t.reachable &= truth != Some(false);
+                f.reachable &= truth != Some(true);
+                self.narrow(test, true, &mut t);
+                self.narrow(test, false, &mut f);
+                self.traced = saved;
+                Split { v, t, f, ops }
+            }
+        }
     }
 
-    fn narrow_impl(&mut self, test: &'static ast::Expr, truth: bool, state: &mut State) {
+    /// `a and b …` / `a or b …` from `st`: its value, the state where the last operand ran to
+    /// its end (narrowed by it too when `test`), and the join of the states where an earlier
+    /// operand ended it.
+    pub fn boolop(&mut self, b: &'static ast::ExprBoolOp, mut st: State, test: bool) -> (Value, State, Option<State>) {
+        let is_and = b.op == ast::BoolOp::And;
+        let mut v = Value::new();
+        let mut stops: Option<State> = None;
+        let mut depth_added = false;
+        let last = b.values.len() - 1;
+        for (i, e) in b.values.iter().enumerate() {
+            if i == last && !test {
+                v = v.join(&self.eval(e, &mut st));
+                break;
+            }
+            let sp = self.split(e, st);
+            let (mut stop, cont) = if is_and { (sp.f, sp.t) } else { (sp.t, sp.f) };
+            if i == last {
+                v = v.join(&sp.v);
+            } else if stop.reachable {
+                // (what ends it here is a value of that truth: `x and y` is x only when x is falsy)
+                v = v.join(&truth_narrowed(&sp.v, !is_and).unwrap_or(sp.v));
+            }
+            if stop.reachable {
+                stops = Some(match stops.take() {
+                    Some(mut acc) => acc.join(&mut stop),
+                    None => stop,
+                });
+                // the rest runs on some paths only
+                if !depth_added {
+                    self.cond_depth += 1;
+                    self.branch_depth += 1;
+                    depth_added = true;
+                }
+            }
+            st = cont;
+            if !st.reachable {
+                break;
+            }
+        }
+        if depth_added {
+            self.branch_depth -= 1;
+            self.cond_depth -= 1;
+        }
+        (v, st, stops)
+    }
+
+    /// The value a part of the test being narrowed had when it was evaluated (None: it was
+    /// not, as an operand after a short circuit).
+    pub(crate) fn traced(&self, e: &'static ast::Expr) -> Option<Value> {
+        self.traced.get(&(e as *const ast::Expr as usize)).cloned()
+    }
+
+    /// Narrow `state` to the paths where the evaluated `test` is `truth`.
+    fn narrow(&mut self, test: &'static ast::Expr, truth: bool, state: &mut State) {
         if !state.reachable {
             return;
         }
@@ -33,16 +130,6 @@ impl Analyzer {
             }
         }
         match test {
-            ast::Expr::UnaryOp(u) if u.op == ast::UnaryOp::Not => {
-                self.narrow(&u.operand, !truth, state);
-            }
-            ast::Expr::BoolOp(b) => {
-                if (b.op == ast::BoolOp::And && truth) || (b.op == ast::BoolOp::Or && !truth) {
-                    for v in &b.values {
-                        self.narrow(v, truth, state);
-                    }
-                }
-            }
             ast::Expr::Named(n) => self.narrow(&n.target, truth, state),
             ast::Expr::Compare(c) if c.ops.len() == 1 => {
                 let op = c.ops[0];
@@ -56,7 +143,7 @@ impl Analyzer {
                     ast::CmpOp::Eq | ast::CmpOp::NotEq => {
                         if let ast::Expr::Name(l) = left {
                             let eq = if op == ast::CmpOp::Eq { truth } else { !truth };
-                            let rv = self.eval(right, state);
+                            let Some(rv) = self.traced(right) else { return };
                             let ks = kv_literals(&rv.kv);
                             // (Decimal / Fraction / datetime literals equal others by value, not
                             // as keys: no narrowing by key identity)
@@ -71,9 +158,8 @@ impl Analyzer {
                             // `obj.attr == lit` on one object whose attribute holds known
                             // literals: the attribute narrows (`self.unit == "F"`)
                             let eq = if op == ast::CmpOp::Eq { truth } else { !truth };
-                            let rv = self.eval(right, state);
+                            let (Some(rv), Some(ov)) = (self.traced(right), self.traced(&la.value)) else { return };
                             let ks = kv_literals(&rv.kv);
-                            let ov = self.eval(&la.value, state);
                             let ak = key_str_lit(la.attr.id.as_str());
                             if let Some(o) = ov.single().filter(|o| self.obj(*o).single && matches!(self.kind(*o), Kind::Instance | Kind::Namespace) && rv.pts.is_empty() && ks.len() == 1) {
                                 let cur = state.slot_opt(o, Ns::Attr, ak);
@@ -100,7 +186,7 @@ impl Analyzer {
                             let ast::Expr::Name(nm) = name_e else { continue };
                             let name = s(nm.id.as_str());
                             let cur = self.load_name(name, &Node::none(), state);
-                            let o = self.eval(other_e, &mut state.copy());
+                            let Some(o) = self.traced(other_e) else { continue };
                             let Some(target) = o.single().filter(|x| o.kv.is_bot() && self.obj(*x).single && !crate::state::is_merged(*x)) else { continue };
                             if !cur.pts.contains(target) || cur.pts.len() < 2 || !cur.kv.is_bot() {
                                 continue;
@@ -134,11 +220,10 @@ impl Analyzer {
                         if let ast::Expr::Call(rc) = right {
                             if let ast::Expr::Attribute(ra) = &*rc.func {
                                 if ra.attr.id.as_str() == "keys" {
-                                    let lv = self.eval(left, state);
+                                    let (Some(lv), Some(rec)) = (self.traced(left), self.traced(&ra.value)) else { return };
                                     let ks = self.lit_keys(&lv, state);
                                     if let Some(ks) = ks {
                                         if truth {
-                                            let rec = self.eval(&ra.value, state);
                                             for k in ks.iter() {
                                                 self.narrow_record(&rec, Ns::Item, k, true, state);
                                             }
@@ -174,9 +259,8 @@ impl Analyzer {
                         return;
                     }
                     if fname == "hasattr" && args.len() == 2 {
-                        let kv = self.eval(&args[1], state);
+                        let (Some(kv), Some(mut rec)) = (self.traced(&args[1]), self.traced(&args[0])) else { return };
                         if let Some(k) = kv.kv.as_lit() {
-                            let mut rec = self.eval(&args[0], state);
                             // (an attribute row describes instances and namespaces; a builtin
                             // container's attributes are its type's: decided by the type, or not)
                             let builtin = |an: &Analyzer, o: u32| matches!(an.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set);
@@ -201,11 +285,10 @@ impl Analyzer {
                             if truth && g.generators.len() == 1 {
                                 if let ast::Expr::Compare(cmp) = &*g.elt {
                                     if cmp.ops.first() == Some(&ast::CmpOp::In) {
-                                        let itv = self.eval(&g.generators[0].iter, state);
+                                        let (Some(itv), Some(rec)) = (self.traced(&g.generators[0].iter), self.traced(&cmp.comparators[0])) else { return };
                                         let ks = self.lit_keys(&itv, state);
                                         if let Some(ks) = ks {
                                             if matches!(&*cmp.left, ast::Expr::Name(_)) {
-                                                let rec = self.eval(&cmp.comparators[0], state);
                                                 for k in ks.iter() {
                                                     self.narrow_record(&rec, Ns::Item, k, true, state);
                                                 }
@@ -220,10 +303,9 @@ impl Analyzer {
                 }
                 if let ast::Expr::Attribute(fa) = &*call.func {
                     if fa.attr.id.as_str() == "issubset" && args.len() == 1 && truth {
-                        let v = self.eval(&fa.value, state);
+                        let (Some(v), Some(rec)) = (self.traced(&fa.value), self.traced(&args[0])) else { return };
                         let ks = self.lit_keys(&v, state);
                         if let Some(ks) = ks {
-                            let rec = self.eval(&args[0], state);
                             for k in ks.iter() {
                                 self.narrow_record(&rec, Ns::Item, k, true, state);
                             }
@@ -287,8 +369,7 @@ impl Analyzer {
             }
             // `if obj.attr:` — the attribute chain's literals of the other truth are not it here
             ast::Expr::Attribute(_) => {
-                if let Some(key) = chain_text(test) {
-                    let v = self.eval(test, &mut state.copy());
+                if let (Some(key), Some(v)) = (chain_text(test), self.traced(test)) {
                     if let Some(nv) = truth_narrowed(&v, truth) {
                         if nv.empty() {
                             state.reachable = false;
@@ -310,14 +391,14 @@ impl Analyzer {
                 (cur, StoreTarget::Name(sid))
             }
             NarrowTarget::Attr(a, whole) => {
-                let base = self.eval(&a.value, state);
+                let Some(base) = self.traced(&a.value) else { return };
                 let recs: Vec<u32> = base.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Instance | Kind::Namespace)).collect();
                 if recs.len() != 1 || base.pts.len() != 1 || !self.strongable(recs[0]) {
                     let Some(key) = chain_text(whole) else { return };
                     if !truth {
                         return;
                     }
-                    let cur = self.eval(whole, state);
+                    let Some(cur) = self.traced(whole).filter(|c| !c.pts.is_empty()) else { return };
                     if cur.pts.is_empty() {
                         return;
                     }
@@ -391,7 +472,7 @@ impl Analyzer {
     }
 
     pub fn narrow_isinstance_value(&mut self, cur: &Value, cls_expr: &'static ast::Expr, truth: bool, state: &mut State, store: StoreTarget) {
-        let cv = self.eval(cls_expr, state);
+        let Some(cv) = self.traced(cls_expr) else { return };
         let mut classes: Vec<u32> = Vec::new();
         let mut kinds: Vec<Kind> = Vec::new();
         let mut star = false;
@@ -525,9 +606,8 @@ impl Analyzer {
         if let ast::Expr::Call(c) = expr {
             if let ast::Expr::Attribute(a) = &*c.func {
                 if a.attr.id.as_str() == "get" && !c.arguments.args.is_empty() {
-                    let kv = self.eval(&c.arguments.args[0], state);
+                    let (Some(kv), Some(rec)) = (self.traced(&c.arguments.args[0]), self.traced(&a.value)) else { return };
                     if let Some(k) = kv.kv.as_lit() {
-                        let rec = self.eval(&a.value, state);
                         // only a dict-like receiver: a user instance's `get` is its own method
                         if rec.pts.iter().any(|o| matches!(self.kind(o), Kind::Instance | Kind::Namespace)) {
                             return;
@@ -551,21 +631,16 @@ impl Analyzer {
         }
     }
 
+    /// `left in right` held (`member`) or not: `right`'s record (of `d.keys()`, `df.columns`)
+    /// and `left`'s value as the test evaluated them.
     fn narrow_membership(&mut self, left: &'static ast::Expr, right: &'static ast::Expr, member: bool, state: &mut State) {
-        let mut rec_expr: &'static ast::Expr = right;
-        if let ast::Expr::Call(c) = right {
-            if let ast::Expr::Attribute(a) = &*c.func {
-                if a.attr.id.as_str() == "keys" {
-                    rec_expr = &a.value;
-                }
-            }
-        } else if let ast::Expr::Attribute(a) = right {
-            if matches!(a.attr.id.as_str(), "columns" | "index") {
-                rec_expr = &a.value;
-            }
-        }
-        let rv = self.eval(rec_expr, state);
-        let lv = self.eval(left, state);
+        let rec_expr = membership_record(right);
+        let (Some(lv), Some(rv)) = (self.traced(left), self.traced(rec_expr)) else { return };
+        self.narrow_member_values(left, &lv, rec_expr, &rv, member, state);
+    }
+
+    fn narrow_member_values(&mut self, left: &'static ast::Expr, lv: &Value, rec_expr: &'static ast::Expr, rv: &Value, member: bool, state: &mut State) {
+        let (lv, rv) = (lv.clone(), rv.clone());
         // user classes defining `__contains__` as `return <x> in <y>`: narrow <y> instead
         let insts: Vec<u32> = rv.pts.iter().filter(|o| self.kind(*o) == Kind::Instance).collect();
         if !insts.is_empty() && rv.pts.len() == 1 {
@@ -586,7 +661,9 @@ impl Analyzer {
                                         let cr: &'static ast::Expr = &cmp.comparators[0];
                                         let lv2 = lv.clone();
                                         self.in_method_frame(f, Value::obj(insts[0]), vec![lv2], state, &mut |an: &mut Analyzer, st: &mut State| {
-                                            an.narrow_membership(cl, cr, member, st);
+                                            let cr = membership_record(cr);
+                                            let (l, r) = (an.eval(cl, st), an.eval(cr, st));
+                                            an.narrow_member_values(cl, &l, cr, &r, member, st);
                                         });
                                     }
                                 }
@@ -687,11 +764,9 @@ impl Analyzer {
         }
         let mut keep: Vec<KeyId> = Vec::new();
         for c in intern::sorted_by_str(cur_keys.iter()) {
-            let mut ov = IndexMap::new();
-            ov.insert(name, Value::with_kv(cur.pts.clone(), KeyVal::Lit(c)));
-            self.frame_mut().overlays.push(ov);
-            let v = self.eval(left, state);
-            self.frame_mut().overlays.pop();
+            let mut st = state.copy();
+            self.rebind_name(name, Value::with_kv(cur.pts.clone(), KeyVal::Lit(c)), &mut st);
+            let v = self.eval(left, &mut st);
             match &v.kv {
                 KeyVal::Lit(k) => {
                     if may.contains(*k) {
@@ -808,6 +883,19 @@ pub fn truth_narrowed(v: &Value, truth: bool) -> Option<Value> {
     }
     let keep: KeySet = lits.iter().filter(|k| crate::models::pyvalues::truthy(*k) != Some(!truth)).collect();
     (keep.len() < lits.len()).then(|| Value::with_kv(v.pts.clone(), if keep.is_empty() { KeyVal::Bot } else { KeyVal::lits(keep) }))
+}
+
+/// The record a membership test's right side stands for: `d` of `d.keys()`, `df` of
+/// `df.columns` / `df.index`.
+fn membership_record(right: &'static ast::Expr) -> &'static ast::Expr {
+    match right {
+        ast::Expr::Call(c) => match &*c.func {
+            ast::Expr::Attribute(a) if a.attr.id.as_str() == "keys" => &a.value,
+            _ => right,
+        },
+        ast::Expr::Attribute(a) if matches!(a.attr.id.as_str(), "columns" | "index") => &a.value,
+        _ => right,
+    }
 }
 
 fn is_structural_qual(q: &str) -> bool {

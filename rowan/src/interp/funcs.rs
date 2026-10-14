@@ -321,11 +321,8 @@ impl Analyzer {
     }
 
     pub fn load_name(&mut self, name: StrId, node: &Node, state: &mut State) -> Value {
-        let _ = node;
-        for ov in self.frame().overlays.iter().rev() {
-            if let Some(v) = ov.get(&name) {
-                return v.clone();
-            }
+        if self.frame().comp_names.iter().any(|ns| ns.contains(&name)) {
+            return state.env.get(&name).cloned().unwrap_or_default();
         }
         let fr_kind = self.frame().kind;
         let fr_module = self.frame().module;
@@ -431,14 +428,9 @@ impl Analyzer {
         let fr_kind = self.frame().kind;
         let fr_module = self.frame().module;
         let key = intern::key(intern::Key::Str(str_get(name)));
-        {
-            let fr = self.frame_mut();
-            for ov in fr.overlays.iter_mut().rev() {
-                if ov.contains_key(&name) {
-                    ov.insert(name, v);
-                    return;
-                }
-            }
+        if self.frame().comp_names.iter().any(|ns| ns.contains(&name)) {
+            state.env.insert(name, v);
+            return;
         }
         if fr_kind == FrameKind::Function {
             if let Some(&cid) = self.frame().cells.get(&name) {
