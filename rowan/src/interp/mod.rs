@@ -2185,14 +2185,16 @@ impl Analyzer {
     /// names of the first `envs` callers, and the modules, cells and loop overlays of the
     /// first `frames` frames.
     pub fn state_roots(&self, state: &State, envs: usize, frames: usize, work: &mut Vec<ObjId>) {
-        let callers = self.env_stack.iter().take(envs).flat_map(|e| e.values());
-        for v in state.env.values().chain(callers).chain(state.narrowed.values()).chain(state.ret.iter()) {
-            v.push_objs(work);
-        }
+        // (a walk takes the last pushed first: the running code's names before the modules'
+        // globals, where an object made again is most often still held)
         for fr in self.frames.iter().take(frames) {
             work.push(fr.module);
             work.extend(fr.cells.values().copied());
             fr.overlays.iter().flat_map(|o| o.values()).for_each(|v| v.push_objs(work));
+        }
+        let callers = self.env_stack.iter().take(envs).flat_map(|e| e.values());
+        for v in callers.chain(state.ret.iter()).chain(state.narrowed.values()).chain(state.env.values()) {
+            v.push_objs(work);
         }
     }
 
@@ -2206,7 +2208,7 @@ impl Analyzer {
         // taken as live, which is always sound: their site makes a recent / variant object; a
         // walk that proves an object dead on a large heap visits all of it, and on email's 20k
         // visits per walk gave the same verdicts as 500)
-        const WALK_BUDGET: usize = 500;
+        const WALK_BUDGET: usize = 200;
         let budget = WALK_BUDGET;
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
         while let Some(o) = work.pop() {
