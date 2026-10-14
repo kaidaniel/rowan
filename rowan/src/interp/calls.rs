@@ -290,7 +290,10 @@ impl Analyzer {
             }
             self.kill_facts_on(&objs, state);
         }
-        let name = qual.rsplit('.').next().unwrap_or(qual);
+        // (the method's name: the qualified name's last part, or for a method of an unknown
+        // value the attribute it was read as, `result of …['equals']`)
+        let read_as = qual.rsplit_once("['").and_then(|(_, r)| r.split_once("']")).map(|(n, _)| n);
+        let name = read_as.unwrap_or_else(|| qual.rsplit('.').next().unwrap_or(qual));
         // (a library object's logging / writing / comparing method — the receiver is not one
         // of the program's objects — changes nothing it is given)
         if NOEFFECT_METHOD_NAMES.contains(&name) && recv.map(|r| r.pts.iter().all(|o| matches!(self.kind(o), Kind::Unknown | Kind::External) && !self.is_any(o))).unwrap_or(true) {
