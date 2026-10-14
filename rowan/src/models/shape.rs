@@ -781,6 +781,8 @@ fn mentions(d: DimId, a: AtomId) -> bool {
             *x == a
                 || match atom_get(*x) {
                     Atom::FloorDiv(p, q) | Atom::Mod(p, q) | Atom::Max(p, q) | Atom::Min(p, q) => mentions(p, a) || mentions(q, a),
+                    // (inside a join too: a substitution into its own alternative never ends)
+                    Atom::Join(v) => v.iter().any(|d| mentions(*d, a)),
                     _ => false,
                 }
         })
