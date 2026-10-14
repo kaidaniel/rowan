@@ -726,6 +726,14 @@ impl Analyzer {
                 out.locs.sort_unstable();
                 out.locs.dedup();
                 let c = std::rc::Rc::new(out);
+                // (a cache of what the program's code reaches, by root set: on large programs
+                // the root sets rarely repeat, so it is emptied past a bound on what it holds)
+                let size = roots.len() + c.code.len() + c.locs.len() + c.rebound.len() + c.values.len();
+                self.closures_size += size;
+                if self.closures_size > super::CLOSURE_CACHE {
+                    self.closures.clear();
+                    self.closures_size = size;
+                }
                 self.closures.insert(roots.to_vec(), c.clone());
                 return c;
             }

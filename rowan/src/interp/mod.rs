@@ -72,6 +72,8 @@ impl YieldStates {
 pub const MAX_CLONES: usize = 256;
 /// havoc walks remembered (`havoc_with`); past this many the table starts over
 pub const HAVOC_MEMOS: usize = 1024;
+/// what the cache of code closures (`code_closure`) may hold; past it the cache starts over
+pub const CLOSURE_CACHE: usize = 1 << 18;
 
 /// What a havoc walk met and the heap it left (`havoc_with`).
 pub struct HavocMemo {
@@ -912,6 +914,8 @@ pub struct Analyzer {
     pub code_uses: FxHashMap<usize, Rc<effects::CodeUses>>,
     /// per code object: what it may change when a call of it does not run (`code_closure`)
     pub closures: FxHashMap<Vec<ObjId>, Rc<effects::Closure>>,
+    /// what `closures` holds (roots, code, slots, values), bounded by `CLOSURE_CACHE`
+    pub closures_size: usize,
     /// the code objects the last `havoc_reachable` met (functions, classes, bound methods)
     pub havoc_code: Vec<ObjId>,
     /// the receiver of a skipped method call (`skipped_call`) and how often a havoc met it
