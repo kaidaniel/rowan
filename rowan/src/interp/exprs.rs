@@ -248,7 +248,7 @@ impl Analyzer {
                         None => Value::data("bool"),
                     },
                     ast::UnaryOp::USub => {
-                        if let Some(k) = v.kv.as_lit() {
+                        if let Some(k) = v.kv.as_lit().filter(|_| v.pts.is_empty()) {
                             if let Some(i) = intern::key_as_int(k) {
                                 if !intern::with_key(k, |kk| matches!(kk, intern::Key::Bool(_))) {
                                     return Value::lit(key_int(-i));
