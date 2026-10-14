@@ -1021,6 +1021,8 @@ impl Analyzer {
             Some((_, ctx, single)) => (ctx, single),
             None => self.receiver_ctx(&self_v, &site),
         };
+        // (a generator's object: the one its run returns, keyed as `yield_value` finds it)
+        let gen_id = matches!(fnode, FuncNode::Def(f) if is_generator(&f.body)).then(|| self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None));
         let fr_single = self.frame().single && self.frame().loop_depth == 0 && ctx_single;
         let fr_single_nl = self.frame().single_nl && ctx_single;
         let mut new_fr = Frame::new(FrameKind::Function, fi.scope, fi.module, &ctx, fr_single, &fi.qualname);
@@ -1047,23 +1049,20 @@ impl Analyzer {
         let saved_exits = { state.exits.take() };
         let mut saved_yields: Option<(ObjId, Option<super::YieldStates>)> = None;
         self.frames.push(new_fr);
-        if let FuncNode::Def(f) = fnode {
-            if is_generator(&f.body) {
-                // the yielded values of this activation
-                let gid = self.alloc(Kind::List, &format!("gen:{}", foid), state, &format!("generator {}", fi.qualname), Payload::None, None, Ns::Item, None, Some(&ctx));
-                self.set_llen(gid, state, Some(0));
-                state.elems.insert(gid, KeyVal::Lits(KeySet::new()));
-                // (a new activation: not consumed yet, its own item states; a running one's
-                // yields are put back after it)
-                // (keyed as `yield_value` finds it: the site's object, not a variant `alloc` made)
-                let ygid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
-                saved_yields = Some((ygid, self.gen_yield_states.remove(&ygid)));
-                state.slots.remove(&gid, &(Ns::Attr, key_str_lit("__cursor")));
-                state.slots.remove(&gid, &(Ns::Attr, key_str_lit("\u{1}effpos")));
-                self.gen_pos_states.remove(&gid);
-                self.gen_pos_conflict.retain(|(g, _)| *g != gid);
-                self.gen_eff.remove(&gid);
-            }
+        if let Some(ygid) = gen_id {
+            // the yielded values of this activation
+            let gid = self.alloc(Kind::List, &format!("gen:{}", foid), state, &format!("generator {}", fi.qualname), Payload::None, None, Ns::Item, None, Some(&ctx));
+            self.set_llen(gid, state, Some(0));
+            state.elems.insert(gid, KeyVal::Lits(KeySet::new()));
+            // (a new activation: not consumed yet, its own item states; a running one's
+            // yields are put back after it)
+            // (keyed as `yield_value` finds it: the site's object, not a variant `alloc` made)
+            saved_yields = Some((ygid, self.gen_yield_states.remove(&ygid)));
+            state.slots.remove(&gid, &(Ns::Attr, key_str_lit("__cursor")));
+            state.slots.remove(&gid, &(Ns::Attr, key_str_lit("\u{1}effpos")));
+            self.gen_pos_states.remove(&gid);
+            self.gen_pos_conflict.retain(|(g, _)| *g != gid);
+            self.gen_eff.remove(&gid);
         }
         let saved_chain = std::mem::take(&mut self.call_chain);
         self.call_chain = chain_extend(&saved_chain, &[node.line]);
@@ -1073,7 +1072,7 @@ impl Analyzer {
 
         let pre_bind = state.copy();
         let obj_mark_call = self.objects.len() as ObjId;
-        if !matches!(fnode, FuncNode::Def(f) if is_generator(&f.body)) {
+        if gen_id.is_none() {
             if let Some(fr) = self.frames.last_mut() {
                 fr.pre_call = Some(super::PreCall(self.serial, std::rc::Rc::new(pre_bind.copy())));
             }
@@ -1166,41 +1165,32 @@ impl Analyzer {
         // the generator's body runs here, eagerly, but its caller sees the heap only where the
         // body is suspended: before the first item, at a yield, or at its end. The objects that
         // existed before the call and that the body changed hold the join of those states.
-        let gen_yields = match fnode {
-            FuncNode::Def(f) if is_generator(&f.body) && !gen_cm => {
-                let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
-                Some((gid, self.gen_yield_states.get(&gid).map(|v| v.states().map(|s| s.copy()).collect::<Vec<State>>()).unwrap_or_default()))
-            }
-            _ => None,
-        };
+        let gen_yields = gen_id.filter(|_| !gen_cm).map(|gid| (gid, self.gen_yield_states.get(&gid).map(|v| v.states().map(|s| s.copy()).collect::<Vec<State>>()).unwrap_or_default()));
         // (a generator that ran to its end: the state there, for a consumer that uses it up)
         let finite_end = if gen_yields.is_some() && st.reachable { Some(st.copy()) } else { None };
         // a generator whose body never ends (`while True: yield …`): the caller resumes from
         // one of its yields, and the yields go on (their number is unknown)
-        if let FuncNode::Def(f) = fnode {
-            if is_generator(&f.body) && !st.reachable {
-                let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
-                let joined = self.gen_yield_states.remove(&gid).and_then(|v| {
-                    let mut it = v.list.into_iter().map(|(_, s)| s);
-                    let mut acc = it.next()?;
-                    for mut s in it {
-                        acc = acc.join(&mut s);
-                    }
-                    Some(acc)
-                });
-                if let Some(mut ys) = joined {
-                    let mut p = self.prefix(gid, &ys).unwrap_or(0);
-                    // (the yields joined: every position some yield made is there — the items
-                    // the endless loop is known to give first)
-                    while ys.has_slot(gid, Ns::Pos, intern::key_int(p as i64)) {
-                        p += 1;
-                    }
-                    if p > 0 {
-                        self.objects[gid as usize].known_prefix = Some(p);
-                    }
-                    ys.lens.insert(gid, (None, p, 0));
-                    st = ys;
+        if let Some(gid) = gen_id.filter(|_| !st.reachable) {
+            let joined = self.gen_yield_states.remove(&gid).and_then(|v| {
+                let mut it = v.list.into_iter().map(|(_, s)| s);
+                let mut acc = it.next()?;
+                for mut s in it {
+                    acc = acc.join(&mut s);
                 }
+                Some(acc)
+            });
+            if let Some(mut ys) = joined {
+                let mut p = self.prefix(gid, &ys).unwrap_or(0);
+                // (the yields joined: every position some yield made is there — the items
+                // the endless loop is known to give first)
+                while ys.has_slot(gid, Ns::Pos, intern::key_int(p as i64)) {
+                    p += 1;
+                }
+                if p > 0 {
+                    self.objects[gid as usize].known_prefix = Some(p);
+                }
+                ys.lens.insert(gid, (None, p, 0));
+                st = ys;
             }
         }
         if let Some((gid, ys)) = gen_yields {
@@ -1235,15 +1225,12 @@ impl Analyzer {
             }
         }
         state.set_to(&mut st);
-        if let FuncNode::Def(f) = fnode {
-            if is_generator(&f.body) {
-                let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
-                // what `yield from` the generator evaluates to: its return value
-                state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}genret"), ret.clone(), true);
-                // (one-shot: what a consumer takes is gone for the next one)
-                self.obj_mut(gid).iterator = true;
-                ret = Value::obj(gid);
-            }
+        if let Some(gid) = gen_id {
+            // what `yield from` the generator evaluates to: its return value
+            state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}genret"), ret.clone(), true);
+            // (one-shot: what a consumer takes is gone for the next one)
+            self.obj_mut(gid).iterator = true;
+            ret = Value::obj(gid);
         }
         let rows: Vec<(u32, Row)> = ret.pts.iter().filter(|o| self.is_record_like(*o)).map(|o| (o, state.row(o, Ns::Item))).collect();
         self.summaries.insert((fi.qualname.clone(), if entry { "entry".into() } else { ctx.clone() }), (ret.clone(), rows));
