@@ -764,7 +764,9 @@ impl Analyzer {
             if (!is_and && truth == Some(false)) || (is_and && truth == Some(true)) {
                 acc = rhs;
             } else {
-                acc = acc.join(&rhs);
+                // (what ends it here is a value of the other truth: `x and y` is x only when x
+                // is falsy)
+                acc = super::narrow::truth_narrowed(&acc, !is_and).unwrap_or(acc).join(&rhs);
             }
             prev = v;
         }

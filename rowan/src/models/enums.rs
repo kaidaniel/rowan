@@ -237,6 +237,7 @@ impl crate::interp::Analyzer {
             let vlit = v.kv.as_lit().filter(|_| v.pts.is_empty());
             if let Some(prev) = vlit.and_then(|l| member_vals.iter().find(|(x, _)| *x == l)).map(|(_, m)| *m) {
                 self.cls_slots.insert((coid, Ns::Attr, nk), Value::obj(prev));
+                state.set_slot(coid, Ns::Attr, nk, Value::obj(prev), true);
                 self.enum_aliases.entry(coid).or_default().push((name, prev));
                 continue;
             }
@@ -249,6 +250,7 @@ impl crate::interp::Analyzer {
             }
             state.set_row(mid, Ns::Attr, row);
             self.cls_slots.insert((coid, Ns::Attr, nk), Value::obj(mid));
+            state.set_slot(coid, Ns::Attr, nk, Value::obj(mid), true);
             let mval = if ek.mixed { v.kv.as_lit().filter(|_| v.pts.is_empty()) } else { None };
             let mk = crate::intern::key_member(&format!("{}.{}", c.name.id, name), mval);
             self.member_key.insert(mid, mk);

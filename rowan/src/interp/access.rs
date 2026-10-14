@@ -1335,7 +1335,7 @@ impl Analyzer {
                     if self.class_lookup(oid, name).is_some() {
                         // a classmethod reached through a class binds that class (not the
                         // class that defines it): `Sub.make()` constructs `Sub`
-                        let v = self.class_attr_value(oid, name);
+                        let v = self.class_attr_value(oid, name, state);
                         let mut out = Value::new();
                         let mut changed = false;
                         for f in v.pts.iter() {
@@ -1727,10 +1727,12 @@ impl Analyzer {
         None
     }
 
-    pub fn class_attr_value(&self, cls: u32, name: &str) -> Value {
+    /// A class attribute's value: on this path when the path has it (a class attribute
+    /// rebound after the class was made: `Cls.mode = "x"`), else what any path stored.
+    pub fn class_attr_value(&self, cls: u32, name: &str, state: &State) -> Value {
         match self.class_lookup(cls, name) {
             None => Value::new(),
-            Some(c) => self.cls_slots.get(&(c, Ns::Attr, key_str_lit(name))).cloned().unwrap_or_default(),
+            Some(c) => state.slot_opt(c, Ns::Attr, key_str_lit(name)).or_else(|| self.cls_slots.get(&(c, Ns::Attr, key_str_lit(name))).cloned()).unwrap_or_default(),
         }
     }
 
@@ -1886,7 +1888,7 @@ impl Analyzer {
             // class's — the read cannot fail)
             let class_attr = cls_of.filter(|c| !row.definite.contains(nk) && !self.dataclass_fields_mro(*c).iter().any(|(f, _)| f == name)).and_then(|c| self.class_lookup(c, name));
             if let (true, Some(defc)) = (row.present.contains(nk), class_attr) {
-                let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
+                let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
                 let plain = !cv.pts.iter().any(|f| matches!(self.kind(f), Kind::Function | Kind::Bound));
                 if plain {
                     if !guarded {
@@ -1914,7 +1916,7 @@ impl Analyzer {
         if let Some(c) = cls_of {
             let is_field = self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name);
             if let (Some(defc), false) = (self.class_lookup(c, name), is_field) {
-                let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
+                let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
                 // a class attribute: the access succeeds (a method read counts only where the
                 // receiver may be other objects too, which may lack it)
                 let plain = !cv.pts.iter().any(|f| matches!(self.kind(f), Kind::Function | Kind::Bound) && !(self.kind(f) == Kind::Function && self.func_info(f).is_property.get()));
@@ -2114,14 +2116,14 @@ impl Analyzer {
                     }
                     // a property without a setter: the assignment raises
                     if kind == Kind::Instance {
-                        let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
+                        let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
                         if !cv.pts.is_empty() && cv.pts.iter().all(|f| self.kind(f) == Kind::Function && self.func_info(f).is_property.get()) {
                             self.raise_here("AttributeError", state);
                             continue;
                         }
                     }
                     // a data descriptor (an object whose class has `__set__`) takes the store
-                    let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
+                    let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
                     let descs: Vec<u32> = cv.pts.iter().filter(|d| self.kind(*d) == Kind::Instance && self.instance_class(*d).and_then(|dc| self.class_lookup(dc, "__set__")).is_some()).collect();
                     if !descs.is_empty() {
                         for d in descs {

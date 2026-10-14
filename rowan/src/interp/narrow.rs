@@ -239,6 +239,14 @@ impl Analyzer {
             // first element / is empty (this path's length only, not the object's)
             ast::Expr::Name(n) => {
                 let mut v = self.load_name(s(n.id.as_str()), &Node::none(), state);
+                if let Some(nv) = truth_narrowed(&v, truth) {
+                    if nv.empty() {
+                        state.reachable = false;
+                        return;
+                    }
+                    self.rebind_name(s(n.id.as_str()), nv.clone(), state);
+                    v = nv;
+                }
                 // several containers: on the truthy path the ones known to be empty are not it
                 if truth && v.pts.len() > 1 && v.kv.is_bot() {
                     let keep: Vec<u32> = v.pts.iter().filter(|o| !(matches!(self.kind(*o), Kind::List | Kind::Tuple | Kind::Set) && self.llen(*o, state) == Some(0))).collect();
@@ -274,6 +282,19 @@ impl Analyzer {
                         state.drop_obj_ns(o, Ns::Pos);
                         state.drop_obj_ns(o, Ns::Elem);
                         state.lens.insert(o, (Some(0), 0, 0));
+                    }
+                }
+            }
+            // `if obj.attr:` — the attribute chain's literals of the other truth are not it here
+            ast::Expr::Attribute(_) => {
+                if let Some(key) = chain_text(test) {
+                    let v = self.eval(test, &mut state.copy());
+                    if let Some(nv) = truth_narrowed(&v, truth) {
+                        if nv.empty() {
+                            state.reachable = false;
+                        } else {
+                            state.narrowed.insert(s(&key), nv);
+                        }
                     }
                 }
             }
@@ -778,6 +799,17 @@ impl Analyzer {
 
 /// Classes whose isinstance checks go by structure (ABCs with subclass hooks, protocols):
 /// an unrelated user class may pass them.
+/// A value on the path where a truth test of it was `truth`: without its literals of the
+/// other truth (None, 0, "" on the true path). None: nothing to remove.
+pub fn truth_narrowed(v: &Value, truth: bool) -> Option<Value> {
+    let lits = kv_literals(&v.kv);
+    if !v.kv.is_literal() || lits.is_empty() {
+        return None;
+    }
+    let keep: KeySet = lits.iter().filter(|k| crate::models::pyvalues::truthy(*k) != Some(!truth)).collect();
+    (keep.len() < lits.len()).then(|| Value::with_kv(v.pts.clone(), if keep.is_empty() { KeyVal::Bot } else { KeyVal::lits(keep) }))
+}
+
 fn is_structural_qual(q: &str) -> bool {
     q.starts_with("collections.abc") || q.starts_with("typing") || q.starts_with("abc.") || q.starts_with("numbers") || q.starts_with("os.PathLike")
 }
