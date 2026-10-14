@@ -544,15 +544,22 @@ fn result_lines(an: &Analyzer) -> Vec<String> {
 /// stopped following, deadlines, and the other notes.
 fn limit_lines(an: &Analyzer) -> Vec<String> {
     let mut unknown: Vec<String> = Vec::new();
-    let mut n_unknown = 0;
+    let (mut n_unknown, mut n_skipped) = (0, 0);
     let mut budget: Vec<String> = Vec::new();
     let mut out: Vec<String> = Vec::new();
     for n in &an.notes {
         if let Some(site) = n.strip_prefix("unknown call ") {
+            // (calls of the program's own functions rowan stopped following: counted with them)
+            if an.skipped_sites.contains(&crate::intern::s(site)) {
+                n_skipped += 1;
+                continue;
+            }
             n_unknown += 1;
             let q = site.rsplit_once("@L").map(|(q, _)| q).unwrap_or(site);
-            if named_call(site) && !unknown.iter().any(|u| u == q) {
-                unknown.push(q.to_string());
+            // (a library base class's method reached through `super()`)
+            let q = q.strip_prefix("super.").map_or_else(|| q.to_string(), |m| format!("super().{}", m));
+            if named_call(site) && !unknown.contains(&q) {
+                unknown.push(q);
             }
         } else if let Some(q) = n.strip_suffix(" ran out of its budget: later calls are unknown code") {
             budget.push(format!("`{}`", q.trim_start_matches("class ")));
@@ -570,7 +577,8 @@ fn limit_lines(an: &Analyzer) -> Vec<String> {
     if !budget.is_empty() {
         let n = budget.len();
         let shown: Vec<String> = budget.into_iter().take(6).collect();
-        lines.push(format!("  rowan stopped following {} function{} after many calls, so their later calls count as code it cannot see: {}{}", n, if n == 1 { "" } else { "s" }, shown.join(", "), if n > 6 { ", …" } else { "" }));
+        let later = if n_skipped > 0 { format!("{} ", n_skipped) } else { String::new() };
+        lines.push(format!("  rowan stopped following {} function{} after many calls, so their {}later calls count as code it cannot see: {}{}", n, if n == 1 { "" } else { "s" }, later, shown.join(", "), if n > 6 { ", …" } else { "" }));
     }
     lines.extend(out);
     lines
