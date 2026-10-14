@@ -145,7 +145,7 @@ pub fn is_scalar_method(name: &str) -> bool {
 }
 pub const NOEFFECT_METHOD_NAMES: &[&str] = &[
     "info", "debug", "warning", "warn", "error", "critical", "exception", "log", "write", "flush", "close", "print", "assert_called",
-    "assert_called_with",
+    "assert_called_with", "equals",
 ];
 pub const DICT_METHOD_NAMES: &[&str] = &["get", "items", "keys", "values", "update", "pop", "setdefault", "copy", "popitem", "clear"];
 /// Methods that make a class-less unknown a list (modelled by `list.*`).

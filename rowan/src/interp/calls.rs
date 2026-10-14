@@ -303,7 +303,9 @@ impl Analyzer {
             self.kill_facts_on(&objs, state);
         }
         let name = qual.rsplit('.').next().unwrap_or(qual);
-        if NOEFFECT_METHOD_NAMES.contains(&name) && recv.map(|r| self.record_objects(r).is_empty()).unwrap_or(true) {
+        // (a library object's logging / writing / comparing method — the receiver is not one
+        // of the program's objects — changes nothing it is given)
+        if NOEFFECT_METHOD_NAMES.contains(&name) && recv.map(|r| r.pts.iter().all(|o| matches!(self.kind(o), Kind::Unknown | Kind::External) && !self.is_any(o))).unwrap_or(true) {
             self.flag_may_raise(state);
             return Value::data(&format!("L{}", node.line));
         }
