@@ -916,6 +916,13 @@ pub struct Analyzer {
     /// keys a check names as absent (`absent={k}`): an open row lists only the absent keys it
     /// has seen; the check also asks whether reading k would surely fail there
     pub row_absent_probes: Vec<(String, u32, String, KeyId)>,
+    /// the comprehension written as the first argument of `torch.cat` / `torch.stack` being
+    /// called (its address): those raise on no tensors, so it ran at least once
+    pub nonempty_comp: usize,
+    /// set by a comprehension above for its generator: at least one iteration ran
+    pub nonempty_gen: bool,
+    /// whether the last `loop_fixpoint` converged (its last round ran from the fixpoint)
+    pub loop_converged: bool,
     /// module index -> its path relative to the main file's directory (`rel_file`)
     pub rel_files: std::cell::RefCell<FxHashMap<u32, String>>,
     /// while a test is evaluated (`split`): its frame depth and the value each node of it had
