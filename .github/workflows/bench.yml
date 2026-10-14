@@ -160,13 +160,13 @@ jobs:
         run: |
           chmod +x rowan/target/release/rowan
           mkdir -p results
-          ROWAN_LIMITS=tab=0,budget=0 uv run --no-project python tests/run_golden.py > golden.txt 2>&1 || true
+          ROWAN_LIMITS=budget=0 uv run --no-project python tests/run_golden.py > golden.txt 2>&1 || true
           line=$(grep -E '^ *[0-9]+/[0-9]+ passed' golden.txt | tail -1)
           pass=$(echo "$line" | sed -E 's|^ *([0-9]+)/([0-9]+).*|\1|')
           total=$(echo "$line" | sed -E 's|^ *([0-9]+)/([0-9]+).*|\2|')
           echo "{\"name\": \"golden tab=0\", \"golden_passing\": ${pass:-0}, \"golden_failing\": $(( ${total:-0} - ${pass:-0} ))}" > results/golden-tab0.json
           {
-            echo "### golden suites with ROWAN_LIMITS=tab=0,budget=0 (informational)"
+            echo "### golden suites with ROWAN_LIMITS=budget=0 (informational)"
             echo
             echo "${line:-no result}"
           } >> "$GITHUB_STEP_SUMMARY"

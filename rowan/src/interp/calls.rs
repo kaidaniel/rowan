@@ -1275,6 +1275,7 @@ impl Analyzer {
             self.havoc_guard = Some((*o, 0, std::rc::Rc::from(e.used.as_slice())));
         }
         let walked = self.havoc_walked;
+        let by_names = eff.is_some();
         let r = self.unknown_call(q, self_v, args, kwargs, star_args, star_kwargs, state, node);
         let site = s(&format!("{}@L{}", q, node.line));
         self.skipped_sites.insert(site);
@@ -1304,7 +1305,7 @@ impl Analyzer {
             }
         }
         if super::debug_enabled() {
-            eprintln!("skip {} at M{}:L{} havoc={}", q, node.module, node.line, self.havoc_walked - walked);
+            eprintln!("skip {} at M{}:L{} havoc={}{}", q, node.module, node.line, self.havoc_walked - walked, if by_names { " (receiver by names)" } else { "" });
         }
         // (a raise after the code's effects on what it reaches beyond its arguments)
         self.flag_may_raise(state);
