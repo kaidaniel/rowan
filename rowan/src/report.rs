@@ -364,6 +364,9 @@ pub fn site_text(an: &Analyzer, site: &str) -> String {
     if let Some(q) = site.strip_prefix("recursion@") {
         return format!("the recursion in `{}`", clean(q));
     }
+    if let Some(q) = site.strip_prefix("consumer@") {
+        return format!("the code that takes the items of `{}`", clean(q));
+    }
     if let Some(l) = site.strip_prefix("del@L") {
         return format!("`del` (line {})", l);
     }

@@ -432,7 +432,7 @@ impl Analyzer {
     /// consumer's own run of that code is analysed where it is).
     fn consumer_between(&mut self, gid: ObjId, state: &mut State) {
         let Some(changes) = self.gen_havoc.get(&gid).cloned().filter(|c| !c.is_empty()) else { return };
-        let site = intern::s("code run between the items");
+        let site = intern::s(&format!("consumer@{}", self.obj(gid).label.trim_start_matches("generator ")));
         let rid = self.any_object(state);
         // (an object that code changed in a way not one key: any of its facts, the objects
         // it holds aside: those it changed are listed too)
