@@ -353,3 +353,6 @@ fn golden_requests(an: &mut Analyzer, rel: &str, src: &str) {
         }
     }
 }
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
