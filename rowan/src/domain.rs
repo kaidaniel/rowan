@@ -1048,19 +1048,6 @@ impl Tier {
             Tier::Unknown => "?",
         }
     }
-    pub fn text(self) -> &'static str {
-        match self {
-            Tier::Proven => "ok",
-            Tier::Likely => "ok (likely — unknown code ran in between)",
-            Tier::Possibly => "possibly missing",
-            Tier::Missing => "definitely missing",
-            Tier::LikelyMissing => "likely missing",
-            Tier::Input => "depends on input",
-            Tier::DataKey => "data-derived key into a closed record",
-            Tier::Map => "map key",
-            Tier::Unknown => "unknown",
-        }
-    }
 }
 
 #[derive(Clone, Debug)]

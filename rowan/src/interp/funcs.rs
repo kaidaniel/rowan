@@ -20,12 +20,6 @@ pub enum Elem {
 }
 
 impl Elem {
-    pub fn key_part(&self) -> Value {
-        match self {
-            Elem::One(v) => v.clone(),
-            Elem::Pair(k, _) => k.clone(),
-        }
-    }
     pub fn value_part(&self) -> Value {
         match self {
             Elem::One(v) => v.clone(),

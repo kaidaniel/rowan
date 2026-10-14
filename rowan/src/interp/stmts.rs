@@ -331,51 +331,24 @@ impl Analyzer {
                 self.stmt_for(f, state);
                 self.loop_gc_end(g, state);
             }
-            ast::Stmt::Break(_) => {
+            ast::Stmt::Break(_) | ast::Stmt::Continue(_) => {
                 let mut st = state.copy();
+                state.reachable = false;
                 // (the finally blocks of the trys this leaves run first)
                 let n = self.loop_stack.len();
-                let pending: Vec<std::rc::Rc<Finally>> = { self.finally_stack.iter().rev().take_while(|(l, _, _)| *l == n).filter(|(_, _, a)| *a).map(|(_, b, _)| b.clone()).collect() };
+                let pending: Vec<std::rc::Rc<Finally>> = self.finally_stack.iter().rev().take_while(|(l, _, _)| *l == n).filter(|(_, _, a)| *a).map(|(_, b, _)| b.clone()).collect();
                 for fin in pending {
-                    self.run_finally(&fin, &mut st, false);
-                    if !st.reachable {
-                        break;
+                    if st.reachable {
+                        self.run_finally(&fin, &mut st, false);
                     }
                 }
-                if !st.reachable {
-                    state.reachable = false;
-                    return;
-                }
-                if let Some(ctx) = self.loop_stack.last_mut() {
-                    ctx.breaks = Some(match ctx.breaks.take() {
+                if let (true, Some(ctx)) = (st.reachable, self.loop_stack.last_mut()) {
+                    let acc = if matches!(node, ast::Stmt::Break(_)) { &mut ctx.breaks } else { &mut ctx.continues };
+                    *acc = Some(match acc.take() {
                         None => st,
                         Some(mut b) => b.join(&mut st),
                     });
                 }
-                state.reachable = false;
-            }
-            ast::Stmt::Continue(_) => {
-                let mut st = state.copy();
-                // (the finally blocks of the trys this leaves run first)
-                let n = self.loop_stack.len();
-                let pending: Vec<std::rc::Rc<Finally>> = { self.finally_stack.iter().rev().take_while(|(l, _, _)| *l == n).filter(|(_, _, a)| *a).map(|(_, b, _)| b.clone()).collect() };
-                for fin in pending {
-                    self.run_finally(&fin, &mut st, false);
-                    if !st.reachable {
-                        break;
-                    }
-                }
-                if !st.reachable {
-                    state.reachable = false;
-                    return;
-                }
-                if let Some(ctx) = self.loop_stack.last_mut() {
-                    ctx.continues = Some(match ctx.continues.take() {
-                        None => st,
-                        Some(mut b) => b.join(&mut st),
-                    });
-                }
-                state.reachable = false;
             }
             ast::Stmt::Try(t) => self.stmt_try(t, state),
             ast::Stmt::With(w) if self.with_suppress(w, state) => {}
