@@ -1978,6 +1978,11 @@ impl Analyzer {
 }
 
 /// A `return` somewhere in these statements (not inside nested functions or classes).
+/// May this code leave its function early (a `return`, or a `yield`: a generator)?
+pub fn may_return(body: &[ast::Stmt]) -> bool {
+    contains_return(body) || crate::interp::is_generator(body)
+}
+
 fn contains_return(body: &[ast::Stmt]) -> bool {
     body.iter().any(|s| match s {
         ast::Stmt::Return(_) => true,

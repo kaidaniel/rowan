@@ -9,11 +9,16 @@ use ruff_python_ast as ast;
 
 use crate::domain::{chain_extend, join_rows, join_values, KeyVal, Ns, Row, Source, SourceKind, Value, DATA};
 use crate::frontend::Node;
-use crate::intern::{self, key_str_lit, s, KeySet, StrId};
+use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};
 use crate::domain::ObjId;
 
 use super::{is_generator, Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, Payload, MAX_ACTIVE, MAX_ARG_JOIN, MAX_CLONES, NOEFFECT_METHOD_NAMES, REC_MAX_ITER};
+
+/// A function run with a receiver (not a static / class method).
+fn fi_is_method(an: &Analyzer, f: ObjId) -> bool {
+    an.func_info_opt(f).is_some_and(|fi| fi.cls.is_some() && !fi.is_static.get() && !fi.is_classmethod.get())
+}
 
 fn widen_value(v: &Value) -> Value {
     if let KeyVal::Lits(ks) = &v.kv {
@@ -1263,6 +1268,10 @@ impl Analyzer {
         // the call reaches otherwise reaches the receiver too (`havoc_guard`)
         let recv = self_v.and_then(|v| v.single()).filter(|o| self.kind(*o) == Kind::Instance);
         let eff = recv.and_then(|o| Some((o, self.receiver_effects(foid, o)?)));
+        let must: Vec<KeyId> = match &eff {
+            Some((_, (_, deletes))) if fi_is_method(self, foid) => self.must_stores(foid).into_iter().filter(|k| !deletes.contains(k)).collect(),
+            _ => Vec::new(),
+        };
         if let Some((o, _)) = &eff {
             self.havoc_guard = Some((*o, 0));
         }
@@ -1295,6 +1304,17 @@ impl Analyzer {
         }
         // (a raise after the code's effects on what it reaches beyond its arguments)
         self.flag_may_raise(state);
+        // (what its own code stores on every way it completes is there after the call: the
+        // raises above may come before)
+        if let (Some(o), false) = (recv, must.is_empty()) {
+            let any = Value::obj(self.any_object(state));
+            let mut row = state.row(o, Ns::Attr);
+            for k in must {
+                state.set_slot(o, Ns::Attr, k, any.clone(), true);
+                row = row.store(k, true);
+            }
+            state.set_row(o, Ns::Attr, row);
+        }
         r
     }
 

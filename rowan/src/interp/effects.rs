@@ -120,6 +120,8 @@ impl RecvScan<'_> {
 impl<'a> Visitor<'a> for RecvScan<'_> {
     fn visit_stmt(&mut self, st: &'a Stmt) {
         match st {
+            // (`return self`: the caller gets it back; no other code gets to change it)
+            Stmt::Return(r) if matches!(r.value.as_deref(), Some(Expr::Name(n)) if n.id.as_str() == self.me) => {}
             Stmt::FunctionDef(_) | Stmt::ClassDef(_) => self.out.escapes |= mentions(self.me, Some(st), None),
             Stmt::Assign(a) => {
                 a.targets.iter().for_each(|t| self.target(t));
@@ -568,6 +570,28 @@ impl Analyzer {
             ks
         };
         Some((keys(stores), keys(deletes)))
+    }
+
+    /// The attribute names a method's own code stores on its receiver on every way it
+    /// completes: the top-level `self.x = …` statements before any statement that may return.
+    pub fn must_stores(&self, foid: ObjId) -> Vec<KeyId> {
+        let Payload::Func(fi) = &self.obj(foid).payload else { return Vec::new() };
+        let (super::FuncNode::Def(f), Some(me)) = (fi.node, fi.node.params().and_then(|p| p.posonlyargs.iter().chain(p.args.iter()).next())) else { return Vec::new() };
+        let me = me.parameter.name.id.as_str();
+        let mine = |t: &Expr| match t {
+            Expr::Attribute(a) if matches!(&*a.value, Expr::Name(n) if n.id.as_str() == me) => Some(key_str_lit(a.attr.as_str())),
+            _ => None,
+        };
+        let mut out = Vec::new();
+        for st in f.body.iter().take_while(|st| !super::stmts::may_return(std::slice::from_ref(*st))) {
+            match st {
+                Stmt::Assign(a) => out.extend(a.targets.iter().filter_map(mine)),
+                Stmt::AnnAssign(a) if a.value.is_some() => out.extend(mine(&a.target)),
+                Stmt::AugAssign(a) => out.extend(mine(&a.target)),
+                _ => {}
+            }
+        }
+        out
     }
 
     /// Where `name` (read in the code of `fi`) is bound — a cell, a module's global — or the
