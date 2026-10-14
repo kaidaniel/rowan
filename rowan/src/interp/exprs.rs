@@ -2336,11 +2336,7 @@ fn gen_facts_equal(a: &State, b: &State, ge: &crate::interp::GenEffects) -> bool
 }
 
 /// Install `src`'s facts about a generator's affected objects into `dst`.
-pub fn gen_copy_facts_pub(dst: &mut State, src: &State, ge: &crate::interp::GenEffects) {
-    gen_copy_facts(dst, src, ge)
-}
-
-fn gen_copy_facts(dst: &mut State, src: &State, ge: &crate::interp::GenEffects) {
+pub fn gen_copy_facts(dst: &mut State, src: &State, ge: &crate::interp::GenEffects) {
     for k in &ge.rows {
         match src.rows.get(k) {
             Some(r) => dst.rows.insert(*k, r),

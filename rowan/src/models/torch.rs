@@ -349,6 +349,36 @@ impl Analyzer {
     }
 
     /// The length of a tuple made by `unbind` / `chunk` with a symbolic count.
+    /// In a torch module, a parameter annotated as a number (`d: int`: arithmetic on it is a
+    /// number, not a tensor, `d ** 0.5`) or as a `Tensor` (`data[j:j + T]` is a tensor's
+    /// slice, not a list's): an unknown known to be one. None for other annotations.
+    pub fn t_param(&mut self, ann: &'static ruff_python_ast::Expr, fi: &crate::interp::FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
+        if !self.torch_modules.contains(&fi.module) {
+            return None;
+        }
+        let node = Analyzer::strip_annotation(ann)?;
+        let number = match node {
+            ruff_python_ast::Expr::Name(n) if matches!(n.id.as_str(), "int" | "float" | "bool") => Some(n.id.as_str() != "float"),
+            ruff_python_ast::Expr::Name(n) if n.id.as_str() == "Tensor" => None,
+            ruff_python_ast::Expr::Attribute(a) if a.attr.as_str() == "Tensor" && matches!(&*a.value, ruff_python_ast::Expr::Name(m) if m.id.as_str() == "torch") => None,
+            _ => return None,
+        };
+        let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), crate::domain::SourceKind::Param, state, &format!("param {}", pname), "", Ns::Item, vec![]);
+        match number {
+            Some(int) => {
+                self.m.t_numbers.insert(poid, int);
+            }
+            None => {
+                if let Some(sy) = self.t_sym_of_obj(poid) {
+                    let mut f = (*state.tf).clone();
+                    f.tensors.insert(sy);
+                    state.tf = std::sync::Arc::new(f);
+                }
+            }
+        }
+        Some(Value::obj(poid))
+    }
+
     /// The length of a call's first argument when it is a comprehension written in the call
     /// with one generator and no filter over a name: as many items as the name's value has
     /// (`torch.stack([data[j:j + T] for j in i])`: `i.shape[0]`; a known str or list: its

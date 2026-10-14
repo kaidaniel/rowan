@@ -1457,16 +1457,8 @@ impl Analyzer {
         if let Some(f) = self.rel_files.borrow().get(&idx) {
             return f.clone();
         }
-        let canon = |p: &str| std::fs::canonicalize(p).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string());
         let f = match frontend::module_path(idx) {
-            Some(p) => {
-                let main_dir = std::path::Path::new(&canon(&self.filename)).parent().map(|d| d.to_path_buf());
-                let cp = canon(&p);
-                match main_dir.as_ref().and_then(|d| std::path::Path::new(&cp).strip_prefix(d).ok()) {
-                    Some(r) => r.to_string_lossy().to_string(),
-                    None => std::path::Path::new(&p).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or(p),
-                }
-            }
+            Some(p) => self.rel_to_main(&p).unwrap_or_else(|| std::path::Path::new(&p).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or(p)),
             None => frontend::module_name(idx),
         };
         self.rel_files.borrow_mut().insert(idx, f.clone());
@@ -1565,13 +1557,14 @@ impl Analyzer {
             return true;
         }
         let idx = self.module_info(m).idx;
-        let Some(p) = frontend::module_path(idx) else { return false };
+        frontend::module_path(idx).map(|p| !p.contains("site-packages") && self.rel_to_main(&p).is_some()).unwrap_or(false)
+    }
+
+    /// Path `p` relative to the main file's directory, when it lies there or below.
+    fn rel_to_main(&self, p: &str) -> Option<String> {
         let canon = |p: &str| std::fs::canonicalize(p).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string());
-        let main_dir = std::path::Path::new(&canon(&self.filename)).parent().map(|d| d.to_path_buf());
-        match main_dir {
-            Some(d) => std::path::Path::new(&canon(&p)).starts_with(&d) && !p.contains("site-packages"),
-            None => false,
-        }
+        let dir = std::path::Path::new(&canon(&self.filename)).parent()?.to_path_buf();
+        std::path::Path::new(&canon(p)).strip_prefix(&dir).ok().map(|r| r.to_string_lossy().to_string())
     }
 
     /// The work done so far: statements run and objects visited by reachability walks (16 to a
@@ -1889,7 +1882,7 @@ impl Analyzer {
         // (with a default, only a torch annotation is taken: an instance for a defaulted
         // parameter of a user class made runs cost coverage, click 186 -> 151 sites)
         let ann = a.annotation.as_deref();
-        let given = match ann.and_then(|ann| if d.is_some() { self.torch_param(ann, fi, a.name.id.as_str(), st) } else { self.param_from_annotation(ann, fi, a.name.id.as_str(), st) }) {
+        let given = match ann.and_then(|ann| if d.is_some() { self.t_param(ann, fi, a.name.id.as_str(), st) } else { self.param_from_annotation(ann, fi, a.name.id.as_str(), st) }) {
             Some(v) => v,
             None => Value::obj(self.param_source(fi, a, st)),
         };
@@ -1899,39 +1892,9 @@ impl Analyzer {
         }
     }
 
-    /// In a torch module, a parameter annotated as a number (`d: int`: arithmetic on it is a
-    /// number, not a tensor, `d ** 0.5`) or as a `Tensor` (`data[j:j + T]` is a tensor's
-    /// slice, not a list's): an unknown known to be one. None for other annotations.
-    pub fn torch_param(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
-        if !self.torch_modules.contains(&fi.module) {
-            return None;
-        }
-        let node = Self::strip_annotation(ann)?;
-        let number = match node {
-            ast::Expr::Name(n) if matches!(n.id.as_str(), "int" | "float" | "bool") => Some(n.id.as_str() != "float"),
-            ast::Expr::Name(n) if n.id.as_str() == "Tensor" => None,
-            ast::Expr::Attribute(a) if a.attr.as_str() == "Tensor" && matches!(&*a.value, ast::Expr::Name(m) if m.id.as_str() == "torch") => None,
-            _ => return None,
-        };
-        let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param, state, &format!("param {}", pname), "", Ns::Item, vec![]);
-        match number {
-            Some(int) => {
-                self.m.t_numbers.insert(poid, int);
-            }
-            None => {
-                if let Some(sy) = self.t_sym_of_obj(poid) {
-                    let mut f = (*state.tf).clone();
-                    f.tensors.insert(sy);
-                    state.tf = std::sync::Arc::new(f);
-                }
-            }
-        }
-        Some(Value::obj(poid))
-    }
-
     pub fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
         let node = Self::strip_annotation(ann)?;
-        if let Some(v) = self.torch_param(ann, fi, pname, state) {
+        if let Some(v) = self.t_param(ann, fi, pname, state) {
             return Some(v);
         }
         let mut v = self.eval(node, state);

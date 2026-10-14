@@ -1508,6 +1508,7 @@ impl Analyzer {
                     }
                     // (a builtin base answers nothing here: its own methods are not user code)
                     let found = found.filter(|fc| self.kind(*fc) != Kind::External);
+                    let ids = self_v.pts.iter().map(|x| x.to_string()).collect::<Vec<String>>().join(",");
                     match found {
                         // (`__new__` is a static method: `super().__new__(cls)` passes the class)
                         Some(fc) if name == "__new__" => self.cls_slots.get(&(fc, Ns::Attr, nk)).cloned().unwrap_or_default(),
@@ -1520,9 +1521,8 @@ impl Analyzer {
                             let mut out = Value::new();
                             for f in fv.pts.iter() {
                                 if self.kind(f) == Kind::Function {
-                                    let ids: Vec<String> = self_v.pts.iter().map(|x| x.to_string()).collect();
                                     let label = format!("{} via super", self.obj(f).label);
-                                    let b = self.alloc_raw(Kind::Bound, &format!("bound:{}:{}", f, ids.join(",")), "", true, &label, Payload::Bound(f, self_v.clone()));
+                                    let b = self.alloc_raw(Kind::Bound, &format!("bound:{}:{}", f, ids), "", true, &label, Payload::Bound(f, self_v.clone()));
                                     out = out.join(&Value::obj(b));
                                 }
                             }
@@ -1530,13 +1530,11 @@ impl Analyzer {
                         }
                         None if name == "__init__" && ci.bases.iter().any(|b| self.dataclass_init_owner(*b).is_some()) => {
                             let dc = ci.bases.iter().find_map(|b| self.dataclass_init_owner(*b)).unwrap();
-                            let ids: Vec<String> = self_v.pts.iter().map(|x| x.to_string()).collect();
-                            Value::obj(self.alloc_raw(Kind::Method, &format!("dcinit:{}:{}", dc, ids.join(",")), "", true, "dataclass __init__ via super", Payload::Method(format!("dcinit.{}", dc), self_v.clone())))
+                            Value::obj(self.alloc_raw(Kind::Method, &format!("dcinit:{}:{}", dc, ids), "", true, "dataclass __init__ via super", Payload::Method(format!("dcinit.{}", dc), self_v.clone())))
                         }
                         // `super().__init__(msg)` in an Exception subclass: the instance's args
                         None if name == "__init__" && self.builtin_exc_base(cls) => {
-                            let ids: Vec<String> = self_v.pts.iter().map(|x| x.to_string()).collect();
-                            Value::obj(self.alloc_raw(Kind::Method, &format!("excinit:{}", ids.join(",")), "", true, "Exception.__init__ via super", Payload::Method("excinit".to_string(), self_v.clone())))
+                            Value::obj(self.alloc_raw(Kind::Method, &format!("excinit:{}", ids), "", true, "Exception.__init__ via super", Payload::Method("excinit".to_string(), self_v.clone())))
                         }
                         // `object`'s own method (or a library base's), run on the receiver:
                         // `object.__setattr__` as modelled, a library base's as unknown code
@@ -1548,9 +1546,8 @@ impl Analyzer {
                             };
                             let q = if closed { format!("builtins.object.{}", name) } else { format!("super.{}", name) };
                             let f = self.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, &q, Payload::Str(q.clone()));
-                            let ids: Vec<String> = self_v.pts.iter().map(|x| x.to_string()).collect();
                             let payload = Payload::Partial(Value::obj(f), vec![self_v.clone()], IndexMap::new());
-                            let b = self.alloc_raw(Kind::Partial, &format!("super:{}:{}", q, ids.join(",")), "", true, &format!("super().{}", name), payload.clone());
+                            let b = self.alloc_raw(Kind::Partial, &format!("super:{}:{}", q, ids), "", true, &format!("super().{}", name), payload.clone());
                             self.obj_mut(b).payload = payload;
                             Value::obj(b)
                         }

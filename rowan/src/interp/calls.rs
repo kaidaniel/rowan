@@ -872,7 +872,7 @@ impl Analyzer {
                 state.replace_with(j);
                 // (how far it has run differs by path: not known, its effects any of its steps')
                 if let Some(ge) = self.gen_eff.get(&o).cloned() {
-                    crate::interp::exprs::gen_copy_facts_pub(state, &ge.join, &ge);
+                    crate::interp::exprs::gen_copy_facts(state, &ge.join, &ge);
                     state.set_slot(o, Ns::Attr, key_str_lit("\u{1}effpos"), Value::lit(key_str_lit("join")), true);
                 }
                 self.set_cursor(o, None, state);
@@ -1211,7 +1211,7 @@ impl Analyzer {
                 if !rows.is_empty() || !slots.is_empty() || !elems.is_empty() {
                     let at = self.gen_pos_states.remove(&gid).unwrap_or_default();
                     let ge = super::GenEffects { rows, slots, elems, lens, pre: pre_bind.copy(), at, end: finite_end, join: st.copy() };
-                    crate::interp::exprs::gen_copy_facts_pub(&mut st, &pre_bind, &ge);
+                    crate::interp::exprs::gen_copy_facts(&mut st, &pre_bind, &ge);
                     st.set_slot(gid, Ns::Attr, key_str_lit("\u{1}effpos"), Value::lit(key_str_lit("pre")), true);
                     self.gen_eff.insert(gid, std::rc::Rc::new(ge));
                 }
