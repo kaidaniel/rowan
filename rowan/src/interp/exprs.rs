@@ -1513,15 +1513,11 @@ impl Analyzer {
         if op == ast::Operator::Add {
             let la = a.kv.as_lit();
             let lb = b.kv.as_lit();
-            if let Some(x) = la {
-                if intern::key_is_str(x) && matches!(b.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
-                    return Value::kv_only(self.rename_kv(&b.kv, &RenameFn::with_arg(FnKind::Prefix, x)));
-                }
-            }
-            if let Some(y) = lb {
-                if intern::key_is_str(y) && matches!(a.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
-                    return Value::kv_only(self.rename_kv(&a.kv, &RenameFn::with_arg(FnKind::Suffix, y)));
-                }
+            // (a known text before or after one of several texts, or keys)
+            match (la.and_then(intern::key_as_str), lb.and_then(intern::key_as_str)) {
+                (Some(x), _) if matches!(b.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) => return Value::kv_only(self.affix(&b.kv, &x, "")),
+                (_, Some(y)) if matches!(a.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) => return Value::kv_only(self.affix(&a.kv, "", &y)),
+                _ => {}
             }
             // two lists with known positions: the concatenation's positions
             if let (Some(x), Some(y)) = (a.single(), b.single()) {
@@ -1649,56 +1645,12 @@ impl Analyzer {
                                 _ => Vec::new(),
                             }
                         };
-                        if args.len() == n {
-                            let to_str = |kv: &KeyVal| -> KeyVal {
-                                match kv {
-                                    KeyVal::Lits(ks) if ks.iter().any(|k| !intern::key_is_str(k)) => KeyVal::Lits(crate::intern::KeySet::from_iter(ks.iter().map(|k| if intern::key_is_str(k) { k } else { key_str_lit(&intern::key_py_str(k)) }))),
-                                    _ => match kv.as_lit() {
-                                        Some(k) if !intern::key_is_str(k) => KeyVal::Lit(key_str_lit(&intern::key_py_str(k))),
-                                        _ => kv.clone(),
-                                    },
-                                }
-                            };
-                            let args: Vec<KeyVal> = args.iter().map(to_str).collect();
-                            let nonlit: Vec<usize> = (0..n).filter(|i| args[*i].as_lit().is_none()).collect();
-                            if nonlit.len() <= 1 {
-                                let hole = nonlit.first().copied();
-                                // literal text before and after the hole (or the whole string)
-                                let text = |from: usize, to: usize| -> String {
-                                    let mut out = String::new();
-                                    for i in from..to {
-                                        out.push_str(&segs[i]);
-                                        if i < n {
-                                            out.push_str(&intern::key_py_str(args[i].as_lit().unwrap()));
-                                        }
-                                    }
-                                    out
-                                };
-                                match hole {
-                                    // (every argument a literal and Python did not format them: an error)
-                                    None => {}
-                                    Some(h) => {
-                                        let pre = format!("{}{}", text(0, h), segs[h]);
-                                        let post = {
-                                            let mut s = String::new();
-                                            for i in (h + 1)..(n + 1) {
-                                                if i > h + 1 {
-                                                    s.push_str(&intern::key_py_str(args[i - 1].as_lit().unwrap()));
-                                                }
-                                                s.push_str(&segs[i]);
-                                            }
-                                            s
-                                        };
-                                        let mut kv = args[h].clone();
-                                        if !pre.is_empty() {
-                                            kv = self.rename_kv(&kv, &RenameFn::with_arg(FnKind::Prefix, key_str_lit(&pre)));
-                                        }
-                                        if !post.is_empty() {
-                                            kv = self.rename_kv(&kv, &RenameFn::with_arg(FnKind::Suffix, key_str_lit(&post)));
-                                        }
-                                        return Value::kv_only(kv);
-                                    }
-                                }
+                        let lit = |i: usize| args[i].as_lit().map(intern::key_py_str);
+                        if let [h] = (0..args.len()).filter(|i| lit(*i).is_none()).collect::<Vec<_>>()[..] {
+                            if args.len() == n {
+                                let pre: String = (0..h).map(|i| format!("{}{}", segs[i], lit(i).unwrap())).collect::<String>() + &segs[h];
+                                let post: String = segs[h + 1].clone() + &(h + 1..n).map(|i| format!("{}{}", lit(i).unwrap(), segs[i + 1])).collect::<String>();
+                                return Value::kv_only(self.affix(&args[h], &pre, &post));
                             }
                         }
                     }
@@ -1713,6 +1665,24 @@ impl Analyzer {
             return Value::with_kv(frames, DATA);
         }
         Value::data(&format!("L{}", node.line))
+    }
+
+    /// The text `pre` + v + `post` for a value v that is one of a few texts or some keys:
+    /// literals as their `str`, the rest renamed (a key made from a parameter keeps the text
+    /// around it).
+    fn affix(&mut self, kv: &KeyVal, pre: &str, post: &str) -> KeyVal {
+        let to_str = |k: KeyId| if intern::key_is_str(k) { k } else { key_str_lit(&intern::key_py_str(k)) };
+        let mut kv = match kv {
+            KeyVal::Lit(k) => KeyVal::Lit(to_str(*k)),
+            KeyVal::Lits(ks) => KeyVal::Lits(ks.iter().map(to_str).collect()),
+            kv => kv.clone(),
+        };
+        for (f, t) in [(FnKind::Prefix, pre), (FnKind::Suffix, post)] {
+            if !t.is_empty() {
+                kv = self.rename_kv(&kv, &RenameFn::with_arg(f, key_str_lit(t)));
+            }
+        }
+        kv
     }
 
     fn expr_fstring(&mut self, f: &'static ast::ExprFString, node: &'static ast::Expr, state: &mut State) -> Value {
@@ -1813,19 +1783,7 @@ impl Analyzer {
                 let i = holes[0];
                 let pre: String = parts[..i].iter().map(|p| if let Part::Lit(l) = p { l.as_str() } else { "" }).collect();
                 let post: String = parts[i + 1..].iter().map(|p| if let Part::Lit(l) = p { l.as_str() } else { "" }).collect();
-                let mut kv = v.kv.clone();
-                if let Some(k) = kv.as_lit() {
-                    if !intern::key_is_str(k) {
-                        kv = KeyVal::Lit(key_str_lit(&intern::key_py_str(k)));
-                    }
-                }
-                if !pre.is_empty() {
-                    kv = self.rename_kv(&kv, &RenameFn::with_arg(FnKind::Prefix, key_str_lit(&pre)));
-                }
-                if !post.is_empty() {
-                    kv = self.rename_kv(&kv, &RenameFn::with_arg(FnKind::Suffix, key_str_lit(&post)));
-                }
-                return Value::kv_only(kv);
+                return Value::kv_only(self.affix(&v.kv, &pre, &post));
             }
         }
         // several holes: known literals concatenate; a parameter among them is decided per
