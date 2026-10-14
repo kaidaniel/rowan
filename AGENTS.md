@@ -51,7 +51,8 @@ on abstract values. Imports run as Python runs them (`TYPE_CHECKING` is False, `
   * **Unknown calls** may change everything they reach through what they are given, at any
     depth: records get a mutator, slots may hold anything (one shared unknown object, which
     no store changes: a value stored into it goes to unknown code, `escape`), lists and sets
-    any items and length; the program's functions among it may run (`follow_code`).
+    any items and length; the program's functions among it may run (`follow_code`). A walk
+    by the same code from the same values walks only what changed since (`havoc_memo`).
     They return an unknown and may raise anything. Library functions known to have no effect
     are `noeffect` (`ALLOWLIST_PREFIXES`), except those changing their arguments (`random.shuffle`).
   * **Builtins** run the program's dunders Python calls for them (`builtin_dunder`); those
@@ -146,7 +147,7 @@ budget; informational, into the history on gh-pages).
   (statements, units = statements + walk visits / 16, body runs, objects, row joins, visits,
   havoc visits): deterministic counters to compare builds. `2`: also every raise and try.
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (the golden `#@limits` sets them per
-  case). `ROWAN_FOLLOW=pkg,…` = `--follow`. `ROWAN_TODO=check` checks `#@todo`s too.
+  case; `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check` checks `#@todo`s too).
 * **Profiling:** the bench workflow's `perf` profiles (`sample` hangs on macOS 27). macOS has
   no `timeout`: `perl -e 'alarm N; exec @ARGV' rowan …`. Compare builds on results (proven /
   missing / possibly / schema counts of `--json`), not only on counters.
@@ -194,6 +195,5 @@ extension (talks to `rowan serve`).
 
 ## Known problems and next steps
 
-Open items are in `SUGGESTED_CHANGES.md`, each with a repro; work it in order: the 10k-line
-goal, the frontier programs' cost, precision lost where budgets run out, the `#@todo`s. Parked
-branches: `parked/joined-summaries` (symbolic summaries: unsound, costly), `slotmap-trie`.
+Open items are in `SUGGESTED_CHANGES.md`, each with a repro. Parked branches:
+`parked/joined-summaries` (symbolic summaries: unsound, costly), `slotmap-trie`.

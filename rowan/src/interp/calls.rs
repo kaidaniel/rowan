@@ -4,6 +4,7 @@
 use std::rc::Rc;
 
 use indexmap::IndexMap;
+use rustc_hash::FxHashSet;
 use ruff_python_ast as ast;
 
 use crate::domain::{chain_extend, join_rows, join_values, KeyVal, Ns, Row, Source, SourceKind, Value, DATA};
@@ -477,7 +478,43 @@ impl Analyzer {
     /// `havoc_reachable` past the objects walk `walk` met already (marking those it meets; the
     /// code met is added to `havoc_code`).
     pub fn havoc_with(&mut self, vals: &[Value], rid: ObjId, site: StrId, state: &mut State, walk: u32) {
-        let mut work: Vec<ObjId> = vals.iter().flat_map(|v| v.pts.iter()).collect();
+        let mut roots: Vec<ObjId> = vals.iter().flat_map(|v| v.pts.iter()).collect();
+        roots.sort_unstable();
+        roots.dedup();
+        // (the same code havocked the same values before, and few writes happened since: the
+        // objects that walk met and no write changed since are as it left them — every slot
+        // holds `any`, every row has the mutator —, and what they hold is met through them
+        // unchanged, or changed and walked here: only the changed ones are walked again)
+        let key = (site, {
+            let mut h = rustc_hash::FxHasher::default();
+            std::hash::Hash::hash(&roots, &mut h);
+            std::hash::Hasher::finish(&h)
+        });
+        let memo = if self.havoc_guard.is_none() { self.havoc_memo.remove(&key).filter(|m| m.roots == roots) } else { None };
+        let mut work = roots.clone();
+        let (mut visited, mut code, changed) = match memo {
+            Some(m) => {
+                let limit = (m.visited.len() / 4).max(32);
+                let changed: Option<FxHashSet<ObjId>> = (|| {
+                    let mut ch: FxHashSet<ObjId> = state.rows.diff_upto(&m.rows, limit)?.into_iter().map(|(o, _)| o).collect();
+                    ch.extend(state.slots.diff_upto(&m.slots, limit)?.into_iter().map(|(o, _)| o));
+                    ch.extend(state.elems.diff_upto(&m.elems, limit)?);
+                    ch.extend(state.lens.diff_upto(&m.lens, limit)?);
+                    Some(ch)
+                })();
+                match changed {
+                    Some(ch) => {
+                        work.extend(ch.iter().copied().filter(|o| m.visited.contains(o)));
+                        self.havoc_code.extend(m.code.iter().copied());
+                        (m.visited, m.code, Some(ch))
+                    }
+                    None => (FxHashSet::default(), Vec::new(), None),
+                }
+            }
+            None => (FxHashSet::default(), Vec::new(), None),
+        };
+        let replay = changed.is_some();
+        let unchanged = |o: ObjId, visited: &FxHashSet<ObjId>| replay && visited.contains(&o) && !changed.as_ref().is_some_and(|c| c.contains(&o));
         // (one object stands for "anything unknown code stored": a value per call would pile
         // up in every slot it reaches)
         let any_id = self.any_object(state);
@@ -500,19 +537,28 @@ impl Analyzer {
                 continue;
             }
             self.havoc_marks[i] = walk;
+            if unchanged(o, &visited) {
+                continue;
+            }
+            visited.insert(o);
             self.havoc_walked += 1;
             let k = self.kind(o);
             match (&k, &self.obj(o).payload) {
                 // (the code it meets, for `skipped_call`; a stored method may change its receiver)
                 (Kind::Class | Kind::Function | Kind::Bound | Kind::Partial, _) => {
                     self.havoc_code.push(o);
+                    code.push(o);
                     continue;
                 }
                 (Kind::Method, Payload::Method(_, recv)) => {
                     work.extend(recv.pts.iter());
                     continue;
                 }
-                (Kind::Instance, Payload::Cls(c)) => self.havoc_code.push(*c),
+                (Kind::Instance, Payload::Cls(c)) => {
+                    let c = *c;
+                    self.havoc_code.push(c);
+                    code.push(c);
+                }
                 (Kind::Module | Kind::External | Kind::Method, _) => continue,
                 _ => {}
             }
@@ -555,6 +601,14 @@ impl Analyzer {
                 state.clear_last(o);
                 self.set_prefix(o, state, 0);
             }
+        }
+        if self.havoc_guard.is_none() {
+            if self.havoc_memo.len() >= super::HAVOC_MEMOS {
+                self.havoc_memo.clear();
+            }
+            code.sort_unstable();
+            code.dedup();
+            self.havoc_memo.insert(key, super::HavocMemo { roots, rows: state.rows.copy_ref(), slots: state.slots.copy_ref(), elems: state.elems.copy_ref(), lens: state.lens.copy_ref(), visited, code });
         }
     }
 

@@ -219,7 +219,6 @@ impl Analyzer {
                 });
                 state.record_exit();
                 state.reachable = false;
-                self.exit_count += 1;
             }
             ast::Stmt::Raise(r) => {
                 let exc_v = match &r.exc {
@@ -333,7 +332,6 @@ impl Analyzer {
                 self.loop_gc_end(g, state);
             }
             ast::Stmt::Break(_) => {
-                self.exit_count += 1;
                 let mut st = state.copy();
                 // (the finally blocks of the trys this leaves run first)
                 let n = self.loop_stack.len();
@@ -357,7 +355,6 @@ impl Analyzer {
                 state.reachable = false;
             }
             ast::Stmt::Continue(_) => {
-                self.exit_count += 1;
                 let mut st = state.copy();
                 // (the finally blocks of the trys this leaves run first)
                 let n = self.loop_stack.len();
