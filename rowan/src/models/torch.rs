@@ -1038,6 +1038,17 @@ impl Analyzer {
             // a layer's attribute rowan does not set (`dropout.p`, `conv.bias` made with
             // unknown arguments): unknown; the nn.Module methods every layer has
             if self.t_layer_type(o).is_some() && st.slot_opt(o, Ns::Attr, key_str_lit(name)).is_none() {
+                // (a ModuleList / Sequential is a list, a ModuleDict a dict: their container
+                // methods — `append`, `extend`, `items`, … — are the list's / dict's)
+                let fam = match self.kind(o) {
+                    Kind::List => "list",
+                    Kind::Dict => "dict",
+                    _ => "",
+                };
+                let q = format!("{}.{}", fam, name);
+                if !fam.is_empty() && !MODULE_METHODS.contains(&name) && self.models.lookup(&q).is_some() {
+                    return Some(self.method_value(&q, obj));
+                }
                 return Some(if MODULE_METHODS.contains(&name) { self.method_value(&format!("nnmodule.{}", name), obj) } else { Value::data(&format!("{}.{}", self.obj(o).label, name)) });
             }
         }
@@ -4679,10 +4690,14 @@ fn np_structured(an: &mut Analyzer, st: &mut State, c: &Call, q: &str) -> Option
 
 /// numpy arrays share the tensor model (shapes, the same methods; `axis=` is `dim=`).
 pub fn m_numpy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let q = c.qual.strip_prefix("numpy.").or_else(|| c.qual.strip_prefix("np.")).unwrap_or("");
+    // (the functions that change what they are given in place: a Python list shuffled)
+    if matches!(q, "random.shuffle" | "copyto" | "put" | "place" | "putmask" | "fill_diagonal") {
+        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+    }
     if !an.torch_on {
         return Value::data(&format!("L{}", c.line));
     }
-    let q = c.qual.strip_prefix("numpy.").or_else(|| c.qual.strip_prefix("np.")).unwrap_or("");
     let node = c.node;
     let shape_arg = |an: &Analyzer, st: &State, v: Option<Value>| -> Option<Shape> { v.and_then(|v| an.t_shape_arg(&v, st)) };
     if let Some(v) = np_structured(an, st, c, q) {

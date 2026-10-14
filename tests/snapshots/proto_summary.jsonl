@@ -544,7 +544,7 @@
 ["verdict", "", 1212, 66, "'templates'", "attr", "proven", [689, 692], "Summary param"]
 ["verdict", "", 1213, 32, "'objects'", "attr", "proven", [689, 692], "SummaryMixin()"]
 ["verdict", "", 1213, 32, "'qualname'", "attr", "input", [689, 692], "SummaryMixin()['objects']['*']['payload'], result of domain.Value@L762, result of interp.FuncInfo@L847 \u00d72"]
-["verdict", "", 1213, 72, "'sum_stack'", "attr", "likely", [689, 692], "SummaryMixin()"]
+["verdict", "", 1213, 72, "'sum_stack'", "attr", "input", [689, 692], "SummaryMixin()"]
 ["verdict", "", 1231, 9, "'foid'", "attr", "likely", [621, 634], "Summary param"]
 ["verdict", "", 1234, 13, "'objects'", "attr", "input", [621, 634], "SummaryMixin()"]
 ["verdict", "", 1235, 14, "'label'", "attr", "input", [621, 634], "SummaryMixin()['objects']['*']"]

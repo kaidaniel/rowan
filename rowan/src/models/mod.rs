@@ -52,7 +52,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.str.", "Series.dt.", "Series.cat.", "Series.sparse.", "Series.list.", "Series.struct.", "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "num.", "cfgparser.", "cfgsection.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "slice.", "memo.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
+    "parser.", "num.", "dcinit.", "statistics.", "cfgparser.", "cfgsection.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "slice.", "memo.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
 ];
 
 pub struct Registry {
@@ -81,6 +81,8 @@ impl Registry {
         r(&["builtins.hasattr"], m_hasattr);
         r(&["builtins.vars", "attr.asdict", "attrs.asdict"], m_vars);
         r(&["dataclasses.asdict"], m_asdict);
+        r(&["excinit"], exceptions::m_excinit);
+        r(&["dcinit.*"], dataclasses::m_dcinit);
         r(&["dataclasses.fields"], m_dc_fields);
         r(&["builtins.map", "builtins.filter"], m_map);
         r(&["builtins.str"], m_str);
@@ -182,6 +184,9 @@ impl Registry {
         r(&["asyncio.gather"], m_gather);
         r(&["builtins.exec", "builtins.eval"], m_exec);
         r(&["builtins.globals"], m_globals);
+        r(&["builtins.locals"], m_locals);
+        r(&["builtins.__import__", "importlib.import_module"], m_import);
+        r(&["builtins.exit", "builtins.quit", "sys.exit"], m_exit);
         r(&["types.SimpleNamespace", "argparse.Namespace"], m_simplenamespace);
         r(&["collections.namedtuple", "typing.NamedTuple"], m_namedtuple);
         r(&["dataclasses.field", "typing.cast", "typing.TypeVar", "typing.NewType"], m_passthrough);
@@ -260,10 +265,12 @@ impl Registry {
                 return Some(noeffect);
             }
         }
-        if qual.starts_with("builtins.") {
-            return Some(noeffect);
+        // (the builtins that change nothing they are given and run none of the program's code;
+        // any other without a model of its own is an unknown call)
+        match qual.strip_prefix("builtins.") {
+            Some("help" | "copyright" | "credits" | "license" | "breakpoint" | "compile" | "ascii" | "bin" | "oct" | "complex" | "dir" | "classmethod" | "staticmethod" | "property" | "bytearray" | "memoryview") => Some(noeffect),
+            _ => None,
         }
-        None
     }
 }
 
@@ -367,6 +374,138 @@ pub fn noeffect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         csvio::clobber(an, st, &vals, c.line);
     }
     Value::data(&format!("L{}", c.line))
+}
+
+/// A builtin or container method taken for one that raises only on arguments of the wrong
+/// type (`len`, `sorted`, `str.join`, …) may still raise a TypeError where an argument (or a
+/// builtin's result) is not known: a running try records that.
+pub fn may_type_error(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<StrId, Value>, r: &Value, state: &mut State) {
+    if an.tries.is_empty() || !state.reachable {
+        return;
+    }
+    // (known: literals and the program's containers of literals; not an unknown value, an
+    // instance, the items of a list of those)
+    let known_kv = |kv: &KeyVal| matches!(kv, KeyVal::Bot | KeyVal::Lit(_) | KeyVal::Lits(_));
+    let known = |an: &Analyzer, v: &Value| {
+        known_kv(&v.kv)
+            && v.pts.iter().all(|o| match an.kind(o) {
+                Kind::Unknown | Kind::Instance => false,
+                Kind::List | Kind::Tuple | Kind::Set => state.elems.get(&o).is_none_or(|kv| known_kv(&kv)) && state.slot(o, Ns::Elem, intern::STAR).pts.iter().all(|x| !matches!(an.kind(x), Kind::Unknown | Kind::Instance)),
+                _ => true,
+            })
+    };
+    let unknown = match qual.strip_prefix("builtins.") {
+        Some(n) if crate::interp::exprs::SAFE_BUILTINS.contains(&n) => {
+            if matches!(n, "str" | "repr" | "print" | "id" | "bool" | "callable" | "type" | "super") {
+                return;
+            }
+            // (isinstance / issubclass / hasattr take anything first)
+            let skip = usize::from(matches!(n, "isinstance" | "issubclass" | "hasattr"));
+            args.iter().skip(skip).chain(kwargs.values()).any(|a| !known(an, a)) || (skip == 0 && !known_kv(&r.kv))
+        }
+        Some(_) => return,
+        // (a str method given arguments whose result is not known may have failed on them:
+        // `",".join(items)` of non-strs)
+        None if crate::interp::safe_method(qual) => args.iter().chain(kwargs.values()).any(|a| !known(an, a)) || (qual.starts_with("str.") && !args.is_empty() && !known_kv(&r.kv)),
+        None => return,
+    };
+    if unknown {
+        an.may_raise_here("TypeError", state);
+    }
+}
+
+/// A builtin Python carries out by a dunder of its argument, given instances of the
+/// program's classes that define it: `str` / `repr` / `format` / `print` (`__str__`,
+/// `__repr__`, `__format__`), `hash`, `len`, `int`, `float`, `abs`, `bool`. The dunders run
+/// (their effects happen) and give the result; the rest of the argument goes to the model.
+#[allow(clippy::too_many_arguments)]
+pub fn builtin_dunder(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &crate::frontend::Node) -> Option<Value> {
+    let names: &[&str] = match qual.strip_prefix("builtins.")? {
+        "str" | "print" => &["__str__", "__repr__"],
+        "repr" | "ascii" => &["__repr__"],
+        "format" => &["__format__"],
+        "hash" => &["__hash__"],
+        "len" => &["__len__"],
+        "int" => &["__int__", "__index__"],
+        "float" => &["__float__", "__index__"],
+        "complex" => &["__complex__", "__float__", "__index__"],
+        "bin" | "oct" | "hex" => &["__index__"],
+        "abs" => &["__abs__"],
+        "round" => &["__round__"],
+        "divmod" => &["__divmod__"],
+        "pow" => &["__pow__"],
+        "dir" => &["__dir__"],
+        "bytes" | "bytearray" => &["__bytes__", "__index__", "__iter__"],
+        "bool" => &["__bool__", "__len__"],
+        _ => return None,
+    };
+    let insts = |an: &Analyzer, v: &Value| v.pts.iter().any(|o| an.kind(o) == Kind::Instance && an.instance_class(o).is_some_and(|c| names.iter().any(|n| an.class_lookup(c, n).is_some())));
+    if !star_args.is_empty() || !star_kwargs.is_empty() || !args.iter().any(|a| insts(an, a)) {
+        return None;
+    }
+    let rest_call = |an: &mut Analyzer, rest: Value, state: &mut State| -> Value {
+        if rest.pts.is_empty() && rest.kv.is_bot() {
+            return Value::new();
+        }
+        let mut a = args.to_vec();
+        a[0] = rest;
+        an.call_external(qual, &a, kwargs, &[], &[], state, node, None)
+    };
+    match qual {
+        // (each argument's text; the call writes those)
+        "builtins.print" => {
+            let mut texts = Vec::new();
+            for a in args {
+                texts.push(match an.run_dunder(a, names, vec![], node, state) {
+                    Some((t, rest)) if rest.pts.is_empty() && rest.kv.is_bot() => t,
+                    Some((t, rest)) => t.join(&rest),
+                    None => a.clone(),
+                });
+            }
+            Some(an.call_external(qual, &texts, kwargs, &[], &[], state, node, None))
+        }
+        "builtins.bool" if args.len() == 1 => Some(match an.truth_of(&args[0], state, node) {
+            Some(b) => Value::lit(intern::key(intern::Key::Bool(b))),
+            None => Value::data(&format!("L{}", node.line)),
+        }),
+        // `format(x, spec)`: `__format__(spec)`; without one, `object.__format__` is `str(x)`
+        // for an empty spec
+        "builtins.format" => {
+            let spec = args.get(1).cloned().unwrap_or_else(|| Value::lit_str(""));
+            let (r, rest) = format_dunder(an, &args[0], spec, node, state)?;
+            let tail = rest_call(an, rest, state);
+            Some(r.join(&tail))
+        }
+        // (the other arguments go to the dunder: `round(x, 2)` is `x.__round__(2)`; the text of
+        // what `__index__` gives for `bin`, `hex`, …; the items `__iter__` gives for `bytes`)
+        _ if !args.is_empty() => {
+            let (r, rest) = an.run_dunder(&args[0], names, args[1..].to_vec(), node, state)?;
+            let r = match qual {
+                "builtins.bin" | "builtins.oct" | "builtins.hex" | "builtins.complex" => an.call_external(qual, &[r], kwargs, &[], &[], state, node, None),
+                "builtins.bytes" | "builtins.bytearray" => {
+                    an.iterate(&r, node, state);
+                    Value::data(&format!("L{}", node.line))
+                }
+                _ => r,
+            };
+            let tail = rest_call(an, rest, state);
+            Some(r.join(&tail))
+        }
+        _ => None,
+    }
+}
+
+/// `format(v, spec)` for the instances among `v` whose class defines `__format__`, or (an
+/// empty spec) `__str__` / `__repr__`: their texts joined, and the rest of `v`.
+pub fn format_dunder(an: &mut Analyzer, v: &Value, spec: Value, node: &crate::frontend::Node, state: &mut State) -> Option<(Value, Value)> {
+    let mut ran = an.run_dunder(v, &["__format__"], vec![spec.clone()], node, state);
+    if spec.kv.as_lit() == Some(key_str_lit("")) && spec.pts.is_empty() {
+        let rest = ran.as_ref().map_or(v, |(_, r)| r).clone();
+        if let Some((r, rest2)) = an.run_dunder(&rest, &["__str__", "__repr__"], vec![], node, state) {
+            ran = Some((ran.map_or(r.clone(), |(o, _)| o.join(&r)), rest2));
+        }
+    }
+    ran
 }
 
 fn last(q: &str) -> &str {
@@ -610,6 +749,10 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             "builtins.reversed" => Some((0..items.len()).rev().collect()),
                             _ => Some((0..items.len()).collect()),
                         };
+                        if order.is_none() && c.qual == "builtins.sorted" {
+                            // (items in no known order may not compare: a TypeError)
+                            an.may_raise_here("TypeError", st);
+                        }
                         if let Some(order) = order {
                             an.set_llen(oid, st, Some(items.len()));
                             for (i, j) in order.into_iter().enumerate() {
@@ -646,6 +789,9 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         // them) the order is known (stable sort); otherwise the count is
                         // known and every position may hold any item
                         let order: Option<Vec<usize>> = if sorted { literal_sort_order(an, st, c, items) } else { None };
+                        if sorted && order.is_none() {
+                            an.may_raise_here("TypeError", st);
+                        }
                         let all = join_values(items.clone());
                         for (i, item) in items.iter().enumerate() {
                             let pos = if reversed { n - 1 - i } else { i };
@@ -2341,31 +2487,8 @@ fn m_pop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let int_key = c.args.first().and_then(|a| a.kv.as_lit()).map(|k| intern::key_as_int(k).is_some()).unwrap_or(false);
     let listy = recv.pts.iter().all(|o| matches!(an.kind(o), Kind::List | Kind::Tuple));
     if !recv.pts.is_empty() && listy && (c.args.is_empty() || int_key) {
-        // list.pop through a placeholder (or with no key): an element
-        let mut outs = Vec::new();
-        // (pop reports its own raises: an empty list / an index outside it is an IndexError)
-        let mut maybe_raise = false;
-        for oid in recv.pts.iter() {
-            match an.kind(oid) {
-                _ => {
-                    let before = an.llen(oid, st);
-                    let idx = c.args.first().and_then(|a| a.kv.as_lit()).and_then(intern::key_as_int);
-                    let ok = match (before, idx) {
-                        (Some(n), None) => n > 0,
-                        (Some(n), Some(i)) => (i >= 0 && (i as usize) < n) || (i < 0 && ((-i) as usize) <= n),
-                        _ => false,
-                    };
-                    if !ok {
-                        maybe_raise = true;
-                    }
-                    outs.push(list_pop_one(an, st, oid, c));
-                }
-            }
-        }
-        if maybe_raise {
-            an.may_raise_here("IndexError", st);
-        }
-        return join_values(outs);
+        // list.pop through a placeholder (or with no key)
+        return m_lpop(an, st, c);
     }
     let Some(key) = c.args.first() else { return Value::data("pop") };
     let has_default = c.args.len() > 1;
@@ -3195,11 +3318,35 @@ class UserDict:
         return dict(self.data)
 "#;
 
+/// `xs.pop()` / `xs.pop(i)` / `s.pop()`: the item; an empty list or an index outside it is an
+/// IndexError (an empty set a KeyError), on every path when no receiver can have the item.
 fn m_lpop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let recv = c.recv.clone().unwrap_or_default();
-    let mut outs = Vec::new();
+    let idx = c.args.first().and_then(|a| a.kv.as_lit().filter(|_| a.pts.is_empty())).and_then(intern::key_as_int);
+    let (mut outs, mut may_fail, mut all_fail) = (Vec::new(), recv.pts.is_empty(), !recv.pts.is_empty());
     for oid in recv.pts.iter() {
-        outs.push(list_pop_one(an, st, oid, c));
+        let n = an.llen(oid, st);
+        let (ok, fails) = match (n, idx, c.args.is_empty()) {
+            (Some(n), _, true) => (n > 0, n == 0),
+            (Some(n), Some(i), _) => {
+                let inside = (i >= 0 && (i as usize) < n) || (i < 0 && ((-i) as usize) <= n);
+                (inside, !inside)
+            }
+            _ => (false, false),
+        };
+        may_fail |= !ok;
+        all_fail &= fails;
+        if !fails {
+            outs.push(list_pop_one(an, st, oid, c));
+        }
+    }
+    let exc = if c.qual.starts_with("set.") { "KeyError" } else { "IndexError" };
+    if all_fail {
+        an.raise_here(exc, st);
+        return Value::new();
+    }
+    if may_fail {
+        an.may_raise_here(exc, st);
     }
     if outs.is_empty() {
         Value::data("pop")
@@ -4013,6 +4160,78 @@ fn m_globals(an: &mut Analyzer, _st: &mut State, _c: &Call) -> Value {
     let vid = an.alloc_raw(Kind::View, &format!("view:attrs:{}", m), "", true, "globals()", Payload::View(ViewKind::Attrs, Value::obj(m)));
     an.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(m));
     Value::obj(vid)
+}
+
+/// What a library base class makes of a class the program defines (`class C(Base)`).
+#[derive(Default)]
+pub struct ClassBase {
+    pub is_enum: bool,
+    pub enum_kind: crate::interp::EnumKind,
+    pub str_mixin: bool,
+    pub dict_base: bool,
+    pub nn_module: bool,
+    pub pydantic: bool,
+    pub typed_dict: bool,
+    pub named_tuple: bool,
+    /// its instances may hold what the program does not show (a base rowan does not see)
+    pub open: bool,
+}
+
+pub fn class_base(q: &str) -> ClassBase {
+    let mut f = ClassBase { is_enum: (q.ends_with("Enum") || q.ends_with("Flag")) && q.starts_with("enum."), ..Default::default() };
+    match q {
+        "enum.StrEnum" | "enum.IntEnum" | "enum.IntFlag" | "enum.ReprEnum" => {
+            f.enum_kind.mixed = true;
+            f.enum_kind.repr_value = true;
+        }
+        "builtins.str" | "builtins.int" => f.enum_kind.mixed = true,
+        _ => {}
+    }
+    f.enum_kind.is_str = q == "enum.StrEnum";
+    f.str_mixin = q == "builtins.str";
+    f.enum_kind.flag = matches!(q, "enum.Flag" | "enum.IntFlag");
+    f.dict_base = q == "builtins.dict";
+    f.nn_module = q.starts_with("torch.nn.");
+    if pydantic::is_pydantic_base(q) {
+        f.pydantic = true;
+    } else if q.ends_with("TypedDict") {
+        f.typed_dict = true;
+    } else if q.ends_with("NamedTuple") {
+        f.named_tuple = true;
+    } else {
+        // (a builtin exception base adds nothing to the instance's `vars()`)
+        let plain = matches!(q, "builtins.object" | "object" | "abc.ABC" | "typing.Protocol" | "typing.Generic") || q.ends_with("Generic") || q.strip_prefix("builtins.").is_some_and(crate::interp::exprs::is_exception_name) || q.starts_with("enum.");
+        f.open = !plain;
+    }
+    f
+}
+
+/// `locals()`: at module level the module's names (as `globals()`); in a function a snapshot
+/// whose changes go nowhere.
+fn m_locals(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    if an.frame().kind == crate::interp::FrameKind::Module {
+        return m_globals(an, st, c);
+    }
+    Value::data(&format!("L{}", c.line))
+}
+
+/// `__import__("os")` / `importlib.import_module("os")`: the module (by a known name), as an
+/// import statement gives it (`__import__("a.b")` gives `a`).
+fn m_import(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let Some(name) = c.args.first().and_then(|a| a.kv.as_lit().filter(|_| a.pts.is_empty())).and_then(intern::key_as_str) else {
+        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+    };
+    let m = an.import_module(&name, &c.node, st);
+    match name.split_once('.') {
+        Some((top, _)) if c.qual == "builtins.__import__" => an.import_module(top, &c.node, st),
+        _ => m,
+    }
+}
+
+/// `exit()` / `quit()` / `sys.exit()`: SystemExit.
+fn m_exit(an: &mut Analyzer, st: &mut State, _c: &Call) -> Value {
+    an.raise_here("SystemExit", st);
+    Value::new()
 }
 
 fn m_exec(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {

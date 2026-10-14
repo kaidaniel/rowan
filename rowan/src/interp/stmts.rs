@@ -136,32 +136,43 @@ impl Analyzer {
                 }
             }
             ast::Stmt::AugAssign(a) => {
-                let cur = self.eval(&a.target, state);
-                let rhs = self.eval(&a.value, state);
                 let n = frontend::node(a);
-                // `xs += ys` on a list extends it in place (other names see it)
-                if a.op == ast::Operator::Add && !cur.pts.is_empty() && cur.pts.iter().all(|o| self.kind(o) == Kind::List) {
-                    let m = self.method_value("list.extend", &cur);
-                    self.call_value(&m, &n, None, state, Some(vec![rhs]));
-                    self.bind_target(&a.target, &cur, state);
-                    return;
-                }
-                // `d |= e` on a dict updates it in place; `s |= t` (`&=`, `-=`, `^=`) on a set too
+                let tn = frontend::node(&*a.target);
+                // (the target's object and key are evaluated once: Python reads and stores
+                // through them; a tensor's subscript goes through the expression)
+                let place: Option<(Value, Result<Value, &str>)> = match &*a.target {
+                    ast::Expr::Subscript(sub) => Some((self.eval(&sub.value, state), Ok(self.eval_key(&sub.slice, state)))).filter(|(o, _)| !crate::models::torch::is_tensor(o)),
+                    ast::Expr::Attribute(at) => Some((self.eval(&at.value, state), Err(at.attr.id.as_str()))),
+                    _ => None,
+                };
+                let cur = match &place {
+                    Some((o, Ok(k))) => self.load_item(o, Ns::Item, k, &tn, state, true),
+                    Some((o, Err(name))) => self.load_attr(o, name, &tn, state, true),
+                    None => self.eval(&a.target, state),
+                };
+                let rhs = self.eval(&a.value, state);
+                let store = |an: &mut Analyzer, v: &Value, state: &mut State| match &place {
+                    Some((o, Ok(k))) => an.store_item(o, Ns::Item, k, v, &tn, state),
+                    Some((o, Err(name))) => an.store_attr(o, name, v, &tn, state),
+                    None => an.bind_target(&a.target, v, state),
+                };
+                // `xs += ys` on a list extends it in place (other names see it); `d |= e` on a
+                // dict updates it in place; `s |= t` (`&=`, `-=`, `^=`) on a set too
                 if !cur.pts.is_empty() {
-                    let all_dict = cur.pts.iter().all(|o| self.kind(o) == Kind::Dict);
-                    let all_set = cur.pts.iter().all(|o| self.kind(o) == Kind::Set);
-                    let m = match (a.op, all_dict, all_set) {
-                        (ast::Operator::BitOr, true, _) => Some("dict.update"),
-                        (ast::Operator::BitOr, _, true) => Some("set.update"),
-                        (ast::Operator::BitAnd, _, true) => Some("set.intersection_update"),
-                        (ast::Operator::Sub, _, true) => Some("set.difference_update"),
-                        (ast::Operator::BitXor, _, true) => Some("set.symmetric_difference_update"),
+                    let all = |an: &Analyzer, k: Kind| cur.pts.iter().all(|o| an.kind(o) == k);
+                    let m = match a.op {
+                        ast::Operator::Add if all(self, Kind::List) => Some("list.extend"),
+                        ast::Operator::BitOr if all(self, Kind::Dict) => Some("dict.update"),
+                        ast::Operator::BitOr if all(self, Kind::Set) => Some("set.update"),
+                        ast::Operator::BitAnd if all(self, Kind::Set) => Some("set.intersection_update"),
+                        ast::Operator::Sub if all(self, Kind::Set) => Some("set.difference_update"),
+                        ast::Operator::BitXor if all(self, Kind::Set) => Some("set.symmetric_difference_update"),
                         _ => None,
                     };
                     if let Some(m) = m {
                         let mv = self.method_value(m, &cur);
                         self.call_value(&mv, &n, None, state, Some(vec![rhs]));
-                        self.bind_target(&a.target, &cur, state);
+                        store(self, &cur, state);
                         return;
                     }
                 }
@@ -172,23 +183,18 @@ impl Analyzer {
                 }
                 // `d[k] += v` with an unknown key on a closed dict: the load raised unless k was
                 // one of its keys, so the store adds none
-                if let ast::Expr::Subscript(sub) = &*a.target {
-                    if matches!(&*sub.value, ast::Expr::Name(_) | ast::Expr::Attribute(_)) && matches!(&*sub.slice, ast::Expr::Name(_) | ast::Expr::Attribute(_) | ast::Expr::Subscript(_)) {
-                        let mut probe = state.copy();
-                        let obj = self.eval(&sub.value, &mut probe);
-                        let key = self.eval_key(&sub.slice, &mut probe);
-                        let plain = !obj.pts.is_empty() && obj.kv.is_bot() && obj.pts.iter().all(|o| self.kind(o) == Kind::Dict && !self.m.dd_factories.contains_key(&o) && !self.m.counters.contains(&o) && !crate::models::pandas::is_series_obj(self, o) && { let r = state.row(o, Ns::Item); r.closed() && !r.present.is_empty() });
-                        if plain && !key.kv.is_literal() {
-                            for o in obj.pts.iter() {
-                                for k in state.row(o, Ns::Item).present.iter() {
-                                    state.set_slot(o, Ns::Item, k, res.clone(), false);
-                                }
+                if let Some((obj, Ok(key))) = &place {
+                    let plain = !obj.pts.is_empty() && obj.kv.is_bot() && obj.pts.iter().all(|o| self.kind(o) == Kind::Dict && !self.m.dd_factories.contains_key(&o) && !self.m.counters.contains(&o) && !crate::models::pandas::is_series_obj(self, o) && { let r = state.row(o, Ns::Item); r.closed() && !r.present.is_empty() });
+                    if plain && !key.kv.is_literal() {
+                        for o in obj.pts.iter() {
+                            for k in state.row(o, Ns::Item).present.iter() {
+                                state.set_slot(o, Ns::Item, k, res.clone(), false);
                             }
-                            return;
                         }
+                        return;
                     }
                 }
-                self.bind_target(&a.target, &res, state);
+                store(self, &res, state);
             }
             ast::Stmt::Return(r) => {
                 let v = match &r.value {
@@ -219,7 +225,6 @@ impl Analyzer {
                 });
                 state.record_exit();
                 state.reachable = false;
-                self.exit_count += 1;
             }
             ast::Stmt::Raise(r) => {
                 let exc_v = match &r.exc {
@@ -332,53 +337,24 @@ impl Analyzer {
                 self.stmt_for(f, state);
                 self.loop_gc_end(g, state);
             }
-            ast::Stmt::Break(_) => {
-                self.exit_count += 1;
+            ast::Stmt::Break(_) | ast::Stmt::Continue(_) => {
                 let mut st = state.copy();
+                state.reachable = false;
                 // (the finally blocks of the trys this leaves run first)
                 let n = self.loop_stack.len();
-                let pending: Vec<std::rc::Rc<Finally>> = { self.finally_stack.iter().rev().take_while(|(l, _, _)| *l == n).filter(|(_, _, a)| *a).map(|(_, b, _)| b.clone()).collect() };
+                let pending: Vec<std::rc::Rc<Finally>> = self.finally_stack.iter().rev().take_while(|(l, _, _)| *l == n).filter(|(_, _, a)| *a).map(|(_, b, _)| b.clone()).collect();
                 for fin in pending {
-                    self.run_finally(&fin, &mut st, false);
-                    if !st.reachable {
-                        break;
+                    if st.reachable {
+                        self.run_finally(&fin, &mut st, false);
                     }
                 }
-                if !st.reachable {
-                    state.reachable = false;
-                    return;
-                }
-                if let Some(ctx) = self.loop_stack.last_mut() {
-                    ctx.breaks = Some(match ctx.breaks.take() {
+                if let (true, Some(ctx)) = (st.reachable, self.loop_stack.last_mut()) {
+                    let acc = if matches!(node, ast::Stmt::Break(_)) { &mut ctx.breaks } else { &mut ctx.continues };
+                    *acc = Some(match acc.take() {
                         None => st,
                         Some(mut b) => b.join(&mut st),
                     });
                 }
-                state.reachable = false;
-            }
-            ast::Stmt::Continue(_) => {
-                self.exit_count += 1;
-                let mut st = state.copy();
-                // (the finally blocks of the trys this leaves run first)
-                let n = self.loop_stack.len();
-                let pending: Vec<std::rc::Rc<Finally>> = { self.finally_stack.iter().rev().take_while(|(l, _, _)| *l == n).filter(|(_, _, a)| *a).map(|(_, b, _)| b.clone()).collect() };
-                for fin in pending {
-                    self.run_finally(&fin, &mut st, false);
-                    if !st.reachable {
-                        break;
-                    }
-                }
-                if !st.reachable {
-                    state.reachable = false;
-                    return;
-                }
-                if let Some(ctx) = self.loop_stack.last_mut() {
-                    ctx.continues = Some(match ctx.continues.take() {
-                        None => st,
-                        Some(mut b) => b.join(&mut st),
-                    });
-                }
-                state.reachable = false;
             }
             ast::Stmt::Try(t) => self.stmt_try(t, state),
             ast::Stmt::With(w) if self.with_suppress(w, state) => {}
@@ -1702,45 +1678,19 @@ impl Analyzer {
                             bases.push(oid)
                         }
                         Kind::External => {
-                            let q = self.external_qual(oid);
-                            if (q.ends_with("Enum") || q.ends_with("Flag")) && q.starts_with("enum.") {
-                                is_enum = true;
-                            }
-                            match q.as_str() {
-                                "enum.StrEnum" | "enum.IntEnum" | "enum.IntFlag" | "enum.ReprEnum" => {
-                                    ek.mixed = true;
-                                    ek.repr_value = true;
-                                }
-                                "builtins.str" | "builtins.int" => ek.mixed = true,
-                                _ => {}
-                            }
-                            if q == "enum.StrEnum" {
-                                ek.is_str = true;
-                            }
-                            if q == "builtins.str" {
-                                str_mixin = true;
-                            }
-                            if matches!(q.as_str(), "enum.Flag" | "enum.IntFlag") {
-                                ek.flag = true;
-                            }
-                            if q == "builtins.dict" {
-                                dict_base = true;
-                            }
-                            if q.starts_with("torch.nn.") {
-                                nn_module = true;
-                            }
-                            if crate::models::pydantic::is_pydantic_base(&q) {
-                                pydantic = true;
-                            } else if q.ends_with("TypedDict") {
-                                typed_dict = true;
-                            } else if q.ends_with("NamedTuple") {
-                                named_tuple = true;
-                            } else if matches!(q.as_str(), "builtins.object" | "object" | "abc.ABC" | "typing.Protocol" | "typing.Generic") || q.ends_with("Generic") || (q.strip_prefix("builtins.").map(crate::interp::exprs::is_exception_name).unwrap_or(false))
-                                || (q.starts_with("enum.")) {
-                                // (a builtin exception base adds nothing to the instance's `vars()`)
-                            } else {
-                                open_base = true;
-                            }
+                            let f = crate::models::class_base(&self.external_qual(oid));
+                            is_enum |= f.is_enum;
+                            ek.mixed |= f.enum_kind.mixed;
+                            ek.repr_value |= f.enum_kind.repr_value;
+                            ek.is_str |= f.enum_kind.is_str;
+                            ek.flag |= f.enum_kind.flag;
+                            str_mixin |= f.str_mixin;
+                            dict_base |= f.dict_base;
+                            nn_module |= f.nn_module;
+                            pydantic |= f.pydantic;
+                            typed_dict |= f.typed_dict;
+                            named_tuple |= f.named_tuple;
+                            open_base |= f.open;
                         }
                         _ => open_base = true,
                     }
@@ -1782,52 +1732,9 @@ impl Analyzer {
         let cnode = frontend::node(c);
         let coid = self.alloc_at(Kind::Class, &cnode, state, &format!("class {}", c.name.id), Payload::Class(info.clone()), None, Ns::Attr, None, None);
         self.user_classes.push(coid);
-        let mut is_dataclass = false;
-        for d in &c.decorator_list {
-            if let Some(q) = self.decorator_qualname(&d.expression, state) {
-                if q == "functools.total_ordering" {
-                    self.total_ordering.insert(coid);
-                }
-                if q.ends_with("dataclass") || q.ends_with("attrs.define") || q.ends_with("attr.s") {
-                    is_dataclass = true;
-                    if q.starts_with("pydantic") {
-                        info.pyd_dataclass.set(true);
-                    }
-                    if let ast::Expr::Call(dc) = &d.expression {
-                        for k in dc.arguments.keywords.iter() {
-                            match (k.arg.as_ref().map(|x| x.as_str()), &k.value) {
-                                (Some("frozen"), ast::Expr::BooleanLiteral(b)) => info.dc_frozen.set(b.value),
-                                (Some("kw_only"), ast::Expr::BooleanLiteral(b)) => info.dc_kw_only.set(b.value),
-                                (Some("order"), ast::Expr::BooleanLiteral(b)) => info.dc_order.set(b.value),
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let is_dataclass = crate::models::dataclasses::class_decorators(self, c, coid, &info, state);
         if is_dataclass || typed_dict || named_tuple || pydantic {
-            let mut fields: Vec<(String, Option<&'static ast::Expr>)> = Vec::new();
-            for st in &c.body {
-                if let ast::Stmt::AnnAssign(a) = st {
-                    if let ast::Expr::Name(n) = &*a.target {
-                        // a `ClassVar` is a class attribute; pydantic's `_x` are private attributes
-                        let classvar = match &*a.annotation {
-                            ast::Expr::Subscript(sb) => dotted_last(&sb.value) == "ClassVar",
-                            other => dotted_last(other) == "ClassVar",
-                        };
-                        let pseudo = match &*a.annotation {
-                            ast::Expr::Subscript(sb) => dotted_last(&sb.value) == "InitVar",
-                            other => dotted_last(other) == "KW_ONLY",
-                        };
-                        if classvar || pseudo || (pydantic && (n.id.starts_with('_') || n.id.as_str() == "model_config")) {
-                            continue;
-                        }
-                        fields.push((n.id.to_string(), a.value.as_deref()));
-                    }
-                }
-            }
-            *info.dataclass_fields.borrow_mut() = Some(fields);
+            *info.dataclass_fields.borrow_mut() = Some(crate::models::dataclasses::declared_fields(c, pydantic));
         }
         // class body
         let mi = self.module_info(fr_module);
@@ -2008,6 +1915,11 @@ impl Analyzer {
 }
 
 /// A `return` somewhere in these statements (not inside nested functions or classes).
+/// May this code leave its function early (a `return`, or a `yield`: a generator)?
+pub fn may_return(body: &[ast::Stmt]) -> bool {
+    contains_return(body) || crate::interp::is_generator(body)
+}
+
 fn contains_return(body: &[ast::Stmt]) -> bool {
     body.iter().any(|s| match s {
         ast::Stmt::Return(_) => true,
@@ -2076,19 +1988,7 @@ fn cond_facts_for(key: intern::StrId, pos: bool, deps: Vec<(intern::StrId, Value
 /// Names bound to literals of different truth in the two branches (`has = True` / `False`):
 /// testing the name later tells which branch ran.
 fn name_facts(vals: &[(intern::StrId, Option<Value>, Option<Value>, Option<Value>)], a: &State, b: &State, j: &State, func: u32) -> Vec<std::sync::Arc<crate::state::CondFact>> {
-    let truth_of = |v: &Value| -> Option<bool> {
-        if !v.pts.is_empty() {
-            return None;
-        }
-        let k = v.kv.as_lit()?;
-        intern::with_key(k, |kk| match kk {
-            intern::Key::Bool(x) => Some(*x),
-            intern::Key::None => Some(false),
-            intern::Key::Int(i) => Some(*i != 0),
-            intern::Key::Str(s) => Some(!s.is_empty()),
-            _ => None,
-        })
-    };
+    let truth_of = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(crate::models::pyvalues::truthy);
     let mut out = Vec::new();
     for (name, va, vb, jv) in vals.iter() {
         let (Some(va), Some(vb), Some(jv)) = (va, vb, jv) else { continue };

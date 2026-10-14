@@ -502,12 +502,17 @@ impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
 
     /// Keys whose value differs between self and base.
     pub fn diff_keys(&self, base: &LayerMap<K, V>) -> Vec<K> {
+        self.diff_upto(base, usize::MAX).unwrap_or_default()
+    }
+
+    /// `diff_keys`, or None once more than `limit` keys differ.
+    pub fn diff_upto(&self, base: &LayerMap<K, V>, limit: usize) -> Option<Vec<K>> {
         let mut out = Vec::new();
-        diff(self.root.as_ref(), base.root.as_ref(), &mut |k| {
+        let done = diff(self.root.as_ref(), base.root.as_ref(), &mut |k| {
             out.push(k.clone());
-            true
+            out.len() <= limit
         });
-        out
+        done.then_some(out)
     }
 }
 
@@ -745,7 +750,11 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
     }
 
     pub fn diff_keys(&self, base: &Self) -> Vec<(K, IK)> {
-        self.m.diff_keys(&base.m).into_iter().filter(|p| p.1.key32() != SENTINEL).map(|Pair(k, ik)| (k, ik)).collect()
+        self.diff_upto(base, usize::MAX).unwrap_or_default()
+    }
+
+    pub fn diff_upto(&self, base: &Self, limit: usize) -> Option<Vec<(K, IK)>> {
+        Some(self.m.diff_upto(&base.m, limit)?.into_iter().filter(|p| p.1.key32() != SENTINEL).map(|Pair(k, ik)| (k, ik)).collect())
     }
 }
 

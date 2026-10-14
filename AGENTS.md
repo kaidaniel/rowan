@@ -36,25 +36,27 @@ on abstract values. Imports run as Python runs them (`TYPE_CHECKING` is False, `
   enclosing try. `with` is a `try` whose `finally` is `__exit__`. `finally` runs on every way
   out, `break` / `continue` / `return` included.
 * **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site, in
-  a context of the innermost `chain` (2) call sites (no call cache: it was unsound and rarely
-  hit). **Budget:** each function code (all closures of one `def`) may run 4,096 statements in
-  all (`budget`); past that its calls are unknown calls that may also change what its code
-  reaches beyond its arguments (`effects.rs`: the globals and cells its code, and the code it
-  reaches by name, reads where they may change or escape; class attributes by name; mutable
-  defaults; a method's receiver only by the names its code uses on it unless it escapes,
-  `receiver_effects`), and the function gets a reporting run with open parameters (its lines
-  then hold for the calls that did not run). Entry runs are not counted (one per function).
-  So the work is bounded by the number of functions times the budget.
+  a context of the innermost `chain` (2) call sites. **Budget:** each function code (all
+  closures of one `def`) may run 4,096 statements in all (`budget`); past that its calls are
+  unknown calls that may also change what its code reaches beyond its arguments (`effects.rs`:
+  the globals and cells its code, and the code it reaches by name, reads where they may change
+  or escape; class attributes by name; mutable defaults; a method's receiver only by the names
+  its code uses on it unless it escapes, `receiver_effects`), and the function gets a reporting
+  run with open parameters (its lines then hold for the calls that did not run). Entry runs
+  are not counted (one per function). So the work is bounded by functions times the budget.
   * **Recursion:** the inner call uses the running activation's partial result; it iterates
-    to a fixpoint (8 rounds), then widens.
+    (8 rounds), then widens. An object a path has no facts of reads as unknown (`read_row`).
   * **Unknown values** are not taken for instances of the program's classes: a method of an
     unknown object is an unknown call (no duck typing; it was a closed-world assumption).
   * **Unknown calls** may change everything they reach through what they are given, at any
     depth: records get a mutator, slots may hold anything (one shared unknown object, which
     no store changes: a value stored into it goes to unknown code, `escape`), lists and sets
-    any items and length; the program's functions among it may run (`follow_code`).
+    any items and length; the program's functions among it may run (`follow_code`). A walk
+    by the same code from the same values walks only what changed since (`havoc_memo`).
     They return an unknown and may raise anything. Library functions known to have no effect
     are `noeffect` (`ALLOWLIST_PREFIXES`), except those changing their arguments (`random.shuffle`).
+  * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model
+    is unknown code. A TypeError may come from those taken to fail only on wrong types.
   * **Entry points:** functions nothing calls run with open parameters; their requirements
     become `param F.x` schemas.
 * **Generators** run whole at their first consumption (iteration, unpacking, a call taking
@@ -145,10 +147,9 @@ budget; informational, into the history on gh-pages).
   (statements, units = statements + walk visits / 16, body runs, objects, row joins, visits,
   havoc visits): deterministic counters to compare builds. `2`: also every raise and try.
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (the golden `#@limits` sets them per
-  case). `ROWAN_FOLLOW=pkg,…` = `--follow`. `ROWAN_TODO=check` checks `#@todo`s too.
-* **Profiling:** short runs, several in parallel. `sample <pid> 3` for time,
-  `MallocStackLogging=lite` + `malloc_history <pid> -allBySize` for memory. macOS has no
-  `timeout`: `perl -e 'alarm N; exec @ARGV' rowan …`. Compare builds on results (proven /
+  case; `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check` checks `#@todo`s too).
+* **Profiling:** the bench workflow's `perf` profiles (`sample` hangs on macOS 27). macOS has
+  no `timeout`: `perl -e 'alarm N; exec @ARGV' rowan …`. Compare builds on results (proven /
   missing / possibly / schema counts of `--json`), not only on counters.
 
 ## Layout (`rowan/src/`, ~61k lines: the engine ~21k, the models ~40k)
@@ -189,11 +190,10 @@ extension (talks to `rowan serve`).
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~5 / ~4 / ~3 / ~14 s; 0.13 / 0.07 / 0.12 / 0.12 GB |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~17 / ~28 / ~70 / ~5 s; 0.26 / 1.5 / 1.0 / 0.4 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~5 / ~6 / ~5 / ~17 s; 0.13 / 0.08 / 0.14 / 0.14 GB |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~23 / ~32 / ~94 / ~7 s; 0.31 / 1.5 / 1.3 / 0.5 GB |
 
 ## Known problems and next steps
 
-Open items are in `SUGGESTED_CHANGES.md`, each with a repro; work it in order: the 10k-line
-goal, the frontier programs' cost, precision lost where budgets run out, the `#@todo`s. Parked
-branches: `parked/joined-summaries` (symbolic summaries: unsound, costly), `slotmap-trie`.
+Open items are in `SUGGESTED_CHANGES.md`, each with a repro. Parked branches:
+`parked/joined-summaries` (symbolic summaries: unsound, costly), `slotmap-trie`.

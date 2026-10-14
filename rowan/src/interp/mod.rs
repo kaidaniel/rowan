@@ -70,6 +70,19 @@ impl YieldStates {
     }
 }
 pub const MAX_CLONES: usize = 256;
+/// havoc walks remembered (`havoc_with`); past this many the table starts over
+pub const HAVOC_MEMOS: usize = 1024;
+
+/// What a havoc walk met and the heap it left (`havoc_with`).
+pub struct HavocMemo {
+    pub roots: Vec<ObjId>,
+    pub rows: crate::layered::LayerMap<(ObjId, Ns), Row>,
+    pub slots: crate::layered::TwoLevel<ObjId, crate::state::SlotKey, Value>,
+    pub elems: crate::layered::LayerMap<ObjId, KeyVal>,
+    pub lens: crate::layered::LayerMap<ObjId, (Option<usize>, usize, u16)>,
+    pub visited: FxHashSet<ObjId>,
+    pub code: Vec<ObjId>,
+}
 /// Call sites kept in an allocation context (deeper chains: a hash of the prefix).
 pub const CHAIN: usize = 2;
 /// Statements a function code may run in all its calls (`ROWAN_LIMITS=budget=N`): past them
@@ -890,8 +903,6 @@ pub struct Analyzer {
     pub walked: std::cell::Cell<usize>,
     /// objects visited by unknown code's havoc walks (`havoc_with`)
     pub havoc_walked: usize,
-    /// return / break / continue statements executed (a try body that ends with one did not raise)
-    pub exit_count: usize,
     /// when the analysis started (see `DEADLINE_MS`)
     pub started: Clock,
     /// the hard deadline passed: function bodies stop, the calls they are in become unknown calls
@@ -908,6 +919,8 @@ pub struct Analyzer {
     /// per object, the last havoc walk that met it (`havoc_walk`)
     pub havoc_marks: Vec<u32>,
     pub havoc_walks: u32,
+    /// per (unknown code, values given): what its last havoc walk met, and the heap it left
+    pub havoc_memo: FxHashMap<(StrId, u64), HavocMemo>,
 
     pub entry_instances: FxHashMap<ObjId, ObjId>,
     pub fresh_in_progress: FxHashSet<ObjId>,
@@ -2789,7 +2802,8 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "InterruptedError", "IsADirectoryError", "MemoryError", "NotADirectoryError", "OverflowError", "PendingDeprecationWarning",
     "ProcessLookupError", "RecursionError", "ReferenceError", "ResourceWarning", "RuntimeWarning", "SyntaxError", "SyntaxWarning",
     "SystemError", "TabError", "UnboundLocalError", "UnicodeDecodeError", "UnicodeEncodeError", "UnicodeError", "UnicodeTranslateError",
-    "UnicodeWarning", "copyright", "credits", "exit", "license", "quit",
+    "UnicodeWarning", "copyright", "credits", "exit", "license", "quit", "dir", "FileExistsError", "ExceptionGroup", "BaseExceptionGroup",
+    "EncodingWarning", "PythonFinalizationError",
 ];
 
 pub fn is_builtin_name(n: &str) -> bool {

@@ -20,12 +20,6 @@ pub enum Elem {
 }
 
 impl Elem {
-    pub fn key_part(&self) -> Value {
-        match self {
-            Elem::One(v) => v.clone(),
-            Elem::Pair(k, _) => k.clone(),
-        }
-    }
     pub fn value_part(&self) -> Value {
         match self {
             Elem::One(v) => v.clone(),
@@ -285,6 +279,26 @@ impl Analyzer {
         } else {
             Some(join_values(outs))
         }
+    }
+
+    /// A builtin Python carries out by a dunder of its argument (`str(x)` calls
+    /// `x.__str__()`): on the instances among `v` whose class defines one of `names` (the
+    /// first defined, in order) that method runs with `args`. Returns the results joined and
+    /// the rest of `v`; None when no instance defines one.
+    pub fn run_dunder(&mut self, v: &Value, names: &[&str], args: Vec<Value>, node: &Node, state: &mut State) -> Option<(Value, Value)> {
+        let mut outs: Vec<Value> = Vec::new();
+        let mut rest = Value::kv_only(v.kv.clone());
+        for o in v.pts.iter() {
+            let cls = self.instance_class(o).filter(|_| self.kind(o) == Kind::Instance);
+            match cls.and_then(|c| names.iter().find(|n| self.class_lookup(c, n).is_some())) {
+                Some(n) => outs.push(self.call_method_with(&Value::obj(o), n, args.clone(), node, state).unwrap_or_default()),
+                None => rest.pts = rest.pts.insert(o),
+            }
+        }
+        if outs.is_empty() {
+            return None;
+        }
+        Some((join_values(outs), rest))
     }
 
     // ------------------------------------------------------------- names

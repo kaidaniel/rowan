@@ -136,3 +136,17 @@ impl crate::interp::Analyzer {
         Some(crate::domain::join_values(out))
     }
 }
+
+/// `super().__init__(…)` reaching a builtin exception base: the instance's `args`, and its
+/// `str()` / `repr()` as the base class gives them.
+pub fn m_excinit(an: &mut crate::interp::Analyzer, st: &mut State, c: &crate::interp::Call) -> Value {
+    let recv = c.recv.clone().unwrap_or_default();
+    for o in recv.pts.iter().filter(|o| an.kind(*o) == Kind::Instance).collect::<Vec<_>>() {
+        let name = an.instance_class(o).and_then(|cl| an.class_info_opt(cl)).map(|ci| ci.name.clone()).unwrap_or_else(|| "Exception".into());
+        let t = an.alloc_positional(Kind::Tuple, &c.node, Some(c.args.clone()), Value::new(), DATA, st);
+        let strong = recv.pts.len() == 1 && an.obj(o).single;
+        an.store_key(o, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, &c.node, st);
+        an.exc_objs.insert(o, name);
+    }
+    an.none_v.clone()
+}

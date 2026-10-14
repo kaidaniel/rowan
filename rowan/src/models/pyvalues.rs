@@ -96,8 +96,8 @@ fn skey(s: &str) -> Option<KeyId> {
     Some(key_str_lit(s))
 }
 
-/// Python truth value.
-fn truthy(k: KeyId) -> Option<bool> {
+/// Python truth value (None: an Enum member or an identity object, whose class decides).
+pub fn truthy(k: KeyId) -> Option<bool> {
     Some(match key_get(k) {
         Key::Int(i) => i != 0,
         Key::Bool(b) => b,
@@ -1431,6 +1431,18 @@ fn py_order(op: &str, a: KeyId, b: KeyId) -> Option<bool> {
             }
             Some(test(Some(x.len().cmp(&y.len()))))
         }
+        _ => None,
+    }
+}
+
+/// How Python orders two literals (None: they do not compare, or not as a total order).
+pub fn py_cmp(a: KeyId, b: KeyId) -> Option<Ordering> {
+    if py_eq(a, b)? {
+        return Some(Ordering::Equal);
+    }
+    match (py_order("lt", a, b)?, py_order("gt", a, b)?) {
+        (true, false) => Some(Ordering::Less),
+        (false, true) => Some(Ordering::Greater),
         _ => None,
     }
 }

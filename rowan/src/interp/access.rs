@@ -401,11 +401,11 @@ impl Analyzer {
     /// A receiver of several objects (or objects and a scalar) one of which runs user code for
     /// the operation: they are alternatives, one state each (the second must not see the
     /// first's effects, nor the first's raise end the others' paths).
-    fn split_dispatch(&self, obj: &Value, dispatch: &dyn Fn(&Analyzer, u32) -> bool) -> bool {
+    pub(crate) fn split_dispatch(&self, obj: &Value, dispatch: &dyn Fn(&Analyzer, u32) -> bool) -> bool {
         obj.pts.len() + usize::from(!obj.kv.is_bot()) > 1 && obj.pts.iter().any(|o| dispatch(self, o))
     }
 
-    fn per_receiver(&mut self, obj: &Value, state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &Value, &mut State) -> Value) -> Value {
+    pub(crate) fn per_receiver(&mut self, obj: &Value, state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &Value, &mut State) -> Value) -> Value {
         let mut parts: Vec<Value> = obj.pts.iter().map(Value::obj).collect();
         if !obj.kv.is_bot() {
             parts.push(Value::kv_only(obj.kv.clone()));
@@ -659,7 +659,7 @@ impl Analyzer {
                         continue;
                     }
                     let ll = self.llen(oid, state);
-                    let idx = key.kv.as_lit().and_then(|k| intern::with_key(k, |kk| if let intern::Key::Int(i) = kk { Some(*i) } else { None }));
+                    let idx = key.kv.as_lit().and_then(intern::key_as_int);
                     // the element appended last
                     if let (Some(-1), None, Some(v)) = (idx, ll, state.last_of(oid)) {
                         parts.push(v);
@@ -757,7 +757,7 @@ impl Analyzer {
     #[allow(clippy::too_many_arguments)]
     fn load_record_inner(&mut self, oid: u32, ns: Ns, key: &Value, node: &Node, state: &mut State, guarded: bool, single_target: bool, try_guard: bool) -> Value {
         let kind = self.kind(oid);
-        let mut row = if kind == Kind::Unknown { self.unknown_row(oid, ns, state) } else { state.row(oid, ns) };
+        let mut row = if kind == Kind::Unknown { self.unknown_row(oid, ns, state) } else { self.read_row(oid, ns, state) };
         // (the row before this read narrows it)
         let row0 = row.clone();
         let kv = &key.kv;
@@ -972,7 +972,7 @@ impl Analyzer {
                 Kind::List | Kind::Tuple | Kind::Set => {
                     state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), crate::models::torch::elem_kv(&v.kv)), false);
                     if let (Some(k), Some(n)) = (key.kv.as_lit(), self.llen(oid, state)) {
-                        if let Some(i) = intern::with_key(k, |kk| if let intern::Key::Int(i) = kk { Some(*i) } else { None }) {
+                        if let Some(i) = intern::key_as_int(k) {
                             if 0 <= i && (i as usize) < n {
                                 state.set_slot(oid, Ns::Pos, intern::key_int(i), v.clone(), strong);
                             }
@@ -1335,7 +1335,7 @@ impl Analyzer {
                     if self.class_lookup(oid, name).is_some() {
                         // a classmethod reached through a class binds that class (not the
                         // class that defines it): `Sub.make()` constructs `Sub`
-                        let v = self.class_attr_value(oid, name);
+                        let v = self.class_attr_value(oid, name, state);
                         let mut out = Value::new();
                         let mut changed = false;
                         for f in v.pts.iter() {
@@ -1581,6 +1581,12 @@ impl Analyzer {
                 }
                 return self.method_value(&format!("num.{}", name), obj);
             }
+            // an attribute of None (but a dunder every object has): an AttributeError
+            let none_only = obj.kv.is_literal() && crate::domain::kv_literals(&obj.kv).iter().all(|k| k == intern::key_none()) && !crate::domain::kv_literals(&obj.kv).is_empty();
+            if none_only && report && !name.starts_with("__") {
+                self.raise_here("AttributeError", state);
+                return Value::new();
+            }
             if matches!(obj.kv, KeyVal::Lit(_) | KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
                 return self.method_value(&format!("str.{}", name), obj);
             }
@@ -1721,10 +1727,12 @@ impl Analyzer {
         None
     }
 
-    pub fn class_attr_value(&self, cls: u32, name: &str) -> Value {
+    /// A class attribute's value: on this path when the path has it (a class attribute
+    /// rebound after the class was made: `Cls.mode = "x"`), else what any path stored.
+    pub fn class_attr_value(&self, cls: u32, name: &str, state: &State) -> Value {
         match self.class_lookup(cls, name) {
             None => Value::new(),
-            Some(c) => self.cls_slots.get(&(c, Ns::Attr, key_str_lit(name))).cloned().unwrap_or_default(),
+            Some(c) => state.slot_opt(c, Ns::Attr, key_str_lit(name)).or_else(|| self.cls_slots.get(&(c, Ns::Attr, key_str_lit(name))).cloned()).unwrap_or_default(),
         }
     }
 
@@ -1873,14 +1881,14 @@ impl Analyzer {
             }
         }
         let v = state.slot_opt(oid, Ns::Attr, nk);
-        let row = state.row(oid, Ns::Attr);
+        let row = self.read_row(oid, Ns::Attr, state);
         let cls_of = self.instance_class(oid);
         if let Some(mut v) = v {
             // (set on some paths only, over a class attribute of the name: the others read the
             // class's — the read cannot fail)
             let class_attr = cls_of.filter(|c| !row.definite.contains(nk) && !self.dataclass_fields_mro(*c).iter().any(|(f, _)| f == name)).and_then(|c| self.class_lookup(c, name));
             if let (true, Some(defc)) = (row.present.contains(nk), class_attr) {
-                let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
+                let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
                 let plain = !cv.pts.iter().any(|f| matches!(self.kind(f), Kind::Function | Kind::Bound));
                 if plain {
                     if !guarded {
@@ -1908,7 +1916,7 @@ impl Analyzer {
         if let Some(c) = cls_of {
             let is_field = self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name);
             if let (Some(defc), false) = (self.class_lookup(c, name), is_field) {
-                let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
+                let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
                 // a class attribute: the access succeeds (a method read counts only where the
                 // receiver may be other objects too, which may lack it)
                 let plain = !cv.pts.iter().any(|f| matches!(self.kind(f), Kind::Function | Kind::Bound) && !(self.kind(f) == Kind::Function && self.func_info(f).is_property.get()));
@@ -1995,6 +2003,13 @@ impl Analyzer {
 
     /// An unknown object's row; none on this path (collected, or never made here): nothing is
     /// known of it (an empty, closed row would claim every key missing).
+    /// The row a read classifies against: of an object this path has no facts about at all
+    /// (made on other paths: a recursion's deeper activations make what its widened
+    /// arguments hold), nothing is known.
+    pub fn read_row(&self, oid: u32, ns: Ns, state: &State) -> Row {
+        if self.has_facts(oid, state) { state.row(oid, ns) } else { Row::top() }
+    }
+
     pub fn unknown_row(&self, oid: u32, ns: Ns, state: &State) -> Row {
         if state.has_row(oid, ns) {
             state.row(oid, ns)
@@ -2101,14 +2116,14 @@ impl Analyzer {
                     }
                     // a property without a setter: the assignment raises
                     if kind == Kind::Instance {
-                        let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
+                        let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
                         if !cv.pts.is_empty() && cv.pts.iter().all(|f| self.kind(f) == Kind::Function && self.func_info(f).is_property.get()) {
                             self.raise_here("AttributeError", state);
                             continue;
                         }
                     }
                     // a data descriptor (an object whose class has `__set__`) takes the store
-                    let cv = self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned().unwrap_or_default();
+                    let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
                     let descs: Vec<u32> = cv.pts.iter().filter(|d| self.kind(*d) == Kind::Instance && self.instance_class(*d).and_then(|dc| self.class_lookup(dc, "__set__")).is_some()).collect();
                     if !descs.is_empty() {
                         for d in descs {

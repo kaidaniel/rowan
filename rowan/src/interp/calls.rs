@@ -4,15 +4,21 @@
 use std::rc::Rc;
 
 use indexmap::IndexMap;
+use rustc_hash::FxHashSet;
 use ruff_python_ast as ast;
 
 use crate::domain::{chain_extend, join_rows, join_values, KeyVal, Ns, Row, Source, SourceKind, Value, DATA};
 use crate::frontend::Node;
-use crate::intern::{self, key_str_lit, s, KeySet, StrId};
+use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};
 use crate::domain::ObjId;
 
 use super::{is_generator, Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, Payload, MAX_ACTIVE, MAX_ARG_JOIN, MAX_CLONES, NOEFFECT_METHOD_NAMES, REC_MAX_ITER};
+
+/// A function run with a receiver (not a static / class method).
+fn fi_is_method(an: &Analyzer, f: ObjId) -> bool {
+    an.func_info_opt(f).is_some_and(|fi| fi.cls.is_some() && !fi.is_static.get() && !fi.is_classmethod.get())
+}
 
 fn widen_value(v: &Value) -> Value {
     if let KeyVal::Lits(ks) = &v.kv {
@@ -162,30 +168,14 @@ impl Analyzer {
             Kind::Class => self.construct(oid, args, kwargs, star_args, star_kwargs, state, node),
             Kind::External => {
                 let qual = self.external_qual(oid);
-                let call = Call { qual: qual.clone(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
-                if let Some(v) = crate::models::pure::try_pure(self, state, &call) {
+                if let Some(v) = crate::models::builtin_dunder(self, &qual, args, kwargs, star_args, star_kwargs, state, node) {
                     return v;
                 }
-                // a builtin exception class: an exception object with its args
-                if let Some(n) = qual.strip_prefix("builtins.").filter(|n| super::exprs::is_exception_name(n)) {
-                    if kwargs.is_empty() && star_args.is_empty() && !self.models.has_exact(&qual) {
-                        let n = n.to_string();
-                        return self.exception_object(&n, args.to_vec(), node, state);
-                    }
+                let r = self.call_external(&qual, args, kwargs, star_args, star_kwargs, state, node, call_ast);
+                if call_ast.is_some() {
+                    crate::models::may_type_error(self, &qual, args, kwargs, &r, state);
                 }
-                // `f.__get__(obj)` (a library function bound by hand: attrs's
-                // `object.__setattr__.__get__(self)`): f with obj as its first argument
-                if let Some(base) = qual.strip_suffix(".__get__").filter(|_| !args.is_empty() && kwargs.is_empty()) {
-                    let f = self.alloc_raw(Kind::External, &format!("ext:{}", base), "", true, base, Payload::Str(base.to_string()));
-                    let pc = Call { qual: "functools.partial".into(), args: vec![Value::obj(f), args[0].clone()], ..call.clone() };
-                    if let Some(m) = self.models.lookup("functools.partial") {
-                        return self.run_model(m, state, &pc);
-                    }
-                }
-                if let Some(m) = self.models.lookup(&qual) {
-                    return self.run_model(m, state, &call);
-                }
-                self.unknown_call(&qual, None, args, kwargs, star_args, star_kwargs, state, node)
+                r
             }
             Kind::Method => {
                 let Payload::Method(qual, recv) = self.obj(oid).payload.clone() else { return Value::new() };
@@ -203,34 +193,6 @@ impl Analyzer {
                     }
                     return join_values(outs);
                 }
-                // `super().__init__(…)` reaching a builtin exception base: args, str / repr
-                if qual == "excinit" {
-                    for o in recv.pts.iter() {
-                        if self.kind(o) == Kind::Instance {
-                            let name = self.instance_class(o).and_then(|c| self.class_info_opt(c)).map(|ci| ci.name.clone()).unwrap_or_else(|| "Exception".into());
-                            let t = self.alloc_positional(Kind::Tuple, node, Some(args.to_vec()), Value::new(), DATA, state);
-                            let strong = recv.pts.len() == 1 && self.obj(o).single;
-                            self.store_key(o, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
-                            self.exc_objs.insert(o, name);
-                        }
-                    }
-                    return self.none_v.clone();
-                }
-                // `super().__init__(…)` / `Base.__init__(self, …)` reaching a dataclass base
-                if let Some(rest) = qual.strip_prefix("dcinit.") {
-                    let (cls, self_v, args): (u32, Value, Vec<Value>) = match rest.strip_prefix("class.") {
-                        Some(c) => (c.parse().unwrap_or(0), args.first().cloned().unwrap_or_default(), args.iter().skip(1).cloned().collect()),
-                        None => (rest.parse().unwrap_or(0), recv.clone(), args.to_vec()),
-                    };
-                    if cls != 0 {
-                        for o in self_v.pts.iter() {
-                            if matches!(self.kind(o), Kind::Instance) {
-                                self.dataclass_init(cls, o, &args, star_args, kwargs, star_kwargs, state, node);
-                            }
-                        }
-                    }
-                    return self.none_v.clone();
-                }
                 let mut args = args.to_vec();
                 if qual.starts_with("dict.") || qual.starts_with("set.") {
                     if let Some(a) = args.first_mut() {
@@ -238,15 +200,16 @@ impl Analyzer {
                     }
                 }
                 let call = Call { qual: qual.clone(), recv: Some(recv.clone()), args, kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
-                if qual.starts_with("str.") {
-                    if let Some(v) = crate::models::pure::try_pure(self, state, &call) {
-                        return v;
-                    }
+                let pure = if qual.starts_with("str.") { crate::models::pure::try_pure(self, state, &call) } else { None };
+                let r = match (pure, self.models.lookup(&qual)) {
+                    (Some(v), _) => v,
+                    (None, Some(m)) => self.run_model(m, state, &call),
+                    (None, None) => return self.unknown_call(&qual, Some(&recv), &call.args, kwargs, star_args, star_kwargs, state, node),
+                };
+                if call_ast.is_some() {
+                    crate::models::may_type_error(self, &qual, &call.args, kwargs, &r, state);
                 }
-                if let Some(m) = self.models.lookup(&qual) {
-                    return self.run_model(m, state, &call);
-                }
-                self.unknown_call(&qual, Some(&recv), &call.args, kwargs, star_args, star_kwargs, state, node)
+                r
             }
             Kind::Unknown => {
                 let q = format!("call of {}", self.obj(oid).label);
@@ -275,6 +238,36 @@ impl Analyzer {
                 self.unknown_call(&q, None, args, kwargs, star_args, star_kwargs, state, node)
             }
         }
+    }
+
+    /// A call of a library function or class (a model, or unknown code).
+    #[allow(clippy::too_many_arguments)]
+    pub fn call_external(&mut self, qual: &str, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+        let qual = qual.to_string();
+        let call = Call { qual: qual.clone(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
+        if let Some(v) = crate::models::pure::try_pure(self, state, &call) {
+            return v;
+        }
+        // a builtin exception class: an exception object with its args
+        if let Some(n) = qual.strip_prefix("builtins.").filter(|n| super::exprs::is_exception_name(n)) {
+            if kwargs.is_empty() && star_args.is_empty() && !self.models.has_exact(&qual) {
+                let n = n.to_string();
+                return self.exception_object(&n, args.to_vec(), node, state);
+            }
+        }
+        // `f.__get__(obj)` (a library function bound by hand: attrs's
+        // `object.__setattr__.__get__(self)`): f with obj as its first argument
+        if let Some(base) = qual.strip_suffix(".__get__").filter(|_| !args.is_empty() && kwargs.is_empty()) {
+            let f = self.alloc_raw(Kind::External, &format!("ext:{}", base), "", true, base, Payload::Str(base.to_string()));
+            let pc = Call { qual: "functools.partial".into(), args: vec![Value::obj(f), args[0].clone()], ..call.clone() };
+            if let Some(m) = self.models.lookup("functools.partial") {
+                return self.run_model(m, state, &pc);
+            }
+        }
+        if let Some(m) = self.models.lookup(&qual) {
+            return self.run_model(m, state, &call);
+        }
+        self.unknown_call(&qual, None, args, kwargs, star_args, star_kwargs, state, node)
     }
 
     pub fn unknown_call(&mut self, qual: &str, recv: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
@@ -462,7 +455,43 @@ impl Analyzer {
     /// `havoc_reachable` past the objects walk `walk` met already (marking those it meets; the
     /// code met is added to `havoc_code`).
     pub fn havoc_with(&mut self, vals: &[Value], rid: ObjId, site: StrId, state: &mut State, walk: u32) {
-        let mut work: Vec<ObjId> = vals.iter().flat_map(|v| v.pts.iter()).collect();
+        let mut roots: Vec<ObjId> = vals.iter().flat_map(|v| v.pts.iter()).collect();
+        roots.sort_unstable();
+        roots.dedup();
+        // (the same code havocked the same values before, and few writes happened since: the
+        // objects that walk met and no write changed since are as it left them — every slot
+        // holds `any`, every row has the mutator —, and what they hold is met through them
+        // unchanged, or changed and walked here: only the changed ones are walked again)
+        let key = (site, {
+            let mut h = rustc_hash::FxHasher::default();
+            std::hash::Hash::hash(&roots, &mut h);
+            std::hash::Hasher::finish(&h)
+        });
+        let memo = if self.havoc_guard.is_none() { self.havoc_memo.remove(&key).filter(|m| m.roots == roots) } else { None };
+        let mut work = roots.clone();
+        let (mut visited, mut code, changed) = match memo {
+            Some(m) => {
+                let limit = (m.visited.len() / 4).max(32);
+                let changed: Option<FxHashSet<ObjId>> = (|| {
+                    let mut ch: FxHashSet<ObjId> = state.rows.diff_upto(&m.rows, limit)?.into_iter().map(|(o, _)| o).collect();
+                    ch.extend(state.slots.diff_upto(&m.slots, limit)?.into_iter().map(|(o, _)| o));
+                    ch.extend(state.elems.diff_upto(&m.elems, limit)?);
+                    ch.extend(state.lens.diff_upto(&m.lens, limit)?);
+                    Some(ch)
+                })();
+                match changed {
+                    Some(ch) => {
+                        work.extend(ch.iter().copied().filter(|o| m.visited.contains(o)));
+                        self.havoc_code.extend(m.code.iter().copied());
+                        (m.visited, m.code, Some(ch))
+                    }
+                    None => (FxHashSet::default(), Vec::new(), None),
+                }
+            }
+            None => (FxHashSet::default(), Vec::new(), None),
+        };
+        let replay = changed.is_some();
+        let unchanged = |o: ObjId, visited: &FxHashSet<ObjId>| replay && visited.contains(&o) && !changed.as_ref().is_some_and(|c| c.contains(&o));
         // (one object stands for "anything unknown code stored": a value per call would pile
         // up in every slot it reaches)
         let any_id = self.any_object(state);
@@ -485,19 +514,28 @@ impl Analyzer {
                 continue;
             }
             self.havoc_marks[i] = walk;
+            if unchanged(o, &visited) {
+                continue;
+            }
+            visited.insert(o);
             self.havoc_walked += 1;
             let k = self.kind(o);
             match (&k, &self.obj(o).payload) {
                 // (the code it meets, for `skipped_call`; a stored method may change its receiver)
                 (Kind::Class | Kind::Function | Kind::Bound | Kind::Partial, _) => {
                     self.havoc_code.push(o);
+                    code.push(o);
                     continue;
                 }
                 (Kind::Method, Payload::Method(_, recv)) => {
                     work.extend(recv.pts.iter());
                     continue;
                 }
-                (Kind::Instance, Payload::Cls(c)) => self.havoc_code.push(*c),
+                (Kind::Instance, Payload::Cls(c)) => {
+                    let c = *c;
+                    self.havoc_code.push(c);
+                    code.push(c);
+                }
                 (Kind::Module | Kind::External | Kind::Method, _) => continue,
                 _ => {}
             }
@@ -540,6 +578,14 @@ impl Analyzer {
                 state.clear_last(o);
                 self.set_prefix(o, state, 0);
             }
+        }
+        if self.havoc_guard.is_none() {
+            if self.havoc_memo.len() >= super::HAVOC_MEMOS {
+                self.havoc_memo.clear();
+            }
+            code.sort_unstable();
+            code.dedup();
+            self.havoc_memo.insert(key, super::HavocMemo { roots, rows: state.rows.copy_ref(), slots: state.slots.copy_ref(), elems: state.elems.copy_ref(), lens: state.lens.copy_ref(), visited, code });
         }
     }
 
@@ -1222,6 +1268,10 @@ impl Analyzer {
         // the call reaches otherwise reaches the receiver too (`havoc_guard`)
         let recv = self_v.and_then(|v| v.single()).filter(|o| self.kind(*o) == Kind::Instance);
         let eff = recv.and_then(|o| Some((o, self.receiver_effects(foid, o)?)));
+        let must: Vec<KeyId> = match &eff {
+            Some((_, (_, deletes))) if fi_is_method(self, foid) => self.must_stores(foid).into_iter().filter(|k| !deletes.contains(k)).collect(),
+            _ => Vec::new(),
+        };
         if let Some((o, _)) = &eff {
             self.havoc_guard = Some((*o, 0));
         }
@@ -1254,6 +1304,17 @@ impl Analyzer {
         }
         // (a raise after the code's effects on what it reaches beyond its arguments)
         self.flag_may_raise(state);
+        // (what its own code stores on every way it completes is there after the call: the
+        // raises above may come before)
+        if let (Some(o), false) = (recv, must.is_empty()) {
+            let any = Value::obj(self.any_object(state));
+            let mut row = state.row(o, Ns::Attr);
+            for k in must {
+                state.set_slot(o, Ns::Attr, k, any.clone(), true);
+                row = row.store(k, true);
+            }
+            state.set_row(o, Ns::Attr, row);
+        }
         r
     }
 

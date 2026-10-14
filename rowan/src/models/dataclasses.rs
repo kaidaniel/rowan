@@ -313,3 +313,70 @@ impl crate::interp::Analyzer {
         false
     }
 }
+
+/// `super().__init__(…)` / `Base.__init__(self, …)` reaching a dataclass base: its generated
+/// `__init__` on the instance (`dcinit.<class>` bound, `dcinit.class.<class>` called with self).
+pub fn m_dcinit(an: &mut crate::interp::Analyzer, st: &mut State, c: &crate::interp::Call) -> Value {
+    let rest = c.qual.strip_prefix("dcinit.").unwrap_or("");
+    let (cls, self_v, args): (u32, Value, Vec<Value>) = match rest.strip_prefix("class.") {
+        Some(cl) => (cl.parse().unwrap_or(0), c.args.first().cloned().unwrap_or_default(), c.args.iter().skip(1).cloned().collect()),
+        None => (rest.parse().unwrap_or(0), c.recv.clone().unwrap_or_default(), c.args.clone()),
+    };
+    if cls != 0 {
+        for o in self_v.pts.iter().filter(|o| an.kind(*o) == Kind::Instance).collect::<Vec<_>>() {
+            an.dataclass_init(cls, o, &args, &c.star_args, &c.kwargs, &c.star_kwargs, st, &c.node);
+        }
+    }
+    an.none_v.clone()
+}
+
+/// The decorators of a class the program defines that the models know: `total_ordering`, and
+/// the dataclass ones (`@dataclass`, `attrs.define`, …) with their `frozen` / `kw_only` /
+/// `order` options. True: a dataclass.
+pub fn class_decorators(an: &mut Analyzer, c: &'static ast::StmtClassDef, coid: ObjId, info: &crate::interp::ClassInfo, state: &mut State) -> bool {
+    let mut is_dataclass = false;
+    for d in &c.decorator_list {
+        let Some(q) = an.decorator_qualname(&d.expression, state) else { continue };
+        if q == "functools.total_ordering" {
+            an.total_ordering.insert(coid);
+        }
+        if q.ends_with("dataclass") || q.ends_with("attrs.define") || q.ends_with("attr.s") {
+            is_dataclass = true;
+            if q.starts_with("pydantic") {
+                info.pyd_dataclass.set(true);
+            }
+            if let ast::Expr::Call(dc) = &d.expression {
+                for k in dc.arguments.keywords.iter() {
+                    match (k.arg.as_ref().map(|x| x.as_str()), &k.value) {
+                        (Some("frozen"), ast::Expr::BooleanLiteral(b)) => info.dc_frozen.set(b.value),
+                        (Some("kw_only"), ast::Expr::BooleanLiteral(b)) => info.dc_kw_only.set(b.value),
+                        (Some("order"), ast::Expr::BooleanLiteral(b)) => info.dc_order.set(b.value),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    is_dataclass
+}
+
+/// The fields a dataclass-like class declares (annotated names in its body, with their
+/// defaults): not a `ClassVar`, `InitVar` or `KW_ONLY`, nor pydantic's private `_x` /
+/// `model_config`.
+pub fn declared_fields(c: &'static ast::StmtClassDef, pydantic: bool) -> Vec<(String, Option<&'static ast::Expr>)> {
+    let mut fields = Vec::new();
+    for st in &c.body {
+        let ast::Stmt::AnnAssign(a) = st else { continue };
+        let ast::Expr::Name(n) = &*a.target else { continue };
+        let ann = |name: &str, sub: bool| match &*a.annotation {
+            ast::Expr::Subscript(sb) => sub && crate::interp::dotted_last(&sb.value) == name,
+            other => !sub && crate::interp::dotted_last(other) == name,
+        };
+        let skipped = ann("ClassVar", true) || ann("ClassVar", false) || ann("InitVar", true) || ann("KW_ONLY", false);
+        if skipped || (pydantic && (n.id.starts_with('_') || n.id.as_str() == "model_config")) {
+            continue;
+        }
+        fields.push((n.id.to_string(), a.value.as_deref()));
+    }
+    fields
+}

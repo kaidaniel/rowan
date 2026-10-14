@@ -126,8 +126,47 @@ fn lit_int(v: &Value) -> Option<i64> {
     v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_int)
 }
 
+/// Items of the program's classes that order themselves (`__lt__`, …) compared by library
+/// code: their comparison methods run, any number of times, on the item and the container's
+/// elements (which pairs depends on the values).
+fn comparisons_run(an: &mut Analyzer, st: &mut State, container: &Value, item: Option<&Value>, node: &crate::frontend::Node) {
+    dunders_run(an, st, container, item, false, node);
+}
+
+/// `comparisons_run`, and with `arith` the arithmetic methods too (`statistics.mean` adds and
+/// divides the items).
+fn dunders_run(an: &mut Analyzer, st: &mut State, container: &Value, item: Option<&Value>, arith: bool, node: &crate::frontend::Node) {
+    let it = an.iterate(container, node, st);
+    let elems = an.elem_value(&it.elem, node, "el");
+    let all = item.map_or_else(|| elems.clone(), |x| x.join(&elems));
+    let names: &[&str] = if arith { &["__lt__", "__gt__", "__le__", "__ge__", "__add__", "__radd__", "__sub__", "__truediv__"] } else { &["__lt__", "__gt__", "__le__", "__ge__"] };
+    let runs = |an: &Analyzer, o: crate::domain::ObjId| an.kind(o) == Kind::Instance && an.instance_class(o).is_some_and(|c| names.iter().any(|m| an.class_lookup(c, m).is_some()));
+    if !all.pts.iter().any(|o| runs(an, o)) || !st.reachable {
+        return;
+    }
+    let (head, _, _) = an.loop_fixpoint(st, &mut |an, s| {
+        an.instance_less(&all, &all, node, s);
+        if arith {
+            for op in [ast::Operator::Add, ast::Operator::Sub, ast::Operator::Div] {
+                an.binop(op, &all, &all, node, s);
+            }
+        }
+    });
+    st.replace_with(head);
+}
+
+/// `statistics.*` given objects of the program's classes: their comparison and arithmetic
+/// methods may run (on literals the value models compute the result first).
+pub fn m_statistics(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    for a in &c.args {
+        dunders_run(an, st, a, None, true, &c.node);
+    }
+    crate::models::noeffect(an, st, c)
+}
+
 pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
+    comparisons_run(an, st, c.args.first().unwrap_or(&Value::new()), c.args.get(1), &c.node);
     let heap = c.args.first().cloned().unwrap_or_default();
     let h = heap.single().filter(|o| an.kind(*o) == Kind::List && an.obj(*o).single);
     let elem_of = |an: &mut Analyzer, st: &mut State, v: &Value| { let it_ = an.iterate(v, &c.node, st); an.elem_value(&it_.elem, &c.node, "el") };
@@ -300,6 +339,9 @@ fn plain_list(an: &mut Analyzer, v: Value) -> Value {
 
 pub fn m_bisect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
+    if c.kw("key").is_none() {
+        comparisons_run(an, st, c.args.first().unwrap_or(&Value::new()), c.args.get(1), &c.node);
+    }
     let a = c.args.first().cloned().unwrap_or_default();
     let x = c.args.get(1).cloned().unwrap_or_default();
     let key = c.kw("key");
@@ -500,6 +542,7 @@ pub fn m_seq_index(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 pub fn register(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {
     r(&["list.index", "list.count", "tuple.index", "tuple.count"], m_seq_index);
+    r(&["statistics.*"], m_statistics);
     r(&["heapq.heappush", "heapq.heappop", "heapq.heapify", "heapq.heapreplace", "heapq.heappushpop", "heapq.nlargest", "heapq.nsmallest", "heapq.merge"], m_heapq);
     r(&["bisect.bisect", "bisect.bisect_left", "bisect.bisect_right", "bisect.insort", "bisect.insort_left", "bisect.insort_right"], m_bisect);
     r(
