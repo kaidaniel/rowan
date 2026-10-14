@@ -401,11 +401,11 @@ impl Analyzer {
     /// A receiver of several objects (or objects and a scalar) one of which runs user code for
     /// the operation: they are alternatives, one state each (the second must not see the
     /// first's effects, nor the first's raise end the others' paths).
-    fn split_dispatch(&self, obj: &Value, dispatch: &dyn Fn(&Analyzer, u32) -> bool) -> bool {
+    pub(crate) fn split_dispatch(&self, obj: &Value, dispatch: &dyn Fn(&Analyzer, u32) -> bool) -> bool {
         obj.pts.len() + usize::from(!obj.kv.is_bot()) > 1 && obj.pts.iter().any(|o| dispatch(self, o))
     }
 
-    fn per_receiver(&mut self, obj: &Value, state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &Value, &mut State) -> Value) -> Value {
+    pub(crate) fn per_receiver(&mut self, obj: &Value, state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &Value, &mut State) -> Value) -> Value {
         let mut parts: Vec<Value> = obj.pts.iter().map(Value::obj).collect();
         if !obj.kv.is_bot() {
             parts.push(Value::kv_only(obj.kv.clone()));

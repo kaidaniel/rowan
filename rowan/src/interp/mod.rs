@@ -2802,7 +2802,8 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "InterruptedError", "IsADirectoryError", "MemoryError", "NotADirectoryError", "OverflowError", "PendingDeprecationWarning",
     "ProcessLookupError", "RecursionError", "ReferenceError", "ResourceWarning", "RuntimeWarning", "SyntaxError", "SyntaxWarning",
     "SystemError", "TabError", "UnboundLocalError", "UnicodeDecodeError", "UnicodeEncodeError", "UnicodeError", "UnicodeTranslateError",
-    "UnicodeWarning", "copyright", "credits", "exit", "license", "quit",
+    "UnicodeWarning", "copyright", "credits", "exit", "license", "quit", "dir", "FileExistsError", "ExceptionGroup", "BaseExceptionGroup",
+    "EncodingWarning", "PythonFinalizationError",
 ];
 
 pub fn is_builtin_name(n: &str) -> bool {

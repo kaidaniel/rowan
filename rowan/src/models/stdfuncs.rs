@@ -126,8 +126,26 @@ fn lit_int(v: &Value) -> Option<i64> {
     v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_int)
 }
 
+/// Items of the program's classes that order themselves (`__lt__`, …) compared by library
+/// code: their comparison methods run, any number of times, on the item and the container's
+/// elements (which pairs depends on the values).
+fn comparisons_run(an: &mut Analyzer, st: &mut State, container: &Value, item: Option<&Value>, node: &crate::frontend::Node) {
+    let it = an.iterate(container, node, st);
+    let elems = an.elem_value(&it.elem, node, "el");
+    let all = item.map_or_else(|| elems.clone(), |x| x.join(&elems));
+    let orders = |an: &Analyzer, o: crate::domain::ObjId| an.kind(o) == Kind::Instance && an.instance_class(o).is_some_and(|c| ["__lt__", "__gt__", "__le__", "__ge__"].iter().any(|m| an.class_lookup(c, m).is_some()));
+    if !all.pts.iter().any(|o| orders(an, o)) || !st.reachable {
+        return;
+    }
+    let (head, _, _) = an.loop_fixpoint(st, &mut |an, s| {
+        an.instance_less(&all, &all, node, s);
+    });
+    st.replace_with(head);
+}
+
 pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
+    comparisons_run(an, st, c.args.first().unwrap_or(&Value::new()), c.args.get(1), &c.node);
     let heap = c.args.first().cloned().unwrap_or_default();
     let h = heap.single().filter(|o| an.kind(*o) == Kind::List && an.obj(*o).single);
     let elem_of = |an: &mut Analyzer, st: &mut State, v: &Value| { let it_ = an.iterate(v, &c.node, st); an.elem_value(&it_.elem, &c.node, "el") };
@@ -300,6 +318,9 @@ fn plain_list(an: &mut Analyzer, v: Value) -> Value {
 
 pub fn m_bisect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
+    if c.kw("key").is_none() {
+        comparisons_run(an, st, c.args.first().unwrap_or(&Value::new()), c.args.get(1), &c.node);
+    }
     let a = c.args.first().cloned().unwrap_or_default();
     let x = c.args.get(1).cloned().unwrap_or_default();
     let key = c.kw("key");

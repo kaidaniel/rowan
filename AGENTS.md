@@ -55,8 +55,8 @@ on abstract values. Imports run as Python runs them (`TYPE_CHECKING` is False, `
     by the same code from the same values walks only what changed since (`havoc_memo`).
     They return an unknown and may raise anything. Library functions known to have no effect
     are `noeffect` (`ALLOWLIST_PREFIXES`), except those changing their arguments (`random.shuffle`).
-  * **Builtins** run the program's dunders Python calls for them (`builtin_dunder`); those
-    taken to raise only on wrong types may raise a TypeError on unknowns (`may_type_error`).
+  * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model
+    is unknown code. A TypeError may come from those taken to fail only on wrong types.
   * **Entry points:** functions nothing calls run with open parameters; their requirements
     become `param F.x` schemas.
 * **Generators** run whole at their first consumption (iteration, unpacking, a call taking

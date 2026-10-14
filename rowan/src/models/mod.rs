@@ -184,6 +184,9 @@ impl Registry {
         r(&["asyncio.gather"], m_gather);
         r(&["builtins.exec", "builtins.eval"], m_exec);
         r(&["builtins.globals"], m_globals);
+        r(&["builtins.locals"], m_locals);
+        r(&["builtins.__import__", "importlib.import_module"], m_import);
+        r(&["builtins.exit", "builtins.quit", "sys.exit"], m_exit);
         r(&["types.SimpleNamespace", "argparse.Namespace"], m_simplenamespace);
         r(&["collections.namedtuple", "typing.NamedTuple"], m_namedtuple);
         r(&["dataclasses.field", "typing.cast", "typing.TypeVar", "typing.NewType"], m_passthrough);
@@ -262,10 +265,12 @@ impl Registry {
                 return Some(noeffect);
             }
         }
-        if qual.starts_with("builtins.") {
-            return Some(noeffect);
+        // (the builtins that change nothing they are given and run none of the program's code;
+        // any other without a model of its own is an unknown call)
+        match qual.strip_prefix("builtins.") {
+            Some("help" | "copyright" | "credits" | "license" | "breakpoint" | "compile" | "ascii" | "bin" | "oct" | "complex" | "dir" | "classmethod" | "staticmethod" | "property" | "bytearray" | "memoryview") => Some(noeffect),
+            _ => None,
         }
-        None
     }
 }
 
@@ -417,13 +422,20 @@ pub fn may_type_error(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &In
 pub fn builtin_dunder(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &crate::frontend::Node) -> Option<Value> {
     let names: &[&str] = match qual.strip_prefix("builtins.")? {
         "str" | "print" => &["__str__", "__repr__"],
-        "repr" => &["__repr__"],
+        "repr" | "ascii" => &["__repr__"],
         "format" => &["__format__"],
         "hash" => &["__hash__"],
         "len" => &["__len__"],
         "int" => &["__int__", "__index__"],
-        "float" => &["__float__"],
+        "float" => &["__float__", "__index__"],
+        "complex" => &["__complex__", "__float__", "__index__"],
+        "bin" | "oct" | "hex" => &["__index__"],
         "abs" => &["__abs__"],
+        "round" => &["__round__"],
+        "divmod" => &["__divmod__"],
+        "pow" => &["__pow__"],
+        "dir" => &["__dir__"],
+        "bytes" | "bytearray" => &["__bytes__", "__index__", "__iter__"],
         "bool" => &["__bool__", "__len__"],
         _ => return None,
     };
@@ -464,8 +476,18 @@ pub fn builtin_dunder(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &In
             let tail = rest_call(an, rest, state);
             Some(r.join(&tail))
         }
-        _ if args.len() == 1 => {
-            let (r, rest) = an.run_dunder(&args[0], names, vec![], node, state)?;
+        // (the other arguments go to the dunder: `round(x, 2)` is `x.__round__(2)`; the text of
+        // what `__index__` gives for `bin`, `hex`, …; the items `__iter__` gives for `bytes`)
+        _ if !args.is_empty() => {
+            let (r, rest) = an.run_dunder(&args[0], names, args[1..].to_vec(), node, state)?;
+            let r = match qual {
+                "builtins.bin" | "builtins.oct" | "builtins.hex" | "builtins.complex" => an.call_external(qual, &[r], kwargs, &[], &[], state, node, None),
+                "builtins.bytes" | "builtins.bytearray" => {
+                    an.iterate(&r, node, state);
+                    Value::data(&format!("L{}", node.line))
+                }
+                _ => r,
+            };
             let tail = rest_call(an, rest, state);
             Some(r.join(&tail))
         }
@@ -4138,6 +4160,34 @@ fn m_globals(an: &mut Analyzer, _st: &mut State, _c: &Call) -> Value {
     let vid = an.alloc_raw(Kind::View, &format!("view:attrs:{}", m), "", true, "globals()", Payload::View(ViewKind::Attrs, Value::obj(m)));
     an.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(m));
     Value::obj(vid)
+}
+
+/// `locals()`: at module level the module's names (as `globals()`); in a function a snapshot
+/// whose changes go nowhere.
+fn m_locals(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    if an.frame().kind == crate::interp::FrameKind::Module {
+        return m_globals(an, st, c);
+    }
+    Value::data(&format!("L{}", c.line))
+}
+
+/// `__import__("os")` / `importlib.import_module("os")`: the module (by a known name), as an
+/// import statement gives it (`__import__("a.b")` gives `a`).
+fn m_import(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let Some(name) = c.args.first().and_then(|a| a.kv.as_lit().filter(|_| a.pts.is_empty())).and_then(intern::key_as_str) else {
+        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+    };
+    let m = an.import_module(&name, &c.node, st);
+    match name.split_once('.') {
+        Some((top, _)) if c.qual == "builtins.__import__" => an.import_module(top, &c.node, st),
+        _ => m,
+    }
+}
+
+/// `exit()` / `quit()` / `sys.exit()`: SystemExit.
+fn m_exit(an: &mut Analyzer, st: &mut State, _c: &Call) -> Value {
+    an.raise_here("SystemExit", st);
+    Value::new()
 }
 
 fn m_exec(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {

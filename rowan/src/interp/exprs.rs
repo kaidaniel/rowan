@@ -2148,6 +2148,15 @@ impl Analyzer {
     /// other's reflected one, else what `@functools.total_ordering` derives, else identity for
     /// `==` / `!=` (None: not such a comparison).
     pub fn rich_compare(&mut self, op: ast::CmpOp, a: &Value, b: &Value, node: &Node, state: &mut State) -> Option<Value> {
+        // (one of several values, some of them instances of the program's classes: each
+        // compared on its own path)
+        let user = |an: &Analyzer, o: ObjId| an.kind(o) == Kind::Instance && an.instance_class(o).is_some();
+        if self.split_dispatch(a, &user) {
+            return Some(self.per_receiver(a, state, &mut |an, p, st| an.rich_compare(op, p, b, node, st).unwrap_or_else(|| Value::data("bool"))));
+        }
+        if self.split_dispatch(b, &user) {
+            return Some(self.per_receiver(b, state, &mut |an, p, st| an.rich_compare(op, a, p, node, st).unwrap_or_else(|| Value::data("bool"))));
+        }
         let inst = |an: &Analyzer, v: &Value| v.single().filter(|o| an.kind(*o) == Kind::Instance && v.kv.is_bot());
         let (ai, bi) = (inst(self, a), inst(self, b));
         if ai.is_none() && bi.is_none() {
