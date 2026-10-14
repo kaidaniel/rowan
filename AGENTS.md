@@ -152,8 +152,8 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (the golden `#@limits` sets them per
   case; `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check` checks `#@todo`s too).
 * **Profiling:** the bench workflow's `perf` profiles (`sample` hangs on macOS 27). macOS has
-  no `timeout`: `perl -e 'alarm N; exec @ARGV' rowan …`. Compare builds on results (proven /
-  missing / possibly / schema counts of `--json`), not only on counters.
+  no `timeout`; time a run inside the guard (`.guard/run /usr/bin/time -l rowan …`: the guard
+  polls every 0.5 s). Compare builds on results (`--json` tier counts) and counters too.
 
 ## Layout (`rowan/src/`, ~62k lines: the engine ~20.6k, the models ~41k)
 
@@ -190,8 +190,8 @@ extension (talks to `rowan serve`).
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.5 / ~3 / ~2.2 / ~8.3 s; 0.14 / 0.07 / 0.13 / 0.11 GB |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~12 / ~22 / ~81 / ~4.4 s; 0.33 / 0.9 / 1.1 / 0.3 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.6 / ~3 / ~2.2 / ~8 s; 0.13 / 0.07 / 0.13 / 0.09 GB |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10 / ~33 / ~67 / ~7.5 s; 0.28 / 1.6 / 1.2 / 0.31 GB |
 
 ## Known problems and next steps
 
