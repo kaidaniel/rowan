@@ -77,6 +77,7 @@ impl Registry {
         r(&["builtins.getattr"], m_getattr);
         r(&["builtins.setattr"], m_setattr);
         r(&["random.shuffle"], m_shuffle);
+        r(&["reprlib.repr"], m_reprlib_repr);
         r(&["operator.setitem"], m_op_setitem);
         r(&["builtins.object.__setattr__"], m_object_setattr);
         r(&["builtins.object.__new__"], m_object_new);
@@ -1415,28 +1416,34 @@ fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    if c.args.len() >= 2 {
-        if let Some(k) = c.args[1].kv.as_lit() {
-            if let Some(name) = intern::key_as_str(k) {
-                // (with a default: the default where the attribute is surely not there, both
-                // where it may not be)
-                if let Some(d) = c.args.get(2) {
-                    let has = m_hasattr(an, st, &Call { args: c.args[..2].to_vec(), ..c.clone() });
-                    let found = |an: &mut Analyzer, st: &mut State| an.load_attr(&c.args[0], &name, &c.node, st, false);
-                    return match has.kv.as_lit().filter(|_| has.pts.is_empty()).map(|b| b == intern::key_bool(true)) {
-                        Some(false) => d.clone(),
-                        Some(true) => found(an, st),
-                        None => found(an, st).join(d),
-                    };
-                }
-                return an.load_attr(&c.args[0], &name, &c.node, st, c.args.len() == 2);
-            }
+    let Some(obj) = c.args.first().cloned() else { return Value::data("getattr") };
+    let name_v = c.args.get(1).cloned().unwrap_or_default();
+    let lit = name_v.kv.as_lit().and_then(intern::key_as_str).map(|name| {
+        // (with a default: the default where the attribute is surely not there, both where it
+        // may not be)
+        let Some(d) = c.args.get(2) else { return an.load_attr(&obj, &name, &c.node, st, true) };
+        let has = m_hasattr(an, st, &Call { args: c.args[..2].to_vec(), ..c.clone() });
+        let found = |an: &mut Analyzer, st: &mut State| an.load_attr(&obj, &name, &c.node, st, false);
+        match has.kv.as_lit().filter(|_| has.pts.is_empty()).map(|b| b == intern::key_bool(true)) {
+            Some(false) => d.clone(),
+            Some(true) => found(an, st),
+            None => found(an, st).join(d),
         }
+    });
+    if lit.is_some() && name_v.pts.is_empty() {
+        return lit.unwrap();
     }
-    if let Some(a) = c.args.first() {
-        return join_values(a.pts.iter().map(|o| an.all_values(o, Ns::Attr, st)));
+    // a name not known (in part): any of the object's attributes (of a library object, anything),
+    // or the default
+    let mut v = join_values(obj.pts.iter().map(|o| an.all_values(o, Ns::Attr, st)));
+    if obj.pts.iter().any(|o| an.kind(o) == Kind::External) {
+        let lib: Vec<Value> = vec![Value::with_kv(obj.pts.filter(|o| an.kind(o) == Kind::External), crate::domain::BOT)];
+        v = v.join(&an.unknown_call(&c.qual, None, &lib, &IndexMap::new(), &[], &[], st, &c.node));
     }
-    Value::data("getattr")
+    for x in lit.iter().chain(c.args.get(2)) {
+        v = v.join(x);
+    }
+    v
 }
 
 fn m_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -1483,6 +1490,29 @@ fn m_shuffle(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     an.none_v.clone()
+}
+
+/// `reprlib.repr(x)`: a str; it runs the `__repr__` of what x reaches, so with an instance of
+/// a class defining one (or anything unknown, or more than a few hundred objects) it is an
+/// unknown call.
+fn m_reprlib_repr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let mut work: Vec<ObjId> = c.args.iter().flat_map(|a| a.pts.iter()).collect();
+    let mut seen: FxHashSet<ObjId> = FxHashSet::default();
+    let mut own_code = !c.kwargs.is_empty() || c.args.len() != 1;
+    while let Some(o) = work.pop() {
+        if !seen.insert(o) || matches!(an.kind(o), Kind::Class | Kind::Module | Kind::Function | Kind::External) {
+            continue;
+        }
+        own_code |= seen.len() > 512 || matches!(an.kind(o), Kind::Unknown | Kind::Frame | Kind::Series) || an.instance_class(o).is_some_and(|cls| an.class_lookup(cls, "__repr__").is_some());
+        if own_code {
+            break;
+        }
+        an.obj_edges(o, st, &mut work);
+    }
+    if own_code {
+        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+    }
+    Value::data(&format!("L{}", c.line))
 }
 
 /// `operator.setitem(d, k, v)` into dicts by a key of no objects is `d[k] = v`; anything else
