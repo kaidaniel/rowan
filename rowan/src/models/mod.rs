@@ -1325,6 +1325,15 @@ fn m_zip(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             return an.alloc_positional(Kind::List, &c.node, Some(tuples), Value::new(), DATA, st);
         }
+        // (not every input's items known: tuples of their items, how many not known)
+        if c.star_args.is_empty() {
+            let elems: Vec<Value> = c.args.clone().iter().map(|x| {
+                let e = an.iterate(x, &c.node, st).elem;
+                an.elem_value(&e, &c.node, "zn")
+            }).collect();
+            let t = an.alloc_positional_sfx(Kind::Tuple, &c.node, "#t", Some(elems), Value::new(), DATA, st);
+            return an.alloc_positional(Kind::List, &c.node, None, t, DATA, st);
+        }
     }
     let a = c.args.first().cloned().unwrap_or_default();
     let b = c.args.get(1).cloned().unwrap_or_default();

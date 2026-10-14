@@ -62,5 +62,5 @@ if __name__ == "__main__":
     o, r = readout(torch.randn(2, 5), torch.randn(5, 4), (6, 4))
     #@shape o: [2, 3]; r: [6, 3]
     w = windows(ids, torch.tensor([0, 2, 4, 6]), 3)
-    #@shape w: [4, _]
-    #@todo shape w: [4, 3] (a slice j:j + T of unknown starts is T long only when j + T <= len(data))
+    #@shape w: [4, 3]
+    # (each start j lies in 0..6: j + T <= 11)

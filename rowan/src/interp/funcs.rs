@@ -1082,6 +1082,8 @@ impl Analyzer {
                     }
                     elems.push(Value::kv_only(KeyVal::lits(ks)));
                 }
+            } else if let Some(e) = self.torch_on.then(|| self.t_iter_elem(v, state)).flatten() {
+                elems.push(e);
             } else {
                 elems.push(line_data.clone());
             }

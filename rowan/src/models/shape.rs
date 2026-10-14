@@ -1566,8 +1566,21 @@ pub fn dim_label(d: DimId) -> String {
 pub fn parse_tensor_label(l: &str) -> Option<ShapeId> {
     let r = l.strip_prefix(TENSOR_PREFIX)?;
     let r = r.strip_prefix('B').unwrap_or(r);
-    let r = r.split('~').next().unwrap_or(r);
+    let r = r.split(['~', '^']).next().unwrap_or(r);
     r.parse().ok().map(ShapeId)
+}
+/// An int tensor of this shape whose elements all lie in `lo..=hi` (`randint`'s, a literal's).
+pub fn ranged_label(s: ShapeId, lo: DimId, hi: DimId) -> String {
+    format!("{}{}^{},{}", TENSOR_PREFIX, s.0, lo.0, hi.0)
+}
+pub fn label_range(l: &str) -> Option<(DimId, DimId)> {
+    let (_, r) = l.strip_prefix(TENSOR_PREFIX)?.split_once('^')?;
+    let (a, b) = r.split_once(',')?;
+    Some((DimId(a.parse().ok()?), DimId(b.parse().ok()?)))
+}
+/// A dim surely not negative: a sum of dims (never negative) with coefficients not negative.
+pub fn nonneg(d: DimId) -> bool {
+    !has_unknown(d) && poly(d).iter().all(|(_, c)| *c >= 0)
 }
 /// A value that is a tensor of this shape, or (if the operands were ints) this dim: the
 /// result of arithmetic on unknown values in a torch module (`x * 2`, `n + m`).

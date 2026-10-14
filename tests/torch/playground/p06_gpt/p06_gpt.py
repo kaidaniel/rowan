@@ -99,8 +99,8 @@ if __name__ == "__main__":
         i = torch.randint(0, len(data) - T - 1, (B,))          # (B, ): Random starting positions
         #@shape i: [B]
         x = torch.stack([data[j : j + T] for j in i])          # (B, T) - rowan gets this as unknown
-        #@shape x: [B, _, *data.shape[1:]]
-        #@todo shape x: [B, T, *data.shape[1:]] (a slice j:j+T of an unknown start: T long only when j + T <= len(data), which randint's bound gives)
+        #@shape x: [B, T, *data.shape[1:]]
+        # (j lies in 0..len(data) - T - 2, randint's range: each window is T long)
         y = torch.stack([data[j + 1 : j + T + 1] for j in i])  # (B, T) - rowan gets this as unknown
         #@shape y: [B, _, *data.shape[1:]]
         return x, y
@@ -120,7 +120,7 @@ if __name__ == "__main__":
     for step in range(STEPS):
         x, y = get_batch(train, B=68, T=64) # x: (B, T): int; y: (B, T): int
         #@shape x: [68, _]; y: [68, _]
-        #@todo shape x: [68, 64]; y: [68, 64] (a slice j:j + T of an unknown start in get_batch)
+        #@todo shape x: [68, 64]; y: [68, 64] (a slice j:j + T of an unknown start in get_batch: train's length is not known, so j + T <= len(train) is not shown)
         logits: Tensor = model(x) # (B, T, V)
         #@todo shape logits: [68, 64, V] (Head.forward is past its budget by the entry runs: 12 blocks of 8 heads per model call; and the heads' rank fact is lost after MultiHead's loop)
         loss = nn.functional.cross_entropy(logits.view(-1, V), y.view(-1))
