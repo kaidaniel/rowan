@@ -86,80 +86,40 @@ impl Analyzer {
                         return v;
                     }
                 }
-                if let ast::Expr::Slice(sl) = &*sub.slice {
-                    if let Some(v) = self.slice_positional(&obj, sl, node, state) {
-                        return v;
-                    }
-                }
-                // a known string sliced / indexed by known numbers
-                if obj.pts.is_empty() && obj.kv.is_literal() {
-                    let strs: Option<Vec<std::sync::Arc<str>>> = crate::domain::kv_literals(&obj.kv).iter().map(intern::key_as_str).collect();
-                    if let Some(strs) = strs.filter(|v| !v.is_empty()) {
-                        let mut out: Option<intern::KeySet> = Some(intern::KeySet::new());
-                        match &*sub.slice {
-                            ast::Expr::Slice(sl) => {
-                                let mut b: Vec<Option<i64>> = Vec::new();
-                                for e in [&sl.lower, &sl.upper, &sl.step] {
-                                    match e.as_deref() {
-                                        None => b.push(None),
-                                        Some(e) => match self.int_value(e, state) {
-                                            Some(i) => b.push(Some(i)),
-                                            None => {
-                                                out = None;
-                                                break;
-                                            }
-                                        },
-                                    }
-                                }
-                                if let Some(o) = out.as_mut() {
-                                    for st0 in &strs {
-                                        let cs: Vec<char> = st0.chars().collect();
-                                        match py_slice(&cs, b[0], b[1], b[2]) {
-                                            Some(t) => *o = o.insert(key_str_lit(&t)),
-                                            None => {
-                                                out = None;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            idx => {
-                                let iv = self.eval(idx, state);
-                                match iv.kv.as_lit().filter(|_| iv.pts.is_empty()).and_then(intern::key_as_int) {
-                                    Some(i) => {
-                                        // (an index out of range raises IndexError: on every string
-                                        // the value may be, or on some)
-                                        let mut outside = 0;
-                                        for st0 in &strs {
-                                            let cs: Vec<char> = st0.chars().collect();
-                                            let j = if i < 0 { i + cs.len() as i64 } else { i };
-                                            if j < 0 || j as usize >= cs.len() {
-                                                outside += 1;
-                                            } else if let Some(o) = out.as_mut() {
-                                                *o = o.insert(key_str_lit(&cs[j as usize].to_string()));
-                                            }
-                                        }
-                                        if outside == strs.len() {
-                                            self.raise_here("IndexError", state);
-                                            return Value::new();
-                                        } else if outside > 0 {
-                                            self.may_raise_here("IndexError", state);
-                                        }
-                                    }
-                                    None => {
-                                        self.may_raise_here("IndexError", state);
-                                        out = None;
-                                    }
-                                }
-                            }
-                        }
-                        if let Some(o) = out {
-                            return Value::kv_only(KeyVal::lits(o));
-                        }
-                    }
-                }
                 let key = self.eval_key(&sub.slice, state);
+                let bounds = Self::slice_label_bounds(&key.kv);
+                if let Some(v) = bounds.and_then(|b| self.slice_positional(&obj, b, node, state)) {
+                    return v;
+                }
+                // a known string sliced / indexed by known numbers (an index out of range raises
+                // IndexError: on every string the value may be, or on some)
+                let strs: Option<Vec<Vec<char>>> = crate::domain::kv_literals(&obj.kv).iter().map(|k| intern::key_as_str(k).map(|t| t.chars().collect())).collect();
+                if let Some(strs) = strs.filter(|v| obj.pts.is_empty() && obj.kv.is_literal() && !v.is_empty()) {
+                    let index = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
+                    let out: Option<intern::KeySet> = match (bounds, index) {
+                        (Some((lo, hi, st)), _) => strs.iter().map(|cs| py_slice(cs, lo, hi, st).map(|t| key_str_lit(&t))).collect(),
+                        (None, Some(i)) => {
+                            let at = |cs: &Vec<char>| usize::try_from(if i < 0 { i + cs.len() as i64 } else { i }).ok().and_then(|j| cs.get(j).map(|c| key_str_lit(&c.to_string())));
+                            let inside: intern::KeySet = strs.iter().filter_map(at).collect();
+                            if inside.is_empty() {
+                                self.raise_here("IndexError", state);
+                                return Value::new();
+                            } else if strs.iter().any(|cs| at(cs).is_none()) {
+                                self.may_raise_here("IndexError", state);
+                            }
+                            Some(inside)
+                        }
+                        (None, None) => {
+                            if !matches!(&*sub.slice, ast::Expr::Slice(_)) {
+                                self.may_raise_here("IndexError", state);
+                            }
+                            None
+                        }
+                    };
+                    if let Some(o) = out {
+                        return Value::kv_only(KeyVal::lits(o));
+                    }
+                }
                 let nd = frontend::node(node);
                 // a key the name's object surely has (stored through the name): no failure
                 if let (ast::Expr::Name(nm), Some(k)) = (&*sub.value, key.kv.as_lit().filter(|_| key.pts.is_empty())) {
@@ -850,72 +810,15 @@ impl Analyzer {
         intern::key_as_int(v.kv.as_lit()?)
     }
 
-    fn slice_positional(&mut self, obj: &Value, sl: &'static ast::ExprSlice, node: &'static ast::Expr, state: &mut State) -> Option<Value> {
-        if let Some(step_e) = sl.step.as_deref() {
-            // a known step (positive or negative) with known or default bounds
-            let step = self.int_value(step_e, state)?;
-            if step == 0 {
-                return None;
-            }
-            let oid = obj.single()?;
-            let kind = self.kind(oid);
-            if !matches!(kind, Kind::List | Kind::Tuple) {
-                return None;
-            }
-            let n = self.llen(oid, state)? as i64;
-            let lo = match sl.lower.as_deref() { None => None, Some(e) => Some(self.int_value(e, state)?) };
-            let hi = match sl.upper.as_deref() { None => None, Some(e) => Some(self.int_value(e, state)?) };
-            let idx = slice_positions(n, lo, hi, step);
-            let vals: Vec<Value> = idx.iter().map(|i| state.slot(oid, Ns::Pos, key_int(*i))).collect();
-            let kv = state.elems.get(&oid).unwrap_or(DATA);
-            let nd = frontend::node(node);
-            return Some(self.alloc_positional(kind, &nd, Some(vals), Value::new(), kv, state));
-        }
-        fn bound(e: &Option<Box<ast::Expr>>) -> Option<Option<i64>> {
-            match e {
-                None => Some(None),
-                Some(x) => match &**x {
-                    ast::Expr::NumberLiteral(n) => match &n.value {
-                        ast::Number::Int(i) => i.as_i64().map(Some),
-                        _ => None,
-                    },
-                    ast::Expr::UnaryOp(u) if u.op == ast::UnaryOp::USub => match &*u.operand {
-                        ast::Expr::NumberLiteral(n) => match &n.value {
-                            ast::Number::Int(i) => i.as_i64().map(|i| Some(-i)),
-                            _ => None,
-                        },
-                        _ => None,
-                    },
-                    _ => None,
-                },
-            }
-        }
-        // a bound that is not written as a number may still hold one known value
-        let lo = match bound(&sl.lower) {
-            Some(b) => b,
-            None => Some(self.int_value(sl.lower.as_deref()?, state)?),
-        };
-        let hi = match bound(&sl.upper) {
-            Some(b) => b,
-            None => Some(self.int_value(sl.upper.as_deref()?, state)?),
-        };
-        let oid = obj.single()?;
-        let kind = self.kind(oid);
-        if !matches!(kind, Kind::List | Kind::Tuple) {
-            return None;
-        }
+    /// `xs[lo:hi:step]` of one list / tuple of known length: its positions.
+    fn slice_positional(&mut self, obj: &Value, (lo, hi, step): (Option<i64>, Option<i64>, Option<i64>), node: &'static ast::Expr, state: &mut State) -> Option<Value> {
+        let step = step.unwrap_or(1);
+        let oid = obj.single().filter(|o| step != 0 && matches!(self.kind(*o), Kind::List | Kind::Tuple))?;
         let n = self.llen(oid, state)? as i64;
-        let norm = |b: Option<i64>, dflt: i64| -> i64 {
-            let b = b.unwrap_or(dflt);
-            let b = if b < 0 { n + b } else { b };
-            b.clamp(0, n)
-        };
-        let lo = norm(lo, 0);
-        let hi = norm(hi, n);
-        let nd = frontend::node(node);
-        let vals: Vec<Value> = (lo..hi.max(lo)).map(|i| state.slot(oid, Ns::Pos, key_int(i))).collect();
+        let vals: Vec<Value> = slice_positions(n, lo, hi, step).iter().map(|i| state.slot(oid, Ns::Pos, key_int(*i))).collect();
         let kv = state.elems.get(&oid).unwrap_or(DATA);
-        Some(self.alloc_positional(kind, &nd, Some(vals), Value::new(), kv, state))
+        let kind = self.kind(oid);
+        Some(self.alloc_positional(kind, &frontend::node(node), Some(vals), Value::new(), kv, state))
     }
 
     /// The label of a slice with known bounds (`slice[1:3:]@L5`): its bounds (None: omitted).
