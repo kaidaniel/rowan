@@ -1836,6 +1836,44 @@ impl Analyzer {
                             ast::InterpolatedStringElement::Literal(l) => parts.push(Part::Lit(l.value.to_string())),
                             ast::InterpolatedStringElement::Interpolation(i) => {
                                 let v = self.eval(&i.expression, state);
+                                // the spec's text (`{n:03d}`, `{x:>{w}}`); None: a part of it is not known
+                                let spec_text: Option<Option<String>> = i.format_spec.as_ref().map(|spec| {
+                                    let mut text = String::new();
+                                    let mut literal = true;
+                                    for se in spec.elements.iter() {
+                                        match se {
+                                            ast::InterpolatedStringElement::Literal(l) => text.push_str(&l.value),
+                                            ast::InterpolatedStringElement::Interpolation(si) => {
+                                                let sv = self.eval(&si.expression, state);
+                                                match sv.kv.as_lit().filter(|_| sv.pts.is_empty() && si.conversion == ast::ConversionFlag::None && si.format_spec.is_none()) {
+                                                    Some(k) => text.push_str(&intern::key_py_str(k)),
+                                                    None => literal = false,
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Some(text).filter(|_| literal)
+                                });
+                                // an object of the program's classes: its `__format__` / `__str__` /
+                                // `__repr__` makes the text
+                                let nd = frontend::node(node);
+                                let ran = match i.conversion {
+                                    ast::ConversionFlag::None => {
+                                        let spec_v = match &spec_text {
+                                            None => Value::lit_str(""),
+                                            Some(Some(t)) => Value::lit_str(t),
+                                            Some(None) => Value::data("spec"),
+                                        };
+                                        crate::models::format_dunder(self, &v, spec_v, &nd, state)
+                                    }
+                                    ast::ConversionFlag::Str => self.run_dunder(&v, &["__str__", "__repr__"], vec![], &nd, state),
+                                    _ => self.run_dunder(&v, &["__repr__"], vec![], &nd, state),
+                                };
+                                if let Some((t, rest)) = ran {
+                                    let whole = rest.pts.is_empty() && rest.kv.is_bot() && (i.conversion == ast::ConversionFlag::None || spec_text.is_none());
+                                    parts.push(if whole { Part::Hole(t) } else { Part::Opaque });
+                                    continue;
+                                }
                                 // `{x!r}` / `{x!s}` / `{x!a}`: the converted text
                                 let v = match i.conversion {
                                     ast::ConversionFlag::None => self.enum_text(&v, state).unwrap_or(v),
@@ -1854,31 +1892,14 @@ impl Analyzer {
                                         }
                                     }
                                 };
-                                if let Some(spec) = &i.format_spec {
-                                    // a spec applied to a known value (`{n:03d}`, `{x:>{w}}`)
-                                    let mut spec_text = String::new();
-                                    let mut literal_spec = true;
-                                    for se in spec.elements.iter() {
-                                        match se {
-                                            ast::InterpolatedStringElement::Literal(l) => spec_text.push_str(&l.value),
-                                            ast::InterpolatedStringElement::Interpolation(si) => {
-                                                let sv = self.eval(&si.expression, state);
-                                                match sv.kv.as_lit().filter(|_| sv.pts.is_empty() && si.conversion == ast::ConversionFlag::None && si.format_spec.is_none()) {
-                                                    Some(k) => spec_text.push_str(&intern::key_py_str(k)),
-                                                    None => literal_spec = false,
-                                                }
-                                            }
-                                        }
-                                    }
-                                    match (literal_spec, v.kv.as_lit().filter(|_| v.pts.is_empty())) {
-                                        (true, Some(k)) => match format_spec_literal(k, &spec_text) {
-                                            Some(s) => parts.push(Part::Lit(s)),
-                                            None => parts.push(Part::Opaque),
-                                        },
-                                        _ => parts.push(Part::Opaque),
-                                    }
-                                } else {
-                                    parts.push(Part::Hole(v));
+                                match spec_text {
+                                    // a spec applied to a known value
+                                    Some(Some(t)) => match v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(|k| format_spec_literal(k, &t)) {
+                                        Some(s) => parts.push(Part::Lit(s)),
+                                        None => parts.push(Part::Opaque),
+                                    },
+                                    Some(None) => parts.push(Part::Opaque),
+                                    None => parts.push(Part::Hole(v)),
                                 }
                             }
                         }
@@ -2299,7 +2320,7 @@ pub fn is_exception_name(n: &str) -> bool {
     n.ends_with("Error") || n.ends_with("Exception") || n.ends_with("Warning") || matches!(n, "StopIteration" | "KeyboardInterrupt" | "SystemExit" | "GeneratorExit")
 }
 
-const SAFE_BUILTINS: &[&str] = &["len", "str", "repr", "bool", "int", "float", "sorted", "reversed", "list", "dict", "set", "tuple", "frozenset", "min", "max", "sum", "abs", "round", "isinstance", "issubclass", "hasattr", "enumerate", "zip", "range", "print", "id", "hash", "type", "callable", "any", "all", "map", "filter", "format", "iter", "super"];
+pub const SAFE_BUILTINS: &[&str] = &["len", "str", "repr", "bool", "int", "float", "sorted", "reversed", "list", "dict", "set", "tuple", "frozenset", "min", "max", "sum", "abs", "round", "isinstance", "issubclass", "hasattr", "enumerate", "zip", "range", "print", "id", "hash", "type", "callable", "any", "all", "map", "filter", "format", "iter", "super"];
 
 /// `format(value, spec)` for a known literal and a plain spec: `[[fill]align][0][width][.prec][type]`.
 pub(crate) fn format_spec_literal(k: KeyId, spec: &str) -> Option<String> {

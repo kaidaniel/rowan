@@ -369,6 +369,121 @@ pub fn noeffect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     Value::data(&format!("L{}", c.line))
 }
 
+/// A builtin or container method taken for one that raises only on arguments of the wrong
+/// type (`len`, `sorted`, `str.join`, …) may still raise a TypeError where an argument (or a
+/// builtin's result) is not known: a running try records that.
+pub fn may_type_error(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<StrId, Value>, r: &Value, state: &mut State) {
+    if an.tries.is_empty() || !state.reachable {
+        return;
+    }
+    // (known: literals and the program's containers of literals; not an unknown value, an
+    // instance, the items of a list of those)
+    let known_kv = |kv: &KeyVal| matches!(kv, KeyVal::Bot | KeyVal::Lit(_) | KeyVal::Lits(_));
+    let known = |an: &Analyzer, v: &Value| {
+        known_kv(&v.kv)
+            && v.pts.iter().all(|o| match an.kind(o) {
+                Kind::Unknown | Kind::Instance => false,
+                Kind::List | Kind::Tuple | Kind::Set => state.elems.get(&o).is_none_or(|kv| known_kv(&kv)) && state.slot(o, Ns::Elem, intern::STAR).pts.iter().all(|x| !matches!(an.kind(x), Kind::Unknown | Kind::Instance)),
+                _ => true,
+            })
+    };
+    let unknown = match qual.strip_prefix("builtins.") {
+        Some(n) if crate::interp::exprs::SAFE_BUILTINS.contains(&n) => {
+            if matches!(n, "str" | "repr" | "print" | "id" | "bool" | "callable" | "type" | "super") {
+                return;
+            }
+            // (isinstance / issubclass / hasattr take anything first)
+            let skip = usize::from(matches!(n, "isinstance" | "issubclass" | "hasattr"));
+            args.iter().skip(skip).chain(kwargs.values()).any(|a| !known(an, a)) || (skip == 0 && !known_kv(&r.kv))
+        }
+        Some(_) => return,
+        // (a str method given arguments whose result is not known may have failed on them:
+        // `",".join(items)` of non-strs)
+        None if crate::interp::safe_method(qual) => args.iter().chain(kwargs.values()).any(|a| !known(an, a)) || (qual.starts_with("str.") && !args.is_empty() && !known_kv(&r.kv)),
+        None => return,
+    };
+    if unknown {
+        an.may_raise_here("TypeError", state);
+    }
+}
+
+/// A builtin Python carries out by a dunder of its argument, given instances of the
+/// program's classes that define it: `str` / `repr` / `format` / `print` (`__str__`,
+/// `__repr__`, `__format__`), `hash`, `len`, `int`, `float`, `abs`, `bool`. The dunders run
+/// (their effects happen) and give the result; the rest of the argument goes to the model.
+#[allow(clippy::too_many_arguments)]
+pub fn builtin_dunder(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &crate::frontend::Node) -> Option<Value> {
+    let names: &[&str] = match qual.strip_prefix("builtins.")? {
+        "str" | "print" => &["__str__", "__repr__"],
+        "repr" => &["__repr__"],
+        "format" => &["__format__"],
+        "hash" => &["__hash__"],
+        "len" => &["__len__"],
+        "int" => &["__int__", "__index__"],
+        "float" => &["__float__"],
+        "abs" => &["__abs__"],
+        "bool" => &["__bool__", "__len__"],
+        _ => return None,
+    };
+    let insts = |an: &Analyzer, v: &Value| v.pts.iter().any(|o| an.kind(o) == Kind::Instance && an.instance_class(o).is_some_and(|c| names.iter().any(|n| an.class_lookup(c, n).is_some())));
+    if !star_args.is_empty() || !star_kwargs.is_empty() || !args.iter().any(|a| insts(an, a)) {
+        return None;
+    }
+    let rest_call = |an: &mut Analyzer, rest: Value, state: &mut State| -> Value {
+        if rest.pts.is_empty() && rest.kv.is_bot() {
+            return Value::new();
+        }
+        let mut a = args.to_vec();
+        a[0] = rest;
+        an.call_external(qual, &a, kwargs, &[], &[], state, node, None)
+    };
+    match qual {
+        // (each argument's text; the call writes those)
+        "builtins.print" => {
+            let mut texts = Vec::new();
+            for a in args {
+                texts.push(match an.run_dunder(a, names, vec![], node, state) {
+                    Some((t, rest)) if rest.pts.is_empty() && rest.kv.is_bot() => t,
+                    Some((t, rest)) => t.join(&rest),
+                    None => a.clone(),
+                });
+            }
+            Some(an.call_external(qual, &texts, kwargs, &[], &[], state, node, None))
+        }
+        "builtins.bool" if args.len() == 1 => Some(match an.truth_of(&args[0], state, node) {
+            Some(b) => Value::lit(intern::key(intern::Key::Bool(b))),
+            None => Value::data(&format!("L{}", node.line)),
+        }),
+        // `format(x, spec)`: `__format__(spec)`; without one, `object.__format__` is `str(x)`
+        // for an empty spec
+        "builtins.format" => {
+            let spec = args.get(1).cloned().unwrap_or_else(|| Value::lit_str(""));
+            let (r, rest) = format_dunder(an, &args[0], spec, node, state)?;
+            let tail = rest_call(an, rest, state);
+            Some(r.join(&tail))
+        }
+        _ if args.len() == 1 => {
+            let (r, rest) = an.run_dunder(&args[0], names, vec![], node, state)?;
+            let tail = rest_call(an, rest, state);
+            Some(r.join(&tail))
+        }
+        _ => None,
+    }
+}
+
+/// `format(v, spec)` for the instances among `v` whose class defines `__format__`, or (an
+/// empty spec) `__str__` / `__repr__`: their texts joined, and the rest of `v`.
+pub fn format_dunder(an: &mut Analyzer, v: &Value, spec: Value, node: &crate::frontend::Node, state: &mut State) -> Option<(Value, Value)> {
+    let mut ran = an.run_dunder(v, &["__format__"], vec![spec.clone()], node, state);
+    if spec.kv.as_lit() == Some(key_str_lit("")) && spec.pts.is_empty() {
+        let rest = ran.as_ref().map_or(v, |(_, r)| r).clone();
+        if let Some((r, rest2)) = an.run_dunder(&rest, &["__str__", "__repr__"], vec![], node, state) {
+            ran = Some((ran.map_or(r.clone(), |(o, _)| o.join(&r)), rest2));
+        }
+    }
+    ran
+}
+
 fn last(q: &str) -> &str {
     q.rsplit('.').next().unwrap_or(q)
 }
@@ -610,6 +725,10 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             "builtins.reversed" => Some((0..items.len()).rev().collect()),
                             _ => Some((0..items.len()).collect()),
                         };
+                        if order.is_none() && c.qual == "builtins.sorted" {
+                            // (items in no known order may not compare: a TypeError)
+                            an.may_raise_here("TypeError", st);
+                        }
                         if let Some(order) = order {
                             an.set_llen(oid, st, Some(items.len()));
                             for (i, j) in order.into_iter().enumerate() {
@@ -646,6 +765,9 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         // them) the order is known (stable sort); otherwise the count is
                         // known and every position may hold any item
                         let order: Option<Vec<usize>> = if sorted { literal_sort_order(an, st, c, items) } else { None };
+                        if sorted && order.is_none() {
+                            an.may_raise_here("TypeError", st);
+                        }
                         let all = join_values(items.clone());
                         for (i, item) in items.iter().enumerate() {
                             let pos = if reversed { n - 1 - i } else { i };
@@ -2341,31 +2463,8 @@ fn m_pop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let int_key = c.args.first().and_then(|a| a.kv.as_lit()).map(|k| intern::key_as_int(k).is_some()).unwrap_or(false);
     let listy = recv.pts.iter().all(|o| matches!(an.kind(o), Kind::List | Kind::Tuple));
     if !recv.pts.is_empty() && listy && (c.args.is_empty() || int_key) {
-        // list.pop through a placeholder (or with no key): an element
-        let mut outs = Vec::new();
-        // (pop reports its own raises: an empty list / an index outside it is an IndexError)
-        let mut maybe_raise = false;
-        for oid in recv.pts.iter() {
-            match an.kind(oid) {
-                _ => {
-                    let before = an.llen(oid, st);
-                    let idx = c.args.first().and_then(|a| a.kv.as_lit()).and_then(intern::key_as_int);
-                    let ok = match (before, idx) {
-                        (Some(n), None) => n > 0,
-                        (Some(n), Some(i)) => (i >= 0 && (i as usize) < n) || (i < 0 && ((-i) as usize) <= n),
-                        _ => false,
-                    };
-                    if !ok {
-                        maybe_raise = true;
-                    }
-                    outs.push(list_pop_one(an, st, oid, c));
-                }
-            }
-        }
-        if maybe_raise {
-            an.may_raise_here("IndexError", st);
-        }
-        return join_values(outs);
+        // list.pop through a placeholder (or with no key)
+        return m_lpop(an, st, c);
     }
     let Some(key) = c.args.first() else { return Value::data("pop") };
     let has_default = c.args.len() > 1;
@@ -3195,11 +3294,35 @@ class UserDict:
         return dict(self.data)
 "#;
 
+/// `xs.pop()` / `xs.pop(i)` / `s.pop()`: the item; an empty list or an index outside it is an
+/// IndexError (an empty set a KeyError), on every path when no receiver can have the item.
 fn m_lpop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let recv = c.recv.clone().unwrap_or_default();
-    let mut outs = Vec::new();
+    let idx = c.args.first().and_then(|a| a.kv.as_lit().filter(|_| a.pts.is_empty())).and_then(intern::key_as_int);
+    let (mut outs, mut may_fail, mut all_fail) = (Vec::new(), recv.pts.is_empty(), !recv.pts.is_empty());
     for oid in recv.pts.iter() {
-        outs.push(list_pop_one(an, st, oid, c));
+        let n = an.llen(oid, st);
+        let (ok, fails) = match (n, idx, c.args.is_empty()) {
+            (Some(n), _, true) => (n > 0, n == 0),
+            (Some(n), Some(i), _) => {
+                let inside = (i >= 0 && (i as usize) < n) || (i < 0 && ((-i) as usize) <= n);
+                (inside, !inside)
+            }
+            _ => (false, false),
+        };
+        may_fail |= !ok;
+        all_fail &= fails;
+        if !fails {
+            outs.push(list_pop_one(an, st, oid, c));
+        }
+    }
+    let exc = if c.qual.starts_with("set.") { "KeyError" } else { "IndexError" };
+    if all_fail {
+        an.raise_here(exc, st);
+        return Value::new();
+    }
+    if may_fail {
+        an.may_raise_here(exc, st);
     }
     if outs.is_empty() {
         Value::data("pop")

@@ -1581,6 +1581,12 @@ impl Analyzer {
                 }
                 return self.method_value(&format!("num.{}", name), obj);
             }
+            // an attribute of None (but a dunder every object has): an AttributeError
+            let none_only = obj.kv.is_literal() && crate::domain::kv_literals(&obj.kv).iter().all(|k| k == intern::key_none()) && !crate::domain::kv_literals(&obj.kv).is_empty();
+            if none_only && report && !name.starts_with("__") {
+                self.raise_here("AttributeError", state);
+                return Value::new();
+            }
             if matches!(obj.kv, KeyVal::Lit(_) | KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
                 return self.method_value(&format!("str.{}", name), obj);
             }

@@ -36,15 +36,14 @@ on abstract values. Imports run as Python runs them (`TYPE_CHECKING` is False, `
   enclosing try. `with` is a `try` whose `finally` is `__exit__`. `finally` runs on every way
   out, `break` / `continue` / `return` included.
 * **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site, in
-  a context of the innermost `chain` (2) call sites (no call cache: it was unsound and rarely
-  hit). **Budget:** each function code (all closures of one `def`) may run 4,096 statements in
-  all (`budget`); past that its calls are unknown calls that may also change what its code
-  reaches beyond its arguments (`effects.rs`: the globals and cells its code, and the code it
-  reaches by name, reads where they may change or escape; class attributes by name; mutable
-  defaults; a method's receiver only by the names its code uses on it unless it escapes,
-  `receiver_effects`), and the function gets a reporting run with open parameters (its lines
-  then hold for the calls that did not run). Entry runs are not counted (one per function).
-  So the work is bounded by the number of functions times the budget.
+  a context of the innermost `chain` (2) call sites. **Budget:** each function code (all
+  closures of one `def`) may run 4,096 statements in all (`budget`); past that its calls are
+  unknown calls that may also change what its code reaches beyond its arguments (`effects.rs`:
+  the globals and cells its code, and the code it reaches by name, reads where they may change
+  or escape; class attributes by name; mutable defaults; a method's receiver only by the names
+  its code uses on it unless it escapes, `receiver_effects`), and the function gets a reporting
+  run with open parameters (its lines then hold for the calls that did not run). Entry runs
+  are not counted (one per function). So the work is bounded by functions times the budget.
   * **Recursion:** the inner call uses the running activation's partial result; it iterates
     to a fixpoint (8 rounds), then widens.
   * **Unknown values** are not taken for instances of the program's classes: a method of an
@@ -55,6 +54,8 @@ on abstract values. Imports run as Python runs them (`TYPE_CHECKING` is False, `
     any items and length; the program's functions among it may run (`follow_code`).
     They return an unknown and may raise anything. Library functions known to have no effect
     are `noeffect` (`ALLOWLIST_PREFIXES`), except those changing their arguments (`random.shuffle`).
+  * **Builtins** run the program's dunders Python calls for them (`builtin_dunder`); those
+    taken to raise only on wrong types may raise a TypeError on unknowns (`may_type_error`).
   * **Entry points:** functions nothing calls run with open parameters; their requirements
     become `param F.x` schemas.
 * **Generators** run whole at their first consumption (iteration, unpacking, a call taking
@@ -146,9 +147,8 @@ budget; informational, into the history on gh-pages).
   havoc visits): deterministic counters to compare builds. `2`: also every raise and try.
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (the golden `#@limits` sets them per
   case). `ROWAN_FOLLOW=pkg,…` = `--follow`. `ROWAN_TODO=check` checks `#@todo`s too.
-* **Profiling:** short runs, several in parallel. `sample <pid> 3` for time,
-  `MallocStackLogging=lite` + `malloc_history <pid> -allBySize` for memory. macOS has no
-  `timeout`: `perl -e 'alarm N; exec @ARGV' rowan …`. Compare builds on results (proven /
+* **Profiling:** the bench workflow's `perf` profiles (`sample` hangs on macOS 27). macOS has
+  no `timeout`: `perl -e 'alarm N; exec @ARGV' rowan …`. Compare builds on results (proven /
   missing / possibly / schema counts of `--json`), not only on counters.
 
 ## Layout (`rowan/src/`, ~61k lines: the engine ~21k, the models ~40k)
