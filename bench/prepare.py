@@ -28,6 +28,7 @@ import json
 import shutil
 import sys
 import sysconfig
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -52,6 +53,19 @@ WORK = HERE / "work"
 STDLIB = Path(sysconfig.get_paths()["stdlib"])
 
 
+def fetch(url: str) -> bytes:
+    """GET url, retried: a CI runner's connection to PyPI drops now and then."""
+    for attempt in range(5):
+        try:
+            return urllib.request.urlopen(url, timeout=60).read()
+        except OSError as e:
+            if attempt == 4:
+                raise
+            print(f"  retrying {url}: {e}", file=sys.stderr)
+            time.sleep(2 ** attempt)
+    raise AssertionError
+
+
 def stdlib12k() -> Path:
     d = WORK / "stdlib12k"
     d.mkdir(parents=True, exist_ok=True)
@@ -73,9 +87,9 @@ def pypi_package(name: str, version: str, driver: str) -> Path:
     d = WORK / name
     shutil.rmtree(d, ignore_errors=True)
     d.mkdir(parents=True)
-    meta = json.load(urllib.request.urlopen(f"https://pypi.org/pypi/{name}/{version}/json"))
+    meta = json.loads(fetch(f"https://pypi.org/pypi/{name}/{version}/json"))
     wheel = next(u for u in meta["urls"] if u["packagetype"] == "bdist_wheel")
-    data = urllib.request.urlopen(wheel["url"]).read()
+    data = fetch(wheel["url"])
     if hashlib.sha256(data).hexdigest() != wheel["digests"]["sha256"]:
         sys.exit(f"{name} {version}: sha256 mismatch")
     whl = d / wheel["filename"]
@@ -93,10 +107,10 @@ def wheel_sources(dest: Path, name: str, version: str) -> int:
     """One PyPI wheel's package files (sha256 checked) under dest, without test packages and
     compiled extensions; the py3-none-any wheel where there is one, else the first by file
     name (the files kept are alike in every platform's wheel). Returns its lines of Python."""
-    meta = json.load(urllib.request.urlopen(f"https://pypi.org/pypi/{name}/{version}/json"))
+    meta = json.loads(fetch(f"https://pypi.org/pypi/{name}/{version}/json"))
     wheels = sorted((u for u in meta["urls"] if u["packagetype"] == "bdist_wheel"), key=lambda u: ("none-any" not in u["filename"], u["filename"]))
     wheel = wheels[0]
-    data = urllib.request.urlopen(wheel["url"]).read()
+    data = fetch(wheel["url"])
     if hashlib.sha256(data).hexdigest() != wheel["digests"]["sha256"]:
         sys.exit(f"{name} {version}: sha256 mismatch")
     lines = 0
