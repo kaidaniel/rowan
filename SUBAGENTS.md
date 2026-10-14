@@ -49,6 +49,11 @@ and write down what you chose and why.
 8. **Few knobs.** The interpreter should have few configs, limits and switches. Every
    `ROWAN_*` variable and `ROWAN_LIMITS=` key (today only `budget` and `ms`) is a cost. A
    simpler design that needs no knob is better than a tuned one.
+9. **Few open `#@todo`s.** A `#@todo` is an expectation the engine doesn't meet yet
+   (`run_golden.py` reports how many it skips). Fewer is better: implement them where you
+   can, and promote the ones that already hold (`ROWAN_TODO=check`). Adding an honest
+   `#@todo` is fine when a new case shows something the engine can't do yet; weigh this
+   count like the other objectives, not as a rule of its own.
 
 **Which libraries matter.** The owner cares most about the builtins, PyTorch, pydantic and
 pandas. If dropping another model (or accepting imprecision on it) makes things materially
@@ -140,6 +145,7 @@ Summarise what you changed, for the owner:
 * **Objectives:**
   * the benchmark numbers before and after (time, memory, verdict counts);
   * the golden pass count with `ROWAN_LIMITS=budget=0`, before and after;
+  * the number of `#@todo` expectations, before and after;
   * the engine's and the models' line counts before and after;
   * the knobs removed;
   * any change to what users see.
