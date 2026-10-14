@@ -695,7 +695,7 @@ mod tests {
         let mut j = then_s.join(&mut else_s);
         assert!(j.reachable);
         let ex = j.exits.take().unwrap();
-        let mut exs = ex.copy_ref();
+        let mut exs = ex.copy();
         let fin = j.join(&mut exs);
         let d = fin.reqs.inner(&src2).expect("source lost");
         assert!(d.contains_key(&key_str_lit("objs")), "key lost");
@@ -746,7 +746,7 @@ mod tests2 {
         branch_return(&mut st, None);
         st.require_simple(src2, key_str_lit("ns"));
         let ex = st.exits.take().unwrap();
-        let mut exs = ex.copy_ref();
+        let mut exs = ex.copy();
         let fin = st.join(&mut exs);
         let d = fin.reqs.inner(&src2).expect("source lost");
         let mut ks: Vec<String> = d.keys().map(|k| crate::intern::key_repr(*k)).collect();
