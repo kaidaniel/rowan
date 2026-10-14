@@ -1384,8 +1384,12 @@ fn getattr_hook_outcome(an: &mut Analyzer, st: &mut State, o: u32, k: KeyId, nod
     }
 }
 
-/// The attributes of `str` other than dunders (CPython 3.14 `dir(str)`).
+/// The attributes of `str` (CPython 3.14 `dir(str)`).
 const STR_ATTRS: &[&str] = &[
+    "__add__", "__class__", "__contains__", "__delattr__", "__dir__", "__doc__", "__eq__", "__format__", "__ge__",
+    "__getattribute__", "__getitem__", "__getnewargs__", "__getstate__", "__gt__", "__hash__", "__init__", "__init_subclass__",
+    "__iter__", "__le__", "__len__", "__lt__", "__mod__", "__mul__", "__ne__", "__new__", "__reduce__", "__reduce_ex__",
+    "__repr__", "__rmod__", "__rmul__", "__setattr__", "__sizeof__", "__str__", "__subclasshook__",
     "capitalize", "casefold", "center", "count", "encode", "endswith", "expandtabs", "find", "format", "format_map", "index",
     "isalnum", "isalpha", "isascii", "isdecimal", "isdigit", "isidentifier", "islower", "isnumeric", "isprintable", "isspace",
     "istitle", "isupper", "join", "ljust", "lower", "lstrip", "maketrans", "partition", "removeprefix", "removesuffix", "replace",
@@ -1399,15 +1403,15 @@ fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         return unknown;
     }
     let Some(name) = c.args[1].kv.as_lit().filter(|_| c.args[1].pts.is_empty()).and_then(intern::key_as_str) else { return unknown };
-    // dunder attributes come from places not modelled (decorators, the type itself)
-    if name.starts_with("__") && !(c.args[0].kv.is_bot() && !c.args[0].pts.is_empty() && c.args[0].pts.iter().all(|o| builtin_has_attr(an, o, &name) == Some(false))) {
-        return unknown;
-    }
     let k = key_str_lit(&name);
     let v0 = &c.args[0];
     // (a str literal: its type's attributes are known exactly — CPython 3.14's `dir(str)`)
-    if v0.pts.is_empty() && v0.kv.is_literal() && crate::domain::kv_literals(&v0.kv).iter().all(intern::key_is_str) && !name.starts_with("__") {
+    if v0.pts.is_empty() && v0.kv.is_literal() && crate::domain::kv_literals(&v0.kv).iter().all(intern::key_is_str) {
         return Value::lit(intern::key_bool(STR_ATTRS.contains(&&*name)));
+    }
+    // dunder attributes come from places not modelled (decorators, the type itself)
+    if name.starts_with("__") && !(c.args[0].kv.is_bot() && !c.args[0].pts.is_empty() && c.args[0].pts.iter().all(|o| builtin_has_attr(an, o, &name) == Some(false))) {
+        return unknown;
     }
     let objs: Vec<u32> = c.args[0].pts.iter().collect();
     if objs.is_empty() || !c.args[0].kv.is_bot() {

@@ -1019,10 +1019,10 @@ impl Analyzer {
     }
 
     /// A loop run to a fixpoint (at most `LOOP_MAX_ITER` rounds, then widened): `round` runs
-    /// one iteration from the head. Returns the head at the fixpoint, the states at the
-    /// `break`s, and the last round's state at the back edge.
+    /// one iteration from the head; the head grows by each round's back edge (joined into it: the
+    /// rounds cannot oscillate). Returns the head at the fixpoint, the states at the `break`s,
+    /// and the last round's state at the back edge.
     pub(crate) fn loop_fixpoint(&mut self, state: &mut State, round: &mut dyn FnMut(&mut Analyzer, &mut State)) -> (State, Option<State>, State) {
-        let mut pre = state.copy();
         let mut head = state.copy();
         let mut breaks: Option<State> = None;
         let mut back = State::bottom();
@@ -1051,7 +1051,7 @@ impl Analyzer {
             };
             let recs = self.recent_stack.pop().unwrap_or_default();
             self.rename_recent(&mut back, &head, recs, mark);
-            let new_head = pre.join_loop(&mut back);
+            let new_head = head.join_loop(&mut back);
             if new_head.same(&head) {
                 converged = true;
                 break;
