@@ -74,7 +74,8 @@ pub fn dedupe(an: &Analyzer, verdicts: &[Verdict]) -> Vec<Verdict> {
             tier,
             obj: object_list(names.values()),
             chain: first.chain.clone(),
-            note: format!("is not on every object this may be ({})", breakdown.join("; ")),
+            // (no object lacks it: the note of the least sure one — unknown code ran, an input)
+            note: if breakdown.is_empty() { by_obj.values().max_by_key(|v| v.tier.rank()).map(|v| v.note.clone()).unwrap_or_default() } else { format!("is not on every object this may be ({})", breakdown.join("; ")) },
             providers: provs,
             mutators: first.mutators.clone(),
             ns: first.ns,
