@@ -54,6 +54,19 @@ and write down what you chose and why.
    can, and promote the ones that already hold (`ROWAN_TODO=check`). Adding an honest
    `#@todo` is fine when a new case shows something the engine can't do yet; weigh this
    count like the other objectives, not as a rule of its own.
+10. **Modular, readable code.** Small lines are not enough: a reader should be able to find
+    and change one concern without understanding all of them.
+    * Components with narrow interfaces instead of one struct everything reaches into. Today
+      `Analyzer` (`interp/mod.rs`) has about 137 fields, and every engine file and every
+      library model takes `&mut Analyzer`. Models should need only a narrow API, and code
+      for one concern (the heap, calls and budgets, verdicts and requirements, caches, the
+      report) should not touch another's fields.
+    * Functions short enough to read at once; one file per concern.
+    * Track it with proxies, reported before and after: `Analyzer`'s field count, the number
+      of engine functions over 100 lines, and the largest engine file.
+    * A pure restructuring is welcome on its own when it changes no behaviour: golden,
+      snapshots and the `--json` verdict counts stay identical. Leave the code you touch
+      easier to follow than you found it.
 
 **Which libraries matter.** The owner cares most about the builtins, PyTorch, pydantic and
 pandas. If dropping another model (or accepting imprecision on it) makes things materially
@@ -151,6 +164,8 @@ Summarise what you changed, for the owner:
   * the golden pass count with `ROWAN_LIMITS=budget=0`, before and after;
   * the number of `#@todo` expectations, before and after;
   * the engine's and the models' line counts before and after;
+  * the modularity proxies before and after (`Analyzer` fields, engine functions over 100
+    lines, largest engine file);
   * the knobs removed;
   * any change to what users see.
 * **Trade-offs:** what you dropped or made less precise, and why.
