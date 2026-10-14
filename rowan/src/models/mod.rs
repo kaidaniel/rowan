@@ -5229,3 +5229,118 @@ pub struct Tables {
     /// `defaultdict(factory)`: the factory, called once per inserted key
     pub dd_factories: FxHashMap<ObjId, Value>,
 }
+
+/// A partial's `func` / `args` / `keywords`.
+pub fn partial_attr(an: &mut Analyzer, oid: ObjId, name: &str, node: &crate::frontend::Node, state: &mut State) -> Value {
+    let Payload::Partial(f, args, kw) = an.obj(oid).payload.clone() else { unreachable!() };
+match name {
+    "func" => f,
+    "args" => {
+        let tid = an.alloc_at(Kind::Tuple, node, state, "partial.args", Payload::None, None, Ns::Item, None, Some(&format!("pargs{}", oid)));
+        for (i, a) in args.iter().enumerate() {
+            state.set_slot(tid, Ns::Pos, intern::key_int(i as i64), a.clone(), true);
+        }
+        let acc = join_values(args.clone());
+        state.set_slot(tid, Ns::Elem, STAR, acc, true);
+        an.set_llen(tid, state, Some(args.len()));
+        Value::obj(tid)
+    }
+    _ => {
+        let did = an.alloc_at(Kind::Dict, node, state, "partial.keywords", Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("pkw{}", oid)));
+        let mut row = Row::new();
+        for (k, v) in kw.iter() {
+            let kk = key_str_lit(&intern::str_get(*k));
+            row = row.store(kk, true);
+            state.set_slot(did, Ns::Item, kk, v.clone(), true);
+        }
+        if let Some(st2) = an.m.partial_star.get(&oid).cloned() {
+            for sk in st2 {
+                an.copy_into(did, Ns::Item, &sk, state, false, &KeySet::new());
+                row = state.row(did, Ns::Item).join(&row);
+            }
+        }
+        state.set_row(did, Ns::Item, row);
+        Value::obj(did)
+    }
+}
+}
+
+/// An attribute of a model object (pydantic FieldInfo / errors / TypeAdapter, FastAPI objects,
+/// paths, stdlib objects, csv readers): None for any other object.
+pub fn model_object_attr(an: &mut Analyzer, oid: ObjId, name: &str, node: &crate::frontend::Node, state: &mut State) -> Option<Value> {
+    let nk = key_str_lit(name);
+    let q = match &an.obj(oid).payload {
+        Payload::Method(q, _) => q.clone(),
+        _ => String::new(),
+    };
+    let k = an.kind(oid);
+    Some(if k == Kind::Namespace && q.starts_with("fieldinfo.") {
+        pydantic::fieldinfo_attr(an, state, &q, name, node)
+    } else if k == Kind::Namespace && pathtext::is_path(an, oid) && pathtext::PATH_PROPS.contains(&name) {
+        pathtext::path_attr(an, state, oid, name, node).unwrap_or_else(|| Value::data(name))
+    } else if k == Kind::Namespace && q.starts_with("stdobj.") {
+        match state.slot_opt(oid, Ns::Attr, nk) {
+            Some(v) => v,
+            None => an.method_value(&format!("{}.{}", q, name), &Value::obj(oid)),
+        }
+    } else if matches!(k, Kind::List | Kind::View) && an.m.csv_readers.contains_key(&oid) && matches!(name, "fieldnames" | "line_num" | "dialect" | "restkey" | "restval") {
+        // a csv reader's fieldnames / line_num
+        if name == "fieldnames" { an.m.csv_readers[&oid].clone() } else { Value::data(name) }
+    } else if k == Kind::Namespace && q.starts_with("pydverr.") {
+        an.method_value(&format!("{}.{}", q, name), &Value::obj(oid))
+    } else if k == Kind::Namespace && (q.starts_with("typeadapter.") || q.starts_with("fastapi.")) {
+        match state.slot_opt(oid, Ns::Attr, nk) {
+            Some(v) => v,
+            None => match fastapi::object_attr(an, oid, name, node, state) {
+                Some(v) => v,
+                None => an.method_value(&format!("{}.{}", q, name), &Value::obj(oid)),
+            },
+        }
+    } else {
+        return None;
+    })
+}
+
+/// A NamedTuple class's `_fields` / `_field_defaults`, a TypedDict class's
+/// `__required_keys__` / `__optional_keys__` / `__total__`: None for other names or classes.
+pub fn record_class_attr(an: &mut Analyzer, oid: ObjId, name: &str, node: &crate::frontend::Node, state: &mut State) -> Option<Value> {
+    if an.class_lookup(oid, name).is_some() {
+        return None;
+    }
+    if matches!(name, "_fields" | "_field_defaults") && an.is_named_tuple_class(oid) {
+        return Some({
+            let fs = an.dataclass_fields_mro(oid);
+        if name == "_fields" {
+            let vs: Vec<Value> = fs.iter().map(|(f, _)| Value::lit(key_str_lit(f))).collect();
+            let kv = KeyVal::lits(vs.iter().filter_map(|v| v.kv.as_lit()).collect());
+            an.alloc_positional(Kind::Tuple, node, Some(vs), Value::new(), kv, state)
+        } else {
+            let mut names = Vec::new();
+            let mut vals = Vec::new();
+            for (f, d) in fs.iter() {
+                if let Some(d) = d {
+                    names.push(f.clone());
+                    vals.push(an.eval(d, state));
+                }
+            }
+            crate::models::names_dict(an, state, node, &names, Some(vals), "default")
+        }
+        });
+    }
+    if matches!(name, "__required_keys__" | "__optional_keys__" | "__total__") && an.class_info_opt(oid).is_some_and(|ci| ci.typed_dict) {
+        return Some(match an.typed_dict_keys(oid) {
+            Some((req, opt)) if name != "__total__" => {
+                let ks: Vec<Value> = intern::sorted_by_str(if name == "__required_keys__" { req } else { opt }.iter()).into_iter().map(Value::lit).collect();
+                let o = an.alloc_simple(Kind::Set, node, state, &format!("{}@L{}", name, node.line));
+                an.set_members(o, KeySet::from_iter(ks.iter().filter_map(|v| v.kv.as_lit())), state);
+                Value::obj(o)
+            }
+            Some(_) => {
+                let total = an.class_info_opt(oid).and_then(|ci| ci.node.arguments.as_ref().and_then(|a| a.keywords.iter().find(|k| k.arg.as_ref().map(|x| x.as_str()) == Some("total")).map(|k| !matches!(&k.value, ast::Expr::BooleanLiteral(b) if !b.value)))).unwrap_or(true);
+                Value::lit(intern::key_bool(total))
+            }
+            None => Value::data("typeddict"),
+        });
+    }
+    None
+}

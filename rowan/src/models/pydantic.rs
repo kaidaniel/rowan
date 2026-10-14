@@ -3230,3 +3230,49 @@ pub fn install(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {
     r(&["pydantic.TypeAdapter", "pydantic.type_adapter.TypeAdapter"], m_type_adapter);
     r(&["pydantic.Field", "pydantic.fields.Field", "pydantic.PrivateAttr", "pydantic.ConfigDict", "pydantic_settings.SettingsConfigDict"], crate::models::noeffect);
 }
+
+/// An assignment to an attribute of a pydantic model instance: a frozen model raises a
+/// ValidationError, a field assigned joins `model_fields_set` (and is validated with
+/// `validate_assignment`), a private attribute is kept apart. True: handled.
+pub fn model_setattr(an: &mut Analyzer, oid: ObjId, name: &str, v: &Value, strong: bool, node: &Node, state: &mut State) -> bool {
+    let nk = key_str_lit(name);
+    // a frozen pydantic model: assignment raises a ValidationError; a field assigned is
+    // in `model_fields_set` from then on
+    if !name.starts_with('_') {
+        if let Some(cls) = an.instance_class(oid) {
+            if crate::models::pydantic::is_model(an, cls) {
+                let pc = an.pyd_class(cls, state);
+                if pc.frozen {
+                    an.raise_here("ValidationError", state);
+                    return true;
+                }
+                if pc.fields.iter().any(|f| f.name == name) {
+                    if let Some((sure, maybe)) = an.m.pyd_set.get(&oid).cloned() {
+                        let ns = if strong { sure.insert(nk) } else { sure };
+                        an.m.pyd_set.insert(oid, (ns, maybe.insert(nk)));
+                    }
+                }
+                match an.pyd_assign(oid, cls, name, v, node, state) {
+                    None => return true,
+                    Some(nv) if pc.validate_assignment => {
+                        let r = state.row(oid, Ns::Attr).store(nk, strong);
+                        state.set_row(oid, Ns::Attr, r);
+                        state.set_slot(oid, Ns::Attr, nk, nv, strong);
+                        return true;
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+    if name.starts_with('_') {
+        let cls = an.instance_class(oid);
+        if let Some(cls) = cls {
+            if an.pyd_is_private(cls, name, state) {
+                state.set_slot(oid, Ns::Attr, crate::models::pydantic::priv_key(name), v.clone(), strong);
+                return true;
+            }
+        }
+    }
+    false
+}

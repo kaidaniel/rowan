@@ -525,3 +525,59 @@ fn forget(an: &mut Analyzer, oid: ObjId, arg: &Value, c: &Call, st: &mut State) 
     an.set_llen(oid, st, None);
     st.drop_obj_ns(oid, Ns::Pos);
 }
+
+/// `dd[k]` / `counter[k]`: a defaultdict inserts its factory's value for a key it lacks (a
+/// fresh one per key); a Counter reads a missing key as 0 without inserting it. Returns the
+/// row to put back after the (never failing) read: a Counter's, or a weak insertion's.
+pub fn default_on_read(an: &mut Analyzer, oid: ObjId, key: &Value, node: &Node, single_target: bool, state: &mut State) -> Option<Row> {
+    let ns = Ns::Item;
+    let mut counter_restore: Option<Row> = None;
+    // `dd[k]` inserts the factory's value when `k` is absent (a fresh one per key)
+    let row = state.row(oid, ns);
+    if an.obj(oid).label.starts_with("Counter@") {
+        counter_restore = Some(row.clone());
+    }
+    if key.kv.is_literal() {
+        let ks = crate::domain::kv_literals(&key.kv);
+        let strong = single_target && ks.len() == 1 && an.strongable(oid);
+        let mut r = row.clone();
+        for k in ks.iter() {
+            if !r.definite.contains(k) {
+                let dflt = match an.m.dd_factories.get(&oid).cloned() {
+                    Some(f) => an.call_value(&f, node, None, state, Some(vec![])),
+                    None => state.slot(oid, Ns::Item, intern::STAR),
+                };
+                // (a key the closed row surely lacks: no earlier value to keep; in an
+                // open one a key not known may be there already, with any value)
+                let absent = r.closed() && !r.present.contains(k);
+                let dflt = if r.open() && !r.present.contains(k) && state.slot_opt(oid, ns, k).is_none() { dflt.join(&Value::data(&format!("{}[*]", an.obj(oid).label))) } else { dflt };
+                r = r.store(k, strong);
+                state.set_slot(oid, ns, k, dflt, absent);
+            }
+        }
+        // (a weak insertion — one of several keys, a weak object — still never
+        // fails the read: it is made against the keys inserted, then the weak row
+        // is put back)
+        if !strong && counter_restore.is_none() {
+            let mut sr = r.clone();
+            for k in ks.iter() {
+                if !sr.definite.contains(k) {
+                    sr = sr.store(k, true);
+                }
+            }
+            counter_restore = Some(r);
+            state.set_row(oid, ns, sr);
+        } else {
+            state.set_row(oid, ns, r);
+        }
+    } else {
+        // an unknown key: some key gets the factory's value
+        if let Some(f) = an.m.dd_factories.get(&oid).cloned() {
+            let dflt = an.call_value(&f, node, None, state, Some(vec![]));
+            state.set_slot(oid, ns, intern::STAR, Value::with_kv(dflt.pts, crate::domain::DATA), false);
+        }
+        let src = Source::new(&an.obj(oid).label, SourceKind::Data);
+        state.set_row(oid, ns, row.data_store(src));
+    }
+    counter_restore
+}
