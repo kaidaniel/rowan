@@ -36,8 +36,8 @@ def relisted(df):
 raw = pd.read_csv(io.StringIO(CSV))
 raw.columns = raw.columns.str.lower()
 # lower-cased names cannot hold an upper-case letter
-# (a row lists absent keys it knows; ID / Amount were never seen: checked by the access below)
-#@todo row raw: absent={ID,Amount} open
+# (ID / Amount are absent though the program never named them before here)
+#@row raw: absent={ID,Amount} open
 #@row raw: open
 raw["amount"]                                      #@ input amount
 try:

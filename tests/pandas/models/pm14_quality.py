@@ -135,8 +135,8 @@ def profile_numbers(report):
     for prof in report["profiles"]:
         if "mean" in prof:
             # (update() adds min, max and mean together: a relation rowan does not keep)
-            #@todo ok max ; ok min
             out.append({"column": prof["column"], "mean": prof["mean"], "range": prof["max"] - prof["min"]})   #@ ok column ; ok mean ; sound max ; sound min
+            #@todo ok max ; ok min
     return out
 
 

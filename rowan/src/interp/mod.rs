@@ -913,6 +913,9 @@ pub struct Analyzer {
     /// `#@row NAME:` checks requested by the golden harness: (file relative to the main
     /// file's directory, "" for the main file; line; name)
     pub row_check_requests: Vec<(String, u32, String)>,
+    /// keys a check names as absent (`absent={k}`): an open row lists only the absent keys it
+    /// has seen; the check also asks whether reading k would surely fail there
+    pub row_absent_probes: Vec<(String, u32, String, KeyId)>,
     /// module index -> its path relative to the main file's directory (`rel_file`)
     pub rel_files: std::cell::RefCell<FxHashMap<u32, String>>,
     /// while a test is evaluated (`split`): its frame depth and the value each node of it had
@@ -2453,7 +2456,14 @@ impl Analyzer {
                 rows.push(state.row(oid, ns));
             }
             let must: Vec<KeyId> = state.name_keys.iter().filter(|(n, _)| *intern::str_get(*n) == *name).map(|(_, k)| *k).collect();
-            let row = if rows.is_empty() { None } else { Some(must.iter().fold(crate::domain::join_rows(rows), |r, k| r.store(*k, true))) };
+            let mut row = if rows.is_empty() { None } else { Some(must.iter().fold(crate::domain::join_rows(rows), |r, k| r.store(*k, true))) };
+            if let Some(r) = row.as_mut() {
+                for (_, _, _, k) in self.row_absent_probes.iter().filter(|(f, l, nm, _)| *f == file && *l == ln && *nm == name) {
+                    if crate::domain::classify(r, *k).tier == crate::domain::Tier::Missing {
+                        *r = r.delete(*k, true);
+                    }
+                }
+            }
             let value = self.value_info(&v, state);
             let tensor = if self.torch_on {
                 // a line run several times in one analysis (a loop body): the join of its values

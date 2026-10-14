@@ -24,8 +24,8 @@ kept = []  # caught failures stay alive: the oracle tells exceptions apart by id
 raw = pd.read_csv(io.StringIO(CSV))
 ru = raw.rename(columns=str.upper)
 ru["QTY"]                                        #@ input QTY
-# (as in p106: the access below checks that qty is gone)
-#@todo row ru: absent={qty}
+# (as in p106: no upper-cased name is qty)
+#@row ru: absent={qty}
 #@row ru: definite={QTY} open
 try:
     ru["qty"]                                    #@ missing qty

@@ -108,8 +108,8 @@ def wide_views(book, prices):
     closes = prices.pivot(index="date", columns="ticker", values="close")
     #@row closes: present={} definite={} open
     rets = closes.pct_change().add_suffix("_ret")
-    # (an open row lists only the absent keys it saw: every column now ends in _ret)
-    #@todo row rets: absent={date,close,total}
+    # (every column now ends in _ret)
+    #@row rets: absent={date,close,total}
     #@row rets: present={} definite={} open
     stacked = rets.stack().rename("ret").reset_index()
     #@row stacked: present={date,ticker,ret} definite={date,ticker,ret} closed

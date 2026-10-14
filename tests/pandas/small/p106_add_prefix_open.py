@@ -10,8 +10,8 @@ kept = []  # caught failures stay alive: the oracle tells exceptions apart by id
 raw = pd.read_csv(io.StringIO(CSV))
 p = raw.add_prefix("in_")
 p["in_qty"]                                      #@ input in_qty
-# (a row lists the absent keys it saw; qty was never seen: the access below checks it)
-#@todo row p: absent={qty}
+# (qty is absent though the program never named it before here)
+#@row p: absent={qty}
 #@row p: definite={in_qty} open
 try:
     p["qty"]                                     #@ missing qty

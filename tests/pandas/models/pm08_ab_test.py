@@ -123,8 +123,8 @@ def revenue_view(merged):
     rev = merged.pivot_table(index="segment", columns="variant", values="revenue", aggfunc="mean", fill_value=0)
     #@row rev: present={} definite={} open
     rev = rev.add_suffix("_arpu")
-    # (an open row lists only the absent keys it saw: every column now ends in _arpu)
-    #@todo row rev: absent={segment,revenue}
+    # (every column now ends in _arpu)
+    #@row rev: absent={segment,revenue}
     #@row rev: present={} definite={} open
     desc = merged.groupby("variant")["revenue"].describe()              #@ ok variant ; ok revenue
     #@row desc: present={count,mean,std,min,"25%","50%","75%",max} definite={count,mean,std,min,"25%","50%","75%",max} closed

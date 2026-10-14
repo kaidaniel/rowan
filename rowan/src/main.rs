@@ -321,6 +321,15 @@ fn golden_requests(an: &mut Analyzer, rel: &str, src: &str) {
         if let Some(pos) = hit {
             let rest = &line[pos..];
             let name: String = rest.trim_start().chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            if let Some(ks) = rest.split("absent={").nth(1).and_then(|r| r.split('}').next()) {
+                for k in ks.split(',').map(str::trim).filter(|k| !k.is_empty()) {
+                    let key = match k.parse::<i64>() {
+                        Ok(n) => rowan::intern::key_int(n),
+                        Err(_) => rowan::intern::key_str_lit(k.trim_matches(|c| c == '"' || c == '\'')),
+                    };
+                    an.row_absent_probes.push((rel.to_string(), i as u32 + 1, name.clone(), key));
+                }
+            }
             push(an, name);
         }
         // `#@value NAME: …; NAME2: …` (also under `#@todo value`), `#@shape[@Ln] NAME: …`,

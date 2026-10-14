@@ -103,8 +103,8 @@ def system_notes(m):
         return m["note"].dropna()                                           #@ ok note
     # (note absent means the counts had a note too, so note_y exists: a relation between columns
     # rowan does not keep)
-    #@todo ok note_y
     return m["note_y"].dropna()                                             #@ sound note_y
+    #@todo ok note_y
 
 
 def location_summary(m):
