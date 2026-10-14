@@ -1561,18 +1561,18 @@ impl Analyzer {
     pub fn may_raise_here(&mut self, name: &str, state: &mut State) {
         let cls = self.cur_exc_cls.take().unwrap_or_else(|| super::builtin_exc_names(name));
         // a builtin exception a model raises, for a handler that may catch it: an object of its
-        // class (its args not known)
-        if self.cur_exc.is_none() && self.class_guarded(&cls) {
-            if let Some(nd) = self.exc_node {
-                let n = name.rsplit('.').next().unwrap_or(name);
-                if super::builtin_exc_names(n).1 && super::is_builtin_name(n) {
-                    let e = self.exception_object(n, vec![], &nd, state);
-                    if let Some(o) = e.pts.iter().next() {
-                        let strong = self.obj(o).single;
-                        self.store_key(o, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &Value::data("args"), strong, &nd, state);
-                    }
-                    self.cur_exc = Some(e);
+        // class, one per class (its args not known)
+        if self.cur_exc.is_none() && self.class_guarded(&cls) && self.exc_node.is_some() {
+            let n = name.rsplit('.').next().unwrap_or(name);
+            if super::builtin_exc_names(n).1 && super::is_builtin_name(n) {
+                let o = self.alloc_raw(Kind::Namespace, &format!("exc:{}", n), "", false, n, Payload::None);
+                crate::state::mark_merged(o);
+                if !state.has_row(o, Ns::Attr) {
+                    state.set_row(o, Ns::Attr, crate::domain::Row::with_source(crate::domain::Source::new(n, crate::domain::SourceKind::Data)));
                 }
+                state.set_slot(o, Ns::Attr, key_str_lit("args"), Value::data("args"), false);
+                self.exc_objs.insert(o, n.to_string());
+                self.cur_exc = Some(Value::obj(o));
             }
         }
         self.cur_exc_cls = Some(cls);
