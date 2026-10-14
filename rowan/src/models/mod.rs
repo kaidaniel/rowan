@@ -1433,9 +1433,10 @@ fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if lit.is_some() && name_v.pts.is_empty() {
         return lit.unwrap();
     }
-    // a name not known (in part): any of the object's attributes (of a library object, anything),
-    // or the default
-    let mut v = join_values(obj.pts.iter().map(|o| an.all_values(o, Ns::Attr, st)));
+    // a name not known: any of the object's attributes (of a library object, anything), or the
+    // default; known in part: that attribute, or one rowan does not follow (AGENTS.md: getattr
+    // by unknown names is not followed; every attribute and method of `self` was too costly)
+    let mut v = if lit.is_some() { Value::obj(an.any_object(st)) } else { join_values(obj.pts.iter().map(|o| an.all_values(o, Ns::Attr, st))) };
     if obj.pts.iter().any(|o| an.kind(o) == Kind::External) {
         let lib: Vec<Value> = vec![Value::with_kv(obj.pts.filter(|o| an.kind(o) == Kind::External), crate::domain::BOT)];
         v = v.join(&an.unknown_call(&c.qual, None, &lib, &IndexMap::new(), &[], &[], st, &c.node));

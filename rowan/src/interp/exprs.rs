@@ -1569,8 +1569,6 @@ impl Analyzer {
                                         None => parts.push(Part::Opaque),
                                     },
                                     Some(None) => parts.push(Part::Opaque),
-                                    // (objects' text, an unknown str's among them, is not known)
-                                    None if !v.pts.is_empty() => parts.push(Part::Opaque),
                                     None => parts.push(Part::Hole(v)),
                                 }
                             }
@@ -1589,7 +1587,15 @@ impl Analyzer {
                 let i = holes[0];
                 let pre: String = parts[..i].iter().map(|p| if let Part::Lit(l) = p { l.as_str() } else { "" }).collect();
                 let post: String = parts[i + 1..].iter().map(|p| if let Part::Lit(l) = p { l.as_str() } else { "" }).collect();
-                return Value::kv_only(self.affix(&v.kv, &pre, &post));
+                let kv = self.affix(&v.kv, &pre, &post);
+                // (objects in the hole, an unknown str among them: other texts too, one unknown)
+                if !v.pts.is_empty() && v.kv.is_literal() {
+                    let nd = frontend::node(node);
+                    let site = format!("fstring@L{}", nd.line);
+                    let o = self.unknown_source(&site, crate::domain::SourceKind::Data, state, &site, "", Ns::Item, vec![]);
+                    return Value::with_kv(ObjSet::one(o), kv);
+                }
+                return Value::kv_only(kv);
             }
         }
         // several holes: known literals concatenate; a parameter among them is decided per
