@@ -1569,6 +1569,8 @@ impl Analyzer {
                                         None => parts.push(Part::Opaque),
                                     },
                                     Some(None) => parts.push(Part::Opaque),
+                                    // (objects' text, an unknown str's among them, is not known)
+                                    None if !v.pts.is_empty() => parts.push(Part::Opaque),
                                     None => parts.push(Part::Hole(v)),
                                 }
                             }

@@ -2459,7 +2459,7 @@ fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             if let Some(k) = kv.as_lit() {
                 if let Some(sk) = intern::key_as_str(k) {
-                    if sk.matches("{}").count() == 1 && c.args.len() == 1 {
+                    if sk.matches("{}").count() == 1 && c.args.len() == 1 && c.args[0].pts.is_empty() {
                         let mut parts = sk.splitn(2, "{}");
                         let pre = parts.next().unwrap_or("").to_string();
                         let post = parts.next().unwrap_or("").to_string();
