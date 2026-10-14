@@ -124,8 +124,12 @@ engine, datetime and FastAPI. When you drop a model:
 * **Golden cases.** Expectations are written by hand before the engine produces them, and are
   never derived from engine output.
 * **Soundness.** If the oracle and an expectation disagree, the oracle wins.
-* **`SUGGESTED_CHANGES.md`.** Never commit it. Keep it up to date with what you learn:
-  remove what you finished, and add what you found.
+* **`SUGGESTED_CHANGES.md`.** Never commit it. It lists only avenues not yet explored: open
+  bugs, ideas and gaps, each with a repro or a pointer, grouped by topic (not by iteration).
+  It is not a changelog (the PRs are): no "done in PR #N", no measurements of past work.
+  Remove what you finished or ruled out (a ruled-out idea goes in your final message's "Ideas
+  not pursued", and stays in the file only as one line saying why, so nobody retries it
+  blindly), and add what you found under its topic.
 * **`AGENTS.md`.** Keep it under 200 lines and true at every commit: update its overview
   when the design changes, and its switches when you remove a knob.
 * **Measuring.**
