@@ -477,11 +477,6 @@ impl State {
         Footprint { rows: self.rows.diff_keys(&base.rows), slots: self.slots.diff_keys(&base.slots), elems: self.elems.diff_keys(&base.elems) }
     }
 
-    /// The same heap: rows, slots, element kinds and lengths.
-    pub fn same_heap(&self, o: &State) -> bool {
-        self.rows.same(&o.rows) && self.slots.same(&o.slots) && self.elems.same(&o.elems) && self.lens.same(&o.lens)
-    }
-
     pub fn same(&self, o: &State) -> bool {
         self.reachable == o.reachable
             && self.env == o.env

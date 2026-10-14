@@ -757,7 +757,7 @@ impl Analyzer {
     #[allow(clippy::too_many_arguments)]
     fn load_record_inner(&mut self, oid: u32, ns: Ns, key: &Value, node: &Node, state: &mut State, guarded: bool, single_target: bool, try_guard: bool) -> Value {
         let kind = self.kind(oid);
-        let mut row = if kind == Kind::Unknown { self.unknown_row(oid, ns, state) } else { state.row(oid, ns) };
+        let mut row = if kind == Kind::Unknown { self.unknown_row(oid, ns, state) } else { self.read_row(oid, ns, state) };
         // (the row before this read narrows it)
         let row0 = row.clone();
         let kv = &key.kv;
@@ -1879,7 +1879,7 @@ impl Analyzer {
             }
         }
         let v = state.slot_opt(oid, Ns::Attr, nk);
-        let row = state.row(oid, Ns::Attr);
+        let row = self.read_row(oid, Ns::Attr, state);
         let cls_of = self.instance_class(oid);
         if let Some(mut v) = v {
             // (set on some paths only, over a class attribute of the name: the others read the
@@ -2001,6 +2001,13 @@ impl Analyzer {
 
     /// An unknown object's row; none on this path (collected, or never made here): nothing is
     /// known of it (an empty, closed row would claim every key missing).
+    /// The row a read classifies against: of an object this path has no facts about at all
+    /// (made on other paths: a recursion's deeper activations make what its widened
+    /// arguments hold), nothing is known.
+    pub fn read_row(&self, oid: u32, ns: Ns, state: &State) -> Row {
+        if self.has_facts(oid, state) { state.row(oid, ns) } else { Row::top() }
+    }
+
     pub fn unknown_row(&self, oid: u32, ns: Ns, state: &State) -> Row {
         if state.has_row(oid, ns) {
             state.row(oid, ns)
