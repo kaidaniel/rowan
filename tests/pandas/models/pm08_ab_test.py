@@ -123,8 +123,8 @@ def revenue_view(merged):
     rev = merged.pivot_table(index="segment", columns="variant", values="revenue", aggfunc="mean", fill_value=0)
     #@row rev: present={} definite={} open
     rev = rev.add_suffix("_arpu")
-    # (an open row lists only the absent keys it saw: every column now ends in _arpu)
-    #@todo row rev: absent={segment,revenue}
+    # (every column now ends in _arpu)
+    #@row rev: absent={segment,revenue}
     #@row rev: present={} definite={} open
     desc = merged.groupby("variant")["revenue"].describe()              #@ ok variant ; ok revenue
     #@row desc: present={count,mean,std,min,"25%","50%","75%",max} definite={count,mean,std,min,"25%","50%","75%",max} closed
@@ -145,8 +145,7 @@ def decide(wide, control, treatment):
         seg = rec["segment"]                                            #@ ok segment
         lift = rec["uplift"]                                            #@ ok uplift
         winner = treatment if lift > 0 else control
-        # (decide runs from a summary: its values are the parameters' symbols)
-        #@todo value winner: exactly={"A","B","CONTROL","TEST"}
+        #@value winner: exactly={"A","B","CONTROL","TEST"}
         decision = "ship" if lift > 0.05 else "hold"
         #@value decision: exactly={"ship","hold"}
         decisions.append((seg, winner, decision))

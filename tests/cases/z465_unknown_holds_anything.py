@@ -24,5 +24,5 @@ e = {"j": [1, 2], "s": "text"}
 reprlib.repr(e)
 first = e["j"][0]                            #@ sound 0
 #@value first: includes={1}
-s = e["s"]                                   #@value s: includes={text}
-#@todo value s: exactly={text}
+s = e["s"]                                   #@value s: exactly={text}
+# (reprlib.repr is modelled now: it runs no code of the program here; z489 has the unknown call)

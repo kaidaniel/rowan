@@ -357,13 +357,21 @@ impl Analyzer {
             return None;
         }
         let node = Analyzer::strip_annotation(ann)?;
+        let is_str = matches!(node, ruff_python_ast::Expr::Name(n) if n.id.as_str() == "str");
         let number = match node {
             ruff_python_ast::Expr::Name(n) if matches!(n.id.as_str(), "int" | "float" | "bool") => Some(n.id.as_str() != "float"),
+            _ if is_str => None,
             ruff_python_ast::Expr::Name(n) if n.id.as_str() == "Tensor" => None,
             ruff_python_ast::Expr::Attribute(a) if a.attr.as_str() == "Tensor" && matches!(&*a.value, ruff_python_ast::Expr::Name(m) if m.id.as_str() == "torch") => None,
             _ => return None,
         };
         let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), crate::domain::SourceKind::Param, state, &format!("param {}", pname), "", Ns::Item, vec![]);
+        if is_str {
+            if let Some(sy) = self.t_sym_of_obj(poid) {
+                self.m.t_strs.insert(sy);
+            }
+            return Some(Value::obj(poid));
+        }
         match number {
             Some(int) => {
                 self.m.t_numbers.insert(poid, int);
@@ -406,6 +414,8 @@ impl Analyzer {
             let o = v.single()?;
             return match self.kind(o) {
                 Kind::List | Kind::Tuple => self.llen(o, st).map(|k| sh::lit(k as i64)),
+                // (a str parameter: as many items as characters)
+                Kind::Unknown if v.kv.is_bot() => self.t_sym_of_obj(o).filter(|sy| self.m.t_strs.contains(sy)).map(|sy| sh::sdim(sy, 0)),
                 _ => None,
             };
         }
@@ -413,6 +423,49 @@ impl Analyzer {
             Some(intern::Key::Str(t)) => Some(sh::lit(t.chars().count() as i64)),
             _ => None,
         }
+    }
+
+    /// An item of iterating a tensor: a tensor of the dims after dim 0 (with the range of an
+    /// int tensor's elements).
+    pub fn t_iter_elem(&self, v: &Value, st: &State) -> Option<Value> {
+        let s = tensor_shape(v).filter(|_| v.pts.is_empty())?;
+        let e = sh::expose_f(&sh::norm_shape(&s, &st.tf), 1, 0, &st.tf);
+        if e.prefix.is_empty() {
+            return None;
+        }
+        let row = sh::canon(Shape { prefix: e.prefix[1..].to_vec(), ..e });
+        Some(match label(v).and_then(|l| sh::label_range(&l)) {
+            Some((lo, hi)) => Value::data(&sh::ranged_label(sh::shape_id(row), lo, hi)),
+            None => tensor_value(row),
+        })
+    }
+
+    /// An index written `a + k1 + k2 …` (ints or names `k`): `a` and the sum of the `k`s.
+    fn t_offset(&mut self, mut e: &'static ast::Expr, st: &mut State) -> Option<(&'static ast::Expr, DimId)> {
+        let mut sum = sh::lit(0);
+        while let ast::Expr::BinOp(b) = e {
+            if b.op != ast::Operator::Add || !matches!(&*b.right, ast::Expr::NumberLiteral(_) | ast::Expr::Name(_)) {
+                break;
+            }
+            let k = self.eval(&b.right, st);
+            sum = sh::add(sum, self.t_dim(&k, st).filter(|k| !sh::has_unknown(*k))?);
+            e = &b.left;
+        }
+        Some((e, sum))
+    }
+
+    /// `x[a + k : a + m]` over a dim `d`, where `a` is a name holding an int tensor whose
+    /// elements lie in `lo..=hi` (`randint`'s, a literal's), with `0 <= lo + k` and
+    /// `hi + m <= d`: `m - k` long.
+    fn t_window(&mut self, lower: &'static ast::Expr, upper: &'static ast::Expr, d: DimId, st: &mut State) -> Option<DimId> {
+        let ((a, k), (b, m)) = (self.t_offset(lower, st)?, self.t_offset(upper, st)?);
+        if !matches!(a, ast::Expr::Name(_)) || ast::comparable::ComparableExpr::from(a) != ast::comparable::ComparableExpr::from(b) {
+            return None;
+        }
+        let v = self.eval(a, st);
+        let (lo, hi) = label(&v).and_then(|l| sh::label_range(&l)).filter(|_| v.pts.is_empty())?;
+        let n = sh::sub(m, k);
+        (sh::nonneg(n) && sh::nonneg(sh::add(lo, k)) && sh::nonneg(sh::sub(d, sh::add(hi, m)))).then_some(n)
     }
 
     pub fn t_tuple_len(&self, v: &Value) -> Option<DimId> {
@@ -467,7 +520,7 @@ impl Analyzer {
     }
 
     pub fn t_print_ctx_at(&self, scope: u32, env: &IndexMap<StrId, Value>, st: &State) -> sh::PrintCtx {
-        let mut ctx = sh::PrintCtx { all: false, scope, ..Default::default() };
+        let mut ctx = sh::PrintCtx { all: false, scope, strs: self.m.t_strs.clone(), ..Default::default() };
         if scope != 0 && self.has_obj(scope) && self.kind(scope) == Kind::Function {
             // a closure sees the names of the functions around it
             let mut q = self.func_info(scope).qualname.clone();
@@ -1527,6 +1580,7 @@ impl Analyzer {
                         }
                         None => sh::unknown(),
                     },
+                    (Some(None), Some(None)) => self.t_window(sl.lower.as_ref().unwrap(), sl.upper.as_ref().unwrap(), d, st).unwrap_or_else(sh::unknown),
                     _ => sh::unknown(),
                 }])
             }
@@ -2589,6 +2643,12 @@ impl Analyzer {
                 if let (Some(n), Some(true)) = (len, d.first().map(|x| sh::has_unknown(*x))) {
                     d[0] = n;
                 }
+                // (a list of int literals: its elements' least and greatest)
+                let ints: Option<Vec<i64>> = data.and_then(|v| self.t_seq(v, st)).map(|xs| xs.iter().map(|x| x.kv.as_lit().filter(|_| x.pts.is_empty()).and_then(intern::key_as_int)).collect::<Option<Vec<_>>>()).flatten();
+                if let Some(xs) = ints.filter(|xs| d.len() == 1 && !xs.is_empty()) {
+                    let (lo, hi) = (*xs.iter().min().unwrap(), *xs.iter().max().unwrap());
+                    return Value::data(&sh::ranged_label(sh::shape_id(sh::canon(Shape::known(d))), sh::lit(lo), sh::lit(hi)));
+                }
                 tensor_value(Shape::known(d))
             }
             None => match data.and_then(|d| tensor_shape(d)) {
@@ -2677,7 +2737,18 @@ impl Analyzer {
             }
             "randint" => {
                 let size = kw(c, "size").cloned().or_else(|| args.iter().rev().find(|a| self.t_seq(a, st).is_some() || size_shape(a).is_some()).cloned());
-                return size.and_then(|v| self.t_shape_arg(&v, st)).map(tensor_value).unwrap_or_else(|| tensor_value(Shape::any()));
+                let Some(s) = size.and_then(|v| self.t_shape_arg(&v, st)) else { return tensor_value(Shape::any()) };
+                // (its elements lie in low..high: `randint(high, size)`, `randint(low, high, size)`)
+                let bounds: Vec<Value> = args.iter().filter(|a| self.t_seq(a, st).is_none() && size_shape(a).is_none()).cloned().collect();
+                let (lo, hi) = match &bounds[..] {
+                    [h] => (Some(sh::lit(0)), self.t_dim(h, st)),
+                    [l, h] => (self.t_dim(l, st), self.t_dim(h, st)),
+                    _ => (None, None),
+                };
+                return match (lo, hi) {
+                    (Some(l), Some(h)) if !sh::has_unknown(l) && !sh::has_unknown(h) => Value::data(&sh::ranged_label(sh::shape_id(sh::canon(s)), l, sh::sub(h, sh::lit(1)))),
+                    _ => tensor_value(s),
+                };
             }
             "randperm" => {
                 let n = args.first().and_then(|v| self.t_dim(v, st)).unwrap_or_else(sh::unknown);

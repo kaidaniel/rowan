@@ -141,6 +141,6 @@ with torch.no_grad():
     logits, alpha = model(Q_bow, K_bow, V_idx)
     #@shape logits: [12, 11]; alpha: [12, 12]
 for (q, a), al, pred in zip(questions, alpha, logits.argmax(-1)):
-    #@todo shape al: [12]; pred: [] (the items of zip over tensors)
+    #@shape al: [12]; pred: []
     top = al.argmax().item()
     print(f"{q:32s} -> {cands[pred]:10s} (true {a:10s})  attends {al[top]:.2f} to '{facts[top][0]}'")

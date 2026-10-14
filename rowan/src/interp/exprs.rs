@@ -154,6 +154,11 @@ impl Analyzer {
                 }
                 let nd = frontend::node(node);
                 let saved_node = self.exc_node.replace(nd);
+                if let (Some(a @ (ast::Expr::ListComp(_) | ast::Expr::Generator(_))), Some(o)) = (c.arguments.args.first(), fv.single()) {
+                    if fv.kv.is_bot() && self.kind(o) == Kind::External && matches!(self.external_qual(o).as_str(), "torch.cat" | "torch.concat" | "torch.concatenate" | "torch.stack") {
+                        self.nonempty_comp = a as *const ast::Expr as usize;
+                    }
+                }
                 let r = self.call_value(&fv, &nd, Some(c), state, None);
                 self.exc_node = saved_node;
                 // (flagged after the call: what the call requires of its inputs, it requires on
@@ -243,7 +248,7 @@ impl Analyzer {
                         None => Value::data("bool"),
                     },
                     ast::UnaryOp::USub => {
-                        if let Some(k) = v.kv.as_lit() {
+                        if let Some(k) = v.kv.as_lit().filter(|_| v.pts.is_empty()) {
                             if let Some(i) = intern::key_as_int(k) {
                                 if !intern::with_key(k, |kk| matches!(kk, intern::Key::Bool(_))) {
                                     return Value::lit(key_int(-i));
@@ -1582,7 +1587,15 @@ impl Analyzer {
                 let i = holes[0];
                 let pre: String = parts[..i].iter().map(|p| if let Part::Lit(l) = p { l.as_str() } else { "" }).collect();
                 let post: String = parts[i + 1..].iter().map(|p| if let Part::Lit(l) = p { l.as_str() } else { "" }).collect();
-                return Value::kv_only(self.affix(&v.kv, &pre, &post));
+                let kv = self.affix(&v.kv, &pre, &post);
+                // (objects in the hole, an unknown str among them: other texts too, one unknown)
+                if !v.pts.is_empty() && v.kv.is_literal() {
+                    let nd = frontend::node(node);
+                    let site = format!("fstring@L{}", nd.line);
+                    let o = self.unknown_source(&site, crate::domain::SourceKind::Data, state, &site, "", Ns::Item, vec![]);
+                    return Value::with_kv(ObjSet::one(o), kv);
+                }
+                return Value::kv_only(kv);
             }
         }
         // several holes: known literals concatenate; a parameter among them is decided per
@@ -1643,6 +1656,7 @@ impl Analyzer {
             return;
         }
         let g = &gens[i];
+        let nonempty = std::mem::take(&mut self.nonempty_gen);
         let itv = self.eval(&g.iter, state);
         let exhaust_after = itv.clone();
         let gn = frontend::node(&g.iter);
@@ -1713,7 +1727,7 @@ impl Analyzer {
         let quiet = same_env && fp.rows.iter().all(|(o, _)| !older(*o)) && fp.slots.iter().all(|(o, _)| !older(*o)) && fp.elems.iter().all(|o| !older(*o)) && s2.lens.diff_keys(&state.lens).iter().all(|o| !older(*o));
         if quiet {
             self.comp_known.pop();
-            let mut joined = state.join(&mut s2);
+            let mut joined = if nonempty { s2.copy() } else { state.join(&mut s2) };
             let ev = elem.value_part();
             self.promote_elem_reqs(&mut joined, &s2, &ev, state);
             state.replace_with(joined);
@@ -1727,6 +1741,10 @@ impl Analyzer {
             an.comp_run_one(g, gens, i, limit, &elem, body_s, body, understood, own);
         });
         self.comp_known.pop();
+        // (at least one iteration: the states after one, from the fixpoint)
+        if nonempty && self.loop_converged && s2.reachable {
+            head = s2.copy();
+        }
         let ev = elem.value_part();
         self.promote_elem_reqs(&mut head, &s2, &ev, state);
         state.replace_with(head);
@@ -1833,6 +1851,10 @@ impl Analyzer {
             _ => false,
         };
         let mark = self.comp_known.len();
+        // (the tensors `torch.cat` joins: at least one iteration ran, or it raised)
+        if std::mem::take(&mut self.nonempty_comp) == node as *const ast::Expr as usize && gens.len() == 1 && gens[0].ifs.is_empty() {
+            self.nonempty_gen = true;
+        }
         self.comp(gens, limit, state, &mut body, oid);
         self.comp_known.truncate(mark);
         if positional {

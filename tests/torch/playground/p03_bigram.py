@@ -44,8 +44,8 @@ def get_batch(data: Tensor, B: int, T: int) -> tuple[Tensor, Tensor]:
     i = torch.randint(0, len(data) - T - 1, (B,))
     #@shape i: [B]
     x = torch.stack([data[j : j + T] for j in i])
-    #@shape x: [B, _, *data.shape[1:]]
-    #@todo shape x: [B, T, *data.shape[1:]] (a slice j:j+T of an unknown start: T long only when j + T <= len(data), which randint's bound gives)
+    #@shape x: [B, T, *data.shape[1:]]
+    # (j lies in 0..len(data) - T - 2, randint's range: each window is T long)
     #@shape@L63 x: [32, _]
     y = torch.stack([data[j + 1 : j + 1 + T] for j in i])
     #@shape y: [B, _, *data.shape[1:]]
@@ -61,8 +61,8 @@ model = Bigram(len(vocab))
 optim = torch.optim.AdamW(model.parameters(), lr=4e-3)
 for step in range(3_000):
     x, y = get_batch(train, 32, 32)
-    #@shape x: [32, _]; y: [32, _]
-    #@todo shape x: [32, 32]; y: [32, 32] (a slice j:j + T of an unknown start in get_batch)
+    #@shape x: [32, 32]; y: [32, 32]
+    # (j lies in 0..len(data) - T - 2, randint's range: each window is T long)
     model.train()
     x_hat = model(x)
     #@shape x_hat: [32, _, 32]

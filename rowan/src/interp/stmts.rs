@@ -1021,6 +1021,7 @@ impl Analyzer {
             }
             prev_head = std::mem::replace(&mut head, new_head);
         }
+        self.loop_converged = converged;
         if !converged {
             self.widen_unconverged(&mut head, &prev_head);
             // (the accesses as the widened states make them)

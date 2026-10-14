@@ -29,7 +29,8 @@ fields — and the **values** of names when they follow from the program text.
 * `#@row NAME: present={…} definite={…} [absent={…}] closed|open` — NAME's keys after the
   line ran: dict → keys; instance / pydantic model / dataclass / namespace → attributes
   (`vars(o)`); namedtuple → fields. `present`: every key that may be there; `definite`: there
-  on every path; `absent`: surely not there; `closed`: nothing else possible, `open`: other
+  on every path; `absent`: surely not there (a key named here that the row has not seen counts
+  when reading it there would surely fail); `closed`: nothing else possible, `open`: other
   keys may exist (data from input, unknown code, `**kwargs` of unknown origin).
 * `#@value NAME: exactly={…}` (one of these literals) / `includes={…}` / `unknown`.
 * `#@ TIER key` on an access line (`d["k"]`, `o.k`, `d.pop("k")`, `M(**d)`, …): `ok` (never

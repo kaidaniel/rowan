@@ -161,10 +161,10 @@ if __name__ == "__main__":
     n_out = len(exp_a.columns)                                   #@value n_out: exactly={5}
     det_t = rt["detail"]                                         #@row det_t: present={team,opened_at,closed_at,priority,hours} definite={team,opened_at,closed_at,priority,hours} absent={opened,closed} open
     # (the generated aggregations come from the data: rowan lists the candidates it knows of, so
-    # no present= here; an open row lists only the absent keys it saw)
+    # no present= here; every export column starts with tickets_)
     sum_t = rt["summary"]                                        #@row sum_t: definite={team,priority} open
-    #@todo row exp_t: absent={team,priority}
     exp_t = rt["export"]                                         #@row exp_t: definite={tickets_team,tickets_priority} open
+    #@row exp_t: absent={team,priority}
     total = exp_a["sales_revenue"].sum()                         #@ ok sales_revenue
     hours = exp_t["tickets_hours_mean"]                          #@ sound tickets_hours_mean
     try:

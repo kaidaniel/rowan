@@ -76,6 +76,9 @@ impl Registry {
         r(&["builtins.next"], m_next);
         r(&["builtins.getattr"], m_getattr);
         r(&["builtins.setattr"], m_setattr);
+        r(&["random.shuffle"], m_shuffle);
+        r(&["reprlib.repr"], m_reprlib_repr);
+        r(&["operator.setitem"], m_op_setitem);
         r(&["builtins.object.__setattr__"], m_object_setattr);
         r(&["builtins.object.__new__"], m_object_new);
         r(&["builtins.delattr"], m_delattr);
@@ -387,7 +390,14 @@ pub fn noeffect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// type (`len`, `sorted`, `str.join`, …) may still raise a TypeError where an argument (or a
 /// builtin's result) is not known: a running try records that.
 pub fn may_type_error(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<StrId, Value>, r: &Value, state: &mut State) {
-    if an.tries.is_empty() || !state.reachable {
+    if !state.reachable {
+        return;
+    }
+    if sure_type_error(an, qual, args, kwargs, state) {
+        an.raise_here("TypeError", state);
+        return;
+    }
+    if an.tries.is_empty() {
         return;
     }
     // (known: literals and the program's containers of literals; not an unknown value, an
@@ -418,6 +428,59 @@ pub fn may_type_error(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &In
     };
     if unknown {
         an.may_raise_here("TypeError", state);
+    }
+}
+
+/// The type of a value that is surely a literal of one kind: 0 a number (bool, int, float),
+/// 1 a str, 2 bytes, 3 None.
+fn lit_kind(v: &Value) -> Option<u8> {
+    if !v.pts.is_empty() {
+        return None;
+    }
+    let ks: Vec<KeyId> = match &v.kv {
+        KeyVal::Lit(k) => vec![*k],
+        KeyVal::Lits(ks) if !ks.is_empty() => ks.to_vec(),
+        _ => return None,
+    };
+    let kind = |k: KeyId| {
+        intern::with_key(k, |k| match k {
+            intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_) => Some(0),
+            intern::Key::Str(_) => Some(1),
+            intern::Key::Bytes(_) => Some(2),
+            intern::Key::None => Some(3),
+            _ => None,
+        })
+    };
+    let first = kind(ks[0])?;
+    ks.iter().all(|k| kind(*k) == Some(first)).then_some(first)
+}
+
+/// A builtin given arguments of a type it rejects on every run: `len(5)`, `hash([])`,
+/// `sorted([1, "a"])` (a sort that compares no int with a str cannot order them),
+/// `",".join([1])`, `sum(["a"])` (`0 + "a"`).
+fn sure_type_error(an: &Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<StrId, Value>, st: &State) -> bool {
+    // the items of one list / tuple of known length
+    let items = |v: &Value| -> Option<Vec<Value>> {
+        let o = v.single().filter(|o| v.kv.is_bot() && matches!(an.kind(*o), Kind::List | Kind::Tuple) && !an.obj(*o).iterator)?;
+        let n = an.llen(o, st)?;
+        Some((0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect())
+    };
+    let [a] = args else { return false };
+    match qual {
+        "builtins.len" => matches!(lit_kind(a), Some(0 | 3)),
+        "builtins.hash" => {
+            !a.pts.is_empty() && a.kv.is_bot() && a.pts.iter().all(|o| an.kind(o) == Kind::Dict || (!an.obj(o).iterator && ["list@", "set@"].iter().any(|p| an.obj(o).label.starts_with(p))))
+        }
+        "builtins.sorted" | "builtins.min" | "builtins.max" if kwargs.keys().all(|k| *k == s("reverse")) => items(a).is_some_and(|xs| {
+            let ks: Vec<Option<u8>> = xs.iter().map(lit_kind).collect();
+            xs.len() >= 2 && (ks.contains(&Some(3)) || ks.iter().flatten().any(|k| ks.iter().flatten().any(|j| j != k)))
+        }),
+        "builtins.sum" if kwargs.is_empty() => items(a).is_some_and(|xs| {
+            let ks: Vec<Option<u8>> = xs.iter().map(lit_kind).collect();
+            ks.iter().all(|k| k.is_some()) && ks.iter().any(|k| *k != Some(0))
+        }),
+        "str.join" if kwargs.is_empty() => items(a).is_some_and(|xs| xs.iter().any(|x| matches!(lit_kind(x), Some(0 | 2 | 3)))),
+        _ => false,
     }
 }
 
@@ -961,7 +1024,7 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     for o in v.pts.iter() {
-        match an.instance_of(o, &classes) {
+        match an.instance_of(o, &classes, st) {
             Some(b) => verdicts.push(b),
             None => return Value::data("bool"),
         }
@@ -1263,6 +1326,15 @@ fn m_zip(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             return an.alloc_positional(Kind::List, &c.node, Some(tuples), Value::new(), DATA, st);
         }
+        // (not every input's items known: tuples of their items, how many not known)
+        if c.star_args.is_empty() {
+            let elems: Vec<Value> = c.args.clone().iter().map(|x| {
+                let e = an.iterate(x, &c.node, st).elem;
+                an.elem_value(&e, &c.node, "zn")
+            }).collect();
+            let t = an.alloc_positional_sfx(Kind::Tuple, &c.node, "#t", Some(elems), Value::new(), DATA, st);
+            return an.alloc_positional(Kind::List, &c.node, None, t, DATA, st);
+        }
     }
     let a = c.args.first().cloned().unwrap_or_default();
     let b = c.args.get(1).cloned().unwrap_or_default();
@@ -1344,17 +1416,35 @@ fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    if c.args.len() >= 2 {
-        if let Some(k) = c.args[1].kv.as_lit() {
-            if let Some(name) = intern::key_as_str(k) {
-                return an.load_attr(&c.args[0], &name, &c.node, st, c.args.len() == 2);
-            }
+    let Some(obj) = c.args.first().cloned() else { return Value::data("getattr") };
+    let name_v = c.args.get(1).cloned().unwrap_or_default();
+    let lit = name_v.kv.as_lit().and_then(intern::key_as_str).map(|name| {
+        // (with a default: the default where the attribute is surely not there, both where it
+        // may not be)
+        let Some(d) = c.args.get(2) else { return an.load_attr(&obj, &name, &c.node, st, true) };
+        let has = m_hasattr(an, st, &Call { args: c.args[..2].to_vec(), ..c.clone() });
+        let found = |an: &mut Analyzer, st: &mut State| an.load_attr(&obj, &name, &c.node, st, false);
+        match has.kv.as_lit().filter(|_| has.pts.is_empty()).map(|b| b == intern::key_bool(true)) {
+            Some(false) => d.clone(),
+            Some(true) => found(an, st),
+            None => found(an, st).join(d),
         }
+    });
+    if lit.is_some() && name_v.pts.is_empty() {
+        return lit.unwrap();
     }
-    if let Some(a) = c.args.first() {
-        return join_values(a.pts.iter().map(|o| an.all_values(o, Ns::Attr, st)));
+    // a name not known: any of the object's attributes (of a library object, anything), or the
+    // default; known in part: that attribute, or one rowan does not follow (AGENTS.md: getattr
+    // by unknown names is not followed; every attribute and method of `self` was too costly)
+    let mut v = if lit.is_some() { Value::obj(an.any_object(st)) } else { join_values(obj.pts.iter().map(|o| an.all_values(o, Ns::Attr, st))) };
+    if obj.pts.iter().any(|o| an.kind(o) == Kind::External) {
+        let lib: Vec<Value> = vec![Value::with_kv(obj.pts.filter(|o| an.kind(o) == Kind::External), crate::domain::BOT)];
+        v = v.join(&an.unknown_call(&c.qual, None, &lib, &IndexMap::new(), &[], &[], st, &c.node));
     }
-    Value::data("getattr")
+    for x in lit.iter().chain(c.args.get(2)) {
+        v = v.join(x);
+    }
+    v
 }
 
 fn m_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -1384,6 +1474,58 @@ fn m_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     an.none_v.clone()
+}
+
+/// `random.shuffle(xs)` of lists of known length: each position may hold any of the items
+/// (the same objects); anything else is an unknown call.
+fn m_shuffle(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let xs = c.args.first().cloned().unwrap_or_default();
+    let lists: Vec<(ObjId, usize)> = xs.pts.iter().filter_map(|o| (an.kind(o) == Kind::List && !an.obj(o).iterator).then(|| an.llen(o, st).map(|n| (o, n))).flatten()).collect();
+    if c.args.len() != 1 || xs.pts.is_empty() || !xs.kv.is_bot() || lists.len() != xs.pts.len() {
+        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+    }
+    for (o, n) in lists {
+        let all = join_values((0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect::<Vec<_>>());
+        for i in 0..n {
+            st.set_slot(o, Ns::Pos, intern::key_int(i as i64), all.clone(), xs.pts.len() == 1);
+        }
+    }
+    an.none_v.clone()
+}
+
+/// `reprlib.repr(x)`: a str; it runs the `__repr__` of what x reaches, so with an instance of
+/// a class defining one (or anything unknown, or more than a few hundred objects) it is an
+/// unknown call.
+fn m_reprlib_repr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    let mut work: Vec<ObjId> = c.args.iter().flat_map(|a| a.pts.iter()).collect();
+    let mut seen: FxHashSet<ObjId> = FxHashSet::default();
+    let mut own_code = !c.kwargs.is_empty() || c.args.len() != 1;
+    while let Some(o) = work.pop() {
+        if !seen.insert(o) || matches!(an.kind(o), Kind::Class | Kind::Module | Kind::Function | Kind::External) {
+            continue;
+        }
+        own_code |= seen.len() > 512 || matches!(an.kind(o), Kind::Unknown | Kind::Frame | Kind::Series) || an.instance_class(o).is_some_and(|cls| an.class_lookup(cls, "__repr__").is_some());
+        if own_code {
+            break;
+        }
+        an.obj_edges(o, st, &mut work);
+    }
+    if own_code {
+        return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+    }
+    Value::data(&format!("L{}", c.line))
+}
+
+/// `operator.setitem(d, k, v)` into dicts by a key of no objects is `d[k] = v`; anything else
+/// is an unknown call.
+fn m_op_setitem(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    match &c.args[..] {
+        [d, k, v] if !d.pts.is_empty() && d.kv.is_bot() && k.pts.is_empty() && d.pts.iter().all(|o| an.kind(o) == Kind::Dict) => {
+            an.store_item(d, Ns::Item, k, v, &c.node, st);
+            an.none_v.clone()
+        }
+        _ => an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node),
+    }
 }
 
 /// `object.__setattr__(obj, "name", v)`: the plain store (no user `__setattr__`).
@@ -2318,7 +2460,7 @@ fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             if let Some(k) = kv.as_lit() {
                 if let Some(sk) = intern::key_as_str(k) {
-                    if sk.matches("{}").count() == 1 && c.args.len() == 1 {
+                    if sk.matches("{}").count() == 1 && c.args.len() == 1 && c.args[0].pts.is_empty() {
                         let mut parts = sk.splitn(2, "{}");
                         let pre = parts.next().unwrap_or("").to_string();
                         let post = parts.next().unwrap_or("").to_string();
@@ -5467,6 +5609,8 @@ pub struct Tables {
     pub fa_body_validation: bool,
     /// unknown parameters annotated `int` / `bool` (true) or `float` (false) in torch modules
     pub t_numbers: FxHashMap<ObjId, bool>,
+    /// unknown parameters annotated `str` in torch modules: their dim 0 prints as `len(s)`
+    pub t_strs: FxHashSet<crate::models::shape::Sym>,
     /// module-level names bound to an unknown number, now dims named by them (`t_name_number`)
     pub t_named_numbers: std::collections::BTreeSet<crate::models::shape::Sym>,
     /// unknown call results named by the variable they were bound to (tensor dims)

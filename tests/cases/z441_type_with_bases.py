@@ -36,8 +36,8 @@ t = a.tag  #@ ok tag
 #@value t: exactly={'A'}
 n = A.__name__  #@value n: exactly={'_A'}
 ok = isinstance(a, Base)  #@value ok: exactly={True}
-x = getattr(a, "nothing", None)  #@value x: includes={None}
-#@todo value x: exactly={None}  (getattr with a default on a closed instance is not modelled)
+x = getattr(a, "nothing", None)  #@value x: exactly={None}
+# (getattr with a default on a closed instance: the default)
 
 U = type(sys.argv[0], (Base,), {})
 un = U.__name__  #@value un: unknown

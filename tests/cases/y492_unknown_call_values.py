@@ -6,6 +6,6 @@ import operator
 
 d = {"k": 1, "box": [{"deep": 1}]}
 operator.setitem(d, "k", 5)
-v = d["k"]                                #@value v: unknown
-#@todo value v: exactly={5}
-inner = d["box"][0]                       #@row inner: open
+v = d["k"]                                #@value v: exactly={5}
+# (operator.setitem is the store d["k"] = 5, now modelled: `inner` was `open`, it is the same dict)
+inner = d["box"][0]                       #@row inner: present={deep} definite={deep} closed
