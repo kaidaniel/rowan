@@ -44,8 +44,8 @@ on abstract values. Imports run as Python runs them (`TYPE_CHECKING` is False, `
   its code uses on it unless it escapes, `receiver_effects`), and the function gets a reporting
   run with open parameters (its lines then hold for the calls that did not run). Entry runs
   are not counted (one per function). So the work is bounded by functions times the budget.
-  * **Recursion:** the inner call uses the running activation's partial result; it iterates
-    to a fixpoint (8 rounds), then widens.
+  * **Recursion:** the inner call uses the running activation's partial result, and the
+    activation's entry joins the inner call's heap; it iterates (8 rounds), then widens.
   * **Unknown values** are not taken for instances of the program's classes: a method of an
     unknown object is an unknown call (no duck typing; it was a closed-world assumption).
   * **Unknown calls** may change everything they reach through what they are given, at any

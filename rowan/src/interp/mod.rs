@@ -740,6 +740,9 @@ pub struct Analyzer {
     pub rec_hit: FxHashSet<(ObjId, String)>,
     pub rec_entry: FxHashMap<(ObjId, String), (Option<Value>, Vec<Value>, IndexMap<StrId, Value>)>,
     pub rec_widened: FxHashSet<(ObjId, String)>,
+    /// per running activation of a recursion: its entry heap joined with the heaps at its
+    /// recursive calls (where deeper activations start), and the last heap joined
+    pub rec_heap: FxHashMap<(ObjId, String), (State, State)>,
     pub loop_stack: Vec<LoopCtx>,
     /// the finally blocks of the running `try` statements: (`loop_stack` depth at the try,
     /// the block, not running yet): a `break` / `continue` runs those of its loop first

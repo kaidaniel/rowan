@@ -957,6 +957,19 @@ impl Analyzer {
                     self.rec_widened.insert(key.clone());
                 }
             }
+            // the heap here is one a deeper activation starts from: the running activation's
+            // entry joins it (objects made or changed before the recursive call)
+            // (the heap joined in at the last such call again: nothing to add)
+            if let Some((acc, _)) = self.rec_heap.get(&key).filter(|(_, last)| !last.same_heap(state)) {
+                let mut n = acc.copy();
+                n.join_heap_fp(state, &state.footprint(acc));
+                let grew = !n.same_heap(acc);
+                if grew {
+                    self.rec_widened.insert(key.clone());
+                }
+                let acc = if grew { n } else { acc.copy() };
+                self.rec_heap.insert(key.clone(), (acc, state.copy()));
+            }
             if let Some((ret, exit_state, fp)) = self.rec_table.get(&key) {
                 let ret = ret.clone();
                 state.join_heap_fp(exit_state, fp);
@@ -1032,6 +1045,7 @@ impl Analyzer {
         self.rec_entry.insert(key.clone(), (self_v.clone(), args.clone(), kwargs.clone()));
 
         let pre_bind = state.copy();
+        self.rec_heap.insert(key.clone(), (pre_bind.copy(), pre_bind.copy()));
         let obj_mark_call = self.objects.len() as ObjId;
         if !matches!(fnode, FuncNode::Def(f) if is_generator(&f.body)) {
             if let Some(fr) = self.frames.last_mut() {
@@ -1080,7 +1094,7 @@ impl Analyzer {
                 let (w_self, w_args, w_kwargs) = self.rec_entry.get(&key).cloned().unwrap();
                 let fp = st.footprint(&entry_state);
                 self.rec_table.insert(key.clone(), (ret.clone(), st.copy(), fp));
-                state.replace_with(pre_bind.copy());
+                state.replace_with(self.rec_heap.get(&key).map_or_else(|| pre_bind.copy(), |(h, _)| h.copy()));
                 self.bind_params(&fi, &w_self, &w_args, &w_kwargs, &star_args, &star_kwargs, state, node);
                 entry_state = state.copy();
                 continue;
@@ -1214,6 +1228,7 @@ impl Analyzer {
         }
         self.rec_hit.remove(&key);
         self.rec_entry.remove(&key);
+        self.rec_heap.remove(&key);
         self.rec_widened.remove(&key);
         self.call_chain = saved_chain;
         self.frames.pop();
