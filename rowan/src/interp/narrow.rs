@@ -460,7 +460,7 @@ impl Analyzer {
                     Some(pc) if star && !self.hierarchy_closed(pc) => None,
                     // (a class deriving from a builtin / library class — `class C(dict)` — is an
                     // instance of it: undecided against such classes)
-                    Some(pc) if ext_tested && self.mro(pc).iter().any(|c| self.class_info_opt(*c).is_some_and(|ci| ci.open_base || ci.dict_base)) => None,
+                    Some(pc) if ext_tested && self.mro(pc).iter().any(|c| self.class_info_opt(*c).is_some_and(|ci| ci.open_base || ci.lib.dict_base)) => None,
                     Some(_) => Some(false),
                 },
                 _ if star => None,

@@ -244,19 +244,30 @@ fn problem_lines(an: &Analyzer, vs: &[Verdict]) -> Vec<String> {
             ((f, l, c, t, mm), vs)
         })
         .collect();
-    let width = groups.keys().map(|k| k.3.chars().count()).max().unwrap_or(0).min(36);
     // (grouped by file: the main file first, then the others under their names)
     groups.sort_by(|a, _, b, _| (!a.0.is_empty(), &a.0, a.1, a.2).cmp(&(!b.0.is_empty(), &b.0, b.1, b.2)));
+    // (the same access written several times on a line, with the same finding: one row, `×2`)
+    let mut rows: IndexMap<(String, u32, String, String), (usize, Vec<&Verdict>)> = IndexMap::new();
+    for ((f, l, _, t, mm), vs) in groups {
+        let e = rows.entry((f, l, t, mm)).or_default();
+        e.0 += 1;
+        e.1.extend(vs);
+    }
+    let rows: Vec<((String, u32, String, String), Vec<&Verdict>)> = rows.into_iter().map(|((f, l, t, mm), (n, vs))| ((f, l, if n > 1 { format!("{} ×{}", t, n) } else { t }, mm), vs)).collect();
+    let width = rows.iter().map(|(k, _)| k.2.chars().count()).max().unwrap_or(0).min(36);
     let mut out = Vec::new();
     let mut file_now = String::new();
-    for ((file, line, _, text, mm), vs) in groups {
+    for ((file, line, text, mm), vs) in rows {
         if file != file_now {
             out.push(format!("  {}:", file));
             file_now = file;
         }
         let (mark, msg) = mm.split_once('\u{0}').unwrap();
         // (reached directly: no call path to show)
-        let via = if vs.iter().any(|v| v.chain.is_empty()) { String::new() } else { via_text(&vs[0].chain, vs.len() - 1) };
+        let mut chains: Vec<&Vec<u32>> = vs.iter().map(|v| &v.chain).collect();
+        chains.sort();
+        chains.dedup();
+        let via = if vs.iter().any(|v| v.chain.is_empty()) { String::new() } else { via_text(&vs[0].chain, chains.len() - 1) };
         let text = if text.chars().count() > width { format!("{}…", text.chars().take(width - 1).collect::<String>()) } else { text };
         let indent = if file_now.is_empty() { "  " } else { "    " };
         out.push(format!("{}{:<5} {:<2} {:<w$}  {}{}", indent, format!("L{}", line), mark, text, msg, via, w = width));
@@ -597,6 +608,7 @@ fn legend(text: &str) -> Vec<String> {
     add(has_mark("✗"), "✗", "fails on every path that reaches it");
     add(has_mark("⚠"), "⚠", "fails on some paths");
     add(has_mark("⚠~"), "⚠~", "fails unless code rowan cannot see sets the key first");
+    add(text.lines().any(|l| l.contains(" ×") && (l.contains(" ✗ ") || l.contains(" ⚠"))), "×2", "written that many times on the line, each with this finding");
     add(text.contains("  via L"), "via L5→L9", "the calls (by line) through which the code was reached");
     add(text.contains("  always:"), "always", "read on every path through the code");
     add(text.contains("  sometimes:"), "sometimes", "read on some paths only");

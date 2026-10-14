@@ -2107,6 +2107,13 @@ fn combine_overlap(lrow: &Row, rrow: &Row, keys: &KeySet, lsuf: &str, rsuf: &str
             gone.push(c);
         }
     }
+    // (pandas' order: the left frame's columns, then the right's, each suffixed where both
+    // have it)
+    let lcols: Vec<KeyId> = lrow.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(lrow.present.iter()));
+    let rcols: Vec<KeyId> = rrow.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(rrow.present.iter()));
+    let suffixed = |k: KeyId, suf: &str| key_str_lit(&format!("{}{}", intern::key_py_str(k), suf));
+    let order: Vec<KeyId> = lcols.iter().flat_map(|k| [*k, suffixed(*k, lsuf)]).chain(rcols.iter().flat_map(|k| [*k, suffixed(*k, rsuf)])).collect();
+    flags.sort_by_cached_key(|k, _| order.iter().position(|o| o == k).unwrap_or(usize::MAX));
     let mut row = Row::new();
     for (k, (may, def)) in &flags {
         if *may {

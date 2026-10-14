@@ -591,6 +591,23 @@ fn find_hi<K, V>(t: &Tree<K, V>, hi: u64) -> Option<&Tree<K, V>> {
     }
 }
 
+/// `t` without the keys whose high 32 bits are `hi`, in one path copy (None: nothing changes;
+/// Some(rest), rest None: empty).
+fn remove_hi<K: Clone, V: Clone>(t: &Tree<K, V>, hi: u64) -> Option<Option<Tree<K, V>>> {
+    match &**t {
+        Node::Leaf { h, .. } => (h >> 32 == hi).then_some(None),
+        // (every key below shares the high bits)
+        Node::Branch { p, m, .. } if *m < 1 << 32 => (p >> 32 == hi).then_some(None),
+        Node::Branch { p, m, l, r } => {
+            let lo = hi << 32;
+            if !match_prefix(lo, *p, *m) {
+                return None;
+            }
+            Some(if zero_bit(lo, *m) { branch(*p, *m, remove_hi(l, hi)?, Some(r.clone()), None) } else { branch(*p, *m, Some(l.clone()), remove_hi(r, hi)?, None) })
+        }
+    }
+}
+
 /// A map of maps (object -> slot -> value, source -> key -> requirement), stored as one
 /// persistent trie on (outer, inner) pairs: a write copies a path, not an object's whole
 /// inner map, and joins / diffs cost what two maps differ in.
@@ -701,7 +718,9 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
     }
 
     pub fn drop_key(&mut self, key: &K) {
-        self.drop_where(key, |_| true);
+        if let Some(rest) = self.m.root.as_ref().and_then(|t| remove_hi(t, key.key64())) {
+            self.m.root = rest;
+        }
     }
 
     pub fn drop_where(&mut self, key: &K, mut pred: impl FnMut(&IK) -> bool) {
@@ -810,6 +829,19 @@ mod tests {
         assert_eq!(j.get(&1, &2), Some(6));
         let d = c.diff_keys(&t);
         assert_eq!(d, vec![(1, 2)]);
+        // (dropping one key's entries keeps the others, also on the copy it came from)
+        let mut m: TwoLevel<u32, u32, u32> = TwoLevel::new();
+        for k in 0..6 {
+            for ik in 0..5 {
+                m.set(&k, ik, k * 10 + ik);
+            }
+        }
+        let keep = m.copy();
+        m.drop_key(&3);
+        m.drop_key(&9);
+        assert!(!m.has_key(&3) && keep.has_key(&3));
+        assert!((0..6).filter(|k| *k != 3).all(|k| (0..5).all(|ik| m.get(&k, &ik) == Some(k * 10 + ik))));
+        assert_eq!(m.diff_keys(&keep).len(), 5);
     }
 }
 

@@ -54,7 +54,8 @@ on abstract values. Imports run as Python runs them (`TYPE_CHECKING` is False, `
     any items and length; the program's functions among it may run (`follow_code`). A walk
     by the same code from the same values walks only what changed since (`havoc_memo`).
     They return an unknown and may raise anything. Library functions known to have no effect
-    are `noeffect` (`ALLOWLIST_PREFIXES`), except those changing their arguments (`random.shuffle`).
+    are `noeffect` (`ALLOWLIST_PREFIXES`), unless they change their arguments (`random.shuffle`)
+    or are given the program's functions. Several callees run as `alternatives`.
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model
     is unknown code. A TypeError may come from those taken to fail only on wrong types.
   * **Entry points:** functions nothing calls run with open parameters; their requirements
@@ -122,7 +123,7 @@ uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv ru
 
 Run the oracle on the cases you touched, and in full before a commit that changes models. CI
 (`.github/workflows/ci.yml`) runs all of the above except torch and the benchmark (`bench.yml`,
-which also counts the golden passes with `ROWAN_LIMITS=tab=0,budget=0`: every call past its
+which also counts the golden passes with `ROWAN_LIMITS=budget=0`: every call past its
 budget; informational, into the history on gh-pages).
 
 ## Tests
@@ -143,7 +144,7 @@ budget; informational, into the history on gh-pages).
 
 ## Debugging switches
 
-* `ROWAN_DEBUG=1`: every body run (`run F at SITE`), entry runs, and a final `work:` line
+* `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls (`skip F …`), entry runs, a `work:` line
   (statements, units = statements + walk visits / 16, body runs, objects, row joins, visits,
   havoc visits): deterministic counters to compare builds. `2`: also every raise and try.
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (the golden `#@limits` sets them per
@@ -190,8 +191,8 @@ extension (talks to `rowan serve`).
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~5 / ~6 / ~5 / ~17 s; 0.13 / 0.08 / 0.14 / 0.14 GB |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~23 / ~32 / ~94 / ~7 s; 0.31 / 1.5 / 1.3 / 0.5 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.5 / ~3 / ~2.2 / ~8.3 s; 0.14 / 0.07 / 0.13 / 0.11 GB |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~12 / ~22 / ~81 / ~4.4 s; 0.33 / 0.9 / 1.1 / 0.3 GB |
 
 ## Known problems and next steps
 
