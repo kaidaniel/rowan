@@ -420,6 +420,8 @@ pub struct GenWatch {
     pub reads: rustc_hash::FxHashSet<Change>,
     /// the budgets spent before the run (a run again of the code gets them back)
     pub budget: std::rc::Rc<FxHashMap<usize, usize>>,
+    /// the birth mark after the run: objects born since are new
+    pub born: u64,
 }
 
 /// A generator call whose body has not run: it runs at the first consumption, from the state

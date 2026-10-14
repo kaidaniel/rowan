@@ -824,7 +824,11 @@ impl Analyzer {
                     own.extend(ge.rows.iter().map(|k| k.0).chain(ge.slots.iter().map(|k| k.0)).chain(ge.elems.iter().copied()).chain(ge.lens.iter().copied()));
                 }
                 let reads = self.gen_last_reads.take().unwrap_or_default();
-                let w = super::GenWatch { gid: o, own, after: state.copy(), reads, budget };
+                // (what it reads that the consumer can reach: from what it was given)
+                let roots: Vec<Value> = lg.self_v.iter().chain(lg.args.iter()).chain(lg.kwargs.values()).cloned().collect();
+                let reach = self.reach_from(&roots, state);
+                let reads = reads.into_iter().filter(|r| reach.contains(&r.0)).collect();
+                let w = super::GenWatch { gid: o, own, after: state.copy(), reads, budget, born: self.serial };
                 self.gen_watch.push(w);
             }
             if !r.pts.contains(o) && state.reachable {
@@ -1858,7 +1862,9 @@ impl Analyzer {
         }
         changed.extend(fp.elems.into_iter().chain(fin.lens.diff_keys(&f.lens)).map(|o| (o, None)));
         let read = |(o, k): &super::Change| w.reads.contains(&(*o, *k)) || w.reads.contains(&(*o, None)) || (k.is_none() && w.reads.iter().any(|r| r.0 == *o));
-        let mut hit: Vec<super::Change> = changed.into_iter().filter(|c| c.0 != w.gid && !w.own.contains(&c.0) && !unknown.contains(&c.0) && read(c)).collect();
+        // (an object made since is not the one the generator read, whatever its site)
+        let older = |o: ObjId| self.objects[o as usize].born < w.born;
+        let mut hit: Vec<super::Change> = changed.into_iter().filter(|c| c.0 != w.gid && older(c.0) && !w.own.contains(&c.0) && !unknown.contains(&c.0) && read(c)).collect();
         if all && !hit.is_empty() {
             hit = w.reads.iter().map(|r| (r.0, None)).collect();
         }
