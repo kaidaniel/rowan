@@ -624,9 +624,9 @@ fn legend(text: &str) -> Vec<String> {
     add(text.contains("[*]"), "[*]", "any element");
     let values = ["\n== what functions return", "\n== module-level variables"].iter().find_map(|h| text.find(h)).map(|i| &text[i..]).unwrap_or("");
     let values = values.split("\n== limits").next().unwrap_or("");
-    let plain = values.replace("**?", "").replace("\"?", "").replace("?=", "=");
+    let plain = values.replace("**?", "").replace("\"?", "").replace("?=", "=").replace("?:", ":");
     add(plain.contains('?'), "?", "a value rowan cannot know (it depends on input or on code rowan cannot see)");
-    add(values.contains("\"?:") || values.contains("?=") || values.contains("\"?,") || values.contains("\"?]"), "\"k\"?: k?=", "a key / attribute / column present on some paths only");
+    add(values.contains("?:") || values.contains("?=") || values.contains("\"?,") || values.contains("\"?]"), "\"k\"?: k?=", "a key / attribute / column present on some paths only");
     add(values.contains("~:") || values.contains("~=") || values.contains("\"~,") || values.contains("\"~]"), "\"k\"~: k~=", "present unless code rowan cannot see removed it");
     add(values.contains("**?"), "**?", "other keys / attributes / columns may exist");
     add(values.contains(" | "), "a | b", "one of these, depending on the path");
