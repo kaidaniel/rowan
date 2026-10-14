@@ -365,6 +365,12 @@ fn m_ordered_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 pub fn noeffect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    // (a library function given the program's functions may call them: `inspect.getmembers(x,
+    // pred)`, `asyncio.to_thread(f, …)`, `os.walk(top, onerror=f)`)
+    let code = |v: &Value| v.pts.iter().any(|o| matches!(an.kind(o), Kind::Function | Kind::Bound | Kind::Partial));
+    if !c.qual.starts_with("builtins.") && c.args.iter().chain(c.kwargs.values()).chain(c.star_args.iter()).any(code) {
+        return an.unknown_call(&c.qual, c.recv.as_ref(), &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
+    }
     // `print(…, file=buf)` writes into a StringIO; other writers (`json.dump(x, buf)`) make its
     // text unknown
     if c.qual == "builtins.print" {

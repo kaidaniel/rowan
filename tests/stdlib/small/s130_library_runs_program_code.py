@@ -1,6 +1,7 @@
 """Library calls that run the program's code: a `threading.Timer`'s function (unless it is
 cancelled first), a `threading.Thread` subclass's `run` on `start()`, a thread pool's
-`initializer` (when a worker starts), `pprint`'s printers (`__repr__`). These were taken to
+`initializer` (when a worker starts), `pprint`'s printers (`__repr__`), a library function given
+the program's functions (`inspect.getmembers(C, pred)`). These were taken to
 have no effect."""
 import concurrent.futures
 import pprint
@@ -53,3 +54,38 @@ class R:
 pprint.pp(R())
 r4 = d4.get("k", "gone")
 #@value r4: exactly={"gone"}
+
+# a library function given the program's functions may call them
+import asyncio
+import inspect
+
+d5 = {"k": 1}
+
+
+def pred(v):
+    d5.pop("k", None)
+    return True
+
+
+class C:
+    x = 1
+
+
+members = inspect.getmembers(C, pred)
+r5 = d5.get("k", "gone")
+#@value r5: includes={"gone"}
+
+d6 = {"k": 1}
+
+
+def blocking(d):
+    d.pop("k", None)
+
+
+async def main():
+    await asyncio.to_thread(blocking, d6)
+
+
+asyncio.run(main())
+r6 = d6.get("k", "gone")
+#@value r6: includes={"gone"}
