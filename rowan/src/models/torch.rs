@@ -1035,6 +1035,11 @@ impl Analyzer {
                     return Some(v);
                 }
             }
+            // a layer's attribute rowan does not set (`dropout.p`, `conv.bias` made with
+            // unknown arguments): unknown; the nn.Module methods every layer has
+            if self.t_layer_type(o).is_some() && st.slot_opt(o, Ns::Attr, key_str_lit(name)).is_none() {
+                return Some(if MODULE_METHODS.contains(&name) { self.method_value(&format!("nnmodule.{}", name), obj) } else { Value::data(&format!("{}.{}", self.obj(o).label, name)) });
+            }
         }
         let tensor = is_tensor(obj);
         let unknown_tensorish = !tensor && self.torch_on && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Unknown)) && (!obj.pts.is_empty() || matches!(&obj.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with("expr:")));
@@ -2888,6 +2893,13 @@ const ELEMENTWISE_LAYERS: &[&str] = &[
     "LogSigmoid", "Tanhshrink", "Identity", "Dropout", "Dropout1d", "Dropout2d", "Dropout3d", "AlphaDropout", "FeatureAlphaDropout", "Threshold", "RReLU",
 ];
 
+/// What every `nn.Module` has (a user module's or a layer's own attribute wins).
+const MODULE_METHODS: &[&str] = &[
+    "register_buffer", "register_parameter", "add_module", "register_module", "parameters", "named_parameters", "buffers", "named_buffers", "modules", "named_modules",
+    "children", "named_children", "to", "cuda", "cpu", "eval", "train", "apply", "zero_grad", "state_dict", "load_state_dict", "requires_grad_", "half", "float", "double",
+    "bfloat16", "type", "share_memory", "get_submodule", "get_parameter", "register_forward_hook", "register_forward_pre_hook", "register_full_backward_hook", "extra_repr",
+];
+
 impl Analyzer {
     pub fn t_is_module_instance(&self, o: u32) -> bool {
         let Some(cls) = self.instance_class(o) else { return false };
@@ -2896,11 +2908,6 @@ impl Analyzer {
 
     /// `self.register_buffer` & co. on a user module (None: a user attribute).
     pub fn t_module_attr(&mut self, o: u32, name: &str, _node: &Node, _st: &mut State) -> Option<Value> {
-        const MODULE_METHODS: &[&str] = &[
-            "register_buffer", "register_parameter", "add_module", "register_module", "parameters", "named_parameters", "buffers", "named_buffers", "modules", "named_modules",
-            "children", "named_children", "to", "cuda", "cpu", "eval", "train", "apply", "zero_grad", "state_dict", "load_state_dict", "requires_grad_", "half", "float", "double",
-            "bfloat16", "type", "share_memory", "get_submodule", "get_parameter", "register_forward_hook", "register_forward_pre_hook", "register_full_backward_hook", "extra_repr",
-        ];
         if !MODULE_METHODS.contains(&name) {
             return None;
         }

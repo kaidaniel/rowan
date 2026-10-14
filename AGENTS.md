@@ -176,8 +176,8 @@ extension (talks to `rowan serve`).
   second overwrites the first.
 * **Narrowing never re-runs a call:** each call node's last value is read back (`call_memo`).
 * **Callees** run with the caller's `state.exits` taken out and restored (y438).
-* **GC roots.** Anything a side table refers to must be in `gc_pinned` or reachable through
-  `obj_edges`; otherwise a later read gives a silently empty row.
+* **GC roots.** A side table keyed by objects goes into `side_edges`; anything else the
+  analyzer holds (a running with's managers) into `gc_pinned`: else a read gets an empty row.
 * **Generator yields** use `alloc_raw` for their per-yield states, not `alloc`.
 * **Stdlib objects** (`stdobj.<kind>`) keep attributes in Attr slots and dispatch through
   `m_stdobj`.
