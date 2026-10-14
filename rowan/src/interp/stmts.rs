@@ -1583,6 +1583,10 @@ impl Analyzer {
     /// (`drop_garbage_at_return`; at a loop's exit the roots are the frame's live names).
     /// `unwind`: a raise state, which only the first `unwind` callers' names outlive.
     pub fn collect_since(&mut self, mark: u64, pre: &State, roots: Vec<u32>, state: &mut State, unwind: Option<usize>) {
+        // (nothing made since: nothing to collect)
+        if self.serial <= mark {
+            return;
+        }
         let young = |an: &Analyzer, o: u32| an.objects[o as usize].born >= mark;
         let fp = state.footprint(pre);
         let mut fresh: rustc_hash::FxHashSet<u32> = Default::default();
