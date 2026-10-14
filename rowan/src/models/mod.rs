@@ -5396,6 +5396,8 @@ pub struct Tables {
     pub fa_body_validation: bool,
     /// unknown parameters annotated `int` / `bool` (true) or `float` (false) in torch modules
     pub t_numbers: FxHashMap<ObjId, bool>,
+    /// module-level names bound to an unknown number, now dims named by them (`t_name_number`)
+    pub t_named_numbers: std::collections::BTreeSet<crate::models::shape::Sym>,
     /// unknown call results named by the variable they were bound to (tensor dims)
     pub t_var_names: FxHashMap<ObjId, crate::models::shape::Sym>,
     /// function objects by qualname (a closure's printing sees its factory's symbols)

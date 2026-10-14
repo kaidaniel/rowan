@@ -263,7 +263,10 @@ function renderHover(name, facts, verdicts) {
     const unknown = objs.filter((o) => o.kind === "unknown");
     const info = [];
     // an unknown named by itself (a parameter, a name defined elsewhere): where it comes from
-    if (text === name && unknown.length === 1 && !(f.legend || []).length) {
+    if (text === name && !objs.length && !(f.legend || []).length) {
+      // a number the module computes from data rowan cannot see, named by its variable
+      info.push(`- not known statically; tensor dims equal to it are written \`${name}\``);
+    } else if (text === name && unknown.length === 1 && !(f.legend || []).length) {
       const o = unknown[0];
       info.push(o.origin ? `- not known here: the result of \`${o.origin.text}\` (line ${o.origin.line})` : `- not known here: ${(o.from || [])[0] || "it comes from outside"}`);
     } else if (text === "?" && !(f.legend || []).length) {

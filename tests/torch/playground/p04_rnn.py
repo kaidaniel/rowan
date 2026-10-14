@@ -141,8 +141,8 @@ for step in range(STEPS):
     #@todo shape x: [64, 32]; y: [64, 32] (a slice j:j + T of an unknown start in get_batch)
     logits: Tensor
     logits, _ = model(x) # logits: (B, T, V)
-    #@shape logits: [64, _, _]
-    #@todo shape logits: [64, 32, V] (V = len(vocab) of the unknown text: a number rowan has no name for)
+    #@shape logits: [64, _, V]
+    #@todo shape logits: [64, 32, V] (see get_batch)
     loss = F.cross_entropy(logits.view(-1, V), y.view(-1))
     #@shape loss: []
     optim.zero_grad()
@@ -157,7 +157,7 @@ for step in range(STEPS):
                 xv, yv = get_batch(test, B=64, T=32)
                 #@shape xv: [64, _]; yv: [64, _]
                 lv, _ = model(xv)
-                #@shape lv: [64, _, _]
+                #@shape lv: [64, _, V]
                 vals.append(F.cross_entropy(lv.view(-1, V), yv.view(-1)))
             val = torch.stack(vals).mean()
             #@shape val: []

@@ -1150,7 +1150,13 @@ impl Analyzer {
             }
         }
         let tensor = is_tensor(obj);
-        let unknown_tensorish = !tensor && self.torch_on && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Unknown)) && (!obj.pts.is_empty() || matches!(&obj.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with("expr:")));
+        // (an unknown joined with a known str or number is not one: each part has its own
+        // attribute, `("hello world" | ?).split()` is not the literal's split alone; None has
+        // none, `mask=None` used as a tensor; a tensor is one, `h = x` joined with a layer's)
+        let no_scalar = obj.kv.is_bot()
+            || (obj.kv.is_literal() && crate::domain::kv_literals(&obj.kv).iter().all(|k| k == intern::key_none()))
+            || matches!(&obj.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with('\u{1}'));
+        let unknown_tensorish = !tensor && self.torch_on && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Unknown)) && ((!obj.pts.is_empty() && no_scalar) || matches!(&obj.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with("expr:")));
         if !tensor && !unknown_tensorish {
             return None;
         }
@@ -4548,6 +4554,27 @@ impl Analyzer {
 }
 
 impl Analyzer {
+    /// `V = len(vocab)` at module level (not in a loop): an unknown number the module binds once
+    /// is a dim named by the variable (`Linear(d, V)` gives `[…, V]`, not `[…, ?]`); a later
+    /// binding of the name keeps its value unnamed (one name, one value).
+    pub fn t_name_number(&mut self, name: StrId, v: &Value) -> Option<Value> {
+        let fr = self.frame();
+        if fr.func.is_some() || fr.loop_depth > 0 || !fr.unroll.is_empty() || self.entry_run.is_some() || !v.pts.is_empty() {
+            return None;
+        }
+        let KeyVal::Data(l) = &v.kv else { return None };
+        let l = intern::str_get(*l);
+        let unknown_dim = sh::parse_dim_label(&l).map(|d| sh::poly(d) == sh::poly(sh::unknown())).unwrap_or(false);
+        if &*l != "len" && !unknown_dim {
+            return None;
+        }
+        let sy = sh::sym(0, &intern::str_get(name));
+        if self.m.t_var_names.values().any(|x| *x == sy) || !self.m.t_named_numbers.insert(sy) {
+            return None;
+        }
+        Some(dim_value(sh::named(sy)))
+    }
+
     /// `w = load(...)`: an unknown call's result is named by the variable it is bound to
     /// (its dims print as `w.shape[0]`).
     pub fn t_name_result(&mut self, name: StrId, v: &Value) {
@@ -4559,7 +4586,11 @@ impl Analyzer {
             return;
         }
         let scope = self.frames.iter().rev().find_map(|fr| fr.func).unwrap_or(0);
-        self.m.t_var_names.insert(o, sh::sym(scope, &intern::str_get(name)));
+        let sy = sh::sym(scope, &intern::str_get(name));
+        // (a name already given to a number stays that number's)
+        if !self.m.t_named_numbers.contains(&sy) {
+            self.m.t_var_names.insert(o, sy);
+        }
     }
 }
 

@@ -483,6 +483,8 @@ impl Analyzer {
         match t {
             ast::Expr::Name(n) => {
                 let name = s(n.id.as_str());
+                let named = if self.torch_on { self.t_name_number(name, v) } else { None };
+                let v = named.as_ref().unwrap_or(v);
                 if self.torch_on {
                     self.t_name_result(name, v);
                 }
