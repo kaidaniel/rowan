@@ -515,16 +515,19 @@ impl Analyzer {
             // (what an earlier havoc by the same code did already is not written again: code
             // past its budget is often called in a loop)
             for ns in [Ns::Item, Ns::Attr] {
-                if state.has_row(o, ns) || (ns == Ns::Item && matches!(k, Kind::Dict | Kind::Frame)) || (ns == Ns::Attr && k == Kind::Instance) {
-                    let r0 = state.row(o, ns);
-                    let r = r0.mutate(site);
-                    if r != r0 {
-                        state.set_row(o, ns, r);
-                    }
+                let r0 = match state.rows.get(&(o, ns)) {
+                    Some(r) => r,
+                    None if (ns == Ns::Item && matches!(k, Kind::Dict | Kind::Frame)) || (ns == Ns::Attr && k == Kind::Instance) => Row::new(),
+                    None => continue,
+                };
+                let r = r0.mutate(site);
+                if r != r0 {
+                    state.set_row(o, ns, r);
                 }
             }
+            // (each value holds what the slot held: written as it is)
             for (sk, v) in writes {
-                state.set_slot(o, sk.0, sk.1, v, false);
+                state.set_slot(o, sk.0, sk.1, v, true);
             }
             let havocked = |state: &State| {
                 state.slot(o, Ns::Elem, intern::STAR).pts.contains(any_id) && state.lens.get(&o) == Some((None, 0, 0)) && !state.lasts.iter().any(|(x, _)| *x == o) && state.elems.get(&o).is_some_and(|kv| crate::domain::kv_join(&kv, &DATA) == kv)
