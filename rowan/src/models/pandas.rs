@@ -362,8 +362,8 @@ fn cut(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let idx = join_rows(ss.iter().map(|o| st.row(*o, Ns::Item)));
     let sid = series_like_id(an, st, c, &ss, idx, "cut");
     let labels = c.kw("labels").and_then(|v| lit_key_seq(an, st, &v));
-    // (a value outside the bins is NaN)
-    let k = labels.clone().map(|l| Known { may: KeySet::from_iter(l).insert(none_key()), sure: KeySet::new() });
+    // (a value outside the bins is NaN: a float, `str()` of it is "nan")
+    let k = labels.clone().map(|l| Known { may: KeySet::from_iter(l).insert(intern::key_float(f64::NAN)), sure: KeySet::new() });
     set_vals(st, sid, vkey(), k.as_ref());
     // a categorical: its categories are the labels
     if let Some(l) = labels {
@@ -660,9 +660,10 @@ fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     // (strings stay the same strings)
                     if astype_dtype(an, &c.arg(0, Some("dtype"))) == Some("object") {
                         if let [one] = ss.as_slice() {
-                            if let Some(v) = vals(st, *one, vkey()).filter(|v| v.may.iter().all(|k| intern::key_is_str(k) || k == none_key())) {
+                            let nan = |k: KeyId| k == none_key() || k == intern::key_float(f64::NAN);
+                            if let Some(v) = vals(st, *one, vkey()).filter(|v| v.may.iter().all(|k| intern::key_is_str(k) || nan(k))) {
                                 // (NaN becomes "nan")
-                                let fix = |ks: &KeySet| KeySet::from_iter(ks.iter().map(|k| if k == none_key() { mk("nan") } else { k }));
+                                let fix = |ks: &KeySet| KeySet::from_iter(ks.iter().map(|k| if nan(k) { mk("nan") } else { k }));
                                 set_vals(st, sid, vkey(), Some(&Known { may: fix(&v.may), sure: fix(&v.sure) }));
                             }
                         }
