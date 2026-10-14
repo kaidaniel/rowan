@@ -2046,19 +2046,7 @@ fn cond_facts_for(key: intern::StrId, pos: bool, deps: Vec<(intern::StrId, Value
 /// Names bound to literals of different truth in the two branches (`has = True` / `False`):
 /// testing the name later tells which branch ran.
 fn name_facts(vals: &[(intern::StrId, Option<Value>, Option<Value>, Option<Value>)], a: &State, b: &State, j: &State, func: u32) -> Vec<std::sync::Arc<crate::state::CondFact>> {
-    let truth_of = |v: &Value| -> Option<bool> {
-        if !v.pts.is_empty() {
-            return None;
-        }
-        let k = v.kv.as_lit()?;
-        intern::with_key(k, |kk| match kk {
-            intern::Key::Bool(x) => Some(*x),
-            intern::Key::None => Some(false),
-            intern::Key::Int(i) => Some(*i != 0),
-            intern::Key::Str(s) => Some(!s.is_empty()),
-            _ => None,
-        })
-    };
+    let truth_of = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(crate::models::pyvalues::truthy);
     let mut out = Vec::new();
     for (name, va, vb, jv) in vals.iter() {
         let (Some(va), Some(vb), Some(jv)) = (va, vb, jv) else { continue };

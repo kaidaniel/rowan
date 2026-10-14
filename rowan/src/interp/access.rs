@@ -659,7 +659,7 @@ impl Analyzer {
                         continue;
                     }
                     let ll = self.llen(oid, state);
-                    let idx = key.kv.as_lit().and_then(|k| intern::with_key(k, |kk| if let intern::Key::Int(i) = kk { Some(*i) } else { None }));
+                    let idx = key.kv.as_lit().and_then(intern::key_as_int);
                     // the element appended last
                     if let (Some(-1), None, Some(v)) = (idx, ll, state.last_of(oid)) {
                         parts.push(v);
@@ -972,7 +972,7 @@ impl Analyzer {
                 Kind::List | Kind::Tuple | Kind::Set => {
                     state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), crate::models::torch::elem_kv(&v.kv)), false);
                     if let (Some(k), Some(n)) = (key.kv.as_lit(), self.llen(oid, state)) {
-                        if let Some(i) = intern::with_key(k, |kk| if let intern::Key::Int(i) = kk { Some(*i) } else { None }) {
+                        if let Some(i) = intern::key_as_int(k) {
                             if 0 <= i && (i as usize) < n {
                                 state.set_slot(oid, Ns::Pos, intern::key_int(i), v.clone(), strong);
                             }

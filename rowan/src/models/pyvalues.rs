@@ -96,8 +96,8 @@ fn skey(s: &str) -> Option<KeyId> {
     Some(key_str_lit(s))
 }
 
-/// Python truth value.
-fn truthy(k: KeyId) -> Option<bool> {
+/// Python truth value (None: an Enum member or an identity object, whose class decides).
+pub fn truthy(k: KeyId) -> Option<bool> {
     Some(match key_get(k) {
         Key::Int(i) => i != 0,
         Key::Bool(b) => b,

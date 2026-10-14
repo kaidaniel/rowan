@@ -847,11 +847,7 @@ impl Analyzer {
         if !v.pts.is_empty() {
             return None;
         }
-        let k = v.kv.as_lit()?;
-        intern::with_key(k, |kk| match kk {
-            intern::Key::Int(i) => Some(*i),
-            _ => None,
-        })
+        intern::key_as_int(v.kv.as_lit()?)
     }
 
     fn slice_positional(&mut self, obj: &Value, sl: &'static ast::ExprSlice, node: &'static ast::Expr, state: &mut State) -> Option<Value> {
@@ -1415,24 +1411,8 @@ impl Analyzer {
         if v.pts.is_empty() && v.kv.is_literal() {
             let lits = crate::domain::kv_literals(&v.kv);
             if !lits.is_empty() {
-                let truthy = |k: KeyId| {
-                    intern::with_key(k, |kk| match kk {
-                        intern::Key::Str(s) => !s.is_empty(),
-                        intern::Key::Int(i) => *i != 0,
-                        intern::Key::Float(b) => f64::from_bits(*b) != 0.0,
-                        intern::Key::Bool(b) => *b,
-                        intern::Key::None => false,
-                        intern::Key::Tuple(t) => !t.is_empty(),
-                        intern::Key::Bytes(b) => !b.is_empty(),
-                        intern::Key::Ellipsis => true,
-                        intern::Key::Inv(..) => true,
-                        intern::Key::Member(..) => true,
-                        intern::Key::Frozen(t) => !t.is_empty(),
-                        intern::Key::Dec(_, c, _) => *c != 0,
-                        intern::Key::Frac(n, _) => *n != 0,
-                        intern::Key::Chrono(kind, v, _) => *kind != crate::models::chrono::DELTA || *v != 0,
-                    })
-                };
+                // (an Enum member, an identity object: true)
+                let truthy = |k: KeyId| crate::models::pyvalues::truthy(k).unwrap_or(true);
                 let mut it = lits.iter();
                 let first = truthy(it.next().unwrap());
                 if it.all(|k| truthy(k) == first) {
