@@ -294,3 +294,30 @@ pub fn member_by_name(an: &mut Analyzer, obj: &Value, key: &Value, node: &Node, 
     }
     out
 }
+
+/// `Color.__members__` (the members and aliases by name, in order), or an Enum's attribute
+/// that is no member nor method: an AttributeError.
+pub(crate) fn class_attr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, guarded: bool, state: &mut State) -> Value {
+    let nk = key_str_lit(name);
+    if name != "__members__" {
+        let cls = Classification::with_note(Tier::Missing, "is not a member of the Enum");
+        if guarded {
+            an.verdict_guarded(node, nk, &cls, oid, Ns::Attr);
+        } else {
+            an.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
+        }
+        return Value::data(&format!("L{}", node.line));
+    }
+    let ms = an.enum_aliases.get(&oid).cloned().unwrap_or_else(|| an.enum_members[&oid].clone());
+    let d = an.alloc_raw(Kind::Dict, &format!("enum-members:{}", oid), "", true, "__members__", Payload::None);
+    let mut row = Row::new();
+    let mut order = Vec::new();
+    for (n, m) in &ms {
+        let k = key_str_lit(n);
+        row = row.store(k, true);
+        order.push(k);
+        state.set_slot(d, Ns::Item, k, Value::obj(*m), true);
+    }
+    state.set_row(d, Ns::Item, row.with_order(order));
+    Value::obj(d)
+}

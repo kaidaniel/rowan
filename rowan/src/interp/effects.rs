@@ -229,14 +229,6 @@ pub struct Closure {
     pub values: Vec<Value>,
 }
 
-/// Method names that neither change their receiver nor keep their arguments.
-const PURE_METHODS: &[&str] = &[
-    "get", "keys", "values", "items", "copy", "count", "index", "startswith", "endswith", "format", "join", "split", "rsplit", "strip", "lstrip", "rstrip", "lower",
-    "upper", "replace", "find", "rfind", "encode", "decode", "isdigit", "isalpha", "isspace", "splitlines", "partition", "rpartition", "casefold", "title",
-];
-/// Builtins that neither change nor keep their arguments.
-const PURE_BUILTINS: &[&str] = &["len", "isinstance", "issubclass", "print", "str", "repr", "int", "float", "bool", "hash", "id", "type", "hasattr", "abs", "round", "format"];
-
 struct Collect<'a> {
     locals: &'a dyn Fn(&str) -> bool,
     esc: bool,
@@ -272,7 +264,7 @@ impl Collect<'_> {
                 let pure = match &*c.func {
                     Expr::Attribute(a) => {
                         self.out.reads.insert(s(a.attr.as_str()));
-                        let pure = PURE_METHODS.contains(&a.attr.as_str());
+                        let pure = super::PURE_METHODS.contains(&a.attr.as_str());
                         match &*a.value {
                             Expr::Name(n) => self.name(n.id.as_str(), Some(a.attr.as_str()), esc || !pure, false),
                             v => self.expr(v, esc || !pure),
@@ -302,7 +294,7 @@ impl Collect<'_> {
                                 _ => {}
                             }
                         }
-                        PURE_BUILTINS.contains(&n.id.as_str())
+                        super::PURE_BUILTINS.contains(&n.id.as_str())
                     }
                     f => {
                         self.expr(f, true);

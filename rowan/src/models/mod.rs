@@ -28,6 +28,7 @@ pub mod pytext;
 pub mod torch;
 pub mod enums;
 pub mod exceptions;
+pub mod tables;
 
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
@@ -401,7 +402,7 @@ pub fn may_type_error(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &In
             })
     };
     let unknown = match qual.strip_prefix("builtins.") {
-        Some(n) if crate::interp::exprs::SAFE_BUILTINS.contains(&n) => {
+        Some(n) if crate::models::tables::SAFE_BUILTINS.contains(&n) => {
             if matches!(n, "str" | "repr" | "print" | "id" | "bool" | "callable" | "type" | "super") {
                 return;
             }
@@ -972,6 +973,117 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     } else {
         Value::data("bool")
     }
+}
+
+/// `a op b` (an ordering or equality) where a library value decides it: pathlib paths are
+/// equal when their texts are (never equal to a str); Decimal / Fraction / datetime literals
+/// compare by value (`Decimal("1.0") == 1`).
+pub fn library_compare(an: &Analyzer, op: ast::CmpOp, a: &Value, b: &Value) -> Option<Value> {
+    let lit = |t: bool| Value::lit(intern::key_bool(t));
+    if matches!(op, ast::CmpOp::Eq | ast::CmpOp::NotEq) {
+        let pt = |v: &Value| v.single().filter(|_| v.kv.is_bot()).and_then(|o| crate::models::pathtext::path_text(an, o));
+        let (pa, pb) = (pt(a), pt(b));
+        let decided = match (&pa, &pb) {
+            (Some(x), Some(y)) => Some(x == y),
+            (Some(_), None) | (None, Some(_)) if (a.pts.is_empty() && a.kv.is_literal()) || (b.pts.is_empty() && b.kv.is_literal()) => Some(false),
+            _ => None,
+        };
+        if let Some(eq) = decided {
+            return Some(lit(if op == ast::CmpOp::Eq { eq } else { !eq }));
+        }
+    }
+    let has_num = |v: &Value| v.kv.is_literal() && crate::domain::kv_literals(&v.kv).iter().any(|k| pynum::is_num_key(k) || chrono::is_chrono_key(k));
+    if !(has_num(a) || has_num(b)) || !a.pts.is_empty() || !b.pts.is_empty() {
+        return None;
+    }
+    let opn = match op {
+        ast::CmpOp::Eq => "eq",
+        ast::CmpOp::NotEq => "ne",
+        ast::CmpOp::Lt => "lt",
+        ast::CmpOp::LtE => "le",
+        ast::CmpOp::Gt => "gt",
+        _ => "ge",
+    };
+    let mut outs: Vec<bool> = Vec::new();
+    for x in crate::domain::kv_literals(&a.kv).iter() {
+        for y in crate::domain::kv_literals(&b.kv).iter() {
+            match pynum::binop(opn, x, y).or_else(|| chrono::binop(opn, x, y)).flatten().and_then(|k| intern::with_key(k, |kk| if let intern::Key::Bool(t) = kk { Some(*t) } else { None })) {
+                Some(t) => outs.push(t),
+                None => return Some(Value::data("bool")),
+            }
+        }
+    }
+    outs.dedup();
+    Some(if outs.len() == 1 { lit(outs[0]) } else { Value::data("bool") })
+}
+
+/// An attribute of a value without objects (a str, a number, a Decimal / Fraction / datetime,
+/// None, a slice, an unknown scalar): its value, or the bound method.
+pub fn scalar_attr(an: &mut Analyzer, obj: &Value, name: &str, report: bool, state: &mut State) -> Value {
+    if name == "str" && matches!(obj.kv, KeyVal::KeysOf(_)) {
+        // `df.columns.str.strip().str.lower()`: the accessor of renamed column names
+        return obj.clone();
+    }
+    // a Decimal / Fraction: its attributes and methods
+    let numlike = |k: KeyId| crate::models::pynum::is_num_key(k) || crate::models::chrono::is_chrono_key(k);
+    if obj.kv.is_literal() && !crate::domain::kv_literals(&obj.kv).is_empty() && crate::domain::kv_literals(&obj.kv).iter().all(numlike) {
+        let ks = crate::domain::kv_literals(&obj.kv);
+        let attr_of = |k: KeyId, n: &str| if crate::models::chrono::is_chrono_key(k) { crate::models::chrono::attr(k, n) } else { crate::models::pynum::attr(k, n) };
+        let mut out: Option<Vec<Value>> = Some(Vec::new());
+        for k in ks.iter() {
+            match (attr_of(k, name), out.as_mut()) {
+                (Some(Some(v)), Some(o)) => o.push(Value::lit(v)),
+                _ => out = None,
+            }
+        }
+        if let Some(o) = out {
+            return join_values(o);
+        }
+        if attr_of(ks.iter().next().unwrap(), name).is_some() {
+            return Value::data(name);
+        }
+        return an.method_value(&format!("num.{}", name), obj);
+    }
+    // an attribute of None (but a dunder every object has): an AttributeError
+    let none_only = obj.kv.is_literal() && crate::domain::kv_literals(&obj.kv).iter().all(|k| k == intern::key_none()) && !crate::domain::kv_literals(&obj.kv).is_empty();
+    if none_only && report && !name.starts_with("__") {
+        an.raise_here("AttributeError", state);
+        return Value::new();
+    }
+    if matches!(obj.kv, KeyVal::Lit(_) | KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
+        return an.method_value(&format!("str.{}", name), obj);
+    }
+    if let KeyVal::Data(d) = &obj.kv {
+        let label = intern::str_get(*d);
+        if matches!(&*label, "datetime" | "date" | "time" | "timedelta" | "timezone") && crate::models::chrono::NAMES.contains(&name) {
+            return match crate::models::chrono::attr(crate::models::chrono::chrono_key(crate::models::chrono::DELTA, 0, crate::models::chrono::NAIVE), name) {
+                _ if matches!(name, "year" | "month" | "day" | "hour" | "minute" | "second" | "microsecond" | "days" | "seconds" | "microseconds" | "tzinfo") => Value::data(name),
+                _ => an.method_value(&format!("num.{}", name), obj),
+            };
+        }
+        // a string whose text is not known (a validated `str` field, a str method's result)
+        if &*label == "str" && crate::interp::STR_METHOD_NAMES.contains(&name) {
+            return an.method_value(&format!("str.{}", name), obj);
+        }
+        if matches!(&*label, "Decimal" | "Fraction") && crate::models::pynum::NAMES.contains(&name) {
+            return if matches!(name, "numerator" | "denominator") { Value::data(name) } else { an.method_value(&format!("num.{}", name), obj) };
+        }
+    }
+    // a slice object with known bounds
+    if let Some((lo, hi, st)) = Analyzer::slice_label_bounds(&obj.kv) {
+        let lit = |b: Option<i64>, an: &Analyzer| match b {
+            Some(i) => Value::lit(intern::key_int(i)),
+            None => an.none_v.clone(),
+        };
+        match name {
+            "start" => return lit(lo, an),
+            "stop" => return lit(hi, an),
+            "step" => return lit(st, an),
+            "indices" => return an.method_value("slice.indices", obj),
+            _ => {}
+        }
+    }
+    an.method_value(&format!("unknown.{}", name), obj)
 }
 
 /// The members of a `typing.Protocol` class (its own and its protocol bases'), as

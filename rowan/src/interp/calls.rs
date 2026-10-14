@@ -29,11 +29,6 @@ fn widen_value(v: &Value) -> Value {
     v.clone()
 }
 
-/// Callees that take all of an iterable's items at once (no program code runs between them).
-const BULK_CONSUMERS: &[&str] = &[
-    "builtins.list", "builtins.tuple", "builtins.set", "builtins.frozenset", "builtins.dict", "builtins.sorted", "builtins.sum", "builtins.min", "builtins.max", "builtins.any", "builtins.all",
-    "str.join", "list.extend", "set.update", "dict.update", "collections.Counter", "collections.deque", "collections.OrderedDict",
-];
 
 impl Analyzer {
     // ---------------------------------------------------------------- calls
@@ -79,8 +74,8 @@ impl Analyzer {
         // (generators passed or called through a method run now; unless the callee takes all
         // their items at once, code runs between the items)
         let bulk = !fv.pts.is_empty() && fv.pts.iter().all(|o| match &self.obj(o).payload {
-            Payload::Str(q) if self.kind(o) == Kind::External => BULK_CONSUMERS.contains(&q.as_str()),
-            Payload::Method(q, _) => BULK_CONSUMERS.contains(&q.as_str()),
+            Payload::Str(q) if self.kind(o) == Kind::External => super::BULK_CONSUMERS.contains(&q.as_str()),
+            Payload::Method(q, _) => super::BULK_CONSUMERS.contains(&q.as_str()),
             _ => false,
         });
         for o in fv.pts.iter() {
@@ -647,13 +642,9 @@ impl Analyzer {
         if let (Some(ms), Some(a)) = (self.enum_members.get(&cls).cloned(), args.first()) {
             return self.enum_lookup(cls, &ms, a, node, state);
         }
-        let ci = self.class_info(cls);
         // a TypedDict class makes a plain dict
-        if ci.lib.typed_dict {
-            let call = Call { qual: "builtins.dict".into(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
-            if let Some(m) = self.models.lookup("builtins.dict") {
-                return m(self, state, &call);
-            }
+        if let Some(v) = self.typed_dict_construct(cls, args, kwargs, star_args, star_kwargs, state, node) {
+            return v;
         }
         // a class with its own `__new__`: the instance is what it returns, and `__init__` runs
         // on it when it is an instance of the class
@@ -681,61 +672,9 @@ impl Analyzer {
             }
         }
         let inst = self.alloc_instance(cls, node, state);
-        // a pydantic model (without its own `__init__`): validation of the keyword input
-        if crate::models::pydantic::is_validated(self, cls) {
-            let own_init = self.class_lookup(cls, "__init__").map(|c| crate::models::pydantic::is_validated(self, c) && self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__")))).unwrap_or(false);
-            if !own_init {
-                // a pydantic dataclass takes its fields positionally too
-                let mut kw = kwargs.clone();
-                if crate::models::pydantic::is_validated(self, cls) && !crate::models::pydantic::is_model(self, cls) {
-                    let names: Vec<String> = self.dataclass_fields_mro(cls).into_iter().map(|(n, _)| n).collect();
-                    for (i, a) in args.iter().enumerate() {
-                        if let Some(n) = names.get(i) {
-                            kw.insert(intern::s(n), a.clone());
-                        }
-                    }
-                }
-                return self.pyd_construct(cls, args, &kw, star_kwargs, state, node);
-            }
-        }
-        // a dict subclass without its own `__init__`: dict's constructor fills its items
-        let dict_based = self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|x| x.lib.dict_base).unwrap_or(false));
-        if dict_based && self.class_lookup(cls, "__init__").is_none() {
-            state.set_row(inst, Ns::Item, Row::new());
-            if let Some(a0) = args.first() {
-                if !self.record_objects(a0).is_empty() {
-                    self.copy_into(inst, Ns::Item, a0, state, true, &crate::intern::KeySet::new());
-                } else {
-                    let r = state.row(inst, Ns::Item).data_store(Source::new(&format!("{}@L{}", ci.name, node.line), SourceKind::Data));
-                    state.set_row(inst, Ns::Item, r);
-                }
-            }
-            for (k, v) in kwargs.iter() {
-                self.store_key(inst, Ns::Item, &KeyVal::Lit(intern::key(intern::Key::Str(intern::str_get(*k)))), v, true, node, state);
-            }
-            for sk in star_kwargs {
-                self.copy_into(inst, Ns::Item, sk, state, true, &crate::intern::KeySet::new());
-            }
-            return Value::obj(inst);
-        }
-        // the generated `__init__` of a dataclass base applies to a subclass without its own
-        let dc_init = ci.has_fields() || {
-            let mut owner: Option<bool> = None;
-            for c in self.mro(cls) {
-                if self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) {
-                    owner = Some(false);
-                    break;
-                }
-                if self.class_info_opt(c).map(|x| x.has_fields()).unwrap_or(false) {
-                    owner = Some(true);
-                    break;
-                }
-            }
-            owner == Some(true)
-        };
-        if dc_init {
-            self.dataclass_init(cls, inst, args, star_args, kwargs, star_kwargs, state, node);
-            return Value::obj(inst);
+        // library classes: TypedDict, pydantic models, dict subclasses, dataclasses
+        if let Some(v) = self.construct_library(cls, inst, args, kwargs, star_args, star_kwargs, state, node) {
+            return v;
         }
         if let Some(init) = self.class_lookup(cls, "__init__") {
             let fv = self.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
@@ -747,12 +686,7 @@ impl Analyzer {
             }
             self.fresh_init.remove(&inst);
         } else if self.builtin_exc_base(cls) {
-            // an Exception subclass without its own `__init__`: args are the arguments
-            let name = self.class_info(cls).name.clone();
-            let t = self.alloc_positional(Kind::Tuple, node, Some(args.to_vec()), Value::new(), DATA, state);
-            let strong = self.obj(inst).single;
-            self.store_key(inst, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
-            self.exc_objs.insert(inst, name);
+            self.exception_init(cls, inst, args, node, state);
         }
         Value::obj(inst)
     }
@@ -883,7 +817,6 @@ impl Analyzer {
             let r = self.call_user(lg.foid, lg.self_v.clone(), lg.args.clone(), lg.kwargs.clone(), vec![], vec![], state, &lg.node, None, false);
             self.call_chain = saved;
             if let (Some((pre, budget)), true) = (pre, state.reachable) {
-                let roots: Vec<Value> = lg.self_v.iter().chain(lg.args.iter()).chain(lg.kwargs.values()).cloned().collect();
                 let fp = state.footprint(&pre);
                 let mut own: FxHashSet<ObjId> = fp.rows.iter().map(|k| k.0).chain(fp.slots.iter().map(|k| k.0)).chain(fp.elems.iter().copied()).chain(state.lens.diff_keys(&pre.lens)).collect();
                 // (and those whose facts follow its items, installed as a consumer takes them)
@@ -891,7 +824,7 @@ impl Analyzer {
                     own.extend(ge.rows.iter().map(|k| k.0).chain(ge.slots.iter().map(|k| k.0)).chain(ge.elems.iter().copied()).chain(ge.lens.iter().copied()));
                 }
                 let reads = self.gen_last_reads.take().unwrap_or_default();
-                let w = super::GenWatch { gid: o, own, after: state.copy(), roots, reads, budget };
+                let w = super::GenWatch { gid: o, own, after: state.copy(), reads, budget };
                 self.gen_watch.push(w);
             }
             if !r.pts.contains(o) && state.reachable {
@@ -1896,56 +1829,47 @@ impl Analyzer {
         (wmark..self.gen_watch.len()).map(|i| (self.gen_watch[i].gid, self.gen_interference_of(i, fin, all))).filter(|(_, h)| !h.is_empty()).collect()
     }
 
-    /// `gen_interference` for one watched generator.
+    /// `gen_interference` for one watched generator: the keys / objects it reads after a
+    /// yield that later code changed (beyond those it changes itself, whose facts follow its
+    /// items, and what unknown code may have changed: nothing tells what such code does).
     fn gen_interference_of(&self, i: usize, fin: &State, all: bool) -> Vec<super::Change> {
         let w = &self.gen_watch[i];
-        {
-            if !fin.reachable {
-                return Vec::new();
-            }
-            let f = &w.after;
-            let fp = fin.footprint(f);
-            // (a read that narrows a row is no change; the objects the generator changes itself
-            // are taken as its own: their facts follow its items, `set_cursor`)
-            // (nor what unknown code may have changed: the generator is not told, as nothing
-            // tells what such code does)
-            let mut changed: Vec<super::Change> = Vec::new();
-            let mut unknown: FxHashSet<ObjId> = FxHashSet::default();
-            for k in fp.rows {
-                let (a, b) = (f.row(k.0, k.1), fin.row(k.0, k.1));
-                if a.mutators != b.mutators || a.top != b.top {
-                    unknown.insert(k.0);
-                } else if a.absent != b.absent {
-                    changed.push((k.0, None));
-                }
-            }
-            for (o, sk) in fp.slots {
-                if fin.slots.get(&o, &sk).is_some_and(|v| v.pts.iter().any(|p| self.is_any(p))) {
-                    unknown.insert(o);
-                    continue;
-                }
-                let keyed = matches!(sk.0, Ns::Item | Ns::Attr) && sk.1 != intern::STAR;
-                changed.push((o, keyed.then_some(sk)));
-            }
-            changed.extend(fp.elems.into_iter().chain(fin.lens.diff_keys(&f.lens)).map(|o| (o, None)));
-            let known = |o: ObjId| f.lens.get(&o).is_some() || f.has_row(o, Ns::Item) || f.has_row(o, Ns::Attr) || f.slots.has_key(&o);
-            changed.retain(|(o, _)| *o != w.gid && !w.own.contains(o) && !unknown.contains(o) && known(*o));
-            if changed.is_empty() {
-                return Vec::new();
-            }
-            // (what the generator reads after a yield, from what it was given)
-            let read = |(o, k): &super::Change| w.reads.contains(&(*o, *k)) || w.reads.contains(&(*o, None)) || (k.is_none() && w.reads.iter().any(|r| r.0 == *o));
-            let reach = self.reach_from(&w.roots, f);
-            let have = self.gen_havoc.get(&w.gid);
-            let mut hit: Vec<super::Change> = if all { reach.iter().map(|o| (*o, None)).collect() } else { changed.into_iter().filter(|c| reach.contains(&c.0) && read(c)).collect() };
-            hit.sort_unstable();
-            hit.dedup();
-            hit.retain(|c| !have.is_some_and(|h| h.contains(c) || h.contains(&(c.0, None))));
-            if !hit.is_empty() && super::debug_enabled() {
-                eprintln!("generator {} sees changes of {:?}", self.obj(w.gid).label, hit.iter().map(|(o, k)| format!("{}{:?}", self.obj(*o).label, k.map(|k| intern::key_repr(k.1)))).collect::<Vec<_>>());
-            }
-            hit
+        if !fin.reachable {
+            return Vec::new();
         }
+        let (f, fp) = (&w.after, fin.footprint(&w.after));
+        let mut changed: Vec<super::Change> = Vec::new();
+        let mut unknown: FxHashSet<ObjId> = FxHashSet::default();
+        // (a read that narrows a row is no change)
+        for k in fp.rows {
+            let (a, b) = (f.row(k.0, k.1), fin.row(k.0, k.1));
+            if a.mutators != b.mutators || a.top != b.top {
+                unknown.insert(k.0);
+            } else if a.absent != b.absent {
+                changed.push((k.0, None));
+            }
+        }
+        for (o, sk) in fp.slots {
+            if fin.slots.get(&o, &sk).is_some_and(|v| v.pts.iter().any(|p| self.is_any(p))) {
+                unknown.insert(o);
+            } else {
+                changed.push((o, (matches!(sk.0, Ns::Item | Ns::Attr) && sk.1 != intern::STAR).then_some(sk)));
+            }
+        }
+        changed.extend(fp.elems.into_iter().chain(fin.lens.diff_keys(&f.lens)).map(|o| (o, None)));
+        let read = |(o, k): &super::Change| w.reads.contains(&(*o, *k)) || w.reads.contains(&(*o, None)) || (k.is_none() && w.reads.iter().any(|r| r.0 == *o));
+        let mut hit: Vec<super::Change> = changed.into_iter().filter(|c| c.0 != w.gid && !w.own.contains(&c.0) && !unknown.contains(&c.0) && read(c)).collect();
+        if all && !hit.is_empty() {
+            hit = w.reads.iter().map(|r| (r.0, None)).collect();
+        }
+        hit.sort_unstable();
+        hit.dedup();
+        let have = self.gen_havoc.get(&w.gid);
+        hit.retain(|c| !have.is_some_and(|h| h.contains(c) || h.contains(&(c.0, None))));
+        if !hit.is_empty() && super::debug_enabled() {
+            eprintln!("generator {} sees changes of {:?}", self.obj(w.gid).label, hit.iter().map(|(o, k)| format!("{}{:?}", self.obj(*o).label, k.map(|k| intern::key_repr(k.1)))).collect::<Vec<_>>());
+        }
+        hit
     }
 
     /// A loop used up the generators among `used`: no later code runs between their items. Those

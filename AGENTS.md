@@ -155,7 +155,7 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
   no `timeout`: `perl -e 'alarm N; exec @ARGV' rowan …`. Compare builds on results (proven /
   missing / possibly / schema counts of `--json`), not only on counters.
 
-## Layout (`rowan/src/`, ~61k lines: the engine ~21k, the models ~40k)
+## Layout (`rowan/src/`, ~62k lines: the engine ~20.6k, the models ~41k)
 
 | file | role |
 | --- | --- |
@@ -169,7 +169,7 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 | `interp/calls.rs`, `interp/effects.rs` | calls: per-call-site runs, budget, recursion, `__new__`, dataclass init; what skipped calls may change |
 | `models/shape.rs` | tensor shapes (dims as polynomials) for the torch and numpy models |
 | `report.rs`, `main.rs` | text / JSON / facts output; CLI, `rowan serve` (runs on a 1 GiB-stack thread) |
-| `models/` | `mod.rs` (`Registry`, builtins, containers); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib (`enums`, `exceptions`, functools, itertools, …); `pandas`, `pydantic`, `fastapi`, `torch` |
+| `models/` | `mod.rs` (`Registry`, builtins, containers); `tables` (what builtins / library calls raise, change, keep); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib (`enums`, `exceptions`, functools, itertools, …); `pandas`, `pydantic`, `fastapi`, `torch` |
 
 `rowan/py/` is a PyO3 binding (does not load on macOS 26); `vscode-rowan/` the editor
 extension (talks to `rowan serve`).

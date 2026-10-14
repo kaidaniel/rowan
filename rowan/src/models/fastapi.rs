@@ -831,7 +831,7 @@ impl Analyzer {
         for (n, _, _) in &hooks {
             caught.insert(n.clone());
         }
-        let caught_names = crate::interp::stmts::expand_caught(caught);
+        let caught_names = crate::models::exceptions::expand_caught(caught);
         self.enter_try(caught_names.clone(), &mut pre);
         self.m.fa_dep_cache.push(rustc_hash::FxHashMap::default());
         self.m.fa_out_resp.push(Vec::new());

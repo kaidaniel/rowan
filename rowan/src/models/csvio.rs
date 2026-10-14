@@ -5,6 +5,7 @@
 //! unknown (`csvhdr:`) still gives `DictReader` rows with exactly those keys.
 
 use indexmap::IndexMap;
+use ruff_python_ast as ast;
 
 use crate::domain::{join_values, KeyVal, Ns, ObjId, Row, Source, SourceKind, Value};
 use crate::frontend::Node;
@@ -869,4 +870,26 @@ mod tests {
         assert_eq!(parse_text("a\n\nb\n", ',', '"').unwrap(), strs(&[&["a"], &[], &["b"]]));
         assert_eq!(parse_text("a,b\r\nc", ',', '"').unwrap(), strs(&[&["a", "b"], &["c"]]));
     }
+}
+
+/// `with contextlib.suppress(E, …): body`: `try: body / except (E, …): pass`. False: not
+/// that case.
+pub fn with_suppress(an: &mut Analyzer, w: &'static ast::StmtWith, state: &mut State) -> bool {
+    if w.items.len() != 1 {
+        return false;
+    }
+    let ast::Expr::Call(call) = &w.items[0].context_expr else { return false };
+    if !matches!(&*call.func, ast::Expr::Name(_) | ast::Expr::Attribute(_)) || !call.arguments.keywords.is_empty() {
+        return false;
+    }
+    let mut probe = state.copy();
+    let fv = an.eval(&call.func, &mut probe);
+    let is_suppress = !fv.pts.is_empty() && fv.pts.iter().all(|o| an.kind(o) == Kind::External && an.external_qual(o) == "contextlib.suppress");
+    if !is_suppress {
+        return false;
+    }
+    // `try: body / except (E, …): pass`
+    let h = crate::interp::stmts::Handler { types: Some(call.arguments.args.iter().collect()), name: None, body: &[], line: crate::frontend::node(w).line };
+    an.stmt_try_parts(&w.body, vec![h], &[], std::rc::Rc::new(crate::interp::stmts::Finally::Block(&[])), state);
+    true
 }

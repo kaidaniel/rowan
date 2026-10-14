@@ -150,3 +150,10 @@ pub fn m_excinit(an: &mut crate::interp::Analyzer, st: &mut State, c: &crate::in
     }
     an.none_v.clone()
 }
+
+/// The class names a handler for `caught` catches: those and their subclasses in the table.
+pub fn expand_caught(mut caught: rustc_hash::FxHashSet<String>) -> rustc_hash::FxHashSet<String> {
+    let subs: Vec<String> = EXC_BASES.iter().filter(|(c, _)| !c.contains('.') && builtin_exc_names(c).0.iter().any(|n| caught.contains(n))).map(|(c, _)| c.to_string()).collect();
+    caught.extend(subs);
+    caught
+}

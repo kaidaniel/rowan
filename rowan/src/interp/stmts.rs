@@ -363,7 +363,7 @@ impl Analyzer {
                 }
             }
             ast::Stmt::Try(t) => self.stmt_try(t, state),
-            ast::Stmt::With(w) if self.with_suppress(w, state) => {}
+            ast::Stmt::With(w) if crate::models::csvio::with_suppress(self, w, state) => {}
             ast::Stmt::With(w) if self.with_contextmanager(w, state) => {}
             ast::Stmt::With(w) => {
                 let mut managers: Vec<(Value, Node)> = Vec::new();
@@ -449,28 +449,6 @@ impl Analyzer {
                 self.note(format!("unsupported statement IpyEscapeCommand at L{}", n.line));
             }
         }
-    }
-
-    /// `with contextlib.suppress(E, …): body`: `try: body / except (E, …): pass`. False: not
-    /// that case.
-    fn with_suppress(&mut self, w: &'static ast::StmtWith, state: &mut State) -> bool {
-        if w.items.len() != 1 {
-            return false;
-        }
-        let ast::Expr::Call(call) = &w.items[0].context_expr else { return false };
-        if !matches!(&*call.func, ast::Expr::Name(_) | ast::Expr::Attribute(_)) || !call.arguments.keywords.is_empty() {
-            return false;
-        }
-        let mut probe = state.copy();
-        let fv = self.eval(&call.func, &mut probe);
-        let is_suppress = !fv.pts.is_empty() && fv.pts.iter().all(|o| self.kind(o) == Kind::External && self.external_qual(o) == "contextlib.suppress");
-        if !is_suppress {
-            return false;
-        }
-        // `try: body / except (E, …): pass`
-        let h = Handler { types: Some(call.arguments.args.iter().collect()), name: None, body: &[], line: frontend::node(w).line };
-        self.stmt_try_parts(&w.body, vec![h], &[], std::rc::Rc::new(Finally::Block(&[])), state);
-        true
     }
 
     /// `with cm(...) as x: body` where `cm` is a `@contextmanager` generator function: the
@@ -1336,7 +1314,7 @@ impl Analyzer {
 
     fn stmt_try_inner(&mut self, body: &'static [ast::Stmt], handlers: &[Handler], orelse: &'static [ast::Stmt], fin: &std::rc::Rc<Finally>, state: &mut State) {
         // (a handler for a class catches its subclasses too)
-        let mut caught = expand_caught(handlers.iter().flat_map(|h| h.names()).collect());
+        let mut caught = crate::models::exceptions::expand_caught(handlers.iter().flat_map(|h| h.names()).collect());
         // handlers that all end by re-raising: the body's reads are still required
         let reraise = !handlers.is_empty() && handlers.iter().all(|h| matches!(h.body.last(), Some(ast::Stmt::Raise(_))));
         if reraise {
@@ -2047,27 +2025,6 @@ impl Handler {
     }
 }
 
-pub fn expand_caught(mut caught: FxHashSet<String>) -> FxHashSet<String> {
-    const SUBS: &[(&str, &[&str])] = &[
-        ("ValueError", &["ValidationError", "JSONDecodeError", "UnicodeDecodeError", "UnicodeEncodeError", "UnicodeError"]),
-        ("LookupError", &["KeyError", "IndexError"]),
-        ("ArithmeticError", &["ZeroDivisionError", "OverflowError", "FloatingPointError"]),
-        ("OSError", &["FileNotFoundError", "PermissionError", "IsADirectoryError", "NotADirectoryError", "FileExistsError", "TimeoutError", "ConnectionError"]),
-        ("IOError", &["FileNotFoundError", "PermissionError"]),
-        ("EnvironmentError", &["FileNotFoundError", "PermissionError"]),
-        ("RuntimeError", &["NotImplementedError", "RecursionError"]),
-        ("ImportError", &["ModuleNotFoundError"]),
-        ("AttributeError", &["FrozenInstanceError"]),
-    ];
-    let mut more: Vec<String> = Vec::new();
-    for (p, subs) in SUBS {
-        if caught.contains(*p) {
-            more.extend(subs.iter().map(|x| x.to_string()));
-        }
-    }
-    caught.extend(more);
-    caught
-}
 
 /// What runs on the way out of a try statement: its finally block, or for a with statement its
 /// managers' `__exit__`.
