@@ -45,6 +45,9 @@ pub fn cell_key() -> KeyId {
     key_str_lit("v")
 }
 
+/// The label of `enumerate`'s index when it is not known: an int.
+pub const ENUM_INDEX: &str = "index";
+
 impl Analyzer {
     // ----------------------------------------------------------- functions
     pub fn make_function(&mut self, node: FuncNode, state: &mut State, name: Option<&str>) -> Value {
@@ -480,6 +483,8 @@ impl Analyzer {
         match t {
             ast::Expr::Name(n) => {
                 let name = s(n.id.as_str());
+                let named = if self.torch_on { self.t_name_number(name, v) } else { None };
+                let v = named.as_ref().unwrap_or(v);
                 if self.torch_on {
                     self.t_name_result(name, v);
                 }
@@ -946,7 +951,7 @@ impl Analyzer {
                     }
                     pair = true;
                     let iv = self.elem_value(&ii.elem, node, "en");
-                    pairs.push((Value::data("index"), iv));
+                    pairs.push((Value::data(ENUM_INDEX), iv));
                 }
                 Kind::Class if self.enum_members.contains_key(&oid) => {
                     // an Enum class: its members in order

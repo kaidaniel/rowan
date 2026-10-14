@@ -461,7 +461,7 @@ pub fn m_methodcaller(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         Some(&m) => m,
         None => {
             let Ok((idx, tree)) = crate::frontend::parse(&modname, None, src) else { return Value::data("methodcaller") };
-            an.make_module_pub(&modname, None, idx, tree)
+            an.make_module(&modname, None, idx, tree)
         }
     };
     // the arguments of this call, then the function

@@ -159,6 +159,26 @@ assert(hd.includes("- ✗ `d['q']`: key \"q\" is never set"), hd);
 // (the other `d` on the line, being assigned, has no access)
 assert(!hover(ki, ksrc, 12, "d").includes("✗"), hover(ki, ksrc, 12, "d"));
 
+// ---- the owner's rnn (pytorch-playground): V = len(vocab) of unknown text names the dims
+{
+  const rnn = path.join(root, "tests", "torch", "playground", "p04_rnn.py");
+  const src = fs.readFileSync(rnn, "utf8").split("\n");
+  const idx = indexResult(facts(rnn));
+  const at = (pre) => src.findIndex((l) => l.startsWith(pre)) + 1;
+  const hv = hover(idx, src, at("V: int = len(vocab)"), "V");
+  assert(hv.includes("- not known statically; tensor dims equal to it are written `V`"), hv);
+  const hl = hover(idx, src, at("    logits, _ = model(x)"), "logits");
+  assert(hl.includes("Tensor[64, ?, V]"), hl);
+}
+
+// ---- keys found by an earlier read: said so, and one line for the keys of one access
+{
+  const found = path.join(tmp, "found.py");
+  fs.writeFileSync(found, ["import sys", "text = sys.argv[1]", "idx = {c: i for i, c in enumerate(sorted(set(text)))}", "def enc(s):", "    return [idx[c] for c in s]", 'a = enc("ab")', 'b = enc("ab")', ""].join("\n"));
+  const h = hover(indexResult(facts(found)), fs.readFileSync(found, "utf8").split("\n"), 5, "idx");
+  assert(h.includes('- ✓ `idx[c]`: keys "a", "b" are there: an earlier read or test on this path found it'), h);
+}
+
 // ---- every hover of several real programs: no internal names, every mark explained
 const files = [
   a01, z, g, kinds,

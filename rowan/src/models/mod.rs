@@ -787,7 +787,21 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         }
                     }
                 }
-                if let Some(items) = &it.items {
+                // (a set of known literals, `set(text)`: its distinct items, however many the
+                // iterable had)
+                let text_chars: Option<Vec<Value>> = a.kv.as_lit().and_then(intern::key_as_str).filter(|_| a.pts.is_empty()).map(|t| t.chars().map(|ch| Value::lit(key_str_lit(&ch.to_string()))).collect());
+                let distinct: Option<Vec<Value>> = it.items.as_ref().or(text_chars.as_ref()).filter(|_| kind == Kind::Set).and_then(|items| {
+                    let mut seen: Vec<KeyId> = Vec::new();
+                    for v in items {
+                        match (&v.kv, v.pts.is_empty()) {
+                            (KeyVal::Lit(k), true) if !seen.contains(k) => seen.push(*k),
+                            (KeyVal::Lit(_), true) => {}
+                            _ => return None,
+                        }
+                    }
+                    Some(seen.into_iter().map(Value::lit).collect())
+                });
+                if let Some(items) = distinct.as_ref().or(it.items.as_ref()) {
                     let reversed = c.qual.as_str() == "builtins.reversed";
                     let sorted = c.qual.as_str() == "builtins.sorted";
                     if an.obj(oid).single && items.len() <= 64 {
@@ -1709,7 +1723,7 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     Some(&m) => m,
                     None => {
                         let Ok((idx, tree)) = crate::frontend::parse(&modname, None, format!("class {}({}):\n    pass\n", name, names.join(", "))) else { return Value::data("type") };
-                        an.make_module_pub(&modname, None, idx, tree)
+                        an.make_module(&modname, None, idx, tree)
                     }
                 };
                 // (made in another state, or not yet: run it in this one)
@@ -2927,7 +2941,7 @@ pub fn generated_class(an: &mut Analyzer, st: &mut State, qual: &str) -> Option<
         Some(&m) => m,
         None => {
             let (idx, tree) = crate::frontend::parse(modname, None, src.to_string()).ok()?;
-            let m = an.make_module_pub(modname, None, idx, tree);
+            let m = an.make_module(modname, None, idx, tree);
             an.run_module(m, st);
             m
         }
@@ -4106,7 +4120,7 @@ fn m_namedtuple(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let args = fields.iter().map(|f| format!("kw.get({:?}, self.{})", f, f)).collect::<Vec<_>>().join(", ");
     src.push_str(&format!("    def _replace(self, **kw):\n        for k in kw:\n            if k not in {:?}:\n                raise ValueError(k)\n        return {}({})\n", fields, tname, args).replace("[", "(").replace("]", ",)"));
     let Ok((idx, tree)) = crate::frontend::parse(&modname, None, src) else { return fallback(an, st, c) };
-    let moid = an.make_module_pub(&modname, None, idx, tree);
+    let moid = an.make_module(&modname, None, idx, tree);
     for (i, v) in dvals.iter().enumerate() {
         st.set_slot(moid, Ns::Attr, key_str_lit(&format!("_rowan_default_{}", i)), v.clone(), true);
     }
@@ -4141,7 +4155,7 @@ fn m_getter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         None => {
             let src = format!("def getter(obj):\n    return {}\n", body);
             let Ok((idx, tree)) = crate::frontend::parse(&modname, None, src) else { return Value::data("getter") };
-            let m = an.make_module_pub(&modname, None, idx, tree);
+            let m = an.make_module(&modname, None, idx, tree);
             an.run_module(m, st);
             m
         }
@@ -4321,7 +4335,7 @@ pub fn re_match_generated(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
                 if ngroups == 1 { "," } else { "" }
             );
             let Ok((idx, tree)) = crate::frontend::parse(&modname, None, src) else { return Value::data("re") };
-            let m = an.make_module_pub(&modname, None, idx, tree);
+            let m = an.make_module(&modname, None, idx, tree);
             an.run_module(m, st);
             m
         }
@@ -4462,7 +4476,7 @@ fn m_make_dataclass(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         src.push_str("    pass\n");
     }
     let Ok((idx, tree)) = crate::frontend::parse(&modname, None, src) else { return fallback(an, st, c) };
-    let moid = an.make_module_pub(&modname, None, idx, tree);
+    let moid = an.make_module(&modname, None, idx, tree);
     for (i, v) in dvals.iter().enumerate() {
         st.set_slot(moid, Ns::Attr, key_str_lit(&format!("_rowan_default_{}", i)), v.clone(), true);
     }
@@ -5380,6 +5394,10 @@ use std::rc::Rc;
 pub struct Tables {
     /// validating a FastAPI test request's body (errors are a 422)
     pub fa_body_validation: bool,
+    /// unknown parameters annotated `int` / `bool` (true) or `float` (false) in torch modules
+    pub t_numbers: FxHashMap<ObjId, bool>,
+    /// module-level names bound to an unknown number, now dims named by them (`t_name_number`)
+    pub t_named_numbers: std::collections::BTreeSet<crate::models::shape::Sym>,
     /// unknown call results named by the variable they were bound to (tensor dims)
     pub t_var_names: FxHashMap<ObjId, crate::models::shape::Sym>,
     /// function objects by qualname (a closure's printing sees its factory's symbols)

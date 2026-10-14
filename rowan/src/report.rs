@@ -183,13 +183,18 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
     if an.torch_on {
         let mut shapes: Vec<String> = Vec::new();
         let mut errs: Vec<&crate::models::torch::ShapeNote> = an.m.shape_errors.iter().collect();
-        errs.sort_by_key(|e| (e.line, e.chain.len()));
-        errs.dedup_by(|a, b| (a.line, &a.text) == (b.line, &b.text));
-        shapes.extend(errs.iter().map(|e| format!("  L{:<5} ✗  shape mismatch: {}{}", e.line, e.text, via_text(&e.chain, 0))));
-        let mut reqs: Vec<(u32, String)> = an.m.shape_reqs.iter().filter(|r| r.chain.is_empty()).map(|r| (r.line, r.text.clone())).collect();
+        // (a line of another module is named with its file: `pkg/layers.py:L12`)
+        let at = |n: &crate::models::torch::ShapeNote| match an.rel_file(n.module) {
+            f if f.is_empty() => format!("L{:<5}", n.line),
+            f => format!("{}:L{}", f, n.line),
+        };
+        errs.sort_by_key(|e| (e.module != an.main_idx(), e.module, e.line, e.chain.len()));
+        errs.dedup_by(|a, b| (a.module, a.line, &a.text) == (b.module, b.line, &b.text));
+        shapes.extend(errs.iter().map(|e| format!("  {} ✗  shape mismatch: {}{}", at(e), e.text, via_text(&e.chain, 0))));
+        let mut reqs: Vec<(bool, u32, u32, String, String)> = an.m.shape_reqs.iter().filter(|r| r.chain.is_empty()).map(|r| (r.module != an.main_idx(), r.module, r.line, at(r), r.text.clone())).collect();
         reqs.sort();
         reqs.dedup();
-        shapes.extend(reqs.iter().map(|(line, text)| format!("  L{:<5}    needs {}", line, text)));
+        shapes.extend(reqs.iter().map(|(_, _, _, at, text)| format!("  {}    needs {}", at, text)));
         if shapes.is_empty() {
             shapes.push("  (no mismatches, no requirements)".into());
         }
@@ -306,6 +311,7 @@ pub fn verdict_message(an: &Analyzer, v: &Verdict) -> String {
     let unknown_code = || code_list(an, &v.mutators);
     // (the other notes are the reason in words: `is only set on some paths`)
     match v.tier {
+        Tier::Proven if v.note == crate::domain::FOUND_BEFORE => format!("{} is there: an earlier read or test on this path found it", what),
         Tier::Proven => format!("{} is always there", what),
         Tier::Likely => format!("{} is there, unless {} removed it", what, unknown_code()),
         Tier::Input => format!("{} must be provided by {}", what, v.providers.iter().map(|p| source_id_text(an, *p)).collect::<Vec<_>>().join(" or ")),
@@ -697,7 +703,7 @@ pub fn golden_json(an: &Analyzer) -> J {
             out
         })
         .collect();
-    let note = |n: &crate::models::torch::ShapeNote| json!({"line": n.line, "chain": n.chain, "entry": n.entry, "text": n.text, "message": n.text});
+    let note = |n: &crate::models::torch::ShapeNote| json!({"file": an.rel_file(n.module), "line": n.line, "chain": n.chain, "entry": n.entry, "text": n.text, "message": n.text});
     let requires: Vec<J> = an.m.shape_reqs.iter().map(note).collect();
     let shape_errors: Vec<J> = an.m.shape_errors.iter().map(note).collect();
     json!({"verdicts": verdicts, "schemas": schemas, "rows": rows, "notes": an.notes, "report": format_text(an, true, true), "requires": requires, "shape_errors": shape_errors, "objects": an.objects.len(), "tabulations": an.tab_runs, "joins": crate::domain::row_joins(), "work": an.work, "visits": an.walked.get() + crate::state::fp_visits(), "havoc": an.havoc_walked})
@@ -1188,7 +1194,7 @@ pub fn facts_json(an: &Analyzer) -> J {
         let mut requires: Vec<String> = Vec::new();
         let mut extra_legend: Vec<(String, String)> = Vec::new();
         for n in &an.m.shape_reqs {
-            if n.line != *line || !n.chain.is_empty() {
+            if n.line != *line || !n.chain.is_empty() || n.module != an.main_idx() {
                 continue;
             }
             let t = match &n.cons {
@@ -1238,7 +1244,7 @@ pub fn facts_json(an: &Analyzer) -> J {
             j
         })
         .collect();
-    let shape_errors: Vec<J> = an.m.shape_errors.iter().map(|n| json!({"line": n.line, "chain": n.chain, "message": n.text})).collect();
+    let shape_errors: Vec<J> = an.m.shape_errors.iter().map(|n| json!({"file": an.rel_file(n.module), "line": n.line, "chain": n.chain, "message": n.text})).collect();
     json!({"file": an.filename, "facts": facts, "verdicts": verdicts, "shape_errors": shape_errors})
 }
 

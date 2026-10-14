@@ -263,7 +263,10 @@ function renderHover(name, facts, verdicts) {
     const unknown = objs.filter((o) => o.kind === "unknown");
     const info = [];
     // an unknown named by itself (a parameter, a name defined elsewhere): where it comes from
-    if (text === name && unknown.length === 1 && !(f.legend || []).length) {
+    if (text === name && !objs.length && !(f.legend || []).length) {
+      // a number the module computes from data rowan cannot see, named by its variable
+      info.push(`- not known statically; tensor dims equal to it are written \`${name}\``);
+    } else if (text === name && unknown.length === 1 && !(f.legend || []).length) {
       const o = unknown[0];
       info.push(o.origin ? `- not known here: the result of \`${o.origin.text}\` (line ${o.origin.line})` : `- not known here: ${(o.from || [])[0] || "it comes from outside"}`);
     } else if (text === "?" && !(f.legend || []).length) {
@@ -300,20 +303,32 @@ function renderHover(name, facts, verdicts) {
       out.push(l);
     }
   }
-  // the accesses on this line, once each (the call paths they were reached by do not matter here)
+  // the accesses on this line, once each (the call paths they were reached by do not matter
+  // here); one access found for several keys alike is one line (`keys "a", "b" are there`)
   const marks = new Set();
-  const seen = new Set();
-  const acc = [];
+  const groups = new Map();
   // (an input's key is in "the code reads" already)
   const reads = facts.some((f) => (f.required || []).length);
   for (const v of verdicts) {
     const mark = MARK[v.tier];
     if (!mark || (mark === "◌" && reads)) continue;
-    const key = `${mark}\u0000${v.text}\u0000${v.key}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const msg = v.message || v.tier;
+    const keyText = typeof v.key_str === "string" ? `key ${JSON.stringify(v.key_str)}` : null;
+    const shape = keyText && msg.startsWith(keyText + " ") ? msg.slice(keyText.length) : null;
+    const gk = `${mark}\u0000${v.text}\u0000${shape === null ? msg : shape}`;
+    if (!groups.has(gk)) groups.set(gk, { mark, text: v.text, msg, shape, keys: [] });
+    const g = groups.get(gk);
+    if (shape !== null && !g.keys.includes(v.key_str)) g.keys.push(v.key_str);
     marks.add(mark);
-    acc.push(`- ${mark} \`${v.text}\`: ${v.message || v.tier}`);
+  }
+  const acc = [];
+  for (const g of groups.values()) {
+    let msg = g.msg;
+    if (g.keys.length > 1) {
+      const shown = g.keys.slice(0, 6).map((k) => JSON.stringify(k)).join(", ") + (g.keys.length > 6 ? ` and ${g.keys.length - 6} more` : "");
+      msg = `keys ${shown}${g.shape.replace(/^ is /, " are ")}`;
+    }
+    acc.push(`- ${g.mark} \`${g.text}\`: ${msg}`);
   }
   if (acc.length) out.push("", ...acc);
   const legend = legendLine(texts, marks);
@@ -353,11 +368,13 @@ function diagnosticMessage(v) {
 
 // ----------------------------------------------------------------- running the engine
 
-const BIN_RELS = ["rowan/target/release/rowan", "rowan/target/debug/rowan", "target/release/rowan", "target/debug/rowan"];
+/** An executable's file name on this platform (`rowan.exe` on Windows). */
+const EXE = (name) => (process.platform === "win32" ? name + ".exe" : name);
+const BIN_RELS = ["rowan/target/release", "rowan/target/debug", "target/release", "target/debug"].map((d) => path.join(d, EXE("rowan")));
 
 /** The binary a platform-specific package carries in `bin/` (release workflow). */
 function bundledBinary() {
-  const p = path.join(__dirname, "bin", process.platform === "win32" ? "rowan.exe" : "rowan");
+  const p = path.join(__dirname, "bin", EXE("rowan"));
   if (!fs.existsSync(p)) return null;
   // (a .vsix is a zip: the executable bit may not survive installation)
   try {
@@ -370,8 +387,8 @@ function bundledBinary() {
  * The engine binary: the `rowan.binaryPath` setting; else the build output under a
  * workspace folder, under any ancestor of the analysed file, or next to this extension
  * (running from the repository); else the binary bundled in `bin/`; else
- * `~/.cargo/bin/rowan` (`cargo install --path rowan`); else `rowan` on PATH.  Returns null
- * when nothing exists and PATH has no `rowan`.
+ * `~/.cargo/bin/rowan` (`cargo install --path rowan`); else `rowan` on PATH (with `.exe` on
+ * Windows).  Returns null when nothing exists and PATH has no `rowan`.
  */
 function findBinary(config, workspaceFolders, filePath) {
   const configured = config.get("binaryPath");
@@ -398,12 +415,76 @@ function findBinary(config, workspaceFolders, filePath) {
   if (bundled) return bundled;
   const home = process.env.HOME || process.env.USERPROFILE;
   if (home) {
-    const p = path.join(home, ".cargo", "bin", "rowan");
+    const p = path.join(home, ".cargo", "bin", EXE("rowan"));
     if (fs.existsSync(p)) return p;
   }
   for (const dir of (process.env.PATH || "").split(path.delimiter)) {
-    if (dir && fs.existsSync(path.join(dir, "rowan"))) return path.join(dir, "rowan");
+    if (dir && fs.existsSync(path.join(dir, EXE("rowan")))) return path.join(dir, EXE("rowan"));
   }
+  return null;
+}
+
+/**
+ * What an executable was built for, from its header: `{ platform, archs, text }` with the
+ * platform and architectures as Node names them (`darwin` / `linux` / `win32`, `x64` /
+ * `arm64`; a macOS universal binary has several), or null for a file that is none of
+ * Mach-O, ELF or PE (a script, a truncated download).
+ */
+function binaryFormat(file) {
+  let b;
+  try {
+    const fd = fs.openSync(file, "r");
+    b = Buffer.alloc(4096);
+    const n = fs.readSync(fd, b, 0, b.length, 0);
+    fs.closeSync(fd);
+    b = b.subarray(0, n);
+  } catch (e) {
+    return null;
+  }
+  if (b.length < 64) return null;
+  const MACHO_CPU = { 0x01000007: "x64", 0x0100000c: "arm64" };
+  const ELF_MACHINE = { 0x3e: "x64", 0xb7: "arm64" };
+  const PE_MACHINE = { 0x8664: "x64", 0xaa64: "arm64" };
+  const result = (platform, archs, kind) => ((archs = [...new Set(archs)]), { platform, archs, text: `${kind} ${archs.join(" + ") || "of another architecture"}` });
+  if (b.readUInt32LE(0) === 0xfeedfacf) return result("darwin", [MACHO_CPU[b.readUInt32LE(4)]].filter(Boolean), "Mach-O");
+  if (b.readUInt32BE(0) === 0xcafebabe) {
+    // (a universal binary: one cputype per slice, big-endian)
+    const n = Math.min(b.readUInt32BE(4), 8);
+    const archs = [];
+    for (let i = 0; i < n && 8 + 20 * i + 4 <= b.length; i++) archs.push(MACHO_CPU[b.readUInt32BE(8 + 20 * i)]);
+    return result("darwin", archs.filter(Boolean), "Mach-O universal");
+  }
+  if (b[0] === 0x7f && b.toString("latin1", 1, 4) === "ELF") {
+    const le = b[5] === 1;
+    const m = le ? b.readUInt16LE(18) : b.readUInt16BE(18);
+    return result("linux", [ELF_MACHINE[m]].filter(Boolean), "ELF");
+  }
+  if (b.toString("latin1", 0, 2) === "MZ") {
+    const pe = b.readUInt32LE(0x3c);
+    if (pe + 6 <= b.length && b.toString("latin1", pe, pe + 4) === "PE\0\0") return result("win32", [PE_MACHINE[b.readUInt16LE(pe + 4)]].filter(Boolean), "PE");
+  }
+  return null;
+}
+
+/**
+ * Why `file` cannot run on this machine (`platform`, `arch` default to this process's), or
+ * null when it can or its format is not known (then spawning it will say).  An x64 binary
+ * runs on arm64 macOS and Windows (Rosetta, emulation).
+ */
+function binaryMismatch(file, platform = process.platform, arch = process.arch) {
+  const f = binaryFormat(file);
+  if (!f) return null;
+  const emulated = arch === "arm64" && (platform === "darwin" || platform === "win32") && f.archs.includes("x64");
+  if (f.platform === platform && (f.archs.includes(arch) || emulated)) return null;
+  const want = `${platform}-${arch}`;
+  return `the rowan engine at ${file} is built for ${f.platform}${f.archs.length ? "-" + f.archs.join("/") : ""} (${f.text}), but this machine is ${want}. Install the rowan extension for ${want} (the .vsix named rowan-${want}-…), or set rowan.binaryPath to an engine built for this machine.`;
+}
+
+/** A spawn error in words: a binary for another platform says so, not `spawn ENOEXEC`. */
+function spawnError(bin, err) {
+  if (err && ["ENOEXEC", "EBADARCH", "UNKNOWN", "EFTYPE"].includes(err.code)) return binaryMismatch(bin) || `the rowan engine at ${bin} cannot be run on this machine (${err.code}).`;
+  if (err && err.code === "EACCES") return `the rowan engine at ${bin} is not executable (EACCES): make it executable (chmod +x) or set rowan.binaryPath.`;
+  if (err && err.code === "ENOENT") return `the rowan engine at ${bin} does not exist: set rowan.binaryPath.`;
   return null;
 }
 
@@ -443,14 +524,15 @@ function getServer(bin, extraArgs) {
   });
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", () => {});
-  const fail = () => {
+  const fail = (err) => {
     srv.dead = true;
-    for (const waiter of srv.pending.values()) waiter({ ok: false, error: "rowan server exited" });
+    const error = (err instanceof Error && spawnError(bin, err)) || "rowan server exited";
+    for (const waiter of srv.pending.values()) waiter({ ok: false, error, spawn: error !== "rowan server exited" });
     srv.pending.clear();
     if (servers.get(key) === srv) servers.delete(key);
   };
   child.on("error", fail);
-  child.on("exit", fail);
+  child.on("exit", () => fail());
   servers.set(key, srv);
   return srv;
 }
@@ -492,14 +574,14 @@ async function runEngineServer(bin, file, extraArgs, timeoutSeconds, changed) {
   const srv = getServer(bin, extraArgs);
   if (changed && changed.length) await serverRequest(srv, { cmd: "changed", paths: changed }, timeoutSeconds);
   const msg = await serverRequest(srv, { cmd: "analyse", path: file }, timeoutSeconds);
-  if (!msg.ok) throw new Error(msg.error || "rowan server error");
+  if (!msg.ok) throw Object.assign(new Error(msg.error || "rowan server error"), { spawn: !!msg.spawn });
   return msg.result;
 }
 
 function runEngine(bin, file, extraArgs, timeoutSeconds) {
   return new Promise((resolve, reject) => {
     execFile(bin, [file, "--facts", ...extraArgs], { maxBuffer: 256 * 1024 * 1024, timeout: timeoutSeconds * 1000 }, (err, stdout, stderr) => {
-      if (err) return reject(new Error((stderr || err.message || "").trim().slice(-500)));
+      if (err) return reject(new Error(spawnError(bin, err) || (stderr || err.message || "").trim().slice(-500)));
       try {
         resolve(JSON.parse(stdout));
       } catch (e) {
@@ -549,6 +631,14 @@ function activate(context) {
       if (choice === "Open settings") vscode.commands.executeCommand("workbench.action.openSettings", "rowan.binaryPath");
       return;
     }
+    const mismatch = binaryMismatch(bin);
+    if (mismatch) {
+      status.text = "$(warning) rowan: engine for another platform";
+      status.show();
+      output.appendLine(`rowan: ${mismatch}`);
+      vscode.window.showErrorMessage(`rowan: ${mismatch}`);
+      return;
+    }
     status.text = "$(sync~spin) rowan";
     status.show();
     try {
@@ -561,6 +651,8 @@ function activate(context) {
         try {
           res = await runEngineServer(bin, doc.uri.fsPath, extraArgs, timeoutSeconds, [doc.uri.fsPath]);
         } catch (e) {
+          // (a binary that cannot start: running it once more would only say so again)
+          if (e.spawn) throw e;
           res = await runEngine(bin, doc.uri.fsPath, extraArgs, timeoutSeconds);
         }
       } else {
@@ -590,6 +682,7 @@ function activate(context) {
       // definite tensor-shape mismatches
       const seenErr = new Set();
       for (const e of res.shape_errors || []) {
+        if (e.file) continue; // mismatches in imported modules
         if (seenErr.has(`${e.line}:${e.message}`)) continue;
         seenErr.add(`${e.line}:${e.message}`);
         const ln = Math.max(0, e.line - 1);
@@ -651,4 +744,5 @@ function deactivate() {
 }
 
 module.exports = {
-  shorten, activate, deactivate, renderHover, prettyValue, hoverValue, indexResult, severityFor, verdictsForWord, diagnosticMessage, findBinary };
+  shorten, activate, deactivate, renderHover, prettyValue, hoverValue, indexResult, severityFor, verdictsForWord, diagnosticMessage, findBinary,
+  binaryFormat, binaryMismatch, spawnError, runEngineServer, stopServers };

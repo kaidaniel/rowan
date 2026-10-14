@@ -81,6 +81,8 @@ pub fn content_hash(source: &str) -> u64 {
 }
 
 pub fn parse(name: &str, path: Option<&str>, source: String) -> Result<(u32, &'static ast::ModModule), String> {
+    // (Windows line ends as `\n`: lines and columns are the same, texts over lines read alike)
+    let source = if source.contains("\r\n") { source.replace("\r\n", "\n") } else { source };
     let key = path.map(|p| (p.to_string(), content_hash(&source)));
     if let Some(k) = &key {
         if let Some(hit) = PARSE_CACHE.with(|c| c.borrow().get(k).copied()) {

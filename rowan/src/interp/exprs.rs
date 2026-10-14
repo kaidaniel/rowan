@@ -1708,15 +1708,16 @@ impl Analyzer {
     }
 
     // comprehensions ---------------------------------------------------------
-    fn comp(&mut self, gens: &'static [ast::Comprehension], state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
+    /// Run a comprehension's generators (`limit`: the most known items a generator unrolls).
+    fn comp(&mut self, gens: &'static [ast::Comprehension], limit: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
         self.frame_mut().overlays.push(IndexMap::new());
         self.comp_cells.push(Default::default());
-        self.comp_gen(gens, 0, state, body, own);
+        self.comp_gen(gens, 0, limit, state, body, own);
         self.comp_cells.pop();
         self.frame_mut().overlays.pop();
     }
 
-    fn comp_gen(&mut self, gens: &'static [ast::Comprehension], i: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
+    fn comp_gen(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
         if i == gens.len() {
             body(self, state);
             return;
@@ -1728,7 +1729,7 @@ impl Analyzer {
         let it = self.iterate(&itv, &gn, state);
         let understood = g.ifs.iter().all(|c| cond_is_exclusion(c, &g.target));
         if let Some(items) = &it.items {
-            if items.len() <= UNROLL_MAX {
+            if items.len() <= limit {
                 // known items: each is its own straight-line iteration; a filter decided
                 // for the item keeps it straight-line (positions survive), an undecided one
                 // makes the iteration conditional
@@ -1737,7 +1738,7 @@ impl Analyzer {
                     let mut s2 = state.copy();
                     self.frame_mut().overlays.push(IndexMap::new());
                     self.frame_mut().unroll.push(idx);
-                    let decided = self.comp_run_one(g, gens, i, &Elem::One(item.clone()), &mut s2, body, understood, own);
+                    let decided = self.comp_run_one(g, gens, i, limit, &Elem::One(item.clone()), &mut s2, body, understood, own);
                     self.frame_mut().unroll.pop();
                     self.frame_mut().overlays.pop();
                     if s2.reachable {
@@ -1776,7 +1777,7 @@ impl Analyzer {
         let mark0 = self.objects.len() as ObjId;
         let vmark = self.verdicts.len();
         self.frame_mut().overlays.push(IndexMap::new());
-        self.comp_run_one(g, gens, i, &elem, &mut s2, body, understood, own);
+        self.comp_run_one(g, gens, i, limit, &elem, &mut s2, body, understood, own);
         self.frame_mut().overlays.pop();
         if it.exhaustive && understood && s2.reachable {
             self.comp_known.pop();
@@ -1804,7 +1805,7 @@ impl Analyzer {
         self.drop_verdicts_since(vmark);
         let (mut head, _, s2) = self.loop_fixpoint(state, &mut |an, body_s| {
             an.frame_mut().overlays.push(IndexMap::new());
-            an.comp_run_one(g, gens, i, &elem, body_s, body, understood, own);
+            an.comp_run_one(g, gens, i, limit, &elem, body_s, body, understood, own);
             an.frame_mut().overlays.pop();
         });
         self.comp_known.pop();
@@ -1815,7 +1816,7 @@ impl Analyzer {
 
     /// Runs one iteration of generator `i`; returns whether every filter was decided (then
     /// the iteration was straight-line code).
-    fn comp_run_one(&mut self, g: &'static ast::Comprehension, gens: &'static [ast::Comprehension], i: usize, it: &Elem, st: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) -> bool {
+    fn comp_run_one(&mut self, g: &'static ast::Comprehension, gens: &'static [ast::Comprehension], i: usize, limit: usize, it: &Elem, st: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) -> bool {
         self.comp_bind(&g.target, it, st);
         let mut decided = true;
         for cond in &g.ifs {
@@ -1839,7 +1840,7 @@ impl Analyzer {
         if conditional {
             self.cond_depth += 1;
         }
-        self.comp_gen(gens, i + 1, st, body, own);
+        self.comp_gen(gens, i + 1, limit, st, body, own);
         if conditional {
             self.cond_depth -= 1;
         }
@@ -1881,7 +1882,8 @@ impl Analyzer {
             let strong = an.obj(oid).single && an.cond_depth == base_depth;
             an.store_key(oid, Ns::Item, &k.kv, &v, strong, &nd, st);
         };
-        self.comp(&dc.generators, state, &mut body, oid);
+        let limit = comp_unroll_limit(&[key_e, val_e]);
+        self.comp(&dc.generators, limit, state, &mut body, oid);
         Value::obj(oid)
     }
 
@@ -1895,9 +1897,19 @@ impl Analyzer {
         // positions: every item known and every filter decided (straight-line iterations)
         let mut n: usize = 0;
         let mut positional = strong;
+        let limit = comp_unroll_limit(&[elt]);
+        // (a set's positions are its distinct members: a literal seen before adds none)
+        let mut seen: Vec<KeyId> = Vec::new();
         let mut body = |an: &mut Analyzer, st: &mut State| {
             let v = an.eval(elt, st);
-            if positional && an.comp_known.iter().all(|k| *k) && an.cond_depth == base_depth && n < UNROLL_MAX {
+            let dup = kind == Kind::Set && v.pts.is_empty() && v.kv.as_lit().map(|k| seen.contains(&k) || {
+                seen.push(k);
+                false
+            }) == Some(true);
+            let straight = positional && an.comp_known.iter().all(|k| *k) && an.cond_depth == base_depth;
+            if straight && dup {
+                // (already a member)
+            } else if straight && n < limit {
                 st.set_slot(oid, Ns::Pos, key_int(n as i64), v.clone(), true);
                 n += 1;
             } else {
@@ -1919,7 +1931,7 @@ impl Analyzer {
             _ => false,
         };
         let mark = self.comp_known.len();
-        self.comp(gens, state, &mut body, oid);
+        self.comp(gens, limit, state, &mut body, oid);
         self.comp_known.truncate(mark);
         if positional {
             self.set_llen(oid, state, Some(n));
@@ -1941,6 +1953,18 @@ impl Analyzer {
             self.normalize_set(oid, state);
         }
         Value::obj(oid)
+    }
+}
+
+/// How many known items a comprehension's generators unroll: up to 64 (as many literals as a
+/// value keeps) when what it makes of each item calls nothing (`{w: i for i, w in
+/// enumerate(words)}`: each word a sure key), else UNROLL_MAX.
+fn comp_unroll_limit(parts: &[&ast::Expr]) -> usize {
+    let costly = |e: &ast::Expr| matches!(e, ast::Expr::Call(_) | ast::Expr::Lambda(_) | ast::Expr::ListComp(_) | ast::Expr::SetComp(_) | ast::Expr::DictComp(_) | ast::Expr::Generator(_) | ast::Expr::Await(_) | ast::Expr::Yield(_) | ast::Expr::YieldFrom(_) | ast::Expr::Named(_));
+    if parts.iter().any(|p| ruff_python_ast::helpers::any_over_expr(p, &costly)) {
+        UNROLL_MAX
+    } else {
+        64
     }
 }
 
@@ -2312,11 +2336,7 @@ fn gen_facts_equal(a: &State, b: &State, ge: &crate::interp::GenEffects) -> bool
 }
 
 /// Install `src`'s facts about a generator's affected objects into `dst`.
-pub fn gen_copy_facts_pub(dst: &mut State, src: &State, ge: &crate::interp::GenEffects) {
-    gen_copy_facts(dst, src, ge)
-}
-
-fn gen_copy_facts(dst: &mut State, src: &State, ge: &crate::interp::GenEffects) {
+pub fn gen_copy_facts(dst: &mut State, src: &State, ge: &crate::interp::GenEffects) {
     for k in &ge.rows {
         match src.rows.get(k) {
             Some(r) => dst.rows.insert(*k, r),

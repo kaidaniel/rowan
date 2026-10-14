@@ -494,12 +494,25 @@ pub fn modulo(a: DimId, b: DimId) -> DimId {
     }
     of_atom(Atom::Mod(a, b))
 }
+/// The atom a dim is exactly (coefficient 1, power 1), if it is one.
+fn single_atom(d: DimId) -> Option<Atom> {
+    match &poly(d)[..] {
+        [(m, 1)] if m.len() == 1 && m[0].1 == 1 => Some(atom_get(m[0].0)),
+        _ => None,
+    }
+}
 pub fn max(a: DimId, b: DimId) -> DimId {
     if a == b {
         return a;
     }
     if let (Some(x), Some(y)) = (as_lit(a), as_lit(b)) {
         return lit(x.max(y));
+    }
+    // max(a, min(a, b)) = a (a causal mask cut to `[:T, :T]` broadcast with `[.., T, T]`)
+    for (p, q) in [(a, b), (b, a)] {
+        if matches!(single_atom(q), Some(Atom::Min(x, y)) if x == p || y == p) {
+            return p;
+        }
     }
     let (x, y) = if a <= b { (a, b) } else { (b, a) };
     of_atom(Atom::Max(x, y))
@@ -510,6 +523,12 @@ pub fn min(a: DimId, b: DimId) -> DimId {
     }
     if let (Some(x), Some(y)) = (as_lit(a), as_lit(b)) {
         return lit(x.min(y));
+    }
+    // min(a, max(a, b)) = a
+    for (p, q) in [(a, b), (b, a)] {
+        if matches!(single_atom(q), Some(Atom::Max(x, y)) if x == p || y == p) {
+            return p;
+        }
     }
     let (x, y) = if a <= b { (a, b) } else { (b, a) };
     of_atom(Atom::Min(x, y))
@@ -1213,14 +1232,25 @@ pub fn expose_f(s: &Shape, n_front: usize, n_back: usize, f: &TFacts) -> Shape {
         s.rest = Some(Rest::Any);
         s.suffix.clear();
     }
+    // (back dims come out of the rest only when it surely holds them: with known leading dims,
+    // a rest that may be empty would make them the leading dims, so `[A, *]` exposes its last
+    // dim as `[*, ?]`, not `[A, *, ?]`, which claims one dim too many)
     while s.suffix.len() < n_back {
         match s.rest.clone() {
-            Some(Rest::Slice(sym, from, back)) => {
+            Some(Rest::Slice(sym, from, back)) if s.prefix.is_empty() || (f.rank_ge(sym) as i64 - from as i64 - back as i64) >= 1 => {
                 s.suffix.insert(0, sdim(sym, -(back as i32) - 1));
                 s.rest = Some(Rest::Slice(sym, from, back + 1));
             }
-            _ => s.suffix.insert(0, unknown()),
+            _ if s.prefix.is_empty() => s.suffix.insert(0, unknown()),
+            _ => break,
         }
+    }
+    if s.suffix.len() < n_back {
+        while s.suffix.len() < n_back {
+            s.suffix.insert(0, unknown());
+        }
+        s.rest = Some(Rest::Any);
+        s.prefix.clear();
     }
     s
 }

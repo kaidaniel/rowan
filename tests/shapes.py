@@ -479,9 +479,14 @@ class ShapeExpectations:
             return True
         return False
 
-    def check(self, res: Dict[str, Any]) -> List[str]:
+    def check(self, res: Dict[str, Any], rel: str = "") -> List[str]:
+        """Check against rowan's golden output the directives of one file of a case (`rel`: its
+        path in a package case, "" for the entry). Shape errors are checked with the entry's
+        directives: every error, in whatever module, must be on (or reached from) one of its
+        `#@shape-error` lines. In another module, `#@requires` sees that module's own
+        requirements (its functions' entry runs), not those its callees add through calls."""
         fails: List[str] = []
-        rows = res.get("rows", [])
+        rows = [r for r in res.get("rows", []) if r.get("file", "") == rel]
 
         def runs(line: int, name: str, at: Optional[int]):
             # the engine joins a line's values within one run: its last record is the join
@@ -520,14 +525,16 @@ class ShapeExpectations:
         reqs = res.get("requires", [])
         def mine(r: Dict[str, Any], line: int) -> bool:
             ch = r.get("chain", [])
-            return (r["line"] == line and not ch) or (bool(ch) and ch[0] == line)
+            if rel:
+                return r.get("file", "") == rel and r["line"] == line and not ch
+            return (r["line"] == line and not ch and not r.get("file")) or (bool(ch) and ch[0] == line)
 
         for line, want in self.requires.items():
             got = sorted({norm_constraint(r["text"]) for r in reqs if mine(r, line)})
             if sorted(set(want)) != got:
                 texts = sorted({r["text"] for r in reqs if mine(r, line)})
                 fails.append(f"L{line} requires: got {texts or 'none'}, want {want or 'none'}")
-        errs = res.get("shape_errors", [])
+        errs = res.get("shape_errors", []) if not rel else []
         for e in errs:
             lines = [e["line"], *e.get("chain", [])]
             hit = [ln for ln in lines if ln in self.errors]

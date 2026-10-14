@@ -1793,12 +1793,11 @@ impl Analyzer {
             let mut found: Option<Value> = None;
             if let Some(po) = pv.single() {
                 if self.kind(po) == Kind::Module {
-                    let ppath = self.module_info(po).path.clone();
-                    if let Some(pp) = ppath.filter(|p| p.ends_with("__init__.py")) {
-                        if let Some(dir) = std::path::Path::new(&pp).parent() {
-                            let dir = dir.to_path_buf();
-                            found = self.load_module_file(name, &dir, leaf, state);
-                        }
+                    // (a package's directory: its `__init__.py`'s, or a namespace package's own)
+                    let ppath = self.module_info(po).path.clone().map(std::path::PathBuf::from);
+                    let dir = ppath.and_then(|p| if p.ends_with("__init__.py") { p.parent().map(|d| d.to_path_buf()) } else if p.is_dir() { Some(p) } else { None });
+                    if let Some(dir) = dir {
+                        found = self.load_module_file(name, &dir, leaf, state).or_else(|| self.load_namespace(name, &dir, leaf));
                     }
                     if let Some(v) = &found {
                         state.set_slot(po, Ns::Attr, key_str_lit(leaf), v.clone(), true);
@@ -1813,6 +1812,15 @@ impl Analyzer {
                 let dir = std::path::PathBuf::from(&base);
                 if let Some(v) = self.load_module_file(name, &dir, name, state) {
                     return v;
+                }
+            }
+            // a directory without `__init__.py` is a namespace package (PEP 420) when no module
+            // or regular package of the name is found (a modelled library's name is not taken)
+            if !crate::models::has_module_models(name) {
+                for base in self.search_paths.clone() {
+                    if let Some(v) = self.load_namespace(name, std::path::Path::new(&base), name) {
+                        return v;
+                    }
                 }
             }
             // an installed package on the allowlist is analysed from site-packages, unless a
@@ -1870,7 +1878,7 @@ impl Analyzer {
             let ps = p.to_string_lossy().to_string();
             return match frontend::parse(name, Some(&ps), src) {
                 Ok((idx, tree)) => {
-                    let moid = self.make_module_pub(name, Some(&ps), idx, tree);
+                    let moid = self.make_module(name, Some(&ps), idx, tree);
                     self.run_module(moid, state);
                     Some(Value::obj(moid))
                 }
@@ -1883,15 +1891,16 @@ impl Analyzer {
         None
     }
 
-    pub fn make_module_pub(&mut self, name: &str, path: Option<&str>, idx: u32, tree: &'static ast::ModModule) -> u32 {
-        let pkg = match path {
-            Some(p) if p.ends_with("__init__.py") => name.to_string(),
-            _ => name.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or_default(),
-        };
-        let info = super::ModuleInfo { name: name.to_string(), path: path.map(|p| p.to_string()), pkg, idx, tree, scopes: crate::scopes::analyse(tree) };
-        let oid = self.alloc_global(Kind::Module, &format!("module:{}", name), &format!("module {}", name), Payload::Module(std::rc::Rc::new(info)));
-        self.modules.insert(name.to_string(), oid);
-        oid
+    /// `dir/leaf`, a directory without `__init__.py`, as namespace package `name`: an empty
+    /// module whose path is the directory (its submodules are found there).
+    fn load_namespace(&mut self, name: &str, dir: &std::path::Path, leaf: &str) -> Option<Value> {
+        let d = dir.join(leaf);
+        if !d.is_dir() || d.join("__init__.py").exists() {
+            return None;
+        }
+        let ps = d.to_string_lossy().to_string();
+        let (idx, tree) = frontend::parse(name, Some(&ps), String::new()).ok()?;
+        Some(Value::obj(self.make_module(name, Some(&ps), idx, tree)))
     }
 }
 

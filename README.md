@@ -306,7 +306,7 @@ Other options: `--no-entry` (don't analyse uncalled functions with unknown argum
 `--search-path DIR`, `--site-packages DIR`, `--value-depth N`, `--no-rows`, `--no-summaries`.
 
 **VS Code.** Install [rowan from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=Rowan.rowan)
-(the engine is bundled for macOS and Linux): hover over a name to see its value as Python,
+(the engine is bundled for macOS, Linux and Windows): hover over a name to see its value as Python,
 what the code reads of it and the accesses on the line, with a legend of the marks used;
 accesses that may fail are diagnostics. Its source is in `vscode-rowan/`; the
 `.vsix` packages of each version are attached to the

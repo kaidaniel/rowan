@@ -71,12 +71,66 @@ jobs:
         run: node test.js
 
       - name: Upload the binary
-        if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v7
         with:
-          name: rowan-linux
+          name: ${{ matrix.os == 'ubuntu-latest' && 'rowan-linux' || 'rowan-macos' }}
           path: rowan/target/release/rowan
           retention-days: 7
+
+  vsix:
+    # The platform-specific .vsix as a user installs it (v0.1.8 shipped a Linux engine to
+    # macOS: `spawn ENOEXEC`): packed per native target, unpacked, the engine's format checked
+    # against the target, `rowan serve` started through the extension's own code, hovers
+    # checked (vscode-rowan/test_package.js). Windows builds its engine here.
+    name: vsix ${{ matrix.target }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, os: ubuntu-latest, binary: rowan-linux }
+          - { target: darwin-arm64, os: macos-latest, binary: rowan-macos }
+          - { target: win32-x64, os: windows-latest, binary: "" }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Download the engine
+        if: matrix.binary
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.binary }}
+          path: vscode-rowan/bin
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ !matrix.binary }}
+
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ !matrix.binary }}
+        with:
+          workspaces: rowan
+
+      - name: Build the engine (Windows)
+        if: ${{ !matrix.binary }}
+        working-directory: rowan
+        run: |
+          cargo build --release --locked
+          mkdir -p ../vscode-rowan/bin
+          cp target/release/rowan.exe ../vscode-rowan/bin/rowan.exe
+
+      - name: Package the .vsix
+        working-directory: vscode-rowan
+        run: npx --yes @vscode/vsce package --no-dependencies --target ${{ matrix.target }} --out ../rowan-${{ matrix.target }}.vsix
+
+      - name: Unpack, check the engine's format, start it through the extension, hovers
+        run: node vscode-rowan/test_package.js rowan-${{ matrix.target }}.vsix ${{ matrix.target }}
 
   oracle:
     name: runtime oracle

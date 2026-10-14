@@ -1072,8 +1072,15 @@ impl Classification {
     }
 }
 
+/// The note of a key proven only because the code read or tested it before.
+pub const FOUND_BEFORE: &str = "found before";
+
 pub fn classify(row: &Row, k: KeyId) -> Classification {
     if row.definite.contains(k) {
+        // (a key of an open record the program never stored: a read or a test found it)
+        if row.open() && !row.stored.contains(k) {
+            return Classification::with_note(Tier::Proven, FOUND_BEFORE);
+        }
         return Classification::new(Tier::Proven);
     }
     if row.absent.contains(k) {

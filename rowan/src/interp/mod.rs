@@ -1007,10 +1007,12 @@ impl Analyzer {
     }
 
     // ------------------------------------------------------------------ setup
-    fn make_module(&mut self, name: &str, path: Option<&str>, idx: u32, tree: &'static ast::ModModule) -> ObjId {
+    /// A module object (registered under `name`) for a parsed tree; `path` is its file, a
+    /// namespace package's directory, or None (a module made by a model).
+    pub fn make_module(&mut self, name: &str, path: Option<&str>, idx: u32, tree: &'static ast::ModModule) -> ObjId {
         let pkg = match path {
             Some(p) if name == "__main__" => package_of_file(p),
-            Some(p) if p.ends_with("__init__.py") => name.to_string(),
+            Some(p) if p.ends_with("__init__.py") || std::path::Path::new(p).is_dir() => name.to_string(),
             _ => name.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or_default(),
         };
         let info = ModuleInfo { name: name.to_string(), path: path.map(|p| p.to_string()), pkg, idx, tree, scopes: scopemod::analyse(tree) };
@@ -1441,25 +1443,22 @@ impl Analyzer {
         self.rel_file(idx)
     }
 
+    /// The main module's frontend index.
+    pub fn main_idx(&self) -> u32 {
+        self.module_info(self.main_module).idx
+    }
+
     /// The path of module `idx` relative to the main file's directory ("" for the main
     /// module; the file name when it lies elsewhere, the module name when it has no file).
     pub fn rel_file(&self, idx: u32) -> String {
-        if idx == self.module_info(self.main_module).idx {
+        if idx == self.main_idx() {
             return String::new();
         }
         if let Some(f) = self.rel_files.borrow().get(&idx) {
             return f.clone();
         }
-        let canon = |p: &str| std::fs::canonicalize(p).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string());
         let f = match frontend::module_path(idx) {
-            Some(p) => {
-                let main_dir = std::path::Path::new(&canon(&self.filename)).parent().map(|d| d.to_path_buf());
-                let cp = canon(&p);
-                match main_dir.as_ref().and_then(|d| std::path::Path::new(&cp).strip_prefix(d).ok()) {
-                    Some(r) => r.to_string_lossy().to_string(),
-                    None => std::path::Path::new(&p).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or(p),
-                }
-            }
+            Some(p) => self.rel_to_main(&p).unwrap_or_else(|| std::path::Path::new(&p).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or(p)),
             None => frontend::module_name(idx),
         };
         self.rel_files.borrow_mut().insert(idx, f.clone());
@@ -1558,13 +1557,14 @@ impl Analyzer {
             return true;
         }
         let idx = self.module_info(m).idx;
-        let Some(p) = frontend::module_path(idx) else { return false };
+        frontend::module_path(idx).map(|p| !p.contains("site-packages") && self.rel_to_main(&p).is_some()).unwrap_or(false)
+    }
+
+    /// Path `p` relative to the main file's directory, when it lies there or below.
+    fn rel_to_main(&self, p: &str) -> Option<String> {
         let canon = |p: &str| std::fs::canonicalize(p).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string());
-        let main_dir = std::path::Path::new(&canon(&self.filename)).parent().map(|d| d.to_path_buf());
-        match main_dir {
-            Some(d) => std::path::Path::new(&canon(&p)).starts_with(&d) && !p.contains("site-packages"),
-            None => false,
-        }
+        let dir = std::path::Path::new(&canon(&self.filename)).parent()?.to_path_buf();
+        std::path::Path::new(&canon(p)).strip_prefix(&dir).ok().map(|r| r.to_string_lossy().to_string())
     }
 
     /// The work done so far: statements run and objects visited by reachability walks (16 to a
@@ -1740,50 +1740,22 @@ impl Analyzer {
             }
             let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
             for a in params {
-                // (keyword-only parameters are passed by keyword)
-                let kwonly = fparams.kwonlyargs.iter().any(|k| std::ptr::eq(&k.parameter, a));
-                let n_before = args.len();
-                let is_vararg = fparams.vararg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);
-                let is_kwarg = fparams.kwarg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);
-                if is_vararg || is_kwarg {
+                if [&fparams.vararg, &fparams.kwarg].iter().any(|v| v.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false)) {
                     // a caller may pass any arguments here
-                    let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
-                    if is_vararg {
-                        star_args.push(Value::obj(poid));
+                    let v = Value::obj(self.param_source(&fi, a, &mut st));
+                    if fparams.vararg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false) {
+                        star_args.push(v);
                     } else {
-                        star_kwargs.push(Value::obj(poid));
+                        star_kwargs.push(v);
                     }
                     continue;
                 }
-                let pname = s(a.name.id.as_str());
-                if let Some(d) = fi.defaults.get(&pname) {
-                    // the default, or whatever a caller passes
-                    let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
-                    // a number default in a torch module: the parameter (whatever a caller
-                    // passes, the default included) stays a name dims can be written in
-                    if self.torch_modules.contains(&fi.module) && d.pts.is_empty() && d.kv.as_lit().map(intern::key_is_number).unwrap_or(false) {
-                        args.push(Value::obj(poid));
-                        continue;
-                    }
-                    args.push(d.join(&Value::obj(poid)));
-                    if kwonly && args.len() > n_before {
-                        let v = args.pop().unwrap();
-                        kwargs.insert(pname, v);
-                    }
-                    continue;
-                }
-                let mut v = match &a.annotation {
-                    Some(ann) => self.param_from_annotation(ann, &fi, a.name.id.as_str(), &mut st),
-                    None => None,
-                };
-                if v.is_none() {
-                    let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
-                    v = Some(Value::obj(poid));
-                }
-                if kwonly {
-                    kwargs.insert(pname, v.unwrap());
+                let v = self.open_param(&fi, a, false, &mut st);
+                // (keyword-only parameters are passed by keyword)
+                if fparams.kwonlyargs.iter().any(|k| std::ptr::eq(&k.parameter, a)) {
+                    kwargs.insert(s(a.name.id.as_str()), v);
                 } else {
-                    args.push(v.unwrap());
+                    args.push(v);
                 }
             }
             self.entry_scope = None;
@@ -1894,8 +1866,37 @@ impl Analyzer {
     }
 
     /// A declared row for an annotated entry-point parameter (§6.6).
+    /// The unknown a caller passes for parameter `a` of `fi` (a `param F.a` input).
+    fn param_source(&mut self, fi: &FuncInfo, a: &ast::Parameter, st: &mut State) -> ObjId {
+        self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, st, &format!("param {}", a.name.id), "", Ns::Item, vec![])
+    }
+
+    /// Parameter `a` of an entry run: its default or whatever a caller passes (only the
+    /// default with `default_only`), as annotated; a number default in a torch module is not
+    /// joined in (the parameter stays a name dims can be written in).
+    fn open_param(&mut self, fi: &FuncInfo, a: &'static ast::Parameter, default_only: bool, st: &mut State) -> Value {
+        let d = fi.defaults.get(&s(a.name.id.as_str())).cloned();
+        if let (Some(d), true) = (&d, default_only) {
+            return d.clone();
+        }
+        // (with a default, only a torch annotation is taken: an instance for a defaulted
+        // parameter of a user class made runs cost coverage, click 186 -> 151 sites)
+        let ann = a.annotation.as_deref();
+        let given = match ann.and_then(|ann| if d.is_some() { self.t_param(ann, fi, a.name.id.as_str(), st) } else { self.param_from_annotation(ann, fi, a.name.id.as_str(), st) }) {
+            Some(v) => v,
+            None => Value::obj(self.param_source(fi, a, st)),
+        };
+        match d {
+            Some(d) if !(self.torch_modules.contains(&fi.module) && d.pts.is_empty() && d.kv.as_lit().map(intern::key_is_number).unwrap_or(false)) => d.join(&given),
+            _ => given,
+        }
+    }
+
     pub fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
         let node = Self::strip_annotation(ann)?;
+        if let Some(v) = self.t_param(ann, fi, pname, state) {
+            return Some(v);
+        }
         let mut v = self.eval(node, state);
         // (a class imported only for type checkers)
         if let ast::Expr::Name(n) = node {
@@ -2021,40 +2022,23 @@ impl Analyzer {
                 if self.torch_modules.contains(&fi.module) {
                     self.entry_scope = Some(init);
                 }
-                let params: Vec<&ast::Parameter> = scopemod::all_params(params_all).into_iter().skip(1).collect();
                 let mut args = Vec::new();
-                for a in params {
-                    let is_var = params_all.vararg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false)
-                        || params_all.kwarg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);
-                    if is_var {
+                let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
+                for a in scopemod::all_params(params_all).into_iter().skip(1) {
+                    if [&params_all.vararg, &params_all.kwarg].iter().any(|v| v.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false)) {
                         continue;
                     }
-                    let pname = s(a.name.id.as_str());
-                    if let Some(d) = fi.defaults.get(&pname) {
-                        let number = d.pts.is_empty() && d.kv.as_lit().map(intern::key_is_number).unwrap_or(false);
-                        if !self.torch_modules.contains(&fi.module) {
-                            args.push(d.clone());
-                            continue;
-                        }
-                        if !number {
-                            // the default, or whatever a caller passes
-                            let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, state, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
-                            args.push(d.join(&Value::obj(poid)));
-                            continue;
-                        }
+                    // (outside torch modules: the defaults, as a caller that passes nothing)
+                    let v = self.open_param(&fi, a, !self.torch_modules.contains(&fi.module), state);
+                    if params_all.kwonlyargs.iter().any(|k| std::ptr::eq(&k.parameter, a)) {
+                        kwargs.insert(s(a.name.id.as_str()), v);
+                    } else {
+                        args.push(v);
                     }
-                    let v = match &a.annotation {
-                        Some(ann) => self.param_from_annotation(ann, &fi, a.name.id.as_str(), state),
-                        None => None,
-                    };
-                    args.push(match v {
-                        Some(v) => v,
-                        None => Value::obj(self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, state, &format!("param {}", a.name.id), "", Ns::Item, vec![])),
-                    });
                 }
                 self.entry_scope = saved_scope;
                 let fake = if self.torch_modules.contains(&fi.module) { Node::synthetic(fi.node.node().module, frontend::node(ci.node).line) } else { Node::synthetic(fi.node.node().module, fi.node.node().line) };
-                self.call_user(init, Some(Value::obj(inst)), args, IndexMap::new(), vec![], vec![], state, &fake, None, true);
+                self.call_user(init, Some(Value::obj(inst)), args, kwargs, vec![], vec![], state, &fake, None, true);
             }
         }
         // (an instance a caller made may have had any of its methods called since: what they

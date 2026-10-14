@@ -273,7 +273,8 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
     let mut deps: Vec<String> = vec![file.to_string()];
     for (_, &m) in an.modules.iter() {
         if let Some(p) = &an.module_info(m).path {
-            if !deps.contains(p) {
+            // (a namespace package's directory has no text to hash)
+            if !deps.contains(p) && !std::path::Path::new(p).is_dir() {
                 deps.push(p.clone());
             }
         }
