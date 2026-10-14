@@ -357,13 +357,21 @@ impl Analyzer {
             return None;
         }
         let node = Analyzer::strip_annotation(ann)?;
+        let is_str = matches!(node, ruff_python_ast::Expr::Name(n) if n.id.as_str() == "str");
         let number = match node {
             ruff_python_ast::Expr::Name(n) if matches!(n.id.as_str(), "int" | "float" | "bool") => Some(n.id.as_str() != "float"),
+            _ if is_str => None,
             ruff_python_ast::Expr::Name(n) if n.id.as_str() == "Tensor" => None,
             ruff_python_ast::Expr::Attribute(a) if a.attr.as_str() == "Tensor" && matches!(&*a.value, ruff_python_ast::Expr::Name(m) if m.id.as_str() == "torch") => None,
             _ => return None,
         };
         let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), crate::domain::SourceKind::Param, state, &format!("param {}", pname), "", Ns::Item, vec![]);
+        if is_str {
+            if let Some(sy) = self.t_sym_of_obj(poid) {
+                self.m.t_strs.insert(sy);
+            }
+            return Some(Value::obj(poid));
+        }
         match number {
             Some(int) => {
                 self.m.t_numbers.insert(poid, int);
@@ -406,6 +414,8 @@ impl Analyzer {
             let o = v.single()?;
             return match self.kind(o) {
                 Kind::List | Kind::Tuple => self.llen(o, st).map(|k| sh::lit(k as i64)),
+                // (a str parameter: as many items as characters)
+                Kind::Unknown if v.kv.is_bot() => self.t_sym_of_obj(o).filter(|sy| self.m.t_strs.contains(sy)).map(|sy| sh::sdim(sy, 0)),
                 _ => None,
             };
         }
@@ -467,7 +477,7 @@ impl Analyzer {
     }
 
     pub fn t_print_ctx_at(&self, scope: u32, env: &IndexMap<StrId, Value>, st: &State) -> sh::PrintCtx {
-        let mut ctx = sh::PrintCtx { all: false, scope, ..Default::default() };
+        let mut ctx = sh::PrintCtx { all: false, scope, strs: self.m.t_strs.clone(), ..Default::default() };
         if scope != 0 && self.has_obj(scope) && self.kind(scope) == Kind::Function {
             // a closure sees the names of the functions around it
             let mut q = self.func_info(scope).qualname.clone();

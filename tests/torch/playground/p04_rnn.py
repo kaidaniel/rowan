@@ -26,8 +26,8 @@ V: int = len(vocab)
 
 def encode(s: str) -> Tensor:
     out = torch.tensor([idx[c] for c in s], dtype=torch.long, device=device) # (T,)
-    #@shape out: [?]
-    #@todo shape out: [len(s)] (the length of a list comprehension over an unknown str)
+    #@shape out: [len(s)]
+    # (a comprehension over the str s: one item per character)
     return out
 
 

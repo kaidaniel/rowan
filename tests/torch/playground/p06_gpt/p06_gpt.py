@@ -86,8 +86,8 @@ if __name__ == "__main__":
 
     def encode(s: str) -> Tensor:
         out = torch.tensor([idx[c] for c in s], dtype=torch.long, device=device) # (T,)
-        #@shape out: [?]
-        #@todo shape out: [len(s)] (the length of a list comprehension over an unknown str)
+        #@shape out: [len(s)]
+        # (a comprehension over the str s: one item per character)
         return out # rowan gets this as T[*] when I feel like it should be able to get T[?] at least (definitely 1-dimensional)?
 
 

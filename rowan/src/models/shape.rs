@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 // ---------------------------------------------------------------------------
 // interned ids
@@ -1301,6 +1301,8 @@ pub struct PrintCtx {
     pub dim_alias: FxHashMap<DimId, String>,
     /// display names of shape dims (`B` for x.shape[0]): hover text only
     pub atom_names: FxHashMap<AtomId, String>,
+    /// symbols of strs: dim 0 prints as `len(s)`
+    pub strs: FxHashSet<Sym>,
 }
 
 thread_local! {
@@ -1383,7 +1385,9 @@ pub fn atom_text(a: AtomId) -> String {
                 return n;
             }
             let Some(t) = sym_print(s) else { return "?".into() };
-            if needs_parens(&t) {
+            if i == 0 && CTX.with(|c| c.borrow().strs.contains(&s)) {
+                format!("len({})", t)
+            } else if needs_parens(&t) {
                 format!("({}).shape[{}]", t, i)
             } else {
                 format!("{}.shape[{}]", t, i)

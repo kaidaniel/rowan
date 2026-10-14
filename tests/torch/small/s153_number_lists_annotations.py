@@ -18,8 +18,8 @@ idx = {c: i for i, c in enumerate(vocab)}
 
 def encode(s: str):
     out = torch.tensor([idx[c] for c in s])
-    #@shape out: [?]
-    #@todo shape out: [len(s)] (the length of a list comprehension over an unknown str)
+    #@shape out: [len(s)]
+    # (a comprehension over the str s: one item per character)
     return out
 
 
