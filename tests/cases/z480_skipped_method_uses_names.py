@@ -26,3 +26,20 @@ red = c.theme["red"]                             #@ ok red
 #@value red: exactly={1}
 w = c.size[0]
 #@value w: includes={80}
+
+
+class Counter:
+    total = {"n": 0}
+
+    def bump(self, v):
+        a = 1
+        b = 2
+        type(self).total["n"] = v
+
+
+k = Counter()
+k.bump(1)
+k.bump(2)
+k.bump(3)
+tn = Counter.total["n"]
+#@value tn: includes={3}

@@ -106,7 +106,9 @@ impl RecvScan<'_> {
             _ => None,
         };
         match (f, lit) {
-            ("isinstance" | "issubclass" | "type" | "id" | "callable", _) => {}
+            ("isinstance" | "issubclass" | "id" | "callable", _) => {}
+            // (`type(self)` is `self.__class__`)
+            ("type", _) => drop(self.out.loads.insert(s("__class__"))),
             ("getattr" | "hasattr", Some(n)) => drop(self.out.loads.insert(s(&n))),
             ("setattr", Some(n)) => drop(self.out.stores.insert(s(&n))),
             ("delattr", Some(n)) => drop(self.out.deletes.insert(s(&n))),
@@ -203,6 +205,15 @@ impl<'a> Visitor<'a> for RecvScan<'_> {
             _ => walk_expr(self, e),
         }
     }
+}
+
+/// What a skipped method may do to its receiver (`receiver_effects`): the attribute names it
+/// may store and delete, those it uses at all, and the methods that run with the receiver.
+pub struct RecvEffects {
+    pub stores: Vec<KeyId>,
+    pub deletes: Vec<KeyId>,
+    pub used: Vec<KeyId>,
+    pub code: Vec<ObjId>,
 }
 
 /// A slot: (object, namespace, key).
@@ -519,7 +530,7 @@ impl Analyzer {
     /// the attribute names it may store and delete, and all the names it uses on it (what it
     /// can reach through the receiver is under those). None: anything (the receiver escapes,
     /// the class hooks attribute access or has a base rowan does not see, a descriptor).
-    pub fn receiver_effects(&mut self, foid: ObjId, recv: ObjId) -> Option<(Vec<KeyId>, Vec<KeyId>, Vec<KeyId>)> {
+    pub fn receiver_effects(&mut self, foid: ObjId, recv: ObjId) -> Option<RecvEffects> {
         let cls = self.instance_class(recv)?;
         let mro = self.mro(cls);
         if mro.iter().any(|c| self.class_info_opt(*c).is_none_or(|ci| ci.open_base)) || ["__getattr__", "__getattribute__", "__setattr__", "__delattr__"].iter().any(|h| self.class_lookup(cls, h).is_some()) {
@@ -571,7 +582,9 @@ impl Analyzer {
             ks.sort_unstable();
             ks
         };
-        Some((keys(stores), keys(deletes), keys(used)))
+        let mut code: Vec<ObjId> = done.into_iter().collect();
+        code.sort_unstable();
+        Some(RecvEffects { stores: keys(stores), deletes: keys(deletes), used: keys(used), code })
     }
 
     /// The attribute names a method's own code stores on its receiver on every way it

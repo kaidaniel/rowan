@@ -502,9 +502,20 @@ impl Analyzer {
             if let Some((_, n, used)) = self.havoc_guard.as_mut().filter(|(g, _, _)| *g == o) {
                 *n += 1;
                 if *n == 1 {
-                    // (its code reaches the receiver's attributes only by the names it uses)
+                    // (its code reaches the receiver's attributes only by the names it uses:
+                    // its own, or its class's data)
+                    let used = used.clone();
+                    let mro = self.instance_class(o).map(|c| self.mro(c)).unwrap_or_default();
                     for k in used.iter() {
+                        // (`self.__class__` / `type(self)`: the class, and all it reaches)
+                        if intern::key_as_str(*k).as_deref() == Some("__class__") {
+                            work.extend(mro.first().copied());
+                        }
                         work.extend(state.slot(o, Ns::Attr, *k).pts.iter());
+                        for c in &mro {
+                            let v = if state.has_slot(*c, Ns::Attr, *k) { state.slot(*c, Ns::Attr, *k) } else { self.cls_slots.get(&(*c, Ns::Attr, *k)).cloned().unwrap_or_default() };
+                            work.extend(v.pts.iter().filter(|x| self.kind(*x) != Kind::Function));
+                        }
                     }
                 }
                 continue;
@@ -1272,11 +1283,11 @@ impl Analyzer {
         let recv = self_v.and_then(|v| v.single()).filter(|o| self.kind(*o) == Kind::Instance);
         let eff = recv.and_then(|o| Some((o, self.receiver_effects(foid, o)?)));
         let must: Vec<KeyId> = match &eff {
-            Some((_, (_, deletes, _))) if fi_is_method(self, foid) => self.must_stores(foid).into_iter().filter(|k| !deletes.contains(k)).collect(),
+            Some((_, e)) if fi_is_method(self, foid) => self.must_stores(foid).into_iter().filter(|k| !e.deletes.contains(k)).collect(),
             _ => Vec::new(),
         };
-        if let Some((o, (_, _, used))) = &eff {
-            self.havoc_guard = Some((*o, 0, std::rc::Rc::from(used.as_slice())));
+        if let Some((o, e)) = &eff {
+            self.havoc_guard = Some((*o, 0, std::rc::Rc::from(e.used.as_slice())));
         }
         let walked = self.havoc_walked;
         let r = self.unknown_call(q, self_v, args, kwargs, star_args, star_kwargs, state, node);
@@ -1284,10 +1295,11 @@ impl Analyzer {
         self.skipped_sites.insert(site);
         let mut roots = vec![foid];
         roots.append(&mut self.havoc_code);
-        roots.extend(eff.as_ref().and_then(|(o, _)| self.instance_class(*o)));
+        // (the methods that run with the receiver: what its code reaches through it)
+        roots.extend(eff.iter().flat_map(|(_, e)| e.code.iter().copied()));
         let rid = r.single().unwrap_or(0);
         self.follow_code(roots, rid, site, state);
-        if let Some((o, (stores, deletes, _))) = eff {
+        if let Some((o, super::effects::RecvEffects { stores, deletes, .. })) = eff {
             let reached_otherwise = self.havoc_guard.take().is_some_and(|(_, n, _)| n > 1);
             if reached_otherwise {
                 let walk = self.havoc_walk();
