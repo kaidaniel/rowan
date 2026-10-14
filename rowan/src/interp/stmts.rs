@@ -136,32 +136,43 @@ impl Analyzer {
                 }
             }
             ast::Stmt::AugAssign(a) => {
-                let cur = self.eval(&a.target, state);
-                let rhs = self.eval(&a.value, state);
                 let n = frontend::node(a);
-                // `xs += ys` on a list extends it in place (other names see it)
-                if a.op == ast::Operator::Add && !cur.pts.is_empty() && cur.pts.iter().all(|o| self.kind(o) == Kind::List) {
-                    let m = self.method_value("list.extend", &cur);
-                    self.call_value(&m, &n, None, state, Some(vec![rhs]));
-                    self.bind_target(&a.target, &cur, state);
-                    return;
-                }
-                // `d |= e` on a dict updates it in place; `s |= t` (`&=`, `-=`, `^=`) on a set too
+                let tn = frontend::node(&*a.target);
+                // (the target's object and key are evaluated once: Python reads and stores
+                // through them; a tensor's subscript goes through the expression)
+                let place: Option<(Value, Result<Value, &str>)> = match &*a.target {
+                    ast::Expr::Subscript(sub) => Some((self.eval(&sub.value, state), Ok(self.eval_key(&sub.slice, state)))).filter(|(o, _)| !crate::models::torch::is_tensor(o)),
+                    ast::Expr::Attribute(at) => Some((self.eval(&at.value, state), Err(at.attr.id.as_str()))),
+                    _ => None,
+                };
+                let cur = match &place {
+                    Some((o, Ok(k))) => self.load_item(o, Ns::Item, k, &tn, state, true),
+                    Some((o, Err(name))) => self.load_attr(o, name, &tn, state, true),
+                    None => self.eval(&a.target, state),
+                };
+                let rhs = self.eval(&a.value, state);
+                let store = |an: &mut Analyzer, v: &Value, state: &mut State| match &place {
+                    Some((o, Ok(k))) => an.store_item(o, Ns::Item, k, v, &tn, state),
+                    Some((o, Err(name))) => an.store_attr(o, name, v, &tn, state),
+                    None => an.bind_target(&a.target, v, state),
+                };
+                // `xs += ys` on a list extends it in place (other names see it); `d |= e` on a
+                // dict updates it in place; `s |= t` (`&=`, `-=`, `^=`) on a set too
                 if !cur.pts.is_empty() {
-                    let all_dict = cur.pts.iter().all(|o| self.kind(o) == Kind::Dict);
-                    let all_set = cur.pts.iter().all(|o| self.kind(o) == Kind::Set);
-                    let m = match (a.op, all_dict, all_set) {
-                        (ast::Operator::BitOr, true, _) => Some("dict.update"),
-                        (ast::Operator::BitOr, _, true) => Some("set.update"),
-                        (ast::Operator::BitAnd, _, true) => Some("set.intersection_update"),
-                        (ast::Operator::Sub, _, true) => Some("set.difference_update"),
-                        (ast::Operator::BitXor, _, true) => Some("set.symmetric_difference_update"),
+                    let all = |an: &Analyzer, k: Kind| cur.pts.iter().all(|o| an.kind(o) == k);
+                    let m = match a.op {
+                        ast::Operator::Add if all(self, Kind::List) => Some("list.extend"),
+                        ast::Operator::BitOr if all(self, Kind::Dict) => Some("dict.update"),
+                        ast::Operator::BitOr if all(self, Kind::Set) => Some("set.update"),
+                        ast::Operator::BitAnd if all(self, Kind::Set) => Some("set.intersection_update"),
+                        ast::Operator::Sub if all(self, Kind::Set) => Some("set.difference_update"),
+                        ast::Operator::BitXor if all(self, Kind::Set) => Some("set.symmetric_difference_update"),
                         _ => None,
                     };
                     if let Some(m) = m {
                         let mv = self.method_value(m, &cur);
                         self.call_value(&mv, &n, None, state, Some(vec![rhs]));
-                        self.bind_target(&a.target, &cur, state);
+                        store(self, &cur, state);
                         return;
                     }
                 }
@@ -172,23 +183,18 @@ impl Analyzer {
                 }
                 // `d[k] += v` with an unknown key on a closed dict: the load raised unless k was
                 // one of its keys, so the store adds none
-                if let ast::Expr::Subscript(sub) = &*a.target {
-                    if matches!(&*sub.value, ast::Expr::Name(_) | ast::Expr::Attribute(_)) && matches!(&*sub.slice, ast::Expr::Name(_) | ast::Expr::Attribute(_) | ast::Expr::Subscript(_)) {
-                        let mut probe = state.copy();
-                        let obj = self.eval(&sub.value, &mut probe);
-                        let key = self.eval_key(&sub.slice, &mut probe);
-                        let plain = !obj.pts.is_empty() && obj.kv.is_bot() && obj.pts.iter().all(|o| self.kind(o) == Kind::Dict && !self.m.dd_factories.contains_key(&o) && !self.m.counters.contains(&o) && !crate::models::pandas::is_series_obj(self, o) && { let r = state.row(o, Ns::Item); r.closed() && !r.present.is_empty() });
-                        if plain && !key.kv.is_literal() {
-                            for o in obj.pts.iter() {
-                                for k in state.row(o, Ns::Item).present.iter() {
-                                    state.set_slot(o, Ns::Item, k, res.clone(), false);
-                                }
+                if let Some((obj, Ok(key))) = &place {
+                    let plain = !obj.pts.is_empty() && obj.kv.is_bot() && obj.pts.iter().all(|o| self.kind(o) == Kind::Dict && !self.m.dd_factories.contains_key(&o) && !self.m.counters.contains(&o) && !crate::models::pandas::is_series_obj(self, o) && { let r = state.row(o, Ns::Item); r.closed() && !r.present.is_empty() });
+                    if plain && !key.kv.is_literal() {
+                        for o in obj.pts.iter() {
+                            for k in state.row(o, Ns::Item).present.iter() {
+                                state.set_slot(o, Ns::Item, k, res.clone(), false);
                             }
-                            return;
                         }
+                        return;
                     }
                 }
-                self.bind_target(&a.target, &res, state);
+                store(self, &res, state);
             }
             ast::Stmt::Return(r) => {
                 let v = match &r.value {
