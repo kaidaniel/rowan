@@ -924,33 +924,9 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
     }
-    let mut classes: Vec<u32> = Vec::new();
-    for o in cv.pts.iter() {
-        match an.kind(o) {
-            Kind::Class | Kind::External => classes.push(o),
-            Kind::Tuple => {
-                for (_, cs) in st.slots_of(o) {
-                    classes.extend(cs.pts.iter().filter(|x| matches!(an.kind(*x), Kind::Class | Kind::External)));
-                }
-            }
-            _ => return Value::data("bool"),
-        }
-    }
-    if classes.is_empty() {
-        return Value::data("bool");
-    }
-    // a `Protocol` class (runtime_checkable): an instance whose class defines all its members
-    // is one; anything else may have them as attributes
-    let protocols: Vec<Vec<String>> = classes.iter().filter_map(|cls| protocol_members(an, *cls)).collect();
-    if !protocols.is_empty() {
-        let has_all = |an: &Analyzer, o: u32, ms: &Vec<String>| an.kind(o) == Kind::Instance && an.instance_class(o).is_some_and(|ic| ms.iter().all(|m| an.class_lookup(ic, m).is_some()));
-        if !v.kv.is_bot() || v.pts.is_empty() || !v.pts.iter().all(|o| protocols.iter().any(|ms| has_all(an, o, ms))) {
-            return Value::data("bool");
-        }
-        return Value::lit(intern::key_bool(true));
-    }
-    let mut verdicts: Vec<bool> = Vec::new();
+    let Some(classes) = an.isinstance_classes(cv, st) else { return Value::data("bool") };
     let builtin = |an: &Analyzer, cls: u32| -> Option<String> { if an.kind(cls) == Kind::External { Some(an.external_qual(cls).rsplit('.').next().unwrap_or("").to_string()) } else { None } };
+    let mut verdicts: Vec<bool> = Vec::new();
     // literal values (with or without objects: both parts count)
     if v.pts.is_empty() || (v.kv.is_literal() && !crate::domain::kv_literals(&v.kv).is_empty()) {
         let lits = crate::domain::kv_literals(&v.kv);
@@ -973,7 +949,7 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             });
             // (an abstract class like numbers.Number or collections.abc.Hashable: not decided)
             const KNOWN: &[&str] = &["str", "bool", "int", "float", "NoneType", "tuple", "bytes", "Decimal", "Fraction", "frozenset", "object", "list", "dict", "set", "complex", "bytearray", "type", "range", "defaultdict", "OrderedDict", "Counter", "deque"];
-            if kind == "?" || classes.iter().any(|cls| builtin(an, *cls).map(|b| !KNOWN.contains(&b.as_str())).unwrap_or(false)) {
+            if kind == "?" || classes.iter().any(|cls| builtin(an, *cls).map(|b| !KNOWN.contains(&b.as_str())).unwrap_or(false) || protocol_members(an, *cls).is_some()) {
                 return Value::data("bool");
             }
             let hit = classes.iter().any(|cls| match builtin(an, *cls) {
@@ -984,27 +960,10 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     for o in v.pts.iter() {
-        let k = an.kind(o);
-        if matches!(k, Kind::Unknown) {
-            return Value::data("bool");
+        match an.instance_of(o, &classes) {
+            Some(b) => verdicts.push(b),
+            None => return Value::data("bool"),
         }
-        // (an instance of a class deriving from a builtin / library class — `class C(dict)` —
-        // is an instance of it too: not decided against those)
-        if k == Kind::Instance && classes.iter().any(|cls| builtin(an, *cls).is_some_and(|b| b != "object")) && an.instance_class(o).is_some_and(|ic| an.mro(ic).iter().any(|c| an.class_info_opt(*c).is_some_and(|ci| ci.open_base || ci.lib.dict_base))) {
-            return Value::data("bool");
-        }
-        let hit = classes.iter().any(|cls| match builtin(an, *cls) {
-            Some(b) => match b.as_str() {
-                "dict" | "defaultdict" | "OrderedDict" | "Counter" => matches!(k, Kind::Dict),
-                "list" => k == Kind::List,
-                "tuple" => k == Kind::Tuple,
-                "set" | "frozenset" => k == Kind::Set,
-                "object" => true,
-                _ => false,
-            },
-            None => k == Kind::Instance && an.instance_class(o).map(|ic| an.is_subclass(ic, *cls)).unwrap_or(false),
-        });
-        verdicts.push(hit);
     }
     if verdicts.iter().all(|b| *b) {
         Value::lit(intern::key_bool(true))

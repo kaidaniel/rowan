@@ -201,8 +201,10 @@ impl Analyzer {
             ast::Expr::If(i) => {
                 let sp = self.split(&i.test, state.copy());
                 let (mut a, mut b) = (sp.t, sp.f);
+                // (a branch that raises gives no value)
                 let va = if a.reachable { self.eval(&i.body, &mut a) } else { Value::new() };
                 let vb = if b.reachable { self.eval(&i.orelse, &mut b) } else { Value::new() };
+                let (va, vb) = (if a.reachable { va } else { Value::new() }, if b.reachable { vb } else { Value::new() });
                 state.replace_with(a.join(&mut b));
                 va.join(&vb)
             }
@@ -419,12 +421,7 @@ impl Analyzer {
                     return self.none_v.clone();
                 }
                 // (a bare `yield` yields None)
-                if y.value.is_some() {
-                    self.yield_value(v, state, (y as *const _ as usize, 0));
-                } else {
-                    let nv = self.none_v.clone();
-                    self.yield_value(nv, state, (y as *const _ as usize, 0));
-                }
+                self.yield_value(v, state, (y as *const _ as usize, 0));
                 // the value of the `yield` expression: what `send` passes, None when iterated
                 if crate::frontend::any_send_call() {
                     Value::data("yield")
@@ -534,6 +531,46 @@ impl Analyzer {
         self.cm_hook = Some(h);
     }
 
+    /// After a yield whose consumer runs code before it asks for the next item: what the
+    /// generator was given and has yielded may have changed (for the generator only: the
+    /// consumer's own run of that code is analysed where it is).
+    fn consumer_between(&mut self, gid: ObjId, state: &mut State) {
+        let Some(changes) = self.gen_havoc.get(&gid).cloned().filter(|c| !c.is_empty()) else { return };
+        let site = intern::s("code run between the items");
+        let rid = self.any_object(state);
+        // (an object that code changed in a way not one key: any of its facts, the objects
+        // it holds aside: those it changed are listed too)
+        let whole: Vec<ObjId> = changes.iter().filter(|c| c.1.is_none()).map(|c| c.0).collect();
+        self.change_objects(&whole, rid, site, state);
+        // (a key that code stored: any value, maybe stored)
+        for (o, sk) in changes.iter().filter_map(|(o, k)| k.map(|k| (*o, k))) {
+            let v = state.slot(o, sk.0, sk.1).join(&Value::obj(rid));
+            state.set_slot(o, sk.0, sk.1, v, false);
+            let r = state.row(o, sk.0).store(sk.1, false);
+            state.set_row(o, sk.0, r);
+        }
+    }
+
+    /// Code `site` may have changed these objects in any way (not the objects they hold): any
+    /// key, any value (`rid`), any length.
+    pub fn change_objects(&mut self, objs: &[ObjId], rid: ObjId, site: intern::StrId, state: &mut State) {
+        for &o in objs {
+            for ns in [Ns::Item, Ns::Attr] {
+                if state.has_row(o, ns) {
+                    let r = state.row(o, ns).mutate(site);
+                    state.set_row(o, ns, r);
+                }
+            }
+            for ((ns, k), v) in state.slots_of(o) {
+                state.set_slot(o, ns, k, v.join(&Value::obj(rid)), false);
+            }
+            if state.elems.get(&o).is_some() {
+                state.elems.insert(o, DATA);
+            }
+            self.set_llen(o, state, None);
+        }
+    }
+
     /// `site`: the yield (and the item of a `yield from`), which with the unrolled loop
     /// positions names the suspension point.
     fn yield_value(&mut self, v: Value, state: &mut State, site: (usize, usize)) -> Option<ObjId> {
@@ -541,6 +578,9 @@ impl Analyzer {
         let ctx = self.frame().ctx.clone();
         let label = format!("generator {}", self.frame().label);
         let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &label, Payload::None);
+        if let Some(r) = self.gen_reads.iter_mut().rev().find(|r| r.0 == gid) {
+            r.1 = true;
+        }
         // a fresh generator list (no yield yet in this activation) starts empty
         let fresh = !state.has_slot(gid, Ns::Elem, STAR);
         // (lengths that were one of a few: one more each, after this item)
@@ -612,6 +652,7 @@ impl Analyzer {
             let mut h = here;
             last.1 = last.1.join(&mut h);
         }
+        self.consumer_between(gid, state);
         Some(gid)
     }
 
@@ -1621,6 +1662,10 @@ impl Analyzer {
     // comprehensions ---------------------------------------------------------
     /// Run a comprehension's generators (`limit`: the most known items a generator unrolls).
     fn comp(&mut self, gens: &'static [ast::Comprehension], limit: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
+        self.with_gen_restart(state, true, &mut |an, st| an.comp_scoped(gens, limit, st, body, own));
+    }
+
+    fn comp_scoped(&mut self, gens: &'static [ast::Comprehension], limit: usize, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), own: ObjId) {
         let mut names: Vec<intern::StrId> = gens.iter().flat_map(|g| names_in(&g.target)).map(|n| s(&n)).collect();
         names.sort_unstable();
         names.dedup();
@@ -1652,6 +1697,7 @@ impl Analyzer {
         let itv = self.eval(&g.iter, state);
         let exhaust_after = itv.clone();
         let gn = frontend::node(&g.iter);
+        self.force_gen(&itv, state, true);
         let it = self.iterate(&itv, &gn, state);
         let understood = g.ifs.iter().all(|c| cond_is_exclusion(c, &g.target));
         if let Some(items) = &it.items {
@@ -1698,7 +1744,7 @@ impl Analyzer {
             }
         }
         let mut s2 = state.copy();
-        let mark0 = self.objects.len() as ObjId;
+        let mark0 = self.serial;
         let vmark = self.verdicts.len();
         self.comp_run_one(g, gens, i, limit, &elem, &mut s2, body, understood, own);
         if it.exhaustive && understood && s2.reachable {
@@ -1710,7 +1756,7 @@ impl Analyzer {
         // it builds: the next one starts from the same state, one pass is the fixpoint)
         // (the element itself narrowed by a read is not a change the next element sees)
         let elem_objs = elem.flat().pts;
-        let older = |o: ObjId| o < mark0 && o != own && !elem_objs.contains(o) && !self.obj(o).iter_elem;
+        let older = |o: ObjId| self.objects[o as usize].born < mark0 && o != own && !elem_objs.contains(o) && !self.obj(o).iter_elem;
         let fp = s2.footprint(state);
         // (the comprehension's own variables aside)
         let own_var = |n: &intern::StrId| self.frame().comp_names.iter().any(|ns| ns.contains(n));

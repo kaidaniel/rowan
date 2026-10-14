@@ -77,7 +77,10 @@ impl Analyzer {
         let last = b.values.len() - 1;
         for (i, e) in b.values.iter().enumerate() {
             if i == last && !test {
-                v = v.join(&self.eval(e, &mut st));
+                let ev = self.eval(e, &mut st);
+                if st.reachable {
+                    v = v.join(&ev);
+                }
                 break;
             }
             let sp = self.split(e, st);
@@ -85,8 +88,10 @@ impl Analyzer {
             if i == last {
                 v = v.join(&sp.v);
             } else if stop.reachable {
-                // (what ends it here is a value of that truth: `x and y` is x only when x is falsy)
-                v = v.join(&truth_narrowed(&sp.v, !is_and).unwrap_or(sp.v));
+                // (what ends it here is a value of that truth: `x and y` is x only when x is
+                // falsy; a bool is that bool)
+                let is_bool = sp.v.pts.is_empty() && matches!(sp.v.kv, KeyVal::Data(d) if &*intern::str_get(d) == "bool");
+                v = v.join(&if is_bool { Value::lit(intern::key_bool(!is_and)) } else { truth_narrowed(&sp.v, !is_and).unwrap_or(sp.v) });
             }
             if stop.reachable {
                 stops = Some(match stops.take() {
@@ -447,122 +452,100 @@ impl Analyzer {
         }
     }
 
-    fn kinds_for_external(q: &str, strict: bool) -> Option<Vec<Kind>> {
-        Some(match q {
-            "dict" | "Mapping" | "MutableMapping" => vec![Kind::Dict, Kind::Unknown],
-            "list" => vec![Kind::List],
-            "tuple" => vec![Kind::Tuple, Kind::Pair],
-            "set" | "frozenset" => vec![Kind::Set],
-            "str" | "int" | "float" | "bool" | "bytes" => vec![],
-            "DataFrame" => vec![Kind::Frame],
-            "Series" if !strict => vec![Kind::Series],
-            "Sequence" if !strict => vec![Kind::List, Kind::Tuple],
-            "Iterable" if !strict => vec![Kind::List, Kind::Tuple, Kind::Set, Kind::Dict, Kind::Unknown, Kind::View],
-            _ => {
-                if strict {
-                    if q.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                        return None;
-                    }
-                    vec![]
-                } else {
-                    return None;
-                }
-            }
-        })
-    }
-
     pub fn narrow_isinstance_value(&mut self, cur: &Value, cls_expr: &'static ast::Expr, truth: bool, state: &mut State, store: StoreTarget) {
         let Some(cv) = self.traced(cls_expr) else { return };
-        let mut classes: Vec<u32> = Vec::new();
-        let mut kinds: Vec<Kind> = Vec::new();
-        let mut star = false;
-        // an external class we know nothing about: still never a base of a user class whose
-        // whole hierarchy is known (unless it is an ABC / protocol checked by structure)
-        let mut star_structural = false;
-        // (builtin classes tested, alone or in a tuple)
-        let mut ext_classes: Vec<u32> = Vec::new();
-        // (some builtin / library class is tested, alone or in a tuple)
-        let mut ext_tested = false;
-        for c in cv.pts.iter() {
-            match self.kind(c) {
-                Kind::Class => classes.push(c),
-                Kind::External => {
-                    ext_classes.push(c);
-                    ext_tested = true;
-                    let q = self.external_qual(c);
-                    let q = q.rsplit('.').next().unwrap_or("").to_string();
-                    let full = self.external_qual(c);
-                    match Self::kinds_for_external(&q, false) {
-                        Some(ks) => kinds.extend(ks),
-                        None => {
-                            star = true;
-                            star_structural |= is_structural_qual(&full);
-                        }
-                    }
-                }
-                Kind::Tuple | Kind::List => {
-                    let n = self.llen(c, state).unwrap_or(0);
-                    for i in 0..n {
-                        let sub = state.slot(c, Ns::Pos, intern::key_int(i as i64));
-                        for c2 in sub.pts.iter() {
-                            match self.kind(c2) {
-                                Kind::Class => classes.push(c2),
-                                Kind::External => {
-                                    ext_tested = true;
-                                    let q = self.external_qual(c2);
-                                    let q = q.rsplit('.').next().unwrap_or("").to_string();
-                                    let full = self.external_qual(c2);
-                                    match Self::kinds_for_external(&q, true) {
-                                        Some(ks) => kinds.extend(ks),
-                                        None => {
-                                            star = true;
-                                            star_structural |= is_structural_qual(&full);
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                _ => return,
-            }
-        }
-        // (a Protocol class is checked by structure too)
-        if star && (star_structural) || classes.iter().any(|c| crate::models::protocol_members(self, *c).is_some()) {
-            return;
-        }
-        let mut keep: Vec<u32> = Vec::new();
-        for oid in cur.pts.iter() {
-            let m: Option<bool> = match self.kind(oid) {
-                Kind::Instance => match self.instance_class(oid) {
-                    None => None,
-                    Some(pc) if classes.iter().any(|c| self.is_subclass(pc, *c)) || classes.contains(&pc) => Some(true),
-                    Some(pc) if star && !self.hierarchy_closed(pc) => None,
-                    // (a class deriving from a builtin / library class — `class C(dict)` — is an
-                    // instance of it: undecided against such classes)
-                    Some(pc) if ext_tested && self.mro(pc).iter().any(|c| self.class_info_opt(*c).is_some_and(|ci| ci.open_base || ci.lib.dict_base)) => None,
-                    Some(_) => Some(false),
-                },
-                _ if star => None,
-                Kind::Unknown => None,
-                k => Some(kinds.contains(&k)),
-            };
-            if m.is_none() || m == Some(truth) {
-                keep.push(oid);
-            }
-        }
+        let Some(classes) = self.isinstance_classes(&cv, state) else { return };
+        let keep: Vec<u32> = cur.pts.iter().filter(|o| self.instance_of(*o, &classes) != Some(!truth)).collect();
         let new_pts = ObjSet::from_vec(keep);
         if new_pts == cur.pts {
             return;
         }
-        if new_pts.is_empty() && (truth || cur.kv.is_bot()) {
-            if cur.kv.is_bot() {
-                state.reachable = false;
-                return;
-            }
+        if new_pts.is_empty() && cur.kv.is_bot() {
+            state.reachable = false;
+            return;
         }
         self.store_narrowed(&store, Value::with_kv(new_pts, cur.kv.clone()), state);
+    }
+
+    /// The classes an `isinstance` test names (a class, or a tuple of them); None when it is
+    /// something else.
+    pub fn isinstance_classes(&self, cv: &Value, state: &State) -> Option<Vec<u32>> {
+        let mut out: Vec<u32> = Vec::new();
+        for o in cv.pts.iter() {
+            match self.kind(o) {
+                Kind::Class | Kind::External => out.push(o),
+                Kind::Tuple | Kind::List => {
+                    for (_, cs) in state.slots_of(o) {
+                        out.extend(cs.pts.iter().filter(|x| matches!(self.kind(*x), Kind::Class | Kind::External)));
+                    }
+                }
+                _ => return None,
+            }
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// Is object `o` an instance of one of `classes` (None: not known)? For both the value of
+    /// an `isinstance` test and what it narrows.
+    pub fn instance_of(&self, o: u32, classes: &[u32]) -> Option<bool> {
+        let k = if crate::models::pandas::is_series_obj(self, o) { Kind::Series } else { self.kind(o) };
+        if k == Kind::Unknown {
+            return None;
+        }
+        let per: Vec<Option<bool>> = classes.iter().map(|c| self.instance_of_one(o, k, *c)).collect();
+        if per.contains(&Some(true)) {
+            Some(true)
+        } else if per.iter().all(|x| *x == Some(false)) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    fn instance_of_one(&self, o: u32, k: Kind, cls: u32) -> Option<bool> {
+        if self.kind(cls) == Kind::Class {
+            // (a Protocol: an instance whose class defines all its members is one; anything
+            // else may have them as attributes)
+            if let Some(ms) = crate::models::protocol_members(self, cls) {
+                let has_all = k == Kind::Instance && self.instance_class(o).is_some_and(|ic| ms.iter().all(|m| self.class_lookup(ic, m).is_some()));
+                return has_all.then_some(true);
+            }
+            return if k == Kind::Instance { Some(self.instance_class(o).is_some_and(|ic| ic == cls || self.is_subclass(ic, cls))) } else { Some(false) };
+        }
+        let full = self.external_qual(cls);
+        let b = full.rsplit('.').next().unwrap_or("");
+        let structural = is_structural_qual(&full);
+        if b == "object" {
+            return Some(true);
+        }
+        if k == Kind::Instance {
+            // (a class deriving from a builtin / library class, or one an ABC may recognise by
+            // its methods: not decided)
+            let ic = self.instance_class(o)?;
+            let open = self.mro(ic).iter().any(|c| self.class_info_opt(*c).is_some_and(|ci| ci.open_base || ci.lib.dict_base));
+            return (!open && !structural).then_some(false);
+        }
+        let container = matches!(k, Kind::Dict | Kind::List | Kind::Tuple | Kind::Pair | Kind::Set | Kind::Frame | Kind::Series);
+        match b {
+            "dict" => container.then_some(k == Kind::Dict),
+            // (a dict object may be one of these)
+            "defaultdict" | "OrderedDict" | "Counter" | "deque" | "UserDict" | "ChainMap" if matches!(k, Kind::Dict | Kind::List) => None,
+            "list" => container.then_some(k == Kind::List),
+            "tuple" => container.then_some(matches!(k, Kind::Tuple | Kind::Pair)),
+            "set" | "frozenset" => container.then_some(k == Kind::Set),
+            "DataFrame" => container.then_some(k == Kind::Frame),
+            "Series" => container.then_some(k == Kind::Series),
+            "Iterable" | "Collection" | "Container" | "Sized" if structural => container.then_some(true),
+            "Mapping" | "MutableMapping" if structural => container.then_some(k == Kind::Dict),
+            "Sequence" if structural => container.then_some(matches!(k, Kind::List | Kind::Tuple | Kind::Pair)),
+            "MutableSequence" if structural => container.then_some(k == Kind::List),
+            "Set" | "AbstractSet" | "MutableSet" if structural => container.then_some(k == Kind::Set),
+            // (no builtin container is a library class's instance; an ABC's or a protocol's
+            // it may be; functions and modules are no plain value's)
+            _ if container && !structural => Some(false),
+            "str" | "int" | "float" | "bool" | "bytes" | "NoneType" | "complex" | "bytearray" if matches!(k, Kind::Function | Kind::Bound | Kind::Module) => Some(false),
+            _ => None,
+        }
     }
 
     /// A user class whose bases are all user classes (or `object`), transitively.
@@ -898,6 +881,6 @@ fn membership_record(right: &'static ast::Expr) -> &'static ast::Expr {
     }
 }
 
-fn is_structural_qual(q: &str) -> bool {
+pub fn is_structural_qual(q: &str) -> bool {
     q.starts_with("collections.abc") || q.starts_with("typing") || q.starts_with("abc.") || q.starts_with("numbers") || q.starts_with("os.PathLike")
 }

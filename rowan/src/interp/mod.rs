@@ -461,6 +461,21 @@ pub struct GenEffects {
     pub join: State,
 }
 
+/// What code changed of an object: one stored key, or anything (None).
+pub type Change = (ObjId, Option<crate::state::SlotKey>);
+
+/// A generator run whole for a consumer that runs code between its items: the state after
+/// the run, what the run changed, what it was given.
+pub struct GenWatch {
+    pub gid: ObjId,
+    pub after: State,
+    pub own: rustc_hash::FxHashSet<ObjId>,
+    pub reads: rustc_hash::FxHashSet<Change>,
+    /// the budgets spent before the run (a run again of the code gets them back)
+    pub budget: std::rc::Rc<FxHashMap<usize, usize>>,
+    pub roots: Vec<Value>,
+}
+
 /// A generator call whose body has not run: it runs at the first consumption, from the state
 /// there (`force_gen`), in the call's own site and context, so the generator object is the same.
 pub struct LazyGen {
@@ -757,6 +772,9 @@ pub struct Analyzer {
     pub rec_hit: FxHashSet<(ObjId, String)>,
     pub rec_entry: FxHashMap<(ObjId, String), (Option<Value>, Vec<Value>, IndexMap<StrId, Value>)>,
     pub rec_widened: FxHashSet<(ObjId, String)>,
+    /// per running activation: the heap it started from, that heap grown by the heaps its
+    /// recursive calls were made in (on older objects they reach), and its birth mark
+    pub rec_heap: FxHashMap<(ObjId, String), (std::rc::Rc<State>, Option<State>, u64)>,
     pub loop_stack: Vec<LoopCtx>,
     /// the finally blocks of the running `try` statements: (`loop_stack` depth at the try,
     /// the block, not running yet): a `break` / `continue` runs those of its loop first
@@ -777,6 +795,19 @@ pub struct Analyzer {
     pub catching_depth: u32,
     /// generators made but not run yet: the call that made each (`force_gen`)
     pub lazy_gens: FxHashMap<ObjId, std::rc::Rc<LazyGen>>,
+    /// generators run whole for a consumer that runs code between their items: (generator,
+    /// the state after its run, what it was given and yields) — see `with_gen_restart`
+    pub gen_watch: Vec<GenWatch>,
+    /// what the running `for` statements iterate (`gen_used_up`)
+    pub for_iters: Vec<crate::domain::ObjSet>,
+    /// running generator activations: whether they yielded, and what they read since (an
+    /// object's key, or the whole object) — what code between their items may change for them
+    pub gen_reads: Vec<(ObjId, bool, rustc_hash::FxHashSet<Change>)>,
+    /// the reads of the last generator run (`force_gen` takes them)
+    pub gen_last_reads: Option<rustc_hash::FxHashSet<Change>>,
+    /// generators whose consumer changes objects they reach: those objects, changed for the
+    /// generator at each of its yields (`consumer_between`)
+    pub gen_havoc: FxHashMap<ObjId, Vec<Change>>,
     /// the call site and context of the generator `force_gen` is running
     pub force_at: Option<(String, String, bool)>,
     /// a generator's effects on older objects, per item: see `set_cursor`
@@ -1465,6 +1496,7 @@ impl Analyzer {
     }
 
     pub fn verdict(&mut self, node: &Node, key: KeyId, cls: &Classification, oid: ObjId, ns: Ns, file_override: Option<&str>, text_override: Option<&str>) {
+        self.gen_read(oid, Some((ns, key)));
         if matches!(cls.tier, Tier::Map) || self.quiet || self.quiet_records {
             return;
         }
@@ -1515,6 +1547,15 @@ impl Analyzer {
     /// A verdict on an access the program guards (a try handling the failure): recorded for
     /// the golden harness and the hover, never a diagnostic.
     /// Forget the verdicts recorded since `mark` (a run whose states a later run supersedes).
+    /// A running generator that yielded reads `o` (one key, or all of it).
+    pub fn gen_read(&mut self, o: ObjId, k: Option<crate::state::SlotKey>) {
+        for (_, yielded, reads) in self.gen_reads.iter_mut() {
+            if *yielded {
+                reads.insert((o, k));
+            }
+        }
+    }
+
     pub fn drop_verdicts_since(&mut self, mark: usize) {
         for v in self.verdicts.drain(mark..) {
             self.verdict_keys.remove(&v.dedupe_key());
@@ -1611,7 +1652,7 @@ impl Analyzer {
         self.frames.push(fr);
         // (imported from inside a function: the function's returns so far are its own)
         let (exits, ret) = (state.exits.take(), state.ret.take());
-        self.exec_block(&info.tree.body, state);
+        self.with_gen_restart(state, true, &mut |an, s| an.exec_block(&info.tree.body, s));
         self.frames.pop();
         state.reachable = true;
         state.exits = exits;

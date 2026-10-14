@@ -334,7 +334,13 @@ impl Analyzer {
             }
             ast::Stmt::For(f) => {
                 let g = self.loop_gc_begin(state);
-                self.stmt_for(f, state);
+                // (a generator the loop runs: what the body changes, it may read at its yields)
+                let depth = self.for_iters.len();
+                self.with_gen_restart(state, false, &mut |an, st| an.stmt_for(f, st));
+                if let Some(used) = self.for_iters.get(depth).cloned().filter(|_| !contains_jump(&f.body)) {
+                    self.gen_used_up(&used, state);
+                }
+                self.for_iters.truncate(depth);
                 self.loop_gc_end(g, state);
             }
             ast::Stmt::Break(_) | ast::Stmt::Continue(_) => {
@@ -1091,6 +1097,8 @@ impl Analyzer {
     fn stmt_for(&mut self, f: &'static ast::StmtFor, state: &mut State) {
         let itv = self.eval(&f.iter, state);
         let iter_node = frontend::node(&*f.iter);
+        self.force_gen(&itv, state, true);
+        self.for_iters.push(itv.pts.clone());
         let it = self.iterate(&itv, &iter_node, state);
         let has_jump = contains_jump(&f.body);
         // a one-shot iterator is used up by the loop; a `break` leaves the rest: the cursor
