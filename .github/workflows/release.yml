@@ -1,5 +1,5 @@
 # Release of the VS Code extension with the engine bundled, per platform. Manual only:
-# Actions → Release → Run workflow, with the new version. Tests run first (as in ci.yml);
+# Actions → Release → Run workflow, with the new version (`dry_run`: everything but the Release). Tests run first (as in ci.yml);
 # then one `rowan` binary per target is built, packed into a platform-specific .vsix
 # (`vsce package --target`), and everything is attached to a GitHub Release `v<version>`.
 # Uploading the .vsix files to the Marketplace is still manual (manage page → Update);
@@ -13,6 +13,10 @@ on:
         description: "Extension version, new and semver (e.g. 0.1.1)"
         required: true
         type: string
+      dry_run:
+        description: "Build and test every package, but make no GitHub Release"
+        type: boolean
+        default: false
 
 concurrency:
   group: release
@@ -173,6 +177,7 @@ jobs:
   release:
     name: GitHub Release
     needs: build
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
