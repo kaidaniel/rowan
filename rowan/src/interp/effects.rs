@@ -516,15 +516,16 @@ impl Analyzer {
 
     /// What a call of method `foid` that does not run may do to its receiver `recv` itself, by
     /// its own code and the methods and properties of the receiver's class that run with it:
-    /// the attribute names it may store and delete. None: anything (the receiver escapes, the
-    /// class hooks attribute access or has a base rowan does not see, a descriptor).
-    pub fn receiver_effects(&mut self, foid: ObjId, recv: ObjId) -> Option<(Vec<KeyId>, Vec<KeyId>)> {
+    /// the attribute names it may store and delete, and all the names it uses on it (what it
+    /// can reach through the receiver is under those). None: anything (the receiver escapes,
+    /// the class hooks attribute access or has a base rowan does not see, a descriptor).
+    pub fn receiver_effects(&mut self, foid: ObjId, recv: ObjId) -> Option<(Vec<KeyId>, Vec<KeyId>, Vec<KeyId>)> {
         let cls = self.instance_class(recv)?;
         let mro = self.mro(cls);
         if mro.iter().any(|c| self.class_info_opt(*c).is_none_or(|ci| ci.open_base)) || ["__getattr__", "__getattribute__", "__setattr__", "__delattr__"].iter().any(|h| self.class_lookup(cls, h).is_some()) {
             return None;
         }
-        let (mut stores, mut deletes): (FxHashSet<StrId>, FxHashSet<StrId>) = Default::default();
+        let (mut stores, mut deletes, mut used): (FxHashSet<StrId>, FxHashSet<StrId>, FxHashSet<StrId>) = Default::default();
         let mut work = vec![foid];
         let mut done: FxHashSet<ObjId> = FxHashSet::default();
         let runs_with_recv = |an: &Analyzer, g: ObjId| an.kind(g) == Kind::Function && !an.func_info(g).is_static.get() && !an.func_info(g).is_classmethod.get();
@@ -539,6 +540,7 @@ impl Analyzer {
             stores.extend(u.stores.iter().copied());
             deletes.extend(u.deletes.iter().copied());
             for &n in u.loads.iter().chain(u.stores.iter()).chain(u.deletes.iter()).chain(u.calls.iter()) {
+                used.insert(n);
                 // (a name the class does not define is the instance's own attribute)
                 let k = key_str_lit(&str_get(n));
                 let Some(owner) = self.class_lookup(cls, &str_get(n)) else { continue };
@@ -569,7 +571,7 @@ impl Analyzer {
             ks.sort_unstable();
             ks
         };
-        Some((keys(stores), keys(deletes)))
+        Some((keys(stores), keys(deletes), keys(used)))
     }
 
     /// The attribute names a method's own code stores on its receiver on every way it

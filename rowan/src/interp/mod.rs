@@ -915,7 +915,7 @@ pub struct Analyzer {
     /// the code objects the last `havoc_reachable` met (functions, classes, bound methods)
     pub havoc_code: Vec<ObjId>,
     /// the receiver of a skipped method call (`skipped_call`) and how often a havoc met it
-    pub havoc_guard: Option<(ObjId, u32)>,
+    pub havoc_guard: Option<(ObjId, u32, std::rc::Rc<[KeyId]>)>,
     /// per object, the last havoc walk that met it (`havoc_walk`)
     pub havoc_marks: Vec<u32>,
     pub havoc_walks: u32,

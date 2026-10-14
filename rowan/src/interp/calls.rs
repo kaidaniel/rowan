@@ -499,10 +499,13 @@ impl Analyzer {
         while let Some(o) = work.pop() {
             // (a skipped method's receiver: what it holds is havocked, it is not, unless met
             // again through something else)
-            if let Some((_, n)) = self.havoc_guard.as_mut().filter(|(g, _)| *g == o) {
+            if let Some((_, n, used)) = self.havoc_guard.as_mut().filter(|(g, _, _)| *g == o) {
                 *n += 1;
                 if *n == 1 {
-                    state.slots.each(&o, &mut |sk, v| if sk.0 == Ns::Attr { work.extend(v.pts.iter()) });
+                    // (its code reaches the receiver's attributes only by the names it uses)
+                    for k in used.iter() {
+                        work.extend(state.slot(o, Ns::Attr, *k).pts.iter());
+                    }
                 }
                 continue;
             }
@@ -1269,12 +1272,13 @@ impl Analyzer {
         let recv = self_v.and_then(|v| v.single()).filter(|o| self.kind(*o) == Kind::Instance);
         let eff = recv.and_then(|o| Some((o, self.receiver_effects(foid, o)?)));
         let must: Vec<KeyId> = match &eff {
-            Some((_, (_, deletes))) if fi_is_method(self, foid) => self.must_stores(foid).into_iter().filter(|k| !deletes.contains(k)).collect(),
+            Some((_, (_, deletes, _))) if fi_is_method(self, foid) => self.must_stores(foid).into_iter().filter(|k| !deletes.contains(k)).collect(),
             _ => Vec::new(),
         };
-        if let Some((o, _)) = &eff {
-            self.havoc_guard = Some((*o, 0));
+        if let Some((o, (_, _, used))) = &eff {
+            self.havoc_guard = Some((*o, 0, std::rc::Rc::from(used.as_slice())));
         }
+        let walked = self.havoc_walked;
         let r = self.unknown_call(q, self_v, args, kwargs, star_args, star_kwargs, state, node);
         let site = s(&format!("{}@L{}", q, node.line));
         self.skipped_sites.insert(site);
@@ -1283,8 +1287,8 @@ impl Analyzer {
         roots.extend(eff.as_ref().and_then(|(o, _)| self.instance_class(*o)));
         let rid = r.single().unwrap_or(0);
         self.follow_code(roots, rid, site, state);
-        if let Some((o, (stores, deletes))) = eff {
-            let reached_otherwise = self.havoc_guard.take().is_some_and(|(_, n)| n > 1);
+        if let Some((o, (stores, deletes, _))) = eff {
+            let reached_otherwise = self.havoc_guard.take().is_some_and(|(_, n, _)| n > 1);
             if reached_otherwise {
                 let walk = self.havoc_walk();
                 self.havoc_with(&[Value::obj(o)], rid, site, state, walk);
@@ -1301,6 +1305,9 @@ impl Analyzer {
                 }
                 state.set_row(o, Ns::Attr, row);
             }
+        }
+        if super::debug_enabled() {
+            eprintln!("skip {} at M{}:L{} havoc={}", q, node.module, node.line, self.havoc_walked - walked);
         }
         // (a raise after the code's effects on what it reaches beyond its arguments)
         self.flag_may_raise(state);
