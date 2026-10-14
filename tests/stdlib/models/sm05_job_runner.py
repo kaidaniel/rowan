@@ -151,8 +151,7 @@ tasks = TASKS                                      #@row tasks: present={sum,gre
 
 if __name__ == "__main__":
     results, registry, log, checks = run_with_cleanup(SPECS)
-    #@row results: present={j1,j2,j3,x2} definite_within={j1,j2,j3,x2} closed
-    #@todo row results: definite={j1,j2,j3,x2}  (x2's KeyError, raised in a summarised task under a re-raising @contextmanager, reaches the future without its value)
+    #@row results: present={j1,j2,j3,x2} definite={j1,j2,j3,x2} closed
     r1 = results["j1"]
     #@row r1: present={ok,job,value} definite={ok,job,value} closed
     v1 = r1["value"]                               #@row v1: present={total,n} definite={total,n} closed

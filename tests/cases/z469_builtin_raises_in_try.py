@@ -41,8 +41,8 @@ def sort_all(xs):
 
 
 r3 = sort_all([1, "a"])
-e3 = r3["mixed"]                 #@ sound mixed
-#@todo ok mixed  (sorting an int and a str always raises)
+e3 = r3["mixed"]                 #@ ok mixed
+# (sorting an int and a str always raises)
 
 
 def size(x):
@@ -54,8 +54,8 @@ def size(x):
 
 
 r4 = size(5)
-e4 = r4["no_len"]                #@ sound no_len
-#@todo ok no_len  (an int has no len)
+e4 = r4["no_len"]                #@ ok no_len
+# (an int has no len)
 
 
 def joined(items):
@@ -67,8 +67,8 @@ def joined(items):
 
 
 r5 = joined([1, 2])
-e5 = r5["not_str"]               #@ sound not_str
-#@todo ok not_str  (join of ints always raises)
+e5 = r5["not_str"]               #@ ok not_str
+# (join of ints always raises)
 
 
 def hashed(x):
@@ -80,8 +80,8 @@ def hashed(x):
 
 
 r6 = hashed([])
-e6 = r6["unhashable"]            #@ sound unhashable
-#@todo ok unhashable  (a list is unhashable)
+e6 = r6["unhashable"]            #@ ok unhashable
+# (a list is unhashable)
 
 
 def total(xs):
@@ -93,8 +93,8 @@ def total(xs):
 
 
 r7 = total(["a"])
-e7 = r7["bad"]                   #@ sound bad
-#@todo ok bad  (0 + "a" raises)
+e7 = r7["bad"]                   #@ ok bad
+# (0 + "a" raises)
 
 
 def count(xs):

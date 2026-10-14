@@ -455,7 +455,7 @@ impl Analyzer {
     pub fn narrow_isinstance_value(&mut self, cur: &Value, cls_expr: &'static ast::Expr, truth: bool, state: &mut State, store: StoreTarget) {
         let Some(cv) = self.traced(cls_expr) else { return };
         let Some(classes) = self.isinstance_classes(&cv, state) else { return };
-        let keep: Vec<u32> = cur.pts.iter().filter(|o| self.instance_of(*o, &classes) != Some(!truth)).collect();
+        let keep: Vec<u32> = cur.pts.iter().filter(|o| self.instance_of(*o, &classes, state) != Some(!truth)).collect();
         let new_pts = ObjSet::from_vec(keep);
         if new_pts == cur.pts {
             return;
@@ -487,12 +487,12 @@ impl Analyzer {
 
     /// Is object `o` an instance of one of `classes` (None: not known)? For both the value of
     /// an `isinstance` test and what it narrows.
-    pub fn instance_of(&self, o: u32, classes: &[u32]) -> Option<bool> {
+    pub fn instance_of(&self, o: u32, classes: &[u32], st: &State) -> Option<bool> {
         let k = if crate::models::pandas::is_series_obj(self, o) { Kind::Series } else { self.kind(o) };
         if k == Kind::Unknown {
             return None;
         }
-        let per: Vec<Option<bool>> = classes.iter().map(|c| self.instance_of_one(o, k, *c)).collect();
+        let per: Vec<Option<bool>> = classes.iter().map(|c| self.instance_of_one(o, k, *c, st)).collect();
         if per.contains(&Some(true)) {
             Some(true)
         } else if per.iter().all(|x| *x == Some(false)) {
@@ -502,13 +502,20 @@ impl Analyzer {
         }
     }
 
-    fn instance_of_one(&self, o: u32, k: Kind, cls: u32) -> Option<bool> {
+    fn instance_of_one(&self, o: u32, k: Kind, cls: u32, st: &State) -> Option<bool> {
         if self.kind(cls) == Kind::Class {
-            // (a Protocol: an instance whose class defines all its members is one; anything
+            // (a Protocol: an instance whose class defines all its members is one; one of a
+            // closed hierarchy without `__getattr__` that surely lacks a member is not; anything
             // else may have them as attributes)
             if let Some(ms) = crate::models::protocol_members(self, cls) {
-                let has_all = k == Kind::Instance && self.instance_class(o).is_some_and(|ic| ms.iter().all(|m| self.class_lookup(ic, m).is_some()));
-                return has_all.then_some(true);
+                let ic = self.instance_class(o).filter(|_| k == Kind::Instance)?;
+                if ms.iter().all(|m| self.class_lookup(ic, m).is_some()) {
+                    return Some(true);
+                }
+                let row = st.row(o, Ns::Attr);
+                let lacks = |m: &String| self.class_lookup(ic, m).is_none() && !row.present.contains(intern::key_str_lit(m));
+                let closed = self.hierarchy_closed(ic) && row.closed() && ["__getattr__", "__getattribute__"].iter().all(|h| self.class_lookup(ic, h).is_none());
+                return (closed && ms.iter().any(lacks)).then_some(false);
             }
             return if k == Kind::Instance { Some(self.instance_class(o).is_some_and(|ic| ic == cls || self.is_subclass(ic, cls))) } else { Some(false) };
         }

@@ -13,5 +13,5 @@ class Obj:
 objs = [Obj({"kind": "f", "qualname": "x"}), Obj({"kind": "d", "size": 1})]
 random.shuffle(objs)
 first = objs[0].payload                   #@row first: present={kind,qualname,size}
-#@todo row first: definite={kind}  (the shuffled items are the same objects: rowan joins in an unknown one)
+#@row first: definite={kind} closed
 first.get("size")

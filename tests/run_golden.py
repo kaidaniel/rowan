@@ -111,7 +111,9 @@ def collect_expectations(src: str):
             TODO_COUNT[0] += 1
             if os.environ.get("ROWAN_TODO") != "check":
                 continue
-            # ROWAN_TODO=check: the open expectations are checked like the others
+            # ROWAN_TODO=check: the open expectations are checked like the others (the
+            # reason in parentheses after them is prose, `;` included)
+            line = re.sub(r"\s\((?=[A-Za-z0-9`])[^\n]*$", "", line)
             line = re.sub(r"#@todo\s+row\b", "#@row", line)
             line = re.sub(r"#@todo\s+value\b", "#@value", line)
             line = re.sub(r"#@todo\s+schema\b", "#@schema", line)

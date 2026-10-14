@@ -39,8 +39,8 @@ def show(x):
 
 
 a = show(Table())                            #@value a: exactly={table}
-b = show(Plain())                            #@value b: includes={plain}
-#@todo value b: exactly={plain}
+b = show(Plain())                            #@value b: exactly={plain}
+# (a Plain has no render, as an attribute neither)
 c = show(Box())                              #@value c: exactly={box}
-d = isinstance(Table(), Measured)            #@value d: includes={False}
-#@todo value d: exactly={False}
+d = isinstance(Table(), Measured)            #@value d: exactly={False}
+# (a Table has no size)

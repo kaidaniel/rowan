@@ -145,8 +145,7 @@ def decide(wide, control, treatment):
         seg = rec["segment"]                                            #@ ok segment
         lift = rec["uplift"]                                            #@ ok uplift
         winner = treatment if lift > 0 else control
-        # (decide runs from a summary: its values are the parameters' symbols)
-        #@todo value winner: exactly={"A","B","CONTROL","TEST"}
+        #@value winner: exactly={"A","B","CONTROL","TEST"}
         decision = "ship" if lift > 0.05 else "hold"
         #@value decision: exactly={"ship","hold"}
         decisions.append((seg, winner, decision))
