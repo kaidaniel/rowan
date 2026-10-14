@@ -1764,15 +1764,18 @@ impl Analyzer {
                 }
                 let pname = s(a.name.id.as_str());
                 if let Some(d) = fi.defaults.get(&pname) {
-                    // the default, or whatever a caller passes
-                    let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
+                    // the default, or whatever a caller passes (as annotated, in a torch module)
+                    let pv = match a.annotation.as_deref().and_then(|ann| self.torch_param(ann, &fi, a.name.id.as_str(), &mut st)) {
+                        Some(v) => v,
+                        None => Value::obj(self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![])),
+                    };
                     // a number default in a torch module: the parameter (whatever a caller
                     // passes, the default included) stays a name dims can be written in
                     if self.torch_modules.contains(&fi.module) && d.pts.is_empty() && d.kv.as_lit().map(intern::key_is_number).unwrap_or(false) {
-                        args.push(Value::obj(poid));
+                        args.push(pv);
                         continue;
                     }
-                    args.push(d.join(&Value::obj(poid)));
+                    args.push(d.join(&pv));
                     if kwonly && args.len() > n_before {
                         let v = args.pop().unwrap();
                         kwargs.insert(pname, v);
@@ -1901,8 +1904,41 @@ impl Analyzer {
     }
 
     /// A declared row for an annotated entry-point parameter (§6.6).
+    /// In a torch module, a parameter annotated as a number (`d: int`: arithmetic on it is a
+    /// number, not a tensor, `d ** 0.5`) or as a `Tensor` (`data[j:j + T]` is a tensor's
+    /// slice, not a list's): an unknown known to be one. None for other annotations.
+    pub fn torch_param(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
+        if !self.torch_modules.contains(&fi.module) {
+            return None;
+        }
+        let node = Self::strip_annotation(ann)?;
+        let number = match node {
+            ast::Expr::Name(n) if matches!(n.id.as_str(), "int" | "float" | "bool") => Some(n.id.as_str() != "float"),
+            ast::Expr::Name(n) if n.id.as_str() == "Tensor" => None,
+            ast::Expr::Attribute(a) if a.attr.as_str() == "Tensor" && matches!(&*a.value, ast::Expr::Name(m) if m.id.as_str() == "torch") => None,
+            _ => return None,
+        };
+        let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param, state, &format!("param {}", pname), "", Ns::Item, vec![]);
+        match number {
+            Some(int) => {
+                self.m.t_numbers.insert(poid, int);
+            }
+            None => {
+                if let Some(sy) = self.t_sym_of_obj(poid) {
+                    let mut f = (*state.tf).clone();
+                    f.tensors.insert(sy);
+                    state.tf = std::sync::Arc::new(f);
+                }
+            }
+        }
+        Some(Value::obj(poid))
+    }
+
     pub fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
         let node = Self::strip_annotation(ann)?;
+        if let Some(v) = self.torch_param(ann, fi, pname, state) {
+            return Some(v);
+        }
         let mut v = self.eval(node, state);
         // (a class imported only for type checkers)
         if let ast::Expr::Name(n) = node {

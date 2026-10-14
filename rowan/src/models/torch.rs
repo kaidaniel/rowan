@@ -6,6 +6,7 @@
 use indexmap::IndexMap;
 
 use crate::domain::{join_values, KeyVal, Ns, ObjId, Value, DATA};
+use ruff_python_ast as ast;
 use crate::frontend::Node;
 use crate::intern::{self, key_int, key_str_lit, s, KeyId, StrId, STAR};
 use crate::interp::{Analyzer, Call, Payload};
@@ -274,10 +275,18 @@ impl Analyzer {
             s = append_dims(&s, &[d]);
         }
         for a in star {
-            let part = self.t_shape_arg(a, st).unwrap_or_else(Shape::any);
-            s = concat(&s, &part);
+            s = concat(&s, &self.t_star_sizes(a, st));
         }
         Some(s)
+    }
+
+    /// The sizes `*v` spreads: a sequence's or a size's; anything else is a sequence of
+    /// unknown length (never one int: `zeros(*dims)` with `dims` unknown is not `[dims]`).
+    fn t_star_sizes(&self, v: &Value, st: &State) -> Shape {
+        if self.t_seq(v, st).is_some() || size_shape(v).is_some() {
+            return self.t_shape_arg(v, st).unwrap_or_else(Shape::any);
+        }
+        Shape::any()
     }
 
     pub fn t_size_value(&mut self, s: &Shape, node: &Node, st: &mut State) -> Value {
@@ -340,6 +349,42 @@ impl Analyzer {
     }
 
     /// The length of a tuple made by `unbind` / `chunk` with a symbolic count.
+    /// The length of a call's first argument when it is a comprehension written in the call
+    /// with one generator and no filter over a name: as many items as the name's value has
+    /// (`torch.stack([data[j:j + T] for j in i])`: `i.shape[0]`; a known str or list: its
+    /// length). Lists past 16 items keep no length, so this is read from the code.
+    pub fn t_comp_len(&mut self, c: &Call, st: &State) -> Option<DimId> {
+        let first = c.call_ast?.arguments.args.first()?;
+        let gens = match first {
+            ast::Expr::ListComp(l) => &l.generators,
+            ast::Expr::Generator(g) => &g.generators,
+            _ => return None,
+        };
+        let [g] = &gens[..] else { return None };
+        let ast::Expr::Name(n) = &g.iter else { return None };
+        if !g.ifs.is_empty() || g.is_async {
+            return None;
+        }
+        let v = self.load_name(s(n.id.as_str()), &Node::none(), &mut st.copy());
+        let named_tensor = !v.pts.is_empty() && v.kv.is_bot() && v.pts.iter().all(|o| self.t_sym_of_obj(o).map(|sy| st.tf.tensors.contains(&sy)).unwrap_or(false));
+        if is_tensor(&v) || named_tensor {
+            // (iterating a tensor goes over dim 0: it has one, or the loop raised)
+            let e = sh::expose_f(&sh::norm_shape(&self.t_shape(&v, st)?, &st.tf), 1, 0, &st.tf);
+            return e.prefix.first().copied().filter(|d| !sh::has_unknown(*d));
+        }
+        if !v.pts.is_empty() {
+            let o = v.single()?;
+            return match self.kind(o) {
+                Kind::List | Kind::Tuple => self.llen(o, st).map(|k| sh::lit(k as i64)),
+                _ => None,
+            };
+        }
+        match v.kv.as_lit().map(intern::key_get) {
+            Some(intern::Key::Str(t)) => Some(sh::lit(t.chars().count() as i64)),
+            _ => None,
+        }
+    }
+
     pub fn t_tuple_len(&self, v: &Value) -> Option<DimId> {
         let o = v.single()?;
         match &self.obj(o).payload {
@@ -688,6 +733,12 @@ fn unused(_: StrId, _: KeyId, _: IndexMap<u8, u8>, _: Vec<Value>) {
     let _ = STAR;
 }
 
+/// An unknown known to be a number: a dim, a number the shape model made, an index of
+/// `enumerate` (`ENUM_INDEX`).
+pub fn is_number_label(l: &str) -> bool {
+    l.starts_with(sh::DIM_PREFIX) || l == sh::NUM_LABEL || l == crate::interp::funcs::ENUM_INDEX
+}
+
 // ---------------------------------------------------------------------------
 // operators, attributes, indexing
 // ---------------------------------------------------------------------------
@@ -778,6 +829,9 @@ impl Analyzer {
                     },
                     _ => None,
                 }
+            } else if let Some(&int) = v.single().and_then(|o| an.m.t_numbers.get(&o)).filter(|_| v.kv.is_bot()) {
+                // a parameter annotated as a number
+                Some(if int { K::Int } else { K::Num })
             } else if an.torch_on && v.kv.is_bot() && v.pts.len() == 1 && an.t_sym_of_obj(v.pts.first().unwrap()).is_some() {
                 // a name used as a size on this path is an int
                 if st.tf.ints.contains(&an.t_sym_of_obj(v.pts.first().unwrap()).unwrap()) {
@@ -861,7 +915,8 @@ impl Analyzer {
             return Some(num_value());
         }
         if matches!((&ka, &kb), (K::Int | K::Num, K::Int | K::Num)) {
-            let special = |v: &Value| label(v).map(|l| l.starts_with('\u{1}')).unwrap_or(false);
+            // (a parameter annotated as a number gives a number, not a named unknown)
+            let special = |v: &Value| label(v).map(|l| l.starts_with('\u{1}')).unwrap_or(false) || v.single().map(|o| self.m.t_numbers.contains_key(&o)).unwrap_or(false);
             if !special(a) && !special(b) {
                 return None;
             }
@@ -918,6 +973,16 @@ impl Analyzer {
                 return Value::new();
             }
             return tensor_value(Shape::known(vec![]).with_assume(&assume));
+        }
+        // a matrix on the right of a tensor whose rank and dims have no names (`(a @ v) @ w.T`):
+        // [*, m] whatever its rank, 1-D included (a named one keeps its dims under a condition)
+        if ra.is_none() && rb == Some(2) && matches!(a.rest, Some(Rest::Any)) {
+            let Some((e, p)) = self.t_locate(&a, -1, node, st, what) else { return Value::new() };
+            if !self.t_require_eq(get_at(&e, p), b.prefix[0], node, st, what) {
+                return Value::new();
+            }
+            let e = sh::norm_shape(&replace_at(&e, p, &[b.prefix[1]]), &st.tf);
+            return tensor_value(e.with_assume(&assume));
         }
         // operand views: (batch rest, rows / cols)
         // a: [..., n, k] (or [k] when 1-D); b: [..., k, m] (or [k])
@@ -1916,7 +1981,7 @@ impl Analyzer {
                 let pos: Vec<Value> = if name == "new_full" { args.iter().take(1).cloned().collect() } else { args.to_vec() };
                 return self.t_sizes(&pos, &c.star_args, st).map(tensor_value).unwrap_or_else(|| tensor_value(Shape::any()));
             }
-            "new_tensor" => return self.t_literal_tensor(args.first(), st),
+            "new_tensor" => return self.t_literal_tensor(args.first(), None, st),
             "nonzero" => {
                 return match s.rank() {
                     Some(r) => tensor_value(Shape::known(vec![sh::unknown(), sh::lit(r as i64)])),
@@ -2447,28 +2512,49 @@ impl Analyzer {
         }
     }
 
-    fn t_literal_tensor(&mut self, data: Option<&Value>, st: &State) -> Value {
-        fn lit_shape(an: &Analyzer, v: &Value, st: &State, depth: u32) -> Option<Vec<i64>> {
+    fn t_literal_tensor(&mut self, data: Option<&Value>, len: Option<DimId>, st: &State) -> Value {
+        /// The shape of nested sequences of numbers: a sequence of unknown length gives an
+        /// unknown dim when its elements are known to be numbers (`[idx[c] for c in text]`
+        /// with ints in `idx`), so the rank is known.
+        fn lit_shape(an: &Analyzer, v: &Value, st: &State, depth: u32) -> Option<Vec<DimId>> {
             if depth > 8 {
                 return None;
             }
             if v.pts.is_empty() {
+                let number = |k: &KeyId| intern::key_is_number(*k) || matches!(intern::key_get(*k), intern::Key::Bool(_));
                 return match &v.kv {
-                    KeyVal::Lit(k) if intern::key_is_number(*k) || matches!(intern::key_get(*k), intern::Key::Bool(_)) => Some(vec![]),
+                    KeyVal::Lit(k) if number(k) => Some(vec![]),
+                    KeyVal::Lits(ks) if !ks.is_empty() && ks.iter().all(|k| number(&k)) => Some(vec![]),
+                    KeyVal::Data(l) if is_number_label(&intern::str_get(*l)) => Some(vec![]),
                     _ => None,
                 };
             }
-            let items = an.t_seq(v, st)?;
-            if items.is_empty() {
-                return Some(vec![0]);
+            if let Some(items) = an.t_seq(v, st) {
+                if items.is_empty() {
+                    return Some(vec![sh::lit(0)]);
+                }
+                let inner = lit_shape(an, &items[0], st, depth + 1)?;
+                let mut out = vec![sh::lit(items.len() as i64)];
+                out.extend(inner);
+                return Some(out);
             }
-            let inner = lit_shape(an, &items[0], st, depth + 1)?;
-            let mut out = vec![items.len() as i64];
-            out.extend(inner);
+            let o = v.single()?;
+            if !matches!(an.kind(o), Kind::List | Kind::Tuple) {
+                return None;
+            }
+            let e = Value::with_kv(st.slot(o, Ns::Elem, STAR).pts, st.elems.get(&o).unwrap_or(crate::domain::DATA));
+            let mut out = vec![sh::unknown()];
+            out.extend(lit_shape(an, &e, st, depth + 1)?);
             Some(out)
         }
         match data.and_then(|d| lit_shape(self, d, st, 0)) {
-            Some(d) => tensor_value(Shape::known(d.into_iter().map(sh::lit).collect())),
+            Some(mut d) => {
+                // (the length of a comprehension written in the call)
+                if let (Some(n), Some(true)) = (len, d.first().map(|x| sh::has_unknown(*x))) {
+                    d[0] = n;
+                }
+                tensor_value(Shape::known(d))
+            }
             None => match data.and_then(|d| tensor_shape(d)) {
                 Some(s) => tensor_value(s),
                 None => tensor_value(Shape::any()),
@@ -2498,9 +2584,12 @@ impl Analyzer {
             return sz.map(tensor_value).unwrap_or_else(|| tensor_value(Shape::any()));
         }
         match name {
-            "tensor" | "Tensor" | "FloatTensor" | "LongTensor" => return self.t_literal_tensor(args.first(), st),
+            "tensor" | "Tensor" | "FloatTensor" | "LongTensor" => {
+                let n = self.t_comp_len(c, st);
+                return self.t_literal_tensor(args.first(), n, st);
+            }
             "from_numpy" | "as_tensor" | "asarray" => {
-                return args.first().filter(|a| is_tensor(a)).and_then(|a| self.t_shape(a, st)).map(tensor_value).unwrap_or_else(|| self.t_literal_tensor(args.first(), st));
+                return args.first().filter(|a| is_tensor(a)).and_then(|a| self.t_shape(a, st)).map(tensor_value).unwrap_or_else(|| self.t_literal_tensor(args.first(), None, st));
             }
             "load" | "frombuffer" => return tensor_value(Shape::any()),
             "arange" => {
@@ -2561,7 +2650,8 @@ impl Analyzer {
             "cat" | "concat" | "concatenate" | "stack" | "hstack" | "vstack" => {
                 let Some(list) = args.first().cloned().or_else(|| kw(c, "tensors").cloned()) else { return tensor_value(Shape::any()) };
                 let d = args.get(1).cloned().or_else(|| kw(c, "dim").cloned()).and_then(|v| self.t_int(&v)).unwrap_or(0);
-                return if name == "stack" { self.t_stack(&list, d, &node, st) } else if name == "vstack" || name == "hstack" { tensor_value(Shape::any()) } else { self.t_cat(&list, d, &node, st) };
+                let n = self.t_comp_len(c, st);
+                return if name == "stack" { self.t_stack(&list, d, n, &node, st) } else if name == "vstack" || name == "hstack" { tensor_value(Shape::any()) } else { self.t_cat(&list, d, &node, st) };
             }
             "einsum" => return self.t_einsum(c, st),
             "where" => {
@@ -2688,7 +2778,7 @@ impl Analyzer {
         tensor_value(replace_at(&first, p0, &[sh::norm(total, &st.tf)]))
     }
 
-    pub fn t_stack(&mut self, list: &Value, d: i64, node: &Node, st: &mut State) -> Value {
+    pub fn t_stack(&mut self, list: &Value, d: i64, len: Option<DimId>, node: &Node, st: &mut State) -> Value {
         let (shapes, elem) = self.t_tensor_list(list, st);
         let (n, base) = match shapes {
             Some(v) if !v.is_empty() => {
@@ -2718,7 +2808,7 @@ impl Analyzer {
                 self.t_error(node, m, st);
                 return Value::new();
             }
-            None => (self.t_tuple_len(list).unwrap_or_else(sh::unknown), elem.unwrap_or_else(Shape::any)),
+            None => (self.t_tuple_len(list).or(len).unwrap_or_else(sh::unknown), elem.unwrap_or_else(Shape::any)),
         };
         let mut nv = vec![n];
         nv.truncate(1);
@@ -4256,8 +4346,7 @@ impl Analyzer {
             if matches!(a, ruff_python_ast::Expr::Starred(_)) {
                 let v = c.star_args.get(si)?;
                 si += 1;
-                let part = self.t_shape_arg(v, st).unwrap_or_else(Shape::any);
-                s = concat(&s, &part);
+                s = concat(&s, &self.t_star_sizes(v, st));
             } else {
                 let v = args.get(pi)?;
                 pi += 1;

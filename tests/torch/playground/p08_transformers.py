@@ -77,9 +77,10 @@ class Block(nn.Module):
         # x: (B, T, d_model)
         # out: (B, T, d_model)
         x = x + self.attn(self.ln1(x))
-        #@shape x: [x.shape[0], x.shape[1], d_model]
+        #@shape x: [*_, d_model]
+        #@todo shape x: [x.shape[0], x.shape[1], d_model] (the heads need x.dim() == 3, but that fact is lost after MultiHead's loop over a list of heads of unknown length: rowan does not use that cat of no tensors raises)
         x = x + self.mlp(self.ln2(x))
-        #@shape x: [x.shape[0], x.shape[1], d_model]
+        #@shape x: [*_, d_model]
         return x
 
 

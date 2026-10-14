@@ -787,7 +787,21 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         }
                     }
                 }
-                if let Some(items) = &it.items {
+                // (a set of known literals, `set(text)`: its distinct items, however many the
+                // iterable had)
+                let text_chars: Option<Vec<Value>> = a.kv.as_lit().and_then(intern::key_as_str).filter(|_| a.pts.is_empty()).map(|t| t.chars().map(|ch| Value::lit(key_str_lit(&ch.to_string()))).collect());
+                let distinct: Option<Vec<Value>> = it.items.as_ref().or(text_chars.as_ref()).filter(|_| kind == Kind::Set).and_then(|items| {
+                    let mut seen: Vec<KeyId> = Vec::new();
+                    for v in items {
+                        match (&v.kv, v.pts.is_empty()) {
+                            (KeyVal::Lit(k), true) if !seen.contains(k) => seen.push(*k),
+                            (KeyVal::Lit(_), true) => {}
+                            _ => return None,
+                        }
+                    }
+                    Some(seen.into_iter().map(Value::lit).collect())
+                });
+                if let Some(items) = distinct.as_ref().or(it.items.as_ref()) {
                     let reversed = c.qual.as_str() == "builtins.reversed";
                     let sorted = c.qual.as_str() == "builtins.sorted";
                     if an.obj(oid).single && items.len() <= 64 {
@@ -5380,6 +5394,8 @@ use std::rc::Rc;
 pub struct Tables {
     /// validating a FastAPI test request's body (errors are a 422)
     pub fa_body_validation: bool,
+    /// unknown parameters annotated `int` / `bool` (true) or `float` (false) in torch modules
+    pub t_numbers: FxHashMap<ObjId, bool>,
     /// unknown call results named by the variable they were bound to (tensor dims)
     pub t_var_names: FxHashMap<ObjId, crate::models::shape::Sym>,
     /// function objects by qualname (a closure's printing sees its factory's symbols)

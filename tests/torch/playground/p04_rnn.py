@@ -62,17 +62,17 @@ class MyRNN(nn.Module):
             #@shape h: [x.shape[0], d_h]
         xw = self.W_x(x) # xw: (B, T, d_h)
         #@shape xw: [x.shape[0], x.shape[1], d_h]
-        #@shape@L142 xw: [64, 32, 256]
+        #@shape@L143 xw: [64, _, 256]
         outs: list[Tensor] = [] # list[(B, d_h)]
         for t in range(T):
             hw = self.W_h(h) # h: (B, d_h)
             #@shape hw: [*_, d_h]
-            #@shape@L142 hw: [64, 256]
+            #@shape@L143 hw: [64, 256]
             xw_t = xw[:, t, :] # xw_t: (B, d_h)
             #@shape xw_t: [x.shape[0], d_h]
             h = torch.tanh(xw_t + hw) # h: (B, d_h)
             #@shape h: [*_, d_h]
-            #@shape@L142 h: [64, 256]
+            #@shape@L143 h: [64, 256]
             outs.append(h)
         # len(outs) == T
         return torch.stack(outs, dim=1), h # (B, T, d_h), (B, d_h)
@@ -92,8 +92,8 @@ class RNNLM(nn.Module):
         emb = self.emb(ids)                                 # emb turns each int into a vector - (B, T): int -> (B, T, d): float
         #@shape emb: [*ids.shape, d]
         out, h = self.rnn(emb, h)                           # out: (B, T, d) — every h_t; h: (1, B, d) — last one
-        #@shape out: [*_, d]; h: [*_, d]
-        #@shape@L142 out: [64, 32, 256]; h: [64, 256]
+        #@todo shape out: [*_, d]; h: [*_, d] (on a run that returns, MyRNN's loop ran: with no step its stack of no tensors raises; rowan keeps the caller's h of any shape)
+        #@shape@L143 out: [64, _, 256]; h: [64, 256]
         return self.head(out), h                            # logits: (B, T, V)
 
     @torch.no_grad()
@@ -137,10 +137,12 @@ print(f"parameters: {sum(p.numel() for p in model.parameters())}")
 
 for step in range(STEPS):
     x, y = get_batch(train, B=64, T=32) # x: (B, T): int; y: (B, T): int
-    #@shape x: [64, 32]; y: [64, 32]
+    #@shape x: [64, _]; y: [64, _]
+    #@todo shape x: [64, 32]; y: [64, 32] (a slice j:j + T of an unknown start in get_batch)
     logits: Tensor
     logits, _ = model(x) # logits: (B, T, V)
-    #@shape logits: [64, 32, V]
+    #@shape logits: [64, _, _]
+    #@todo shape logits: [64, 32, V] (V = len(vocab) of the unknown text: a number rowan has no name for)
     loss = F.cross_entropy(logits.view(-1, V), y.view(-1))
     #@shape loss: []
     optim.zero_grad()
@@ -153,9 +155,9 @@ for step in range(STEPS):
             vals = []
             for _ in range(10):                             # average several val batches: less noisy
                 xv, yv = get_batch(test, B=64, T=32)
-                #@shape xv: [64, 32]; yv: [64, 32]
+                #@shape xv: [64, _]; yv: [64, _]
                 lv, _ = model(xv)
-                #@shape lv: [64, 32, V]
+                #@shape lv: [64, _, _]
                 vals.append(F.cross_entropy(lv.view(-1, V), yv.view(-1)))
             val = torch.stack(vals).mean()
             #@shape val: []
@@ -165,10 +167,10 @@ for step in range(STEPS):
 
 def complete(prompt: str, n: int, **kw) -> str:
     ids = encode(prompt)[None, :]                           # (1, T)
-    #@shape@L175 ids: [1, 3]
+    #@shape@L177 ids: [1, 3]
     completion = model.generate(ids, n, **kw)               # (1, T+n)
-    #@shape@L175 completion: [1, ?]
-    #@todo shape@L175 completion: [1, 63] (60 steps of a cat along dim 1 in a loop that is not unrolled)
+    #@shape@L177 completion: [1, ?]
+    #@todo shape@L177 completion: [1, 63] (60 steps of a cat along dim 1 in a loop that is not unrolled)
     return decode(completion[0])
 
 

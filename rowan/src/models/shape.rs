@@ -494,12 +494,25 @@ pub fn modulo(a: DimId, b: DimId) -> DimId {
     }
     of_atom(Atom::Mod(a, b))
 }
+/// The atom a dim is exactly (coefficient 1, power 1), if it is one.
+fn single_atom(d: DimId) -> Option<Atom> {
+    match &poly(d)[..] {
+        [(m, 1)] if m.len() == 1 && m[0].1 == 1 => Some(atom_get(m[0].0)),
+        _ => None,
+    }
+}
 pub fn max(a: DimId, b: DimId) -> DimId {
     if a == b {
         return a;
     }
     if let (Some(x), Some(y)) = (as_lit(a), as_lit(b)) {
         return lit(x.max(y));
+    }
+    // max(a, min(a, b)) = a (a causal mask cut to `[:T, :T]` broadcast with `[.., T, T]`)
+    for (p, q) in [(a, b), (b, a)] {
+        if matches!(single_atom(q), Some(Atom::Min(x, y)) if x == p || y == p) {
+            return p;
+        }
     }
     let (x, y) = if a <= b { (a, b) } else { (b, a) };
     of_atom(Atom::Max(x, y))
@@ -510,6 +523,12 @@ pub fn min(a: DimId, b: DimId) -> DimId {
     }
     if let (Some(x), Some(y)) = (as_lit(a), as_lit(b)) {
         return lit(x.min(y));
+    }
+    // min(a, max(a, b)) = a
+    for (p, q) in [(a, b), (b, a)] {
+        if matches!(single_atom(q), Some(Atom::Max(x, y)) if x == p || y == p) {
+            return p;
+        }
     }
     let (x, y) = if a <= b { (a, b) } else { (b, a) };
     of_atom(Atom::Min(x, y))

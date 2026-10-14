@@ -19,13 +19,13 @@ class Bigram(torch.nn.Module):
     def generate(self, ids: Tensor, n: int) -> Tensor:
         for _ in range(n):
             logits = self(ids[:, -1])
-            #@shape@L91 logits: [1, 32]
+            #@shape@L92 logits: [1, 32]
             probs = torch.softmax(logits, dim=1)
-            #@shape@L91 probs: [1, 32]
+            #@shape@L92 probs: [1, 32]
             next_token = torch.multinomial(probs, num_samples=1)
-            #@shape@L91 next_token: [1, 1]
+            #@shape@L92 next_token: [1, 1]
             ids = torch.cat([ids, next_token], dim=1)
-            #@shape@L91 ids: [1, ?]
+            #@shape@L92 ids: [1, ?]
         return ids
 
 
@@ -46,7 +46,7 @@ def get_batch(data: Tensor, B: int, T: int) -> tuple[Tensor, Tensor]:
     x = torch.stack([data[j : j + T] for j in i])
     #@shape x: [B, _, *data.shape[1:]]
     #@todo shape x: [B, T, *data.shape[1:]] (a slice j:j+T of an unknown start: T long only when j + T <= len(data), which randint's bound gives)
-    #@shape@L63 x: [32, 32]
+    #@shape@L63 x: [32, _]
     y = torch.stack([data[j + 1 : j + 1 + T] for j in i])
     #@shape y: [B, _, *data.shape[1:]]
     return x, y
@@ -61,10 +61,11 @@ model = Bigram(len(vocab))
 optim = torch.optim.AdamW(model.parameters(), lr=4e-3)
 for step in range(3_000):
     x, y = get_batch(train, 32, 32)
-    #@shape x: [32, 32]; y: [32, 32]
+    #@shape x: [32, _]; y: [32, _]
+    #@todo shape x: [32, 32]; y: [32, 32] (a slice j:j + T of an unknown start in get_batch)
     model.train()
     x_hat = model(x)
-    #@shape x_hat: [32, 32, 32]
+    #@shape x_hat: [32, _, 32]
     loss = torch.nn.functional.cross_entropy(
         x_hat.view(-1, len(vocab)), 
         y.view(-1)
@@ -76,7 +77,7 @@ for step in range(3_000):
     if step % 1_000 == 0:
         with torch.no_grad():
             xv, yv = get_batch(test, 32, 32)
-            #@shape xv: [32, 32]; yv: [32, 32]
+            #@shape xv: [32, _]; yv: [32, _]
             val = torch.nn.functional.cross_entropy(
                 model(xv).view(-1, len(vocab)),
                 yv.view(-1)
@@ -85,7 +86,7 @@ for step in range(3_000):
 
 def complete(prompt: str, n: int) -> str:
     ids = encode(prompt)[None, :]
-    #@shape@L91 ids: [1, 19]
+    #@shape@L92 ids: [1, 19]
     return decode(model.generate(ids, n)[0])
 
 print(complete("Lorem ipsum dolor s", n=10))

@@ -1,6 +1,6 @@
 # The owner's pytorch-playground `pytorch_playground/transformers.py`, unchanged but for this
-# header and one check, as the module the case's entry imports (its shapes in its own terms
-# are checked in p08_transformers.py, where it is the main module).
+# header, as the module the case's entry imports (its shapes in its own terms are checked in
+# p08_transformers.py, where it is the main module).
 from torch import Tensor, nn
 import torch
 
@@ -28,7 +28,6 @@ class Head(nn.Module):
         S: Tensor = Qx @ KxT / self.d_head ** 0.5 # (B, T, T) "pairwise attention-scores of positions". Rowan doesn't seem to use the fact that self.d_head is an int and treats it as "broadcast".
         if self.causal:
             S = S.masked_fill(~self.tril[:T, :T], float("-inf"))
-            #@ ok tril
         A = torch.softmax(S, dim=-1) # (B, T, T) such that last dim sums to 1 => "pairwise attentions of positions". S is "Tensor[*]" here when we actually _do_ know it's shape.
         out = A @ Vx # (B, T, d_head) "what I collect after attending"
         return out # out is Tensor[*] here but it's shape is actually quite easy to express in terms of B, T, d?
