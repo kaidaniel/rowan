@@ -1072,141 +1072,84 @@ impl Analyzer {
                 Some(if op == ast::CmpOp::Is { same } else { !same })
             }
             ast::CmpOp::In | ast::CmpOp::NotIn => {
+                let b = self.eval_right(right, state);
+                let decide = |found: bool| Some(if op == ast::CmpOp::In { found } else { !found });
                 // members of a Flag: bits; else a member is its key
                 if (!self.member_key.is_empty() || !self.identity_objs.borrow().is_empty()) && !a.pts.is_empty() {
-                    let b = self.eval_right(right, state);
                     if let Some(r) = self.flag_contains(a, &b, state) {
-                        return Some(if op == ast::CmpOp::In { r } else { !r });
+                        return decide(r);
                     }
-                    self.cmp_right = Some(b);
                     let ka = self.keyify_in(a, state);
                     if ka.pts.is_empty() {
+                        self.cmp_right = Some(b);
                         return self.compare_const(op, &ka, right, state);
                     }
                 }
-                // several literals in a positional container of known literals: decided when
-                // every one is there, or none is
-                if a.pts.is_empty() && a.kv.is_literal() && lits.len() > 1 {
-                    let b = self.eval_right(right, state);
-                    if let Some(o) = b.single().filter(|o| matches!(self.kind(*o), Kind::List | Kind::Tuple | Kind::Set)) {
-                        if let Some(n) = self.llen(o, state) {
-                            let items: Option<Vec<KeyId>> = (0..n).map(|i| {
-                                let sv = state.slot(o, Ns::Pos, key_int(i as i64));
-                                // (Enum members / identity objects as their keys)
-                                let sv = if sv.pts.is_empty() { sv } else { self.keyify_in(&sv, state) };
-                                sv.kv.as_lit().filter(|_| sv.pts.is_empty())
-                            }).collect();
-                            if let Some(items) = items {
-                                // (by Python's equality: `1.0 in [1, 2]`)
-                                let eqs: Option<Vec<bool>> = lits.iter().map(|k| items.iter().map(|x| lit_eq(*x, k)).collect::<Option<Vec<bool>>>().map(|v| v.contains(&true))).collect();
-                                let Some(eqs) = eqs else { return None };
-                                let hits = eqs.iter().filter(|b| **b).count();
-                                if hits == lits.len() || hits == 0 {
-                                    let found = hits > 0;
-                                    return Some(if op == ast::CmpOp::In { found } else { !found });
-                                }
-                            }
-                        }
-                    }
+                if !a.pts.is_empty() || !a.kv.is_literal() || lits.is_empty() {
+                    return None;
+                }
+                // a range with known bounds: membership of a known int
+                if let (Some(Payload::Range(lo, hi, step)), [k]) = (b.single().map(|o| &self.obj(o).payload), &lits.iter().collect::<Vec<_>>()[..]) {
+                    let x = intern::key_as_int(*k)?;
+                    let inside = if *step > 0 { x >= *lo && x < *hi } else { x <= *lo && x > *hi };
+                    return decide(inside && (x - lo) % step == 0);
+                }
+                // literals in a positional container of known literals: decided when every one
+                // is there, or none is (by Python's equality: `1.0 in [1, 2]`)
+                if let Some(o) = b.single().filter(|o| matches!(self.kind(*o), Kind::List | Kind::Tuple | Kind::Set)) {
+                    let n = self.llen(o, state)?;
+                    let items: Vec<KeyId> = (0..n).map(|i| {
+                        let sv = state.slot(o, Ns::Pos, key_int(i as i64));
+                        // (Enum members / identity objects as their keys)
+                        let sv = if sv.pts.is_empty() { sv } else { self.keyify_in(&sv, state) };
+                        sv.kv.as_lit().filter(|_| sv.pts.is_empty())
+                    }).collect::<Option<_>>()?;
+                    let eqs: Vec<bool> = lits.iter().map(|k| items.iter().map(|x| lit_eq(*x, k)).collect::<Option<Vec<bool>>>().map(|v| v.contains(&true))).collect::<Option<_>>()?;
+                    let hits = eqs.iter().filter(|b| **b).count();
+                    return if hits == lits.len() || hits == 0 { decide(hits > 0) } else { None };
                 }
                 // a literal key in records whose rows decide it
-                if a.pts.is_empty() && a.kv.is_literal() && lits.len() == 1 {
-                    let k = lits.iter().next().unwrap();
-                    let b = self.eval_right(right, state);
-                    // a substring test on known strings
-                    if let (Some(needle), Some(hay)) = (intern::key_as_str(k), b.kv.as_lit().filter(|_| b.pts.is_empty()).and_then(intern::key_as_str)) {
-                        let found = hay.contains(&*needle);
-                        return Some(if op == ast::CmpOp::In { found } else { !found });
-                    }
-                    // a range with known bounds: membership of a known int
-                    if let Some(o) = b.single() {
-                        if let (Payload::Range(lo, hi, step), Some(x)) = (&self.obj(o).payload, intern::key_as_int(k)) {
-                            let (lo, hi, step) = (*lo, *hi, *step);
-                            let inside = if step > 0 { x >= lo && x < hi } else { x <= lo && x > hi };
-                            let member = inside && (x - lo) % step == 0;
-                            return Some(if op == ast::CmpOp::In { member } else { !member });
+                if lits.len() != 1 {
+                    return None;
+                }
+                let k = lits.iter().next().unwrap();
+                // a substring test on known strings
+                if let (Some(needle), Some(hay)) = (intern::key_as_str(k), b.kv.as_lit().filter(|_| b.pts.is_empty()).and_then(intern::key_as_str)) {
+                    return decide(hay.contains(&*needle));
+                }
+                if let Some(o) = b.single() {
+                    match self.obj(o).payload.clone() {
+                        // a view of a dict: its keys are the dict's (live); its values are decided
+                        // when they are all known literals
+                        Payload::View(ViewKind::Keys | ViewKind::Proxy, inner) => {
+                            self.cmp_right = Some(inner);
+                            return self.compare_const(op, a, right, state);
                         }
-                    }
-                    // a positional container of known literals: membership is decided
-                    if let Some(o) = b.single() {
-                        if matches!(self.kind(o), Kind::List | Kind::Tuple | Kind::Set) {
-                            if let Some(n) = self.llen(o, state) {
-                                let mut all_lit = true;
-                                let mut found = false;
-                                for i in 0..n {
-                                    let sv = state.slot(o, Ns::Pos, key_int(i as i64));
-                                    match sv.kv.as_lit().filter(|_| sv.pts.is_empty()).map(|x| lit_eq(x, k)) {
-                                        Some(Some(true)) => found = true,
-                                        Some(Some(false)) => {}
-                                        _ => {
-                                            all_lit = false;
-                                            break;
-                                        }
-                                    }
-                                }
-                                if all_lit {
-                                    return Some(if op == ast::CmpOp::In { found } else { !found });
-                                }
-                            }
+                        Payload::View(ViewKind::Values, inner) => {
+                            let d = inner.single().filter(|d| self.kind(*d) == Kind::Dict)?;
+                            let items = self.literal_dict_items(d, state)?;
+                            let vals: Vec<KeyId> = items.iter().map(|(_, v)| v.kv.as_lit().filter(|_| v.pts.is_empty())).collect::<Option<_>>()?;
+                            return decide(vals.contains(&k));
                         }
-                    }
-                    // a view of a dict: its keys are the dict's (live); its values are decided
-                    // when they are all known literals
-                    if let Some(o) = b.single() {
-                        if let Payload::View(vk, inner) = self.obj(o).payload.clone() {
-                            match vk {
-                                ViewKind::Keys | ViewKind::Proxy => {
-                                    let b2 = inner;
-                                    let recs = self.record_objects(&b2);
-                                    if !b2.pts.is_empty() && recs.len() == b2.pts.len() && recs.iter().all(|o| matches!(self.kind(*o), Kind::Dict | Kind::Frame)) {
-                                        let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
-                                        if rows.iter().all(|r| r.definite.contains(k)) {
-                                            return Some(op == ast::CmpOp::In);
-                                        }
-                                        if rows.iter().all(|r| r.lacks(k)) {
-                                            return Some(op != ast::CmpOp::In);
-                                        }
-                                    }
-                                    return None;
-                                }
-                                ViewKind::Values => {
-                                    if let Some(d) = inner.single().filter(|d| self.kind(*d) == Kind::Dict) {
-                                        if let Some(items) = self.literal_dict_items(d, state) {
-                                            let mut found = false;
-                                            for (_, v) in &items {
-                                                match v.kv.as_lit().filter(|_| v.pts.is_empty()) {
-                                                    Some(x) if x == k => found = true,
-                                                    Some(_) => {}
-                                                    None => return None,
-                                                }
-                                            }
-                                            return Some(if op == ast::CmpOp::In { found } else { !found });
-                                        }
-                                    }
-                                    return None;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    let recs = self.record_objects(&b);
-                    if !b.pts.is_empty() && recs.len() == b.pts.len() && recs.iter().all(|o| matches!(self.kind(*o), Kind::Dict | Kind::Frame)) {
-                        let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
-                        let member = if rows.iter().all(|r| r.definite.contains(k)) {
-                            true
-                        } else if rows.iter().all(|r| r.lacks(k)) {
-                            false
-                        } else {
-                            return None;
-                        };
-                        return Some(if op == ast::CmpOp::In { member } else { !member });
-                    }
-                    // removed (`del`, `pop`) or excluded on every path, whatever the container
-                    if !b.pts.is_empty() && recs.len() == b.pts.len() && recs.iter().all(|o| state.row(*o, Ns::Item).absent.contains(k)) {
-                        return Some(op != ast::CmpOp::In);
+                        _ => {}
                     }
                 }
-                None
+                let recs = self.record_objects(&b);
+                if b.pts.is_empty() || recs.len() != b.pts.len() {
+                    return None;
+                }
+                let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
+                if recs.iter().all(|o| matches!(self.kind(*o), Kind::Dict | Kind::Frame)) {
+                    if rows.iter().all(|r| r.definite.contains(k)) {
+                        return decide(true);
+                    }
+                    if rows.iter().all(|r| r.lacks(k)) {
+                        return decide(false);
+                    }
+                    return None;
+                }
+                // removed (`del`, `pop`) or excluded on every path, whatever the container
+                rows.iter().all(|r| r.absent.contains(k)).then_some(op != ast::CmpOp::In)
             }
             ast::CmpOp::Eq | ast::CmpOp::NotEq => {
                 let b = self.eval_right(right, state);
