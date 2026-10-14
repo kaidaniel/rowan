@@ -257,48 +257,48 @@ impl Analyzer {
         self.call_method_with(v, name, Vec::new(), node, state)
     }
 
-    /// `call_method_if_defined` with positional arguments.
+    /// `call_method_if_defined` with positional arguments: on the instances among `v` whose
+    /// class defines `name`, one alternative each (None: none does).
     pub fn call_method_with(&mut self, v: &Value, name: &str, args: Vec<Value>, node: &Node, state: &mut State) -> Option<Value> {
-        let mut outs: Vec<Value> = Vec::new();
-        for oid in v.pts.iter() {
-            if self.kind(oid) == Kind::Instance {
-                if let Some(cls) = self.instance_class(oid) {
-                    if let Some(m) = self.class_lookup(cls, name) {
-                        let fv = self.cls_slots.get(&(m, Ns::Attr, key_str_lit(name))).cloned().unwrap_or_default();
-                        for f in fv.pts.iter() {
-                            if self.kind(f) == Kind::Function {
-                                outs.push(self.call_user(f, Some(Value::obj(oid)), args.clone(), IndexMap::new(), vec![], vec![], state, node, None, false));
-                            }
-                        }
-                    }
+        let calls = self.method_calls(v, &[name]).0;
+        if calls.is_empty() {
+            return None;
+        }
+        Some(self.alternatives(calls.len(), false, state, &mut |an, i, st| an.call_user(calls[i].1, Some(Value::obj(calls[i].0)), args.clone(), IndexMap::new(), vec![], vec![], st, node, None, false)))
+    }
+
+    /// The (receiver, function) pairs of the instances among `v` whose class defines one of
+    /// `names` (the first defined, in order), and the rest of `v`.
+    fn method_calls(&self, v: &Value, names: &[&str]) -> (Vec<(ObjId, ObjId)>, Value) {
+        let mut calls = Vec::new();
+        let mut rest = Value::kv_only(v.kv.clone());
+        for o in v.pts.iter() {
+            let cls = self.instance_class(o).filter(|_| self.kind(o) == Kind::Instance);
+            let found = cls.and_then(|c| names.iter().find_map(|n| Some((self.class_lookup(c, n)?, *n))));
+            match found {
+                Some((m, n)) => {
+                    let fv = self.cls_slots.get(&(m, Ns::Attr, key_str_lit(n))).cloned().unwrap_or_default();
+                    calls.extend(fv.pts.iter().filter(|f| self.kind(*f) == Kind::Function).map(|f| (o, f)));
                 }
+                None => rest.pts = rest.pts.insert(o),
             }
         }
-        if outs.is_empty() {
-            None
-        } else {
-            Some(join_values(outs))
-        }
+        (calls, rest)
     }
 
     /// A builtin Python carries out by a dunder of its argument (`str(x)` calls
     /// `x.__str__()`): on the instances among `v` whose class defines one of `names` (the
-    /// first defined, in order) that method runs with `args`. Returns the results joined and
-    /// the rest of `v`; None when no instance defines one.
+    /// first defined, in order) that method runs with `args`, one alternative each (and one
+    /// where none runs, for the rest of `v`). Returns the results joined and the rest of `v`;
+    /// None when no instance defines one.
     pub fn run_dunder(&mut self, v: &Value, names: &[&str], args: Vec<Value>, node: &Node, state: &mut State) -> Option<(Value, Value)> {
-        let mut outs: Vec<Value> = Vec::new();
-        let mut rest = Value::kv_only(v.kv.clone());
-        for o in v.pts.iter() {
-            let cls = self.instance_class(o).filter(|_| self.kind(o) == Kind::Instance);
-            match cls.and_then(|c| names.iter().find(|n| self.class_lookup(c, n).is_some())) {
-                Some(n) => outs.push(self.call_method_with(&Value::obj(o), n, args.clone(), node, state).unwrap_or_default()),
-                None => rest.pts = rest.pts.insert(o),
-            }
-        }
-        if outs.is_empty() {
+        let (calls, rest) = self.method_calls(v, names);
+        if calls.is_empty() {
             return None;
         }
-        Some((join_values(outs), rest))
+        let keep = !rest.empty();
+        let r = self.alternatives(calls.len(), keep, state, &mut |an, i, st| an.call_user(calls[i].1, Some(Value::obj(calls[i].0)), args.clone(), IndexMap::new(), vec![], vec![], st, node, None, false));
+        Some((r, rest))
     }
 
     // ------------------------------------------------------------- names
@@ -979,14 +979,9 @@ impl Analyzer {
                         items = None;
                         exhaustive = false;
                         let mut none_taken = state.copy();
-                        let mut nexts = Value::new();
-                        for it in &iters {
-                            if self.instance_class(*it).and_then(|c| self.class_lookup(c, "__next__")).is_some() {
-                                nexts = nexts.join(&self.call_method_with(&Value::obj(*it), "__next__", Vec::new(), node, state).unwrap_or_default());
-                            } else {
-                                nexts = nexts.join(&Value::data("next"));
-                            }
-                        }
+                        let its = Value::objs(iters.iter().copied().collect());
+                        let (nexts, rest) = self.run_dunder(&its, &["__next__"], Vec::new(), node, state).unwrap_or((Value::new(), its));
+                        let nexts = if rest.empty() { nexts } else { nexts.join(&Value::data("next")) };
                         // (the loop may take no item: StopIteration at once)
                         let j = if state.reachable { state.join(&mut none_taken) } else { none_taken };
                         state.replace_with(j);

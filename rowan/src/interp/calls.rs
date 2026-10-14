@@ -81,51 +81,46 @@ impl Analyzer {
         if self.over_hard_deadline() && targets.iter().all(|o| matches!(self.kind(*o), Kind::Function | Kind::Bound)) {
             return self.unknown_call("?", None, &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
+        self.alternatives(targets.len(), false, state, &mut |an, i, st| {
+            let oid = targets[i];
+            // (a groupby method of one of several groupby objects: its results are its own)
+            let own = matches!(&an.obj(oid).payload, Payload::Method(q, r) if q.starts_with("groupby.") && r.pts.iter().all(|g| an.kind(g) == Kind::Groupby));
+            let saved = if own { an.alloc_extra.replace(format!("gbm{}", oid)) } else { an.alloc_extra.clone() };
+            let r = an.call_one(oid, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast);
+            an.alloc_extra = saved;
+            r
+        })
+    }
+
+    /// Alternatives: `run(i)` for each of `n` callees, each on its own copy of the state, the
+    /// states joined (`keep`: the state as it is is one more, where none runs); the results
+    /// of those that return (a callee that raises on every path returns nothing: `A(x)` whose
+    /// `__init__` always fails gives no A).
+    pub fn alternatives(&mut self, n: usize, keep: bool, state: &mut State, run: &mut dyn FnMut(&mut Analyzer, usize, &mut State) -> Value) -> Value {
+        if n == 1 && !keep {
+            return run(self, 0, state);
+        }
         let pre = state.copy();
         let mut outs: Vec<Value> = Vec::new();
-        let mut states: Vec<State> = Vec::new();
-        for oid in targets {
+        let mut states: Vec<State> = if keep { vec![pre.copy()] } else { Vec::new() };
+        for i in 0..n {
             let mut st = pre.copy();
-            // (a groupby method of one of several groupby objects: its results are its own)
-            let own = matches!(&self.obj(oid).payload, Payload::Method(q, r) if q.starts_with("groupby.") && r.pts.iter().all(|g| self.kind(g) == Kind::Groupby));
-            let saved = if own { self.alloc_extra.replace(format!("gbm{}", oid)) } else { self.alloc_extra.clone() };
-            let r = self.call_one(oid, &args, &kwargs, &star_args, &star_kwargs, &mut st, node, call_ast);
-            self.alloc_extra = saved;
-            // (a callee that raises on every path returns nothing: `A(x)` whose `__init__`
-            // always fails gives no A)
+            let r = run(self, i, &mut st);
             if st.reachable {
                 outs.push(r);
             }
             states.push(st);
         }
-        state.replace_with(State::join_all(states).unwrap());
+        if let Some(j) = State::join_all(states) {
+            state.replace_with(j);
+        }
         join_values(outs)
     }
 
-    /// Several definitions of one method (conditional ones): alternatives, one state each.
+    /// Several definitions of one method (conditional ones) on one receiver.
     #[allow(clippy::too_many_arguments)]
     fn call_alternatives(&mut self, fns: &[u32], recv: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
-        if fns.len() == 1 {
-            let mut outs = Vec::new();
-            for x in fns {
-                outs.push(self.call_user(*x, Some(Value::obj(recv)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, call_ast, false));
-            }
-            return join_values(outs);
-        }
-        let mut outs = Vec::new();
-        let mut acc: Option<State> = None;
-        for x in fns {
-            let mut st = state.copy();
-            outs.push(self.call_user(*x, Some(Value::obj(recv)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), &mut st, node, call_ast, false));
-            acc = Some(match acc {
-                None => st,
-                Some(mut a) => a.join(&mut st),
-            });
-        }
-        if let Some(a) = acc {
-            state.replace_with(a);
-        }
-        join_values(outs)
+        self.alternatives(fns.len(), false, state, &mut |an, i, st| an.call_user(fns[i], Some(Value::obj(recv)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), st, node, call_ast, false))
     }
 
     pub fn call_one(&mut self, oid: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
@@ -182,16 +177,14 @@ impl Analyzer {
                 // several groupby objects (`groupby` over one of several columns): the model runs
                 // once per object, each making its own results
                 if qual.starts_with("groupby.") && recv.pts.len() > 1 && recv.pts.iter().all(|o| self.kind(o) == Kind::Groupby) {
-                    let mut outs: Vec<Value> = Vec::new();
-                    for g in recv.pts.iter() {
-                        let mv = self.method_value(&qual, &Value::obj(g));
-                        let Some(mo) = mv.single() else { continue };
-                        let saved = self.alloc_extra.replace(format!("gb{}", g));
-                        let r = self.call_one(mo, args, kwargs, star_args, star_kwargs, state, node, call_ast);
-                        self.alloc_extra = saved;
-                        outs.push(r);
-                    }
-                    return join_values(outs);
+                    let gs: Vec<ObjId> = recv.pts.to_vec();
+                    return self.alternatives(gs.len(), false, state, &mut |an, i, st| {
+                        let Some(mo) = an.method_value(&qual, &Value::obj(gs[i])).single() else { return Value::new() };
+                        let saved = an.alloc_extra.replace(format!("gb{}", gs[i]));
+                        let r = an.call_one(mo, args, kwargs, star_args, star_kwargs, st, node, call_ast);
+                        an.alloc_extra = saved;
+                        r
+                    });
                 }
                 let mut args = args.to_vec();
                 if qual.starts_with("dict.") || qual.starts_with("set.") {
