@@ -1747,53 +1747,22 @@ impl Analyzer {
             }
             let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
             for a in params {
-                // (keyword-only parameters are passed by keyword)
-                let kwonly = fparams.kwonlyargs.iter().any(|k| std::ptr::eq(&k.parameter, a));
-                let n_before = args.len();
-                let is_vararg = fparams.vararg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);
-                let is_kwarg = fparams.kwarg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);
-                if is_vararg || is_kwarg {
+                if [&fparams.vararg, &fparams.kwarg].iter().any(|v| v.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false)) {
                     // a caller may pass any arguments here
-                    let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
-                    if is_vararg {
-                        star_args.push(Value::obj(poid));
+                    let v = Value::obj(self.param_source(&fi, a, &mut st));
+                    if fparams.vararg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false) {
+                        star_args.push(v);
                     } else {
-                        star_kwargs.push(Value::obj(poid));
+                        star_kwargs.push(v);
                     }
                     continue;
                 }
-                let pname = s(a.name.id.as_str());
-                if let Some(d) = fi.defaults.get(&pname) {
-                    // the default, or whatever a caller passes (as annotated, in a torch module)
-                    let pv = match a.annotation.as_deref().and_then(|ann| self.torch_param(ann, &fi, a.name.id.as_str(), &mut st)) {
-                        Some(v) => v,
-                        None => Value::obj(self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![])),
-                    };
-                    // a number default in a torch module: the parameter (whatever a caller
-                    // passes, the default included) stays a name dims can be written in
-                    if self.torch_modules.contains(&fi.module) && d.pts.is_empty() && d.kv.as_lit().map(intern::key_is_number).unwrap_or(false) {
-                        args.push(pv);
-                        continue;
-                    }
-                    args.push(d.join(&pv));
-                    if kwonly && args.len() > n_before {
-                        let v = args.pop().unwrap();
-                        kwargs.insert(pname, v);
-                    }
-                    continue;
-                }
-                let mut v = match &a.annotation {
-                    Some(ann) => self.param_from_annotation(ann, &fi, a.name.id.as_str(), &mut st),
-                    None => None,
-                };
-                if v.is_none() {
-                    let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, &mut st, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
-                    v = Some(Value::obj(poid));
-                }
-                if kwonly {
-                    kwargs.insert(pname, v.unwrap());
+                let v = self.open_param(&fi, a, false, &mut st);
+                // (keyword-only parameters are passed by keyword)
+                if fparams.kwonlyargs.iter().any(|k| std::ptr::eq(&k.parameter, a)) {
+                    kwargs.insert(s(a.name.id.as_str()), v);
                 } else {
-                    args.push(v.unwrap());
+                    args.push(v);
                 }
             }
             self.entry_scope = None;
@@ -1904,6 +1873,32 @@ impl Analyzer {
     }
 
     /// A declared row for an annotated entry-point parameter (§6.6).
+    /// The unknown a caller passes for parameter `a` of `fi` (a `param F.a` input).
+    fn param_source(&mut self, fi: &FuncInfo, a: &ast::Parameter, st: &mut State) -> ObjId {
+        self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, st, &format!("param {}", a.name.id), "", Ns::Item, vec![])
+    }
+
+    /// Parameter `a` of an entry run: its default or whatever a caller passes (only the
+    /// default with `default_only`), as annotated; a number default in a torch module is not
+    /// joined in (the parameter stays a name dims can be written in).
+    fn open_param(&mut self, fi: &FuncInfo, a: &'static ast::Parameter, default_only: bool, st: &mut State) -> Value {
+        let d = fi.defaults.get(&s(a.name.id.as_str())).cloned();
+        if let (Some(d), true) = (&d, default_only) {
+            return d.clone();
+        }
+        // (with a default, only a torch annotation is taken: an instance for a defaulted
+        // parameter of a user class made runs cost coverage, click 186 -> 151 sites)
+        let ann = a.annotation.as_deref();
+        let given = match ann.and_then(|ann| if d.is_some() { self.torch_param(ann, fi, a.name.id.as_str(), st) } else { self.param_from_annotation(ann, fi, a.name.id.as_str(), st) }) {
+            Some(v) => v,
+            None => Value::obj(self.param_source(fi, a, st)),
+        };
+        match d {
+            Some(d) if !(self.torch_modules.contains(&fi.module) && d.pts.is_empty() && d.kv.as_lit().map(intern::key_is_number).unwrap_or(false)) => d.join(&given),
+            _ => given,
+        }
+    }
+
     /// In a torch module, a parameter annotated as a number (`d: int`: arithmetic on it is a
     /// number, not a tensor, `d ** 0.5`) or as a `Tensor` (`data[j:j + T]` is a tensor's
     /// slice, not a list's): an unknown known to be one. None for other annotations.
@@ -2064,40 +2059,23 @@ impl Analyzer {
                 if self.torch_modules.contains(&fi.module) {
                     self.entry_scope = Some(init);
                 }
-                let params: Vec<&ast::Parameter> = scopemod::all_params(params_all).into_iter().skip(1).collect();
                 let mut args = Vec::new();
-                for a in params {
-                    let is_var = params_all.vararg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false)
-                        || params_all.kwarg.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false);
-                    if is_var {
+                let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
+                for a in scopemod::all_params(params_all).into_iter().skip(1) {
+                    if [&params_all.vararg, &params_all.kwarg].iter().any(|v| v.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false)) {
                         continue;
                     }
-                    let pname = s(a.name.id.as_str());
-                    if let Some(d) = fi.defaults.get(&pname) {
-                        let number = d.pts.is_empty() && d.kv.as_lit().map(intern::key_is_number).unwrap_or(false);
-                        if !self.torch_modules.contains(&fi.module) {
-                            args.push(d.clone());
-                            continue;
-                        }
-                        if !number {
-                            // the default, or whatever a caller passes
-                            let poid = self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, state, &format!("param {}", a.name.id), "", Ns::Item, vec![]);
-                            args.push(d.join(&Value::obj(poid)));
-                            continue;
-                        }
+                    // (outside torch modules: the defaults, as a caller that passes nothing)
+                    let v = self.open_param(&fi, a, !self.torch_modules.contains(&fi.module), state);
+                    if params_all.kwonlyargs.iter().any(|k| std::ptr::eq(&k.parameter, a)) {
+                        kwargs.insert(s(a.name.id.as_str()), v);
+                    } else {
+                        args.push(v);
                     }
-                    let v = match &a.annotation {
-                        Some(ann) => self.param_from_annotation(ann, &fi, a.name.id.as_str(), state),
-                        None => None,
-                    };
-                    args.push(match v {
-                        Some(v) => v,
-                        None => Value::obj(self.unknown_source(&format!("param {}.{}", fi.py_qualname(), a.name.id), SourceKind::Param, state, &format!("param {}", a.name.id), "", Ns::Item, vec![])),
-                    });
                 }
                 self.entry_scope = saved_scope;
                 let fake = if self.torch_modules.contains(&fi.module) { Node::synthetic(fi.node.node().module, frontend::node(ci.node).line) } else { Node::synthetic(fi.node.node().module, fi.node.node().line) };
-                self.call_user(init, Some(Value::obj(inst)), args, IndexMap::new(), vec![], vec![], state, &fake, None, true);
+                self.call_user(init, Some(Value::obj(inst)), args, kwargs, vec![], vec![], state, &fake, None, true);
             }
         }
         // (an instance a caller made may have had any of its methods called since: what they
