@@ -826,7 +826,10 @@ impl Analyzer {
                 let reads = self.gen_last_reads.take().unwrap_or_default();
                 // (what it reads that the consumer can reach: from what it was given)
                 let roots: Vec<Value> = lg.self_v.iter().chain(lg.args.iter()).chain(lg.kwargs.values()).cloned().collect();
-                let reach = self.reach_from(&roots, state);
+                let mut targets: Vec<ObjId> = reads.iter().map(|r| r.0).collect();
+                targets.sort_unstable();
+                targets.dedup();
+                let reach = if targets.is_empty() { FxHashSet::default() } else { self.reach_among(&roots, &targets, state) };
                 let reads = reads.into_iter().filter(|r| reach.contains(&r.0)).collect();
                 let w = super::GenWatch { gid: o, own, after: state.copy(), reads, budget, born: self.serial };
                 self.gen_watch.push(w);
@@ -986,8 +989,11 @@ impl Analyzer {
                 let had = grown.is_some();
                 let roots: Vec<Value> = self_v.iter().chain(args.iter()).chain(kwargs.values()).cloned().collect();
                 let fp = state.footprint(&pre);
-                let mut reach = self.reach_from(&roots, state);
-                reach.retain(|o| self.objects[*o as usize].born < mark);
+                let old = |o: ObjId| self.objects[o as usize].born < mark;
+                let mut targets: Vec<ObjId> = fp.rows.iter().map(|k| k.0).chain(fp.slots.iter().map(|k| k.0)).chain(fp.elems.iter().copied()).filter(|o| old(*o)).collect();
+                targets.sort_unstable();
+                targets.dedup();
+                let reach = if targets.is_empty() { FxHashSet::default() } else { self.reach_among(&roots, &targets, state) };
                 let fp = crate::state::Footprint { rows: fp.rows.into_iter().filter(|k| reach.contains(&k.0)).collect(), slots: fp.slots.into_iter().filter(|k| reach.contains(&k.0)).collect(), elems: fp.elems.into_iter().filter(|o| reach.contains(o)).collect() };
                 if !fp.rows.is_empty() || !fp.slots.is_empty() || !fp.elems.is_empty() {
                     let mut g = self.rec_heap.get_mut(&key).and_then(|e| e.1.take()).unwrap_or_else(|| pre.copy());
@@ -1261,6 +1267,7 @@ impl Analyzer {
         self.rec_entry.remove(&key);
         self.rec_widened.remove(&key);
         self.rec_heap.remove(&key);
+        self.rec_table.remove(&key);
         self.call_chain = saved_chain;
         self.frames.pop();
         self.env_stack.pop();
@@ -1816,8 +1823,11 @@ impl Analyzer {
             let mods: Vec<Value> = self.modules.values().skip(mmark).map(|m| Value::obj(*m)).collect();
             let mut again = pre.copy();
             if !mods.is_empty() {
-                let reach = self.reach_from(&mods, state);
                 let fp = state.footprint(&pre);
+                let mut targets: Vec<ObjId> = fp.rows.iter().map(|k| k.0).chain(fp.slots.iter().map(|k| k.0)).chain(fp.elems.iter().copied()).collect();
+                targets.sort_unstable();
+                targets.dedup();
+                let reach = self.reach_among(&mods, &targets, state);
                 let keep = crate::state::Footprint { rows: fp.rows.into_iter().filter(|k| reach.contains(&k.0)).collect(), slots: fp.slots.into_iter().filter(|k| reach.contains(&k.0)).collect(), elems: fp.elems.into_iter().filter(|o| reach.contains(o)).collect() };
                 again.join_heap_fp(state, &keep);
             }
@@ -1892,15 +1902,27 @@ impl Analyzer {
         }
     }
 
-    /// The objects reachable from `roots` in `st`.
-    fn reach_from(&self, roots: &[Value], st: &State) -> FxHashSet<ObjId> {
+    /// Which of `targets` are reachable from `roots` in `st` (the walk ends when all are found).
+    fn reach_among(&self, roots: &[Value], targets: &[ObjId], st: &State) -> FxHashSet<ObjId> {
+        let mut found: FxHashSet<ObjId> = FxHashSet::default();
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
         let mut work: Vec<ObjId> = roots.iter().flat_map(|v| v.pts.iter()).collect();
         while let Some(o) = work.pop() {
-            if seen.insert(o) && !matches!(self.kind(o), Kind::Module | Kind::Class | Kind::Function) {
+            if !seen.insert(o) {
+                continue;
+            }
+            self.walked.set(self.walked.get() + 1);
+            if targets.binary_search(&o).is_ok() {
+                found.insert(o);
+                if found.len() == targets.len() {
+                    break;
+                }
+            }
+            if !matches!(self.kind(o), Kind::Module | Kind::Class | Kind::Function) {
                 self.obj_edges(o, st, &mut work);
             }
         }
-        seen
+        found
     }
+
 }
