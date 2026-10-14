@@ -1435,6 +1435,18 @@ fn py_order(op: &str, a: KeyId, b: KeyId) -> Option<bool> {
     }
 }
 
+/// How Python orders two literals (None: they do not compare, or not as a total order).
+pub fn py_cmp(a: KeyId, b: KeyId) -> Option<Ordering> {
+    if py_eq(a, b)? {
+        return Some(Ordering::Equal);
+    }
+    match (py_order("lt", a, b)?, py_order("gt", a, b)?) {
+        (true, false) => Some(Ordering::Less),
+        (false, true) => Some(Ordering::Greater),
+        _ => None,
+    }
+}
+
 fn py_lt(a: KeyId, b: KeyId) -> Option<bool> {
     py_order("lt", a, b)
 }

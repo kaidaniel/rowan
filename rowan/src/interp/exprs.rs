@@ -12,32 +12,10 @@ use super::funcs::Elem;
 use super::{is_constant, names_in, Analyzer, ObjId, Payload, ViewKind, UNROLL_MAX};
 
 /// Python's `s[lo:hi:step]` on characters.
+/// `text[lo:hi:step]` (None: a zero step).
 fn py_slice(cs: &[char], lo: Option<i64>, hi: Option<i64>, step: Option<i64>) -> Option<String> {
-    let n = cs.len() as i64;
     let step = step.unwrap_or(1);
-    if step == 0 {
-        return None;
-    }
-    let norm = |x: i64| if x < 0 { x + n } else { x };
-    let mut out = String::new();
-    if step > 0 {
-        let lo = lo.map(norm).unwrap_or(0).clamp(0, n);
-        let hi = hi.map(norm).unwrap_or(n).clamp(0, n);
-        let mut i = lo;
-        while i < hi {
-            out.push(cs[i as usize]);
-            i += step;
-        }
-    } else {
-        let lo = lo.map(norm).unwrap_or(n - 1).clamp(-1, n - 1);
-        let hi = hi.map(norm).unwrap_or(-1).clamp(-1, n - 1);
-        let mut i = lo;
-        while i > hi {
-            out.push(cs[i as usize]);
-            i += step;
-        }
-    }
-    Some(out)
+    (step != 0).then(|| slice_positions(cs.len() as i64, lo, hi, step).into_iter().map(|i| cs[i as usize]).collect())
 }
 
 impl Analyzer {
@@ -1555,11 +1533,6 @@ impl Analyzer {
         if op == ast::Operator::Add {
             let la = a.kv.as_lit();
             let lb = b.kv.as_lit();
-            if let (Some(x), Some(y)) = (la, lb) {
-                if let (Some(sx), Some(sy)) = (intern::key_as_str(x), intern::key_as_str(y)) {
-                    return Value::lit(key_str_lit(&format!("{}{}", sx, sy)));
-                }
-            }
             if let Some(x) = la {
                 if intern::key_is_str(x) && matches!(b.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) {
                     return Value::kv_only(self.rename_kv(&b.kv, &RenameFn::with_arg(FnKind::Prefix, x)));
@@ -2136,53 +2109,9 @@ impl Analyzer {
 }
 
 /// Ordering of two literals of one kind: numbers (ints, floats, bools) or strings.
+/// How Python orders two literals (None: they do not compare).
 pub fn literal_order(x: KeyId, y: KeyId) -> Option<std::cmp::Ordering> {
-    if crate::models::chrono::is_chrono_key(x) || crate::models::chrono::is_chrono_key(y) {
-        use std::cmp::Ordering::*;
-        return match (crate::models::chrono::compare("lt", x, y), crate::models::chrono::compare("eq", x, y)) {
-            (_, Some(true)) => Some(Equal),
-            (Some(true), _) => Some(Less),
-            (Some(false), Some(false)) => Some(Greater),
-            _ => None,
-        };
-    }
-    if crate::models::pynum::is_num_key(x) || crate::models::pynum::is_num_key(y) {
-        return crate::models::pynum::order(x, y);
-    }
-    let nx = intern::with_key(x, num_of);
-    let ny = intern::with_key(y, num_of);
-    if let (Some(a), Some(b)) = (nx, ny) {
-        return match (a, b) {
-            (Num::I(p), Num::I(q)) => Some(p.cmp(&q)),
-            (p, q) => p.f().partial_cmp(&q.f()),
-        };
-    }
-    if let (Some(a), Some(b)) = (intern::key_as_str(x), intern::key_as_str(y)) {
-        return Some(a.cmp(&b));
-    }
-    None
-}
-
-#[derive(Clone, Copy)]
-enum Num {
-    I(i64),
-    F(f64),
-}
-impl Num {
-    fn f(self) -> f64 {
-        match self {
-            Num::I(i) => i as f64,
-            Num::F(f) => f,
-        }
-    }
-}
-
-fn num_of(k: &intern::Key) -> Option<Num> {
-    match k {
-        intern::Key::Int(i) => Some(Num::I(*i)),
-        intern::Key::Float(b) => Some(Num::F(f64::from_bits(*b))),
-        _ => None,
-    }
+    crate::models::pyvalues::py_cmp(x, y)
 }
 
 /// `k != "x"`, `k not in (...)`, `k in (...)`, and conjunctions of those, on the key target.
@@ -2343,21 +2272,11 @@ const SELF_REPORTING: &[&str] = &["excinit", "str.format", "cfgparser.", "cfgsec
 
 /// The positions `xs[lo:hi:step]` selects from a sequence of length `n` (`slice.indices`).
 pub fn slice_positions(n: i64, lo: Option<i64>, hi: Option<i64>, step: i64) -> Vec<i64> {
-    let norm = |b: i64| if b < 0 { b + n } else { b };
+    let (s, e, step) = slice_indices(n, lo, hi, step);
     if step > 0 {
-        let s = lo.map(norm).unwrap_or(0).clamp(0, n);
-        let e = hi.map(norm).unwrap_or(n).clamp(0, n);
         (s..e).step_by(step as usize).collect()
     } else {
-        let s = lo.map(norm).unwrap_or(n - 1).clamp(-1, n - 1);
-        let e = hi.map(norm).unwrap_or(-1).clamp(-1, n - 1);
-        let mut v = Vec::new();
-        let mut i = s;
-        while i > e {
-            v.push(i);
-            i += step;
-        }
-        v
+        (e + 1..=s).rev().step_by(step.unsigned_abs() as usize).collect()
     }
 }
 
