@@ -1254,7 +1254,9 @@ impl Analyzer {
             // so it is merged — weak, always sound)
             // (an unknown call's result allocated again: taken as still in use without a walk,
             // and merged — its rows are open anyway; walking for it dominated large runs)
-            let hard = existed == Some(oid) && (self.over_hard_deadline() || (kind == Kind::Unknown));
+            // (an object already merged — its site made again while in use, past its variants —
+            // stays merged without a walk: such walks found nothing in their budget)
+            let hard = existed == Some(oid) && (self.over_hard_deadline() || (kind == Kind::Unknown) || !self.obj(oid).single);
             if existed == Some(oid) && (hard || model_held || (self.has_facts(oid, state) && self.is_live(oid, state))) {
                 // allocated again while the earlier object is still reachable (a method run
                 // twice on one receiver, a call repeated in a loop)
