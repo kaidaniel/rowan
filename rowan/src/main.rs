@@ -279,7 +279,7 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
         }
     }
     if std::env::var("ROWAN_DEBUG").is_ok() {
-        eprintln!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {}, havoc visits {})", an.work, an.work_units(), an.tab_runs, an.objects.len(), an.started.elapsed().as_millis(), if an.hard_cut { ", cut at the deadline" } else { "" }, an.tab_count.values().sum::<usize>(), rowan::domain::row_joins(), an.walked.get() + rowan::state::fp_visits(), an.havoc_walked);
+        eprintln!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {} (walks {}, joins {}), havoc visits {})", an.work, an.work_units(), an.tab_runs, an.objects.len(), an.started.elapsed().as_millis(), if an.hard_cut { ", cut at the deadline" } else { "" }, an.tab_count.values().sum::<usize>(), rowan::domain::row_joins(), an.walked.get() + rowan::state::fp_visits(), an.walked.get(), rowan::state::fp_visits(), an.havoc_walked);
     }
     if facts {
         return Ok((serde_json::to_string(&report::facts_json(&an)).unwrap(), deps));

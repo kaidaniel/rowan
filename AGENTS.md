@@ -7,7 +7,8 @@ must be true at the last commit. The details live in the code's doc comments.
 ## How rowan works
 
 rowan is a whole-program **abstract interpreter** for Python (Rust, `rowan/`). It parses with
-ruff and walks the syntax tree directly, running the program on abstract values.
+ruff (private names mangled as CPython does) and walks the syntax tree, running the program
+on abstract values. Imports run as Python runs them (`TYPE_CHECKING` is False, `import *`).
 
 * **Values** (`Value`, `domain.rs`) are a set of object ids plus a scalar part (`KeyVal`): a
   literal, up to 64 literals, the keys of some objects, or `Data(label)`, an unknown named by
@@ -49,8 +50,9 @@ ruff and walks the syntax tree directly, running the program on abstract values.
   * **Unknown values** are not taken for instances of the program's classes: a method of an
     unknown object is an unknown call (no duck typing; it was a closed-world assumption).
   * **Unknown calls** may change everything they reach through what they are given, at any
-    depth: records get a mutator, slots may hold anything (one shared unknown object), lists
-    and sets any items and length; the program's functions among it may run (`follow_code`).
+    depth: records get a mutator, slots may hold anything (one shared unknown object, which
+    no store changes: a value stored into it goes to unknown code, `escape`), lists and sets
+    any items and length; the program's functions among it may run (`follow_code`).
     They return an unknown and may raise anything. Library functions known to have no effect
     are `noeffect` (`ALLOWLIST_PREFIXES`), except those changing their arguments (`random.shuffle`).
   * **Entry points:** functions nothing calls run with open parameters; their requirements
@@ -113,7 +115,7 @@ uv run --no-project --with pandas --with pydantic --with pydantic-settings --wit
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py [case…]
 cd vscode-rowan && node test.js && npm run package  # hover / diagnostic text checks; builds the .vsix
 uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"
-                                                    # benchmark (stdlib12k / email / rich / click)
+                       # benchmark: stdlib12k / email / rich / click; frontier pip / timm / sktime / functional
 ```
 
 Run the oracle on the cases you touched, and in full before a commit that changes models. CI
@@ -174,8 +176,8 @@ extension (talks to `rowan serve`).
   second overwrites the first.
 * **Narrowing never re-runs a call:** each call node's last value is read back (`call_memo`).
 * **Callees** run with the caller's `state.exits` taken out and restored (y438).
-* **GC roots.** Anything a side table refers to must be in `gc_pinned` or reachable through
-  `obj_edges`; otherwise a later read gives a silently empty row.
+* **GC roots.** A side table keyed by objects goes into `side_edges`; anything else the
+  analyzer holds (a running with's managers) into `gc_pinned`: else a read gets an empty row.
 * **Generator yields** use `alloc_raw` for their per-yield states, not `alloc`.
 * **Stdlib objects** (`stdobj.<kind>`) keep attributes in Attr slots and dispatch through
   `m_stdobj`.
@@ -187,13 +189,11 @@ extension (talks to `rowan serve`).
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~6 / ~5 / ~4 / ~105 s; 0.08 / 0.06 / 0.08 / 0.29 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~5 / ~4 / ~3 / ~14 s; 0.13 / 0.07 / 0.12 / 0.12 GB |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~17 / ~28 / ~70 / ~5 s; 0.26 / 1.5 / 1.0 / 0.4 GB |
 
 ## Known problems and next steps
 
-Open bugs, performance items and precision to-dos are in `SUGGESTED_CHANGES.md`, each with a
-repro; work it in order. The main ones: the interpreter is still far from its 10k-line goal,
-precision lost where a function's budget runs out on large programs, and the precision to-dos
-(`#@todo`s in the suites). Symbolic summaries were removed (they were the main source of
-unsoundness and cost; the parked `parked/joined-summaries` branch tried to repair them). The branch `slotmap-trie` is parked (same
-answers, no gain).
+Open items are in `SUGGESTED_CHANGES.md`, each with a repro; work it in order: the 10k-line
+goal, the frontier programs' cost, precision lost where budgets run out, the `#@todo`s. Parked
+branches: `parked/joined-summaries` (symbolic summaries: unsound, costly), `slotmap-trie`.

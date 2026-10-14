@@ -133,12 +133,12 @@ impl Analyzer {
         if groups.is_empty() {
             groups.push((foid, args[0].clone()));
         }
-        let pre = state.copy_ref();
+        let pre = state.copy();
         let mut outs = Vec::new();
         let mut states: Vec<State> = Vec::new();
         let n = groups.len();
         for (f, part) in groups {
-            let mut st = if n == 1 { std::mem::replace(state, State::bottom()) } else { pre.copy_ref() };
+            let mut st = if n == 1 { std::mem::replace(state, State::bottom()) } else { pre.copy() };
             let mut a = args.clone();
             a[0] = part;
             if f == foid {

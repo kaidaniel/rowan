@@ -75,7 +75,7 @@ impl Analyzer {
         if self.over_hard_deadline() && targets.iter().all(|o| matches!(self.kind(*o), Kind::Function | Kind::Bound)) {
             return self.unknown_call("?", None, &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
-        let mut pre = state.copy();
+        let pre = state.copy();
         let mut outs: Vec<Value> = Vec::new();
         let mut states: Vec<State> = Vec::new();
         for oid in targets {
@@ -83,8 +83,13 @@ impl Analyzer {
             // (a groupby method of one of several groupby objects: its results are its own)
             let own = matches!(&self.obj(oid).payload, Payload::Method(q, r) if q.starts_with("groupby.") && r.pts.iter().all(|g| self.kind(g) == Kind::Groupby));
             let saved = if own { self.alloc_extra.replace(format!("gbm{}", oid)) } else { self.alloc_extra.clone() };
-            outs.push(self.call_one(oid, &args, &kwargs, &star_args, &star_kwargs, &mut st, node, call_ast));
+            let r = self.call_one(oid, &args, &kwargs, &star_args, &star_kwargs, &mut st, node, call_ast);
             self.alloc_extra = saved;
+            // (a callee that raises on every path returns nothing: `A(x)` whose `__init__`
+            // always fails gives no A)
+            if st.reachable {
+                outs.push(r);
+            }
             states.push(st);
         }
         state.replace_with(State::join_all(states).unwrap());
@@ -166,6 +171,15 @@ impl Analyzer {
                     if kwargs.is_empty() && star_args.is_empty() && !self.models.has_exact(&qual) {
                         let n = n.to_string();
                         return self.exception_object(&n, args.to_vec(), node, state);
+                    }
+                }
+                // `f.__get__(obj)` (a library function bound by hand: attrs's
+                // `object.__setattr__.__get__(self)`): f with obj as its first argument
+                if let Some(base) = qual.strip_suffix(".__get__").filter(|_| !args.is_empty() && kwargs.is_empty()) {
+                    let f = self.alloc_raw(Kind::External, &format!("ext:{}", base), "", true, base, Payload::Str(base.to_string()));
+                    let pc = Call { qual: "functools.partial".into(), args: vec![Value::obj(f), args[0].clone()], ..call.clone() };
+                    if let Some(m) = self.models.lookup("functools.partial") {
+                        return self.run_model(m, state, &pc);
                     }
                 }
                 if let Some(m) = self.models.lookup(&qual) {
@@ -289,7 +303,9 @@ impl Analyzer {
             self.kill_facts_on(&objs, state);
         }
         let name = qual.rsplit('.').next().unwrap_or(qual);
-        if NOEFFECT_METHOD_NAMES.contains(&name) && recv.map(|r| self.record_objects(r).is_empty()).unwrap_or(true) {
+        // (a library object's logging / writing / comparing method — the receiver is not one
+        // of the program's objects — changes nothing it is given)
+        if NOEFFECT_METHOD_NAMES.contains(&name) && recv.map(|r| r.pts.iter().all(|o| matches!(self.kind(o), Kind::Unknown | Kind::External) && !self.is_any(o))).unwrap_or(true) {
             self.flag_may_raise(state);
             return Value::data(&format!("L{}", node.line));
         }
@@ -375,6 +391,27 @@ impl Analyzer {
         Value::obj(rid)
     }
 
+    /// The shared unknown object (`any_object`).
+    pub fn is_any(&self, o: ObjId) -> bool {
+        crate::state::is_any(o)
+    }
+
+    /// `v` passes to unknown code without a call (stored into an object only unknown code
+    /// holds): what it reaches may change, and the code it holds may run.
+    pub fn escape(&mut self, v: &Value, site: &str, state: &mut State) {
+        if v.pts.is_empty() {
+            return;
+        }
+        let any = self.any_object(state);
+        let site_id = s(site);
+        self.havoc_reachable(std::slice::from_ref(v), any, site_id, state);
+        let found = std::mem::take(&mut self.havoc_code);
+        let callables: Vec<ObjId> = found.into_iter().filter(|o| matches!(self.kind(*o), Kind::Function | Kind::Bound | Kind::Partial)).collect();
+        if !callables.is_empty() {
+            self.follow_code(callables, any, site_id, state);
+        }
+    }
+
     pub fn reachable_records(&self, vals: &[Value], state: &State, depth: u32) -> Vec<(u32, Ns)> {
         let mut out: Vec<(u32, Ns)> = Vec::new();
         let mut seen: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
@@ -400,13 +437,9 @@ impl Analyzer {
     }
 
     /// The object standing for any value unknown code may have stored: nothing known about it.
-    pub fn any_object(&mut self, state: &mut State) -> ObjId {
+    pub fn any_object(&mut self, _state: &mut State) -> ObjId {
         let o = self.alloc_raw(Kind::Unknown, "any", "", false, "?", Payload::None);
-        for ns in [Ns::Item, Ns::Attr] {
-            if !state.has_row(o, ns) {
-                state.set_row(o, ns, Row::top());
-            }
-        }
+        crate::state::set_any(o);
         o
     }
 
@@ -482,16 +515,19 @@ impl Analyzer {
             // (what an earlier havoc by the same code did already is not written again: code
             // past its budget is often called in a loop)
             for ns in [Ns::Item, Ns::Attr] {
-                if state.has_row(o, ns) || (ns == Ns::Item && matches!(k, Kind::Dict | Kind::Frame)) || (ns == Ns::Attr && k == Kind::Instance) {
-                    let r0 = state.row(o, ns);
-                    let r = r0.mutate(site);
-                    if r != r0 {
-                        state.set_row(o, ns, r);
-                    }
+                let r0 = match state.rows.get(&(o, ns)) {
+                    Some(r) => r,
+                    None if (ns == Ns::Item && matches!(k, Kind::Dict | Kind::Frame)) || (ns == Ns::Attr && k == Kind::Instance) => Row::new(),
+                    None => continue,
+                };
+                let r = r0.mutate(site);
+                if r != r0 {
+                    state.set_row(o, ns, r);
                 }
             }
+            // (each value holds what the slot held: written as it is)
             for (sk, v) in writes {
-                state.set_slot(o, sk.0, sk.1, v, false);
+                state.set_slot(o, sk.0, sk.1, v, true);
             }
             let havocked = |state: &State| {
                 state.slot(o, Ns::Elem, intern::STAR).pts.contains(any_id) && state.lens.get(&o) == Some((None, 0, 0)) && !state.lasts.iter().any(|(x, _)| *x == o) && state.elems.get(&o).is_some_and(|kv| crate::domain::kv_join(&kv, &DATA) == kv)
@@ -980,7 +1016,7 @@ impl Analyzer {
         self.active_by_func.entry(foid).or_default().push(key.clone());
         self.rec_entry.insert(key.clone(), (self_v.clone(), args.clone(), kwargs.clone()));
 
-        let mut pre_bind = state.copy();
+        let pre_bind = state.copy();
         let obj_mark_call = self.objects.len() as ObjId;
         if !matches!(fnode, FuncNode::Def(f) if is_generator(&f.body)) {
             if let Some(fr) = self.frames.last_mut() {
@@ -1018,7 +1054,7 @@ impl Analyzer {
                 eprintln!("  callee {} did not complete (called at L{})", fi.qualname, node.line);
             }
             if let Some(ex) = st.exits.take() {
-                let mut exs = ex.copy_ref();
+                let mut exs = ex.copy();
                 st = if st.reachable { st.join(&mut exs) } else { exs };
                 st.exits = None;
             }
@@ -1057,7 +1093,7 @@ impl Analyzer {
                 // did not converge: the last state, widened (its result may be any
                 // value, the records it touched may hold other keys)
                 let mut s0 = match self.rec_table.get(&key) {
-                    Some((_, pst, _)) => pst.copy_ref(),
+                    Some((_, pst, _)) => pst.copy(),
                     None => entry_state.copy(),
                 };
                 let fp = s0.footprint(&entry_state);
@@ -1078,7 +1114,7 @@ impl Analyzer {
         let gen_yields = match fnode {
             FuncNode::Def(f) if is_generator(&f.body) && !gen_cm => {
                 let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
-                Some((gid, self.gen_yield_states.get(&gid).map(|v| v.states().map(|s| s.copy_ref()).collect::<Vec<State>>()).unwrap_or_default()))
+                Some((gid, self.gen_yield_states.get(&gid).map(|v| v.states().map(|s| s.copy()).collect::<Vec<State>>()).unwrap_or_default()))
             }
             _ => None,
         };
@@ -1291,7 +1327,7 @@ impl Analyzer {
                 return true;
             }
         }
-        self.tries.last_mut().unwrap().last = Some((here.copy_ref(), cls.clone(), exc.clone()));
+        self.tries.last_mut().unwrap().last = Some((here.copy(), cls.clone(), exc.clone()));
         // (joined per class: a handler takes every raise of a class or none of them; what
         // callees made is collected when the try ends)
         let recs = &mut self.tries.last_mut().unwrap().recs;

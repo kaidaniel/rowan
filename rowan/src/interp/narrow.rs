@@ -153,6 +153,16 @@ impl Analyzer {
             }
             ast::Expr::Call(call) => {
                 let args = &call.arguments.args;
+                // `isclass(x)` / `inspect.isclass(x)`
+                let fname = match &*call.func {
+                    ast::Expr::Name(n) => Some(n.id.as_str()),
+                    ast::Expr::Attribute(a) => Some(a.attr.id.as_str()),
+                    _ => None,
+                };
+                if let (Some("isclass"), [ast::Expr::Name(n)]) = (fname, &args[..]) {
+                    self.narrow_isclass(s(n.id.as_str()), truth, state);
+                    return;
+                }
                 if let ast::Expr::Name(fnm) = &*call.func {
                     let fname = fnm.id.as_str();
                     if fname == "isinstance" && args.len() == 2 {
@@ -305,6 +315,26 @@ impl Analyzer {
         self.narrow_isinstance_value(&cur, cls_expr, truth, state, store);
     }
 
+    /// After `isclass(x)`: x is one of its values that may be a class (or not one that surely
+    /// is). Literals are not classes; a library object may be one.
+    fn narrow_isclass(&mut self, name: StrId, truth: bool, state: &mut State) {
+        let cur = self.load_name(name, &Node::none(), state);
+        let keep: Vec<u32> = cur.pts.iter().filter(|o| match self.kind(*o) {
+            Kind::Class => truth,
+            Kind::External | Kind::Unknown => true,
+            _ => !truth,
+        }).collect();
+        let kv = if truth && cur.kv.is_literal() { KeyVal::Bot } else { cur.kv.clone() };
+        if keep.len() == cur.pts.len() && kv == cur.kv {
+            return;
+        }
+        if keep.is_empty() && kv.is_bot() {
+            state.reachable = false;
+            return;
+        }
+        self.store_narrowed(&StoreTarget::Name(name), Value::with_kv(ObjSet::from_vec(keep), kv), state);
+    }
+
     fn store_narrowed(&mut self, store: &StoreTarget, v: Value, state: &mut State) {
         match store {
             StoreTarget::Name(n) => self.rebind_name(*n, v, state),
@@ -396,7 +426,8 @@ impl Analyzer {
                 _ => return,
             }
         }
-        if star && (star_structural) {
+        // (a Protocol class is checked by structure too)
+        if star && (star_structural) || classes.iter().any(|c| crate::models::protocol_members(self, *c).is_some()) {
             return;
         }
         let mut keep: Vec<u32> = Vec::new();

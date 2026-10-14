@@ -8,10 +8,88 @@ use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s};
 use crate::state::{Kind, State};
 
-use super::{TryExit, contains_jump, dotted_last, is_constant, is_main_guard, Analyzer, ClassInfo, Frame, FrameKind, FuncNode, LoopCtx, Payload, LOOP_MAX_ITER, UNROLL_MAX};
+use super::{TryExit, contains_jump, dotted_last, is_constant, Analyzer, ClassInfo, Frame, FrameKind, FuncNode, LoopCtx, Payload, LOOP_MAX_ITER, UNROLL_MAX};
 use super::funcs::Elem;
 
 impl Analyzer {
+    /// The module `from M import …` names (relative imports resolve against the current
+    /// module's package).
+    fn import_from_module(&self, i: &ast::StmtImportFrom) -> String {
+        if i.level > 0 {
+            let pkg = self.module_info(self.frame().module).pkg.clone();
+            let mut base: Vec<&str> = pkg.split('.').filter(|x| !x.is_empty()).collect();
+            for _ in 1..i.level {
+                base.pop();
+            }
+            let mut full = base.join(".");
+            if let Some(m) = &i.module {
+                if !full.is_empty() {
+                    full.push('.');
+                }
+                full.push_str(m.id.as_str());
+            }
+            full
+        } else {
+            i.module.as_ref().map(|m| m.id.to_string()).unwrap_or_default()
+        }
+    }
+
+    /// The names an `if TYPE_CHECKING:` block imports (it does not run): for annotations only,
+    /// resolved once the module they name is loaded (`type_only_name`).
+    fn note_type_only_imports(&mut self, body: &'static [ast::Stmt]) {
+        let m = self.frame().module;
+        for st in body {
+            match st {
+                ast::Stmt::ImportFrom(i) => {
+                    let modname = self.import_from_module(i);
+                    for a in &i.names {
+                        let bound = a.asname.as_ref().unwrap_or(&a.name).id.as_str();
+                        self.type_only.insert((m, s(bound)), (modname.clone(), Some(a.name.id.to_string())));
+                    }
+                }
+                ast::Stmt::Import(i) => {
+                    for a in i.names.iter().filter(|a| a.asname.is_some() || !a.name.id.contains('.')) {
+                        let bound = a.asname.as_ref().unwrap_or(&a.name).id.as_str();
+                        self.type_only.insert((m, s(bound)), (a.name.id.to_string(), None));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A name an `if TYPE_CHECKING:` block of the running module imports, once its module is
+    /// loaded (nothing is imported for it).
+    pub fn type_only_name(&self, name: &str, state: &State) -> Option<Value> {
+        let (modname, attr) = self.type_only.get(&(self.frame().module, s(name)))?;
+        let mo = *self.modules.get(modname)?;
+        match attr {
+            Some(a) => state.slot_opt(mo, Ns::Attr, key_str_lit(a)),
+            None => Some(Value::obj(mo)),
+        }
+    }
+
+    /// `from M import *`: the names in M's `__all__` (a submodule of a package for a name it
+    /// does not define), or without a known one every name of M not starting with `_`.
+    fn import_star(&mut self, mod_v: &Value, modname: &str, n: &Node, state: &mut State) {
+        let Some(mo) = mod_v.single().filter(|o| self.kind(*o) == Kind::Module) else { return };
+        let all = state.slot_opt(mo, Ns::Attr, key_str_lit("__all__")).map(|v| self.iterate(&v, n, state).items);
+        let names: Vec<String> = match all.flatten().and_then(|items| items.iter().map(|v| v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_str)).collect::<Option<Vec<_>>>()) {
+            Some(ns) => ns.iter().map(|x| x.to_string()).collect(),
+            None => state.obj_slots(mo, Ns::Attr).into_iter().filter_map(|(k, _)| intern::key_as_str(k)).filter(|x| !x.starts_with('_')).map(|x| x.to_string()).collect(),
+        };
+        for name in names {
+            let mut v = state.slot_opt(mo, Ns::Attr, key_str_lit(&name)).unwrap_or_default();
+            if v.pts.is_empty() && v.kv.is_bot() {
+                v = self.import_module(&format!("{}.{}", modname, name), n, state);
+            }
+            if v.pts.is_empty() && v.kv.is_bot() {
+                v = self.load_attr(mod_v, &name, n, state, false);
+            }
+            self.store_name(s(&name), v, state);
+        }
+    }
+
     pub fn exec_block(&mut self, stmts: &'static [ast::Stmt], state: &mut State) {
         for st in stmts {
             if !state.reachable {
@@ -218,27 +296,11 @@ impl Analyzer {
             }
             ast::Stmt::ImportFrom(i) => {
                 let n = frontend::node(i);
-                // relative imports resolve against the current module's package
-                let modname = if i.level > 0 {
-                    let pkg = self.module_info(self.frame().module).pkg.clone();
-                    let mut base: Vec<&str> = pkg.split('.').filter(|x| !x.is_empty()).collect();
-                    for _ in 1..i.level {
-                        base.pop();
-                    }
-                    let mut full = base.join(".");
-                    if let Some(m) = &i.module {
-                        if !full.is_empty() {
-                            full.push('.');
-                        }
-                        full.push_str(m.id.as_str());
-                    }
-                    full
-                } else {
-                    i.module.as_ref().map(|m| m.id.to_string()).unwrap_or_default()
-                };
+                let modname = self.import_from_module(i);
                 let mod_v = if modname.is_empty() { Value::new() } else { self.import_module(&modname, &n, state) };
                 for a in &i.names {
                     if a.name.id.as_str() == "*" {
+                        self.import_star(&mod_v, &modname, &n, state);
                         continue;
                     }
                     let aname = a.name.id.as_str();
@@ -462,7 +524,7 @@ impl Analyzer {
                 if let Some(mut bx) = h.body_exits.take() {
                     bx.reachable = true;
                     let joined = match state.exits.take() {
-                        Some(cur) => cur.copy_ref().join(&mut bx),
+                        Some(cur) => cur.copy().join(&mut bx),
                         None => bx,
                     };
                     state.exits = Some(std::sync::Arc::new(joined));
@@ -670,11 +732,10 @@ impl Analyzer {
     }
 
     fn stmt_if(&mut self, test: &'static ast::Expr, body: &'static [ast::Stmt], rest: &'static [ast::ElifElseClause], state: &mut State) {
-        if is_main_guard(test) {
-            self.exec_block(body, state);
-            return;
-        }
         let tv = self.eval(test, state);
+        if matches!(test, ast::Expr::Name(n) if n.id.as_str() == "TYPE_CHECKING") || matches!(test, ast::Expr::Attribute(a) if a.attr.as_str() == "TYPE_CHECKING") {
+            self.note_type_only_imports(body);
+        }
         let mut then_s = state.copy();
         let mut else_s = state.copy();
         let decided = self.truth_of(&tv, state, &frontend::node(test));
@@ -956,7 +1017,7 @@ impl Analyzer {
     }
 
     fn stmt_while_loop(&mut self, w: &'static ast::StmtWhile, state: &mut State) {
-        let (mut head, exit_acc, _) = self.loop_fixpoint(state, &mut |an, body_s| {
+        let (head, exit_acc, _) = self.loop_fixpoint(state, &mut |an, body_s| {
             let tv = an.eval(&w.test, body_s);
             // a test decided at the loop head prunes: false means no iteration from here
             if an.truthiness(&tv, body_s) == Some(false) {
@@ -1159,7 +1220,7 @@ impl Analyzer {
             self.set_cursor(o, None, state);
         }
         let pre = state.copy();
-        let (mut head, exit_acc, back) = self.loop_fixpoint(state, &mut |an, body_s| {
+        let (head, exit_acc, back) = self.loop_fixpoint(state, &mut |an, body_s| {
             an.bind_iter_target(&f.target, &it.elem, body_s);
             an.exec_block(&f.body, body_s);
         });
@@ -1448,7 +1509,7 @@ impl Analyzer {
             let mut exits_acc: Option<State> = None;
             let add_exits = |e: Option<std::sync::Arc<State>>, acc: &mut Option<State>| {
                 if let Some(e) = e {
-                    let mut s2 = e.copy_ref();
+                    let mut s2 = e.copy();
                     *acc = Some(match acc.take() {
                         None => s2,
                         Some(mut a) => a.join(&mut s2),
@@ -1466,7 +1527,7 @@ impl Analyzer {
             // returns made inside the try: the finally runs before the function returns
             let mut ways: Vec<State> = Vec::new();
             if let Some(ie) = inner_exits {
-                ways.push(ie.copy_ref());
+                ways.push(ie.copy());
             }
             // an exception leaving the try (no handler here) that a `return` in the finally
             // swallows
@@ -1522,6 +1583,10 @@ impl Analyzer {
     /// (`drop_garbage_at_return`; at a loop's exit the roots are the frame's live names).
     /// `unwind`: a raise state, which only the first `unwind` callers' names outlive.
     pub fn collect_since(&mut self, mark: u64, pre: &State, roots: Vec<u32>, state: &mut State, unwind: Option<usize>) {
+        // (nothing made since: nothing to collect)
+        if self.serial <= mark {
+            return;
+        }
         let young = |an: &Analyzer, o: u32| an.objects[o as usize].born >= mark;
         let fp = state.footprint(pre);
         let mut fresh: rustc_hash::FxHashSet<u32> = Default::default();

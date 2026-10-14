@@ -3,10 +3,10 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{join_values, KeyVal, Ns, Row, Value};
+use crate::domain::{join_values, Classification, KeyVal, Ns, Row, Tier, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, KeyId, KeySet};
-use crate::interp::Payload;
+use crate::interp::{Analyzer, Payload};
 use crate::state::{Kind, State};
 
 impl crate::interp::Analyzer {
@@ -261,4 +261,34 @@ impl crate::interp::Analyzer {
         }
         self.enum_members.insert(coid, members);
     }
+}
+
+/// `Color["RED"]`: an Enum's member by name (KeyError for a name that is not one).
+pub fn member_by_name(an: &mut Analyzer, obj: &Value, key: &Value, node: &Node, guarded: bool, state: &mut State) -> Value {
+    let mut out = Value::new();
+    for oid in obj.pts.iter() {
+        let ms = an.enum_members[&oid].clone();
+        let aliases = an.enum_aliases.get(&oid).cloned().unwrap_or_default();
+        match key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_str) {
+            Some(nm) => match aliases.iter().chain(ms.iter()).find(|(n, _)| *n == *nm) {
+                Some((_, m)) => {
+                    let cls = Classification::new(Tier::Proven);
+                    if !guarded { an.verdict(node, key_str_lit(&nm), &cls, oid, Ns::Item, None, None); } else { an.verdict_guarded(node, key_str_lit(&nm), &cls, oid, Ns::Item); }
+                    out = out.join(&Value::obj(*m));
+                }
+                None => {
+                    let cls = Classification::with_note(Tier::Missing, "is not a member of the Enum");
+                    if !guarded { an.verdict(node, key_str_lit(&nm), &cls, oid, Ns::Item, None, None); } else { an.verdict_guarded(node, key_str_lit(&nm), &cls, oid, Ns::Item); }
+                    if obj.pts.len() == 1 {
+                        an.raise_here("KeyError", state);
+                    }
+                }
+            },
+            None => {
+                an.may_raise_here("KeyError", state);
+                out = out.join(&join_values(ms.iter().map(|(_, m)| Value::obj(*m)).collect::<Vec<_>>()));
+            }
+        }
+    }
+    out
 }

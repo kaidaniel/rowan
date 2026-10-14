@@ -223,7 +223,7 @@ impl State {
 
     // -- copying -----------------------------------------------------------
     /// Copy from a shared reference (used for `exits`, which are shared and never mutated).
-    pub fn copy_ref(&self) -> State {
+    pub fn copy(&self) -> State {
         State {
             env: self.env.clone(),
             narrowed: self.narrowed.clone(),
@@ -243,10 +243,6 @@ impl State {
         }
     }
 
-    pub fn copy(&mut self) -> State {
-        self.copy_ref()
-    }
-
     /// Snapshot the heap at a `return` so the caller sees it joined over all return points.
     pub fn record_exit(&mut self) {
         let mut snap = self.copy();
@@ -255,7 +251,7 @@ impl State {
         snap.exits = None;
         self.exits = Some(Arc::new(match self.exits.take() {
             None => snap,
-            Some(e) => e.copy_ref().join(&mut snap),
+            Some(e) => e.copy().join(&mut snap),
         }));
     }
 
@@ -315,7 +311,7 @@ impl State {
             (None, e) => e.clone(),
             (e, None) => e.clone(),
             (Some(a), Some(b)) if Arc::ptr_eq(a, b) => Some(a.clone()),
-            (Some(a), Some(b)) => Some(Arc::new(a.copy_ref().join(&mut b.copy_ref()))),
+            (Some(a), Some(b)) => Some(Arc::new(a.copy().join(&mut b.copy()))),
         };
         if !o.reachable {
             let mut s = self.copy();
@@ -504,14 +500,21 @@ impl State {
         if let Some(r) = self.rows.get(&(oid, ns)) {
             return r;
         }
+        if is_any(oid) && matches!(ns, Ns::Item | Ns::Attr) {
+            return Row::top();
+        }
         Row::new()
     }
 
     pub fn has_row(&self, oid: ObjId, ns: Ns) -> bool {
-        self.rows.contains_key(&(oid, ns))
+        self.rows.contains_key(&(oid, ns)) || (is_any(oid) && matches!(ns, Ns::Item | Ns::Attr))
     }
 
     pub fn set_row(&mut self, oid: ObjId, ns: Ns, row: Row) {
+        // (what unknown code holds is anything, whatever is stored into it)
+        if is_any(oid) {
+            return;
+        }
         // (an object several runtime objects share: what is installed joins what is there)
         if is_merged(oid) {
             if let Some(cur) = self.rows.get(&(oid, ns)) {
@@ -538,6 +541,9 @@ impl State {
     }
 
     pub fn set_slot(&mut self, oid: ObjId, ns: Ns, key: KeyId, v: Value, strong: bool) {
+        if is_any(oid) {
+            return;
+        }
         if matches!(ns, Ns::Pos | Ns::Elem) {
             self.clear_last(oid);
         }
@@ -689,7 +695,7 @@ mod tests {
         let mut j = then_s.join(&mut else_s);
         assert!(j.reachable);
         let ex = j.exits.take().unwrap();
-        let mut exs = ex.copy_ref();
+        let mut exs = ex.copy();
         let fin = j.join(&mut exs);
         let d = fin.reqs.inner(&src2).expect("source lost");
         assert!(d.contains_key(&key_str_lit("objs")), "key lost");
@@ -740,7 +746,7 @@ mod tests2 {
         branch_return(&mut st, None);
         st.require_simple(src2, key_str_lit("ns"));
         let ex = st.exits.take().unwrap();
-        let mut exs = ex.copy_ref();
+        let mut exs = ex.copy();
         let fin = st.join(&mut exs);
         let d = fin.reqs.inner(&src2).expect("source lost");
         let mut ks: Vec<String> = d.keys().map(|k| crate::intern::key_repr(*k)).collect();
@@ -777,6 +783,19 @@ pub fn mark_merged(oid: ObjId) {
     });
 }
 
+thread_local! {
+    /// the shared unknown object (`Analyzer::any_object`): no store changes it
+    static ANY: std::cell::Cell<ObjId> = const { std::cell::Cell::new(ObjId::MAX) };
+}
+
+pub fn set_any(oid: ObjId) {
+    ANY.with(|a| a.set(oid));
+}
+
+pub fn is_any(oid: ObjId) -> bool {
+    ANY.with(|a| a.get() == oid)
+}
+
 pub fn is_merged(oid: ObjId) -> bool {
     MERGED.with(|m| m.borrow().contains(&oid))
 }
@@ -785,6 +804,7 @@ pub fn is_merged(oid: ObjId) -> bool {
 /// again, so the merged set and the cost counters do too.
 pub fn reset_thread_state() {
     MERGED.with(|m| m.borrow_mut().clear());
+    ANY.with(|a| a.set(ObjId::MAX));
     FP_VISITS.with(|c| c.set(0));
     crate::domain::reset_row_joins();
     crate::models::shape::reset();

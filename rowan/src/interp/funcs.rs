@@ -356,6 +356,11 @@ impl Analyzer {
             return v;
         }
         let nm = str_get(name);
+        // (the module's own name: `__main__` for the program's entry)
+        if &*nm == "__name__" {
+            let own = if fr_module == self.main_module { "__main__".to_string() } else { self.module_info(fr_module).name.clone() };
+            return Value::lit_str(&own);
+        }
         if is_builtin_name(&nm) {
             let oid = self.alloc_raw(Kind::External, &format!("ext:builtins.{}", nm), "", true, &nm, Payload::Str(format!("builtins.{}", nm)));
             return Value::obj(oid);
@@ -1297,6 +1302,12 @@ impl Analyzer {
             return n;
         }
         let o_kind = self.kind(oid);
+        // a tuple is its own copy (`copy.copy`), and its own deep copy when nothing in it is
+        // copied (CPython returns the same object)
+        if o_kind == Kind::Tuple && (!deep || state.slots_of(oid).iter().all(|(_, v)| v.pts.iter().all(|x| !matches!(self.kind(x), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance)))) {
+            seen.insert(oid, oid);
+            return oid;
+        }
         let kind = if matches!(o_kind, Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance | Kind::Frame) { o_kind } else { Kind::Dict };
         let tag = if deep { "deep" } else { "copy" };
         // (the original's id in the site: a deep copy's nested copies are distinct objects; a

@@ -145,7 +145,7 @@ pub fn is_scalar_method(name: &str) -> bool {
 }
 pub const NOEFFECT_METHOD_NAMES: &[&str] = &[
     "info", "debug", "warning", "warn", "error", "critical", "exception", "log", "write", "flush", "close", "print", "assert_called",
-    "assert_called_with",
+    "assert_called_with", "equals",
 ];
 pub const DICT_METHOD_NAMES: &[&str] = &["get", "items", "keys", "values", "update", "pop", "setdefault", "copy", "popitem", "clear"];
 /// Methods that make a class-less unknown a list (modelled by `list.*`).
@@ -294,7 +294,7 @@ pub type RaiseRec = (Option<ExcNames>, State, Value);
 
 /// The states of a try's recorded raises, joined (None: no raise recorded).
 pub fn join_raise_recs(recs: &[RaiseRec]) -> Option<State> {
-    State::join_all(recs.iter().map(|r| r.1.copy_ref()).collect())
+    State::join_all(recs.iter().map(|r| r.1.copy()).collect())
 }
 
 /// The class of an exception that code rowan cannot see (or a model that does not say which)
@@ -877,6 +877,8 @@ pub struct Analyzer {
     pub call_chain: Vec<u32>,
     pub analysed_funcs: FxHashSet<ObjId>,
     pub modules: IndexMap<String, ObjId>,
+    /// names imported under `if TYPE_CHECKING:` (module, name) -> (module imported, name in it)
+    pub type_only: FxHashMap<(ObjId, StrId), (String, Option<String>)>,
     pub final_state: Option<State>,
     pub user_classes: Vec<ObjId>,
     /// class attributes (flow-insensitive)
@@ -1252,7 +1254,9 @@ impl Analyzer {
             // so it is merged — weak, always sound)
             // (an unknown call's result allocated again: taken as still in use without a walk,
             // and merged — its rows are open anyway; walking for it dominated large runs)
-            let hard = existed == Some(oid) && (self.over_hard_deadline() || (kind == Kind::Unknown));
+            // (an object already merged — its site made again while in use, past its variants —
+            // stays merged without a walk: such walks found nothing in their budget)
+            let hard = existed == Some(oid) && (self.over_hard_deadline() || (kind == Kind::Unknown) || !self.obj(oid).single);
             if existed == Some(oid) && (hard || model_held || (self.has_facts(oid, state) && self.is_live(oid, state))) {
                 // allocated again while the earlier object is still reachable (a method run
                 // twice on one receiver, a call repeated in a loop)
@@ -1512,7 +1516,10 @@ impl Analyzer {
         if node.addr == 0 {
             return String::new();
         }
-        frontend::text_at(node)
+        // (an expression written over several lines, on one: the report's column and a hover
+        // keep their layout)
+        let t = frontend::text_at(node);
+        if t.contains('\n') { t.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ") } else { t }
     }
 
     pub fn note(&mut self, msg: String) {
@@ -1586,10 +1593,13 @@ impl Analyzer {
         let info = self.module_info(moid);
         let fr = Frame::new(FrameKind::Module, info.scopes.module(), moid, "", true, &format!("<module {}>", info.name));
         self.frames.push(fr);
+        // (imported from inside a function: the function's returns so far are its own)
+        let (exits, ret) = (state.exits.take(), state.ret.take());
         self.exec_block(&info.tree.body, state);
         self.frames.pop();
         state.reachable = true;
-        state.exits = None;
+        state.exits = exits;
+        state.ret = ret;
     }
 
     /// Entry-point rule (§6.4): functions never called get analysed with open parameters.
@@ -1662,7 +1672,7 @@ impl Analyzer {
             // a closure made by a factory's entry run starts from that run's state (its cells)
             let mut st = match self.t_closure_states.get(&oid) {
                 Some(cs) => {
-                    let mut c = cs.copy_ref();
+                    let mut c = cs.copy();
                     c.reachable = true;
                     c.exits = None;
                     c
@@ -1869,7 +1879,13 @@ impl Analyzer {
     /// A declared row for an annotated entry-point parameter (§6.6).
     pub fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
         let node = Self::strip_annotation(ann)?;
-        let v = self.eval(node, state);
+        let mut v = self.eval(node, state);
+        // (a class imported only for type checkers)
+        if let ast::Expr::Name(n) = node {
+            if !v.pts.iter().any(|o| self.kind(o) == Kind::Class) {
+                v = self.type_only_name(n.id.as_str(), state).unwrap_or(v);
+            }
+        }
         for oid in v.pts.iter() {
             let o = self.kind(oid);
             if o == Kind::Class {
@@ -2174,14 +2190,16 @@ impl Analyzer {
     /// names of the first `envs` callers, and the modules, cells and loop overlays of the
     /// first `frames` frames.
     pub fn state_roots(&self, state: &State, envs: usize, frames: usize, work: &mut Vec<ObjId>) {
-        let callers = self.env_stack.iter().take(envs).flat_map(|e| e.values());
-        for v in state.env.values().chain(callers).chain(state.narrowed.values()).chain(state.ret.iter()) {
-            v.push_objs(work);
-        }
+        // (a walk takes the last pushed first: the running code's names before the modules'
+        // globals, where an object made again is most often still held)
         for fr in self.frames.iter().take(frames) {
             work.push(fr.module);
             work.extend(fr.cells.values().copied());
             fr.overlays.iter().flat_map(|o| o.values()).for_each(|v| v.push_objs(work));
+        }
+        let callers = self.env_stack.iter().take(envs).flat_map(|e| e.values());
+        for v in callers.chain(state.ret.iter()).chain(state.narrowed.values()).chain(state.env.values()) {
+            v.push_objs(work);
         }
     }
 
@@ -2195,7 +2213,7 @@ impl Analyzer {
         // taken as live, which is always sound: their site makes a recent / variant object; a
         // walk that proves an object dead on a large heap visits all of it, and on email's 20k
         // visits per walk gave the same verdicts as 500)
-        const WALK_BUDGET: usize = 500;
+        const WALK_BUDGET: usize = 200;
         let budget = WALK_BUDGET;
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
         while let Some(o) = work.pop() {
@@ -2259,48 +2277,38 @@ impl Analyzer {
             Payload::Locidx(_, f) => work.push(*f),
             _ => {}
         }
-        if let Some(ms) = self.m.chainmaps.get(&o) {
-            ms.iter().for_each(|m| m.push_objs(work));
+        self.side_edges(Some(o), work);
+    }
+
+    /// What the analyzer's side tables keyed by an object refer to: `o`'s entries, or every
+    /// entry's (None: the collector's roots, `gc_pinned`).
+    fn side_edges(&self, o: Option<ObjId>, work: &mut Vec<ObjId>) {
+        fn each<'a, V>(m: &'a FxHashMap<ObjId, V>, o: Option<ObjId>) -> Box<dyn Iterator<Item = &'a V> + 'a> {
+            match o {
+                Some(o) => Box::new(m.get(&o).into_iter()),
+                None => Box::new(m.values()),
+            }
         }
-        if let Some(v) = self.m.dd_factories.get(&o) {
-            v.push_objs(work);
+        each(&self.m.chainmaps, o).flatten().for_each(|m| m.push_objs(work));
+        for m in [&self.m.dd_factories, &self.m.csv_readers, &self.wrapped] {
+            each(m, o).for_each(|v| v.push_objs(work));
         }
-        if let Some(v) = self.m.csv_readers.get(&o) {
-            v.push_objs(work);
-        }
-        if let Some(v) = self.wrapped.get(&o) {
-            v.push_objs(work);
-        }
-        if let Some(vs) = self.m.partial_star.get(&o) {
-            vs.iter().for_each(|v| v.push_objs(work));
-        }
-        if let Some(srcs) = self.lazy_src.get(&o) {
-            work.extend(srcs.iter().map(|(s, _)| *s));
-        }
+        each(&self.m.partial_star, o).flatten().for_each(|v| v.push_objs(work));
+        each(&self.lazy_src, o).flatten().for_each(|(s, _)| work.push(*s));
         for m in [&self.attr_mirrors, &self.entry_instances, &self.copy_root, &self.m.sql_cursors] {
-            if let Some(x) = m.get(&o) {
-                work.push(*x);
-            }
+            work.extend(each(m, o).copied());
         }
-        if let Some(items) = self.m.sorted_items.get(&o) {
-            items.iter().for_each(|(_, v, _)| v.push_objs(work));
+        each(&self.m.sorted_items, o).flat_map(|items| items.iter()).for_each(|(_, v, _)| v.push_objs(work));
+        for (f, args, kw) in each(&self.m.exit_callbacks, o).flatten() {
+            f.push_objs(work);
+            args.iter().for_each(|a| a.push_objs(work));
+            kw.values().for_each(|v| v.push_objs(work));
         }
-        if let Some(cbs) = self.m.exit_callbacks.get(&o) {
-            for (f, args, kw) in cbs {
-                f.push_objs(work);
-                args.iter().for_each(|a| a.push_objs(work));
-                kw.values().for_each(|v| v.push_objs(work));
-            }
+        for (v, f) in each(&self.sdispatch, o).flatten() {
+            v.push_objs(work);
+            work.push(*f);
         }
-        if let Some(ds) = self.sdispatch.get(&o) {
-            for (v, f) in ds {
-                v.push_objs(work);
-                work.push(*f);
-            }
-        }
-        if let Some(ds) = self.m.fa_app_deps.get(&o) {
-            ds.iter().for_each(|v| v.push_objs(work));
-        }
+        each(&self.m.fa_app_deps, o).flatten().for_each(|v| v.push_objs(work));
     }
 
     /// Objects the analyzer itself holds beyond the state: what side tables keyed by other
@@ -2308,13 +2316,8 @@ impl Analyzer {
     /// `unwind`: for a raise state, only the first `unwind` callers' names, and no loop's recent
     /// objects (those still in use are reachable from the names).
     pub fn gc_pinned(&self, work: &mut Vec<ObjId>, unwind: Option<usize>) {
-        let st = State::new();
-        for o in self.m.chainmaps.keys().chain(self.m.dd_factories.keys()).chain(self.m.csv_readers.keys()).chain(self.wrapped.keys()).chain(self.m.partial_star.keys()).chain(self.lazy_src.keys()).chain(self.attr_mirrors.keys()).chain(self.entry_instances.keys()).chain(self.copy_root.keys()).chain(self.m.sql_cursors.keys()).chain(self.m.sorted_items.keys()).chain(self.m.exit_callbacks.keys()).chain(self.sdispatch.keys()).chain(self.m.fa_app_deps.keys()) {
-            // (the side-table edges only: the key itself may be dead)
-            let mut w = Vec::new();
-            self.obj_edges(*o, &st, &mut w);
-            work.extend(w);
-        }
+        // (the side tables' entries: their keys themselves may be dead)
+        self.side_edges(None, work);
         for v in self.cur_exc.iter().chain(self.tries.iter().flat_map(|t| t.recs.iter().map(|r| &r.2))).chain(self.handling_values.iter()).chain(self.cmp_right.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
             v.push_objs(work);
         }
@@ -2327,6 +2330,12 @@ impl Analyzer {
         }
         for env in self.env_stack.iter().take(unwind.unwrap_or(usize::MAX)) {
             env.values().for_each(|v| v.push_objs(work));
+        }
+        // (the managers of the with statements running: their `__exit__` runs on the way out)
+        for (_, fin, _) in &self.finally_stack {
+            if let crate::interp::stmts::Finally::Exit(ms) = &**fin {
+                ms.iter().for_each(|(v, _)| v.push_objs(work));
+            }
         }
         for (_, env, _) in &self.cm_frames {
             env.values().for_each(|v| v.push_objs(work));
@@ -2657,15 +2666,6 @@ pub fn chain_text(node: &ast::Expr) -> Option<String> {
     parts.push(nm.id.as_str());
     parts.reverse();
     Some(parts.join("."))
-}
-
-pub fn is_main_guard(test: &ast::Expr) -> bool {
-    let ast::Expr::Compare(c) = test else { return false };
-    let ast::Expr::Name(l) = &*c.left else { return false };
-    if l.id.as_str() != "__name__" || c.ops.len() != 1 || c.ops[0] != ast::CmpOp::Eq {
-        return false;
-    }
-    matches!(&c.comparators[0], ast::Expr::StringLiteral(sl) if sl.value.to_str() == "__main__")
 }
 
 /// True if the loop body has a break/continue targeting this loop.

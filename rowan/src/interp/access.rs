@@ -504,89 +504,18 @@ impl Analyzer {
         }
         // `Color["RED"]`: an Enum's member by name
         if ns == Ns::Item && !obj.pts.is_empty() && obj.pts.iter().all(|o| self.enum_members.contains_key(&o)) {
-            let mut out = Value::new();
-            for oid in obj.pts.iter() {
-                let ms = self.enum_members[&oid].clone();
-                let aliases = self.enum_aliases.get(&oid).cloned().unwrap_or_default();
-                match key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_str) {
-                    Some(nm) => match aliases.iter().chain(ms.iter()).find(|(n, _)| *n == *nm) {
-                        Some((_, m)) => {
-                            let cls = Classification::new(Tier::Proven);
-                            if !guarded { self.verdict(node, key_str_lit(&nm), &cls, oid, Ns::Item, None, None); } else { self.verdict_guarded(node, key_str_lit(&nm), &cls, oid, Ns::Item); }
-                            out = out.join(&Value::obj(*m));
-                        }
-                        None => {
-                            let cls = Classification::with_note(Tier::Missing, "is not a member of the Enum");
-                            if !guarded { self.verdict(node, key_str_lit(&nm), &cls, oid, Ns::Item, None, None); } else { self.verdict_guarded(node, key_str_lit(&nm), &cls, oid, Ns::Item); }
-                            if obj.pts.len() == 1 {
-                                self.raise_here("KeyError", state);
-                            }
-                        }
-                    },
-                    None => {
-                        self.may_raise_here("KeyError", state);
-                        out = out.join(&join_values(ms.iter().map(|(_, m)| Value::obj(*m)).collect::<Vec<_>>()));
-                    }
-                }
-            }
-            return out;
+            return crate::models::enums::member_by_name(self, obj, key, node, guarded, state);
         }
         // (all targets' values joined at once: a pairwise join over many targets is quadratic)
         let mut parts: Vec<Value> = vec![std::mem::take(&mut acc)];
         for oid in obj.pts.iter() {
             let kind = self.kind(oid);
-            // a Counter reads a missing key as 0 without inserting it: the row is put back
-            // after the (never failing) access
-            let mut counter_restore: Option<Row> = None;
-            if kind == Kind::Dict && ns == Ns::Item && (self.obj(oid).label.starts_with("defaultdict@") || self.obj(oid).label.starts_with("Counter@")) {
-                // `dd[k]` inserts the factory's value when `k` is absent (a fresh one per key)
-                let row = state.row(oid, ns);
-                if self.obj(oid).label.starts_with("Counter@") {
-                    counter_restore = Some(row.clone());
-                }
-                if key.kv.is_literal() {
-                    let ks = crate::domain::kv_literals(&key.kv);
-                    let strong = single_target && ks.len() == 1 && self.strongable(oid);
-                    let mut r = row.clone();
-                    for k in ks.iter() {
-                        if !r.definite.contains(k) {
-                            let dflt = match self.m.dd_factories.get(&oid).cloned() {
-                                Some(f) => self.call_value(&f, node, None, state, Some(vec![])),
-                                None => state.slot(oid, Ns::Item, STAR),
-                            };
-                            // (a key the closed row surely lacks: no earlier value to keep; in an
-                            // open one a key not known may be there already, with any value)
-                            let absent = r.closed() && !r.present.contains(k);
-                            let dflt = if r.open() && !r.present.contains(k) && state.slot_opt(oid, ns, k).is_none() { dflt.join(&Value::data(&format!("{}[*]", self.obj(oid).label))) } else { dflt };
-                            r = r.store(k, strong);
-                            state.set_slot(oid, ns, k, dflt, absent);
-                        }
-                    }
-                    // (a weak insertion — one of several keys, a weak object — still never
-                    // fails the read: it is made against the keys inserted, then the weak row
-                    // is put back)
-                    if !strong && counter_restore.is_none() {
-                        let mut sr = r.clone();
-                        for k in ks.iter() {
-                            if !sr.definite.contains(k) {
-                                sr = sr.store(k, true);
-                            }
-                        }
-                        counter_restore = Some(r);
-                        state.set_row(oid, ns, sr);
-                    } else {
-                        state.set_row(oid, ns, r);
-                    }
-                } else {
-                    // an unknown key: some key gets the factory's value
-                    if let Some(f) = self.m.dd_factories.get(&oid).cloned() {
-                        let dflt = self.call_value(&f, node, None, state, Some(vec![]));
-                        state.set_slot(oid, ns, STAR, Value::with_kv(dflt.pts, DATA), false);
-                    }
-                    let src = Source::new(&self.obj(oid).label, SourceKind::Data);
-                    state.set_row(oid, ns, row.data_store(src));
-                }
-            }
+            // (a defaultdict / Counter key read: `models::counter::default_on_read`)
+            let counter_restore = if kind == Kind::Dict && ns == Ns::Item && (self.obj(oid).label.starts_with("defaultdict@") || self.obj(oid).label.starts_with("Counter@")) {
+                crate::models::counter::default_on_read(self, oid, key, node, single_target, state)
+            } else {
+                None
+            };
             match kind {
                 Kind::Locidx => {
                     let v = crate::models::pandas::loc_get(self, oid, key, node, state);
@@ -632,6 +561,23 @@ impl Analyzer {
                                     continue;
                                 }
                             }
+                        }
+                        // a NamedTuple by position: its fields in order, from either end
+                        if self.is_named_tuple_class(cls) {
+                            let fs = self.dataclass_fields_mro(cls);
+                            let n = fs.len() as i64;
+                            let field = |i: i64, state: &State| state.slot(oid, Ns::Attr, key_str_lit(&fs[(if i < 0 { n + i } else { i }) as usize].0));
+                            match key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int) {
+                                Some(i) if -n <= i && i < n => parts.push(field(i, state)),
+                                Some(_) if single_target => self.raise_here("IndexError", state),
+                                _ => {
+                                    // (an index not known: any field, or a slice of them)
+                                    self.may_raise_here("IndexError", state);
+                                    parts.extend((0..n).map(|i| field(i, state)));
+                                    parts.push(line_data.clone());
+                                }
+                            }
+                            continue;
                         }
                         if let Some(ci) = self.class_info_opt(cls) {
                             if !ci.typed_dict && !ci.named_tuple && !ci.open_base {
@@ -679,6 +625,12 @@ impl Analyzer {
                 },
                 Kind::Zip | Kind::Enumerate => {
                     parts.push(line_data.clone());
+                }
+                // `C[T]`: a generic class's alias, called like the class (a TypeError for a class
+                // that is not generic)
+                Kind::Class if ns == Ns::Item => {
+                    self.may_raise_here("TypeError", state);
+                    parts.push(Value::obj(oid));
                 }
                 Kind::List | Kind::Tuple | Kind::Set => {
                     let is_slice = matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice"));
@@ -1092,6 +1044,12 @@ impl Analyzer {
     }
 
     pub fn store_key(&mut self, oid: u32, ns: Ns, kv: &KeyVal, v: &Value, strong: bool, node: &Node, state: &mut State) {
+        // a store into what unknown code holds (the shared unknown object): the value goes to
+        // unknown code, as if given to it; the shared object stays "anything"
+        if self.is_any(oid) {
+            self.escape(v, &format!("store into unknown@L{}", node.line), state);
+            return;
+        }
         let kv = &self.canon_kv(oid, ns, kv, state);
         let row = state.row(oid, ns);
         match kv {
@@ -1315,9 +1273,19 @@ impl Analyzer {
             let v: Value = match k {
                 Kind::Module => match state.slot_opt(oid, Ns::Attr, nk) {
                     Some(v) => v,
+                    // (what every module has)
+                    None if matches!(name, "__name__" | "__file__" | "__doc__" | "__package__" | "__spec__" | "__loader__" | "__path__" | "__cached__" | "__builtins__") => {
+                        if name == "__name__" { Value::lit_str(&self.module_info(oid).name) } else { Value::data(&format!("module {}", name)) }
+                    }
+                    // (inside a try that catches the AttributeError: the handler's way)
+                    None if report && guarded => self.load_record(oid, Ns::Attr, &Value::lit(nk), node, state, guarded, single, true),
                     None => {
+                        // (a namespace changed by code rowan cannot see — `globals().update(…)`
+                        // with unknown names — may have it)
+                        let row = state.row(oid, Ns::Attr);
+                        let cls = if row.closed() { Classification::with_note(Tier::Missing, "is not defined in the module") } else { classify(&row, nk) };
                         if !guarded {
-                            self.verdict(node, nk, &Classification::with_note(Tier::Missing, "is not defined in the module"), oid, Ns::Attr, None, None);
+                            self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
                         }
                         Value::data(&format!("L{}", node.line))
                     }
@@ -1341,40 +1309,7 @@ impl Analyzer {
                         None => Value::obj(self.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, &q, Payload::Str(q.clone()))),
                     }
                 }
-                // a partial's func / args / keywords
-                Kind::Partial if matches!(name, "func" | "args" | "keywords") => {
-                    let Payload::Partial(f, args, kw) = self.obj(oid).payload.clone() else { unreachable!() };
-                    match name {
-                        "func" => f,
-                        "args" => {
-                            let tid = self.alloc_at(Kind::Tuple, node, state, "partial.args", Payload::None, None, Ns::Item, None, Some(&format!("pargs{}", oid)));
-                            for (i, a) in args.iter().enumerate() {
-                                state.set_slot(tid, Ns::Pos, intern::key_int(i as i64), a.clone(), true);
-                            }
-                            let acc = join_values(args.clone());
-                            state.set_slot(tid, Ns::Elem, STAR, acc, true);
-                            self.set_llen(tid, state, Some(args.len()));
-                            Value::obj(tid)
-                        }
-                        _ => {
-                            let did = self.alloc_at(Kind::Dict, node, state, "partial.keywords", Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("pkw{}", oid)));
-                            let mut row = Row::new();
-                            for (k, v) in kw.iter() {
-                                let kk = key_str_lit(&intern::str_get(*k));
-                                row = row.store(kk, true);
-                                state.set_slot(did, Ns::Item, kk, v.clone(), true);
-                            }
-                            if let Some(st2) = self.m.partial_star.get(&oid).cloned() {
-                                for sk in st2 {
-                                    self.copy_into(did, Ns::Item, &sk, state, false, &KeySet::new());
-                                    row = state.row(did, Ns::Item).join(&row);
-                                }
-                            }
-                            state.set_row(did, Ns::Item, row);
-                            Value::obj(did)
-                        }
-                    }
-                }
+                Kind::Partial if matches!(name, "func" | "args" | "keywords") => crate::models::partial_attr(self, oid, name, node, state),
                 Kind::Parser | Kind::Groupby | Kind::Partial => self.method_value(&format!("{}.{}", k.name(), name), &Value::obj(oid)),
                 Kind::Instance if name == "__class__" => match self.instance_class(oid) {
                     Some(c) => Value::obj(c),
@@ -1385,78 +1320,13 @@ impl Analyzer {
                     self.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(oid));
                     Value::obj(vid)
                 }
-                Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("fieldinfo.")) => {
-                    let Payload::Method(q, _) = self.obj(oid).payload.clone() else { unreachable!() };
-                    crate::models::pydantic::fieldinfo_attr(self, state, &q, name, node)
-                }
-                Kind::Namespace if crate::models::pathtext::is_path(self, oid) && crate::models::pathtext::PATH_PROPS.contains(&name) => {
-                    crate::models::pathtext::path_attr(self, state, oid, name, node).unwrap_or_else(|| Value::data(name))
-                }
-                Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("stdobj.")) => {
-                    let Payload::Method(q, _) = self.obj(oid).payload.clone() else { unreachable!() };
-                    match state.slot_opt(oid, Ns::Attr, nk) {
-                        Some(v) => v,
-                        None => self.method_value(&format!("{}.{}", q, name), &Value::obj(oid)),
-                    }
-                }
-                // a csv reader's fieldnames / line_num
-                Kind::List | Kind::View if self.m.csv_readers.contains_key(&oid) && matches!(name, "fieldnames" | "line_num" | "dialect" | "restkey" | "restval") => match name {
-                    "fieldnames" => self.m.csv_readers[&oid].clone(),
-                    _ => Value::data(name),
-                },
-                Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("pydverr.")) => {
-                    let Payload::Method(q, _) = self.obj(oid).payload.clone() else { unreachable!() };
-                    self.method_value(&format!("{}.{}", q, name), &Value::obj(oid))
-                }
-                Kind::Namespace if matches!(&self.obj(oid).payload, Payload::Method(q, _) if q.starts_with("typeadapter.") || q.starts_with("fastapi.")) => {
-                    let Payload::Method(q, _) = self.obj(oid).payload.clone() else { unreachable!() };
-                    if let Some(v) = state.slot_opt(oid, Ns::Attr, nk) {
-                        v
-                    } else {
-                        match crate::models::fastapi::object_attr(self, oid, name, node, state) {
-                            Some(v) => v,
-                            None => self.method_value(&format!("{}.{}", q, name), &Value::obj(oid)),
-                        }
-                    }
-                }
+                Kind::Namespace | Kind::List | Kind::View if crate::models::model_object_attr(self, oid, name, node, state).map(|v| parts.push(v)).is_some() => continue,
                 Kind::Namespace | Kind::Instance => self.load_instance_attr(oid, name, node, state, guarded, report && guarded, single),
                 Kind::Class if name == "__annotations__" && self.class_lookup(oid, name).is_none() && self.class_info_opt(oid).is_some() => {
                     let names = crate::models::annotated_names(self, oid, false).unwrap_or_default();
                     crate::models::names_dict(self, state, node, &names, None, "annotation")
                 }
-                Kind::Class if matches!(name, "_fields" | "_field_defaults") && self.class_lookup(oid, name).is_none() && self.is_named_tuple_class(oid) => {
-                    let fs = self.dataclass_fields_mro(oid);
-                    if name == "_fields" {
-                        let vs: Vec<Value> = fs.iter().map(|(f, _)| Value::lit(key_str_lit(f))).collect();
-                        let kv = KeyVal::lits(vs.iter().filter_map(|v| v.kv.as_lit()).collect());
-                        self.alloc_positional(Kind::Tuple, node, Some(vs), Value::new(), kv, state)
-                    } else {
-                        let mut names = Vec::new();
-                        let mut vals = Vec::new();
-                        for (f, d) in fs.iter() {
-                            if let Some(d) = d {
-                                names.push(f.clone());
-                                vals.push(self.eval(d, state));
-                            }
-                        }
-                        crate::models::names_dict(self, state, node, &names, Some(vals), "default")
-                    }
-                }
-                Kind::Class if matches!(name, "__required_keys__" | "__optional_keys__" | "__total__") && self.class_info_opt(oid).map(|ci| ci.typed_dict).unwrap_or(false) => {
-                    match self.typed_dict_keys(oid) {
-                        Some((req, opt)) if name != "__total__" => {
-                            let ks: Vec<Value> = intern::sorted_by_str(if name == "__required_keys__" { req } else { opt }.iter()).into_iter().map(Value::lit).collect();
-                            let o = self.alloc_simple(Kind::Set, node, state, &format!("{}@L{}", name, node.line));
-                            self.set_members(o, KeySet::from_iter(ks.iter().filter_map(|v| v.kv.as_lit())), state);
-                            Value::obj(o)
-                        }
-                        Some(_) => {
-                            let total = self.class_info_opt(oid).and_then(|ci| ci.node.arguments.as_ref().and_then(|a| a.keywords.iter().find(|k| k.arg.as_ref().map(|x| x.as_str()) == Some("total")).map(|k| !matches!(&k.value, ast::Expr::BooleanLiteral(b) if !b.value)))).unwrap_or(true);
-                            Value::lit(intern::key_bool(total))
-                        }
-                        None => Value::data("typeddict"),
-                    }
-                }
+                Kind::Class if crate::models::record_class_attr(self, oid, name, node, state).map(|v| parts.push(v)).is_some() => continue,
                 Kind::Class if matches!(name, "__name__" | "__qualname__") && self.class_lookup(oid, name).is_none() => {
                     let n = self.class_info_opt(oid).map(|ci| ci.name.clone()).unwrap_or_default();
                     Value::lit(key_str_lit(&n))
@@ -1662,7 +1532,22 @@ impl Analyzer {
                             let ids: Vec<String> = self_v.pts.iter().map(|x| x.to_string()).collect();
                             Value::obj(self.alloc_raw(Kind::Method, &format!("excinit:{}", ids.join(",")), "", true, "Exception.__init__ via super", Payload::Method("excinit".to_string(), self_v.clone())))
                         }
-                        None => Value::data("super"),
+                        // `object`'s own method (or a library base's), run on the receiver:
+                        // `object.__setattr__` as modelled, a library base's as unknown code
+                        // given the receiver (it was a call given nothing)
+                        None => {
+                            let closed = match recv_cls[..] {
+                                [rc] => self.hierarchy_closed(rc),
+                                _ => self.hierarchy_closed(cls),
+                            };
+                            let q = if closed { format!("builtins.object.{}", name) } else { format!("super.{}", name) };
+                            let f = self.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, &q, Payload::Str(q.clone()));
+                            let ids: Vec<String> = self_v.pts.iter().map(|x| x.to_string()).collect();
+                            let payload = Payload::Partial(Value::obj(f), vec![self_v.clone()], IndexMap::new());
+                            let b = self.alloc_raw(Kind::Partial, &format!("super:{}:{}", q, ids.join(",")), "", true, &format!("super().{}", name), payload.clone());
+                            self.obj_mut(b).payload = payload;
+                            Value::obj(b)
+                        }
                     }
                 }
                 _ => Value::data(&format!("L{}", node.line)),
@@ -2161,9 +2046,6 @@ impl Analyzer {
             });
             return;
         }
-        if self.torch_on {
-
-        }
         if !state.narrowed.is_empty() {
             let needle = format!(".{}", name);
             state.narrowed.retain(|k, _| !intern::str_get(*k).contains(&needle));
@@ -2177,6 +2059,10 @@ impl Analyzer {
         let targets: Vec<u32> = obj.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Instance | Kind::Module | Kind::Class | Kind::Unknown | Kind::Frame | Kind::Namespace | Kind::Function)).collect();
         for &oid in &targets {
             let kind = self.kind(oid);
+            if self.is_any(oid) {
+                self.escape(v, &format!("store into unknown@L{}", node.line), state);
+                continue;
+            }
             let strong = targets.len() == 1 && self.obj(oid).single;
             // a store that may raise on some classes (a frozen model / dataclass, a
             // `__setattr__`): decided per call site, where the class is known
@@ -2198,43 +2084,9 @@ impl Analyzer {
                     }
                 }
             }
-            // a frozen pydantic model: assignment raises a ValidationError; a field assigned is
-            // in `model_fields_set` from then on
-            if kind == Kind::Instance && !name.starts_with('_') {
-                if let Some(cls) = self.instance_class(oid) {
-                    if crate::models::pydantic::is_model(self, cls) {
-                        let pc = self.pyd_class(cls, state);
-                        if pc.frozen {
-                            self.raise_here("ValidationError", state);
-                            continue;
-                        }
-                        if pc.fields.iter().any(|f| f.name == name) {
-                            if let Some((sure, maybe)) = self.m.pyd_set.get(&oid).cloned() {
-                                let ns = if strong { sure.insert(nk) } else { sure };
-                                self.m.pyd_set.insert(oid, (ns, maybe.insert(nk)));
-                            }
-                        }
-                        match self.pyd_assign(oid, cls, name, v, node, state) {
-                            None => continue,
-                            Some(nv) if pc.validate_assignment => {
-                                let r = state.row(oid, Ns::Attr).store(nk, strong);
-                                state.set_row(oid, Ns::Attr, r);
-                                state.set_slot(oid, Ns::Attr, nk, nv, strong);
-                                continue;
-                            }
-                            Some(_) => {}
-                        }
-                    }
-                }
-            }
-            if matches!(kind, Kind::Instance) && name.starts_with('_') {
-                let cls = self.instance_class(oid);
-                if let Some(cls) = cls {
-                    if self.pyd_is_private(cls, name, state) {
-                        state.set_slot(oid, Ns::Attr, crate::models::pydantic::priv_key(name), v.clone(), strong);
-                        continue;
-                    }
-                }
+            // a pydantic model's field / private attribute (`models::pydantic::model_setattr`)
+            if kind == Kind::Instance && crate::models::pydantic::model_setattr(self, oid, name, v, strong, node, state) {
+                continue;
             }
             // a property with a setter: the setter runs instead of the store
             let cls_of = match kind {

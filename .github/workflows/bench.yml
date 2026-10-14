@@ -1,4 +1,5 @@
-# Benchmarks: rowan on four large real programs, without its deadlines, one job each in
+# Benchmarks: rowan on large real programs (stdlib12k, email, rich, click; and the frontier of
+# ~130k-350k-line packages: pip, timm, sktime, functional), without its deadlines, one job each in
 # parallel, cut at 10 minutes. Records wall time, peak memory, rowan's deterministic work
 # counters and verdict counts, plus a `perf` profile (top functions in the job summary, a
 # flamegraph as an artifact). Informational only: every job has continue-on-error, and this
@@ -59,7 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        program: [stdlib12k, email, rich, click]
+        program: [stdlib12k, email, rich, click, pip, timm, sktime, functional]
     steps:
       - uses: actions/checkout@v7
 
@@ -101,8 +102,8 @@ jobs:
         if: steps.perf.outputs.ok == 'true'
         continue-on-error: true
         run: |
-          perf report -i perf.data --stdio --no-children --sort symbol --percent-limit 0.5 2>/dev/null \
-            | grep -v '^#' | grep -v '^$' | head -25 > results/${{ matrix.program }}.profile.txt
+          perf report -i perf.data --stdio --no-children --sort symbol -g none --percent-limit 0.5 2>/dev/null \
+            | grep -v '^#' | grep -v '^$' | head -40 > results/${{ matrix.program }}.profile.txt
           perf script -i perf.data 2>/dev/null | inferno-collapse-perf | inferno-flamegraph \
             --title "rowan: ${{ matrix.program }}" > results/${{ matrix.program }}.flamegraph.svg
 
@@ -197,7 +198,7 @@ jobs:
             echo
             echo "| program | result | wall | peak memory | work | units | tabulations | objects | ✗/⚠ verdicts |"
             echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
-            for p in stdlib12k email rich click; do
+            for p in stdlib12k email rich click pip timm sktime functional; do
               cat "results/$p.md" 2>/dev/null || echo "| $p | no result | | | | | | | |"
             done
             echo
