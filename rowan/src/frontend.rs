@@ -349,8 +349,14 @@ pub fn text<T: Ranged>(n: &T) -> String {
         let Some(&m) = r.nodes.get(&addr) else { return String::new() };
         let src = &r.modules[m as usize].source;
         let rg = n.range();
-        src.get(rg.start().to_usize()..rg.end().to_usize()).map(|s| s.to_string()).unwrap_or_default()
+        src.get(rg.start().to_usize()..rg.end().to_usize()).map(lf_text).unwrap_or_default()
     })
+}
+
+/// Source text with Windows line ends (`\r\n`) as `\n`: the report and hovers show code
+/// spanning lines the same whatever the file's line ends.
+fn lf_text(t: &str) -> String {
+    if t.contains('\r') { t.replace("\r\n", "\n") } else { t.to_string() }
 }
 
 pub fn module_name(idx: u32) -> String {
@@ -397,7 +403,7 @@ pub fn text_at(n: &Node) -> String {
         let end_line = ruff_source_file::OneIndexed::new(n.end_line.max(1) as usize).unwrap();
         let s = m.lines.line_start(start_line, &m.source).to_usize() + n.col as usize;
         let e = m.lines.line_start(end_line, &m.source).to_usize() + n.end_col as usize;
-        m.source.get(s..e).map(|t| t.to_string()).unwrap_or_default()
+        m.source.get(s..e).map(lf_text).unwrap_or_default()
     })
 }
 

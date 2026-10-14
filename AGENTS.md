@@ -116,15 +116,14 @@ uv run --no-project python tests/run_snapshots.py   # --update only after review
 uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy \
     python tests/oracle.py [--strict|--lenient] [-v] [-j N] [case…]  # vs real runs, ~1.5 min
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py [case…]
-cd vscode-rowan && node test.js && npm run package  # hover / diagnostic text checks; builds the .vsix
+cd vscode-rowan && node test.js && npm run package  # hovers; the .vsix (test_package.js X.vsix TARGET)
 uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"
                        # benchmark: stdlib12k / email / rich / click; frontier pip / timm / sktime / functional
 ```
 
 Run the oracle on the cases you touched, and in full before a commit that changes models. CI
-(`.github/workflows/ci.yml`) runs all of the above except torch and the benchmark (`bench.yml`,
-which also counts the golden passes with `ROWAN_LIMITS=budget=0`: every call past its
-budget; informational, into the history on gh-pages).
+(`ci.yml`) runs the above but torch and the benchmark (`bench.yml`, also the `budget=0` golden
+count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win32-x64).
 
 ## Tests
 

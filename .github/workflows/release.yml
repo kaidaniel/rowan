@@ -97,6 +97,11 @@ jobs:
           # distribution from the last decade (Ubuntu 18.04+, RHEL / Rocky 8+, Debian 10+)
           - { target: linux-x64, os: ubuntu-latest, rust: x86_64-unknown-linux-gnu, zig: true, run: true }
           - { target: linux-arm64, os: ubuntu-latest, rust: aarch64-unknown-linux-gnu, zig: true, run: false }
+          # Windows: native x64 (MSVC); the engine is bin/rowan.exe
+          - { target: win32-x64, os: windows-latest, rust: x86_64-pc-windows-msvc, zig: false, run: true, exe: .exe }
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
 
@@ -134,15 +139,15 @@ jobs:
       - name: Put the binary into the extension
         run: |
           mkdir -p vscode-rowan/bin
-          cp rowan/target/${{ matrix.rust }}/release/rowan vscode-rowan/bin/rowan
-          chmod 755 vscode-rowan/bin/rowan
-          cp rowan/target/${{ matrix.rust }}/release/rowan rowan-${{ matrix.target }}
+          cp rowan/target/${{ matrix.rust }}/release/rowan${{ matrix.exe }} vscode-rowan/bin/rowan${{ matrix.exe }}
+          chmod 755 vscode-rowan/bin/rowan${{ matrix.exe }}
+          cp rowan/target/${{ matrix.rust }}/release/rowan${{ matrix.exe }} rowan-${{ matrix.target }}${{ matrix.exe }}
 
       - name: Smoke test (native targets)
         if: matrix.run
         run: |
           printf 'd = {"a": 1}\nx = d["b"]\n' > smoke.py
-          vscode-rowan/bin/rowan smoke.py | tee smoke.out
+          vscode-rowan/bin/rowan${{ matrix.exe }} smoke.py | tee smoke.out
           grep -q 'key "b" is never set$' smoke.out
 
       - name: Package the .vsix
@@ -152,12 +157,17 @@ jobs:
           npx --yes @vscode/vsce package --no-dependencies --target ${{ matrix.target }} \
             --out "../rowan-${{ matrix.target }}-$VERSION.vsix"
 
+      # (every target: unpacked and its engine's format checked; native targets also start
+      # `rowan serve` through the extension's own code and check hovers)
+      - name: Test the packaged extension
+        run: node vscode-rowan/test_package.js "rowan-${{ matrix.target }}-$VERSION.vsix" ${{ matrix.target }}
+
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.target }}
           path: |
             rowan-${{ matrix.target }}-${{ inputs.version }}.vsix
-            rowan-${{ matrix.target }}
+            rowan-${{ matrix.target }}${{ matrix.exe }}
           retention-days: 7
 
   release:
@@ -182,7 +192,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "rowan $VERSION" \
-            --notes "VS Code extension with the rowan engine bundled, one .vsix per platform (darwin-arm64, darwin-x64, linux-x64, linux-arm64), and the bare \`rowan\` binaries.
+            --notes "VS Code extension with the rowan engine bundled, one .vsix per platform (darwin-arm64, darwin-x64, linux-x64, linux-arm64, win32-x64), and the bare \`rowan\` binaries.
 
           **Marketplace:** upload each .vsix at https://marketplace.visualstudio.com/manage (the extension's ⋯ menu → Update).
           **Manual install:** \`code --install-extension rowan-<platform>-$VERSION.vsix\`."
