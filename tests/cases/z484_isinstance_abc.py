@@ -27,3 +27,7 @@ b_iter = isinstance(Bag(), collections.abc.Iterable)      #@value b_iter: includ
 p = to_pair((1, None))
 p0 = p[0]                                                 #@value p0: exactly={1}
 p1 = p[1]                                                 #@value p1: exactly={None}
+cls_str = isinstance(Bag, str)                            #@value cls_str: exactly={False}
+cls_type = isinstance(Bag, type)                          #@value cls_type: exactly={True}
+fn_type = isinstance(to_pair, type)                       #@value fn_type: exactly={False}
+fn_tuple = isinstance(to_pair, (str, tuple))              #@value fn_tuple: exactly={False}

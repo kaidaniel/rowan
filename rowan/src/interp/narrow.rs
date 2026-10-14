@@ -526,7 +526,13 @@ impl Analyzer {
             return (!open && !structural).then_some(false);
         }
         let container = matches!(k, Kind::Dict | Kind::List | Kind::Tuple | Kind::Pair | Kind::Set | Kind::Frame | Kind::Series);
+        let code = matches!(k, Kind::Class | Kind::Function | Kind::Bound | Kind::Module);
         match b {
+            // (classes are `type`'s instances; functions, classes and modules are no plain value's)
+            "type" if code => Some(k == Kind::Class),
+            // (a library class other than an ABC or a `types` one: no class, function or module
+            // is its instance, short of a metaclass)
+            _ if code && !structural && !full.starts_with("types.") && !b.ends_with("Meta") => Some(false),
             "dict" => container.then_some(k == Kind::Dict),
             // (a dict object may be one of these)
             "defaultdict" | "OrderedDict" | "Counter" | "deque" | "UserDict" | "ChainMap" if matches!(k, Kind::Dict | Kind::List) => None,
@@ -543,7 +549,6 @@ impl Analyzer {
             // (no builtin container is a library class's instance; an ABC's or a protocol's
             // it may be; functions and modules are no plain value's)
             _ if container && !structural => Some(false),
-            "str" | "int" | "float" | "bool" | "bytes" | "NoneType" | "complex" | "bytearray" if matches!(k, Kind::Function | Kind::Bound | Kind::Module) => Some(false),
             _ => None,
         }
     }
