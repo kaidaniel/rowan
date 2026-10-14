@@ -1213,14 +1213,25 @@ pub fn expose_f(s: &Shape, n_front: usize, n_back: usize, f: &TFacts) -> Shape {
         s.rest = Some(Rest::Any);
         s.suffix.clear();
     }
+    // (back dims come out of the rest only when it surely holds them: with known leading dims,
+    // a rest that may be empty would make them the leading dims, so `[A, *]` exposes its last
+    // dim as `[*, ?]`, not `[A, *, ?]`, which claims one dim too many)
     while s.suffix.len() < n_back {
         match s.rest.clone() {
-            Some(Rest::Slice(sym, from, back)) => {
+            Some(Rest::Slice(sym, from, back)) if s.prefix.is_empty() || (f.rank_ge(sym) as i64 - from as i64 - back as i64) >= 1 => {
                 s.suffix.insert(0, sdim(sym, -(back as i32) - 1));
                 s.rest = Some(Rest::Slice(sym, from, back + 1));
             }
-            _ => s.suffix.insert(0, unknown()),
+            _ if s.prefix.is_empty() => s.suffix.insert(0, unknown()),
+            _ => break,
         }
+    }
+    if s.suffix.len() < n_back {
+        while s.suffix.len() < n_back {
+            s.suffix.insert(0, unknown());
+        }
+        s.rest = Some(Rest::Any);
+        s.prefix.clear();
     }
     s
 }

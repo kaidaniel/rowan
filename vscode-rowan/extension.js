@@ -667,6 +667,7 @@ function activate(context) {
       // definite tensor-shape mismatches
       const seenErr = new Set();
       for (const e of res.shape_errors || []) {
+        if (e.file) continue; // mismatches in imported modules
         if (seenErr.has(`${e.line}:${e.message}`)) continue;
         seenErr.add(`${e.line}:${e.message}`);
         const ln = Math.max(0, e.line - 1);

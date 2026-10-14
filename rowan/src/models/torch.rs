@@ -17,6 +17,8 @@ pub const SIZE_PREFIX: &str = "\u{1}S";
 
 #[derive(Clone, Debug)]
 pub struct ShapeNote {
+    /// the module (frontend index) and line of the operation
+    pub module: u32,
     pub line: u32,
     pub chain: Vec<u32>,
     pub entry: bool,
@@ -454,8 +456,8 @@ impl Analyzer {
 
     pub fn t_require_note(&mut self, node: &Node, text: String, cons: Option<(Cons, sh::PrintCtx)>) {
         let (chain, entry) = self.t_note_ctx();
-        let n = ShapeNote { line: node.line, chain, entry, text, cons };
-        if !self.m.shape_reqs.iter().any(|x| x.line == n.line && x.chain == n.chain && x.entry == n.entry && x.text == n.text) {
+        let n = ShapeNote { module: node.module, line: node.line, chain, entry, text, cons };
+        if !self.m.shape_reqs.iter().any(|x| x.module == n.module && x.line == n.line && x.chain == n.chain && x.entry == n.entry && x.text == n.text) {
             self.m.shape_reqs.push(n);
         }
     }
@@ -465,8 +467,8 @@ impl Analyzer {
             return;
         }
         let (chain, entry) = self.t_note_ctx();
-        let n = ShapeNote { line: node.line, chain, entry, text: msg, cons: None };
-        if !self.m.shape_errors.iter().any(|x| x.line == n.line && x.chain == n.chain && x.text == n.text) {
+        let n = ShapeNote { module: node.module, line: node.line, chain, entry, text: msg, cons: None };
+        if !self.m.shape_errors.iter().any(|x| x.module == n.module && x.line == n.line && x.chain == n.chain && x.text == n.text) {
             self.m.shape_errors.push(n);
         }
         self.raise_here("RuntimeError", st);
@@ -609,7 +611,7 @@ impl Analyzer {
             Some((e, Pos::F(i as usize)))
         } else {
             let k = (-i) as usize;
-            let e = sh::expose(&s, 0, k);
+            let e = sh::expose_f(&s, 0, k, &st.tf);
             let n = e.suffix.len();
             Some((e, Pos::B(n - k)))
         }
@@ -4077,7 +4079,11 @@ impl Analyzer {
                     return Some(vec![Value::new(); n]);
                 }
                 let s = sh::norm_shape(&s, &st.tf);
-                let d = s.dims().unwrap_or_else(|| vec![sh::unknown(); n]);
+                // (an unknown rest of a shape of exactly n dims: what is around it stays)
+                let d = s.dims().unwrap_or_else(|| match n.checked_sub(s.prefix.len() + s.suffix.len()) {
+                    Some(k) => s.prefix.iter().copied().chain(std::iter::repeat_n(sh::unknown(), k)).chain(s.suffix.iter().copied()).collect(),
+                    None => vec![sh::unknown(); n],
+                });
                 Some(d.iter().map(|x| dim_value(*x)).collect())
             }
             Some(si) => {

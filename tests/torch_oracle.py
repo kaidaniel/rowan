@@ -42,6 +42,7 @@ class Check:
     def __init__(self, line: int, kind: str, at: Optional[int], name: str, body: str, where: Dict[str, str]):
         self.line, self.kind, self.at, self.name, self.body, self.where = line, kind, at, name, body, where
         self.ran = False
+        self.file = ""
         self.fail: Optional[str] = None
 
 
@@ -135,13 +136,28 @@ def check_shape(c: Check, env: Dict[str, Any], v: Any) -> Optional[str]:
     return None
 
 
-def run_case(path: str, verbose: bool) -> List[str]:
-    src = open(path, encoding="utf-8").read()
-    checks = parse(src)
-    by_line: Dict[int, List[Check]] = {}
-    for c in checks:
-        by_line.setdefault(c.line, []).append(c)
+def case_files(path: str) -> List[str]:
+    """The files whose directives a case checks: the entry and, in a package case (a directory
+    whose name shares the entry's prefix: `p06_gpt/p06_gpt.py`), every module under it."""
     path = os.path.abspath(path)
+    d = os.path.dirname(path)
+    prefix = os.path.basename(path).split("_")[0]
+    out = [path]
+    if prefix and os.path.basename(d).startswith(prefix + "_"):
+        out += sorted(os.path.abspath(p) for p in glob.glob(os.path.join(d, "**", "*.py"), recursive=True) if os.path.abspath(p) != path)
+    return out
+
+
+def run_case(path: str, verbose: bool) -> List[str]:
+    path = os.path.abspath(path)
+    files = case_files(path)
+    checks: List[Check] = []
+    by_line: Dict[Tuple[str, int], List[Check]] = {}
+    for f in files:
+        for c in parse(open(f, encoding="utf-8").read()):
+            c.file = f
+            checks.append(c)
+            by_line.setdefault((f, c.line), []).append(c)
     inits: Dict[int, Dict[str, Any]] = {}
     last: Dict[int, int] = {}  # frame id -> last line
 
@@ -154,7 +170,7 @@ def run_case(path: str, verbose: bool) -> List[str]:
         return False
 
     def evaluate(frame, line: int) -> None:
-        for c in by_line.get(line, []):
+        for c in by_line.get((frame.f_code.co_filename, line), []):
             if c.kind == "error":
                 continue
             if c.at is not None and not called_from(frame, c.at):
@@ -193,18 +209,23 @@ def run_case(path: str, verbose: bool) -> List[str]:
             if frame.f_code.co_name == "__init__" and "self" in frame.f_locals:
                 inits.setdefault(id(frame.f_locals["self"]), {}).update({k: v for k, v in frame.f_locals.items() if k != "self"})
         elif event == "exception":
-            for c in by_line.get(frame.f_lineno, []):
+            for c in by_line.get((frame.f_code.co_filename, frame.f_lineno), []):
                 if c.kind == "error":
                     c.ran = True
         return local
 
+    traced = set(files)
+
     def glob_trace(frame, event, arg):
-        if frame.f_code.co_filename == path:
+        if frame.f_code.co_filename in traced:
             return local
         return None
 
     old_cwd = os.getcwd()
     os.chdir(os.path.dirname(path))
+    # (a package case imports its own modules: from its directory, and not another case's
+    # modules of the same name)
+    sys.path.insert(0, os.path.dirname(path))
     sys.settrace(glob_trace)
     crashed = None
     try:
@@ -213,17 +234,21 @@ def run_case(path: str, verbose: bool) -> List[str]:
         crashed = "".join(traceback.format_exception_only(type(e), e)).strip()
         tb = e.__traceback__
         while tb is not None:
-            if tb.tb_frame.f_code.co_filename == path:
-                crashed += f" (L{tb.tb_lineno})"
+            if tb.tb_frame.f_code.co_filename in traced:
+                crashed += f" ({os.path.relpath(tb.tb_frame.f_code.co_filename, os.path.dirname(path))}:{tb.tb_lineno})"
             tb = tb.tb_next
     finally:
         sys.settrace(None)
         os.chdir(old_cwd)
+        sys.path.remove(os.path.dirname(path))
+        for name, m in list(sys.modules.items()):
+            if (getattr(m, "__file__", None) or "").startswith(os.path.dirname(path) + os.sep) or name.split(".")[0] in {os.path.basename(os.path.dirname(f)) for f in files[1:]}:
+                del sys.modules[name]
     fails: List[str] = []
     if crashed:
         fails.append(f"program crashed: {crashed}")
     for c in checks:
-        label = f"L{c.line} {c.kind} {c.name}".rstrip()
+        label = f"{os.path.relpath(c.file, os.path.dirname(path)) + ':' if c.file != path else ''}L{c.line} {c.kind} {c.name}".rstrip()
         if not c.ran:
             fails.append(f"{label}: never ran" + (f" from L{c.at}" if c.at else "") + (" (no exception raised)" if c.kind == "error" else ""))
         elif c.fail:
@@ -237,6 +262,11 @@ def main(argv: List[str]) -> int:
     verbose = "-v" in argv
     args = [a for a in argv if not a.startswith("-")]
     paths = args or sorted(glob.glob(os.path.join(HERE, "torch", "*", "*.py")) + glob.glob(os.path.join(HERE, "numpy", "*", "*.py")))
+    # package cases: the entry of a directory below a group (`playground/p06_gpt/p06_gpt.py`)
+    if not args:
+        for d in sorted(glob.glob(os.path.join(HERE, "torch", "*", "*", "")) + glob.glob(os.path.join(HERE, "numpy", "*", "*", ""))):
+            prefix = os.path.basename(os.path.dirname(d)).split("_")[0]
+            paths += sorted(glob.glob(os.path.join(d, prefix + "_*.py")))
     bad = 0
     total = 0
     for p in paths:

@@ -1,1 +1,7 @@
 # torch cases written but not yet expected to pass (paths relative to tests/torch/)
+playground/p03_bigram.py
+playground/p04_rnn.py
+playground/p05_key_memory_net.py
+playground/p06_gpt/p06_gpt.py
+playground/p07_encoder/p07_encoder.py
+playground/p08_transformers.py

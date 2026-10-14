@@ -1007,10 +1007,12 @@ impl Analyzer {
     }
 
     // ------------------------------------------------------------------ setup
-    fn make_module(&mut self, name: &str, path: Option<&str>, idx: u32, tree: &'static ast::ModModule) -> ObjId {
+    /// A module object (registered under `name`) for a parsed tree; `path` is its file, a
+    /// namespace package's directory, or None (a module made by a model).
+    pub fn make_module(&mut self, name: &str, path: Option<&str>, idx: u32, tree: &'static ast::ModModule) -> ObjId {
         let pkg = match path {
             Some(p) if name == "__main__" => package_of_file(p),
-            Some(p) if p.ends_with("__init__.py") => name.to_string(),
+            Some(p) if p.ends_with("__init__.py") || std::path::Path::new(p).is_dir() => name.to_string(),
             _ => name.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or_default(),
         };
         let info = ModuleInfo { name: name.to_string(), path: path.map(|p| p.to_string()), pkg, idx, tree, scopes: scopemod::analyse(tree) };
@@ -1441,10 +1443,15 @@ impl Analyzer {
         self.rel_file(idx)
     }
 
+    /// The main module's frontend index.
+    pub fn main_idx(&self) -> u32 {
+        self.module_info(self.main_module).idx
+    }
+
     /// The path of module `idx` relative to the main file's directory ("" for the main
     /// module; the file name when it lies elsewhere, the module name when it has no file).
     pub fn rel_file(&self, idx: u32) -> String {
-        if idx == self.module_info(self.main_module).idx {
+        if idx == self.main_idx() {
             return String::new();
         }
         if let Some(f) = self.rel_files.borrow().get(&idx) {

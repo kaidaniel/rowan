@@ -1709,7 +1709,7 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     Some(&m) => m,
                     None => {
                         let Ok((idx, tree)) = crate::frontend::parse(&modname, None, format!("class {}({}):\n    pass\n", name, names.join(", "))) else { return Value::data("type") };
-                        an.make_module_pub(&modname, None, idx, tree)
+                        an.make_module(&modname, None, idx, tree)
                     }
                 };
                 // (made in another state, or not yet: run it in this one)
@@ -2927,7 +2927,7 @@ pub fn generated_class(an: &mut Analyzer, st: &mut State, qual: &str) -> Option<
         Some(&m) => m,
         None => {
             let (idx, tree) = crate::frontend::parse(modname, None, src.to_string()).ok()?;
-            let m = an.make_module_pub(modname, None, idx, tree);
+            let m = an.make_module(modname, None, idx, tree);
             an.run_module(m, st);
             m
         }
@@ -4106,7 +4106,7 @@ fn m_namedtuple(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let args = fields.iter().map(|f| format!("kw.get({:?}, self.{})", f, f)).collect::<Vec<_>>().join(", ");
     src.push_str(&format!("    def _replace(self, **kw):\n        for k in kw:\n            if k not in {:?}:\n                raise ValueError(k)\n        return {}({})\n", fields, tname, args).replace("[", "(").replace("]", ",)"));
     let Ok((idx, tree)) = crate::frontend::parse(&modname, None, src) else { return fallback(an, st, c) };
-    let moid = an.make_module_pub(&modname, None, idx, tree);
+    let moid = an.make_module(&modname, None, idx, tree);
     for (i, v) in dvals.iter().enumerate() {
         st.set_slot(moid, Ns::Attr, key_str_lit(&format!("_rowan_default_{}", i)), v.clone(), true);
     }
@@ -4141,7 +4141,7 @@ fn m_getter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         None => {
             let src = format!("def getter(obj):\n    return {}\n", body);
             let Ok((idx, tree)) = crate::frontend::parse(&modname, None, src) else { return Value::data("getter") };
-            let m = an.make_module_pub(&modname, None, idx, tree);
+            let m = an.make_module(&modname, None, idx, tree);
             an.run_module(m, st);
             m
         }
@@ -4321,7 +4321,7 @@ pub fn re_match_generated(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
                 if ngroups == 1 { "," } else { "" }
             );
             let Ok((idx, tree)) = crate::frontend::parse(&modname, None, src) else { return Value::data("re") };
-            let m = an.make_module_pub(&modname, None, idx, tree);
+            let m = an.make_module(&modname, None, idx, tree);
             an.run_module(m, st);
             m
         }
@@ -4462,7 +4462,7 @@ fn m_make_dataclass(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         src.push_str("    pass\n");
     }
     let Ok((idx, tree)) = crate::frontend::parse(&modname, None, src) else { return fallback(an, st, c) };
-    let moid = an.make_module_pub(&modname, None, idx, tree);
+    let moid = an.make_module(&modname, None, idx, tree);
     for (i, v) in dvals.iter().enumerate() {
         st.set_slot(moid, Ns::Attr, key_str_lit(&format!("_rowan_default_{}", i)), v.clone(), true);
     }

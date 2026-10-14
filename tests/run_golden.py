@@ -73,18 +73,24 @@ def parse_set(s: str) -> set:
     s = s.strip()
     if s.startswith("{") and s.endswith("}"):
         s = s[1:-1]
-    # top-level commas only: tuple keys (`("y", "max")`, MultiIndex columns) stay whole
-    parts, depth, cur = [], 0, ""
+    # top-level commas only: tuple keys (`("y", "max")`, MultiIndex columns) and quoted
+    # commas (`","`) stay whole
+    parts, depth, cur, quote = [], 0, "", None
     for ch in s:
-        if ch in "([":
+        if quote:
+            if ch == quote and not cur.endswith("\\"):
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch in "([":
             depth += 1
         elif ch in ")]":
             depth -= 1
-        if ch == "," and depth == 0:
+        elif ch == "," and depth == 0:
             parts.append(cur)
             cur = ""
-        else:
-            cur += ch
+            continue
+        cur += ch
     parts.append(cur)
     return {parse_key(t) for t in parts if t.strip()}
 
@@ -421,8 +427,7 @@ def check_file(src: str, rel: str, res: Dict[str, Any]) -> List[str]:
                     prob = f"value {desc} leaves out {sorted(lost)}"
             row_checks.append((ln, f"value of {name}", spec, prob))
     failures = check_results(verdict_exp, row_checks, schema_exp, [v if (v.get("file") or "") == rel else dict(v, line=-1) for v in vs_here], res["schemas"])
-    if not rel:
-        failures += SHAPES[0].check(res)
+    failures += SHAPES[0].check(res, rel)
     return failures
 
 
