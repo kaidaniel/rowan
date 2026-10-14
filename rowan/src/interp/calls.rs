@@ -83,8 +83,13 @@ impl Analyzer {
             // (a groupby method of one of several groupby objects: its results are its own)
             let own = matches!(&self.obj(oid).payload, Payload::Method(q, r) if q.starts_with("groupby.") && r.pts.iter().all(|g| self.kind(g) == Kind::Groupby));
             let saved = if own { self.alloc_extra.replace(format!("gbm{}", oid)) } else { self.alloc_extra.clone() };
-            outs.push(self.call_one(oid, &args, &kwargs, &star_args, &star_kwargs, &mut st, node, call_ast));
+            let r = self.call_one(oid, &args, &kwargs, &star_args, &star_kwargs, &mut st, node, call_ast);
             self.alloc_extra = saved;
+            // (a callee that raises on every path returns nothing: `A(x)` whose `__init__`
+            // always fails gives no A)
+            if st.reachable {
+                outs.push(r);
+            }
             states.push(st);
         }
         state.replace_with(State::join_all(states).unwrap());
