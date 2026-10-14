@@ -1753,6 +1753,11 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 continue;
             }
             let n = match an.kind(o) {
+                // (a torch container — ModuleList, Sequential, ModuleDict — is not a list or dict)
+                _ if an.t_layer_type(o).is_some() => {
+                    known = false;
+                    continue;
+                }
                 Kind::Dict if !crate::models::pandas::is_series_obj(an, o) => "dict",
                 Kind::List => "list",
                 Kind::Tuple => "tuple",

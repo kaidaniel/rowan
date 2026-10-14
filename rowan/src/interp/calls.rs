@@ -127,7 +127,8 @@ impl Analyzer {
         let kind = self.kind(oid);
         // torch: a layer object / Sequential, or a user nn.Module (its forward)
         if matches!(kind, Kind::Namespace | Kind::List) && self.t_layer_type(oid).is_some() {
-            return self.t_layer_call(oid, args, kwargs, node, state);
+            let r = self.t_layer_call(oid, args, kwargs, node, state);
+            return self.t_forward_hooks(oid, args, r, state, node);
         }
         if kind == Kind::Instance && self.torch_on && self.t_is_module_instance(oid) {
             if let Some(cls) = self.instance_class(oid) {
@@ -135,7 +136,8 @@ impl Analyzer {
                     if let Some(m) = self.class_lookup(cls, "forward") {
                         let f = self.cls_slots.get(&(m, Ns::Attr, key_str_lit("forward"))).cloned().unwrap_or_default();
                         let fns: Vec<u32> = f.pts.iter().filter(|x| self.kind(*x) == Kind::Function).collect();
-                        return self.call_alternatives(&fns, oid, args, kwargs, star_args, star_kwargs, state, node, call_ast);
+                        let r = self.call_alternatives(&fns, oid, args, kwargs, star_args, star_kwargs, state, node, call_ast);
+                        return self.t_forward_hooks(oid, args, r, state, node);
                     }
                 }
             }

@@ -5,7 +5,7 @@
 
 use indexmap::IndexMap;
 
-use crate::domain::{join_values, KeyVal, Ns, Value, DATA};
+use crate::domain::{join_values, KeyVal, Ns, ObjId, Value, DATA};
 use crate::frontend::Node;
 use crate::intern::{self, key_int, key_str_lit, s, KeyId, StrId, STAR};
 use crate::interp::{Analyzer, Call, Payload};
@@ -2912,6 +2912,48 @@ const MODULE_METHODS: &[&str] = &[
 ];
 
 impl Analyzer {
+    /// The forward hooks registered on module `o` run after a call of it, each perhaps (its
+    /// handle may have removed it): `hook(module, args, output)`; a result other than None
+    /// replaces the output.
+    pub fn t_forward_hooks(&mut self, o: ObjId, args: &[Value], out: Value, st: &mut State, node: &Node) -> Value {
+        let hooks = st.slot(o, Ns::Attr, key_str_lit(FWD_HOOKS));
+        if hooks.pts.is_empty() || !st.reachable {
+            return out;
+        }
+        let tup = self.alloc_positional(Kind::Tuple, node, Some(args.to_vec()), Value::new(), crate::domain::DATA, st);
+        let mut not_run = st.copy();
+        let r = self.call_value(&hooks, node, None, st, Some(vec![Value::obj(o), tup, out.clone()]));
+        let j = st.join(&mut not_run);
+        st.replace_with(j);
+        let none = self.none_v.clone();
+        let other = Value::with_kv(r.pts.iter().filter(|x| !none.pts.contains(*x)).collect(), if r.kv == none.kv { crate::domain::BOT } else { r.kv.clone() });
+        if other.empty() {
+            out
+        } else {
+            out.join(&other)
+        }
+    }
+
+    /// The modules of `o` in the order `apply` visits them: each child's, then `o`.
+    pub fn t_submodules(&self, o: ObjId, st: &State, order: &mut Vec<ObjId>) {
+        if order.contains(&o) || order.len() > 256 {
+            return;
+        }
+        let is_module = |an: &Analyzer, x: ObjId| an.t_layer_type(x).is_some() || an.t_is_module_instance(x);
+        let mut kids: Vec<ObjId> = Vec::new();
+        for ns in [Ns::Attr, Ns::Pos, Ns::Item, Ns::Elem] {
+            for (_, v) in st.obj_slots(o, ns) {
+                kids.extend(v.pts.iter().filter(|x| *x != o && is_module(self, *x)));
+            }
+        }
+        for k in kids {
+            self.t_submodules(k, st, order);
+        }
+        if !order.contains(&o) {
+            order.push(o);
+        }
+    }
+
     pub fn t_is_module_instance(&self, o: u32) -> bool {
         let Some(cls) = self.instance_class(o) else { return false };
         self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|ci| ci.lib.nn_module).unwrap_or(false))
@@ -3964,10 +4006,34 @@ pub fn m_nnmodule(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             an.store_attr(&recv, &n, &v, &node, st);
             an.none_v.clone()
         }
-        "to" | "cuda" | "cpu" | "eval" | "train" | "requires_grad_" | "half" | "float" | "double" | "bfloat16" | "type" | "share_memory" | "apply" => recv,
+        // `m.apply(fn)`: fn on every submodule, then on m
+        "apply" => {
+            let Some(f) = c.arg(0, Some("fn")) else { return recv };
+            let mut order: Vec<ObjId> = Vec::new();
+            for o in recv.pts.iter() {
+                an.t_submodules(o, st, &mut order);
+            }
+            for m in order {
+                an.call_value(&f, &c.node, None, st, Some(vec![Value::obj(m)]));
+            }
+            recv
+        }
+        // (a hook runs at each call of the module: `t_forward_hooks`)
+        "register_forward_hook" => {
+            if let Some(h) = c.arg(0, Some("hook")) {
+                for o in recv.pts.iter() {
+                    st.set_slot(o, Ns::Attr, key_str_lit(FWD_HOOKS), h.clone(), false);
+                }
+            }
+            Value::data(&format!("hook handle@L{}", c.line))
+        }
+        "to" | "cuda" | "cpu" | "eval" | "train" | "requires_grad_" | "half" | "float" | "double" | "bfloat16" | "type" | "share_memory" => recv,
         _ => Value::data(&format!("L{}", c.line)),
     }
 }
+
+/// The slot of a module holding its forward hooks.
+const FWD_HOOKS: &str = "\u{1}fwd_hooks";
 
 impl Analyzer {
     /// Unpacking a size / tensor into `n` targets (`star`: index of a starred target, which
