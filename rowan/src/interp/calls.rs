@@ -188,34 +188,6 @@ impl Analyzer {
                     }
                     return join_values(outs);
                 }
-                // `super().__init__(…)` reaching a builtin exception base: args, str / repr
-                if qual == "excinit" {
-                    for o in recv.pts.iter() {
-                        if self.kind(o) == Kind::Instance {
-                            let name = self.instance_class(o).and_then(|c| self.class_info_opt(c)).map(|ci| ci.name.clone()).unwrap_or_else(|| "Exception".into());
-                            let t = self.alloc_positional(Kind::Tuple, node, Some(args.to_vec()), Value::new(), DATA, state);
-                            let strong = recv.pts.len() == 1 && self.obj(o).single;
-                            self.store_key(o, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
-                            self.exc_objs.insert(o, name);
-                        }
-                    }
-                    return self.none_v.clone();
-                }
-                // `super().__init__(…)` / `Base.__init__(self, …)` reaching a dataclass base
-                if let Some(rest) = qual.strip_prefix("dcinit.") {
-                    let (cls, self_v, args): (u32, Value, Vec<Value>) = match rest.strip_prefix("class.") {
-                        Some(c) => (c.parse().unwrap_or(0), args.first().cloned().unwrap_or_default(), args.iter().skip(1).cloned().collect()),
-                        None => (rest.parse().unwrap_or(0), recv.clone(), args.to_vec()),
-                    };
-                    if cls != 0 {
-                        for o in self_v.pts.iter() {
-                            if matches!(self.kind(o), Kind::Instance) {
-                                self.dataclass_init(cls, o, &args, star_args, kwargs, star_kwargs, state, node);
-                            }
-                        }
-                    }
-                    return self.none_v.clone();
-                }
                 let mut args = args.to_vec();
                 if qual.starts_with("dict.") || qual.starts_with("set.") {
                     if let Some(a) = args.first_mut() {

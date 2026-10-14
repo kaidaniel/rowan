@@ -52,7 +52,7 @@ pub const ALLOWLIST_PREFIXES: &[&str] = &[
 
 const PREFIXES: &[&str] = &[
     "Series.str.", "Series.dt.", "Series.cat.", "Series.sparse.", "Series.list.", "Series.struct.", "Series.", "str.", "DataFrame.", "list.", "set.", "tuple.", "dict.", "view.", "groupby.", "zip.", "enumerate.", "unknown.", "class.", "pair.",
-    "parser.", "num.", "cfgparser.", "cfgsection.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "slice.", "memo.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
+    "parser.", "num.", "dcinit.", "cfgparser.", "cfgsection.", "partial.", "response.", "pydantic.cls.", "pydantic.", "typeadapter.", "fieldinfo.", "pydverr.", "counter.", "chainmap.", "deque.", "stdobj.", "slice.", "memo.", "fastapi.", "starlette.", "torch.", "tensor.", "tensorq.", "nnmodule.", "math.", "numpy.", "np.",
 ];
 
 pub struct Registry {
@@ -81,6 +81,8 @@ impl Registry {
         r(&["builtins.hasattr"], m_hasattr);
         r(&["builtins.vars", "attr.asdict", "attrs.asdict"], m_vars);
         r(&["dataclasses.asdict"], m_asdict);
+        r(&["excinit"], exceptions::m_excinit);
+        r(&["dcinit.*"], dataclasses::m_dcinit);
         r(&["dataclasses.fields"], m_dc_fields);
         r(&["builtins.map", "builtins.filter"], m_map);
         r(&["builtins.str"], m_str);

@@ -313,3 +313,19 @@ impl crate::interp::Analyzer {
         false
     }
 }
+
+/// `super().__init__(…)` / `Base.__init__(self, …)` reaching a dataclass base: its generated
+/// `__init__` on the instance (`dcinit.<class>` bound, `dcinit.class.<class>` called with self).
+pub fn m_dcinit(an: &mut crate::interp::Analyzer, st: &mut State, c: &crate::interp::Call) -> Value {
+    let rest = c.qual.strip_prefix("dcinit.").unwrap_or("");
+    let (cls, self_v, args): (u32, Value, Vec<Value>) = match rest.strip_prefix("class.") {
+        Some(cl) => (cl.parse().unwrap_or(0), c.args.first().cloned().unwrap_or_default(), c.args.iter().skip(1).cloned().collect()),
+        None => (rest.parse().unwrap_or(0), c.recv.clone().unwrap_or_default(), c.args.clone()),
+    };
+    if cls != 0 {
+        for o in self_v.pts.iter().filter(|o| an.kind(*o) == Kind::Instance).collect::<Vec<_>>() {
+            an.dataclass_init(cls, o, &args, &c.star_args, &c.kwargs, &c.star_kwargs, st, &c.node);
+        }
+    }
+    an.none_v.clone()
+}
