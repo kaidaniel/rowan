@@ -189,11 +189,11 @@ extension (talks to `rowan serve`).
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~6 / ~5 / ~4 / ~105 s; 0.08 / 0.06 / 0.08 / 0.29 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~5 / ~4 / ~3 / ~14 s; 0.13 / 0.07 / 0.12 / 0.12 GB |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~17 / ~28 / ~70 / ~5 s; 0.26 / 1.5 / 1.0 / 0.4 GB |
 
 ## Known problems and next steps
 
-Open bugs, performance items and precision to-dos are in `SUGGESTED_CHANGES.md`, each with a
-repro; work it in order. The main ones: the interpreter is far from its 10k-line goal, the
-frontier programs' cost, precision lost where budgets run out, the `#@todo`s. Parked branches:
-`parked/joined-summaries` (symbolic summaries, removed: unsound, costly), `slotmap-trie`.
+Open items are in `SUGGESTED_CHANGES.md`, each with a repro; work it in order: the 10k-line
+goal, the frontier programs' cost, precision lost where budgets run out, the `#@todo`s. Parked
+branches: `parked/joined-summaries` (symbolic summaries: unsound, costly), `slotmap-trie`.
