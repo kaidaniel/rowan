@@ -524,7 +524,7 @@ impl Analyzer {
                 if let Some(mut bx) = h.body_exits.take() {
                     bx.reachable = true;
                     let joined = match state.exits.take() {
-                        Some(cur) => cur.copy_ref().join(&mut bx),
+                        Some(cur) => cur.copy().join(&mut bx),
                         None => bx,
                     };
                     state.exits = Some(std::sync::Arc::new(joined));
@@ -1017,7 +1017,7 @@ impl Analyzer {
     }
 
     fn stmt_while_loop(&mut self, w: &'static ast::StmtWhile, state: &mut State) {
-        let (mut head, exit_acc, _) = self.loop_fixpoint(state, &mut |an, body_s| {
+        let (head, exit_acc, _) = self.loop_fixpoint(state, &mut |an, body_s| {
             let tv = an.eval(&w.test, body_s);
             // a test decided at the loop head prunes: false means no iteration from here
             if an.truthiness(&tv, body_s) == Some(false) {
@@ -1220,7 +1220,7 @@ impl Analyzer {
             self.set_cursor(o, None, state);
         }
         let pre = state.copy();
-        let (mut head, exit_acc, back) = self.loop_fixpoint(state, &mut |an, body_s| {
+        let (head, exit_acc, back) = self.loop_fixpoint(state, &mut |an, body_s| {
             an.bind_iter_target(&f.target, &it.elem, body_s);
             an.exec_block(&f.body, body_s);
         });
@@ -1509,7 +1509,7 @@ impl Analyzer {
             let mut exits_acc: Option<State> = None;
             let add_exits = |e: Option<std::sync::Arc<State>>, acc: &mut Option<State>| {
                 if let Some(e) = e {
-                    let mut s2 = e.copy_ref();
+                    let mut s2 = e.copy();
                     *acc = Some(match acc.take() {
                         None => s2,
                         Some(mut a) => a.join(&mut s2),
@@ -1527,7 +1527,7 @@ impl Analyzer {
             // returns made inside the try: the finally runs before the function returns
             let mut ways: Vec<State> = Vec::new();
             if let Some(ie) = inner_exits {
-                ways.push(ie.copy_ref());
+                ways.push(ie.copy());
             }
             // an exception leaving the try (no handler here) that a `return` in the finally
             // swallows

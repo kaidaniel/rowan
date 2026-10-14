@@ -582,7 +582,7 @@ impl Analyzer {
         h.body_died = !state.reachable && (!h.ran || h.body_died);
         // (the body's `return`s are the caller's: kept for when the with statement ends)
         if let Some(ex) = state.exits.take() {
-            let mut ex = ex.copy_ref();
+            let mut ex = ex.copy();
             h.body_exits = Some(match h.body_exits.take() {
                 Some(mut prev) => prev.join(&mut ex),
                 None => ex,

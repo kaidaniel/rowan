@@ -849,7 +849,7 @@ impl Analyzer {
             if recs.iter().any(|(c, _, _)| !answered(c)) {
                 let mut keep_st: Option<State> = None;
                 let mut keep_v = Value::new();
-                for (c, mut st, ev) in recs {
+                for (c, st, ev) in recs {
                     if answered(&c) {
                         let mut s2 = st.copy();
                         keep_st = Some(match keep_st { None => s2, Some(mut a) => a.join(&mut s2) });
@@ -1172,7 +1172,7 @@ impl Analyzer {
         let mut outs: Vec<Value> = Vec::new();
         let mut states: Vec<State> = Vec::new();
         let mut statuses: Vec<Value> = Vec::new();
-        let mut pre = state.copy();
+        let pre = state.copy();
         for a in app.pts.iter() {
             for (full, idx) in self.fa_routes_of(a) {
                 if !self.m.fa_routes[idx].methods.iter().any(|m| m == method || m == "*") {

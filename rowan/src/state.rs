@@ -223,7 +223,7 @@ impl State {
 
     // -- copying -----------------------------------------------------------
     /// Copy from a shared reference (used for `exits`, which are shared and never mutated).
-    pub fn copy_ref(&self) -> State {
+    pub fn copy(&self) -> State {
         State {
             env: self.env.clone(),
             narrowed: self.narrowed.clone(),
@@ -243,10 +243,6 @@ impl State {
         }
     }
 
-    pub fn copy(&mut self) -> State {
-        self.copy_ref()
-    }
-
     /// Snapshot the heap at a `return` so the caller sees it joined over all return points.
     pub fn record_exit(&mut self) {
         let mut snap = self.copy();
@@ -255,7 +251,7 @@ impl State {
         snap.exits = None;
         self.exits = Some(Arc::new(match self.exits.take() {
             None => snap,
-            Some(e) => e.copy_ref().join(&mut snap),
+            Some(e) => e.copy().join(&mut snap),
         }));
     }
 
@@ -315,7 +311,7 @@ impl State {
             (None, e) => e.clone(),
             (e, None) => e.clone(),
             (Some(a), Some(b)) if Arc::ptr_eq(a, b) => Some(a.clone()),
-            (Some(a), Some(b)) => Some(Arc::new(a.copy_ref().join(&mut b.copy_ref()))),
+            (Some(a), Some(b)) => Some(Arc::new(a.copy().join(&mut b.copy()))),
         };
         if !o.reachable {
             let mut s = self.copy();

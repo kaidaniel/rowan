@@ -75,7 +75,7 @@ impl Analyzer {
         if self.over_hard_deadline() && targets.iter().all(|o| matches!(self.kind(*o), Kind::Function | Kind::Bound)) {
             return self.unknown_call("?", None, &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
-        let mut pre = state.copy();
+        let pre = state.copy();
         let mut outs: Vec<Value> = Vec::new();
         let mut states: Vec<State> = Vec::new();
         for oid in targets {
@@ -1011,7 +1011,7 @@ impl Analyzer {
         self.active_by_func.entry(foid).or_default().push(key.clone());
         self.rec_entry.insert(key.clone(), (self_v.clone(), args.clone(), kwargs.clone()));
 
-        let mut pre_bind = state.copy();
+        let pre_bind = state.copy();
         let obj_mark_call = self.objects.len() as ObjId;
         if !matches!(fnode, FuncNode::Def(f) if is_generator(&f.body)) {
             if let Some(fr) = self.frames.last_mut() {
@@ -1049,7 +1049,7 @@ impl Analyzer {
                 eprintln!("  callee {} did not complete (called at L{})", fi.qualname, node.line);
             }
             if let Some(ex) = st.exits.take() {
-                let mut exs = ex.copy_ref();
+                let mut exs = ex.copy();
                 st = if st.reachable { st.join(&mut exs) } else { exs };
                 st.exits = None;
             }
@@ -1088,7 +1088,7 @@ impl Analyzer {
                 // did not converge: the last state, widened (its result may be any
                 // value, the records it touched may hold other keys)
                 let mut s0 = match self.rec_table.get(&key) {
-                    Some((_, pst, _)) => pst.copy_ref(),
+                    Some((_, pst, _)) => pst.copy(),
                     None => entry_state.copy(),
                 };
                 let fp = s0.footprint(&entry_state);
@@ -1109,7 +1109,7 @@ impl Analyzer {
         let gen_yields = match fnode {
             FuncNode::Def(f) if is_generator(&f.body) && !gen_cm => {
                 let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None);
-                Some((gid, self.gen_yield_states.get(&gid).map(|v| v.states().map(|s| s.copy_ref()).collect::<Vec<State>>()).unwrap_or_default()))
+                Some((gid, self.gen_yield_states.get(&gid).map(|v| v.states().map(|s| s.copy()).collect::<Vec<State>>()).unwrap_or_default()))
             }
             _ => None,
         };
@@ -1322,7 +1322,7 @@ impl Analyzer {
                 return true;
             }
         }
-        self.tries.last_mut().unwrap().last = Some((here.copy_ref(), cls.clone(), exc.clone()));
+        self.tries.last_mut().unwrap().last = Some((here.copy(), cls.clone(), exc.clone()));
         // (joined per class: a handler takes every raise of a class or none of them; what
         // callees made is collected when the try ends)
         let recs = &mut self.tries.last_mut().unwrap().recs;

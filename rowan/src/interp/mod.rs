@@ -294,7 +294,7 @@ pub type RaiseRec = (Option<ExcNames>, State, Value);
 
 /// The states of a try's recorded raises, joined (None: no raise recorded).
 pub fn join_raise_recs(recs: &[RaiseRec]) -> Option<State> {
-    State::join_all(recs.iter().map(|r| r.1.copy_ref()).collect())
+    State::join_all(recs.iter().map(|r| r.1.copy()).collect())
 }
 
 /// The class of an exception that code rowan cannot see (or a model that does not say which)
@@ -1667,7 +1667,7 @@ impl Analyzer {
             // a closure made by a factory's entry run starts from that run's state (its cells)
             let mut st = match self.t_closure_states.get(&oid) {
                 Some(cs) => {
-                    let mut c = cs.copy_ref();
+                    let mut c = cs.copy();
                     c.reachable = true;
                     c.exits = None;
                     c
