@@ -367,19 +367,20 @@ pub fn with_lens<R>(id: LensId, f: impl FnOnce(&Lens) -> R) -> R {
 // sorted id sets
 // ---------------------------------------------------------------------------
 
-/// A small sorted set of `Copy + Ord` ids with structural sharing.
+/// A small sorted set of `Copy + Ord` ids with structural sharing (the empty set is no
+/// allocation: values are made empty everywhere).
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct IdSet<T: Copy + Ord>(Arc<[T]>);
+pub struct IdSet<T: Copy + Ord>(Option<Arc<[T]>>);
 
 impl<T: Copy + Ord + fmt::Debug> fmt::Debug for IdSet<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_set().entries(self.0.iter()).finish()
+        f.debug_set().entries(self.s().iter()).finish()
     }
 }
 
 impl<T: Copy + Ord> Default for IdSet<T> {
     fn default() -> Self {
-        IdSet(Arc::from(Vec::new()))
+        IdSet(None)
     }
 }
 
@@ -387,37 +388,44 @@ impl<T: Copy + Ord> IdSet<T> {
     pub fn new() -> Self {
         Self::default()
     }
+    /// The set of a sorted vector without duplicates.
+    fn sorted(v: Vec<T>) -> Self {
+        IdSet(if v.is_empty() { None } else { Some(Arc::from(v)) })
+    }
+    fn s(&self) -> &[T] {
+        self.0.as_deref().unwrap_or(&[])
+    }
     pub fn one(x: T) -> Self {
-        IdSet(Arc::from(vec![x]))
+        IdSet(Some(Arc::from(&[x][..])))
     }
     pub fn from_vec(mut v: Vec<T>) -> Self {
         v.sort_unstable();
         v.dedup();
-        IdSet(Arc::from(v))
+        Self::sorted(v)
     }
     pub fn from_iter(it: impl IntoIterator<Item = T>) -> Self {
         Self::from_vec(it.into_iter().collect())
     }
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.s().is_empty()
     }
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.s().len()
     }
     pub fn contains(&self, x: T) -> bool {
-        self.0.binary_search(&x).is_ok()
+        self.s().binary_search(&x).is_ok()
     }
     pub fn iter(&self) -> impl Iterator<Item = T> + '_ {
-        self.0.iter().copied()
+        self.s().iter().copied()
     }
     pub fn as_slice(&self) -> &[T] {
-        &self.0
+        &self.s()
     }
     pub fn first(&self) -> Option<T> {
-        self.0.first().copied()
+        self.s().first().copied()
     }
     pub fn to_vec(&self) -> Vec<T> {
-        self.0.to_vec()
+        self.s().to_vec()
     }
     pub fn union(&self, o: &Self) -> Self {
         if o.is_empty() || o.is_subset(self) {
@@ -427,7 +435,7 @@ impl<T: Copy + Ord> IdSet<T> {
             return o.clone();
         }
         let mut out = Vec::with_capacity(self.len() + o.len());
-        let (a, b) = (&self.0, &o.0);
+        let (a, b) = (&self.s(), &o.s());
         let (mut i, mut j) = (0, 0);
         while i < a.len() && j < b.len() {
             match a[i].cmp(&b[j]) {
@@ -448,13 +456,13 @@ impl<T: Copy + Ord> IdSet<T> {
         }
         out.extend_from_slice(&a[i..]);
         out.extend_from_slice(&b[j..]);
-        IdSet(Arc::from(out))
+        Self::sorted(out)
     }
     pub fn is_subset(&self, o: &Self) -> bool {
         if self.len() > o.len() {
             return false;
         }
-        let (a, b) = (&self.0, &o.0);
+        let (a, b) = (&self.s(), &o.s());
         let mut j = 0;
         for &x in a.iter() {
             while j < b.len() && b[j] < x {
@@ -475,7 +483,7 @@ impl<T: Copy + Ord> IdSet<T> {
             return Self::new();
         }
         let mut out = Vec::new();
-        let (a, b) = (&self.0, &o.0);
+        let (a, b) = (&self.s(), &o.s());
         let (mut i, mut j) = (0, 0);
         while i < a.len() && j < b.len() {
             match a[i].cmp(&b[j]) {
@@ -494,20 +502,20 @@ impl<T: Copy + Ord> IdSet<T> {
         if out.len() == b.len() {
             return o.clone();
         }
-        IdSet(Arc::from(out))
+        Self::sorted(out)
     }
     pub fn difference(&self, o: &Self) -> Self {
         if self.is_empty() || o.is_empty() {
             return self.clone();
         }
-        let out: Vec<T> = self.0.iter().copied().filter(|x| !o.contains(*x)).collect();
+        let out: Vec<T> = self.s().iter().copied().filter(|x| !o.contains(*x)).collect();
         if out.len() == self.len() {
             return self.clone();
         }
-        IdSet(Arc::from(out))
+        Self::sorted(out)
     }
     pub fn intersects(&self, o: &Self) -> bool {
-        let (a, b) = (&self.0, &o.0);
+        let (a, b) = (&self.s(), &o.s());
         let (mut i, mut j) = (0, 0);
         while i < a.len() && j < b.len() {
             match a[i].cmp(&b[j]) {
@@ -522,27 +530,27 @@ impl<T: Copy + Ord> IdSet<T> {
         if self.contains(x) {
             return self.clone();
         }
-        let mut v = self.0.to_vec();
+        let mut v = self.s().to_vec();
         let pos = v.binary_search(&x).unwrap_err();
         v.insert(pos, x);
-        IdSet(Arc::from(v))
+        Self::sorted(v)
     }
     pub fn remove(&self, x: T) -> Self {
         if !self.contains(x) {
             return self.clone();
         }
-        let v: Vec<T> = self.0.iter().copied().filter(|y| *y != x).collect();
-        IdSet(Arc::from(v))
+        let v: Vec<T> = self.s().iter().copied().filter(|y| *y != x).collect();
+        Self::sorted(v)
     }
     pub fn map(&self, f: impl FnMut(T) -> T) -> Self {
-        Self::from_iter(self.0.iter().copied().map(f))
+        Self::from_iter(self.s().iter().copied().map(f))
     }
     pub fn filter(&self, mut f: impl FnMut(T) -> bool) -> Self {
-        let v: Vec<T> = self.0.iter().copied().filter(|x| f(*x)).collect();
+        let v: Vec<T> = self.s().iter().copied().filter(|x| f(*x)).collect();
         if v.len() == self.len() {
             return self.clone();
         }
-        IdSet(Arc::from(v))
+        Self::sorted(v)
     }
 }
 
