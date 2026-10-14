@@ -311,6 +311,7 @@ pub fn verdict_message(an: &Analyzer, v: &Verdict) -> String {
     let unknown_code = || code_list(an, &v.mutators);
     // (the other notes are the reason in words: `is only set on some paths`)
     match v.tier {
+        Tier::Proven if v.note == crate::domain::FOUND_BEFORE => format!("{} is there: an earlier read or test on this path found it", what),
         Tier::Proven => format!("{} is always there", what),
         Tier::Likely => format!("{} is there, unless {} removed it", what, unknown_code()),
         Tier::Input => format!("{} must be provided by {}", what, v.providers.iter().map(|p| source_id_text(an, *p)).collect::<Vec<_>>().join(" or ")),

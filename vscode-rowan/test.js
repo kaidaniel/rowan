@@ -159,6 +159,14 @@ assert(hd.includes("- ✗ `d['q']`: key \"q\" is never set"), hd);
 // (the other `d` on the line, being assigned, has no access)
 assert(!hover(ki, ksrc, 12, "d").includes("✗"), hover(ki, ksrc, 12, "d"));
 
+// ---- keys found by an earlier read: said so, and one line for the keys of one access
+{
+  const found = path.join(tmp, "found.py");
+  fs.writeFileSync(found, ["import sys", "text = sys.argv[1]", "idx = {c: i for i, c in enumerate(sorted(set(text)))}", "def enc(s):", "    return [idx[c] for c in s]", 'a = enc("ab")', 'b = enc("ab")', ""].join("\n"));
+  const h = hover(indexResult(facts(found)), fs.readFileSync(found, "utf8").split("\n"), 5, "idx");
+  assert(h.includes('- ✓ `idx[c]`: keys "a", "b" are there: an earlier read or test on this path found it'), h);
+}
+
 // ---- every hover of several real programs: no internal names, every mark explained
 const files = [
   a01, z, g, kinds,

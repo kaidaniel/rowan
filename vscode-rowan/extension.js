@@ -300,20 +300,32 @@ function renderHover(name, facts, verdicts) {
       out.push(l);
     }
   }
-  // the accesses on this line, once each (the call paths they were reached by do not matter here)
+  // the accesses on this line, once each (the call paths they were reached by do not matter
+  // here); one access found for several keys alike is one line (`keys "a", "b" are there`)
   const marks = new Set();
-  const seen = new Set();
-  const acc = [];
+  const groups = new Map();
   // (an input's key is in "the code reads" already)
   const reads = facts.some((f) => (f.required || []).length);
   for (const v of verdicts) {
     const mark = MARK[v.tier];
     if (!mark || (mark === "◌" && reads)) continue;
-    const key = `${mark}\u0000${v.text}\u0000${v.key}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const msg = v.message || v.tier;
+    const keyText = typeof v.key_str === "string" ? `key ${JSON.stringify(v.key_str)}` : null;
+    const shape = keyText && msg.startsWith(keyText + " ") ? msg.slice(keyText.length) : null;
+    const gk = `${mark}\u0000${v.text}\u0000${shape === null ? msg : shape}`;
+    if (!groups.has(gk)) groups.set(gk, { mark, text: v.text, msg, shape, keys: [] });
+    const g = groups.get(gk);
+    if (shape !== null && !g.keys.includes(v.key_str)) g.keys.push(v.key_str);
     marks.add(mark);
-    acc.push(`- ${mark} \`${v.text}\`: ${v.message || v.tier}`);
+  }
+  const acc = [];
+  for (const g of groups.values()) {
+    let msg = g.msg;
+    if (g.keys.length > 1) {
+      const shown = g.keys.slice(0, 6).map((k) => JSON.stringify(k)).join(", ") + (g.keys.length > 6 ? ` and ${g.keys.length - 6} more` : "");
+      msg = `keys ${shown}${g.shape.replace(/^ is /, " are ")}`;
+    }
+    acc.push(`- ${g.mark} \`${g.text}\`: ${msg}`);
   }
   if (acc.length) out.push("", ...acc);
   const legend = legendLine(texts, marks);
