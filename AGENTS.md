@@ -190,8 +190,8 @@ extension (talks to `rowan serve`).
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~5 / ~4 / ~3 / ~14 s; 0.13 / 0.07 / 0.12 / 0.12 GB |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~17 / ~28 / ~70 / ~5 s; 0.26 / 1.5 / 1.0 / 0.4 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~5 / ~6 / ~5 / ~17 s; 0.13 / 0.08 / 0.14 / 0.14 GB |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~23 / ~32 / ~94 / ~7 s; 0.31 / 1.5 / 1.3 / 0.5 GB |
 
 ## Known problems and next steps
 
