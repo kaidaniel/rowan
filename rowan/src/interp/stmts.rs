@@ -1678,45 +1678,19 @@ impl Analyzer {
                             bases.push(oid)
                         }
                         Kind::External => {
-                            let q = self.external_qual(oid);
-                            if (q.ends_with("Enum") || q.ends_with("Flag")) && q.starts_with("enum.") {
-                                is_enum = true;
-                            }
-                            match q.as_str() {
-                                "enum.StrEnum" | "enum.IntEnum" | "enum.IntFlag" | "enum.ReprEnum" => {
-                                    ek.mixed = true;
-                                    ek.repr_value = true;
-                                }
-                                "builtins.str" | "builtins.int" => ek.mixed = true,
-                                _ => {}
-                            }
-                            if q == "enum.StrEnum" {
-                                ek.is_str = true;
-                            }
-                            if q == "builtins.str" {
-                                str_mixin = true;
-                            }
-                            if matches!(q.as_str(), "enum.Flag" | "enum.IntFlag") {
-                                ek.flag = true;
-                            }
-                            if q == "builtins.dict" {
-                                dict_base = true;
-                            }
-                            if q.starts_with("torch.nn.") {
-                                nn_module = true;
-                            }
-                            if crate::models::pydantic::is_pydantic_base(&q) {
-                                pydantic = true;
-                            } else if q.ends_with("TypedDict") {
-                                typed_dict = true;
-                            } else if q.ends_with("NamedTuple") {
-                                named_tuple = true;
-                            } else if matches!(q.as_str(), "builtins.object" | "object" | "abc.ABC" | "typing.Protocol" | "typing.Generic") || q.ends_with("Generic") || (q.strip_prefix("builtins.").map(crate::interp::exprs::is_exception_name).unwrap_or(false))
-                                || (q.starts_with("enum.")) {
-                                // (a builtin exception base adds nothing to the instance's `vars()`)
-                            } else {
-                                open_base = true;
-                            }
+                            let f = crate::models::class_base(&self.external_qual(oid));
+                            is_enum |= f.is_enum;
+                            ek.mixed |= f.enum_kind.mixed;
+                            ek.repr_value |= f.enum_kind.repr_value;
+                            ek.is_str |= f.enum_kind.is_str;
+                            ek.flag |= f.enum_kind.flag;
+                            str_mixin |= f.str_mixin;
+                            dict_base |= f.dict_base;
+                            nn_module |= f.nn_module;
+                            pydantic |= f.pydantic;
+                            typed_dict |= f.typed_dict;
+                            named_tuple |= f.named_tuple;
+                            open_base |= f.open;
                         }
                         _ => open_base = true,
                     }
@@ -1758,52 +1732,9 @@ impl Analyzer {
         let cnode = frontend::node(c);
         let coid = self.alloc_at(Kind::Class, &cnode, state, &format!("class {}", c.name.id), Payload::Class(info.clone()), None, Ns::Attr, None, None);
         self.user_classes.push(coid);
-        let mut is_dataclass = false;
-        for d in &c.decorator_list {
-            if let Some(q) = self.decorator_qualname(&d.expression, state) {
-                if q == "functools.total_ordering" {
-                    self.total_ordering.insert(coid);
-                }
-                if q.ends_with("dataclass") || q.ends_with("attrs.define") || q.ends_with("attr.s") {
-                    is_dataclass = true;
-                    if q.starts_with("pydantic") {
-                        info.pyd_dataclass.set(true);
-                    }
-                    if let ast::Expr::Call(dc) = &d.expression {
-                        for k in dc.arguments.keywords.iter() {
-                            match (k.arg.as_ref().map(|x| x.as_str()), &k.value) {
-                                (Some("frozen"), ast::Expr::BooleanLiteral(b)) => info.dc_frozen.set(b.value),
-                                (Some("kw_only"), ast::Expr::BooleanLiteral(b)) => info.dc_kw_only.set(b.value),
-                                (Some("order"), ast::Expr::BooleanLiteral(b)) => info.dc_order.set(b.value),
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let is_dataclass = crate::models::dataclasses::class_decorators(self, c, coid, &info, state);
         if is_dataclass || typed_dict || named_tuple || pydantic {
-            let mut fields: Vec<(String, Option<&'static ast::Expr>)> = Vec::new();
-            for st in &c.body {
-                if let ast::Stmt::AnnAssign(a) = st {
-                    if let ast::Expr::Name(n) = &*a.target {
-                        // a `ClassVar` is a class attribute; pydantic's `_x` are private attributes
-                        let classvar = match &*a.annotation {
-                            ast::Expr::Subscript(sb) => dotted_last(&sb.value) == "ClassVar",
-                            other => dotted_last(other) == "ClassVar",
-                        };
-                        let pseudo = match &*a.annotation {
-                            ast::Expr::Subscript(sb) => dotted_last(&sb.value) == "InitVar",
-                            other => dotted_last(other) == "KW_ONLY",
-                        };
-                        if classvar || pseudo || (pydantic && (n.id.starts_with('_') || n.id.as_str() == "model_config")) {
-                            continue;
-                        }
-                        fields.push((n.id.to_string(), a.value.as_deref()));
-                    }
-                }
-            }
-            *info.dataclass_fields.borrow_mut() = Some(fields);
+            *info.dataclass_fields.borrow_mut() = Some(crate::models::dataclasses::declared_fields(c, pydantic));
         }
         // class body
         let mi = self.module_info(fr_module);

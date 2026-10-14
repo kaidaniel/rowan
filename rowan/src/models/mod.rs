@@ -4162,6 +4162,50 @@ fn m_globals(an: &mut Analyzer, _st: &mut State, _c: &Call) -> Value {
     Value::obj(vid)
 }
 
+/// What a library base class makes of a class the program defines (`class C(Base)`).
+#[derive(Default)]
+pub struct ClassBase {
+    pub is_enum: bool,
+    pub enum_kind: crate::interp::EnumKind,
+    pub str_mixin: bool,
+    pub dict_base: bool,
+    pub nn_module: bool,
+    pub pydantic: bool,
+    pub typed_dict: bool,
+    pub named_tuple: bool,
+    /// its instances may hold what the program does not show (a base rowan does not see)
+    pub open: bool,
+}
+
+pub fn class_base(q: &str) -> ClassBase {
+    let mut f = ClassBase { is_enum: (q.ends_with("Enum") || q.ends_with("Flag")) && q.starts_with("enum."), ..Default::default() };
+    match q {
+        "enum.StrEnum" | "enum.IntEnum" | "enum.IntFlag" | "enum.ReprEnum" => {
+            f.enum_kind.mixed = true;
+            f.enum_kind.repr_value = true;
+        }
+        "builtins.str" | "builtins.int" => f.enum_kind.mixed = true,
+        _ => {}
+    }
+    f.enum_kind.is_str = q == "enum.StrEnum";
+    f.str_mixin = q == "builtins.str";
+    f.enum_kind.flag = matches!(q, "enum.Flag" | "enum.IntFlag");
+    f.dict_base = q == "builtins.dict";
+    f.nn_module = q.starts_with("torch.nn.");
+    if pydantic::is_pydantic_base(q) {
+        f.pydantic = true;
+    } else if q.ends_with("TypedDict") {
+        f.typed_dict = true;
+    } else if q.ends_with("NamedTuple") {
+        f.named_tuple = true;
+    } else {
+        // (a builtin exception base adds nothing to the instance's `vars()`)
+        let plain = matches!(q, "builtins.object" | "object" | "abc.ABC" | "typing.Protocol" | "typing.Generic") || q.ends_with("Generic") || q.strip_prefix("builtins.").is_some_and(crate::interp::exprs::is_exception_name) || q.starts_with("enum.");
+        f.open = !plain;
+    }
+    f
+}
+
 /// `locals()`: at module level the module's names (as `globals()`); in a function a snapshot
 /// whose changes go nowhere.
 fn m_locals(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
