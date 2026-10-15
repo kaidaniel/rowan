@@ -243,7 +243,7 @@ impl Analyzer {
         // unrolled: `continue` rejoins at the next iteration, `break` at the exit; a closed dict
         // with some keys only maybe there: a maybe one runs on one path and is skipped on the other
         let unrolled = match &it.items {
-            Some(items) if items.len() <= UNROLL_MAX => Some((items.iter().map(|i| (i.clone(), true)).collect(), once.filter(|_| has_jump).map(|o| (o, c0)))),
+            Some(items) if items.len() <= UNROLL_MAX && !self.identical_summaries(items) => Some((items.iter().map(|i| (i.clone(), true)).collect(), once.filter(|_| has_jump).map(|o| (o, c0)))),
             None => self.maybe_dict_items(&itv, state).map(|items| (items, None)),
             _ => None,
         };
@@ -283,15 +283,23 @@ impl Analyzer {
             self.set_cursor(o, None, state);
         }
         let pre = state.copy();
+        let focus0 = self.cx.focus.len();
+        if let Elem::One(v) = &it.elem {
+            if let Some(o) = v.single().filter(|o| !self.heap.obj(*o).single && self.heap.is_record_like(*o)) {
+                self.cx.focus.push(o);
+            }
+        }
         let (head, exit_acc, back) = self.loop_fixpoint(state, &mut |an, body_s| {
             an.bind_iter_target(&f.target, &it.elem, body_s);
             an.exec_block(&f.body, body_s);
         });
+        self.cx.focus.truncate(focus0);
         let mut exit_s = head.copy();
         let elem_v = it.elem.value_part();
         self.promote_elem_reqs(&mut exit_s, &back, &elem_v, state);
         if exit_acc.is_none() && back.reachable {
-            self.elements_done(&elem_v, &back, &mut exit_s);
+            let own = itv.single().filter(|l| self.heap.obj(*l).single && matches!(self.heap.kind(*l), Kind::List | Kind::Tuple) && back.slots_of(*l) == pre.slots_of(*l) && back.lens.get(l) == pre.lens.get(l));
+            self.elements_done(&elem_v, own, &f.target, &back, &mut exit_s);
         }
         if !f.orelse.is_empty() && exit_s.reachable {
             self.exec_block(&f.orelse, &mut exit_s);
@@ -334,13 +342,17 @@ impl Analyzer {
 
     /// Every element of the iterable went through the body: its row after the loop is the
     /// body's exit row, not the join with "not processed yet".
-    fn elements_done(&mut self, elem_v: &Value, back: &State, exit_s: &mut State) {
+    /// (A summary record — `[dict(x) for x in data]` — too, when nothing but the list the loop
+    /// went through, which the body did not change, holds it: every one it stands for that is
+    /// still in use was an item.)
+    fn elements_done(&mut self, elem_v: &Value, list: Option<ObjId>, target: &ast::Expr, back: &State, exit_s: &mut State) {
         for oid in elem_v.pts.iter() {
-            if self.heap.is_record_like(oid) && self.heap.obj(oid).single {
-                for ns in [Ns::Item, Ns::Attr] {
-                    if back.has_row(oid, ns) {
-                        exit_s.set_row(oid, ns, back.row(oid, ns));
-                    }
+            // (rows the body changed; for a summary, only then the walk)
+            let rows: Vec<Ns> = [Ns::Item, Ns::Attr].into_iter().filter(|ns| back.has_row(oid, *ns) && back.row(oid, *ns) != exit_s.row(oid, *ns)).collect();
+            let held = |an: &Analyzer| list.is_some_and(|l| an.held_only_by(oid, l, target, exit_s));
+            if !rows.is_empty() && self.heap.is_record_like(oid) && (self.heap.obj(oid).single || held(self)) {
+                for ns in rows {
+                    exit_s.set_row(oid, ns, back.row(oid, ns));
                 }
             }
         }
@@ -380,4 +392,55 @@ pub(super) fn join_into(acc: &mut Option<State>, mut s: State) {
         None => s,
         Some(mut a) => a.join(&mut s),
     });
+}
+
+impl Analyzer {
+    /// Known items that are all one summary object (`[Block() for _ in range(n)]`): their
+    /// iterations cannot be told apart, they run as a loop.
+    pub(super) fn identical_summaries(&self, items: &[Value]) -> bool {
+        items.len() > 1 && !items[0].pts.is_empty() && items[0].kv.is_bot() && items.iter().all(|v| *v == items[0]) && items[0].pts.iter().all(|o| !self.heap.obj(o).single)
+    }
+
+    /// Whether nothing but the list `l` (and the loop `target`'s names) holds `s` in `state`
+    /// (a walk from the roots that does not enter `l`; a long one answers no).
+    fn held_only_by(&self, s: ObjId, l: ObjId, target: &ast::Expr, state: &State) -> bool {
+        let skip: Vec<intern::StrId> = super::names_in(target).iter().map(|n| intern::s(n)).collect();
+        let mut work: Vec<ObjId> = Vec::new();
+        for fr in &self.cx.frames {
+            work.push(fr.module);
+            work.extend(fr.cells.values().copied());
+        }
+        for v in state.ret.iter().chain(state.narrowed.values()) {
+            v.push_objs(&mut work);
+        }
+        for (n, v) in state.env.iter() {
+            if !skip.contains(n) {
+                v.push_objs(&mut work);
+            }
+        }
+        self.gc_pinned(&mut work, None);
+        // (at module level the target is a global: the module's other names)
+        let module = matches!(self.frame().kind, super::FrameKind::Module).then(|| self.frame().module);
+        let mut seen: rustc_hash::FxHashSet<ObjId> = Default::default();
+        while let Some(o) = work.pop() {
+            if o == s {
+                return false;
+            }
+            if o == l || !seen.insert(o) {
+                continue;
+            }
+            if Some(o) == module {
+                state.slots.each(&o, &mut |(_, k), v| if !skip.iter().any(|n| intern::key_str_lit(&intern::str_get(*n)) == *k) {
+                    v.push_objs(&mut work)
+                });
+                continue;
+            }
+            self.budget.walk_visit();
+            if seen.len() > 200 {
+                return false;
+            }
+            self.obj_edges(o, state, &mut work);
+        }
+        true
+    }
 }

@@ -4203,6 +4203,15 @@ pub fn m_nnmodule(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             for m in order {
                 an.call_value(&f, &c.node, None, st, Some(vec![Value::obj(m)]));
+                // (a summary module — `[Block() for _ in range(n)]` — stands for several: fn
+                // runs on each of them, any number of times more)
+                if !an.heap.obj(m).single {
+                    let node = c.node;
+                    let (head, _, _) = an.loop_fixpoint(st, &mut |an, s| {
+                        an.call_value(&f, &node, None, s, Some(vec![Value::obj(m)]));
+                    });
+                    st.replace_with(head);
+                }
             }
             recv
         }
@@ -4753,6 +4762,10 @@ pub fn t_hover_names(an: &Analyzer, v: &Value, st: &State) -> (FxHashMap<sh::Ato
     for (n, val) in st.env.iter() {
         let name = intern::str_get(*n).to_string();
         used.push(name.clone());
+        // (`_, T = x.shape`: `_` says the dim is not used, it names nothing)
+        if name == "_" {
+            continue;
+        }
         if let Some(d0) = dim_of_label(val) {
             // the dim as bound and as it is now (a fact may have rewritten it)
             for d in [d0, sh::norm(d0, &st.tf)] {

@@ -55,27 +55,12 @@ impl Analyzer {
         let it = self.iterate(&itv, &gn, state);
         let understood = g.ifs.iter().all(|c| cond_is_exclusion(c, &g.target));
         if let Some(items) = &it.items {
-            if items.len() <= limit {
-                // known items: each is its own straight-line iteration; a filter decided
-                // for the item keeps it straight-line (positions survive), an undecided one
-                // makes the iteration conditional
-                self.cx.comp_known.push(true);
-                for (idx, item) in items.iter().enumerate() {
-                    let mut s2 = state.copy();
-                    self.frame_mut().unroll.push(idx);
-                    let decided = self.comp_run_one(g, gens, i, limit, &Elem::One(item.clone()), &mut s2, body, understood, own);
-                    self.frame_mut().unroll.pop();
-                    if s2.reachable {
-                        // (an undecided filter may skip this item: joined with skipping it)
-                        if decided {
-                            state.replace_with(s2);
-                        } else {
-                            let j = state.join(&mut s2);
-                            state.replace_with(j);
-                        }
-                    }
-                }
-                self.cx.comp_known.pop();
+            let same = self.identical_summaries(items);
+            if i == 0 && gens.len() == 1 && g.ifs.is_empty() && (limit == SUMMARY || same || items.len() > limit) {
+                self.cx.summary_items.insert(own, items.len());
+            }
+            if items.len() <= limit && !same {
+                self.comp_unrolled(gens, i, limit, items, state, body, understood, own);
                 self.exhaust(&exhaust_after, state);
                 return;
             }
@@ -100,7 +85,14 @@ impl Analyzer {
         let mut s2 = state.copy();
         let mark0 = self.heap.serial();
         let vmark = self.findings.mark();
+        // (one pass stands for every item: what it makes is one object per item, a summary)
+        let hmark = self.heap.len() as u32;
+        self.frame_mut().loop_depth += 1;
+        self.cx.recent_stack.push(Vec::new());
         self.comp_run_one(g, gens, i, limit, &elem, &mut s2, body, understood, own);
+        let recs = self.cx.recent_stack.pop().unwrap_or_default();
+        self.frame_mut().loop_depth -= 1;
+        self.rename_recent(&mut s2, state, recs, hmark);
         if it.exhaustive && understood && s2.reachable {
             self.cx.comp_known.pop();
             state.replace_with(s2);
@@ -139,6 +131,25 @@ impl Analyzer {
         let ev = elem.value_part();
         self.promote_elem_reqs(&mut head, &s2, &ev, state);
         state.replace_with(head);
+    }
+
+    /// Known items: each is its own straight-line iteration; a filter decided for the item
+    /// keeps it straight-line (positions survive), an undecided one makes the iteration
+    /// conditional (joined with skipping the item).
+    #[allow(clippy::too_many_arguments)]
+    fn comp_unrolled(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, items: &[Value], state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) {
+        self.cx.comp_known.push(true);
+        for (idx, item) in items.iter().enumerate() {
+            let mut s2 = state.copy();
+            self.frame_mut().unroll.push(idx);
+            let decided = self.comp_run_one(&gens[i], gens, i, limit, &Elem::One(item.clone()), &mut s2, body, understood, own);
+            self.frame_mut().unroll.pop();
+            if s2.reachable {
+                let j = if decided { s2 } else { state.join(&mut s2) };
+                state.replace_with(j);
+            }
+        }
+        self.cx.comp_known.pop();
     }
 
     /// Runs one iteration of generator `i`; returns whether every filter was decided (then
@@ -193,8 +204,9 @@ impl Analyzer {
             let strong = an.heap.obj(oid).single && an.cx.cond_depth == base_depth;
             an.store_key(oid, Ns::Item, &k.kv, &v, strong, &nd, st);
         };
-        let limit = comp_unroll_limit(&[key_e, val_e]);
+        let limit = comp_unroll_limit(&dc.generators, &[key_e, val_e], self.is_torch_module(self.frame().module));
         self.comp(&dc.generators, limit, state, &mut body, oid);
+        self.cx.summary_items.remove(&oid);
         Value::obj(oid)
     }
 
@@ -208,7 +220,7 @@ impl Analyzer {
         // positions: every item known and every filter decided (straight-line iterations)
         let mut n: usize = 0;
         let mut positional = strong;
-        let limit = comp_unroll_limit(&[elt]);
+        let limit = comp_unroll_limit(gens, &[elt], self.is_torch_module(self.frame().module));
         // (a set's positions are its distinct members: a literal seen before adds none)
         let mut seen: Vec<KeyId> = Vec::new();
         let mut body = |an: &mut Analyzer, st: &mut State| {
@@ -248,7 +260,17 @@ impl Analyzer {
         }
         self.comp(gens, limit, state, &mut body, oid);
         self.cx.comp_known.truncate(mark);
+        let summary_n = self.cx.summary_items.remove(&oid).filter(|_| strong && kind != Kind::Set);
         if positional {
+            self.heap.set_llen(oid, state, Some(n));
+        } else if let Some(n) = summary_n.filter(|n| *n <= 64) {
+            // (known items in one pass: as many as there were, each the pass's element)
+            let e = state.slot(oid, Ns::Elem, STAR);
+            let ev = Value::with_kv(e.pts, state.elems.get(&oid).unwrap_or(crate::domain::DATA));
+            state.drop_obj_ns(oid, Ns::Pos);
+            for i in 0..n {
+                state.set_slot(oid, Ns::Pos, key_int(i as i64), ev.clone(), true);
+            }
             self.heap.set_llen(oid, state, Some(n));
         } else {
             self.heap.set_llen(oid, state, None);
@@ -273,15 +295,33 @@ impl Analyzer {
 
 /// How many known items a comprehension's generators unroll: up to 64 (as many literals as a
 /// value keeps) when what it makes of each item calls nothing (`{w: i for i, w in
-/// enumerate(words)}`: each word a sure key), else UNROLL_MAX.
-fn comp_unroll_limit(parts: &[&ast::Expr]) -> usize {
+/// enumerate(words)}`: each word a sure key), else UNROLL_MAX. In a torch module, the
+/// iterations of a comprehension that cannot be told apart (one generator, no filter, a target
+/// its element does not use: `[Block(d) for _ in range(n)]`, a model's repeated layers) and
+/// call something run as one summary iteration standing for all of them (its objects
+/// summaries, the count kept): unrolled, every forward would run each layer's methods again
+/// (a GPT of 12 blocks of 8 heads: 96 head runs per forward).
+fn comp_unroll_limit(gens: &[ast::Comprehension], parts: &[&ast::Expr], torch: bool) -> usize {
     let costly = |e: &ast::Expr| matches!(e, ast::Expr::Call(_) | ast::Expr::Lambda(_) | ast::Expr::ListComp(_) | ast::Expr::SetComp(_) | ast::Expr::DictComp(_) | ast::Expr::Generator(_) | ast::Expr::Await(_) | ast::Expr::Yield(_) | ast::Expr::YieldFrom(_) | ast::Expr::Named(_));
-    if parts.iter().any(|p| ruff_python_ast::helpers::any_over_expr(p, &costly)) {
-        UNROLL_MAX
+    if !parts.iter().any(|p| ruff_python_ast::helpers::any_over_expr(p, &costly)) {
+        return 64;
+    }
+    let indistinct = match gens {
+        [g] if g.ifs.is_empty() && !g.is_async => {
+            let t = names_in(&g.target);
+            !parts.iter().any(|p| names_in(p).iter().any(|n| t.contains(n)))
+        }
+        _ => false,
+    };
+    if indistinct && torch {
+        SUMMARY
     } else {
-        64
+        UNROLL_MAX
     }
 }
+
+/// `comp_unroll_limit` of a summary comprehension: no unrolling.
+const SUMMARY: usize = 0;
 
 /// `k != "x"`, `k not in (...)`, `k in (...)`, and conjunctions of those, on the key target.
 pub fn cond_is_exclusion(cond: &ast::Expr, target: &ast::Expr) -> bool {

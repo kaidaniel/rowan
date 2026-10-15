@@ -48,6 +48,19 @@ pub struct Context {
     /// instances whose `__init__` is running for their construction (stores into them are
     /// strong)
     pub fresh_init: FxHashSet<ObjId>,
+    /// per running summary comprehension (`[Block() for _ in range(n)]`: its iterations
+    /// cannot be told apart; by the object it makes): the number of items its one iteration
+    /// stands for
+    pub summary_items: FxHashMap<ObjId, usize>,
+    /// summary records a running loop takes its items from (`for r in rows` over
+    /// `[dict(x) for x in data]`): within an iteration the item is one record, so stores into
+    /// it and keys a read or test proves are strong, as for an input's element (`iter_elem`)
+    pub focus: Vec<ObjId>,
+    /// running calls of one of several functions or classes a value picks (`CONVERTERS[k](x)`
+    /// with `k` not known): the call as written and the one running. Rowan cannot tell which
+    /// one the program picks for the arguments it is given: what fails in one fails where the
+    /// program picks it (`possibly`), not on every path (`missing`)
+    pub picked: Vec<(String, String)>,
 }
 
 /// Modes an evaluation sets for the code it calls, restored after: how an access reports, how

@@ -187,6 +187,30 @@ assert(!hover(ki, ksrc, 12, "d").includes("✗"), hover(ki, ksrc, 12, "d"));
   assert(hl.includes("Tensor[64, ?, V]"), hl);
 }
 
+// ---- the owner's GPT: its 96 heads within their budget, the model's output keeps its rank;
+// a dim bound to `_` (`_ , T = ids.shape`) is not named `_` (it reads as "any dim")
+{
+  const gpt = path.join(root, "tests", "torch", "playground", "p06_gpt", "p06_gpt.py");
+  const src = fs.readFileSync(gpt, "utf8").split("\n");
+  const idx = indexResult(facts(gpt));
+  const at = (pre) => src.findIndex((l) => l.startsWith(pre)) + 1;
+  const hl = hover(idx, src, at("        logits: Tensor = model(x)"), "logits");
+  assert(hl.includes("Tensor[68, ?, V]"), hl);
+  const hx = hover(idx, src, at("            x = block(x)"), "x");
+  assert(hx.includes("Tensor[A, T, d]") && hx.includes("- `A, T` = `ids.shape`"), hx);
+}
+
+// ---- a function one of several a dict holds, picked by a key rowan cannot compute: what
+// fails in it is said to fail where the program picks it (a warning), not on every path
+{
+  const z512 = path.join(root, "tests", "cases", "z512_functions_picked_by_unknown_key.py");
+  const line = fs.readFileSync(z512, "utf8").split("\n").findIndex((l) => l.includes('rec["b"]')) + 1;
+  const vs = indexResult(facts(z512)).verdicts.get(line) || [];
+  const v = vs.find((x) => x.tier === "possibly");
+  assert(v && severityFor(v.tier) === "warning", JSON.stringify(vs));
+  assert(diagnosticMessage(v).startsWith('key "b" is never set, where `CONVERTERS[kind_of(rec)](rec)` calls from_b'), diagnosticMessage(v));
+}
+
 // ---- keys found by an earlier read: said so, and one line for the keys of one access
 {
   const found = path.join(tmp, "found.py");

@@ -47,7 +47,7 @@ class GPT(nn.Module):
         for block in self.blocks:
             x = block(x) # (B, T, d) - but rowan doesn't even see this as a Tensor!
             #@shape x: [*_, d]
-            #@todo shape x: [ids.shape[0], ids.shape[1], d] (Head.forward is past its budget by the entry runs: 12 blocks of 8 heads per model call; and the heads' rank fact is lost after MultiHead's loop)
+            #@shape x: [ids.shape[0], ids.shape[1], d]
         return self.head(self.ln_f(x)) # (B, T, V)
     
     @torch.no_grad()
@@ -58,7 +58,7 @@ class GPT(nn.Module):
             #@todo shape ctx: [ids.shape[0], _, *ids.shape[2:]] (ids joined over the loop's rounds loses its rank: before the loop it is open, after a round 2-D)
             #@todo shape ctx: [ids.shape[0], min(ids.shape[1], self.context_length), *ids.shape[2:]] (a slice by an unknown negative start)
             curr = self(ctx)[:, -1, :]                       # (B, V)
-            #@todo shape curr: [ids.shape[0], V] (Head.forward is past its budget by the entry runs: 12 blocks of 8 heads per model call; and the heads' rank fact is lost after MultiHead's loop)
+            #@todo shape curr: [ids.shape[0], V] (ctx above: the model is called on a tensor of unknown rank)
             if greedy:
                 next_id = curr.argmax(dim=-1, keepdim=True)
                 #@shape next_id: [*_, 1]
@@ -122,7 +122,8 @@ if __name__ == "__main__":
         #@shape x: [68, _]; y: [68, _]
         #@todo shape x: [68, 64]; y: [68, 64] (a slice j:j + T of an unknown start in get_batch: train's length is not known, so j + T <= len(train) is not shown)
         logits: Tensor = model(x) # (B, T, V)
-        #@todo shape logits: [68, 64, V] (Head.forward is past its budget by the entry runs: 12 blocks of 8 heads per model call; and the heads' rank fact is lost after MultiHead's loop)
+        #@shape logits: [68, _, V]
+        #@todo shape logits: [68, 64, V] (x above: its second dim is not known)
         loss = nn.functional.cross_entropy(logits.view(-1, V), y.view(-1))
         #@shape loss: []
         optim.zero_grad()
@@ -139,7 +140,8 @@ if __name__ == "__main__":
                     xv, yv = get_batch(test, B=64, T=64) # I feel like rowan should be able to get the right number of dimensions here, so it should be T[64, 64, ?]. If it can show T[64, 64, len(idx)] it would be even more awesome.
                     #@shape xv: [64, _]; yv: [64, _]
                     lv = model(xv)
-                    #@todo shape lv: [64, 64, V] (Head.forward is past its budget by the entry runs: 12 blocks of 8 heads per model call; and the heads' rank fact is lost after MultiHead's loop)
+                    #@shape lv: [64, _, V]
+                    #@todo shape lv: [64, 64, V] (xv above: its second dim is not known)
                     vals.append(nn.functional.cross_entropy(lv.view(-1, V), yv.view(-1)))
                 val = torch.stack(vals).mean()
                 #@shape val: []

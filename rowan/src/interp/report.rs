@@ -32,7 +32,9 @@ pub fn dedupe(an: &Analyzer, verdicts: &[Verdict]) -> Vec<Verdict> {
         let mut tiers: Vec<Tier> = by_obj.values().map(|v| v.tier).collect();
         tiers.sort();
         tiers.dedup();
-        if tiers.contains(&Tier::Unknown) {
+        // (with an object rowan knows nothing of, the group says nothing — but where the
+        // access fails on another object: it may fail)
+        if tiers.contains(&Tier::Unknown) && !tiers.contains(&Tier::Missing) {
             continue;
         }
         let first = vs[0];

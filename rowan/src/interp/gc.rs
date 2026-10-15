@@ -216,8 +216,9 @@ impl Analyzer {
     /// tuples whose positions the summary keeps (one length).
     fn summary_objects(&mut self, back: &mut State, recs: &[(ObjId, Kind, String, String)]) -> (FxHashMap<ObjId, ObjId>, FxHashSet<ObjId>) {
         let mut map: FxHashMap<ObjId, ObjId> = FxHashMap::default();
-        // (tuples of one length keep their positions in the summary object: each position
-        // the join of the tuples' — unpacking `a, b = t` then keeps them apart)
+        // (tuples and lists of one length keep their positions in the summary object: each
+        // position the join of theirs — unpacking `a, b = t` then keeps them apart, a summary
+        // block's `nn.Sequential` its layers)
         let mut keep_pos: FxHashSet<ObjId> = FxHashSet::default();
         for (r, kind, site, ctx) in recs {
             let (label, payload, iter_elem, derived, depth) = {
@@ -242,7 +243,7 @@ impl Analyzer {
                 (Some(n), Some((Some(m), _, _))) if n == m => Some(n),
                 _ => None,
             };
-            match same_len.filter(|_| *kind == Kind::Tuple) {
+            match same_len.filter(|_| matches!(kind, Kind::Tuple | Kind::List)) {
                 Some(n) => {
                     back.lens.insert(sid, (Some(n), n, 0));
                     keep_pos.insert(*r);
