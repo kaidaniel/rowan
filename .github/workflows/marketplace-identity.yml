@@ -22,10 +22,15 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
 
-      # 499b84ac-… is the Azure DevOps resource id: the token is for Azure DevOps, not Azure
+      # 499b84ac-… is the Azure DevOps resource id: the token is for Azure DevOps, not Azure.
+      # An app registration has no Azure DevOps profile until it is added to an organization
+      # (VSS011031 from profiles/me), but connectionData returns its identity either way.
       - name: Profile id
         run: |
-          id=$(az rest --url https://app.vssps.visualstudio.com/_apis/profile/profiles/me \
-                       --resource 499b84ac-1321-427f-aa17-267ca6975798 --query id --output tsv)
-          echo "profile id: $id"
+          res=499b84ac-1321-427f-aa17-267ca6975798
+          az rest --url https://app.vssps.visualstudio.com/_apis/connectionData --resource $res \
+                  --query authenticatedUser --output json | tee user.json
+          id=$(jq -r .id user.json)
           echo "::notice::Marketplace member id for the Rowan publisher (Contributor): $id"
+          echo "profile (if any):"
+          az rest --url https://app.vssps.visualstudio.com/_apis/profile/profiles/me --resource $res || true
