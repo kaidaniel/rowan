@@ -126,142 +126,9 @@ impl Analyzer {
             }
             // identity of objects: distinct abstract objects are distinct objects; one strong
             // object is itself
-            ast::CmpOp::Is | ast::CmpOp::IsNot if !a.pts.is_empty() && a.kv.is_bot() => {
-                if b.pts.is_empty() || !b.kv.is_bot() {
-                    return None;
-                }
-                // builtin classes (`type(x) is dict`): the same class exactly when the same name
-                let builtin_q = |an: &Analyzer, v: &Value| -> Option<Vec<String>> { v.pts.iter().map(|o| if an.heap.kind(o) == Kind::External { Some(an.heap.external_qual(o)).filter(|q| q.starts_with("builtins.")) } else { None }).collect() };
-                if let (Some(qa), Some(qb)) = (builtin_q(self, &a), builtin_q(self, &b)) {
-                    if qb.len() == 1 {
-                        let same_all = qa.iter().all(|q| *q == qb[0]);
-                        let diff_all = qa.iter().all(|q| *q != qb[0]);
-                        if same_all || diff_all {
-                            let same = same_all;
-                            return Some(if op == ast::CmpOp::Is { same } else { !same });
-                        }
-                    }
-                }
-                let opaque = |an: &Analyzer, v: &Value| v.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::Unknown | Kind::External | Kind::Class | Kind::Module | Kind::Function));
-                if opaque(self, &a) || opaque(self, &b) {
-                    return None;
-                }
-                let same = if a.pts.intersection(&b.pts).is_empty() {
-                    false
-                } else if a.pts.len() == 1 && a.pts == b.pts && self.heap.obj(a.pts.first().unwrap()).single {
-                    true
-                } else {
-                    return None;
-                };
-                Some(if op == ast::CmpOp::Is { same } else { !same })
-            }
-            ast::CmpOp::In | ast::CmpOp::NotIn => {
-                let decide = |found: bool| Some(if op == ast::CmpOp::In { found } else { !found });
-                // members of a Flag: bits; else a member is its key
-                if (!self.heap.keys.member_key.is_empty() || !self.heap.keys.identity_objs.borrow().is_empty()) && !a.pts.is_empty() {
-                    if let Some(r) = crate::models::enums::flag_contains(self, a, &b, state) {
-                        return decide(r);
-                    }
-                    let ka = self.keyify_in(a, state);
-                    if ka.pts.is_empty() {
-                        return self.compare_const(op, &ka, b, right, state);
-                    }
-                }
-                if !a.pts.is_empty() || !a.kv.is_literal() || lits.is_empty() {
-                    return None;
-                }
-                // a range with known bounds: membership of a known int
-                if let (Some(Payload::Range(lo, hi, step)), [k]) = (b.single().map(|o| &self.heap.obj(o).payload), &lits.iter().collect::<Vec<_>>()[..]) {
-                    let x = intern::key_as_int(*k)?;
-                    let inside = if *step > 0 { x >= *lo && x < *hi } else { x <= *lo && x > *hi };
-                    return decide(inside && (x - lo) % step == 0);
-                }
-                // literals in a positional container of known literals: decided when every one
-                // is there, or none is (by Python's equality: `1.0 in [1, 2]`)
-                if let Some(o) = b.single().filter(|o| matches!(self.heap.kind(*o), Kind::List | Kind::Tuple | Kind::Set)) {
-                    let n = self.heap.llen(o, state)?;
-                    let items: Vec<KeyId> = (0..n).map(|i| {
-                        let sv = state.slot(o, Ns::Pos, key_int(i as i64));
-                        // (Enum members / identity objects as their keys)
-                        let sv = if sv.pts.is_empty() { sv } else { self.keyify_in(&sv, state) };
-                        sv.kv.as_lit().filter(|_| sv.pts.is_empty())
-                    }).collect::<Option<_>>()?;
-                    let eqs: Vec<bool> = lits.iter().map(|k| items.iter().map(|x| lit_eq(*x, k)).collect::<Option<Vec<bool>>>().map(|v| v.contains(&true))).collect::<Option<_>>()?;
-                    let hits = eqs.iter().filter(|b| **b).count();
-                    return if hits == lits.len() || hits == 0 { decide(hits > 0) } else { None };
-                }
-                // a literal key in records whose rows decide it
-                if lits.len() != 1 {
-                    return None;
-                }
-                let k = lits.iter().next().unwrap();
-                // a substring test on known strings
-                if let (Some(needle), Some(hay)) = (intern::key_as_str(k), b.kv.as_lit().filter(|_| b.pts.is_empty()).and_then(intern::key_as_str)) {
-                    return decide(hay.contains(&*needle));
-                }
-                if let Some(o) = b.single() {
-                    match self.heap.obj(o).payload.clone() {
-                        // a view of a dict: its keys are the dict's (live); its values are decided
-                        // when they are all known literals
-                        Payload::View(ViewKind::Keys | ViewKind::Proxy, inner) => {
-                            return self.compare_const(op, a, &inner, right, state);
-                        }
-                        Payload::View(ViewKind::Values, inner) => {
-                            let d = inner.single().filter(|d| self.heap.kind(*d) == Kind::Dict)?;
-                            let items = self.literal_dict_items(d, state)?;
-                            let vals: Vec<KeyId> = items.iter().map(|(_, v)| v.kv.as_lit().filter(|_| v.pts.is_empty())).collect::<Option<_>>()?;
-                            return decide(vals.contains(&k));
-                        }
-                        _ => {}
-                    }
-                }
-                let recs = self.record_objects(&b);
-                if b.pts.is_empty() || recs.len() != b.pts.len() {
-                    return None;
-                }
-                let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
-                if recs.iter().all(|o| matches!(self.heap.kind(*o), Kind::Dict | Kind::Frame)) {
-                    if rows.iter().all(|r| r.definite.contains(k)) {
-                        return decide(true);
-                    }
-                    if rows.iter().all(|r| r.lacks(k)) {
-                        return decide(false);
-                    }
-                    return None;
-                }
-                // removed (`del`, `pop`) or excluded on every path, whatever the container
-                rows.iter().all(|r| r.absent.contains(k)).then_some(op != ast::CmpOp::In)
-            }
-            ast::CmpOp::Eq | ast::CmpOp::NotEq => {
-                // Enum members: their keys (a mixed-in one: its value)
-                let (a, b, lits) = if self.heap.keys.member_key.is_empty() {
-                    (a.clone(), b.clone(), lits)
-                } else {
-                    let ka = crate::models::enums::member_base(self, &self.keyify(a));
-                    let kb = crate::models::enums::member_base(self, &self.keyify(&b));
-                    let l = crate::domain::kv_literals(&ka.kv);
-                    (ka, kb, l)
-                };
-                let bl = crate::domain::kv_literals(&b.kv);
-                // a builtin dict / list / tuple / set never equals a str / number / bool / None
-                let container = |an: &Analyzer, v: &Value| !v.pts.is_empty() && v.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set) && !crate::models::pandas::is_series_obj(an, o)) && matches!(v.kv, KeyVal::Bot);
-                let scalar = |v: &Value| v.pts.is_empty() && v.kv.is_literal() && !crate::domain::kv_literals(&v.kv).iter().any(|k| intern::with_key(k, |kk| matches!(kk, intern::Key::Tuple(_))));
-                if (container(self, &a) && scalar(&b)) || (container(self, &b) && scalar(&a)) {
-                    return Some(op == ast::CmpOp::NotEq);
-                }
-                // (by Python's equality: `1 == 1.0 == True`; several literals decide when every
-                // pair agrees)
-                let decided = if a.pts.is_empty() && b.pts.is_empty() && a.kv.is_literal() && b.kv.is_literal() {
-                    let eqs: Option<Vec<bool>> = lits.iter().flat_map(|x| bl.iter().map(move |y| lit_eq(x, y))).collect();
-                    eqs.filter(|e| !e.is_empty() && e.iter().all(|x| *x == e[0])).map(|e| e[0])
-                } else {
-                    None
-                };
-                let Some(eq) = decided else {
-                    return None;
-                };
-                Some(if op == ast::CmpOp::Eq { eq } else { !eq })
-            }
+            ast::CmpOp::Is | ast::CmpOp::IsNot if !a.pts.is_empty() && a.kv.is_bot() => self.compare_identity(op, a, b),
+            ast::CmpOp::In | ast::CmpOp::NotIn => self.compare_in(op, a, b, right, &lits, state),
+            ast::CmpOp::Eq | ast::CmpOp::NotEq => self.compare_eq(op, a, b, lits),
             ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE => {
                 // two single literals of one kind (numbers, or strings) are ordered here;
                 // anything else is decided per call site when it is concrete there
@@ -281,6 +148,150 @@ impl Analyzer {
             }
             _ => None,
         }
+    }
+
+    /// `a == b` / `a != b` decided on literals, tuples of literals and known members.
+    fn compare_eq(&mut self, op: ast::CmpOp, a: &Value, b: &Value, lits: crate::intern::KeySet) -> Option<bool> {
+        // Enum members: their keys (a mixed-in one: its value)
+        let (a, b, lits) = if self.heap.keys.member_key.is_empty() {
+            (a.clone(), b.clone(), lits)
+        } else {
+            let ka = crate::models::enums::member_base(self, &self.keyify(a));
+            let kb = crate::models::enums::member_base(self, &self.keyify(&b));
+            let l = crate::domain::kv_literals(&ka.kv);
+            (ka, kb, l)
+        };
+        let bl = crate::domain::kv_literals(&b.kv);
+        // a builtin dict / list / tuple / set never equals a str / number / bool / None
+        let container = |an: &Analyzer, v: &Value| !v.pts.is_empty() && v.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set) && !crate::models::pandas::is_series_obj(an, o)) && matches!(v.kv, KeyVal::Bot);
+        let scalar = |v: &Value| v.pts.is_empty() && v.kv.is_literal() && !crate::domain::kv_literals(&v.kv).iter().any(|k| intern::with_key(k, |kk| matches!(kk, intern::Key::Tuple(_))));
+        if (container(self, &a) && scalar(&b)) || (container(self, &b) && scalar(&a)) {
+            return Some(op == ast::CmpOp::NotEq);
+        }
+        // (by Python's equality: `1 == 1.0 == True`; several literals decide when every
+        // pair agrees)
+        let decided = if a.pts.is_empty() && b.pts.is_empty() && a.kv.is_literal() && b.kv.is_literal() {
+            let eqs: Option<Vec<bool>> = lits.iter().flat_map(|x| bl.iter().map(move |y| lit_eq(x, y))).collect();
+            eqs.filter(|e| !e.is_empty() && e.iter().all(|x| *x == e[0])).map(|e| e[0])
+        } else {
+            None
+        };
+        let Some(eq) = decided else {
+            return None;
+        };
+        Some(if op == ast::CmpOp::Eq { eq } else { !eq })
+    }
+
+    /// `a is b` on objects: distinct abstract objects are distinct objects; one strong object is
+    /// itself.
+    fn compare_identity(&mut self, op: ast::CmpOp, a: &Value, b: &Value) -> Option<bool> {
+        if b.pts.is_empty() || !b.kv.is_bot() {
+            return None;
+        }
+        // builtin classes (`type(x) is dict`): the same class exactly when the same name
+        let builtin_q = |an: &Analyzer, v: &Value| -> Option<Vec<String>> { v.pts.iter().map(|o| if an.heap.kind(o) == Kind::External { Some(an.heap.external_qual(o)).filter(|q| q.starts_with("builtins.")) } else { None }).collect() };
+        if let (Some(qa), Some(qb)) = (builtin_q(self, &a), builtin_q(self, &b)) {
+            if qb.len() == 1 {
+                let same_all = qa.iter().all(|q| *q == qb[0]);
+                let diff_all = qa.iter().all(|q| *q != qb[0]);
+                if same_all || diff_all {
+                    let same = same_all;
+                    return Some(if op == ast::CmpOp::Is { same } else { !same });
+                }
+            }
+        }
+        let opaque = |an: &Analyzer, v: &Value| v.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::Unknown | Kind::External | Kind::Class | Kind::Module | Kind::Function));
+        if opaque(self, &a) || opaque(self, &b) {
+            return None;
+        }
+        let same = if a.pts.intersection(&b.pts).is_empty() {
+            false
+        } else if a.pts.len() == 1 && a.pts == b.pts && self.heap.obj(a.pts.first().unwrap()).single {
+            true
+        } else {
+            return None;
+        };
+        Some(if op == ast::CmpOp::Is { same } else { !same })
+    }
+
+    /// `a in b` / `a not in b` decided: a record's keys, a container's known members or elements,
+    /// a text's substrings.
+    fn compare_in(&mut self, op: ast::CmpOp, a: &Value, b: &Value, right: &'static ast::Expr, lits: &crate::intern::KeySet, state: &mut State) -> Option<bool> {
+        let decide = |found: bool| Some(if op == ast::CmpOp::In { found } else { !found });
+        // members of a Flag: bits; else a member is its key
+        if (!self.heap.keys.member_key.is_empty() || !self.heap.keys.identity_objs.borrow().is_empty()) && !a.pts.is_empty() {
+            if let Some(r) = crate::models::enums::flag_contains(self, a, &b, state) {
+                return decide(r);
+            }
+            let ka = self.keyify_in(a, state);
+            if ka.pts.is_empty() {
+                return self.compare_const(op, &ka, b, right, state);
+            }
+        }
+        if !a.pts.is_empty() || !a.kv.is_literal() || lits.is_empty() {
+            return None;
+        }
+        // a range with known bounds: membership of a known int
+        if let (Some(Payload::Range(lo, hi, step)), [k]) = (b.single().map(|o| &self.heap.obj(o).payload), &lits.iter().collect::<Vec<_>>()[..]) {
+            let x = intern::key_as_int(*k)?;
+            let inside = if *step > 0 { x >= *lo && x < *hi } else { x <= *lo && x > *hi };
+            return decide(inside && (x - lo) % step == 0);
+        }
+        // literals in a positional container of known literals: decided when every one
+        // is there, or none is (by Python's equality: `1.0 in [1, 2]`)
+        if let Some(o) = b.single().filter(|o| matches!(self.heap.kind(*o), Kind::List | Kind::Tuple | Kind::Set)) {
+            let n = self.heap.llen(o, state)?;
+            let items: Vec<KeyId> = (0..n).map(|i| {
+                let sv = state.slot(o, Ns::Pos, key_int(i as i64));
+                // (Enum members / identity objects as their keys)
+                let sv = if sv.pts.is_empty() { sv } else { self.keyify_in(&sv, state) };
+                sv.kv.as_lit().filter(|_| sv.pts.is_empty())
+            }).collect::<Option<_>>()?;
+            let eqs: Vec<bool> = lits.iter().map(|k| items.iter().map(|x| lit_eq(*x, k)).collect::<Option<Vec<bool>>>().map(|v| v.contains(&true))).collect::<Option<_>>()?;
+            let hits = eqs.iter().filter(|b| **b).count();
+            return if hits == lits.len() || hits == 0 { decide(hits > 0) } else { None };
+        }
+        // a literal key in records whose rows decide it
+        if lits.len() != 1 {
+            return None;
+        }
+        let k = lits.iter().next().unwrap();
+        // a substring test on known strings
+        if let (Some(needle), Some(hay)) = (intern::key_as_str(k), b.kv.as_lit().filter(|_| b.pts.is_empty()).and_then(intern::key_as_str)) {
+            return decide(hay.contains(&*needle));
+        }
+        if let Some(o) = b.single() {
+            match self.heap.obj(o).payload.clone() {
+                // a view of a dict: its keys are the dict's (live); its values are decided
+                // when they are all known literals
+                Payload::View(ViewKind::Keys | ViewKind::Proxy, inner) => {
+                    return self.compare_const(op, a, &inner, right, state);
+                }
+                Payload::View(ViewKind::Values, inner) => {
+                    let d = inner.single().filter(|d| self.heap.kind(*d) == Kind::Dict)?;
+                    let items = self.literal_dict_items(d, state)?;
+                    let vals: Vec<KeyId> = items.iter().map(|(_, v)| v.kv.as_lit().filter(|_| v.pts.is_empty())).collect::<Option<_>>()?;
+                    return decide(vals.contains(&k));
+                }
+                _ => {}
+            }
+        }
+        let recs = self.record_objects(&b);
+        if b.pts.is_empty() || recs.len() != b.pts.len() {
+            return None;
+        }
+        let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
+        if recs.iter().all(|o| matches!(self.heap.kind(*o), Kind::Dict | Kind::Frame)) {
+            if rows.iter().all(|r| r.definite.contains(k)) {
+                return decide(true);
+            }
+            if rows.iter().all(|r| r.lacks(k)) {
+                return decide(false);
+            }
+            return None;
+        }
+        // removed (`del`, `pop`) or excluded on every path, whatever the container
+        rows.iter().all(|r| r.absent.contains(k)).then_some(op != ast::CmpOp::In)
     }
 
     /// An instance whose class (or a base) defines `__bool__` or `__len__`.
