@@ -205,11 +205,26 @@ impl Analyzer {
         if recs.is_empty() {
             return;
         }
+        let (map, keep_pos) = self.summary_objects(back, &recs);
+        fold_recent_facts(back, &map, &keep_pos);
+        rename_references(back, head, &map);
+        // 3. objects allocated during the iteration that hold references in their payloads
+        self.heap.rename_payloads(mark, &|v: &Value| rename_value(v, &map), &map);
+        // 4. flow-insensitive class attributes
+        let ups: Vec<((ObjId, Ns, KeyId), Value)> = self.heap.cls_slots.iter().filter_map(|(k, v)| rename_value(v, &map).map(|nv| (*k, nv))).collect();
+        for (k, nv) in ups {
+            self.heap.cls_slots.insert(k, nv);
+        }
+    }
+
+    /// The weak per-site summary object of each recent object (`recs`), with its length; the
+    /// tuples whose positions the summary keeps (one length).
+    fn summary_objects(&mut self, back: &mut State, recs: &[(ObjId, Kind, String, String)]) -> (FxHashMap<ObjId, ObjId>, FxHashSet<ObjId>) {
         let mut map: FxHashMap<ObjId, ObjId> = FxHashMap::default();
         // (tuples of one length keep their positions in the summary object: each position
         // the join of the tuples' — unpacking `a, b = t` then keeps them apart)
         let mut keep_pos: FxHashSet<ObjId> = FxHashSet::default();
-        for (r, kind, site, ctx) in &recs {
+        for (r, kind, site, ctx) in recs {
             let (label, payload, iter_elem, derived, depth) = {
                 let o = self.heap.obj(*r);
                 (o.label.clone(), o.payload.clone(), o.iter_elem, o.derived_from, o.depth)
@@ -244,113 +259,7 @@ impl Analyzer {
             }
             map.insert(*r, sid);
         }
-        let rename_value = |v: &Value, map: &FxHashMap<ObjId, ObjId>| -> Option<Value> {
-            let hit_pts = v.pts.iter().any(|o| map.contains_key(&o));
-            let hit_kv = matches!(&v.kv, KeyVal::KeysOf(ko) if ko.objs.iter().any(|o| map.contains_key(&o)));
-            if !hit_pts && !hit_kv {
-                return None;
-            }
-            let pts = v.pts.map(|o| *map.get(&o).unwrap_or(&o));
-            let kv = match &v.kv {
-                KeyVal::KeysOf(ko) if hit_kv => KeyVal::KeysOf(KeysOf { objs: ko.objs.map(|o| *map.get(&o).unwrap_or(&o)), ..ko.clone() }),
-                other => other.clone(),
-            };
-            Some(Value::with_kv(pts, kv))
-        };
-        // 1. the recent objects' own facts move to the summary objects (weakly)
-        for (&r, &sid) in &map {
-            for ns in [Ns::Item, Ns::Attr] {
-                if let Some(row) = back.rows.get(&(r, ns)) {
-                    let nr = match back.rows.get(&(sid, ns)) {
-                        Some(cur) => cur.join(&row),
-                        None => row,
-                    };
-                    back.rows.insert((sid, ns), nr);
-                    back.rows.remove(&(r, ns));
-                }
-            }
-            for ((ns, k), v) in back.slots_of(r) {
-                if ns == Ns::Pos && !keep_pos.contains(&r) {
-                    continue;
-                }
-                let v = rename_value(&v, &map).unwrap_or(v);
-                back.set_slot(sid, ns, k, v, false);
-            }
-            back.drop_obj(r);
-            if let Some(kv) = back.elems.get(&r) {
-                let kv = rename_value(&Value::kv_only(kv.clone()), &map).map(|v| v.kv).unwrap_or(kv);
-                let nv = match back.elems.get(&sid) {
-                    Some(cur) => crate::domain::kv_join(&cur, &kv),
-                    None => kv,
-                };
-                back.elems.insert(sid, nv);
-                back.elems.remove(&r);
-            }
-        }
-        // 2. references written during the iteration
-        let fp = back.footprint(head);
-        for (oid, sk) in fp.slots {
-            if map.contains_key(&oid) {
-                continue;
-            }
-            if let Some(v) = back.slots.get(&oid, &sk) {
-                if let Some(nv) = rename_value(&v, &map) {
-                    back.slots.set(&oid, sk, nv);
-                }
-            }
-        }
-        for oid in fp.elems {
-            if map.contains_key(&oid) {
-                continue;
-            }
-            if let Some(kv) = back.elems.get(&oid) {
-                if let Some(nv) = rename_value(&Value::kv_only(kv), &map) {
-                    back.elems.insert(oid, nv.kv);
-                }
-            }
-        }
-        let env_updates: Vec<(StrId, Value)> = back.env.iter().filter_map(|(k, v)| rename_value(v, &map).map(|nv| (*k, nv))).collect();
-        for (k, nv) in env_updates {
-            back.env.insert(k, nv);
-        }
-        let nar_updates: Vec<(StrId, Value)> = back.narrowed.iter().filter_map(|(k, v)| rename_value(v, &map).map(|nv| (*k, nv))).collect();
-        for (k, nv) in nar_updates {
-            back.narrowed.insert(k, nv);
-        }
-        if let Some(r) = &back.ret {
-            if let Some(nv) = rename_value(r, &map) {
-                back.ret = Some(nv);
-            }
-        }
-        // 3. objects allocated during the iteration that hold references in their payloads
-        let n = self.heap.len() as ObjId;
-        for oid in mark..n {
-            let o = self.heap.obj_mut(oid);
-            if let Some(d) = o.derived_from {
-                if let Some(&sd) = map.get(&d) {
-                    o.derived_from = Some(sd);
-                }
-            }
-            let rv = |v: &Value| rename_value(v, &map).unwrap_or_else(|| v.clone());
-            o.payload = match &o.payload {
-                Payload::Method(q, v) => Payload::Method(q.clone(), rv(v)),
-                Payload::Bound(f, v) => Payload::Bound(*map.get(f).unwrap_or(f), rv(v)),
-                Payload::Super(c, v) => Payload::Super(*c, rv(v)),
-                Payload::View(k, v) => Payload::View(*k, rv(v)),
-                Payload::Zip(a, b) => Payload::Zip(rv(a), rv(b)),
-                Payload::Enumerate(v, s0) => Payload::Enumerate(rv(v), *s0),
-                Payload::Pair(a, b) => Payload::Pair(rv(a), rv(b)),
-                Payload::Partial(f, args, kw) => Payload::Partial(rv(f), args.iter().map(&rv).collect(), kw.iter().map(|(k, v)| (*k, rv(v))).collect()),
-                Payload::Groupby(fs, ks, ai, sel) => Payload::Groupby(fs.iter().map(|f| *map.get(f).unwrap_or(f)).collect(), ks.clone(), *ai, sel.clone()),
-                Payload::Locidx(nm, x) => Payload::Locidx(nm.clone(), *map.get(x).unwrap_or(x)),
-                other => other.clone(),
-            };
-        }
-        // 4. flow-insensitive class attributes
-        let ups: Vec<((ObjId, Ns, KeyId), Value)> = self.heap.cls_slots.iter().filter_map(|(k, v)| rename_value(v, &map).map(|nv| (*k, nv))).collect();
-        for (k, nv) in ups {
-            self.heap.cls_slots.insert(k, nv);
-        }
+        (map, keep_pos)
     }
 
     /// A `return` of a value without objects (`return None`) in a call: the call's
@@ -448,5 +357,93 @@ impl Analyzer {
             v.push_objs(&mut roots);
         }
         self.collect_since(mark, &pre, roots, state, None);
+    }
+}
+
+/// `v` with the recent objects of `map` renamed to their summary objects (None: none in it).
+fn rename_value(v: &Value, map: &FxHashMap<ObjId, ObjId>) -> Option<Value> {
+    let hit_pts = v.pts.iter().any(|o| map.contains_key(&o));
+    let hit_kv = matches!(&v.kv, KeyVal::KeysOf(ko) if ko.objs.iter().any(|o| map.contains_key(&o)));
+    if !hit_pts && !hit_kv {
+        return None;
+    }
+    let pts = v.pts.map(|o| *map.get(&o).unwrap_or(&o));
+    let kv = match &v.kv {
+        KeyVal::KeysOf(ko) if hit_kv => KeyVal::KeysOf(KeysOf { objs: ko.objs.map(|o| *map.get(&o).unwrap_or(&o)), ..ko.clone() }),
+        other => other.clone(),
+    };
+    Some(Value::with_kv(pts, kv))
+}
+
+/// References written during a loop iteration (`back` beyond `head`) to the recent objects of
+/// `map`: renamed to their summary objects.
+fn rename_references(back: &mut State, head: &State, map: &FxHashMap<ObjId, ObjId>) {
+    let fp = back.footprint(head);
+    for (oid, sk) in fp.slots {
+        if map.contains_key(&oid) {
+            continue;
+        }
+        if let Some(v) = back.slots.get(&oid, &sk) {
+            if let Some(nv) = rename_value(&v, map) {
+                back.slots.set(&oid, sk, nv);
+            }
+        }
+    }
+    for oid in fp.elems {
+        if map.contains_key(&oid) {
+            continue;
+        }
+        if let Some(kv) = back.elems.get(&oid) {
+            if let Some(nv) = rename_value(&Value::kv_only(kv), map) {
+                back.elems.insert(oid, nv.kv);
+            }
+        }
+    }
+    let env_updates: Vec<(StrId, Value)> = back.env.iter().filter_map(|(k, v)| rename_value(v, map).map(|nv| (*k, nv))).collect();
+    for (k, nv) in env_updates {
+        back.env.insert(k, nv);
+    }
+    let nar_updates: Vec<(StrId, Value)> = back.narrowed.iter().filter_map(|(k, v)| rename_value(v, map).map(|nv| (*k, nv))).collect();
+    for (k, nv) in nar_updates {
+        back.narrowed.insert(k, nv);
+    }
+    if let Some(r) = &back.ret {
+        if let Some(nv) = rename_value(r, map) {
+            back.ret = Some(nv);
+        }
+    }
+}
+
+/// The recent objects' own facts move to their summary objects (weakly; positions only for
+/// the tuples in `keep_pos`).
+fn fold_recent_facts(back: &mut State, map: &FxHashMap<ObjId, ObjId>, keep_pos: &FxHashSet<ObjId>) {
+    for (&r, &sid) in map {
+        for ns in [Ns::Item, Ns::Attr] {
+            if let Some(row) = back.rows.get(&(r, ns)) {
+                let nr = match back.rows.get(&(sid, ns)) {
+                    Some(cur) => cur.join(&row),
+                    None => row,
+                };
+                back.rows.insert((sid, ns), nr);
+                back.rows.remove(&(r, ns));
+            }
+        }
+        for ((ns, k), v) in back.slots_of(r) {
+            if ns == Ns::Pos && !keep_pos.contains(&r) {
+                continue;
+            }
+            let v = rename_value(&v, map).unwrap_or(v);
+            back.set_slot(sid, ns, k, v, false);
+        }
+        back.drop_obj(r);
+        if let Some(kv) = back.elems.get(&r) {
+            let kv = rename_value(&Value::kv_only(kv.clone()), map).map(|v| v.kv).unwrap_or(kv);
+            let nv = match back.elems.get(&sid) {
+                Some(cur) => crate::domain::kv_join(&cur, &kv),
+                None => kv,
+            };
+            back.elems.insert(sid, nv);
+            back.elems.remove(&r);
+        }
     }
 }

@@ -438,4 +438,32 @@ impl Heap {
         }
         c3(self, cls, 0).unwrap_or_else(|| self.mro_bfs(cls))
     }
+
+    /// The objects made since `mark` refer to the summary objects of `map` instead of the
+    /// recent ones (payloads, `derived_from`).
+    pub fn rename_payloads(&mut self, mark: ObjId, rename: &dyn Fn(&Value) -> Option<Value>, map: &FxHashMap<ObjId, ObjId>) {
+        let n = self.len() as ObjId;
+        for oid in mark..n {
+            let o = self.obj_mut(oid);
+            if let Some(d) = o.derived_from {
+                if let Some(&sd) = map.get(&d) {
+                    o.derived_from = Some(sd);
+                }
+            }
+            let rv = |v: &Value| rename(v).unwrap_or_else(|| v.clone());
+            o.payload = match &o.payload {
+                Payload::Method(q, v) => Payload::Method(q.clone(), rv(v)),
+                Payload::Bound(f, v) => Payload::Bound(*map.get(f).unwrap_or(f), rv(v)),
+                Payload::Super(c, v) => Payload::Super(*c, rv(v)),
+                Payload::View(k, v) => Payload::View(*k, rv(v)),
+                Payload::Zip(a, b) => Payload::Zip(rv(a), rv(b)),
+                Payload::Enumerate(v, s0) => Payload::Enumerate(rv(v), *s0),
+                Payload::Pair(a, b) => Payload::Pair(rv(a), rv(b)),
+                Payload::Partial(f, args, kw) => Payload::Partial(rv(f), args.iter().map(&rv).collect(), kw.iter().map(|(k, v)| (*k, rv(v))).collect()),
+                Payload::Groupby(fs, ks, ai, sel) => Payload::Groupby(fs.iter().map(|f| *map.get(f).unwrap_or(f)).collect(), ks.clone(), *ai, sel.clone()),
+                Payload::Locidx(nm, x) => Payload::Locidx(nm.clone(), *map.get(x).unwrap_or(x)),
+                other => other.clone(),
+            };
+    }
+    }
 }
