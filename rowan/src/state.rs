@@ -121,6 +121,9 @@ pub struct State {
     /// tests of the running functions' parameters every path here passed, as Python text true
     /// at the call (`interp/guards.rs`): (`param F.` of the function, the test)
     pub path: Arc<Vec<(StrId, StrId)>>,
+    /// lists whose length is a tensor dim (`shape.rs` label): a loop of `T` rounds appended once
+    /// per round (`loops.rs` `counted_appends`); any other change of the list ends it
+    pub sym_lens: Arc<Vec<(ObjId, StrId)>>,
 }
 
 /// At the join of a branch on a pure test: when `cond` (a canonical test text) is `truth`,
@@ -217,6 +220,7 @@ impl State {
             tf: Arc::new(crate::models::shape::TFacts::default()),
             unbound: Arc::new(Vec::new()),
             path: Arc::new(Vec::new()),
+            sym_lens: Arc::new(Vec::new()),
         }
     }
 
@@ -254,12 +258,41 @@ impl State {
         if self.lasts.iter().any(|(o, _)| *o == oid) {
             self.lasts = Arc::new(self.lasts.iter().filter(|(o, _)| *o != oid).cloned().collect());
         }
+        self.drop_sym_len(oid);
     }
 
     pub fn set_last(&mut self, oid: ObjId, v: Value) {
         let mut l: Vec<(ObjId, Value)> = self.lasts.iter().filter(|(o, _)| *o != oid).cloned().collect();
         l.push((oid, v));
         self.lasts = Arc::new(l);
+    }
+
+    /// A list's length on this path (positions, alternatives): any write of it goes through here.
+    pub fn set_lens(&mut self, oid: ObjId, v: (Option<usize>, usize, u16)) {
+        self.lens.insert(oid, v);
+        self.drop_sym_len(oid);
+    }
+
+    pub fn forget_len(&mut self, oid: &ObjId) {
+        self.lens.remove(oid);
+        self.drop_sym_len(*oid);
+    }
+
+    pub fn drop_sym_len(&mut self, oid: ObjId) {
+        if self.sym_lens.iter().any(|(o, _)| *o == oid) {
+            self.sym_lens = Arc::new(self.sym_lens.iter().filter(|(o, _)| *o != oid).copied().collect());
+        }
+    }
+
+    pub fn set_sym_len(&mut self, oid: ObjId, label: StrId) {
+        let mut l: Vec<(ObjId, StrId)> = self.sym_lens.iter().filter(|(o, _)| *o != oid).copied().collect();
+        l.push((oid, label));
+        self.sym_lens = Arc::new(l);
+    }
+
+    /// The length of a list as a tensor dim's label (`sym_lens`).
+    pub fn sym_len(&self, oid: ObjId) -> Option<StrId> {
+        self.sym_lens.iter().find(|(o, _)| *o == oid).map(|(_, l)| *l)
     }
 
     pub fn last_of(&self, oid: ObjId) -> Option<Value> {
@@ -308,6 +341,7 @@ impl State {
         s.name_keys = if Arc::ptr_eq(&self.name_keys, &o.name_keys) { self.name_keys.clone() } else { Arc::new(self.name_keys.iter().filter(|x| o.name_keys.contains(x)).copied().collect()) };
         s.lasts = join_lasts(&self.lasts, &o.lasts);
         s.unbound = join_unbound(self, o);
+        s.sym_lens = if Arc::ptr_eq(&self.sym_lens, &o.sym_lens) { self.sym_lens.clone() } else { Arc::new(self.sym_lens.iter().filter(|x| o.sym_lens.contains(x)).copied().collect()) };
         s.path = if Arc::ptr_eq(&self.path, &o.path) { self.path.clone() } else { Arc::new(self.path.iter().filter(|t| o.path.contains(t)).copied().collect()) };
         s
     }
@@ -429,10 +463,10 @@ impl State {
         for k in touched {
             if let Some(v) = o.lens.get(&k) {
                 match self.lens.get(&k) {
-                    None => self.lens.insert(k, v),
+                    None => self.set_lens(k, v),
                     Some(cur) => {
                         if cur != v {
-                            self.lens.insert(k, join_len(&cur, &v));
+                            self.set_lens(k, join_len(&cur, &v));
                         }
                     }
                 }
@@ -635,6 +669,7 @@ impl State {
         self.slots.drop_key(&oid);
         self.elems.remove(&oid);
         self.lens.remove(&oid);
+        self.drop_sym_len(oid);
     }
 
     pub fn drop_obj(&mut self, oid: ObjId) {

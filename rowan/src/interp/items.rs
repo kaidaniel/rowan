@@ -282,7 +282,7 @@ impl Analyzer {
             let kv = state.elems.get(&oid).unwrap_or(DATA);
             let v = self.alloc_positional(kind, node, Some(vals), Value::new(), kv, state);
             if let (Some(m), Some(nid)) = (mask, v.single()) {
-                state.lens.insert(nid, (None, 0, m));
+                state.set_lens(nid, (None, 0, m));
             }
             parts.push(v);
             return true;

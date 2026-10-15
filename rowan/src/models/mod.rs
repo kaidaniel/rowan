@@ -913,7 +913,7 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     for (i, v) in lead.iter().enumerate() {
                         st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
                     }
-                    st.lens.insert(oid, (None, lead.len(), 0));
+                    st.set_lens(oid, (None, lead.len(), 0));
                 }
             }
         }
@@ -926,7 +926,7 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         if let Some(src) = c.args.first().and_then(|a| a.single()).filter(|s| matches!(an.heap.kind(*s), Kind::List | Kind::Tuple)) {
             if let Some((None, _, m)) = st.lens.get(&src).filter(|l| l.2 != 0) {
                 let p = an.heap.prefix(oid, st).unwrap_or(0);
-                st.lens.insert(oid, (None, p, m));
+                st.set_lens(oid, (None, p, m));
             }
         }
     }
@@ -2937,13 +2937,20 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         (Some(r), Some(_)) => r.pts.iter().filter_map(|o| st.lens.get(&o).filter(|l| l.0.is_none() && l.2 != 0).map(|l| (o, l.2))).collect(),
         _ => Vec::new(),
     };
+    // (a length that is a dim: that many more)
+    let sym = c.recv.as_ref().and_then(|r| r.single()).and_then(|o| Some((o, st.sym_len(o)?))).filter(|_| added.is_some());
     let r = m_append_inner(an, st, c);
+    if let (Some((o, l)), Some(k)) = (sym, added) {
+        if let Some(d) = crate::models::shape::parse_dim_label(&intern::str_get(l)) {
+            st.set_sym_len(o, intern::s(&crate::models::shape::dim_label(crate::models::shape::add(d, crate::models::shape::lit(k as i64)))));
+        }
+    }
     if let Some(k) = added {
         for (o, m) in before {
             if let Some((None, p, 0)) = st.lens.get(&o) {
                 let shifted = (m as u32) << k;
                 if shifted <= 0xFFFF {
-                    st.lens.insert(o, (None, p, shifted as u16));
+                    st.set_lens(o, (None, p, shifted as u16));
                 }
             }
         }
@@ -5443,6 +5450,10 @@ fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         if let Some(n) = an.heap.llen(o, st) {
             return Value::lit(intern::key_int(n as i64));
+        }
+        // (a loop of a tensor dim's rounds appended to it once each)
+        if let Some(l) = st.sym_len(o) {
+            return Value::data(&intern::str_get(l));
         }
         if matches!(an.heap.kind(o), Kind::Dict) {
             let row = st.row(o, Ns::Item);

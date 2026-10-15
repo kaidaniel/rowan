@@ -21,7 +21,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   the state of objects made since (`Obj::born`, renewed by a strong re-allocation) nothing reaches.
 * **State** (`State`, `state.rs`) is one point on one path: names → values, and per object
   its **rows** (`(object, namespace)` → `Row`), slots (the value under each key), elements,
-  lengths, and the requirements recorded so far. The maps are persistent Patricia tries
+  lengths (one writer, `set_lens`; a tensor dim after `T` rounds of one append each, `sym_lens`),
+  and the requirements recorded so far. The maps are persistent Patricia tries
   (`layered.rs`): a copy is O(1), and a join or diff costs what two states differ in.
 * **The analyzer** (`Analyzer`, `interp/mod.rs`) is components with private state, one file each
   (Layout); models, the report and the driver see the `Heap`, their `m` and `api.rs`. Its doc sorts
@@ -147,8 +148,7 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
   `#@only src: KEY if TEST | KEY none`, `#@todo …`, `#@argv`, `#@shape` (torch). Cost bounds, by hand:
   `#@objects`, `#@tabulations`, `#@joins`, `#@work`, `#@visits`, `#@havoc <= N`; `#@limits
   k=v,…` sets the case's `ROWAN_LIMITS`. A directive-only line applies to the code line above.
-* **Oracle** (`tests/oracle.py`): reruns each case under CPython with a tracer and checks every
-  directive; schemas by dropping keys from the input. Strict on the library suites.
+* **Oracle** (`tests/oracle.py`): reruns each case under CPython (a tracer), checks every directive (schemas by dropping keys), strict on library suites.
 * **Snapshots** (`tests/snapshots/`): `--json` on `examples/etl_report.py`, `tests/fixtures/proto_*.py`:
   the guard for internals (ids may shift). **Unit tests**: CPython values, the regex engine, tries.
 

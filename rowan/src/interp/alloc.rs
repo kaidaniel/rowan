@@ -138,7 +138,7 @@ impl Analyzer {
             self.heap.renew(oid);
         }
         // born here: its length is unknown until the code making it says
-        state.lens.insert(oid, (None, 0, 0));
+        state.set_lens(oid, (None, 0, 0));
         if kind.is_record() || kind == Kind::Frame {
             let fresh = row.unwrap_or_default();
             if state.has_row(oid, ns) && !obj_single {

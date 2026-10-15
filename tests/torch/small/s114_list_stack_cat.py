@@ -1,4 +1,4 @@
-# lists of tensors: stack / cat of literal lists, a list built in a loop of unknown length, a cat mismatch
+# lists of tensors: stack / cat of literal lists, a list built in a loop of unknown length (one append in each of n rounds: n long; was `?`), a cat mismatch
 import torch
 
 
@@ -8,7 +8,7 @@ def gather(x, n):
     outs = []
     for i in range(n):
         outs.append(x[:, i])
-    s = torch.stack(outs, dim=1)  #@shape s: [x.shape[0], ?, x.shape[2]]
+    s = torch.stack(outs, dim=1)  #@shape s: [x.shape[0], n, x.shape[2]]
     return s
 
 

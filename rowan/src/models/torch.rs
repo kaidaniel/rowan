@@ -467,6 +467,11 @@ fn t_window(an: &mut Analyzer, lower: &'static ast::Expr, upper: &'static ast::E
     (sh::nonneg(n) && sh::nonneg(sh::add(lo, k)) && sh::nonneg(sh::sub(d, sh::add(hi, m)))).then_some(n)
 }
 
+/// A list's length as a dim (a loop of a dim's rounds appended to it: `State::sym_lens`).
+pub fn sym_list_len(v: &Value, st: &State) -> Option<DimId> {
+    v.single().filter(|_| v.kv.is_bot()).and_then(|o| st.sym_len(o)).and_then(|l| sh::parse_dim_label(&intern::str_get(l)))
+}
+
 pub fn t_tuple_len(an: &Analyzer, v: &Value) -> Option<DimId> {
     let o = v.single()?;
     match &an.heap.obj(o).payload {
@@ -2909,7 +2914,7 @@ pub fn t_stack(an: &mut Analyzer, list: &Value, d: i64, len: Option<DimId>, node
             t_error(an, node, m, st);
             return Value::new();
         }
-        None => (t_tuple_len(an, list).or(len).unwrap_or_else(sh::unknown), elem.unwrap_or_else(Shape::any)),
+        None => (t_tuple_len(an, list).or(len).or_else(|| sym_list_len(list, st)).unwrap_or_else(sh::unknown), elem.unwrap_or_else(Shape::any)),
     };
     let mut nv = vec![n];
     nv.truncate(1);

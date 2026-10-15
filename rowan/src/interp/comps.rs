@@ -286,7 +286,7 @@ impl Analyzer {
                 let ekv = state.elems.get(&oid).unwrap_or(crate::domain::DATA);
                 if !(e.pts.is_empty() && ekv.is_bot()) {
                     state.set_slot(oid, Ns::Pos, key_int(0), Value::with_kv(e.pts, ekv), true);
-                    state.lens.insert(oid, (None, 1, 0));
+                    state.set_lens(oid, (None, 1, 0));
                 }
             }
         }

@@ -101,7 +101,7 @@ impl Analyzer {
             }
         }
         for o in head.lens.diff_keys(&prev.lens) {
-            head.lens.insert(o, (None, 0, 0));
+            head.set_lens(o, (None, 0, 0));
         }
     }
 
@@ -308,6 +308,7 @@ impl Analyzer {
         join_breaks(&mut exit_s, exit_acc);
         if f.orelse.is_empty() && !has_jump && !prefixed && back.reachable && pre.reachable && exit_s.reachable {
             self.loop_ran_facts(f, &back, &pre, &mut exit_s);
+            self.counted_appends(f, &pre, &mut exit_s);
         }
         join_breaks(&mut exit_s, prefix_breaks);
         state.replace_with(exit_s);
@@ -339,6 +340,58 @@ impl Analyzer {
             new.extend(cond_facts_for(s(&format!("{}@{}", text, func)), true, deps, back, pre, exit_s));
         }
         add_facts(exit_s, new);
+    }
+
+    /// `for _ in range(T): … xs.append(x) …` with no `break` / `continue`, the append a statement
+    /// of the body itself, `xs` named nowhere else in it and held by nothing else: every round
+    /// that ends appended once, so after the loop `len(xs)` is its length before plus `T` (a
+    /// tensor dim, `sym_lens`).
+    fn counted_appends(&mut self, f: &'static ast::StmtFor, pre: &State, exit_s: &mut State) {
+        let ast::Expr::Call(c) = &*f.iter else { return };
+        let (true, [ast::Expr::Name(n)], true) = (matches!(&*c.func, ast::Expr::Name(r) if r.id.as_str() == "range"), &c.arguments.args[..], c.arguments.keywords.is_empty()) else { return };
+        if self.frame().kind != super::FrameKind::Function {
+            return;
+        }
+        let Some(rounds) = self.name_value(pre, s(n.id.as_str())).and_then(|v| crate::models::torch::t_dim(self, &v, pre)).filter(|d| crate::models::shape::nonneg(*d)) else { return };
+        let appended: Vec<&'static ast::ExprName> = f.body.iter().filter_map(|st| match st {
+            ast::Stmt::Expr(e) => match &*e.value {
+                ast::Expr::Call(c) if c.arguments.args.len() == 1 && c.arguments.keywords.is_empty() => match &*c.func {
+                    ast::Expr::Attribute(a) if a.attr.as_str() == "append" => match &*a.value {
+                        ast::Expr::Name(l) => Some(l),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        }).collect();
+        let scope = self.heap.module_info(self.frame().module).scopes.get(self.frame().scope).cells.clone();
+        let target_names = super::names_in(&f.target);
+        for l in appended {
+            let name = l.id.as_str();
+            if scope.contains(name) || target_names.iter().any(|t| t == name) || body_mentions(&f.body, name) != 1 {
+                continue;
+            }
+            let Some(o) = self.name_value(pre, s(name)).and_then(|v| v.single().filter(|_| v.kv.is_bot())) else { continue };
+            let (Kind::List, true, Some(n0)) = (self.heap.kind(o), self.heap.obj(o).single, self.heap.llen(o, pre)) else { continue };
+            if !self.held_only_by_name(o, name, pre) {
+                continue;
+            }
+            let len = crate::models::shape::add(crate::models::shape::lit(n0 as i64), rounds);
+            exit_s.set_sym_len(o, s(&crate::models::shape::dim_label(len)));
+        }
+    }
+
+    /// Whether nothing but the local `name` holds `o` in `state` (what the code holds, walked).
+    fn held_only_by_name(&self, o: ObjId, name: &str, state: &State) -> bool {
+        let n = s(name);
+        if state.env.iter().any(|(k, v)| *k != n && (v.pts.contains(o) || matches!(&v.kv, crate::domain::KeyVal::KeysOf(ko) if ko.objs.contains(o)))) {
+            return false;
+        }
+        let mut st = state.copy();
+        st.env.shift_remove(&n);
+        self.held_only_by(o, ObjId::MAX, &ast::Expr::Name(ast::ExprName { range: Default::default(), node_index: Default::default(), id: ast::name::Name::new(""), ctx: ast::ExprContext::Load }), &st)
     }
 
     /// Every element of the iterable went through the body: its row after the loop is the
@@ -417,7 +470,7 @@ impl Analyzer {
             state.slots.set(&i, sk, v);
         }
         if let Some(l) = state.lens.get(&o) {
-            state.lens.insert(i, l);
+            state.set_lens(i, l);
         }
         if let Some(e) = state.elems.get(&o) {
             state.elems.insert(i, e);
@@ -537,4 +590,25 @@ impl Analyzer {
         }
         true
     }
+}
+
+/// How many times the plain name `name` occurs in these statements (nested functions too).
+fn body_mentions(body: &[ast::Stmt], name: &str) -> usize {
+    struct V<'n>(&'n str, usize);
+    impl<'a> ast::visitor::source_order::SourceOrderVisitor<'a> for V<'_> {
+        fn visit_expr(&mut self, e: &'a ast::Expr) {
+            if let ast::Expr::Name(n) = e {
+                if n.id.as_str() == self.0 {
+                    self.1 += 1;
+                }
+            }
+            ast::visitor::source_order::walk_expr(self, e);
+        }
+    }
+    use ast::visitor::source_order::SourceOrderVisitor;
+    let mut v = V(name, 0);
+    for st in body {
+        v.visit_stmt(st);
+    }
+    v.1
 }
