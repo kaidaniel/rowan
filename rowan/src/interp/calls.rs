@@ -94,28 +94,35 @@ impl Analyzer {
         // receiver's own: not picked)
         let picked = targets.iter().all(|o| !matches!(self.heap.kind(*o), Kind::Bound) && !matches!(self.heap.obj(*o).payload, Payload::Method(..) | Payload::Bound(..))).then(|| self.node_text(node));
         self.alternatives(targets.len() + usize::from(batch.is_some()), false, state, &mut |an, i, st| {
-            let Some(&oid) = targets.get(i) else {
-                let (f, recv) = batch.as_ref().unwrap();
-                return an.skipped_on(*f, recv, &args, &kwargs, &star_args, &star_kwargs, st, node);
-            };
-            // (a groupby method of one of several groupby objects: its results are its own)
-            let own = matches!(&an.heap.obj(oid).payload, Payload::Method(q, r) if q.starts_with("groupby.") && r.pts.iter().all(|g| an.heap.kind(g) == Kind::Groupby));
-            let saved = if own { an.cx.alloc_extra.replace(format!("gbm{}", oid)) } else { an.cx.alloc_extra.clone() };
-            if let Some(call) = &picked {
-                let name = match an.heap.kind(oid) {
-                    Kind::Function => an.heap.func_info(oid).qualname.clone(),
-                    Kind::Unknown => "code rowan cannot see".to_string(),
-                    _ => an.heap.obj(oid).label.to_string(),
-                };
-                an.cx.picked.push((call.clone(), name));
+            match (targets.get(i), &batch) {
+                (Some(&oid), _) => an.call_picked(oid, &picked, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast),
+                (None, Some((f, recv))) => an.skipped_on(*f, recv, &args, &kwargs, &star_args, &star_kwargs, st, node),
+                (None, None) => unreachable!(),
             }
-            let r = an.call_one(oid, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast);
-            if picked.is_some() {
-                an.cx.picked.pop();
-            }
-            an.cx.alloc_extra = saved;
-            r
         })
+    }
+
+    /// One of several callees a value picks (`call_value`; `picked`: the call's text, when the
+    /// value picks among functions).
+    #[allow(clippy::too_many_arguments)]
+    fn call_picked(&mut self, oid: ObjId, picked: &Option<String>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], st: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+        // (a groupby method of one of several groupby objects: its results are its own)
+        let own = matches!(&self.heap.obj(oid).payload, Payload::Method(q, r) if q.starts_with("groupby.") && r.pts.iter().all(|g| self.heap.kind(g) == Kind::Groupby));
+        let saved = if own { self.cx.alloc_extra.replace(format!("gbm{}", oid)) } else { self.cx.alloc_extra.clone() };
+        if let Some(call) = picked {
+            let name = match self.heap.kind(oid) {
+                Kind::Function => self.heap.func_info(oid).qualname.clone(),
+                Kind::Unknown => "code rowan cannot see".to_string(),
+                _ => self.heap.obj(oid).label.to_string(),
+            };
+            self.cx.picked.push((call.clone(), name));
+        }
+        let r = self.call_one(oid, args, kwargs, star_args, star_kwargs, st, node, call_ast);
+        if picked.is_some() {
+            self.cx.picked.pop();
+        }
+        self.cx.alloc_extra = saved;
+        r
     }
 
     /// Alternatives: `run(i)` for each of `n` callees, each on its own copy of the state, the

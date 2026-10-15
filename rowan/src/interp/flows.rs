@@ -828,6 +828,13 @@ impl<'a> Flow<'a> {
                     self.expr(x, Pos::Change);
                 }
             }
+            _ => self.compound_stmt(st),
+        }
+    }
+
+    /// The statements that hold others or define code (`stmt`).
+    fn compound_stmt(&mut self, st: &'static Stmt) {
+        match st {
             Stmt::Try(t) => {
                 self.body(&t.body);
                 for h in &t.handlers {

@@ -688,36 +688,15 @@ impl Analyzer {
         // (a value that is a literal or an unknown object may be any key: no narrowing by its
         // literal part)
         let lit_only = lv.pts.iter().all(|o| !matches!(self.heap.kind(o), Kind::Unknown | Kind::Instance | Kind::External));
-        // (a tuple of names where it is in closed records: each name only the literals some
-        // key has at its position; the objects stay)
-        if let (ast::Expr::Tuple(t), true, false) = (left, member, recs.is_empty()) {
-            let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
-            if rows.iter().all(|r| r.closed()) {
-                let keys: Vec<Vec<KeyId>> = rows.iter().flat_map(|r| r.present.iter()).filter_map(|k| match intern::key_get(k) {
-                    intern::Key::Tuple(parts) if parts.len() == t.elts.len() => Some(parts.clone()),
-                    _ => None,
-                }).collect();
-                for (i, e) in t.elts.iter().enumerate() {
-                    let ast::Expr::Name(n) = e else { continue };
-                    let v = self.load_name(s(n.id.as_str()), &Node::none(), state);
-                    let lits = match &v.kv {
-                        KeyVal::Lit(k) => KeySet::from_vec(vec![*k]),
-                        KeyVal::Lits(ks) => ks.clone(),
-                        _ => continue,
-                    };
-                    let keep = lits.filter(|c| keys.iter().any(|k| k[i] == c));
-                    self.keep_lits(s(n.id.as_str()), &keep, state);
-                }
-            }
+        if let (ast::Expr::Tuple(t), true) = (left, member) {
+            self.narrow_tuple_parts(t, &recs, state);
         }
         if !recs.is_empty() {
             match &lv.kv {
                 // (the key is one of the literals or one of the objects: where it is in closed
                 // records, a literal they cannot have is not it; the objects stay)
                 KeyVal::Lit(_) | KeyVal::Lits(_) if !lit_only => {
-                    let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
-                    if member && rows.iter().all(|r| r.closed()) {
-                        let may = rows.iter().fold(KeySet::new(), |m, r| m.union(&r.present));
+                    if let (true, Some(may)) = (member, closed_keys(&recs, state)) {
                         let ks = match &lv.kv {
                             KeyVal::Lit(k) => KeySet::from_vec(vec![*k]),
                             KeyVal::Lits(ks) => ks.clone(),
@@ -738,12 +717,7 @@ impl Analyzer {
                 // an unknown key (data, or an unknown value's object) in closed dicts of string
                 // keys: one of those keys
                 KeyVal::KeysOf(_) | KeyVal::Data(_) | KeyVal::Bot if member && (lv.pts.is_empty() || lv.pts.iter().all(|o| self.heap.kind(o) == Kind::Unknown)) && !(lv.pts.is_empty() && lv.kv.is_bot()) => {
-                    let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
-                    if rows.iter().all(|r| r.closed()) {
-                        let mut may = KeySet::new();
-                        for r in &rows {
-                            may = may.union(&r.present);
-                        }
+                    if let Some(may) = closed_keys(&recs, state) {
                         if !may.is_empty() && may.iter().all(intern::key_is_str) {
                             self.narrow_key_expr(left, &lv, &may, &may, false, state);
                         } else if may.is_empty() {
@@ -752,15 +726,9 @@ impl Analyzer {
                     }
                 }
                 KeyVal::Lits(ks) if member => {
-                    let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
-                    if rows.iter().all(|r| r.closed()) {
-                        let mut may = KeySet::new();
-                        for r in &rows {
-                            may = may.union(&r.present);
-                        }
+                    if let Some(may) = closed_keys(&recs, state) {
                         let ks = ks.clone();
                         self.narrow_key_expr(left, &lv, &ks, &may, false, state);
-                    } else {
                     }
                 }
                 _ => {}
@@ -773,6 +741,27 @@ impl Analyzer {
             if let Some(ks) = ks {
                 self.narrow_kv(s(l.id.as_str()), &ks, member, state);
             }
+        }
+    }
+
+    /// `(a, b) in d` with `d` among closed records `recs`: each name of the tuple only the
+    /// literals some key has at its position (the objects stay).
+    fn narrow_tuple_parts(&mut self, t: &ast::ExprTuple, recs: &[u32], state: &mut State) {
+        let Some(may) = closed_keys(recs, state).filter(|_| !recs.is_empty()) else { return };
+        let keys: Vec<Vec<KeyId>> = may.iter().filter_map(|k| match intern::key_get(k) {
+            intern::Key::Tuple(parts) if parts.len() == t.elts.len() => Some(parts.clone()),
+            _ => None,
+        }).collect();
+        for (i, e) in t.elts.iter().enumerate() {
+            let ast::Expr::Name(n) = e else { continue };
+            let v = self.load_name(s(n.id.as_str()), &Node::none(), state);
+            let lits = match &v.kv {
+                KeyVal::Lit(k) => KeySet::from_vec(vec![*k]),
+                KeyVal::Lits(ks) => ks.clone(),
+                _ => continue,
+            };
+            let keep = lits.filter(|c| keys.iter().any(|k| k[i] == c));
+            self.keep_lits(s(n.id.as_str()), &keep, state);
         }
     }
 
@@ -967,4 +956,10 @@ fn membership_record(right: &'static ast::Expr) -> &'static ast::Expr {
 
 pub fn is_structural_qual(q: &str) -> bool {
     q.starts_with("collections.abc") || q.starts_with("typing") || q.starts_with("abc.") || q.starts_with("numbers") || q.starts_with("os.PathLike")
+}
+
+/// The keys closed records may have, all of them (None: one is open).
+fn closed_keys(recs: &[u32], state: &State) -> Option<KeySet> {
+    let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
+    rows.iter().all(|r| r.closed()).then(|| rows.iter().fold(KeySet::new(), |m, r| m.union(&r.present)))
 }
