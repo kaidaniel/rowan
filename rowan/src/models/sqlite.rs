@@ -1190,7 +1190,7 @@ fn sql_cmp(a: KeyId, b: KeyId) -> Option<std::cmp::Ordering> {
     }
     match ca {
         0 => Some(std::cmp::Ordering::Equal),
-        1 => crate::interp::exprs::literal_order(a, b),
+        1 => crate::interp::compare::literal_order(a, b),
         2 => Some(intern::key_as_str(a)?.cmp(&intern::key_as_str(b)?)),
         _ => None,
     }

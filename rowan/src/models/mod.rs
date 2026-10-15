@@ -1249,7 +1249,7 @@ fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let mut best = 0usize;
             let mut ok = true;
             for i in 1..items.len() {
-                match crate::interp::exprs::literal_order(keys[i].unwrap(), keys[best].unwrap()) {
+                match crate::interp::compare::literal_order(keys[i].unwrap(), keys[best].unwrap()) {
                     Some(std::cmp::Ordering::Greater) if is_max => best = i,
                     Some(std::cmp::Ordering::Less) if !is_max => best = i,
                     Some(_) => {}
@@ -2297,7 +2297,7 @@ fn format_fields(an: &mut Analyzer, st: &mut State, t: &str, c: &Call, mapping: 
             },
             _ => return None,
         };
-        let piece = if spec.is_empty() { Some(intern::key_py_str(k)) } else { crate::interp::exprs::format_spec_literal(k, &spec) };
+        let piece = if spec.is_empty() { Some(intern::key_py_str(k)) } else { crate::interp::ops::format_spec_literal(k, &spec) };
         push(&mut out, piece);
     }
     out
@@ -5528,10 +5528,10 @@ fn sorted_dict_items(an: &Analyzer, st: &State, a: &Value, c: &Call) -> Option<V
     let mut keys: Vec<KeyId> = row.present.iter().collect();
     for i in 0..keys.len() {
         for j in (i + 1)..keys.len() {
-            crate::interp::exprs::literal_order(keys[i], keys[j])?;
+            crate::interp::compare::literal_order(keys[i], keys[j])?;
         }
     }
-    keys.sort_by(|x, y| crate::interp::exprs::literal_order(*x, *y).unwrap());
+    keys.sort_by(|x, y| crate::interp::compare::literal_order(*x, *y).unwrap());
     let reverse = match c.kw("reverse") {
         None => false,
         Some(r) => intern::with_key(r.kv.as_lit()?, |kk| match kk { intern::Key::Bool(b) => Some(*b), _ => None })?,
@@ -5569,7 +5569,7 @@ fn literal_sort_order(an: &mut Analyzer, st: &mut State, c: &Call, items: &[Valu
     let reverse = c.kw("reverse").map(|r| matches!(r.kv.as_lit().map(|k| intern::with_key(k, |kk| matches!(kk, intern::Key::Bool(true)))), Some(true))).unwrap_or(false);
     let cmp = |a: &Vec<KeyId>, b: &Vec<KeyId>| -> Option<std::cmp::Ordering> {
         for (x, y) in a.iter().zip(b.iter()) {
-            match crate::interp::exprs::literal_order(*x, *y)? {
+            match crate::interp::compare::literal_order(*x, *y)? {
                 std::cmp::Ordering::Equal => continue,
                 o => return Some(o),
             }

@@ -1312,7 +1312,7 @@ fn set_members(state: &State, o: ObjId, n: usize) -> Option<Vec<crate::intern::K
         let sv = state.slot_opt(o, Ns::Pos, intern::key_int(i as i64))?;
         ms.push(sv.kv.as_lit().filter(|_| sv.pts.is_empty())?);
     }
-    ms.sort_by(|a, b| crate::interp::exprs::literal_order(*a, *b).unwrap_or_else(|| intern::key_repr(*a).cmp(&intern::key_repr(*b))));
+    ms.sort_by(|a, b| crate::interp::compare::literal_order(*a, *b).unwrap_or_else(|| intern::key_repr(*a).cmp(&intern::key_repr(*b))));
     ms.dedup();
     Some(ms)
 }

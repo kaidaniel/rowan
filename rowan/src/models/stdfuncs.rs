@@ -54,7 +54,7 @@ fn key_order(x: KeyId, y: KeyId) -> Option<Ordering> {
         }
         return Some(a.len().cmp(&b.len()));
     }
-    crate::interp::exprs::literal_order(x, y)
+    crate::interp::compare::literal_order(x, y)
 }
 
 /// The items of a list with known positions.
