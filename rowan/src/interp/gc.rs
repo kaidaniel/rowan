@@ -14,7 +14,7 @@ use crate::state::{Kind, State};
 impl Analyzer {
     /// Is `oid` reachable from a binding the program can still use: the locals of every
     /// active frame, cells, module objects, narrowed values, the return value?
-    pub fn is_live(&self, oid: ObjId, state: &State) -> bool {
+    pub(in crate::interp) fn is_live(&self, oid: ObjId, state: &State) -> bool {
         !self.live_among(&[oid], state).is_empty()
     }
 
@@ -22,14 +22,14 @@ impl Analyzer {
     /// length entry in the state, and only the collector (at returns and loop exits) forgets
     /// an object's facts: an object without them was never made on this path or was
     /// collected, and needs no reachability walk.
-    pub fn has_facts(&self, oid: ObjId, state: &State) -> bool {
+    pub(in crate::interp) fn has_facts(&self, oid: ObjId, state: &State) -> bool {
         state.lens.get(&oid).is_some() || state.has_row(oid, Ns::Item) || state.has_row(oid, Ns::Attr) || state.slots.has_key(&oid)
     }
 
     /// The roots of a reachability walk: the names, narrowed values and result of `state`, the
     /// names of the first `envs` callers, and the modules and cells of the first `frames`
     /// frames.
-    pub fn state_roots(&self, state: &State, envs: usize, frames: usize, work: &mut Vec<ObjId>) {
+    pub(in crate::interp) fn state_roots(&self, state: &State, envs: usize, frames: usize, work: &mut Vec<ObjId>) {
         // (a walk takes the last pushed first: the running code's names before the modules'
         // globals, where an object made again is most often still held)
         for fr in self.cx.frames.iter().take(frames) {
@@ -44,7 +44,7 @@ impl Analyzer {
 
     /// Which of `targets` the program can still reach (one walk from the roots for all; it
     /// stops when every one is found).
-    pub fn live_among(&self, targets: &[ObjId], state: &State) -> FxHashSet<ObjId> {
+    pub(in crate::interp) fn live_among(&self, targets: &[ObjId], state: &State) -> FxHashSet<ObjId> {
         let mut found: FxHashSet<ObjId> = FxHashSet::default();
         let mut work: Vec<ObjId> = Vec::new();
         self.state_roots(state, usize::MAX, usize::MAX, &mut work);
@@ -154,7 +154,7 @@ impl Analyzer {
     /// objects refer to, exceptions in flight, the callers' names, loop recency objects.
     /// `unwind`: for a raise state, only the first `unwind` callers' names, and no loop's recent
     /// objects (those still in use are reachable from the names).
-    pub fn gc_pinned(&self, work: &mut Vec<ObjId>, unwind: Option<usize>) {
+    pub(in crate::interp) fn gc_pinned(&self, work: &mut Vec<ObjId>, unwind: Option<usize>) {
         // (the side tables' entries: their keys themselves may be dead)
         self.side_edges(None, work);
         for v in self.unwind.cur_exc.iter().chain(self.unwind.tries.iter().flat_map(|t| t.recs.iter().map(|r| &r.2))).chain(self.unwind.handling_values.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
@@ -201,7 +201,7 @@ impl Analyzer {
     /// Recency abstraction, back-edge step: the recent objects allocated during a loop
     /// iteration are folded into their weak per-site summary objects, and every reference
     /// to them written during the iteration is re-pointed to the summary object.
-    pub fn rename_recent(&mut self, back: &mut State, head: &State, recs: Vec<(ObjId, Kind, String, String)>, mark: ObjId) {
+    pub(in crate::interp) fn rename_recent(&mut self, back: &mut State, head: &State, recs: Vec<(ObjId, Kind, String, String)>, mark: ObjId) {
         if recs.is_empty() {
             return;
         }
@@ -370,7 +370,7 @@ impl Analyzer {
     /// Objects made since the allocation serial `mark` that no root reaches lose their state
     /// (`drop_garbage_at_return`; at a loop's exit the roots are the frame's live names).
     /// `unwind`: a raise state, which only the first `unwind` callers' names outlive.
-    pub fn collect_since(&mut self, mark: u64, pre: &State, roots: Vec<u32>, state: &mut State, unwind: Option<usize>) {
+    pub(in crate::interp) fn collect_since(&mut self, mark: u64, pre: &State, roots: Vec<u32>, state: &mut State, unwind: Option<usize>) {
         // (nothing made since: nothing to collect)
         if self.heap.serial() <= mark {
             return;

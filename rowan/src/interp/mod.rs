@@ -102,28 +102,25 @@ pub enum FuncNode {
 }
 
 impl FuncNode {
-    pub fn params(&self) -> Option<&'static ast::Parameters> {
+    pub(in crate::interp) fn params(&self) -> Option<&'static ast::Parameters> {
         match self {
             FuncNode::Def(f) => Some(&f.parameters),
             FuncNode::Lambda(l) => l.parameters.as_deref(),
         }
     }
-    pub fn node(&self) -> Node {
+    pub(in crate::interp) fn node(&self) -> Node {
         match self {
             FuncNode::Def(f) => frontend::node(*f),
             FuncNode::Lambda(l) => frontend::node(*l),
         }
     }
-    pub fn is_lambda(&self) -> bool {
-        matches!(self, FuncNode::Lambda(_))
-    }
-    pub fn addr(&self) -> usize {
+    pub(in crate::interp) fn addr(&self) -> usize {
         match self {
             FuncNode::Def(f) => *f as *const _ as usize,
             FuncNode::Lambda(l) => *l as *const _ as usize,
         }
     }
-    pub fn body(&self) -> &'static [ast::Stmt] {
+    pub(in crate::interp) fn body(&self) -> &'static [ast::Stmt] {
         match self {
             FuncNode::Def(f) => &f.body,
             FuncNode::Lambda(_) => &[],
@@ -409,7 +406,7 @@ impl Analyzer {
     /// Past the deadline a statement in a function body does not run: its path ends, and
     /// the call it belongs to is replaced by an unknown call (`call_user`). Module code goes on
     /// (its calls are unknown calls). Checked every 64 statements.
-    pub fn cut_body(&mut self, state: &mut State) -> bool {
+    pub(in crate::interp) fn cut_body(&mut self, state: &mut State) -> bool {
         if !self.budget.tick() {
             return false;
         }

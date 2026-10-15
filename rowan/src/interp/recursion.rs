@@ -39,18 +39,18 @@ pub struct Recursion {
 }
 
 impl Recursion {
-    pub fn is_active(&self, key: &ActKey) -> bool {
+    pub(in crate::interp) fn is_active(&self, key: &ActKey) -> bool {
         self.active.contains(key)
     }
 
     /// How many activations of `foid` are running.
-    pub fn depth(&self, foid: ObjId) -> usize {
+    pub(in crate::interp) fn depth(&self, foid: ObjId) -> usize {
         self.by_func.get(&foid).map(|v| v.len()).unwrap_or(0)
     }
 
     /// An activation begins: its arguments, the heap before its parameters are bound, and the
     /// birth mark then.
-    pub fn begin(&mut self, key: &ActKey, entry: (Option<Value>, Vec<Value>, IndexMap<StrId, Value>), pre: std::rc::Rc<State>, mark: u64) {
+    pub(in crate::interp) fn begin(&mut self, key: &ActKey, entry: (Option<Value>, Vec<Value>, IndexMap<StrId, Value>), pre: std::rc::Rc<State>, mark: u64) {
         self.active.insert(key.clone());
         self.by_func.entry(key.0).or_default().push(key.clone());
         self.entry.insert(key.clone(), entry);
@@ -58,7 +58,7 @@ impl Recursion {
     }
 
     /// The activation ends.
-    pub fn end(&mut self, key: &ActKey) {
+    pub(in crate::interp) fn end(&mut self, key: &ActKey) {
         self.active.remove(key);
         if let Some(lst) = self.by_func.get_mut(&key.0) {
             lst.pop();

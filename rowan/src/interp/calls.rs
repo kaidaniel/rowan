@@ -98,7 +98,7 @@ impl Analyzer {
     /// states joined (`keep`: the state as it is is one more, where none runs); the results
     /// of those that return (a callee that raises on every path returns nothing: `A(x)` whose
     /// `__init__` always fails gives no A).
-    pub fn alternatives(&mut self, n: usize, keep: bool, state: &mut State, run: &mut dyn FnMut(&mut Analyzer, usize, &mut State) -> Value) -> Value {
+    pub(in crate::interp) fn alternatives(&mut self, n: usize, keep: bool, state: &mut State, run: &mut dyn FnMut(&mut Analyzer, usize, &mut State) -> Value) -> Value {
         if n == 1 && !keep {
             return run(self, 0, state);
         }
@@ -269,7 +269,7 @@ impl Analyzer {
 
     /// A model call: objects it allocates at one site stay distinct from each other (one
     /// weak object) even while only the model's own code holds them.
-    pub fn run_model(&mut self, m: crate::models::Model, state: &mut State, call: &Call) -> Value {
+    pub(in crate::interp) fn run_model(&mut self, m: crate::models::Model, state: &mut State, call: &Call) -> Value {
         if self.cx.model_depth == 0 {
             self.cx.model_epoch += 1;
         }
@@ -572,7 +572,7 @@ impl Analyzer {
         new_fr
     }
 
-    pub fn in_method_frame(&mut self, foid: u32, self_v: Value, args: Vec<Value>, state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &mut State)) {
+    pub(in crate::interp) fn in_method_frame(&mut self, foid: u32, self_v: Value, args: Vec<Value>, state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &mut State)) {
         let fi = self.heap.func_info(foid);
         let ctx = self.frame().ctx.clone();
         let mut new_fr = Frame::new(FrameKind::Function, fi.scope, fi.module, &ctx, false, &fi.qualname);
@@ -594,7 +594,7 @@ impl Analyzer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn bind_params(&mut self, fi: &FuncInfo, self_v: &Option<Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) {
+    pub(in crate::interp) fn bind_params(&mut self, fi: &FuncInfo, self_v: &Option<Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) {
         let bound = self.compute_bindings(fi, self_v, args, kwargs, star_args, star_kwargs, state, node);
         for (name, v) in bound {
             self.store_name(name, v, state);
@@ -603,7 +603,7 @@ impl Analyzer {
 
     /// Parameter name -> argument value (allocating the *args tuple / **kwargs dict in `state`).
     #[allow(clippy::too_many_arguments)]
-    pub fn compute_bindings(&mut self, fi: &FuncInfo, self_v: &Option<Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> IndexMap<StrId, Value> {
+    pub(in crate::interp) fn compute_bindings(&mut self, fi: &FuncInfo, self_v: &Option<Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> IndexMap<StrId, Value> {
         let mut bound: IndexMap<StrId, Value> = IndexMap::new();
         let Some(a) = fi.node.params() else {
             return bound;

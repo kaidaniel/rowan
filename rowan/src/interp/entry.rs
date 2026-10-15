@@ -361,7 +361,7 @@ impl Analyzer {
         }
     }
 
-    pub fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
+    pub(in crate::interp) fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
         let node = Self::strip_annotation(ann)?;
         if let Some(v) = crate::models::torch::t_param(self, ann, fi, pname, state) {
             return Some(v);
@@ -430,7 +430,7 @@ impl Analyzer {
         None
     }
 
-    pub fn fresh_instance(&mut self, cls_oid: ObjId, state: &mut State, ctx: &str) -> ObjId {
+    pub(in crate::interp) fn fresh_instance(&mut self, cls_oid: ObjId, state: &mut State, ctx: &str) -> ObjId {
         let ci = self.heap.class_info(cls_oid);
         if self.entry.fresh_in_progress.contains(&cls_oid) {
             // self-referential annotation: open instance

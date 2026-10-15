@@ -512,7 +512,7 @@ impl Analyzer {
 
     /// The attribute names the methods of `cls` (and its bases) other than `__init__` store on
     /// some object, and those they delete.
-    pub fn attrs_set_by_methods(&mut self, cls: ObjId, state: &State) -> (Vec<KeyId>, Vec<KeyId>) {
+    pub(in crate::interp) fn attrs_set_by_methods(&mut self, cls: ObjId, state: &State) -> (Vec<KeyId>, Vec<KeyId>) {
         let (mut out, mut del): (FxHashSet<StrId>, FxHashSet<StrId>) = Default::default();
         for c in self.heap.mro(cls) {
             for (k, v) in state.obj_slots(c, Ns::Attr) {
@@ -542,7 +542,7 @@ impl Analyzer {
     /// the attribute names it may store and delete, and all the names it uses on it (what it
     /// can reach through the receiver is under those). None: anything (the receiver escapes,
     /// the class hooks attribute access or has a base rowan does not see, a descriptor).
-    pub fn receiver_effects(&mut self, foid: ObjId, recv: ObjId) -> Option<RecvEffects> {
+    pub(in crate::interp) fn receiver_effects(&mut self, foid: ObjId, recv: ObjId) -> Option<RecvEffects> {
         let cls = self.heap.instance_class(recv)?;
         let mro = self.heap.mro(cls);
         if mro.iter().any(|c| self.heap.class_info_opt(*c).is_none_or(|ci| ci.open_base)) || ["__getattr__", "__getattribute__", "__setattr__", "__delattr__"].iter().any(|h| self.class_lookup(cls, h).is_some()) {
@@ -601,7 +601,7 @@ impl Analyzer {
 
     /// The attribute names a method's own code stores on its receiver on every way it
     /// completes: the top-level `self.x = …` statements before any statement that may return.
-    pub fn must_stores(&self, foid: ObjId) -> Vec<KeyId> {
+    pub(in crate::interp) fn must_stores(&self, foid: ObjId) -> Vec<KeyId> {
         let Payload::Func(fi) = &self.heap.obj(foid).payload else { return Vec::new() };
         let (super::FuncNode::Def(f), Some(me)) = (fi.node, fi.node.params().and_then(|p| p.posonlyargs.iter().chain(p.args.iter()).next())) else { return Vec::new() };
         let me = me.parameter.name.id.as_str();
@@ -646,7 +646,7 @@ impl Analyzer {
     /// name holds is taken as fixed (rebinding a function or class is monkey-patching), and
     /// methods called by a computed name are not followed; the code in the data those values
     /// hold is followed where the call is (`skipped_call`).
-    pub fn code_closure(&mut self, roots: &[ObjId], state: &State) -> std::rc::Rc<Closure> {
+    pub(in crate::interp) fn code_closure(&mut self, roots: &[ObjId], state: &State) -> std::rc::Rc<Closure> {
         if let Some(c) = self.effects.closures.get(roots) {
             return c.clone();
         }

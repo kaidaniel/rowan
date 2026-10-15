@@ -375,7 +375,7 @@ impl Analyzer {
         }
     }
 
-    pub fn eval_key(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {
+    pub(in crate::interp) fn eval_key(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {
         match node {
             ast::Expr::Tuple(t) => {
                 let parts: Vec<Value> = t.elts.iter().map(|e| self.eval(e, state)).collect();
@@ -489,7 +489,7 @@ impl Analyzer {
     /// `xs[lo:hi]` with constant bounds on one list/tuple with known positions: a container
     /// with the selected positions.
     /// The single known int an expression evaluates to.
-    pub fn int_value(&mut self, e: &'static ast::Expr, state: &mut State) -> Option<i64> {
+    pub(in crate::interp) fn int_value(&mut self, e: &'static ast::Expr, state: &mut State) -> Option<i64> {
         let v = self.eval(e, state);
         if !v.pts.is_empty() {
             return None;
@@ -901,11 +901,11 @@ impl Analyzer {
     /// An instance whose class (or a base) defines `__bool__` or `__len__`.
     /// An instance of a class deriving from a class rowan does not see (a builtin, a library
     /// class): the base may define what the class body does not.
-    pub fn external_based(&self, oid: u32) -> bool {
+    pub(in crate::interp) fn external_based(&self, oid: u32) -> bool {
         self.heap.instance_class(oid).is_some_and(|c| self.heap.mro(c).iter().any(|x| self.heap.class_info_opt(*x).is_some_and(|ci| ci.open_base || ci.lib.dict_base)))
     }
 
-    pub fn has_truth_dunder(&self, oid: u32) -> bool {
+    pub(in crate::interp) fn has_truth_dunder(&self, oid: u32) -> bool {
         match self.heap.instance_class(oid) {
             Some(c) => self.class_lookup(c, "__bool__").is_some() || self.class_lookup(c, "__len__").is_some(),
             None => false,
@@ -1708,7 +1708,7 @@ pub(crate) fn format_spec_literal(k: KeyId, spec: &str) -> Option<String> {
 impl Analyzer {
     /// `a op b` where every object `a` (or else `b`) may be is an instance of a class defining
     /// `__op__` (`__rop__`): that method's result. None: not decided this way.
-    pub fn binop_dunder(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Option<Value> {
+    pub(in crate::interp) fn binop_dunder(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Option<Value> {
         use ast::Operator as O;
         let name = match op {
             O::Add => "add",
@@ -1801,7 +1801,7 @@ impl Analyzer {
     /// `a OP b` where an operand is an instance with comparison methods: the method, else the
     /// other's reflected one, else what `@functools.total_ordering` derives, else identity for
     /// `==` / `!=` (None: not such a comparison).
-    pub fn rich_compare(&mut self, op: ast::CmpOp, a: &Value, b: &Value, node: &Node, state: &mut State) -> Option<Value> {
+    pub(in crate::interp) fn rich_compare(&mut self, op: ast::CmpOp, a: &Value, b: &Value, node: &Node, state: &mut State) -> Option<Value> {
         // (one of several values, some of them instances of the program's classes: each
         // compared on its own path)
         let user = |an: &Analyzer, o: ObjId| an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).is_some();

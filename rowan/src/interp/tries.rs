@@ -119,7 +119,7 @@ pub enum Finally {
 }
 
 impl Finally {
-    pub fn is_empty(&self) -> bool {
+    pub(in crate::interp) fn is_empty(&self) -> bool {
         match self {
             Finally::Block(b) => b.is_empty(),
             Finally::Exit(m) => m.is_empty(),
@@ -127,7 +127,7 @@ impl Finally {
     }
 
     /// A `return` / `break` / `continue` in it ends an exception passing through.
-    pub fn swallows(&self) -> bool {
+    pub(in crate::interp) fn swallows(&self) -> bool {
         match self {
             Finally::Block(b) => contains_return(b) || contains_jump(b),
             Finally::Exit(_) => false,
@@ -203,7 +203,7 @@ impl Analyzer {
     /// An exception raised here (`cur_exc`, of class `cur_exc_cls`) enters the innermost
     /// running try: its handlers and finally start from this state (with the try frame's
     /// locals when the raise is inside a callee). False: no try is running.
-    pub fn record_raise_state(&mut self, state: &mut State) -> bool {
+    pub(in crate::interp) fn record_raise_state(&mut self, state: &mut State) -> bool {
         let exc = self.unwind.cur_exc.take().unwrap_or_else(|| Value::data("exception"));
         let cls = self.unwind.cur_exc_cls.take().or_else(|| self.exc_value_names(&exc));
         let Some(t) = self.unwind.tries.last() else { return false };
@@ -252,12 +252,12 @@ impl Analyzer {
     }
 
     /// Does some running try's guard catch exceptions of this class?
-    pub fn class_guarded(&self, c: &super::ExcNames) -> bool {
+    pub(in crate::interp) fn class_guarded(&self, c: &super::ExcNames) -> bool {
         self.guards().any(|g| g.contains("*") || c.0.iter().any(|n| g.contains(n)) || (!c.1 && (g.contains("Exception") || g.contains("BaseException"))))
     }
 
     /// The class names of an exception value (one class; None: not known).
-    pub fn exc_value_names(&self, v: &Value) -> Option<super::ExcNames> {
+    pub(in crate::interp) fn exc_value_names(&self, v: &Value) -> Option<super::ExcNames> {
         if !v.kv.is_bot() || v.pts.is_empty() {
             return None;
         }
@@ -283,7 +283,7 @@ impl Analyzer {
     }
 
     /// The names of a user exception class's MRO, with the builtin bases' names.
-    pub fn exc_class_names(&self, cls: u32) -> Option<super::ExcNames> {
+    pub(in crate::interp) fn exc_class_names(&self, cls: u32) -> Option<super::ExcNames> {
         let mro = self.heap.mro(cls);
         let mut names: Vec<String> = Vec::new();
         let mut complete = true;
@@ -401,7 +401,7 @@ impl Analyzer {
     /// A finally block run on the way out of its try (not again by a `break` / `continue`
     /// inside it); for a with statement, the managers' `__exit__` (innermost first), with an
     /// unknown exception on an exceptional way out.
-    pub fn run_finally(&mut self, fin: &std::rc::Rc<Finally>, st: &mut State, exc: bool) {
+    pub(in crate::interp) fn run_finally(&mut self, fin: &std::rc::Rc<Finally>, st: &mut State, exc: bool) {
         let idx: Vec<usize> = self.unwind.finally_stack.iter().enumerate().filter(|(_, (_, b, a))| *a && std::rc::Rc::ptr_eq(b, fin)).map(|(i, _)| i).collect();
         for i in &idx {
             self.unwind.finally_stack[*i].2 = false;

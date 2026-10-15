@@ -54,14 +54,14 @@ pub fn any_object(heap: &mut Heap) -> ObjId {
 
 impl Havoc {
     /// A new havoc walk: the objects it meets are marked with its number (`walk_from`).
-    pub fn new_walk(&mut self) -> u32 {
+    pub(in crate::interp) fn new_walk(&mut self) -> u32 {
         self.walks += 1;
         self.walks
     }
 
     /// Unknown code ran on `vals`, past the objects walk `walk` met already (marking those it
     /// meets; the code met is added to `code`).
-    pub fn walk_from(&mut self, heap: &mut Heap, vals: &[Value], rid: ObjId, site: StrId, state: &mut State, walk: u32) {
+    pub(in crate::interp) fn walk_from(&mut self, heap: &mut Heap, vals: &[Value], rid: ObjId, site: StrId, state: &mut State, walk: u32) {
         let mut roots: Vec<ObjId> = vals.iter().flat_map(|v| v.pts.iter()).collect();
         roots.sort_unstable();
         roots.dedup();
@@ -330,13 +330,13 @@ impl Analyzer {
     }
 
     /// The shared unknown object (`any_object`).
-    pub fn is_any(&self, o: ObjId) -> bool {
+    pub(in crate::interp) fn is_any(&self, o: ObjId) -> bool {
         crate::state::is_any(o)
     }
 
     /// `v` passes to unknown code without a call (stored into an object only unknown code
     /// holds): what it reaches may change, and the code it holds may run.
-    pub fn escape(&mut self, v: &Value, site: &str, state: &mut State) {
+    pub(in crate::interp) fn escape(&mut self, v: &Value, site: &str, state: &mut State) {
         if v.pts.is_empty() {
             return;
         }
@@ -350,7 +350,7 @@ impl Analyzer {
         }
     }
 
-    pub fn reachable_records(&self, vals: &[Value], state: &State, depth: u32) -> Vec<(u32, Ns)> {
+    pub(in crate::interp) fn reachable_records(&self, vals: &[Value], state: &State, depth: u32) -> Vec<(u32, Ns)> {
         let mut out: Vec<(u32, Ns)> = Vec::new();
         let mut seen: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
         let mut work: Vec<(u32, u32)> = vals.iter().flat_map(|v| v.pts.iter().map(|o| (o, 0u32)).collect::<Vec<_>>()).collect();
@@ -378,7 +378,7 @@ impl Analyzer {
     /// may have changed. Records get the call as a mutator (any key may have been added or
     /// removed), every slot of a mutable object may now hold the call's result `rid` (any value),
     /// lists and sets any items and any length. Modules, classes and functions are not entered.
-    pub fn havoc_reachable(&mut self, vals: &[Value], rid: ObjId, site: StrId, state: &mut State) {
+    pub(in crate::interp) fn havoc_reachable(&mut self, vals: &[Value], rid: ObjId, site: StrId, state: &mut State) {
         self.havoc.code.clear();
         let walk = self.havoc.new_walk();
         self.havoc.walk_from(&mut self.heap, vals, rid, site, state, walk);
@@ -411,7 +411,7 @@ impl Analyzer {
     }
 
     /// Drop the facts whose test read one of `objs`.
-    pub fn kill_facts_on(&mut self, objs: &[u32], state: &mut State) {
+    pub(in crate::interp) fn kill_facts_on(&mut self, objs: &[u32], state: &mut State) {
         if objs.is_empty() || state.facts.is_empty() {
             return;
         }

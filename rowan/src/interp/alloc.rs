@@ -13,12 +13,12 @@ use crate::state::{Kind, State};
 
 impl Analyzer {
     // ------------------------------------------------------------ allocation
-    pub fn alloc_global(&mut self, kind: Kind, site: &str, label: &str, payload: Payload) -> ObjId {
+    pub(in crate::interp) fn alloc_global(&mut self, kind: Kind, site: &str, label: &str, payload: Payload) -> ObjId {
         let label = if label.is_empty() { site } else { label };
         self.heap.alloc_raw(kind, site, "", true, label, payload)
     }
 
-    pub fn site_of(&self, node: &Node) -> String {
+    pub(in crate::interp) fn site_of(&self, node: &Node) -> String {
         site_string(node)
     }
 

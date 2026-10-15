@@ -1,7 +1,36 @@
-//! What the library models (`models/`), the report and the driver may use of the interpreter
-//! beyond the `Heap`, their own `models::Tables` and the evaluation methods (`eval`,
-//! `call_value`, `iterate`, `load_attr`, `alloc_at`, `raise_here`, …): the components'
-//! state is the interpreter's own (`pub(in crate::interp)`), read and changed through these.
+//! The interpreter's interface to the library models (`models/`), the report and the driver.
+//! The components' state (`program`, `findings`, `names`, `budget`, `recursion`, `entry`,
+//! `gens`, `unwind`, `cx`, `mode`, …) is the interpreter's own (`pub(in crate::interp)`), and
+//! so are its methods unless marked `pub`. A model sees:
+//!
+//! * the `Heap` (objects, payloads, lengths, class attributes, keys standing for objects) and
+//!   its own `models::Tables`;
+//! * the methods in this file: modules and models, frames, branches, entry runs, notes, guarded
+//!   reads, raises with an exception object, catching frames, plain setattr, symbols;
+//! * the interpreter's `pub` methods, which are these:
+//!   - evaluation: `eval`, `exec_block`, `run_module`, `stmt_try_parts`, `load_name`, `frame`,
+//!     `frame_mut`;
+//!   - reads and writes: `load_attr`, `load_item`, `store_attr`, `store_item`, `store_key`,
+//!     `delete_item`, `copy_into`, `copy_object`, `method_value`, `class_lookup`, the literal
+//!     views (`lit_keys`, `literal_mapping`, `literal_dict_items`, `maybe_dict_items`,
+//!     `known_members`, `known_positions`, `all_values`, `record_objects`) and their writers
+//!     (`set_members`, `set_positions`, `normalize_set`, `literal_set`), keys (`unkey`,
+//!     `opaque_key`, `value_key`, `rename_kv`), `path_placeholder_value`;
+//!   - operations: `binop`, `truthiness`, `truth_of`, `instance_less`, `isinstance_classes`,
+//!     `instance_of`, `hierarchy_closed`;
+//!   - iteration: `iterate`, `unpack`, `elem_of`, `elem_value`, `consume_lazy`, `cursor_of`,
+//!     `set_cursor`, `exhaust`;
+//!   - calls: `call_value`, `call_one`, `call_user`, `call_external`, `unknown_call`,
+//!     `construct`, `call_method_if_defined`, `call_method_with`, `run_dunder`,
+//!     `decorator_qualname`;
+//!   - allocation: `alloc`, `alloc_at`, `alloc_simple`, `alloc_instance`, `alloc_positional`,
+//!     `alloc_positional_sfx`, `unknown_source`, `strongable`;
+//!   - raises: `raise_here`, `may_raise_here`, `flag_may_raise`, `enter_try`, `leave_try`,
+//!     `reraise_rec`, `guards`;
+//!   - verdicts and requirements: `verdict`, `verdict_guarded`, `is_guarded`,
+//!     `require_providers`, `require_providers_k`;
+//!   - also `obj_edges` (what an object refers to), `strip_annotation`, `slice_label_bounds`,
+//!     and the driver's `run`.
 
 use indexmap::IndexMap;
 

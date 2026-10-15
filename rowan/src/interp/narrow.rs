@@ -27,7 +27,7 @@ pub struct Split {
 
 impl Analyzer {
     /// Evaluate `test` once from `st`, splitting the state by its truth.
-    pub fn split(&mut self, test: &'static ast::Expr, mut st: State) -> Split {
+    pub(in crate::interp) fn split(&mut self, test: &'static ast::Expr, mut st: State) -> Split {
         match test {
             ast::Expr::UnaryOp(u) if u.op == ast::UnaryOp::Not => {
                 let sp = self.split(&u.operand, st);
@@ -69,7 +69,7 @@ impl Analyzer {
     /// `a and b …` / `a or b …` from `st`: its value, the state where the last operand ran to
     /// its end (narrowed by it too when `test`), and the join of the states where an earlier
     /// operand ended it.
-    pub fn boolop(&mut self, b: &'static ast::ExprBoolOp, mut st: State, test: bool) -> (Value, State, Option<State>) {
+    pub(in crate::interp) fn boolop(&mut self, b: &'static ast::ExprBoolOp, mut st: State, test: bool) -> (Value, State, Option<State>) {
         let is_and = b.op == ast::BoolOp::And;
         let mut v = Value::new();
         let mut stops: Option<State> = None;
@@ -452,7 +452,7 @@ impl Analyzer {
         }
     }
 
-    pub fn narrow_isinstance_value(&mut self, cur: &Value, cls_expr: &'static ast::Expr, truth: bool, state: &mut State, store: StoreTarget) {
+    pub(in crate::interp) fn narrow_isinstance_value(&mut self, cur: &Value, cls_expr: &'static ast::Expr, truth: bool, state: &mut State, store: StoreTarget) {
         let Some(cv) = self.traced(cls_expr) else { return };
         let Some(classes) = self.isinstance_classes(&cv, state) else { return };
         let keep: Vec<u32> = cur.pts.iter().filter(|o| self.instance_of(*o, &classes, state) != Some(!truth)).collect();
@@ -578,7 +578,7 @@ impl Analyzer {
         true
     }
 
-    pub fn is_subclass(&self, cls: u32, base: u32) -> bool {
+    pub(in crate::interp) fn is_subclass(&self, cls: u32, base: u32) -> bool {
         let mut seen: Vec<u32> = Vec::new();
         let mut order = vec![cls];
         while !order.is_empty() {
@@ -779,7 +779,7 @@ impl Analyzer {
         self.narrow_kv(name, &KeySet::from_vec(keep), true, state);
     }
 
-    pub fn narrow_kv(&mut self, name: StrId, keys: &KeySet, restrict: bool, state: &mut State) {
+    pub(in crate::interp) fn narrow_kv(&mut self, name: StrId, keys: &KeySet, restrict: bool, state: &mut State) {
         if keys.is_empty() {
             return;
         }
@@ -819,7 +819,7 @@ impl Analyzer {
         }
     }
 
-    pub fn narrow_record(&mut self, rec: &Value, ns: Ns, k: KeyId, member: bool, state: &mut State) {
+    pub(in crate::interp) fn narrow_record(&mut self, rec: &Value, ns: Ns, k: KeyId, member: bool, state: &mut State) {
         let targets: Vec<u32> = rec.pts.iter().filter(|o| self.heap.is_record_like(*o)).collect();
         let single = targets.len() == 1;
         for oid in targets {
@@ -850,7 +850,7 @@ impl Analyzer {
     }
 
     /// A key proven on a view of a record is proven on the record it was derived from.
-    pub fn propagate_narrowing(&mut self, oid: u32, ns: Ns, k: KeyId, state: &mut State) {
+    pub(in crate::interp) fn propagate_narrowing(&mut self, oid: u32, ns: Ns, k: KeyId, state: &mut State) {
         let mut src = self.heap.obj(oid).derived_from;
         let mut seen: Vec<u32> = Vec::new();
         while let Some(sid) = src {

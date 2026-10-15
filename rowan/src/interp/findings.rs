@@ -41,7 +41,7 @@ pub struct Verdict {
 }
 
 impl Verdict {
-    pub fn dedupe_key(&self) -> (String, u32, u32, String, Tier, ObjId, Chain) {
+    pub(in crate::interp) fn dedupe_key(&self) -> (String, u32, u32, String, Tier, ObjId, Chain) {
         (self.file.clone(), self.line, self.col, intern::key_repr(self.key), self.tier, self.oid, self.chain.clone())
     }
 }
@@ -121,17 +121,17 @@ pub struct Findings {
 }
 
 impl Findings {
-    pub fn verdicts(&self) -> &[Verdict] {
+    pub(in crate::interp) fn verdicts(&self) -> &[Verdict] {
         &self.verdicts
     }
 
     /// A mark to drop the verdicts recorded after it (`drop_since`).
-    pub fn mark(&self) -> usize {
+    pub(in crate::interp) fn mark(&self) -> usize {
         self.verdicts.len()
     }
 
     /// Record the verdict `make` builds, unless one with the same key is recorded.
-    pub fn add(&mut self, key: (String, u32, u32, String, Tier, ObjId, Chain), make: impl FnOnce() -> Verdict) {
+    pub(in crate::interp) fn add(&mut self, key: (String, u32, u32, String, Tier, ObjId, Chain), make: impl FnOnce() -> Verdict) {
         if self.keys.contains(&key) {
             return;
         }
@@ -140,18 +140,18 @@ impl Findings {
     }
 
     /// Forget the verdicts recorded since `mark` (a run whose states a later run supersedes).
-    pub fn drop_since(&mut self, mark: usize) {
+    pub(in crate::interp) fn drop_since(&mut self, mark: usize) {
         for v in self.verdicts.drain(mark..) {
             self.keys.remove(&v.dedupe_key());
         }
     }
 
-    pub fn notes(&self) -> &[String] {
+    pub(in crate::interp) fn notes(&self) -> &[String] {
         &self.notes
     }
 
     /// A note for the report (once each; none in a quiet run).
-    pub fn note(&mut self, msg: String) {
+    pub(in crate::interp) fn note(&mut self, msg: String) {
         if self.quiet {
             return;
         }
@@ -217,7 +217,7 @@ impl Analyzer {
         self.mode.verdict_guarded = saved;
     }
 
-    pub fn node_text(&self, node: &Node) -> String {
+    pub(in crate::interp) fn node_text(&self, node: &Node) -> String {
         if node.addr == 0 {
             return String::new();
         }
@@ -227,7 +227,7 @@ impl Analyzer {
         if t.contains('\n') { t.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ") } else { t }
     }
 
-    pub fn record_fact(&mut self, node: &Node, name: StrId, v: &Value, state: &State) {
+    pub(in crate::interp) fn record_fact(&mut self, node: &Node, name: StrId, v: &Value, state: &State) {
         if !self.findings.facts_on || node.addr == 0 || self.findings.quiet {
             return;
         }
@@ -337,7 +337,7 @@ impl Analyzer {
 
     /// What a value is, for the golden harness's `#@value` checks: literals it may be, whether
     /// it may also be something unknown, and the (known) objects it may be.
-    pub fn value_info(&self, v: &Value, state: &State) -> ValueInfo {
+    pub(in crate::interp) fn value_info(&self, v: &Value, state: &State) -> ValueInfo {
         let mut info = ValueInfo::default();
         if v.kv.is_literal() {
             info.lits = crate::domain::kv_literals(&v.kv).iter().collect();
@@ -359,7 +359,7 @@ impl Analyzer {
     }
 
     /// Row-check support for the golden harness: after a statement at a requested line.
-    pub fn after_stmt(&mut self, stmt: &ast::Stmt, state: &mut State) {
+    pub(in crate::interp) fn after_stmt(&mut self, stmt: &ast::Stmt, state: &mut State) {
         if self.findings.row_check_requests.is_empty() || self.findings.quiet {
             return;
         }

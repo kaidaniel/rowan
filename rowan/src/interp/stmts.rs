@@ -22,7 +22,7 @@ impl Analyzer {
         }
     }
 
-    pub fn exec_stmt(&mut self, node: &'static ast::Stmt, state: &mut State) {
+    pub(in crate::interp) fn exec_stmt(&mut self, node: &'static ast::Stmt, state: &mut State) {
         self.budget.charge(self.cx.frames.last().map(|f| f.code).unwrap_or(0));
         if self.cut_body(state) {
             return;

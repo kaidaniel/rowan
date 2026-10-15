@@ -32,26 +32,22 @@ pub struct YieldStates {
 }
 
 impl YieldStates {
-    pub fn len(&self) -> usize {
+    pub(in crate::interp) fn len(&self) -> usize {
         self.list.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.list.is_empty()
-    }
-
-    pub fn push(&mut self, key: YieldKey, st: State) {
+    pub(in crate::interp) fn push(&mut self, key: YieldKey, st: State) {
         self.first.entry(key.clone()).or_insert(self.list.len());
         self.list.push((key, st));
     }
 
     /// The first state recorded under `key`.
-    pub fn get_mut(&mut self, key: &YieldKey) -> Option<&mut State> {
+    pub(in crate::interp) fn get_mut(&mut self, key: &YieldKey) -> Option<&mut State> {
         let i = *self.first.get(key)?;
         Some(&mut self.list[i].1)
     }
 
-    pub fn states(&self) -> impl Iterator<Item = &State> {
+    pub(in crate::interp) fn states(&self) -> impl Iterator<Item = &State> {
         self.list.iter().map(|(_, s)| s)
     }
 }
@@ -164,7 +160,7 @@ pub struct Gens {
 
 impl Gens {
     /// A running generator that yielded reads `o` (one key, or all of it).
-    pub fn read(&mut self, o: ObjId, k: Option<crate::state::SlotKey>) {
+    pub(in crate::interp) fn read(&mut self, o: ObjId, k: Option<crate::state::SlotKey>) {
         for (_, yielded, reads) in self.reads.iter_mut() {
             if *yielded {
                 reads.insert((o, k));
@@ -212,7 +208,7 @@ impl Analyzer {
     /// Runs the bodies of the generators among `v` not run yet, from this state. `between`:
     /// the consumer runs code between the items (a loop, `next`), which may change what the
     /// generator reads after a yield: watched (`gen_watch`, `with_gen_restart`).
-    pub fn force_gen(&mut self, v: &Value, state: &mut State, between: bool) {
+    pub(in crate::interp) fn force_gen(&mut self, v: &Value, state: &mut State, between: bool) {
         for o in v.pts.iter() {
             let (lazy, run) = lazy_state(state, o);
             if !state.reachable || !lazy {
@@ -366,7 +362,7 @@ impl Analyzer {
     /// of its yields (`gen_havoc`; at most three rounds, then everything it reaches). `close`:
     /// the generators run in `body` are used up or out of reach after it (a loop without
     /// `break`, a call's end): no later code changes anything for them.
-    pub fn with_gen_restart(&mut self, state: &mut State, close: bool, body: &mut dyn FnMut(&mut Analyzer, &mut State)) {
+    pub(in crate::interp) fn with_gen_restart(&mut self, state: &mut State, close: bool, body: &mut dyn FnMut(&mut Analyzer, &mut State)) {
         let pre = state.copy();
         let vmark = self.findings.mark();
         let mmark = self.program.modules.len();
@@ -464,7 +460,7 @@ impl Analyzer {
     /// A loop used up the generators among `used`: no later code runs between their items. Those
     /// that saw no change by `fin` are no longer watched; the others are left to the run that
     /// made them, to run again.
-    pub fn gen_used_up(&mut self, used: &crate::domain::ObjSet, fin: &State) {
+    pub(in crate::interp) fn gen_used_up(&mut self, used: &crate::domain::ObjSet, fin: &State) {
         let mut i = 0;
         while i < self.gens.watch.len() {
             if used.contains(self.gens.watch[i].gid) && self.gen_interference_of(i, fin, false).is_empty() {
@@ -577,7 +573,7 @@ impl Analyzer {
 
     /// Code `site` may have changed these objects in any way (not the objects they hold): any
     /// key, any value (`rid`), any length.
-    pub fn change_objects(&mut self, objs: &[ObjId], rid: ObjId, site: intern::StrId, state: &mut State) {
+    pub(in crate::interp) fn change_objects(&mut self, objs: &[ObjId], rid: ObjId, site: intern::StrId, state: &mut State) {
         for &o in objs {
             for ns in [Ns::Item, Ns::Attr] {
                 if state.has_row(o, ns) {
@@ -720,7 +716,7 @@ impl Analyzer {
     }
 
     /// `set_cursor`; `at_end`: used up (its length may not be known).
-    pub fn set_cursor_ex(&mut self, o: u32, c: Option<usize>, at_end: bool, state: &mut State) {
+    pub(in crate::interp) fn set_cursor_ex(&mut self, o: u32, c: Option<usize>, at_end: bool, state: &mut State) {
         let cv = match c {
             Some(n) => Value::lit(key_int(n as i64)),
             None => Value::data(if at_end { "cursor-end" } else { "cursor" }),

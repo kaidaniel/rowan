@@ -48,7 +48,7 @@ impl Analyzer {
     }
 
     /// The innermost handler that catches this namespace's error re-raises it.
-    pub fn guard_reraises(&self, ns: Ns) -> bool {
+    pub(in crate::interp) fn guard_reraises(&self, ns: Ns) -> bool {
         let want: &[&str] = if ns == Ns::Item { match self.unwind.item_exc { Some("ValueError") => super::VALUE_GUARDS, Some("ValidationError") => super::VALIDATION_GUARDS, _ => ITEM_GUARDS } } else { ATTR_GUARDS };
         for g in self.guards().rev() {
             if g.iter().any(|x| want.contains(&x.as_str())) {
@@ -59,7 +59,7 @@ impl Analyzer {
     }
 
     /// Some class of `cls`'s MRO derives from a builtin exception class directly.
-    pub fn builtin_exc_base(&self, cls: u32) -> bool {
+    pub(in crate::interp) fn builtin_exc_base(&self, cls: u32) -> bool {
         // (external bases are not in `bases`: read the class statement's base expressions)
         self.heap.mro(cls).iter().any(|c| {
             self.heap.class_info_opt(*c)
@@ -76,7 +76,7 @@ impl Analyzer {
 
     /// The attribute names `__slots__` allows on instances of `cls`, when every class of its MRO
     /// declares them (literally) and none gives a `__dict__`.
-    pub fn slots_of(&self, cls: u32) -> Option<Vec<String>> {
+    pub(in crate::interp) fn slots_of(&self, cls: u32) -> Option<Vec<String>> {
         let mut out: Vec<String> = Vec::new();
         for c in self.heap.mro(cls) {
             let Some(ci) = self.heap.class_info_opt(c) else {
@@ -160,7 +160,7 @@ impl Analyzer {
     /// `True`, `1` and `1.0` are one dict key: a numeric literal key equal to a key the record
     /// has (or may have) is that key.
     /// A mixed-in Enum member (`StrEnum`, `IntEnum`) and its value are one key too.
-    pub fn canon_key(&self, oid: u32, ns: Ns, k: KeyId, state: &State) -> KeyId {
+    pub(in crate::interp) fn canon_key(&self, oid: u32, ns: Ns, k: KeyId, state: &State) -> KeyId {
         if !self.m.ci_dicts.is_empty() && self.m.ci_dicts.contains(&oid) {
             if let Some(s) = intern::key_as_str(k) {
                 return key_str_lit(&s.to_lowercase());
@@ -187,7 +187,7 @@ impl Analyzer {
     }
 
     /// Enum members (and Flag combinations) used as keys are their `Key::Member` literals.
-    pub fn keyify(&self, v: &Value) -> Value {
+    pub(in crate::interp) fn keyify(&self, v: &Value) -> Value {
         if v.pts.is_empty() {
             return v.clone();
         }
@@ -234,7 +234,7 @@ impl Analyzer {
     }
 
     /// `keyify`, with tuples / frozensets of known items as their value keys.
-    pub fn keyify_in(&self, v: &Value, state: &State) -> Value {
+    pub(in crate::interp) fn keyify_in(&self, v: &Value, state: &State) -> Value {
         if v.pts.is_empty() {
             return v.clone();
         }
@@ -256,7 +256,7 @@ impl Analyzer {
 
     /// A key standing for one object hashed by its identity (a future, a function, an instance
     /// of a class without `__eq__` / `__hash__`), while that object is one runtime object.
-    pub fn identity_key(&self, o: u32) -> Option<KeyId> {
+    pub(in crate::interp) fn identity_key(&self, o: u32) -> Option<KeyId> {
         if let Some(k) = self.heap.keys.identity_keys.borrow().get(&o) {
             return Some(*k);
         }
@@ -306,7 +306,7 @@ impl Analyzer {
         Value::with_kv(pts, kv)
     }
 
-    pub fn canon_kv(&self, oid: u32, ns: Ns, kv: &KeyVal, state: &State) -> KeyVal {
+    pub(in crate::interp) fn canon_kv(&self, oid: u32, ns: Ns, kv: &KeyVal, state: &State) -> KeyVal {
         match kv {
             KeyVal::Lit(k) => KeyVal::Lit(self.canon_key(oid, ns, *k, state)),
             KeyVal::Lits(ks) => KeyVal::Lits(ks.map(|k| self.canon_key(oid, ns, k, state))),
@@ -1058,7 +1058,7 @@ impl Analyzer {
     }
 
     /// A ChainMap's merged keys and values, rebuilt from its maps (the first one wins).
-    pub fn refresh_chainmap(&mut self, oid: u32, state: &mut State) {
+    pub(in crate::interp) fn refresh_chainmap(&mut self, oid: u32, state: &mut State) {
         let maps = self.m.chainmaps.get(&oid).cloned().unwrap_or_default();
         state.set_row(oid, Ns::Item, Row::new());
         state.drop_obj_ns(oid, Ns::Item);
@@ -1495,7 +1495,7 @@ impl Analyzer {
 
     /// A class attribute's value: on this path when the path has it (a class attribute
     /// rebound after the class was made: `Cls.mode = "x"`), else what any path stored.
-    pub fn class_attr_value(&self, cls: u32, name: &str, state: &State) -> Value {
+    pub(in crate::interp) fn class_attr_value(&self, cls: u32, name: &str, state: &State) -> Value {
         match self.class_lookup(cls, name) {
             None => Value::new(),
             Some(c) => state.slot_opt(c, Ns::Attr, key_str_lit(name)).or_else(|| self.heap.cls_slots.get(&(c, Ns::Attr, key_str_lit(name))).cloned()).unwrap_or_default(),
@@ -1544,7 +1544,7 @@ impl Analyzer {
         join_values(outs)
     }
 
-    pub fn load_instance_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool, try_guard: bool, single_target: bool) -> Value {
+    pub(in crate::interp) fn load_instance_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool, try_guard: bool, single_target: bool) -> Value {
         let nk = key_str_lit(name);
         // a pydantic private attribute: its hidden slot
         if let Some(cls) = self.heap.instance_class(oid) {
@@ -1711,7 +1711,7 @@ impl Analyzer {
     }
 
     /// A value declared dynamically typed (`Any`): accesses on it are not checkable (§6.6).
-    pub fn dynamic_value(&mut self, label: &str, state: &mut State) -> Value {
+    pub(in crate::interp) fn dynamic_value(&mut self, label: &str, state: &mut State) -> Value {
         let oid = self.heap.alloc_raw(Kind::Unknown, &format!("any:{}", label), "", true, &format!("Any {}", label), Payload::None);
         if !state.has_row(oid, Ns::Item) {
             state.set_row(oid, Ns::Item, Row::top());
@@ -1721,7 +1721,7 @@ impl Analyzer {
     }
 
     /// Is the attribute declared `Any` (or `object`) in the class body or its bases?
-    pub fn field_is_any(&self, cls: u32, name: &str) -> bool {
+    pub(in crate::interp) fn field_is_any(&self, cls: u32, name: &str) -> bool {
         for c in self.heap.mro(cls) {
             let Some(ci) = self.heap.class_info_opt(c) else { continue };
             let mut cache = ci.any_fields.borrow_mut();
@@ -1752,7 +1752,7 @@ impl Analyzer {
 
     /// Does the value have a scalar part besides its objects (other than None, which has no
     /// keys or attributes of its own)?
-    pub fn may_be_scalar(&self, v: &Value) -> bool {
+    pub(in crate::interp) fn may_be_scalar(&self, v: &Value) -> bool {
         // (an unknown object stands for any value, scalars too: its scalar part adds nothing)
         !v.pts.is_empty() && !v.kv.is_bot() && v.kv.as_lit() != Some(intern::key_none()) && v.pts.iter().any(|o| self.heap.kind(o) != Kind::Unknown)
     }
@@ -1762,11 +1762,11 @@ impl Analyzer {
     /// The row a read classifies against: of an object this path has no facts about at all
     /// (made on other paths: a recursion's deeper activations make what its widened
     /// arguments hold), nothing is known.
-    pub fn read_row(&self, oid: u32, ns: Ns, state: &State) -> Row {
+    pub(in crate::interp) fn read_row(&self, oid: u32, ns: Ns, state: &State) -> Row {
         if self.has_facts(oid, state) { state.row(oid, ns) } else { Row::top() }
     }
 
-    pub fn unknown_row(&self, oid: u32, ns: Ns, state: &State) -> Row {
+    pub(in crate::interp) fn unknown_row(&self, oid: u32, ns: Ns, state: &State) -> Row {
         if state.has_row(oid, ns) {
             state.row(oid, ns)
         } else {
@@ -1774,7 +1774,7 @@ impl Analyzer {
         }
     }
 
-    pub fn load_unknown_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool) -> Value {
+    pub(in crate::interp) fn load_unknown_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool) -> Value {
         let nk = key_str_lit(name);
         if DICT_METHOD_NAMES.contains(&name) {
             return self.method_value(&format!("dict.{}", name), &Value::obj(oid));

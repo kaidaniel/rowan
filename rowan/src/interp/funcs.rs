@@ -20,7 +20,7 @@ pub enum Elem {
 }
 
 impl Elem {
-    pub fn value_part(&self) -> Value {
+    pub(in crate::interp) fn value_part(&self) -> Value {
         match self {
             Elem::One(v) => v.clone(),
             Elem::Pair(_, v) => v.clone(),
@@ -50,7 +50,7 @@ pub const ENUM_INDEX: &str = "index";
 
 impl Analyzer {
     // ----------------------------------------------------------- functions
-    pub fn make_function(&mut self, node: FuncNode, state: &mut State, name: Option<&str>) -> Value {
+    pub(in crate::interp) fn make_function(&mut self, node: FuncNode, state: &mut State, name: Option<&str>) -> Value {
         let fr_module = self.frame().module;
         let fr_kind = self.frame().kind;
         let fr_label = self.frame().label.clone();
@@ -161,7 +161,7 @@ impl Analyzer {
         None
     }
 
-    pub fn apply_decorators(&mut self, decorators: &'static [ast::Decorator], fnode: Node, mut fv: Value, state: &mut State) -> Value {
+    pub(in crate::interp) fn apply_decorators(&mut self, decorators: &'static [ast::Decorator], fnode: Node, mut fv: Value, state: &mut State) -> Value {
         for d in decorators.iter().rev() {
             let q = self.decorator_qualname(&d.expression, state).unwrap_or_default();
             let fobj = fv.pts.first();
@@ -385,7 +385,7 @@ impl Analyzer {
 
 
     /// A narrowed value for a name (a test on it): its value changes, not whether it is bound.
-    pub fn rebind_name(&mut self, name: StrId, v: Value, state: &mut State) {
+    pub(in crate::interp) fn rebind_name(&mut self, name: StrId, v: Value, state: &mut State) {
         let module = self.frame().module;
         let at_module = self.frame().kind == FrameKind::Module;
         let row = if at_module { Some(state.row(module, Ns::Attr)) } else { None };
@@ -410,7 +410,7 @@ impl Analyzer {
         }
     }
 
-    pub fn store_name(&mut self, name: StrId, v: Value, state: &mut State) {
+    pub(in crate::interp) fn store_name(&mut self, name: StrId, v: Value, state: &mut State) {
         state.drop_name_keys(Some(name));
         // a fact about a test reading this name no longer holds once it is rebound
         if !state.facts.is_empty() && state.facts.iter().any(|f| f.deps.iter().any(|(n, _)| *n == name)) {
@@ -471,7 +471,7 @@ impl Analyzer {
     }
 
     // ------------------------------------------------------------ targets
-    pub fn bind_target(&mut self, t: &'static ast::Expr, v: &Value, state: &mut State) {
+    pub(in crate::interp) fn bind_target(&mut self, t: &'static ast::Expr, v: &Value, state: &mut State) {
         match t {
             ast::Expr::Name(n) => {
                 let name = s(n.id.as_str());
@@ -641,7 +641,7 @@ impl Analyzer {
         parts
     }
 
-    pub fn bind_iter_target(&mut self, target: &'static ast::Expr, elem: &Elem, state: &mut State) {
+    pub(in crate::interp) fn bind_iter_target(&mut self, target: &'static ast::Expr, elem: &Elem, state: &mut State) {
         match elem {
             Elem::Pair(k, val) => {
                 let two = match target {
@@ -1115,7 +1115,7 @@ impl Analyzer {
     }
 
     /// Requirements on the loop's own elements are per element, not per program run.
-    pub fn promote_elem_reqs(&mut self, exit_s: &mut State, body_s: &State, elem: &Value, state: &State) {
+    pub(in crate::interp) fn promote_elem_reqs(&mut self, exit_s: &mut State, body_s: &State, elem: &Value, state: &State) {
         if !body_s.reachable {
             return;
         }
@@ -1239,7 +1239,7 @@ impl Analyzer {
 
     /// The values a record holds, including what its unknown keys hold (a parameter's dict,
     /// an open record: its content under an unknown key).
-    pub fn record_values(&mut self, oid: u32, state: &mut State) -> Value {
+    pub(in crate::interp) fn record_values(&mut self, oid: u32, state: &mut State) -> Value {
         let v = state.all_slots(oid, Ns::Item);
         let row = state.row(oid, Ns::Item);
         // (keys stored under unknown names keep their values in the `*` slot: only content
