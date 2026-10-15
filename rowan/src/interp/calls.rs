@@ -128,24 +128,24 @@ impl Analyzer {
     pub fn call_one(&mut self, oid: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
         let kind = self.heap.kind(oid);
         // torch: a layer object / Sequential, or a user nn.Module (its forward)
-        if matches!(kind, Kind::Namespace | Kind::List) && self.t_layer_type(oid).is_some() {
-            let r = self.t_layer_call(oid, args, kwargs, node, state);
-            return self.t_forward_hooks(oid, args, r, state, node);
+        if matches!(kind, Kind::Namespace | Kind::List) && crate::models::torch::t_layer_type(self, oid).is_some() {
+            let r = crate::models::torch::t_layer_call(self, oid, args, kwargs, node, state);
+            return crate::models::torch::t_forward_hooks(self, oid, args, r, state, node);
         }
-        if kind == Kind::Instance && self.m.torch_on && self.t_is_module_instance(oid) {
+        if kind == Kind::Instance && self.m.torch_on && crate::models::torch::t_is_module_instance(self, oid) {
             if let Some(cls) = self.heap.instance_class(oid) {
                 if self.class_lookup(cls, "__call__").is_none() {
                     if let Some(m) = self.class_lookup(cls, "forward") {
                         let f = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("forward"))).cloned().unwrap_or_default();
                         let fns: Vec<u32> = f.pts.iter().filter(|x| self.heap.kind(*x) == Kind::Function).collect();
                         let r = self.call_alternatives(&fns, oid, args, kwargs, star_args, star_kwargs, state, node, call_ast);
-                        return self.t_forward_hooks(oid, args, r, state, node);
+                        return crate::models::torch::t_forward_hooks(self, oid, args, r, state, node);
                     }
                 }
             }
         }
         match kind {
-            Kind::Function if self.heap.func_info(oid).is_memo.get() && star_args.is_empty() && star_kwargs.is_empty() => self.memo_call(oid, args, kwargs, state, node, call_ast),
+            Kind::Function if self.heap.func_info(oid).is_memo.get() && star_args.is_empty() && star_kwargs.is_empty() => crate::models::singledispatch::memo_call(self, oid, args, kwargs, state, node, call_ast),
             Kind::Function => {
                 let fi = self.heap.func_info(oid);
                 if fi.cls.is_some() && !fi.is_static.get() && !args.is_empty() && !fi.is_classmethod.get() {
@@ -249,7 +249,7 @@ impl Analyzer {
         if let Some(n) = qual.strip_prefix("builtins.").filter(|n| super::exprs::is_exception_name(n)) {
             if kwargs.is_empty() && star_args.is_empty() && !self.program.models.has_exact(&qual) {
                 let n = n.to_string();
-                return self.exception_object(&n, args.to_vec(), node, state);
+                return crate::models::exceptions::exception_object(self, &n, args.to_vec(), node, state);
             }
         }
         // `f.__get__(obj)` (a library function bound by hand: attrs's
@@ -276,21 +276,21 @@ impl Analyzer {
         self.cx.model_depth += 1;
         let r = m(self, state, call);
         self.cx.model_depth -= 1;
-        self.after_model_consume(call, &r, state);
+        crate::models::itertools::after_model_consume(self, call, &r, state);
         r
     }
 
     pub fn construct(&mut self, cls: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
-        if self.abstract_unimplemented(cls) {
+        if crate::models::dataclasses::abstract_unimplemented(self, cls) {
             self.raise_here("TypeError", state);
             return Value::new();
         }
         // `Color(3)`: the Enum member with that value, else ValueError
         if let (Some(ms), Some(a)) = (self.m.enum_members.get(&cls).cloned(), args.first()) {
-            return self.enum_lookup(cls, &ms, a, node, state);
+            return crate::models::enums::enum_lookup(self, cls, &ms, a, node, state);
         }
         // a TypedDict class makes a plain dict
-        if let Some(v) = self.typed_dict_construct(cls, args, kwargs, star_args, star_kwargs, state, node) {
+        if let Some(v) = crate::models::dataclasses::typed_dict_construct(self, cls, args, kwargs, star_args, star_kwargs, state, node) {
             return v;
         }
         // a class with its own `__new__`: the instance is what it returns, and `__init__` runs
@@ -320,7 +320,7 @@ impl Analyzer {
         }
         let inst = self.alloc_instance(cls, node, state);
         // library classes: TypedDict, pydantic models, dict subclasses, dataclasses
-        if let Some(v) = self.construct_library(cls, inst, args, kwargs, star_args, star_kwargs, state, node) {
+        if let Some(v) = crate::models::dataclasses::construct_library(self, cls, inst, args, kwargs, star_args, star_kwargs, state, node) {
             return v;
         }
         if let Some(init) = self.class_lookup(cls, "__init__") {
@@ -333,7 +333,7 @@ impl Analyzer {
             }
             self.cx.fresh_init.remove(&inst);
         } else if self.builtin_exc_base(cls) {
-            self.exception_init(cls, inst, args, node, state);
+            crate::models::dataclasses::exception_init(self, cls, inst, args, node, state);
         }
         Value::obj(inst)
     }
@@ -453,7 +453,7 @@ impl Analyzer {
         let forced = self.gens.force_at.take();
         // a singledispatch function: the implementation for the first argument's type
         if self.m.sdispatch.contains_key(&foid) && self.m.sd_bypass.take() != Some(foid) && !args.is_empty() && star_args.is_empty() {
-            return self.sdispatch_call(foid, self_v, args, kwargs, star_kwargs, state, node, entry);
+            return crate::models::singledispatch::sdispatch_call(self, foid, self_v, args, kwargs, star_kwargs, state, node, entry);
         }
         if !state.narrowed.is_empty() {
             state.narrowed.clear();

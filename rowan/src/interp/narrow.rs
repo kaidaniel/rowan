@@ -129,7 +129,7 @@ impl Analyzer {
             return;
         }
         if self.m.torch_on {
-            self.t_narrow(test, truth, state);
+            crate::models::torch::t_narrow(self, test, truth, state);
             if !state.reachable {
                 return;
             }

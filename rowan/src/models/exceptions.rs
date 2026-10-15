@@ -9,7 +9,7 @@ use rustc_hash::FxHashMap;
 use crate::domain::{KeyVal, Ns, Row, Value, DATA};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit};
-use crate::interp::{ExcNames, Payload};
+use crate::interp::{Analyzer, ExcNames, Payload};
 use crate::state::{Kind, State};
 
 /// Builtin (and modelled library) exception classes and their bases.
@@ -90,51 +90,49 @@ fn builtin_exc_names_uncached(name: &str) -> (Vec<String>, bool) {
     }
 }
 
-impl crate::interp::Analyzer {
-    /// A builtin exception (`KeyError(key)`, …) as a value: open attributes, known `args`.
-    pub fn exception_object(&mut self, cls_name: &str, args: Vec<Value>, node: &Node, state: &mut State) -> Value {
-        let t = self.alloc_positional(Kind::Tuple, node, Some(args), Value::new(), DATA, state);
-        let row = Row::with_source(crate::domain::Source::new(cls_name, crate::domain::SourceKind::Data));
-        let oid = self.alloc_at(Kind::Namespace, node, state, &format!("{}@L{}", cls_name, node.line), Payload::None, Some(row), Ns::Attr, None, None);
-        let strong = self.heap.obj(oid).single;
-        self.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
-        self.m.exc_objs.insert(oid, cls_name.to_string());
-        Value::obj(oid)
-    }
+/// A builtin exception (`KeyError(key)`, …) as a value: open attributes, known `args`.
+pub fn exception_object(an: &mut Analyzer, cls_name: &str, args: Vec<Value>, node: &Node, state: &mut State) -> Value {
+    let t = an.alloc_positional(Kind::Tuple, node, Some(args), Value::new(), DATA, state);
+    let row = Row::with_source(crate::domain::Source::new(cls_name, crate::domain::SourceKind::Data));
+    let oid = an.alloc_at(Kind::Namespace, node, state, &format!("{}@L{}", cls_name, node.line), Payload::None, Some(row), Ns::Attr, None, None);
+    let strong = an.heap.obj(oid).single;
+    an.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
+    an.m.exc_objs.insert(oid, cls_name.to_string());
+    Value::obj(oid)
+}
 
-    /// `str(e)` / `repr(e)` of exception objects with known args.
-    pub fn exc_text(&self, v: &Value, repr: bool, state: &State) -> Option<Value> {
-        if v.pts.is_empty() || !v.kv.is_bot() {
-            return None;
-        }
-        let mut out = Vec::new();
-        for o in v.pts.iter() {
-            let name = self.m.exc_objs.get(&o)?;
-            let t = state.slot(o, Ns::Attr, key_str_lit("args"));
-            let tid = t.single()?;
-            let n = self.heap.llen(tid, state)?;
-            let mut parts = Vec::new();
-            for i in 0..n {
-                let a = state.slot(tid, Ns::Pos, intern::key_int(i as i64));
-                parts.push(a.kv.as_lit().filter(|_| a.pts.is_empty())?);
-            }
-            let reprs: Vec<String> = parts.iter().map(|k| intern::key_repr(*k)).collect();
-            let s = if repr {
-                format!("{}({})", name, reprs.join(", "))
-            } else if parts.len() == 1 {
-                // (a KeyError shows its key's repr)
-                if name == "KeyError" { reprs[0].clone() } else { intern::key_py_str(parts[0]) }
-            } else if parts.is_empty() {
-                String::new()
-            } else if parts.len() == 1 {
-                reprs[0].clone()
-            } else {
-                format!("({})", reprs.join(", "))
-            };
-            out.push(Value::lit(key_str_lit(&s)));
-        }
-        Some(crate::domain::join_values(out))
+/// `str(e)` / `repr(e)` of exception objects with known args.
+pub fn exc_text(an: &Analyzer, v: &Value, repr: bool, state: &State) -> Option<Value> {
+    if v.pts.is_empty() || !v.kv.is_bot() {
+        return None;
     }
+    let mut out = Vec::new();
+    for o in v.pts.iter() {
+        let name = an.m.exc_objs.get(&o)?;
+        let t = state.slot(o, Ns::Attr, key_str_lit("args"));
+        let tid = t.single()?;
+        let n = an.heap.llen(tid, state)?;
+        let mut parts = Vec::new();
+        for i in 0..n {
+            let a = state.slot(tid, Ns::Pos, intern::key_int(i as i64));
+            parts.push(a.kv.as_lit().filter(|_| a.pts.is_empty())?);
+        }
+        let reprs: Vec<String> = parts.iter().map(|k| intern::key_repr(*k)).collect();
+        let s = if repr {
+            format!("{}({})", name, reprs.join(", "))
+        } else if parts.len() == 1 {
+            // (a KeyError shows its key's repr)
+            if name == "KeyError" { reprs[0].clone() } else { intern::key_py_str(parts[0]) }
+        } else if parts.is_empty() {
+            String::new()
+        } else if parts.len() == 1 {
+            reprs[0].clone()
+        } else {
+            format!("({})", reprs.join(", "))
+        };
+        out.push(Value::lit(key_str_lit(&s)));
+    }
+    Some(crate::domain::join_values(out))
 }
 
 /// `super().__init__(…)` reaching a builtin exception base: the instance's `args`, and its

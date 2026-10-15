@@ -112,7 +112,7 @@ impl Analyzer {
                 continue;
             }
             if handler {
-                self.fa_entry_run(oid, &fi, state);
+                crate::models::fastapi::fa_entry_run(self, oid, &fi, state);
                 continue;
             }
             self.entry_run(oid, &fi, quiet, state);
@@ -351,7 +351,7 @@ impl Analyzer {
         // (with a default, only a torch annotation is taken: an instance for a defaulted
         // parameter of a user class made runs cost coverage, click 186 -> 151 sites)
         let ann = a.annotation.as_deref();
-        let given = match ann.and_then(|ann| if d.is_some() { self.t_param(ann, fi, a.name.id.as_str(), st) } else { self.param_from_annotation(ann, fi, a.name.id.as_str(), st) }) {
+        let given = match ann.and_then(|ann| if d.is_some() { crate::models::torch::t_param(self, ann, fi, a.name.id.as_str(), st) } else { self.param_from_annotation(ann, fi, a.name.id.as_str(), st) }) {
             Some(v) => v,
             None => Value::obj(self.param_source(fi, a, st)),
         };
@@ -363,7 +363,7 @@ impl Analyzer {
 
     pub fn param_from_annotation(&mut self, ann: &'static ast::Expr, fi: &FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
         let node = Self::strip_annotation(ann)?;
-        if let Some(v) = self.t_param(ann, fi, pname, state) {
+        if let Some(v) = crate::models::torch::t_param(self, ann, fi, pname, state) {
             return Some(v);
         }
         let mut v = self.eval(node, state);
@@ -383,7 +383,7 @@ impl Analyzer {
                     // a TypedDict's `total=False` / `NotRequired` keys may be absent
                     let mut declared = Row::closed_with(fields.clone());
                     if ci.lib.typed_dict {
-                        if let Some((req, opt)) = self.typed_dict_keys(oid) {
+                        if let Some((req, opt)) = crate::models::dataclasses::typed_dict_keys(self, oid) {
                             fields = req.union(&opt);
                             declared = Row::from_data(crate::domain::RowData { present: fields.clone(), definite: req.clone(), likely: req, ..Default::default() });
                         }

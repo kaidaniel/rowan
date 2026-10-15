@@ -272,8 +272,8 @@ impl Analyzer {
         }
         // tensors: dims named by locals / letters, printed in the function's own terms
         let (pctx, tnames, tlegend) = if self.m.torch_on {
-            let mut ctx = self.t_print_ctx(state);
-            let (names, legend) = crate::models::shape::with_ctx(ctx.clone(), || self.t_hover_names(v, state));
+            let mut ctx = crate::models::torch::t_print_ctx(self, state);
+            let (names, legend) = crate::models::shape::with_ctx(ctx.clone(), || crate::models::torch::t_hover_names(self, v, state));
             ctx.atom_names = names.clone();
             (Some(ctx), names, legend)
         } else {
@@ -421,7 +421,7 @@ impl Analyzer {
                     None => v.clone(),
                 };
                 self.findings.t_row_values.insert((ln, name.clone(), chain, entry), joined.clone());
-                Some(self.t_check_json(&joined, state))
+                Some(crate::models::torch::t_check_json(self, &joined, state))
             } else {
                 None
             };

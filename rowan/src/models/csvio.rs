@@ -261,32 +261,30 @@ fn parse_text(text: &str, delim: char, quote: char) -> Option<Vec<Vec<String>>> 
     Some(rows)
 }
 
-impl Analyzer {
-    /// A list with these items at `node`, its own object per `ctx`.
-    fn csv_list(&mut self, vals: Vec<Value>, node: &Node, st: &mut State, ctx: &str, iterator: bool) -> Value {
-        let oid = self.alloc_at(Kind::List, node, st, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, Some(ctx));
-        let acc = join_values(vals.clone());
-        let single = self.heap.obj(oid).single;
-        st.set_slot(oid, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), single);
-        st.elems.insert(oid, acc.kv.clone());
-        if single {
-            for (i, v) in vals.iter().enumerate() {
-                st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
-            }
-            self.heap.set_llen(oid, st, Some(vals.len()));
-        } else {
-            self.heap.set_llen(oid, st, None);
+/// A list with these items at `node`, its own object per `ctx`.
+fn csv_list(an: &mut Analyzer, vals: Vec<Value>, node: &Node, st: &mut State, ctx: &str, iterator: bool) -> Value {
+    let oid = an.alloc_at(Kind::List, node, st, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, Some(ctx));
+    let acc = join_values(vals.clone());
+    let single = an.heap.obj(oid).single;
+    st.set_slot(oid, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), single);
+    st.elems.insert(oid, acc.kv.clone());
+    if single {
+        for (i, v) in vals.iter().enumerate() {
+            st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
         }
-        if iterator {
-            self.heap.obj_mut(oid).iterator = true;
-        }
-        Value::obj(oid)
+        an.heap.set_llen(oid, st, Some(vals.len()));
+    } else {
+        an.heap.set_llen(oid, st, None);
     }
+    if iterator {
+        an.heap.obj_mut(oid).iterator = true;
+    }
+    Value::obj(oid)
+}
 
-    fn csv_str_list(&mut self, items: &[String], node: &Node, st: &mut State, ctx: &str) -> Value {
-        let vals: Vec<Value> = items.iter().map(|x| Value::lit_str(x)).collect();
-        self.csv_list(vals, node, st, ctx, false)
-    }
+fn csv_str_list(an: &mut Analyzer, items: &[String], node: &Node, st: &mut State, ctx: &str) -> Value {
+    let vals: Vec<Value> = items.iter().map(|x| Value::lit_str(x)).collect();
+    csv_list(an, vals, node, st, ctx, false)
 }
 
 pub fn stringio_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -417,7 +415,7 @@ pub fn m_stdobj(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 match t {
                     Text::Lit(s) => {
                         let lines: Vec<String> = s.split_inclusive('\n').map(|x| x.to_string()).collect();
-                        an.csv_str_list(&lines, &c.node, st, "lines")
+                        csv_str_list(an, &lines, &c.node, st, "lines")
                     }
                     _ => Value::data("lines"),
                 }
@@ -555,19 +553,19 @@ pub fn reader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let plain = c.kwargs.keys().all(|k| matches!(&*intern::str_get(*k), "delimiter" | "quotechar"));
     if let (Text::Lit(text), Some(d), Some(q), true) = (text_in(an, st, &f), delim, quote, plain) {
         if let Some(rows) = parse_text(&text, d, q) {
-            let vals: Vec<Value> = rows.iter().enumerate().map(|(i, r)| an.csv_str_list(r, &c.node, st, &format!("csvr{}", i))).collect();
-            return an.csv_list(vals, &c.node, st, "csvrows", true);
+            let vals: Vec<Value> = rows.iter().enumerate().map(|(i, r)| csv_str_list(an, r, &c.node, st, &format!("csvr{}", i))).collect();
+            return csv_list(an, vals, &c.node, st, "csvrows", true);
         }
     }
     // unknown rows: lists of strings
     let e = Value::data(&format!("csv field@L{}", c.line));
-    let row = an.csv_list(vec![], &c.node, st, "csvrow", false);
+    let row = csv_list(an, vec![], &c.node, st, "csvrow", false);
     if let Some(o) = row.single() {
         st.set_slot(o, Ns::Elem, intern::STAR, e.clone(), true);
         st.elems.insert(o, e.kv.clone());
         an.heap.set_llen(o, st, None);
     }
-    let lid = an.csv_list(vec![], &c.node, st, "csvrows", true);
+    let lid = csv_list(an, vec![], &c.node, st, "csvrows", true);
     if let Some(o) = lid.single() {
         st.set_slot(o, Ns::Elem, intern::STAR, row.clone(), true);
         an.heap.set_llen(o, st, None);
@@ -616,7 +614,7 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                                 st.set_slot(did, Ns::Item, k, v, true);
                             }
                             if r.len() > fields.len() {
-                                let rest = an.csv_str_list(&r[fields.len()..].to_vec(), &c.node, st, &format!("csvrest{}", i));
+                                let rest = csv_str_list(an, &r[fields.len()..].to_vec(), &c.node, st, &format!("csvrest{}", i));
                                 row = row.store(rk, true);
                                 st.set_slot(did, Ns::Item, rk, rest, true);
                             }
@@ -624,10 +622,10 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             vals.push(Value::obj(did));
                         }
                     }
-                    let lv = an.csv_list(vals, &c.node, st, "csvdrows", true);
+                    let lv = csv_list(an, vals, &c.node, st, "csvdrows", true);
                     if let Some(o) = lv.single() {
                         let fv = match &fields {
-                            Some(fs) => an.csv_str_list(fs, &c.node, st, "csvfields"),
+                            Some(fs) => csv_str_list(an, fs, &c.node, st, "csvfields"),
                             None => an.none_v.clone(),
                         };
                         an.m.csv_readers.insert(o, fv);
@@ -661,8 +659,8 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let vid = an.heap.alloc_raw(Kind::View, &format!("view:elems:{}", c.site), &ctx, true, "DictReader", Payload::View(ViewKind::Elems, Value::obj(rid)));
     an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Elems, Value::obj(rid));
     let fv = match (&text, &given, &fieldnames) {
-        (_, Some(g), _) => an.csv_str_list(g, &c.node, st, "csvfields"),
-        (Text::Hdr(_, fs), None, None) => an.csv_str_list(fs, &c.node, st, "csvfields"),
+        (_, Some(g), _) => csv_str_list(an, g, &c.node, st, "csvfields"),
+        (Text::Hdr(_, fs), None, None) => csv_str_list(an, fs, &c.node, st, "csvfields"),
         (_, None, Some(fv)) => fv.clone(),
         _ => Value::data("fieldnames"),
     };

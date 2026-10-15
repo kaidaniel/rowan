@@ -301,7 +301,7 @@ pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         if rev { o.reverse() } else { o }
                     });
                     let vals: Vec<Value> = idx.into_iter().take(n.max(0) as usize).map(|i| keyed[i].1.clone()).collect();
-                    let l = an.it_list(Some(vals), Value::new(), &c.node, st, "heapn");
+                    let l = crate::models::itertools::it_list(an, Some(vals), Value::new(), &c.node, st, "heapn");
                     return plain_list(an, l);
                 }
             }
@@ -310,7 +310,7 @@ pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 an.call_value(f, &c.node, None, st, Some(vec![e]));
             }
             let e = an.elem_value(&it.elem, &c.node, "el");
-            let l = an.it_list(None, e, &c.node, st, "heapn");
+            let l = crate::models::itertools::it_list(an, None, e, &c.node, st, "heapn");
             plain_list(an, l)
         }
         "merge" => {
@@ -323,7 +323,7 @@ pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     all.extend(its);
                 }
             }
-            an.it_list(None, elem, &c.node, st, "heapmerge")
+            crate::models::itertools::it_list(an, None, elem, &c.node, st, "heapmerge")
         }
         _ => Value::data(&format!("heapq.{}", name)),
     }

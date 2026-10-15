@@ -42,7 +42,7 @@ impl Analyzer {
             // (`__getattr__` / `__getattribute__` answer any name)
             Some(c) if self.class_lookup(c, "__getattr__").is_some() || self.class_lookup(c, "__getattribute__").is_some() => true,
             // (a field's class-level default is shadowed by the instance's attribute)
-            Some(c) => self.class_lookup(c, name).is_some() && !self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name),
+            Some(c) => self.class_lookup(c, name).is_some() && !crate::models::dataclasses::dataclass_fields_mro(self, c).iter().any(|(f, _)| f == name),
             None => false,
         }
     }
@@ -211,7 +211,7 @@ impl Analyzer {
         let kind = self.heap.kind(o);
         // a frozen dataclass / pydantic instance hashes by its fields: `Key(ns='a', name='b')`
         if kind == Kind::Instance && depth <= 3 && self.heap.obj(o).single {
-            return self.frozen_instance_key(o, state, depth);
+            return crate::models::dataclasses::frozen_instance_key(self, o, state, depth);
         }
         if !matches!(kind, Kind::Tuple | Kind::Set) || depth > 3 || !self.heap.obj(o).single {
             return None;
@@ -479,8 +479,8 @@ impl Analyzer {
                             }
                         }
                         // a NamedTuple by position: its fields in order, from either end
-                        if self.is_named_tuple_class(cls) {
-                            let v = self.named_tuple_item(oid, cls, key, single_target, node, state);
+                        if crate::models::dataclasses::is_named_tuple_class(self, cls) {
+                            let v = crate::models::dataclasses::named_tuple_item(self, oid, cls, key, single_target, node, state);
                             parts.push(v);
                             continue;
                         }
@@ -689,7 +689,7 @@ impl Analyzer {
                     if model_read {
                     } else if !self.unwind.tries.is_empty() {
                         let cname = if ns == Ns::Item { self.unwind.item_exc.unwrap_or("KeyError") } else { "AttributeError" };
-                        let e = self.exception_object(cname, vec![Value::lit(k)], node, state);
+                        let e = crate::models::exceptions::exception_object(self, cname, vec![Value::lit(k)], node, state);
                         self.unwind.cur_exc = Some(e);
                     }
                     // (required on the handler's path too: the exception fired for the key)
@@ -1137,7 +1137,7 @@ impl Analyzer {
                 state.set_row(oid, ns, row.clone());
                 let exc = if ns == Ns::Item { "KeyError" } else { "AttributeError" };
                 if !self.unwind.tries.is_empty() {
-                    let e = self.exception_object(exc, vec![Value::lit(k)], node, state);
+                    let e = crate::models::exceptions::exception_object(self, exc, vec![Value::lit(k)], node, state);
                     self.unwind.cur_exc = Some(e);
                 }
                 if surely {
@@ -1165,7 +1165,7 @@ impl Analyzer {
         }
         let unk = self.unkey(obj);
         let obj = &unk;
-        if let Some(v) = self.t_getattr(obj, name, node, state) {
+        if let Some(v) = crate::models::torch::t_getattr(self, obj, name, node, state) {
             return v;
         }
         let mut acc = Value::new();
@@ -1265,8 +1265,8 @@ impl Analyzer {
                         crate::models::pydantic::attr_value(self, state, oid, name, node)
                     } else if crate::models::pydantic::PYD_METHODS.contains(&name) && crate::models::pydantic::is_model(self, oid) {
                         self.method_value(&format!("pydantic.cls.{}", name), &Value::obj(oid))
-                    } else if name == "__init__" && self.dataclass_init_owner(oid).is_some() {
-                        let dc = self.dataclass_init_owner(oid).unwrap();
+                    } else if name == "__init__" && crate::models::dataclasses::dataclass_init_owner(self, oid).is_some() {
+                        let dc = crate::models::dataclasses::dataclass_init_owner(self, oid).unwrap();
                         Value::obj(self.heap.alloc_raw(Kind::Method, &format!("dcinit:{}", oid), "", true, &format!("{}.__init__", self.heap.obj(oid).label), Payload::Method(format!("dcinit.class.{}", dc), Value::obj(oid))))
                     } else {
                         let label = format!("{}.{}", self.heap.obj(oid).label, name);
@@ -1417,8 +1417,8 @@ impl Analyzer {
                             }
                             out
                         }
-                        None if name == "__init__" && ci.bases.iter().any(|b| self.dataclass_init_owner(*b).is_some()) => {
-                            let dc = ci.bases.iter().find_map(|b| self.dataclass_init_owner(*b)).unwrap();
+                        None if name == "__init__" && ci.bases.iter().any(|b| crate::models::dataclasses::dataclass_init_owner(self, *b).is_some()) => {
+                            let dc = ci.bases.iter().find_map(|b| crate::models::dataclasses::dataclass_init_owner(self, *b)).unwrap();
                             Value::obj(self.heap.alloc_raw(Kind::Method, &format!("dcinit:{}:{}", dc, ids), "", true, "dataclass __init__ via super", Payload::Method(format!("dcinit.{}", dc), self_v.clone())))
                         }
                         // `super().__init__(msg)` in an Exception subclass: the instance's args
@@ -1548,14 +1548,14 @@ impl Analyzer {
         let nk = key_str_lit(name);
         // a pydantic private attribute: its hidden slot
         if let Some(cls) = self.heap.instance_class(oid) {
-            if name.starts_with('_') && self.pyd_is_private(cls, name, state) {
+            if name.starts_with('_') && crate::models::pydantic::pyd_is_private(self, cls, name, state) {
                 if !guarded {
                     self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
                 }
                 return state.slot(oid, Ns::Attr, crate::models::pydantic::priv_key(name));
             }
             if name == "__pydantic_private__" && crate::models::pydantic::is_model(self, cls) {
-                let pc = self.pyd_class(cls, state);
+                let pc = crate::models::pydantic::pyd_class(self, cls, state);
                 let did = self.alloc_at(Kind::Dict, node, state, &format!("private@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("priv{}", oid)));
                 let mut row = Row::new();
                 for (pn, _, _) in pc.privates.iter() {
@@ -1605,9 +1605,9 @@ impl Analyzer {
         // the methods every NamedTuple has
         if matches!(name, "_asdict" | "_replace" | "_fields") {
             if let Some(cls) = self.heap.instance_class(oid) {
-                if self.class_lookup(cls, name).is_none() && self.is_named_tuple_class(cls) {
+                if self.class_lookup(cls, name).is_none() && crate::models::dataclasses::is_named_tuple_class(self, cls) {
                     if name == "_fields" {
-                        let fs: Vec<Value> = self.dataclass_fields_mro(cls).iter().map(|(f, _)| Value::lit(key_str_lit(f))).collect();
+                        let fs: Vec<Value> = crate::models::dataclasses::dataclass_fields_mro(self, cls).iter().map(|(f, _)| Value::lit(key_str_lit(f))).collect();
                         let kv = KeyVal::lits(fs.iter().filter_map(|v| v.kv.as_lit()).collect());
                         return self.alloc_positional(Kind::Tuple, node, Some(fs), Value::new(), kv, state);
                     }
@@ -1642,7 +1642,7 @@ impl Analyzer {
         if let Some(mut v) = v {
             // (set on some paths only, over a class attribute of the name: the others read the
             // class's — the read cannot fail)
-            let class_attr = cls_of.filter(|c| !row.definite.contains(nk) && !self.dataclass_fields_mro(*c).iter().any(|(f, _)| f == name)).and_then(|c| self.class_lookup(c, name));
+            let class_attr = cls_of.filter(|c| !row.definite.contains(nk) && !crate::models::dataclasses::dataclass_fields_mro(self, *c).iter().any(|(f, _)| f == name)).and_then(|c| self.class_lookup(c, name));
             if let (true, Some(defc)) = (row.present.contains(nk), class_attr) {
                 let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
                 let plain = !cv.pts.iter().any(|f| matches!(self.heap.kind(f), Kind::Function | Kind::Bound));
@@ -1670,7 +1670,7 @@ impl Analyzer {
             }
         }
         if let Some(c) = cls_of {
-            let is_field = self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name);
+            let is_field = crate::models::dataclasses::dataclass_fields_mro(self, c).iter().any(|(f, _)| f == name);
             if let (Some(defc), false) = (self.class_lookup(c, name), is_field) {
                 let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
                 // a class attribute: the access succeeds (a method read counts only where the
@@ -1849,7 +1849,7 @@ impl Analyzer {
                         continue;
                     }
                     // a NamedTuple's fields are read-only, and it has no instance dict
-                    if self.is_named_tuple_class(cls) && self.class_lookup(cls, "__setattr__").is_none() {
+                    if crate::models::dataclasses::is_named_tuple_class(self, cls) && self.class_lookup(cls, "__setattr__").is_none() {
                         self.raise_here("AttributeError", state);
                         continue;
                     }

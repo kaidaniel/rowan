@@ -97,7 +97,7 @@ impl Analyzer {
                 }
                 let res = self.binop(a.op, &cur, &rhs, &n, state);
                 // `t += u` on a tensor is in place: the result must keep t's shape
-                if self.m.torch_on && crate::models::torch::is_definite_tensor(&cur) && !self.t_inplace_fits(&cur, &res, &n, state) {
+                if self.m.torch_on && crate::models::torch::is_definite_tensor(&cur) && !crate::models::torch::t_inplace_fits(self, &cur, &res, &n, state) {
                     return;
                 }
                 // `d[k] += v` with an unknown key on a closed dict: the load raised unless k was
@@ -1235,7 +1235,7 @@ impl Analyzer {
         self.cx.frames.pop();
         let enum_base = info.bases.iter().any(|b| self.m.enum_members.contains_key(b));
         if is_enum || enum_base {
-            self.make_enum_members(c, coid, lek, str_mixin, state);
+            crate::models::enums::make_enum_members(self, c, coid, lek, str_mixin, state);
         }
         // `__set_name__(owner, name)` on descriptor objects assigned in the class body
         for st in &c.body {

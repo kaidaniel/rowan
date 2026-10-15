@@ -71,13 +71,13 @@ impl Analyzer {
                 let obj = self.eval(&sub.value, state);
                 // a generic pydantic model parametrised: `Page[User]`
                 if let Some(c) = obj.single().filter(|c| self.heap.kind(*c) == Kind::Class && crate::models::pydantic::is_validated(self, *c)) {
-                    if let Some(v) = self.pyd_specialise(c, &sub.slice, state) {
+                    if let Some(v) = crate::models::pydantic::pyd_specialise(self, c, &sub.slice, state) {
                         return v;
                     }
                 }
                 {
                     let nd = frontend::node(node);
-                    if let Some(v) = self.t_subscript(&obj, &sub.slice, &nd, state) {
+                    if let Some(v) = crate::models::torch::t_subscript(self, &obj, &sub.slice, &nd, state) {
                         return v;
                     }
                 }
@@ -237,7 +237,7 @@ impl Analyzer {
                         return crate::models::torch::dim_value(if u.op == ast::UnaryOp::USub { crate::models::shape::scale(d, -1) } else { d });
                     }
                     if u.op == ast::UnaryOp::USub {
-                        if let Some(r) = self.t_neg_named(&v, state) {
+                        if let Some(r) = crate::models::torch::t_neg_named(self, &v, state) {
                             return r;
                         }
                     }
@@ -439,7 +439,7 @@ impl Analyzer {
         }
         // `(*x.shape[:-1], n)`: a size
         if let Some(parts) = size_parts {
-            if let Some(v) = self.t_size_from_parts(&parts, &nd, state) {
+            if let Some(v) = crate::models::torch::t_size_from_parts(self, &parts, &nd, state) {
                 return v;
             }
         }
@@ -561,11 +561,11 @@ impl Analyzer {
         }
         let ordering = !matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn | ast::CmpOp::Is | ast::CmpOp::IsNot);
         if ordering && crate::models::torch::is_tensor(a) {
-            return self.t_compare(a, b, nd, state);
+            return crate::models::torch::t_compare(self, a, b, nd, state);
         }
         // a named unknown against a number / tensor
         if ordering && self.m.torch_on && a.kv.is_bot() && a.pts.len() == 1 && a.pts.iter().all(|o| self.heap.kind(o) == Kind::Unknown) {
-            if let Some(r) = self.t_compare_named(a, b, nd, state) {
+            if let Some(r) = crate::models::torch::t_compare_named(self, a, b, nd, state) {
                 return r;
             }
             return self.compare_const(op, a, b, right, state).map(lit).unwrap_or_else(|| Value::data("bool"));
@@ -676,7 +676,7 @@ impl Analyzer {
                 let decide = |found: bool| Some(if op == ast::CmpOp::In { found } else { !found });
                 // members of a Flag: bits; else a member is its key
                 if (!self.heap.keys.member_key.is_empty() || !self.heap.keys.identity_objs.borrow().is_empty()) && !a.pts.is_empty() {
-                    if let Some(r) = self.flag_contains(a, &b, state) {
+                    if let Some(r) = crate::models::enums::flag_contains(self, a, &b, state) {
                         return decide(r);
                     }
                     let ka = self.keyify_in(a, state);
@@ -754,8 +754,8 @@ impl Analyzer {
                 let (a, b, lits) = if self.heap.keys.member_key.is_empty() {
                     (a.clone(), b.clone(), lits)
                 } else {
-                    let ka = self.member_base(&self.keyify(a));
-                    let kb = self.member_base(&self.keyify(&b));
+                    let ka = crate::models::enums::member_base(self, &self.keyify(a));
+                    let kb = crate::models::enums::member_base(self, &self.keyify(&b));
                     let l = crate::domain::kv_literals(&ka.kv);
                     (ka, kb, l)
                 };
@@ -994,10 +994,10 @@ impl Analyzer {
                 return v;
             }
         }
-        if let Some(v) = self.flag_binop(op, a, b, node, state) {
+        if let Some(v) = crate::models::enums::flag_binop(self, op, a, b, node, state) {
             return v;
         }
-        if let Some(v) = self.t_binop(op, a, b, node, state) {
+        if let Some(v) = crate::models::torch::t_binop(self, op, a, b, node, state) {
             return v;
         }
         // Counter arithmetic
@@ -1268,14 +1268,14 @@ impl Analyzer {
                                 }
                                 // `{x!r}` / `{x!s}` / `{x!a}`: the converted text
                                 let v = match i.conversion {
-                                    ast::ConversionFlag::None => self.enum_text(&v, state).unwrap_or(v),
+                                    ast::ConversionFlag::None => crate::models::enums::enum_text(self, &v, state).unwrap_or(v),
                                     conv => {
                                         let name = match conv {
                                             ast::ConversionFlag::Repr => "repr",
                                             ast::ConversionFlag::Ascii => "ascii",
                                             _ => "str",
                                         };
-                                        let v = if name == "str" { self.enum_text(&v, state).unwrap_or(v) } else { v };
+                                        let v = if name == "str" { crate::models::enums::enum_text(self, &v, state).unwrap_or(v) } else { v };
                                         match v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(|k| crate::models::pyvalues::builtin(name, &[k], &[])) {
                                             Some(t) => Value::lit(t),
                                             None => {
@@ -1895,7 +1895,7 @@ impl Analyzer {
                 }
             }
             // `@dataclass(order=True)`: two instances of the class compare their fields
-            if let Some(o) = ai.zip(bi).and_then(|(x, y)| self.dataclass_order(x, y, state)) {
+            if let Some(o) = ai.zip(bi).and_then(|(x, y)| crate::models::dataclasses::dataclass_order(self, x, y, state)) {
                 return Some(lit(Some(decide(o))));
             }
         }

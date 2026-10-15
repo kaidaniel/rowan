@@ -73,11 +73,13 @@ namespace packages).
 * **Verdicts:** every read, `del` and `pop` gets a tier per object from its row (`classify`):
   `proven`, `possibly`, `missing` and `input` are sound; `likely` / `likely-missing` are
   optimistic (they assume unknown code removed nothing).
-* **Models** (`models/`, by qualified name in `Registry`) compute CPython's result on known
-  values (str / bytes, formatting, json, re, datetime, decimal, sqlite, csv…), and simulate
-  pandas columns, pydantic / FastAPI validation and routing, and torch / numpy shapes (dims as
-  polynomials; an undecided condition is a requirement and then a fact on the path; in torch
-  modules `int` / `Tensor` annotations hold; a module-level unknown number names its dims).
+* **Models** (`models/`, by qualified name in `Registry`; free functions of `&mut Analyzer` that
+  see the `Heap`, their `models::Tables` and the interpreter's public methods) compute
+  CPython's result on known values (str / bytes, formatting, json, re, datetime, decimal,
+  sqlite, csv…), and simulate pandas columns, pydantic / FastAPI validation and routing, and
+  torch / numpy shapes (dims as polynomials; an undecided condition is a requirement and then a
+  fact on the path; in torch modules `int` / `Tensor` annotations hold; a module-level unknown
+  number names its dims).
 * **Deadline:** a safety net only (`ms`, 10 s): past it user calls become unknown calls and
   running calls stop where they are. The budget, not the deadline, bounds the work.
 * **Soundness** holds relative to the models and to annotations of values whose class is
@@ -159,17 +161,15 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 
 | file | role |
 | --- | --- |
-| `intern.rs`, `domain.rs` | interned keys, sources, lenses; `Row`, `KeyVal`, `Value`, transfers, `classify` |
-| `layered.rs`, `state.rs` | persistent maps (`LayerMap`, `TwoLevel`); `State`, joins, `diff_keys` |
+| `intern.rs`, `domain.rs`, `layered.rs`, `state.rs` | interned keys, sources, lenses; `Row`, `KeyVal`, `Value`, transfers, `classify`; persistent maps (`LayerMap`, `TwoLevel`); `State`, joins, `diff_keys` |
 | `frontend.rs`, `scopes.rs`, `interp/program.rs` | ruff parsing, leaked `&'static` trees, module registry; lexical scopes; `Program` (paths, models, modules imported), imports |
 | `interp/mod.rs`; `context.rs`; `entry.rs`; `heap.rs`, `alloc.rs`, `gc.rs` | `Analyzer` (its components); `Context` (frames, callers, call chain), `Modes`; running the program, entry runs (`Entries`); the `Heap` (objects, lengths, birth marks), allocation policy (`alloc`: variants, recency), liveness (`live_among`, `gc_pinned`) and collectors |
 | `interp/stmts.rs`, `interp/tries.rs` | statements, loops, match; raises, try contexts (`Unwind`), try / with, `finally` |
 | `interp/exprs.rs`, `interp/funcs.rs`, `interp/gens.rs` | expressions, comprehensions; functions, names, iteration; generators and `@contextmanager` bodies (`Gens`: lazy runs, per-yield states, watched runs) |
 | `interp/narrow.rs`, `interp/access.rs` | tests (`split`), narrowing; attribute and item access, verdicts, requirements |
 | `interp/calls.rs`, `recursion.rs`, `budget.rs`, `unknown.rs`, `effects.rs` | calls: per-call-site runs; recursion (`Recursion`: activations, fixpoint rounds); `Budget` (per code, deadline, work counters); `__new__`, dataclass init; unknown calls (`Havoc` walks); what skipped calls may change (`skipped_call`, `EffectsCache`) |
-| `models/shape.rs` | tensor shapes (dims as polynomials) for the torch and numpy models |
 | `interp/findings.rs`, `names.rs`, `report.rs`, `api.rs`; `main.rs` | `Findings` (verdicts, notes, row checks, hover facts) and `Names` (symbols, origins) collected; text / JSON / facts output; what models, report and driver may use; CLI (mimalloc), `rowan serve` (on a 1 GiB-stack thread) |
-| `models/` | `mod.rs` (`Registry`, builtins, containers); `tables` (what builtins / library calls raise, change, keep); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib (`enums`, `exceptions`, functools, itertools, …); `pandas`, `pydantic`, `fastapi`, `torch` |
+| `models/` | `mod.rs` (`Registry`, builtins, containers); `tables` (what builtins / library calls raise, change, keep); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib (`enums`, `exceptions`, functools, itertools, …); `pandas`, `pydantic`, `fastapi`, `torch`; `shape.rs` (tensor dims as polynomials) |
 
 `rowan/py/` is a PyO3 binding (does not load on macOS 26); `vscode-rowan/` the editor
 extension (talks to `rowan serve`).

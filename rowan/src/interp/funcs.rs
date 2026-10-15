@@ -212,7 +212,7 @@ impl Analyzer {
                 continue;
             }
             // functools: singledispatch (and its `register`), lru_cache / cache, wraps
-            if self.functools_decorator(&q, d, fobj, fi.as_deref(), state) {
+            if crate::models::singledispatch::functools_decorator(self, &q, d, fobj, fi.as_deref(), state) {
                 continue;
             }
             if q.starts_with("fastapi.") {
@@ -475,10 +475,10 @@ impl Analyzer {
         match t {
             ast::Expr::Name(n) => {
                 let name = s(n.id.as_str());
-                let named = if self.m.torch_on { self.t_name_number(name, v) } else { None };
+                let named = if self.m.torch_on { crate::models::torch::t_name_number(self, name, v) } else { None };
                 let v = named.as_ref().unwrap_or(v);
                 if self.m.torch_on {
-                    self.t_name_result(name, v);
+                    crate::models::torch::t_name_result(self, name, v);
                 }
                 self.store_name(name, v.clone(), state);
                 if self.findings.facts_on {
@@ -509,7 +509,7 @@ impl Analyzer {
                 if self.m.torch_on && {
                     let star = elts.iter().position(|e| matches!(e, ast::Expr::Starred(_)));
                     let n = frontend::node(t);
-                    match self.t_unpack(v, elts.len(), star, &n, state) {
+                    match crate::models::torch::t_unpack(self, v, elts.len(), star, &n, state) {
                         Some(parts) => {
                             for (sub, pv) in elts.iter().zip(parts.iter()) {
                                 self.bind_target(sub, pv, state);
@@ -580,9 +580,9 @@ impl Analyzer {
                     let sv = state.slot(oid, Ns::Pos, key_int(i as i64));
                     parts[i] = parts[i].join(&sv);
                 }
-            } else if let Some(cls) = self.heap.instance_class(oid).filter(|c| kind == Kind::Instance && self.is_named_tuple_class(*c)) {
+            } else if let Some(cls) = self.heap.instance_class(oid).filter(|c| kind == Kind::Instance && crate::models::dataclasses::is_named_tuple_class(self, *c)) {
                 // a NamedTuple: its fields in order
-                let fs = self.dataclass_fields_mro(cls);
+                let fs = crate::models::dataclasses::dataclass_fields_mro(self, cls);
                 for i in 0..n {
                     let v = match fs.get(i) {
                         Some((f, _)) => state.slot(oid, Ns::Attr, intern::key_str_lit(f)),
@@ -879,7 +879,7 @@ impl Analyzer {
                     items = None;
                     exhaustive = false;
                     let inf = self.m.infinites[&oid].clone();
-                    elems.push(self.infinite_elem(&inf));
+                    elems.push(crate::models::itertools::infinite_elem(self, &inf));
                 }
                 Kind::Zip => {
                     let Payload::Zip(ks, vs) = self.heap.obj(oid).payload.clone() else { continue };
@@ -888,12 +888,12 @@ impl Analyzer {
                     // an infinite side (or a generator known that far) yields as many items as the
                     // other has
                     if let (None, Some(n)) = (&ki.items, vi.items.as_ref().map(|x| x.len())) {
-                        if let Some(its) = self.take_known(&ks, n, state) {
+                        if let Some(its) = crate::models::itertools::take_known(self, &ks, n, state) {
                             ki.items = Some(its);
                         }
                     }
                     if let (None, Some(n)) = (&vi.items, ki.items.as_ref().map(|x| x.len())) {
-                        if let Some(its) = self.take_known(&vs, n, state) {
+                        if let Some(its) = crate::models::itertools::take_known(self, &vs, n, state) {
                             vi.items = Some(its);
                         }
                     }
@@ -1082,7 +1082,7 @@ impl Analyzer {
                     }
                     elems.push(Value::kv_only(KeyVal::lits(ks)));
                 }
-            } else if let Some(e) = self.m.torch_on.then(|| self.t_iter_elem(v, state)).flatten() {
+            } else if let Some(e) = self.m.torch_on.then(|| crate::models::torch::t_iter_elem(self, v, state)).flatten() {
                 elems.push(e);
             } else {
                 elems.push(line_data.clone());

@@ -813,14 +813,14 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
         parts.extend(ls);
     }
     // a tensor parameter with known shape facts: its shape
-    if let Some(s) = an.t_known_param_shape(v, state) {
+    if let Some(s) = crate::models::torch::t_known_param_shape(an, v, state) {
         return crate::models::torch::tensor_text(&s);
     }
     for o in v.pts.iter() {
         parts.push(render_object(an, state, o, depth, seen));
     }
     // a part nothing is known about (data, keys of something): `?`
-    if let Some(t) = an.t_render(v, state) {
+    if let Some(t) = crate::models::torch::t_render(an, v, state) {
         parts.push(t);
     } else if let Some(expr) = data_expr(&v.kv) {
         parts.push(expr);

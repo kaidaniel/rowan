@@ -29,78 +29,76 @@ pub struct Raised {
     pub exc: Value,
 }
 
-impl Analyzer {
-    /// `f(*args, **kwargs)` with every exception caught (a thread, a future): its value, and
-    /// what it raised; the state after is the join of the normal end and the raising points.
-    pub fn call_catching(&mut self, f: &Value, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, state: &mut State, node: &Node) -> (Value, Raised) {
-        let mut pre = state.copy();
-        self.enter_try(rustc_hash::FxHashSet::from_iter(["*".to_string()]), &mut pre);
-        let outs = self.catching(|an| {
-            let mut outs = Vec::new();
-            for fo in f.pts.iter() {
-                let v = match an.heap.kind(fo) {
-                    Kind::Function => an.call_user(fo, None, args.clone(), kwargs.clone(), vec![], vec![], state, node, None, false),
-                    _ => an.call_value(&Value::obj(fo), node, None, state, Some(args.clone())),
-                };
-                outs.push(v);
-            }
-            outs
-        });
-        let out = self.leave_try();
-        let (flagged, raised_at, raised_v) = (out.any(), out.raised(), out.value());
-        let died = !state.reachable;
-        let raised = flagged || raised_at.is_some() || died;
-        let level = if died && raised { 2 } else if raised { 1 } else { 0 };
-        let mut names: Vec<String> = Vec::new();
-        let mut any = flagged || raised_v.pts.is_empty();
-        for o in raised_v.pts.iter() {
-            let n = match self.heap.kind(o) {
-                Kind::Instance => self.heap.instance_class(o).map(|c| self.heap.class_info(c).name.clone()),
-                _ => self.heap.obj(o).label.split(|ch: char| !ch.is_alphanumeric() && ch != '_').next().map(|x| x.to_string()).filter(|x| !x.is_empty()),
+/// `f(*args, **kwargs)` with every exception caught (a thread, a future): its value, and
+/// what it raised; the state after is the join of the normal end and the raising points.
+pub fn call_catching(an: &mut Analyzer, f: &Value, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, state: &mut State, node: &Node) -> (Value, Raised) {
+    let mut pre = state.copy();
+    an.enter_try(rustc_hash::FxHashSet::from_iter(["*".to_string()]), &mut pre);
+    let outs = an.catching(|an| {
+        let mut outs = Vec::new();
+        for fo in f.pts.iter() {
+            let v = match an.heap.kind(fo) {
+                Kind::Function => an.call_user(fo, None, args.clone(), kwargs.clone(), vec![], vec![], state, node, None, false),
+                _ => an.call_value(&Value::obj(fo), node, None, state, Some(args.clone())),
             };
-            match n {
-                Some(n) if !names.contains(&n) => names.push(n),
-                Some(_) => {}
-                None => any = true,
-            }
+            outs.push(v);
         }
-        if any {
-            names.clear();
+        outs
+    });
+    let out = an.leave_try();
+    let (flagged, raised_at, raised_v) = (out.any(), out.raised(), out.value());
+    let died = !state.reachable;
+    let raised = flagged || raised_at.is_some() || died;
+    let level = if died && raised { 2 } else if raised { 1 } else { 0 };
+    let mut names: Vec<String> = Vec::new();
+    let mut any = flagged || raised_v.pts.is_empty();
+    for o in raised_v.pts.iter() {
+        let n = match an.heap.kind(o) {
+            Kind::Instance => an.heap.instance_class(o).map(|c| an.heap.class_info(c).name.clone()),
+            _ => an.heap.obj(o).label.split(|ch: char| !ch.is_alphanumeric() && ch != '_').next().map(|x| x.to_string()).filter(|x| !x.is_empty()),
+        };
+        match n {
+            Some(n) if !names.contains(&n) => names.push(n),
+            Some(_) => {}
+            None => any = true,
         }
-        match raised_at {
-            Some(mut r) => {
-                let after = if state.reachable { state.copy().join(&mut r) } else { r };
-                state.replace_with(after);
-            }
-            None if died => {
-                // (raised somewhere unknown: from the state before the call)
-                state.replace_with(pre.copy());
-            }
-            None => {}
-        }
-        let exc = if any { Value::new() } else { raised_v.clone() };
-        (join_values(outs), Raised { level, names, exc })
     }
-
-    /// Re-raising what a call raised (`future.result()`).
-    pub fn reraise(&mut self, level: u8, names: &[String], state: &mut State) {
-        if level == 0 {
-            return;
+    if any {
+        names.clear();
+    }
+    match raised_at {
+        Some(mut r) => {
+            let after = if state.reachable { state.copy().join(&mut r) } else { r };
+            state.replace_with(after);
         }
-        let ns: Vec<String> = if names.is_empty() { vec!["Exception".into()] } else { names.to_vec() };
-        if level == 2 && ns.len() == 1 {
-            self.raise_here(&ns[0], state);
-        } else {
-            for n in &ns {
-                self.may_raise_here(n, state);
-            }
-            if names.is_empty() {
-                // (any exception: any handler may run)
-                self.flag_may_raise(state);
-            }
-            if level == 2 {
-                state.reachable = false;
-            }
+        None if died => {
+            // (raised somewhere unknown: from the state before the call)
+            state.replace_with(pre.copy());
+        }
+        None => {}
+    }
+    let exc = if any { Value::new() } else { raised_v.clone() };
+    (join_values(outs), Raised { level, names, exc })
+}
+
+/// Re-raising what a call raised (`future.result()`).
+pub fn reraise(an: &mut Analyzer, level: u8, names: &[String], state: &mut State) {
+    if level == 0 {
+        return;
+    }
+    let ns: Vec<String> = if names.is_empty() { vec!["Exception".into()] } else { names.to_vec() };
+    if level == 2 && ns.len() == 1 {
+        an.raise_here(&ns[0], state);
+    } else {
+        for n in &ns {
+            an.may_raise_here(n, state);
+        }
+        if names.is_empty() {
+            // (any exception: any handler may run)
+            an.flag_may_raise(state);
+        }
+        if level == 2 {
+            state.reachable = false;
         }
     }
 }
@@ -159,7 +157,7 @@ fn thread_start(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId) {
     let (a, kw) = call_args(an, st, &c.node, &args, &kwargs);
     // (a timer's function runs unless it is cancelled first)
     let mut cancelled = (st.slot(o, Ns::Attr, slot_key("timer")).kv.as_lit() != Some(intern::key_bool(false))).then(|| st.copy());
-    an.call_catching(&target, a, kw, st, &c.node);
+    call_catching(an, &target, a, kw, st, &c.node);
     if let Some(c) = cancelled.as_mut() {
         let j = st.join(c);
         st.replace_with(j);
@@ -176,7 +174,7 @@ pub fn executor_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let (a, kw) = call_args(an, st, &c.node, &args, &Value::new());
         // (when a worker starts: perhaps never)
         let mut none = st.copy();
-        an.call_catching(&f, a, kw, st, &c.node);
+        call_catching(an, &f, a, kw, st, &c.node);
         let j = st.join(&mut none);
         st.replace_with(j);
     }
@@ -226,7 +224,7 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             "submit" => {
                 let Some(f) = c.args.first().cloned() else { return Value::data("future") };
                 let args: Vec<Value> = c.args.iter().skip(1).cloned().collect();
-                let (v, r) = an.call_catching(&f, args, c.kwargs.clone(), st, &c.node);
+                let (v, r) = call_catching(an, &f, args, c.kwargs.clone(), st, &c.node);
                 return future_of(an, st, &c.node, &format!("fut{}", c.site), v, &r);
             }
             "map" => {
@@ -243,7 +241,7 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         // (each call its own context: the results stay distinct objects)
                         let mut nd = c.node;
                         nd.col = c.node.col.wrapping_add(2_000_000 + k as u32);
-                        let (v, r) = an.call_catching(&f, args, IndexMap::new(), st, &nd);
+                        let (v, r) = call_catching(an, &f, args, IndexMap::new(), st, &nd);
                         if r.level > 0 {
                             worst.level = worst.level.max(1);
                             worst.names.extend(r.names);
@@ -252,13 +250,13 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     }
                 } else {
                     let args: Vec<Value> = iters.iter().map(|i| an.elem_value(&i.elem, &c.node, "el")).collect();
-                    let (v, r) = an.call_catching(&f, args, IndexMap::new(), st, &c.node);
+                    let (v, r) = call_catching(an, &f, args, IndexMap::new(), st, &c.node);
                     worst.level = r.level.min(1);
                     worst.names = r.names;
                     results.push(v);
                 }
                 // (an exception comes out when its result is reached: here, approximately)
-                an.reraise(worst.level, &worst.names, st);
+                reraise(an, worst.level, &worst.names, st);
                 let lid = an.alloc_at(Kind::List, &c.node, st, &format!("map@L{}", c.line), Payload::None, None, Ns::Item, None, Some(&format!("exmap{}", c.site)));
                 let acc = join_values(results.clone());
                 st.set_slot(lid, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
@@ -285,7 +283,7 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     let lvl = st.slot(o, Ns::Attr, slot_key("raised")).kv.as_lit().and_then(intern::key_as_int).unwrap_or(1) as u8;
                     let names = an.m.future_excs.get(&o).cloned().unwrap_or_default();
                     outs.push(st.slot(o, Ns::Attr, slot_key("result")));
-                    an.reraise(lvl, &names, st);
+                    reraise(an, lvl, &names, st);
                 }
                 return join_values(outs);
             }
@@ -294,7 +292,7 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             "exception" => return join_values(objs.iter().map(|o| st.slot(*o, Ns::Attr, slot_key("exc"))).collect::<Vec<_>>()),
             "add_done_callback" => {
                 if let Some(f) = c.args.first().cloned() {
-                    an.call_catching(&f, vec![recv.clone()], IndexMap::new(), st, &c.node);
+                    call_catching(an, &f, vec![recv.clone()], IndexMap::new(), st, &c.node);
                 }
                 return an.none_v.clone();
             }

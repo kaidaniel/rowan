@@ -975,7 +975,7 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let tensor = crate::models::torch::is_tensor(v);
                 let not_tensor = !tensor
                     && !v.pts.is_empty()
-                    && v.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::List | Kind::Tuple | Kind::Dict | Kind::Set | Kind::Namespace | Kind::Function | Kind::Class) || (an.heap.kind(o) == Kind::Instance && !an.t_is_module_instance(o)))
+                    && v.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::List | Kind::Tuple | Kind::Dict | Kind::Set | Kind::Namespace | Kind::Function | Kind::Class) || (an.heap.kind(o) == Kind::Instance && !crate::models::torch::t_is_module_instance(an, o)))
                     && (v.kv.is_bot() || v.kv.is_literal())
                     || v.pts.is_empty() && v.kv.is_literal();
                 if tensor && q == "torch.Tensor" {
@@ -1187,7 +1187,7 @@ pub fn protocol_members(an: &Analyzer, cls: u32) -> Option<Vec<String>> {
 /// with several arguments, any of them.
 fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if an.m.torch_on {
-        if let Some(v) = an.t_minmax(c.qual.ends_with("max"), &c.args, st) {
+        if let Some(v) = crate::models::torch::t_minmax(an, c.qual.ends_with("max"), &c.args, st) {
             return v;
         }
     }
@@ -1716,7 +1716,7 @@ fn m_asdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 Kind::Instance => an.heap.instance_class(o),
                 _ => None,
             };
-            let is_dc = cls_of.map(|cl| !an.dataclass_fields_mro(cl).is_empty()).unwrap_or(false);
+            let is_dc = cls_of.map(|cl| !crate::models::dataclasses::dataclass_fields_mro(an, cl).is_empty()).unwrap_or(false);
             if !is_dc || depth > 4 {
                 out = out.join(&Value::obj(o));
                 continue;
@@ -1725,7 +1725,7 @@ fn m_asdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             // one dict per converted instance (siblings at one depth must not share it)
             let d = an.alloc_at(Kind::Dict, &c.node, st, &format!("asdict@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("asdict{}:{}", depth, o)));
             st.set_row(d, Ns::Item, Row::new());
-            for (f, _) in an.dataclass_fields_mro(cls) {
+            for (f, _) in crate::models::dataclasses::dataclass_fields_mro(an, cls) {
                 let fk = key_str_lit(&f);
                 let row = st.row(o, Ns::Attr);
                 if !row.present.contains(fk) {
@@ -1739,7 +1739,7 @@ fn m_asdict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         out
     }
-    if a.pts.iter().all(|o| an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).map(|cl| !an.dataclass_fields_mro(cl).is_empty()).unwrap_or(false)) && !a.pts.is_empty() {
+    if a.pts.iter().all(|o| an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).map(|cl| !crate::models::dataclasses::dataclass_fields_mro(an, cl).is_empty()).unwrap_or(false)) && !a.pts.is_empty() {
         return conv(an, st, c, &a, 0);
     }
     m_vars(an, st, c)
@@ -1754,7 +1754,7 @@ fn m_dc_fields(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         _ => None,
     });
     let Some(cls) = cls else { return Value::data("fields") };
-    let names: Vec<String> = an.dataclass_fields_mro(cls).into_iter().map(|(f, _)| f).collect();
+    let names: Vec<String> = crate::models::dataclasses::dataclass_fields_mro(an, cls).into_iter().map(|(f, _)| f).collect();
     let mut vals: Vec<Value> = Vec::new();
     for (i, f) in names.iter().enumerate() {
         an.frame_mut().unroll.push(i);
@@ -1979,7 +1979,7 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             let n = match an.heap.kind(o) {
                 // (a torch container — ModuleList, Sequential, ModuleDict — is not a list or dict)
-                _ if an.t_layer_type(o).is_some() => {
+                _ if crate::models::torch::t_layer_type(an, o).is_some() => {
                     known = false;
                     continue;
                 }
@@ -2030,10 +2030,10 @@ fn m_str(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         return Value::data("str");
     }
     if let Some(a) = c.args.first() {
-        if let Some(t) = an.enum_text(a, st) {
+        if let Some(t) = crate::models::enums::enum_text(an, a, st) {
             return t;
         }
-        if let Some(t) = an.exc_text(a, false, st) {
+        if let Some(t) = crate::models::exceptions::exc_text(an, a, false, st) {
             return t;
         }
         let mut out = if a.kv.is_bot() { Value::new() } else { Value::kv_only(an.rename_kv(&a.kv, &RenameFn::new(FnKind::Str))) };
@@ -2051,7 +2051,7 @@ fn m_str(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 fn m_repr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    if let Some(t) = c.args.first().and_then(|a| an.exc_text(a, true, st)) {
+    if let Some(t) = c.args.first().and_then(|a| crate::models::exceptions::exc_text(an, a, true, st)) {
         return t;
     }
     if let Some(r) = c.args.first().and_then(|a| a.single()).and_then(|o| pathtext::path_repr(an, o)) {
@@ -4201,7 +4201,7 @@ fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 (Ok(j), None) => return json_literal(an, st, c, &j, ""),
                 (_, Some((msg, pos))) => {
                     let (lineno, colno, full) = crate::models::pytext::py_json_error_parts(&text, &msg, pos);
-                    let e = an.exception_object("JSONDecodeError", vec![Value::lit(intern::key_str_lit(&full))], &c.node, st);
+                    let e = crate::models::exceptions::exception_object(an, "JSONDecodeError", vec![Value::lit(intern::key_str_lit(&full))], &c.node, st);
                     if let Some(o) = e.single() {
                         let strong = an.heap.obj(o).single;
                         for (name, v) in [("msg", Value::lit(intern::key_str_lit(&msg))), ("doc", Value::lit(intern::key_str_lit(&text))), ("pos", Value::lit(intern::key_int(pos as i64))), ("lineno", Value::lit(intern::key_int(lineno))), ("colno", Value::lit(intern::key_int(colno)))] {
@@ -4579,8 +4579,8 @@ fn m_nt_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let mut outs: Vec<Value> = Vec::new();
     for o in recv.pts.iter() {
         let cls = an.heap.instance_class(o);
-        let Some(cls) = cls.filter(|cl| an.is_named_tuple_class(*cl)) else { continue };
-        let fields: Vec<String> = an.dataclass_fields_mro(cls).into_iter().map(|(f, _)| f).collect();
+        let Some(cls) = cls.filter(|cl| crate::models::dataclasses::is_named_tuple_class(an, *cl)) else { continue };
+        let fields: Vec<String> = crate::models::dataclasses::dataclass_fields_mro(an, cls).into_iter().map(|(f, _)| f).collect();
         if c.qual.ends_with("_asdict") {
             let d = an.alloc_simple(Kind::Dict, &c.node, st, &format!("dict@L{}", c.line));
             for f in &fields {
@@ -4619,11 +4619,11 @@ fn m_astuple(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 Kind::Instance => an.heap.instance_class(o),
                 _ => None,
             };
-            let Some(cls) = cls.filter(|cl| !an.dataclass_fields_mro(*cl).is_empty()).filter(|_| depth < 4) else {
+            let Some(cls) = cls.filter(|cl| !crate::models::dataclasses::dataclass_fields_mro(an, *cl).is_empty()).filter(|_| depth < 4) else {
                 out = out.join(&Value::obj(o));
                 continue;
             };
-            let fields: Vec<String> = an.dataclass_fields_mro(cls).into_iter().map(|(f, _)| f).collect();
+            let fields: Vec<String> = crate::models::dataclasses::dataclass_fields_mro(an, cls).into_iter().map(|(f, _)| f).collect();
             let mut vals = Vec::new();
             for f in fields {
                 let x = st.slot(o, Ns::Attr, key_str_lit(&f));
@@ -4704,7 +4704,7 @@ fn m_dc_replace(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             _ => None,
         };
         if let Some(cls) = cls.filter(|cl| an.heap.class_info_opt(*cl).map(|ci| ci.has_fields() && !ci.lib.named_tuple).unwrap_or(false)) {
-            let specs = an.dc_specs(cls);
+            let specs = crate::models::dataclasses::dc_specs(an, cls);
             let mut kw: IndexMap<intern::StrId, Value> = IndexMap::new();
             for sp in specs.iter().filter(|sp| sp.init && !sp.initvar) {
                 let v = st.slot(o, Ns::Attr, key_str_lit(&sp.name));
@@ -5315,7 +5315,7 @@ fn m_any_all(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(v) = c.args.first() else { return Value::data("len") };
     if an.m.torch_on {
-        if let Some(r) = an.t_len(v, &c.node, st) {
+        if let Some(r) = crate::models::torch::t_len(an, v, &c.node, st) {
             return r;
         }
     }
@@ -5390,9 +5390,9 @@ fn m_sum(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if an.m.torch_on {
         let e = it.elem.flat();
         if crate::models::torch::is_tensor(&e) {
-            if let Some(s) = an.t_shape(&e, st) {
-                let start = c.args.get(1).and_then(|x| an.t_shape(x, st)).unwrap_or_else(|| crate::models::shape::Shape::known(vec![]));
-                return an.t_broadcast(&s, &start, &c.node, st, "sum");
+            if let Some(s) = crate::models::torch::t_shape(an, &e, st) {
+                let start = c.args.get(1).and_then(|x| crate::models::torch::t_shape(an, x, st)).unwrap_or_else(|| crate::models::shape::Shape::known(vec![]));
+                return crate::models::torch::t_broadcast(an, &s, &start, &c.node, st, "sum");
             }
         }
     }
@@ -5823,9 +5823,9 @@ pub fn record_class_attr(an: &mut Analyzer, oid: ObjId, name: &str, node: &crate
     if an.class_lookup(oid, name).is_some() {
         return None;
     }
-    if matches!(name, "_fields" | "_field_defaults") && an.is_named_tuple_class(oid) {
+    if matches!(name, "_fields" | "_field_defaults") && crate::models::dataclasses::is_named_tuple_class(an, oid) {
         return Some({
-            let fs = an.dataclass_fields_mro(oid);
+            let fs = crate::models::dataclasses::dataclass_fields_mro(an, oid);
         if name == "_fields" {
             let vs: Vec<Value> = fs.iter().map(|(f, _)| Value::lit(key_str_lit(f))).collect();
             let kv = KeyVal::lits(vs.iter().filter_map(|v| v.kv.as_lit()).collect());
@@ -5844,7 +5844,7 @@ pub fn record_class_attr(an: &mut Analyzer, oid: ObjId, name: &str, node: &crate
         });
     }
     if matches!(name, "__required_keys__" | "__optional_keys__" | "__total__") && an.heap.class_info_opt(oid).is_some_and(|ci| ci.lib.typed_dict) {
-        return Some(match an.typed_dict_keys(oid) {
+        return Some(match crate::models::dataclasses::typed_dict_keys(an, oid) {
             Some((req, opt)) if name != "__total__" => {
                 let ks: Vec<Value> = intern::sorted_by_str(if name == "__required_keys__" { req } else { opt }.iter()).into_iter().map(Value::lit).collect();
                 let o = an.alloc_simple(Kind::Set, node, state, &format!("{}@L{}", name, node.line));
