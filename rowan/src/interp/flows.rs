@@ -25,6 +25,8 @@ pub enum Origin {
     NameAttr(StrId, StrId),
     /// the value of attribute `a` of anything (`e.a`): a class attribute `a` among others
     Attr(StrId),
+    /// the class of a value (`type(e)`, `e.__class__`)
+    TypeOf,
 }
 
 /// The value an origin gives, or something it holds.
@@ -334,6 +336,9 @@ impl<'a> Flow<'a> {
                 v => {
                     let mut out = held(self.srcs(v));
                     out.push((Origin::Attr(s(a.attr.as_str())), Level::Own));
+                    if a.attr.as_str() == "__class__" {
+                        out.push((Origin::TypeOf, Level::Own));
+                    }
                     out
                 }
             },
@@ -367,7 +372,10 @@ impl<'a> Flow<'a> {
                             out
                         }
                         "vars" => c.arguments.args.first().map(|x| self.srcs(x)).unwrap_or_default(),
-                        f if super::PURE_BUILTINS.contains(&f) || PASSING_BUILTINS.contains(&f) => args().flat_map(|x| self.srcs(x)).collect(),
+                        "type" if c.arguments.args.len() == 1 => vec![(Origin::TypeOf, Level::Own)],
+                        // (`abs` / `round` may give back their argument, by its dunder; `sorted`,
+                        // `min`, … what they were given; `len`, `str`, `isinstance`, … a new value)
+                        f if PASSING_BUILTINS.contains(&f) || matches!(f, "abs" | "round") => args().flat_map(|x| self.srcs(x)).collect(),
                         _ => Vec::new(),
                     },
                     _ => Vec::new(),
@@ -580,15 +588,6 @@ impl<'a> Flow<'a> {
     /// (`K.x = …`, also through a local), `type(e)` / `e.__class__`, a parameter (a class
     /// method's `cls`, a class given to a function) — not the method's own instance.
     fn class_store(&mut self, base: &Expr, a: StrId) {
-        let typeof_ = match base {
-            Expr::Call(c) => matches!(&*c.func, Expr::Name(f) if f.id.as_str() == "type" && !self.local("type")) && c.arguments.args.len() == 1,
-            Expr::Attribute(x) => x.attr.as_str() == "__class__",
-            _ => false,
-        };
-        if typeof_ {
-            self.out.class_stores.insert(a);
-            return;
-        }
         if self.is_me(base) {
             return;
         }
@@ -598,7 +597,7 @@ impl<'a> Flow<'a> {
                     self.name(n, Some(a));
                     self.flags.entry(Origin::NameAttr(n, a)).or_default().rebinds = true;
                 }
-                (Origin::Param(_), Level::Own) => drop(self.out.class_stores.insert(a)),
+                (Origin::Param(_) | Origin::TypeOf, Level::Own) => drop(self.out.class_stores.insert(a)),
                 _ => {}
             }
         }
