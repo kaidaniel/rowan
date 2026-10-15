@@ -403,7 +403,7 @@ impl Analyzer {
                     }
                     let inst = self.alloc(
                         Kind::Instance,
-                        &format!("param:{}:{}", fi.qualname, ci.name),
+                        &format!("param:{}.{}:{}#{}", fi.qualname, pname, ci.name, oid),
                         state,
                         &format!("{} param", ci.name),
                         Payload::Cls(oid),
@@ -422,7 +422,7 @@ impl Analyzer {
                     return Some(Value::obj(inst));
                 }
                 // (None: a caller's instance, made otherwise)
-                return self.fresh_instance(oid, state, &format!("entry:{}", fi.qualname)).map(Value::obj);
+                return self.fresh_instance(oid, state, &format!("entry:{}.{}", fi.qualname, pname)).map(Value::obj);
             }
             if o == Kind::External && self.heap.external_qual(oid).ends_with("DataFrame") {
                 let src = Source::new(&format!("param {}", fi.qualname), SourceKind::Param);
@@ -465,7 +465,8 @@ impl Analyzer {
     fn instance_with(&mut self, cls_oid: ObjId, ci: &ClassInfo, row: Row, state: &mut State, ctx: &str) -> ObjId {
         self.alloc(
             Kind::Instance,
-            &format!("instance:{}:{}", ci.name, ctx),
+            // (the class's own object: two classes may share a name)
+            &format!("instance:{}#{}:{}", ci.name, cls_oid, ctx),
             state,
             &format!("{}()", ci.name),
             Payload::Cls(cls_oid),
