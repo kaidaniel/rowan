@@ -50,13 +50,7 @@ impl Analyzer {
             }
         };
         let oid = if recent {
-            let rsite = format!("{}#recent", site);
-            let oid = self.heap.alloc_raw(kind, &rsite, &ctx, true, &label, payload);
-            let top = self.cx.recent_stack.last_mut().unwrap();
-            if !top.iter().any(|(o, _, _, _)| *o == oid) {
-                top.push((oid, kind, site.to_string(), ctx.clone()));
-            }
-            oid
+            self.alloc_recent(kind, site, &ctx, &label, payload)
         } else {
             let existed = self.heap.find(kind, site, &ctx);
             let payload2 = payload.clone();
@@ -79,34 +73,12 @@ impl Analyzer {
                 if single && !self.cx.recent_stack.is_empty() && !hard {
                     // inside a loop: a strong recent object, folded into the summary object
                     // at the loop's back-edge (the earlier object becomes that summary)
-                    let rsite = format!("{}#recent", site);
-                    let r = self.heap.alloc_raw(kind, &rsite, &ctx, true, &label, payload2);
-                    let top = self.cx.recent_stack.last_mut().unwrap();
-                    if !top.iter().any(|(o, _, _, _)| *o == r) {
-                        top.push((r, kind, site.to_string(), ctx.clone()));
-                    }
-                    oid = r;
+                    oid = self.alloc_recent(kind, site, &ctx, &label, payload2);
                 } else {
                     // another object of the site while the first is still in use: a variant
                     // of its own (a method run twice on one receiver keeps both records), up
                     // to a few; past them one summary object, weak (no longer one key)
-                    let mut variant: Option<ObjId> = None;
-                    if single && !hard {
-                        // (the variants made so far, their liveness in one walk)
-                        let made: Vec<(String, Option<ObjId>)> = (1..=8usize).map(|k| {
-                            let vctx = format!("{}~{}", ctx, k);
-                            let v = self.heap.find(kind, site, &vctx);
-                            (vctx, v)
-                        }).collect();
-                        let first_free = made.iter().position(|(_, v)| v.is_none()).unwrap_or(made.len());
-                        let olds: Vec<ObjId> = made[..first_free].iter().filter_map(|(_, v)| *v).collect();
-                        let olds: Vec<ObjId> = olds.into_iter().filter(|o| self.has_facts(*o, state)).collect();
-                        let live = if olds.is_empty() { FxHashSet::default() } else { self.live_among(&olds, state) };
-                        let pick = made.iter().position(|(_, v)| match v { None => true, Some(o) => !live.contains(o) });
-                        if let Some(i) = pick {
-                            variant = Some(self.heap.alloc_raw(kind, site, &made[i].0, single, &label, payload2.clone()));
-                        }
-                    }
+                    let variant = if single && !hard { self.alloc_variant(kind, site, &ctx, single, &label, &payload2, state) } else { None };
                     match variant {
                         Some(v) => oid = v,
                         None => {
@@ -121,6 +93,46 @@ impl Analyzer {
             }
             oid
         };
+        self.born_facts(oid, kind, state, row, ns);
+        oid
+    }
+
+    /// A strong *recent* object of the site in the running loop iteration (folded into the
+    /// site's summary object at the back-edge, `rename_recent`).
+    fn alloc_recent(&mut self, kind: Kind, site: &str, ctx: &str, label: &str, payload: Payload) -> ObjId {
+        let rsite = format!("{}#recent", site);
+        let oid = self.heap.alloc_raw(kind, &rsite, ctx, true, label, payload);
+        let top = self.cx.recent_stack.last_mut().unwrap();
+        if !top.iter().any(|(o, _, _, _)| *o == oid) {
+            top.push((oid, kind, site.to_string(), ctx.to_string()));
+        }
+        oid
+    }
+
+    /// Another object of the site while the first is still in use: the first of its variants
+    /// (up to 8) nothing reaches any more (their liveness in one walk); None: all in use.
+    #[allow(clippy::too_many_arguments)]
+    fn alloc_variant(&mut self, kind: Kind, site: &str, ctx: &str, single: bool, label: &str, payload2: &Payload, state: &State) -> Option<ObjId> {
+        // (the variants made so far, their liveness in one walk)
+        let made: Vec<(String, Option<ObjId>)> = (1..=8usize).map(|k| {
+            let vctx = format!("{}~{}", ctx, k);
+            let v = self.heap.find(kind, site, &vctx);
+            (vctx, v)
+        }).collect();
+        let first_free = made.iter().position(|(_, v)| v.is_none()).unwrap_or(made.len());
+        let olds: Vec<ObjId> = made[..first_free].iter().filter_map(|(_, v)| *v).collect();
+        let olds: Vec<ObjId> = olds.into_iter().filter(|o| self.has_facts(*o, state)).collect();
+        let live = if olds.is_empty() { FxHashSet::default() } else { self.live_among(&olds, state) };
+        let pick = made.iter().position(|(_, v)| match v { None => true, Some(o) => !live.contains(o) });
+        if let Some(i) = pick {
+            return Some(self.heap.alloc_raw(kind, site, &made[i].0, single, label, payload2.clone()));
+        }
+        None
+    }
+
+    /// An object made here: its length unknown until the code making it says; a record's row
+    /// (joined into the old one for a weak object; a strong one starts over).
+    fn born_facts(&mut self, oid: ObjId, kind: Kind, state: &mut State, row: Option<Row>, ns: Ns) {
         let obj_single = self.heap.obj(oid).single;
         if obj_single {
             self.heap.renew(oid);
@@ -143,7 +155,6 @@ impl Analyzer {
             state.drop_obj(oid);
             state.elems.remove(&oid);
         }
-        oid
     }
 
     /// `alloc` at an AST node.
