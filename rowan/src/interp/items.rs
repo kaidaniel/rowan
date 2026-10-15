@@ -238,6 +238,11 @@ impl Analyzer {
                 self.may_raise_here("TypeError", state);
                 let label = format!("{}{}", self.heap.obj(base).label, bounds);
                 let sid = self.heap.alloc_raw(Kind::Unknown, &format!("slice:{}", base), "", false, &label, Payload::View(ViewKind::Elems, Value::obj(base)));
+                // (its own content is not known: what a copy of it holds, say)
+                if !state.has_row(sid, Ns::Item) {
+                    state.set_row(sid, Ns::Item, Row::top());
+                    state.set_row(sid, Ns::Attr, Row::top());
+                }
                 if let Some(sym) = self.names.get(base).filter(|_| !self.names.has(sid)).map(|b| format!("{}{}", b, bounds)) {
                     let scope = self.names.scope(base);
                     self.names.set(sid, sym, scope);

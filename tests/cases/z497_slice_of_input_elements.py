@@ -27,3 +27,5 @@ data = json.loads(TEXT)
 t = total(data)
 n = second_name(data)
 #@schema json.loads@L26['*']: always={amount,name} only={amount,name}
+pairs = dict(json.loads('[["a", 1], ["b", 2]]' if n else TEXT)[1:])
+#@row pairs: present={} definite={} open
