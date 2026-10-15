@@ -146,7 +146,7 @@ impl Analyzer {
                 },
                 Kind::Namespace | Kind::Instance if name == "__dict__" => {
                     let vid = self.heap.alloc_raw(Kind::View, &format!("view:attrs:{}", oid), "", true, "__dict__", Payload::View(ViewKind::Attrs, Value::obj(oid)));
-                    self.heap.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(oid));
+                    self.heap.set_payload(vid, Payload::View(ViewKind::Attrs, Value::obj(oid)));
                     Value::obj(vid)
                 }
                 Kind::Namespace | Kind::List | Kind::View if crate::models::model_object_attr(self, oid, name, node, state).map(|v| parts.push(v)).is_some() => continue,
@@ -396,7 +396,7 @@ impl Analyzer {
                 let f = self.heap.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, &q, Payload::Str(q.clone()));
                 let payload = Payload::Partial(Value::obj(f), vec![self_v.clone()], IndexMap::new());
                 let b = self.heap.alloc_raw(Kind::Partial, &format!("super:{}:{}", q, ids), "", true, &format!("super().{}", name), payload.clone());
-                self.heap.obj_mut(b).payload = payload;
+                self.heap.set_payload(b, payload);
                 Value::obj(b)
             }
         })

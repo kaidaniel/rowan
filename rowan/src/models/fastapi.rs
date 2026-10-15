@@ -49,7 +49,7 @@ const HTTP_METHODS: &[&str] = &["get", "post", "put", "patch", "delete", "head",
 
 fn fa_obj(an: &mut Analyzer, st: &mut State, node: &Node, qual: &str, v: Value, ctx: &str) -> Value {
     let oid = an.alloc_at(Kind::Namespace, node, st, qual, Payload::Method(qual.to_string(), v.clone()), Some(Row::new()), Ns::Attr, None, Some(ctx));
-    an.heap.obj_mut(oid).payload = Payload::Method(qual.to_string(), v);
+    an.heap.set_payload(oid, Payload::Method(qual.to_string(), v));
     // its attributes as slots (read through a placeholder in a summary like any object's)
     let attrs: &[&str] = match qual {
         "fastapi.request" => &["query_params", "headers", "cookies", "path_params", "method", "url", "client", "state", "scope", "app", "json", "body", "form"],

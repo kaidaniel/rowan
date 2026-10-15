@@ -208,6 +208,8 @@ impl Analyzer {
         let cls = self.unwind.cur_exc_cls.take().or_else(|| self.exc_value_names(&exc));
         let Some(t) = self.unwind.tries.last() else { return false };
         let (fl, el) = (t.frames, t.envs);
+        self.memo.raise_recs += 1;
+        self.memo.raise_log.push(fl);
         let mut here = state.copy();
         // the try is in a `@contextmanager` generator whose with body is running (also from a
         // callee of the body): the generator's names

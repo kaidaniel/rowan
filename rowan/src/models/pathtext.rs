@@ -255,7 +255,7 @@ pub fn pathlib_norm(parts: &[String]) -> String {
 fn new_path(an: &mut Analyzer, st: &mut State, node: &Node, text: &str, cls: &str, ctx: &str) -> Value {
     let p = Payload::Method(PATH_KIND.into(), Value::lit_str(text));
     let oid = an.alloc_at(Kind::Namespace, node, st, &format!("{}('{}')", cls, text), p.clone(), Some(Row::new()), Ns::Attr, None, Some(&format!("path:{}:{}", ctx, text)));
-    an.heap.obj_mut(oid).payload = p;
+    an.heap.set_payload(oid, p);
     st.set_row(oid, Ns::Attr, Row::new());
     an.m.path_classes.insert(oid, cls.to_string());
     Value::obj(oid)

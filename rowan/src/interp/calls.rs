@@ -486,6 +486,9 @@ impl Analyzer {
         if super::debug_enabled() {
             eprintln!("run {} at {} frames={} chain={:?}", fi.qualname, site, self.cx.frames.len(), self.cx.call_chain);
         }
+        let probe = (forced.is_none() && !entry && !matches!(fnode, FuncNode::Def(f) if is_generator(&f.body))).then(|| self.probe_begin(foid, &site, &self_v, &args, &kwargs, &star_args, &star_kwargs, state));
+        let raise_mark = self.memo.raise_log.len();
+        let depth0 = self.cx.frames.len();
         // context for allocations inside the callee (§3)
         let (ctx, ctx_single) = match forced {
             Some((_, ctx, single)) => (ctx, single),
@@ -535,7 +538,7 @@ impl Analyzer {
             // what `yield from` the generator evaluates to: its return value
             state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}genret"), ret.clone(), true);
             // (one-shot: what a consumer takes is gone for the next one)
-            self.heap.obj_mut(gid).iterator = true;
+            self.heap.set_iterator(gid);
             ret = Value::obj(gid);
         }
         let rows: Vec<(u32, Row)> = ret.pts.iter().filter(|o| self.heap.is_record_like(*o)).map(|o| (o, state.row(o, Ns::Item))).collect();
@@ -550,6 +553,12 @@ impl Analyzer {
         state.ret = saved_ret;
         if saved_exits.is_some() {
             state.exits = saved_exits;
+        }
+        if self.memo.raise_log[raise_mark..].iter().any(|f| *f <= depth0) {
+            self.memo.outer_raise_recs += 1;
+        }
+        if let Some(tok) = probe {
+            self.probe_end(tok, state, &ret);
         }
         ret
     }

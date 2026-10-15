@@ -230,7 +230,8 @@ impl Analyzer {
                 (o.label.clone(), o.payload.clone(), o.iter_elem, o.derived_from, o.depth)
             };
             let sid = self.heap.alloc_raw(*kind, site, ctx, false, &label, payload);
-            {
+            let so = self.heap.obj(sid);
+            if so.single || so.literal_len.is_some() || so.iter_elem != iter_elem || so.depth != depth || (so.derived_from.is_none() && derived.is_some()) {
                 let so = self.heap.obj_mut(sid);
                 so.single = false;
                 so.literal_len = None;

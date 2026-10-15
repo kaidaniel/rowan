@@ -1214,7 +1214,7 @@ fn alloc_ctx(an: &mut Analyzer, kind: Kind, node: &Node, items: Vec<Value>, ctx:
 fn new_obj(an: &mut Analyzer, st: &mut State, node: &Node, kind: &str, label: &str, ctx: &str) -> u32 {
     let p = Payload::Method(format!("stdobj.{}", kind), Value::new());
     let oid = an.alloc_at(Kind::Namespace, node, st, label, p.clone(), Some(Row::new()), Ns::Attr, None, Some(ctx));
-    an.heap.obj_mut(oid).payload = p;
+    an.heap.set_payload(oid, p);
     st.set_row(oid, Ns::Attr, Row::new());
     oid
 }

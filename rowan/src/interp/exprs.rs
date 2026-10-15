@@ -112,7 +112,7 @@ impl Analyzer {
             ast::Expr::Generator(g) => {
                 let v = self.seq_comp(node, Kind::List, &g.elt, &g.generators, state);
                 if let Some(o) = v.single() {
-                    self.heap.obj_mut(o).iterator = true;
+                    self.heap.set_iterator(o);
                 }
                 v
             }

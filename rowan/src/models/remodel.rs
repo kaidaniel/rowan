@@ -50,7 +50,7 @@ fn pattern_of(an: &Analyzer, v: &Value, flags: Option<&Value>) -> Option<(String
 fn new_stdobj(an: &mut Analyzer, st: &mut State, node: &Node, kind: &str, label: &str, ctx: Option<&str>) -> u32 {
     let p = Payload::Method(format!("stdobj.{}", kind), Value::new());
     let oid = an.alloc_at(Kind::Namespace, node, st, label, p.clone(), Some(Row::new()), Ns::Attr, None, ctx);
-    an.heap.obj_mut(oid).payload = p;
+    an.heap.set_payload(oid, p);
     st.set_row(oid, Ns::Attr, Row::new());
     oid
 }

@@ -277,7 +277,7 @@ fn csv_list(an: &mut Analyzer, vals: Vec<Value>, node: &Node, st: &mut State, ct
         an.heap.set_llen(oid, st, None);
     }
     if iterator {
-        an.heap.obj_mut(oid).iterator = true;
+        an.heap.set_iterator(oid);
     }
     Value::obj(oid)
 }
@@ -290,7 +290,7 @@ fn csv_str_list(an: &mut Analyzer, items: &[String], node: &Node, st: &mut State
 pub fn stringio_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let init = c.arg(0, Some("initial_value")).unwrap_or_else(|| Value::lit_str(""));
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, &format!("StringIO@L{}", c.line), Payload::Method("stdobj.stringio".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
-    an.heap.obj_mut(oid).payload = Payload::Method("stdobj.stringio".into(), Value::new());
+    an.heap.set_payload(oid, Payload::Method("stdobj.stringio".into(), Value::new()));
     // (the text as given: a literal, or a library's text label such as pandas' to_json)
     let t = if init.pts.is_empty() { init } else { Value::data(&format!("text@L{}", c.line)) };
     st.set_slot(oid, Ns::Attr, text_key(), t, true);
@@ -316,7 +316,7 @@ pub fn writer_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         None => true,
     };
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, &format!("{}@L{}", if dict { "DictWriter" } else { "writer" }, c.line), Payload::Method("stdobj.csvwriter".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
-    an.heap.obj_mut(oid).payload = Payload::Method("stdobj.csvwriter".into(), Value::new());
+    an.heap.set_payload(oid, Payload::Method("stdobj.csvwriter".into(), Value::new()));
     let known = plain && delim.is_some() && quote.is_some() && term.is_some();
     an.m.csv_writers.insert(
         oid,
@@ -650,14 +650,14 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         _ => Row::with_source(Source::new(&format!("csv.DictReader@L{}", c.line), SourceKind::External)),
     };
     let rid = an.alloc_at(Kind::Dict, &c.node, st, &format!("DictReader row@L{}", c.line), Payload::None, Some(row.clone()), Ns::Item, Some(false), None);
-    an.heap.obj_mut(rid).iter_elem = true;
+    an.heap.set_iter_elem(rid);
     for k in row.present.iter() {
         let v = if Some(k) == rk { Value::data("csv rest") } else { Value::data(&format!("csv field@L{}", c.line)) };
         st.set_slot(rid, Ns::Item, k, v, false);
     }
     let ctx = an.frame().ctx.clone();
     let vid = an.heap.alloc_raw(Kind::View, &format!("view:elems:{}", c.site), &ctx, true, "DictReader", Payload::View(ViewKind::Elems, Value::obj(rid)));
-    an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Elems, Value::obj(rid));
+    an.heap.set_payload(vid, Payload::View(ViewKind::Elems, Value::obj(rid)));
     let fv = match (&text, &given, &fieldnames) {
         (_, Some(g), _) => csv_str_list(an, g, &c.node, st, "csvfields"),
         (Text::Hdr(_, fs), None, None) => csv_str_list(an, fs, &c.node, st, "csvfields"),
@@ -691,7 +691,7 @@ pub fn print_into(an: &mut Analyzer, st: &mut State, c: &Call) {
 /// `contextlib.redirect_stdout(f)` / `redirect_stderr(f)`: a manager holding its target.
 pub fn redirect_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, "redirect", Payload::Method("stdobj.redirect".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
-    an.heap.obj_mut(oid).payload = Payload::Method("stdobj.redirect".into(), Value::new());
+    an.heap.set_payload(oid, Payload::Method("stdobj.redirect".into(), Value::new()));
     let target = c.arg(0, Some("new_target")).unwrap_or_default();
     st.set_slot(oid, Ns::Attr, key_str_lit("\u{1}target"), target, true);
     st.set_slot(oid, Ns::Attr, key_str_lit("\u{1}stderr"), Value::lit(intern::key_bool(c.qual.ends_with("stderr"))), true);
@@ -718,7 +718,7 @@ pub fn redirect_targets(an: &Analyzer, st: &State, managers: &[Value]) -> Vec<Va
 pub fn closing_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let kind = if c.qual.ends_with("closing") { "stdobj.closing" } else { "stdobj.nullcontext" };
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, kind, Payload::Method(kind.into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
-    an.heap.obj_mut(oid).payload = Payload::Method(kind.into(), Value::new());
+    an.heap.set_payload(oid, Payload::Method(kind.into(), Value::new()));
     let target = c.arg(0, Some("enter_result")).or_else(|| c.arg(0, Some("thing"))).unwrap_or_else(|| an.none_v.clone());
     st.set_slot(oid, Ns::Attr, key_str_lit("\u{1}target"), target, true);
     Value::obj(oid)
@@ -755,7 +755,7 @@ pub fn closing_exit(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) {
 /// `contextlib.ExitStack()`.
 pub fn exitstack_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, "ExitStack", Payload::Method("stdobj.exitstack".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
-    an.heap.obj_mut(oid).payload = Payload::Method("stdobj.exitstack".into(), Value::new());
+    an.heap.set_payload(oid, Payload::Method("stdobj.exitstack".into(), Value::new()));
     an.m.exit_callbacks.insert(oid, Vec::new());
     Value::obj(oid)
 }

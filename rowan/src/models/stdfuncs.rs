@@ -628,7 +628,7 @@ fn m_template_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let text = c.arg(0, Some("template")).unwrap_or_else(|| Value::data("template"));
     let p = crate::interp::Payload::Method("stdobj.template".into(), text.clone());
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, &format!("Template@L{}", c.line), p.clone(), Some(crate::domain::Row::new()), Ns::Attr, None, None);
-    an.heap.obj_mut(oid).payload = p;
+    an.heap.set_payload(oid, p);
     let tk = intern::key_str_lit("template");
     st.set_row(oid, Ns::Attr, crate::domain::Row::new().store(tk, true));
     st.set_slot(oid, Ns::Attr, tk, text, true);

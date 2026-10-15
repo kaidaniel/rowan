@@ -289,6 +289,7 @@ impl Analyzer {
 
     /// The deterministic work counters (`ROWAN_DEBUG=1`'s `work:` line).
     pub fn work_line(&self) -> String {
+        eprintln!("{}", self.probe_line());
         format!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {} (walks {}, joins {}), havoc visits {})", self.budget.statements, self.budget.work_units(), self.budget.runs, self.heap.len(), self.budget.elapsed_ms(), if self.budget.hard_cut { ", cut at the deadline" } else { "" }, self.budget.spent_total(), crate::domain::row_joins(), self.budget.walked.get() + crate::state::fp_visits(), self.budget.walked.get(), crate::state::fp_visits(), self.havoc.visited)
     }
 }

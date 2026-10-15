@@ -793,7 +793,7 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if let Some(a) = c.args.first() {
         let it = an.iterate(a, &c.node, st);
         if c.qual == "builtins.iter" {
-            an.heap.obj_mut(oid).iterator = true;
+            an.heap.set_iterator(oid);
         } else {
             an.exhaust(a, st);
         }
@@ -1339,7 +1339,7 @@ fn m_zip(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let a = c.args.first().cloned().unwrap_or_default();
     let b = c.args.get(1).cloned().unwrap_or_default();
     let oid = an.alloc_at(Kind::Zip, &c.node, st, &format!("zip@L{}", c.line), Payload::Zip(a.clone(), b.clone()), None, Ns::Item, None, None);
-    an.heap.obj_mut(oid).payload = Payload::Zip(a.clone(), b.clone());
+    an.heap.set_payload(oid, Payload::Zip(a.clone(), b.clone()));
     // `strict=True`: lengths that differ raise ValueError; otherwise both have the known one
     let strict = c.kwargs.get(&intern::s("strict")).and_then(|v| v.kv.as_lit()) == Some(intern::key_bool(true));
     if strict {
@@ -1366,7 +1366,7 @@ fn m_enumerate(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         Some(v) => v.kv.as_lit().and_then(intern::key_as_int).filter(|_| v.pts.is_empty()),
     };
     let oid = an.alloc_at(Kind::Enumerate, &c.node, st, &format!("enumerate@L{}", c.line), Payload::Enumerate(a.clone(), start), None, Ns::Item, None, None);
-    an.heap.obj_mut(oid).payload = Payload::Enumerate(a, start);
+    an.heap.set_payload(oid, Payload::Enumerate(a, start));
     Value::obj(oid)
 }
 
@@ -2133,7 +2133,7 @@ fn m_super(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let ctx = an.frame().ctx.clone();
     let oid = an.heap.alloc_raw(Kind::Super, &format!("super:{}:{}", foid, c.site), &ctx, true, "super()", Payload::Super(cls, self_v.clone()));
-    an.heap.obj_mut(oid).payload = Payload::Super(cls, self_v);
+    an.heap.set_payload(oid, Payload::Super(cls, self_v));
     Value::obj(oid)
 }
 
@@ -2848,7 +2848,7 @@ fn m_views(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
     let recv = c.recv.clone().unwrap_or_default();
     let ids: Vec<String> = recv.pts.iter().map(|x| x.to_string()).collect();
     let oid = an.heap.alloc_raw(Kind::View, &format!("view:{}:{}", kind.name(), ids.join(",")), "", true, &format!("{} view", kind.name()), Payload::View(kind, recv.clone()));
-    an.heap.obj_mut(oid).payload = Payload::View(kind, recv);
+    an.heap.set_payload(oid, Payload::View(kind, recv));
     Value::obj(oid)
 }
 
@@ -4239,7 +4239,7 @@ fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn m_http(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let tag = format!("{}@L{}", json_tag(&c.qual), c.line);
     let oid = an.alloc_at(Kind::Response, &c.node, st, &tag, Payload::Str(tag.clone()), None, Ns::Item, None, None);
-    an.heap.obj_mut(oid).payload = Payload::Str(tag);
+    an.heap.set_payload(oid, Payload::Str(tag));
     Value::obj(oid)
 }
 
@@ -4398,7 +4398,7 @@ fn m_simplenamespace(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn m_globals(an: &mut Analyzer, _st: &mut State, _c: &Call) -> Value {
     let m = an.frame().module;
     let vid = an.heap.alloc_raw(Kind::View, &format!("view:attrs:{}", m), "", true, "globals()", Payload::View(ViewKind::Attrs, Value::obj(m)));
-    an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Attrs, Value::obj(m));
+    an.heap.set_payload(vid, Payload::View(ViewKind::Attrs, Value::obj(m)));
     Value::obj(vid)
 }
 
@@ -4835,10 +4835,10 @@ fn m_dictreader(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         None => Row::with_source(Source::new(&format!("csv.DictReader@L{}", c.line), SourceKind::External)),
     };
     let rid = an.alloc_at(Kind::Dict, &c.node, st, &format!("DictReader row@L{}", c.line), Payload::None, Some(row), Ns::Item, Some(false), None);
-    an.heap.obj_mut(rid).iter_elem = true;
+    an.heap.set_iter_elem(rid);
     let ctx = an.frame().ctx.clone();
     let vid = an.heap.alloc_raw(Kind::View, &format!("view:elems:{}", c.site), &ctx, true, "DictReader", Payload::View(ViewKind::Elems, Value::obj(rid)));
-    an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Elems, Value::obj(rid));
+    an.heap.set_payload(vid, Payload::View(ViewKind::Elems, Value::obj(rid)));
     Value::obj(vid)
 }
 
@@ -4989,7 +4989,7 @@ fn m_partial(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let payload = Payload::Partial(func, args, kw);
     let oid = an.alloc_at(Kind::Partial, &c.node, st, &format!("partial@L{}", c.line), payload.clone(), None, Ns::Item, None, None);
-    an.heap.obj_mut(oid).payload = payload;
+    an.heap.set_payload(oid, payload);
     if !rest_star.is_empty() {
         an.m.partial_star.insert(oid, rest_star);
     } else {
@@ -5145,7 +5145,7 @@ fn m_mappingproxy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let _ = st;
     let vid = an.heap.alloc_raw(Kind::View, &format!("view:proxy:{}:{}", c.site, d.pts.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(",")), "", true, "mappingproxy", Payload::View(ViewKind::Proxy, d.clone()));
-    an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Proxy, d);
+    an.heap.set_payload(vid, Payload::View(ViewKind::Proxy, d));
     Value::obj(vid)
 }
 
@@ -5285,7 +5285,7 @@ fn m_range(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     };
     let v = an.alloc_positional(Kind::List, &c.node, vals, Value::new(), kv, st);
     if let Some(oid) = v.single() {
-        an.heap.obj_mut(oid).payload = Payload::Range(lo, hi, step);
+        an.heap.set_payload(oid, Payload::Range(lo, hi, step));
     }
     v
 }
@@ -5859,4 +5859,11 @@ pub fn record_class_attr(an: &mut Analyzer, oid: ObjId, name: &str, node: &crate
         });
     }
     None
+}
+
+impl Tables {
+    /// (probe) the sizes of the tables
+    pub fn size_fp(&self) -> usize {
+        self.t_numbers.len() + self.t_strs.len() + self.t_named_numbers.len() + self.t_var_names.len() + self.t_funcs_by_qual.len() + self.shape_reqs.len() + self.shape_errors.len() + self.ci_dicts.len() + self.csv_writers.len() + self.csv_readers.len() + self.argp.len() + self.future_excs.len() + self.stdout_redirect.len() + self.exit_callbacks.len() + self.cookie_jars.len() + self.cfg_parsers.len() + self.cfg_sections.len() + self.re_patterns.len() + self.re_matches.len() + self.path_classes.len() + self.sql_dbs.len() + self.sql_cursors.len() + self.sql_rows.len() + self.infinites.len() + self.partial_star.len() + self.pyd_classes.len() + self.pyd_adapters.len() + self.pyd_errs.len() + self.pyd_verrs.len() + self.np_struct.len() + self.pyd_set.len() + self.pyd_generic.len() + self.fa_routes.len() + self.fa_includes.len() + self.fa_prefix.len() + self.fa_handlers.len() + self.fa_hooks.len() + self.fa_pending.len() + self.fa_out_resp.len() + self.fa_dep_cache.len() + self.fa_app_deps.len() + self.zip_strict.len() + self.counters.len() + self.sorted_items.len() + self.chainmaps.len() + self.deques.len() + self.userdict_classes.len() + self.dd_factories.len() + self.enum_members.len() + self.enum_aliases.len() + self.enum_kind.len() + self.sdispatch.len() + self.sdispatch_method.len() + self.exc_objs.len() + self.td_param_src.len() + self.wrapped.len() + self.total_ordering.len() + self.attr_mirrors.len() + self.lazy_src.len()
+    }
 }

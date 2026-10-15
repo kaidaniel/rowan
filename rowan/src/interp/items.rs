@@ -544,7 +544,7 @@ impl Analyzer {
             }
         }
         let d = self.heap.obj(oid).depth + 1;
-        self.heap.obj_mut(pid).depth = d;
+        self.heap.set_depth(pid, d);
         if !state.has_row(pid, Ns::Item) {
             let srcs = row.sources.filter(|(src, _)| !crate::domain::source_is_data(src)).map(|(src, _)| (crate::domain::source_extend(src, k), intern::EMPTY_LENS));
             // (the parent's value was read on this path: its requirements are known here, none

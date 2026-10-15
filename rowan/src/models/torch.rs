@@ -294,7 +294,7 @@ pub fn t_size_value(an: &mut Analyzer, s: &Shape, node: &Node, st: &mut State) -
             let vals: Vec<Value> = d.iter().map(|x| dim_value(*x)).collect();
             let v = an.alloc_positional(Kind::Tuple, node, Some(vals), Value::new(), DATA, st);
             if let Some(o) = v.single() {
-                an.heap.obj_mut(o).payload = Payload::Str("torch.Size".into());
+                an.heap.set_payload(o, Payload::Str("torch.Size".into()));
             }
             v
         }
@@ -323,7 +323,7 @@ pub fn t_tuple_role(an: &mut Analyzer, vals: Vec<Value>, node: &Node, st: &mut S
         an.heap.set_llen(oid, st, None);
     }
     if let Some(m) = marker {
-        an.heap.obj_mut(oid).payload = Payload::Str(m.into());
+        an.heap.set_payload(oid, Payload::Str(m.into()));
     }
     Value::obj(oid)
 }
@@ -3248,7 +3248,7 @@ pub fn t_layer_new(an: &mut Analyzer, ty: &str, c: &Call, st: &mut State) -> Val
         // its items are also its attributes (`self.transformer.wte`)
         for o in v.pts.iter() {
             if an.heap.kind(o) == Kind::Dict {
-                an.heap.obj_mut(o).payload = Payload::Str("torch.nn.ModuleDict".into());
+                an.heap.set_payload(o, Payload::Str("torch.nn.ModuleDict".into()));
             }
         }
         return v;
@@ -3326,7 +3326,7 @@ fn t_list_layer(an: &mut Analyzer, ty: &str, items: Option<Vec<Value>>, elem: Op
         }
     };
     if let Some(o) = v.single() {
-        an.heap.obj_mut(o).payload = Payload::Str(format!("torch.nn.{}", ty));
+        an.heap.set_payload(o, Payload::Str(format!("torch.nn.{}", ty)));
     }
     v
 }

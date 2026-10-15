@@ -86,6 +86,29 @@ impl Payload {
     pub fn is_none(&self) -> bool {
         matches!(self, Payload::None)
     }
+
+    /// The same payload (shared infos by identity).
+    pub fn same(&self, o: &Payload) -> bool {
+        use Payload as P;
+        match (self, o) {
+            (P::None, P::None) => true,
+            (P::Module(a), P::Module(b)) => Rc::ptr_eq(a, b),
+            (P::Func(a), P::Func(b)) => Rc::ptr_eq(a, b),
+            (P::Class(a), P::Class(b)) => Rc::ptr_eq(a, b),
+            (P::Cls(a), P::Cls(b)) => a == b,
+            (P::Str(a), P::Str(b)) => a == b,
+            (P::Method(a, x), P::Method(b, y)) => a == b && x == y,
+            (P::Bound(a, x), P::Bound(b, y)) | (P::Super(a, x), P::Super(b, y)) => a == b && x == y,
+            (P::View(a, x), P::View(b, y)) => a == b && x == y,
+            (P::Zip(a, x), P::Zip(b, y)) | (P::Pair(a, x), P::Pair(b, y)) => a == b && x == y,
+            (P::Enumerate(a, x), P::Enumerate(b, y)) => a == b && x == y,
+            (P::Partial(a, x, k), P::Partial(b, y, l)) => a == b && x == y && k == l,
+            (P::Groupby(a, x, p, q), P::Groupby(b, y, r, s)) => a == b && x == y && p == r && q == s,
+            (P::Locidx(a, x), P::Locidx(b, y)) => a == b && x == y,
+            (P::Range(a, x, p), P::Range(b, y, q)) => a == b && x == y && p == q,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -148,12 +171,14 @@ pub struct Heap {
     /// a copy's original (through copies made at the same node: `out = deepcopy(out)` in a loop
     /// makes one copy site, not a new one per round)
     pub copy_root: FxHashMap<ObjId, ObjId>,
+    pub muts: u64,
+    pub last_mut: Option<&'static std::panic::Location<'static>>,
 }
 
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, literal_len: None, known_prefix: None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0 };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default() }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default(), muts: 0, last_mut: None }
     }
 }
 
@@ -170,8 +195,36 @@ impl Heap {
     pub fn obj(&self, oid: ObjId) -> &Obj {
         &self.objects[oid as usize]
     }
+    #[track_caller]
     pub fn obj_mut(&mut self, oid: ObjId) -> &mut Obj {
+        self.muts += 1;
+        self.last_mut = Some(std::panic::Location::caller());
         &mut self.objects[oid as usize]
+    }
+    /// Set `oid`'s payload (a change only if it differs).
+    #[track_caller]
+    pub fn set_payload(&mut self, oid: ObjId, p: Payload) {
+        if !self.objects[oid as usize].payload.same(&p) {
+            self.obj_mut(oid).payload = p;
+        }
+    }
+    /// Mark `oid` a one-shot iterator.
+    pub fn set_iterator(&mut self, oid: ObjId) {
+        if !self.objects[oid as usize].iterator {
+            self.obj_mut(oid).iterator = true;
+        }
+    }
+    /// Mark `oid` the current element of a loop.
+    pub fn set_iter_elem(&mut self, oid: ObjId) {
+        if !self.objects[oid as usize].iter_elem {
+            self.obj_mut(oid).iter_elem = true;
+        }
+    }
+    /// Set `oid`'s access-path depth.
+    pub fn set_depth(&mut self, oid: ObjId, d: u32) {
+        if self.objects[oid as usize].depth != d {
+            self.obj_mut(oid).depth = d;
+        }
     }
     pub fn kind(&self, oid: ObjId) -> Kind {
         self.objects[oid as usize].kind
@@ -212,10 +265,15 @@ impl Heap {
 
     /// The object at (kind, site, context), made if there is none yet; an existing one is weak
     /// if either allocation is, and takes a new payload.
+    #[track_caller]
     pub fn alloc_raw(&mut self, kind: Kind, site: &str, ctx: &str, single: bool, label: &str, payload: Payload) -> ObjId {
         let key = (kind, intern::s(site), intern::s(ctx));
         if let Some(&oid) = self.index.get(&key) {
             let o = &mut self.objects[oid as usize];
+            if o.single && !single || (!payload.is_none() && !o.payload.same(&payload)) {
+                self.muts += 1;
+                self.last_mut = Some(std::panic::Location::caller());
+            }
             o.single = o.single && single;
             if !payload.is_none() {
                 o.payload = payload;
@@ -444,14 +502,13 @@ impl Heap {
     pub fn rename_payloads(&mut self, mark: ObjId, rename: &dyn Fn(&Value) -> Option<Value>, map: &FxHashMap<ObjId, ObjId>) {
         let n = self.len() as ObjId;
         for oid in mark..n {
-            let o = self.obj_mut(oid);
-            if let Some(d) = o.derived_from {
-                if let Some(&sd) = map.get(&d) {
-                    o.derived_from = Some(sd);
-                }
+            let o = &self.objects[oid as usize];
+            if let Some(&sd) = o.derived_from.and_then(|d| map.get(&d)) {
+                self.obj_mut(oid).derived_from = Some(sd);
             }
+            let o = &self.objects[oid as usize];
             let rv = |v: &Value| rename(v).unwrap_or_else(|| v.clone());
-            o.payload = match &o.payload {
+            let p = match &o.payload {
                 Payload::Method(q, v) => Payload::Method(q.clone(), rv(v)),
                 Payload::Bound(f, v) => Payload::Bound(*map.get(f).unwrap_or(f), rv(v)),
                 Payload::Super(c, v) => Payload::Super(*c, rv(v)),
@@ -462,8 +519,9 @@ impl Heap {
                 Payload::Partial(f, args, kw) => Payload::Partial(rv(f), args.iter().map(&rv).collect(), kw.iter().map(|(k, v)| (*k, rv(v))).collect()),
                 Payload::Groupby(fs, ks, ai, sel) => Payload::Groupby(fs.iter().map(|f| *map.get(f).unwrap_or(f)).collect(), ks.clone(), *ai, sel.clone()),
                 Payload::Locidx(nm, x) => Payload::Locidx(nm.clone(), *map.get(x).unwrap_or(x)),
-                other => other.clone(),
+                _ => continue,
             };
+            self.set_payload(oid, p);
         }
     }
 }

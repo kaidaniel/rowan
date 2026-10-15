@@ -665,7 +665,7 @@ impl Analyzer {
                 } else {
                     let addr = target as *const ast::Expr as usize;
                     let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}", addr), "", true, "pair", Payload::Pair(k.clone(), val.clone()));
-                    self.heap.obj_mut(pid).payload = Payload::Pair(k.clone(), val.clone());
+                    self.heap.set_payload(pid, Payload::Pair(k.clone(), val.clone()));
                     self.bind_target(target, &Value::obj(pid), state);
                 }
             }
@@ -919,9 +919,9 @@ impl Analyzer {
                 self.names.set(eid, sym, scope);
             }
         }
-        self.heap.obj_mut(eid).iter_elem = true;
+        self.heap.set_iter_elem(eid);
         let d = self.heap.obj(oid).depth + 1;
-        self.heap.obj_mut(eid).depth = d;
+        self.heap.set_depth(eid, d);
         if !state.has_row(eid, Ns::Item) {
             let srcs = row.sources.map(|(src, _)| (crate::domain::source_extend(src, STAR), intern::EMPTY_LENS));
             // (an element was taken on this path: its source's requirements are
@@ -1013,7 +1013,7 @@ impl Analyzer {
                 for (i, item) in inner_items.into_iter().enumerate() {
                     let idx = Value::lit(key_int(start + i as i64));
                     let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), its.len()), &ctx, true, "pair", Payload::Pair(idx.clone(), item.clone()));
-                    self.heap.obj_mut(pid).payload = Payload::Pair(idx, item);
+                    self.heap.set_payload(pid, Payload::Pair(idx, item));
                     its.push(Value::obj(pid));
                 }
             }
@@ -1062,7 +1062,7 @@ impl Analyzer {
                 let ctx = self.frame().ctx.clone();
                 for (k, val) in kit.into_iter().zip(vit.into_iter()) {
                     let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), its.len()), &ctx, true, "pair", Payload::Pair(k.clone(), val.clone()));
-                    self.heap.obj_mut(pid).payload = Payload::Pair(k, val);
+                    self.heap.set_payload(pid, Payload::Pair(k, val));
                     its.push(Value::obj(pid));
                 }
             }
@@ -1111,7 +1111,7 @@ impl Analyzer {
                         ViewKind::Values => its.push(val),
                         _ => {
                             let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", oid, intern::key_repr(k)), "", true, "pair", Payload::Pair(Value::lit(k), val.clone()));
-                            self.heap.obj_mut(pid).payload = Payload::Pair(Value::lit(k), val);
+                            self.heap.set_payload(pid, Payload::Pair(Value::lit(k), val));
                             its.push(Value::obj(pid));
                         }
                     }
@@ -1228,7 +1228,7 @@ impl Analyzer {
                 ViewKind::Values => val,
                 _ => {
                     let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", o, intern::key_repr(k)), "", true, "pair", Payload::Pair(Value::lit(k), val.clone()));
-                    self.heap.obj_mut(pid).payload = Payload::Pair(Value::lit(k), val);
+                    self.heap.set_payload(pid, Payload::Pair(Value::lit(k), val));
                     Value::obj(pid)
                 }
             };

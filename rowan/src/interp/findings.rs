@@ -230,6 +230,7 @@ impl Analyzer {
         let chain = self.cx.call_chain.clone();
         let dk = (fname.clone(), node.line, node.col, intern::key_repr(key), cls.tier, oid, chain.clone());
         let (obj, guarded) = (self.heap.obj(oid).label.to_string(), self.mode.verdict_guarded);
+        self.memo.verdict_adds += 1;
         self.findings.add(dk, || Verdict {
             line: node.line,
             col: node.col,
@@ -267,6 +268,7 @@ impl Analyzer {
     }
 
     pub(in crate::interp) fn record_fact(&mut self, node: &Node, name: StrId, v: &Value, state: &State) {
+        self.memo.facts += 1;
         if !self.findings.facts_on || node.addr == 0 || self.findings.quiet {
             return;
         }

@@ -116,6 +116,7 @@ impl Analyzer {
     /// round).
     pub(super) fn recursive_call(&mut self, key: &ActKey, self_v: &Option<Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &mut State) -> Value {
         self.recursion.hit.insert(key.clone());
+        self.memo.rec_calls += 1;
         // widen the entry arguments with the ones of this recursive call (§6.3)
         if let Some((e_self, e_args, e_kwargs)) = self.recursion.entry.get(key).cloned() {
             let n_self = match (&e_self, &self_v) {

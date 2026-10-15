@@ -307,12 +307,12 @@ pub fn series_getattr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, st: 
         "str" | "dt" | "cat" | "sparse" | "list" | "struct" => {
             let label = format!("{}.{}", an.heap.obj(oid).label, name);
             let lid = an.heap.alloc_raw(Kind::Locidx, &format!("acc:{}:{}", name, oid), "", true, &label, Payload::Locidx(name.to_string(), oid));
-            an.heap.obj_mut(lid).payload = Payload::Locidx(name.to_string(), oid);
+            an.heap.set_payload(lid, Payload::Locidx(name.to_string(), oid));
             Value::obj(lid)
         }
         "index" if oid != an.m.series => {
             let vid = an.heap.alloc_raw(Kind::View, &format!("view:keys:{}", oid), "", true, "index", Payload::View(ViewKind::Keys, Value::obj(oid)));
-            an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Keys, Value::obj(oid));
+            an.heap.set_payload(vid, Payload::View(ViewKind::Keys, Value::obj(oid)));
             Value::obj(vid)
         }
         "name" => series_name(an, st, oid),
@@ -320,7 +320,7 @@ pub fn series_getattr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, st: 
         "iloc" | "loc" | "at" | "iat" if oid != an.m.series => {
             let label = format!("{} of {}", name, an.heap.obj(oid).label);
             let lid = an.heap.alloc_raw(Kind::Locidx, &format!("sloc:{}:{}", name, oid), "", true, &label, Payload::Locidx(format!("s{}", name), oid));
-            an.heap.obj_mut(lid).payload = Payload::Locidx(format!("s{}", name), oid);
+            an.heap.set_payload(lid, Payload::Locidx(format!("s{}", name), oid));
             Value::obj(lid)
         }
         "iloc" | "loc" | "at" | "iat" => Value::data(&format!("{}@L{}", name, node.line)),
@@ -2924,7 +2924,7 @@ fn groupby_one(an: &mut Analyzer, st: &mut State, c: &Call, ctx: Option<&str>) -
     let seq = by.as_ref().and_then(|b| lit_key_seq(an, st, b).or_else(|| b.kv.as_lit().filter(|_| b.pts.is_empty()).map(|k| vec![k])));
     let payload = Payload::Groupby(fs.clone(), ks, ai, None);
     let gid = an.alloc_at(Kind::Groupby, &c.node, st, &format!("groupby@L{}", c.line), payload.clone(), None, Ns::Item, None, ctx);
-    an.heap.obj_mut(gid).payload = payload;
+    an.heap.set_payload(gid, payload);
     if let Some(seq) = seq {
         st.set_slot(gid, Ns::Meta, mk("by"), Value::lit(intern::key_tuple(seq)), true);
     }
@@ -2963,7 +2963,7 @@ pub fn groupby_select(an: &mut Analyzer, gid: u32, key: &Value, node: &Node, sta
     let sel = cols.map(|cs| (cs, matches!(key.kv, KeyVal::Lit(_)) && key.pts.is_empty()));
     let payload = Payload::Groupby(fs, ks, ai, sel);
     let nid = an.alloc_at(Kind::Groupby, node, state, &format!("groupby@L{}", node.line), payload.clone(), None, Ns::Item, None, None);
-    an.heap.obj_mut(nid).payload = payload;
+    an.heap.set_payload(nid, payload);
     copy_gb_meta(state, gid, nid);
     if let Some(seq) = seq {
         state.set_slot(nid, Ns::Meta, mk("selseq"), Value::lit(intern::key_tuple(seq)), true);
@@ -2980,7 +2980,7 @@ fn window_of(an: &mut Analyzer, st: &mut State, c: &Call, fs: Vec<u32>, keys: Op
     };
     let payload = Payload::Groupby(fs.clone(), keys, ai, sel);
     let gid = an.alloc_at(Kind::Groupby, &c.node, st, &format!("{}@L{}", kind, c.line), payload.clone(), None, Ns::Item, None, None);
-    an.heap.obj_mut(gid).payload = payload;
+    an.heap.set_payload(gid, payload);
     if let Some(g) = src_gb {
         copy_gb_meta(st, g, gid);
         st.set_slot(gid, Ns::Meta, mk("grouped"), Value::lit(intern::key_bool(true)), true);
@@ -3374,7 +3374,7 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// A row of a frame (iterrows / itertuples / apply / records): accesses on it narrow the
 /// row, not the frame (a frame without rows never runs them).
 fn mark_view(an: &mut Analyzer, vrow: u32, _fs: &[u32]) {
-    an.heap.obj_mut(vrow).iter_elem = true;
+    an.heap.set_iter_elem(vrow);
 }
 
 fn df_apply(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -3702,7 +3702,7 @@ fn iterrows(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let ctx = an.frame().ctx.clone();
     let vid = an.heap.alloc_raw(Kind::View, &format!("view:rows:{}", c.site), &ctx, true, "iterrows", Payload::View(ViewKind::Rows, Value::obj(vrow)));
-    an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Rows, Value::obj(vrow));
+    an.heap.set_payload(vid, Payload::View(ViewKind::Rows, Value::obj(vrow)));
     Value::obj(vid)
 }
 
@@ -3787,7 +3787,7 @@ fn itertuples(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let ctx = an.frame().ctx.clone();
     let vid = an.heap.alloc_raw(Kind::View, &format!("view:elems:{}", c.site), &ctx, true, "itertuples", Payload::View(ViewKind::Elems, rows_v.clone()));
-    an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Elems, rows_v);
+    an.heap.set_payload(vid, Payload::View(ViewKind::Elems, rows_v));
     Value::obj(vid)
 }
 
@@ -5002,7 +5002,7 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let ids: Vec<String> = fs.iter().map(|f| f.to_string()).collect();
         let recv = c.recv.clone().unwrap_or_default();
         let vid = an.heap.alloc_raw(Kind::View, &format!("view:{}:{}", name, ids.join(",")), "", true, &name, Payload::View(kind, recv.clone()));
-        an.heap.obj_mut(vid).payload = Payload::View(kind, recv);
+        an.heap.set_payload(vid, Payload::View(kind, recv));
         return Value::obj(vid);
     }
     if matches!(name.as_str(), "xs") {
@@ -5029,12 +5029,12 @@ pub fn frame_getattr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, state
     if matches!(name, "loc" | "iloc" | "at" | "iat") {
         let label = format!("{} of {}", name, an.heap.obj(oid).label);
         let lid = an.heap.alloc_raw(Kind::Locidx, &format!("loc:{}:{}", name, oid), "", true, &label, Payload::Locidx(name.to_string(), oid));
-        an.heap.obj_mut(lid).payload = Payload::Locidx(name.to_string(), oid);
+        an.heap.set_payload(lid, Payload::Locidx(name.to_string(), oid));
         return Value::obj(lid);
     }
     if name == "columns" {
         let vid = an.heap.alloc_raw(Kind::View, &format!("view:keys:{}", oid), "", true, "columns", Payload::View(ViewKind::Keys, Value::obj(oid)));
-        an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Keys, Value::obj(oid));
+        an.heap.set_payload(vid, Payload::View(ViewKind::Keys, Value::obj(oid)));
         return Value::obj(vid);
     }
     if matches!(name, "str" | "dt" | "cat") {

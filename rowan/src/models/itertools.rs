@@ -45,7 +45,7 @@ pub fn it_list(an: &mut Analyzer, vals: Option<Vec<Value>>, elem: Value, node: &
         }
         _ => an.heap.set_llen(lid, st, None),
     }
-    an.heap.obj_mut(lid).iterator = true;
+    an.heap.set_iterator(lid);
     Value::obj(lid)
 }
 
@@ -119,7 +119,7 @@ pub fn infinite_elem(_an: &Analyzer, inf: &Infinite) -> Value {
 
 fn new_infinite(an: &mut Analyzer, inf: Infinite, node: &Node, st: &mut State) -> Value {
     let oid = an.alloc_at(Kind::Namespace, node, st, "itertools iterator", Payload::Method("stdobj.infinite".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
-    an.heap.obj_mut(oid).payload = Payload::Method("stdobj.infinite".into(), Value::new());
+    an.heap.set_payload(oid, Payload::Method("stdobj.infinite".into(), Value::new()));
     an.m.infinites.insert(oid, inf);
     Value::obj(oid)
 }

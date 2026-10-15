@@ -1116,7 +1116,7 @@ fn pyd_raise_errors_as(an: &mut Analyzer, errs: Vec<PErr>, state: &mut State, no
             };
         }
     }
-    an.heap.obj_mut(eo).payload = Payload::Method(format!("pydverr.{}", use_idx), Value::new());
+    an.heap.set_payload(eo, Payload::Method(format!("pydverr.{}", use_idx), Value::new()));
     state.set_row(eo, Ns::Attr, Row::new().data_store(crate::domain::Source::new("ValidationError", crate::domain::SourceKind::Data)));
     let exc_cls = (cls != "ValidationError").then(|| crate::interp::builtin_exc_names(cls));
     an.raise_exc(cls, Some(Value::obj(eo)), exc_cls, sure, state);

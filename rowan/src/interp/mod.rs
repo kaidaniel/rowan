@@ -42,6 +42,7 @@ pub mod gens;
 pub use gens::*;
 pub mod heap;
 pub use heap::*;
+pub mod memo;
 pub mod names;
 pub use names::Names;
 pub mod narrow;
@@ -388,6 +389,7 @@ pub struct Analyzer {
     pub(in crate::interp) cx: Context,
     /// modes an evaluation sets for the code it calls (`interp/context.rs`)
     pub(in crate::interp) mode: Modes,
+    pub(in crate::interp) memo: memo::MemoProbe,
     /// `None`
     pub none_v: Value,
 }
