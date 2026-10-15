@@ -15,6 +15,9 @@ use crate::scopes::Scopes;
 use crate::state::{Kind, State};
 
 pub mod access;
+pub mod attrs;
+pub mod items;
+pub mod keys;
 pub mod budget;
 pub use budget::{Budget, Clock};
 pub mod calls;
