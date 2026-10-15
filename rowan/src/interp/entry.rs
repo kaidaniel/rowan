@@ -532,7 +532,11 @@ impl Analyzer {
                 }
                 self.entry.scope = saved_scope;
                 let fake = if self.entry.torch_modules.contains(&fi.module) { Node::synthetic(fi.node.node().module, frontend::node(ci.node).line) } else { Node::synthetic(fi.node.node().module, fi.node.node().line) };
+                // (with its verdicts, also for an entry run that has none: made once, whichever
+                // entry run needs the instance first)
+                let saved_quiet = std::mem::replace(&mut self.findings.quiet, false);
                 self.call_user(init, Some(Value::obj(inst)), args, kwargs, vec![], vec![], state, &fake, true);
+                self.findings.quiet = saved_quiet;
             }
         }
         if !state.reachable {
