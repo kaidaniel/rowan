@@ -9,6 +9,7 @@ use indexmap::IndexMap;
 
 use crate::domain::{Ns, ObjId, Value};
 use crate::frontend::Node;
+use ruff_python_ast as ast;
 use crate::intern::{self, key_str_lit, s, str_get, KeyId, StrId};
 use crate::state::{Kind, State};
 
@@ -372,11 +373,13 @@ impl Analyzer {
         self.havoc.guard = effs.iter().map(|(o, e)| (*o, 0, std::rc::Rc::from(e.used.as_slice()))).collect();
         let walked = self.havoc.visited;
         let by_names = !effs.is_empty();
-        let r = self.unknown_call(q, self_v, args, kwargs, star_args, star_kwargs, state, node);
+        let (args, kwargs, arg_code) = self.args_as_seen(foid, self_v.is_some(), args, kwargs, state);
+        let r = self.unknown_call(q, self_v, &args, &kwargs, star_args, star_kwargs, state, node);
         let site = s(&format!("{}@L{}", q, node.line));
         self.names.skipped_sites.insert(site);
         let mut roots = vec![foid];
         roots.append(&mut self.havoc.code);
+        roots.extend(arg_code);
         // (the methods that run with the receiver: what its code reaches through it)
         roots.extend(effs.iter().flat_map(|(_, e)| e.code.iter().copied()));
         let rid = r.single().unwrap_or(0);
@@ -421,6 +424,49 @@ impl Analyzer {
             state.set_row(o, Ns::Attr, row);
         }
         r
+    }
+
+    /// The arguments of a call of `foid` that does not run, as what its code may change of
+    /// them: one its parameter only reads is left out, one whose parts only it may change gives
+    /// its parts (a generator's or coroutine's code runs later: all of them); and the code
+    /// those left out hold (functions, instances' classes: what reading them may run).
+    #[allow(clippy::type_complexity)]
+    fn args_as_seen(&mut self, foid: ObjId, bound: bool, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &State) -> (Vec<Value>, IndexMap<StrId, Value>, Vec<ObjId>) {
+        let fi = self.heap.func_info(foid);
+        let (super::FuncNode::Def(f), Some(ps)) = (fi.node, fi.node.params()) else { return (args.to_vec(), kwargs.clone(), Vec::new()) };
+        if f.is_async || super::is_generator(&f.body) {
+            return (args.to_vec(), kwargs.clone(), Vec::new());
+        }
+        let uses = self.code_uses(&fi);
+        let flags = |n: &str| uses.params.get(&s(n)).copied().unwrap_or_default();
+        let positional: Vec<&str> = ps.posonlyargs.iter().chain(ps.args.iter()).skip(usize::from(bound)).map(|a| a.parameter.name.id.as_str()).collect();
+        let named: Vec<&str> = ps.args.iter().chain(ps.kwonlyargs.iter()).map(|a| a.parameter.name.id.as_str()).collect();
+        // (an argument past the named ones is a part of `*args`, a keyword one of `**kw`)
+        let rest = |p: Option<&ast::Parameter>| p.map(|p| flags(p.name.id.as_str())).map(|f| Flags { changes: f.changes || f.held, ..Flags::default() }).unwrap_or_default();
+        let (va, kw) = (rest(ps.vararg.as_deref()), rest(ps.kwarg.as_deref()));
+        let mut code: Vec<ObjId> = Vec::new();
+        let mut seen = |an: &Analyzer, f: Flags, v: &Value| -> Value {
+            let (own, held) = an.flag_effect(&f, v, state);
+            if !own {
+                code.extend(v.pts.iter().filter_map(|o| match (an.heap.kind(o), &an.heap.obj(o).payload) {
+                    (Kind::Function | Kind::Class | Kind::Bound | Kind::Partial, _) => Some(o),
+                    (Kind::Instance, Payload::Cls(c)) => Some(*c),
+                    _ => None,
+                }));
+            }
+            match (own, held) {
+                (true, _) => v.clone(),
+                (false, true) => {
+                    let mut parts = Vec::new();
+                    v.pts.iter().for_each(|o| an.obj_edges(o, state, &mut parts));
+                    Value::objs(parts.into_iter().collect())
+                }
+                _ => Value::new(),
+            }
+        };
+        let args = args.iter().enumerate().map(|(i, v)| seen(self, positional.get(i).map_or(va, |n| flags(n)), v)).collect();
+        let kwargs = kwargs.iter().map(|(k, v)| (*k, seen(self, if named.contains(&&*str_get(*k)) { flags(&str_get(*k)) } else { kw }, v))).collect();
+        (args, kwargs, code)
     }
 
     /// What a function's code adds to a closure: what may happen to the values of the names it
