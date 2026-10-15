@@ -688,9 +688,44 @@ impl Analyzer {
         // (a value that is a literal or an unknown object may be any key: no narrowing by its
         // literal part)
         let lit_only = lv.pts.iter().all(|o| !matches!(self.heap.kind(o), Kind::Unknown | Kind::Instance | Kind::External));
+        // (a tuple of names where it is in closed records: each name only the literals some
+        // key has at its position; the objects stay)
+        if let (ast::Expr::Tuple(t), true, false) = (left, member, recs.is_empty()) {
+            let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
+            if rows.iter().all(|r| r.closed()) {
+                let keys: Vec<Vec<KeyId>> = rows.iter().flat_map(|r| r.present.iter()).filter_map(|k| match intern::key_get(k) {
+                    intern::Key::Tuple(parts) if parts.len() == t.elts.len() => Some(parts.clone()),
+                    _ => None,
+                }).collect();
+                for (i, e) in t.elts.iter().enumerate() {
+                    let ast::Expr::Name(n) = e else { continue };
+                    let v = self.load_name(s(n.id.as_str()), &Node::none(), state);
+                    let lits = match &v.kv {
+                        KeyVal::Lit(k) => KeySet::from_vec(vec![*k]),
+                        KeyVal::Lits(ks) => ks.clone(),
+                        _ => continue,
+                    };
+                    let keep = lits.filter(|c| keys.iter().any(|k| k[i] == c));
+                    self.keep_lits(s(n.id.as_str()), &keep, state);
+                }
+            }
+        }
         if !recs.is_empty() {
             match &lv.kv {
-                KeyVal::Lit(_) | KeyVal::Lits(_) if !lit_only => {}
+                // (the key is one of the literals or one of the objects: where it is in closed
+                // records, a literal they cannot have is not it; the objects stay)
+                KeyVal::Lit(_) | KeyVal::Lits(_) if !lit_only => {
+                    let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
+                    if member && rows.iter().all(|r| r.closed()) {
+                        let may = rows.iter().fold(KeySet::new(), |m, r| m.union(&r.present));
+                        let ks = match &lv.kv {
+                            KeyVal::Lit(k) => KeySet::from_vec(vec![*k]),
+                            KeyVal::Lits(ks) => ks.clone(),
+                            _ => unreachable!(),
+                        };
+                        self.narrow_key_expr(left, &lv, &ks, &may, true, state);
+                    }
+                }
                 KeyVal::Lit(k) => {
                     // whichever object the name holds has the key (several objects: none narrows)
                     if member && recs.len() > 1 {
@@ -710,7 +745,7 @@ impl Analyzer {
                             may = may.union(&r.present);
                         }
                         if !may.is_empty() && may.iter().all(intern::key_is_str) {
-                            self.narrow_key_expr(left, &lv, &may, &may, state);
+                            self.narrow_key_expr(left, &lv, &may, &may, false, state);
                         } else if may.is_empty() {
                             state.reachable = false;
                         }
@@ -724,7 +759,7 @@ impl Analyzer {
                             may = may.union(&r.present);
                         }
                         let ks = ks.clone();
-                        self.narrow_key_expr(left, &lv, &ks, &may, state);
+                        self.narrow_key_expr(left, &lv, &ks, &may, false, state);
                     } else {
                     }
                 }
@@ -742,11 +777,15 @@ impl Analyzer {
     }
 
     /// Narrow the variable a key expression is built from to the alternatives whose key the
-    /// record may have.
-    fn narrow_key_expr(&mut self, left: &'static ast::Expr, lv: &Value, lits: &KeySet, may: &KeySet, state: &mut State) {
+    /// record may have (`objects_stay`: only its literals that cannot be the key are dropped).
+    fn narrow_key_expr(&mut self, left: &'static ast::Expr, lv: &Value, lits: &KeySet, may: &KeySet, objects_stay: bool, state: &mut State) {
         if let ast::Expr::Name(l) = left {
             let keep = lits.filter(|k| may.contains(k));
-            self.narrow_kv(s(l.id.as_str()), &keep, true, state);
+            if objects_stay {
+                self.keep_lits(s(l.id.as_str()), &keep, state);
+            } else {
+                self.narrow_kv(s(l.id.as_str()), &keep, true, state);
+            }
             return;
         }
         let _ = lv;
@@ -759,7 +798,7 @@ impl Analyzer {
         let mut cands: Vec<String> = Vec::new();
         for n in &names {
             let v = self.load_name(s(n), &Node::none(), state);
-            if matches!(v.kv, KeyVal::Lits(_)) {
+            if matches!(v.kv, KeyVal::Lits(_)) || (objects_stay && matches!(v.kv, KeyVal::Lit(_))) {
                 cands.push(n.clone());
             }
         }
@@ -768,14 +807,20 @@ impl Analyzer {
         }
         let name = s(&cands[0]);
         let cur = self.load_name(name, &Node::none(), state);
-        let KeyVal::Lits(cur_keys) = &cur.kv else { return };
+        let cur_keys = match &cur.kv {
+            KeyVal::Lits(ks) => ks.clone(),
+            KeyVal::Lit(k) => KeySet::from_vec(vec![*k]),
+            _ => return,
+        };
         if cur_keys.len() > 64 {
             return;
         }
         let mut keep: Vec<KeyId> = Vec::new();
         for c in intern::sorted_by_str(cur_keys.iter()) {
             let mut st = state.copy();
-            self.rebind_name(name, Value::with_kv(cur.pts.clone(), KeyVal::Lit(c)), &mut st);
+            // (the literal alone: what the key is when the name is it)
+            let alone = if objects_stay { crate::domain::ObjSet::default() } else { cur.pts.clone() };
+            self.rebind_name(name, Value::with_kv(alone, KeyVal::Lit(c)), &mut st);
             let v = self.eval(left, &mut st);
             match &v.kv {
                 KeyVal::Lit(k) => {
@@ -791,7 +836,24 @@ impl Analyzer {
                 _ => return,
             }
         }
-        self.narrow_kv(name, &KeySet::from_vec(keep), true, state);
+        if objects_stay {
+            self.keep_lits(name, &KeySet::from_vec(keep), state);
+        } else {
+            self.narrow_kv(name, &KeySet::from_vec(keep), true, state);
+        }
+    }
+
+    /// `name`'s literals only those of `keep`; its objects stay (none, and no literal left: the
+    /// path cannot be).
+    fn keep_lits(&mut self, name: StrId, keep: &KeySet, state: &mut State) {
+        let cur = self.load_name(name, &Node::none(), state);
+        let kv = if keep.is_empty() { None } else { kv_restrict(&cur.kv, keep) };
+        match kv {
+            Some(kv) if kv != cur.kv => self.rebind_name(name, Value::with_kv(cur.pts.clone(), kv), state),
+            Some(_) => {}
+            None if cur.pts.is_empty() => state.reachable = false,
+            None => self.rebind_name(name, Value::objs(cur.pts.clone()), state),
+        }
     }
 
     pub(in crate::interp) fn narrow_kv(&mut self, name: StrId, keys: &KeySet, restrict: bool, state: &mut State) {
