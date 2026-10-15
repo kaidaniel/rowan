@@ -447,6 +447,15 @@ fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: Str
     let havocked = |state: &State| {
         state.slot(o, Ns::Elem, intern::STAR).pts.contains(any_id) && state.lens.get(&o) == Some((None, 0, 0)) && !state.lasts.iter().any(|(x, _)| *x == o) && state.elems.get(&o).is_some_and(|kv| crate::domain::kv_join(&kv, &DATA) == kv)
     };
+    // (for people: which unknown code may have changed a list or set, on a row of its own —
+    // it has no attributes to read)
+    if matches!(k, Kind::List | Kind::Set) && !heap.obj(o).site.starts_with("gen:") {
+        let r0 = state.rows.get(&(o, Ns::Attr)).unwrap_or_else(Row::new);
+        let r = r0.mutate(site);
+        if r != r0 {
+            state.set_row(o, Ns::Attr, r);
+        }
+    }
     if matches!(k, Kind::List | Kind::Set) && !heap.obj(o).site.starts_with("gen:") && !havocked(state) {
         let e = state.slot(o, Ns::Elem, intern::STAR).join(any);
         state.set_slot(o, Ns::Elem, intern::STAR, e, false);
