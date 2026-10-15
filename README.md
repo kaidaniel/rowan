@@ -66,7 +66,8 @@ email = u["emial"]        # a typo
 
 `"role"?` means *on some paths only*. The string methods and the f-string are evaluated
 exactly. `make_user` also gets a contract of its own: whoever calls it must pass a `row` with
-`id` and `name`.
+`id` and `name`. A read under a test of another argument says which (had the branch read
+`row["since"]`, the contract would add `only if admin: row["since"]`).
 
 ### The schema your code assumes
 

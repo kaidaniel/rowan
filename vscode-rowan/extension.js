@@ -331,7 +331,8 @@ function renderHover(name, facts, verdicts) {
     // what the code reads of it, when it comes from outside (an argument, an input)
     const req = f.required || [];
     const always = req.filter((r) => r.always).map((r) => r.path);
-    const sometimes = req.filter((r) => !r.always);
+    // (reads under a test of the arguments first: they say when)
+    const sometimes = req.filter((r) => !r.always).sort((a, b) => !!b.only_if - !!a.only_if);
     if (always.length) info.push(`- the code reads ${codeList(always)}`);
     // (a read under a test of the arguments: `row["role"]` (only if `admin`))
     const some = sometimes.slice(0, 6).map((r) => "`" + r.path + "`" + (r.only_if ? ` (only if \`${r.only_if}\`)` : "")).join(", ") + (sometimes.length > 6 ? ` and ${sometimes.length - 6} more` : "");
