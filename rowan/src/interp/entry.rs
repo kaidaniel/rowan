@@ -198,7 +198,7 @@ impl Analyzer {
         let saved_q = std::mem::replace(&mut self.findings.quiet, quiet);
         let mut params = scopemod::all_params(fparams);
         let self_val = self.entry_receiver(fi, &mut params, &mut st, state);
-        let (args, kwargs, star_args, star_kwargs) = self.entry_arguments(oid, fi, fparams, params, &mut st);
+        let (args, kwargs, star_args, star_kwargs) = self.entry_arguments(oid, fi, fparams, params, false, &mut st);
         self.findings.quiet = saved_q;
         let defaults = std::mem::replace(&mut self.entry.used_defaults, saved_used);
         self.entry.any_instance = saved_any;
@@ -304,9 +304,10 @@ impl Analyzer {
         self_val
     }
 
-    /// The open arguments of an entry run: (positional, keyword, `*args`, `**kwargs`).
+    /// The open arguments of an entry run (`defaults_only`: a parameter with a default takes it):
+    /// (positional, keyword, `*args`, `**kwargs`).
     #[allow(clippy::type_complexity)]
-    fn entry_arguments(&mut self, oid: ObjId, fi: &FuncInfo, fparams: &'static ast::Parameters, params: Vec<&'static ast::Parameter>, st: &mut State) -> (Vec<Value>, IndexMap<StrId, Value>, Vec<Value>, Vec<Value>) {
+    fn entry_arguments(&mut self, oid: ObjId, fi: &FuncInfo, fparams: &'static ast::Parameters, params: Vec<&'static ast::Parameter>, defaults_only: bool, st: &mut State) -> (Vec<Value>, IndexMap<StrId, Value>, Vec<Value>, Vec<Value>) {
         let mut args: Vec<Value> = Vec::new();
         let mut star_args: Vec<Value> = Vec::new();
         let mut star_kwargs: Vec<Value> = Vec::new();
@@ -327,7 +328,7 @@ impl Analyzer {
                 }
                 continue;
             }
-            let v = self.open_param(fi, a, false, st);
+            let v = self.open_param(fi, a, defaults_only, st);
             // (keyword-only parameters are passed by keyword)
             if fparams.kwonlyargs.iter().any(|k| std::ptr::eq(&k.parameter, a)) {
                 kwargs.insert(s(a.name.id.as_str()), v);
@@ -597,28 +598,11 @@ impl Analyzer {
                 if self.entry.torch_modules.contains(&fi.module) {
                     self.entry.scope = Some(init);
                 }
-                let mut args = Vec::new();
-                let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
-                let (mut star_args, mut star_kwargs) = (Vec::new(), Vec::new());
                 // (any arguments, as annotated, or the defaults: the instance any construction
                 // may make, so that a method run on it holds for any call; or the defaults, as a
                 // caller that passes nothing)
-                for a in scopemod::all_params(params_all).into_iter().skip(1) {
-                    if params_all.vararg.as_deref().is_some_and(|v| std::ptr::eq(v, a)) {
-                        star_args.push(Value::obj(self.param_source(&fi, a, state)));
-                        continue;
-                    }
-                    if params_all.kwarg.as_deref().is_some_and(|v| std::ptr::eq(v, a)) {
-                        star_kwargs.push(Value::obj(self.param_source(&fi, a, state)));
-                        continue;
-                    }
-                    let v = self.open_param(&fi, a, !self.entry.any_instance, state);
-                    if params_all.kwonlyargs.iter().any(|k| std::ptr::eq(&k.parameter, a)) {
-                        kwargs.insert(s(a.name.id.as_str()), v);
-                    } else {
-                        args.push(v);
-                    }
-                }
+                let params = scopemod::all_params(params_all).into_iter().skip(1).collect();
+                let (args, kwargs, star_args, star_kwargs) = self.entry_arguments(init, &fi, params_all, params, !self.entry.any_instance, state);
                 self.entry.scope = saved_scope;
                 let fake = if self.entry.torch_modules.contains(&fi.module) { Node::synthetic(fi.node.node().module, frontend::node(ci.node).line) } else { Node::synthetic(fi.node.node().module, fi.node.node().line) };
                 // (made with its defaults: with its verdicts, also for an entry run that has
