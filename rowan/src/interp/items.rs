@@ -3,12 +3,29 @@
 
 use indexmap::IndexMap;
 
-use crate::domain::{classify, join_rows, join_values, lens_apply, Classification, KeyVal, Ns, ObjSet, Row, Source, SourceKind, Tier, Value, DATA};
+use crate::domain::{ObjId, classify, join_rows, join_values, lens_apply, Classification, KeyVal, Ns, ObjSet, Row, Source, SourceKind, Tier, Value, DATA};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, STAR};
 use crate::state::{Kind, State};
 
 use super::{Analyzer, Payload, ViewKind, PATH_DEPTH};
+
+/// An item read `obj[key]` (an attribute read when `ns` is `Attr`): what each receiver's part
+/// of it needs.
+struct ItemRead<'a> {
+    obj: &'a Value,
+    ns: Ns,
+    key: &'a Value,
+    node: &'a Node,
+    report: bool,
+    /// a handler catches its failure (or the read is a model's, unreported)
+    guarded: bool,
+    /// a real try / except guard: no exception means the key was there
+    try_guard: bool,
+    /// one receiver, not also a scalar
+    single_target: bool,
+    line_data: Value,
+}
 
 impl Analyzer {
     pub fn load_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
@@ -69,218 +86,11 @@ impl Analyzer {
         }
         // (all targets' values joined at once: a pairwise join over many targets is quadratic)
         let mut parts: Vec<Value> = vec![std::mem::take(&mut acc)];
+        let rd = ItemRead { obj, ns, key, node, report, guarded, try_guard, single_target, line_data };
         for oid in obj.pts.iter() {
-            let kind = self.heap.kind(oid);
-            // (a defaultdict / Counter key read: `models::counter::default_on_read`)
-            let counter_restore = if kind == Kind::Dict && ns == Ns::Item && (self.heap.obj(oid).label.starts_with("defaultdict@") || self.heap.obj(oid).label.starts_with("Counter@")) {
-                crate::models::counter::default_on_read(self, oid, key, node, single_target, state)
-            } else {
-                None
-            };
-            match kind {
-                Kind::Locidx => {
-                    let v = crate::models::pandas::loc_get(self, oid, key, node, state);
-                    parts.push(v);
-                    continue;
-                }
-                Kind::Groupby => {
-                    // (several groupby objects: each selection is an object of its own)
-                    let several = obj.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Groupby).count() > 1;
-                    let saved = if several { self.cx.alloc_extra.replace(format!("gb{}", oid)) } else { self.cx.alloc_extra.clone() };
-                    let v = crate::models::pandas::groupby_select(self, oid, key, node, state);
-                    self.cx.alloc_extra = saved;
-                    parts.push(v);
-                    continue;
-                }
-                Kind::Instance if ns == Ns::Item => {
-                    let cls = self.heap.instance_class(oid);
-                    if let Some(cls) = cls {
-                        if let Some(m) = self.class_lookup(cls, "__getitem__") {
-                            let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__getitem__"))).cloned().unwrap_or_default();
-                            for f in fv.pts.iter() {
-                                if self.heap.kind(f) == Kind::Function {
-                                    let r = self.call_user(f, Some(Value::obj(oid)), vec![key.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
-                                    parts.push(r);
-                                }
-                            }
-                            continue;
-                        }
-                        // `__missing__` answers the keys the dict does not have
-                        if self.class_lookup(cls, "__missing__").is_some() {
-                            if let Some(k) = key.kv.as_lit().filter(|_| key.pts.is_empty()) {
-                                let row = state.row(oid, Ns::Item);
-                                if !row.definite.contains(k) {
-                                    let r = self.call_method_with(&Value::obj(oid), "__missing__", vec![key.clone()], node, state).unwrap_or_default();
-                                    parts.push(r);
-                                    if row.present.contains(k) {
-                                        parts.push(state.slot(oid, Ns::Item, k));
-                                    }
-                                    // an open / symbolic dict may hold it (never a missing key)
-                                    if !row.present.contains(k) && (row.open()) {
-                                        parts.push(line_data.clone());
-                                    }
-                                    continue;
-                                }
-                            }
-                        }
-                        // a NamedTuple by position: its fields in order, from either end
-                        if crate::models::dataclasses::is_named_tuple_class(self, cls) {
-                            let v = crate::models::dataclasses::named_tuple_item(self, oid, cls, key, single_target, node, state);
-                            parts.push(v);
-                            continue;
-                        }
-                        if let Some(ci) = self.heap.class_info_opt(cls) {
-                            if !ci.lib.typed_dict && !ci.lib.named_tuple && !ci.open_base {
-                                parts.push(line_data.clone());
-                                continue;
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-            match kind {
-                Kind::Pair => {
-                    // a (key, value) pair indexed by 0 / 1 (or -2 / -1)
-                    let idx = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
-                    match (idx, self.heap.obj(oid).payload.clone()) {
-                        (Some(0 | -2), Payload::Pair(k, _)) => parts.push(k),
-                        (Some(1 | -1), Payload::Pair(_, v)) => parts.push(v),
-                        _ => parts.push(line_data.clone()),
-                    }
-                }
-                Kind::View => {
-                    if let Payload::View(ViewKind::Attrs, inst) = self.heap.obj(oid).payload.clone() {
-                        // `obj.__dict__[k]`: an attribute load
-                        let v = self.load_item(&inst, Ns::Attr, key, node, state, report);
-                        parts.push(v);
-                    } else if let Payload::View(ViewKind::Proxy, inner) = self.heap.obj(oid).payload.clone() {
-                        let v = self.load_item(&inner, Ns::Item, key, node, state, report);
-                        parts.push(v);
-                    } else {
-                        parts.push(line_data.clone());
-                    }
-                }
-                // an sqlite3.Row indexed by position
-                Kind::Dict if self.m.sql_rows.contains_key(&oid) && key.kv.as_lit().and_then(intern::key_as_int).is_some() => match crate::models::sqlite::row_index(self, state, oid, key) {
-                    Some(v) => parts.push(v),
-                    None => {
-                        self.raise_here("IndexError", state);
-                    }
-                },
-                // a regex match: `m[g]` is its group
-                Kind::Namespace if self.m.re_matches.contains_key(&oid) => match crate::models::remodel::match_item(self, oid, key) {
-                    Some(v) => parts.push(v),
-                    None => parts.push(line_data.clone()),
-                },
-                Kind::Zip | Kind::Enumerate => {
-                    parts.push(line_data.clone());
-                }
-                // `C[T]`: a generic class's alias, called like the class (a TypeError for a class
-                // that is not generic)
-                Kind::Class if ns == Ns::Item => {
-                    self.may_raise_here("TypeError", state);
-                    parts.push(Value::obj(oid));
-                }
-                Kind::List | Kind::Tuple | Kind::Set => {
-                    let is_slice = matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice"));
-                    // a slice object with known bounds (`xs[slice(0, n)]`) on known positions
-                    if is_slice && kind != Kind::Set && single_target {
-                        if let (Some((lo, hi, step)), Some(n)) = (Self::slice_label_bounds(&key.kv), self.heap.llen(oid, state)) {
-                            let step = step.unwrap_or(1);
-                            if step != 0 {
-                                let idx = crate::interp::exprs::slice_positions(n as i64, lo, hi, step);
-                                let vals: Vec<Value> = idx.iter().map(|i| state.slot(oid, Ns::Pos, intern::key_int(*i))).collect();
-                                let kv = state.elems.get(&oid).unwrap_or(DATA);
-                                parts.push(self.alloc_positional(kind, node, Some(vals), Value::new(), kv, state));
-                                continue;
-                            }
-                        }
-                    }
-                    if is_slice && kind != Kind::Set {
-                        // a slice is a container of the same elements (positions unknown)
-                        let elem = state.slot(oid, Ns::Elem, STAR);
-                        let kv = state.elems.get(&oid).unwrap_or(DATA);
-                        let nid = self.alloc_at(kind, node, state, &format!("{}@L{}", kind.name(), node.line), Payload::None, None, Ns::Item, None, None);
-                        self.heap.set_llen(nid, state, None);
-                        state.set_slot(nid, Ns::Elem, STAR, elem, true);
-                        state.elems.insert(nid, kv);
-                        parts.push(Value::obj(nid));
-                        continue;
-                    }
-                    let ll = self.heap.llen(oid, state);
-                    let idx = key.kv.as_lit().and_then(intern::key_as_int);
-                    // the element appended last
-                    if let (Some(-1), None, Some(v)) = (idx, ll, state.last_of(oid)) {
-                        parts.push(v);
-                        continue;
-                    }
-                    // positions below a known prefix stay valid after appends of unknown count
-                    if let (Some(i), None, Some(p)) = (idx, ll, self.heap.prefix(oid, state)) {
-                        if 0 <= i && (i as usize) < p {
-                            parts.push(state.slot(oid, Ns::Pos, intern::key_int(i)));
-                            continue;
-                        }
-                    }
-                    match (idx, ll) {
-                        (Some(i), Some(n)) => {
-                            let n = n as i64;
-                            if 0 <= i && i < n {
-                                parts.push(state.slot(oid, Ns::Pos, intern::key_int(i)));
-                            } else if -n <= i && i < 0 {
-                                parts.push(state.slot(oid, Ns::Pos, intern::key_int(n + i)));
-                            } else if kind != Kind::Set && single_target && self.heap.obj(oid).single {
-                                // out of range on a list of known length
-                                self.raise_here("IndexError", state);
-                            } else {
-                                self.may_raise_here("IndexError", state);
-                                parts.push(state.slot(oid, Ns::Pos, intern::key_int(i)).join(&state.slot(oid, Ns::Elem, STAR)));
-                            }
-                        }
-                        _ => {
-                            // (an index or a length not known: it may be out of range)
-                            if kind != Kind::Set {
-                                self.may_raise_here("IndexError", state);
-                            }
-                            // (the elements' objects and scalars: `elems`, nothing known when unset)
-                            let e = state.slot(oid, Ns::Elem, STAR);
-                            parts.push(Value::with_kv(e.pts, state.elems.get(&oid).unwrap_or(DATA)));
-                        }
-                    }
-                }
-                Kind::Series => parts.push(Value::with_kv(ObjSet::one(self.m.series), DATA)),
-                Kind::Frame if ns == Ns::Item => {
-                    let v = crate::models::pandas::frame_getitem_n(self, oid, key, node, state, guarded, report);
-                    parts.push(v);
-                }
-                k if k.is_record() => {
-                    let ckv = self.canon_kv(oid, ns, &key.kv, state);
-                    let v = if ckv != key.kv {
-                        let saved = self.mode.key_alias.take();
-                        if let (KeyVal::Lit(c), KeyVal::Lit(o)) = (&ckv, &key.kv) {
-                            self.mode.key_alias = Some((*c, *o));
-                        }
-                        let ck = Value::with_kv(key.pts.clone(), ckv);
-                        let v = self.load_record(oid, ns, &ck, node, state, guarded, single_target, try_guard);
-                        self.mode.key_alias = saved;
-                        v
-                    } else {
-                        self.load_record(oid, ns, key, node, state, guarded, single_target, try_guard)
-                    };
-                    parts.push(v);
-                }
-                // a library object rowan does not model (`sys.argv`): its subscript runs code
-                // rowan cannot see, which may raise anything
-                Kind::External if ns == Ns::Item => {
-                    self.flag_may_raise(state);
-                    parts.push(line_data.clone());
-                }
-                _ => parts.push(line_data.clone()),
-            }
-            if let Some(r) = counter_restore {
-                state.set_row(oid, ns, r);
-            }
+            self.item_of(oid, &rd, state, &mut parts);
         }
+        let line_data = rd.line_data;
         acc = crate::domain::join_values(parts);
         if obj.pts.is_empty() {
             acc = line_data;
@@ -291,6 +101,237 @@ impl Analyzer {
             }
         }
         acc
+    }
+
+    /// One receiver's part of an item read (`load_item_inner`), pushed to `parts`.
+    fn item_of(&mut self, oid: ObjId, rd: &ItemRead, state: &mut State, parts: &mut Vec<Value>) {
+        let (obj, ns, key, node) = (rd.obj, rd.ns, rd.key, rd.node);
+        let (report, guarded, single_target, line_data) = (rd.report, rd.guarded, rd.single_target, &rd.line_data);
+        let kind = self.heap.kind(oid);
+        // (a defaultdict / Counter key read: `models::counter::default_on_read`)
+        let counter_restore = if kind == Kind::Dict && ns == Ns::Item && (self.heap.obj(oid).label.starts_with("defaultdict@") || self.heap.obj(oid).label.starts_with("Counter@")) {
+            crate::models::counter::default_on_read(self, oid, key, node, single_target, state)
+        } else {
+            None
+        };
+        match kind {
+            Kind::Locidx => {
+                let v = crate::models::pandas::loc_get(self, oid, key, node, state);
+                parts.push(v);
+                return;
+            }
+            Kind::Groupby => {
+                // (several groupby objects: each selection is an object of its own)
+                let several = obj.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Groupby).count() > 1;
+                let saved = if several { self.cx.alloc_extra.replace(format!("gb{}", oid)) } else { self.cx.alloc_extra.clone() };
+                let v = crate::models::pandas::groupby_select(self, oid, key, node, state);
+                self.cx.alloc_extra = saved;
+                parts.push(v);
+                return;
+            }
+            Kind::Instance if ns == Ns::Item => { if self.item_of_instance(oid, key, node, state, single_target, line_data, parts) { return; } }
+            _ => {}
+        }
+        match kind {
+            Kind::Pair => {
+                // a (key, value) pair indexed by 0 / 1 (or -2 / -1)
+                let idx = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
+                match (idx, self.heap.obj(oid).payload.clone()) {
+                    (Some(0 | -2), Payload::Pair(k, _)) => parts.push(k),
+                    (Some(1 | -1), Payload::Pair(_, v)) => parts.push(v),
+                    _ => parts.push(line_data.clone()),
+                }
+            }
+            Kind::View => {
+                if let Payload::View(ViewKind::Attrs, inst) = self.heap.obj(oid).payload.clone() {
+                    // `obj.__dict__[k]`: an attribute load
+                    let v = self.load_item(&inst, Ns::Attr, key, node, state, report);
+                    parts.push(v);
+                } else if let Payload::View(ViewKind::Proxy, inner) = self.heap.obj(oid).payload.clone() {
+                    let v = self.load_item(&inner, Ns::Item, key, node, state, report);
+                    parts.push(v);
+                } else {
+                    parts.push(line_data.clone());
+                }
+            }
+            // an sqlite3.Row indexed by position
+            Kind::Dict if self.m.sql_rows.contains_key(&oid) && key.kv.as_lit().and_then(intern::key_as_int).is_some() => match crate::models::sqlite::row_index(self, state, oid, key) {
+                Some(v) => parts.push(v),
+                None => {
+                    self.raise_here("IndexError", state);
+                }
+            },
+            // a regex match: `m[g]` is its group
+            Kind::Namespace if self.m.re_matches.contains_key(&oid) => match crate::models::remodel::match_item(self, oid, key) {
+                Some(v) => parts.push(v),
+                None => parts.push(line_data.clone()),
+            },
+            Kind::Zip | Kind::Enumerate => {
+                parts.push(line_data.clone());
+            }
+            // `C[T]`: a generic class's alias, called like the class (a TypeError for a class
+            // that is not generic)
+            Kind::Class if ns == Ns::Item => {
+                self.may_raise_here("TypeError", state);
+                parts.push(Value::obj(oid));
+            }
+            Kind::List | Kind::Tuple | Kind::Set => { if self.item_of_sequence(oid, kind, key, node, state, single_target, parts) { return; } }
+            Kind::Series => parts.push(Value::with_kv(ObjSet::one(self.m.series), DATA)),
+            Kind::Frame if ns == Ns::Item => {
+                let v = crate::models::pandas::frame_getitem_n(self, oid, key, node, state, guarded, report);
+                parts.push(v);
+            }
+            k if k.is_record() => parts.push(self.item_of_record(oid, rd, state)),
+            // a library object rowan does not model (`sys.argv`): its subscript runs code
+            // rowan cannot see, which may raise anything
+            Kind::External if ns == Ns::Item => {
+                self.flag_may_raise(state);
+                parts.push(line_data.clone());
+            }
+            _ => parts.push(line_data.clone()),
+        }
+        if let Some(r) = counter_restore {
+            state.set_row(oid, ns, r);
+        }
+    }
+
+    /// `rec[key]` on a record: the key made canonical (`1` for `True`), reported as written.
+    fn item_of_record(&mut self, oid: ObjId, rd: &ItemRead, state: &mut State) -> Value {
+        let (ns, key, node) = (rd.ns, rd.key, rd.node);
+        let ckv = self.canon_kv(oid, ns, &key.kv, state);
+        if ckv != key.kv {
+            let saved = self.mode.key_alias.take();
+            if let (KeyVal::Lit(c), KeyVal::Lit(o)) = (&ckv, &key.kv) {
+                self.mode.key_alias = Some((*c, *o));
+            }
+            let ck = Value::with_kv(key.pts.clone(), ckv);
+            let v = self.load_record(oid, ns, &ck, node, state, rd.guarded, rd.single_target, rd.try_guard);
+            self.mode.key_alias = saved;
+            v
+        } else {
+            self.load_record(oid, ns, key, node, state, rd.guarded, rd.single_target, rd.try_guard)
+        }
+    }
+
+    /// `seq[i]` / `seq[a:b]` on a list, tuple or set: the position (from either end; a prefix still
+    /// known after appends of unknown count, the last appended), a slice (known positions or the same
+    /// elements), else any element (may raise IndexError). True: the read is done.
+    fn item_of_sequence(&mut self, oid: ObjId, kind: Kind, key: &Value, node: &Node, state: &mut State, single_target: bool, parts: &mut Vec<Value>) -> bool {
+        let is_slice = matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice"));
+        // a slice object with known bounds (`xs[slice(0, n)]`) on known positions
+        if is_slice && kind != Kind::Set && single_target {
+            if let (Some((lo, hi, step)), Some(n)) = (Self::slice_label_bounds(&key.kv), self.heap.llen(oid, state)) {
+                let step = step.unwrap_or(1);
+                if step != 0 {
+                    let idx = crate::interp::exprs::slice_positions(n as i64, lo, hi, step);
+                    let vals: Vec<Value> = idx.iter().map(|i| state.slot(oid, Ns::Pos, intern::key_int(*i))).collect();
+                    let kv = state.elems.get(&oid).unwrap_or(DATA);
+                    parts.push(self.alloc_positional(kind, node, Some(vals), Value::new(), kv, state));
+                    return true;
+                }
+            }
+        }
+        if is_slice && kind != Kind::Set {
+            // a slice is a container of the same elements (positions unknown)
+            let elem = state.slot(oid, Ns::Elem, STAR);
+            let kv = state.elems.get(&oid).unwrap_or(DATA);
+            let nid = self.alloc_at(kind, node, state, &format!("{}@L{}", kind.name(), node.line), Payload::None, None, Ns::Item, None, None);
+            self.heap.set_llen(nid, state, None);
+            state.set_slot(nid, Ns::Elem, STAR, elem, true);
+            state.elems.insert(nid, kv);
+            parts.push(Value::obj(nid));
+            return true;
+        }
+        let ll = self.heap.llen(oid, state);
+        let idx = key.kv.as_lit().and_then(intern::key_as_int);
+        // the element appended last
+        if let (Some(-1), None, Some(v)) = (idx, ll, state.last_of(oid)) {
+            parts.push(v);
+            return true;
+        }
+        // positions below a known prefix stay valid after appends of unknown count
+        if let (Some(i), None, Some(p)) = (idx, ll, self.heap.prefix(oid, state)) {
+            if 0 <= i && (i as usize) < p {
+                parts.push(state.slot(oid, Ns::Pos, intern::key_int(i)));
+                return true;
+            }
+        }
+        match (idx, ll) {
+            (Some(i), Some(n)) => {
+                let n = n as i64;
+                if 0 <= i && i < n {
+                    parts.push(state.slot(oid, Ns::Pos, intern::key_int(i)));
+                } else if -n <= i && i < 0 {
+                    parts.push(state.slot(oid, Ns::Pos, intern::key_int(n + i)));
+                } else if kind != Kind::Set && single_target && self.heap.obj(oid).single {
+                    // out of range on a list of known length
+                    self.raise_here("IndexError", state);
+                } else {
+                    self.may_raise_here("IndexError", state);
+                    parts.push(state.slot(oid, Ns::Pos, intern::key_int(i)).join(&state.slot(oid, Ns::Elem, STAR)));
+                }
+            }
+            _ => {
+                // (an index or a length not known: it may be out of range)
+                if kind != Kind::Set {
+                    self.may_raise_here("IndexError", state);
+                }
+                // (the elements' objects and scalars: `elems`, nothing known when unset)
+                let e = state.slot(oid, Ns::Elem, STAR);
+                parts.push(Value::with_kv(e.pts, state.elems.get(&oid).unwrap_or(DATA)));
+            }
+        }
+        false
+    }
+
+    /// `obj[key]` on an instance: its class's `__getitem__`, `__missing__` for keys the dict lacks, a
+    /// NamedTuple's positions, else nothing (a plain class: not subscriptable). True: the read is
+    /// done (the parts pushed).
+    fn item_of_instance(&mut self, oid: ObjId, key: &Value, node: &Node, state: &mut State, single_target: bool, line_data: &Value, parts: &mut Vec<Value>) -> bool {
+        let cls = self.heap.instance_class(oid);
+        if let Some(cls) = cls {
+            if let Some(m) = self.class_lookup(cls, "__getitem__") {
+                let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__getitem__"))).cloned().unwrap_or_default();
+                for f in fv.pts.iter() {
+                    if self.heap.kind(f) == Kind::Function {
+                        let r = self.call_user(f, Some(Value::obj(oid)), vec![key.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
+                        parts.push(r);
+                    }
+                }
+                return true;
+            }
+            // `__missing__` answers the keys the dict does not have
+            if self.class_lookup(cls, "__missing__").is_some() {
+                if let Some(k) = key.kv.as_lit().filter(|_| key.pts.is_empty()) {
+                    let row = state.row(oid, Ns::Item);
+                    if !row.definite.contains(k) {
+                        let r = self.call_method_with(&Value::obj(oid), "__missing__", vec![key.clone()], node, state).unwrap_or_default();
+                        parts.push(r);
+                        if row.present.contains(k) {
+                            parts.push(state.slot(oid, Ns::Item, k));
+                        }
+                        // an open / symbolic dict may hold it (never a missing key)
+                        if !row.present.contains(k) && (row.open()) {
+                            parts.push(line_data.clone());
+                        }
+                        return true;
+                    }
+                }
+            }
+            // a NamedTuple by position: its fields in order, from either end
+            if crate::models::dataclasses::is_named_tuple_class(self, cls) {
+                let v = crate::models::dataclasses::named_tuple_item(self, oid, cls, key, single_target, node, state);
+                parts.push(v);
+                return true;
+            }
+            if let Some(ci) = self.heap.class_info_opt(cls) {
+                if !ci.lib.typed_dict && !ci.lib.named_tuple && !ci.open_base {
+                    parts.push(line_data.clone());
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     #[allow(clippy::too_many_arguments)]
