@@ -86,14 +86,14 @@ fn expr_sym(l: &str) -> Option<sh::Sym> {
 impl Analyzer {
     /// The symbol of an unknown object (parameter, attribute read, unknown call result).
     pub fn t_sym_of_obj(&self, o: u32) -> Option<sh::Sym> {
-        if !matches!(self.kind(o), Kind::Unknown) {
+        if !matches!(self.heap.kind(o), Kind::Unknown) {
             return None;
         }
         if let Some(sy) = self.m.t_var_names.get(&o) {
             return Some(*sy);
         }
         // the result of an unknown call that no variable names: nothing to name its dims by
-        if self.kind(o) == Kind::Unknown && self.origins.contains_key(&o) && self.torch_on {
+        if self.heap.kind(o) == Kind::Unknown && self.origins.contains_key(&o) && self.torch_on {
             return None;
         }
         let text = self.symbols.get(&o)?;
@@ -135,7 +135,7 @@ impl Analyzer {
             _ => {}
         }
         for o in v.pts.iter() {
-            match self.kind(o) {
+            match self.heap.kind(o) {
                 Kind::Unknown => match self.t_sym_of_obj(o) {
                     Some(sy) => add(Shape::of_sym(sy)),
                     None => add(Shape::any()),
@@ -191,7 +191,7 @@ impl Analyzer {
             _ => {}
         }
         for o in v.pts.iter() {
-            match self.kind(o) {
+            match self.heap.kind(o) {
                 Kind::Unknown => put(self.t_sym_of_obj(o).map(sh::named).unwrap_or_else(sh::unknown)),
                 _ => return None,
             }
@@ -236,10 +236,10 @@ impl Analyzer {
     /// Positions of a tuple / list value (None: not a sequence with known positions).
     pub fn t_seq(&self, v: &Value, st: &State) -> Option<Vec<Value>> {
         let o = v.single()?;
-        if !matches!(self.kind(o), Kind::Tuple | Kind::List) {
+        if !matches!(self.heap.kind(o), Kind::Tuple | Kind::List) {
             return None;
         }
-        let n = self.llen(o, st)?;
+        let n = self.heap.llen(o, st)?;
         Some((0..n).map(|i| st.slot(o, Ns::Pos, key_int(i as i64))).collect())
     }
 
@@ -295,7 +295,7 @@ impl Analyzer {
                 let vals: Vec<Value> = d.iter().map(|x| dim_value(*x)).collect();
                 let v = self.alloc_positional(Kind::Tuple, node, Some(vals), Value::new(), DATA, st);
                 if let Some(o) = v.single() {
-                    self.obj_mut(o).payload = Payload::Str("torch.Size".into());
+                    self.heap.obj_mut(o).payload = Payload::Str("torch.Size".into());
                 }
                 v
             }
@@ -311,20 +311,20 @@ impl Analyzer {
     pub fn t_tuple_role(&mut self, vals: Vec<Value>, node: &Node, st: &mut State, marker: Option<&str>, role: &str) -> Value {
         let site = format!("{}#{}", crate::interp::site_string(node), role);
         let oid = self.alloc(Kind::Tuple, &site, st, &format!("tuple@L{}", node.line), Payload::None, None, Ns::Item, None, None);
-        let single = self.obj(oid).single;
+        let single = self.heap.obj(oid).single;
         let acc = join_values(vals.clone());
         st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), single);
         st.elems.insert(oid, acc.kv.clone());
         if single {
-            self.set_llen(oid, st, Some(vals.len()));
+            self.heap.set_llen(oid, st, Some(vals.len()));
             for (i, v) in vals.iter().enumerate() {
                 st.set_slot(oid, Ns::Pos, key_int(i as i64), v.clone(), true);
             }
         } else {
-            self.set_llen(oid, st, None);
+            self.heap.set_llen(oid, st, None);
         }
         if let Some(m) = marker {
-            self.obj_mut(oid).payload = Payload::Str(m.into());
+            self.heap.obj_mut(oid).payload = Payload::Str(m.into());
         }
         Value::obj(oid)
     }
@@ -337,11 +337,11 @@ impl Analyzer {
     pub fn t_tuple_count(&mut self, elem: Value, count: Option<DimId>, node: &Node, st: &mut State) -> Value {
         let site = format!("{}#n", crate::interp::site_string(node));
         let oid = self.alloc(Kind::Tuple, &site, st, &format!("tuple@L{}", node.line), Payload::None, None, Ns::Item, None, None);
-        let single = self.obj(oid).single;
+        let single = self.heap.obj(oid).single;
         st.set_slot(oid, Ns::Elem, STAR, elem.clone(), single);
         st.elems.insert(oid, elem.kv.clone());
-        self.set_llen(oid, st, None);
-        self.obj_mut(oid).payload = Payload::Str(match count {
+        self.heap.set_llen(oid, st, None);
+        self.heap.obj_mut(oid).payload = Payload::Str(match count {
             Some(d) => format!("torch.n:{}", d.0),
             None => "torch.n".into(),
         });
@@ -412,8 +412,8 @@ impl Analyzer {
         }
         if !v.pts.is_empty() {
             let o = v.single()?;
-            return match self.kind(o) {
-                Kind::List | Kind::Tuple => self.llen(o, st).map(|k| sh::lit(k as i64)),
+            return match self.heap.kind(o) {
+                Kind::List | Kind::Tuple => self.heap.llen(o, st).map(|k| sh::lit(k as i64)),
                 // (a str parameter: as many items as characters)
                 Kind::Unknown if v.kv.is_bot() => self.t_sym_of_obj(o).filter(|sy| self.m.t_strs.contains(sy)).map(|sy| sh::sdim(sy, 0)),
                 _ => None,
@@ -470,7 +470,7 @@ impl Analyzer {
 
     pub fn t_tuple_len(&self, v: &Value) -> Option<DimId> {
         let o = v.single()?;
-        match &self.obj(o).payload {
+        match &self.heap.obj(o).payload {
             Payload::Str(q) => q.strip_prefix("torch.n:").and_then(|d| d.parse().ok()).map(DimId),
             _ => None,
         }
@@ -521,16 +521,16 @@ impl Analyzer {
 
     pub fn t_print_ctx_at(&self, scope: u32, env: &IndexMap<StrId, Value>, st: &State) -> sh::PrintCtx {
         let mut ctx = sh::PrintCtx { all: false, scope, strs: self.m.t_strs.clone(), ..Default::default() };
-        if scope != 0 && self.has_obj(scope) && self.kind(scope) == Kind::Function {
+        if scope != 0 && self.heap.has_obj(scope) && self.heap.kind(scope) == Kind::Function {
             // a closure sees the names of the functions around it
-            let mut q = self.func_info(scope).qualname.clone();
+            let mut q = self.heap.func_info(scope).qualname.clone();
             while let Some(i) = q.rfind('.') {
                 q.truncate(i);
                 if let Some(fs) = self.m.t_funcs_by_qual.get(&q) {
                     ctx.extra.extend(fs.iter().copied());
                 }
             }
-            if let Some(cls) = self.func_info(scope).cls {
+            if let Some(cls) = self.heap.func_info(scope).cls {
                 for c in self.mro(cls) {
                     if let Some(v) = self.cls_slots.get(&(c, Ns::Attr, key_str_lit("__init__"))) {
                         for f in v.pts.iter() {
@@ -541,7 +541,7 @@ impl Analyzer {
                 // aliases: the shortest attribute path from self (through instances, not
                 // layer configs) holding an `__init__` value
                 if let Some(selfv) = env.get(&s("self")) {
-                    let mut queue: std::collections::VecDeque<(u32, String, u32)> = selfv.pts.iter().filter(|o| self.kind(*o) == Kind::Instance).map(|o| (o, "self".to_string(), 0)).collect();
+                    let mut queue: std::collections::VecDeque<(u32, String, u32)> = selfv.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Instance).map(|o| (o, "self".to_string(), 0)).collect();
                     let mut seen: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
                     while let Some((o, path, depth)) = queue.pop_front() {
                         if !seen.insert(o) || queue.len() > 256 {
@@ -570,7 +570,7 @@ impl Analyzer {
                                 let x = v.pts.first().unwrap();
                                 if let Some(sy) = self.t_sym_of_obj(x) {
                                     ctx.sym_alias.entry(sy).or_insert_with(|| p.clone());
-                                } else if self.kind(x) == Kind::Instance && depth < 3 {
+                                } else if self.heap.kind(x) == Kind::Instance && depth < 3 {
                                     queue.push_back((x, p.clone(), depth + 1));
                                 }
                             }
@@ -832,7 +832,7 @@ impl Analyzer {
         use ruff_python_ast::Operator as O;
         if op == O::MatMult {
             // a user object's `__matmul__` / `__rmatmul__` decides
-            if a.pts.iter().chain(b.pts.iter()).any(|o| matches!(self.kind(o), Kind::Instance | Kind::Class | Kind::Namespace | Kind::Dict | Kind::List | Kind::Tuple)) {
+            if a.pts.iter().chain(b.pts.iter()).any(|o| matches!(self.heap.kind(o), Kind::Instance | Kind::Class | Kind::Namespace | Kind::Dict | Kind::List | Kind::Tuple)) {
                 return None;
             }
             let sa = self.t_shape(a, st).unwrap_or_else(Shape::any);
@@ -846,12 +846,12 @@ impl Analyzer {
                     return Some(s);
                 }
                 let o = v.single()?;
-                if matches!(an.kind(o), Kind::Tuple) {
+                if matches!(an.heap.kind(o), Kind::Tuple) {
                     return an.t_shape_arg(v, st);
                 }
                 None
             };
-            let is_size = |an: &Analyzer, v: &Value| size_shape(v).is_some() || v.single().map(|o| matches!(&an.obj(o).payload, Payload::Str(q) if q == "torch.Size")).unwrap_or(false);
+            let is_size = |an: &Analyzer, v: &Value| size_shape(v).is_some() || v.single().map(|o| matches!(&an.heap.obj(o).payload, Payload::Str(q) if q == "torch.Size")).unwrap_or(false);
             if (is_size(self, a) || is_size(self, b)) && self.torch_on {
                 if let (Some(x), Some(y)) = (size_of(self, a), size_of(self, b)) {
                     let r = concat(&x, &y);
@@ -921,7 +921,7 @@ impl Analyzer {
                     return Some(K::Int);
                 }
                 Some(K::Named)
-            } else if an.torch_on && v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| matches!(an.kind(o), Kind::Unknown)) {
+            } else if an.torch_on && v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::Unknown)) {
                 // an unknown without a name (an unknown call's result): any shape
                 Some(K::Named)
             } else {
@@ -1162,11 +1162,11 @@ impl Analyzer {
         }
         // layer objects / return tuples
         if let Some(o) = obj.single() {
-            if self.kind(o) == Kind::Dict && matches!(&self.obj(o).payload, Payload::Str(q) if q == "torch.nn.ModuleDict") && !matches!(name, "keys" | "values" | "items" | "get" | "update" | "pop" | "clear") {
+            if self.heap.kind(o) == Kind::Dict && matches!(&self.heap.obj(o).payload, Payload::Str(q) if q == "torch.nn.ModuleDict") && !matches!(name, "keys" | "values" | "items" | "get" | "update" | "pop" | "clear") {
                 let k = Value::lit(key_str_lit(name));
                 return Some(self.load_item(obj, Ns::Item, &k, node, st, true));
             }
-            if let Payload::Str(q) = &self.obj(o).payload {
+            if let Payload::Str(q) = &self.heap.obj(o).payload {
                 if q == "torch.return_types" {
                     let i = match name {
                         "values" => 0,
@@ -1176,11 +1176,11 @@ impl Analyzer {
                     return Some(st.slot(o, Ns::Pos, key_int(i)));
                 }
             }
-            if self.kind(o) == Kind::Instance && self.t_is_module_instance(o) {
+            if self.heap.kind(o) == Kind::Instance && self.t_is_module_instance(o) {
                 return self.t_module_attr(o, name, node, st);
             }
             // a named module of a Sequential(OrderedDict(...))
-            if self.kind(o) == Kind::List && self.t_layer_type(o).is_some() {
+            if self.heap.kind(o) == Kind::List && self.t_layer_type(o).is_some() {
                 if let Some(v) = st.slot_opt(o, Ns::Attr, key_str_lit(name)) {
                     return Some(v);
                 }
@@ -1190,7 +1190,7 @@ impl Analyzer {
             if self.t_layer_type(o).is_some() && st.slot_opt(o, Ns::Attr, key_str_lit(name)).is_none() {
                 // (a ModuleList / Sequential is a list, a ModuleDict a dict: their container
                 // methods — `append`, `extend`, `items`, … — are the list's / dict's)
-                let fam = match self.kind(o) {
+                let fam = match self.heap.kind(o) {
                     Kind::List => "list",
                     Kind::Dict => "dict",
                     _ => "",
@@ -1199,7 +1199,7 @@ impl Analyzer {
                 if !fam.is_empty() && !MODULE_METHODS.contains(&name) && self.models.lookup(&q).is_some() {
                     return Some(self.method_value(&q, obj));
                 }
-                return Some(if MODULE_METHODS.contains(&name) { self.method_value(&format!("nnmodule.{}", name), obj) } else { Value::data(&format!("{}.{}", self.obj(o).label, name)) });
+                return Some(if MODULE_METHODS.contains(&name) { self.method_value(&format!("nnmodule.{}", name), obj) } else { Value::data(&format!("{}.{}", self.heap.obj(o).label, name)) });
             }
         }
         let tensor = is_tensor(obj);
@@ -1209,7 +1209,7 @@ impl Analyzer {
         let no_scalar = obj.kv.is_bot()
             || (obj.kv.is_literal() && crate::domain::kv_literals(&obj.kv).iter().all(|k| k == intern::key_none()))
             || matches!(&obj.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with('\u{1}'));
-        let unknown_tensorish = !tensor && self.torch_on && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Unknown)) && ((!obj.pts.is_empty() && no_scalar) || matches!(&obj.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with("expr:")));
+        let unknown_tensorish = !tensor && self.torch_on && obj.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Unknown)) && ((!obj.pts.is_empty() && no_scalar) || matches!(&obj.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with("expr:")));
         if !tensor && !unknown_tensorish {
             return None;
         }
@@ -1303,7 +1303,7 @@ impl Analyzer {
             return Some(self.t_size_index(&s, idx, node, st));
         }
         if let Some(o) = obj.single() {
-            if matches!(&self.obj(o).payload, Payload::Str(q) if q == "torch.Size") && matches!(idx, E::Slice(_)) {
+            if matches!(&self.heap.obj(o).payload, Payload::Str(q) if q == "torch.Size") && matches!(idx, E::Slice(_)) {
                 if let Some(s) = self.t_shape_arg(obj, st) {
                     return Some(self.t_size_index(&s, idx, node, st));
                 }
@@ -1334,7 +1334,7 @@ impl Analyzer {
         }
         // an element of a list of tensors without known positions (built by `append`)
         if let Some(o) = obj.single() {
-            if matches!(self.kind(o), Kind::List | Kind::Tuple) && self.llen(o, st).is_none() && self.t_layer_type(o).is_none() && !matches!(idx, E::Slice(_)) {
+            if matches!(self.heap.kind(o), Kind::List | Kind::Tuple) && self.heap.llen(o, st).is_none() && self.t_layer_type(o).is_none() && !matches!(idx, E::Slice(_)) {
                 let e = self.t_list_elem(o, st);
                 if tensor_shape(&e).is_some() {
                     let _ = self.eval(idx, st);
@@ -1344,7 +1344,7 @@ impl Analyzer {
         }
         // an element of a result tuple of unknown length
         if let Some(o) = obj.single() {
-            if matches!(&self.obj(o).payload, Payload::Str(q) if q == "torch.n" || q.starts_with("torch.n:")) {
+            if matches!(&self.heap.obj(o).payload, Payload::Str(q) if q == "torch.n" || q.starts_with("torch.n:")) {
                 if !matches!(idx, E::Slice(_)) {
                     let _ = self.eval(idx, st);
                     return Some(st.slot(o, Ns::Elem, STAR));
@@ -1352,7 +1352,7 @@ impl Analyzer {
                 return Some(obj.clone());
             }
         }
-        let tensor = is_tensor(obj) || (tensor_shape(obj).is_some() && obj.pts.iter().all(|o| matches!(self.kind(o), Kind::Unknown)));
+        let tensor = is_tensor(obj) || (tensor_shape(obj).is_some() && obj.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Unknown)));
         let items: Vec<&'static E> = match idx {
             E::Tuple(t) => t.elts.iter().collect(),
             e => vec![e],
@@ -1606,7 +1606,7 @@ impl Analyzer {
                 if self.t_int(v).is_some() || dim_of_label(v).is_some() {
                     return Some(vec![]);
                 }
-                if v.pts.iter().any(|o| matches!(self.kind(o), Kind::List | Kind::Tuple)) {
+                if v.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::List | Kind::Tuple)) {
                     *adv += 1;
                     return Some(vec![sh::unknown()]);
                 }
@@ -2629,7 +2629,7 @@ impl Analyzer {
                 return Some(out);
             }
             let o = v.single()?;
-            if !matches!(an.kind(o), Kind::List | Kind::Tuple) {
+            if !matches!(an.heap.kind(o), Kind::List | Kind::Tuple) {
                 return None;
             }
             let e = Value::with_kv(st.slot(o, Ns::Elem, STAR).pts, st.elems.get(&o).unwrap_or(crate::domain::DATA));
@@ -2824,7 +2824,7 @@ impl Analyzer {
             return (Some(shapes), None);
         }
         if let Some(o) = list.single() {
-            if matches!(self.kind(o), Kind::List | Kind::Tuple) {
+            if matches!(self.heap.kind(o), Kind::List | Kind::Tuple) {
                 let e = self.t_list_elem(o, st);
                 return (None, Some(self.t_shape(&e, st).unwrap_or_else(Shape::any)));
             }
@@ -3154,8 +3154,8 @@ impl Analyzer {
     }
 
     pub fn t_is_module_instance(&self, o: u32) -> bool {
-        let Some(cls) = self.instance_class(o) else { return false };
-        self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|ci| ci.lib.nn_module).unwrap_or(false))
+        let Some(cls) = self.heap.instance_class(o) else { return false };
+        self.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.lib.nn_module).unwrap_or(false))
     }
 
     /// `self.register_buffer` & co. on a user module (None: a user attribute).
@@ -3163,7 +3163,7 @@ impl Analyzer {
         if !MODULE_METHODS.contains(&name) {
             return None;
         }
-        let cls = self.instance_class(o)?;
+        let cls = self.heap.instance_class(o)?;
         if self.class_lookup(cls, name).is_some() {
             return None;
         }
@@ -3171,9 +3171,9 @@ impl Analyzer {
     }
 
     pub fn t_layer_type(&self, o: u32) -> Option<String> {
-        match &self.obj(o).payload {
-            Payload::Str(q) if self.kind(o) == Kind::Namespace => q.strip_prefix("torch.nn.").map(|x| x.to_string()),
-            Payload::Str(q) if matches!(self.kind(o), Kind::List | Kind::Dict) && q.starts_with("torch.nn.") => q.strip_prefix("torch.nn.").map(|x| x.to_string()),
+        match &self.heap.obj(o).payload {
+            Payload::Str(q) if self.heap.kind(o) == Kind::Namespace => q.strip_prefix("torch.nn.").map(|x| x.to_string()),
+            Payload::Str(q) if matches!(self.heap.kind(o), Kind::List | Kind::Dict) && q.starts_with("torch.nn.") => q.strip_prefix("torch.nn.").map(|x| x.to_string()),
             _ => None,
         }
     }
@@ -3220,7 +3220,7 @@ impl Analyzer {
                 }
                 // Sequential(OrderedDict(...)): its values, in order, also as attributes
                 if v.len() == 1 && c.star_args.is_empty() {
-                    if let Some(d) = v[0].single().filter(|d| self.kind(*d) == Kind::Dict) {
+                    if let Some(d) = v[0].single().filter(|d| self.heap.kind(*d) == Kind::Dict) {
                         let row = st.row(d, Ns::Item);
                         if let Some(keys) = row.ordered_keys().filter(|_| row.closed() && row.present == row.definite) {
                             let vals: Vec<Value> = keys.iter().map(|k| st.slot(d, Ns::Item, *k)).collect();
@@ -3257,8 +3257,8 @@ impl Analyzer {
             });
             // its items are also its attributes (`self.transformer.wte`)
             for o in v.pts.iter() {
-                if self.kind(o) == Kind::Dict {
-                    self.obj_mut(o).payload = Payload::Str("torch.nn.ModuleDict".into());
+                if self.heap.kind(o) == Kind::Dict {
+                    self.heap.obj_mut(o).payload = Payload::Str("torch.nn.ModuleDict".into());
                 }
             }
             return v;
@@ -3272,7 +3272,7 @@ impl Analyzer {
             return Value::data(&format!("L{}", node.line));
         }
         let o = self.alloc_at(Kind::Namespace, &node, st, &format!("{}@L{}", ty, node.line), Payload::Str(format!("torch.nn.{}", ty)), Some(crate::domain::Row::new()), Ns::Attr, None, None);
-        let strong = self.obj(o).single;
+        let strong = self.heap.obj(o).single;
         let set = |an: &mut Analyzer, st: &mut State, name: &str, v: Value| {
             an.store_key(o, Ns::Attr, &KeyVal::Lit(key_str_lit(name)), &v, strong, &node, st);
         };
@@ -3336,7 +3336,7 @@ impl Analyzer {
             }
         };
         if let Some(o) = v.single() {
-            self.obj_mut(o).payload = Payload::Str(format!("torch.nn.{}", ty));
+            self.heap.obj_mut(o).payload = Payload::Str(format!("torch.nn.{}", ty));
         }
         v
     }
@@ -4122,7 +4122,7 @@ fn expand_call(an: &Analyzer, c: &Call, st: &State) -> Result<Option<Call>, ()> 
     }
     let mut kwargs = c.kwargs.clone();
     for sk in &c.star_kwargs {
-        let Some(d) = sk.single().filter(|d| an.kind(*d) == Kind::Dict) else { return Err(()) };
+        let Some(d) = sk.single().filter(|d| an.heap.kind(*d) == Kind::Dict) else { return Err(()) };
         let row = st.row(d, Ns::Item);
         if !row.closed() || row.present != row.definite {
             return Err(());
@@ -4242,8 +4242,8 @@ impl Analyzer {
         let (shape, is_size) = if let Some(s) = size_shape(v) {
             (s, true)
         } else if let Some(o) = v.single() {
-            if matches!(&self.obj(o).payload, Payload::Str(q) if q == "torch.Size") {
-                let len = self.llen(o, st)?;
+            if matches!(&self.heap.obj(o).payload, Payload::Str(q) if q == "torch.Size") {
+                let len = self.heap.llen(o, st)?;
                 if star.is_none() && len != n || star.is_some() && len < fixed {
                     let m = format!("cannot unpack a torch.Size of {} dims into {} names", len, n);
                     self.t_error(node, m, st);
@@ -4369,16 +4369,16 @@ impl Analyzer {
         let (chain, entry) = self.t_note_ctx();
         let shape = if let Some(s) = size_shape(v) {
             Some(sh::norm_shape(&s, &st.tf))
-        } else if let Some(o) = v.single().filter(|o| v.kv.is_bot() && (matches!(&self.obj(*o).payload, Payload::Str(q) if q == "torch.Size") || (self.kind(*o) == Kind::Tuple && self.llen(*o, st).is_some()))) {
+        } else if let Some(o) = v.single().filter(|o| v.kv.is_bot() && (matches!(&self.heap.obj(*o).payload, Payload::Str(q) if q == "torch.Size") || (self.heap.kind(*o) == Kind::Tuple && self.heap.llen(*o, st).is_some()))) {
             self.t_shape_arg(&Value::obj(o), st)
         } else if tensor_shape(v).is_some() {
             // a tensor or some other object (a user method's result): no shape claimed
-            if v.pts.iter().any(|o| !matches!(self.kind(o), Kind::Unknown)) {
+            if v.pts.iter().any(|o| !matches!(self.heap.kind(o), Kind::Unknown)) {
                 None
             } else {
                 self.t_shape(v, st)
             }
-        } else if !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::Unknown)) {
+        } else if !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Unknown)) {
             // a parameter / read: its shape; an unknown call's result: only once facts say
             // something about it
             let call_result = v.pts.iter().any(|o| self.origins.contains_key(&o) || self.symbols.get(&o).map(|t| t.contains('(')).unwrap_or(false));
@@ -4387,7 +4387,7 @@ impl Analyzer {
             None
         };
         let dual = label(v).map(|l| sh::dual_dim(&l).is_some()).unwrap_or(false);
-        let dim = if dim_of_label(v).is_some() || dual || self.t_int(v).is_some() || (!v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::Unknown))) {
+        let dim = if dim_of_label(v).is_some() || dual || self.t_int(v).is_some() || (!v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Unknown))) {
             self.t_dim(v, st).map(|d| self.t_print(st, || sh::dim_text(d)))
         } else {
             None
@@ -4409,7 +4409,7 @@ impl Analyzer {
                     s = append_dims(&s, &[d]);
                 }
                 Err(v) => {
-                    if size_shape(v).is_some() || v.single().map(|o| matches!(&self.obj(o).payload, Payload::Str(q) if q == "torch.Size")).unwrap_or(false) {
+                    if size_shape(v).is_some() || v.single().map(|o| matches!(&self.heap.obj(o).payload, Payload::Str(q) if q == "torch.Size")).unwrap_or(false) {
                         any_size = true;
                     }
                     let part = self.t_shape_arg(v, st)?;
@@ -4431,7 +4431,7 @@ impl Analyzer {
         if let Some(s) = size_shape(v) {
             return Some(self.t_rank_value(&sh::norm_shape(&s, &st.tf)));
         }
-        if is_tensor(v) || (self.torch_on && !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.kind(o), Kind::Unknown) && self.t_sym_of_obj(o).is_some())) {
+        if is_tensor(v) || (self.torch_on && !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Unknown) && self.t_sym_of_obj(o).is_some())) {
             let s = self.t_shape(v, st)?;
             let (e, p) = self.t_locate(&s, 0, node, st, "len")?;
             return Some(dim_value(get_at(&e, p)));
@@ -4650,7 +4650,7 @@ impl Analyzer {
             return;
         }
         let o = v.pts.first().unwrap();
-        if self.kind(o) != Kind::Unknown || !self.origins.contains_key(&o) || self.m.t_var_names.contains_key(&o) {
+        if self.heap.kind(o) != Kind::Unknown || !self.origins.contains_key(&o) || self.m.t_var_names.contains_key(&o) {
             return;
         }
         let scope = self.frames.iter().rev().find_map(|fr| fr.func).unwrap_or(0);
@@ -4768,8 +4768,8 @@ impl Analyzer {
         };
         collect(v);
         for o in v.pts.iter() {
-            if matches!(self.kind(o), Kind::Tuple | Kind::List) {
-                if let Some(n) = self.llen(o, st) {
+            if matches!(self.heap.kind(o), Kind::Tuple | Kind::List) {
+                if let Some(n) = self.heap.llen(o, st) {
                     for i in 0..n.min(8) {
                         collect(&st.slot(o, Ns::Pos, key_int(i as i64)));
                     }
@@ -4923,7 +4923,7 @@ fn np_structured(an: &mut Analyzer, st: &mut State, c: &Call, q: &str) -> Option
     };
     // the number of records
     let n: Option<i64> = match q {
-        "array" => c.args.first().and_then(|d| d.single()).and_then(|o| an.llen(o, st)).map(|l| l as i64),
+        "array" => c.args.first().and_then(|d| d.single()).and_then(|o| an.heap.llen(o, st)).map(|l| l as i64),
         "zeros" | "ones" | "empty" => c.args.first().and_then(|a| a.kv.as_lit()).and_then(intern::key_as_int),
         _ => None,
     };
@@ -5060,7 +5060,7 @@ fn numpy_fn(an: &mut Analyzer, st: &mut State, c: &Call, q: &str) -> Value {
     };
     if METHODS.contains(&q) {
         // (an array, or an unknown value used as one: a parameter)
-        let Some(recv) = c.args.first().cloned().filter(|v| is_tensor(v) || (!v.kv.is_literal() && v.pts.iter().all(|o| matches!(an.kind(o), Kind::Unknown)))) else { return unknown() };
+        let Some(recv) = c.args.first().cloned().filter(|v| is_tensor(v) || (!v.kv.is_literal() && v.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::Unknown)))) else { return unknown() };
         let rest: Vec<Value> = c.args[1..].to_vec();
         let call = Call { qual: format!("tensor.{}", q), recv: Some(recv.clone()), args: rest.clone(), kwargs: c.kwargs.clone(), star_args: vec![], star_kwargs: vec![], node: c.node, call_ast: None, site: c.site.clone(), line: c.line };
         let saved = std::mem::replace(&mut an.torch_real, false);

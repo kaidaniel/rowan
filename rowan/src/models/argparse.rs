@@ -226,8 +226,8 @@ fn read_arg(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<ArgSpec> {
     };
     let conv = match c.kw("type") {
         None => Conv::Str,
-        Some(t) => match t.single().map(|o| (an.kind(o), o)) {
-            Some((Kind::External, o)) => match an.external_qual(o).as_str() {
+        Some(t) => match t.single().map(|o| (an.heap.kind(o), o)) {
+            Some((Kind::External, o)) => match an.heap.external_qual(o).as_str() {
                 "builtins.int" => Conv::Int,
                 "builtins.float" => Conv::Float,
                 "builtins.str" => Conv::Str,
@@ -237,7 +237,7 @@ fn read_arg(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<ArgSpec> {
         },
     };
     let none = an.none_v.clone();
-    let suppress_v = |v: &Value, an: &Analyzer| v.pts.iter().any(|o| an.kind(o) == Kind::External && an.external_qual(o).ends_with("SUPPRESS")) || matches!(&v.kv, KeyVal::Data(d) if intern::str_get(*d).contains("SUPPRESS")) || lit_str(v).as_deref() == Some("==SUPPRESS==");
+    let suppress_v = |v: &Value, an: &Analyzer| v.pts.iter().any(|o| an.heap.kind(o) == Kind::External && an.heap.external_qual(o).ends_with("SUPPRESS")) || matches!(&v.kv, KeyVal::Data(d) if intern::str_get(*d).contains("SUPPRESS")) || lit_str(v).as_deref() == Some("==SUPPRESS==");
     let (default, has_default, suppress) = match c.kw("default") {
         Some(d) => {
             let sup = suppress_v(&d, an);
@@ -484,7 +484,7 @@ fn parse_known(an: &mut Analyzer, st: &mut State, c: &Call, p: ObjId, tokens: &[
         let rest: Vec<Value> = extras.iter().map(|x| Value::lit_str(x)).collect();
         let rv = list_value(an, st, c, rest, "rest");
         let tid = an.alloc_at(Kind::Tuple, &c.node, st, "parse_known_args result", Payload::None, None, Ns::Item, None, Some("pka"));
-        an.set_llen(tid, st, Some(2));
+        an.heap.set_llen(tid, st, Some(2));
         st.set_slot(tid, Ns::Pos, intern::key_int(0), nid.clone(), true);
         st.set_slot(tid, Ns::Pos, intern::key_int(1), rv, true);
         return Some(Value::obj(tid));
@@ -500,7 +500,7 @@ fn list_value(an: &mut Analyzer, st: &mut State, c: &Call, vals: Vec<Value>, ctx
     for (i, v) in vals.iter().enumerate() {
         st.set_slot(lid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
     }
-    an.set_llen(lid, st, Some(vals.len()));
+    an.heap.set_llen(lid, st, Some(vals.len()));
     Value::obj(lid)
 }
 
@@ -811,7 +811,7 @@ fn any_value(an: &mut Analyzer, st: &mut State, c: &Call, a: &ArgSpec) -> Value 
             let lid = an.alloc_at(Kind::List, &c.node, st, &format!("list@L{}", c.line), Payload::None, None, Ns::Item, None, Some(&format!("anyl{}", a.dest)));
             st.set_slot(lid, Ns::Elem, intern::STAR, e.clone(), true);
             st.elems.insert(lid, e.kv.clone());
-            an.set_llen(lid, st, None);
+            an.heap.set_llen(lid, st, None);
             Value::obj(lid)
         }
         _ => {
@@ -833,7 +833,7 @@ fn any_value(an: &mut Analyzer, st: &mut State, c: &Call, a: &ArgSpec) -> Value 
                     let lid = an.alloc_at(Kind::List, &c.node, st, &format!("list@L{}", c.line), Payload::None, None, Ns::Item, None, Some(&format!("anyn{}", a.dest)));
                     st.set_slot(lid, Ns::Elem, intern::STAR, one.clone(), true);
                     st.elems.insert(lid, one.kv.clone());
-                    an.set_llen(lid, st, None);
+                    an.heap.set_llen(lid, st, None);
                     Value::obj(lid)
                 }
             }
@@ -906,11 +906,11 @@ fn parse_unknown(an: &mut Analyzer, st: &mut State, c: &Call, p: ObjId, known_ar
         let rv = Value::obj({
             let lid = an.alloc_at(Kind::List, &c.node, st, &format!("list@L{}", c.line), Payload::None, None, Ns::Item, None, Some("rest"));
             st.set_slot(lid, Ns::Elem, intern::STAR, Value::data("arg"), true);
-            an.set_llen(lid, st, None);
+            an.heap.set_llen(lid, st, None);
             lid
         });
         let tid = an.alloc_at(Kind::Tuple, &c.node, st, "parse_known_args result", Payload::None, None, Ns::Item, None, Some("pka"));
-        an.set_llen(tid, st, Some(2));
+        an.heap.set_llen(tid, st, Some(2));
         st.set_slot(tid, Ns::Pos, intern::key_int(0), v, true);
         st.set_slot(tid, Ns::Pos, intern::key_int(1), rv, true);
         return Value::obj(tid);

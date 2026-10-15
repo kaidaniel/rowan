@@ -30,7 +30,7 @@ impl Analyzer {
     /// A one-shot iterator over `vals` (positions known) or with element `elem` (unknown count).
     pub fn it_list(&mut self, vals: Option<Vec<Value>>, elem: Value, node: &Node, st: &mut State, ctx: &str) -> Value {
         let lid = self.alloc_at(Kind::List, node, st, &format!("iter@L{}", node.line), Payload::None, None, Ns::Item, None, Some(ctx));
-        let single = self.obj(lid).single;
+        let single = self.heap.obj(lid).single;
         let acc = match &vals {
             Some(vs) => join_values(vs.clone()),
             None => elem,
@@ -42,11 +42,11 @@ impl Analyzer {
                 for (i, v) in vs.iter().enumerate() {
                     st.set_slot(lid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
                 }
-                self.set_llen(lid, st, Some(vs.len()));
+                self.heap.set_llen(lid, st, Some(vs.len()));
             }
-            _ => self.set_llen(lid, st, None),
+            _ => self.heap.set_llen(lid, st, None),
         }
-        self.obj_mut(lid).iterator = true;
+        self.heap.obj_mut(lid).iterator = true;
         Value::obj(lid)
     }
 
@@ -59,14 +59,14 @@ impl Analyzer {
         for (i, v) in vals.iter().enumerate() {
             st.set_slot(tid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
         }
-        self.set_llen(tid, st, Some(vals.len()));
+        self.heap.set_llen(tid, st, Some(vals.len()));
         Value::obj(tid)
     }
 
     /// The infinite iterator a value is (one of them), if it is one.
     pub fn infinite_of(&self, v: &Value) -> Option<Infinite> {
         let o = v.single()?;
-        if self.kind(o) != Kind::Namespace || !matches!(&self.obj(o).payload, Payload::Method(q, _) if q == "stdobj.infinite") {
+        if self.heap.kind(o) != Kind::Namespace || !matches!(&self.heap.obj(o).payload, Payload::Method(q, _) if q == "stdobj.infinite") {
             return None;
         }
         self.m.infinites.get(&o).cloned()
@@ -79,11 +79,11 @@ impl Analyzer {
         if let Some(inf) = self.infinite_of(v) {
             return self.infinite_take(&inf, n);
         }
-        let o = v.single().filter(|o| v.kv.is_bot() && self.obj(*o).iterator && self.obj(*o).single && self.kind(*o) == Kind::List)?;
+        let o = v.single().filter(|o| v.kv.is_bot() && self.heap.obj(*o).iterator && self.heap.obj(*o).single && self.heap.kind(*o) == Kind::List)?;
         let c = self.cursor_of(o, st)?;
-        let end = match self.llen(o, st) {
+        let end = match self.heap.llen(o, st) {
             Some(len) => (c + n).min(len),
-            None if c + n <= self.prefix(o, st).unwrap_or(0) => c + n,
+            None if c + n <= self.heap.prefix(o, st).unwrap_or(0) => c + n,
             None => return None,
         };
         Some((c..end).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect())
@@ -120,7 +120,7 @@ impl Analyzer {
 
     fn new_infinite(&mut self, inf: Infinite, node: &Node, st: &mut State) -> Value {
         let oid = self.alloc_at(Kind::Namespace, node, st, "itertools iterator", Payload::Method("stdobj.infinite".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
-        self.obj_mut(oid).payload = Payload::Method("stdobj.infinite".into(), Value::new());
+        self.heap.obj_mut(oid).payload = Payload::Method("stdobj.infinite".into(), Value::new());
         self.m.infinites.insert(oid, inf);
         Value::obj(oid)
     }
@@ -130,8 +130,8 @@ impl Analyzer {
         // `operator.add` / `mul` / … on two values: the binary operator
         if args.len() == 2 && f.pts.len() == 1 {
             let o = f.pts.first().unwrap();
-            if self.kind(o) == Kind::External {
-                let q = self.external_qual(o);
+            if self.heap.kind(o) == Kind::External {
+                let q = self.heap.external_qual(o);
                 let op = match q.as_str() {
                     "operator.add" | "operator.concat" => Some(ruff_python_ast::Operator::Add),
                     "operator.sub" => Some(ruff_python_ast::Operator::Sub),
@@ -268,7 +268,7 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 // unknown inputs: tuples of their elements
                 let t = an.it_tuple(vec![elem.clone()], &node, st, &format!("{}t", ctx));
                 if let Some(o) = t.single() {
-                    an.set_llen(o, st, None);
+                    an.heap.set_llen(o, st, None);
                 }
                 return an.it_list(None, t, &node, st, &ctx);
             };
@@ -333,7 +333,7 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             if idx_tuples.len() > MAX_ITEMS {
                 let t = an.it_tuple(vec![elem.clone()], &node, st, &format!("{}t", ctx));
                 if let Some(o) = t.single() {
-                    an.set_llen(o, st, None);
+                    an.heap.set_llen(o, st, None);
                 }
                 return an.it_list(None, t, &node, st, &ctx);
             }
@@ -541,7 +541,7 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 _ => {
                     let t = an.it_tuple(vec![e], &node, st, &format!("{}t", ctx));
                     if let Some(o) = t.single() {
-                        an.set_llen(o, st, None);
+                        an.heap.set_llen(o, st, None);
                     }
                     an.it_list(None, t, &node, st, &ctx)
                 }
@@ -609,7 +609,7 @@ impl crate::interp::Analyzer {
     /// itself; anything else leaves their position unknown.
     pub(crate) fn after_model_consume(&mut self, call: &Call, r: &Value, state: &mut State) {
         // (one-shot iterators, and lazy iterators over them)
-        let its: Vec<(usize, u32)> = call.args.iter().chain(call.star_args.iter()).enumerate().filter_map(|(i, a)| a.single().filter(|o| a.kv.is_bot() && ((self.obj(*o).iterator && self.obj(*o).single && matches!(self.kind(*o), Kind::List)) || self.lazy_src.contains_key(o))).map(|o| (i, o))).collect();
+        let its: Vec<(usize, u32)> = call.args.iter().chain(call.star_args.iter()).enumerate().filter_map(|(i, a)| a.single().filter(|o| a.kv.is_bot() && ((self.heap.obj(*o).iterator && self.heap.obj(*o).single && matches!(self.heap.kind(*o), Kind::List)) || self.lazy_src.contains_key(o))).map(|o| (i, o))).collect();
         if its.is_empty() {
             return;
         }
@@ -677,13 +677,13 @@ impl crate::interp::Analyzer {
         // (exact remaining length, or a lower bound)
         let mut lens: Vec<(Option<usize>, usize, Option<u32>)> = Vec::new();
         for a in &call.args {
-            let one = a.single().filter(|o| a.kv.is_bot() && self.obj(*o).iterator && self.obj(*o).single && matches!(self.kind(*o), Kind::List));
+            let one = a.single().filter(|o| a.kv.is_bot() && self.heap.obj(*o).iterator && self.heap.obj(*o).single && matches!(self.heap.kind(*o), Kind::List));
             match one {
                 Some(o) => {
                     let c = self.cursor_of(o, state)?;
-                    match self.llen(o, state) {
+                    match self.heap.llen(o, state) {
                         Some(n) => lens.push((Some(n.saturating_sub(c)), n.saturating_sub(c), Some(o))),
-                        None => lens.push((None, self.prefix(o, state).unwrap_or(0).saturating_sub(c), Some(o))),
+                        None => lens.push((None, self.heap.prefix(o, state).unwrap_or(0).saturating_sub(c), Some(o))),
                     }
                 }
                 None => {

@@ -13,12 +13,12 @@ use crate::state::{Kind, State};
 impl Analyzer {
     /// The class a singledispatch implementation's first parameter is annotated with.
     pub fn sdispatch_annotation(&mut self, f: ObjId, method: bool, state: &mut State) -> Option<Value> {
-        let fi = self.func_info(f);
+        let fi = self.heap.func_info(f);
         let crate::interp::FuncNode::Def(d) = &fi.node else { return None };
         let ps: Vec<&'static ast::ParameterWithDefault> = d.parameters.posonlyargs.iter().chain(d.parameters.args.iter()).collect();
         let p = ps.get(if method { 1 } else { 0 })?;
         let ann: &'static ast::Expr = p.parameter.annotation.as_deref()?;
-        let mi = self.module_info(fi.module);
+        let mi = self.heap.module_info(fi.module);
         self.frames.push(crate::interp::Frame::new(crate::interp::FrameKind::Module, mi.scopes.module(), fi.module, "sdispatch", true, "<ann>"));
         let v = self.eval(ann, state);
         self.frames.pop();
@@ -51,12 +51,12 @@ impl Analyzer {
             out.push((None, Value::kv_only(v.kv.clone())));
         }
         for o in v.pts.iter() {
-            let t = match self.kind(o) {
+            let t = match self.heap.kind(o) {
                 Kind::Dict if !self.m.counters.contains(&o) => Some(Ok("dict".to_string())),
                 Kind::List if !self.m.deques.contains_key(&o) => Some(Ok("list".to_string())),
                 Kind::Tuple => Some(Ok("tuple".to_string())),
                 Kind::Set => Some(Ok("set".to_string())),
-                Kind::Instance => self.instance_class(o).map(Err),
+                Kind::Instance => self.heap.instance_class(o).map(Err),
                 _ => None,
             };
             out.push((t, Value::obj(o)));
@@ -68,9 +68,9 @@ impl Analyzer {
     fn dispatch_distance(&self, t: &Result<String, ObjId>, reg: &Value) -> Option<usize> {
         let mut best: Option<usize> = None;
         for r in reg.pts.iter() {
-            let d = match (self.kind(r), t) {
+            let d = match (self.heap.kind(r), t) {
                 (Kind::External, Ok(name)) => {
-                    let q = self.external_qual(r);
+                    let q = self.heap.external_qual(r);
                     let rn = q.rsplit('.').next().unwrap_or("").to_string();
                     let chain: &[&str] = match name.as_str() {
                         "bool" => &["bool", "int", "object"],
@@ -87,7 +87,7 @@ impl Analyzer {
                     pos
                 }
                 (Kind::External, Err(_)) => {
-                    let q = self.external_qual(r);
+                    let q = self.heap.external_qual(r);
                     if q.ends_with(".object") || q == "object" { Some(1000) } else { None }
                 }
                 (Kind::Class, Err(c)) => self.mro(*c).iter().position(|m| *m == r),
@@ -179,7 +179,7 @@ impl crate::interp::Analyzer {
         let Some(mk) = key else {
             return self.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, call_ast, false);
         };
-        let memo = self.alloc_raw(Kind::Dict, &format!("memo:{}", oid), "", true, "lru_cache", Payload::None);
+        let memo = self.heap.alloc_raw(Kind::Dict, &format!("memo:{}", oid), "", true, "lru_cache", Payload::None);
         let row = state.row(memo, Ns::Item);
         // the hit / miss counts (cache_info), known while every call's outcome is
         let bump = |state: &mut State, name: &str, by_known: bool| {
@@ -217,7 +217,7 @@ impl crate::interp::Analyzer {
         // `@singledispatch`: implementations registered on it are chosen by the type of the
         // first argument
         if matches!(q, "functools.singledispatch" | "functools.singledispatchmethod") {
-            if let Some(f) = fobj.filter(|o| self.kind(*o) == Kind::Function) {
+            if let Some(f) = fobj.filter(|o| self.heap.kind(*o) == Kind::Function) {
                 self.sdispatch.insert(f, Vec::new());
                 if q.ends_with("method") {
                     self.sdispatch_method.insert(f);
@@ -230,11 +230,11 @@ impl crate::interp::Analyzer {
                 ast::Expr::Call(c) => self.eval(&c.func, state),
                 other => self.eval(other, state),
             };
-            let base = dv.pts.iter().find_map(|m| match &self.obj(m).payload {
+            let base = dv.pts.iter().find_map(|m| match &self.heap.obj(m).payload {
                 Payload::Method(_, b) => b.single(),
                 _ => None,
             });
-            let impl_f = fobj.filter(|o| self.kind(*o) == Kind::Function);
+            let impl_f = fobj.filter(|o| self.heap.kind(*o) == Kind::Function);
             if let (Some(base), Some(impl_f)) = (base, impl_f) {
                 // the type: `@f.register(T)`, else the first parameter's annotation
                 let ty = match &d.expression {
@@ -251,7 +251,7 @@ impl crate::interp::Analyzer {
             if let (Some(fi), Some(f)) = (&fi, fobj) {
                 fi.is_memo.set(true);
                 // the (empty) cache exists from the definition on, on every path
-                let memo = self.alloc_raw(Kind::Dict, &format!("memo:{}", f), "", true, "lru_cache", Payload::None);
+                let memo = self.heap.alloc_raw(Kind::Dict, &format!("memo:{}", f), "", true, "lru_cache", Payload::None);
                 state.set_row(memo, Ns::Item, crate::domain::Row::new());
             }
             return true;

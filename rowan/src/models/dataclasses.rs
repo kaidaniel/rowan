@@ -26,7 +26,7 @@ impl Analyzer {
     /// (a fresh instance, or `self` when called explicitly as `Base.__init__(self, …)` /
     /// `super().__init__(…)` from a subclass).
     pub fn dataclass_init(&mut self, cls: u32, inst: ObjId, args: &[Value], star_args: &[Value], kwargs: &IndexMap<StrId, Value>, star_kwargs: &[Value], state: &mut State, node: &Node) {
-        let ci = self.class_info(cls);
+        let ci = self.heap.class_info(cls);
         let ns = if ci.lib.typed_dict { Ns::Item } else { Ns::Attr };
         let mut initvars: Vec<Value> = Vec::new();
         // `*seq` arguments: a sequence of known length gives positional arguments in order; past
@@ -38,8 +38,8 @@ impl Analyzer {
                 break;
             }
             // (a list / tuple of known length: its positions)
-            if let Some(o) = sa.single().filter(|o| matches!(self.kind(*o), Kind::Tuple | Kind::List) && sa.kv.is_bot()) {
-                if let Some(n) = self.llen(o, state) {
+            if let Some(o) = sa.single().filter(|o| matches!(self.heap.kind(*o), Kind::Tuple | Kind::List) && sa.kv.is_bot()) {
+                if let Some(n) = self.heap.llen(o, state) {
                     for i in 0..n {
                         args_full.push(state.slot(o, Ns::Pos, intern::key_int(i as i64)));
                     }
@@ -151,7 +151,7 @@ impl Analyzer {
         if let Some(pc) = self.class_lookup(cls, "__post_init__") {
             let fv = self.cls_slots.get(&(pc, Ns::Attr, key_str_lit("__post_init__"))).cloned().unwrap_or_default();
             for f in fv.pts.iter() {
-                if self.kind(f) == Kind::Function {
+                if self.heap.kind(f) == Kind::Function {
                     self.call_user(f, Some(Value::obj(inst)), initvars.clone(), IndexMap::new(), Vec::new(), Vec::new(), state, node, None, false);
                 }
             }
@@ -164,7 +164,7 @@ impl Analyzer {
     pub fn dc_specs(&self, cls: u32) -> Vec<DcSpec> {
         let mut out: Vec<DcSpec> = Vec::new();
         for c in self.mro(cls).into_iter().rev() {
-            let Some(ci) = self.class_info_opt(c) else { continue };
+            let Some(ci) = self.heap.class_info_opt(c) else { continue };
             if !ci.has_fields() {
                 continue;
             }
@@ -219,11 +219,11 @@ impl Analyzer {
     pub fn dataclass_default(&mut self, d: &'static ast::Expr, node: &Node, state: &mut State) -> Value {
         // the default's names are the defining module's (a class from another module, a
         // generated namedtuple): evaluated there
-        let here = self.module_info(self.frame().module).idx;
+        let here = self.heap.module_info(self.frame().module).idx;
         let owner = crate::frontend::module_of_addr(d as *const ast::Expr as usize);
         if let Some(idx) = owner.filter(|i| *i != here) {
-            if let Some(moid) = self.modules.values().copied().find(|m| self.module_info(*m).idx == idx) {
-                let mi = self.module_info(moid);
+            if let Some(moid) = self.modules.values().copied().find(|m| self.heap.module_info(*m).idx == idx) {
+                let mi = self.heap.module_info(moid);
                 let (ctx, single) = (self.frame().ctx.clone(), self.frame().single);
                 self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), moid, &ctx, single, "<default>"));
                 let v = self.dataclass_default_here(d, node, state);
@@ -258,7 +258,7 @@ impl Analyzer {
     pub fn dataclass_fields_mro(&self, cls: u32) -> Vec<(String, Option<&'static ast::Expr>)> {
         let mut out: Vec<(String, Option<&'static ast::Expr>)> = Vec::new();
         for c in self.mro(cls).into_iter().rev() {
-            if let Some(ci) = self.class_info_opt(c) {
+            if let Some(ci) = self.heap.class_info_opt(c) {
                 for (name, d) in ci.fields() {
                     if let Some(e) = out.iter_mut().find(|(n, _)| *n == name) {
                         e.1 = d;
@@ -277,7 +277,7 @@ impl crate::interp::Analyzer {
     pub fn abstract_unimplemented(&self, cls: u32) -> bool {
         let mro = self.mro(cls);
         let is_abc = mro.iter().any(|c| {
-            self.class_info_opt(*c).map(|ci| {
+            self.heap.class_info_opt(*c).map(|ci| {
                 ci.node.arguments.as_ref().map(|a| a.args.iter().any(|b| crate::interp::dotted_last(b) == "ABC") || a.keywords.iter().any(|k| k.arg.as_ref().map(|x| x.as_str()) == Some("metaclass") && crate::interp::dotted_last(&k.value) == "ABCMeta")).unwrap_or(false)
             }).unwrap_or(false)
         });
@@ -287,7 +287,7 @@ impl crate::interp::Analyzer {
         // the first definition of each name along the MRO decides
         let mut seen: Vec<String> = Vec::new();
         for c in mro.iter() {
-            let Some(ci) = self.class_info_opt(*c) else { continue };
+            let Some(ci) = self.heap.class_info_opt(*c) else { continue };
             for st in &ci.node.body {
                 let (name, decos) = match st {
                     ast::Stmt::FunctionDef(f) => (f.name.id.to_string(), &f.decorator_list),
@@ -323,7 +323,7 @@ pub fn m_dcinit(an: &mut crate::interp::Analyzer, st: &mut State, c: &crate::int
         None => (rest.parse().unwrap_or(0), c.recv.clone().unwrap_or_default(), c.args.clone()),
     };
     if cls != 0 {
-        for o in self_v.pts.iter().filter(|o| an.kind(*o) == Kind::Instance).collect::<Vec<_>>() {
+        for o in self_v.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Instance).collect::<Vec<_>>() {
             an.dataclass_init(cls, o, &args, &c.star_args, &c.kwargs, &c.star_kwargs, st, &c.node);
         }
     }
@@ -391,7 +391,7 @@ impl Analyzer {
                 continue;
             }
             seen.push(c);
-            let Some(ci) = self.class_info_opt(c) else { continue };
+            let Some(ci) = self.heap.class_info_opt(c) else { continue };
             if ci.lib.named_tuple {
                 return true;
             }
@@ -423,7 +423,7 @@ impl Analyzer {
     /// A TypedDict's required and optional keys (`total=`, `Required[…]` / `NotRequired[…]`,
     /// inherited from TypedDict bases).
     pub fn typed_dict_keys(&self, cls: u32) -> Option<(KeySet, KeySet)> {
-        let ci = self.class_info_opt(cls)?;
+        let ci = self.heap.class_info_opt(cls)?;
         if !ci.lib.typed_dict {
             return None;
         }
@@ -483,7 +483,7 @@ impl Analyzer {
             if self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) {
                 return None;
             }
-            if self.class_info_opt(c).map(|x| x.has_fields()).unwrap_or(false) {
+            if self.heap.class_info_opt(c).map(|x| x.has_fields()).unwrap_or(false) {
                 return Some(c);
             }
         }
@@ -492,8 +492,8 @@ impl Analyzer {
 
     /// The key a frozen dataclass / pydantic instance hashes as (its fields), when known.
     pub fn frozen_instance_key(&self, o: u32, state: &State, depth: usize) -> Option<KeyId> {
-        let c = self.instance_class(o)?;
-        let ci = self.class_info_opt(c)?;
+        let c = self.heap.instance_class(o)?;
+        let ci = self.heap.class_info_opt(c)?;
         // a frozen pydantic model hashes by its fields too
         let pyd_fields: Option<Vec<(String, Option<&'static ast::Expr>)>> = self.m.pyd_classes.get(&c).filter(|p| p.frozen).map(|p| p.fields.iter().map(|f| (f.name.clone(), None)).collect());
         if (!ci.dc_frozen.get() && pyd_fields.is_none()) || self.class_lookup(c, "__hash__").is_some() || self.class_lookup(c, "__eq__").is_some() {
@@ -518,7 +518,7 @@ impl Analyzer {
             };
             parts.push(format!("{}={}", f, intern::key_repr(k)));
         }
-        let name = self.obj(c).label.trim_start_matches("class ").to_string();
+        let name = self.heap.obj(c).label.trim_start_matches("class ").to_string();
         let k = intern::key_member(&format!("{}({})", name, parts.join(", ")), None);
         self.identity_objs.borrow_mut().entry(k).or_insert(o);
         Some(k)
@@ -527,8 +527,8 @@ impl Analyzer {
     /// Two instances of an `@dataclass(order=True)` class: their fields (those not
     /// `field(compare=False)`) compared as tuples, when known.
     pub fn dataclass_order(&self, x: u32, y: u32, state: &State) -> Option<std::cmp::Ordering> {
-        let cx = self.instance_class(x)?;
-        if Some(cx) != self.instance_class(y) || !self.class_info_opt(cx).map(|ci| ci.dc_order.get()).unwrap_or(false) {
+        let cx = self.heap.instance_class(x)?;
+        if Some(cx) != self.heap.instance_class(y) || !self.heap.class_info_opt(cx).map(|ci| ci.dc_order.get()).unwrap_or(false) {
             return None;
         }
         let compared = |d: &Option<&'static ast::Expr>| match d {
@@ -552,7 +552,7 @@ impl Analyzer {
     /// A TypedDict class called: a plain dict.
     #[allow(clippy::too_many_arguments)]
     pub fn typed_dict_construct(&mut self, cls: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Option<Value> {
-        if !self.class_info(cls).lib.typed_dict {
+        if !self.heap.class_info(cls).lib.typed_dict {
             return None;
         }
         let call = crate::interp::Call { qual: "builtins.dict".into(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
@@ -566,7 +566,7 @@ impl Analyzer {
     /// runs the generated `__init__`. None: none of these.
     #[allow(clippy::too_many_arguments)]
     pub fn construct_library(&mut self, cls: u32, inst: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Option<Value> {
-        let ci = self.class_info(cls);
+        let ci = self.heap.class_info(cls);
         if crate::models::pydantic::is_validated(self, cls) {
             let own_init = self.class_lookup(cls, "__init__").map(|c| crate::models::pydantic::is_validated(self, c) && self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__")))).unwrap_or(false);
             if !own_init {
@@ -583,7 +583,7 @@ impl Analyzer {
                 return Some(self.pyd_construct(cls, args, &kw, star_kwargs, state, node));
             }
         }
-        let dict_based = self.mro(cls).iter().any(|c| self.class_info_opt(*c).map(|x| x.lib.dict_base).unwrap_or(false));
+        let dict_based = self.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).map(|x| x.lib.dict_base).unwrap_or(false));
         if dict_based && self.class_lookup(cls, "__init__").is_none() {
             state.set_row(inst, Ns::Item, crate::domain::Row::new());
             if let Some(a0) = args.first() {
@@ -603,7 +603,7 @@ impl Analyzer {
             return Some(Value::obj(inst));
         }
         // the generated `__init__` of a dataclass base applies to a subclass without its own
-        let owner = self.mro(cls).into_iter().find_map(|c| if self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) { Some(false) } else if self.class_info_opt(c).is_some_and(|x| x.has_fields()) { Some(true) } else { None });
+        let owner = self.mro(cls).into_iter().find_map(|c| if self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) { Some(false) } else if self.heap.class_info_opt(c).is_some_and(|x| x.has_fields()) { Some(true) } else { None });
         if ci.has_fields() || owner == Some(true) {
             self.dataclass_init(cls, inst, args, star_args, kwargs, star_kwargs, state, node);
             return Some(Value::obj(inst));
@@ -613,9 +613,9 @@ impl Analyzer {
 
     /// An Exception subclass without its own `__init__` made: its `args` are the arguments.
     pub fn exception_init(&mut self, cls: u32, inst: u32, args: &[Value], node: &Node, state: &mut State) {
-        let name = self.class_info(cls).name.clone();
+        let name = self.heap.class_info(cls).name.clone();
         let t = self.alloc_positional(Kind::Tuple, node, Some(args.to_vec()), Value::new(), crate::domain::DATA, state);
-        let strong = self.obj(inst).single;
+        let strong = self.heap.obj(inst).single;
         self.store_key(inst, Ns::Attr, &crate::domain::KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
         self.exc_objs.insert(inst, name);
     }

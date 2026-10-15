@@ -166,7 +166,7 @@ impl Analyzer {
                             let (Some(rv), Some(ov)) = (self.traced(right), self.traced(&la.value)) else { return };
                             let ks = kv_literals(&rv.kv);
                             let ak = key_str_lit(la.attr.id.as_str());
-                            if let Some(o) = ov.single().filter(|o| self.obj(*o).single && matches!(self.kind(*o), Kind::Instance | Kind::Namespace) && rv.pts.is_empty() && ks.len() == 1) {
+                            if let Some(o) = ov.single().filter(|o| self.heap.obj(*o).single && matches!(self.heap.kind(*o), Kind::Instance | Kind::Namespace) && rv.pts.is_empty() && ks.len() == 1) {
                                 let cur = state.slot_opt(o, Ns::Attr, ak);
                                 if let Some(cur) = cur.filter(|c| c.pts.is_empty() && c.kv.is_literal()) {
                                     let lits = kv_literals(&cur.kv);
@@ -192,7 +192,7 @@ impl Analyzer {
                             let name = s(nm.id.as_str());
                             let cur = self.load_name(name, &Node::none(), state);
                             let Some(o) = self.traced(other_e) else { continue };
-                            let Some(target) = o.single().filter(|x| o.kv.is_bot() && self.obj(*x).single && !crate::state::is_merged(*x)) else { continue };
+                            let Some(target) = o.single().filter(|x| o.kv.is_bot() && self.heap.obj(*x).single && !crate::state::is_merged(*x)) else { continue };
                             if !cur.pts.contains(target) || cur.pts.len() < 2 || !cur.kv.is_bot() {
                                 continue;
                             }
@@ -268,7 +268,7 @@ impl Analyzer {
                         if let Some(k) = kv.kv.as_lit() {
                             // (an attribute row describes instances and namespaces; a builtin
                             // container's attributes are its type's: decided by the type, or not)
-                            let builtin = |an: &Analyzer, o: u32| matches!(an.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set);
+                            let builtin = |an: &Analyzer, o: u32| matches!(an.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set);
                             if !rec.pts.is_empty() && rec.pts.iter().all(|o| builtin(self, o)) {
                                 if let Some(name) = intern::key_as_str(k) {
                                     if rec.pts.iter().all(|o| crate::models::builtin_has_attr(self, o, &name) == Some(!truth)) {
@@ -336,7 +336,7 @@ impl Analyzer {
                 }
                 // several containers: on the truthy path the ones known to be empty are not it
                 if truth && v.pts.len() > 1 && v.kv.is_bot() {
-                    let keep: Vec<u32> = v.pts.iter().filter(|o| !(matches!(self.kind(*o), Kind::List | Kind::Tuple | Kind::Set) && self.llen(*o, state) == Some(0))).collect();
+                    let keep: Vec<u32> = v.pts.iter().filter(|o| !(matches!(self.heap.kind(*o), Kind::List | Kind::Tuple | Kind::Set) && self.heap.llen(*o, state) == Some(0))).collect();
                     if !keep.is_empty() && keep.len() < v.pts.len() {
                         v = Value::objs(crate::domain::ObjSet::from_vec(keep));
                         self.rebind_name(s(n.id.as_str()), v.clone(), state);
@@ -344,26 +344,26 @@ impl Analyzer {
                 }
                 if v.pts.len() == 1 && v.kv.is_bot() {
                     let o = v.pts.first().unwrap();
-                    if matches!(self.kind(o), Kind::List | Kind::Tuple) && self.obj(o).single && self.llen(o, state).is_none() {
+                    if matches!(self.heap.kind(o), Kind::List | Kind::Tuple) && self.heap.obj(o).single && self.heap.llen(o, state).is_none() {
                         if truth {
-                            if self.prefix(o, state).is_none() {
+                            if self.heap.prefix(o, state).is_none() {
                                 let e = state.slot(o, Ns::Elem, intern::STAR);
                                 let ekv = state.elems.get(&o).unwrap_or(crate::domain::DATA);
                                 state.set_slot(o, Ns::Pos, intern::key_int(0), Value::with_kv(e.pts, ekv), true);
                                 state.lens.insert(o, (None, 1, 0));
                             }
-                        } else if self.prefix(o, state).is_none() {
+                        } else if self.heap.prefix(o, state).is_none() {
                             state.lens.insert(o, (Some(0), 0, 0));
                         }
                     }
                     // a falsy dict is empty on this path (`while queue:` ends with no keys)
-                    if !truth && self.kind(o) == Kind::Dict && self.obj(o).single {
+                    if !truth && self.heap.kind(o) == Kind::Dict && self.heap.obj(o).single {
                         state.set_row(o, Ns::Item, crate::domain::Row::new());
                         state.drop_obj_ns(o, Ns::Item);
                     }
                     // a falsy unknown value (a JSON document, an input): an empty container if
                     // len() or a key read accepts it at all (a falsy number makes them raise)
-                    if !truth && self.kind(o) == Kind::Unknown && self.obj(o).single && v.kv.is_bot() {
+                    if !truth && self.heap.kind(o) == Kind::Unknown && self.heap.obj(o).single && v.kv.is_bot() {
                         state.set_row(o, Ns::Item, crate::domain::Row::new());
                         state.drop_obj_ns(o, Ns::Item);
                         state.drop_obj_ns(o, Ns::Pos);
@@ -397,7 +397,7 @@ impl Analyzer {
             }
             NarrowTarget::Attr(a, whole) => {
                 let Some(base) = self.traced(&a.value) else { return };
-                let recs: Vec<u32> = base.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Instance | Kind::Namespace)).collect();
+                let recs: Vec<u32> = base.pts.iter().filter(|o| matches!(self.heap.kind(*o), Kind::Instance | Kind::Namespace)).collect();
                 if recs.len() != 1 || base.pts.len() != 1 || !self.strongable(recs[0]) {
                     let Some(key) = chain_text(whole) else { return };
                     if !truth {
@@ -426,7 +426,7 @@ impl Analyzer {
     /// is). Literals are not classes; a library object may be one.
     fn narrow_isclass(&mut self, name: StrId, truth: bool, state: &mut State) {
         let cur = self.load_name(name, &Node::none(), state);
-        let keep: Vec<u32> = cur.pts.iter().filter(|o| match self.kind(*o) {
+        let keep: Vec<u32> = cur.pts.iter().filter(|o| match self.heap.kind(*o) {
             Kind::Class => truth,
             Kind::External | Kind::Unknown => true,
             _ => !truth,
@@ -472,11 +472,11 @@ impl Analyzer {
     pub fn isinstance_classes(&self, cv: &Value, state: &State) -> Option<Vec<u32>> {
         let mut out: Vec<u32> = Vec::new();
         for o in cv.pts.iter() {
-            match self.kind(o) {
+            match self.heap.kind(o) {
                 Kind::Class | Kind::External => out.push(o),
                 Kind::Tuple | Kind::List => {
                     for (_, cs) in state.slots_of(o) {
-                        out.extend(cs.pts.iter().filter(|x| matches!(self.kind(*x), Kind::Class | Kind::External)));
+                        out.extend(cs.pts.iter().filter(|x| matches!(self.heap.kind(*x), Kind::Class | Kind::External)));
                     }
                 }
                 _ => return None,
@@ -488,7 +488,7 @@ impl Analyzer {
     /// Is object `o` an instance of one of `classes` (None: not known)? For both the value of
     /// an `isinstance` test and what it narrows.
     pub fn instance_of(&self, o: u32, classes: &[u32], st: &State) -> Option<bool> {
-        let k = if crate::models::pandas::is_series_obj(self, o) { Kind::Series } else { self.kind(o) };
+        let k = if crate::models::pandas::is_series_obj(self, o) { Kind::Series } else { self.heap.kind(o) };
         if k == Kind::Unknown {
             return None;
         }
@@ -503,12 +503,12 @@ impl Analyzer {
     }
 
     fn instance_of_one(&self, o: u32, k: Kind, cls: u32, st: &State) -> Option<bool> {
-        if self.kind(cls) == Kind::Class {
+        if self.heap.kind(cls) == Kind::Class {
             // (a Protocol: an instance whose class defines all its members is one; one of a
             // closed hierarchy without `__getattr__` that surely lacks a member is not; anything
             // else may have them as attributes)
             if let Some(ms) = crate::models::protocol_members(self, cls) {
-                let ic = self.instance_class(o).filter(|_| k == Kind::Instance)?;
+                let ic = self.heap.instance_class(o).filter(|_| k == Kind::Instance)?;
                 if ms.iter().all(|m| self.class_lookup(ic, m).is_some()) {
                     return Some(true);
                 }
@@ -517,9 +517,9 @@ impl Analyzer {
                 let closed = self.hierarchy_closed(ic) && row.closed() && ["__getattr__", "__getattribute__"].iter().all(|h| self.class_lookup(ic, h).is_none());
                 return (closed && ms.iter().any(lacks)).then_some(false);
             }
-            return if k == Kind::Instance { Some(self.instance_class(o).is_some_and(|ic| ic == cls || self.is_subclass(ic, cls))) } else { Some(false) };
+            return if k == Kind::Instance { Some(self.heap.instance_class(o).is_some_and(|ic| ic == cls || self.is_subclass(ic, cls))) } else { Some(false) };
         }
-        let full = self.external_qual(cls);
+        let full = self.heap.external_qual(cls);
         let b = full.rsplit('.').next().unwrap_or("");
         let structural = is_structural_qual(&full);
         if b == "object" {
@@ -528,8 +528,8 @@ impl Analyzer {
         if k == Kind::Instance {
             // (a class deriving from a builtin / library class, or one an ABC may recognise by
             // its methods: not decided)
-            let ic = self.instance_class(o)?;
-            let open = self.mro(ic).iter().any(|c| self.class_info_opt(*c).is_some_and(|ci| ci.open_base || ci.lib.dict_base));
+            let ic = self.heap.instance_class(o)?;
+            let open = self.mro(ic).iter().any(|c| self.heap.class_info_opt(*c).is_some_and(|ci| ci.open_base || ci.lib.dict_base));
             return (!open && !structural).then_some(false);
         }
         let container = matches!(k, Kind::Dict | Kind::List | Kind::Tuple | Kind::Pair | Kind::Set | Kind::Frame | Kind::Series);
@@ -569,7 +569,7 @@ impl Analyzer {
                 continue;
             }
             seen.push(c);
-            let Some(ci) = self.class_info_opt(c) else { return false };
+            let Some(ci) = self.heap.class_info_opt(c) else { return false };
             if ci.open_base {
                 return false;
             }
@@ -590,7 +590,7 @@ impl Analyzer {
                 continue;
             }
             seen.push(c);
-            if let Some(ci) = self.class_info_opt(c) {
+            if let Some(ci) = self.heap.class_info_opt(c) {
                 order.extend(ci.bases.iter().copied());
             }
         }
@@ -604,13 +604,13 @@ impl Analyzer {
                     let (Some(kv), Some(rec)) = (self.traced(&c.arguments.args[0]), self.traced(&a.value)) else { return };
                     if let Some(k) = kv.kv.as_lit() {
                         // only a dict-like receiver: a user instance's `get` is its own method
-                        if rec.pts.iter().any(|o| matches!(self.kind(o), Kind::Instance | Kind::Namespace)) {
+                        if rec.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::Instance | Kind::Namespace)) {
                             return;
                         }
                         // a name holding several dicts: those that surely lack the key are not it
                         if let ast::Expr::Name(n) = &*a.value {
                             if rec.pts.len() > 1 {
-                                let keep: Vec<u32> = rec.pts.iter().filter(|o| !(self.kind(*o) == Kind::Dict && { let r = state.row(*o, Ns::Item); !r.open() && !r.present.contains(k) })).collect();
+                                let keep: Vec<u32> = rec.pts.iter().filter(|o| !(self.heap.kind(*o) == Kind::Dict && { let r = state.row(*o, Ns::Item); !r.open() && !r.present.contains(k) })).collect();
                                 if !keep.is_empty() && keep.len() < rec.pts.len() {
                                     let nv = Value::with_kv(ObjSet::from_vec(keep), rec.kv.clone());
                                     self.store_narrowed(&StoreTarget::Name(s(n.id.as_str())), nv.clone(), state);
@@ -637,16 +637,16 @@ impl Analyzer {
     fn narrow_member_values(&mut self, left: &'static ast::Expr, lv: &Value, rec_expr: &'static ast::Expr, rv: &Value, member: bool, state: &mut State) {
         let (lv, rv) = (lv.clone(), rv.clone());
         // user classes defining `__contains__` as `return <x> in <y>`: narrow <y> instead
-        let insts: Vec<u32> = rv.pts.iter().filter(|o| self.kind(*o) == Kind::Instance).collect();
+        let insts: Vec<u32> = rv.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Instance).collect();
         if !insts.is_empty() && rv.pts.len() == 1 {
-            if let Some(cls) = self.instance_class(insts[0]) {
+            if let Some(cls) = self.heap.instance_class(insts[0]) {
                 if let Some(m) = self.class_lookup(cls, "__contains__") {
                     let fv = self.cls_slots.get(&(m, Ns::Attr, key_str_lit("__contains__"))).cloned().unwrap_or_default();
                     for f in fv.pts.iter() {
-                        if self.kind(f) != Kind::Function {
+                        if self.heap.kind(f) != Kind::Function {
                             continue;
                         }
-                        let fi = self.func_info(f);
+                        let fi = self.heap.func_info(f);
                         let body = fi.node.body();
                         if body.len() == 1 {
                             if let ast::Stmt::Return(r) = &body[0] {
@@ -669,10 +669,10 @@ impl Analyzer {
                 }
             }
         }
-        let recs: Vec<u32> = rv.pts.iter().filter(|o| self.is_record_like(*o)).collect();
+        let recs: Vec<u32> = rv.pts.iter().filter(|o| self.heap.is_record_like(*o)).collect();
         // (a value that is a literal or an unknown object may be any key: no narrowing by its
         // literal part)
-        let lit_only = lv.pts.iter().all(|o| !matches!(self.kind(o), Kind::Unknown | Kind::Instance | Kind::External));
+        let lit_only = lv.pts.iter().all(|o| !matches!(self.heap.kind(o), Kind::Unknown | Kind::Instance | Kind::External));
         if !recs.is_empty() {
             match &lv.kv {
                 KeyVal::Lit(_) | KeyVal::Lits(_) if !lit_only => {}
@@ -687,7 +687,7 @@ impl Analyzer {
                 }
                 // an unknown key (data, or an unknown value's object) in closed dicts of string
                 // keys: one of those keys
-                KeyVal::KeysOf(_) | KeyVal::Data(_) | KeyVal::Bot if member && (lv.pts.is_empty() || lv.pts.iter().all(|o| self.kind(o) == Kind::Unknown)) && !(lv.pts.is_empty() && lv.kv.is_bot()) => {
+                KeyVal::KeysOf(_) | KeyVal::Data(_) | KeyVal::Bot if member && (lv.pts.is_empty() || lv.pts.iter().all(|o| self.heap.kind(o) == Kind::Unknown)) && !(lv.pts.is_empty() && lv.kv.is_bot()) => {
                     let rows: Vec<crate::domain::Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
                     if rows.iter().all(|r| r.closed()) {
                         let mut may = KeySet::new();
@@ -787,12 +787,12 @@ impl Analyzer {
         let new = if restrict { kv_restrict(&cur.kv, keys) } else { kv_exclude(&cur.kv, keys) };
         // objects that may equal a literal (an unknown value, a placeholder, an instance with
         // its own __eq__)
-        let maybe_eq = cur.pts.filter(|o| matches!(self.kind(o), Kind::Unknown | Kind::Instance | Kind::External));
+        let maybe_eq = cur.pts.filter(|o| matches!(self.heap.kind(o), Kind::Unknown | Kind::Instance | Kind::External));
         match new {
             None if !maybe_eq.is_empty() => {
                 // none of the literals is left: the objects are what remains (one of the keys)
                 let v = if restrict {
-                    Value::with_kv(maybe_eq.filter(|o| self.kind(o) == Kind::Instance), KeyVal::lits(keys.clone()))
+                    Value::with_kv(maybe_eq.filter(|o| self.heap.kind(o) == Kind::Instance), KeyVal::lits(keys.clone()))
                 } else {
                     Value::objs(cur.pts.clone())
                 };
@@ -811,7 +811,7 @@ impl Analyzer {
             }
             Some(nk) => {
                 // equal to one of the literals: an unknown value is that literal now
-                let pts = if restrict { cur.pts.filter(|o| self.kind(o) != Kind::Unknown) } else { cur.pts.clone() };
+                let pts = if restrict { cur.pts.filter(|o| self.heap.kind(o) != Kind::Unknown) } else { cur.pts.clone() };
                 if nk != cur.kv || pts != cur.pts {
                     self.rebind_name(name, Value::with_kv(pts, nk), state);
                 }
@@ -820,7 +820,7 @@ impl Analyzer {
     }
 
     pub fn narrow_record(&mut self, rec: &Value, ns: Ns, k: KeyId, member: bool, state: &mut State) {
-        let targets: Vec<u32> = rec.pts.iter().filter(|o| self.is_record_like(*o)).collect();
+        let targets: Vec<u32> = rec.pts.iter().filter(|o| self.heap.is_record_like(*o)).collect();
         let single = targets.len() == 1;
         for oid in targets {
             let row = state.row(oid, ns);
@@ -845,24 +845,24 @@ impl Analyzer {
     }
 
     pub fn strongable(&self, oid: u32) -> bool {
-        let o = self.obj(oid);
+        let o = self.heap.obj(oid);
         o.single || o.iter_elem
     }
 
     /// A key proven on a view of a record is proven on the record it was derived from.
     pub fn propagate_narrowing(&mut self, oid: u32, ns: Ns, k: KeyId, state: &mut State) {
-        let mut src = self.obj(oid).derived_from;
+        let mut src = self.heap.obj(oid).derived_from;
         let mut seen: Vec<u32> = Vec::new();
         while let Some(sid) = src {
             if seen.contains(&sid) {
                 break;
             }
             seen.push(sid);
-            if self.obj(sid).single && state.has_row(sid, ns) {
+            if self.heap.obj(sid).single && state.has_row(sid, ns) {
                 let r = state.row(sid, ns).narrow_in(k, true);
                 state.set_row(sid, ns, r);
             }
-            src = self.obj(sid).derived_from;
+            src = self.heap.obj(sid).derived_from;
         }
     }
 }

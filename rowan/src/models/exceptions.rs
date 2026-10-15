@@ -96,7 +96,7 @@ impl crate::interp::Analyzer {
         let t = self.alloc_positional(Kind::Tuple, node, Some(args), Value::new(), DATA, state);
         let row = Row::with_source(crate::domain::Source::new(cls_name, crate::domain::SourceKind::Data));
         let oid = self.alloc_at(Kind::Namespace, node, state, &format!("{}@L{}", cls_name, node.line), Payload::None, Some(row), Ns::Attr, None, None);
-        let strong = self.obj(oid).single;
+        let strong = self.heap.obj(oid).single;
         self.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
         self.exc_objs.insert(oid, cls_name.to_string());
         Value::obj(oid)
@@ -112,7 +112,7 @@ impl crate::interp::Analyzer {
             let name = self.exc_objs.get(&o)?;
             let t = state.slot(o, Ns::Attr, key_str_lit("args"));
             let tid = t.single()?;
-            let n = self.llen(tid, state)?;
+            let n = self.heap.llen(tid, state)?;
             let mut parts = Vec::new();
             for i in 0..n {
                 let a = state.slot(tid, Ns::Pos, intern::key_int(i as i64));
@@ -141,10 +141,10 @@ impl crate::interp::Analyzer {
 /// `str()` / `repr()` as the base class gives them.
 pub fn m_excinit(an: &mut crate::interp::Analyzer, st: &mut State, c: &crate::interp::Call) -> Value {
     let recv = c.recv.clone().unwrap_or_default();
-    for o in recv.pts.iter().filter(|o| an.kind(*o) == Kind::Instance).collect::<Vec<_>>() {
-        let name = an.instance_class(o).and_then(|cl| an.class_info_opt(cl)).map(|ci| ci.name.clone()).unwrap_or_else(|| "Exception".into());
+    for o in recv.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Instance).collect::<Vec<_>>() {
+        let name = an.heap.instance_class(o).and_then(|cl| an.heap.class_info_opt(cl)).map(|ci| ci.name.clone()).unwrap_or_else(|| "Exception".into());
         let t = an.alloc_positional(Kind::Tuple, &c.node, Some(c.args.clone()), Value::new(), DATA, st);
-        let strong = recv.pts.len() == 1 && an.obj(o).single;
+        let strong = recv.pts.len() == 1 && an.heap.obj(o).single;
         an.store_key(o, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, &c.node, st);
         an.exc_objs.insert(o, name);
     }

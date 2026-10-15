@@ -1,0 +1,331 @@
+//! The object heap: every abstract object, identified by its allocation site and context, and
+//! the allocation counter the collectors' birth marks compare with (`Obj::born`).
+//!
+//! The heap is flow-insensitive: an object, once made, exists on every path; what a path knows
+//! of it (rows, slots, elements, lengths) is in its `State`. Only an object's identity and its
+//! payload (the function, class or module it is, a bound method's parts, …) live here, plus
+//! two per-object fallbacks for lengths (`literal_len`, `known_prefix`) that a state not
+//! descended from the allocation reads. Allocation *policy* (contexts, strong / recent /
+//! variant / merged objects) is `Analyzer::alloc` (`interp/alloc.rs`); this is the table.
+
+use std::rc::Rc;
+
+use indexmap::IndexMap;
+use rustc_hash::FxHashMap;
+
+use super::{ClassInfo, FuncInfo, ModuleInfo};
+use crate::domain::{ObjId, Value};
+use crate::intern::{self, KeySet, StrId};
+use crate::state::{Kind, State};
+
+/// Objects one allocation site may have across contexts; past it the site's objects collapse
+/// onto one context-free summary object.
+pub const MAX_CLONES: usize = 256;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ViewKind {
+    Keys,
+    Values,
+    Items,
+    Rows,
+    Elems,
+    /// `obj.__dict__`: the instance's attributes as a dict
+    Attrs,
+    /// `types.MappingProxyType(d)`: a read-only live view of the dict
+    Proxy,
+}
+
+impl ViewKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            ViewKind::Keys => "keys",
+            ViewKind::Values => "values",
+            ViewKind::Items => "items",
+            ViewKind::Rows => "rows",
+            ViewKind::Elems => "elems",
+            ViewKind::Attrs => "attrs",
+            ViewKind::Proxy => "proxy",
+        }
+    }
+    pub fn from_name(n: &str) -> ViewKind {
+        match n {
+            "keys" => ViewKind::Keys,
+            "values" => ViewKind::Values,
+            "items" => ViewKind::Items,
+            "rows" => ViewKind::Rows,
+            _ => ViewKind::Elems,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum Payload {
+    None,
+    Module(Rc<ModuleInfo>),
+    Func(Rc<FuncInfo>),
+    Class(Rc<ClassInfo>),
+    /// instance: its class
+    Cls(ObjId),
+    /// external qualname / response tag
+    Str(String),
+    Method(String, Value),
+    Bound(ObjId, Value),
+    Super(ObjId, Value),
+    View(ViewKind, Value),
+    Zip(Value, Value),
+    Enumerate(Value, Option<i64>),
+    Pair(Value, Value),
+    Partial(Value, Vec<Value>, IndexMap<StrId, Value>),
+    Groupby(Vec<ObjId>, Option<KeySet>, bool, Option<(KeySet, bool)>),
+    Locidx(String, ObjId),
+    /// `range(start, stop, step)` with known bounds
+    Range(i64, i64, i64),
+}
+
+impl Payload {
+    pub fn is_none(&self) -> bool {
+        matches!(self, Payload::None)
+    }
+}
+
+#[derive(Debug)]
+pub struct Obj {
+    pub id: ObjId,
+    pub kind: Kind,
+    /// site, context and label are shared strings (one allocation per distinct string: many
+    /// objects have the same context or label)
+    pub site: std::sync::Arc<str>,
+    pub ctx: std::sync::Arc<str>,
+    pub single: bool,
+    pub label: std::sync::Arc<str>,
+    pub payload: Payload,
+    /// containers built from a literal: positional slots are valid
+    pub literal_len: Option<usize>,
+    /// after appends of unknown count: positions below this are still valid
+    pub known_prefix: Option<usize>,
+    /// the object standing for "the current element" of a loop
+    pub iter_elem: bool,
+    /// record this object is a view of (virtual row -> frame)
+    pub derived_from: Option<ObjId>,
+    /// access-path depth under an open source (placeholders, elements)
+    pub depth: u32,
+    /// a one-shot iterator (generator, generator expression, `iter(...)`): a full iteration
+    /// exhausts it
+    pub iterator: bool,
+    /// when its state was last made new (`Analyzer::serial` then): a strong re-allocation of
+    /// its site starts it over, so it is younger than any mark taken before
+    pub born: u64,
+}
+
+
+/// The objects made so far (object 0 is a placeholder: no value points to it).
+pub struct Heap {
+    objects: Vec<Obj>,
+    /// (kind, site, context) -> object; site and context interned
+    index: FxHashMap<(Kind, StrId, StrId), ObjId>,
+    /// objects made per allocation site (`MAX_CLONES`)
+    site_clones: FxHashMap<String, usize>,
+    /// allocations so far (`Obj::born`): the collectors' marks
+    serial: u64,
+}
+
+impl Default for Heap {
+    fn default() -> Heap {
+        let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, literal_len: None, known_prefix: None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0 };
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0 }
+    }
+}
+
+impl Heap {
+    /// The number of objects made (ids are below it).
+    pub fn len(&self) -> usize {
+        self.objects.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.objects.len() <= 1
+    }
+
+    pub fn obj(&self, oid: ObjId) -> &Obj {
+        &self.objects[oid as usize]
+    }
+    pub fn obj_mut(&mut self, oid: ObjId) -> &mut Obj {
+        &mut self.objects[oid as usize]
+    }
+    pub fn kind(&self, oid: ObjId) -> Kind {
+        self.objects[oid as usize].kind
+    }
+    pub fn label(&self, oid: ObjId) -> String {
+        self.objects[oid as usize].label.to_string()
+    }
+    pub fn has_obj(&self, oid: ObjId) -> bool {
+        (oid as usize) < self.objects.len() && oid > 0
+    }
+
+    /// The object made at (kind, site, context), if any.
+    pub fn find(&self, kind: Kind, site: &str, ctx: &str) -> Option<ObjId> {
+        self.index.get(&(kind, intern::s(site), intern::s(ctx))).copied()
+    }
+
+    /// How many objects the site has made (across contexts).
+    pub fn clones(&self, site: &str) -> usize {
+        self.site_clones.get(site).copied().unwrap_or(0)
+    }
+
+    /// The allocation counter: a mark taken now is older than every object made (or made new)
+    /// from here on.
+    pub fn serial(&self) -> u64 {
+        self.serial
+    }
+
+    /// Was `o` made (or made new) before `mark`?
+    pub fn born_before(&self, o: ObjId, mark: u64) -> bool {
+        self.objects[o as usize].born < mark
+    }
+
+    /// A strong re-allocation: the object's state starts over, younger than every mark taken.
+    pub fn renew(&mut self, oid: ObjId) {
+        self.objects[oid as usize].born = self.serial;
+        self.serial += 1;
+    }
+
+    /// The object at (kind, site, context), made if there is none yet; an existing one is weak
+    /// if either allocation is, and takes a new payload.
+    pub fn alloc_raw(&mut self, kind: Kind, site: &str, ctx: &str, single: bool, label: &str, payload: Payload) -> ObjId {
+        let key = (kind, intern::s(site), intern::s(ctx));
+        if let Some(&oid) = self.index.get(&key) {
+            let o = &mut self.objects[oid as usize];
+            o.single = o.single && single;
+            if !payload.is_none() {
+                o.payload = payload;
+            }
+            return oid;
+        }
+        let n = self.site_clones.get(site).copied().unwrap_or(0);
+        if n >= MAX_CLONES && !ctx.is_empty() {
+            // too many clones of one allocation site: collapse onto the context-free summary object
+            let o = self.alloc_raw(kind, site, "", false, label, payload);
+            crate::state::mark_merged(o);
+            return o;
+        }
+        self.site_clones.insert(site.to_string(), n + 1);
+        let oid = self.objects.len() as ObjId;
+        self.objects.push(Obj {
+            id: oid,
+            kind,
+            site: intern::str_get(key.1),
+            ctx: intern::str_get(key.2),
+            single,
+            label: intern::str_get(intern::s(label)),
+            payload,
+            literal_len: None,
+            known_prefix: None,
+            iter_elem: false,
+            derived_from: None,
+            depth: 0,
+            iterator: site.starts_with("gen:"),
+            born: self.serial,
+        });
+        self.serial += 1;
+        self.index.insert(key, oid);
+        oid
+    }
+
+    // ------------------------------------------------------------ payloads
+    pub fn module_info(&self, moid: ObjId) -> Rc<ModuleInfo> {
+        match &self.obj(moid).payload {
+            Payload::Module(m) => m.clone(),
+            _ => panic!("not a module: {}", moid),
+        }
+    }
+    pub fn func_info(&self, foid: ObjId) -> Rc<FuncInfo> {
+        match &self.obj(foid).payload {
+            Payload::Func(f) => f.clone(),
+            _ => panic!("not a function: {}", foid),
+        }
+    }
+    pub fn func_info_opt(&self, foid: ObjId) -> Option<Rc<FuncInfo>> {
+        match &self.obj(foid).payload {
+            Payload::Func(f) => Some(f.clone()),
+            _ => None,
+        }
+    }
+    pub fn class_info(&self, coid: ObjId) -> Rc<ClassInfo> {
+        match &self.obj(coid).payload {
+            Payload::Class(c) => c.clone(),
+            _ => panic!("not a class: {} ({})", coid, self.obj(coid).label),
+        }
+    }
+    pub fn class_info_opt(&self, coid: ObjId) -> Option<Rc<ClassInfo>> {
+        if !self.has_obj(coid) {
+            return None;
+        }
+        match &self.obj(coid).payload {
+            Payload::Class(c) => Some(c.clone()),
+            _ => None,
+        }
+    }
+    /// The class of an instance object (payload), if it is a user class.
+    pub fn instance_class(&self, oid: ObjId) -> Option<ObjId> {
+        match &self.obj(oid).payload {
+            Payload::Cls(c) => Some(*c),
+            _ => None,
+        }
+    }
+    pub fn external_qual(&self, oid: ObjId) -> String {
+        match &self.obj(oid).payload {
+            Payload::Str(q) => q.clone(),
+            _ => String::new(),
+        }
+    }
+    pub fn is_record_like(&self, oid: ObjId) -> bool {
+        self.kind(oid).is_record_like()
+    }
+
+    // ------------------------------------------------------------ lengths
+    /// The length of a list / tuple on this path (positions 0..n are its items), else None.
+    pub fn llen(&self, o: ObjId, st: &State) -> Option<usize> {
+        match st.lens.get(&o) {
+            Some(v) => v.0,
+            None => self.objects[o as usize].literal_len,
+        }
+    }
+
+    /// The possible lengths of a list / tuple on this path: the exact one, or the alternatives
+    /// a join kept (lengths 0..15 on the joined paths).
+    pub fn len_alts(&self, o: ObjId, st: &State) -> Option<Vec<usize>> {
+        if let Some(n) = self.llen(o, st) {
+            return Some(vec![n]);
+        }
+        match st.lens.get(&o) {
+            Some((None, _, m)) if m != 0 => Some((0..16).filter(|i| m & (1 << i) != 0).collect()),
+            _ => None,
+        }
+    }
+
+    /// The number of leading positions known (the length when known; after appends of unknown
+    /// count, the length before them).
+    pub fn prefix(&self, o: ObjId, st: &State) -> Option<usize> {
+        let p = match st.lens.get(&o) {
+            Some((Some(n), _, _)) => n,
+            Some((None, p, _)) => p,
+            None => self.objects[o as usize].literal_len.or(self.objects[o as usize].known_prefix).unwrap_or(0),
+        };
+        Some(p).filter(|p| *p > 0)
+    }
+
+    /// (also the object's own field: what a state not descended from the one it was made in
+    /// reads)
+    pub fn set_llen(&mut self, o: ObjId, st: &mut State, v: Option<usize>) {
+        st.lens.insert(o, (v, v.unwrap_or(0), 0));
+        self.objects[o as usize].literal_len = v;
+        self.objects[o as usize].known_prefix = None;
+    }
+
+    /// The length is unknown now, its first `n` positions are still known.
+    pub fn set_prefix(&mut self, o: ObjId, st: &mut State, n: usize) {
+        st.lens.insert(o, (None, n, 0));
+        self.objects[o as usize].literal_len = None;
+        self.objects[o as usize].known_prefix = Some(n);
+    }
+}

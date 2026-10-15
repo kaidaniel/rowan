@@ -49,7 +49,7 @@ const HTTP_METHODS: &[&str] = &["get", "post", "put", "patch", "delete", "head",
 
 fn fa_obj(an: &mut Analyzer, st: &mut State, node: &Node, qual: &str, v: Value, ctx: &str) -> Value {
     let oid = an.alloc_at(Kind::Namespace, node, st, qual, Payload::Method(qual.to_string(), v.clone()), Some(Row::new()), Ns::Attr, None, Some(ctx));
-    an.obj_mut(oid).payload = Payload::Method(qual.to_string(), v);
+    an.heap.obj_mut(oid).payload = Payload::Method(qual.to_string(), v);
     // its attributes as slots (read through a placeholder in a summary like any object's)
     let attrs: &[&str] = match qual {
         "fastapi.request" => &["query_params", "headers", "cookies", "path_params", "method", "url", "client", "state", "scope", "app", "json", "body", "form"],
@@ -76,8 +76,8 @@ fn fa_obj(an: &mut Analyzer, st: &mut State, node: &Node, qual: &str, v: Value, 
 }
 
 fn payload_of(an: &Analyzer, oid: ObjId) -> Option<(String, Value)> {
-    match &an.obj(oid).payload {
-        Payload::Method(q, v) if q.starts_with("fastapi.") && an.kind(oid) == Kind::Namespace => Some((q.clone(), v.clone())),
+    match &an.heap.obj(oid).payload {
+        Payload::Method(q, v) if q.starts_with("fastapi.") && an.heap.kind(oid) == Kind::Namespace => Some((q.clone(), v.clone())),
         _ => None,
     }
 }
@@ -130,9 +130,9 @@ impl Analyzer {
     /// The name an exception class value stands for (`NotFound`, `KeyError`).
     fn exc_name(&self, v: &Value) -> String {
         for o in v.pts.iter() {
-            match self.kind(o) {
-                Kind::Class => return self.class_info(o).name.clone(),
-                Kind::External => return self.external_qual(o).rsplit('.').next().unwrap_or("").to_string(),
+            match self.heap.kind(o) {
+                Kind::Class => return self.heap.class_info(o).name.clone(),
+                Kind::External => return self.heap.external_qual(o).rsplit('.').next().unwrap_or("").to_string(),
                 _ => {}
             }
         }
@@ -140,7 +140,7 @@ impl Analyzer {
     }
 
     pub(crate) fn eval_in_module(&mut self, module: ObjId, e: &'static ast::Expr, state: &mut State) -> Value {
-        let mi = self.module_info(module);
+        let mi = self.heap.module_info(module);
         self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), module, "fastapi", true, "<fastapi>"));
         let v = self.eval(e, state);
         self.frames.pop();
@@ -174,7 +174,7 @@ impl Analyzer {
     /// The arguments FastAPI passes `func` (a handler or a dependency) for request `req`
     /// (None: an entry run, every input open).
     pub fn fa_bind(&mut self, func: ObjId, req: Option<&Req>, state: &mut State, node: &Node, depth: u32) -> IndexMap<StrId, Value> {
-        let fi = self.func_info(func);
+        let fi = self.heap.func_info(func);
         let mut out: IndexMap<StrId, Value> = IndexMap::new();
         let params: &'static ast::Parameters = match &fi.node {
             FuncNode::Def(f) => &f.parameters,
@@ -274,7 +274,7 @@ impl Analyzer {
 
     #[allow(clippy::too_many_arguments)]
     fn fa_param(&mut self, func: ObjId, p: &'static ast::ParameterWithDefault, req: Option<&Req>, body_params: &[String], state: &mut State, node: &Node, depth: u32) -> Value {
-        let fi = self.func_info(func);
+        let fi = self.heap.func_info(func);
         let dep_req = req;
         let shared_obj = req.and_then(|r| r.obj.clone());
         // an open request is any request: the values are those of an entry run
@@ -355,7 +355,7 @@ impl Analyzer {
                     Some(j) if embed => {
                         // the key in the JSON, else the default
                         let kk = key_str_lit(&pname);
-                        let recs: Vec<ObjId> = j.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown)).collect();
+                        let recs: Vec<ObjId> = j.pts.iter().filter(|o| matches!(self.heap.kind(*o), Kind::Dict | Kind::Unknown)).collect();
                         let sure = !recs.is_empty() && recs.iter().all(|o| state.row(*o, Ns::Item).definite.contains(kk));
                         let maybe = recs.iter().any(|o| state.row(*o, Ns::Item).present.contains(kk) || state.row(*o, Ns::Item).open());
                         let mut v = if maybe { self.load_item(j, Ns::Item, &Value::lit(kk), node, state, false) } else { Value::new() };
@@ -571,7 +571,7 @@ impl Analyzer {
             ast::Expr::Subscript(sb) => dotted_last(&sb.value) == "Literal",
             ast::Expr::Name(_) | ast::Expr::Attribute(_) => {
                 let cv = self.eval_in_module(fi.module, ann, state);
-                cv.single().map(|c| self.kind(c) == Kind::Class && self.enum_members.contains_key(&c)).unwrap_or(false)
+                cv.single().map(|c| self.heap.kind(c) == Kind::Class && self.enum_members.contains_key(&c)).unwrap_or(false)
             }
             _ => false,
         }
@@ -605,7 +605,7 @@ impl Analyzer {
             out
         } else {
             let cv = self.eval_in_module(fi.module, ann, state);
-            let Some(cls) = cv.single().filter(|c| self.kind(*c) == Kind::Class && self.enum_members.contains_key(c)) else { return v };
+            let Some(cls) = cv.single().filter(|c| self.heap.kind(*c) == Kind::Class && self.enum_members.contains_key(c)) else { return v };
             let vk = key_str_lit("value");
             self.enum_members[&cls].clone().iter().map(|(_, m)| (Value::obj(*m), state.slot(*m, Ns::Attr, vk).kv.as_lit())).collect()
         };
@@ -653,10 +653,10 @@ impl Analyzer {
         }
         let mut outs: Vec<Value> = Vec::new();
         for o in g.pts.iter() {
-            match self.kind(o) {
+            match self.heap.kind(o) {
                 Kind::Function => {
                     let kwargs = self.fa_bind(o, req, state, node, depth);
-                    let fi = self.func_info(o);
+                    let fi = self.heap.func_info(o);
                     let r = self.call_user(o, None, vec![], kwargs, vec![], vec![], state, node, None, false);
                     let is_gen = match &fi.node {
                         FuncNode::Def(f) => crate::interp::is_generator(&f.body),
@@ -677,7 +677,7 @@ impl Analyzer {
                 }
                 Kind::Class => {
                     let kwargs = match self.class_lookup(o, "__init__").and_then(|c| self.cls_slots.get(&(c, Ns::Attr, key_str_lit("__init__"))).cloned()) {
-                        Some(fv) => match fv.pts.iter().find(|f| self.kind(*f) == Kind::Function) {
+                        Some(fv) => match fv.pts.iter().find(|f| self.heap.kind(*f) == Kind::Function) {
                             Some(init) => self.fa_bind(init, req, state, node, depth),
                             None => IndexMap::new(),
                         },
@@ -700,7 +700,7 @@ impl Analyzer {
 
     /// The handler's `Depends(g)` parameters whose `g` is a generator function (`yield` dependencies).
     pub fn fa_yield_deps(&mut self, func: ObjId, state: &mut State) -> Vec<ObjId> {
-        let fi = self.func_info(func);
+        let fi = self.heap.func_info(func);
         let FuncNode::Def(f) = &fi.node else { return vec![] };
         let mut out = Vec::new();
         for p in f.parameters.posonlyargs.iter().chain(f.parameters.args.iter()).chain(f.parameters.kwonlyargs.iter()) {
@@ -713,8 +713,8 @@ impl Analyzer {
                 if q != "fastapi.depends" {
                     continue;
                 }
-                if let Some(o) = g.single().filter(|o| self.kind(*o) == Kind::Function) {
-                    let gi = self.func_info(o);
+                if let Some(o) = g.single().filter(|o| self.heap.kind(*o) == Kind::Function) {
+                    let gi = self.heap.func_info(o);
                     if matches!(&gi.node, FuncNode::Def(d) if crate::interp::is_generator(&d.body)) && !out.contains(&o) {
                         out.push(o);
                     }
@@ -764,13 +764,13 @@ impl Analyzer {
         let mws: Vec<ObjId> = self.m.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
         let first = *mws.first()?;
         let idx = self.m.fa_routes.iter().position(|r| r.func == Some(func))?;
-        let fi = self.func_info(func);
+        let fi = self.heap.func_info(func);
         let body = Value::obj(self.unknown_source(&format!("param {}.request", fi.py_qualname()), SourceKind::Param, state, "request.json()", "", Ns::Item, vec![]));
         let robj = fa_obj(self, state, node, "fastapi.request", body, &format!("entryreq{}", func));
         let rq = Req { obj: Some(robj.clone()), open: true, ..Default::default() };
         let n = self.m.fa_pending.len();
         self.m.fa_pending.push((idx, rq));
-        let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
+        let cn = self.heap.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
         self.call_user(first, None, vec![robj, Value::obj(cn)], IndexMap::new(), vec![], vec![], state, node, None, false);
         Some(())
     }
@@ -912,11 +912,11 @@ impl Analyzer {
             let mut unmatched = raised_v.pts.is_empty() || !raised_v.kv.is_bot();
             let mut rest: Vec<ObjId> = Vec::new();
             for o in raised_v.pts.iter() {
-                let cls = if self.kind(o) == Kind::Instance { self.instance_class(o) } else { None };
+                let cls = if self.heap.kind(o) == Kind::Instance { self.heap.instance_class(o) } else { None };
                 let httpexc = payload_of(self, o).map(|(q, _)| q == "fastapi.httpexc").unwrap_or(false);
                 let hit = hooks.iter().find(|(n, hv, _)| match cls {
-                    Some(c) => hv.pts.iter().any(|h| self.kind(h) == Kind::Class && self.mro(c).contains(&h)) || self.mro(c).iter().any(|m| self.class_info_opt(*m).map(|ci| ci.name == *n).unwrap_or(false)),
-                    None => n == "KeyError" && self.obj(o).label.starts_with("KeyError") || n == "Exception" || httpexc && n == "HTTPException",
+                    Some(c) => hv.pts.iter().any(|h| self.heap.kind(h) == Kind::Class && self.mro(c).contains(&h)) || self.mro(c).iter().any(|m| self.heap.class_info_opt(*m).map(|ci| ci.name == *n).unwrap_or(false)),
+                    None => n == "KeyError" && self.heap.obj(o).label.starts_with("KeyError") || n == "Exception" || httpexc && n == "HTTPException",
                 }).cloned();
                 match hit {
                     Some((_, _, hf)) => {
@@ -947,7 +947,7 @@ impl Analyzer {
                 // their `loc` after "body")
                 let mut verr = false;
                 for o in &rest {
-                    let verr_idx = match &self.obj(*o).payload {
+                    let verr_idx = match &self.heap.obj(*o).payload {
                         Payload::Method(q, _) => q.strip_prefix("pydverr.").and_then(|x| x.parse::<usize>().ok()),
                         _ => None,
                     };
@@ -1059,7 +1059,7 @@ impl Analyzer {
             }
         }
         if ann.is_none() {
-            let fi = self.func_info(func);
+            let fi = self.heap.func_info(func);
             if let FuncNode::Def(f) = &fi.node {
                 if let Some(ra) = &f.returns {
                     let ra: &'static ast::Expr = ra;
@@ -1108,7 +1108,7 @@ impl Analyzer {
         // the items of a literal dict argument (None: not known)
         let items_of = |an: &Analyzer, st: &State, v: &Option<Value>| -> Option<Vec<(String, Value)>> {
             let Some(v) = v else { return Some(vec![]) };
-            let d = v.single().filter(|d| an.kind(*d) == Kind::Dict)?;
+            let d = v.single().filter(|d| an.heap.kind(*d) == Kind::Dict)?;
             let row = st.row(d, Ns::Item);
             if !row.closed() || row.present != row.definite {
                 return None;
@@ -1209,7 +1209,7 @@ impl Analyzer {
                     // the (first) middleware runs with call_next dispatching the route
                     let n = self.m.fa_pending.len();
                     self.m.fa_pending.push((idx, rq.clone()));
-                    let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
+                    let cn = self.heap.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
                     let resp = self.call_user(mws[0], None, vec![robj.clone(), Value::obj(cn)], IndexMap::new(), vec![], vec![], &mut st, &c.node, None, false);
                     let mut bodies: Vec<Value> = Vec::new();
                     let mut stv = Value::new();
@@ -1252,7 +1252,7 @@ impl Analyzer {
                 self.fa_fill_request(&robj, &req, method, state, &c.node);
                 let n = self.m.fa_pending.len();
                 self.m.fa_pending.push((usize::MAX, Req { obj: Some(robj.clone()), json: Some(Value::obj(did)), ..Default::default() }));
-                let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
+                let cn = self.heap.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
                 self.call_user(first, None, vec![robj, Value::obj(cn)], IndexMap::new(), vec![], vec![], state, &c.node, None, false);
             }
             let v = fa_obj(self, state, &c.node, "fastapi.response", Value::obj(did), "faresp");
@@ -1464,7 +1464,7 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
                 None => vec!["get".into()],
             };
             let module = an.frame().module;
-            for fo in f.pts.iter().filter(|x| an.kind(*x) == Kind::Function).collect::<Vec<_>>() {
+            for fo in f.pts.iter().filter(|x| an.heap.kind(*x) == Kind::Function).collect::<Vec<_>>() {
                 an.m.fa_routes.push(FaRoute { app: o, methods: methods.clone(), path: path.clone(), func: Some(fo), call: c.call_ast, module });
                 an.m.fa_handlers.insert(fo);
             }
@@ -1496,7 +1496,7 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
             let f = c.args.first().cloned().unwrap_or_default();
             let args: Vec<Value> = c.args.iter().skip(1).cloned().collect();
             for fo in f.pts.iter().collect::<Vec<_>>() {
-                if an.kind(fo) == Kind::Function {
+                if an.heap.kind(fo) == Kind::Function {
                     an.call_user(fo, None, args.clone(), c.kwargs.clone(), vec![], vec![], st, &c.node, None, false);
                 } else if c.kwargs.is_empty() {
                     // (a bound method, a builtin's method, a partial: called as well)
@@ -1576,7 +1576,7 @@ pub fn apply_route(an: &mut Analyzer, dv: &Value, f: &Value) {
         if let Some((q, _)) = payload_of(an, o) {
             if let Some(idx) = q.strip_prefix("fastapi.hook.").and_then(|x| x.parse::<usize>().ok()) {
                 for fo in f.pts.iter() {
-                    if an.kind(fo) == Kind::Function {
+                    if an.heap.kind(fo) == Kind::Function {
                         an.m.fa_hooks[idx].3 = Some(fo);
                         // (run around each handler, not on its own)
                         an.entry_done.insert(fo);
@@ -1585,7 +1585,7 @@ pub fn apply_route(an: &mut Analyzer, dv: &Value, f: &Value) {
             }
             if let Some(idx) = q.strip_prefix("fastapi.route.").and_then(|x| x.parse::<usize>().ok()) {
                 for fo in f.pts.iter() {
-                    if an.kind(fo) == Kind::Function {
+                    if an.heap.kind(fo) == Kind::Function {
                         an.m.fa_routes[idx].func = Some(fo);
                         an.m.fa_handlers.insert(fo);
                     }
@@ -1646,7 +1646,7 @@ impl crate::interp::Analyzer {
     pub(crate) fn fa_entry_run(&mut self, oid: ObjId, fi: &crate::interp::FuncInfo, state: &mut State) {
         let mut st = state.copy();
         st.ret = None;
-        let mi = self.module_info(fi.module);
+        let mi = self.heap.module_info(fi.module);
         self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
         self.entry_scope = Some(oid);
         let fake = Node::synthetic(mi.idx, fi.node.node().line);

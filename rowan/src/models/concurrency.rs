@@ -13,7 +13,7 @@ use crate::state::{Kind, State};
 
 fn obj(an: &mut Analyzer, st: &mut State, node: &Node, qual: &str, ctx: &str) -> ObjId {
     let oid = an.alloc_at(Kind::Namespace, node, st, qual, Payload::Method(qual.into(), Value::new()), Some(Row::new()), Ns::Attr, None, Some(ctx));
-    an.obj_mut(oid).payload = Payload::Method(qual.into(), Value::new());
+    an.heap.obj_mut(oid).payload = Payload::Method(qual.into(), Value::new());
     oid
 }
 
@@ -38,7 +38,7 @@ impl Analyzer {
         self.catching_depth += 1;
         let mut outs = Vec::new();
         for fo in f.pts.iter() {
-            let v = match self.kind(fo) {
+            let v = match self.heap.kind(fo) {
                 Kind::Function => self.call_user(fo, None, args.clone(), kwargs.clone(), vec![], vec![], state, node, None, false),
                 _ => self.call_value(&Value::obj(fo), node, None, state, Some(args.clone())),
             };
@@ -53,9 +53,9 @@ impl Analyzer {
         let mut names: Vec<String> = Vec::new();
         let mut any = flagged || raised_v.pts.is_empty();
         for o in raised_v.pts.iter() {
-            let n = match self.kind(o) {
-                Kind::Instance => self.instance_class(o).map(|c| self.class_info(c).name.clone()),
-                _ => self.obj(o).label.split(|ch: char| !ch.is_alphanumeric() && ch != '_').next().map(|x| x.to_string()).filter(|x| !x.is_empty()),
+            let n = match self.heap.kind(o) {
+                Kind::Instance => self.heap.instance_class(o).map(|c| self.heap.class_info(c).name.clone()),
+                _ => self.heap.obj(o).label.split(|ch: char| !ch.is_alphanumeric() && ch != '_').next().map(|x| x.to_string()).filter(|x| !x.is_empty()),
             };
             match n {
                 Some(n) if !names.contains(&n) => names.push(n),
@@ -136,7 +136,7 @@ fn call_args(an: &mut Analyzer, st: &mut State, node: &Node, args: &Value, kwarg
         }
     }
     let mut kw = IndexMap::new();
-    for d in kwargs.pts.iter().filter(|o| an.kind(*o) == Kind::Dict).collect::<Vec<_>>() {
+    for d in kwargs.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Dict).collect::<Vec<_>>() {
         let row = st.row(d, Ns::Item);
         for k in row.present.iter() {
             if let Some(name) = intern::key_as_str(k) {
@@ -262,15 +262,15 @@ pub fn m_conc(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let acc = join_values(results.clone());
                 st.set_slot(lid, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
                 st.elems.insert(lid, acc.kv.clone());
-                if all_known && an.obj(lid).single {
+                if all_known && an.heap.obj(lid).single {
                     for (i, v) in results.iter().enumerate() {
                         st.set_slot(lid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
                     }
-                    an.set_llen(lid, st, Some(results.len()));
+                    an.heap.set_llen(lid, st, Some(results.len()));
                 } else {
-                    an.set_llen(lid, st, None);
+                    an.heap.set_llen(lid, st, None);
                 }
-                an.obj_mut(lid).iterator = true;
+                an.heap.obj_mut(lid).iterator = true;
                 return Value::obj(lid);
             }
             _ => return Value::data(name),
@@ -315,8 +315,8 @@ pub fn as_completed(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let lid = an.alloc_at(Kind::List, &c.node, st, &format!("as_completed@L{}", c.line), Payload::None, None, Ns::Item, None, Some("asc"));
     st.set_slot(lid, Ns::Elem, intern::STAR, e.clone(), true);
     st.elems.insert(lid, e.kv.clone());
-    an.set_llen(lid, st, None);
-    an.obj_mut(lid).iterator = true;
+    an.heap.set_llen(lid, st, None);
+    an.heap.obj_mut(lid).iterator = true;
     Value::obj(lid)
 }
 

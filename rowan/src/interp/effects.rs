@@ -461,7 +461,7 @@ impl Analyzer {
         if let Some(u) = self.code_uses.get(&addr) {
             return u.clone();
         }
-        let mi = self.module_info(fi.module);
+        let mi = self.heap.module_info(fi.module);
         let scope = mi.scopes.get(fi.scope);
         let locals = |n: &str| scope.is_local(n);
         let mut c = Collect { locals: &locals, esc: true, out: CodeUses { uses: Vec::new(), imports: FxHashMap::default(), attrs: FxHashSet::default(), stored: FxHashSet::default(), deleted: FxHashSet::default(), reads: FxHashSet::default(), recv: None }, pkg: mi.pkg.clone() };
@@ -500,7 +500,7 @@ impl Analyzer {
                     continue;
                 }
                 for f in v.pts.iter() {
-                    if let Payload::Func(fi) = &self.obj(f).payload {
+                    if let Payload::Func(fi) = &self.heap.obj(f).payload {
                         let fi = fi.clone();
                         let u = self.code_uses(&fi);
                         out.extend(u.stored.iter().copied());
@@ -523,20 +523,20 @@ impl Analyzer {
     /// can reach through the receiver is under those). None: anything (the receiver escapes,
     /// the class hooks attribute access or has a base rowan does not see, a descriptor).
     pub fn receiver_effects(&mut self, foid: ObjId, recv: ObjId) -> Option<RecvEffects> {
-        let cls = self.instance_class(recv)?;
+        let cls = self.heap.instance_class(recv)?;
         let mro = self.mro(cls);
-        if mro.iter().any(|c| self.class_info_opt(*c).is_none_or(|ci| ci.open_base)) || ["__getattr__", "__getattribute__", "__setattr__", "__delattr__"].iter().any(|h| self.class_lookup(cls, h).is_some()) {
+        if mro.iter().any(|c| self.heap.class_info_opt(*c).is_none_or(|ci| ci.open_base)) || ["__getattr__", "__getattribute__", "__setattr__", "__delattr__"].iter().any(|h| self.class_lookup(cls, h).is_some()) {
             return None;
         }
         let (mut stores, mut deletes, mut used): (FxHashSet<StrId>, FxHashSet<StrId>, FxHashSet<StrId>) = Default::default();
         let mut work = vec![foid];
         let mut done: FxHashSet<ObjId> = FxHashSet::default();
-        let runs_with_recv = |an: &Analyzer, g: ObjId| an.kind(g) == Kind::Function && !an.func_info(g).is_static.get() && !an.func_info(g).is_classmethod.get();
+        let runs_with_recv = |an: &Analyzer, g: ObjId| an.heap.kind(g) == Kind::Function && !an.heap.func_info(g).is_static.get() && !an.heap.func_info(g).is_classmethod.get();
         while let Some(f) = work.pop() {
             if !done.insert(f) {
                 continue;
             }
-            let Payload::Func(fi) = &self.obj(f).payload else { return None };
+            let Payload::Func(fi) = &self.heap.obj(f).payload else { return None };
             let fi = fi.clone();
             let uses = self.code_uses(&fi);
             let u = uses.recv.as_ref().filter(|u| !u.escapes)?;
@@ -548,12 +548,12 @@ impl Analyzer {
                 let k = key_str_lit(&str_get(n));
                 let Some(owner) = self.class_lookup(cls, &str_get(n)) else { continue };
                 for g in self.cls_slots.get(&(owner, Ns::Attr, k)).cloned().unwrap_or_default().pts.iter() {
-                    match self.kind(g) {
+                    match self.heap.kind(g) {
                         // (a method read without a call: a bound method holding the receiver)
-                        Kind::Function if runs_with_recv(self, g) && u.loads.contains(&n) && !self.func_info(g).is_property.get() => return None,
+                        Kind::Function if runs_with_recv(self, g) && u.loads.contains(&n) && !self.heap.func_info(g).is_property.get() => return None,
                         Kind::Function if runs_with_recv(self, g) => work.push(g),
                         // (a descriptor's code runs with the receiver)
-                        Kind::Instance if self.instance_class(g).is_some_and(|c| ["__get__", "__set__", "__delete__"].iter().any(|h| self.class_lookup(c, h).is_some())) => return None,
+                        Kind::Instance if self.heap.instance_class(g).is_some_and(|c| ["__get__", "__set__", "__delete__"].iter().any(|h| self.class_lookup(c, h).is_some())) => return None,
                         _ => {}
                     }
                 }
@@ -582,7 +582,7 @@ impl Analyzer {
     /// The attribute names a method's own code stores on its receiver on every way it
     /// completes: the top-level `self.x = …` statements before any statement that may return.
     pub fn must_stores(&self, foid: ObjId) -> Vec<KeyId> {
-        let Payload::Func(fi) = &self.obj(foid).payload else { return Vec::new() };
+        let Payload::Func(fi) = &self.heap.obj(foid).payload else { return Vec::new() };
         let (super::FuncNode::Def(f), Some(me)) = (fi.node, fi.node.params().and_then(|p| p.posonlyargs.iter().chain(p.args.iter()).next())) else { return Vec::new() };
         let me = me.parameter.name.id.as_str();
         let mine = |t: &Expr| match t {
@@ -635,13 +635,13 @@ impl Analyzer {
         let (mut attrs, mut reads): (FxHashSet<StrId>, FxHashSet<StrId>) = Default::default();
         let mut classes: Vec<ObjId> = Vec::new();
         let (mut done, mut done_attrs): (FxHashSet<(ObjId, KeyId)>, FxHashSet<(ObjId, KeyId)>) = Default::default();
-        let code = |an: &Analyzer, v: &Value, work: &mut Vec<ObjId>| work.extend(v.pts.iter().filter(|x| matches!(an.kind(*x), Kind::Function | Kind::Class | Kind::Bound | Kind::Instance | Kind::Partial | Kind::Module)));
+        let code = |an: &Analyzer, v: &Value, work: &mut Vec<ObjId>| work.extend(v.pts.iter().filter(|x| matches!(an.heap.kind(*x), Kind::Function | Kind::Class | Kind::Bound | Kind::Instance | Kind::Partial | Kind::Module)));
         loop {
             while let Some(o) = work.pop() {
                 if !out.code.insert(o) {
                     continue;
                 }
-                match (self.kind(o), &self.obj(o).payload) {
+                match (self.heap.kind(o), &self.heap.obj(o).payload) {
                     (Kind::Function, Payload::Func(fi)) => {
                         let fi = fi.clone();
                         let uses = self.code_uses(&fi);
@@ -656,7 +656,7 @@ impl Analyzer {
                             // (`m.x` of a module m: its global x)
                             let (loc, in_module) = match (self.resolve_use(&fi, &uses, u.name), u.attr) {
                                 (Ok(l), None) => (l, false),
-                                (Ok(l), Some(a)) => match state.slot(l.0, l.1, l.2).single().filter(|m| self.kind(*m) == Kind::Module) {
+                                (Ok(l), Some(a)) => match state.slot(l.0, l.1, l.2).single().filter(|m| self.heap.kind(*m) == Kind::Module) {
                                     Some(m) => ((m, Ns::Attr, key_str_lit(&str_get(a))), true),
                                     None => (l, false),
                                 },
@@ -684,7 +684,7 @@ impl Analyzer {
                     }
                     (Kind::Class, _) => {
                         classes.push(o);
-                        if let Some(ci) = self.class_info_opt(o) {
+                        if let Some(ci) = self.heap.class_info_opt(o) {
                             work.extend(ci.bases.iter().copied());
                         }
                     }

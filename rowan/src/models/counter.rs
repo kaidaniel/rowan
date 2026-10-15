@@ -74,7 +74,7 @@ fn make_unknown(an: &mut Analyzer, st: &mut State, node: &Node, present: &[KeyId
 fn contribution(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) -> Option<Vec<(KeyId, i64)>> {
     let o = v.single();
     if let Some(o) = o {
-        if an.kind(o) == Kind::Dict {
+        if an.heap.kind(o) == Kind::Dict {
             if an.m.counters.contains(&o) {
                 return counts(an, o, st);
             }
@@ -112,7 +112,7 @@ fn maybe_keys(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) -> (Vec
     let mut ks: Vec<KeyId> = Vec::new();
     let mut open = false;
     for o in v.pts.iter() {
-        if an.kind(o) == Kind::Dict {
+        if an.heap.kind(o) == Kind::Dict {
             let row = st.row(o, Ns::Item);
             ks.extend(row.present.iter());
             open |= row.open();
@@ -290,7 +290,7 @@ pub fn m_counter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         },
         "update" | "subtract" => {
-            let strong = an.obj(oid).single;
+            let strong = an.heap.obj(oid).single;
             let mut add: Option<Vec<(KeyId, i64)>> = Some(Vec::new());
             for a in c.args.iter() {
                 match (contribution(an, st, a, &c.node), add.as_mut()) {
@@ -369,7 +369,7 @@ pub const DEQUE_METHODS: &[&str] = &["append", "appendleft", "pop", "popleft", "
 
 /// The known items of a list-like object (positions of a single object), or None.
 fn known_items(an: &Analyzer, o: ObjId, st: &State) -> Option<Vec<Value>> {
-    let n = an.llen(o, st)?;
+    let n = an.heap.llen(o, st)?;
     Some((0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect())
 }
 
@@ -379,7 +379,7 @@ fn set_items(an: &mut Analyzer, o: ObjId, items: Vec<Value>, st: &mut State) {
     for (i, v) in items.iter().enumerate() {
         st.set_slot(o, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
     }
-    an.set_llen(o, st, Some(items.len()));
+    an.heap.set_llen(o, st, Some(items.len()));
     st.set_slot(o, Ns::Elem, intern::STAR, Value::with_kv(all.pts.clone(), crate::models::torch::elem_kv(&all.kv)), true);
     st.elems.insert(o, if items.is_empty() { KeyVal::Lits(intern::KeySet::new()) } else { all.kv.clone() });
 }
@@ -394,7 +394,7 @@ pub fn deque_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         None => Some(Vec::new()),
     };
     match items {
-        Some(mut items) if an.obj(oid).single => {
+        Some(mut items) if an.heap.obj(oid).single => {
             if let Some(m) = maxlen {
                 let m = m.max(0) as usize;
                 if items.len() > m {
@@ -407,7 +407,7 @@ pub fn deque_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let e = c.arg(0, Some("iterable")).map(|it| { let it_ = an.iterate(&it, &c.node, st); an.elem_value(&it_.elem, &c.node, "el") }).unwrap_or_default();
             st.set_slot(oid, Ns::Elem, intern::STAR, Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv)), false);
             st.elems.insert(oid, e.kv.clone());
-            an.set_llen(oid, st, None);
+            an.heap.set_llen(oid, st, None);
         }
     }
     Value::obj(oid)
@@ -418,7 +418,7 @@ pub fn m_deque(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     let Some(oid) = c.recv.as_ref().and_then(|r| r.single()) else { return Value::data("deque") };
     let maxlen = an.m.deques.get(&oid).copied().flatten();
-    let strong = an.obj(oid).single && an.frame().loop_depth == 0 && an.cond_depth == 0;
+    let strong = an.heap.obj(oid).single && an.frame().loop_depth == 0 && an.cond_depth == 0;
     let cur = known_items(an, oid, st).filter(|_| strong);
     let arg = c.args.first().cloned().unwrap_or_default();
     let fit = |mut items: Vec<Value>, left: bool| -> Vec<Value> {
@@ -502,7 +502,7 @@ pub fn m_deque(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         ("pop" | "popleft", None) => {
             an.may_raise_here("IndexError", st);
             let e = st.slot(oid, Ns::Elem, intern::STAR);
-            an.set_llen(oid, st, None);
+            an.heap.set_llen(oid, st, None);
             st.drop_obj_ns(oid, Ns::Pos);
             e
         }
@@ -522,7 +522,7 @@ fn forget(an: &mut Analyzer, oid: ObjId, arg: &Value, c: &Call, st: &mut State) 
     st.set_slot(oid, Ns::Elem, intern::STAR, cur.join(&Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv))), false);
     let kv = crate::domain::kv_join(&st.elems.get(&oid).unwrap_or(KeyVal::Bot), &e.kv);
     st.elems.insert(oid, kv);
-    an.set_llen(oid, st, None);
+    an.heap.set_llen(oid, st, None);
     st.drop_obj_ns(oid, Ns::Pos);
 }
 
@@ -534,7 +534,7 @@ pub fn default_on_read(an: &mut Analyzer, oid: ObjId, key: &Value, node: &Node, 
     let mut counter_restore: Option<Row> = None;
     // `dd[k]` inserts the factory's value when `k` is absent (a fresh one per key)
     let row = state.row(oid, ns);
-    if an.obj(oid).label.starts_with("Counter@") {
+    if an.heap.obj(oid).label.starts_with("Counter@") {
         counter_restore = Some(row.clone());
     }
     if key.kv.is_literal() {
@@ -550,7 +550,7 @@ pub fn default_on_read(an: &mut Analyzer, oid: ObjId, key: &Value, node: &Node, 
                 // (a key the closed row surely lacks: no earlier value to keep; in an
                 // open one a key not known may be there already, with any value)
                 let absent = r.closed() && !r.present.contains(k);
-                let dflt = if r.open() && !r.present.contains(k) && state.slot_opt(oid, ns, k).is_none() { dflt.join(&Value::data(&format!("{}[*]", an.obj(oid).label))) } else { dflt };
+                let dflt = if r.open() && !r.present.contains(k) && state.slot_opt(oid, ns, k).is_none() { dflt.join(&Value::data(&format!("{}[*]", an.heap.obj(oid).label))) } else { dflt };
                 r = r.store(k, strong);
                 state.set_slot(oid, ns, k, dflt, absent);
             }
@@ -576,7 +576,7 @@ pub fn default_on_read(an: &mut Analyzer, oid: ObjId, key: &Value, node: &Node, 
             let dflt = an.call_value(&f, node, None, state, Some(vec![]));
             state.set_slot(oid, ns, intern::STAR, Value::with_kv(dflt.pts, crate::domain::DATA), false);
         }
-        let src = Source::new(&an.obj(oid).label, SourceKind::Data);
+        let src = Source::new(&an.heap.obj(oid).label, SourceKind::Data);
         state.set_row(oid, ns, row.data_store(src));
     }
     counter_restore

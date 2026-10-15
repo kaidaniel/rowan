@@ -10,7 +10,7 @@ use ruff_python_ast as ast;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::domain::{
-    Chain, Classification, KeyVal, KeysOf, Ns, ObjId, Row, Source, SourceKind, Tier, Value,
+    Chain, Classification, KeyVal, Ns, ObjId, Row, Source, SourceKind, Tier, Value,
 };
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
@@ -21,8 +21,12 @@ use crate::state::{Kind, State};
 pub mod access;
 pub mod calls;
 pub mod effects;
+pub mod alloc;
 pub mod exprs;
 pub mod funcs;
+pub mod gc;
+pub mod heap;
+pub use heap::*;
 pub mod narrow;
 pub use crate::models::tables::*;
 pub mod stmts;
@@ -70,7 +74,6 @@ impl YieldStates {
         self.list.iter().map(|(_, s)| s)
     }
 }
-pub const MAX_CLONES: usize = 256;
 /// havoc walks remembered (`havoc_with`); past this many the table starts over
 pub const HAVOC_MEMOS: usize = 1024;
 /// what the cache of code closures (`code_closure`) may hold; past it the cache starts over
@@ -522,101 +525,6 @@ impl Call {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ViewKind {
-    Keys,
-    Values,
-    Items,
-    Rows,
-    Elems,
-    /// `obj.__dict__`: the instance's attributes as a dict
-    Attrs,
-    /// `types.MappingProxyType(d)`: a read-only live view of the dict
-    Proxy,
-}
-
-impl ViewKind {
-    pub fn name(self) -> &'static str {
-        match self {
-            ViewKind::Keys => "keys",
-            ViewKind::Values => "values",
-            ViewKind::Items => "items",
-            ViewKind::Rows => "rows",
-            ViewKind::Elems => "elems",
-            ViewKind::Attrs => "attrs",
-            ViewKind::Proxy => "proxy",
-        }
-    }
-    pub fn from_name(n: &str) -> ViewKind {
-        match n {
-            "keys" => ViewKind::Keys,
-            "values" => ViewKind::Values,
-            "items" => ViewKind::Items,
-            "rows" => ViewKind::Rows,
-            _ => ViewKind::Elems,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum Payload {
-    None,
-    Module(Rc<ModuleInfo>),
-    Func(Rc<FuncInfo>),
-    Class(Rc<ClassInfo>),
-    /// instance: its class
-    Cls(ObjId),
-    /// external qualname / response tag
-    Str(String),
-    Method(String, Value),
-    Bound(ObjId, Value),
-    Super(ObjId, Value),
-    View(ViewKind, Value),
-    Zip(Value, Value),
-    Enumerate(Value, Option<i64>),
-    Pair(Value, Value),
-    Partial(Value, Vec<Value>, IndexMap<StrId, Value>),
-    Groupby(Vec<ObjId>, Option<KeySet>, bool, Option<(KeySet, bool)>),
-    Locidx(String, ObjId),
-    /// `range(start, stop, step)` with known bounds
-    Range(i64, i64, i64),
-}
-
-impl Payload {
-    pub fn is_none(&self) -> bool {
-        matches!(self, Payload::None)
-    }
-}
-
-#[derive(Debug)]
-pub struct Obj {
-    pub id: ObjId,
-    pub kind: Kind,
-    /// site, context and label are shared strings (one allocation per distinct string: many
-    /// objects have the same context or label)
-    pub site: std::sync::Arc<str>,
-    pub ctx: std::sync::Arc<str>,
-    pub single: bool,
-    pub label: std::sync::Arc<str>,
-    pub payload: Payload,
-    /// containers built from a literal: positional slots are valid
-    pub literal_len: Option<usize>,
-    /// after appends of unknown count: positions below this are still valid
-    pub known_prefix: Option<usize>,
-    /// the object standing for "the current element" of a loop
-    pub iter_elem: bool,
-    /// record this object is a view of (virtual row -> frame)
-    pub derived_from: Option<ObjId>,
-    /// access-path depth under an open source (placeholders, elements)
-    pub depth: u32,
-    /// a one-shot iterator (generator, generator expression, `iter(...)`): a full iteration
-    /// exhausts it
-    pub iterator: bool,
-    /// when its state was last made new (`Analyzer::serial` then): a strong re-allocation of
-    /// its site starts it over, so it is younger than any mark taken before
-    pub born: u64,
-}
-
 /// Where a narrowed value is written back (`_narrow_isinstance`'s `store` closure).
 #[derive(Clone)]
 pub enum StoreTarget {
@@ -704,9 +612,8 @@ pub struct Analyzer {
     /// site-packages directories searched for followed packages
     pub site_paths: Vec<String>,
     pub analyse_entry_points: bool,
-    pub objects: Vec<Obj>,
-    /// (kind, site, context) -> object; site and context interned
-    pub obj_index: FxHashMap<(Kind, StrId, StrId), ObjId>,
+    /// the objects (`interp/heap.rs`)
+    pub heap: Heap,
     pub verdicts: Vec<Verdict>,
     pub verdict_keys: FxHashSet<(String, u32, u32, String, Tier, ObjId, Chain)>,
     pub notes: Vec<String>,
@@ -727,8 +634,6 @@ pub struct Analyzer {
     /// the finally blocks of the running `try` statements: (`loop_stack` depth at the try,
     /// the block, not running yet): a `break` / `continue` runs those of its loop first
     pub finally_stack: Vec<(usize, std::rc::Rc<crate::interp::stmts::Finally>, bool)>,
-    /// allocations so far (`Obj::born`): the collectors' marks
-    pub serial: u64,
     /// the running try contexts (innermost last): `try` statements, swallowing `with`s and the
     /// models' own catching frames
     pub tries: Vec<TryCtx>,
@@ -877,7 +782,6 @@ pub struct Analyzer {
     pub user_classes: Vec<ObjId>,
     /// class attributes (flow-insensitive)
     pub cls_slots: FxHashMap<(ObjId, Ns, KeyId), Value>,
-    pub site_clones: FxHashMap<String, usize>,
     /// statements executed plus objects instantiated (debug output)
     pub work: usize,
     /// objects visited by reachability walks (liveness, GC): part of the work measure
@@ -985,7 +889,6 @@ impl Analyzer {
             filename: filename.to_string(),
             search_paths: if follow_imports { search_paths } else { Vec::new() },
             analyse_entry_points,
-            objects: vec![Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, literal_len: None, known_prefix: None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0 }],
             none_v: Value::lit(intern::key_none()),
             ..Default::default()
         };
@@ -1012,7 +915,7 @@ impl Analyzer {
     /// A try context begins: raises inside it record the state there for its handlers and
     /// its finally; `pre` is the state before the body.
     pub fn enter_try(&mut self, caught: FxHashSet<String>, pre: &mut State) {
-        let (frames, envs, mark) = (self.frames.len(), self.env_stack.len(), self.serial);
+        let (frames, envs, mark) = (self.frames.len(), self.env_stack.len(), self.heap.serial());
         self.tries.push(TryCtx { caught, frames, envs, pre: pre.copy(), mark, recs: Vec::new(), last: None });
     }
 
@@ -1048,346 +951,8 @@ impl Analyzer {
         self.frames.last_mut().expect("no frame")
     }
 
-    pub fn obj(&self, oid: ObjId) -> &Obj {
-        &self.objects[oid as usize]
-    }
-    pub fn obj_mut(&mut self, oid: ObjId) -> &mut Obj {
-        &mut self.objects[oid as usize]
-    }
-    pub fn kind(&self, oid: ObjId) -> Kind {
-        self.objects[oid as usize].kind
-    }
-    pub fn label(&self, oid: ObjId) -> String {
-        self.objects[oid as usize].label.to_string()
-    }
-    pub fn has_obj(&self, oid: ObjId) -> bool {
-        (oid as usize) < self.objects.len() && oid > 0
-    }
-
-    pub fn module_info(&self, moid: ObjId) -> Rc<ModuleInfo> {
-        match &self.obj(moid).payload {
-            Payload::Module(m) => m.clone(),
-            _ => panic!("not a module: {}", moid),
-        }
-    }
-    pub fn func_info(&self, foid: ObjId) -> Rc<FuncInfo> {
-        match &self.obj(foid).payload {
-            Payload::Func(f) => f.clone(),
-            _ => panic!("not a function: {}", foid),
-        }
-    }
-    pub fn func_info_opt(&self, foid: ObjId) -> Option<Rc<FuncInfo>> {
-        match &self.obj(foid).payload {
-            Payload::Func(f) => Some(f.clone()),
-            _ => None,
-        }
-    }
-    pub fn class_info(&self, coid: ObjId) -> Rc<ClassInfo> {
-        match &self.obj(coid).payload {
-            Payload::Class(c) => c.clone(),
-            _ => panic!("not a class: {} ({})", coid, self.obj(coid).label),
-        }
-    }
-    pub fn class_info_opt(&self, coid: ObjId) -> Option<Rc<ClassInfo>> {
-        if !self.has_obj(coid) {
-            return None;
-        }
-        match &self.obj(coid).payload {
-            Payload::Class(c) => Some(c.clone()),
-            _ => None,
-        }
-    }
-    /// The class of an instance object (payload), if it is a user class.
-    pub fn instance_class(&self, oid: ObjId) -> Option<ObjId> {
-        match &self.obj(oid).payload {
-            Payload::Cls(c) => Some(*c),
-            _ => None,
-        }
-    }
-    pub fn external_qual(&self, oid: ObjId) -> String {
-        match &self.obj(oid).payload {
-            Payload::Str(q) => q.clone(),
-            _ => String::new(),
-        }
-    }
-    pub fn is_record_like(&self, oid: ObjId) -> bool {
-        self.kind(oid).is_record_like()
-    }
     pub fn now(&self) -> f64 {
         self.started.elapsed().as_secs_f64()
-    }
-
-    // ------------------------------------------------------------ allocation
-    pub fn alloc_global(&mut self, kind: Kind, site: &str, label: &str, payload: Payload) -> ObjId {
-        let label = if label.is_empty() { site } else { label };
-        self.alloc_raw(kind, site, "", true, label, payload)
-    }
-
-    pub fn alloc_raw(&mut self, kind: Kind, site: &str, ctx: &str, single: bool, label: &str, payload: Payload) -> ObjId {
-        let key = (kind, intern::s(site), intern::s(ctx));
-        if let Some(&oid) = self.obj_index.get(&key) {
-            let o = &mut self.objects[oid as usize];
-            o.single = o.single && single;
-            if !payload.is_none() {
-                o.payload = payload;
-            }
-            return oid;
-        }
-        let n = self.site_clones.get(site).copied().unwrap_or(0);
-        if n >= MAX_CLONES && !ctx.is_empty() {
-            // too many clones of one allocation site: collapse onto the context-free summary object
-            let o = self.alloc_raw(kind, site, "", false, label, payload);
-            crate::state::mark_merged(o);
-            return o;
-        }
-        self.site_clones.insert(site.to_string(), n + 1);
-        let oid = self.objects.len() as ObjId;
-        self.objects.push(Obj {
-            id: oid,
-            kind,
-            site: intern::str_get(key.1),
-            ctx: intern::str_get(key.2),
-            single,
-            label: intern::str_get(intern::s(label)),
-            payload,
-            literal_len: None,
-            known_prefix: None,
-            iter_elem: false,
-            derived_from: None,
-            depth: 0,
-            iterator: site.starts_with("gen:"),
-            born: self.serial,
-        });
-        self.serial += 1;
-        self.obj_index.insert(key, oid);
-        oid
-    }
-
-    /// The length of a list / tuple on this path (positions 0..n are its items), else None.
-    pub fn llen(&self, o: ObjId, st: &State) -> Option<usize> {
-        match st.lens.get(&o) {
-            Some(v) => v.0,
-            None => self.objects[o as usize].literal_len,
-        }
-    }
-
-    /// The possible lengths of a list / tuple on this path: the exact one, or the alternatives
-    /// a join kept (lengths 0..15 on the joined paths).
-    pub fn len_alts(&self, o: ObjId, st: &State) -> Option<Vec<usize>> {
-        if let Some(n) = self.llen(o, st) {
-            return Some(vec![n]);
-        }
-        match st.lens.get(&o) {
-            Some((None, _, m)) if m != 0 => Some((0..16).filter(|i| m & (1 << i) != 0).collect()),
-            _ => None,
-        }
-    }
-
-    /// The number of leading positions known (the length when known; after appends of unknown
-    /// count, the length before them).
-    pub fn prefix(&self, o: ObjId, st: &State) -> Option<usize> {
-        let p = match st.lens.get(&o) {
-            Some((Some(n), _, _)) => n,
-            Some((None, p, _)) => p,
-            None => self.objects[o as usize].literal_len.or(self.objects[o as usize].known_prefix).unwrap_or(0),
-        };
-        Some(p).filter(|p| *p > 0)
-    }
-
-    /// (also the object's own field: what a state not descended from the one it was made in
-    /// reads)
-    pub fn set_llen(&mut self, o: ObjId, st: &mut State, v: Option<usize>) {
-        st.lens.insert(o, (v, v.unwrap_or(0), 0));
-        self.objects[o as usize].literal_len = v;
-        self.objects[o as usize].known_prefix = None;
-    }
-
-    /// The length is unknown now, its first `n` positions are still known.
-    pub fn set_prefix(&mut self, o: ObjId, st: &mut State, n: usize) {
-        st.lens.insert(o, (None, n, 0));
-        self.objects[o as usize].literal_len = None;
-        self.objects[o as usize].known_prefix = Some(n);
-    }
-
-    pub fn site_of(&self, node: &Node) -> String {
-        site_string(node)
-    }
-
-    /// Allocate an object at `site` (string) in the current frame's context.  `single`:
-    /// explicit strength; `None` = the frame decides (strong outside loops; inside a loop a
-    /// strong *recent* object with the recency abstraction, else the weak per-site object).
-    #[allow(clippy::too_many_arguments)]
-    pub fn alloc(&mut self, kind: Kind, site: &str, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, single: Option<bool>, ctx: Option<&str>) -> ObjId {
-        let fr = self.frame();
-        let ctx = ctx.map(|c| c.to_string()).unwrap_or_else(|| fr.ctx.clone());
-        let label = if label.is_empty() { format!("{}@{}", kind.name(), site) } else { label.to_string() };
-        // inside unrolled loop iterations each iteration is straight-line code: its own site
-        let site_buf;
-        let site: &str = if !fr.unroll.is_empty() {
-            site_buf = format!("{}#{}", site, fr.unroll.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("."));
-            &site_buf
-        } else {
-            site
-        };
-        let (single, recent) = match single {
-            Some(x) => (x, false),
-            None => {
-                let strong = fr.single && fr.loop_depth == 0;
-                if !strong && fr.single_nl && !self.recent_stack.is_empty() {
-                    (true, true)
-                } else {
-                    (strong, false)
-                }
-            }
-        };
-        let oid = if recent {
-            let rsite = format!("{}#recent", site);
-            let oid = self.alloc_raw(kind, &rsite, &ctx, true, &label, payload);
-            let top = self.recent_stack.last_mut().unwrap();
-            if !top.iter().any(|(o, _, _, _)| *o == oid) {
-                top.push((oid, kind, site.to_string(), ctx.clone()));
-            }
-            oid
-        } else {
-            let existed = self.obj_index.get(&(kind, intern::s(site), intern::s(&ctx))).copied();
-            let payload2 = payload.clone();
-            let mut oid = self.alloc_raw(kind, site, &ctx, single, &label, payload);
-            // (made earlier in the same model call: held by the model's own code)
-            let model_held = self.model_depth > 0 && self.model_born.get(&oid) == Some(&self.model_epoch);
-            if self.model_depth > 0 {
-                self.model_born.insert(oid, self.model_epoch);
-            }
-            // (past the hard deadline no walk: the site's object is taken as still in use,
-            // so it is merged — weak, always sound)
-            // (an unknown call's result allocated again: taken as still in use without a walk,
-            // and merged — its rows are open anyway; walking for it dominated large runs)
-            // (an object already merged — its site made again while in use, past its variants —
-            // stays merged without a walk: such walks found nothing in their budget)
-            let hard = existed == Some(oid) && (self.over_hard_deadline() || (kind == Kind::Unknown) || !self.obj(oid).single);
-            if existed == Some(oid) && (hard || model_held || (self.has_facts(oid, state) && self.is_live(oid, state))) {
-                // allocated again while the earlier object is still reachable (a method run
-                // twice on one receiver, a call repeated in a loop)
-                if single && !self.recent_stack.is_empty() && !hard {
-                    // inside a loop: a strong recent object, folded into the summary object
-                    // at the loop's back-edge (the earlier object becomes that summary)
-                    let rsite = format!("{}#recent", site);
-                    let r = self.alloc_raw(kind, &rsite, &ctx, true, &label, payload2);
-                    let top = self.recent_stack.last_mut().unwrap();
-                    if !top.iter().any(|(o, _, _, _)| *o == r) {
-                        top.push((r, kind, site.to_string(), ctx.clone()));
-                    }
-                    oid = r;
-                } else {
-                    // another object of the site while the first is still in use: a variant
-                    // of its own (a method run twice on one receiver keeps both records), up
-                    // to a few; past them one summary object, weak (no longer one key)
-                    let mut variant: Option<ObjId> = None;
-                    if single && !hard {
-                        // (the variants made so far, their liveness in one walk)
-                        let made: Vec<(String, Option<ObjId>)> = (1..=8usize).map(|k| {
-                            let vctx = format!("{}~{}", ctx, k);
-                            let v = self.obj_index.get(&(kind, intern::s(site), intern::s(&vctx))).copied();
-                            (vctx, v)
-                        }).collect();
-                        let first_free = made.iter().position(|(_, v)| v.is_none()).unwrap_or(made.len());
-                        let olds: Vec<ObjId> = made[..first_free].iter().filter_map(|(_, v)| *v).collect();
-                        let olds: Vec<ObjId> = olds.into_iter().filter(|o| self.has_facts(*o, state)).collect();
-                        let live = if olds.is_empty() { FxHashSet::default() } else { self.live_among(&olds, state) };
-                        let pick = made.iter().position(|(_, v)| match v { None => true, Some(o) => !live.contains(o) });
-                        if let Some(i) = pick {
-                            variant = Some(self.alloc_raw(kind, site, &made[i].0, single, &label, payload2.clone()));
-                        }
-                    }
-                    match variant {
-                        Some(v) => oid = v,
-                        None => {
-                            self.obj_mut(oid).single = false;
-                            crate::state::mark_merged(oid);
-                            if let Some(k) = self.identity_keys.borrow_mut().remove(&oid) {
-                                self.identity_objs.borrow_mut().remove(&k);
-                            }
-                        }
-                    }
-                }
-            }
-            oid
-        };
-        let obj_single = self.obj(oid).single;
-        if obj_single {
-            self.objects[oid as usize].born = self.serial;
-            self.serial += 1;
-        }
-        // born here: its length is unknown until the code making it says
-        state.lens.insert(oid, (None, 0, 0));
-        if kind.is_record() || kind == Kind::Frame {
-            let fresh = row.unwrap_or_default();
-            if state.has_row(oid, ns) && !obj_single {
-                let j = state.row(oid, ns).join(&fresh);
-                state.set_row(oid, ns, j);
-            } else {
-                state.set_row(oid, ns, fresh);
-                if obj_single {
-                    // strong re-allocation: drop stale slots of this object
-                    state.drop_obj(oid);
-                }
-            }
-        } else if kind.is_container() && obj_single {
-            state.drop_obj(oid);
-            state.elems.remove(&oid);
-        }
-        oid
-    }
-
-    /// `alloc` at an AST node.
-    /// A model's `ctx` is a suffix of the frame's context: the same code run from two call
-    /// contexts makes two objects.
-    pub fn alloc_at(&mut self, kind: Kind, node: &Node, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, single: Option<bool>, ctx: Option<&str>) -> ObjId {
-        let site = site_string(node);
-        let joined: Option<String> = match (&self.alloc_extra, ctx) {
-            (Some(x), Some(c)) => Some(format!("{}/{}", x, c)),
-            (Some(x), None) => Some(x.clone()),
-            (None, c) => c.map(|c| c.to_string()),
-        };
-        let ctx = joined.as_deref();
-        let full = ctx.map(|c| format!("{}/{}", self.frame().ctx, c));
-        self.alloc(kind, &site, state, label, payload, row, ns, single, full.as_deref())
-    }
-
-    /// Short form used by most models: a record-ish object at a node with a row.
-    pub fn alloc_simple(&mut self, kind: Kind, node: &Node, state: &mut State, label: &str) -> ObjId {
-        self.alloc_at(kind, node, state, label, Payload::None, None, Ns::Item, None, None)
-    }
-
-    pub fn unknown_source(&mut self, site: &str, kind: SourceKind, state: &mut State, label: &str, ctx: &str, _ns: Ns, path: Vec<KeyId>) -> ObjId {
-        let src = intern::source(Source { site: site.into(), kind, path });
-        let slabel = crate::domain::source_label(src);
-        let kname = match kind {
-            SourceKind::External => "external",
-            SourceKind::Call => "call",
-            SourceKind::Param => "param",
-            SourceKind::Name => "name",
-            SourceKind::Data => "data",
-            SourceKind::Class => "class",
-        };
-        let label = if label.is_empty() { slabel.clone() } else { label.to_string() };
-        let oid = self.alloc_raw(Kind::Unknown, &format!("{}:{}", kname, slabel), ctx, true, &label, Payload::None);
-        for n in [Ns::Item, Ns::Attr] {
-            if !state.has_row(oid, n) {
-                state.set_row(oid, n, Row::with_source(src));
-            }
-        }
-        if !self.symbols.contains_key(&oid) {
-            let sym = match kind {
-                SourceKind::Param => Some(label.trim_start_matches("param ").to_string()),
-                SourceKind::Name => Some(label.trim_start_matches('?').to_string()),
-                _ => None,
-            };
-            if let Some(sym) = sym.filter(|x| !x.is_empty()) {
-                let scope = if kind == SourceKind::Param { self.entry_scope.unwrap_or_else(|| self.frame().func.unwrap_or(0)) } else { 0 };
-                self.set_symbol(oid, sym, scope);
-            }
-        }
-        oid
     }
 
     pub fn set_symbol(&mut self, oid: ObjId, sym: String, scope: u32) {
@@ -1409,8 +974,8 @@ impl Analyzer {
     /// The symbol of `parent`'s content under (ns, key): `d["k"]`, `o.x`, `rows[*]`, a cell's
     /// variable; None when the parent has no symbol.
     pub fn sym_access(&self, parent: ObjId, ns: Ns, key: KeyId) -> Option<String> {
-        if self.kind(parent) == Kind::Cell {
-            return self.obj(parent).label.strip_prefix("cell ").map(|x| x.to_string());
+        if self.heap.kind(parent) == Kind::Cell {
+            return self.heap.obj(parent).label.strip_prefix("cell ").map(|x| x.to_string());
         }
         let base = self.symbols.get(&parent)?;
         Some(match ns {
@@ -1427,13 +992,13 @@ impl Analyzer {
         if m == self.main_module {
             return String::new();
         }
-        let idx = self.module_info(m).idx;
+        let idx = self.heap.module_info(m).idx;
         self.rel_file(idx)
     }
 
     /// The main module's frontend index.
     pub fn main_idx(&self) -> u32 {
-        self.module_info(self.main_module).idx
+        self.heap.module_info(self.main_module).idx
     }
 
     /// The path of module `idx` relative to the main file's directory ("" for the main
@@ -1489,7 +1054,7 @@ impl Analyzer {
             col: node.col,
             key,
             tier: cls.tier,
-            obj: self.obj(oid).label.to_string(),
+            obj: self.heap.obj(oid).label.to_string(),
             chain,
             note: cls.note.clone(),
             providers: cls.providers.iter().map(|(s, _)| *s).collect(),
@@ -1554,7 +1119,7 @@ impl Analyzer {
         if m == self.main_module {
             return true;
         }
-        let idx = self.module_info(m).idx;
+        let idx = self.heap.module_info(m).idx;
         frontend::module_path(idx).map(|p| !p.contains("site-packages") && self.rel_to_main(&p).is_some()).unwrap_or(false)
     }
 
@@ -1605,7 +1170,7 @@ impl Analyzer {
     }
 
     pub fn run_module(&mut self, moid: ObjId, state: &mut State) {
-        let info = self.module_info(moid);
+        let info = self.heap.module_info(moid);
         let fr = Frame::new(FrameKind::Module, info.scopes.module(), moid, "", true, &format!("<module {}>", info.name));
         self.frames.push(fr);
         // (imported from inside a function: the function's returns so far are its own)
@@ -1623,7 +1188,7 @@ impl Analyzer {
         // a few rounds, each over the functions made so far
         let mut start: ObjId = 1;
         for _round in 0..4 {
-            let n = self.objects.len() as ObjId;
+            let n = self.heap.len() as ObjId;
             if start >= n {
                 break;
             }
@@ -1632,7 +1197,7 @@ impl Analyzer {
         }
         // then the requirement-only runs of the functions the program calls (last: runs made
         // while quiet hold no verdicts)
-        let n = self.objects.len() as ObjId;
+        let n = self.heap.len() as ObjId;
         self.analyse_uncalled_range(1, n, state, true);
     }
 
@@ -1641,10 +1206,10 @@ impl Analyzer {
             if self.over_hard_deadline() {
                 break;
             }
-            if self.kind(oid) != Kind::Function || self.entry_done.contains(&oid) {
+            if self.heap.kind(oid) != Kind::Function || self.entry_done.contains(&oid) {
                 continue;
             }
-            let fi = self.func_info(oid);
+            let fi = self.heap.func_info(oid);
             // functions of torch modules get their own run even when called (the shapes
             // inside, in terms of their own parameters)
             // a FastAPI handler: called by the framework with any request (also when the
@@ -1673,7 +1238,7 @@ impl Analyzer {
                 if let FuncNode::Lambda(_) = fi.node {
                     let mut st = state.copy();
                     st.ret = None;
-                    let mi = self.module_info(fi.module);
+                    let mi = self.heap.module_info(fi.module);
                     self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
                     let fake = Node::synthetic(mi.idx, fi.node.node().line);
                     self.call_user(oid, None, vec![], IndexMap::new(), vec![], vec![], &mut st, &fake, None, true);
@@ -1682,7 +1247,7 @@ impl Analyzer {
                 continue;
             };
             if debug_enabled() {
-                eprintln!("[rowan] entry {} L{} t={:.1}s objs={} verdicts={} quiet={}", fi.qualname, fi.node.node().line, self.now(), self.objects.len(), self.verdicts.len(), quiet);
+                eprintln!("[rowan] entry {} L{} t={:.1}s objs={} verdicts={} quiet={}", fi.qualname, fi.node.node().line, self.now(), self.heap.len(), self.verdicts.len(), quiet);
             }
             // a closure made by a factory's entry run starts from that run's state (its cells)
             let mut st = match self.t_closure_states.get(&oid) {
@@ -1696,7 +1261,7 @@ impl Analyzer {
             };
             st.ret = None;
             let mut args: Vec<Value> = Vec::new();
-            let mi = self.module_info(fi.module);
+            let mi = self.heap.module_info(fi.module);
             self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
             self.entry_scope = Some(oid);
             let mut params = scopemod::all_params(fparams);
@@ -1713,7 +1278,7 @@ impl Analyzer {
                         let inst = match self.entry_instances.get(&c) {
                             Some(&i) => i,
                             None => {
-                                let cname = self.class_info(c).name.clone();
+                                let cname = self.heap.class_info(c).name.clone();
                                 let i = self.fresh_instance(c, state, &format!("entry:{}", cname));
                                 self.entry_instances.insert(c, i);
                                 st = state.copy();
@@ -1759,7 +1324,7 @@ impl Analyzer {
             self.entry_scope = None;
             let fake = Node::synthetic(mi.idx, fi.node.node().line);
             let saved_entry = self.entry_run.replace(oid);
-            let before = self.objects.len() as ObjId;
+            let before = self.heap.len() as ObjId;
             let saved_quiet = std::mem::replace(&mut self.quiet, quiet);
             let called_torch = self.analysed_funcs.contains(&oid) && self.torch_modules.contains(&fi.module);
             let saved_qr = std::mem::replace(&mut self.quiet_records, called_torch);
@@ -1769,16 +1334,16 @@ impl Analyzer {
             self.entry_run = saved_entry;
             if quiet {
                 // functions made by a requirement-only run are not the program's
-                let after = self.objects.len() as ObjId;
+                let after = self.heap.len() as ObjId;
                 for o in before..after {
-                    if self.kind(o) == Kind::Function {
+                    if self.heap.kind(o) == Kind::Function {
                         self.entry_done.insert(o);
                     }
                 }
             }
             if self.torch_modules.contains(&fi.module) {
-                let after = self.objects.len() as ObjId;
-                let made: Vec<ObjId> = (before..after).filter(|o| self.kind(*o) == Kind::Function && !self.func_info(*o).closure.is_empty()).collect();
+                let after = self.heap.len() as ObjId;
+                let made: Vec<ObjId> = (before..after).filter(|o| self.heap.kind(*o) == Kind::Function && !self.heap.func_info(*o).closure.is_empty()).collect();
                 if !made.is_empty() {
                     let snap = std::rc::Rc::new(st.copy());
                     for o in made {
@@ -1898,14 +1463,14 @@ impl Analyzer {
         let mut v = self.eval(node, state);
         // (a class imported only for type checkers)
         if let ast::Expr::Name(n) = node {
-            if !v.pts.iter().any(|o| self.kind(o) == Kind::Class) {
+            if !v.pts.iter().any(|o| self.heap.kind(o) == Kind::Class) {
                 v = self.type_only_name(n.id.as_str(), state).unwrap_or(v);
             }
         }
         for oid in v.pts.iter() {
-            let o = self.kind(oid);
+            let o = self.heap.kind(oid);
             if o == Kind::Class {
-                let ci = self.class_info(oid);
+                let ci = self.heap.class_info(oid);
                 if ci.has_fields() {
                     let mut fields: KeySet = KeySet::from_iter(ci.fields().iter().map(|(f, _)| key_str_lit(f)));
                     let ns = if ci.lib.typed_dict { Ns::Item } else { Ns::Attr };
@@ -1940,7 +1505,7 @@ impl Analyzer {
                 let inst = self.fresh_instance(oid, state, &format!("entry:{}", fi.qualname));
                 return Some(Value::obj(inst));
             }
-            if o == Kind::External && self.external_qual(oid).ends_with("DataFrame") {
+            if o == Kind::External && self.heap.external_qual(oid).ends_with("DataFrame") {
                 let src = Source::new(&format!("param {}", fi.qualname), SourceKind::Param);
                 let fid = self.alloc(
                     Kind::Frame,
@@ -1960,7 +1525,7 @@ impl Analyzer {
     }
 
     pub fn fresh_instance(&mut self, cls_oid: ObjId, state: &mut State, ctx: &str) -> ObjId {
-        let ci = self.class_info(cls_oid);
+        let ci = self.heap.class_info(cls_oid);
         if self.fresh_in_progress.contains(&cls_oid) {
             // self-referential annotation: open instance
             return self.unknown_source(&format!("instance {}", ci.name), SourceKind::Class, state, &format!("{} (recursive)", ci.name), "", Ns::Attr, vec![]);
@@ -1973,7 +1538,7 @@ impl Analyzer {
 
     fn fresh_instance_inner(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> ObjId {
         let has_init = self.class_lookup(cls_oid, "__init__").is_some();
-        let has_fields = self.mro(cls_oid).iter().any(|c| self.class_info_opt(*c).map(|ci| ci.has_fields()).unwrap_or(false));
+        let has_fields = self.mro(cls_oid).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.has_fields()).unwrap_or(false));
         // a class that never initialises its own attributes is only used through subclasses
         let open_inst = ci.open_base || !(has_init || has_fields);
         let row = if open_inst { Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)) } else { Row::new() };
@@ -1996,7 +1561,7 @@ impl Analyzer {
             if !seen.insert(c) {
                 continue;
             }
-            let Some(cinfo) = self.class_info_opt(c) else { continue };
+            let Some(cinfo) = self.heap.class_info_opt(c) else { continue };
             if cinfo.has_fields() {
                 let ns = if cinfo.lib.typed_dict { Ns::Item } else { Ns::Attr };
                 for (f, _) in cinfo.fields() {
@@ -2011,10 +1576,10 @@ impl Analyzer {
         if let Some(init_cls) = self.class_lookup(cls_oid, "__init__") {
             let inits = self.cls_slots.get(&(init_cls, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
             for init in inits.pts.iter() {
-                if self.kind(init) != Kind::Function {
+                if self.heap.kind(init) != Kind::Function {
                     continue;
                 }
-                let fi = self.func_info(init);
+                let fi = self.heap.func_info(init);
                 let Some(params_all) = fi.node.params() else { continue };
                 let saved_scope = self.entry_scope;
                 if self.torch_modules.contains(&fi.module) {
@@ -2066,12 +1631,12 @@ impl Analyzer {
         if !self.facts_on || node.addr == 0 || self.quiet {
             return;
         }
-        if node.module != self.module_info(self.main_module).idx {
+        if node.module != self.heap.module_info(self.main_module).idx {
             return;
         }
         let mut rows: Vec<(ObjId, Option<Row>, Option<Row>)> = Vec::new();
         for oid in v.pts.iter() {
-            let k = self.kind(oid);
+            let k = self.heap.kind(oid);
             let item = if matches!(k, Kind::Dict | Kind::Frame | Kind::Unknown | Kind::Namespace | Kind::Module | Kind::Class) || state.has_row(oid, Ns::Item) { Some(state.row(oid, Ns::Item)) } else { None };
             let attr = if matches!(k, Kind::Instance | Kind::Namespace | Kind::Unknown | Kind::Module | Kind::Class) || state.has_row(oid, Ns::Attr) { Some(state.row(oid, Ns::Attr)) } else { None };
             rows.push((oid, item, attr));
@@ -2171,192 +1736,6 @@ impl Analyzer {
     }
 
 
-    /// Is `oid` reachable from a binding the program can still use: the locals of every
-    /// active frame, cells, module objects, narrowed values, the return value?
-    pub fn is_live(&self, oid: ObjId, state: &State) -> bool {
-        !self.live_among(&[oid], state).is_empty()
-    }
-
-    /// May the program still hold `oid` on this path? Every allocation records the object's
-    /// length entry in the state, and only the collector (at returns and loop exits) forgets
-    /// an object's facts: an object without them was never made on this path or was
-    /// collected, and needs no reachability walk.
-    pub fn has_facts(&self, oid: ObjId, state: &State) -> bool {
-        state.lens.get(&oid).is_some() || state.has_row(oid, Ns::Item) || state.has_row(oid, Ns::Attr) || state.slots.has_key(&oid)
-    }
-
-    /// The roots of a reachability walk: the names, narrowed values and result of `state`, the
-    /// names of the first `envs` callers, and the modules and cells of the first `frames`
-    /// frames.
-    pub fn state_roots(&self, state: &State, envs: usize, frames: usize, work: &mut Vec<ObjId>) {
-        // (a walk takes the last pushed first: the running code's names before the modules'
-        // globals, where an object made again is most often still held)
-        for fr in self.frames.iter().take(frames) {
-            work.push(fr.module);
-            work.extend(fr.cells.values().copied());
-        }
-        let callers = self.env_stack.iter().take(envs).flat_map(|e| e.values());
-        for v in callers.chain(state.ret.iter()).chain(state.narrowed.values()).chain(state.env.values()) {
-            v.push_objs(work);
-        }
-    }
-
-    /// Which of `targets` the program can still reach (one walk from the roots for all; it
-    /// stops when every one is found).
-    pub fn live_among(&self, targets: &[ObjId], state: &State) -> FxHashSet<ObjId> {
-        let mut found: FxHashSet<ObjId> = FxHashSet::default();
-        let mut work: Vec<ObjId> = Vec::new();
-        self.state_roots(state, usize::MAX, usize::MAX, &mut work);
-        // (a walk over a large heap is bounded: past the budget the targets not found yet are
-        // taken as live, which is always sound: their site makes a recent / variant object; a
-        // walk that proves an object dead on a large heap visits all of it, and on email's 20k
-        // visits per walk gave the same verdicts as 500)
-        const WALK_BUDGET: usize = 200;
-        let budget = WALK_BUDGET;
-        let mut seen: FxHashSet<ObjId> = FxHashSet::default();
-        while let Some(o) = work.pop() {
-            if !seen.insert(o) {
-                continue;
-            }
-            self.walked.set(self.walked.get() + 1);
-            if seen.len() > budget {
-                return targets.iter().copied().collect();
-            }
-            if targets.contains(&o) {
-                found.insert(o);
-                if found.len() == targets.len() {
-                    return found;
-                }
-            }
-            self.obj_edges(o, state, &mut work);
-        }
-        found
-    }
-
-    /// The objects `o` refers to: its slots and element kinds in `state`, its payload, and what
-    /// side tables keyed by it hold (a ChainMap's maps, a defaultdict's factory, …).
-    pub fn obj_edges(&self, o: ObjId, state: &State, work: &mut Vec<ObjId>) {
-        // (the slot table in place: a walk visits the whole reachable heap)
-        state.slots.each(&o, &mut |_, v| v.push_objs(work));
-        match state.elems.get_ref(&o) {
-            Some(KeyVal::KeysOf(ko)) => work.extend(ko.objs.iter()),
-            _ => {}
-        }
-        for (lo, v) in state.lasts.iter() {
-            if *lo == o {
-                v.push_objs(work);
-            }
-        }
-        if !self.has_obj(o) {
-            return;
-        }
-        match &self.obj(o).payload {
-            Payload::Func(fi) => work.extend(fi.closure.values().copied()),
-            Payload::Cls(c) => work.push(*c),
-            Payload::Method(_, v) | Payload::View(_, v) | Payload::Enumerate(v, _) => v.push_objs(work),
-            Payload::Bound(f, v) | Payload::Super(f, v) => {
-                work.push(*f);
-                v.push_objs(work);
-            }
-            Payload::Zip(a, b) | Payload::Pair(a, b) => {
-                a.push_objs(work);
-                b.push_objs(work);
-            }
-            Payload::Partial(f, args, kw) => {
-                f.push_objs(work);
-                for a in args {
-                    a.push_objs(work);
-                }
-                for v in kw.values() {
-                    v.push_objs(work);
-                }
-            }
-            Payload::Groupby(fs, _, _, _) => work.extend(fs.iter().copied()),
-            Payload::Locidx(_, f) => work.push(*f),
-            _ => {}
-        }
-        self.side_edges(Some(o), work);
-    }
-
-    /// What the analyzer's side tables keyed by an object refer to: `o`'s entries, or every
-    /// entry's (None: the collector's roots, `gc_pinned`).
-    fn side_edges(&self, o: Option<ObjId>, work: &mut Vec<ObjId>) {
-        fn each<'a, V>(m: &'a FxHashMap<ObjId, V>, o: Option<ObjId>) -> Box<dyn Iterator<Item = &'a V> + 'a> {
-            match o {
-                Some(o) => Box::new(m.get(&o).into_iter()),
-                None => Box::new(m.values()),
-            }
-        }
-        each(&self.m.chainmaps, o).flatten().for_each(|m| m.push_objs(work));
-        for m in [&self.m.dd_factories, &self.m.csv_readers, &self.wrapped] {
-            each(m, o).for_each(|v| v.push_objs(work));
-        }
-        each(&self.m.partial_star, o).flatten().for_each(|v| v.push_objs(work));
-        each(&self.lazy_src, o).flatten().for_each(|(s, _)| work.push(*s));
-        for m in [&self.attr_mirrors, &self.entry_instances, &self.copy_root, &self.m.sql_cursors] {
-            work.extend(each(m, o).copied());
-        }
-        each(&self.m.sorted_items, o).flat_map(|items| items.iter()).for_each(|(_, v, _)| v.push_objs(work));
-        for (f, args, kw) in each(&self.m.exit_callbacks, o).flatten() {
-            f.push_objs(work);
-            args.iter().for_each(|a| a.push_objs(work));
-            kw.values().for_each(|v| v.push_objs(work));
-        }
-        for (v, f) in each(&self.sdispatch, o).flatten() {
-            v.push_objs(work);
-            work.push(*f);
-        }
-        each(&self.m.fa_app_deps, o).flatten().for_each(|v| v.push_objs(work));
-    }
-
-    /// Objects the analyzer itself holds beyond the state: what side tables keyed by other
-    /// objects refer to, exceptions in flight, the callers' names, loop recency objects.
-    /// `unwind`: for a raise state, only the first `unwind` callers' names, and no loop's recent
-    /// objects (those still in use are reachable from the names).
-    pub fn gc_pinned(&self, work: &mut Vec<ObjId>, unwind: Option<usize>) {
-        // (the side tables' entries: their keys themselves may be dead)
-        self.side_edges(None, work);
-        for v in self.cur_exc.iter().chain(self.tries.iter().flat_map(|t| t.recs.iter().map(|r| &r.2))).chain(self.handling_values.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
-            v.push_objs(work);
-        }
-        for c in &self.m.fa_dep_cache {
-            c.values().for_each(|v| v.push_objs(work));
-        }
-        for (_, _, v, f) in &self.m.fa_hooks {
-            v.push_objs(work);
-            work.extend(f.iter().copied());
-        }
-        for env in self.env_stack.iter().take(unwind.unwrap_or(usize::MAX)) {
-            env.values().for_each(|v| v.push_objs(work));
-        }
-        // (the managers of the with statements running: their `__exit__` runs on the way out)
-        for (_, fin, _) in &self.finally_stack {
-            if let crate::interp::stmts::Finally::Exit(ms) = &**fin {
-                ms.iter().for_each(|(v, _)| v.push_objs(work));
-            }
-        }
-        for (_, env, _) in &self.cm_frames {
-            env.values().for_each(|v| v.push_objs(work));
-        }
-        for cells in &self.comp_cells {
-            work.extend(cells.values().copied());
-        }
-        for rs in self.recent_stack.iter().filter(|_| unwind.is_none()) {
-            work.extend(rs.iter().map(|(o, _, _, _)| *o));
-        }
-        for rs in &self.m.fa_out_resp {
-            work.extend(rs.iter().copied());
-        }
-        // (the value unknown code stores: values anywhere may hold it)
-        if let Some(&any) = self.obj_index.get(&(Kind::Unknown, intern::s("any"), intern::s(""))) {
-            work.push(any);
-        }
-        for fr in &self.frames {
-            work.push(fr.module);
-            work.extend(fr.cells.values().copied());
-        }
-    }
-
     /// What a value is, for the golden harness's `#@value` checks: literals it may be, whether
     /// it may also be something unknown, and the (known) objects it may be.
     pub fn value_info(&self, v: &Value, state: &State) -> ValueInfo {
@@ -2367,11 +1746,11 @@ impl Analyzer {
             info.unknown = true;
         }
         for o in v.pts.iter() {
-            match self.kind(o) {
+            match self.heap.kind(o) {
                 Kind::Unknown | Kind::External => info.unknown = true,
                 // a tuple of known literals is that literal (as Python prints it)
                 Kind::Tuple | Kind::Pair if self.literal_tuple(o, state, 0).is_some() => info.lits.push(self.literal_tuple(o, state, 0).unwrap()),
-                _ => info.objects.push(self.obj(o).label.to_string()),
+                _ => info.objects.push(self.heap.obj(o).label.to_string()),
             }
         }
         if v.pts.is_empty() && v.kv.is_bot() {
@@ -2387,18 +1766,18 @@ impl Analyzer {
             return None;
         }
         // a (key, value) pair (zip / enumerate / items): a 2-tuple
-        if self.kind(o) == Kind::Pair {
-            let Payload::Pair(k, v) = &self.obj(o).payload else { return None };
+        if self.heap.kind(o) == Kind::Pair {
+            let Payload::Pair(k, v) = &self.heap.obj(o).payload else { return None };
             let one = |x: &Value| -> Option<KeyId> {
                 match (x.pts.len(), &x.kv) {
                     (0, KeyVal::Lit(k)) => Some(*k),
-                    (1, KeyVal::Bot) if matches!(self.kind(x.pts.first().unwrap()), Kind::Tuple | Kind::Pair) => self.literal_tuple(x.pts.first().unwrap(), state, depth + 1),
+                    (1, KeyVal::Bot) if matches!(self.heap.kind(x.pts.first().unwrap()), Kind::Tuple | Kind::Pair) => self.literal_tuple(x.pts.first().unwrap(), state, depth + 1),
                     _ => None,
                 }
             };
             return Some(intern::key_tuple(vec![one(k)?, one(v)?]));
         }
-        let n = self.llen(o, state)?;
+        let n = self.heap.llen(o, state)?;
         let mut items = Vec::with_capacity(n);
         for i in 0..n {
             let v = state.slot(o, Ns::Pos, intern::key_int(i as i64));
@@ -2406,7 +1785,7 @@ impl Analyzer {
                 (0, KeyVal::Lit(k)) => *k,
                 (1, KeyVal::Bot) => {
                     let x = v.pts.first().unwrap();
-                    if !matches!(self.kind(x), Kind::Tuple | Kind::Pair) {
+                    if !matches!(self.heap.kind(x), Kind::Tuple | Kind::Pair) {
                         return None;
                     }
                     self.literal_tuple(x, state, depth + 1)?
@@ -2440,16 +1819,16 @@ impl Analyzer {
             let mut ns_used = Ns::Item;
             for oid in v.pts.iter() {
                 // a UserDict's keys are those of its `data`
-                if self.kind(oid) == Kind::Instance && self.instance_class(oid).map(|c| self.mro(c).iter().any(|m| self.m.userdict_classes.contains(m))).unwrap_or(false) {
+                if self.heap.kind(oid) == Kind::Instance && self.heap.instance_class(oid).map(|c| self.mro(c).iter().any(|m| self.m.userdict_classes.contains(m))).unwrap_or(false) {
                     let d = state.slot(oid, Ns::Attr, key_str_lit("data"));
-                    if let Some(dd) = d.single().filter(|x| self.kind(*x) == Kind::Dict) {
+                    if let Some(dd) = d.single().filter(|x| self.heap.kind(*x) == Kind::Dict) {
                         ns_used = Ns::Item;
                         rows.push(state.row(dd, Ns::Item));
                         continue;
                     }
                 }
                 // a mapping proxy shows its dict
-                if let Payload::View(ViewKind::Proxy, inner) = self.obj(oid).payload.clone() {
+                if let Payload::View(ViewKind::Proxy, inner) = self.heap.obj(oid).payload.clone() {
                     for dd in inner.pts.iter() {
                         rows.push(state.row(dd, Ns::Item));
                     }
@@ -2457,8 +1836,8 @@ impl Analyzer {
                 }
                 // (a numpy structured array is keyed by its fields)
                 // (an instance of a dict subclass: its items)
-                let dict_sub = self.kind(oid) == Kind::Instance && self.instance_class(oid).is_some_and(|c| self.mro(c).iter().any(|x| self.class_info_opt(*x).map(|ci| ci.lib.dict_base).unwrap_or(false)));
-                let ns = if matches!(self.kind(oid), Kind::Instance | Kind::Namespace) && !self.m.np_struct.contains(&oid) && !dict_sub { Ns::Attr } else { Ns::Item };
+                let dict_sub = self.heap.kind(oid) == Kind::Instance && self.heap.instance_class(oid).is_some_and(|c| self.mro(c).iter().any(|x| self.heap.class_info_opt(*x).map(|ci| ci.lib.dict_base).unwrap_or(false)));
+                let ns = if matches!(self.heap.kind(oid), Kind::Instance | Kind::Namespace) && !self.m.np_struct.contains(&oid) && !dict_sub { Ns::Attr } else { Ns::Item };
                 ns_used = ns;
                 rows.push(state.row(oid, ns));
             }
@@ -2491,160 +1870,6 @@ impl Analyzer {
 }
 
 impl Analyzer {
-    /// Recency abstraction, back-edge step: the recent objects allocated during a loop
-    /// iteration are folded into their weak per-site summary objects, and every reference
-    /// to them written during the iteration is re-pointed to the summary object.
-    pub fn rename_recent(&mut self, back: &mut State, head: &State, recs: Vec<(ObjId, Kind, String, String)>, mark: ObjId) {
-        if recs.is_empty() {
-            return;
-        }
-        let mut map: FxHashMap<ObjId, ObjId> = FxHashMap::default();
-        // (tuples of one length keep their positions in the summary object: each position
-        // the join of the tuples' — unpacking `a, b = t` then keeps them apart)
-        let mut keep_pos: FxHashSet<ObjId> = FxHashSet::default();
-        for (r, kind, site, ctx) in &recs {
-            let (label, payload, iter_elem, derived, depth) = {
-                let o = self.obj(*r);
-                (o.label.clone(), o.payload.clone(), o.iter_elem, o.derived_from, o.depth)
-            };
-            let sid = self.alloc_raw(*kind, site, ctx, false, &label, payload);
-            {
-                let so = self.obj_mut(sid);
-                so.single = false;
-                so.literal_len = None;
-                so.iter_elem = iter_elem;
-                so.depth = depth;
-                if so.derived_from.is_none() {
-                    so.derived_from = derived;
-                }
-            }
-            let rlen = back.lens.get(r).and_then(|l| l.0);
-            let prev = back.lens.get(&sid);
-            let same_len = match (rlen, prev) {
-                (Some(n), None) => Some(n),
-                (Some(n), Some((Some(m), _, _))) if n == m => Some(n),
-                _ => None,
-            };
-            match same_len.filter(|_| *kind == Kind::Tuple) {
-                Some(n) => {
-                    back.lens.insert(sid, (Some(n), n, 0));
-                    keep_pos.insert(*r);
-                }
-                None => {
-                    back.lens.insert(sid, (None, 0, 0));
-                    back.drop_obj_ns(sid, Ns::Pos);
-                }
-            }
-            map.insert(*r, sid);
-        }
-        let rename_value = |v: &Value, map: &FxHashMap<ObjId, ObjId>| -> Option<Value> {
-            let hit_pts = v.pts.iter().any(|o| map.contains_key(&o));
-            let hit_kv = matches!(&v.kv, KeyVal::KeysOf(ko) if ko.objs.iter().any(|o| map.contains_key(&o)));
-            if !hit_pts && !hit_kv {
-                return None;
-            }
-            let pts = v.pts.map(|o| *map.get(&o).unwrap_or(&o));
-            let kv = match &v.kv {
-                KeyVal::KeysOf(ko) if hit_kv => KeyVal::KeysOf(KeysOf { objs: ko.objs.map(|o| *map.get(&o).unwrap_or(&o)), ..ko.clone() }),
-                other => other.clone(),
-            };
-            Some(Value::with_kv(pts, kv))
-        };
-        // 1. the recent objects' own facts move to the summary objects (weakly)
-        for (&r, &sid) in &map {
-            for ns in [Ns::Item, Ns::Attr] {
-                if let Some(row) = back.rows.get(&(r, ns)) {
-                    let nr = match back.rows.get(&(sid, ns)) {
-                        Some(cur) => cur.join(&row),
-                        None => row,
-                    };
-                    back.rows.insert((sid, ns), nr);
-                    back.rows.remove(&(r, ns));
-                }
-            }
-            for ((ns, k), v) in back.slots_of(r) {
-                if ns == Ns::Pos && !keep_pos.contains(&r) {
-                    continue;
-                }
-                let v = rename_value(&v, &map).unwrap_or(v);
-                back.set_slot(sid, ns, k, v, false);
-            }
-            back.drop_obj(r);
-            if let Some(kv) = back.elems.get(&r) {
-                let kv = rename_value(&Value::kv_only(kv.clone()), &map).map(|v| v.kv).unwrap_or(kv);
-                let nv = match back.elems.get(&sid) {
-                    Some(cur) => crate::domain::kv_join(&cur, &kv),
-                    None => kv,
-                };
-                back.elems.insert(sid, nv);
-                back.elems.remove(&r);
-            }
-        }
-        // 2. references written during the iteration
-        let fp = back.footprint(head);
-        for (oid, sk) in fp.slots {
-            if map.contains_key(&oid) {
-                continue;
-            }
-            if let Some(v) = back.slots.get(&oid, &sk) {
-                if let Some(nv) = rename_value(&v, &map) {
-                    back.slots.set(&oid, sk, nv);
-                }
-            }
-        }
-        for oid in fp.elems {
-            if map.contains_key(&oid) {
-                continue;
-            }
-            if let Some(kv) = back.elems.get(&oid) {
-                if let Some(nv) = rename_value(&Value::kv_only(kv), &map) {
-                    back.elems.insert(oid, nv.kv);
-                }
-            }
-        }
-        let env_updates: Vec<(StrId, Value)> = back.env.iter().filter_map(|(k, v)| rename_value(v, &map).map(|nv| (*k, nv))).collect();
-        for (k, nv) in env_updates {
-            back.env.insert(k, nv);
-        }
-        let nar_updates: Vec<(StrId, Value)> = back.narrowed.iter().filter_map(|(k, v)| rename_value(v, &map).map(|nv| (*k, nv))).collect();
-        for (k, nv) in nar_updates {
-            back.narrowed.insert(k, nv);
-        }
-        if let Some(r) = &back.ret {
-            if let Some(nv) = rename_value(r, &map) {
-                back.ret = Some(nv);
-            }
-        }
-        // 3. objects allocated during the iteration that hold references in their payloads
-        let n = self.objects.len() as ObjId;
-        for oid in mark..n {
-            let o = &mut self.objects[oid as usize];
-            if let Some(d) = o.derived_from {
-                if let Some(&sd) = map.get(&d) {
-                    o.derived_from = Some(sd);
-                }
-            }
-            let rv = |v: &Value| rename_value(v, &map).unwrap_or_else(|| v.clone());
-            o.payload = match &o.payload {
-                Payload::Method(q, v) => Payload::Method(q.clone(), rv(v)),
-                Payload::Bound(f, v) => Payload::Bound(*map.get(f).unwrap_or(f), rv(v)),
-                Payload::Super(c, v) => Payload::Super(*c, rv(v)),
-                Payload::View(k, v) => Payload::View(*k, rv(v)),
-                Payload::Zip(a, b) => Payload::Zip(rv(a), rv(b)),
-                Payload::Enumerate(v, s0) => Payload::Enumerate(rv(v), *s0),
-                Payload::Pair(a, b) => Payload::Pair(rv(a), rv(b)),
-                Payload::Partial(f, args, kw) => Payload::Partial(rv(f), args.iter().map(&rv).collect(), kw.iter().map(|(k, v)| (*k, rv(v))).collect()),
-                Payload::Groupby(fs, ks, ai, sel) => Payload::Groupby(fs.iter().map(|f| *map.get(f).unwrap_or(f)).collect(), ks.clone(), *ai, sel.clone()),
-                Payload::Locidx(nm, x) => Payload::Locidx(nm.clone(), *map.get(x).unwrap_or(x)),
-                other => other.clone(),
-            };
-        }
-        // 4. flow-insensitive class attributes
-        let ups: Vec<((ObjId, Ns, KeyId), Value)> = self.cls_slots.iter().filter_map(|(k, v)| rename_value(v, &map).map(|nv| (*k, nv))).collect();
-        for (k, nv) in ups {
-            self.cls_slots.insert(k, nv);
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

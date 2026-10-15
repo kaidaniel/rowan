@@ -17,7 +17,7 @@ use super::{is_generator, Analyzer, Call, Frame, FrameKind, FuncInfo, FuncNode, 
 
 /// A function run with a receiver (not a static / class method).
 fn fi_is_method(an: &Analyzer, f: ObjId) -> bool {
-    an.func_info_opt(f).is_some_and(|fi| fi.cls.is_some() && !fi.is_static.get() && !fi.is_classmethod.get())
+    an.heap.func_info_opt(f).is_some_and(|fi| fi.cls.is_some() && !fi.is_static.get() && !fi.is_classmethod.get())
 }
 
 fn widen_value(v: &Value) -> Value {
@@ -62,8 +62,8 @@ impl Analyzer {
             return Value::new();
         }
         // (what a running generator reads through library code: its arguments, its receiver)
-        if self.gen_reads.iter().any(|r| r.1) && !fv.pts.iter().all(|o| matches!(self.kind(o), Kind::Function | Kind::Bound | Kind::Class)) {
-            let objs: Vec<ObjId> = fv.pts.iter().filter_map(|o| match &self.obj(o).payload {
+        if self.gen_reads.iter().any(|r| r.1) && !fv.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Function | Kind::Bound | Kind::Class)) {
+            let objs: Vec<ObjId> = fv.pts.iter().filter_map(|o| match &self.heap.obj(o).payload {
                 Payload::Method(_, r) => Some(r.pts.to_vec()),
                 _ => None,
             }).flatten().chain(args.iter().chain(kwargs.values()).chain(star_args.iter()).flat_map(|a| a.pts.iter())).collect();
@@ -73,19 +73,19 @@ impl Analyzer {
         }
         // (generators passed or called through a method run now; unless the callee takes all
         // their items at once, code runs between the items)
-        let bulk = !fv.pts.is_empty() && fv.pts.iter().all(|o| match &self.obj(o).payload {
-            Payload::Str(q) if self.kind(o) == Kind::External => super::BULK_CONSUMERS.contains(&q.as_str()),
+        let bulk = !fv.pts.is_empty() && fv.pts.iter().all(|o| match &self.heap.obj(o).payload {
+            Payload::Str(q) if self.heap.kind(o) == Kind::External => super::BULK_CONSUMERS.contains(&q.as_str()),
             Payload::Method(q, _) => super::BULK_CONSUMERS.contains(&q.as_str()),
             _ => false,
         });
         for o in fv.pts.iter() {
-            if let Payload::Method(_, r) | Payload::Bound(_, r) = &self.obj(o).payload {
+            if let Payload::Method(_, r) | Payload::Bound(_, r) = &self.heap.obj(o).payload {
                 let r = r.clone();
                 self.force_gen(&r, state, true);
             }
         }
         // (the program's own code takes them as they are: its loops run them)
-        let user = !fv.pts.is_empty() && fv.pts.iter().all(|o| matches!(self.kind(o), Kind::Function | Kind::Bound | Kind::Class));
+        let user = !fv.pts.is_empty() && fv.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Function | Kind::Bound | Kind::Class));
         for a in args.iter().chain(kwargs.values()).chain(star_args.iter()).chain(star_kwargs.iter()).filter(|_| !user) {
             self.force_gen(a, state, !bulk);
         }
@@ -97,13 +97,13 @@ impl Analyzer {
             return self.call_one(targets[0], &args, &kwargs, &star_args, &star_kwargs, state, node, call_ast);
         }
         // (past the hard deadline: one unknown call for all of them)
-        if self.over_hard_deadline() && targets.iter().all(|o| matches!(self.kind(*o), Kind::Function | Kind::Bound)) {
+        if self.over_hard_deadline() && targets.iter().all(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound)) {
             return self.unknown_call("?", None, &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
         self.alternatives(targets.len(), false, state, &mut |an, i, st| {
             let oid = targets[i];
             // (a groupby method of one of several groupby objects: its results are its own)
-            let own = matches!(&an.obj(oid).payload, Payload::Method(q, r) if q.starts_with("groupby.") && r.pts.iter().all(|g| an.kind(g) == Kind::Groupby));
+            let own = matches!(&an.heap.obj(oid).payload, Payload::Method(q, r) if q.starts_with("groupby.") && r.pts.iter().all(|g| an.heap.kind(g) == Kind::Groupby));
             let saved = if own { an.alloc_extra.replace(format!("gbm{}", oid)) } else { an.alloc_extra.clone() };
             let r = an.call_one(oid, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast);
             an.alloc_extra = saved;
@@ -143,18 +143,18 @@ impl Analyzer {
     }
 
     pub fn call_one(&mut self, oid: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
-        let kind = self.kind(oid);
+        let kind = self.heap.kind(oid);
         // torch: a layer object / Sequential, or a user nn.Module (its forward)
         if matches!(kind, Kind::Namespace | Kind::List) && self.t_layer_type(oid).is_some() {
             let r = self.t_layer_call(oid, args, kwargs, node, state);
             return self.t_forward_hooks(oid, args, r, state, node);
         }
         if kind == Kind::Instance && self.torch_on && self.t_is_module_instance(oid) {
-            if let Some(cls) = self.instance_class(oid) {
+            if let Some(cls) = self.heap.instance_class(oid) {
                 if self.class_lookup(cls, "__call__").is_none() {
                     if let Some(m) = self.class_lookup(cls, "forward") {
                         let f = self.cls_slots.get(&(m, Ns::Attr, key_str_lit("forward"))).cloned().unwrap_or_default();
-                        let fns: Vec<u32> = f.pts.iter().filter(|x| self.kind(*x) == Kind::Function).collect();
+                        let fns: Vec<u32> = f.pts.iter().filter(|x| self.heap.kind(*x) == Kind::Function).collect();
                         let r = self.call_alternatives(&fns, oid, args, kwargs, star_args, star_kwargs, state, node, call_ast);
                         return self.t_forward_hooks(oid, args, r, state, node);
                     }
@@ -162,9 +162,9 @@ impl Analyzer {
             }
         }
         match kind {
-            Kind::Function if self.func_info(oid).is_memo.get() && star_args.is_empty() && star_kwargs.is_empty() => self.memo_call(oid, args, kwargs, state, node, call_ast),
+            Kind::Function if self.heap.func_info(oid).is_memo.get() && star_args.is_empty() && star_kwargs.is_empty() => self.memo_call(oid, args, kwargs, state, node, call_ast),
             Kind::Function => {
-                let fi = self.func_info(oid);
+                let fi = self.heap.func_info(oid);
                 if fi.cls.is_some() && !fi.is_static.get() && !args.is_empty() && !fi.is_classmethod.get() {
                     // unbound method called with explicit self: Base.method(self, ...)
                     return self.call_user(oid, Some(args[0].clone()), args[1..].to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, call_ast, false);
@@ -178,12 +178,12 @@ impl Analyzer {
                 self.call_user(oid, None, args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, call_ast, false)
             }
             Kind::Bound => {
-                let Payload::Bound(f, self_v) = self.obj(oid).payload.clone() else { return Value::new() };
+                let Payload::Bound(f, self_v) = self.heap.obj(oid).payload.clone() else { return Value::new() };
                 self.call_user(f, Some(self_v), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, call_ast, false)
             }
             Kind::Class => self.construct(oid, args, kwargs, star_args, star_kwargs, state, node),
             Kind::External => {
-                let qual = self.external_qual(oid);
+                let qual = self.heap.external_qual(oid);
                 if let Some(v) = crate::models::builtin_dunder(self, &qual, args, kwargs, star_args, star_kwargs, state, node) {
                     return v;
                 }
@@ -194,10 +194,10 @@ impl Analyzer {
                 r
             }
             Kind::Method => {
-                let Payload::Method(qual, recv) = self.obj(oid).payload.clone() else { return Value::new() };
+                let Payload::Method(qual, recv) = self.heap.obj(oid).payload.clone() else { return Value::new() };
                 // several groupby objects (`groupby` over one of several columns): the model runs
                 // once per object, each making its own results
-                if qual.starts_with("groupby.") && recv.pts.len() > 1 && recv.pts.iter().all(|o| self.kind(o) == Kind::Groupby) {
+                if qual.starts_with("groupby.") && recv.pts.len() > 1 && recv.pts.iter().all(|o| self.heap.kind(o) == Kind::Groupby) {
                     let gs: Vec<ObjId> = recv.pts.to_vec();
                     return self.alternatives(gs.len(), false, state, &mut |an, i, st| {
                         let Some(mo) = an.method_value(&qual, &Value::obj(gs[i])).single() else { return Value::new() };
@@ -226,7 +226,7 @@ impl Analyzer {
                 r
             }
             Kind::Unknown => {
-                let q = format!("call of {}", self.obj(oid).label);
+                let q = format!("call of {}", self.heap.obj(oid).label);
                 self.unknown_call(&q, Some(&Value::obj(oid)), args, kwargs, star_args, star_kwargs, state, node)
             }
             Kind::Partial => {
@@ -234,21 +234,21 @@ impl Analyzer {
                 crate::models::partial_call(self, state, &call)
             }
             Kind::Instance => {
-                if let Some(cls) = self.instance_class(oid) {
+                if let Some(cls) = self.heap.instance_class(oid) {
                     if let Some(m) = self.class_lookup(cls, "__call__") {
                         let f = self.cls_slots.get(&(m, Ns::Attr, key_str_lit("__call__"))).cloned().unwrap_or_default();
                         if f.pts.is_empty() {
                             return Value::new();
                         }
-                        let fns: Vec<u32> = f.pts.iter().filter(|x| self.kind(*x) == Kind::Function).collect();
+                        let fns: Vec<u32> = f.pts.iter().filter(|x| self.heap.kind(*x) == Kind::Function).collect();
                         return self.call_alternatives(&fns, oid, args, kwargs, star_args, star_kwargs, state, node, call_ast);
                     }
                 }
-                let q = format!("call of {}", self.obj(oid).label);
+                let q = format!("call of {}", self.heap.obj(oid).label);
                 self.unknown_call(&q, Some(&Value::obj(oid)), args, kwargs, star_args, star_kwargs, state, node)
             }
             _ => {
-                let q = format!("call of {}", self.obj(oid).label);
+                let q = format!("call of {}", self.heap.obj(oid).label);
                 self.unknown_call(&q, None, args, kwargs, star_args, star_kwargs, state, node)
             }
         }
@@ -272,7 +272,7 @@ impl Analyzer {
         // `f.__get__(obj)` (a library function bound by hand: attrs's
         // `object.__setattr__.__get__(self)`): f with obj as its first argument
         if let Some(base) = qual.strip_suffix(".__get__").filter(|_| !args.is_empty() && kwargs.is_empty()) {
-            let f = self.alloc_raw(Kind::External, &format!("ext:{}", base), "", true, base, Payload::Str(base.to_string()));
+            let f = self.heap.alloc_raw(Kind::External, &format!("ext:{}", base), "", true, base, Payload::Str(base.to_string()));
             let pc = Call { qual: "functools.partial".into(), args: vec![Value::obj(f), args[0].clone()], ..call.clone() };
             if let Some(m) = self.models.lookup("functools.partial") {
                 return self.run_model(m, state, &pc);
@@ -315,7 +315,7 @@ impl Analyzer {
         let name = read_as.unwrap_or_else(|| qual.rsplit('.').next().unwrap_or(qual));
         // (a library object's logging / writing / comparing method — the receiver is not one
         // of the program's objects — changes nothing it is given)
-        if NOEFFECT_METHOD_NAMES.contains(&name) && recv.map(|r| r.pts.iter().all(|o| matches!(self.kind(o), Kind::Unknown | Kind::External) && !self.is_any(o))).unwrap_or(true) {
+        if NOEFFECT_METHOD_NAMES.contains(&name) && recv.map(|r| r.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Unknown | Kind::External) && !self.is_any(o))).unwrap_or(true) {
             self.flag_may_raise(state);
             return Value::data(&format!("L{}", node.line));
         }
@@ -341,7 +341,7 @@ impl Analyzer {
         // items, lengths; and it may call the program's functions it is given
         self.havoc_reachable(&vals, rid, site_id, state);
         let found = std::mem::take(&mut self.havoc_code);
-        let callables: Vec<ObjId> = found.iter().copied().filter(|o| matches!(self.kind(*o), Kind::Function | Kind::Bound | Kind::Partial)).collect();
+        let callables: Vec<ObjId> = found.iter().copied().filter(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound | Kind::Partial)).collect();
         if !callables.is_empty() {
             self.follow_code(callables, rid, site_id, state);
         }
@@ -352,10 +352,10 @@ impl Analyzer {
             let text = crate::frontend::text_at(node);
             let mut given: Vec<String> = Vec::new();
             for (o, _) in &arg_recs {
-                if matches!(self.kind(*o), Kind::Unknown) {
+                if matches!(self.heap.kind(*o), Kind::Unknown) {
                     continue;
                 }
-                let g = self.obj(*o).label.to_string();
+                let g = self.heap.obj(*o).label.to_string();
                 if !given.contains(&g) {
                     given.push(g);
                 }
@@ -416,7 +416,7 @@ impl Analyzer {
         let site_id = s(site);
         self.havoc_reachable(std::slice::from_ref(v), any, site_id, state);
         let found = std::mem::take(&mut self.havoc_code);
-        let callables: Vec<ObjId> = found.into_iter().filter(|o| matches!(self.kind(*o), Kind::Function | Kind::Bound | Kind::Partial)).collect();
+        let callables: Vec<ObjId> = found.into_iter().filter(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound | Kind::Partial)).collect();
         if !callables.is_empty() {
             self.follow_code(callables, any, site_id, state);
         }
@@ -430,7 +430,7 @@ impl Analyzer {
             if !seen.insert(oid) {
                 continue;
             }
-            let k = self.kind(oid);
+            let k = self.heap.kind(oid);
             if matches!(k, Kind::Dict | Kind::Frame | Kind::Unknown) {
                 out.push((oid, Ns::Item));
             }
@@ -448,7 +448,7 @@ impl Analyzer {
 
     /// The object standing for any value unknown code may have stored: nothing known about it.
     pub fn any_object(&mut self, _state: &mut State) -> ObjId {
-        let o = self.alloc_raw(Kind::Unknown, "any", "", false, "?", Payload::None);
+        let o = self.heap.alloc_raw(Kind::Unknown, "any", "", false, "?", Payload::None);
         crate::state::set_any(o);
         o
     }
@@ -522,7 +522,7 @@ impl Analyzer {
                     // (its code reaches the receiver's attributes only by the names it uses:
                     // its own, or its class's data)
                     let used = used.clone();
-                    let mro = self.instance_class(o).map(|c| self.mro(c)).unwrap_or_default();
+                    let mro = self.heap.instance_class(o).map(|c| self.mro(c)).unwrap_or_default();
                     for k in used.iter() {
                         // (`self.__class__` / `type(self)`: the class, and all it reaches)
                         if intern::key_as_str(*k).as_deref() == Some("__class__") {
@@ -531,7 +531,7 @@ impl Analyzer {
                         work.extend(state.slot(o, Ns::Attr, *k).pts.iter());
                         for c in &mro {
                             let v = if state.has_slot(*c, Ns::Attr, *k) { state.slot(*c, Ns::Attr, *k) } else { self.cls_slots.get(&(*c, Ns::Attr, *k)).cloned().unwrap_or_default() };
-                            work.extend(v.pts.iter().filter(|x| self.kind(*x) != Kind::Function));
+                            work.extend(v.pts.iter().filter(|x| self.heap.kind(*x) != Kind::Function));
                         }
                     }
                 }
@@ -539,7 +539,7 @@ impl Analyzer {
             }
             let i = o as usize;
             if i >= self.havoc_marks.len() {
-                self.havoc_marks.resize(self.objects.len().max(i + 1), 0);
+                self.havoc_marks.resize(self.heap.len().max(i + 1), 0);
             }
             if o == rid || o == any_id || self.havoc_marks[i] == walk {
                 continue;
@@ -550,8 +550,8 @@ impl Analyzer {
             }
             visited.insert(o);
             self.havoc_walked += 1;
-            let k = self.kind(o);
-            match (&k, &self.obj(o).payload) {
+            let k = self.heap.kind(o);
+            match (&k, &self.heap.obj(o).payload) {
                 // (the code it meets, for `skipped_call`; a stored method may change its receiver)
                 (Kind::Class | Kind::Function | Kind::Bound | Kind::Partial, _) => {
                     self.havoc_code.push(o);
@@ -601,13 +601,13 @@ impl Analyzer {
             let havocked = |state: &State| {
                 state.slot(o, Ns::Elem, intern::STAR).pts.contains(any_id) && state.lens.get(&o) == Some((None, 0, 0)) && !state.lasts.iter().any(|(x, _)| *x == o) && state.elems.get(&o).is_some_and(|kv| crate::domain::kv_join(&kv, &DATA) == kv)
             };
-            if matches!(k, Kind::List | Kind::Set) && !self.obj(o).site.starts_with("gen:") && !havocked(state) {
+            if matches!(k, Kind::List | Kind::Set) && !self.heap.obj(o).site.starts_with("gen:") && !havocked(state) {
                 let e = state.slot(o, Ns::Elem, intern::STAR).join(&any);
                 state.set_slot(o, Ns::Elem, intern::STAR, e, false);
                 let kv = crate::domain::kv_join(&state.elems.get(&o).unwrap_or(DATA), &DATA);
                 state.elems.insert(o, kv);
                 state.clear_last(o);
-                self.set_prefix(o, state, 0);
+                self.heap.set_prefix(o, state, 0);
             }
         }
         if self.havoc_guard.is_none() {
@@ -650,7 +650,7 @@ impl Analyzer {
         // on it when it is an instance of the class
         if let Some(owner) = self.class_lookup(cls, "__new__") {
             let fv = self.cls_slots.get(&(owner, Ns::Attr, key_str_lit("__new__"))).cloned().unwrap_or_default();
-            let fns: Vec<ObjId> = fv.pts.iter().filter(|f| self.kind(*f) == Kind::Function).collect();
+            let fns: Vec<ObjId> = fv.pts.iter().filter(|f| self.heap.kind(*f) == Kind::Function).collect();
             if !fns.is_empty() {
                 let mut nargs = vec![Value::obj(cls)];
                 nargs.extend(args.iter().cloned());
@@ -661,9 +661,9 @@ impl Analyzer {
                 }
                 if let Some(init) = self.class_lookup(cls, "__init__") {
                     let iv = self.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
-                    let insts: Vec<ObjId> = out.pts.iter().filter(|o| self.kind(*o) == Kind::Instance && self.instance_class(*o).is_some_and(|c| self.mro(c).contains(&cls))).collect();
+                    let insts: Vec<ObjId> = out.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Instance && self.heap.instance_class(*o).is_some_and(|c| self.mro(c).contains(&cls))).collect();
                     for inst in insts {
-                        for f in iv.pts.iter().filter(|f| self.kind(*f) == Kind::Function).collect::<Vec<_>>() {
+                        for f in iv.pts.iter().filter(|f| self.heap.kind(*f) == Kind::Function).collect::<Vec<_>>() {
                             self.call_user(f, Some(Value::obj(inst)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, None, false);
                         }
                     }
@@ -680,7 +680,7 @@ impl Analyzer {
             let fv = self.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
             self.fresh_init.insert(inst);
             for f in fv.pts.iter() {
-                if self.kind(f) == Kind::Function {
+                if self.heap.kind(f) == Kind::Function {
                     self.call_user(f, Some(Value::obj(inst)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, None, false);
                 }
             }
@@ -694,7 +694,7 @@ impl Analyzer {
     /// A fresh instance of user class `cls` allocated at `node`, without attributes (an
     /// external base's may come from outside the program).
     pub fn alloc_instance(&mut self, cls: ObjId, node: &Node, state: &mut State) -> ObjId {
-        let ci = self.class_info(cls);
+        let ci = self.heap.class_info(cls);
         let row = if ci.open_base { Row::with_source(Source::new(&format!("instance {}@L{}", ci.name, node.line), SourceKind::Class)) } else { Row::new() };
         // the allocation site includes the class: `cls()` with several possible classes must
         // not collapse onto one instance (prototype: same site, last class wins); by the class
@@ -716,13 +716,13 @@ impl Analyzer {
     fn receiver_ctx(&self, self_v: &Option<Value>, site: &str) -> (String, bool) {
         if let Some(sv) = self_v {
             if let Some(r) = sv.single() {
-                if self.kind(r) == Kind::Instance {
-                    let recv = self.obj(r);
+                if self.heap.kind(r) == Kind::Instance {
+                    let recv = self.heap.obj(r);
                     // per receiver and call site: two calls of one method on one receiver
                     // allocate distinct objects
                     let ctx = if !recv.single {
                         site.to_string()
-                    } else if self.site_clones.get(&*recv.site).copied().unwrap_or(0) >= MAX_CLONES {
+                    } else if self.heap.clones(&recv.site) >= MAX_CLONES {
                         String::new()
                     } else {
                         format!("o{}/{}", recv.id, site)
@@ -769,9 +769,9 @@ impl Analyzer {
     fn make_lazy_gen(&mut self, foid: u32, self_v: Option<Value>, mut args: Vec<Value>, mut kwargs: IndexMap<StrId, Value>, state: &mut State, node: &Node) -> Value {
         let site = self.callee_site(node);
         let ctx = self.receiver_ctx(&self_v, &site);
-        let q = self.func_info(foid).qualname.clone();
-        let gid = self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx.0, true, &format!("generator {}", q), Payload::None);
-        self.obj_mut(gid).iterator = true;
+        let q = self.heap.func_info(foid).qualname.clone();
+        let gid = self.heap.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx.0, true, &format!("generator {}", q), Payload::None);
+        self.heap.obj_mut(gid).iterator = true;
         let mut self_v = self_v;
         if let Some(old) = self.lazy_gens.get(&gid).filter(|_| lazy_state(state, gid).0) {
             self_v = match (&self_v, &old.self_v) {
@@ -831,7 +831,7 @@ impl Analyzer {
                 targets.dedup();
                 let reach = if targets.is_empty() { FxHashSet::default() } else { self.reach_among(&roots, &targets, state) };
                 let reads = reads.into_iter().filter(|r| reach.contains(&r.0)).collect();
-                let w = super::GenWatch { gid: o, own, after: state.copy(), reads, budget, born: self.serial };
+                let w = super::GenWatch { gid: o, own, after: state.copy(), reads, budget, born: self.heap.serial() };
                 self.gen_watch.push(w);
             }
             if !r.pts.contains(o) && state.reachable {
@@ -843,7 +843,7 @@ impl Analyzer {
                 state.set_slot(o, Ns::Elem, intern::STAR, Value::objs(e.pts.clone()), false);
                 let kv = crate::domain::kv_join(&state.elems.get(&o).unwrap_or(DATA), &e.kv);
                 state.elems.insert(o, kv);
-                self.set_llen(o, state, None);
+                self.heap.set_llen(o, state, None);
                 state.drop_obj_ns(o, Ns::Pos);
                 state.set_slot(o, Ns::Attr, key_str_lit("\u{1}genret"), Value::data("generator result"), true);
             }
@@ -868,7 +868,7 @@ impl Analyzer {
         // arguments possibly changed, it may raise): the run ends in bounded time
         if self.over_hard_deadline() {
             self.force_at = None;
-            let q = self.func_info(foid).qualname.clone();
+            let q = self.heap.func_info(foid).qualname.clone();
             self.note(format!("analysis cut at the deadline ({} ms): later calls are unknown code", super::limit("ms", super::DEADLINE_MS)));
             return self.skipped_call(foid, &q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
@@ -879,7 +879,7 @@ impl Analyzer {
             && star_args.is_empty()
             && star_kwargs.is_empty()
             && !self.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth == self.frames.len())
-            && matches!(self.func_info(foid).node, FuncNode::Def(f) if is_generator(&f.body));
+            && matches!(self.heap.func_info(foid).node, FuncNode::Def(f) if is_generator(&f.body));
         if lazy {
             return self.make_lazy_gen(foid, self_v, args, kwargs, state, node);
         }
@@ -891,7 +891,7 @@ impl Analyzer {
         let r = self.call_user_inner(foid, self_v, args, kwargs, star_args, star_kwargs, state, node, _call_ast, entry);
         self.model_depth = saved_md;
         if self.hard_cut && !was_cut {
-            let q = self.func_info(foid).qualname.clone();
+            let q = self.heap.func_info(foid).qualname.clone();
             self.note(format!("analysis cut at the deadline ({} ms) inside {}: the call is unknown code", super::limit("ms", super::DEADLINE_MS), q));
             state.reachable = true;
             let (sv, a, kw, sa, skw) = keep;
@@ -910,7 +910,7 @@ impl Analyzer {
         if !state.narrowed.is_empty() {
             state.narrowed.clear();
         }
-        let fi = self.func_info(foid);
+        let fi = self.heap.func_info(foid);
         let fnode = fi.node;
         let site = match forced.as_ref() {
             Some((site, _, _)) => site.clone(),
@@ -989,7 +989,7 @@ impl Analyzer {
                 let had = grown.is_some();
                 let roots: Vec<Value> = self_v.iter().chain(args.iter()).chain(kwargs.values()).cloned().collect();
                 let fp = state.footprint(&pre);
-                let old = |o: ObjId| self.objects[o as usize].born < mark;
+                let old = |o: ObjId| self.heap.born_before(o, mark);
                 let mut targets: Vec<ObjId> = fp.rows.iter().map(|k| k.0).chain(fp.slots.iter().map(|k| k.0)).chain(fp.elems.iter().copied()).filter(|o| old(*o)).collect();
                 targets.sort_unstable();
                 targets.dedup();
@@ -1033,7 +1033,7 @@ impl Analyzer {
             None => self.receiver_ctx(&self_v, &site),
         };
         // (a generator's object: the one its run returns, keyed as `yield_value` finds it)
-        let gen_id = matches!(fnode, FuncNode::Def(f) if is_generator(&f.body)).then(|| self.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None));
+        let gen_id = matches!(fnode, FuncNode::Def(f) if is_generator(&f.body)).then(|| self.heap.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None));
         let fr_single = self.frame().single && self.frame().loop_depth == 0 && ctx_single;
         let fr_single_nl = self.frame().single_nl && ctx_single;
         let mut new_fr = Frame::new(FrameKind::Function, fi.scope, fi.module, &ctx, fr_single, &fi.qualname);
@@ -1041,11 +1041,11 @@ impl Analyzer {
         new_fr.func = Some(foid);
         new_fr.code = fi.node.addr();
         {
-            let mi = self.module_info(fi.module);
+            let mi = self.heap.module_info(fi.module);
             let mut cells: Vec<String> = mi.scopes.get(fi.scope).cells.iter().cloned().collect();
             cells.sort();
             for name in cells {
-                let cid = self.alloc_raw(Kind::Cell, &format!("cell:{}.{}", fi.qualname, name), &ctx, fr_single, &format!("cell {}", name), Payload::None);
+                let cid = self.heap.alloc_raw(Kind::Cell, &format!("cell:{}.{}", fi.qualname, name), &ctx, fr_single, &format!("cell {}", name), Payload::None);
                 new_fr.cells.insert(s(&name), cid);
             }
         }
@@ -1063,7 +1063,7 @@ impl Analyzer {
         if let Some(ygid) = gen_id {
             // the yielded values of this activation
             let gid = self.alloc(Kind::List, &format!("gen:{}", foid), state, &format!("generator {}", fi.qualname), Payload::None, None, Ns::Item, None, Some(&ctx));
-            self.set_llen(gid, state, Some(0));
+            self.heap.set_llen(gid, state, Some(0));
             state.elems.insert(gid, KeyVal::Lits(KeySet::new()));
             // (a new activation: not consumed yet, its own item states; a running one's
             // yields are put back after it)
@@ -1083,12 +1083,12 @@ impl Analyzer {
 
         let pre_bind = state.copy();
         // (objects made from here on, by birth: a run again of code makes them anew)
-        let born_mark = self.serial;
+        let born_mark = self.heap.serial();
         let pre_rc = std::rc::Rc::new(pre_bind.copy());
         self.rec_heap.insert(key.clone(), (pre_rc.clone(), None, born_mark));
         if gen_id.is_none() {
             if let Some(fr) = self.frames.last_mut() {
-                fr.pre_call = Some(super::PreCall(self.serial, pre_rc));
+                fr.pre_call = Some(super::PreCall(self.heap.serial(), pre_rc));
             }
         }
         let gen_cm = self.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth + 1 == self.frames.len());
@@ -1204,14 +1204,14 @@ impl Analyzer {
                 Some(acc)
             });
             if let Some(mut ys) = joined {
-                let mut p = self.prefix(gid, &ys).unwrap_or(0);
+                let mut p = self.heap.prefix(gid, &ys).unwrap_or(0);
                 // (the yields joined: every position some yield made is there — the items
                 // the endless loop is known to give first)
                 while ys.has_slot(gid, Ns::Pos, intern::key_int(p as i64)) {
                     p += 1;
                 }
                 if p > 0 {
-                    self.objects[gid as usize].known_prefix = Some(p);
+                    self.heap.obj_mut(gid).known_prefix = Some(p);
                 }
                 ys.lens.insert(gid, (None, p, 0));
                 st = ys;
@@ -1222,7 +1222,7 @@ impl Analyzer {
             // the effects per item: before the first, the objects are as before the call
             if st.reachable {
                 let fp = st.footprint(&pre_bind);
-                let old = |o: ObjId| self.objects[o as usize].born < born_mark && o != gid;
+                let old = |o: ObjId| self.heap.born_before(o, born_mark) && o != gid;
                 let rows: Vec<(ObjId, Ns)> = fp.rows.iter().copied().filter(|(o, _)| old(*o)).collect();
                 let slots: Vec<(ObjId, crate::state::SlotKey)> = fp.slots.iter().copied().filter(|(o, _)| old(*o)).collect();
                 let elems: Vec<ObjId> = fp.elems.iter().copied().filter(|o| old(*o)).collect();
@@ -1253,10 +1253,10 @@ impl Analyzer {
             // what `yield from` the generator evaluates to: its return value
             state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}genret"), ret.clone(), true);
             // (one-shot: what a consumer takes is gone for the next one)
-            self.obj_mut(gid).iterator = true;
+            self.heap.obj_mut(gid).iterator = true;
             ret = Value::obj(gid);
         }
-        let rows: Vec<(u32, Row)> = ret.pts.iter().filter(|o| self.is_record_like(*o)).map(|o| (o, state.row(o, Ns::Item))).collect();
+        let rows: Vec<(u32, Row)> = ret.pts.iter().filter(|o| self.heap.is_record_like(*o)).map(|o| (o, state.row(o, Ns::Item))).collect();
         self.summaries.insert((fi.qualname.clone(), if entry { "entry".into() } else { ctx.clone() }), (ret.clone(), rows));
         // cleanup
         self.active.remove(&key);
@@ -1288,7 +1288,7 @@ impl Analyzer {
         // a method whose code touches its receiver only by attribute names (`self.x`, methods
         // run on it): the receiver's own attributes change only by those names, unless what
         // the call reaches otherwise reaches the receiver too (`havoc_guard`)
-        let recv = self_v.and_then(|v| v.single()).filter(|o| self.kind(*o) == Kind::Instance);
+        let recv = self_v.and_then(|v| v.single()).filter(|o| self.heap.kind(*o) == Kind::Instance);
         let eff = recv.and_then(|o| Some((o, self.receiver_effects(foid, o)?)));
         let must: Vec<KeyId> = match &eff {
             Some((_, e)) if fi_is_method(self, foid) => self.must_stores(foid).into_iter().filter(|k| !e.deletes.contains(k)).collect(),
@@ -1441,7 +1441,7 @@ impl Analyzer {
             return;
         }
         let fp = st.footprint(pre);
-        let old = |o: ObjId| self.objects[o as usize].born < mark && o != gid;
+        let old = |o: ObjId| self.heap.born_before(o, mark) && o != gid;
         let ys: Vec<&State> = yields.iter().filter(|y| y.reachable).collect();
         // Each fact of `st` is joined with `pre`'s and every yield state's. Yield states are
         // copies of one another changed by the body, sharing structure: each is diffed against
@@ -1451,7 +1451,7 @@ impl Analyzer {
         // each was facts × yields).
         let entry = |an: &Analyzer, s: &State, o: ObjId| -> (Option<usize>, usize, u16) {
             s.lens.get(&o).unwrap_or_else(|| {
-                let ob = &an.objects[o as usize];
+                let ob = an.heap.obj(o);
                 (ob.literal_len, ob.literal_len.or(ob.known_prefix).unwrap_or(0), 0)
             })
         };
@@ -1533,13 +1533,13 @@ impl Analyzer {
         }
         let mut out: Option<super::ExcNames> = None;
         for o in v.pts.iter() {
-            let names = if let Some(c) = self.instance_class(o) {
+            let names = if let Some(c) = self.heap.instance_class(o) {
                 self.exc_class_names(c)?
             } else if let Some(n) = self.exc_objs.get(&o) {
                 super::builtin_exc_names(n)
-            } else if self.kind(o) == Kind::External && self.class_info_opt(o).is_none() {
+            } else if self.heap.kind(o) == Kind::External && self.heap.class_info_opt(o).is_none() {
                 // (a raised class: `raise KeyError`)
-                super::builtin_exc_names(self.external_qual(o).rsplit('.').next().unwrap_or(""))
+                super::builtin_exc_names(self.heap.external_qual(o).rsplit('.').next().unwrap_or(""))
             } else {
                 return None;
             };
@@ -1558,9 +1558,9 @@ impl Analyzer {
         let mut names: Vec<String> = Vec::new();
         let mut complete = true;
         for c in mro.iter() {
-            let ci = self.class_info_opt(*c)?;
+            let ci = self.heap.class_info_opt(*c)?;
             names.push(ci.name.clone());
-            let user: Vec<String> = ci.bases.iter().filter_map(|b| self.class_info_opt(*b).map(|x| x.name.clone())).collect();
+            let user: Vec<String> = ci.bases.iter().filter_map(|b| self.heap.class_info_opt(*b).map(|x| x.name.clone())).collect();
             for e in ci.node.arguments.as_ref().map(|a| a.args.iter().collect::<Vec<_>>()).unwrap_or_default() {
                 let n = super::dotted_last(e);
                 if user.contains(&n) || n == "object" {
@@ -1593,7 +1593,7 @@ impl Analyzer {
         if self.cur_exc.is_none() && self.class_guarded(&cls) && self.exc_node.is_some() {
             let n = name.rsplit('.').next().unwrap_or(name);
             if super::builtin_exc_names(n).1 && super::is_builtin_name(n) {
-                let o = self.alloc_raw(Kind::Namespace, &format!("exc:{}", n), "", false, n, Payload::None);
+                let o = self.heap.alloc_raw(Kind::Namespace, &format!("exc:{}", n), "", false, n, Payload::None);
                 crate::state::mark_merged(o);
                 if !state.has_row(o, Ns::Attr) {
                     state.set_row(o, Ns::Attr, crate::domain::Row::with_source(crate::domain::Source::new(n, crate::domain::SourceKind::Data)));
@@ -1629,7 +1629,7 @@ impl Analyzer {
     }
 
     pub fn in_method_frame(&mut self, foid: u32, self_v: Value, args: Vec<Value>, state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &mut State)) {
-        let fi = self.func_info(foid);
+        let fi = self.heap.func_info(foid);
         let ctx = self.frame().ctx.clone();
         let mut new_fr = Frame::new(FrameKind::Function, fi.scope, fi.module, &ctx, false, &fi.qualname);
         new_fr.func = Some(foid);
@@ -1747,7 +1747,7 @@ impl Analyzer {
             }
             state.set_slot(tid, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), DATA), true);
             state.elems.insert(tid, if !rest_pos.is_empty() { acc.kv.clone() } else { DATA });
-            self.set_llen(tid, state, if star_args.is_empty() { Some(rest_pos.len()) } else { None });
+            self.heap.set_llen(tid, state, if star_args.is_empty() { Some(rest_pos.len()) } else { None });
             for (i, v) in rest_pos.iter().enumerate() {
                 state.set_slot(tid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
             }
@@ -1873,7 +1873,7 @@ impl Analyzer {
         changed.extend(fp.elems.into_iter().chain(fin.lens.diff_keys(&f.lens)).map(|o| (o, None)));
         let read = |(o, k): &super::Change| w.reads.contains(&(*o, *k)) || w.reads.contains(&(*o, None)) || (k.is_none() && w.reads.iter().any(|r| r.0 == *o));
         // (an object made since is not the one the generator read, whatever its site)
-        let older = |o: ObjId| self.objects[o as usize].born < w.born;
+        let older = |o: ObjId| self.heap.born_before(o, w.born);
         let mut hit: Vec<super::Change> = changed.into_iter().filter(|c| c.0 != w.gid && older(c.0) && !w.own.contains(&c.0) && !unknown.contains(&c.0) && read(c)).collect();
         if all && !hit.is_empty() {
             hit = w.reads.iter().map(|r| (r.0, None)).collect();
@@ -1883,7 +1883,7 @@ impl Analyzer {
         let have = self.gen_havoc.get(&w.gid);
         hit.retain(|c| !have.is_some_and(|h| h.contains(c) || h.contains(&(c.0, None))));
         if !hit.is_empty() && super::debug_enabled() {
-            eprintln!("generator {} sees changes of {:?}", self.obj(w.gid).label, hit.iter().map(|(o, k)| format!("{}{:?}", self.obj(*o).label, k.map(|k| intern::key_repr(k.1)))).collect::<Vec<_>>());
+            eprintln!("generator {} sees changes of {:?}", self.heap.obj(w.gid).label, hit.iter().map(|(o, k)| format!("{}{:?}", self.heap.obj(*o).label, k.map(|k| intern::key_repr(k.1)))).collect::<Vec<_>>());
         }
         hit
     }
@@ -1918,7 +1918,7 @@ impl Analyzer {
                     break;
                 }
             }
-            if !matches!(self.kind(o), Kind::Module | Kind::Class | Kind::Function) {
+            if !matches!(self.heap.kind(o), Kind::Module | Kind::Class | Kind::Function) {
                 self.obj_edges(o, st, &mut work);
             }
         }

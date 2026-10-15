@@ -272,7 +272,7 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
     an.run();
     let mut deps: Vec<String> = vec![file.to_string()];
     for (_, &m) in an.modules.iter() {
-        if let Some(p) = &an.module_info(m).path {
+        if let Some(p) = &an.heap.module_info(m).path {
             // (a namespace package's directory has no text to hash)
             if !deps.contains(p) && !std::path::Path::new(p).is_dir() {
                 deps.push(p.clone());
@@ -280,7 +280,7 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
         }
     }
     if std::env::var("ROWAN_DEBUG").is_ok() {
-        eprintln!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {} (walks {}, joins {}), havoc visits {})", an.work, an.work_units(), an.tab_runs, an.objects.len(), an.started.elapsed().as_millis(), if an.hard_cut { ", cut at the deadline" } else { "" }, an.tab_count.values().sum::<usize>(), rowan::domain::row_joins(), an.walked.get() + rowan::state::fp_visits(), an.walked.get(), rowan::state::fp_visits(), an.havoc_walked);
+        eprintln!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {} (walks {}, joins {}), havoc visits {})", an.work, an.work_units(), an.tab_runs, an.heap.len(), an.started.elapsed().as_millis(), if an.hard_cut { ", cut at the deadline" } else { "" }, an.tab_count.values().sum::<usize>(), rowan::domain::row_joins(), an.walked.get() + rowan::state::fp_visits(), an.walked.get(), rowan::state::fp_visits(), an.havoc_walked);
     }
     if facts {
         return Ok((serde_json::to_string(&report::facts_json(&an)).unwrap(), deps));

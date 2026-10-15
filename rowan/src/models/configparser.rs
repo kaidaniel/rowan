@@ -178,7 +178,7 @@ pub fn m_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// A dict of literal str keys and literal values (`str()` of them).
 fn literal_mapping(an: &mut Analyzer, st: &State, v: &Value) -> Option<IndexMap<String, String>> {
-    let d = v.single().filter(|o| an.kind(*o) == Kind::Dict)?;
+    let d = v.single().filter(|o| an.heap.kind(*o) == Kind::Dict)?;
     let row = st.row(d, Ns::Item);
     if row.open() || row.present != row.definite {
         return None;
@@ -510,7 +510,7 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// `{"section": {"opt": value, …}, …}` with literal keys / values.
 fn nested_mapping(an: &mut Analyzer, st: &State, v: &Value) -> Option<IndexMap<String, IndexMap<String, String>>> {
-    let d = v.single().filter(|o| an.kind(*o) == Kind::Dict)?;
+    let d = v.single().filter(|o| an.heap.kind(*o) == Kind::Dict)?;
     let row = st.row(d, Ns::Item);
     if row.open() || row.present != row.definite {
         return None;

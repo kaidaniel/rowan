@@ -168,7 +168,7 @@ fn df_dispatch(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         return res;
     }
     let fs = frames(an, c.recv.as_ref());
-    let strong = fs.len() == 1 && an.obj(fs[0]).single;
+    let strong = fs.len() == 1 && an.heap.obj(fs[0]).single;
     for r in frames(an, Some(&res)) {
         let row = st.row(r, Ns::Item);
         let meta: Vec<(crate::state::SlotKey, Value)> = st.slots_of(r).into_iter().filter(|((ns, _), _)| *ns == Ns::Meta).collect();
@@ -202,8 +202,8 @@ fn series_call(an: &mut Analyzer, _st: &mut State, _c: &Call) -> Value {
 // names, as for frames), ("vals", "") / ("dtype", "") its values.
 
 pub fn is_series_obj(an: &Analyzer, o: u32) -> bool {
-    an.kind(o) == Kind::Dict && {
-        let l = &an.obj(o).label;
+    an.heap.kind(o) == Kind::Dict && {
+        let l = &an.heap.obj(o).label;
         l.starts_with("series@") || l.starts_with("row@") || l.starts_with("row of ")
     }
 }
@@ -305,22 +305,22 @@ fn column_series(an: &mut Analyzer, st: &mut State, f: u32, col: KeyId, node: &N
 pub fn series_getattr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, st: &mut State) -> Value {
     match name {
         "str" | "dt" | "cat" | "sparse" | "list" | "struct" => {
-            let label = format!("{}.{}", an.obj(oid).label, name);
-            let lid = an.alloc_raw(Kind::Locidx, &format!("acc:{}:{}", name, oid), "", true, &label, Payload::Locidx(name.to_string(), oid));
-            an.obj_mut(lid).payload = Payload::Locidx(name.to_string(), oid);
+            let label = format!("{}.{}", an.heap.obj(oid).label, name);
+            let lid = an.heap.alloc_raw(Kind::Locidx, &format!("acc:{}:{}", name, oid), "", true, &label, Payload::Locidx(name.to_string(), oid));
+            an.heap.obj_mut(lid).payload = Payload::Locidx(name.to_string(), oid);
             Value::obj(lid)
         }
         "index" if oid != an.series => {
-            let vid = an.alloc_raw(Kind::View, &format!("view:keys:{}", oid), "", true, "index", Payload::View(ViewKind::Keys, Value::obj(oid)));
-            an.obj_mut(vid).payload = Payload::View(ViewKind::Keys, Value::obj(oid));
+            let vid = an.heap.alloc_raw(Kind::View, &format!("view:keys:{}", oid), "", true, "index", Payload::View(ViewKind::Keys, Value::obj(oid)));
+            an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Keys, Value::obj(oid));
             Value::obj(vid)
         }
         "name" => series_name(an, st, oid),
         "values" | "array" | "dtype" | "shape" | "size" | "empty" | "nbytes" | "ndim" | "hasnans" | "is_unique" | "is_monotonic_increasing" | "is_monotonic_decreasing" | "index" | "axes" | "dtypes" | "flags" | "attrs" => Value::data(&format!("{}@L{}", name, node.line)),
         "iloc" | "loc" | "at" | "iat" if oid != an.series => {
-            let label = format!("{} of {}", name, an.obj(oid).label);
-            let lid = an.alloc_raw(Kind::Locidx, &format!("sloc:{}:{}", name, oid), "", true, &label, Payload::Locidx(format!("s{}", name), oid));
-            an.obj_mut(lid).payload = Payload::Locidx(format!("s{}", name), oid);
+            let label = format!("{} of {}", name, an.heap.obj(oid).label);
+            let lid = an.heap.alloc_raw(Kind::Locidx, &format!("sloc:{}:{}", name, oid), "", true, &label, Payload::Locidx(format!("s{}", name), oid));
+            an.heap.obj_mut(lid).payload = Payload::Locidx(format!("s{}", name), oid);
             Value::obj(lid)
         }
         "iloc" | "loc" | "at" | "iat" => Value::data(&format!("{}@L{}", name, node.line)),
@@ -378,7 +378,7 @@ fn named_agg(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let col = c.arg(0, Some("column")).unwrap_or_default();
     let f = c.arg(1, Some("aggfunc")).unwrap_or_default();
     let tid = an.alloc_at(Kind::Tuple, &c.node, st, "tuple", Payload::None, None, Ns::Item, None, None);
-    an.set_llen(tid, st, Some(2));
+    an.heap.set_llen(tid, st, Some(2));
     st.set_slot(tid, Ns::Pos, intern::key_int(0), col, true);
     st.set_slot(tid, Ns::Pos, intern::key_int(1), f, true);
     Value::obj(tid)
@@ -387,7 +387,7 @@ fn named_agg(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// Named aggregations `name=(column, f)`, from keywords and `**dict`: (name, surely, column).
 fn named_aggs(an: &Analyzer, st: &State, c: &Call) -> Vec<(KeyId, bool, Option<KeyId>)> {
     let col_of = |v: &Value| -> Option<KeyId> {
-        v.pts.iter().find_map(|x| (an.kind(x) == Kind::Tuple && an.llen(x, st) == Some(2)).then(|| st.slot(x, Ns::Pos, intern::key_int(0)).kv.as_lit()).flatten())
+        v.pts.iter().find_map(|x| (an.heap.kind(x) == Kind::Tuple && an.heap.llen(x, st) == Some(2)).then(|| st.slot(x, Ns::Pos, intern::key_int(0)).kv.as_lit()).flatten())
     };
     let mut out = Vec::new();
     for (k, v) in c.kwargs.iter() {
@@ -396,7 +396,7 @@ fn named_aggs(an: &Analyzer, st: &State, c: &Call) -> Vec<(KeyId, bool, Option<K
         }
     }
     for sk in &c.star_kwargs {
-        for d in sk.pts.iter().filter(|o| an.kind(*o) == Kind::Dict) {
+        for d in sk.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Dict) {
             let r = st.row(d, Ns::Item);
             for k in r.present.iter() {
                 out.push((k, r.definite.contains(k), col_of(&st.slot(d, Ns::Item, k))));
@@ -412,7 +412,7 @@ fn series_ctor(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.kw("name").or_else(|| c.arg(3, None)).unwrap_or_else(|| an.none_v.clone());
     let idx_kw = index.as_ref().and_then(|v| an.lit_keys(v, st));
     let (idx, vk): (Option<Row>, Option<Known>) = match data.as_ref().and_then(|d| d.single()) {
-        Some(d) if an.kind(d) == Kind::Dict && !is_series_obj(an, d) => {
+        Some(d) if an.heap.kind(d) == Kind::Dict && !is_series_obj(an, d) => {
             let r = st.row(d, Ns::Item);
             let mut vals_ = KeySet::new();
             let mut ok = r.closed();
@@ -425,9 +425,9 @@ fn series_ctor(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             (Some(Row::new().copy_from(&r, true, &KeySet::new(), EMPTY_LENS)), ok.then(|| Known::exact(vals_)))
         }
         Some(d) if is_series_obj(an, d) => (Some(st.row(d, Ns::Item)), vals(st, d, vkey())),
-        Some(d) if matches!(an.kind(d), Kind::List | Kind::Tuple) => {
+        Some(d) if matches!(an.heap.kind(d), Kind::List | Kind::Tuple) => {
             let items = lit_key_seq(an, st, &Value::obj(d));
-            let n = an.llen(d, st);
+            let n = an.heap.llen(d, st);
             let idx = n.map(|n| range_labels(n as i64).row());
             (idx, items.map(|it| Known::exact(KeySet::from_iter(it))))
         }
@@ -714,10 +714,10 @@ fn astype_dtype(an: &Analyzer, v: &Option<Value>) -> Option<&'static str> {
         intern::key_as_str(k)?.to_string()
     } else {
         let o = v.single()?;
-        if an.kind(o) != Kind::External {
+        if an.heap.kind(o) != Kind::External {
             return None;
         }
-        last(&an.external_qual(o)).to_string()
+        last(&an.heap.external_qual(o)).to_string()
     };
     Some(match name.as_str() {
         "int" | "int64" | "int32" | "Int64" | "int8" | "int16" | "uint8" => "int",
@@ -807,7 +807,7 @@ fn accessor_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn frames(an: &Analyzer, v: Option<&Value>) -> Vec<u32> {
     match v {
-        Some(v) => v.pts.iter().filter(|o| an.kind(*o) == Kind::Frame).collect(),
+        Some(v) => v.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Frame).collect(),
         None => Vec::new(),
     }
 }
@@ -1115,10 +1115,10 @@ fn dtype_of_value(an: &Analyzer, st: &State, v: &Value) -> Option<&'static str> 
         return if v.kv.is_literal() { dtype_of_lits(&kv_literals(&v.kv)) } else { None };
     }
     let o = v.single()?;
-    if !matches!(an.kind(o), Kind::List | Kind::Tuple) {
+    if !matches!(an.heap.kind(o), Kind::List | Kind::Tuple) {
         return None;
     }
-    if an.llen(o, st) == Some(0) {
+    if an.heap.llen(o, st) == Some(0) {
         return Some("object");
     }
     match st.elems.get(&o) {
@@ -1204,10 +1204,10 @@ fn lit_key(v: &Option<Value>) -> Option<KeyId> {
 /// The literal keys of a single list / tuple in order (`["b", "a"]`), or None.
 pub fn lit_key_seq(an: &Analyzer, st: &State, v: &Value) -> Option<Vec<KeyId>> {
     let o = v.single()?;
-    if !matches!(an.kind(o), Kind::List | Kind::Tuple) {
+    if !matches!(an.heap.kind(o), Kind::List | Kind::Tuple) {
         return None;
     }
-    let n = an.llen(o, st)?;
+    let n = an.heap.llen(o, st)?;
     (0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64)).kv.as_lit()).collect()
 }
 
@@ -1221,9 +1221,9 @@ fn list_keys_split(an: &mut Analyzer, st: &State, v: &Value) -> Option<(KeySet, 
     }
     let mut sure: Option<KeySet> = None;
     for o in v.pts.iter() {
-        let s1 = match an.kind(o) {
+        let s1 = match an.heap.kind(o) {
             Kind::List | Kind::Tuple => {
-                let n = an.llen(o, st).or(an.prefix(o, st)).unwrap_or(0);
+                let n = an.heap.llen(o, st).or(an.heap.prefix(o, st)).unwrap_or(0);
                 KeySet::from_iter((0..n).filter_map(|i| {
                     let x = st.slot(o, Ns::Pos, intern::key_int(i as i64));
                     if x.pts.is_empty() { if let KeyVal::Lit(k) = x.kv { return Some(k) } }
@@ -1386,7 +1386,7 @@ pub fn json_of_frame(an: &mut Analyzer, st: &mut State, c: &Call, f: u32, orient
             let site = format!("{}:jrecs", crate::interp::site_string(&c.node));
             let lid = an.alloc(Kind::List, &site, st, &format!("records@L{}", c.line), Payload::None, None, Ns::Item, None, None);
             let n = nrows(st, f);
-            an.set_llen(lid, st, n.map(|n| n as usize));
+            an.heap.set_llen(lid, st, n.map(|n| n as usize));
             if let Some(n) = n {
                 for i in 0..n {
                     st.set_slot(lid, Ns::Pos, intern::key_int(i), Value::obj(vrow), true);
@@ -1498,7 +1498,7 @@ fn item_columns(an: &Analyzer, st: &State, v: &Value) -> Option<Vec<Result<Row, 
     // some of them have maybe
     let mut rec: Option<Row> = None;
     for x in v.pts.iter() {
-        match an.kind(x) {
+        match an.heap.kind(x) {
             Kind::Dict | Kind::Frame => {
                 let d = Row::new().copy_from(&st.row(x, Ns::Item), true, &KeySet::new(), EMPTY_LENS).data();
                 // a key the record surely has is a column of the frame; one it may have, maybe
@@ -1508,7 +1508,7 @@ fn item_columns(an: &Analyzer, st: &State, v: &Value) -> Option<Vec<Result<Row, 
                     Some(cur) => cur.join(&r),
                 });
             }
-            Kind::List | Kind::Tuple => out.push(Err(an.llen(x, st)?)),
+            Kind::List | Kind::Tuple => out.push(Err(an.heap.llen(x, st)?)),
             _ => return None,
         }
     }
@@ -1547,14 +1547,14 @@ fn pd_dataframe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             None => true,
             Some(d) => {
                 !d.pts.is_empty() && d.kv.is_bot() && d.pts.iter().all(|o| {
-                    if !matches!(an.kind(o), Kind::List | Kind::Tuple) {
+                    if !matches!(an.heap.kind(o), Kind::List | Kind::Tuple) {
                         return false;
                     }
-                    if an.llen(o, st) == Some(0) {
+                    if an.heap.llen(o, st) == Some(0) {
                         return true;
                     }
                     let e = an.elem_of(&Value::obj(o), &c.node, st);
-                    !e.pts.is_empty() && e.kv.is_bot() && e.pts.iter().all(|x| an.kind(x) == Kind::Dict)
+                    !e.pts.is_empty() && e.kv.is_bot() && e.pts.iter().all(|x| an.heap.kind(x) == Kind::Dict)
                 })
             }
         };
@@ -1585,7 +1585,7 @@ fn pd_dataframe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     // `DataFrame(**df.to_dict("split"))`: the columns entry
     for sk in &c.star_kwargs {
-        for d in sk.pts.iter().filter(|o| an.kind(*o) == Kind::Dict) {
+        for d in sk.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Dict) {
             let cv = st.slot(d, Ns::Item, mk("columns"));
             if let Some(seq) = lit_key_seq(an, st, &cv) {
                 return finish(an, st, closed_ordered(&seq));
@@ -1594,7 +1594,7 @@ fn pd_dataframe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     // orient="tight": the columns entry
     if from_dict && key_is(&c.kw("orient").or_else(|| c.arg(1, None)), "tight") {
-        if let Some(d) = data.as_ref().and_then(|d| d.single()).filter(|d| an.kind(*d) == Kind::Dict) {
+        if let Some(d) = data.as_ref().and_then(|d| d.single()).filter(|d| an.heap.kind(*d) == Kind::Dict) {
             let cv = st.slot(d, Ns::Item, mk("columns"));
             if let Some(seq) = lit_key_seq(an, st, &cv) {
                 return finish(an, st, closed_ordered(&seq));
@@ -1603,7 +1603,7 @@ fn pd_dataframe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         return open(an, st);
     }
     // a record array (to_records): its fields
-    if let Some(rec) = data.as_ref().and_then(|d| d.single()).filter(|d| an.kind(*d) == Kind::Namespace) {
+    if let Some(rec) = data.as_ref().and_then(|d| d.single()).filter(|d| an.heap.kind(*d) == Kind::Namespace) {
         if let Some(fd) = st.slot_opt(rec, Ns::Meta, mk("recfields")).and_then(|v| v.single()) {
             let r = st.row(fd, Ns::Item);
             return finish(an, st, Row::new().copy_from(&r, true, &KeySet::new(), EMPTY_LENS));
@@ -1621,7 +1621,7 @@ fn pd_dataframe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         });
     };
     for x in data.pts.iter() {
-        match an.kind(x) {
+        match an.heap.kind(x) {
             Kind::Dict if index_orient => {
                 // {label: {col: v}} / {label: [v, …]}: the inner rows are the frame's rows
                 let r = st.row(x, Ns::Item);
@@ -1658,9 +1658,9 @@ fn pd_dataframe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     // first row known to exist, the keys every possible row surely has are
                     let mut d = r.data();
                     let mut sure = KeySet::new();
-                    if an.prefix(x, st).is_some() {
+                    if an.heap.prefix(x, st).is_some() {
                         if let Elem::One(e) = &it.elem {
-                            if !e.pts.is_empty() && e.kv.is_bot() && e.pts.iter().all(|o| an.kind(o) == Kind::Dict) {
+                            if !e.pts.is_empty() && e.kv.is_bot() && e.pts.iter().all(|o| an.heap.kind(o) == Kind::Dict) {
                                 let mut acc: Option<KeySet> = None;
                                 for o in e.pts.iter() {
                                     let dr = st.row(o, Ns::Item);
@@ -1687,7 +1687,7 @@ fn pd_dataframe(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         None => return open(an, st),
     };
     // a dict of columns: each column's dtype from its literal values
-    if let (Some(nid), Some(d)) = (v.single(), data.single().filter(|d| an.kind(*d) == Kind::Dict && !index_orient)) {
+    if let (Some(nid), Some(d)) = (v.single(), data.single().filter(|d| an.heap.kind(*d) == Kind::Dict && !index_orient)) {
         for k in st.row(d, Ns::Item).present.iter() {
             let dt = dtype_of_value(an, st, &st.slot(d, Ns::Item, k));
             set_dtype(st, nid, k, dt, true);
@@ -1716,7 +1716,7 @@ fn frame_meta_from_data(an: &mut Analyzer, st: &mut State, c: &Call, nid: u32, d
     let mut labs: Option<Known> = index_kw.as_ref().map(|i| Known::exact(KeySet::from_iter(i.iter().copied())));
     let none = an.none_v.kv.as_lit();
     let mut colvals: Vec<(KeyId, Option<Known>)> = Vec::new();
-    match an.kind(d) {
+    match an.heap.kind(d) {
         Kind::Dict if index_orient => {
             let r = st.row(d, Ns::Item);
             if r.closed() && r.present == r.definite {
@@ -1758,7 +1758,7 @@ fn frame_meta_from_data(an: &mut Analyzer, st: &mut State, c: &Call, nid: u32, d
             }
         }
         Kind::List | Kind::Tuple => {
-            if let Some(len) = an.llen(d, st) {
+            if let Some(len) = an.heap.llen(d, st) {
                 n = n.or(Some(len as i64));
                 for k in cols.present.iter() {
                     let mut may = KeySet::new();
@@ -1766,7 +1766,7 @@ fn frame_meta_from_data(an: &mut Analyzer, st: &mut State, c: &Call, nid: u32, d
                     for i in 0..len {
                         let item = st.slot(d, Ns::Pos, intern::key_int(i as i64));
                         let cell = match item.single() {
-                            Some(o) if an.kind(o) == Kind::Dict => {
+                            Some(o) if an.heap.kind(o) == Kind::Dict => {
                                 let rr = st.row(o, Ns::Item);
                                 if rr.definite.contains(k) {
                                     cell_lit(&st.slot(o, Ns::Item, k))
@@ -1776,7 +1776,7 @@ fn frame_meta_from_data(an: &mut Analyzer, st: &mut State, c: &Call, nid: u32, d
                                     None
                                 }
                             }
-                            Some(o) if matches!(an.kind(o), Kind::List | Kind::Tuple) => intern::key_as_int(k).and_then(|j| cell_lit(&st.slot(o, Ns::Pos, intern::key_int(j)))),
+                            Some(o) if matches!(an.heap.kind(o), Kind::List | Kind::Tuple) => intern::key_as_int(k).and_then(|j| cell_lit(&st.slot(o, Ns::Pos, intern::key_int(j)))),
                             _ => None,
                         };
                         match cell {
@@ -1793,7 +1793,7 @@ fn frame_meta_from_data(an: &mut Analyzer, st: &mut State, c: &Call, nid: u32, d
     if labs.is_none() {
         labs = n.map(range_labels);
     }
-    if an.kind(d) == Kind::Frame {
+    if an.heap.kind(d) == Kind::Frame {
         if let Some(m) = st.slot_opt(d, Ns::Meta, mk("index")) {
             st.set_slot(nid, Ns::Meta, mk("index"), m, true);
         }
@@ -1819,7 +1819,7 @@ fn open_frame_call(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn piece_row_at(an: &Analyzer, st: &State, v: &Value, axis1: bool, pos: Option<KeyId>) -> Option<Row> {
     let mut rows = Vec::new();
     for o in v.pts.iter() {
-        if an.kind(o) == Kind::Frame {
+        if an.heap.kind(o) == Kind::Frame {
             rows.push(st.row(o, Ns::Item));
         } else if is_series_obj(an, o) {
             if axis1 {
@@ -1857,7 +1857,7 @@ fn concat(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let mut pieces: Vec<Value> = Vec::new();
     let mut keys: Option<Vec<KeyId>> = c.kw("keys").and_then(|k| lit_key_seq(an, st, &k));
     let mut known_count = true;
-    if let Some(d) = objs.single().filter(|d| an.kind(*d) == Kind::Dict && !is_series_obj(an, *d)) {
+    if let Some(d) = objs.single().filter(|d| an.heap.kind(*d) == Kind::Dict && !is_series_obj(an, *d)) {
         let r = st.row(d, Ns::Item);
         if !(r.closed() && r.present == r.definite) {
             return open_frame_call(an, st, c);
@@ -1976,7 +1976,7 @@ fn concat(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let v = new_frame(an, st, c, row, None, None);
     if let Some(nid) = v.single() {
         set_labels(st, nid, None);
-        let piece_frames: Vec<u32> = pieces.iter().flat_map(|p0| p0.pts.iter().filter(|o| an.kind(*o) == Kind::Frame).collect::<Vec<_>>()).collect();
+        let piece_frames: Vec<u32> = pieces.iter().flat_map(|p0| p0.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Frame).collect::<Vec<_>>()).collect();
         let ignore = key_is_bool(&c.kw("ignore_index"), true);
         if axis1 {
             let lv = levels_of(st, &piece_frames);
@@ -2158,7 +2158,7 @@ fn suffix_pair(an: &Analyzer, st: &State, v: Option<Value>) -> (String, String) 
     let mut suffixes = ("_x".to_string(), "_y".to_string());
     if let Some(sv) = v {
         for x in sv.pts.iter() {
-            if matches!(an.kind(x), Kind::Tuple | Kind::List) && an.llen(x, st) == Some(2) {
+            if matches!(an.heap.kind(x), Kind::Tuple | Kind::List) && an.heap.llen(x, st) == Some(2) {
                 let a = st.slot(x, Ns::Pos, intern::key_int(0));
                 let b = st.slot(x, Ns::Pos, intern::key_int(1));
                 if let (Some(ka), Some(kb)) = (a.kv.as_lit(), b.kv.as_lit()) {
@@ -2280,7 +2280,7 @@ fn df_join(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // the other side: frames, named Series, or a list of them
     let mut rrows: Vec<Row> = Vec::new();
     let mut items: Vec<Value> = vec![other.clone()];
-    if other.pts.iter().any(|o| matches!(an.kind(o), Kind::List | Kind::Tuple)) {
+    if other.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::List | Kind::Tuple)) {
         let it = an.iterate(&other, &c.node, st);
         items = match (&it.items, &it.elem) {
             (Some(i), _) => i.clone(),
@@ -2290,7 +2290,7 @@ fn df_join(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     for item in &items {
         for o in item.pts.iter() {
-            if an.kind(o) == Kind::Frame {
+            if an.heap.kind(o) == Kind::Frame {
                 rrows.push(st.row(o, Ns::Item));
             } else if is_series_obj(an, o) {
                 let nm = series_name(an, st, o);
@@ -2350,9 +2350,9 @@ fn rename_step(an: &mut Analyzer, st: &mut State, cols: &Value, c: &Call, fs: &[
         return Some(vec![Step::RenameMap(std::sync::Arc::new(pairs))]);
     }
     for x in cols.pts.iter() {
-        match an.kind(x) {
+        match an.heap.kind(x) {
             Kind::External => {
-                let q = an.external_qual(x);
+                let q = an.heap.external_qual(x);
                 if let Some(f) = FnKind::from_name(last(&q)) {
                     if matches!(f, FnKind::Upper | FnKind::Lower | FnKind::Strip | FnKind::Title) {
                         return Some(vec![Step::RenameFn(RenameFn::new(f))]);
@@ -2521,7 +2521,7 @@ fn df_assign(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     for (k, v) in c.kwargs.iter() {
         let col = intern::key(intern::Key::Str(intern::str_get(*k)));
         // a callable gets the frame as built so far (earlier keywords included)
-        if v.pts.iter().any(|o| matches!(an.kind(o), Kind::Function | Kind::Bound | Kind::Partial | Kind::Class)) {
+        if v.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::Function | Kind::Bound | Kind::Partial | Kind::Class)) {
             let tmp = an.alloc(Kind::Frame, &format!("{}:assign:{}", crate::interp::site_string(&c.node), intern::key_py_str(col)), st, &format!("frame@L{}", c.line), Payload::None, Some(row.clone()), Ns::Item, None, None);
             an.call_value(v, &c.node, None, st, Some(vec![Value::obj(tmp)]));
             colvals.push((col, None));
@@ -2533,7 +2533,7 @@ fn df_assign(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     // `assign(**{"a b": …})`: the dict's keys
     for sk in &c.star_kwargs {
-        for d in sk.pts.iter().filter(|o| an.kind(*o) == Kind::Dict) {
+        for d in sk.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Dict) {
             let r = st.row(d, Ns::Item);
             for k in r.present.iter() {
                 row = row.store(k, r.definite.contains(k));
@@ -2924,7 +2924,7 @@ fn groupby_one(an: &mut Analyzer, st: &mut State, c: &Call, ctx: Option<&str>) -
     let seq = by.as_ref().and_then(|b| lit_key_seq(an, st, b).or_else(|| b.kv.as_lit().filter(|_| b.pts.is_empty()).map(|k| vec![k])));
     let payload = Payload::Groupby(fs.clone(), ks, ai, None);
     let gid = an.alloc_at(Kind::Groupby, &c.node, st, &format!("groupby@L{}", c.line), payload.clone(), None, Ns::Item, None, ctx);
-    an.obj_mut(gid).payload = payload;
+    an.heap.obj_mut(gid).payload = payload;
     if let Some(seq) = seq {
         st.set_slot(gid, Ns::Meta, mk("by"), Value::lit(intern::key_tuple(seq)), true);
     }
@@ -2951,7 +2951,7 @@ fn gb_str(st: &State, g: u32, k: &str) -> Option<String> {
 }
 
 pub fn groupby_select(an: &mut Analyzer, gid: u32, key: &Value, node: &Node, state: &mut State) -> Value {
-    let Payload::Groupby(fs, ks, ai, _sel) = an.obj(gid).payload.clone() else { return Value::new() };
+    let Payload::Groupby(fs, ks, ai, _sel) = an.heap.obj(gid).payload.clone() else { return Value::new() };
     let seq = lit_key_seq(an, state, key);
     let cols = if !key.pts.is_empty() { an.lit_keys(key, state) } else { Some(kv_literals(&key.kv)) };
     let cols = cols.filter(|c| !c.is_empty());
@@ -2963,7 +2963,7 @@ pub fn groupby_select(an: &mut Analyzer, gid: u32, key: &Value, node: &Node, sta
     let sel = cols.map(|cs| (cs, matches!(key.kv, KeyVal::Lit(_)) && key.pts.is_empty()));
     let payload = Payload::Groupby(fs, ks, ai, sel);
     let nid = an.alloc_at(Kind::Groupby, node, state, &format!("groupby@L{}", node.line), payload.clone(), None, Ns::Item, None, None);
-    an.obj_mut(nid).payload = payload;
+    an.heap.obj_mut(nid).payload = payload;
     copy_gb_meta(state, gid, nid);
     if let Some(seq) = seq {
         state.set_slot(nid, Ns::Meta, mk("selseq"), Value::lit(intern::key_tuple(seq)), true);
@@ -2974,13 +2974,13 @@ pub fn groupby_select(an: &mut Analyzer, gid: u32, key: &Value, node: &Node, sta
 /// A rolling / expanding / ewm / resample window over a frame or over groups: a groupby
 /// object marked `window` (its aggregations keep the rows' columns).
 fn window_of(an: &mut Analyzer, st: &mut State, c: &Call, fs: Vec<u32>, keys: Option<KeySet>, src_gb: Option<u32>, kind: &str) -> Value {
-    let (ai, sel) = match src_gb.map(|g| an.obj(g).payload.clone()) {
+    let (ai, sel) = match src_gb.map(|g| an.heap.obj(g).payload.clone()) {
         Some(Payload::Groupby(_, _, ai, sel)) => (ai, sel),
         _ => (true, None),
     };
     let payload = Payload::Groupby(fs.clone(), keys, ai, sel);
     let gid = an.alloc_at(Kind::Groupby, &c.node, st, &format!("{}@L{}", kind, c.line), payload.clone(), None, Ns::Item, None, None);
-    an.obj_mut(gid).payload = payload;
+    an.heap.obj_mut(gid).payload = payload;
     if let Some(g) = src_gb {
         copy_gb_meta(st, g, gid);
         st.set_slot(gid, Ns::Meta, mk("grouped"), Value::lit(intern::key_bool(true)), true);
@@ -3004,20 +3004,20 @@ fn agg_names(an: &mut Analyzer, st: &State, v: &Value) -> Option<(Vec<KeyId>, bo
     }
     let o = v.single()?;
     // a function's __name__ (lambdas: "<lambda>"; numbered "<lambda_i>" in a list)
-    let is_lambda = |an: &Analyzer, o: u32| an.kind(o) == Kind::Function && matches!(an.func_info(o).node, crate::interp::FuncNode::Lambda(_));
+    let is_lambda = |an: &Analyzer, o: u32| an.heap.kind(o) == Kind::Function && matches!(an.heap.func_info(o).node, crate::interp::FuncNode::Lambda(_));
     let fname = |an: &Analyzer, o: u32| -> Option<KeyId> {
-        match an.kind(o) {
+        match an.heap.kind(o) {
             Kind::Function if is_lambda(an, o) => Some(mk("<lambda>")),
             Kind::Function => {
-                let q = an.func_info(o).qualname.clone();
+                let q = an.heap.func_info(o).qualname.clone();
                 Some(mk(q.rsplit('.').next().unwrap_or(&q)))
             }
-            Kind::External => Some(mk(last(&an.external_qual(o)))),
+            Kind::External => Some(mk(last(&an.heap.external_qual(o)))),
             _ => None,
         }
     };
-    if matches!(an.kind(o), Kind::List | Kind::Tuple) {
-        let n = an.llen(o, st)?;
+    if matches!(an.heap.kind(o), Kind::List | Kind::Tuple) {
+        let n = an.heap.llen(o, st)?;
         let mut out = Vec::new();
         let mut lambdas = 0;
         for i in 0..n {
@@ -3040,12 +3040,12 @@ fn agg_names(an: &mut Analyzer, st: &State, v: &Value) -> Option<(Vec<KeyId>, bo
 fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let mut name = last(&c.qual).to_string();
     let recv = c.recv.clone().unwrap_or_default();
-    let gids: Vec<u32> = recv.pts.iter().filter(|o| an.kind(*o) == Kind::Groupby).collect();
+    let gids: Vec<u32> = recv.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Groupby).collect();
     if gids.is_empty() {
         return Value::data(&format!("L{}", c.line));
     }
     let g0 = gids[0];
-    let Payload::Groupby(fs, ks, ai, sel) = an.obj(g0).payload.clone() else { return Value::new() };
+    let Payload::Groupby(fs, ks, ai, sel) = an.heap.obj(g0).payload.clone() else { return Value::new() };
     let window = gb_str(st, g0, "window");
     if let Some(src) = st.slot_opt(g0, Ns::Meta, mk("srcseries")) {
         // a window over a Series
@@ -3176,7 +3176,7 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             for (k, d, _) in &named {
                 row = row.store(*k, *d);
             }
-            if c.star_kwargs.iter().any(|sk| sk.pts.iter().any(|o| an.kind(o) != Kind::Dict || !st.row(o, Ns::Item).closed())) {
+            if c.star_kwargs.iter().any(|sk| sk.pts.iter().any(|o| an.heap.kind(o) != Kind::Dict || !st.row(o, Ns::Item).closed())) {
                 let mut dd = row.data();
                 dd.sources = dd.sources.insert((Source::new(&format!("agg@L{}", c.line), SourceKind::Call), EMPTY_LENS));
                 row = Row::from_data(dd);
@@ -3185,7 +3185,7 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         if let Some(spec) = c.args.first().or_else(|| c.kwargs.get(&intern::s("func"))).cloned() {
             // {col: f | [f, …]}
-            if spec.single().map(|o| an.kind(o) == Kind::Dict).unwrap_or(false) {
+            if spec.single().map(|o| an.heap.kind(o) == Kind::Dict).unwrap_or(false) {
                 let d = spec.single().unwrap();
                 let r = st.row(d, Ns::Item);
                 if r.closed() {
@@ -3322,7 +3322,7 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         }
                         return v;
                     }
-                    let recs: Vec<u32> = res.pts.iter().filter(|o| an.kind(*o) == Kind::Dict).collect();
+                    let recs: Vec<u32> = res.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Dict).collect();
                     if !recs.is_empty() {
                         // a Series per group: its index becomes the columns
                         let row = join_rows(recs.iter().map(|x| st.row(*x, Ns::Item)));
@@ -3374,7 +3374,7 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// A row of a frame (iterrows / itertuples / apply / records): accesses on it narrow the
 /// row, not the frame (a frame without rows never runs them).
 fn mark_view(an: &mut Analyzer, vrow: u32, _fs: &[u32]) {
-    an.obj_mut(vrow).iter_elem = true;
+    an.heap.obj_mut(vrow).iter_elem = true;
 }
 
 fn df_apply(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
@@ -3385,7 +3385,7 @@ fn df_apply(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let base = recv_row(an, st, c);
     let expand = key_is(&c.kw("result_type"), "expand");
     if rowwise {
-        let label = format!("row of {}", fs.first().map(|f| an.obj(*f).label.clone()).unwrap_or_else(|| "frame".into()));
+        let label = format!("row of {}", fs.first().map(|f| an.heap.obj(*f).label.clone()).unwrap_or_else(|| "frame".into()));
         let vrow = an.alloc_at(Kind::Dict, &c.node, st, &label, Payload::None, Some(base.clone()), Ns::Item, Some(false), None);
         mark_view(an, vrow, &fs);
         for k in base.present.iter() {
@@ -3395,7 +3395,7 @@ fn df_apply(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         oargs.extend(c.args[1..].iter().cloned());
         let res = an.call_value(&fnv, &c.node, None, st, Some(oargs));
         let sers: Vec<u32> = res.pts.iter().filter(|o| is_series_obj(an, *o)).collect();
-        let dicts: Vec<u32> = res.pts.iter().filter(|o| an.kind(*o) == Kind::Dict && !is_series_obj(an, *o)).collect();
+        let dicts: Vec<u32> = res.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Dict && !is_series_obj(an, *o)).collect();
         // a Series per row (or dicts with result_type="expand"): its keys are the columns
         let recs: Vec<u32> = if expand { sers.iter().chain(dicts.iter()).copied().collect() } else { sers.clone() };
         if !recs.is_empty() && recs.len() + if expand { 0 } else { dicts.len() } == res.pts.len() {
@@ -3472,7 +3472,7 @@ fn df_agg(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         for (k, v) in c.kwargs.iter() {
             names.push(intern::key(intern::Key::Str(intern::str_get(*k))));
             for x in v.pts.iter() {
-                if an.kind(x) == Kind::Tuple && an.llen(x, st) == Some(2) {
+                if an.heap.kind(x) == Kind::Tuple && an.heap.llen(x, st) == Some(2) {
                     if let Some(col) = st.slot(x, Ns::Pos, intern::key_int(0)).kv.as_lit() {
                         cols = cols.store(col, true);
                     }
@@ -3485,7 +3485,7 @@ fn df_agg(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         return v;
     }
     let Some(spec) = c.arg(0, Some("func")) else { return open_frame_call(an, st, c) };
-    if let Some(d) = spec.single().filter(|o| an.kind(*o) == Kind::Dict) {
+    if let Some(d) = spec.single().filter(|o| an.heap.kind(*o) == Kind::Dict) {
         let r = st.row(d, Ns::Item);
         if !(r.closed() && r.present == r.definite) {
             return open_frame_call(an, st, c);
@@ -3701,8 +3701,8 @@ fn iterrows(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         st.set_slot(vrow, Ns::Item, k, Value::data(&format!("cell {}", intern::key_py_str(k))), false);
     }
     let ctx = an.frame().ctx.clone();
-    let vid = an.alloc_raw(Kind::View, &format!("view:rows:{}", c.site), &ctx, true, "iterrows", Payload::View(ViewKind::Rows, Value::obj(vrow)));
-    an.obj_mut(vid).payload = Payload::View(ViewKind::Rows, Value::obj(vrow));
+    let vid = an.heap.alloc_raw(Kind::View, &format!("view:rows:{}", c.site), &ctx, true, "iterrows", Payload::View(ViewKind::Rows, Value::obj(vrow)));
+    an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Rows, Value::obj(vrow));
     Value::obj(vid)
 }
 
@@ -3754,7 +3754,7 @@ fn itertuples(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let vrow = if plain {
             let t = an.alloc(Kind::Namespace, &site, st, &format!("tuple@L{}", c.line), Payload::None, Some(Row::new()), Ns::Attr, Some(false), None);
             if order.is_some() && base.present == base.definite {
-                an.set_llen(t, st, Some(fields.len()));
+                an.heap.set_llen(t, st, Some(fields.len()));
                 for i in 0..fields.len() {
                     st.set_slot(t, Ns::Pos, intern::key_int(i as i64), Value::data("cell"), true);
                 }
@@ -3775,7 +3775,7 @@ fn itertuples(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 st.set_slot(t, Ns::Attr, *k, Value::data(&format!("cell {}", intern::key_py_str(*k))), false);
             }
             if order.is_some() {
-                an.set_llen(t, st, Some(fields.len()));
+                an.heap.set_llen(t, st, Some(fields.len()));
             }
             t
         };
@@ -3786,8 +3786,8 @@ fn itertuples(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         return Value::data(&format!("itertuples@L{}", c.line));
     }
     let ctx = an.frame().ctx.clone();
-    let vid = an.alloc_raw(Kind::View, &format!("view:elems:{}", c.site), &ctx, true, "itertuples", Payload::View(ViewKind::Elems, rows_v.clone()));
-    an.obj_mut(vid).payload = Payload::View(ViewKind::Elems, rows_v);
+    let vid = an.heap.alloc_raw(Kind::View, &format!("view:elems:{}", c.site), &ctx, true, "itertuples", Payload::View(ViewKind::Elems, rows_v.clone()));
+    an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Elems, rows_v);
     Value::obj(vid)
 }
 
@@ -3795,7 +3795,7 @@ fn itertuples(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn lit_list(an: &mut Analyzer, st: &mut State, node: &Node, tag: &str, items: &[KeyId], kind: Kind) -> u32 {
     let site = format!("{}:{}", crate::interp::site_string(node), tag);
     let lid = an.alloc(kind, &site, st, &format!("{}@L{}", kind.name(), node.line), Payload::None, None, Ns::Item, None, None);
-    an.set_llen(lid, st, Some(items.len()));
+    an.heap.set_llen(lid, st, Some(items.len()));
     for (i, k) in items.iter().enumerate() {
         st.set_slot(lid, Ns::Pos, intern::key_int(i as i64), Value::lit(*k), true);
     }
@@ -3834,7 +3834,7 @@ fn to_dict(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let lid = an.alloc(Kind::List, &site, st, &format!("records@L{}", c.line), Payload::None, None, Ns::Item, None, None);
                 // one record per row (positions known when the row count is)
                 let n = nrows(st, *f);
-                an.set_llen(lid, st, n.map(|n| n as usize));
+                an.heap.set_llen(lid, st, n.map(|n| n as usize));
                 if let Some(n) = n {
                     for i in 0..n {
                         st.set_slot(lid, Ns::Pos, intern::key_int(i), Value::obj(vrow), true);
@@ -3947,7 +3947,7 @@ fn df_insert(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let val = c.arg(2, Some("value")).unwrap_or_default();
     for f in frames(an, c.recv.as_ref()) {
         if let Some(col) = &col {
-            let single = an.obj(f).single;
+            let single = an.heap.obj(f).single;
             frame_setitem(an, f, col, &val, &c.node, st, single);
         }
     }
@@ -3958,7 +3958,7 @@ fn df_pop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let col = c.arg(0, Some("item"));
     for f in frames(an, c.recv.as_ref()) {
         if let Some(col) = &col {
-            let single = an.obj(f).single;
+            let single = an.heap.obj(f).single;
             frame_delitem(an, f, col, &c.node, st, single, true);
         }
     }
@@ -4273,7 +4273,7 @@ fn pivot(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let base = rows_of(st, &fs);
     let margins = key_is_bool(&c.kw("margins"), true);
     let mname = lit_key(&c.kw("margins_name")).unwrap_or_else(|| mk("All"));
-    let aggdict: Option<Vec<KeyId>> = c.kw("aggfunc").and_then(|a| a.single()).filter(|o| an.kind(*o) == Kind::Dict).map(|o| {
+    let aggdict: Option<Vec<KeyId>> = c.kw("aggfunc").and_then(|a| a.single()).filter(|o| an.heap.kind(*o) == Kind::Dict).map(|o| {
         let r = st.row(o, Ns::Item);
         r.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(r.present.iter()))
     });
@@ -4451,7 +4451,7 @@ fn flatten_keys(an: &Analyzer, st: &State, d: u32, prefix: &str, sep: &str, leve
     for k in r.ordered_keys().unwrap_or_else(|| intern::sorted_by_str(r.present.iter())) {
         let name = format!("{}{}", prefix, intern::key_py_str(k));
         let v = st.slot(d, Ns::Item, k);
-        let nested = v.single().filter(|o| an.kind(*o) == Kind::Dict && !is_series_obj(an, *o));
+        let nested = v.single().filter(|o| an.heap.kind(*o) == Kind::Dict && !is_series_obj(an, *o));
         match nested {
             Some(o) if max_level.map(|m| level < m).unwrap_or(true) => {
                 if !flatten_keys(an, st, o, &format!("{}{}", name, sep), sep, level + 1, max_level, out) {
@@ -4472,8 +4472,8 @@ fn json_normalize(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let record_prefix = lit_key(&c.kw("record_prefix")).and_then(intern::key_as_str).map(|s| s.to_string()).unwrap_or_default();
     // the records: a list of dicts (or one dict)
     let recs: Vec<Value> = match data.single() {
-        Some(o) if an.kind(o) == Kind::Dict => vec![data.clone()],
-        Some(o) if matches!(an.kind(o), Kind::List | Kind::Tuple) => {
+        Some(o) if an.heap.kind(o) == Kind::Dict => vec![data.clone()],
+        Some(o) if matches!(an.heap.kind(o), Kind::List | Kind::Tuple) => {
             let it = an.iterate(&data, &c.node, st);
             match &it.items {
                 Some(items) => items.clone(),
@@ -4484,7 +4484,7 @@ fn json_normalize(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     };
     let mut rows: Vec<Result<Row, usize>> = Vec::new();
     for r in &recs {
-        let Some(d) = r.single().filter(|o| an.kind(*o) == Kind::Dict) else { return open_frame_call(an, st, c) };
+        let Some(d) = r.single().filter(|o| an.heap.kind(*o) == Kind::Dict) else { return open_frame_call(an, st, c) };
         let mut keys: Vec<(KeyId, bool)> = Vec::new();
         match &record_path {
             None => {
@@ -4501,7 +4501,7 @@ fn json_normalize(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 // the records at the path, each with the meta fields
                 let mut cur = Value::obj(d);
                 for p0 in path {
-                    let Some(o) = cur.single().filter(|o| an.kind(*o) == Kind::Dict) else { return open_frame_call(an, st, c) };
+                    let Some(o) = cur.single().filter(|o| an.heap.kind(*o) == Kind::Dict) else { return open_frame_call(an, st, c) };
                     cur = st.slot(o, Ns::Item, *p0);
                 }
                 let it = an.iterate(&cur, &c.node, st);
@@ -4509,7 +4509,7 @@ fn json_normalize(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let mut meta_cols: Vec<KeyId> = Vec::new();
                 if let Some(m) = c.kw("meta") {
                     if let Some(mo) = m.single() {
-                        let n = an.llen(mo, st).unwrap_or(0);
+                        let n = an.heap.llen(mo, st).unwrap_or(0);
                         for i0 in 0..n {
                             let e = st.slot(mo, Ns::Pos, intern::key_int(i0 as i64));
                             match keys_arg(an, st, &Some(e)) {
@@ -4520,7 +4520,7 @@ fn json_normalize(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     }
                 }
                 for item in items {
-                    let Some(io) = item.single().filter(|o| an.kind(*o) == Kind::Dict) else { return open_frame_call(an, st, c) };
+                    let Some(io) = item.single().filter(|o| an.heap.kind(*o) == Kind::Dict) else { return open_frame_call(an, st, c) };
                     let mut ks: Vec<(KeyId, bool)> = Vec::new();
                     if !flatten_keys(an, st, io, &record_prefix, &sep, 0, max_level, &mut ks) {
                         return open_frame_call(an, st, c);
@@ -4879,7 +4879,7 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         copy_dtypes(st, *f, nid, &row.present);
                     }
                     let arg = c.arg(0, Some("dtype"));
-                    let pairs: Option<Vec<(KeyId, Option<&'static str>)>> = arg.as_ref().and_then(|a| a.single()).filter(|o| an.kind(*o) == Kind::Dict).map(|o| {
+                    let pairs: Option<Vec<(KeyId, Option<&'static str>)>> = arg.as_ref().and_then(|a| a.single()).filter(|o| an.heap.kind(*o) == Kind::Dict).map(|o| {
                         let r = st.row(o, Ns::Item);
                         r.present.iter().map(|k| (k, astype_dtype(an, &Some(st.slot(o, Ns::Item, k))))).collect()
                     });
@@ -5001,8 +5001,8 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let kind = if name == "items" { ViewKind::Items } else { ViewKind::Keys };
         let ids: Vec<String> = fs.iter().map(|f| f.to_string()).collect();
         let recv = c.recv.clone().unwrap_or_default();
-        let vid = an.alloc_raw(Kind::View, &format!("view:{}:{}", name, ids.join(",")), "", true, &name, Payload::View(kind, recv.clone()));
-        an.obj_mut(vid).payload = Payload::View(kind, recv);
+        let vid = an.heap.alloc_raw(Kind::View, &format!("view:{}:{}", name, ids.join(",")), "", true, &name, Payload::View(kind, recv.clone()));
+        an.heap.obj_mut(vid).payload = Payload::View(kind, recv);
         return Value::obj(vid);
     }
     if matches!(name.as_str(), "xs") {
@@ -5027,14 +5027,14 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 // ------------------------------------------------------------- frame hooks used by the interpreter
 pub fn frame_getattr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool) -> Value {
     if matches!(name, "loc" | "iloc" | "at" | "iat") {
-        let label = format!("{} of {}", name, an.obj(oid).label);
-        let lid = an.alloc_raw(Kind::Locidx, &format!("loc:{}:{}", name, oid), "", true, &label, Payload::Locidx(name.to_string(), oid));
-        an.obj_mut(lid).payload = Payload::Locidx(name.to_string(), oid);
+        let label = format!("{} of {}", name, an.heap.obj(oid).label);
+        let lid = an.heap.alloc_raw(Kind::Locidx, &format!("loc:{}:{}", name, oid), "", true, &label, Payload::Locidx(name.to_string(), oid));
+        an.heap.obj_mut(lid).payload = Payload::Locidx(name.to_string(), oid);
         return Value::obj(lid);
     }
     if name == "columns" {
-        let vid = an.alloc_raw(Kind::View, &format!("view:keys:{}", oid), "", true, "columns", Payload::View(ViewKind::Keys, Value::obj(oid)));
-        an.obj_mut(vid).payload = Payload::View(ViewKind::Keys, Value::obj(oid));
+        let vid = an.heap.alloc_raw(Kind::View, &format!("view:keys:{}", oid), "", true, "columns", Payload::View(ViewKind::Keys, Value::obj(oid)));
+        an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Keys, Value::obj(oid));
         return Value::obj(vid);
     }
     if matches!(name, "str" | "dt" | "cat") {
@@ -5055,7 +5055,7 @@ pub fn frame_getattr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, state
                 // (rows, columns): the column count when the columns are known
                 let row = state.row(oid, Ns::Item);
                 let tid = an.alloc_at(Kind::Tuple, node, state, "tuple", Payload::None, None, Ns::Item, None, None);
-                an.set_llen(tid, state, Some(2));
+                an.heap.set_llen(tid, state, Some(2));
                 let n = match nrows(state, oid) {
                     Some(n) => Value::lit(intern::key_int(n)),
                     None => Value::data("rows"),
@@ -5079,8 +5079,8 @@ pub fn frame_getattr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, state
 /// `df.columns.map(f)`: the names as a renaming of the frame's keys (None: not a frame's).
 pub fn columns_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
     let vid = c.recv.as_ref()?.single()?;
-    let Payload::View(ViewKind::Keys, recv) = an.obj(vid).payload.clone() else { return None };
-    let fs: Vec<u32> = recv.pts.iter().filter(|o| an.kind(*o) == Kind::Frame).collect();
+    let Payload::View(ViewKind::Keys, recv) = an.heap.obj(vid).payload.clone() else { return None };
+    let fs: Vec<u32> = recv.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Frame).collect();
     if fs.is_empty() {
         return None;
     }
@@ -5098,13 +5098,13 @@ pub fn columns_map(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value>
 
 /// `df.columns.name = v` / `df.index.name = v` (an attribute store on a frame's view).
 pub fn view_setattr(an: &mut Analyzer, vid: u32, name: &str, v: &Value, state: &mut State) {
-    let Payload::View(ViewKind::Keys, recv) = an.obj(vid).payload.clone() else { return };
+    let Payload::View(ViewKind::Keys, recv) = an.heap.obj(vid).payload.clone() else { return };
     if name != "name" && name != "names" {
         return;
     }
-    let is_index = &*an.obj(vid).label == "index";
+    let is_index = &*an.heap.obj(vid).label == "index";
     for f in recv.pts.iter() {
-        if an.kind(f) == Kind::Frame {
+        if an.heap.kind(f) == Kind::Frame {
             if is_index {
                 let k = v.kv.as_lit().filter(|_| v.pts.is_empty()).map(|k| if k == none_key() { None } else { Some(k) });
                 set_index_levels(state, f, k.map(|k| vec![k]).as_deref());
@@ -5128,7 +5128,7 @@ pub fn frame_setattr(an: &mut Analyzer, oid: u32, name: &str, v: &Value, node: &
         }
         let mut kv: Option<KeyVal> = if v.pts.is_empty() { Some(v.kv.clone()) } else { None };
         for x in v.pts.iter() {
-            match an.kind(x) {
+            match an.heap.kind(x) {
                 Kind::List => {
                     let e = state.elems.get(&x).unwrap_or(DATA);
                     kv = Some(match kv {
@@ -5137,7 +5137,7 @@ pub fn frame_setattr(an: &mut Analyzer, oid: u32, name: &str, v: &Value, node: &
                     });
                 }
                 Kind::View => {
-                    if let Payload::View(_, recv) = &an.obj(x).payload {
+                    if let Payload::View(_, recv) = &an.heap.obj(x).payload {
                         let e = KeyVal::KeysOf(KeysOf::new(recv.pts.clone(), Ns::Item));
                         kv = Some(match kv {
                             None => e,
@@ -5234,12 +5234,12 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
             an.require_providers_k(&cls, &row, true, state, Some(k), Ns::Item);
         }
         // the program went on: the column was there (also under a try that handles the miss)
-        if narrow && cls.tier != Tier::Missing && an.obj(oid).single {
+        if narrow && cls.tier != Tier::Missing && an.heap.obj(oid).single {
             state.set_row(oid, Ns::Item, row.narrow_in(k, true));
         }
         return column_series(an, state, oid, k, node);
     }
-    if is_seriesish(an, key) || key.pts.iter().any(|x| an.kind(x) == Kind::Frame) {
+    if is_seriesish(an, key) || key.pts.iter().any(|x| an.heap.kind(x) == Kind::Frame) {
         // a boolean mask: some of the rows
         let nid = an.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(row.clone()), Ns::Item, None, None);
         derive(state, oid, nid, Rows::Subset, &row.present);
@@ -5287,7 +5287,7 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
             return Value::obj(nid);
         }
     }
-    if is_seriesish(an, key) || key.pts.iter().any(|x| an.kind(x) == Kind::Frame) {
+    if is_seriesish(an, key) || key.pts.iter().any(|x| an.heap.kind(x) == Kind::Frame) {
         let nid = an.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(row), Ns::Item, None, None);
         copy_meta(oid, nid, state);
         return Value::obj(nid);
@@ -5307,9 +5307,9 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
         return Value::obj(nid);
     }
     // `df[list(df.columns)]` / `df[df.columns]`: every column of the frame itself
-    let own_keys = key.pts.iter().all(|x| match an.kind(x) {
+    let own_keys = key.pts.iter().all(|x| match an.heap.kind(x) {
         Kind::List | Kind::Tuple => matches!(state.elems.get(&x), Some(KeyVal::KeysOf(ko)) if ko.objs == ObjSet::one(oid) && ko.exclude.is_empty() && ko.chain == EMPTY_LENS),
-        Kind::View => matches!(&an.obj(x).payload, Payload::View(ViewKind::Keys, r) if r.pts == ObjSet::one(oid)),
+        Kind::View => matches!(&an.heap.obj(x).payload, Payload::View(ViewKind::Keys, r) if r.pts == ObjSet::one(oid)),
         _ => false,
     });
     if own_keys && !key.pts.is_empty() {
@@ -5317,7 +5317,7 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
         derive(state, oid, nid, Rows::Same, &row.present);
         return Value::obj(nid);
     }
-    if key.pts.iter().any(|x| matches!(an.kind(x), Kind::List | Kind::View)) {
+    if key.pts.iter().any(|x| matches!(an.heap.kind(x), Kind::List | Kind::View)) {
         let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.insert((Source::new(&format!("columns@L{}", node.line), SourceKind::Call), EMPTY_LENS)), mutators: row.mutators.clone(), ..Default::default() });
         let nid = an.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(r), Ns::Item, None, None);
         return Value::obj(nid);
@@ -5413,7 +5413,7 @@ fn frame_with(an: &mut Analyzer, foid: u32, node: &Node, state: &mut State, row:
 }
 
 pub fn loc_get(an: &mut Analyzer, lo: u32, key: &Value, node: &Node, state: &mut State) -> Value {
-    let Payload::Locidx(name, foid) = an.obj(lo).payload.clone() else { return Value::new() };
+    let Payload::Locidx(name, foid) = an.heap.obj(lo).payload.clone() else { return Value::new() };
     if name.starts_with('s') && is_series_obj(an, foid) {
         // an element of a tracked Series (a dict per row stays one)
         if key.pts.is_empty() && key.kv.as_lit().is_some() {
@@ -5430,7 +5430,7 @@ pub fn loc_get(an: &mut Analyzer, lo: u32, key: &Value, node: &Node, state: &mut
     let positional = name == "iloc" || name == "iat";
     let mut parts: Option<(Value, Value)> = None;
     for x in key.pts.iter() {
-        if an.kind(x) == Kind::Tuple && an.llen(x, state) == Some(2) {
+        if an.heap.kind(x) == Kind::Tuple && an.heap.llen(x, state) == Some(2) {
             parts = Some((state.slot(x, Ns::Pos, intern::key_int(0)), state.slot(x, Ns::Pos, intern::key_int(1))));
         }
     }
@@ -5516,14 +5516,14 @@ pub fn loc_get(an: &mut Analyzer, lo: u32, key: &Value, node: &Node, state: &mut
 }
 
 pub fn loc_set(an: &mut Analyzer, lo: u32, key: &Value, v: &Value, node: &Node, state: &mut State) {
-    let Payload::Locidx(name, foid) = an.obj(lo).payload.clone() else { return };
+    let Payload::Locidx(name, foid) = an.heap.obj(lo).payload.clone() else { return };
     for x in key.pts.iter() {
-        if an.kind(x) == Kind::Tuple && an.llen(x, state) == Some(2) {
+        if an.heap.kind(x) == Kind::Tuple && an.heap.llen(x, state) == Some(2) {
             let cols = state.slot(x, Ns::Pos, intern::key_int(1));
             if name == "iloc" || name == "iat" {
                 return;
             }
-            let single = an.obj(foid).single;
+            let single = an.heap.obj(foid).single;
             frame_setitem(an, foid, &cols, v, node, state, single);
             return;
         }

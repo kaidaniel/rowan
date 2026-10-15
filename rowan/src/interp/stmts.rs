@@ -16,7 +16,7 @@ impl Analyzer {
     /// module's package).
     fn import_from_module(&self, i: &ast::StmtImportFrom) -> String {
         if i.level > 0 {
-            let pkg = self.module_info(self.frame().module).pkg.clone();
+            let pkg = self.heap.module_info(self.frame().module).pkg.clone();
             let mut base: Vec<&str> = pkg.split('.').filter(|x| !x.is_empty()).collect();
             for _ in 1..i.level {
                 base.pop();
@@ -72,7 +72,7 @@ impl Analyzer {
     /// `from M import *`: the names in M's `__all__` (a submodule of a package for a name it
     /// does not define), or without a known one every name of M not starting with `_`.
     fn import_star(&mut self, mod_v: &Value, modname: &str, n: &Node, state: &mut State) {
-        let Some(mo) = mod_v.single().filter(|o| self.kind(*o) == Kind::Module) else { return };
+        let Some(mo) = mod_v.single().filter(|o| self.heap.kind(*o) == Kind::Module) else { return };
         let all = state.slot_opt(mo, Ns::Attr, key_str_lit("__all__")).map(|v| self.iterate(&v, n, state).items);
         let names: Vec<String> = match all.flatten().and_then(|items| items.iter().map(|v| v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_str)).collect::<Option<Vec<_>>>()) {
             Some(ns) => ns.iter().map(|x| x.to_string()).collect(),
@@ -159,7 +159,7 @@ impl Analyzer {
                 // `xs += ys` on a list extends it in place (other names see it); `d |= e` on a
                 // dict updates it in place; `s |= t` (`&=`, `-=`, `^=`) on a set too
                 if !cur.pts.is_empty() {
-                    let all = |an: &Analyzer, k: Kind| cur.pts.iter().all(|o| an.kind(o) == k);
+                    let all = |an: &Analyzer, k: Kind| cur.pts.iter().all(|o| an.heap.kind(o) == k);
                     let m = match a.op {
                         ast::Operator::Add if all(self, Kind::List) => Some("list.extend"),
                         ast::Operator::BitOr if all(self, Kind::Dict) => Some("dict.update"),
@@ -184,7 +184,7 @@ impl Analyzer {
                 // `d[k] += v` with an unknown key on a closed dict: the load raised unless k was
                 // one of its keys, so the store adds none
                 if let Some((obj, Ok(key))) = &place {
-                    let plain = !obj.pts.is_empty() && obj.kv.is_bot() && obj.pts.iter().all(|o| self.kind(o) == Kind::Dict && !self.m.dd_factories.contains_key(&o) && !self.m.counters.contains(&o) && !crate::models::pandas::is_series_obj(self, o) && { let r = state.row(o, Ns::Item); r.closed() && !r.present.is_empty() });
+                    let plain = !obj.pts.is_empty() && obj.kv.is_bot() && obj.pts.iter().all(|o| self.heap.kind(o) == Kind::Dict && !self.m.dd_factories.contains_key(&o) && !self.m.counters.contains(&o) && !crate::models::pandas::is_series_obj(self, o) && { let r = state.row(o, Ns::Item); r.closed() && !r.present.is_empty() });
                     if plain && !key.kv.is_literal() {
                         for o in obj.pts.iter() {
                             for k in state.row(o, Ns::Item).present.iter() {
@@ -237,8 +237,8 @@ impl Analyzer {
                     let cv = self.eval(ce, state);
                     let ck = key_str_lit("__cause__");
                     for o in xv.pts.iter() {
-                        if matches!(self.kind(o), Kind::Instance | Kind::Namespace) || self.exc_objs.contains_key(&o) {
-                            let strong = xv.pts.len() == 1 && self.obj(o).single;
+                        if matches!(self.heap.kind(o), Kind::Instance | Kind::Namespace) || self.exc_objs.contains_key(&o) {
+                            let strong = xv.pts.len() == 1 && self.heap.obj(o).single;
                             let row = state.row(o, Ns::Attr).store(ck, strong);
                             state.set_row(o, Ns::Attr, row);
                             state.set_slot(o, Ns::Attr, ck, cv.clone(), strong);
@@ -250,7 +250,7 @@ impl Analyzer {
                     Some(_) => vec![],
                     None => self.handling.last().map(|h| h.iter().cloned().collect()).unwrap_or_default(),
                 };
-                self.cur_exc = exc_v.clone().filter(|v| v.pts.iter().any(|o| self.kind(o) == Kind::Instance || self.exc_objs.contains_key(&o) || matches!(&self.obj(o).payload, Payload::Method(q, _) if q == "fastapi.httpexc")));
+                self.cur_exc = exc_v.clone().filter(|v| v.pts.iter().any(|o| self.heap.kind(o) == Kind::Instance || self.exc_objs.contains_key(&o) || matches!(&self.heap.obj(o).payload, Payload::Method(q, _) if q == "fastapi.httpexc")));
                 // a bare raise: the exception the handler holds
                 if r.exc.is_none() {
                     self.cur_exc = self.handling_values.last().cloned().filter(|v| !v.pts.is_empty());
@@ -260,9 +260,9 @@ impl Analyzer {
                 self.cur_exc_cls = match &self.cur_exc {
                     Some(v) => self.exc_value_names(v),
                     None => match &exc_v {
-                        Some(v) if v.kv.is_bot() && v.pts.len() == 1 && self.class_info_opt(v.pts.iter().next().unwrap()).is_some() => self.exc_class_names(v.pts.iter().next().unwrap()),
-                        Some(v) if v.kv.is_bot() && v.pts.len() == 1 && self.kind(v.pts.iter().next().unwrap()) == Kind::External => {
-                            let q = self.external_qual(v.pts.iter().next().unwrap());
+                        Some(v) if v.kv.is_bot() && v.pts.len() == 1 && self.heap.class_info_opt(v.pts.iter().next().unwrap()).is_some() => self.exc_class_names(v.pts.iter().next().unwrap()),
+                        Some(v) if v.kv.is_bot() && v.pts.len() == 1 && self.heap.kind(v.pts.iter().next().unwrap()) == Kind::External => {
+                            let q = self.heap.external_qual(v.pts.iter().next().unwrap());
                             q.strip_prefix("builtins.").map(crate::interp::builtin_exc_names)
                         }
                         _ => None,
@@ -310,11 +310,11 @@ impl Analyzer {
                     }
                     let aname = a.name.id.as_str();
                     let mut v = Value::new();
-                    if let Some(mo) = mod_v.single().filter(|o| self.kind(*o) == Kind::Module) {
+                    if let Some(mo) = mod_v.single().filter(|o| self.heap.kind(*o) == Kind::Module) {
                         // a name the module does not define may be one of its submodules
                         if state.slot_opt(mo, Ns::Attr, key_str_lit(aname)).is_none() {
                             let sub = self.import_module(&format!("{}.{}", modname, aname), &n, state);
-                            if sub.single().map(|o| self.kind(o) == Kind::Module).unwrap_or(false) {
+                            if sub.single().map(|o| self.heap.kind(o) == Kind::Module).unwrap_or(false) {
                                 v = sub;
                             }
                         }
@@ -375,7 +375,7 @@ impl Analyzer {
                         entered = crate::models::csvio::enter_value(self, state, &v);
                     }
                     if entered.is_none() {
-                        entered = Some(if v.pts.iter().any(|o| self.kind(o).is_record()) { v.clone() } else { Value::data(&format!("with@L{}", frontend::node(w).line)) });
+                        entered = Some(if v.pts.iter().any(|o| self.heap.kind(o).is_record()) { v.clone() } else { Value::data(&format!("with@L{}", frontend::node(w).line)) });
                     }
                     if let Some(ov) = &item.optional_vars {
                         self.bind_target(ov, &entered.unwrap(), state);
@@ -466,7 +466,7 @@ impl Analyzer {
         let mut probe = state.copy();
         let fv = self.eval(&call.func, &mut probe);
         let Some(f) = fv.single() else { return false };
-        if self.kind(f) != Kind::Function || !self.func_info(f).is_contextmanager.get() {
+        if self.heap.kind(f) != Kind::Function || !self.heap.func_info(f).is_contextmanager.get() {
             return false;
         }
         let prev = self.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.frames.len(), env_after: None, ran: false, then: None, body_died: false, env_before: None, multi: true, body_exits: None, body_ret: None });
@@ -549,7 +549,7 @@ impl Analyzer {
                     }
                     return None;
                 }
-                if !subj.pts.is_empty() && subj.pts.iter().all(|o| self.kind(o).is_container() || self.kind(o) == Kind::Instance && self.instance_class(o).map(|c| self.class_lookup(c, "__eq__").is_none()).unwrap_or(false)) {
+                if !subj.pts.is_empty() && subj.pts.iter().all(|o| self.heap.kind(o).is_container() || self.heap.kind(o) == Kind::Instance && self.heap.instance_class(o).map(|c| self.class_lookup(c, "__eq__").is_none()).unwrap_or(false)) {
                     // containers / plain instances never equal a literal
                     return Some(false);
                 }
@@ -568,7 +568,7 @@ impl Analyzer {
                     }
                     return if lits.contains(want) { None } else { Some(false) };
                 }
-                if !subj.pts.is_empty() && subj.pts.iter().all(|o| self.kind(o).is_container() || self.kind(o) == Kind::Instance) {
+                if !subj.pts.is_empty() && subj.pts.iter().all(|o| self.heap.kind(o).is_container() || self.heap.kind(o) == Kind::Instance) {
                     return Some(false);
                 }
                 None
@@ -580,9 +580,9 @@ impl Analyzer {
                     }
                     return None;
                 }
-                let recs: Vec<u32> = subj.pts.iter().filter(|o| self.kind(*o) == Kind::Dict).collect();
+                let recs: Vec<u32> = subj.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Dict).collect();
                 if recs.len() != subj.pts.len() {
-                    if subj.pts.iter().all(|o| matches!(self.kind(o), Kind::List | Kind::Tuple | Kind::Set)) {
+                    if subj.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::List | Kind::Tuple | Kind::Set)) {
                         return Some(false);
                     }
                     for p in &mm.patterns {
@@ -656,7 +656,7 @@ impl Analyzer {
                     let n = frontend::node(t);
                     // `del xs[i]` on a list: later positions move down
                     for o in obj.pts.iter() {
-                        if self.kind(o) != Kind::List {
+                        if self.heap.kind(o) != Kind::List {
                             continue;
                         }
                         let idx = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
@@ -670,7 +670,7 @@ impl Analyzer {
                                 }
                             }
                             _ => {
-                                self.set_llen(o, state, None);
+                                self.heap.set_llen(o, state, None);
                                 state.drop_obj_ns(o, Ns::Pos);
                             }
                         }
@@ -741,7 +741,7 @@ impl Analyzer {
                 // the test's names keep their values through the branches (narrowing aside):
                 // their joined values stand for them; a branch that assigns one gives no fact
                 let deps: Vec<(intern::StrId, Value)> = names.iter().map(|n| (*n, self.dep_value(&mut j, *n))).collect();
-                let mutable_seq = deps.iter().any(|(_, v)| v.pts.iter().any(|o| matches!(self.kind(o), Kind::List | Kind::Set)));
+                let mutable_seq = deps.iter().any(|(_, v)| v.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::List | Kind::Set)));
                 if !names.iter().any(|n| assigned.contains(n)) && !mutable_seq {
                     new.extend(cond_facts_for(key, pos, deps, &then_s, &else_s, &j));
                 }
@@ -775,9 +775,9 @@ impl Analyzer {
         let Some(k) = kv.kv.as_lit().filter(|_| kv.pts.is_empty()) else { return };
         let mut recs: Vec<u32> = Vec::new();
         for o in target.pts.iter() {
-            match &self.obj(o).payload {
-                Payload::View(super::ViewKind::Keys, inner) => recs.extend(inner.pts.iter().filter(|x| matches!(self.kind(*x), Kind::Dict | Kind::Frame | Kind::Unknown))),
-                _ if matches!(self.kind(o), Kind::Dict | Kind::Frame | Kind::Unknown) => recs.push(o),
+            match &self.heap.obj(o).payload {
+                Payload::View(super::ViewKind::Keys, inner) => recs.extend(inner.pts.iter().filter(|x| matches!(self.heap.kind(*x), Kind::Dict | Kind::Frame | Kind::Unknown))),
+                _ if matches!(self.heap.kind(o), Kind::Dict | Kind::Frame | Kind::Unknown) => recs.push(o),
                 _ => {}
             }
         }
@@ -882,7 +882,7 @@ impl Analyzer {
         // that takes a few items sees exactly those; only outside other loops and unrolled
         // iterations, as nested unrolling multiplies: email's `_parsegen` nests such loops)
         let outermost = self.frame().loop_depth == 0 && self.frame().unroll.is_empty();
-        let gen_body = is_constant(&w.test) && outermost && self.frame().func.map(|f| matches!(self.func_info(f).node, crate::interp::FuncNode::Def(d) if crate::interp::is_generator(&d.body))).unwrap_or(false);
+        let gen_body = is_constant(&w.test) && outermost && self.frame().func.map(|f| matches!(self.heap.func_info(f).node, crate::interp::FuncNode::Def(d) if crate::interp::is_generator(&d.body))).unwrap_or(false);
         if !is_constant(&w.test) || gen_body {
             let mut idx = 0usize;
             loop {
@@ -928,10 +928,10 @@ impl Analyzer {
             eprintln!("[rowan] loop fixpoint cut off after {} rounds: widening names {:?}, {} rows, {} slots, {} elems, lens {}", LOOP_MAX_ITER, nn, fp0.rows.len(), fp0.slots.len(), fp0.elems.len(), head.lens.diff_keys(&prev.lens).len());
             if crate::interp::debug_level() >= 2 {
                 for (o, ns) in fp0.rows.iter().take(5) {
-                    eprintln!("    row {} {:?} {:?} -> {:?}", self.obj(*o).label, ns, prev.row(*o, *ns), head.row(*o, *ns));
+                    eprintln!("    row {} {:?} {:?} -> {:?}", self.heap.obj(*o).label, ns, prev.row(*o, *ns), head.row(*o, *ns));
                 }
                 for (o, sk) in fp0.slots.iter().take(5) {
-                    eprintln!("    slot {} {:?} {:?} -> {:?}", self.obj(*o).label, sk, prev.slots.get(o, sk), head.slots.get(o, sk));
+                    eprintln!("    slot {} {:?} {:?} -> {:?}", self.heap.obj(*o).label, sk, prev.slots.get(o, sk), head.slots.get(o, sk));
                 }
             }
         }
@@ -1000,7 +1000,7 @@ impl Analyzer {
             self.drop_verdicts_since(vmark);
             vmark = self.verdicts.len();
             let mut body_s = head.copy();
-            let mark = self.objects.len() as u32;
+            let mark = self.heap.len() as u32;
             self.recent_stack.push(Vec::new());
             self.loop_stack.push(LoopCtx::default());
             round(self, &mut body_s);
@@ -1082,12 +1082,12 @@ impl Analyzer {
         let has_jump = contains_jump(&f.body);
         // a one-shot iterator is used up by the loop; a `break` leaves the rest: the cursor
         // follows the unrolled iterations, else it is not known after a loop that may break
-        let once = itv.single().filter(|o| self.obj(*o).iterator && self.obj(*o).single);
+        let once = itv.single().filter(|o| self.heap.obj(*o).iterator && self.heap.obj(*o).single);
         let c0 = once.and_then(|o| self.cursor_of(o, state)).unwrap_or(0);
         // an endless generator with known first items: those iterations are unrolled (the
         // cursor follows), the rest of the loop runs on from there
         if let (Some(o), None, true) = (once, &it.items, matches!(&*f.iter, ast::Expr::Name(_))) {
-            if let (None, Some(p)) = (self.llen(o, state), self.prefix(o, state)) {
+            if let (None, Some(p)) = (self.heap.llen(o, state), self.heap.prefix(o, state)) {
                 if p > c0 && p - c0 <= UNROLL_MAX {
                     let items: Vec<(Value, bool)> = (c0..p).map(|i| (state.slot(o, Ns::Pos, intern::key_int(i as i64)), true)).collect();
                     let breaks = self.unroll_for(f, &items, Some((o, c0)), state);
@@ -1143,8 +1143,8 @@ impl Analyzer {
         let mut prefix_breaks: Option<State> = None;
         let mut prefixed = false;
         if let (None, None, Some(o)) = (&it.items, once, itv.single().filter(|_| itv.kv.is_bot())) {
-            if matches!(self.kind(o), Kind::List | Kind::Tuple) && !self.obj(o).iterator && self.obj(o).single && self.llen(o, state).is_none() {
-                if let Some(p) = self.prefix(o, state).filter(|p| *p <= UNROLL_MAX) {
+            if matches!(self.heap.kind(o), Kind::List | Kind::Tuple) && !self.heap.obj(o).iterator && self.heap.obj(o).single && self.heap.llen(o, state).is_none() {
+                if let Some(p) = self.heap.prefix(o, state).filter(|p| *p <= UNROLL_MAX) {
                     let items: Vec<(Value, bool)> = (0..p).map(|i| (state.slot(o, Ns::Pos, intern::key_int(i as i64)), true)).collect();
                     prefixed = true;
                     prefix_breaks = self.unroll_for(f, &items, None, state);
@@ -1173,7 +1173,7 @@ impl Analyzer {
             // every element of the iterable went through the body: its row after the loop is
             // the body's exit row, not the join with "not processed yet"
             for oid in elem_v.pts.iter() {
-                if self.is_record_like(oid) && self.obj(oid).single {
+                if self.heap.is_record_like(oid) && self.heap.obj(oid).single {
                     for ns in [Ns::Item, Ns::Attr] {
                         if back.has_row(oid, ns) {
                             exit_s.set_row(oid, ns, back.row(oid, ns));
@@ -1206,7 +1206,7 @@ impl Analyzer {
                     continue;
                 }
                 let deps = vec![(name, self.dep_value(&mut exit_s, name))];
-                if deps[0].1.pts.iter().any(|o| matches!(self.kind(o), Kind::List | Kind::Set)) {
+                if deps[0].1.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::List | Kind::Set)) {
                     continue;
                 }
                 new.extend(cond_facts_for(s(&format!("{}@{}", text, func)), true, deps, &back, &pre, &exit_s));
@@ -1244,13 +1244,13 @@ impl Analyzer {
             v.0
         }
         for oid in v.pts.iter() {
-            if self.kind(oid) != Kind::Instance {
+            if self.heap.kind(oid) != Kind::Instance {
                 continue;
             }
-            let Some(cls) = self.instance_class(oid) else { continue };
+            let Some(cls) = self.heap.instance_class(oid) else { continue };
             let Some(m) = self.class_lookup(cls, "__exit__") else { continue };
             let fv = self.cls_slots.get(&(m, Ns::Attr, key_str_lit("__exit__"))).cloned().unwrap_or_default();
-            if fv.pts.iter().any(|f| self.kind(f) == Kind::Function && may_return_true(self.func_info(f).node.body())) {
+            if fv.pts.iter().any(|f| self.heap.kind(f) == Kind::Function && may_return_true(self.heap.func_info(f).node.body())) {
                 return true;
             }
         }
@@ -1341,7 +1341,7 @@ impl Analyzer {
                 let builtin = crate::interp::builtin_exc_names(&n);
                 let user = matches!(e, ast::Expr::Name(_)) && {
                     let v = self.eval(e, &mut pre.copy());
-                    v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| self.class_info_opt(o).is_some_and(|ci| ci.name == n))
+                    v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| self.heap.class_info_opt(o).is_some_and(|ci| ci.name == n))
                 };
                 user || (builtin.1 && builtin.0.len() > 1) || n == "BaseException"
             });
@@ -1507,103 +1507,6 @@ impl Analyzer {
         state.replace_with(out);
     }
 
-    /// A `return` of a value without objects (`return None`) in a call: the call's
-    /// own objects that nothing older can reach are garbage on this path; forgetting them
-    /// lets the join of the exits keep what the other paths say of them (a record returned
-    /// on another path keeps that path's keys).
-    fn drop_garbage_at_return(&mut self, v: &Value, state: &mut State) {
-        let Some(crate::interp::PreCall(mark, pre)) = self.frame().pre_call.clone() else { return };
-        if !matches!(self.frame().kind, FrameKind::Function) {
-            return;
-        }
-        let mut roots: Vec<u32> = Vec::new();
-        v.push_objs(&mut roots);
-        self.collect_since(mark, &pre, roots, state, None);
-    }
-
-    /// Objects made since the allocation serial `mark` that no root reaches lose their state
-    /// (`drop_garbage_at_return`; at a loop's exit the roots are the frame's live names).
-    /// `unwind`: a raise state, which only the first `unwind` callers' names outlive.
-    pub fn collect_since(&mut self, mark: u64, pre: &State, roots: Vec<u32>, state: &mut State, unwind: Option<usize>) {
-        // (nothing made since: nothing to collect)
-        if self.serial <= mark {
-            return;
-        }
-        let young = |an: &Analyzer, o: u32| an.objects[o as usize].born >= mark;
-        let fp = state.footprint(pre);
-        let mut fresh: rustc_hash::FxHashSet<u32> = Default::default();
-        for o in fp.rows.iter().map(|(o, _)| *o).chain(fp.slots.iter().map(|(o, _)| *o)).chain(fp.elems.iter().copied()) {
-            if young(self, o) {
-                fresh.insert(o);
-            }
-        }
-        if fresh.is_empty() || fresh.len() > 4096 {
-            return;
-        }
-        // roots: the returned value, what older objects' changed slots hold (globals,
-        // parameters, cells, …), and what the analyzer holds beyond the state
-        let mut work: Vec<u32> = roots;
-        for (o, sk) in fp.slots.iter() {
-            if !young(self, *o) {
-                if let Some(val) = state.slots.get(o, sk) {
-                    work.extend(val.pts.iter());
-                    if let KeyVal::KeysOf(ko) = &val.kv {
-                        work.extend(ko.objs.iter());
-                    }
-                }
-            }
-        }
-        for o in fp.elems.iter().filter(|o| !young(self, **o)) {
-            if let Some(KeyVal::KeysOf(ko)) = state.elems.get(o) {
-                work.extend(ko.objs.iter());
-            }
-        }
-        self.gc_pinned(&mut work, unwind);
-        // (unknown objects stand for objects outside the call — a parameter's record, an
-        // input's part: what they hold is reachable from there)
-        work.extend(fresh.iter().copied().filter(|o| matches!(self.kind(*o), Kind::Unknown)));
-        // (older objects reach young ones only through those roots: a young one was made
-        // since, so whatever refers to it was written since; only young ones expand)
-        let mut reached: rustc_hash::FxHashSet<u32> = Default::default();
-        while let Some(o) = work.pop() {
-            if !reached.insert(o) || !young(self, o) {
-                continue;
-            }
-            self.walked.set(self.walked.get() + 1);
-            self.obj_edges(o, state, &mut work);
-        }
-        // (a part of an input — an unknown object, a placeholder — is found again by its path
-        // whenever that path is read: its rows belong to the input, never garbage)
-        for o in fresh {
-            if !reached.contains(&o) && !matches!(self.kind(o), Kind::Unknown) {
-                state.forget_obj(o);
-            }
-        }
-    }
-
-    /// Garbage collection at a loop's exit (in a function): objects the loop allocated that the
-    /// frame's names, the enclosing frames and the analyzer no longer reach lose their state.
-    fn loop_gc_begin(&mut self, state: &mut State) -> Option<(u64, State)> {
-        if !matches!(self.frame().kind, FrameKind::Function) || self.frame().pre_call.is_none() {
-            return None;
-        }
-        Some((self.serial, state.copy()))
-    }
-
-    fn loop_gc_end(&mut self, g: Option<(u64, State)>, state: &mut State) {
-        let Some((mark, pre)) = g else { return };
-        if !state.reachable {
-            return;
-        }
-        let mut roots: Vec<u32> = Vec::new();
-        self.state_roots(state, usize::MAX, usize::MAX, &mut roots);
-        for (o, v) in state.lasts.iter() {
-            roots.push(*o);
-            v.push_objs(&mut roots);
-        }
-        self.collect_since(mark, &pre, roots, state, None);
-    }
-
     fn stmt_classdef(&mut self, c: &'static ast::StmtClassDef, state: &mut State) {
         let fr_module = self.frame().module;
         let fr_ctx = self.frame().ctx.clone();
@@ -1622,7 +1525,7 @@ impl Analyzer {
                 };
                 let bv = self.eval(b, state);
                 for oid in bv.pts.iter() {
-                    match self.kind(oid) {
+                    match self.heap.kind(oid) {
                         Kind::Class => {
                             if let Some(k) = self.enum_kind.get(&oid) {
                                 ek.mixed |= k.mixed;
@@ -1632,12 +1535,12 @@ impl Analyzer {
                             }
                             // (a base that derives from an external class — `list`, an unseen
                             // library class — makes this one's instances open too)
-                            if self.class_info_opt(oid).is_some_and(|ci| ci.open_base) {
+                            if self.heap.class_info_opt(oid).is_some_and(|ci| ci.open_base) {
                                 open_base = true;
                             }
                             bases.push(oid)
                         }
-                        Kind::External => lib.join(crate::models::class_base(&self.external_qual(oid))),
+                        Kind::External => lib.join(crate::models::class_base(&self.heap.external_qual(oid))),
                         _ => open_base = true,
                     }
                 }
@@ -1649,7 +1552,7 @@ impl Analyzer {
             for kw in args.keywords.iter() {
                 if kw.arg.as_ref().map(|a| a.as_str() == "metaclass").unwrap_or(false) {
                     let mv = self.eval(&kw.value, state);
-                    let abc = mv.pts.iter().all(|o| self.kind(o) == Kind::External && self.external_qual(o).ends_with("ABCMeta")) && !mv.pts.is_empty();
+                    let abc = mv.pts.iter().all(|o| self.heap.kind(o) == Kind::External && self.heap.external_qual(o).ends_with("ABCMeta")) && !mv.pts.is_empty();
                     if !abc {
                         open_base = true;
                     }
@@ -1684,7 +1587,7 @@ impl Analyzer {
             *info.dataclass_fields.borrow_mut() = Some(crate::models::dataclasses::declared_fields(c, pydantic));
         }
         // class body
-        let mi = self.module_info(fr_module);
+        let mi = self.heap.module_info(fr_module);
         let cscope = mi.scopes.of_node(crate::scopes::node_addr(c)).unwrap_or_else(|| mi.scopes.module());
         let fr_single_nl = self.frame().single_nl;
         let mut cf = Frame::new(FrameKind::Class, cscope, fr_module, &fr_ctx, fr_single, &format!("class {}", c.name.id));
@@ -1711,7 +1614,7 @@ impl Analyzer {
             let [ast::Expr::Name(n)] = &a.targets[..] else { continue };
             let v = self.cls_slots.get(&(coid, Ns::Attr, key_str_lit(n.id.as_str()))).cloned().unwrap_or_default();
             for d in v.pts.iter() {
-                if self.kind(d) == Kind::Instance && self.instance_class(d).and_then(|dc| self.class_lookup(dc, "__set_name__")).is_some() {
+                if self.heap.kind(d) == Kind::Instance && self.heap.instance_class(d).and_then(|dc| self.class_lookup(dc, "__set_name__")).is_some() {
                     self.call_method_with(&Value::obj(d), "__set_name__", vec![Value::obj(coid), Value::lit(key_str_lit(n.id.as_str()))], &cnode, state);
                 }
             }
@@ -1732,7 +1635,7 @@ impl Analyzer {
                 }
             }
             for f in fv.pts.iter() {
-                if self.kind(f) == Kind::Function {
+                if self.heap.kind(f) == Kind::Function {
                     // concretely: the class's own attributes (`cls.__name__`) are known here
                     self.call_user(f, Some(Value::obj(coid)), vec![], kwargs.clone(), vec![], vec![], state, &cnode, None, false);
                 }
@@ -1758,9 +1661,9 @@ impl Analyzer {
             let pv = self.import_module(parent, node, state);
             let mut found: Option<Value> = None;
             if let Some(po) = pv.single() {
-                if self.kind(po) == Kind::Module {
+                if self.heap.kind(po) == Kind::Module {
                     // (a package's directory: its `__init__.py`'s, or a namespace package's own)
-                    let ppath = self.module_info(po).path.clone().map(std::path::PathBuf::from);
+                    let ppath = self.heap.module_info(po).path.clone().map(std::path::PathBuf::from);
                     let dir = ppath.and_then(|p| if p.ends_with("__init__.py") { p.parent().map(|d| d.to_path_buf()) } else if p.is_dir() { Some(p) } else { None });
                     if let Some(dir) = dir {
                         found = self.load_module_file(name, &dir, leaf, state).or_else(|| self.load_namespace(name, &dir, leaf));
@@ -1814,7 +1717,7 @@ impl Analyzer {
             let m = self.frame().module;
             self.torch_modules.insert(m);
         }
-        let oid = self.alloc_raw(Kind::External, &format!("ext:{}", name), "", true, name, Payload::Str(name.to_string()));
+        let oid = self.heap.alloc_raw(Kind::External, &format!("ext:{}", name), "", true, name, Payload::Str(name.to_string()));
         Value::obj(oid)
     }
 
@@ -1828,7 +1731,7 @@ impl Analyzer {
             }
             let real = std::fs::canonicalize(p).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string_lossy().to_string());
             for (_, &moid) in self.modules.clone().iter() {
-                let mi = self.module_info(moid);
+                let mi = self.heap.module_info(moid);
                 if let Some(mp) = &mi.path {
                     let mreal = std::fs::canonicalize(mp).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| mp.clone());
                     if mreal == real {

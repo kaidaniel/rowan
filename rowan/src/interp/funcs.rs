@@ -56,7 +56,7 @@ impl Analyzer {
         let fr_label = self.frame().label.clone();
         let fr_cells = self.frame().cells.clone();
         let fr_class = self.frame().class_oid;
-        let mi = self.module_info(fr_module);
+        let mi = self.heap.module_info(fr_module);
         let scope = mi.scopes.of_node(node.addr());
         let scope = match scope {
             Some(sc) => sc,
@@ -144,12 +144,12 @@ impl Analyzer {
         };
         let v = self.eval(target, state);
         for oid in v.pts.iter() {
-            match self.kind(oid) {
-                Kind::External => return Some(self.external_qual(oid)),
-                Kind::Function => return Some(format!("user:{}", self.func_info(oid).qualname)),
-                Kind::Class => return Some(format!("class:{}", self.class_info(oid).name)),
+            match self.heap.kind(oid) {
+                Kind::External => return Some(self.heap.external_qual(oid)),
+                Kind::Function => return Some(format!("user:{}", self.heap.func_info(oid).qualname)),
+                Kind::Class => return Some(format!("class:{}", self.heap.class_info(oid).name)),
                 Kind::Method => {
-                    if let Payload::Method(q, _) = &self.obj(oid).payload {
+                    if let Payload::Method(q, _) = &self.heap.obj(oid).payload {
                         if q.starts_with("fastapi.") || q.starts_with("sdispatch.") {
                             return Some(q.clone());
                         }
@@ -165,7 +165,7 @@ impl Analyzer {
         for d in decorators.iter().rev() {
             let q = self.decorator_qualname(&d.expression, state).unwrap_or_default();
             let fobj = fv.pts.first();
-            let fi = fobj.and_then(|o| self.func_info_opt(o));
+            let fi = fobj.and_then(|o| self.heap.func_info_opt(o));
             if q.ends_with("property") || q == "builtins.property" || q.ends_with("computed_field") {
                 if let Some(fi) = &fi {
                     fi.is_property.set(true);
@@ -230,7 +230,7 @@ impl Analyzer {
                 };
                 let mut probe = state.copy();
                 let tv = self.eval(target, &mut probe);
-                !tv.pts.is_empty() && tv.pts.iter().all(|o| matches!(self.kind(o), Kind::Function | Kind::Bound))
+                !tv.pts.is_empty() && tv.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Function | Kind::Bound))
             };
             if !user_target && (KNOWN_IDENTITY_DECORATORS.contains(&q.as_str()) || q.ends_with(".getter") || q.ends_with(".deleter") || q.ends_with(".register")) {
                 continue;
@@ -276,12 +276,12 @@ impl Analyzer {
         let mut calls = Vec::new();
         let mut rest = Value::kv_only(v.kv.clone());
         for o in v.pts.iter() {
-            let cls = self.instance_class(o).filter(|_| self.kind(o) == Kind::Instance);
+            let cls = self.heap.instance_class(o).filter(|_| self.heap.kind(o) == Kind::Instance);
             let found = cls.and_then(|c| names.iter().find_map(|n| Some((self.class_lookup(c, n)?, *n))));
             match found {
                 Some((m, n)) => {
                     let fv = self.cls_slots.get(&(m, Ns::Attr, key_str_lit(n))).cloned().unwrap_or_default();
-                    calls.extend(fv.pts.iter().filter(|f| self.kind(*f) == Kind::Function).map(|f| (o, f)));
+                    calls.extend(fv.pts.iter().filter(|f| self.heap.kind(*f) == Kind::Function).map(|f| (o, f)));
                 }
                 None => rest.pts = rest.pts.insert(o),
             }
@@ -332,7 +332,7 @@ impl Analyzer {
                 return v;
             }
             let scope = self.frame().scope;
-            let mi = self.module_info(fr_module);
+            let mi = self.heap.module_info(fr_module);
             if mi.scopes.get(scope).is_local(&str_get(name)) {
                 if let Some(v) = state.env.get(&name).cloned() {
                     if state.unbound.contains(&name) {
@@ -372,11 +372,11 @@ impl Analyzer {
         let nm = str_get(name);
         // (the module's own name: `__main__` for the program's entry)
         if &*nm == "__name__" {
-            let own = if fr_module == self.main_module { "__main__".to_string() } else { self.module_info(fr_module).name.clone() };
+            let own = if fr_module == self.main_module { "__main__".to_string() } else { self.heap.module_info(fr_module).name.clone() };
             return Value::lit_str(&own);
         }
         if is_builtin_name(&nm) {
-            let oid = self.alloc_raw(Kind::External, &format!("ext:builtins.{}", nm), "", true, &nm, Payload::Str(format!("builtins.{}", nm)));
+            let oid = self.heap.alloc_raw(Kind::External, &format!("ext:builtins.{}", nm), "", true, &nm, Payload::Str(format!("builtins.{}", nm)));
             return Value::obj(oid);
         }
         let oid = self.unknown_source(&format!("name {}", nm), SourceKind::Name, state, &format!("?{}", nm), "", Ns::Item, vec![]);
@@ -393,7 +393,7 @@ impl Analyzer {
         // (keys stored through the name hold on whichever object it is: narrowed to one dict,
         // they are that dict's — `t is a` after `t[k] = …` with t one of a, b)
         let keys: Vec<KeyId> = state.name_keys.iter().filter(|(n, _)| *n == name).map(|(_, k)| *k).collect();
-        let one = v.single().filter(|o| self.kind(*o) == Kind::Dict && v.kv.is_bot());
+        let one = v.single().filter(|o| self.heap.kind(*o) == Kind::Dict && v.kv.is_bot());
         self.store_name(name, v, state);
         if let Some(r) = row {
             state.set_row(module, Ns::Attr, r);
@@ -434,12 +434,12 @@ impl Analyzer {
         }
         if fr_kind == FrameKind::Function {
             if let Some(&cid) = self.frame().cells.get(&name) {
-                let strong = self.obj(cid).single;
+                let strong = self.heap.obj(cid).single;
                 state.set_slot(cid, Ns::Cell, cell_key(), v, strong);
                 return;
             }
             let scope = self.frame().scope;
-            let mi = self.module_info(fr_module);
+            let mi = self.heap.module_info(fr_module);
             if mi.scopes.get(scope).globals_decl.contains(&*str_get(name)) {
                 state.set_slot(fr_module, Ns::Attr, key, v, true);
                 return;
@@ -500,7 +500,7 @@ impl Analyzer {
                 self.store_item(&obj, Ns::Item, &key, v, &n, state);
                 // `t[k] = v`: whichever object `t` is has k now
                 if let (ast::Expr::Name(nm), Some(k)) = (&*sub.value, key.kv.as_lit().filter(|_| key.pts.is_empty())) {
-                    if obj.pts.len() > 1 && obj.pts.iter().all(|o| self.kind(o) == Kind::Dict) {
+                    if obj.pts.len() > 1 && obj.pts.iter().all(|o| self.heap.kind(o) == Kind::Dict) {
                         state.add_name_key(s(nm.id.as_str()), k);
                     }
                 }
@@ -546,7 +546,7 @@ impl Analyzer {
     fn bind_starred(&mut self, elts: &'static [ast::Expr], v: &Value, state: &mut State, n: &Node) {
         let si = elts.iter().position(|e| matches!(e, ast::Expr::Starred(_))).unwrap_or(0);
         let after = elts.len() - si - 1;
-        let known = v.single().filter(|o| matches!(self.kind(*o), Kind::List | Kind::Tuple)).and_then(|o| self.llen(o, state).filter(|l| *l >= si + after).map(|l| (o, l)));
+        let known = v.single().filter(|o| matches!(self.heap.kind(*o), Kind::List | Kind::Tuple)).and_then(|o| self.heap.llen(o, state).filter(|l| *l >= si + after).map(|l| (o, l)));
         let (lead, mid, trail): (Vec<Value>, Value, Vec<Value>) = if let Some((oid, len)) = known {
             let at = |i: usize, state: &State| state.slot(oid, Ns::Pos, key_int(i as i64));
             let lead = (0..si).map(|i| at(i, state)).collect();
@@ -573,14 +573,14 @@ impl Analyzer {
         self.force_gen(v, state, false);
         let mut parts: Vec<Value> = (0..n).map(|_| Value::new()).collect();
         for oid in v.pts.iter() {
-            let kind = self.kind(oid);
-            let ll = self.llen(oid, state);
+            let kind = self.heap.kind(oid);
+            let ll = self.heap.llen(oid, state);
             if matches!(kind, Kind::Tuple | Kind::List) && ll.is_some() {
                 for i in 0..n {
                     let sv = state.slot(oid, Ns::Pos, key_int(i as i64));
                     parts[i] = parts[i].join(&sv);
                 }
-            } else if let Some(cls) = self.instance_class(oid).filter(|c| kind == Kind::Instance && self.is_named_tuple_class(*c)) {
+            } else if let Some(cls) = self.heap.instance_class(oid).filter(|c| kind == Kind::Instance && self.is_named_tuple_class(*c)) {
                 // a NamedTuple: its fields in order
                 let fs = self.dataclass_fields_mro(cls);
                 for i in 0..n {
@@ -591,7 +591,7 @@ impl Analyzer {
                     parts[i] = parts[i].join(&v);
                 }
             } else if kind == Kind::Pair {
-                if let Payload::Pair(k, val) = self.obj(oid).payload.clone() {
+                if let Payload::Pair(k, val) = self.heap.obj(oid).payload.clone() {
                     if n >= 1 {
                         parts[0] = parts[0].join(&k);
                     }
@@ -654,8 +654,8 @@ impl Analyzer {
                     self.bind_target(&elts[1], val, state);
                 } else {
                     let addr = target as *const ast::Expr as usize;
-                    let pid = self.alloc_raw(Kind::Pair, &format!("pair:{}", addr), "", true, "pair", Payload::Pair(k.clone(), val.clone()));
-                    self.obj_mut(pid).payload = Payload::Pair(k.clone(), val.clone());
+                    let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}", addr), "", true, "pair", Payload::Pair(k.clone(), val.clone()));
+                    self.heap.obj_mut(pid).payload = Payload::Pair(k.clone(), val.clone());
                     self.bind_target(target, &Value::obj(pid), state);
                 }
             }
@@ -672,7 +672,7 @@ impl Analyzer {
             return None;
         }
         // (a `__next__` found not unrollable once is not probed again: the probes cost work)
-        let fkey: Vec<ObjId> = m.pts.iter().map(|b| match &self.obj(b).payload {
+        let fkey: Vec<ObjId> = m.pts.iter().map(|b| match &self.heap.obj(b).payload {
             Payload::Bound(f, _) => *f,
             _ => b,
         }).collect();
@@ -691,7 +691,7 @@ impl Analyzer {
         let mut cur = state.copy();
         let mut seq: Vec<Value> = Vec::new();
         for _ in 0..super::UNROLL_MAX {
-            let mark = self.objects.len() as ObjId;
+            let mark = self.heap.len() as ObjId;
             let mut probe = cur.copy();
             // (a frame that catches StopIteration only, as the for loop does: other raises and
             // the reads in the call behave as in the loop; the classes raised as a try records
@@ -745,7 +745,7 @@ impl Analyzer {
             Elem::One(v) => v.clone(),
             Elem::Pair(k, v) => {
                 let ctx = self.frame().ctx.clone();
-                let pid = self.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), tag), &ctx, false, "pair", Payload::Pair(k.clone(), v.clone()));
+                let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), tag), &ctx, false, "pair", Payload::Pair(k.clone(), v.clone()));
                 Value::obj(pid)
             }
         }
@@ -766,8 +766,8 @@ impl Analyzer {
         if alts_mode {
             let mut lists: Option<Vec<Vec<Value>>> = Some(Vec::new());
             for o in v.pts.iter() {
-                let seq = matches!(self.kind(o), Kind::List | Kind::Tuple) && !self.obj(o).iterator;
-                match (seq, self.llen(o, state), lists.as_mut()) {
+                let seq = matches!(self.heap.kind(o), Kind::List | Kind::Tuple) && !self.heap.obj(o).iterator;
+                match (seq, self.heap.llen(o, state), lists.as_mut()) {
                     (true, Some(n), Some(ls)) if n <= UNROLL_MAX => ls.push((0..n).map(|i| state.slot(o, Ns::Pos, key_int(i as i64))).collect()),
                     _ => lists = None,
                 }
@@ -796,10 +796,10 @@ impl Analyzer {
         let mut exhaustive = true;
         let line_data = Value::data(&format!("L{}", node.line));
         for oid in v.pts.iter() {
-            let kind = self.kind(oid);
+            let kind = self.heap.kind(oid);
             match kind {
                 Kind::List | Kind::Tuple | Kind::Set => {
-                    let ll = self.llen(oid, state);
+                    let ll = self.heap.llen(oid, state);
                     // a generator partly consumed by next(): iteration starts at its cursor
                     let cursor = self.cursor_of(oid, state);
                     match (ll, items.as_mut(), cursor) {
@@ -822,7 +822,7 @@ impl Analyzer {
                     elems.push(Value::kv_only(KeyVal::KeysOf(KeysOf::new(ObjSet::one(oid), Ns::Item))));
                 }
                 Kind::View => {
-                    let Payload::View(vk, recv) = self.obj(oid).payload.clone() else { continue };
+                    let Payload::View(vk, recv) = self.heap.obj(oid).payload.clone() else { continue };
                     if matches!(vk, ViewKind::Rows | ViewKind::Elems | ViewKind::Attrs) {
                         items = None;
                         exhaustive = false;
@@ -844,8 +844,8 @@ impl Analyzer {
                                     ViewKind::Keys | ViewKind::Proxy => its.push(Value::lit(k)),
                                     ViewKind::Values => its.push(val),
                                     _ => {
-                                        let pid = self.alloc_raw(Kind::Pair, &format!("pair:{}:{}", oid, intern::key_repr(k)), "", true, "pair", Payload::Pair(Value::lit(k), val.clone()));
-                                        self.obj_mut(pid).payload = Payload::Pair(Value::lit(k), val);
+                                        let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", oid, intern::key_repr(k)), "", true, "pair", Payload::Pair(Value::lit(k), val.clone()));
+                                        self.heap.obj_mut(pid).payload = Payload::Pair(Value::lit(k), val);
                                         its.push(Value::obj(pid));
                                     }
                                 }
@@ -882,7 +882,7 @@ impl Analyzer {
                     elems.push(self.infinite_elem(&inf));
                 }
                 Kind::Zip => {
-                    let Payload::Zip(ks, vs) = self.obj(oid).payload.clone() else { continue };
+                    let Payload::Zip(ks, vs) = self.heap.obj(oid).payload.clone() else { continue };
                     let mut ki = self.iterate(&ks, node, state);
                     let mut vi = self.iterate(&vs, node, state);
                     // an infinite side (or a generator known that far) yields as many items as the
@@ -917,8 +917,8 @@ impl Analyzer {
                             // zip stops at the shorter input
                             let ctx = self.frame().ctx.clone();
                             for (k, val) in kit.into_iter().zip(vit.into_iter()) {
-                                let pid = self.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), its.len()), &ctx, true, "pair", Payload::Pair(k.clone(), val.clone()));
-                                self.obj_mut(pid).payload = Payload::Pair(k, val);
+                                let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), its.len()), &ctx, true, "pair", Payload::Pair(k.clone(), val.clone()));
+                                self.heap.obj_mut(pid).payload = Payload::Pair(k, val);
                                 its.push(Value::obj(pid));
                             }
                         }
@@ -929,7 +929,7 @@ impl Analyzer {
                     pairs.push((kv1, vv1));
                 }
                 Kind::Enumerate => {
-                    let Payload::Enumerate(inner, start) = self.obj(oid).payload.clone() else { continue };
+                    let Payload::Enumerate(inner, start) = self.heap.obj(oid).payload.clone() else { continue };
                     let ii = self.iterate(&inner, node, state);
                     match (ii.items, items.as_mut(), start) {
                         (Some(inner_items), Some(its), Some(start)) => {
@@ -937,8 +937,8 @@ impl Analyzer {
                             let ctx = self.frame().ctx.clone();
                             for (i, item) in inner_items.into_iter().enumerate() {
                                 let idx = Value::lit(key_int(start + i as i64));
-                                let pid = self.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), its.len()), &ctx, true, "pair", Payload::Pair(idx.clone(), item.clone()));
-                                self.obj_mut(pid).payload = Payload::Pair(idx, item);
+                                let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), its.len()), &ctx, true, "pair", Payload::Pair(idx.clone(), item.clone()));
+                                self.heap.obj_mut(pid).payload = Payload::Pair(idx, item);
                                 its.push(Value::obj(pid));
                             }
                         }
@@ -956,12 +956,12 @@ impl Analyzer {
                     }
                     elems.push(join_values(ms));
                 }
-                Kind::Instance if self.instance_class(oid).and_then(|c| self.class_lookup(c, "__iter__")).is_some() => {
+                Kind::Instance if self.heap.instance_class(oid).and_then(|c| self.class_lookup(c, "__iter__")).is_some() => {
                     // a user iterable: what its `__iter__` returns
                     let r = self.call_method_with(&Value::obj(oid), "__iter__", Vec::new(), node, state).unwrap_or_default();
                     // an iterator (`return self`, an object with `__next__`): its items are what
                     // `__next__` returns (iterating it again would ask `__iter__` forever)
-                    let iters: Vec<u32> = r.pts.iter().filter(|p| *p == oid || (self.kind(*p) == Kind::Instance && self.instance_class(*p).and_then(|c| self.class_lookup(c, "__next__")).is_some())).collect();
+                    let iters: Vec<u32> = r.pts.iter().filter(|p| *p == oid || (self.heap.kind(*p) == Kind::Instance && self.heap.instance_class(*p).and_then(|c| self.class_lookup(c, "__next__")).is_some())).collect();
                     // (one iterator whose `__next__` is decided call by call — an item, or surely
                     // StopIteration — and changes nothing but its own state and the items it makes:
                     // its items, in order, up to UNROLL_MAX)
@@ -1017,22 +1017,22 @@ impl Analyzer {
                 Kind::Unknown => {
                     items = None;
                     exhaustive = false;
-                    if self.obj(oid).depth >= PATH_DEPTH {
+                    if self.heap.obj(oid).depth >= PATH_DEPTH {
                         elems.push(Value::data("deep"));
                         continue;
                     }
                     let row = state.row(oid, Ns::Item);
-                    let label = format!("elem of {}", self.obj(oid).label);
-                    let eid = self.alloc_raw(Kind::Unknown, &format!("elem:{}", oid), "", false, &label, Payload::None);
+                    let label = format!("elem of {}", self.heap.obj(oid).label);
+                    let eid = self.heap.alloc_raw(Kind::Unknown, &format!("elem:{}", oid), "", false, &label, Payload::None);
                     if let Some(sym) = self.sym_access(oid, Ns::Item, STAR) {
                         if !self.symbols.contains_key(&eid) {
                             let scope = self.symbol_scope.get(&oid).copied().unwrap_or(0);
                             self.set_symbol(eid, sym, scope);
                         }
                     }
-                    self.obj_mut(eid).iter_elem = true;
-                    let d = self.obj(oid).depth + 1;
-                    self.obj_mut(eid).depth = d;
+                    self.heap.obj_mut(eid).iter_elem = true;
+                    let d = self.heap.obj(oid).depth + 1;
+                    self.heap.obj_mut(eid).depth = d;
                     if !state.has_row(eid, Ns::Item) {
                         let srcs = row.sources.map(|(src, _)| (crate::domain::source_extend(src, STAR), intern::EMPTY_LENS));
                         // (an element was taken on this path: its source's requirements are
@@ -1127,7 +1127,7 @@ impl Analyzer {
         for _ in 0..2 {
             let mut next: Vec<ObjId> = Vec::new();
             for oid in level {
-                if matches!(self.kind(oid), Kind::List | Kind::Tuple) {
+                if matches!(self.heap.kind(oid), Kind::List | Kind::Tuple) {
                     state.slots.each(&oid, &mut |sk, v| {
                         if matches!(sk.0, Ns::Elem | Ns::Pos) {
                             next.extend(v.pts.iter());
@@ -1167,9 +1167,9 @@ impl Analyzer {
     /// maybe item on one path and skips it on the other).
     pub fn maybe_dict_items(&mut self, v: &Value, state: &State) -> Option<Vec<(Value, bool)>> {
         let o = v.single().filter(|_| v.kv.is_bot())?;
-        let (d, vk) = match (self.kind(o), &self.obj(o).payload) {
+        let (d, vk) = match (self.heap.kind(o), &self.heap.obj(o).payload) {
             (Kind::Dict, _) => (o, ViewKind::Keys),
-            (Kind::View, Payload::View(vk, recv)) if matches!(vk, ViewKind::Keys | ViewKind::Values | ViewKind::Items | ViewKind::Proxy) => (recv.single().filter(|r| recv.kv.is_bot() && self.kind(*r) == Kind::Dict)?, *vk),
+            (Kind::View, Payload::View(vk, recv)) if matches!(vk, ViewKind::Keys | ViewKind::Values | ViewKind::Items | ViewKind::Proxy) => (recv.single().filter(|r| recv.kv.is_bot() && self.heap.kind(*r) == Kind::Dict)?, *vk),
             _ => return None,
         };
         let row = state.row(d, Ns::Item);
@@ -1185,8 +1185,8 @@ impl Analyzer {
                 ViewKind::Keys | ViewKind::Proxy => Value::lit(k),
                 ViewKind::Values => val,
                 _ => {
-                    let pid = self.alloc_raw(Kind::Pair, &format!("pair:{}:{}", o, intern::key_repr(k)), "", true, "pair", Payload::Pair(Value::lit(k), val.clone()));
-                    self.obj_mut(pid).payload = Payload::Pair(Value::lit(k), val);
+                    let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", o, intern::key_repr(k)), "", true, "pair", Payload::Pair(Value::lit(k), val.clone()));
+                    self.heap.obj_mut(pid).payload = Payload::Pair(Value::lit(k), val);
                     Value::obj(pid)
                 }
             };
@@ -1217,7 +1217,7 @@ impl Analyzer {
     pub fn elem_of(&mut self, v: &Value, node: &Node, state: &State) -> Value {
         let mut acc = Value::new();
         for oid in v.pts.iter() {
-            match self.kind(oid) {
+            match self.heap.kind(oid) {
                 Kind::List | Kind::Tuple | Kind::Set => {
                     let e = state.slot(oid, Ns::Elem, STAR);
                     let kv = state.elems.get(&oid).unwrap_or(DATA);
@@ -1258,7 +1258,7 @@ impl Analyzer {
         }
         let mut out = KeySet::new();
         for oid in v.pts.iter() {
-            match self.kind(oid) {
+            match self.heap.kind(oid) {
                 Kind::List | Kind::Tuple | Kind::Set => match state.elems.get(&oid) {
                     Some(kv) if kv.is_literal() => out = out.union(&crate::domain::kv_literals(&kv)),
                     _ => {
@@ -1286,7 +1286,7 @@ impl Analyzer {
     pub fn literal_mapping(&mut self, v: &Value, state: &State) -> Option<Vec<(KeyId, KeyId)>> {
         let mut out: Vec<(KeyId, KeyId)> = Vec::new();
         for oid in v.pts.iter() {
-            if self.kind(oid) != Kind::Dict {
+            if self.heap.kind(oid) != Kind::Dict {
                 return None;
             }
             let row = state.row(oid, Ns::Item);
@@ -1312,10 +1312,10 @@ impl Analyzer {
         if let Some(&n) = seen.get(&oid) {
             return n;
         }
-        let o_kind = self.kind(oid);
+        let o_kind = self.heap.kind(oid);
         // a tuple is its own copy (`copy.copy`), and its own deep copy when nothing in it is
         // copied (CPython returns the same object)
-        if o_kind == Kind::Tuple && (!deep || state.slots_of(oid).iter().all(|(_, v)| v.pts.iter().all(|x| !matches!(self.kind(x), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance)))) {
+        if o_kind == Kind::Tuple && (!deep || state.slots_of(oid).iter().all(|(_, v)| v.pts.iter().all(|x| !matches!(self.heap.kind(x), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance)))) {
             seen.insert(oid, oid);
             return oid;
         }
@@ -1324,20 +1324,20 @@ impl Analyzer {
         // (the original's id in the site: a deep copy's nested copies are distinct objects; a
         // copy of a copy made at this node counts as a copy of the first original)
         let prefix = format!("{}:{}:", tag, self.site_of(node));
-        let site_root = self.obj(oid).site.strip_prefix(&prefix).and_then(|rest| rest.split(['#', ':']).nth(1)).and_then(|r| r.parse::<u32>().ok());
+        let site_root = self.heap.obj(oid).site.strip_prefix(&prefix).and_then(|rest| rest.split(['#', ':']).nth(1)).and_then(|r| r.parse::<u32>().ok());
         let root = match (self.copy_root.get(&oid), site_root) {
-            (Some(&r), _) if self.obj(oid).site.starts_with(&prefix) => r,
-            (_, Some(r)) if (r as usize) < self.objects.len() => r,
+            (Some(&r), _) if self.heap.obj(oid).site.starts_with(&prefix) => r,
+            (_, Some(r)) if (r as usize) < self.heap.len() => r,
             _ => oid,
         };
-        let label = format!("{} of {}@L{}", tag, self.obj(root).label, node.line);
-        let payload = self.obj(oid).payload.clone();
+        let label = format!("{} of {}@L{}", tag, self.heap.obj(root).label, node.line);
+        let payload = self.heap.obj(oid).payload.clone();
         let nid = self.alloc(kind, &format!("{}{}:{}", prefix, kind.name(), root), state, &label, payload, None, if kind == Kind::Instance { Ns::Attr } else { Ns::Item }, None, None);
         self.copy_root.insert(nid, root);
         seen.insert(oid, nid);
-        let ll = self.llen(oid, state);
-        self.set_llen(nid, state, ll);
-        let nsingle = self.obj(nid).single;
+        let ll = self.heap.llen(oid, state);
+        self.heap.set_llen(nid, state, ll);
+        let nsingle = self.heap.obj(nid).single;
         for ns in [Ns::Item, Ns::Attr] {
             if state.has_row(oid, ns) {
                 let prev = state.rows.get(&(nid, ns));
@@ -1355,7 +1355,7 @@ impl Analyzer {
             if deep && seen.len() < 64 {
                 let mut newp: Vec<u32> = Vec::new();
                 for x in v.pts.iter() {
-                    if matches!(self.kind(x), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance) {
+                    if matches!(self.heap.kind(x), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance) {
                         newp.push(self.copy_object(x, node, state, true, seen));
                     } else {
                         newp.push(x);

@@ -27,7 +27,7 @@ impl crate::interp::Analyzer {
         if !self.member_key.contains_key(&o) {
             return None;
         }
-        let Payload::Cls(cls) = self.obj(o).payload else { return None };
+        let Payload::Cls(cls) = self.heap.obj(o).payload else { return None };
         let v = state.slot(o, Ns::Attr, key_str_lit("value"));
         v.kv.as_lit().filter(|_| v.pts.is_empty()).map(|k| (cls, k))
     }
@@ -45,7 +45,7 @@ impl crate::interp::Analyzer {
         let mut out: Vec<KeyId> = Vec::new();
         for o in v.pts.iter() {
             let mk = *self.member_key.get(&o)?;
-            let Payload::Cls(cls) = self.obj(o).payload else { return None };
+            let Payload::Cls(cls) = self.heap.obj(o).payload else { return None };
             let ek = self.enum_kind.get(&cls).copied()?;
             if ek.repr_value {
                 let (_, val) = self.member_value(o, state)?;
@@ -103,9 +103,9 @@ impl crate::interp::Analyzer {
         }
         parts.sort_by(|p, q| p.0.cmp(&q.0));
         let name = if r != 0 && covered == r { Value::lit_str(&parts.iter().map(|p| p.1.as_str()).collect::<Vec<_>>().join("|")) } else { self.none_v.clone() };
-        let cname = self.class_info(cls).name.clone();
+        let cname = self.heap.class_info(cls).name.clone();
         let qual = format!("{}({})", cname, r);
-        let mid = self.alloc_raw(Kind::Instance, &format!("flag:{}:{}", cls, r), "", true, &qual, Payload::Cls(cls));
+        let mid = self.heap.alloc_raw(Kind::Instance, &format!("flag:{}:{}", cls, r), "", true, &qual, Payload::Cls(cls));
         let mut row = Row::new();
         for (k, val) in [("name", name), ("value", Value::lit(intern::key_int(r)))] {
             let kk = key_str_lit(k);
@@ -227,7 +227,7 @@ impl crate::interp::Analyzer {
                 self.cls_slots.insert((coid, Ns::Attr, nk), av);
             }
             let Some(v) = self.cls_slots.get(&(coid, Ns::Attr, nk)).cloned() else { continue };
-            if v.pts.iter().any(|o| matches!(self.kind(o), Kind::Function | Kind::Class)) {
+            if v.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::Function | Kind::Class)) {
                 continue;
             }
             if let Some(i) = v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(crate::intern::key_as_int) {
@@ -241,7 +241,7 @@ impl crate::interp::Analyzer {
                 self.enum_aliases.entry(coid).or_default().push((name, prev));
                 continue;
             }
-            let mid = self.alloc_raw(Kind::Instance, &format!("enum:{}:{}", coid, name), "", true, &format!("{}.{}", c.name.id, name), Payload::Cls(coid));
+            let mid = self.heap.alloc_raw(Kind::Instance, &format!("enum:{}:{}", coid, name), "", true, &format!("{}.{}", c.name.id, name), Payload::Cls(coid));
             let mut row = Row::new();
             for (k, val) in [("name", Value::lit(nk)), ("value", v.clone())] {
                 let kk = key_str_lit(k);
@@ -309,7 +309,7 @@ pub(crate) fn class_attr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, g
         return Value::data(&format!("L{}", node.line));
     }
     let ms = an.enum_aliases.get(&oid).cloned().unwrap_or_else(|| an.enum_members[&oid].clone());
-    let d = an.alloc_raw(Kind::Dict, &format!("enum-members:{}", oid), "", true, "__members__", Payload::None);
+    let d = an.heap.alloc_raw(Kind::Dict, &format!("enum-members:{}", oid), "", true, "__members__", Payload::None);
     let mut row = Row::new();
     let mut order = Vec::new();
     for (n, m) in &ms {

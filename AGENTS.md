@@ -14,7 +14,7 @@ namespace packages).
 * **Values** (`Value`, `domain.rs`) are a set of object ids plus a scalar part (`KeyVal`): a
   literal, up to 64 literals, the keys of some objects, or `Data(label)`, an unknown named by
   where it comes from (`row["id"]`, `x.shape[0]`). A label can also hold a tensor shape.
-* **Objects** (`Obj`, `interp/mod.rs`) are identified by allocation site and context (the call
+* **Objects** (`Obj`, `interp/heap.rs`) are identified by allocation site and context (the call
   chain, 2 deep). A *single* object stands for one runtime object: stores into it are strong.
   Allocating a site again while its earlier object is live gives a variant (up to 8), then a
   *merged* object (stores only join). Garbage collection at returns, loop exits and try exits
@@ -162,7 +162,7 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 | `intern.rs`, `domain.rs` | interned keys, sources, lenses; `Row`, `KeyVal`, `Value`, transfers, `classify` |
 | `layered.rs`, `state.rs` | persistent maps (`LayerMap`, `TwoLevel`); `State`, joins, `diff_keys` |
 | `frontend.rs`, `scopes.rs` | ruff parsing, leaked `&'static` trees, module registry; lexical scopes |
-| `interp/mod.rs` | `Analyzer`, side tables, `Obj`, allocation (`alloc`, `live_among`), lengths, GC, entry runs |
+| `interp/mod.rs`; `heap.rs`, `alloc.rs`, `gc.rs` | `Analyzer`, side tables, entry runs; the `Heap` (objects, lengths, birth marks), allocation policy (`alloc`: variants, recency), liveness (`live_among`, `gc_pinned`) and collectors |
 | `interp/stmts.rs` | statements, loops, try / with / match, `finally` |
 | `interp/exprs.rs`, `interp/funcs.rs` | expressions, comprehensions, yields; functions, iteration, generators |
 | `interp/narrow.rs`, `interp/access.rs` | tests (`split`), narrowing; attribute and item access, verdicts, requirements |
