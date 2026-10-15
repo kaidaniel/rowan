@@ -580,6 +580,12 @@ impl Row {
         Row::with_sources(SrcSet::one((src, EMPTY_LENS)))
     }
 
+    /// The same row value, not only an equal one: no write made it since (every write makes a
+    /// new row; `CondFact`s hold only while their rows are these very ones).
+    pub fn same_ptr(&self, o: &Row) -> bool {
+        Arc::ptr_eq(&self.inner, &o.inner)
+    }
+
     pub fn top() -> Row {
         Row::from_data(RowData { top: true, ..Default::default() })
     }

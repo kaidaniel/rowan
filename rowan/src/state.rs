@@ -285,7 +285,7 @@ impl State {
             return s;
         }
         // facts both sides still hold
-        let facts: Vec<Arc<CondFact>> = self.facts.iter().filter(|f| o.facts.iter().any(|g| Arc::ptr_eq(f, g))).cloned().collect();
+        let facts = if self.facts.is_empty() || o.facts.is_empty() { Vec::new() } else { self.fresh_facts(o) };
         let mut s = State::new();
         s.env = join_env(&self.env, &o.env);
         if !self.narrowed.is_empty() && !o.narrowed.is_empty() {
@@ -305,6 +305,32 @@ impl State {
         s.lasts = join_lasts(&self.lasts, &o.lasts);
         s.unbound = join_unbound(self, o);
         s
+    }
+
+    /// The facts both `self` and `o` hold, each without the rows a path wrote since (a row the
+    /// two differ in: a write on one of them, though the join may give back an equal row).
+    fn fresh_facts(&self, o: &State) -> Vec<Arc<CondFact>> {
+        let mut out = Vec::new();
+        for f in self.facts.iter().filter(|f| o.facts.iter().any(|g| Arc::ptr_eq(f, g))) {
+            let same = |k: &(ObjId, Ns)| match (self.rows.get(k), o.rows.get(k)) {
+                (Some(a), Some(b)) => a.same_ptr(&b),
+                (None, None) => true,
+                _ => false,
+            };
+            if f.rows.iter().all(|(k, _, _)| same(k)) && f.guards.iter().all(|(k, _)| same(k)) {
+                out.push(f.clone());
+                continue;
+            }
+            // (a test's objects written since: the test may read otherwise now)
+            if !f.guards.iter().all(|(k, _)| same(k)) {
+                continue;
+            }
+            let rows: Vec<((ObjId, Ns), Row, Row)> = f.rows.iter().filter(|(k, _, _)| same(k)).cloned().collect();
+            if !rows.is_empty() || f.unbound.is_some() {
+                out.push(Arc::new(CondFact { cond: f.cond, truth: f.truth, deps: f.deps.clone(), rows, guards: f.guards.clone(), unbound: f.unbound.clone() }));
+            }
+        }
+        out
     }
 
     /// The join of several states, pairwise: each round joins what two of them wrote, not a

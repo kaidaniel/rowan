@@ -681,7 +681,23 @@ impl Analyzer {
         if let (true, Some((kv, target))) = (conditional, &sp.ops) {
             self.require_by_raise(test, body, rest, kv, target, &pre, &mut then_s, &mut else_s);
         }
+        // facts of this same test whose rows the branches left as they put them back: they
+        // hold on after the join (which drops facts on rows the two sides differ in)
+        let kept = match &cond {
+            Some((key, pos, _)) if then_s.reachable && else_s.reachable => same_test_facts(*key, *pos, &then_s, &else_s),
+            _ => Vec::new(),
+        };
         let mut j = then_s.join(&mut else_s);
+        if !kept.is_empty() {
+            for f in &kept {
+                for (k, _, joined) in &f.rows {
+                    j.rows.insert(*k, joined.clone());
+                }
+            }
+            let mut all: Vec<std::sync::Arc<crate::state::CondFact>> = j.facts.iter().filter(|f| !kept.iter().any(|g| g.cond == f.cond)).cloned().collect();
+            all.extend(kept);
+            j.facts = std::sync::Arc::new(all);
+        }
         if then_s.reachable && else_s.reachable && conditional {
             let mut new: Vec<std::sync::Arc<crate::state::CondFact>> = Vec::new();
             let mut assigned: Vec<intern::StrId> = Vec::new();
@@ -805,11 +821,11 @@ impl Analyzer {
             if !f.deps.iter().all(|(n, v)| self.dep_value(pre, *n) == *v) {
                 continue;
             }
-            if !f.guards.iter().all(|((o, ns), r)| pre.row(*o, *ns) == *r) {
+            if !f.guards.iter().all(|((o, ns), r)| pre.row(*o, *ns).same_ptr(r)) {
                 continue;
             }
             for (k, branch, joined) in &f.rows {
-                if pre.row(k.0, k.1) == *joined {
+                if pre.row(k.0, k.1).same_ptr(joined) {
                     st.set_row(k.0, k.1, branch.clone());
                 }
             }
@@ -887,6 +903,22 @@ pub(super) fn cond_facts_for(key: intern::StrId, pos: bool, deps: Vec<(intern::S
         std::sync::Arc::new(crate::state::CondFact { cond: key, truth: pos, deps: deps.clone(), rows: rt, guards: guards.clone(), unbound: ut }),
         std::sync::Arc::new(crate::state::CondFact { cond: key, truth: !pos, deps, rows: re, guards, unbound: ue }),
     ]
+}
+
+/// The facts of test `key` both branches still hold whose every row is the branch's own row
+/// on its side (put back by `apply_cond_facts`, unchanged since): the join of the two is the
+/// joined row they record, so they hold after the join too.
+fn same_test_facts(key: intern::StrId, pos: bool, then_s: &State, else_s: &State) -> Vec<std::sync::Arc<crate::state::CondFact>> {
+    let held = |st: &State, truth: bool| st.facts.iter().find(|f| f.cond == key && f.truth == truth).cloned();
+    let (Some(ft), Some(fe)) = (held(then_s, pos), held(else_s, !pos)) else { return Vec::new() };
+    if !std::sync::Arc::ptr_eq(&held(else_s, pos).unwrap_or_else(|| ft.clone()), &ft) || !std::sync::Arc::ptr_eq(&held(then_s, !pos).unwrap_or_else(|| fe.clone()), &fe) {
+        return Vec::new();
+    }
+    let put_back = |st: &State, f: &crate::state::CondFact| f.rows.iter().all(|(k, branch, _)| st.row(k.0, k.1).same_ptr(branch)) && f.guards.iter().all(|(k, r)| st.row(k.0, k.1).same_ptr(r));
+    if ft.rows.len() != fe.rows.len() || !put_back(then_s, &ft) || !put_back(else_s, &fe) {
+        return Vec::new();
+    }
+    vec![ft, fe]
 }
 
 /// Names bound to literals of different truth in the two branches (`has = True` / `False`):
