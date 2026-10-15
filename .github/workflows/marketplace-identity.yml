@@ -1,7 +1,8 @@
 # One-off helper for the Marketplace sign-in that release.yml uses (see its header): signs in as
 # the Entra ID identity and prints its Azure DevOps profile id, which is what the Marketplace's
 # publisher page needs to make the identity a Contributor. The id can only be read while signed
-# in as the identity, hence a workflow. Run it once after setting the AZURE_* variables.
+# in as the identity, hence a workflow. Run it after setting the AZURE_* variables, and again
+# after adding the member: its last step checks that the identity may publish.
 name: Marketplace identity
 
 on:
@@ -34,3 +35,11 @@ jobs:
           echo "::notice::Marketplace member id for the Rowan publisher (Contributor): $id"
           echo "profile (if any):"
           az rest --url https://app.vssps.visualstudio.com/_apis/profile/profiles/me --resource $res || true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # Fails until the id above is a Contributor of the publisher; green means a release can publish.
+      - name: The identity may publish for the Rowan publisher
+        run: npx --yes @vscode/vsce verify-pat --azure-credential Rowan
