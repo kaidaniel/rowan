@@ -4,7 +4,7 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{KeyVal, Ns, Value};
+use crate::domain::{ObjId, KeyVal, Ns, Value};
 use crate::frontend::{self};
 use crate::intern::{self, s};
 use crate::state::{Kind, State};
@@ -228,17 +228,8 @@ impl Analyzer {
         // an endless generator with known first items: those iterations are unrolled (the
         // cursor follows), the rest of the loop runs on from there
         if let (Some(o), None, true) = (once, &it.items, matches!(&*f.iter, ast::Expr::Name(_))) {
-            if let (None, Some(p)) = (self.heap.llen(o, state), self.heap.prefix(o, state)) {
-                if p > c0 && p - c0 <= UNROLL_MAX {
-                    let items: Vec<(Value, bool)> = (c0..p).map(|i| (state.slot(o, Ns::Pos, intern::key_int(i as i64)), true)).collect();
-                    let breaks = self.unroll_for(f, &items, Some((o, c0)), state);
-                    if state.reachable {
-                        // (the rest: from the end of the known items)
-                        self.stmt_for(f, state);
-                    }
-                    join_breaks(state, breaks);
-                    return;
-                }
+            if self.for_known_first_items(f, o, c0, state) {
+                return;
             }
         }
         if once.is_none() || !has_jump {
@@ -311,51 +302,78 @@ impl Analyzer {
         let elem_v = it.elem.value_part();
         self.promote_elem_reqs(&mut exit_s, &back, &elem_v, state);
         if exit_acc.is_none() && back.reachable {
-            // every element of the iterable went through the body: its row after the loop is
-            // the body's exit row, not the join with "not processed yet"
-            for oid in elem_v.pts.iter() {
-                if self.heap.is_record_like(oid) && self.heap.obj(oid).single {
-                    for ns in [Ns::Item, Ns::Attr] {
-                        if back.has_row(oid, ns) {
-                            exit_s.set_row(oid, ns, back.row(oid, ns));
-                        }
-                    }
-                }
-            }
+            self.elements_done(&elem_v, &back, &mut exit_s);
         }
         if !f.orelse.is_empty() && exit_s.reachable {
             self.exec_block(&f.orelse, &mut exit_s);
         }
         join_breaks(&mut exit_s, exit_acc);
-        // the loop ran at least once exactly when its iterable was non-empty: a later test of
-        // that (`if xs:`, `if n > 0:` for `range(n)`) gets the rows the iterations left
         if f.orelse.is_empty() && !has_jump && !prefixed && back.reachable && pre.reachable && exit_s.reachable {
-            let mut assigned: Vec<intern::StrId> = Vec::new();
-            f.body.iter().for_each(|x| collect_assigned(x, &mut assigned));
-            let func = self.frame().func.unwrap_or(0);
-            let tests: Vec<(String, intern::StrId)> = match &*f.iter {
-                ast::Expr::Name(n) => vec![(n.id.to_string(), s(n.id.as_str()))],
-                ast::Expr::Call(c) if c.arguments.args.len() == 1 && matches!(&*c.func, ast::Expr::Name(r) if r.id.as_str() == "range") => match &c.arguments.args[0] {
-                    ast::Expr::Name(n) => vec![(format!("{} > 0", n.id), s(n.id.as_str())), (format!("{} >= 1", n.id), s(n.id.as_str()))],
-                    _ => vec![],
-                },
-                _ => vec![],
-            };
-            let mut new = Vec::new();
-            for (text, name) in tests {
-                if assigned.contains(&name) {
-                    continue;
-                }
-                let deps = vec![(name, self.dep_value(&mut exit_s, name))];
-                if deps[0].1.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::List | Kind::Set)) {
-                    continue;
-                }
-                new.extend(cond_facts_for(s(&format!("{}@{}", text, func)), true, deps, &back, &pre, &exit_s));
-            }
-            add_facts(&mut exit_s, new);
+            self.loop_ran_facts(f, &back, &pre, &mut exit_s);
         }
         join_breaks(&mut exit_s, prefix_breaks);
         state.replace_with(exit_s);
+    }
+
+    /// The loop ran at least once exactly when its iterable was non-empty: a later test of
+    /// that (`if xs:`, `if n > 0:` for `range(n)`) gets the rows the iterations left.
+    fn loop_ran_facts(&mut self, f: &'static ast::StmtFor, back: &State, pre: &State, exit_s: &mut State) {
+        let mut assigned: Vec<intern::StrId> = Vec::new();
+        f.body.iter().for_each(|x| collect_assigned(x, &mut assigned));
+        let func = self.frame().func.unwrap_or(0);
+        let tests: Vec<(String, intern::StrId)> = match &*f.iter {
+            ast::Expr::Name(n) => vec![(n.id.to_string(), s(n.id.as_str()))],
+            ast::Expr::Call(c) if c.arguments.args.len() == 1 && matches!(&*c.func, ast::Expr::Name(r) if r.id.as_str() == "range") => match &c.arguments.args[0] {
+                ast::Expr::Name(n) => vec![(format!("{} > 0", n.id), s(n.id.as_str())), (format!("{} >= 1", n.id), s(n.id.as_str()))],
+                _ => vec![],
+            },
+            _ => vec![],
+        };
+        let mut new = Vec::new();
+        for (text, name) in tests {
+            if assigned.contains(&name) {
+                continue;
+            }
+            let deps = vec![(name, self.dep_value(exit_s, name))];
+            if deps[0].1.pts.iter().any(|o| matches!(self.heap.kind(o), Kind::List | Kind::Set)) {
+                continue;
+            }
+            new.extend(cond_facts_for(s(&format!("{}@{}", text, func)), true, deps, back, pre, exit_s));
+        }
+        add_facts(exit_s, new);
+    }
+
+    /// Every element of the iterable went through the body: its row after the loop is the
+    /// body's exit row, not the join with "not processed yet".
+    fn elements_done(&mut self, elem_v: &Value, back: &State, exit_s: &mut State) {
+        for oid in elem_v.pts.iter() {
+            if self.heap.is_record_like(oid) && self.heap.obj(oid).single {
+                for ns in [Ns::Item, Ns::Attr] {
+                    if back.has_row(oid, ns) {
+                        exit_s.set_row(oid, ns, back.row(oid, ns));
+                    }
+                }
+            }
+        }
+    }
+
+    /// An endless generator with known first items (`o`, from its cursor `c0`): those
+    /// iterations are unrolled (the cursor follows), the rest of the loop runs on from there.
+    /// True: the loop ran.
+    fn for_known_first_items(&mut self, f: &'static ast::StmtFor, o: ObjId, c0: usize, state: &mut State) -> bool {
+        if let (None, Some(p)) = (self.heap.llen(o, state), self.heap.prefix(o, state)) {
+            if p > c0 && p - c0 <= UNROLL_MAX {
+                let items: Vec<(Value, bool)> = (c0..p).map(|i| (state.slot(o, Ns::Pos, intern::key_int(i as i64)), true)).collect();
+                let breaks = self.unroll_for(f, &items, Some((o, c0)), state);
+                if state.reachable {
+                    // (the rest: from the end of the known items)
+                    self.stmt_for(f, state);
+                }
+                join_breaks(state, breaks);
+                return true;
+            }
+        }
+        false
     }
 }
 
