@@ -125,3 +125,17 @@ try:
         prev = r
 except KeyError:
     pass
+
+# the consumer keeps the previous item: another record than the next one
+def plain(rows):
+    for r in rows:
+        yield r
+
+
+prev_rec = None
+for rec in plain([{"id": r["id"]} for r in raw]):
+    if prev_rec is not None:
+        prev_rec["seen"] = 1
+        print(rec["seen"])  #@ possibly seen
+        #@todo missing seen (rowan does not know the two items are different records)
+    prev_rec = rec

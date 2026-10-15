@@ -59,6 +59,18 @@ def done_with_alias():
         print(r["t"])  #@ possibly t
 
 
+def previous_item():
+    # the item of the previous iteration is another record than this one
+    rows = [{"id": r["id"]} for r in raw]
+    prev = None
+    for r in rows:
+        if prev is not None:
+            prev["seen"] = 1
+            print(r["seen"])  #@ possibly seen
+            #@todo missing seen (rowan does not know the two items are different records)
+        prev = r
+
+
 def last_of_input(items):
     # `last` is the input's last element; the first iteration stores into the first one
     last = None
@@ -70,7 +82,7 @@ def last_of_input(items):
             print(last["y"])  #@ input y
 
 
-for f in (ahead, through_list, two_loops, after_break, done_with_alias):
+for f in (ahead, through_list, two_loops, after_break, done_with_alias, previous_item):
     try:
         f()
     except KeyError:
