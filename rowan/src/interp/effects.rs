@@ -664,36 +664,7 @@ impl Analyzer {
                 match (self.heap.kind(o), &self.heap.obj(o).payload) {
                     (Kind::Function, Payload::Func(fi)) => {
                         let fi = fi.clone();
-                        let uses = self.code_uses(&fi);
-                        attrs.extend(uses.attrs.iter().copied());
-                        reads.extend(uses.reads.iter().copied());
-                        // (a mutable default is the function's own state)
-                        for v in fi.defaults.values() {
-                            out.values.push(v.clone());
-                            code(self, v, &mut work);
-                        }
-                        for u in &uses.uses {
-                            // (`m.x` of a module m: its global x)
-                            let (loc, in_module) = match (self.resolve_use(&fi, &uses, u.name), u.attr) {
-                                (Ok(l), None) => (l, false),
-                                (Ok(l), Some(a)) => match state.slot(l.0, l.1, l.2).single().filter(|m| self.heap.kind(*m) == Kind::Module) {
-                                    Some(m) => ((m, Ns::Attr, key_str_lit(&str_get(a))), true),
-                                    None => (l, false),
-                                },
-                                (Err(m), Some(a)) => ((m, Ns::Attr, key_str_lit(&str_get(a))), true),
-                                (Err(m), None) => {
-                                    work.push(m);
-                                    continue;
-                                }
-                            };
-                            if u.rebinds && (u.attr.is_none() || in_module) {
-                                out.rebound.push(loc);
-                            }
-                            if u.changes {
-                                out.locs.push(loc);
-                            }
-                            code(self, &state.slot(loc.0, loc.1, loc.2), &mut work);
-                        }
+                        self.function_closure(&fi, state, &mut out, &mut attrs, &mut reads, &mut work);
                     }
                     (Kind::Module, _) => {
                         // (a module used as a value: any of its globals)
@@ -816,6 +787,43 @@ impl Analyzer {
             state.set_row(o, Ns::Attr, row);
         }
         r
+    }
+
+    /// What a function's code adds to a closure: the attribute names it changes and reads, its
+    /// mutable defaults, and the slots of the names it reads (changed, rebound) with the code
+    /// they hold.
+    fn function_closure(&mut self, fi: &FuncInfo, state: &State, out: &mut Closure, attrs: &mut FxHashSet<StrId>, reads: &mut FxHashSet<StrId>, work: &mut Vec<ObjId>) {
+        let code = |an: &Analyzer, v: &Value, work: &mut Vec<ObjId>| work.extend(v.pts.iter().filter(|x| matches!(an.heap.kind(*x), Kind::Function | Kind::Class | Kind::Bound | Kind::Instance | Kind::Partial | Kind::Module)));
+        let uses = self.code_uses(&fi);
+        attrs.extend(uses.attrs.iter().copied());
+        reads.extend(uses.reads.iter().copied());
+        // (a mutable default is the function's own state)
+        for v in fi.defaults.values() {
+            out.values.push(v.clone());
+            code(self, v, work);
+        }
+        for u in &uses.uses {
+            // (`m.x` of a module m: its global x)
+            let (loc, in_module) = match (self.resolve_use(&fi, &uses, u.name), u.attr) {
+                (Ok(l), None) => (l, false),
+                (Ok(l), Some(a)) => match state.slot(l.0, l.1, l.2).single().filter(|m| self.heap.kind(*m) == Kind::Module) {
+                    Some(m) => ((m, Ns::Attr, key_str_lit(&str_get(a))), true),
+                    None => (l, false),
+                },
+                (Err(m), Some(a)) => ((m, Ns::Attr, key_str_lit(&str_get(a))), true),
+                (Err(m), None) => {
+                    work.push(m);
+                    continue;
+                }
+            };
+            if u.rebinds && (u.attr.is_none() || in_module) {
+                out.rebound.push(loc);
+            }
+            if u.changes {
+                out.locs.push(loc);
+            }
+            code(self, &state.slot(loc.0, loc.1, loc.2), work);
+        }
     }
 }
 
