@@ -605,7 +605,10 @@ impl Analyzer {
         if state.has_row(pid, Ns::Item) {
             return;
         }
-        let srcs = row.sources.filter(|(src, _)| elem || !crate::domain::source_is_data(src)).map(|(src, _)| (crate::domain::source_extend(src, k), intern::EMPTY_LENS));
+        // (an input's parts below PATH_DEPTH + 1 keys are nothing more of it: data copied out of
+        // a placeholder and read again, as a recursion over unknown values does, made paths
+        // without end — `args['*'][0][0][0]…` — in contracts no one can read)
+        let srcs = row.sources.filter(|(src, _)| (elem || !crate::domain::source_is_data(src)) && crate::domain::source_depth(src) <= PATH_DEPTH as usize).map(|(src, _)| (crate::domain::source_extend(src, k), intern::EMPTY_LENS));
         // (the parent's value was read on this path: its requirements are known here, none so
         // far — a path without the entry never read it)
         for (cs, _) in srcs.iter() {

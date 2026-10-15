@@ -449,6 +449,11 @@ pub fn source_is_nested(s: SourceId) -> bool {
     with_source(s, |src| !src.path.is_empty())
 }
 
+/// How many keys below its input a source is (`json.loads@L3['db']['host']`: 2).
+pub fn source_depth(s: SourceId) -> usize {
+    with_source(s, |src| src.path.len())
+}
+
 pub fn source_is_data(s: SourceId) -> bool {
     with_source(s, |src| src.kind == SourceKind::Data)
 }
