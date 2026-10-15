@@ -2919,6 +2919,8 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             continue;
         }
         let mut ext_items: Option<Vec<Value>> = None;
+        // (the lengths it may have, before a store of an element voids them)
+        let alts = an.heap.len_alts(oid, st);
         let elem = if (name == "extend" || name == "update") && !c.args.is_empty() {
             let it = an.iterate(&c.args[0], &c.node, st);
             if name == "extend" {
@@ -2969,7 +2971,20 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             st.drop_obj_ns(oid, Ns::Pos);
         } else if name == "append" || name == "extend" {
-            // the length was unknown already: the known prefix stays
+            // the length was unknown already: the known prefix stays; one of a few lengths: the
+            // items at each one's end (as each path has them)
+            if let Some(alts) = alts {
+                match if name == "append" { Some(vec![elem.clone()]) } else { ext_items.clone() } {
+                    Some(items) => {
+                        for n in alts {
+                            for (i, item) in items.iter().enumerate() {
+                                st.set_slot(oid, Ns::Pos, intern::key_int((n + i) as i64), item.clone(), false);
+                            }
+                        }
+                    }
+                    None => an.heap.set_prefix(oid, st, alts[0]),
+                }
+            }
             continue;
         }
         an.heap.set_llen(oid, st, None);

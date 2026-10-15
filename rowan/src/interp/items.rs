@@ -557,6 +557,31 @@ impl Analyzer {
         }
     }
 
+    /// `seq[i] = v`: the position (from either end, of each length it may have; any known one
+    /// when i is not known); `seq[a:b] = items`: positions and length not known any more.
+    fn store_in_sequence(&mut self, oid: ObjId, key: &Value, v: &Value, strong: bool, node: &Node, state: &mut State) {
+        if matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice")) {
+            let it = self.iterate(v, node, state);
+            let e = self.elem_value(&it.elem, node, "el");
+            state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv)), false);
+            let kv = crate::domain::kv_join(&state.elems.get(&oid).unwrap_or(KeyVal::Bot), &e.kv);
+            state.elems.insert(oid, kv);
+            state.drop_obj_ns(oid, Ns::Pos);
+            self.heap.set_llen(oid, state, None);
+            return;
+        }
+        state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), crate::models::torch::elem_kv(&v.kv)), false);
+        let idx = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
+        let at: Vec<i64> = match (idx, self.heap.len_alts(oid, state)) {
+            (Some(i), Some(alts)) => alts.iter().map(|n| if i < 0 { *n as i64 + i } else { i }).zip(alts.iter()).filter(|(p, n)| 0 <= *p && *p < **n as i64).map(|(p, _)| p).collect(),
+            _ => state.slots_of(oid).into_iter().filter(|((ns, _), _)| *ns == Ns::Pos).filter_map(|((_, k), _)| intern::key_as_int(k)).collect(),
+        };
+        let one = idx.is_some() && self.heap.llen(oid, state).is_some();
+        for p in at {
+            state.set_slot(oid, Ns::Pos, intern::key_int(p), v.clone(), strong && one);
+        }
+    }
+
     /// The object a shallow copy (`copy.copy`, `dict.copy`) was made of.
     pub(in crate::interp) fn shallow_copy_root(&self, oid: ObjId) -> Option<ObjId> {
         self.heap.copy_root.get(&oid).copied().filter(|_| self.heap.obj(oid).site.starts_with("copy:"))
@@ -703,14 +728,7 @@ impl Analyzer {
                     continue;
                 }
                 Kind::List | Kind::Tuple | Kind::Set => {
-                    state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), crate::models::torch::elem_kv(&v.kv)), false);
-                    if let (Some(k), Some(n)) = (key.kv.as_lit(), self.heap.llen(oid, state)) {
-                        if let Some(i) = intern::key_as_int(k) {
-                            if 0 <= i && (i as usize) < n {
-                                state.set_slot(oid, Ns::Pos, intern::key_int(i), v.clone(), strong);
-                            }
-                        }
-                    }
+                    self.store_in_sequence(oid, key, v, strong, node, state);
                     continue;
                 }
                 Kind::Frame => {
