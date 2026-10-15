@@ -550,95 +550,11 @@ impl Analyzer {
 
     pub(in crate::interp) fn load_instance_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool, try_guard: bool, single_target: bool) -> Value {
         let nk = key_str_lit(name);
-        // a pydantic private attribute: its hidden slot
-        if let Some(cls) = self.heap.instance_class(oid) {
-            if name.starts_with('_') && crate::models::pydantic::pyd_is_private(self, cls, name, state) {
-                if !guarded {
-                    self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
-                }
-                return state.slot(oid, Ns::Attr, crate::models::pydantic::priv_key(name));
-            }
-            if name == "__pydantic_private__" && crate::models::pydantic::is_model(self, cls) {
-                let pc = crate::models::pydantic::pyd_class(self, cls, state);
-                let did = self.alloc_at(Kind::Dict, node, state, &format!("private@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("priv{}", oid)));
-                let mut row = Row::new();
-                for (pn, _, _) in pc.privates.iter() {
-                    let k = key_str_lit(pn);
-                    row = row.store(k, true);
-                    let v = state.slot(oid, Ns::Attr, crate::models::pydantic::priv_key(pn));
-                    state.set_slot(did, Ns::Item, k, v, true);
-                }
-                state.set_row(did, Ns::Item, row);
-                return Value::obj(did);
-            }
+        if let Some(v) = self.instance_library_attr(oid, name, nk, node, state, guarded) {
+            return v;
         }
-        // what every instance has from `object` and its class (`__module__`, `__repr__`, …),
-        // when neither the class nor the instance defines it
-        if OBJECT_ATTRS.contains(&name) && name != "__dict__" && name != "__class__" {
-            if let Some(cls) = self.heap.instance_class(oid) {
-                if self.class_lookup(cls, name).is_none() && state.slot_opt(oid, Ns::Attr, nk).is_none() {
-                    if !guarded {
-                        self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
-                    }
-                    return match name {
-                        "__module__" | "__doc__" | "__weakref__" => Value::data(&format!("{}@L{}", name, node.line)),
-                        _ => self.method_value(&format!("object.{}", name), &Value::obj(oid)),
-                    };
-                }
-            }
-        }
-        // pydantic's API on a model instance (`model_dump`, `model_copy`, …)
-        if crate::models::pydantic::PYD_METHODS.contains(&name) {
-            if let Some(cls) = self.heap.instance_class(oid) {
-                if self.class_lookup(cls, name).is_none() && crate::models::pydantic::is_model(self, cls) && !state.row(oid, Ns::Attr).present.contains(nk) {
-                    if crate::models::pydantic::PYD_ATTRS.contains(&name) {
-                        return crate::models::pydantic::attr_value(self, state, oid, name, node);
-                    }
-                    return self.method_value(&format!("pydantic.{}", name), &Value::obj(oid));
-                }
-            }
-        }
-        // a `threading.Thread` subclass's `start()` runs its `run()`
-        if matches!(name, "start" | "join") {
-            if let Some(cls) = self.heap.instance_class(oid).filter(|c| self.class_lookup(*c, name).is_none()) {
-                if self.heap.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).is_some_and(|ci| ci.lib.quals.iter().any(|q| q == "threading.Thread"))) {
-                    return self.method_value(&format!("threadsub.{}", name), &Value::obj(oid));
-                }
-            }
-        }
-        // the methods every NamedTuple has
-        if matches!(name, "_asdict" | "_replace" | "_fields") {
-            if let Some(cls) = self.heap.instance_class(oid) {
-                if self.class_lookup(cls, name).is_none() && crate::models::dataclasses::is_named_tuple_class(self, cls) {
-                    if name == "_fields" {
-                        let fs: Vec<Value> = crate::models::dataclasses::dataclass_fields_mro(self, cls).iter().map(|(f, _)| Value::lit(key_str_lit(f))).collect();
-                        let kv = KeyVal::lits(fs.iter().filter_map(|v| v.kv.as_lit()).collect());
-                        return self.alloc_positional(Kind::Tuple, node, Some(fs), Value::new(), kv, state);
-                    }
-                    return self.method_value(&format!("namedtuple.{}", name), &Value::obj(oid));
-                }
-            }
-        }
-        // `__getattr__` answers what normal lookup does not find
-        if let Some(cls) = self.heap.instance_class(oid) {
-            if !name.starts_with("__") && self.class_lookup(cls, name).is_none() && self.class_lookup(cls, "__getattr__").is_some() {
-                let row = state.row(oid, Ns::Attr);
-                if !row.definite.contains(nk) {
-                    if !row.present.contains(nk) {
-                        return self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, state).unwrap_or_default();
-                    }
-                    // (set on some paths: `__getattr__` runs on the others only — when it raises
-                    // there, the paths that have the attribute go on)
-                    let mut missing = state.copy();
-                    let fallback = self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, &mut missing).unwrap_or_default();
-                    let own = state.slot(oid, Ns::Attr, nk);
-                    if missing.reachable {
-                        let j = state.join(&mut missing);
-                        state.replace_with(j);
-                    }
-                    return own.join(&fallback);
-                }
-            }
+        if let Some(v) = self.instance_getattr(oid, name, nk, node, state) {
+            return v;
         }
         let v = state.slot_opt(oid, Ns::Attr, nk);
         let row = self.read_row(oid, Ns::Attr, state);
@@ -712,6 +628,109 @@ impl Analyzer {
             return self.path_placeholder_value(oid, Ns::Attr, nk, &row, state);
         }
         Value::data(&format!("L{}", node.line))
+    }
+
+    /// What a library makes of an instance's attribute before its own attributes: pydantic's
+    /// private attributes and API, `object`'s attributes, a Thread subclass's `start` /
+    /// `join`, a NamedTuple's methods.
+    fn instance_library_attr(&mut self, oid: ObjId, name: &str, nk: KeyId, node: &Node, state: &mut State, guarded: bool) -> Option<Value> {
+        // a pydantic private attribute: its hidden slot
+        if let Some(cls) = self.heap.instance_class(oid) {
+            if name.starts_with('_') && crate::models::pydantic::pyd_is_private(self, cls, name, state) {
+                if !guarded {
+                    self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
+                }
+                return Some(state.slot(oid, Ns::Attr, crate::models::pydantic::priv_key(name)));
+            }
+            if name == "__pydantic_private__" && crate::models::pydantic::is_model(self, cls) {
+                let pc = crate::models::pydantic::pyd_class(self, cls, state);
+                let did = self.alloc_at(Kind::Dict, node, state, &format!("private@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("priv{}", oid)));
+                let mut row = Row::new();
+                for (pn, _, _) in pc.privates.iter() {
+                    let k = key_str_lit(pn);
+                    row = row.store(k, true);
+                    let v = state.slot(oid, Ns::Attr, crate::models::pydantic::priv_key(pn));
+                    state.set_slot(did, Ns::Item, k, v, true);
+                }
+                state.set_row(did, Ns::Item, row);
+                return Some(Value::obj(did));
+            }
+        }
+        // what every instance has from `object` and its class (`__module__`, `__repr__`, …),
+        // when neither the class nor the instance defines it
+        if OBJECT_ATTRS.contains(&name) && name != "__dict__" && name != "__class__" {
+            if let Some(cls) = self.heap.instance_class(oid) {
+                if self.class_lookup(cls, name).is_none() && state.slot_opt(oid, Ns::Attr, nk).is_none() {
+                    if !guarded {
+                        self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
+                    }
+                    return Some(match name {
+                        "__module__" | "__doc__" | "__weakref__" => Value::data(&format!("{}@L{}", name, node.line)),
+                        _ => self.method_value(&format!("object.{}", name), &Value::obj(oid)),
+                    });
+                }
+            }
+        }
+        // pydantic's API on a model instance (`model_dump`, `model_copy`, …)
+        if crate::models::pydantic::PYD_METHODS.contains(&name) {
+            if let Some(cls) = self.heap.instance_class(oid) {
+                if self.class_lookup(cls, name).is_none() && crate::models::pydantic::is_model(self, cls) && !state.row(oid, Ns::Attr).present.contains(nk) {
+                    if crate::models::pydantic::PYD_ATTRS.contains(&name) {
+                        return Some(crate::models::pydantic::attr_value(self, state, oid, name, node));
+                    }
+                    return Some(self.method_value(&format!("pydantic.{}", name), &Value::obj(oid)));
+                }
+            }
+        }
+        // a `threading.Thread` subclass's `start()` runs its `run()`
+        if matches!(name, "start" | "join") {
+            if let Some(cls) = self.heap.instance_class(oid).filter(|c| self.class_lookup(*c, name).is_none()) {
+                if self.heap.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).is_some_and(|ci| ci.lib.quals.iter().any(|q| q == "threading.Thread"))) {
+                    return Some(self.method_value(&format!("threadsub.{}", name), &Value::obj(oid)));
+                }
+            }
+        }
+        // the methods every NamedTuple has
+        if matches!(name, "_asdict" | "_replace" | "_fields") {
+            if let Some(cls) = self.heap.instance_class(oid) {
+                if self.class_lookup(cls, name).is_none() && crate::models::dataclasses::is_named_tuple_class(self, cls) {
+                    if name == "_fields" {
+                        let fs: Vec<Value> = crate::models::dataclasses::dataclass_fields_mro(self, cls).iter().map(|(f, _)| Value::lit(key_str_lit(f))).collect();
+                        let kv = KeyVal::lits(fs.iter().filter_map(|v| v.kv.as_lit()).collect());
+                        return Some(self.alloc_positional(Kind::Tuple, node, Some(fs), Value::new(), kv, state));
+                    }
+                    return Some(self.method_value(&format!("namedtuple.{}", name), &Value::obj(oid)));
+                }
+            }
+        }
+        None
+    }
+
+    /// The class's `__getattr__`, for a name normal lookup does not find (on the paths the
+    /// instance lacks it).
+    fn instance_getattr(&mut self, oid: ObjId, name: &str, nk: KeyId, node: &Node, state: &mut State) -> Option<Value> {
+        // `__getattr__` answers what normal lookup does not find
+        if let Some(cls) = self.heap.instance_class(oid) {
+            if !name.starts_with("__") && self.class_lookup(cls, name).is_none() && self.class_lookup(cls, "__getattr__").is_some() {
+                let row = state.row(oid, Ns::Attr);
+                if !row.definite.contains(nk) {
+                    if !row.present.contains(nk) {
+                        return Some(self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, state).unwrap_or_default());
+                    }
+                    // (set on some paths: `__getattr__` runs on the others only — when it raises
+                    // there, the paths that have the attribute go on)
+                    let mut missing = state.copy();
+                    let fallback = self.call_method_with(&Value::obj(oid), "__getattr__", vec![Value::lit(nk)], node, &mut missing).unwrap_or_default();
+                    let own = state.slot(oid, Ns::Attr, nk);
+                    if missing.reachable {
+                        let j = state.join(&mut missing);
+                        state.replace_with(j);
+                    }
+                    return Some(own.join(&fallback));
+                }
+            }
+        }
+        None
     }
 
     /// A value declared dynamically typed (`Any`): accesses on it are not checkable (§6.6).
