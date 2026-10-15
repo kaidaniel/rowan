@@ -389,7 +389,7 @@ impl Analyzer {
         }
         if let Some(init) = self.class_lookup(cls, "__init__") {
             let fv = self.heap.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
-            self.cx.fresh_init.insert(inst, (self.heap.serial(), state.copy()));
+            self.cx.fresh_init.insert(inst, super::context::Building { mark: self.heap.serial(), at: state.copy(), roots: Vec::new(), holders: Vec::new(), looks: 0, held: false });
             for f in fv.pts.iter() {
                 if self.heap.kind(f) == Kind::Function {
                     self.call_user(f, Some(Value::obj(inst)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, false);

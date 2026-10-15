@@ -240,8 +240,8 @@ impl Analyzer {
         // later raise point holds once built)
         if self.cx.frames.len() > fl {
             let mark = self.unwind.tries.last().unwrap().mark;
-            let half: Vec<(ObjId, u64, State)> = self.cx.fresh_init.iter().filter(|(o, _)| !self.heap.born_before(**o, mark)).map(|(o, (s, st))| (*o, *s, st.copy())).collect();
-            for (o, since, at) in half {
+            let half: Vec<ObjId> = self.cx.fresh_init.iter().filter(|(o, b)| !b.held && !self.heap.born_before(**o, mark)).map(|(o, _)| *o).collect();
+            for o in half {
                 let mut roots: Vec<ObjId> = Vec::new();
                 self.state_roots(&here, el, fl, &mut roots);
                 for (x, v) in here.lasts.iter() {
@@ -249,7 +249,7 @@ impl Analyzer {
                     v.push_objs(&mut roots);
                 }
                 exc.push_objs(&mut roots);
-                self.drop_unreached(since, &at, roots, o, &mut here, el);
+                self.drop_unreached(o, roots, &mut here, el);
             }
         }
         // (joined per class: a handler takes every raise of a class or none of them; what
