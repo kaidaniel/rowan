@@ -561,7 +561,25 @@ impl Analyzer {
     /// when i is not known); `seq[a:b] = items`: positions and length not known any more.
     fn store_in_sequence(&mut self, oid: ObjId, key: &Value, v: &Value, strong: bool, node: &Node, state: &mut State) {
         if matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice")) {
+            // known bounds (step 1) on a known length, known items: the list spliced
             let it = self.iterate(v, node, state);
+            if let (Some((lo, hi, None | Some(1))), Some(n), Some(items), true) = (Self::slice_label_bounds(&key.kv), self.heap.llen(oid, state), it.items.as_ref(), strong) {
+                let norm = |x: i64| if x < 0 { (n as i64 + x).max(0) } else { x.min(n as i64) } as usize;
+                let (a, b) = (norm(lo.unwrap_or(0)), norm(hi.unwrap_or(n as i64)));
+                let b = b.max(a);
+                let mut vals: Vec<Value> = (0..a).map(|i| state.slot(oid, Ns::Pos, intern::key_int(i as i64))).collect();
+                vals.extend(items.iter().cloned());
+                vals.extend((b..n).map(|i| state.slot(oid, Ns::Pos, intern::key_int(i as i64))));
+                if vals.len() < 16 {
+                    state.drop_obj_ns(oid, Ns::Pos);
+                    for (i, x) in vals.iter().enumerate() {
+                        state.set_slot(oid, Ns::Pos, intern::key_int(i as i64), x.clone(), true);
+                        state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(x.pts.clone(), crate::models::torch::elem_kv(&x.kv)), false);
+                    }
+                    self.heap.set_llen(oid, state, Some(vals.len()));
+                    return;
+                }
+            }
             let e = self.elem_value(&it.elem, node, "el");
             state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv)), false);
             let kv = crate::domain::kv_join(&state.elems.get(&oid).unwrap_or(KeyVal::Bot), &e.kv);

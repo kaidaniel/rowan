@@ -1,7 +1,8 @@
 # Stores into a list with known positions: by an index not known, every position may be the
 # one stored (it was left untouched); by a negative index, the position from the end; a slice
-# assignment changes positions and length (the assigned list was taken for an item); an append
-# to a list of one of a few lengths lands at each one's end.
+# assignment splices known items in (else positions and length are not known: the assigned
+# list was taken for an item); an append to a list of one of a few lengths lands at each
+# one's end.
 import os
 
 c = os.environ.get("Z519_C")
@@ -23,3 +24,10 @@ if c:
     q.append("y")
 q.append("z")
 q1 = q[1]                                        #@value q1: exactly={"y","z"}
+
+p = [1, 2, 3]
+p[:] = p[1:]
+p0 = p[0]                                        #@value p0: exactly={2}
+p[1:2] = ["a", "b"]
+np = len(p)                                      #@value np: exactly={3}
+p2 = p[2]                                        #@value p2: exactly={"b"}
