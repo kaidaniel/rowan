@@ -282,7 +282,7 @@ impl Analyzer {
             let kv = state.elems.get(&oid).unwrap_or(DATA);
             let v = self.alloc_positional(kind, node, Some(vals), Value::new(), kv, state);
             if let (Some(m), Some(nid)) = (mask, v.single()) {
-                state.lens.insert(nid, (None, 0, m));
+                state.set_lens(nid, (None, 0, m));
             }
             parts.push(v);
             return true;
@@ -535,7 +535,7 @@ impl Analyzer {
                 state.require(src, k, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
                 if fresh && (self.cx.branch_depth > 0 || self.cx.cond_depth > 0) {
                     if let Some(cur) = state.reqs.get(&src, &k) {
-                        state.reqs.set(&src, k, crate::domain::ReqInfo { always: false, ..cur });
+                        state.reqs.set(&src, k, cur.sometimes());
                     }
                 }
             }

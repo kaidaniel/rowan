@@ -76,6 +76,12 @@ assert(u8.includes("not defined in this file"), u8);
 const user2 = hover(a01idx, a01src, 2, "user");
 assert(user2.includes("- not known here: argument `user` of `build`") && user2.includes("- in calls: `u` (line 8)") && user2.includes("- the code reads `user.id`"), user2);
 assert.strictEqual(renderHover("zzz", [], []), null);
+// a key read only under a test of another argument: "(only if `admin`)", with its legend entry
+const z535 = path.join(root, "tests", "cases", "z535_requirements_under_parameter_tests.py");
+const z535src = fs.readFileSync(z535, "utf8").split("\n");
+const row11 = hover(indexResult(facts(z535)), z535src, z535src.indexOf('        return row["role"]') + 1, "row");
+assert(row11.includes('- on some paths the code reads `row["id"]` (only if `not admin`), `row["role"]` (only if `admin`)'), row11);
+assert(row11.includes("`(only if x)` read only on calls where `x` holds of the arguments as passed"), row11);
 // an alternative too wide for its line keeps whole items (`…` for the rest), not a cut word
 assert.strictEqual(shorten('{"id": 1, "owner": "bo", "priority": 2, "tags": [], "title": "printer jam"}', 60), '{"id": 1, "owner": "bo", "priority": 2, "tags": [], …}');
 assert.strictEqual(shorten('Ticket(id=1, title="a very long title that goes on and on and on")', 30), "Ticket(id=1, …)");
@@ -313,3 +319,4 @@ console.log(`ok (${n} hovers checked)`);
 console.log("\n--- sample hover for qkv (nanoGPT attention) ---\n" + qkv);
 console.log("\n--- sample hover for r at line 9 ---\n" + r9);
 console.log("\n--- sample hover for u at line 8 ---\n" + u8);
+console.log("\n--- sample hover for row in contract (z535) ---\n" + row11);

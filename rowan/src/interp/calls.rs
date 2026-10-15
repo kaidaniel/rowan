@@ -556,12 +556,7 @@ impl Analyzer {
         // (a generator's object: the one its run returns, keyed as `yield_value` finds it)
         let gen_id = matches!(fnode, FuncNode::Def(f) if is_generator(&f.body)).then(|| self.heap.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None));
         let new_fr = self.callee_frame(foid, &fi, &ctx);
-        let saved_env = std::mem::take(&mut state.env);
-        let saved_unbound = std::mem::take(&mut state.unbound);
-        self.cx.env_stack.push(saved_env.clone());
-        let saved_ret = state.ret.take();
-        // (the caller's recorded returns are not the callee's: its end must not join them in)
-        let saved_exits = { state.exits.take() };
+        let caller = self.take_caller(&fi, state);
         self.cx.frames.push(new_fr);
         let saved_yields = gen_id.map(|ygid| (ygid, self.gen_activation_begin(ygid, foid, &fi, &ctx, state)));
         let saved_chain = std::mem::take(&mut self.cx.call_chain);
@@ -606,14 +601,33 @@ impl Analyzer {
         self.recursion.end(&key);
         self.cx.call_chain = saved_chain;
         self.cx.frames.pop();
-        self.cx.env_stack.pop();
-        state.env = saved_env;
-        state.unbound = saved_unbound;
-        state.ret = saved_ret;
-        if saved_exits.is_some() {
-            state.exits = saved_exits;
-        }
+        self.give_back(caller, state);
         ret
+    }
+
+    /// What a callee's run takes out of the caller's state: its names, its possibly-unbound
+    /// names, its returns so far (the callee's end must not join them in), and from its path
+    /// the tests of the callee's own parameters (another call's).
+    fn take_caller(&mut self, fi: &FuncInfo, state: &mut State) -> Caller {
+        let env = std::mem::take(&mut state.env);
+        self.cx.env_stack.push(env.clone());
+        let path = state.path.clone();
+        let own = s(&format!("param {}.", fi.py_qualname()));
+        if state.path.iter().any(|(o, _)| *o == own) {
+            state.path = std::sync::Arc::new(state.path.iter().filter(|(o, _)| *o != own).copied().collect());
+        }
+        Caller { env, unbound: std::mem::take(&mut state.unbound), path, ret: state.ret.take(), exits: state.exits.take() }
+    }
+
+    fn give_back(&mut self, c: Caller, state: &mut State) {
+        self.cx.env_stack.pop();
+        state.env = c.env;
+        state.unbound = c.unbound;
+        state.path = c.path;
+        state.ret = c.ret;
+        if c.exits.is_some() {
+            state.exits = c.exits;
+        }
     }
 
     /// The frame a call of `fi` runs in: context `ctx`, its own cells and its closure's.
@@ -792,3 +806,12 @@ impl Analyzer {
     }
 }
 
+
+/// (see `Analyzer::take_caller`)
+struct Caller {
+    env: IndexMap<StrId, Value>,
+    unbound: std::sync::Arc<Vec<StrId>>,
+    path: std::sync::Arc<Vec<(StrId, StrId)>>,
+    ret: Option<Value>,
+    exits: Option<std::sync::Arc<State>>,
+}

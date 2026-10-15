@@ -343,14 +343,14 @@ impl Heap {
     /// (also the object's own field: what a state not descended from the one it was made in
     /// reads)
     pub fn set_llen(&mut self, o: ObjId, st: &mut State, v: Option<usize>) {
-        st.lens.insert(o, (v, v.unwrap_or(0), 0));
+        st.set_lens(o, (v, v.unwrap_or(0), 0));
         self.objects[o as usize].literal_len = v;
         self.objects[o as usize].known_prefix = None;
     }
 
     /// The length is unknown now, its first `n` positions are still known.
     pub fn set_prefix(&mut self, o: ObjId, st: &mut State, n: usize) {
-        st.lens.insert(o, (None, n, 0));
+        st.set_lens(o, (None, n, 0));
         self.objects[o as usize].literal_len = None;
         self.objects[o as usize].known_prefix = Some(n);
     }

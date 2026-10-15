@@ -380,7 +380,7 @@ impl Analyzer {
             st.elems.insert(o, kv);
         }
         for (o, l) in lens {
-            st.lens.insert(o, l);
+            st.set_lens(o, l);
         }
     }
 
@@ -742,7 +742,7 @@ impl Analyzer {
             if let Some((None, p, 0)) = state.lens.get(&gid) {
                 let shifted = (alts_before as u32) << 1;
                 if shifted <= 0xFFFF {
-                    state.lens.insert(gid, (None, p, shifted as u16));
+                    state.set_lens(gid, (None, p, shifted as u16));
                 }
             }
         }
@@ -962,9 +962,9 @@ pub fn gen_copy_facts(dst: &mut State, src: &State, ge: &crate::interp::GenEffec
     }
     for o in &ge.lens {
         match src.lens.get(o) {
-            Some(v) => dst.lens.insert(*o, v),
+            Some(v) => dst.set_lens(*o, v),
             None => {
-                dst.lens.remove(o);
+                dst.forget_len(o);
             }
         }
     }
@@ -1026,7 +1026,7 @@ impl Analyzer {
                 if p > 0 {
                     self.heap.obj_mut(gid).known_prefix = Some(p);
                 }
-                ys.lens.insert(gid, (None, p, 0));
+                ys.set_lens(gid, (None, p, 0));
                 *st = ys;
             }
         }

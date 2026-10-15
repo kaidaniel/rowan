@@ -226,7 +226,7 @@ impl Analyzer {
         let mut keep_pos: FxHashSet<ObjId> = FxHashSet::default();
         for (r, kind, site, ctx) in recs {
             if let Some(s) = crate::state::view_of(*r) {
-                back.lens.remove(r);
+                back.forget_len(r);
                 map.insert(*r, s);
                 continue;
             }
@@ -254,11 +254,11 @@ impl Analyzer {
             };
             match same_len.filter(|_| matches!(kind, Kind::Tuple | Kind::List)) {
                 Some(n) => {
-                    back.lens.insert(sid, (Some(n), n, 0));
+                    back.set_lens(sid, (Some(n), n, 0));
                     keep_pos.insert(*r);
                 }
                 None => {
-                    back.lens.insert(sid, (None, 0, 0));
+                    back.set_lens(sid, (None, 0, 0));
                     back.drop_obj_ns(sid, Ns::Pos);
                 }
             }

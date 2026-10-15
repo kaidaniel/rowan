@@ -53,6 +53,10 @@ fields — and the **values** of names when they follow from the program text.
   input (at that call / at every call of F) and reruns: dropping an `always` key must raise a
   KeyError / AttributeError / pydantic missing-field error for it; dropping a key outside
   `only ∪ sometimes ∪ always` must not.
+* `#@only param F.X: KEY if TEST` / `#@only param F.X: KEY none` — KEY of parameter X is read
+  only on calls where TEST (Python over F's parameters, as passed) holds; `none`: no such test
+  is claimed. The oracle drops KEY at every call of F: a call that raises for it must have had
+  TEST true (evaluated at the call).
 
 The precise answer is what holds for **every** run of the program, as written (the driver's
 inputs are examples). Rules of thumb (the overview is in AGENTS.md):

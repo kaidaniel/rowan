@@ -1597,6 +1597,11 @@ pub fn label_range(l: &str) -> Option<(DimId, DimId)> {
 pub fn nonneg(d: DimId) -> bool {
     !has_unknown(d) && poly(d).iter().all(|(_, c)| *c >= 0)
 }
+/// A count surely not negative at run time: a sum of tensors' dims (`x.shape[i]`, a str's
+/// length) with coefficients not negative; a named int (`n`) may be negative.
+pub fn tensor_count(d: DimId) -> bool {
+    nonneg(d) && poly(d).iter().all(|(m, _)| m.iter().all(|(a, _)| matches!(atom_get(*a), Atom::Dim(..))))
+}
 /// A value that is a tensor of this shape, or (if the operands were ints) this dim: the
 /// result of arithmetic on unknown values in a torch module (`x * 2`, `n + m`).
 pub fn dual_label(s: ShapeId, d: DimId) -> String {

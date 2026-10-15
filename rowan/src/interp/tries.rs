@@ -507,7 +507,7 @@ impl Analyzer {
             self.exec_block(orelse, &mut body_end);
         }
         results.push(body_end);
-        self.run_handlers(handlers, &hclasses, &mut recs, &mut results);
+        self.run_handlers(handlers, &hclasses, &mut recs, &pre, &mut results);
         self.cx.branch_depth -= 1;
         self.cx.cond_depth -= 1;
         let mut out = self.join_try_ways(body, orelse, handlers, results);
@@ -564,7 +564,7 @@ impl Analyzer {
 
     /// Each handler runs from the raises it may catch that no earlier one surely catches; its
     /// end state is one way out of the try.
-    fn run_handlers(&mut self, handlers: &[Handler], hclasses: &[(FxHashSet<String>, bool)], recs: &mut [crate::interp::RaiseRec], results: &mut Vec<State>) {
+    fn run_handlers(&mut self, handlers: &[Handler], hclasses: &[(FxHashSet<String>, bool)], recs: &mut [crate::interp::RaiseRec], pre: &State, results: &mut Vec<State>) {
         for (hi, h) in handlers.iter().enumerate() {
             // the exceptions raised at the recorded points (anything else: unknown)
             let unknown = Value::data(&format!("exc@L{}", h.line));
@@ -586,6 +586,8 @@ impl Analyzer {
             if !hs.reachable {
                 continue;
             }
+            // (a raise in a call may carry its tests: those of the try's own path hold)
+            hs.path = pre.path.clone();
             if let Some(name) = h.name {
                 self.store_name(s(name), ev.clone(), &mut hs);
             }
@@ -617,7 +619,7 @@ impl Analyzer {
             for h in handlers {
                 h.body.iter().for_each(|x| collect_assigned(x, &mut assigned));
             }
-            let vals: Vec<(intern::StrId, Option<Value>, Option<Value>, Option<Value>)> = assigned.iter().map(|n| (*n, self.name_value(&a, *n), self.name_value(&b, *n), self.name_value(&out, *n))).collect();
+            let vals: Vec<(intern::StrId, Option<Value>, Option<Value>, Option<Value>)> = assigned.iter().filter(|n| self.tested(**n) >= 1).map(|n| (*n, self.name_value(&a, *n), self.name_value(&b, *n), self.name_value(&out, *n))).collect();
             let new = name_facts(&vals, &a, &b, &out, self.frame().func.unwrap_or(0));
             add_facts(&mut out, new);
         }

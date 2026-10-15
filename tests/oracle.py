@@ -261,8 +261,11 @@ class Mutator:
     """Applies `drop` (remove key `col` from the source's value) or `spy` (record its keys)
     to one source: a call at a line (read_csv / json.loads …) or a function's parameter."""
 
-    def __init__(self, src: Dict[str, Any], col: Any = None, spy: Optional[List[Any]] = None):
+    def __init__(self, src: Dict[str, Any], col: Any = None, spy: Optional[List[Any]] = None, guard: Optional[str] = None):
         self.src, self.col, self.spy = src, col, spy
+        # `#@only`: the test, its value at each call of the function (by frame), and the calls
+        # that raised for the dropped key where it was false
+        self.guard, self.guard_at, self.guard_fails, self.guard_raised = guard, {}, 0, 0
 
     def apply(self, v: Any) -> Any:
         if self.spy is not None:
@@ -304,6 +307,29 @@ class Mutator:
             new = self.apply(loc[src["arg"]])
             if self.spy is None:
                 loc[src["arg"]] = new  # PEP 667: writes through to the fast local
+        if self.guard is not None:
+            try:
+                self.guard_at[id(frame)] = bool(eval(self.guard, dict(frame.f_globals), dict(frame.f_locals)))
+            except Exception:  # noqa: BLE001
+                self.guard_at[id(frame)] = None
+
+    def on_raise(self, frame, e: BaseException) -> None:
+        """A raise for the dropped key in a call of the function: its test must have held."""
+        if self.guard is None or id(frame) not in self.guard_at or not raised_for(e, self.col):
+            return
+        # (the innermost call of the function a raise passes through read its own argument)
+        if hasattr(e, "_oracle_seen"):
+            return
+        try:
+            e._oracle_seen = frame  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+        self.guard_raised += 1
+        if self.guard_at[id(frame)] is False:
+            self.guard_fails += 1
+
+    def on_return(self, frame) -> None:
+        self.guard_at.pop(id(frame), None)
 
 
 class Run:
@@ -384,8 +410,12 @@ class Run:
                 elif event == "return":
                     if fid in last:
                         self.check_after(frame, last.pop(fid))
+                    if self.mutator is not None:
+                        self.mutator.on_return(frame)
                 elif event == "exception":
                     e = arg[1]
+                    if self.mutator is not None:
+                        self.mutator.on_raise(frame, e)
                     ln = frame.f_lineno
                     for tier, k in self.exp.verdicts.get((fn, ln), []):
                         if raised_for(e, k):
@@ -470,6 +500,15 @@ def run_one(path: str, strict: bool) -> Dict[str, Any]:
                 continue
             total += 1
             enc = json.dumps(src)
+            if "only_if" in spec:
+                # `#@only`: with the key dropped, a call that raises for it passed the test
+                col, cond = spec["only_if"]
+                if cond is None or src["kind"] != "param" or src["path"]:
+                    continue
+                rr = run_child(path, ["--drop", enc, json.dumps(col), "--guard", cond])
+                if rr.get("guard_fails"):
+                    fails.append(f"schema {label}: {col!r} read on {rr['guard_fails']} of {rr.get('guard_raised')} calls where `{cond}` was false")
+                continue
             # errors the unmutated program already raises (deliberate misses) say nothing
             baseline = set(run_child(path, ["--drop", enc, json.dumps("\x00none")]).get("raised_keys", []))
             cols = run_child(path, ["--columns", enc]).get("columns", [])
@@ -522,12 +561,13 @@ def child_main(argv: List[str]) -> None:
         src = json.loads(argv[i + 1])
         exp = Expect(path)
         seen: List[Any] = []
-        mut = Mutator(src, col=json.loads(argv[i + 2])) if flag == "--drop" else Mutator(src, spy=seen)
+        guard = argv[argv.index("--guard") + 1] if "--guard" in argv else None
+        mut = Mutator(src, col=json.loads(argv[i + 2]), guard=guard) if flag == "--drop" else Mutator(src, spy=seen)
         exp.verdicts, exp.rows, exp.values, exp.schemas = {}, {}, {}, []
         r = Run(path, exp, mut)
         r.go()
         if flag == "--drop":
-            res = {"raised_keys": [k for k in r.raised_keys if isinstance(k, (str, int, float, bool))]}
+            res = {"raised_keys": [k for k in r.raised_keys if isinstance(k, (str, int, float, bool))], "guard_fails": mut.guard_fails, "guard_raised": mut.guard_raised}
         else:
             res = {"columns": [k for k in seen if isinstance(k, (str, int, float, bool))]}
     else:

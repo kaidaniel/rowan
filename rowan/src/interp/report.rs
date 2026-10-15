@@ -147,13 +147,17 @@ pub const MAX_FACT_OBJECTS: usize = 16;
 pub const MAX_CHAINS_PER_FINDING: usize = 8;
 
 /// What the program reads of each input, by its label: {key -> read on every path}.
-pub fn schema_rows(an: &Analyzer) -> IndexMap<String, IndexMap<String, bool>> {
-    let mut out: IndexMap<String, IndexMap<String, bool>> = IndexMap::new();
+pub fn schema_rows(an: &Analyzer) -> IndexMap<String, IndexMap<String, J>> {
+    let mut out: IndexMap<String, IndexMap<String, J>> = IndexMap::new();
     let Some(st) = &an.findings.final_state else { return out };
     for (src, d) in st.reqs.items().into_iter().filter(|(s, _)| !source_is_data(*s)) {
         let entry = out.entry(source_label(src)).or_default();
         for (k, info) in d.iter() {
-            entry.insert(key_repr(*k), info.always);
+            let mut j = json!({"always": info.always});
+            if !info.only_if.is_empty() {
+                j["only_if"] = J::String(only_if_text(&info.only_if));
+            }
+            entry.insert(key_repr(*k), j);
         }
     }
     out.sort_keys();
@@ -401,7 +405,7 @@ fn source_id_text(an: &Analyzer, src: SourceId) -> String {
     let (site, kind, path) = intern::with_source(src, |s| (s.site.clone(), s.kind, s.path.clone()));
     let t = site_text(an, &site);
     let Some(st) = an.findings.final_state.as_ref().filter(|_| !path.is_empty()) else { return t };
-    let steps = path_steps(st, &site, kind, 0, &path).map(|(p, _)| p).unwrap_or_else(|| "…".into());
+    let steps = path_steps(st, &site, kind, 0, &path).map(|p| p.0).unwrap_or_else(|| "…".into());
     match t.find("` ").or_else(|| t.ends_with('`').then(|| t.len() - 1)) {
         Some(i) if t[..i].contains('`') => format!("{}{}{}", &t[..i], steps, &t[i..]),
         _ => format!("{} {}", t, steps),
@@ -412,20 +416,27 @@ fn source_id_text(an: &Analyzer, src: SourceId) -> String {
 /// the parent's requirement says it was read; whether a step is an attribute; None for a
 /// path through what a method returned (`df.groupby(…)["amount"]`: a step the code called,
 /// with no requirement of its own).
-fn path_steps(st: &State, site: &std::sync::Arc<str>, kind: crate::domain::SourceKind, from: usize, path: &[KeyId]) -> Option<(String, bool)> {
+/// Also: whether every step is read on every path, and the tests of the parameters the steps'
+/// reads are under (a path below is read only where the steps to it are).
+fn path_steps(st: &State, site: &std::sync::Arc<str>, kind: crate::domain::SourceKind, from: usize, path: &[KeyId]) -> Option<(String, bool, bool, intern::IdSet<intern::StrId>)> {
     let mut out = String::new();
     let mut attr_step = false;
+    let (mut always, mut only_if) = (true, intern::IdSet::new());
     for i in from..path.len() {
         let parent = intern::source(crate::domain::Source { site: site.clone(), kind, path: path[..i].to_vec() });
         let attr = match st.reqs.get(&parent, &path[i]) {
-            Some(r) => r.attr,
+            Some(r) => {
+                always &= r.always;
+                only_if = only_if.union(&r.only_if);
+                r.attr
+            }
             None if path[i] != STAR && intern::key_as_str(path[i]).is_some() => return None,
             None => false,
         };
         attr_step |= attr;
         out += &step_text(path[i], attr);
     }
-    Some((out, attr_step))
+    Some((out, attr_step, always, only_if))
 }
 
 /// Is an unknown call's result an input worth listing (a library function the program
@@ -472,7 +483,7 @@ fn needs_text(an: &Analyzer) -> (Vec<String>, Vec<String>) {
         }
     }
     roots.sort_by(|a, b| (&a.1, &a.3).cmp(&(&b.1, &b.3)));
-    let mut groups: IndexMap<(bool, String), Vec<(String, bool)>> = IndexMap::new();
+    let mut groups: IndexMap<(bool, String), Vec<Need>> = IndexMap::new();
     for (param, header, root, base) in roots {
         // (attributes of what a library call returned are its API, not data the code needs)
         groups.entry((param, header)).or_default().extend(reads_below(st, root, &base, !param));
@@ -480,10 +491,17 @@ fn needs_text(an: &Analyzer) -> (Vec<String>, Vec<String>) {
     let (mut inputs, mut funcs) = (Vec::new(), Vec::new());
     let width = groups.keys().map(|(_, h)| h.chars().count()).max().unwrap_or(0).min(30);
     for ((param, header), needs) in groups {
-        let always: Vec<&str> = needs.iter().filter(|(_, a)| *a).map(|(p, _)| p.as_str()).collect();
-        let sometimes: Vec<&str> = needs.iter().filter(|(_, a)| !*a).map(|(p, _)| p.as_str()).collect();
         if needs.is_empty() {
             continue;
+        }
+        // (always, sometimes, then a line per test of the parameters the reads are under)
+        let mut lines: Vec<(String, Vec<&str>)> = ["always:", "sometimes:"].iter().map(|l| (l.to_string(), needs.iter().filter(|n| n.always == (*l == "always:") && n.only_if.is_none()).map(|n| n.path.as_str()).collect())).collect();
+        for n in needs.iter().filter(|n| n.only_if.is_some()) {
+            let label = format!("only if {}:", n.only_if.as_deref().unwrap_or(""));
+            match lines.iter_mut().find(|(l, _)| *l == label) {
+                Some((_, ps)) => ps.push(n.path.as_str()),
+                None => lines.push((label, vec![n.path.as_str()])),
+            }
         }
         let out = if param { &mut funcs } else { &mut inputs };
         let mut head = format!("  {:<w$}", header, w = width);
@@ -492,8 +510,8 @@ fn needs_text(an: &Analyzer) -> (Vec<String>, Vec<String>) {
             head = format!("  {:<w$}", "", w = width);
         }
         let pad = format!("  {:<w$}", "", w = width);
-        for (i, (label, ps)) in [("always", &always), ("sometimes", &sometimes)].into_iter().filter(|(_, ps)| !ps.is_empty()).enumerate() {
-            out.push(format!("{}  {:<10} {}", if i == 0 { &head } else { &pad }, format!("{}:", label), index_runs(ps).join(", ")));
+        for (i, (label, ps)) in lines.iter().filter(|(_, ps)| !ps.is_empty()).enumerate() {
+            out.push(format!("{}  {:<10} {}", if i == 0 { &head } else { &pad }, label, index_runs(ps).join(", ")));
         }
     }
     (inputs, funcs)
@@ -540,15 +558,15 @@ fn index_runs(paths: &[&str]) -> Vec<String> {
 /// What the code reads of input `src` and of what lies below it, as access paths from
 /// `base` (`row["id"]`, `items[*].sku`): (path, read on every path), the longest paths only.
 /// `data_only`: keys and elements, not attributes.
-pub fn reads_below(st: &State, src: SourceId, base: &str, data_only: bool) -> Vec<(String, bool)> {
+pub fn reads_below(st: &State, src: SourceId, base: &str, data_only: bool) -> Vec<Need> {
     let (site, kind, top) = intern::with_source(src, |s| (s.site.clone(), s.kind, s.path.clone()));
-    let mut needs: Vec<(String, bool)> = Vec::new();
+    let mut needs: Vec<Need> = Vec::new();
     for (s2, d) in st.reqs.items() {
         let (site2, kind2, path) = intern::with_source(s2, |s| (s.site.clone(), s.kind, s.path.clone()));
         if site2 != site || kind2 != kind || !path.starts_with(&top) {
             continue;
         }
-        let Some((prefix, attr_step)) = path_steps(st, &site, kind, top.len(), &path) else { continue };
+        let Some((prefix, attr_step, steps_always, steps_only_if)) = path_steps(st, &site, kind, top.len(), &path) else { continue };
         if data_only && attr_step {
             continue;
         }
@@ -557,23 +575,41 @@ pub fn reads_below(st: &State, src: SourceId, base: &str, data_only: bool) -> Ve
                 continue;
             }
             // (a key unknown code or another input may supply is needed only sometimes)
-            let always = info.always && info.caveats.is_empty() && info.alternatives.is_empty();
+            let always = info.always && steps_always && info.caveats.is_empty() && info.alternatives.is_empty();
+            let info_only_if = info.only_if.union(&steps_only_if);
             // (a group of alternatives reads the same from any of its keys: in one order)
             let mut alts: Vec<String> = std::iter::once(*k).chain(info.alt_keys.iter()).map(|a| format!("{}{}{}", base, prefix, step_text(a, info.attr))).collect();
             alts.sort();
             alts.dedup();
-            needs.push((alts.join(" or "), always));
+            let only_if = (!always && !info_only_if.is_empty()).then(|| only_if_text(&info_only_if));
+            needs.push(Need { path: alts.join(" or "), always, only_if });
         }
     }
-    needs.sort();
-    needs.dedup_by(|a, b| a.0 == b.0 && {
-        b.1 = b.1 && a.1;
+    needs.sort_by(|a, b| a.path.cmp(&b.path));
+    needs.dedup_by(|a, b| a.path == b.path && {
+        b.only_if = if b.only_if == a.only_if { b.only_if.take() } else { None };
+        b.always = b.always && a.always;
         true
     });
     // (a path read below another needs that one too: only the longer is listed)
-    let all: Vec<String> = needs.iter().map(|(p, _)| p.clone()).collect();
-    needs.retain(|(p, _)| !all.iter().any(|q| q.len() > p.len() && q.starts_with(p.as_str()) && matches!(q.as_bytes()[p.len()], b'[' | b'.')));
+    let all: Vec<String> = needs.iter().map(|n| n.path.clone()).collect();
+    needs.retain(|n| !all.iter().any(|q| q.len() > n.path.len() && q.starts_with(n.path.as_str()) && matches!(q.as_bytes()[n.path.len()], b'[' | b'.')));
     needs
+}
+
+/// What the code reads of an input: an access path, whether on every path, else the tests of
+/// the function's parameters every path that reads it passed (`admin`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Need {
+    pub path: String,
+    pub always: bool,
+    pub only_if: Option<String>,
+}
+
+/// Tests that all hold, as Python: `a and b is None`.
+fn only_if_text(tests: &intern::IdSet<intern::StrId>) -> String {
+    let par = |t: &str| if t.contains(" or ") { format!("({})", t) } else { t.to_string() };
+    tests.iter().map(|t| par(&intern::str_get(t))).collect::<Vec<_>>().join(" and ")
 }
 
 /// One step of an access path: `.name` for an attribute, `["k"]` / `[0]` / `[*]` for an item.
@@ -672,6 +708,7 @@ fn legend(text: &str) -> Vec<String> {
     add(text.contains("  via L"), "via L5→L9", "the calls (by line) through which the code was reached");
     add(text.contains("  always:"), "always", "read on every path through the code");
     add(text.contains("  sometimes:"), "sometimes", "read on some paths only");
+    add(text.contains("  only if "), "only if x:", "read only on calls where x holds of the arguments as passed");
     add(text.contains("[*]"), "[*]", "any element");
     add(text.lines().any(|l| (l.contains("  always:") || l.contains("  sometimes:")) && l.contains("..")), "[0..6]", "each index from 0 to 6");
     let values = ["\n== what functions return", "\n== module-level variables"].iter().find_map(|h| text.find(h)).map(|i| &text[i..]).unwrap_or("");
@@ -712,7 +749,7 @@ pub fn to_json(an: &Analyzer) -> Vec<J> {
         out.push(verdict_json(an, &v));
     }
     for (label, entry) in schema_rows(an) {
-        let keys: serde_json::Map<String, J> = entry.iter().map(|(k, a)| (k.clone(), json!({"always": a}))).collect();
+        let keys: serde_json::Map<String, J> = entry.into_iter().collect();
         out.push(json!({"kind": "schema", "source": label, "keys": keys}));
     }
     out
@@ -728,7 +765,7 @@ pub fn golden_json(an: &Analyzer) -> J {
     let verdicts: Vec<J> = dedupe(an, an.findings.verdicts()).iter().map(|v| verdict_json(an, v)).collect();
     let mut schemas = serde_json::Map::new();
     for (label, entry) in schema_rows(an) {
-        let keys: serde_json::Map<String, J> = entry.iter().map(|(k, a)| (k.clone(), json!({"always": a}))).collect();
+        let keys: serde_json::Map<String, J> = entry.into_iter().collect();
         schemas.insert(label, J::Object(keys));
     }
     let rows: Vec<J> = an
@@ -1234,7 +1271,13 @@ pub fn facts_json(an: &Analyzer) -> J {
         });
         // what the code reads of the inputs these objects come from, as access paths from the name
         let required = fact_required(an, f, *name);
-        let required: Vec<J> = required.into_iter().map(|(p, a)| json!({"path": p, "always": a})).collect();
+        let required: Vec<J> = required
+            .into_iter()
+            .map(|n| match n.only_if {
+                Some(w) => json!({"path": n.path, "always": n.always, "only_if": w}),
+                None => json!({"path": n.path, "always": n.always}),
+            })
+            .collect();
         // tensor-shape requirements recorded on this line (in the line's own analysis), in
         // the dim names of this fact
         let (requires, extra_legend) = fact_shape_requires(an, f, *line);
@@ -1306,8 +1349,8 @@ fn fact_object_json(an: &Analyzer, f: &crate::interp::Fact, oid: ObjId, item: &O
 
 /// What the code reads of the inputs a hover's objects come from, as access paths from the
 /// name (with whether every path reads it).
-fn fact_required(an: &Analyzer, f: &crate::interp::Fact, name: crate::intern::StrId) -> Vec<(String, bool)> {
-    let mut required: Vec<(String, bool)> = Vec::new();
+fn fact_required(an: &Analyzer, f: &crate::interp::Fact, name: crate::intern::StrId) -> Vec<Need> {
+    let mut required: Vec<Need> = Vec::new();
     if let Some(st) = &an.findings.final_state {
         for (_, (item, attr)) in f.shown_rows() {
             for r in [item, attr].into_iter().flatten() {
@@ -1316,7 +1359,7 @@ fn fact_required(an: &Analyzer, f: &crate::interp::Fact, name: crate::intern::St
                         continue;
                     }
                     for need in reads_below(st, src, &intern::str_get(name), false) {
-                        if !required.iter().any(|(p, _)| *p == need.0) {
+                        if !required.iter().any(|n| n.path == need.path) {
                             required.push(need);
                         }
                     }

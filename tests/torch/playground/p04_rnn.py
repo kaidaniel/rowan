@@ -101,8 +101,8 @@ class RNNLM(nn.Module):
         # Run the prompt once to build the state, then feed one token at a time from that state.
         # ids: (B, T)
         logits, h = self(ids)                               # (B, T, V), (1, B, d)
-        #@shape logits: [ids.shape[0], _, V]; h: [ids.shape[0], d]
-        #@todo shape logits: [ids.shape[0], ids.shape[1], V] (the length of the list MyRNN.forward stacks: T appends in a loop of unknown length)
+        #@shape logits: [ids.shape[0], ids.shape[1], V]; h: [ids.shape[0], d]
+        # (the list MyRNN.forward stacks: one append in each of the loop's T rounds)
         logits = logits[:, -1, :]                              # (B, V): only the last position matters
         #@shape logits: [ids.shape[0], V]
         for _ in range(n):
@@ -169,8 +169,8 @@ def complete(prompt: str, n: int, **kw) -> str:
     ids = encode(prompt)[None, :]                           # (1, T)
     #@shape@L177 ids: [1, 3]
     completion = model.generate(ids, n, **kw)               # (1, T+n)
-    #@shape@L177 completion: [1, ?]
-    #@todo shape@L177 completion: [1, 63] (60 steps of a cat along dim 1 in a loop that is not unrolled)
+    #@shape@L177 completion: [1, 63]
+    # (60 rounds of a loop that is not unrolled, each a cat of one more along dim 1)
     return decode(completion[0])
 
 

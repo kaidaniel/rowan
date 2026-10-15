@@ -467,6 +467,101 @@ fn t_window(an: &mut Analyzer, lower: &'static ast::Expr, upper: &'static ast::E
     (sh::nonneg(n) && sh::nonneg(sh::add(lo, k)) && sh::nonneg(sh::sub(d, sh::add(hi, m)))).then_some(n)
 }
 
+/// `for _ in range(T): … ids = torch.cat([ids, x], dim=d) …` with no break / continue: `ids`
+/// assigned nowhere else in the body, `x` assigned only before the `cat`, neither changed in
+/// place (`x.unsqueeze_()`), `x` of size `c` along `d` in every round (so at the back edge of
+/// the loop's last round, which stands for them all, and before the loop if bound there): after
+/// the loop `ids` is its shape before with `c * T` more along `d` (a known rank). The names to
+/// bind after the loop, with their values.
+pub fn counted_cats(an: &mut Analyzer, f: &'static ast::StmtFor, rounds: DimId, pre: &State, back: &State) -> Vec<(StrId, Value)> {
+    let mut out = Vec::new();
+    for (i, st) in f.body.iter().enumerate() {
+        let ast::Stmt::Assign(a) = st else { continue };
+        let ([ast::Expr::Name(target)], ast::Expr::Call(c)) = (&a.targets[..], &*a.value) else { continue };
+        let is_cat = matches!(&*c.func, ast::Expr::Attribute(at) if matches!(at.attr.as_str(), "cat" | "concat" | "concatenate") && matches!(&*at.value, ast::Expr::Name(m) if m.id.as_str() == "torch"));
+        let parts = match c.arguments.args.first() {
+            Some(ast::Expr::List(l)) => &l.elts,
+            Some(ast::Expr::Tuple(t)) => &t.elts,
+            _ => continue,
+        };
+        let d_expr = c.arguments.args.get(1).or_else(|| c.arguments.keywords.iter().find(|k| k.arg.as_ref().is_some_and(|n| n.as_str() == "dim")).map(|k| &k.value));
+        let d = match d_expr {
+            Some(e) => match an.eval(e, &mut pre.copy()).kv.as_lit().map(intern::key_get) {
+                Some(intern::Key::Int(d)) => d,
+                _ => continue,
+            },
+            None => 0,
+        };
+        let (true, [ast::Expr::Name(me), ast::Expr::Name(x)]) = (is_cat, &parts[..]) else { continue };
+        let (name, xn) = (target.id.as_str(), x.id.as_str());
+        if me.id.as_str() != name || xn == name || stores_in(&f.body, name) != 1 || stores_in(&f.body[i..], xn) != 0 || in_place(&f.body, name) || in_place(&f.body, xn) {
+            continue;
+        }
+        let shape_of = |an: &mut Analyzer, st: &State, n: &str| {
+            let v = an.load_name(s(n), &Node::none(), &mut st.copy());
+            t_shape(an, &v, st).map(|sh0| sh::norm_shape(&sh0, &st.tf)).and_then(|sh0| sh0.dims())
+        };
+        let (Some(dims), Some(xdims)) = (shape_of(an, pre, name), shape_of(an, back, xn)) else { continue };
+        let r = dims.len() as i64;
+        let dd = if d < 0 { d + r } else { d };
+        if dd < 0 || dd >= r || xdims.len() as i64 != r {
+            continue;
+        }
+        let Some(c) = sh::as_lit(xdims[dd as usize]) else { continue };
+        // (bound before the loop: the first round may cat that one)
+        if pre.env.contains_key(&s(xn)) && shape_of(an, pre, xn).map(|p| p.len() as i64 == r && sh::as_lit(p[dd as usize]) == Some(c)) != Some(true) {
+            continue;
+        }
+        let mut nd = dims.clone();
+        nd[dd as usize] = sh::norm(sh::add(dims[dd as usize], sh::mul(sh::lit(c), rounds)), &pre.tf);
+        out.push((s(name), tensor_value(Shape::known(nd))));
+    }
+    out
+}
+
+/// How many times these statements bind the plain name `name` (nested blocks too).
+fn stores_in(body: &[ast::Stmt], name: &str) -> usize {
+    struct V<'n>(&'n str, usize);
+    impl<'a> ast::visitor::source_order::SourceOrderVisitor<'a> for V<'_> {
+        fn visit_expr(&mut self, e: &'a ast::Expr) {
+            if let ast::Expr::Name(n) = e {
+                if n.id.as_str() == self.0 && !matches!(n.ctx, ast::ExprContext::Load) {
+                    self.1 += 1;
+                }
+            }
+            ast::visitor::source_order::walk_expr(self, e);
+        }
+    }
+    use ast::visitor::source_order::SourceOrderVisitor;
+    let mut v = V(name, 0);
+    body.iter().for_each(|st| v.visit_stmt(st));
+    v.1
+}
+
+/// Whether these statements call an in-place method of `name` (`x.unsqueeze_()`).
+fn in_place(body: &[ast::Stmt], name: &str) -> bool {
+    struct V<'n>(&'n str, bool);
+    impl<'a> ast::visitor::source_order::SourceOrderVisitor<'a> for V<'_> {
+        fn visit_expr(&mut self, e: &'a ast::Expr) {
+            if let ast::Expr::Attribute(a) = e {
+                if matches!(&*a.value, ast::Expr::Name(n) if n.id.as_str() == self.0) && a.attr.as_str().ends_with('_') && !a.attr.as_str().starts_with("__") {
+                    self.1 = true;
+                }
+            }
+            ast::visitor::source_order::walk_expr(self, e);
+        }
+    }
+    use ast::visitor::source_order::SourceOrderVisitor;
+    let mut v = V(name, false);
+    body.iter().for_each(|st| v.visit_stmt(st));
+    v.1
+}
+
+/// A list's length as a dim (a loop of a dim's rounds appended to it: `State::sym_lens`).
+pub fn sym_list_len(v: &Value, st: &State) -> Option<DimId> {
+    v.single().filter(|_| v.kv.is_bot()).and_then(|o| st.sym_len(o)).and_then(|l| sh::parse_dim_label(&intern::str_get(l)))
+}
+
 pub fn t_tuple_len(an: &Analyzer, v: &Value) -> Option<DimId> {
     let o = v.single()?;
     match &an.heap.obj(o).payload {
@@ -2909,7 +3004,7 @@ pub fn t_stack(an: &mut Analyzer, list: &Value, d: i64, len: Option<DimId>, node
             t_error(an, node, m, st);
             return Value::new();
         }
-        None => (t_tuple_len(an, list).or(len).unwrap_or_else(sh::unknown), elem.unwrap_or_else(Shape::any)),
+        None => (t_tuple_len(an, list).or(len).or_else(|| sym_list_len(list, st)).unwrap_or_else(sh::unknown), elem.unwrap_or_else(Shape::any)),
     };
     let mut nv = vec![n];
     nv.truncate(1);

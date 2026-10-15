@@ -653,6 +653,10 @@ impl Analyzer {
         // stay positional, requirements stay "always")
         let conditional = then_s.reachable && else_s.reachable;
         let cond = if conditional { self.cond_key(test) } else { None };
+        if let Some((owner, pt, nt)) = if conditional { self.branch_tests(test, &mut pre) } else { None } {
+            super::guards::add_test(&mut then_s, owner, pt);
+            super::guards::add_test(&mut else_s, owner, nt);
+        }
         if let Some((key, pos, _)) = &cond {
             // an earlier join on the same test: each branch gets back the rows it had then (the
             // test is pure: the state before it is the one it was evaluated in)
@@ -681,7 +685,23 @@ impl Analyzer {
         if let (true, Some((kv, target))) = (conditional, &sp.ops) {
             self.require_by_raise(test, body, rest, kv, target, &pre, &mut then_s, &mut else_s);
         }
+        // facts of this same test whose rows the branches left as they put them back: they
+        // hold on after the join (which drops facts on rows the two sides differ in)
+        let kept = match &cond {
+            Some((key, pos, _)) if then_s.reachable && else_s.reachable => same_test_facts(*key, *pos, &then_s, &else_s),
+            _ => Vec::new(),
+        };
         let mut j = then_s.join(&mut else_s);
+        if !kept.is_empty() {
+            for f in &kept {
+                for (k, _, joined) in &f.rows {
+                    j.rows.insert(*k, joined.clone());
+                }
+            }
+            let mut all: Vec<std::sync::Arc<crate::state::CondFact>> = j.facts.iter().filter(|f| !kept.iter().any(|g| g.cond == f.cond)).cloned().collect();
+            all.extend(kept);
+            j.facts = std::sync::Arc::new(all);
+        }
         if then_s.reachable && else_s.reachable && conditional {
             let mut new: Vec<std::sync::Arc<crate::state::CondFact>> = Vec::new();
             let mut assigned: Vec<intern::StrId> = Vec::new();
@@ -693,7 +713,7 @@ impl Analyzer {
                     collect_assigned(st, &mut assigned);
                 }
             }
-            if let Some((key, pos, names)) = cond {
+            if let Some((key, pos, names)) = cond.filter(|(k, _, _)| self.tested(*k) >= 2) {
                 // the test's names keep their values through the branches (narrowing aside):
                 // their joined values stand for them; a branch that assigns one gives no fact
                 let deps: Vec<(intern::StrId, Value)> = names.iter().map(|n| (*n, self.dep_value(&mut j, *n))).collect();
@@ -702,7 +722,7 @@ impl Analyzer {
                     new.extend(cond_facts_for(key, pos, deps, &then_s, &else_s, &j));
                 }
             }
-            let vals: Vec<(intern::StrId, Option<Value>, Option<Value>, Option<Value>)> = assigned.iter().map(|n| (*n, self.name_value(&then_s, *n), self.name_value(&else_s, *n), self.name_value(&j, *n))).collect();
+            let vals: Vec<(intern::StrId, Option<Value>, Option<Value>, Option<Value>)> = assigned.iter().filter(|n| self.tested(**n) >= 1).map(|n| (*n, self.name_value(&then_s, *n), self.name_value(&else_s, *n), self.name_value(&j, *n))).collect();
             new.extend(name_facts(&vals, &then_s, &else_s, &j, self.frame().func.unwrap_or(0)));
             add_facts(&mut j, new);
         }
@@ -777,6 +797,25 @@ impl Analyzer {
         Some((s(&format!("{}@{}", text, self.frame().func.unwrap_or(0))), pos, names))
     }
 
+    /// How often the running function tests this text (`if` / `elif` / `while`, a `not` taken
+    /// off; a test in a loop counts twice: it runs again): a branch fact (`CondFact`) serves
+    /// only a later test of its text. Outside functions: always enough.
+    pub(super) fn tested(&self, text: intern::StrId) -> u32 {
+        let t = intern::str_get(text);
+        let t = t.rsplit_once('@').map(|(a, _)| a).unwrap_or(&t);
+        let Some(fi) = self.frame().func.and_then(|f| self.heap.func_info_opt(f)) else { return u32::MAX };
+        let body = fi.node.body();
+        TESTED.with(|m| {
+            let mut m = m.borrow_mut();
+            let counts = m.entry(body.as_ptr() as usize).or_insert_with(|| {
+                let mut c = rustc_hash::FxHashMap::default();
+                count_tests(body, false, &mut c);
+                c
+            });
+            counts.get(t).copied().unwrap_or(0)
+        })
+    }
+
     /// The value a plain name has in `st` (a local, else a module-level name), if bound.
     pub(super) fn name_value(&self, st: &State, n: intern::StrId) -> Option<Value> {
         if let Some(v) = st.env.get(&n) {
@@ -805,11 +844,11 @@ impl Analyzer {
             if !f.deps.iter().all(|(n, v)| self.dep_value(pre, *n) == *v) {
                 continue;
             }
-            if !f.guards.iter().all(|((o, ns), r)| pre.row(*o, *ns) == *r) {
+            if !f.guards.iter().all(|((o, ns), r)| pre.row(*o, *ns).same_ptr(r)) {
                 continue;
             }
             for (k, branch, joined) in &f.rows {
-                if pre.row(k.0, k.1) == *joined {
+                if pre.row(k.0, k.1).same_ptr(joined) {
                     st.set_row(k.0, k.1, branch.clone());
                 }
             }
@@ -889,6 +928,22 @@ pub(super) fn cond_facts_for(key: intern::StrId, pos: bool, deps: Vec<(intern::S
     ]
 }
 
+/// The facts of test `key` both branches still hold whose every row is the branch's own row
+/// on its side (put back by `apply_cond_facts`, unchanged since): the join of the two is the
+/// joined row they record, so they hold after the join too.
+fn same_test_facts(key: intern::StrId, pos: bool, then_s: &State, else_s: &State) -> Vec<std::sync::Arc<crate::state::CondFact>> {
+    let held = |st: &State, truth: bool| st.facts.iter().find(|f| f.cond == key && f.truth == truth).cloned();
+    let (Some(ft), Some(fe)) = (held(then_s, pos), held(else_s, !pos)) else { return Vec::new() };
+    if !std::sync::Arc::ptr_eq(&held(else_s, pos).unwrap_or_else(|| ft.clone()), &ft) || !std::sync::Arc::ptr_eq(&held(then_s, !pos).unwrap_or_else(|| fe.clone()), &fe) {
+        return Vec::new();
+    }
+    let put_back = |st: &State, f: &crate::state::CondFact| f.rows.iter().all(|(k, branch, _)| st.row(k.0, k.1).same_ptr(branch)) && f.guards.iter().all(|(k, r)| st.row(k.0, k.1).same_ptr(r));
+    if ft.rows.len() != fe.rows.len() || !put_back(then_s, &ft) || !put_back(else_s, &fe) {
+        return Vec::new();
+    }
+    vec![ft, fe]
+}
+
 /// Names bound to literals of different truth in the two branches (`has = True` / `False`):
 /// testing the name later tells which branch ran.
 pub(super) fn name_facts(vals: &[(intern::StrId, Option<Value>, Option<Value>, Option<Value>)], a: &State, b: &State, j: &State, func: u32) -> Vec<std::sync::Arc<crate::state::CondFact>> {
@@ -950,5 +1005,57 @@ pub(super) fn collect_assigned(st: &ast::Stmt, out: &mut Vec<intern::StrId>) {
         }
         ast::Stmt::With(w) => w.body.iter().for_each(|x| collect_assigned(x, out)),
         _ => {}
+    }
+}
+
+thread_local! {
+    /// per function body: how often it tests each text (`Analyzer::tested`)
+    static TESTED: std::cell::RefCell<rustc_hash::FxHashMap<usize, rustc_hash::FxHashMap<String, u32>>> = Default::default();
+}
+
+/// Count the tests of these statements by their text (`cond_key`'s), twice in a loop.
+fn count_tests(body: &[ast::Stmt], in_loop: bool, out: &mut rustc_hash::FxHashMap<String, u32>) {
+    let add = |e: &ast::Expr, out: &mut rustc_hash::FxHashMap<String, u32>| {
+        let inner = match e {
+            ast::Expr::UnaryOp(u) if u.op == ast::UnaryOp::Not => &*u.operand,
+            other => other,
+        };
+        let text: String = frontend::text(inner).split_whitespace().collect::<Vec<_>>().join(" ");
+        *out.entry(text).or_insert(0) += if in_loop { 2 } else { 1 };
+    };
+    for st in body {
+        match st {
+            ast::Stmt::If(i) => {
+                add(&i.test, out);
+                count_tests(&i.body, in_loop, out);
+                for c in &i.elif_else_clauses {
+                    if let Some(t) = &c.test {
+                        add(t, out);
+                    }
+                    count_tests(&c.body, in_loop, out);
+                }
+            }
+            ast::Stmt::While(w) => {
+                add(&w.test, out);
+                count_tests(&w.body, true, out);
+                count_tests(&w.orelse, in_loop, out);
+            }
+            ast::Stmt::For(f) => {
+                count_tests(&f.body, true, out);
+                count_tests(&f.orelse, in_loop, out);
+            }
+            ast::Stmt::With(w) => count_tests(&w.body, in_loop, out),
+            ast::Stmt::Try(t) => {
+                count_tests(&t.body, in_loop, out);
+                for h in &t.handlers {
+                    let ast::ExceptHandler::ExceptHandler(h) = h;
+                    count_tests(&h.body, in_loop, out);
+                }
+                count_tests(&t.orelse, in_loop, out);
+                count_tests(&t.finalbody, in_loop, out);
+            }
+            ast::Stmt::Match(m) => m.cases.iter().for_each(|c| count_tests(&c.body, in_loop, out)),
+            _ => {}
+        }
     }
 }
