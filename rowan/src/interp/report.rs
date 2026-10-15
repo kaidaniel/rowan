@@ -33,7 +33,7 @@ pub fn dedupe(an: &Analyzer, verdicts: &[Verdict]) -> Vec<Verdict> {
         let mut mixed: Vec<Verdict> = Vec::new();
         for (o, v) in by_obj.iter() {
             if matches!(v.tier, Tier::Missing | Tier::LikelyMissing) && vs.iter().any(|w| w.oid == *o && w.tier.rank() < Tier::Possibly.rank()) {
-                mixed.push(Verdict { tier: Tier::Possibly, note: "is there on some runs of this line only".into(), ..(*v).clone() });
+                mixed.push(Verdict { tier: Tier::Possibly, note: "is missing on some of the times this line runs".into(), ..(*v).clone() });
             }
         }
         for m in mixed.iter() {
