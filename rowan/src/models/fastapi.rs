@@ -13,7 +13,7 @@ use ruff_python_ast as ast;
 use crate::domain::{join_values, KeyVal, Ns, ObjId, Row, Source, SourceKind, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, StrId};
-use crate::interp::{dotted_last, Analyzer, Call, Frame, FrameKind, FuncNode, Payload};
+use crate::interp::{dotted_last, Analyzer, Call, FuncNode, Payload};
 use crate::models::pydantic::{Ann, DumpOpts};
 use crate::state::{Kind, State};
 
@@ -49,7 +49,7 @@ const HTTP_METHODS: &[&str] = &["get", "post", "put", "patch", "delete", "head",
 
 fn fa_obj(an: &mut Analyzer, st: &mut State, node: &Node, qual: &str, v: Value, ctx: &str) -> Value {
     let oid = an.alloc_at(Kind::Namespace, node, st, qual, Payload::Method(qual.to_string(), v.clone()), Some(Row::new()), Ns::Attr, None, Some(ctx));
-    an.obj_mut(oid).payload = Payload::Method(qual.to_string(), v);
+    an.heap.obj_mut(oid).payload = Payload::Method(qual.to_string(), v);
     // its attributes as slots (read through a placeholder in a summary like any object's)
     let attrs: &[&str] = match qual {
         "fastapi.request" => &["query_params", "headers", "cookies", "path_params", "method", "url", "client", "state", "scope", "app", "json", "body", "form"],
@@ -76,8 +76,8 @@ fn fa_obj(an: &mut Analyzer, st: &mut State, node: &Node, qual: &str, v: Value, 
 }
 
 fn payload_of(an: &Analyzer, oid: ObjId) -> Option<(String, Value)> {
-    match &an.obj(oid).payload {
-        Payload::Method(q, v) if q.starts_with("fastapi.") && an.kind(oid) == Kind::Namespace => Some((q.clone(), v.clone())),
+    match &an.heap.obj(oid).payload {
+        Payload::Method(q, v) if q.starts_with("fastapi.") && an.heap.kind(oid) == Kind::Namespace => Some((q.clone(), v.clone())),
         _ => None,
     }
 }
@@ -126,1149 +126,1143 @@ fn match_path(tmpl: &str, url: &str) -> Option<Vec<(String, String)>> {
     Some(out)
 }
 
-impl Analyzer {
-    /// The name an exception class value stands for (`NotFound`, `KeyError`).
-    fn exc_name(&self, v: &Value) -> String {
-        for o in v.pts.iter() {
-            match self.kind(o) {
-                Kind::Class => return self.class_info(o).name.clone(),
-                Kind::External => return self.external_qual(o).rsplit('.').next().unwrap_or("").to_string(),
-                _ => {}
-            }
-        }
-        String::new()
-    }
-
-    pub(crate) fn eval_in_module(&mut self, module: ObjId, e: &'static ast::Expr, state: &mut State) -> Value {
-        let mi = self.module_info(module);
-        self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), module, "fastapi", true, "<fastapi>"));
-        let v = self.eval(e, state);
-        self.frames.pop();
-        v
-    }
-
-    /// All routes of `app`: its own and those of the routers included in it (with prefixes),
-    /// as (full path, route index).
-    pub fn fa_routes_of(&self, app: ObjId) -> Vec<(Option<String>, usize)> {
-        let mut out = Vec::new();
-        let mut work: Vec<(ObjId, String, u32)> = vec![(app, String::new(), 0)];
-        while let Some((a, prefix, depth)) = work.pop() {
-            if depth > 8 {
-                continue;
-            }
-            let own = format!("{}{}", prefix, self.m.fa_prefix.get(&a).cloned().unwrap_or_default());
-            for (i, r) in self.m.fa_routes.iter().enumerate() {
-                if r.app == a {
-                    out.push((r.path.as_ref().map(|p| format!("{}{}", own, p)), i));
-                }
-            }
-            for (parent, router, pfx) in &self.m.fa_includes {
-                if *parent == a {
-                    work.push((*router, format!("{}{}", own, pfx), depth + 1));
-                }
-            }
-        }
-        out
-    }
-
-    /// The arguments FastAPI passes `func` (a handler or a dependency) for request `req`
-    /// (None: an entry run, every input open).
-    pub fn fa_bind(&mut self, func: ObjId, req: Option<&Req>, state: &mut State, node: &Node, depth: u32) -> IndexMap<StrId, Value> {
-        let fi = self.func_info(func);
-        let mut out: IndexMap<StrId, Value> = IndexMap::new();
-        let params: &'static ast::Parameters = match &fi.node {
-            FuncNode::Def(f) => &f.parameters,
-            _ => return out,
-        };
-        let skip_self = fi.cls.is_some() && !fi.is_static.get();
-        let all: Vec<&'static ast::ParameterWithDefault> = params.posonlyargs.iter().chain(params.args.iter()).chain(params.kwonlyargs.iter()).collect();
-        let body_params: Vec<String> = all.iter().filter(|p| self.fa_is_body_param(&fi, p, state)).map(|p| p.parameter.name.id.to_string()).collect();
-        // FastAPI solves the dependencies before it validates the request's own values (a
-        // missing header is a 422 after the sub-dependencies ran)
-        // (read off the program text: evaluating the markers again would make them weak)
-        let is_dep = |an: &mut Analyzer, p: &'static ast::ParameterWithDefault, _st: &mut State| -> bool {
-            let pname = p.parameter.name.id.to_string();
-            let call_is_dep = |e: &ast::Expr| matches!(e, ast::Expr::Call(c) if matches!(dotted_last(&c.func).as_str(), "Depends" | "Security"));
-            let in_ann = match p.parameter.annotation.as_deref() {
-                Some(ast::Expr::Subscript(sb)) if dotted_last(&sb.value) == "Annotated" => match &*sb.slice {
-                    ast::Expr::Tuple(tu) => tu.elts.iter().skip(1).any(|e| call_is_dep(e)),
-                    _ => false,
-                },
-                _ => false,
-            };
-            in_ann || matches!(an.fa_marker(&fi, &pname), Some((q, _)) if q == "fastapi.depends")
-        };
-        let mut vals: Vec<Option<Value>> = vec![None; all.len()];
-        for pass in 0..2 {
-            for (i, p) in all.iter().enumerate() {
-                if i == 0 && skip_self {
-                    continue;
-                }
-                let dep = false || is_dep(self, p, state);
-                if (pass == 0) != dep {
-                    continue;
-                }
-                if pass == 1 && vals[i].is_some() {
-                    continue;
-                }
-                vals[i] = Some(self.fa_param(func, p, req, &body_params, state, node, depth));
-            }
-        }
-        for (i, p) in all.iter().enumerate() {
-            if let Some(v) = vals[i].take() {
-                out.insert(s(p.parameter.name.id.as_str()), v);
-            }
-        }
-        out
-    }
-
-    fn fa_marker(&self, fi: &crate::interp::FuncInfo, pname: &str) -> Option<(String, Value)> {
-        let d = fi.defaults.get(&s(pname))?;
-        let o = d.single()?;
-        payload_of(self, o)
-    }
-
-    /// The metadata of `Annotated[T, Depends(g)]`: the marker objects, and T.
-    fn fa_annotated(&mut self, fi: &crate::interp::FuncInfo, ann: &'static ast::Expr, state: &mut State) -> (Option<(String, Value)>, &'static ast::Expr) {
-        if let ast::Expr::Subscript(sb) = ann {
-            if dotted_last(&sb.value) == "Annotated" {
-                if let ast::Expr::Tuple(t) = &*sb.slice {
-                    let inner: &'static ast::Expr = &t.elts[0];
-                    for m in t.elts.iter().skip(1) {
-                        let m: &'static ast::Expr = m;
-                        let v = self.eval_in_module(fi.module, m, state);
-                        if let Some(o) = v.single() {
-                            if let Some(p) = payload_of(self, o) {
-                                return (Some(p), inner);
-                            }
-                        }
-                    }
-                    return (None, inner);
-                }
-            }
-        }
-        (None, ann)
-    }
-
-    fn fa_is_body_param(&mut self, fi: &crate::interp::FuncInfo, p: &'static ast::ParameterWithDefault, state: &mut State) -> bool {
-        let pname = p.parameter.name.id.to_string();
-        let (meta, ann) = match &p.parameter.annotation {
-            Some(a) => {
-                let (m, inner) = self.fa_annotated(fi, a, state);
-                (m, Some(inner))
-            }
-            None => (None, None),
-        };
-        let marker = meta.or_else(|| self.fa_marker(fi, &pname));
-        if let Some((q, _)) = &marker {
-            return q.starts_with("fastapi.param.Body");
-        }
-        match ann {
-            Some(a) => {
-                let pa = self.pyd_ann_pub(a, fi.module, state);
-                bodyish(&pa) || matches!(dotted_last(a).as_str(), "dict" | "Dict") || matches!(a, ast::Expr::Subscript(sb) if matches!(dotted_last(&sb.value).as_str(), "dict" | "Dict"))
-            }
-            None => false,
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn fa_param(&mut self, func: ObjId, p: &'static ast::ParameterWithDefault, req: Option<&Req>, body_params: &[String], state: &mut State, node: &Node, depth: u32) -> Value {
-        let fi = self.func_info(func);
-        let dep_req = req;
-        let shared_obj = req.and_then(|r| r.obj.clone());
-        // an open request is any request: the values are those of an entry run
-        let req = req.filter(|r| !r.open);
-        let pname = p.parameter.name.id.to_string();
-        let (meta, ann) = match &p.parameter.annotation {
-            Some(a) => {
-                let (m, inner) = self.fa_annotated(&fi, a, state);
-                (m, Some(inner))
-            }
-            None => (None, None),
-        };
-        let marker = meta.or_else(|| self.fa_marker(&fi, &pname));
-        let ann_name = ann.map(scalar_ann_name).unwrap_or_default();
-        let open = |an: &mut Analyzer, st: &mut State| -> Value {
-            Value::obj(an.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param, st, &format!("param {}", pname), "", Ns::Item, vec![]))
-        };
-        // a dependency: its result
-        if let Some((q, g)) = &marker {
-            if q == "fastapi.depends" {
-                let g = if g.empty() {
-                    // `Depends()`: the annotation's class
-                    match ann {
-                        Some(a) => self.eval_in_module(fi.module, a, state),
-                        None => Value::new(),
-                    }
-                } else {
-                    g.clone()
-                };
-                return self.fa_call_dep(&g, dep_req, state, node, depth + 1);
-            }
-        }
-        // the request, background tasks, a response
-        match ann_name.as_str() {
-            "Request" | "WebSocket" | "HTTPConnection" => {
-                if let Some(o) = shared_obj {
-                    return o;
-                }
-                let body = match req.and_then(|r| r.json.clone()) {
-                    Some(j) => j,
-                    None if req.is_some() => Value::data("body"),
-                    None => {
-                        let src = Value::obj(self.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param, state, &format!("{}.json()", pname), "", Ns::Item, vec![]));
-                        src
-                    }
-                };
-                return fa_obj(self, state, node, "fastapi.request", body, &format!("req{}", func));
-            }
-            "BackgroundTasks" => return fa_obj(self, state, node, "fastapi.bg", Value::new(), &format!("bg{}", func)),
-            "Response" => {
-                let v = fa_obj(self, state, node, "fastapi.outresp", Value::new(), &format!("resp{}", func));
-                if let (Some(o), Some(top)) = (v.single(), self.m.fa_out_resp.last_mut()) {
-                    top.push(o);
-                }
-                return v;
-            }
+/// The name an exception class value stands for (`NotFound`, `KeyError`).
+fn exc_name(an: &Analyzer, v: &Value) -> String {
+    for o in v.pts.iter() {
+        match an.heap.kind(o) {
+            Kind::Class => return an.heap.class_info(o).name.clone(),
+            Kind::External => return an.heap.external_qual(o).rsplit('.').next().unwrap_or("").to_string(),
             _ => {}
         }
-        let route_path: Vec<(String, String)> = req.map(|r| r.path.clone()).unwrap_or_default();
-        let is_body = body_params.contains(&pname);
-        let default: Option<Value> = match &marker {
-            Some((q, d)) if q.starts_with("fastapi.param.") => {
-                if d.empty() {
-                    // (`Annotated[int, Query(ge=1)] = 2`: the parameter's own default)
-                    fi.defaults.get(&s(&pname)).cloned().filter(|dv| !dv.pts.iter().any(|o| payload_of(self, o).is_some()))
-                } else {
-                    Some(d.clone())
-                }
+    }
+    String::new()
+}
+
+pub(crate) fn eval_in_module(an: &mut Analyzer, module: ObjId, e: &'static ast::Expr, state: &mut State) -> Value {
+    an.in_module(module, "fastapi", "<fastapi>", |an| an.eval(e, state))
+}
+
+/// All routes of `app`: its own and those of the routers included in it (with prefixes),
+/// as (full path, route index).
+pub fn fa_routes_of(an: &Analyzer, app: ObjId) -> Vec<(Option<String>, usize)> {
+    let mut out = Vec::new();
+    let mut work: Vec<(ObjId, String, u32)> = vec![(app, String::new(), 0)];
+    while let Some((a, prefix, depth)) = work.pop() {
+        if depth > 8 {
+            continue;
+        }
+        let own = format!("{}{}", prefix, an.m.fa_prefix.get(&a).cloned().unwrap_or_default());
+        for (i, r) in an.m.fa_routes.iter().enumerate() {
+            if r.app == a {
+                out.push((r.path.as_ref().map(|p| format!("{}{}", own, p)), i));
             }
-            Some(_) => None,
-            None => fi.defaults.get(&s(&pname)).cloned(),
+        }
+        for (parent, router, pfx) in &an.m.fa_includes {
+            if *parent == a {
+                work.push((*router, format!("{}{}", own, pfx), depth + 1));
+            }
+        }
+    }
+    out
+}
+
+/// The arguments FastAPI passes `func` (a handler or a dependency) for request `req`
+/// (None: an entry run, every input open).
+pub fn fa_bind(an: &mut Analyzer, func: ObjId, req: Option<&Req>, state: &mut State, node: &Node, depth: u32) -> IndexMap<StrId, Value> {
+    let fi = an.heap.func_info(func);
+    let mut out: IndexMap<StrId, Value> = IndexMap::new();
+    let params: &'static ast::Parameters = match &fi.node {
+        FuncNode::Def(f) => &f.parameters,
+        _ => return out,
+    };
+    let skip_self = fi.cls.is_some() && !fi.is_static.get();
+    let all: Vec<&'static ast::ParameterWithDefault> = params.posonlyargs.iter().chain(params.args.iter()).chain(params.kwonlyargs.iter()).collect();
+    let body_params: Vec<String> = all.iter().filter(|p| fa_is_body_param(an, &fi, p, state)).map(|p| p.parameter.name.id.to_string()).collect();
+    // FastAPI solves the dependencies before it validates the request's own values (a
+    // missing header is a 422 after the sub-dependencies ran)
+    // (read off the program text: evaluating the markers again would make them weak)
+    let is_dep = |an: &mut Analyzer, p: &'static ast::ParameterWithDefault, _st: &mut State| -> bool {
+        let pname = p.parameter.name.id.to_string();
+        let call_is_dep = |e: &ast::Expr| matches!(e, ast::Expr::Call(c) if matches!(dotted_last(&c.func).as_str(), "Depends" | "Security"));
+        let in_ann = match p.parameter.annotation.as_deref() {
+            Some(ast::Expr::Subscript(sb)) if dotted_last(&sb.value) == "Annotated" => match &*sb.slice {
+                ast::Expr::Tuple(tu) => tu.elts.iter().skip(1).any(|e| call_is_dep(e)),
+                _ => false,
+            },
+            _ => false,
         };
-        let pann = ann.map(|a| self.pyd_ann_pub(a, fi.module, state)).unwrap_or(Ann::Other);
-        if is_body {
-            let embed = matches!(&marker, Some((q, _)) if q.ends_with(".embed")) || body_params.len() > 1;
-            let raw = match req {
-                Some(r) => match &r.json {
-                    Some(j) if embed => {
-                        // the key in the JSON, else the default
-                        let kk = key_str_lit(&pname);
-                        let recs: Vec<ObjId> = j.pts.iter().filter(|o| matches!(self.kind(*o), Kind::Dict | Kind::Unknown)).collect();
-                        let sure = !recs.is_empty() && recs.iter().all(|o| state.row(*o, Ns::Item).definite.contains(kk));
-                        let maybe = recs.iter().any(|o| state.row(*o, Ns::Item).present.contains(kk) || state.row(*o, Ns::Item).open());
-                        let mut v = if maybe { self.load_item(j, Ns::Item, &Value::lit(kk), node, state, false) } else { Value::new() };
-                        if !sure {
-                            match &default {
-                                Some(d) => v = v.join(d),
-                                // a required body the JSON does not hold under its name: 422
-                                None if !maybe => {
-                                    self.raise_here("RequestValidationError", state);
-                                    return Value::new();
-                                }
-                                None => self.may_raise_here("RequestValidationError", state),
-                            }
+        in_ann || matches!(fa_marker(an, &fi, &pname), Some((q, _)) if q == "fastapi.depends")
+    };
+    let mut vals: Vec<Option<Value>> = vec![None; all.len()];
+    for pass in 0..2 {
+        for (i, p) in all.iter().enumerate() {
+            if i == 0 && skip_self {
+                continue;
+            }
+            let dep = false || is_dep(an, p, state);
+            if (pass == 0) != dep {
+                continue;
+            }
+            if pass == 1 && vals[i].is_some() {
+                continue;
+            }
+            vals[i] = Some(fa_param(an, func, p, req, &body_params, state, node, depth));
+        }
+    }
+    for (i, p) in all.iter().enumerate() {
+        if let Some(v) = vals[i].take() {
+            out.insert(s(p.parameter.name.id.as_str()), v);
+        }
+    }
+    out
+}
+
+fn fa_marker(an: &Analyzer, fi: &crate::interp::FuncInfo, pname: &str) -> Option<(String, Value)> {
+    let d = fi.defaults.get(&s(pname))?;
+    let o = d.single()?;
+    payload_of(an, o)
+}
+
+/// The metadata of `Annotated[T, Depends(g)]`: the marker objects, and T.
+fn fa_annotated(an: &mut Analyzer, fi: &crate::interp::FuncInfo, ann: &'static ast::Expr, state: &mut State) -> (Option<(String, Value)>, &'static ast::Expr) {
+    if let ast::Expr::Subscript(sb) = ann {
+        if dotted_last(&sb.value) == "Annotated" {
+            if let ast::Expr::Tuple(t) = &*sb.slice {
+                let inner: &'static ast::Expr = &t.elts[0];
+                for m in t.elts.iter().skip(1) {
+                    let m: &'static ast::Expr = m;
+                    let v = eval_in_module(an, fi.module, m, state);
+                    if let Some(o) = v.single() {
+                        if let Some(p) = payload_of(an, o) {
+                            return (Some(p), inner);
                         }
-                        v
                     }
-                    Some(j) => j.clone(),
-                    None => Value::data("body"),
-                },
-                None => open(self, state),
+                }
+                return (None, inner);
+            }
+        }
+    }
+    (None, ann)
+}
+
+fn fa_is_body_param(an: &mut Analyzer, fi: &crate::interp::FuncInfo, p: &'static ast::ParameterWithDefault, state: &mut State) -> bool {
+    let pname = p.parameter.name.id.to_string();
+    let (meta, ann) = match &p.parameter.annotation {
+        Some(a) => {
+            let (m, inner) = fa_annotated(an, fi, a, state);
+            (m, Some(inner))
+        }
+        None => (None, None),
+    };
+    let marker = meta.or_else(|| fa_marker(an, fi, &pname));
+    if let Some((q, _)) = &marker {
+        return q.starts_with("fastapi.param.Body");
+    }
+    match ann {
+        Some(a) => {
+            let pa = crate::models::pydantic::pyd_ann_pub(an, a, fi.module, state);
+            bodyish(&pa) || matches!(dotted_last(a).as_str(), "dict" | "Dict") || matches!(a, ast::Expr::Subscript(sb) if matches!(dotted_last(&sb.value).as_str(), "dict" | "Dict"))
+        }
+        None => false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fa_param(an: &mut Analyzer, func: ObjId, p: &'static ast::ParameterWithDefault, req: Option<&Req>, body_params: &[String], state: &mut State, node: &Node, depth: u32) -> Value {
+    let fi = an.heap.func_info(func);
+    let dep_req = req;
+    let shared_obj = req.and_then(|r| r.obj.clone());
+    // an open request is any request: the values are those of an entry run
+    let req = req.filter(|r| !r.open);
+    let pname = p.parameter.name.id.to_string();
+    let (meta, ann) = match &p.parameter.annotation {
+        Some(a) => {
+            let (m, inner) = fa_annotated(an, &fi, a, state);
+            (m, Some(inner))
+        }
+        None => (None, None),
+    };
+    let marker = meta.or_else(|| fa_marker(an, &fi, &pname));
+    let ann_name = ann.map(scalar_ann_name).unwrap_or_default();
+    let open = |an: &mut Analyzer, st: &mut State| -> Value {
+        Value::obj(an.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param, st, &format!("param {}", pname), "", Ns::Item, vec![]))
+    };
+    // a dependency: its result
+    if let Some((q, g)) = &marker {
+        if q == "fastapi.depends" {
+            let g = if g.empty() {
+                // `Depends()`: the annotation's class
+                match ann {
+                    Some(a) => eval_in_module(an, fi.module, a, state),
+                    None => Value::new(),
+                }
+            } else {
+                g.clone()
             };
-            let report = req.is_none();
-            let v = match &pann {
-                Ann::Model(c) => {
-                    // (a test request's body: its validation errors are the 422 response)
-                    let saved = std::mem::replace(&mut self.m.fa_body_validation, !report);
-                    let v = self.pyd_validate_opts(*c, &raw, state, node, report);
-                    self.m.fa_body_validation = saved;
+            return fa_call_dep(an, &g, dep_req, state, node, depth + 1);
+        }
+    }
+    // the request, background tasks, a response
+    match ann_name.as_str() {
+        "Request" | "WebSocket" | "HTTPConnection" => {
+            if let Some(o) = shared_obj {
+                return o;
+            }
+            let body = match req.and_then(|r| r.json.clone()) {
+                Some(j) => j,
+                None if req.is_some() => Value::data("body"),
+                None => {
+                    let src = Value::obj(an.unknown_source(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param, state, &format!("{}.json()", pname), "", Ns::Item, vec![]));
+                    src
+                }
+            };
+            return fa_obj(an, state, node, "fastapi.request", body, &format!("req{}", func));
+        }
+        "BackgroundTasks" => return fa_obj(an, state, node, "fastapi.bg", Value::new(), &format!("bg{}", func)),
+        "Response" => {
+            let v = fa_obj(an, state, node, "fastapi.outresp", Value::new(), &format!("resp{}", func));
+            if let (Some(o), Some(top)) = (v.single(), an.m.fa_out_resp.last_mut()) {
+                top.push(o);
+            }
+            return v;
+        }
+        _ => {}
+    }
+    let route_path: Vec<(String, String)> = req.map(|r| r.path.clone()).unwrap_or_default();
+    let is_body = body_params.contains(&pname);
+    let default: Option<Value> = match &marker {
+        Some((q, d)) if q.starts_with("fastapi.param.") => {
+            if d.empty() {
+                // (`Annotated[int, Query(ge=1)] = 2`: the parameter's own default)
+                fi.defaults.get(&s(&pname)).cloned().filter(|dv| !dv.pts.iter().any(|o| payload_of(an, o).is_some()))
+            } else {
+                Some(d.clone())
+            }
+        }
+        Some(_) => None,
+        None => fi.defaults.get(&s(&pname)).cloned(),
+    };
+    let pann = ann.map(|a| crate::models::pydantic::pyd_ann_pub(an, a, fi.module, state)).unwrap_or(Ann::Other);
+    if is_body {
+        let embed = matches!(&marker, Some((q, _)) if q.ends_with(".embed")) || body_params.len() > 1;
+        let raw = match req {
+            Some(r) => match &r.json {
+                Some(j) if embed => {
+                    // the key in the JSON, else the default
+                    let kk = key_str_lit(&pname);
+                    let recs: Vec<ObjId> = j.pts.iter().filter(|o| matches!(an.heap.kind(*o), Kind::Dict | Kind::Unknown)).collect();
+                    let sure = !recs.is_empty() && recs.iter().all(|o| state.row(*o, Ns::Item).definite.contains(kk));
+                    let maybe = recs.iter().any(|o| state.row(*o, Ns::Item).present.contains(kk) || state.row(*o, Ns::Item).open());
+                    let mut v = if maybe { an.load_item(j, Ns::Item, &Value::lit(kk), node, state, false) } else { Value::new() };
+                    if !sure {
+                        match &default {
+                            Some(d) => v = v.join(d),
+                            // a required body the JSON does not hold under its name: 422
+                            None if !maybe => {
+                                an.raise_here("RequestValidationError", state);
+                                return Value::new();
+                            }
+                            None => an.may_raise_here("RequestValidationError", state),
+                        }
+                    }
                     v
                 }
-                Ann::Other => raw,
-                other => self.pyd_convert_pub(other, &raw, state, node),
-            };
-            return match default {
-                Some(d) if req.is_none() => v.join(&d),
-                _ => v,
-            };
-        }
-        // a path / query / header / cookie value
-        let mut v = Value::new();
-        // (an Enum / Literal annotation validates the text itself)
-        let restrictable = ann.map(|a| self.fa_restrictable(&fi, a, state)).unwrap_or(false);
-        // (a text the annotation surely rejects converts to nothing and is a 422 below)
-        let bad = std::cell::Cell::new(false);
-        let conv = |ann_name: &str, text: &str| {
-            let v = if restrictable { Value::lit_str(text) } else { conv_scalar(ann_name, text) };
-            if v.empty() {
-                bad.set(true);
-            }
-            v
+                Some(j) => j.clone(),
+                None => Value::data("body"),
+            },
+            None => open(an, state),
         };
-        if let Some(r) = req {
-            if let Some((_, val)) = route_path.iter().find(|(n, _)| *n == pname) {
-                v = conv(&ann_name, val);
-            } else if matches!(&marker, Some((q, _)) if q.starts_with("fastapi.param.Cookie")) {
-                let ck = match &marker {
-                    Some((q, _)) if q.contains(".alias=") => q.split(".alias=").nth(1).unwrap_or(&pname).to_string(),
-                    _ => pname.clone(),
-                };
-                let mut found = false;
-                if let Some(cj) = &r.cookies {
-                    for o in cj.pts.iter() {
-                        let row = state.row(o, Ns::Item);
-                        let k = key_str_lit(&ck);
-                        if row.present.contains(k) {
-                            v = v.join(&state.slot(o, Ns::Item, k));
-                            found = row.definite.contains(k);
-                            if !found {
-                                v = v.join(&default.clone().unwrap_or_else(|| Value::data("cookie")));
-                            }
-                            found = true;
-                        } else if row.open() {
-                            v = v.join(&Value::data("cookie"));
-                            found = true;
+        let report = req.is_none();
+        let v = match &pann {
+            Ann::Model(c) => {
+                // (a test request's body: its validation errors are the 422 response)
+                let saved = std::mem::replace(&mut an.m.fa_body_validation, !report);
+                let v = crate::models::pydantic::pyd_validate_opts(an, *c, &raw, state, node, report);
+                an.m.fa_body_validation = saved;
+                v
+            }
+            Ann::Other => raw,
+            other => crate::models::pydantic::pyd_convert_pub(an, other, &raw, state, node),
+        };
+        return match default {
+            Some(d) if req.is_none() => v.join(&d),
+            _ => v,
+        };
+    }
+    // a path / query / header / cookie value
+    let mut v = Value::new();
+    // (an Enum / Literal annotation validates the text itself)
+    let restrictable = ann.map(|a| fa_restrictable(an, &fi, a, state)).unwrap_or(false);
+    // (a text the annotation surely rejects converts to nothing and is a 422 below)
+    let bad = std::cell::Cell::new(false);
+    let conv = |ann_name: &str, text: &str| {
+        let v = if restrictable { Value::lit_str(text) } else { conv_scalar(ann_name, text) };
+        if v.empty() {
+            bad.set(true);
+        }
+        v
+    };
+    if let Some(r) = req {
+        if let Some((_, val)) = route_path.iter().find(|(n, _)| *n == pname) {
+            v = conv(&ann_name, val);
+        } else if matches!(&marker, Some((q, _)) if q.starts_with("fastapi.param.Cookie")) {
+            let ck = match &marker {
+                Some((q, _)) if q.contains(".alias=") => q.split(".alias=").nth(1).unwrap_or(&pname).to_string(),
+                _ => pname.clone(),
+            };
+            let mut found = false;
+            if let Some(cj) = &r.cookies {
+                for o in cj.pts.iter() {
+                    let row = state.row(o, Ns::Item);
+                    let k = key_str_lit(&ck);
+                    if row.present.contains(k) {
+                        v = v.join(&state.slot(o, Ns::Item, k));
+                        found = row.definite.contains(k);
+                        if !found {
+                            v = v.join(&default.clone().unwrap_or_else(|| Value::data("cookie")));
                         }
+                        found = true;
+                    } else if row.open() {
+                        v = v.join(&Value::data("cookie"));
+                        found = true;
+                    }
+                }
+            }
+            if !found {
+                v = default.clone().unwrap_or_else(|| Value::data("cookie"));
+            }
+        } else if matches!(&marker, Some((q, _)) if q.starts_with("fastapi.param.Header")) {
+            let hk = pname.replace('_', "-");
+            // (whether the request surely has it / surely lacks it)
+            let mut surely_absent = true;
+            let mut surely_present = false;
+            if let Some(h) = &r.headers {
+                if !h.kv.is_bot() && !h.kv.is_literal() {
+                    surely_absent = false;
+                }
+                for o in h.pts.iter() {
+                    let row = state.row(o, Ns::Item);
+                    if row.open() {
+                        surely_absent = false;
+                    }
+                    for k in row.present.iter() {
+                        if intern::key_as_str(k).map(|x| x.to_lowercase() == hk.to_lowercase()).unwrap_or(false) {
+                            v = v.join(&state.slot(o, Ns::Item, k));
+                            surely_absent = false;
+                            surely_present |= row.definite.contains(k) && h.pts.len() == 1;
+                        }
+                    }
+                }
+            }
+            // (the headers a TestClient always sends)
+            const CLIENT_HEADERS: &[(&str, &str)] = &[("host", "testserver"), ("accept", "*/*"), ("accept-encoding", "gzip, deflate"), ("connection", "keep-alive"), ("user-agent", "testclient")];
+            if !surely_present {
+                if let Some((_, hv)) = CLIENT_HEADERS.iter().find(|(n, _)| *n == hk.to_lowercase()) {
+                    if v.empty() {
+                        v = Value::lit_str(hv);
+                    }
+                    surely_absent = false;
+                }
+            }
+            if v.empty() || !surely_present {
+                match default.clone() {
+                    Some(d) => v = v.join(&d),
+                    None if surely_absent && v.empty() => {
+                        // a required header the request does not send: 422
+                        an.raise_here("RequestValidationError", state);
+                        return Value::new();
+                    }
+                    None if !surely_present => {
+                        an.may_raise_here("RequestValidationError", state);
+                        if v.empty() {
+                            v = Value::data("header");
+                        }
+                    }
+                    None => {
+                        if v.empty() {
+                            v = Value::data("header");
+                        }
+                    }
+                }
+            }
+        } else {
+            let alias = match &marker {
+                Some((q, _)) if q.contains(".alias=") => q.split(".alias=").nth(1).unwrap_or(&pname).to_string(),
+                _ => pname.clone(),
+            };
+            if let Some((_, val)) = r.url_query.iter().find(|(n, _)| *n == alias) {
+                v = conv(&ann_name, val);
+            } else if let Some(qd) = &r.query {
+                let k = key_str_lit(&alias);
+                let mut found = false;
+                for o in qd.pts.iter() {
+                    let row = state.row(o, Ns::Item);
+                    if row.present.contains(k) {
+                        found = true;
+                        let x = state.slot(o, Ns::Item, k);
+                        v = v.join(&match str_of(&x) {
+                            Some(t) => conv(&ann_name, &t),
+                            None => x,
+                        });
+                        if !row.definite.contains(k) {
+                            v = v.join(&default.clone().unwrap_or_else(|| Value::data("query")));
+                        }
+                    } else if row.open() {
+                        found = true;
+                        v = v.join(&Value::data("query"));
                     }
                 }
                 if !found {
-                    v = default.clone().unwrap_or_else(|| Value::data("cookie"));
-                }
-            } else if matches!(&marker, Some((q, _)) if q.starts_with("fastapi.param.Header")) {
-                let hk = pname.replace('_', "-");
-                // (whether the request surely has it / surely lacks it)
-                let mut surely_absent = true;
-                let mut surely_present = false;
-                if let Some(h) = &r.headers {
-                    if !h.kv.is_bot() && !h.kv.is_literal() {
-                        surely_absent = false;
-                    }
-                    for o in h.pts.iter() {
-                        let row = state.row(o, Ns::Item);
-                        if row.open() {
-                            surely_absent = false;
-                        }
-                        for k in row.present.iter() {
-                            if intern::key_as_str(k).map(|x| x.to_lowercase() == hk.to_lowercase()).unwrap_or(false) {
-                                v = v.join(&state.slot(o, Ns::Item, k));
-                                surely_absent = false;
-                                surely_present |= row.definite.contains(k) && h.pts.len() == 1;
-                            }
-                        }
-                    }
-                }
-                // (the headers a TestClient always sends)
-                const CLIENT_HEADERS: &[(&str, &str)] = &[("host", "testserver"), ("accept", "*/*"), ("accept-encoding", "gzip, deflate"), ("connection", "keep-alive"), ("user-agent", "testclient")];
-                if !surely_present {
-                    if let Some((_, hv)) = CLIENT_HEADERS.iter().find(|(n, _)| *n == hk.to_lowercase()) {
-                        if v.empty() {
-                            v = Value::lit_str(hv);
-                        }
-                        surely_absent = false;
-                    }
-                }
-                if v.empty() || !surely_present {
-                    match default.clone() {
-                        Some(d) => v = v.join(&d),
-                        None if surely_absent && v.empty() => {
-                            // a required header the request does not send: 422
-                            self.raise_here("RequestValidationError", state);
-                            return Value::new();
-                        }
-                        None if !surely_present => {
-                            self.may_raise_here("RequestValidationError", state);
-                            if v.empty() {
-                                v = Value::data("header");
-                            }
-                        }
-                        None => {
-                            if v.empty() {
-                                v = Value::data("header");
-                            }
-                        }
-                    }
-                }
-            } else {
-                let alias = match &marker {
-                    Some((q, _)) if q.contains(".alias=") => q.split(".alias=").nth(1).unwrap_or(&pname).to_string(),
-                    _ => pname.clone(),
-                };
-                if let Some((_, val)) = r.url_query.iter().find(|(n, _)| *n == alias) {
-                    v = conv(&ann_name, val);
-                } else if let Some(qd) = &r.query {
-                    let k = key_str_lit(&alias);
-                    let mut found = false;
-                    for o in qd.pts.iter() {
-                        let row = state.row(o, Ns::Item);
-                        if row.present.contains(k) {
-                            found = true;
-                            let x = state.slot(o, Ns::Item, k);
-                            v = v.join(&match str_of(&x) {
-                                Some(t) => conv(&ann_name, &t),
-                                None => x,
-                            });
-                            if !row.definite.contains(k) {
-                                v = v.join(&default.clone().unwrap_or_else(|| Value::data("query")));
-                            }
-                        } else if row.open() {
-                            found = true;
-                            v = v.join(&Value::data("query"));
-                        }
-                    }
-                    if !found {
-                        v = default.clone().unwrap_or_else(|| Value::data("query"));
-                    }
-                } else {
                     v = default.clone().unwrap_or_else(|| Value::data("query"));
                 }
+            } else {
+                v = default.clone().unwrap_or_else(|| Value::data("query"));
             }
-            if bad.get() {
-                if v.empty() {
-                    self.raise_here("RequestValidationError", state);
-                    return Value::new();
-                }
-                self.may_raise_here("RequestValidationError", state);
+        }
+        if bad.get() {
+            if v.empty() {
+                an.raise_here("RequestValidationError", state);
+                return Value::new();
             }
-            // `Query(ge=1)` / `Path(gt=0)` constraints on the value the request gave (a default
-            // is not validated)
-            let cons = marker_constraints(p);
-            if !cons.is_empty() && default.as_ref() != Some(&v) {
-                if v.pts.is_empty() && v.kv.is_literal() {
-                    let lits = crate::domain::kv_literals(&v.kv);
-                    let bad: Vec<KeyId> = lits.iter().filter(|k| *k != intern::key_none() && crate::models::pydantic::literal_breaks(&cons, *k).is_some()).collect();
-                    if !bad.is_empty() {
-                        if bad.len() == lits.len() {
-                            self.raise_here("RequestValidationError", state);
-                            return Value::new();
-                        }
-                        self.may_raise_here("RequestValidationError", state);
-                        v = Value::kv_only(crate::domain::KeyVal::lits(intern::KeySet::from_iter(lits.iter().filter(|k| !bad.contains(k)))));
+            an.may_raise_here("RequestValidationError", state);
+        }
+        // `Query(ge=1)` / `Path(gt=0)` constraints on the value the request gave (a default
+        // is not validated)
+        let cons = marker_constraints(p);
+        if !cons.is_empty() && default.as_ref() != Some(&v) {
+            if v.pts.is_empty() && v.kv.is_literal() {
+                let lits = crate::domain::kv_literals(&v.kv);
+                let bad: Vec<KeyId> = lits.iter().filter(|k| *k != intern::key_none() && crate::models::pydantic::literal_breaks(&cons, *k).is_some()).collect();
+                if !bad.is_empty() {
+                    if bad.len() == lits.len() {
+                        an.raise_here("RequestValidationError", state);
+                        return Value::new();
                     }
-                } else if !v.empty() {
-                    self.may_raise_here("RequestValidationError", state);
+                    an.may_raise_here("RequestValidationError", state);
+                    v = Value::kv_only(crate::domain::KeyVal::lits(intern::KeySet::from_iter(lits.iter().filter(|k| !bad.contains(k)))));
                 }
+            } else if !v.empty() {
+                an.may_raise_here("RequestValidationError", state);
             }
-            if let Some(a) = ann {
-                v = self.fa_restrict(&fi, a, v, default.as_ref(), state);
-            }
+        }
+        if let Some(a) = ann {
+            v = fa_restrict(an, &fi, a, v, default.as_ref(), state);
+        }
+        return v;
+    }
+    // an entry run: anything the client sends, or the default
+    let mut ov = open(an, state);
+    if let Some(a) = ann {
+        ov = fa_restrict(an, &fi, a, ov, None, state);
+    }
+    match default {
+        Some(d) => d.join(&ov),
+        None => ov,
+    }
+}
+
+fn fa_restrictable(an: &mut Analyzer, fi: &crate::interp::FuncInfo, ann: &'static ast::Expr, state: &mut State) -> bool {
+    match ann {
+        ast::Expr::Subscript(sb) => dotted_last(&sb.value) == "Literal",
+        ast::Expr::Name(_) | ast::Expr::Attribute(_) => {
+            let cv = eval_in_module(an, fi.module, ann, state);
+            cv.single().map(|c| an.heap.kind(c) == Kind::Class && an.m.enum_members.contains_key(&c)).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+/// A path / query value validated by its annotation: an Enum class makes it the member with
+/// that value, `Literal[...]` one of the literals; anything else is a 422 (raised here).
+fn fa_restrict(an: &mut Analyzer, fi: &crate::interp::FuncInfo, ann: &'static ast::Expr, v: Value, default: Option<&Value>, state: &mut State) -> Value {
+    // (the default is not validated)
+    if let Some(d) = default {
+        if v == *d {
             return v;
         }
-        // an entry run: anything the client sends, or the default
-        let mut ov = open(self, state);
-        if let Some(a) = ann {
-            ov = self.fa_restrict(&fi, a, ov, None, state);
-        }
-        match default {
-            Some(d) => d.join(&ov),
-            None => ov,
-        }
     }
-
-    fn fa_restrictable(&mut self, fi: &crate::interp::FuncInfo, ann: &'static ast::Expr, state: &mut State) -> bool {
-        match ann {
-            ast::Expr::Subscript(sb) => dotted_last(&sb.value) == "Literal",
-            ast::Expr::Name(_) | ast::Expr::Attribute(_) => {
-                let cv = self.eval_in_module(fi.module, ann, state);
-                cv.single().map(|c| self.kind(c) == Kind::Class && self.enum_members.contains_key(&c)).unwrap_or(false)
-            }
-            _ => false,
+    let allowed: Vec<(Value, Option<KeyId>)> = if let ast::Expr::Subscript(sb) = ann {
+        if dotted_last(&sb.value) != "Literal" {
+            return v;
         }
+        let elts: Vec<&'static ast::Expr> = match &*sb.slice {
+            ast::Expr::Tuple(t) => t.elts.iter().collect(),
+            e => vec![e],
+        };
+        let mut out = Vec::new();
+        for e in elts {
+            let lv = eval_in_module(an, fi.module, e, state);
+            match lv.kv.as_lit().filter(|_| lv.pts.is_empty()) {
+                Some(k) => out.push((lv.clone(), Some(k))),
+                None => return v,
+            }
+        }
+        out
+    } else {
+        let cv = eval_in_module(an, fi.module, ann, state);
+        let Some(cls) = cv.single().filter(|c| an.heap.kind(*c) == Kind::Class && an.m.enum_members.contains_key(c)) else { return v };
+        let vk = key_str_lit("value");
+        an.m.enum_members[&cls].clone().iter().map(|(_, m)| (Value::obj(*m), state.slot(*m, Ns::Attr, vk).kv.as_lit())).collect()
+    };
+    if allowed.is_empty() {
+        return v;
     }
-
-    /// A path / query value validated by its annotation: an Enum class makes it the member with
-    /// that value, `Literal[...]` one of the literals; anything else is a 422 (raised here).
-    fn fa_restrict(&mut self, fi: &crate::interp::FuncInfo, ann: &'static ast::Expr, v: Value, default: Option<&Value>, state: &mut State) -> Value {
-        // (the default is not validated)
-        if let Some(d) = default {
-            if v == *d {
-                return v;
-            }
-        }
-        let allowed: Vec<(Value, Option<KeyId>)> = if let ast::Expr::Subscript(sb) = ann {
-            if dotted_last(&sb.value) != "Literal" {
-                return v;
-            }
-            let elts: Vec<&'static ast::Expr> = match &*sb.slice {
-                ast::Expr::Tuple(t) => t.elts.iter().collect(),
-                e => vec![e],
-            };
-            let mut out = Vec::new();
-            for e in elts {
-                let lv = self.eval_in_module(fi.module, e, state);
-                match lv.kv.as_lit().filter(|_| lv.pts.is_empty()) {
-                    Some(k) => out.push((lv.clone(), Some(k))),
-                    None => return v,
+    // the text the client sent: compared with each allowed value's str()
+    let given = if v.pts.is_empty() && v.kv.is_literal() { Some(crate::domain::kv_literals(&v.kv)) } else { None };
+    match given {
+        Some(ks) => {
+            let mut out = Value::new();
+            let mut miss = false;
+            for k in ks.iter() {
+                let text = intern::key_py_str(k);
+                match allowed.iter().find(|(_, a)| a.map(|a| a == k || intern::key_py_str(a) == text).unwrap_or(false)) {
+                    Some((av, _)) => out = out.join(av),
+                    None => miss = true,
                 }
+            }
+            if out.empty() {
+                an.raise_here("RequestValidationError", state);
+                return Value::new();
+            }
+            if miss {
+                an.may_raise_here("RequestValidationError", state);
             }
             out
-        } else {
-            let cv = self.eval_in_module(fi.module, ann, state);
-            let Some(cls) = cv.single().filter(|c| self.kind(*c) == Kind::Class && self.enum_members.contains_key(c)) else { return v };
-            let vk = key_str_lit("value");
-            self.enum_members[&cls].clone().iter().map(|(_, m)| (Value::obj(*m), state.slot(*m, Ns::Attr, vk).kv.as_lit())).collect()
-        };
-        if allowed.is_empty() {
-            return v;
         }
-        // the text the client sent: compared with each allowed value's str()
-        let given = if v.pts.is_empty() && v.kv.is_literal() { Some(crate::domain::kv_literals(&v.kv)) } else { None };
-        match given {
-            Some(ks) => {
-                let mut out = Value::new();
-                let mut miss = false;
-                for k in ks.iter() {
-                    let text = intern::key_py_str(k);
-                    match allowed.iter().find(|(_, a)| a.map(|a| a == k || intern::key_py_str(a) == text).unwrap_or(false)) {
-                        Some((av, _)) => out = out.join(av),
-                        None => miss = true,
-                    }
-                }
-                if out.empty() {
-                    self.raise_here("RequestValidationError", state);
-                    return Value::new();
-                }
-                if miss {
-                    self.may_raise_here("RequestValidationError", state);
-                }
-                out
-            }
-            None => {
-                self.may_raise_here("RequestValidationError", state);
-                join_values(allowed.into_iter().map(|(a, _)| a))
-            }
+        None => {
+            an.may_raise_here("RequestValidationError", state);
+            join_values(allowed.into_iter().map(|(a, _)| a))
         }
     }
+}
 
-    /// A dependency `g` called by FastAPI: g's parameters bound like a handler's, a `yield`
-    /// dependency's value is what it yields, a class is constructed.
-    fn fa_call_dep(&mut self, g: &Value, req: Option<&Req>, state: &mut State, node: &Node, depth: u32) -> Value {
-        if depth > 8 {
-            return Value::data("depends");
-        }
-        // a dependency runs once per request: its value is reused
-        if let Some(v) = g.single().and_then(|o| self.m.fa_dep_cache.last().and_then(|c| c.get(&o).cloned())) {
-            return v;
-        }
-        let mut outs: Vec<Value> = Vec::new();
-        for o in g.pts.iter() {
-            match self.kind(o) {
-                Kind::Function => {
-                    let kwargs = self.fa_bind(o, req, state, node, depth);
-                    let fi = self.func_info(o);
-                    let r = self.call_user(o, None, vec![], kwargs, vec![], vec![], state, node, None, false);
-                    let is_gen = match &fi.node {
-                        FuncNode::Def(f) => crate::interp::is_generator(&f.body),
-                        _ => false,
-                    };
-                    if is_gen {
-                        let it = self.iterate(&r, node, state);
-                        outs.push(match (it.items, it.elem) {
-                            (Some(items), _) if !items.is_empty() => items[0].clone(),
-                            (_, crate::interp::funcs::Elem::One(e)) => e,
-                            _ => Value::data("depends"),
-                        });
-                        // (FastAPI runs it to its end after the response: its effects all happen)
-                        self.exhaust(&r, state);
-                    } else {
-                        outs.push(r);
-                    }
+/// A dependency `g` called by FastAPI: g's parameters bound like a handler's, a `yield`
+/// dependency's value is what it yields, a class is constructed.
+fn fa_call_dep(an: &mut Analyzer, g: &Value, req: Option<&Req>, state: &mut State, node: &Node, depth: u32) -> Value {
+    if depth > 8 {
+        return Value::data("depends");
+    }
+    // a dependency runs once per request: its value is reused
+    if let Some(v) = g.single().and_then(|o| an.m.fa_dep_cache.last().and_then(|c| c.get(&o).cloned())) {
+        return v;
+    }
+    let mut outs: Vec<Value> = Vec::new();
+    for o in g.pts.iter() {
+        match an.heap.kind(o) {
+            Kind::Function => {
+                let kwargs = fa_bind(an, o, req, state, node, depth);
+                let fi = an.heap.func_info(o);
+                let r = an.call_user(o, None, vec![], kwargs, vec![], vec![], state, node, None, false);
+                let is_gen = match &fi.node {
+                    FuncNode::Def(f) => crate::interp::is_generator(&f.body),
+                    _ => false,
+                };
+                if is_gen {
+                    let it = an.iterate(&r, node, state);
+                    outs.push(match (it.items, it.elem) {
+                        (Some(items), _) if !items.is_empty() => items[0].clone(),
+                        (_, crate::interp::funcs::Elem::One(e)) => e,
+                        _ => Value::data("depends"),
+                    });
+                    // (FastAPI runs it to its end after the response: its effects all happen)
+                    an.exhaust(&r, state);
+                } else {
+                    outs.push(r);
                 }
-                Kind::Class => {
-                    let kwargs = match self.class_lookup(o, "__init__").and_then(|c| self.cls_slots.get(&(c, Ns::Attr, key_str_lit("__init__"))).cloned()) {
-                        Some(fv) => match fv.pts.iter().find(|f| self.kind(*f) == Kind::Function) {
-                            Some(init) => self.fa_bind(init, req, state, node, depth),
-                            None => IndexMap::new(),
-                        },
+            }
+            Kind::Class => {
+                let kwargs = match an.class_lookup(o, "__init__").and_then(|c| an.heap.cls_slots.get(&(c, Ns::Attr, key_str_lit("__init__"))).cloned()) {
+                    Some(fv) => match fv.pts.iter().find(|f| an.heap.kind(*f) == Kind::Function) {
+                        Some(init) => fa_bind(an, init, req, state, node, depth),
                         None => IndexMap::new(),
-                    };
-                    outs.push(self.construct(o, &[], &kwargs, &[], &[], state, node));
-                }
-                _ => outs.push(self.call_value(&Value::obj(o), node, None, state, Some(vec![]))),
-            }
-        }
-        if outs.is_empty() {
-            return Value::data("depends");
-        }
-        let v = join_values(outs);
-        if let (Some(o), Some(c)) = (g.single(), self.m.fa_dep_cache.last_mut()) {
-            c.insert(o, v.clone());
-        }
-        v
-    }
-
-    /// The handler's `Depends(g)` parameters whose `g` is a generator function (`yield` dependencies).
-    pub fn fa_yield_deps(&mut self, func: ObjId, state: &mut State) -> Vec<ObjId> {
-        let fi = self.func_info(func);
-        let FuncNode::Def(f) = &fi.node else { return vec![] };
-        let mut out = Vec::new();
-        for p in f.parameters.posonlyargs.iter().chain(f.parameters.args.iter()).chain(f.parameters.kwonlyargs.iter()) {
-            let pname = p.parameter.name.id.to_string();
-            let meta = match &p.parameter.annotation {
-                Some(a) => self.fa_annotated(&fi, a, state).0,
-                None => None,
-            };
-            if let Some((q, g)) = meta.or_else(|| self.fa_marker(&fi, &pname)) {
-                if q != "fastapi.depends" {
-                    continue;
-                }
-                if let Some(o) = g.single().filter(|o| self.kind(*o) == Kind::Function) {
-                    let gi = self.func_info(o);
-                    if matches!(&gi.node, FuncNode::Def(d) if crate::interp::is_generator(&d.body)) && !out.contains(&o) {
-                        out.push(o);
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    /// The handler called inside its yield dependencies: each runs to its `yield`, the rest of
-    /// the request (the next one, finally the handler) runs there, then its code after `yield`.
-    pub fn fa_run_handler(&mut self, func: ObjId, mut gens: Vec<ObjId>, req: Option<Req>, entry: bool, state: &mut State, node: &Node) -> Value {
-        if gens.is_empty() {
-            let kwargs = self.fa_bind(func, req.as_ref(), state, node, 0);
-            return self.call_user(func, None, vec![], kwargs, vec![], vec![], state, node, None, entry);
-        }
-        let g = gens.remove(0);
-        let kwargs = self.fa_bind(g, req.as_ref(), state, node, 1);
-        let nd = *node;
-        let then: Box<dyn FnOnce(&mut Analyzer, Value, &mut State)> = Box::new(move |an: &mut Analyzer, v: Value, st: &mut State| {
-            if let Some(c) = an.m.fa_dep_cache.last_mut() {
-                c.insert(g, v);
-            }
-            let r = an.fa_run_handler(func, gens, req, entry, st, &nd);
-            an.m.fa_gen_ret = Some(an.m.fa_gen_ret.take().unwrap_or_default().join(&r));
-        });
-        let prev = self.cm_hook.replace(crate::interp::CmHook { body: &[], target: None, depth: self.frames.len(), env_after: None, ran: false, then: Some(then), body_died: false, env_before: None, multi: false, body_exits: None, body_ret: None });
-        let outer = self.m.fa_gen_ret.take();
-        self.call_user(g, None, vec![], kwargs, vec![], vec![], state, node, None, false);
-        let h = std::mem::replace(&mut self.cm_hook, prev);
-        let ret = std::mem::replace(&mut self.m.fa_gen_ret, outer).unwrap_or_default();
-        match h {
-            Some(h) if h.ran => {
-                if let Some(env) = h.env_after {
-                    state.env = env;
-                }
-                ret
-            }
-            // the dependency never reached its yield: no handler
-            _ => Value::new(),
-        }
-    }
-
-    /// The entry run of a handler when middlewares are registered: any request, through the
-    /// first middleware (its `call_next` runs the handler). None without middlewares.
-    pub fn fa_entry_through_middleware(&mut self, func: ObjId, state: &mut State, node: &Node) -> Option<()> {
-        let mws: Vec<ObjId> = self.m.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
-        let first = *mws.first()?;
-        let idx = self.m.fa_routes.iter().position(|r| r.func == Some(func))?;
-        let fi = self.func_info(func);
-        let body = Value::obj(self.unknown_source(&format!("param {}.request", fi.py_qualname()), SourceKind::Param, state, "request.json()", "", Ns::Item, vec![]));
-        let robj = fa_obj(self, state, node, "fastapi.request", body, &format!("entryreq{}", func));
-        let rq = Req { obj: Some(robj.clone()), open: true, ..Default::default() };
-        let n = self.m.fa_pending.len();
-        self.m.fa_pending.push((idx, rq));
-        let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
-        self.call_user(first, None, vec![robj, Value::obj(cn)], IndexMap::new(), vec![], vec![], state, node, None, false);
-        Some(())
-    }
-
-    /// The dependencies a route runs before its handler's parameters: those of the apps /
-    /// routers it belongs to (outermost first), then `dependencies=[…]` of the route.
-    pub fn fa_route_deps(&mut self, idx: usize, req: Option<&Req>, state: &mut State, node: &Node) {
-        let r = self.m.fa_routes[idx].clone();
-        // the chain of apps / routers above the route's
-        let mut chain: Vec<ObjId> = vec![r.app];
-        let mut cur = r.app;
-        for _ in 0..8 {
-            match self.m.fa_includes.iter().find(|(_, ro, _)| *ro == cur) {
-                Some((parent, _, _)) => {
-                    chain.push(*parent);
-                    cur = *parent;
-                }
-                None => break,
-            }
-        }
-        let mut lists: Vec<Value> = Vec::new();
-        for a in chain.iter().rev() {
-            lists.extend(self.m.fa_app_deps.get(a).cloned().unwrap_or_default());
-        }
-        if let Some(e) = r.call.and_then(|c| kw(c, "dependencies")) {
-            let e: &'static ast::Expr = e;
-            lists.push(self.eval_in_module(r.module, e, state));
-        }
-        for l in lists {
-            let it = self.iterate(&l, node, state);
-            let markers: Vec<Value> = match it.items {
-                Some(items) => items,
-                None => vec![self.elem_value(&it.elem, node, "el")],
-            };
-            for m in markers {
-                for o in m.pts.iter() {
-                    if let Some((q, g)) = payload_of(self, o) {
-                        if q == "fastapi.depends" {
-                            self.fa_call_dep(&g, req, state, node, 1);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// A route's handler called with a concrete request: an `HTTPException` (any exception the
-    /// handler raises) ends in a response, so the call continues on those paths too.
-    fn fa_dispatch(&mut self, route: usize, req: &Req, state: &mut State, node: &Node) -> Value {
-        let r = self.m.fa_routes[route].clone();
-        let Some(func) = r.func else { return Value::data("response") };
-        let mut pre = state.copy();
-        // exception handlers (`@app.exception_handler(E)`): E is caught too
-        let hooks: Vec<(String, Value, ObjId)> = self.m.fa_hooks.iter().filter(|h| h.1 == "exc").filter_map(|h| h.3.map(|f| (self.exc_name(&h.2), h.2.clone(), f))).collect();
-        // (a pydantic ValidationError the handler's own code raises is no request error: the
-        // TestClient re-raises it, as any other exception FastAPI does not answer)
-        let mut caught: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::from_iter(["HTTPException".to_string(), "RequestValidationError".to_string()]);
-        for (n, _, _) in &hooks {
-            caught.insert(n.clone());
-        }
-        let caught_names = crate::models::exceptions::expand_caught(caught);
-        self.enter_try(caught_names.clone(), &mut pre);
-        self.m.fa_dep_cache.push(rustc_hash::FxHashMap::default());
-        self.m.fa_out_resp.push(Vec::new());
-        self.fa_route_deps(route, Some(req), state, node);
-        let gens = self.fa_yield_deps(func, state);
-        let ret = self.fa_run_handler(func, gens, Some(req.clone()), false, state, node);
-        let out_resps = self.m.fa_out_resp.pop().unwrap_or_default();
-        self.m.fa_dep_cache.pop();
-        let out_try = self.leave_try();
-        let mut raised_v = out_try.value();
-        let recs = out_try.recs;
-        // (the raises are kept one by one: their states joined)
-        let mut raised_at: Option<State> = crate::interp::join_raise_recs(&recs);
-        // exceptions of known classes that FastAPI does not answer (a KeyError, …) are
-        // re-raised by the TestClient at the call: they go on to the enclosing try
-        if !recs.is_empty() {
-            let answered = |c: &Option<crate::interp::ExcNames>| match c {
-                Some((names, _)) => names.iter().any(|n| caught_names.contains(n)),
-                None => true,
-            };
-            if recs.iter().any(|(c, _, _)| !answered(c)) {
-                let mut keep_st: Option<State> = None;
-                let mut keep_v = Value::new();
-                for (c, st, ev) in recs {
-                    if answered(&c) {
-                        let mut s2 = st.copy();
-                        keep_st = Some(match keep_st { None => s2, Some(mut a) => a.join(&mut s2) });
-                        keep_v = keep_v.join(&ev);
-                    } else {
-                        self.reraise_rec((c, st, ev));
-                    }
-                }
-                raised_at = keep_st;
-                raised_v = keep_v;
-            }
-        }
-        let mut out = if state.reachable { self.fa_response_value(&r, func, &ret, state, node) } else { Value::new() };
-        // the status: a returned JSONResponse's, else one the handler set on its Response, else
-        // the route's
-        let sk = key_str_lit("status_code");
-        let mut status = Value::new();
-        if state.reachable {
-            let mut plain = !ret.kv.is_bot();
-            for o in ret.pts.iter() {
-                match payload_of(self, o) {
-                    Some((q, _)) if q == "fastapi.jsonresponse" => status = status.join(&state.slot(o, Ns::Attr, sk)),
-                    _ => plain = true,
-                }
-            }
-            if ret.empty() {
-                plain = true;
-            }
-            if plain {
-                let set: Vec<Value> = out_resps.iter().map(|o| state.slot(*o, Ns::Attr, sk)).collect();
-                let unset = |v: &Value| v.empty() || matches!(&v.kv, KeyVal::Data(d) if intern::str_get(*d).contains("unset_status"));
-                let mut route_default = set.is_empty();
-                for v in &set {
-                    if unset(v) {
-                        route_default = true;
-                    } else {
-                        // (a value set on some paths only: joined with the unset marker)
-                        if let KeyVal::Lits(_) | KeyVal::Lit(_) = v.kv {
-                            status = status.join(v);
-                        } else {
-                            status = status.join(&Value::data("status_code"));
-                            route_default = true;
-                        }
-                    }
-                }
-                if route_default {
-                    status = status.join(&self.fa_route_status(&r, state));
-                }
-            }
-        }
-        if let Some(mut rs) = raised_at {
-            // the raised exceptions: a registered handler's response, else (an HTTPException, a
-            // validation error) the error response {"detail": …}
-            let mut unmatched = raised_v.pts.is_empty() || !raised_v.kv.is_bot();
-            let mut rest: Vec<ObjId> = Vec::new();
-            for o in raised_v.pts.iter() {
-                let cls = if self.kind(o) == Kind::Instance { self.instance_class(o) } else { None };
-                let httpexc = payload_of(self, o).map(|(q, _)| q == "fastapi.httpexc").unwrap_or(false);
-                let hit = hooks.iter().find(|(n, hv, _)| match cls {
-                    Some(c) => hv.pts.iter().any(|h| self.kind(h) == Kind::Class && self.mro(c).contains(&h)) || self.mro(c).iter().any(|m| self.class_info_opt(*m).map(|ci| ci.name == *n).unwrap_or(false)),
-                    None => n == "KeyError" && self.obj(o).label.starts_with("KeyError") || n == "Exception" || httpexc && n == "HTTPException",
-                }).cloned();
-                match hit {
-                    Some((_, _, hf)) => {
-                        let robj = req.obj.clone().unwrap_or_else(|| Value::data("request"));
-                        let resp = self.call_user(hf, None, vec![robj, Value::obj(o)], IndexMap::new(), vec![], vec![], &mut rs, node, None, false);
-                        let mut rv: Vec<Value> = Vec::new();
-                        for x in resp.pts.iter() {
-                            if let Some((q, v)) = payload_of(self, x) {
-                                if q == "fastapi.jsonresponse" {
-                                    rv.push(v);
-                                    status = status.join(&rs.slot(x, Ns::Attr, sk));
-                                }
-                            }
-                        }
-                        out = out.join(&join_values(rv));
-                    }
-                    None => rest.push(o),
-                }
-            }
-            if !rest.is_empty() {
-                unmatched = true;
-            }
-            if unmatched {
-                // the detail of a raised HTTPException
-                let mut detail = Value::new();
-                let mut other = raised_v.pts.is_empty() || !raised_v.kv.is_bot();
-                // (a request body that breaks its model: FastAPI's detail is pydantic's errors,
-                // their `loc` after "body")
-                let mut verr = false;
-                for o in &rest {
-                    let verr_idx = match &self.obj(*o).payload {
-                        Payload::Method(q, _) => q.strip_prefix("pydverr.").and_then(|x| x.parse::<usize>().ok()),
-                        _ => None,
-                    };
-                    if let Some(i) = verr_idx {
-                        let errs = crate::models::pydantic::verr_errors(self, &mut rs, node, i, false, Some(key_str_lit("body")));
-                        detail = detail.join(&errs);
-                        status = status.join(&Value::lit(intern::key_int(422)));
-                        verr = true;
-                        continue;
-                    }
-                    match payload_of(self, *o) {
-                        Some((q, _)) if q == "fastapi.httpexc" => {
-                            detail = detail.join(&rs.slot(*o, Ns::Attr, key_str_lit("detail")));
-                            status = status.join(&rs.slot(*o, Ns::Attr, sk));
-                        }
-                        _ => other = true,
-                    }
-                }
-                let _ = verr;
-                // (a validation error: 422)
-                if other {
-                    status = status.join(&Value::lit(intern::key_int(422)));
-                }
-                if other || detail.empty() {
-                    detail = detail.join(&Value::data("detail"));
-                }
-                let did = self.alloc_at(Kind::Dict, node, state, &format!("error@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some("faerr"));
-                let dk = key_str_lit("detail");
-                rs.set_row(did, Ns::Item, Row::new().store(dk, true));
-                rs.set_slot(did, Ns::Item, dk, detail, true);
-                out = out.join(&Value::obj(did));
-            }
-            let mut after = if state.reachable { state.copy().join(&mut rs) } else { rs.copy() };
-            // (an error response is an exceptional exit: what the handler needs on its normal
-            // path stays needed — `always`)
-            if state.reachable {
-                after.reqs = state.reqs.join_with(&rs.reqs, &mut |a, b| a.join(b), &mut |a| a.clone());
-            }
-            state.replace_with(after);
-        }
-        self.m.fa_status = if status.empty() { Value::data("status_code") } else { status };
-        out
-    }
-
-    /// A route's `status_code=` (a literal or `status.HTTP_201_CREATED`), else 200.
-    fn fa_route_status(&mut self, r: &FaRoute, state: &mut State) -> Value {
-        let Some(e) = r.call.and_then(|c| kw(c, "status_code")) else { return Value::lit(intern::key_int(200)) };
-        if let ast::Expr::Attribute(at) = e {
-            let n = at.attr.as_str();
-            if let Some(code) = n.strip_prefix("HTTP_").and_then(|x| x.get(..3)).and_then(|x| x.parse::<i64>().ok()) {
-                return Value::lit(intern::key_int(code));
-            }
-        }
-        let e: &'static ast::Expr = e;
-        let v = self.eval_in_module(r.module, e, state);
-        if v.pts.is_empty() && v.kv.as_lit().and_then(intern::key_as_int).is_some() {
-            v
-        } else {
-            Value::data("status_code")
-        }
-    }
-
-    /// The JSON FastAPI sends for a handler's return value.
-    fn fa_response_value(&mut self, r: &FaRoute, func: ObjId, ret: &Value, state: &mut State, node: &Node) -> Value {
-        // a JSONResponse: its content
-        let mut vals: Vec<Value> = Vec::new();
-        let mut plain = Value::with_kv(crate::domain::ObjSet::new(), ret.kv.clone());
-        for o in ret.pts.iter() {
-            match payload_of(self, o) {
-                Some((q, v)) if q == "fastapi.jsonresponse" => vals.push(v),
-                _ => plain = plain.join(&Value::obj(o)),
-            }
-        }
-        // response_model= (or the return annotation)
-        let mut ann: Option<Ann> = None;
-        let mut opts = DumpOpts::default();
-        if let Some(c) = r.call {
-            if let Some(e) = kw(c, "response_model") {
-                let e: &'static ast::Expr = e;
-                ann = Some(self.pyd_ann_pub(e, r.module, state));
-            }
-            for (k, f) in [("response_model_exclude_none", 0), ("response_model_exclude_unset", 1), ("response_model_exclude_defaults", 2), ("response_model_by_alias", 3)] {
-                if let Some(ast::Expr::BooleanLiteral(b)) = kw(c, k) {
-                    match f {
-                        0 => opts.exclude_none = b.value,
-                        1 => opts.exclude_unset = b.value,
-                        2 => opts.exclude_defaults = b.value,
-                        _ => {}
-                    }
-                }
-            }
-        }
-        opts.by_alias = !matches!(r.call.and_then(|c| kw(c, "response_model_by_alias")), Some(ast::Expr::BooleanLiteral(b)) if !b.value);
-        // response_model_include= / response_model_exclude= (literal sets)
-        for (k, inc) in [("response_model_include", true), ("response_model_exclude", false)] {
-            if let Some(e) = r.call.and_then(|c| kw(c, k)) {
-                let e: &'static ast::Expr = e;
-                let v = self.eval_in_module(r.module, e, state);
-                match crate::models::pydantic::key_spec(self, state, &v, node) {
-                    Some((ks, _)) => {
-                        if inc {
-                            opts.include = Some(ks);
-                        } else {
-                            opts.exclude = Some(ks);
-                        }
-                    }
-                    None => opts.unknown_sel = true,
-                }
-            }
-        }
-        if ann.is_none() {
-            let fi = self.func_info(func);
-            if let FuncNode::Def(f) = &fi.node {
-                if let Some(ra) = &f.returns {
-                    let ra: &'static ast::Expr = ra;
-                    ann = Some(self.pyd_ann_pub(ra, fi.module, state));
-                }
-            }
-        }
-        let ann = ann.unwrap_or(Ann::Other);
-        // (a response model serialises in pydantic's JSON mode; plain data goes through
-        // jsonable_encoder: Decimals as floats)
-        let decimal_float = matches!(ann, Ann::Other);
-        opts.json = !decimal_float;
-        // a returned model instance (of a subclass, say) goes through the response model's
-        // fields: dumped, then validated as the response model
-        if !matches!(ann, Ann::Other) {
-            plain = self.pyd_dump_value_pub(&Ann::Other, &plain, &DumpOpts::default(), state, node);
-        }
-        let validated = match &ann {
-            Ann::Model(c) => self.pyd_validate_opts(*c, &plain, state, node, false),
-            Ann::Other => plain,
-            other => self.pyd_convert_pub(other, &plain, state, node),
-        };
-        let dumped = self.pyd_dump_value_pub(&ann, &validated, &opts, state, node);
-        vals.push(crate::models::json_wire(self, state, node, &dumped, decimal_float));
-        join_values(vals)
-    }
-
-    /// The request object of a `TestClient` call: its method, headers (case-insensitive keys,
-    /// with the client's own), query and path parameters as the call gives them.
-    fn fa_fill_request(&mut self, robj: &Value, rq: &Req, method: &str, state: &mut State, node: &Node) {
-        let Some(o) = robj.single() else { return };
-        let lit_dict = |an: &mut Analyzer, st: &mut State, name: &str, items: Vec<(String, Value)>, ci: bool| -> Option<Value> {
-            let d = an.alloc_at(Kind::Dict, node, st, &format!("request.{}", name), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("rq{}{}", o, name)));
-            let mut row = Row::new();
-            for (k, v) in items {
-                let kk = key_str_lit(&if ci { k.to_lowercase() } else { k });
-                row = row.store(kk, true);
-                st.set_slot(d, Ns::Item, kk, v, true);
-            }
-            st.set_row(d, Ns::Item, row);
-            if ci {
-                an.m.ci_dicts.insert(d);
-            }
-            Some(Value::obj(d))
-        };
-        // the items of a literal dict argument (None: not known)
-        let items_of = |an: &Analyzer, st: &State, v: &Option<Value>| -> Option<Vec<(String, Value)>> {
-            let Some(v) = v else { return Some(vec![]) };
-            let d = v.single().filter(|d| an.kind(*d) == Kind::Dict)?;
-            let row = st.row(d, Ns::Item);
-            if !row.closed() || row.present != row.definite {
-                return None;
-            }
-            Some(row.present.iter().filter_map(|k| intern::key_as_str(k).map(|x| (x.to_string(), st.slot(d, Ns::Item, k)))).collect())
-        };
-        if let Some(mut hs) = items_of(self, state, &rq.headers) {
-            // httpx's own headers
-            for (k, v) in [("host", "testserver"), ("accept", "*/*"), ("accept-encoding", "gzip, deflate"), ("connection", "keep-alive"), ("user-agent", "testclient")] {
-                if !hs.iter().any(|(h, _)| h.to_lowercase() == k) {
-                    hs.push((k.to_string(), Value::lit_str(v)));
-                }
-            }
-            if rq.json.is_some() {
-                hs.push(("content-length".into(), Value::data("content-length")));
-                hs.push(("content-type".into(), Value::lit_str("application/json")));
-            }
-            if let Some(v) = lit_dict(self, state, "headers", hs, true) {
-                state.set_slot(o, Ns::Attr, key_str_lit("headers"), v, true);
-            }
-        }
-        if let Some(mut qs) = items_of(self, state, &rq.query) {
-            // (query values are strings)
-            for q in qs.iter_mut() {
-                if let Some(k) = q.1.kv.as_lit().filter(|_| q.1.pts.is_empty()) {
-                    q.1 = Value::lit_str(&intern::key_py_str(k));
-                } else {
-                    q.1 = Value::data("query");
-                }
-            }
-            for (k, v) in &rq.url_query {
-                qs.push((k.clone(), Value::lit_str(v)));
-            }
-            if let Some(v) = lit_dict(self, state, "query_params", qs, false) {
-                state.set_slot(o, Ns::Attr, key_str_lit("query_params"), v, true);
-            }
-        }
-        let ps: Vec<(String, Value)> = rq.path.iter().map(|(k, v)| (k.clone(), Value::lit_str(v))).collect();
-        if let Some(v) = lit_dict(self, state, "path_params", ps, false) {
-            state.set_slot(o, Ns::Attr, key_str_lit("path_params"), v, true);
-        }
-        if method != "*" {
-            state.set_slot(o, Ns::Attr, key_str_lit("method"), Value::lit_str(&method.to_uppercase()), true);
-        }
-    }
-
-    /// `client.post(url, json=…, params=…, headers=…)`.
-    fn fa_client_call(&mut self, app: &Value, method: &str, c: &Call, state: &mut State) -> Value {
-        let url = c.arg(0, Some("url")).and_then(|u| str_of(&u));
-        let mut req = Req { json: c.kwargs.get(&s("json")).cloned(), query: c.kwargs.get(&s("params")).cloned(), headers: c.kwargs.get(&s("headers")).cloned(), ..Default::default() };
-        // the cookies: `cookies=`, else the client's jar
-        req.cookies = c.kwargs.get(&s("cookies")).cloned().or_else(|| {
-            let cl = c.recv.as_ref().and_then(|r| r.single())?;
-            state.slot_opt(cl, Ns::Attr, key_str_lit("cookies"))
-        });
-        let (path, qs) = match &url {
-            Some(u) => match u.split_once('?') {
-                Some((p, q)) => (Some(p.to_string()), q.to_string()),
-                None => (Some(u.clone()), String::new()),
-            },
-            None => (None, String::new()),
-        };
-        for part in qs.split('&').filter(|x| !x.is_empty()) {
-            let (k, v) = part.split_once('=').unwrap_or((part, ""));
-            req.url_query.push((k.to_string(), v.to_string()));
-        }
-        let mut outs: Vec<Value> = Vec::new();
-        let mut states: Vec<State> = Vec::new();
-        let mut statuses: Vec<Value> = Vec::new();
-        let pre = state.copy();
-        for a in app.pts.iter() {
-            for (full, idx) in self.fa_routes_of(a) {
-                if !self.m.fa_routes[idx].methods.iter().any(|m| m == method || m == "*") {
-                    continue;
-                }
-                let params = match (&full, &path) {
-                    (Some(t), Some(p)) => match match_path(t, p) {
-                        Some(ps) => ps,
-                        None => continue,
                     },
-                    // an unknown URL: any route of the method
-                    _ => Vec::new(),
+                    None => IndexMap::new(),
                 };
-                let mut st = pre.copy();
-                let mut rq = req.clone();
-                rq.path = params;
-                // one request object for the middlewares and the handler
-                let body = rq.json.clone().unwrap_or_else(|| Value::data("concrete"));
-                let robj = fa_obj(self, &mut st, &c.node, "fastapi.request", body, &format!("req{}", c.line));
-                self.fa_fill_request(&robj, &rq, method, &mut st, &c.node);
-                rq.obj = Some(robj.clone());
-                let mws: Vec<ObjId> = self.m.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
-                let v = if mws.is_empty() {
-                    let b = self.fa_dispatch(idx, &rq, &mut st, &c.node);
-                    statuses.push(self.m.fa_status.clone());
-                    b
-                } else {
-                    // the (first) middleware runs with call_next dispatching the route
-                    let n = self.m.fa_pending.len();
-                    self.m.fa_pending.push((idx, rq.clone()));
-                    let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
-                    let resp = self.call_user(mws[0], None, vec![robj.clone(), Value::obj(cn)], IndexMap::new(), vec![], vec![], &mut st, &c.node, None, false);
-                    let mut bodies: Vec<Value> = Vec::new();
-                    let mut stv = Value::new();
-                    for x in resp.pts.iter() {
-                        if let Some((q, v)) = payload_of(self, x) {
-                            if q == "fastapi.response" || q == "fastapi.jsonresponse" {
-                                bodies.push(v);
-                                stv = stv.join(&st.slot(x, Ns::Attr, key_str_lit("status_code")));
-                            }
-                        }
-                    }
-                    statuses.push(if stv.empty() || resp.pts.len() != bodies.len() { Value::data("status_code") } else { stv });
-                    join_values(bodies)
-                };
-                outs.push(v);
-                states.push(st);
-                if path.is_some() {
-                    // the first matching route answers
-                    break;
+                outs.push(an.construct(o, &[], &kwargs, &[], &[], state, node));
+            }
+            _ => outs.push(an.call_value(&Value::obj(o), node, None, state, Some(vec![]))),
+        }
+    }
+    if outs.is_empty() {
+        return Value::data("depends");
+    }
+    let v = join_values(outs);
+    if let (Some(o), Some(c)) = (g.single(), an.m.fa_dep_cache.last_mut()) {
+        c.insert(o, v.clone());
+    }
+    v
+}
+
+/// The handler's `Depends(g)` parameters whose `g` is a generator function (`yield` dependencies).
+pub fn fa_yield_deps(an: &mut Analyzer, func: ObjId, state: &mut State) -> Vec<ObjId> {
+    let fi = an.heap.func_info(func);
+    let FuncNode::Def(f) = &fi.node else { return vec![] };
+    let mut out = Vec::new();
+    for p in f.parameters.posonlyargs.iter().chain(f.parameters.args.iter()).chain(f.parameters.kwonlyargs.iter()) {
+        let pname = p.parameter.name.id.to_string();
+        let meta = match &p.parameter.annotation {
+            Some(a) => fa_annotated(an, &fi, a, state).0,
+            None => None,
+        };
+        if let Some((q, g)) = meta.or_else(|| fa_marker(an, &fi, &pname)) {
+            if q != "fastapi.depends" {
+                continue;
+            }
+            if let Some(o) = g.single().filter(|o| an.heap.kind(*o) == Kind::Function) {
+                let gi = an.heap.func_info(o);
+                if matches!(&gi.node, FuncNode::Def(d) if crate::interp::is_generator(&d.body)) && !out.contains(&o) {
+                    out.push(o);
                 }
             }
         }
-        if states.is_empty() {
-            // no route: a 404 / 405 response (through the middlewares, which run for it too)
-            let path_known = path.is_some();
-            let other_method = app.pts.iter().any(|a| self.fa_routes_of(a).iter().any(|(full, _)| match (full, &path) {
-                (Some(t), Some(p)) => match_path(t, p).is_some(),
-                _ => false,
-            }));
-            let code = if !path_known { Value::data("status_code") } else { Value::lit(intern::key_int(if other_method { 405 } else { 404 })) };
-            self.m.fa_status = code.clone();
-            let did = self.alloc_at(Kind::Dict, &c.node, state, &format!("error@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, Some("fa404"));
-            let dk = key_str_lit("detail");
-            state.set_row(did, Ns::Item, Row::new().store(dk, true));
-            state.set_slot(did, Ns::Item, dk, Value::data("detail"), true);
-            let mws: Vec<ObjId> = self.m.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
-            if let Some(first) = mws.first().copied() {
-                let body = req.json.clone().unwrap_or_else(|| Value::data("concrete"));
-                let robj = fa_obj(self, state, &c.node, "fastapi.request", body, &format!("req{}", c.line));
-                self.fa_fill_request(&robj, &req, method, state, &c.node);
-                let n = self.m.fa_pending.len();
-                self.m.fa_pending.push((usize::MAX, Req { obj: Some(robj.clone()), json: Some(Value::obj(did)), ..Default::default() }));
-                let cn = self.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
-                self.call_user(first, None, vec![robj, Value::obj(cn)], IndexMap::new(), vec![], vec![], state, &c.node, None, false);
-            }
-            let v = fa_obj(self, state, &c.node, "fastapi.response", Value::obj(did), "faresp");
-            set_status(state, &v, code);
-            return v;
-        }
-        let mut out = states.remove(0);
-        for mut st in states {
-            out = out.join(&mut st);
-        }
-        state.replace_with(out);
-        let body = join_values(outs);
-        let v = fa_obj(self, state, &c.node, "fastapi.response", body, "faresp");
-        set_status(state, &v, join_values(statuses));
-        v
     }
+    out
+}
+
+/// The handler called inside its yield dependencies: each runs to its `yield`, the rest of
+/// the request (the next one, finally the handler) runs there, then its code after `yield`.
+pub fn fa_run_handler(an: &mut Analyzer, func: ObjId, mut gens: Vec<ObjId>, req: Option<Req>, entry: bool, state: &mut State, node: &Node) -> Value {
+    if gens.is_empty() {
+        let kwargs = fa_bind(an, func, req.as_ref(), state, node, 0);
+        return an.call_user(func, None, vec![], kwargs, vec![], vec![], state, node, None, entry);
+    }
+    let g = gens.remove(0);
+    let kwargs = fa_bind(an, g, req.as_ref(), state, node, 1);
+    let nd = *node;
+    let then: Box<dyn FnOnce(&mut Analyzer, Value, &mut State)> = Box::new(move |an: &mut Analyzer, v: Value, st: &mut State| {
+        if let Some(c) = an.m.fa_dep_cache.last_mut() {
+            c.insert(g, v);
+        }
+        let r = fa_run_handler(an, func, gens, req, entry, st, &nd);
+        an.m.fa_gen_ret = Some(an.m.fa_gen_ret.take().unwrap_or_default().join(&r));
+    });
+    let outer = an.m.fa_gen_ret.take();
+    let h = an.with_cm_then(then, |an| {
+        an.call_user(g, None, vec![], kwargs, vec![], vec![], state, node, None, false);
+    });
+    let ret = std::mem::replace(&mut an.m.fa_gen_ret, outer).unwrap_or_default();
+    match h {
+        Some(h) if h.ran => {
+            if let Some(env) = h.env_after {
+                state.env = env;
+            }
+            ret
+        }
+        // the dependency never reached its yield: no handler
+        _ => Value::new(),
+    }
+}
+
+/// The entry run of a handler when middlewares are registered: any request, through the
+/// first middleware (its `call_next` runs the handler). None without middlewares.
+pub fn fa_entry_through_middleware(an: &mut Analyzer, func: ObjId, state: &mut State, node: &Node) -> Option<()> {
+    let mws: Vec<ObjId> = an.m.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
+    let first = *mws.first()?;
+    let idx = an.m.fa_routes.iter().position(|r| r.func == Some(func))?;
+    let fi = an.heap.func_info(func);
+    let body = Value::obj(an.unknown_source(&format!("param {}.request", fi.py_qualname()), SourceKind::Param, state, "request.json()", "", Ns::Item, vec![]));
+    let robj = fa_obj(an, state, node, "fastapi.request", body, &format!("entryreq{}", func));
+    let rq = Req { obj: Some(robj.clone()), open: true, ..Default::default() };
+    let n = an.m.fa_pending.len();
+    an.m.fa_pending.push((idx, rq));
+    let cn = an.heap.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
+    an.call_user(first, None, vec![robj, Value::obj(cn)], IndexMap::new(), vec![], vec![], state, node, None, false);
+    Some(())
+}
+
+/// The dependencies a route runs before its handler's parameters: those of the apps /
+/// routers it belongs to (outermost first), then `dependencies=[…]` of the route.
+pub fn fa_route_deps(an: &mut Analyzer, idx: usize, req: Option<&Req>, state: &mut State, node: &Node) {
+    let r = an.m.fa_routes[idx].clone();
+    // the chain of apps / routers above the route's
+    let mut chain: Vec<ObjId> = vec![r.app];
+    let mut cur = r.app;
+    for _ in 0..8 {
+        match an.m.fa_includes.iter().find(|(_, ro, _)| *ro == cur) {
+            Some((parent, _, _)) => {
+                chain.push(*parent);
+                cur = *parent;
+            }
+            None => break,
+        }
+    }
+    let mut lists: Vec<Value> = Vec::new();
+    for a in chain.iter().rev() {
+        lists.extend(an.m.fa_app_deps.get(a).cloned().unwrap_or_default());
+    }
+    if let Some(e) = r.call.and_then(|c| kw(c, "dependencies")) {
+        let e: &'static ast::Expr = e;
+        lists.push(eval_in_module(an, r.module, e, state));
+    }
+    for l in lists {
+        let it = an.iterate(&l, node, state);
+        let markers: Vec<Value> = match it.items {
+            Some(items) => items,
+            None => vec![an.elem_value(&it.elem, node, "el")],
+        };
+        for m in markers {
+            for o in m.pts.iter() {
+                if let Some((q, g)) = payload_of(an, o) {
+                    if q == "fastapi.depends" {
+                        fa_call_dep(an, &g, req, state, node, 1);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A route's handler called with a concrete request: an `HTTPException` (any exception the
+/// handler raises) ends in a response, so the call continues on those paths too.
+fn fa_dispatch(an: &mut Analyzer, route: usize, req: &Req, state: &mut State, node: &Node) -> Value {
+    let r = an.m.fa_routes[route].clone();
+    let Some(func) = r.func else { return Value::data("response") };
+    let mut pre = state.copy();
+    // exception handlers (`@app.exception_handler(E)`): E is caught too
+    let hooks: Vec<(String, Value, ObjId)> = an.m.fa_hooks.iter().filter(|h| h.1 == "exc").filter_map(|h| h.3.map(|f| (exc_name(an, &h.2), h.2.clone(), f))).collect();
+    // (a pydantic ValidationError the handler's own code raises is no request error: the
+    // TestClient re-raises it, as any other exception FastAPI does not answer)
+    let mut caught: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::from_iter(["HTTPException".to_string(), "RequestValidationError".to_string()]);
+    for (n, _, _) in &hooks {
+        caught.insert(n.clone());
+    }
+    let caught_names = crate::models::exceptions::expand_caught(caught);
+    an.enter_try(caught_names.clone(), &mut pre);
+    an.m.fa_dep_cache.push(rustc_hash::FxHashMap::default());
+    an.m.fa_out_resp.push(Vec::new());
+    fa_route_deps(an, route, Some(req), state, node);
+    let gens = fa_yield_deps(an, func, state);
+    let ret = fa_run_handler(an, func, gens, Some(req.clone()), false, state, node);
+    let out_resps = an.m.fa_out_resp.pop().unwrap_or_default();
+    an.m.fa_dep_cache.pop();
+    let out_try = an.leave_try();
+    let mut raised_v = out_try.value();
+    let recs = out_try.recs;
+    // (the raises are kept one by one: their states joined)
+    let mut raised_at: Option<State> = crate::interp::join_raise_recs(&recs);
+    // exceptions of known classes that FastAPI does not answer (a KeyError, …) are
+    // re-raised by the TestClient at the call: they go on to the enclosing try
+    if !recs.is_empty() {
+        let answered = |c: &Option<crate::interp::ExcNames>| match c {
+            Some((names, _)) => names.iter().any(|n| caught_names.contains(n)),
+            None => true,
+        };
+        if recs.iter().any(|(c, _, _)| !answered(c)) {
+            let mut keep_st: Option<State> = None;
+            let mut keep_v = Value::new();
+            for (c, st, ev) in recs {
+                if answered(&c) {
+                    let mut s2 = st.copy();
+                    keep_st = Some(match keep_st { None => s2, Some(mut a) => a.join(&mut s2) });
+                    keep_v = keep_v.join(&ev);
+                } else {
+                    an.reraise_rec((c, st, ev));
+                }
+            }
+            raised_at = keep_st;
+            raised_v = keep_v;
+        }
+    }
+    let mut out = if state.reachable { fa_response_value(an, &r, func, &ret, state, node) } else { Value::new() };
+    // the status: a returned JSONResponse's, else one the handler set on its Response, else
+    // the route's
+    let sk = key_str_lit("status_code");
+    let mut status = Value::new();
+    if state.reachable {
+        let mut plain = !ret.kv.is_bot();
+        for o in ret.pts.iter() {
+            match payload_of(an, o) {
+                Some((q, _)) if q == "fastapi.jsonresponse" => status = status.join(&state.slot(o, Ns::Attr, sk)),
+                _ => plain = true,
+            }
+        }
+        if ret.empty() {
+            plain = true;
+        }
+        if plain {
+            let set: Vec<Value> = out_resps.iter().map(|o| state.slot(*o, Ns::Attr, sk)).collect();
+            let unset = |v: &Value| v.empty() || matches!(&v.kv, KeyVal::Data(d) if intern::str_get(*d).contains("unset_status"));
+            let mut route_default = set.is_empty();
+            for v in &set {
+                if unset(v) {
+                    route_default = true;
+                } else {
+                    // (a value set on some paths only: joined with the unset marker)
+                    if let KeyVal::Lits(_) | KeyVal::Lit(_) = v.kv {
+                        status = status.join(v);
+                    } else {
+                        status = status.join(&Value::data("status_code"));
+                        route_default = true;
+                    }
+                }
+            }
+            if route_default {
+                status = status.join(&fa_route_status(an, &r, state));
+            }
+        }
+    }
+    if let Some(mut rs) = raised_at {
+        // the raised exceptions: a registered handler's response, else (an HTTPException, a
+        // validation error) the error response {"detail": …}
+        let mut unmatched = raised_v.pts.is_empty() || !raised_v.kv.is_bot();
+        let mut rest: Vec<ObjId> = Vec::new();
+        for o in raised_v.pts.iter() {
+            let cls = if an.heap.kind(o) == Kind::Instance { an.heap.instance_class(o) } else { None };
+            let httpexc = payload_of(an, o).map(|(q, _)| q == "fastapi.httpexc").unwrap_or(false);
+            let hit = hooks.iter().find(|(n, hv, _)| match cls {
+                Some(c) => hv.pts.iter().any(|h| an.heap.kind(h) == Kind::Class && an.heap.mro(c).contains(&h)) || an.heap.mro(c).iter().any(|m| an.heap.class_info_opt(*m).map(|ci| ci.name == *n).unwrap_or(false)),
+                None => n == "KeyError" && an.heap.obj(o).label.starts_with("KeyError") || n == "Exception" || httpexc && n == "HTTPException",
+            }).cloned();
+            match hit {
+                Some((_, _, hf)) => {
+                    let robj = req.obj.clone().unwrap_or_else(|| Value::data("request"));
+                    let resp = an.call_user(hf, None, vec![robj, Value::obj(o)], IndexMap::new(), vec![], vec![], &mut rs, node, None, false);
+                    let mut rv: Vec<Value> = Vec::new();
+                    for x in resp.pts.iter() {
+                        if let Some((q, v)) = payload_of(an, x) {
+                            if q == "fastapi.jsonresponse" {
+                                rv.push(v);
+                                status = status.join(&rs.slot(x, Ns::Attr, sk));
+                            }
+                        }
+                    }
+                    out = out.join(&join_values(rv));
+                }
+                None => rest.push(o),
+            }
+        }
+        if !rest.is_empty() {
+            unmatched = true;
+        }
+        if unmatched {
+            // the detail of a raised HTTPException
+            let mut detail = Value::new();
+            let mut other = raised_v.pts.is_empty() || !raised_v.kv.is_bot();
+            // (a request body that breaks its model: FastAPI's detail is pydantic's errors,
+            // their `loc` after "body")
+            let mut verr = false;
+            for o in &rest {
+                let verr_idx = match &an.heap.obj(*o).payload {
+                    Payload::Method(q, _) => q.strip_prefix("pydverr.").and_then(|x| x.parse::<usize>().ok()),
+                    _ => None,
+                };
+                if let Some(i) = verr_idx {
+                    let errs = crate::models::pydantic::verr_errors(an, &mut rs, node, i, false, Some(key_str_lit("body")));
+                    detail = detail.join(&errs);
+                    status = status.join(&Value::lit(intern::key_int(422)));
+                    verr = true;
+                    continue;
+                }
+                match payload_of(an, *o) {
+                    Some((q, _)) if q == "fastapi.httpexc" => {
+                        detail = detail.join(&rs.slot(*o, Ns::Attr, key_str_lit("detail")));
+                        status = status.join(&rs.slot(*o, Ns::Attr, sk));
+                    }
+                    _ => other = true,
+                }
+            }
+            let _ = verr;
+            // (a validation error: 422)
+            if other {
+                status = status.join(&Value::lit(intern::key_int(422)));
+            }
+            if other || detail.empty() {
+                detail = detail.join(&Value::data("detail"));
+            }
+            let did = an.alloc_at(Kind::Dict, node, state, &format!("error@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some("faerr"));
+            let dk = key_str_lit("detail");
+            rs.set_row(did, Ns::Item, Row::new().store(dk, true));
+            rs.set_slot(did, Ns::Item, dk, detail, true);
+            out = out.join(&Value::obj(did));
+        }
+        let mut after = if state.reachable { state.copy().join(&mut rs) } else { rs.copy() };
+        // (an error response is an exceptional exit: what the handler needs on its normal
+        // path stays needed — `always`)
+        if state.reachable {
+            after.reqs = state.reqs.join_with(&rs.reqs, &mut |a, b| a.join(b), &mut |a| a.clone());
+        }
+        state.replace_with(after);
+    }
+    an.m.fa_status = if status.empty() { Value::data("status_code") } else { status };
+    out
+}
+
+/// A route's `status_code=` (a literal or `status.HTTP_201_CREATED`), else 200.
+fn fa_route_status(an: &mut Analyzer, r: &FaRoute, state: &mut State) -> Value {
+    let Some(e) = r.call.and_then(|c| kw(c, "status_code")) else { return Value::lit(intern::key_int(200)) };
+    if let ast::Expr::Attribute(at) = e {
+        let n = at.attr.as_str();
+        if let Some(code) = n.strip_prefix("HTTP_").and_then(|x| x.get(..3)).and_then(|x| x.parse::<i64>().ok()) {
+            return Value::lit(intern::key_int(code));
+        }
+    }
+    let e: &'static ast::Expr = e;
+    let v = eval_in_module(an, r.module, e, state);
+    if v.pts.is_empty() && v.kv.as_lit().and_then(intern::key_as_int).is_some() {
+        v
+    } else {
+        Value::data("status_code")
+    }
+}
+
+/// The JSON FastAPI sends for a handler's return value.
+fn fa_response_value(an: &mut Analyzer, r: &FaRoute, func: ObjId, ret: &Value, state: &mut State, node: &Node) -> Value {
+    // a JSONResponse: its content
+    let mut vals: Vec<Value> = Vec::new();
+    let mut plain = Value::with_kv(crate::domain::ObjSet::new(), ret.kv.clone());
+    for o in ret.pts.iter() {
+        match payload_of(an, o) {
+            Some((q, v)) if q == "fastapi.jsonresponse" => vals.push(v),
+            _ => plain = plain.join(&Value::obj(o)),
+        }
+    }
+    // response_model= (or the return annotation)
+    let mut ann: Option<Ann> = None;
+    let mut opts = DumpOpts::default();
+    if let Some(c) = r.call {
+        if let Some(e) = kw(c, "response_model") {
+            let e: &'static ast::Expr = e;
+            ann = Some(crate::models::pydantic::pyd_ann_pub(an, e, r.module, state));
+        }
+        for (k, f) in [("response_model_exclude_none", 0), ("response_model_exclude_unset", 1), ("response_model_exclude_defaults", 2), ("response_model_by_alias", 3)] {
+            if let Some(ast::Expr::BooleanLiteral(b)) = kw(c, k) {
+                match f {
+                    0 => opts.exclude_none = b.value,
+                    1 => opts.exclude_unset = b.value,
+                    2 => opts.exclude_defaults = b.value,
+                    _ => {}
+                }
+            }
+        }
+    }
+    opts.by_alias = !matches!(r.call.and_then(|c| kw(c, "response_model_by_alias")), Some(ast::Expr::BooleanLiteral(b)) if !b.value);
+    // response_model_include= / response_model_exclude= (literal sets)
+    for (k, inc) in [("response_model_include", true), ("response_model_exclude", false)] {
+        if let Some(e) = r.call.and_then(|c| kw(c, k)) {
+            let e: &'static ast::Expr = e;
+            let v = eval_in_module(an, r.module, e, state);
+            match crate::models::pydantic::key_spec(an, state, &v, node) {
+                Some((ks, _)) => {
+                    if inc {
+                        opts.include = Some(ks);
+                    } else {
+                        opts.exclude = Some(ks);
+                    }
+                }
+                None => opts.unknown_sel = true,
+            }
+        }
+    }
+    if ann.is_none() {
+        let fi = an.heap.func_info(func);
+        if let FuncNode::Def(f) = &fi.node {
+            if let Some(ra) = &f.returns {
+                let ra: &'static ast::Expr = ra;
+                ann = Some(crate::models::pydantic::pyd_ann_pub(an, ra, fi.module, state));
+            }
+        }
+    }
+    let ann = ann.unwrap_or(Ann::Other);
+    // (a response model serialises in pydantic's JSON mode; plain data goes through
+    // jsonable_encoder: Decimals as floats)
+    let decimal_float = matches!(ann, Ann::Other);
+    opts.json = !decimal_float;
+    // a returned model instance (of a subclass, say) goes through the response model's
+    // fields: dumped, then validated as the response model
+    if !matches!(ann, Ann::Other) {
+        plain = crate::models::pydantic::pyd_dump_value_pub(an, &Ann::Other, &plain, &DumpOpts::default(), state, node);
+    }
+    let validated = match &ann {
+        Ann::Model(c) => crate::models::pydantic::pyd_validate_opts(an, *c, &plain, state, node, false),
+        Ann::Other => plain,
+        other => crate::models::pydantic::pyd_convert_pub(an, other, &plain, state, node),
+    };
+    let dumped = crate::models::pydantic::pyd_dump_value_pub(an, &ann, &validated, &opts, state, node);
+    vals.push(crate::models::json_wire(an, state, node, &dumped, decimal_float));
+    join_values(vals)
+}
+
+/// The request object of a `TestClient` call: its method, headers (case-insensitive keys,
+/// with the client's own), query and path parameters as the call gives them.
+fn fa_fill_request(an: &mut Analyzer, robj: &Value, rq: &Req, method: &str, state: &mut State, node: &Node) {
+    let Some(o) = robj.single() else { return };
+    let lit_dict = |an: &mut Analyzer, st: &mut State, name: &str, items: Vec<(String, Value)>, ci: bool| -> Option<Value> {
+        let d = an.alloc_at(Kind::Dict, node, st, &format!("request.{}", name), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("rq{}{}", o, name)));
+        let mut row = Row::new();
+        for (k, v) in items {
+            let kk = key_str_lit(&if ci { k.to_lowercase() } else { k });
+            row = row.store(kk, true);
+            st.set_slot(d, Ns::Item, kk, v, true);
+        }
+        st.set_row(d, Ns::Item, row);
+        if ci {
+            an.m.ci_dicts.insert(d);
+        }
+        Some(Value::obj(d))
+    };
+    // the items of a literal dict argument (None: not known)
+    let items_of = |an: &Analyzer, st: &State, v: &Option<Value>| -> Option<Vec<(String, Value)>> {
+        let Some(v) = v else { return Some(vec![]) };
+        let d = v.single().filter(|d| an.heap.kind(*d) == Kind::Dict)?;
+        let row = st.row(d, Ns::Item);
+        if !row.closed() || row.present != row.definite {
+            return None;
+        }
+        Some(row.present.iter().filter_map(|k| intern::key_as_str(k).map(|x| (x.to_string(), st.slot(d, Ns::Item, k)))).collect())
+    };
+    if let Some(mut hs) = items_of(an, state, &rq.headers) {
+        // httpx's own headers
+        for (k, v) in [("host", "testserver"), ("accept", "*/*"), ("accept-encoding", "gzip, deflate"), ("connection", "keep-alive"), ("user-agent", "testclient")] {
+            if !hs.iter().any(|(h, _)| h.to_lowercase() == k) {
+                hs.push((k.to_string(), Value::lit_str(v)));
+            }
+        }
+        if rq.json.is_some() {
+            hs.push(("content-length".into(), Value::data("content-length")));
+            hs.push(("content-type".into(), Value::lit_str("application/json")));
+        }
+        if let Some(v) = lit_dict(an, state, "headers", hs, true) {
+            state.set_slot(o, Ns::Attr, key_str_lit("headers"), v, true);
+        }
+    }
+    if let Some(mut qs) = items_of(an, state, &rq.query) {
+        // (query values are strings)
+        for q in qs.iter_mut() {
+            if let Some(k) = q.1.kv.as_lit().filter(|_| q.1.pts.is_empty()) {
+                q.1 = Value::lit_str(&intern::key_py_str(k));
+            } else {
+                q.1 = Value::data("query");
+            }
+        }
+        for (k, v) in &rq.url_query {
+            qs.push((k.clone(), Value::lit_str(v)));
+        }
+        if let Some(v) = lit_dict(an, state, "query_params", qs, false) {
+            state.set_slot(o, Ns::Attr, key_str_lit("query_params"), v, true);
+        }
+    }
+    let ps: Vec<(String, Value)> = rq.path.iter().map(|(k, v)| (k.clone(), Value::lit_str(v))).collect();
+    if let Some(v) = lit_dict(an, state, "path_params", ps, false) {
+        state.set_slot(o, Ns::Attr, key_str_lit("path_params"), v, true);
+    }
+    if method != "*" {
+        state.set_slot(o, Ns::Attr, key_str_lit("method"), Value::lit_str(&method.to_uppercase()), true);
+    }
+}
+
+/// `client.post(url, json=…, params=…, headers=…)`.
+fn fa_client_call(an: &mut Analyzer, app: &Value, method: &str, c: &Call, state: &mut State) -> Value {
+    let url = c.arg(0, Some("url")).and_then(|u| str_of(&u));
+    let mut req = Req { json: c.kwargs.get(&s("json")).cloned(), query: c.kwargs.get(&s("params")).cloned(), headers: c.kwargs.get(&s("headers")).cloned(), ..Default::default() };
+    // the cookies: `cookies=`, else the client's jar
+    req.cookies = c.kwargs.get(&s("cookies")).cloned().or_else(|| {
+        let cl = c.recv.as_ref().and_then(|r| r.single())?;
+        state.slot_opt(cl, Ns::Attr, key_str_lit("cookies"))
+    });
+    let (path, qs) = match &url {
+        Some(u) => match u.split_once('?') {
+            Some((p, q)) => (Some(p.to_string()), q.to_string()),
+            None => (Some(u.clone()), String::new()),
+        },
+        None => (None, String::new()),
+    };
+    for part in qs.split('&').filter(|x| !x.is_empty()) {
+        let (k, v) = part.split_once('=').unwrap_or((part, ""));
+        req.url_query.push((k.to_string(), v.to_string()));
+    }
+    let mut outs: Vec<Value> = Vec::new();
+    let mut states: Vec<State> = Vec::new();
+    let mut statuses: Vec<Value> = Vec::new();
+    let pre = state.copy();
+    for a in app.pts.iter() {
+        for (full, idx) in fa_routes_of(an, a) {
+            if !an.m.fa_routes[idx].methods.iter().any(|m| m == method || m == "*") {
+                continue;
+            }
+            let params = match (&full, &path) {
+                (Some(t), Some(p)) => match match_path(t, p) {
+                    Some(ps) => ps,
+                    None => continue,
+                },
+                // an unknown URL: any route of the method
+                _ => Vec::new(),
+            };
+            let mut st = pre.copy();
+            let mut rq = req.clone();
+            rq.path = params;
+            // one request object for the middlewares and the handler
+            let body = rq.json.clone().unwrap_or_else(|| Value::data("concrete"));
+            let robj = fa_obj(an, &mut st, &c.node, "fastapi.request", body, &format!("req{}", c.line));
+            fa_fill_request(an, &robj, &rq, method, &mut st, &c.node);
+            rq.obj = Some(robj.clone());
+            let mws: Vec<ObjId> = an.m.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
+            let v = if mws.is_empty() {
+                let b = fa_dispatch(an, idx, &rq, &mut st, &c.node);
+                statuses.push(an.m.fa_status.clone());
+                b
+            } else {
+                // the (first) middleware runs with call_next dispatching the route
+                let n = an.m.fa_pending.len();
+                an.m.fa_pending.push((idx, rq.clone()));
+                let cn = an.heap.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
+                let resp = an.call_user(mws[0], None, vec![robj.clone(), Value::obj(cn)], IndexMap::new(), vec![], vec![], &mut st, &c.node, None, false);
+                let mut bodies: Vec<Value> = Vec::new();
+                let mut stv = Value::new();
+                for x in resp.pts.iter() {
+                    if let Some((q, v)) = payload_of(an, x) {
+                        if q == "fastapi.response" || q == "fastapi.jsonresponse" {
+                            bodies.push(v);
+                            stv = stv.join(&st.slot(x, Ns::Attr, key_str_lit("status_code")));
+                        }
+                    }
+                }
+                statuses.push(if stv.empty() || resp.pts.len() != bodies.len() { Value::data("status_code") } else { stv });
+                join_values(bodies)
+            };
+            outs.push(v);
+            states.push(st);
+            if path.is_some() {
+                // the first matching route answers
+                break;
+            }
+        }
+    }
+    if states.is_empty() {
+        // no route: a 404 / 405 response (through the middlewares, which run for it too)
+        let path_known = path.is_some();
+        let other_method = app.pts.iter().any(|a| fa_routes_of(an, a).iter().any(|(full, _)| match (full, &path) {
+            (Some(t), Some(p)) => match_path(t, p).is_some(),
+            _ => false,
+        }));
+        let code = if !path_known { Value::data("status_code") } else { Value::lit(intern::key_int(if other_method { 405 } else { 404 })) };
+        an.m.fa_status = code.clone();
+        let did = an.alloc_at(Kind::Dict, &c.node, state, &format!("error@L{}", c.line), Payload::None, Some(Row::new()), Ns::Item, None, Some("fa404"));
+        let dk = key_str_lit("detail");
+        state.set_row(did, Ns::Item, Row::new().store(dk, true));
+        state.set_slot(did, Ns::Item, dk, Value::data("detail"), true);
+        let mws: Vec<ObjId> = an.m.fa_hooks.iter().filter(|h| h.1 == "mw").filter_map(|h| h.3).collect();
+        if let Some(first) = mws.first().copied() {
+            let body = req.json.clone().unwrap_or_else(|| Value::data("concrete"));
+            let robj = fa_obj(an, state, &c.node, "fastapi.request", body, &format!("req{}", c.line));
+            fa_fill_request(an, &robj, &req, method, state, &c.node);
+            let n = an.m.fa_pending.len();
+            an.m.fa_pending.push((usize::MAX, Req { obj: Some(robj.clone()), json: Some(Value::obj(did)), ..Default::default() }));
+            let cn = an.heap.alloc_raw(Kind::Method, &format!("callnext:{}", n), "", true, "call_next", Payload::Method(format!("fastapi.callnext.{}", n), Value::new()));
+            an.call_user(first, None, vec![robj, Value::obj(cn)], IndexMap::new(), vec![], vec![], state, &c.node, None, false);
+        }
+        let v = fa_obj(an, state, &c.node, "fastapi.response", Value::obj(did), "faresp");
+        set_status(state, &v, code);
+        return v;
+    }
+    let mut out = states.remove(0);
+    for mut st in states {
+        out = out.join(&mut st);
+    }
+    state.replace_with(out);
+    let body = join_values(outs);
+    let v = fa_obj(an, state, &c.node, "fastapi.response", body, "faresp");
+    set_status(state, &v, join_values(statuses));
+    v
 }
 
 /// A type FastAPI reads from the body: a model, a TypedDict, a union of models, a dict, or a
@@ -1333,7 +1327,7 @@ pub fn m_fastapi(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if let Some(n) = q.strip_prefix("fastapi.callnext.").and_then(|x| x.parse::<usize>().ok()) {
         let Some((idx, rq)) = an.m.fa_pending.get(n).cloned() else { return Value::data("response") };
         // (no route: the 404 body)
-        let (body, status) = if idx == usize::MAX { (rq.json.clone().unwrap_or_default(), an.m.fa_status.clone()) } else { (an.fa_dispatch(idx, &rq, st, &c.node), an.m.fa_status.clone()) };
+        let (body, status) = if idx == usize::MAX { (rq.json.clone().unwrap_or_default(), an.m.fa_status.clone()) } else { (fa_dispatch(an, idx, &rq, st, &c.node), an.m.fa_status.clone()) };
         let v = fa_obj(an, st, &c.node, "fastapi.response", body, &format!("mwresp{}", n));
         set_status(st, &v, status);
         return v;
@@ -1408,7 +1402,7 @@ pub fn m_fastapi(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
         "jsonable_encoder" => {
             let v = c.arg(0, Some("obj")).unwrap_or_default();
-            an.pyd_dump_value_pub(&Ann::Other, &v, &DumpOpts::default(), st, &c.node)
+            crate::models::pydantic::pyd_dump_value_pub(an, &Ann::Other, &v, &DumpOpts::default(), st, &c.node)
         }
         _ => Value::data(&format!("fastapi.{}", last)),
     }
@@ -1464,7 +1458,7 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
                 None => vec!["get".into()],
             };
             let module = an.frame().module;
-            for fo in f.pts.iter().filter(|x| an.kind(*x) == Kind::Function).collect::<Vec<_>>() {
+            for fo in f.pts.iter().filter(|x| an.heap.kind(*x) == Kind::Function).collect::<Vec<_>>() {
                 an.m.fa_routes.push(FaRoute { app: o, methods: methods.clone(), path: path.clone(), func: Some(fo), call: c.call_ast, module });
                 an.m.fa_handlers.insert(fo);
             }
@@ -1496,7 +1490,7 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
             let f = c.args.first().cloned().unwrap_or_default();
             let args: Vec<Value> = c.args.iter().skip(1).cloned().collect();
             for fo in f.pts.iter().collect::<Vec<_>>() {
-                if an.kind(fo) == Kind::Function {
+                if an.heap.kind(fo) == Kind::Function {
                     an.call_user(fo, None, args.clone(), c.kwargs.clone(), vec![], vec![], st, &c.node, None, false);
                 } else if c.kwargs.is_empty() {
                     // (a bound method, a builtin's method, a partial: called as well)
@@ -1516,7 +1510,7 @@ fn object_method(an: &mut Analyzer, st: &mut State, c: &Call, o: ObjId, kind: &s
             } else {
                 (m.to_string(), c.clone())
             };
-            an.fa_client_call(pv, &method, &c2, st)
+            fa_client_call(an, pv, &method, &c2, st)
         }
         ("fastapi.client", "__enter__") => Value::obj(o),
         ("fastapi.response", "json") => pv.clone(),
@@ -1576,16 +1570,16 @@ pub fn apply_route(an: &mut Analyzer, dv: &Value, f: &Value) {
         if let Some((q, _)) = payload_of(an, o) {
             if let Some(idx) = q.strip_prefix("fastapi.hook.").and_then(|x| x.parse::<usize>().ok()) {
                 for fo in f.pts.iter() {
-                    if an.kind(fo) == Kind::Function {
+                    if an.heap.kind(fo) == Kind::Function {
                         an.m.fa_hooks[idx].3 = Some(fo);
                         // (run around each handler, not on its own)
-                        an.entry_done.insert(fo);
+                        an.mark_entry_done(fo);
                     }
                 }
             }
             if let Some(idx) = q.strip_prefix("fastapi.route.").and_then(|x| x.parse::<usize>().ok()) {
                 for fo in f.pts.iter() {
-                    if an.kind(fo) == Kind::Function {
+                    if an.heap.kind(fo) == Kind::Function {
                         an.m.fa_routes[idx].func = Some(fo);
                         an.m.fa_handlers.insert(fo);
                     }
@@ -1639,37 +1633,29 @@ fn scalar_ann_name(a: &ast::Expr) -> String {
     }
 }
 
-impl crate::interp::Analyzer {
-    /// The entry run of a FastAPI handler: called by the framework with any request (also when
-    /// the program's own TestClient calls it), through its middlewares and dependencies; its
-    /// requirements join `state`'s.
-    pub(crate) fn fa_entry_run(&mut self, oid: ObjId, fi: &crate::interp::FuncInfo, state: &mut State) {
-        let mut st = state.copy();
-        st.ret = None;
-        let mi = self.module_info(fi.module);
-        self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
-        self.entry_scope = Some(oid);
-        let fake = Node::synthetic(mi.idx, fi.node.node().line);
-        let saved_entry = self.entry_run.replace(oid);
-        if self.fa_entry_through_middleware(oid, &mut st, &fake).is_none() {
-            self.m.fa_dep_cache.push(rustc_hash::FxHashMap::default());
-            if let Some(idx) = self.m.fa_routes.iter().position(|r| r.func == Some(oid)) {
-                self.fa_route_deps(idx, None, &mut st, &fake);
+/// The entry run of a FastAPI handler: called by the framework with any request (also when
+/// the program's own TestClient calls it), through its middlewares and dependencies; its
+/// requirements join `state`'s.
+pub(crate) fn fa_entry_run(an: &mut Analyzer, oid: ObjId, fi: &crate::interp::FuncInfo, state: &mut State) {
+    let mut st = state.copy();
+    st.ret = None;
+    an.as_entry_run(oid, fi, |an, fake| {
+        if fa_entry_through_middleware(an, oid, &mut st, fake).is_none() {
+            an.m.fa_dep_cache.push(rustc_hash::FxHashMap::default());
+            if let Some(idx) = an.m.fa_routes.iter().position(|r| r.func == Some(oid)) {
+                fa_route_deps(an, idx, None, &mut st, fake);
             }
-            let gens = self.fa_yield_deps(oid, &mut st);
-            self.fa_run_handler(oid, gens, None, true, &mut st, &fake);
-            self.m.fa_dep_cache.pop();
+            let gens = fa_yield_deps(an, oid, &mut st);
+            fa_run_handler(an, oid, gens, None, true, &mut st, fake);
+            an.m.fa_dep_cache.pop();
         }
-        self.entry_scope = None;
-        self.entry_run = saved_entry;
-        self.frames.pop();
-        for (src, k) in st.reqs.diff_keys(&state.reqs) {
-            let Some(info) = st.reqs.get(&src, &k) else { continue };
-            let nv = match state.reqs.get(&src, &k) {
-                Some(cur) => cur.join(&info),
-                None => info,
-            };
-            state.reqs.set(&src, k, nv);
-        }
+    });
+    for (src, k) in st.reqs.diff_keys(&state.reqs) {
+        let Some(info) = st.reqs.get(&src, &k) else { continue };
+        let nv = match state.reqs.get(&src, &k) {
+            Some(cur) => cur.join(&info),
+            None => info,
+        };
+        state.reqs.set(&src, k, nv);
     }
 }

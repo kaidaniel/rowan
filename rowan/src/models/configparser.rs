@@ -178,7 +178,7 @@ pub fn m_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// A dict of literal str keys and literal values (`str()` of them).
 fn literal_mapping(an: &mut Analyzer, st: &State, v: &Value) -> Option<IndexMap<String, String>> {
-    let d = v.single().filter(|o| an.kind(*o) == Kind::Dict)?;
+    let d = v.single().filter(|o| an.heap.kind(*o) == Kind::Dict)?;
     let row = st.row(d, Ns::Item);
     if row.open() || row.present != row.definite {
         return None;
@@ -230,13 +230,7 @@ pub fn rebuild(an: &mut Analyzer, st: &mut State, node: &Node, oid: u32) {
 fn cfg_raise(an: &mut Analyzer, st: &mut State, name: &str, sure: bool) {
     // (its class: configparser's hierarchy, `except configparser.Error` catches it too)
     let q = if name == "ValueError" { name.to_string() } else { format!("configparser.{}", name) };
-    an.cur_exc_cls = Some(crate::interp::builtin_exc_names(&q));
-    if sure {
-        an.raise_here(&q, st);
-    } else {
-        an.may_raise_here(&q, st);
-    }
-    an.cur_exc_cls = None;
+    an.raise_exc(&q, None, Some(crate::interp::builtin_exc_names(&q)), sure, st);
 }
 
 fn convert(kind: &str, s: &str) -> Option<intern::KeyId> {
@@ -486,13 +480,13 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 Some(k) => {
                     let sv = st.slot(oid, Ns::Item, k);
                     let call = Call { qual: "dict.items".into(), recv: Some(sv), args: vec![], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: c.node, call_ast: c.call_ast, site: c.site.clone(), line: c.line };
-                    let views = an.models.lookup("dict.items");
+                    let views = an.model("dict.items");
                     let v = match views {
                         Some(m) => m(an, st, &call),
                         None => return Value::data("items"),
                     };
                     let call2 = Call { qual: "builtins.list".into(), recv: None, args: vec![v], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: c.node, call_ast: c.call_ast, site: c.site.clone(), line: c.line };
-                    match an.models.lookup("builtins.list") {
+                    match an.model("builtins.list") {
                         Some(m) => m(an, st, &call2),
                         None => Value::data("items"),
                     }
@@ -510,7 +504,7 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// `{"section": {"opt": value, …}, …}` with literal keys / values.
 fn nested_mapping(an: &mut Analyzer, st: &State, v: &Value) -> Option<IndexMap<String, IndexMap<String, String>>> {
-    let d = v.single().filter(|o| an.kind(*o) == Kind::Dict)?;
+    let d = v.single().filter(|o| an.heap.kind(*o) == Kind::Dict)?;
     let row = st.row(d, Ns::Item);
     if row.open() || row.present != row.definite {
         return None;

@@ -210,17 +210,17 @@ const PATH_KIND: &str = "stdobj.path";
 
 /// A path object's normalised text.
 pub fn path_text(an: &Analyzer, o: u32) -> Option<String> {
-    if an.kind(o) != Kind::Namespace {
+    if an.heap.kind(o) != Kind::Namespace {
         return None;
     }
-    match &an.obj(o).payload {
+    match &an.heap.obj(o).payload {
         Payload::Method(q, t) if q == PATH_KIND => lit_str(t),
         _ => None,
     }
 }
 
 pub fn is_path(an: &Analyzer, o: u32) -> bool {
-    matches!(&an.obj(o).payload, Payload::Method(q, _) if q == PATH_KIND) && an.kind(o) == Kind::Namespace
+    matches!(&an.heap.obj(o).payload, Payload::Method(q, _) if q == PATH_KIND) && an.heap.kind(o) == Kind::Namespace
 }
 
 /// The class a path object was made with (`PurePosixPath`, `PosixPath`, …).
@@ -255,7 +255,7 @@ pub fn pathlib_norm(parts: &[String]) -> String {
 fn new_path(an: &mut Analyzer, st: &mut State, node: &Node, text: &str, cls: &str, ctx: &str) -> Value {
     let p = Payload::Method(PATH_KIND.into(), Value::lit_str(text));
     let oid = an.alloc_at(Kind::Namespace, node, st, &format!("{}('{}')", cls, text), p.clone(), Some(Row::new()), Ns::Attr, None, Some(&format!("path:{}:{}", ctx, text)));
-    an.obj_mut(oid).payload = p;
+    an.heap.obj_mut(oid).payload = p;
     st.set_row(oid, Ns::Attr, Row::new());
     an.m.path_classes.insert(oid, cls.to_string());
     Value::obj(oid)

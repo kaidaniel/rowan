@@ -740,7 +740,7 @@ pub fn mark_merged(oid: ObjId) {
 }
 
 thread_local! {
-    /// the shared unknown object (`Analyzer::any_object`): no store changes it
+    /// the shared unknown object (`interp::any_object`): no store changes it
     static ANY: std::cell::Cell<ObjId> = const { std::cell::Cell::new(ObjId::MAX) };
 }
 

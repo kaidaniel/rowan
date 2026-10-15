@@ -233,11 +233,10 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
     }
     roots.extend(search);
     let mut an = Analyzer::new(src.clone(), file, roots, entry, imports)?;
-    an.facts_on = facts;
-    an.follow = follow;
-    if !an.follow.is_empty() {
-        an.site_paths = site_packages_for(file, &site);
+    if facts {
+        an.collect_facts();
     }
+    an.follow_packages(follow, || site_packages_for(file, &site));
     if golden {
         // `#@row NAME:` / `#@value` / `#@shape` expectations of the main file and, in a package
         // case (a directory whose name shares the entry's prefix: `k94_pkg/k94_modules.py`), of
@@ -271,8 +270,8 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
     }
     an.run();
     let mut deps: Vec<String> = vec![file.to_string()];
-    for (_, &m) in an.modules.iter() {
-        if let Some(p) = &an.module_info(m).path {
+    for (_, &m) in an.modules().iter() {
+        if let Some(p) = &an.heap.module_info(m).path {
             // (a namespace package's directory has no text to hash)
             if !deps.contains(p) && !std::path::Path::new(p).is_dir() {
                 deps.push(p.clone());
@@ -280,7 +279,7 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
         }
     }
     if std::env::var("ROWAN_DEBUG").is_ok() {
-        eprintln!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {} (walks {}, joins {}), havoc visits {})", an.work, an.work_units(), an.tab_runs, an.objects.len(), an.started.elapsed().as_millis(), if an.hard_cut { ", cut at the deadline" } else { "" }, an.tab_count.values().sum::<usize>(), rowan::domain::row_joins(), an.walked.get() + rowan::state::fp_visits(), an.walked.get(), rowan::state::fp_visits(), an.havoc_walked);
+        eprintln!("{}", an.work_line());
     }
     if facts {
         return Ok((serde_json::to_string(&report::facts_json(&an)).unwrap(), deps));
@@ -311,10 +310,7 @@ fn golden_requests(an: &mut Analyzer, rel: &str, src: &str) {
             i0
         };
         let push = |an: &mut Analyzer, name: String| {
-            let req = (rel.to_string(), i as u32 + 1, name);
-            if !req.2.is_empty() && !an.row_check_requests.contains(&req) {
-                an.row_check_requests.push(req);
-            }
+            an.request_row_check((rel.to_string(), i as u32 + 1, name));
         };
         // (`#@todo row NAME:` too: the harness checks those with ROWAN_TODO=check)
         let hit = line.find("#@row").map(|p| p + 5).or_else(|| line.find("#@todo row").map(|p| p + 10));
@@ -327,7 +323,7 @@ fn golden_requests(an: &mut Analyzer, rel: &str, src: &str) {
                         Ok(n) => rowan::intern::key_int(n),
                         Err(_) => rowan::intern::key_str_lit(k.trim_matches(|c| c == '"' || c == '\'')),
                     };
-                    an.row_absent_probes.push((rel.to_string(), i as u32 + 1, name.clone(), key));
+                    an.request_absent_probe((rel.to_string(), i as u32 + 1, name.clone(), key));
                 }
             }
             push(an, name);

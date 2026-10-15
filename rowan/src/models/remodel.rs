@@ -50,7 +50,7 @@ fn pattern_of(an: &Analyzer, v: &Value, flags: Option<&Value>) -> Option<(String
 fn new_stdobj(an: &mut Analyzer, st: &mut State, node: &Node, kind: &str, label: &str, ctx: Option<&str>) -> u32 {
     let p = Payload::Method(format!("stdobj.{}", kind), Value::new());
     let oid = an.alloc_at(Kind::Namespace, node, st, label, p.clone(), Some(Row::new()), Ns::Attr, None, ctx);
-    an.obj_mut(oid).payload = p;
+    an.heap.obj_mut(oid).payload = p;
     st.set_row(oid, Ns::Attr, Row::new());
     oid
 }
@@ -335,7 +335,7 @@ fn findall_item(an: &mut Analyzer, st: &mut State, node: &Node, re: &Regex, m: &
     }
     st.set_slot(tid, Ns::Elem, intern::STAR, Value::new(), true);
     st.elems.insert(tid, acc.kv);
-    an.set_llen(tid, st, Some(vals.len()));
+    an.heap.set_llen(tid, st, Some(vals.len()));
     Value::obj(tid)
 }
 

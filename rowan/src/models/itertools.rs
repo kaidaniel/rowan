@@ -26,131 +26,129 @@ fn sub_node(node: &Node, i: usize, salt: u32) -> Node {
     n
 }
 
-impl Analyzer {
-    /// A one-shot iterator over `vals` (positions known) or with element `elem` (unknown count).
-    pub fn it_list(&mut self, vals: Option<Vec<Value>>, elem: Value, node: &Node, st: &mut State, ctx: &str) -> Value {
-        let lid = self.alloc_at(Kind::List, node, st, &format!("iter@L{}", node.line), Payload::None, None, Ns::Item, None, Some(ctx));
-        let single = self.obj(lid).single;
-        let acc = match &vals {
-            Some(vs) => join_values(vs.clone()),
-            None => elem,
-        };
-        st.set_slot(lid, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), single);
-        st.elems.insert(lid, acc.kv.clone());
-        match vals {
-            Some(vs) if single && vs.len() <= MAX_ITEMS => {
-                for (i, v) in vs.iter().enumerate() {
-                    st.set_slot(lid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
-                }
-                self.set_llen(lid, st, Some(vs.len()));
+/// A one-shot iterator over `vals` (positions known) or with element `elem` (unknown count).
+pub fn it_list(an: &mut Analyzer, vals: Option<Vec<Value>>, elem: Value, node: &Node, st: &mut State, ctx: &str) -> Value {
+    let lid = an.alloc_at(Kind::List, node, st, &format!("iter@L{}", node.line), Payload::None, None, Ns::Item, None, Some(ctx));
+    let single = an.heap.obj(lid).single;
+    let acc = match &vals {
+        Some(vs) => join_values(vs.clone()),
+        None => elem,
+    };
+    st.set_slot(lid, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), single);
+    st.elems.insert(lid, acc.kv.clone());
+    match vals {
+        Some(vs) if single && vs.len() <= MAX_ITEMS => {
+            for (i, v) in vs.iter().enumerate() {
+                st.set_slot(lid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
             }
-            _ => self.set_llen(lid, st, None),
+            an.heap.set_llen(lid, st, Some(vs.len()));
         }
-        self.obj_mut(lid).iterator = true;
-        Value::obj(lid)
+        _ => an.heap.set_llen(lid, st, None),
     }
+    an.heap.obj_mut(lid).iterator = true;
+    Value::obj(lid)
+}
 
-    /// A tuple with these items.
-    pub fn it_tuple(&mut self, vals: Vec<Value>, node: &Node, st: &mut State, ctx: &str) -> Value {
-        let tid = self.alloc_at(Kind::Tuple, node, st, &format!("tuple@L{}", node.line), Payload::None, None, Ns::Item, None, Some(ctx));
-        let acc = join_values(vals.clone());
-        st.set_slot(tid, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
-        st.elems.insert(tid, acc.kv.clone());
-        for (i, v) in vals.iter().enumerate() {
-            st.set_slot(tid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
-        }
-        self.set_llen(tid, st, Some(vals.len()));
-        Value::obj(tid)
+/// A tuple with these items.
+pub fn it_tuple(an: &mut Analyzer, vals: Vec<Value>, node: &Node, st: &mut State, ctx: &str) -> Value {
+    let tid = an.alloc_at(Kind::Tuple, node, st, &format!("tuple@L{}", node.line), Payload::None, None, Ns::Item, None, Some(ctx));
+    let acc = join_values(vals.clone());
+    st.set_slot(tid, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
+    st.elems.insert(tid, acc.kv.clone());
+    for (i, v) in vals.iter().enumerate() {
+        st.set_slot(tid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
     }
+    an.heap.set_llen(tid, st, Some(vals.len()));
+    Value::obj(tid)
+}
 
-    /// The infinite iterator a value is (one of them), if it is one.
-    pub fn infinite_of(&self, v: &Value) -> Option<Infinite> {
-        let o = v.single()?;
-        if self.kind(o) != Kind::Namespace || !matches!(&self.obj(o).payload, Payload::Method(q, _) if q == "stdobj.infinite") {
-            return None;
-        }
-        self.m.infinites.get(&o).cloned()
+/// The infinite iterator a value is (one of them), if it is one.
+pub fn infinite_of(an: &Analyzer, v: &Value) -> Option<Infinite> {
+    let o = v.single()?;
+    if an.heap.kind(o) != Kind::Namespace || !matches!(&an.heap.obj(o).payload, Payload::Method(q, _) if q == "stdobj.infinite") {
+        return None;
     }
+    an.m.infinites.get(&o).cloned()
+}
 
-    /// The next `n` items of an iterator whose items are known that far: an infinite one, or
-    /// a one-shot iterator (a generator) from its cursor within its known positions (fewer at
-    /// its end).
-    pub fn take_known(&mut self, v: &Value, n: usize, st: &State) -> Option<Vec<Value>> {
-        if let Some(inf) = self.infinite_of(v) {
-            return self.infinite_take(&inf, n);
-        }
-        let o = v.single().filter(|o| v.kv.is_bot() && self.obj(*o).iterator && self.obj(*o).single && self.kind(*o) == Kind::List)?;
-        let c = self.cursor_of(o, st)?;
-        let end = match self.llen(o, st) {
-            Some(len) => (c + n).min(len),
-            None if c + n <= self.prefix(o, st).unwrap_or(0) => c + n,
-            None => return None,
-        };
-        Some((c..end).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect())
+/// The next `n` items of an iterator whose items are known that far: an infinite one, or
+/// a one-shot iterator (a generator) from its cursor within its known positions (fewer at
+/// its end).
+pub fn take_known(an: &mut Analyzer, v: &Value, n: usize, st: &State) -> Option<Vec<Value>> {
+    if let Some(inf) = infinite_of(an, v) {
+        return infinite_take(an, &inf, n);
     }
+    let o = v.single().filter(|o| v.kv.is_bot() && an.heap.obj(*o).iterator && an.heap.obj(*o).single && an.heap.kind(*o) == Kind::List)?;
+    let c = an.cursor_of(o, st)?;
+    let end = match an.heap.llen(o, st) {
+        Some(len) => (c + n).min(len),
+        None if c + n <= an.heap.prefix(o, st).unwrap_or(0) => c + n,
+        None => return None,
+    };
+    Some((c..end).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect())
+}
 
-    /// The first `n` items of an infinite iterator.
-    pub fn infinite_take(&mut self, inf: &Infinite, n: usize) -> Option<Vec<Value>> {
-        if n > MAX_ITEMS {
-            return None;
-        }
-        match inf {
-            Infinite::Count(start, step) => {
-                let s = start.kv.as_lit().filter(|_| start.pts.is_empty()).and_then(intern::key_as_int);
-                let d = step.kv.as_lit().filter(|_| step.pts.is_empty()).and_then(intern::key_as_int);
-                match (s, d) {
-                    (Some(s), Some(d)) => Some((0..n as i64).map(|i| Value::lit(intern::key_int(s + i * d))).collect()),
-                    _ => Some(vec![Value::data("count"); n]),
-                }
-            }
-            Infinite::Cycle(items) if !items.is_empty() => Some((0..n).map(|i| items[i % items.len()].clone()).collect()),
-            Infinite::Cycle(_) => Some(vec![]),
-            Infinite::Repeat(v) => Some(vec![v.clone(); n]),
-        }
+/// The first `n` items of an infinite iterator.
+pub fn infinite_take(_an: &mut Analyzer, inf: &Infinite, n: usize) -> Option<Vec<Value>> {
+    if n > MAX_ITEMS {
+        return None;
     }
-
-    /// The element an infinite iterator yields (for a loop over it).
-    pub fn infinite_elem(&self, inf: &Infinite) -> Value {
-        match inf {
-            Infinite::Count(..) => Value::data("count"),
-            Infinite::Cycle(items) => join_values(items.clone()),
-            Infinite::Repeat(v) => v.clone(),
-        }
-    }
-
-    fn new_infinite(&mut self, inf: Infinite, node: &Node, st: &mut State) -> Value {
-        let oid = self.alloc_at(Kind::Namespace, node, st, "itertools iterator", Payload::Method("stdobj.infinite".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
-        self.obj_mut(oid).payload = Payload::Method("stdobj.infinite".into(), Value::new());
-        self.m.infinites.insert(oid, inf);
-        Value::obj(oid)
-    }
-
-    /// `f(*args)` for a callback (a function, `operator.add`, a builtin…).
-    fn it_call(&mut self, f: &Value, args: Vec<Value>, node: &Node, st: &mut State) -> Value {
-        // `operator.add` / `mul` / … on two values: the binary operator
-        if args.len() == 2 && f.pts.len() == 1 {
-            let o = f.pts.first().unwrap();
-            if self.kind(o) == Kind::External {
-                let q = self.external_qual(o);
-                let op = match q.as_str() {
-                    "operator.add" | "operator.concat" => Some(ruff_python_ast::Operator::Add),
-                    "operator.sub" => Some(ruff_python_ast::Operator::Sub),
-                    "operator.mul" => Some(ruff_python_ast::Operator::Mult),
-                    "operator.floordiv" => Some(ruff_python_ast::Operator::FloorDiv),
-                    "operator.truediv" => Some(ruff_python_ast::Operator::Div),
-                    "operator.mod" => Some(ruff_python_ast::Operator::Mod),
-                    "operator.pow" => Some(ruff_python_ast::Operator::Pow),
-                    "operator.or_" => Some(ruff_python_ast::Operator::BitOr),
-                    "operator.and_" => Some(ruff_python_ast::Operator::BitAnd),
-                    _ => None,
-                };
-                if let Some(op) = op {
-                    return self.binop(op, &args[0], &args[1], node, st);
-                }
+    match inf {
+        Infinite::Count(start, step) => {
+            let s = start.kv.as_lit().filter(|_| start.pts.is_empty()).and_then(intern::key_as_int);
+            let d = step.kv.as_lit().filter(|_| step.pts.is_empty()).and_then(intern::key_as_int);
+            match (s, d) {
+                (Some(s), Some(d)) => Some((0..n as i64).map(|i| Value::lit(intern::key_int(s + i * d))).collect()),
+                _ => Some(vec![Value::data("count"); n]),
             }
         }
-        self.call_value(f, node, None, st, Some(args))
+        Infinite::Cycle(items) if !items.is_empty() => Some((0..n).map(|i| items[i % items.len()].clone()).collect()),
+        Infinite::Cycle(_) => Some(vec![]),
+        Infinite::Repeat(v) => Some(vec![v.clone(); n]),
     }
+}
+
+/// The element an infinite iterator yields (for a loop over it).
+pub fn infinite_elem(_an: &Analyzer, inf: &Infinite) -> Value {
+    match inf {
+        Infinite::Count(..) => Value::data("count"),
+        Infinite::Cycle(items) => join_values(items.clone()),
+        Infinite::Repeat(v) => v.clone(),
+    }
+}
+
+fn new_infinite(an: &mut Analyzer, inf: Infinite, node: &Node, st: &mut State) -> Value {
+    let oid = an.alloc_at(Kind::Namespace, node, st, "itertools iterator", Payload::Method("stdobj.infinite".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
+    an.heap.obj_mut(oid).payload = Payload::Method("stdobj.infinite".into(), Value::new());
+    an.m.infinites.insert(oid, inf);
+    Value::obj(oid)
+}
+
+/// `f(*args)` for a callback (a function, `operator.add`, a builtin…).
+fn it_call(an: &mut Analyzer, f: &Value, args: Vec<Value>, node: &Node, st: &mut State) -> Value {
+    // `operator.add` / `mul` / … on two values: the binary operator
+    if args.len() == 2 && f.pts.len() == 1 {
+        let o = f.pts.first().unwrap();
+        if an.heap.kind(o) == Kind::External {
+            let q = an.heap.external_qual(o);
+            let op = match q.as_str() {
+                "operator.add" | "operator.concat" => Some(ruff_python_ast::Operator::Add),
+                "operator.sub" => Some(ruff_python_ast::Operator::Sub),
+                "operator.mul" => Some(ruff_python_ast::Operator::Mult),
+                "operator.floordiv" => Some(ruff_python_ast::Operator::FloorDiv),
+                "operator.truediv" => Some(ruff_python_ast::Operator::Div),
+                "operator.mod" => Some(ruff_python_ast::Operator::Mod),
+                "operator.pow" => Some(ruff_python_ast::Operator::Pow),
+                "operator.or_" => Some(ruff_python_ast::Operator::BitOr),
+                "operator.and_" => Some(ruff_python_ast::Operator::BitAnd),
+                _ => None,
+            };
+            if let Some(op) = op {
+                return an.binop(op, &args[0], &args[1], node, st);
+            }
+        }
+    }
+    an.call_value(f, node, None, st, Some(args))
 }
 
 fn items(an: &mut Analyzer, v: &Value, node: &Node, st: &mut State) -> (Option<Vec<Value>>, Value) {
@@ -169,22 +167,22 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "count" => {
             let start = arg(0, "start").unwrap_or_else(|| Value::lit(intern::key_int(0)));
             let step = arg(1, "step").unwrap_or_else(|| Value::lit(intern::key_int(1)));
-            an.new_infinite(Infinite::Count(start, step), &node, st)
+            new_infinite(an, Infinite::Count(start, step), &node, st)
         }
         "cycle" => {
             let Some(x) = arg(0, "iterable") else { return Value::data("cycle") };
             match items(an, &x, &node, st) {
-                (Some(its), _) => an.new_infinite(Infinite::Cycle(its), &node, st),
-                (None, e) => an.it_list(None, e, &node, st, &ctx),
+                (Some(its), _) => new_infinite(an, Infinite::Cycle(its), &node, st),
+                (None, e) => it_list(an, None, e, &node, st, &ctx),
             }
         }
         "repeat" => {
             let x = arg(0, "object").unwrap_or_default();
             match arg(1, "times") {
-                None => an.new_infinite(Infinite::Repeat(x), &node, st),
+                None => new_infinite(an, Infinite::Repeat(x), &node, st),
                 Some(t) => match t.kv.as_lit().filter(|_| t.pts.is_empty()).and_then(intern::key_as_int) {
-                    Some(n) => an.it_list(Some(vec![x; n.max(0) as usize]), Value::new(), &node, st, &ctx),
-                    None => an.it_list(None, x, &node, st, &ctx),
+                    Some(n) => it_list(an, Some(vec![x; n.max(0) as usize]), Value::new(), &node, st, &ctx),
+                    None => it_list(an, None, x, &node, st, &ctx),
                 },
             }
         }
@@ -200,28 +198,28 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let (start, stop, step) = if c.args.len() <= 2 { (Some(None), lit(c.args.get(1).cloned()), Some(None)) } else { (lit(c.args.get(1).cloned()), lit(c.args.get(2).cloned()), lit(c.args.get(3).cloned())) };
             let (Some(start), Some(stop), Some(step)) = (start, stop, step) else {
                 let e = items(an, &src, &node, st).1;
-                return an.it_list(None, e, &node, st, &ctx);
+                return it_list(an, None, e, &node, st, &ctx);
             };
             let (s0, st1) = (start.unwrap_or(0).max(0) as usize, step.unwrap_or(1).max(1) as usize);
-            let its = match an.infinite_of(&src) {
+            let its = match infinite_of(an, &src) {
                 Some(inf) => match stop {
-                    Some(e) => an.infinite_take(&inf, e.max(0) as usize),
+                    Some(e) => infinite_take(an, &inf, e.max(0) as usize),
                     None => None,
                 },
-                None => items(an, &src, &node, st).0.or_else(|| stop.and_then(|e| an.take_known(&src, e.max(0) as usize, st))),
+                None => items(an, &src, &node, st).0.or_else(|| stop.and_then(|e| take_known(an, &src, e.max(0) as usize, st))),
             };
             match its {
                 Some(its) => {
                     let end = stop.map(|e| (e.max(0) as usize).min(its.len())).unwrap_or(its.len());
                     let sel: Vec<Value> = (s0..end).step_by(st1).map(|i| its[i].clone()).collect();
-                    an.it_list(Some(sel), Value::new(), &node, st, &ctx)
+                    it_list(an, Some(sel), Value::new(), &node, st, &ctx)
                 }
                 None => {
-                    let e = match an.infinite_of(&src) {
-                        Some(inf) => an.infinite_elem(&inf),
+                    let e = match infinite_of(an, &src) {
+                        Some(inf) => infinite_elem(an, &inf),
                         None => items(an, &src, &node, st).1,
                     };
-                    an.it_list(None, e, &node, st, &ctx)
+                    it_list(an, None, e, &node, st, &ctx)
                 }
             }
         }
@@ -231,7 +229,7 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     Some((Some(its), _)) => its,
                     Some((None, e)) => {
                         let inner = items(an, &e, &node, st).1;
-                        return an.it_list(None, inner, &node, st, &ctx);
+                        return it_list(an, None, inner, &node, st, &ctx);
                     }
                     None => vec![],
                 }
@@ -248,7 +246,7 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     _ => all = None,
                 }
             }
-            an.it_list(all, elem, &node, st, &ctx)
+            it_list(an, all, elem, &node, st, &ctx)
         }
         "product" | "permutations" | "combinations" | "combinations_with_replacement" => {
             let repeat = c.kw("repeat").and_then(|v| v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_int)).unwrap_or(1).max(0) as usize;
@@ -266,11 +264,11 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let r = c.arg(1, Some("r")).and_then(|v| v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_int)).map(|x| x.max(0) as usize);
             let Some(cols) = cols else {
                 // unknown inputs: tuples of their elements
-                let t = an.it_tuple(vec![elem.clone()], &node, st, &format!("{}t", ctx));
+                let t = it_tuple(an, vec![elem.clone()], &node, st, &format!("{}t", ctx));
                 if let Some(o) = t.single() {
-                    an.set_llen(o, st, None);
+                    an.heap.set_llen(o, st, None);
                 }
-                return an.it_list(None, t, &node, st, &ctx);
+                return it_list(an, None, t, &node, st, &ctx);
             };
             let idx_tuples: Vec<Vec<(usize, usize)>> = match name.as_str() {
                 "product" => {
@@ -331,18 +329,18 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 }
             };
             if idx_tuples.len() > MAX_ITEMS {
-                let t = an.it_tuple(vec![elem.clone()], &node, st, &format!("{}t", ctx));
+                let t = it_tuple(an, vec![elem.clone()], &node, st, &format!("{}t", ctx));
                 if let Some(o) = t.single() {
-                    an.set_llen(o, st, None);
+                    an.heap.set_llen(o, st, None);
                 }
-                return an.it_list(None, t, &node, st, &ctx);
+                return it_list(an, None, t, &node, st, &ctx);
             }
             let mut tuples = Vec::new();
             for (k, t) in idx_tuples.iter().enumerate() {
                 let vals: Vec<Value> = t.iter().map(|(j, i)| cols[*j][*i].clone()).collect();
-                tuples.push(an.it_tuple(vals, &node, st, &format!("{}t{}", ctx, k)));
+                tuples.push(it_tuple(an, vals, &node, st, &format!("{}t{}", ctx, k)));
             }
-            an.it_list(Some(tuples), Value::new(), &node, st, &ctx)
+            it_list(an, Some(tuples), Value::new(), &node, st, &ctx)
         }
         "accumulate" => {
             let Some(src) = arg(0, "iterable") else { return Value::data("accumulate") };
@@ -362,7 +360,7 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             Some(a) => {
                                 let nd = sub_node(&node, k, 1_100_000);
                                 match &func {
-                                    Some(f) => an.it_call(f, vec![a.clone(), x], &nd, st),
+                                    Some(f) => it_call(an, f, vec![a.clone(), x], &nd, st),
                                     None => an.binop(ruff_python_ast::Operator::Add, a, &x, &nd, st),
                                 }
                             }
@@ -370,15 +368,15 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         out.push(nv.clone());
                         acc = Some(nv);
                     }
-                    an.it_list(Some(out), Value::new(), &node, st, &ctx)
+                    it_list(an, Some(out), Value::new(), &node, st, &ctx)
                 }
                 None => {
                     let r = match &func {
-                        Some(f) => an.it_call(f, vec![e.clone(), e.clone()], &node, st),
+                        Some(f) => it_call(an, f, vec![e.clone(), e.clone()], &node, st),
                         None => an.binop(ruff_python_ast::Operator::Add, &e, &e, &node, st),
                     };
                     let el = e.join(&r).join(&initial.unwrap_or_default());
-                    an.it_list(None, el, &node, st, &ctx)
+                    it_list(an, None, el, &node, st, &ctx)
                 }
             }
         }
@@ -394,17 +392,17 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             Some(a) => a,
                             None => vec![items(an, &t, &nd, st).1],
                         };
-                        out.push(an.it_call(&f, args, &nd, st));
+                        out.push(it_call(an, &f, args, &nd, st));
                     }
-                    an.it_list(Some(out), Value::new(), &node, st, &ctx)
+                    it_list(an, Some(out), Value::new(), &node, st, &ctx)
                 }
                 None => {
                     let args = match items(an, &e, &node, st).0 {
                         Some(a) => a,
                         None => vec![items(an, &e, &node, st).1],
                     };
-                    let r = an.it_call(&f, args, &node, st);
-                    an.it_list(None, r, &node, st, &ctx)
+                    let r = it_call(an, &f, args, &node, st);
+                    it_list(an, None, r, &node, st, &ctx)
                 }
             }
         }
@@ -426,13 +424,13 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     let mut tuples = Vec::new();
                     for k in 0..n {
                         let vals: Vec<Value> = cols.iter().map(|c0| c0.get(k).cloned().unwrap_or_else(|| fill.clone())).collect();
-                        tuples.push(an.it_tuple(vals, &node, st, &format!("{}t{}", ctx, k)));
+                        tuples.push(it_tuple(an, vals, &node, st, &format!("{}t{}", ctx, k)));
                     }
-                    an.it_list(Some(tuples), Value::new(), &node, st, &ctx)
+                    it_list(an, Some(tuples), Value::new(), &node, st, &ctx)
                 }
                 None => {
-                    let t = an.it_tuple(elems, &node, st, &format!("{}t", ctx));
-                    an.it_list(None, t, &node, st, &ctx)
+                    let t = it_tuple(an, elems, &node, st, &format!("{}t", ctx));
+                    it_list(an, None, t, &node, st, &ctx)
                 }
             }
         }
@@ -450,7 +448,7 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             out.push(x);
                             continue;
                         }
-                        let r = an.it_call(&pred, vec![x.clone()], &nd, st);
+                        let r = it_call(an, &pred, vec![x.clone()], &nd, st);
                         let t = an.truth_of(&r, st, &nd);
                         match (name.as_str(), t) {
                             ("takewhile", Some(true)) => out.push(x),
@@ -469,15 +467,15 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         }
                     }
                     if known {
-                        an.it_list(Some(out), Value::new(), &node, st, &ctx)
+                        it_list(an, Some(out), Value::new(), &node, st, &ctx)
                     } else {
                         let el = items(an, &src, &node, st).1;
-                        an.it_list(None, el, &node, st, &ctx)
+                        it_list(an, None, el, &node, st, &ctx)
                     }
                 }
                 None => {
-                    an.it_call(&pred, vec![e.clone()], &node, st);
-                    an.it_list(None, e, &node, st, &ctx)
+                    it_call(an, &pred, vec![e.clone()], &node, st);
+                    it_list(an, None, e, &node, st, &ctx)
                 }
             }
         }
@@ -496,17 +494,17 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     }
                 }
                 if known {
-                    return an.it_list(Some(out), Value::new(), &node, st, &ctx);
+                    return it_list(an, Some(out), Value::new(), &node, st, &ctx);
                 }
             }
-            an.it_list(None, de, &node, st, &ctx)
+            it_list(an, None, de, &node, st, &ctx)
         }
         "tee" => {
             let Some(src) = arg(0, "iterable") else { return Value::data("tee") };
             let n = arg(1, "n").and_then(|v| v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_int)).unwrap_or(2).max(0) as usize;
             let (its, e) = items(an, &src, &node, st);
-            let copies: Vec<Value> = (0..n).map(|k| an.it_list(its.clone(), e.clone(), &node, st, &format!("{}c{}", ctx, k))).collect();
-            an.it_tuple(copies, &node, st, &format!("{}t", ctx))
+            let copies: Vec<Value> = (0..n).map(|k| it_list(an, its.clone(), e.clone(), &node, st, &format!("{}c{}", ctx, k))).collect();
+            it_tuple(an, copies, &node, st, &format!("{}t", ctx))
         }
         "pairwise" => {
             let Some(src) = arg(0, "iterable") else { return Value::data("pairwise") };
@@ -515,13 +513,13 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 Some(its) => {
                     let mut tuples = Vec::new();
                     for k in 1..its.len() {
-                        tuples.push(an.it_tuple(vec![its[k - 1].clone(), its[k].clone()], &node, st, &format!("{}t{}", ctx, k)));
+                        tuples.push(it_tuple(an, vec![its[k - 1].clone(), its[k].clone()], &node, st, &format!("{}t{}", ctx, k)));
                     }
-                    an.it_list(Some(tuples), Value::new(), &node, st, &ctx)
+                    it_list(an, Some(tuples), Value::new(), &node, st, &ctx)
                 }
                 None => {
-                    let t = an.it_tuple(vec![e.clone(), e], &node, st, &format!("{}t", ctx));
-                    an.it_list(None, t, &node, st, &ctx)
+                    let t = it_tuple(an, vec![e.clone(), e], &node, st, &format!("{}t", ctx));
+                    it_list(an, None, t, &node, st, &ctx)
                 }
             }
         }
@@ -534,16 +532,16 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     let n = n as usize;
                     let mut tuples = Vec::new();
                     for (k, chunk) in its.chunks(n).enumerate() {
-                        tuples.push(an.it_tuple(chunk.to_vec(), &node, st, &format!("{}t{}", ctx, k)));
+                        tuples.push(it_tuple(an, chunk.to_vec(), &node, st, &format!("{}t{}", ctx, k)));
                     }
-                    an.it_list(Some(tuples), Value::new(), &node, st, &ctx)
+                    it_list(an, Some(tuples), Value::new(), &node, st, &ctx)
                 }
                 _ => {
-                    let t = an.it_tuple(vec![e], &node, st, &format!("{}t", ctx));
+                    let t = it_tuple(an, vec![e], &node, st, &format!("{}t", ctx));
                     if let Some(o) = t.single() {
-                        an.set_llen(o, st, None);
+                        an.heap.set_llen(o, st, None);
                     }
-                    an.it_list(None, t, &node, st, &ctx)
+                    it_list(an, None, t, &node, st, &ctx)
                 }
             }
         }
@@ -553,7 +551,7 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let (its, e) = items(an, &src, &node, st);
             let key_of = |an: &mut Analyzer, st: &mut State, x: &Value, nd: &Node| -> Value {
                 match &key {
-                    Some(f) => an.it_call(f, vec![x.clone()], nd, st),
+                    Some(f) => it_call(an, f, vec![x.clone()], nd, st),
                     None => x.clone(),
                 }
             };
@@ -576,16 +574,16 @@ pub fn m_itertools(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 if known {
                     let mut pairs = Vec::new();
                     for (k, (_, kv, members)) in groups.into_iter().enumerate() {
-                        let g = an.it_list(Some(members), Value::new(), &node, st, &format!("{}g{}", ctx, k));
-                        pairs.push(an.it_tuple(vec![kv, g], &node, st, &format!("{}p{}", ctx, k)));
+                        let g = it_list(an, Some(members), Value::new(), &node, st, &format!("{}g{}", ctx, k));
+                        pairs.push(it_tuple(an, vec![kv, g], &node, st, &format!("{}p{}", ctx, k)));
                     }
-                    return an.it_list(Some(pairs), Value::new(), &node, st, &ctx);
+                    return it_list(an, Some(pairs), Value::new(), &node, st, &ctx);
                 }
             }
             let kv = key_of(an, st, &e, &node);
-            let g = an.it_list(None, e, &node, st, &format!("{}g", ctx));
-            let p = an.it_tuple(vec![kv, g], &node, st, &format!("{}p", ctx));
-            an.it_list(None, p, &node, st, &ctx)
+            let g = it_list(an, None, e, &node, st, &format!("{}g", ctx));
+            let p = it_tuple(an, vec![kv, g], &node, st, &format!("{}p", ctx));
+            it_list(an, None, p, &node, st, &ctx)
         }
         _ => Value::data(&format!("itertools.{}", name)),
     }
@@ -603,108 +601,106 @@ pub fn register(r: &mut dyn FnMut(&[&'static str], crate::models::Model)) {
     );
 }
 
-impl crate::interp::Analyzer {
-    /// What a model call does to the one-shot iterators it is given: a full consumer uses
-    /// them up; a lazy wrapper (zip, islice, map, …) takes from them when it is consumed
-    /// itself; anything else leaves their position unknown.
-    pub(crate) fn after_model_consume(&mut self, call: &Call, r: &Value, state: &mut State) {
-        // (one-shot iterators, and lazy iterators over them)
-        let its: Vec<(usize, u32)> = call.args.iter().chain(call.star_args.iter()).enumerate().filter_map(|(i, a)| a.single().filter(|o| a.kv.is_bot() && ((self.obj(*o).iterator && self.obj(*o).single && matches!(self.kind(*o), Kind::List)) || self.lazy_src.contains_key(o))).map(|o| (i, o))).collect();
-        if its.is_empty() {
-            return;
-        }
-        let q = call.qual.as_str();
-        const FULL: &[&str] = &[
-            "builtins.list", "builtins.tuple", "builtins.set", "builtins.frozenset", "builtins.dict", "builtins.sorted", "builtins.sum", "builtins.min", "builtins.max",
-            "str.join", "collections.Counter", "collections.deque", "collections.OrderedDict", "collections.defaultdict", "list.extend", "set.update", "dict.update",
-            "statistics.mean", "statistics.median", "statistics.fmean", "math.fsum", "math.prod", "bytes.join",
-        ];
-        const LAZY_ALL: &[&str] = &["builtins.map", "builtins.filter", "builtins.enumerate", "builtins.iter", "itertools.chain", "itertools.starmap", "itertools.takewhile", "itertools.dropwhile", "itertools.accumulate", "itertools.compress", "itertools.groupby", "itertools.pairwise", "itertools.batched"];
-        if matches!(q, "builtins.next" | "builtins.iter") && its.len() == 1 && r.single() == Some(its[0].1) {
-            return;
-        }
-        if q == "builtins.next" {
-            return;
-        }
-        if FULL.contains(&q) {
-            for (_, o) in its {
-                self.exhaust(&Value::obj(o), state);
-            }
-            return;
-        }
-        let robj = r.single().filter(|ro| !its.iter().any(|(_, o)| o == ro));
-        if q == "itertools.islice" {
-            // islice(it, stop) / islice(it, start, stop): start + the items it gives
-            let lit = |v: Option<&Value>| v.and_then(|x| x.kv.as_lit().filter(|_| x.pts.is_empty())).and_then(intern::key_as_int);
-            let n = match call.args.len() {
-                2 => lit(call.args.get(1)),
-                n if n >= 3 => lit(call.args.get(2)),
-                _ => None,
-            };
-            if let (Some(ro), Some(n)) = (robj, n) {
-                self.lazy_src.insert(ro, vec![(its[0].1, Some(n.max(0) as usize))]);
-                return;
-            }
-        }
-        if q == "builtins.zip" {
-            if let (Some(ro), Some(pulls)) = (robj, self.zip_pulls(call, state)) {
-                self.lazy_src.insert(ro, pulls);
-                return;
-            }
-        }
-        if LAZY_ALL.contains(&q) {
-            if let Some(ro) = robj {
-                self.lazy_src.insert(ro, its.iter().map(|(_, o)| (*o, None)).collect());
-                return;
-            }
-        }
+/// What a model call does to the one-shot iterators it is given: a full consumer uses
+/// them up; a lazy wrapper (zip, islice, map, …) takes from them when it is consumed
+/// itself; anything else leaves their position unknown.
+pub(crate) fn after_model_consume(an: &mut Analyzer, call: &Call, r: &Value, state: &mut State) {
+    // (one-shot iterators, and lazy iterators over them)
+    let its: Vec<(usize, u32)> = call.args.iter().chain(call.star_args.iter()).enumerate().filter_map(|(i, a)| a.single().filter(|o| a.kv.is_bot() && ((an.heap.obj(*o).iterator && an.heap.obj(*o).single && matches!(an.heap.kind(*o), Kind::List)) || an.m.lazy_src.contains_key(o))).map(|o| (i, o))).collect();
+    if its.is_empty() {
+        return;
+    }
+    let q = call.qual.as_str();
+    const FULL: &[&str] = &[
+        "builtins.list", "builtins.tuple", "builtins.set", "builtins.frozenset", "builtins.dict", "builtins.sorted", "builtins.sum", "builtins.min", "builtins.max",
+        "str.join", "collections.Counter", "collections.deque", "collections.OrderedDict", "collections.defaultdict", "list.extend", "set.update", "dict.update",
+        "statistics.mean", "statistics.median", "statistics.fmean", "math.fsum", "math.prod", "bytes.join",
+    ];
+    const LAZY_ALL: &[&str] = &["builtins.map", "builtins.filter", "builtins.enumerate", "builtins.iter", "itertools.chain", "itertools.starmap", "itertools.takewhile", "itertools.dropwhile", "itertools.accumulate", "itertools.compress", "itertools.groupby", "itertools.pairwise", "itertools.batched"];
+    if matches!(q, "builtins.next" | "builtins.iter") && its.len() == 1 && r.single() == Some(its[0].1) {
+        return;
+    }
+    if q == "builtins.next" {
+        return;
+    }
+    if FULL.contains(&q) {
         for (_, o) in its {
-            if self.lazy_src.contains_key(&o) {
-                self.consume_lazy(&Value::obj(o), false, state);
-            } else {
-                self.set_cursor(o, None, state);
-            }
+            an.exhaust(&Value::obj(o), state);
+        }
+        return;
+    }
+    let robj = r.single().filter(|ro| !its.iter().any(|(_, o)| o == ro));
+    if q == "itertools.islice" {
+        // islice(it, stop) / islice(it, start, stop): start + the items it gives
+        let lit = |v: Option<&Value>| v.and_then(|x| x.kv.as_lit().filter(|_| x.pts.is_empty())).and_then(intern::key_as_int);
+        let n = match call.args.len() {
+            2 => lit(call.args.get(1)),
+            n if n >= 3 => lit(call.args.get(2)),
+            _ => None,
+        };
+        if let (Some(ro), Some(n)) = (robj, n) {
+            an.m.lazy_src.insert(ro, vec![(its[0].1, Some(n.max(0) as usize))]);
+            return;
         }
     }
+    if q == "builtins.zip" {
+        if let (Some(ro), Some(pulls)) = (robj, zip_pulls(an, call, state)) {
+            an.m.lazy_src.insert(ro, pulls);
+            return;
+        }
+    }
+    if LAZY_ALL.contains(&q) {
+        if let Some(ro) = robj {
+            an.m.lazy_src.insert(ro, its.iter().map(|(_, o)| (*o, None)).collect());
+            return;
+        }
+    }
+    for (_, o) in its {
+        if an.m.lazy_src.contains_key(&o) {
+            an.consume_lazy(&Value::obj(o), false, state);
+        } else {
+            an.set_cursor(o, None, state);
+        }
+    }
+}
 
-    /// The items `zip(...)` takes from each one-shot iterator argument when it is consumed:
-    /// rounds = the shortest length; in the last round the arguments before the first that
-    /// ran out each gave one more.
-    pub(crate) fn zip_pulls(&mut self, call: &Call, state: &mut State) -> Option<Vec<(ObjId, Option<usize>)>> {
-        if !call.star_args.is_empty() || call.kwargs.keys().any(|k| &*intern::str_get(*k) != "strict") {
-            return None;
-        }
-        // (exact remaining length, or a lower bound)
-        let mut lens: Vec<(Option<usize>, usize, Option<u32>)> = Vec::new();
-        for a in &call.args {
-            let one = a.single().filter(|o| a.kv.is_bot() && self.obj(*o).iterator && self.obj(*o).single && matches!(self.kind(*o), Kind::List));
-            match one {
-                Some(o) => {
-                    let c = self.cursor_of(o, state)?;
-                    match self.llen(o, state) {
-                        Some(n) => lens.push((Some(n.saturating_sub(c)), n.saturating_sub(c), Some(o))),
-                        None => lens.push((None, self.prefix(o, state).unwrap_or(0).saturating_sub(c), Some(o))),
-                    }
-                }
-                None => {
-                    let it = self.iterate(a, &call.node, state);
-                    let n = it.items.map(|v| v.len())?;
-                    lens.push((Some(n), n, None));
-                }
-            }
-        }
-        let rounds = lens.iter().filter_map(|(e, _, _)| *e).min()?;
-        // (an argument of unknown length must surely outlast the shortest)
-        if lens.iter().any(|(e, lb, _)| e.is_none() && *lb <= rounds) {
-            return None;
-        }
-        let first_out = lens.iter().position(|(e, _, _)| *e == Some(rounds))?;
-        let mut out = Vec::new();
-        for (i, (_, _, o)) in lens.iter().enumerate() {
-            if let Some(o) = o {
-                out.push((*o, Some(if i < first_out { rounds + 1 } else { rounds })));
-            }
-        }
-        Some(out)
+/// The items `zip(...)` takes from each one-shot iterator argument when it is consumed:
+/// rounds = the shortest length; in the last round the arguments before the first that
+/// ran out each gave one more.
+pub(crate) fn zip_pulls(an: &mut Analyzer, call: &Call, state: &mut State) -> Option<Vec<(ObjId, Option<usize>)>> {
+    if !call.star_args.is_empty() || call.kwargs.keys().any(|k| &*intern::str_get(*k) != "strict") {
+        return None;
     }
+    // (exact remaining length, or a lower bound)
+    let mut lens: Vec<(Option<usize>, usize, Option<u32>)> = Vec::new();
+    for a in &call.args {
+        let one = a.single().filter(|o| a.kv.is_bot() && an.heap.obj(*o).iterator && an.heap.obj(*o).single && matches!(an.heap.kind(*o), Kind::List));
+        match one {
+            Some(o) => {
+                let c = an.cursor_of(o, state)?;
+                match an.heap.llen(o, state) {
+                    Some(n) => lens.push((Some(n.saturating_sub(c)), n.saturating_sub(c), Some(o))),
+                    None => lens.push((None, an.heap.prefix(o, state).unwrap_or(0).saturating_sub(c), Some(o))),
+                }
+            }
+            None => {
+                let it = an.iterate(a, &call.node, state);
+                let n = it.items.map(|v| v.len())?;
+                lens.push((Some(n), n, None));
+            }
+        }
+    }
+    let rounds = lens.iter().filter_map(|(e, _, _)| *e).min()?;
+    // (an argument of unknown length must surely outlast the shortest)
+    if lens.iter().any(|(e, lb, _)| e.is_none() && *lb <= rounds) {
+        return None;
+    }
+    let first_out = lens.iter().position(|(e, _, _)| *e == Some(rounds))?;
+    let mut out = Vec::new();
+    for (i, (_, _, o)) in lens.iter().enumerate() {
+        if let Some(o) = o {
+            out.push((*o, Some(if i < first_out { rounds + 1 } else { rounds })));
+        }
+    }
+    Some(out)
 }

@@ -17,10 +17,10 @@ fn lit_of(an: &Analyzer, st: &State, v: &Value, as_seq: bool) -> Option<KeyId> {
         return None;
     }
     let o: ObjId = v.single()?;
-    match an.kind(o) {
-        Kind::Tuple => an.literal_tuple(o, st, 0),
+    match an.heap.kind(o) {
+        Kind::Tuple => an.heap.literal_tuple(o, st, 0),
         Kind::List if as_seq => {
-            let n = an.llen(o, st)?;
+            let n = an.heap.llen(o, st)?;
             let items: Option<Vec<KeyId>> = (0..n)
                 .map(|i| {
                     let x = st.slot(o, Ns::Pos, intern::key_int(i as i64));
@@ -105,7 +105,7 @@ pub fn try_pure(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
         }
         "math" => {
             // (torch programs: math results stay the tensor model's numbers)
-            if !c.kwargs.is_empty() || an.torch_real {
+            if !c.kwargs.is_empty() || an.m.torch_real {
                 return None;
             }
             pyvalues::math_call(name, &args?).map(Value::lit)
@@ -128,7 +128,7 @@ pub fn try_pure(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
             // `fmt.format_map(mapping)`: a closed mapping of literals
             let recv = c.recv.clone()?;
             let text = intern::key_as_str(recv.kv.as_lit().filter(|_| recv.pts.is_empty())?)?;
-            let m = c.args.first()?.single().filter(|o| an.kind(*o) == Kind::Dict)?;
+            let m = c.args.first()?.single().filter(|o| an.heap.kind(*o) == Kind::Dict)?;
             let row = st.row(m, Ns::Item);
             if row.open() || row.present != row.definite {
                 return None;

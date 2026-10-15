@@ -1190,7 +1190,7 @@ fn sql_cmp(a: KeyId, b: KeyId) -> Option<std::cmp::Ordering> {
     }
     match ca {
         0 => Some(std::cmp::Ordering::Equal),
-        1 => crate::interp::exprs::literal_order(a, b),
+        1 => crate::interp::compare::literal_order(a, b),
         2 => Some(intern::key_as_str(a)?.cmp(&intern::key_as_str(b)?)),
         _ => None,
     }
@@ -1207,14 +1207,14 @@ fn alloc_ctx(an: &mut Analyzer, kind: Kind, node: &Node, items: Vec<Value>, ctx:
     }
     st.set_slot(oid, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), DATA), true);
     st.elems.insert(oid, if items.is_empty() { KeyVal::Lits(KeySet::new()) } else { acc.kv });
-    an.set_llen(oid, st, Some(items.len()));
+    an.heap.set_llen(oid, st, Some(items.len()));
     Value::obj(oid)
 }
 
 fn new_obj(an: &mut Analyzer, st: &mut State, node: &Node, kind: &str, label: &str, ctx: &str) -> u32 {
     let p = Payload::Method(format!("stdobj.{}", kind), Value::new());
     let oid = an.alloc_at(Kind::Namespace, node, st, label, p.clone(), Some(Row::new()), Ns::Attr, None, Some(ctx));
-    an.obj_mut(oid).payload = p;
+    an.heap.obj_mut(oid).payload = p;
     st.set_row(oid, Ns::Attr, Row::new());
     oid
 }
@@ -1251,7 +1251,7 @@ fn lit(v: &Value) -> Option<KeyId> {
 /// The parameters of `execute(sql, params)`: a sequence (positional) or a mapping (named).
 fn params_of(an: &mut Analyzer, st: &mut State, node: &Node, p: Option<&Value>) -> Option<(Vec<Value>, IndexMap<String, Value>)> {
     let Some(p) = p else { return Some((Vec::new(), IndexMap::new())) };
-    if let Some(d) = p.single().filter(|o| an.kind(*o) == Kind::Dict) {
+    if let Some(d) = p.single().filter(|o| an.heap.kind(*o) == Kind::Dict) {
         let row = st.row(d, Ns::Item);
         if row.open() || row.present != row.definite {
             return None;
@@ -1615,7 +1615,7 @@ fn row_value(an: &mut Analyzer, st: &mut State, node: &Node, factory: &Value, cu
         (None, Some(cs)) => Some(cs.iter().map(|_| Value::data("sql")).collect()),
         (None, None) => None,
     };
-    let is_row = factory.pts.iter().any(|o| an.kind(o) == Kind::External && an.external_qual(o) == "sqlite3.Row");
+    let is_row = factory.pts.iter().any(|o| an.heap.kind(o) == Kind::External && an.heap.external_qual(o) == "sqlite3.Row");
     let is_none = factory.pts.is_empty() && factory.kv.as_lit() == Some(intern::key_none());
     if is_row {
         let did = an.alloc_at(Kind::Dict, node, st, &format!("sqlite3.Row@L{}", node.line), Payload::None, Some(Row::new()), Ns::Item, None, Some(&format!("sqlrow{}", i)));
@@ -1714,7 +1714,7 @@ pub fn cursor_rows(an: &mut Analyzer, st: &mut State, node: &Node, cur: u32) -> 
     let list = st.slot(cur, Ns::Attr, key_str_lit("\u{1}rows"));
     let pos = lit(&st.slot(cur, Ns::Attr, key_str_lit("\u{1}pos"))).and_then(intern::key_as_int);
     let lo = list.single()?;
-    match (pos, an.llen(lo, st)) {
+    match (pos, an.heap.llen(lo, st)) {
         (Some(0), _) => Some(list),
         (Some(p), Some(n)) => {
             let items: Vec<Value> = (p as usize..n).map(|i| st.slot(lo, Ns::Pos, intern::key_int(i as i64))).collect();
@@ -1729,7 +1729,7 @@ pub fn cursor_rows(an: &mut Analyzer, st: &mut State, node: &Node, cur: u32) -> 
 
 fn exec_on(an: &mut Analyzer, st: &mut State, c: &Call, con: u32, existing: Option<u32>, many: bool) -> Value {
     let sql = c.arg(0, Some("sql")).and_then(|v| lit(&v)).and_then(intern::key_as_str).map(|s| s.to_string());
-    let uncertain = an.cond_depth > 0 || an.frame().loop_depth as usize > an.frame().unroll.len();
+    let uncertain = an.cond_depth() > 0 || an.frame().loop_depth as usize > an.frame().unroll.len();
     let Some(sql) = sql else {
         // unknown SQL: every table may have changed
         if let Some(db) = an.m.sql_dbs.get_mut(&con) {
@@ -1782,7 +1782,7 @@ pub fn m_sql(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         (_, "executemany") => exec_on(an, st, c, con, if is_con { None } else { Some(o) }, true),
         (_, "executescript") => {
             if let Some(script) = c.arg(0, Some("sql_script")).and_then(|v| lit(&v)).and_then(intern::key_as_str) {
-                let uncertain = an.cond_depth > 0 || an.frame().loop_depth as usize > an.frame().unroll.len();
+                let uncertain = an.cond_depth() > 0 || an.frame().loop_depth as usize > an.frame().unroll.len();
                 for part in script.split(';') {
                     if !part.trim().is_empty() {
                         run(an, con, part, Some((Vec::new(), IndexMap::new())), uncertain);
@@ -1804,7 +1804,7 @@ pub fn m_sql(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let pk = key_str_lit("\u{1}pos");
             let pos = lit(&st.slot(o, Ns::Attr, pk)).and_then(intern::key_as_int);
             let lo = list.single();
-            match (pos, lo.and_then(|l| an.llen(l, st))) {
+            match (pos, lo.and_then(|l| an.heap.llen(l, st))) {
                 (Some(p), Some(n)) => {
                     st.set_slot(o, Ns::Attr, pk, Value::lit(intern::key_int(p + 1)), true);
                     if (p as usize) < n {

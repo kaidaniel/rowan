@@ -25,13 +25,13 @@ pub fn value_order(an: &Analyzer, st: &State, a: &Value, b: &Value) -> Option<Or
             };
         }
         // a (key, value) pair of items() / zip / enumerate
-        if let Some(o) = v.single().filter(|o| an.kind(*o) == Kind::Pair && v.kv.is_bot()) {
-            if let crate::interp::Payload::Pair(k, x) = &an.obj(o).payload {
+        if let Some(o) = v.single().filter(|o| an.heap.kind(*o) == Kind::Pair && v.kv.is_bot()) {
+            if let crate::interp::Payload::Pair(k, x) = &an.heap.obj(o).payload {
                 return Some(vec![k.clone(), x.clone()]);
             }
         }
-        let o = v.single().filter(|o| an.kind(*o) == Kind::Tuple && v.kv.is_bot())?;
-        let n = an.llen(o, st)?;
+        let o = v.single().filter(|o| an.heap.kind(*o) == Kind::Tuple && v.kv.is_bot())?;
+        let n = an.heap.llen(o, st)?;
         Some((0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect())
     };
     let (ia, ib) = (items(a)?, items(b)?);
@@ -54,12 +54,12 @@ fn key_order(x: KeyId, y: KeyId) -> Option<Ordering> {
         }
         return Some(a.len().cmp(&b.len()));
     }
-    crate::interp::exprs::literal_order(x, y)
+    crate::interp::compare::literal_order(x, y)
 }
 
 /// The items of a list with known positions.
 fn list_items(an: &Analyzer, st: &State, o: ObjId) -> Option<Vec<Value>> {
-    let n = an.llen(o, st)?;
+    let n = an.heap.llen(o, st)?;
     Some((0..n).map(|i| st.slot(o, Ns::Pos, intern::key_int(i as i64))).collect())
 }
 
@@ -73,7 +73,7 @@ fn set_items(an: &mut Analyzer, st: &mut State, o: ObjId, vals: Vec<Value>) {
     st.set_slot(o, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), false);
     let cur = st.elems.get(&o).unwrap_or_else(|| acc.kv.clone());
     st.elems.insert(o, crate::domain::kv_join(&cur, &acc.kv));
-    an.set_llen(o, st, Some(vals.len()));
+    an.heap.set_llen(o, st, Some(vals.len()));
 }
 
 /// The list's positions are no longer known; `x` may be among its items.
@@ -83,7 +83,7 @@ fn blur(an: &mut Analyzer, st: &mut State, o: ObjId, x: Option<&Value>) {
         let cur = st.elems.get(&o).unwrap_or_else(|| x.kv.clone());
         st.elems.insert(o, crate::domain::kv_join(&cur, &x.kv));
     }
-    an.set_llen(o, st, None);
+    an.heap.set_llen(o, st, None);
     st.drop_obj_ns(o, Ns::Pos);
 }
 
@@ -140,7 +140,7 @@ fn dunders_run(an: &mut Analyzer, st: &mut State, container: &Value, item: Optio
     let elems = an.elem_value(&it.elem, node, "el");
     let all = item.map_or_else(|| elems.clone(), |x| x.join(&elems));
     let names: &[&str] = if arith { &["__lt__", "__gt__", "__le__", "__ge__", "__add__", "__radd__", "__sub__", "__truediv__"] } else { &["__lt__", "__gt__", "__le__", "__ge__"] };
-    let runs = |an: &Analyzer, o: crate::domain::ObjId| an.kind(o) == Kind::Instance && an.instance_class(o).is_some_and(|c| names.iter().any(|m| an.class_lookup(c, m).is_some()));
+    let runs = |an: &Analyzer, o: crate::domain::ObjId| an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).is_some_and(|c| names.iter().any(|m| an.class_lookup(c, m).is_some()));
     if !all.pts.iter().any(|o| runs(an, o)) || !st.reachable {
         return;
     }
@@ -168,7 +168,7 @@ pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     comparisons_run(an, st, c.args.first().unwrap_or(&Value::new()), c.args.get(1), &c.node);
     let heap = c.args.first().cloned().unwrap_or_default();
-    let h = heap.single().filter(|o| an.kind(*o) == Kind::List && an.obj(*o).single);
+    let h = heap.single().filter(|o| an.heap.kind(*o) == Kind::List && an.heap.obj(*o).single);
     let elem_of = |an: &mut Analyzer, st: &mut State, v: &Value| { let it_ = an.iterate(v, &c.node, st); an.elem_value(&it_.elem, &c.node, "el") };
     match name.as_str() {
         "heappush" => {
@@ -301,7 +301,7 @@ pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                         if rev { o.reverse() } else { o }
                     });
                     let vals: Vec<Value> = idx.into_iter().take(n.max(0) as usize).map(|i| keyed[i].1.clone()).collect();
-                    let l = an.it_list(Some(vals), Value::new(), &c.node, st, "heapn");
+                    let l = crate::models::itertools::it_list(an, Some(vals), Value::new(), &c.node, st, "heapn");
                     return plain_list(an, l);
                 }
             }
@@ -310,7 +310,7 @@ pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 an.call_value(f, &c.node, None, st, Some(vec![e]));
             }
             let e = an.elem_value(&it.elem, &c.node, "el");
-            let l = an.it_list(None, e, &c.node, st, "heapn");
+            let l = crate::models::itertools::it_list(an, None, e, &c.node, st, "heapn");
             plain_list(an, l)
         }
         "merge" => {
@@ -323,7 +323,7 @@ pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     all.extend(its);
                 }
             }
-            an.it_list(None, elem, &c.node, st, "heapmerge")
+            crate::models::itertools::it_list(an, None, elem, &c.node, st, "heapmerge")
         }
         _ => Value::data(&format!("heapq.{}", name)),
     }
@@ -332,7 +332,7 @@ pub fn m_heapq(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// (nlargest / nsmallest return lists: not one-shot iterators)
 fn plain_list(an: &mut Analyzer, v: Value) -> Value {
     if let Some(o) = v.single() {
-        an.obj_mut(o).iterator = false;
+        an.heap.obj_mut(o).iterator = false;
     }
     v
 }
@@ -348,7 +348,7 @@ pub fn m_bisect(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let right = !name.ends_with("_left");
     let insort = name.starts_with("insort");
     // a parameter's value: decided at the call site
-    let o = a.single().filter(|o| matches!(an.kind(*o), Kind::List | Kind::Tuple));
+    let o = a.single().filter(|o| matches!(an.heap.kind(*o), Kind::List | Kind::Tuple));
     let items = o.and_then(|o| list_items(an, st, o));
     if let Some(its) = items {
         let lo = c.arg(2, Some("lo")).and_then(|v| lit_int(&v)).unwrap_or(0).max(0) as usize;
@@ -457,8 +457,8 @@ pub fn m_methodcaller(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     call_args.extend(kws.iter().map(|(k, g)| format!("{}={}", k, g)));
     let modname = format!("<methodcaller {} {}>", mname, c.site);
     let src = format!("def caller(obj):\n    return obj.{}({})\n", mname, call_args.join(", "));
-    let moid = match an.modules.get(&modname) {
-        Some(&m) => m,
+    let moid = match an.module(&modname) {
+        Some(m) => m,
         None => {
             let Ok((idx, tree)) = crate::frontend::parse(&modname, None, src) else { return Value::data("methodcaller") };
             an.make_module(&modname, None, idx, tree)
@@ -488,14 +488,14 @@ fn value_eq(an: &Analyzer, st: &State, a: &Value, b: &Value) -> Option<bool> {
             None => Some(false),
         };
     }
-    if a.pts.len() == 1 && a.pts == b.pts && a.kv.is_bot() && b.kv.is_bot() && an.obj(a.pts.first().unwrap()).single {
+    if a.pts.len() == 1 && a.pts == b.pts && a.kv.is_bot() && b.kv.is_bot() && an.heap.obj(a.pts.first().unwrap()).single {
         return Some(true);
     }
     // an instance of plain user classes without `__eq__` equals only itself: never a literal
     let plain = |v: &Value| {
         v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| {
-            an.kind(o) == Kind::Instance && an.instance_class(o).is_some_and(|c| {
-                an.class_lookup(c, "__eq__").is_none() && an.mro(c).iter().all(|m| an.class_info_opt(*m).is_some_and(|ci| !ci.open_base && !ci.lib.dict_base && !ci.lib.typed_dict && !ci.lib.named_tuple))
+            an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).is_some_and(|c| {
+                an.class_lookup(c, "__eq__").is_none() && an.heap.mro(c).iter().all(|m| an.heap.class_info_opt(*m).is_some_and(|ci| !ci.open_base && !ci.lib.dict_base && !ci.lib.typed_dict && !ci.lib.named_tuple))
             })
         })
     };
@@ -512,7 +512,7 @@ pub fn m_seq_index(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let count = c.qual.ends_with("count");
     let recv = c.recv.clone().unwrap_or_default();
     let x = c.args.first().cloned().unwrap_or_default();
-    if let Some(o) = recv.single().filter(|o| matches!(an.kind(*o), Kind::List | Kind::Tuple)) {
+    if let Some(o) = recv.single().filter(|o| matches!(an.heap.kind(*o), Kind::List | Kind::Tuple)) {
         if let Some(its) = list_items(an, st, o) {
             let eqs: Vec<Option<bool>> = its.iter().map(|it| value_eq(an, st, it, &x)).collect();
             if count {
@@ -628,7 +628,7 @@ fn m_template_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let text = c.arg(0, Some("template")).unwrap_or_else(|| Value::data("template"));
     let p = crate::interp::Payload::Method("stdobj.template".into(), text.clone());
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, &format!("Template@L{}", c.line), p.clone(), Some(crate::domain::Row::new()), Ns::Attr, None, None);
-    an.obj_mut(oid).payload = p;
+    an.heap.obj_mut(oid).payload = p;
     let tk = intern::key_str_lit("template");
     st.set_row(oid, Ns::Attr, crate::domain::Row::new().store(tk, true));
     st.set_slot(oid, Ns::Attr, tk, text, true);
@@ -638,7 +638,7 @@ fn m_template_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// `t.substitute(mapping, **kws)` / `t.safe_substitute(…)` / `t.get_identifiers()` / `t.is_valid()`.
 pub fn m_template(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
-    let text = c.recv.as_ref().and_then(|r| r.single()).and_then(|o| match &an.obj(o).payload {
+    let text = c.recv.as_ref().and_then(|r| r.single()).and_then(|o| match &an.heap.obj(o).payload {
         crate::interp::Payload::Method(_, t) => t.kv.as_lit().filter(|_| t.pts.is_empty()).and_then(intern::key_as_str).map(|s| s.to_string()),
         _ => None,
     });

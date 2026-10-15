@@ -80,7 +80,7 @@ fn text_value(t: &Text, line: u32) -> Value {
 }
 
 fn is_stringio(an: &Analyzer, o: ObjId) -> bool {
-    an.kind(o) == Kind::Namespace && matches!(&an.obj(o).payload, Payload::Method(q, _) if q == "stdobj.stringio")
+    an.heap.kind(o) == Kind::Namespace && matches!(&an.heap.obj(o).payload, Payload::Method(q, _) if q == "stdobj.stringio")
 }
 
 /// The text a value of StringIO objects / strings holds (joined over the objects).
@@ -261,38 +261,36 @@ fn parse_text(text: &str, delim: char, quote: char) -> Option<Vec<Vec<String>>> 
     Some(rows)
 }
 
-impl Analyzer {
-    /// A list with these items at `node`, its own object per `ctx`.
-    fn csv_list(&mut self, vals: Vec<Value>, node: &Node, st: &mut State, ctx: &str, iterator: bool) -> Value {
-        let oid = self.alloc_at(Kind::List, node, st, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, Some(ctx));
-        let acc = join_values(vals.clone());
-        let single = self.obj(oid).single;
-        st.set_slot(oid, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), single);
-        st.elems.insert(oid, acc.kv.clone());
-        if single {
-            for (i, v) in vals.iter().enumerate() {
-                st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
-            }
-            self.set_llen(oid, st, Some(vals.len()));
-        } else {
-            self.set_llen(oid, st, None);
+/// A list with these items at `node`, its own object per `ctx`.
+fn csv_list(an: &mut Analyzer, vals: Vec<Value>, node: &Node, st: &mut State, ctx: &str, iterator: bool) -> Value {
+    let oid = an.alloc_at(Kind::List, node, st, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, Some(ctx));
+    let acc = join_values(vals.clone());
+    let single = an.heap.obj(oid).single;
+    st.set_slot(oid, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), single);
+    st.elems.insert(oid, acc.kv.clone());
+    if single {
+        for (i, v) in vals.iter().enumerate() {
+            st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
         }
-        if iterator {
-            self.obj_mut(oid).iterator = true;
-        }
-        Value::obj(oid)
+        an.heap.set_llen(oid, st, Some(vals.len()));
+    } else {
+        an.heap.set_llen(oid, st, None);
     }
+    if iterator {
+        an.heap.obj_mut(oid).iterator = true;
+    }
+    Value::obj(oid)
+}
 
-    fn csv_str_list(&mut self, items: &[String], node: &Node, st: &mut State, ctx: &str) -> Value {
-        let vals: Vec<Value> = items.iter().map(|x| Value::lit_str(x)).collect();
-        self.csv_list(vals, node, st, ctx, false)
-    }
+fn csv_str_list(an: &mut Analyzer, items: &[String], node: &Node, st: &mut State, ctx: &str) -> Value {
+    let vals: Vec<Value> = items.iter().map(|x| Value::lit_str(x)).collect();
+    csv_list(an, vals, node, st, ctx, false)
 }
 
 pub fn stringio_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let init = c.arg(0, Some("initial_value")).unwrap_or_else(|| Value::lit_str(""));
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, &format!("StringIO@L{}", c.line), Payload::Method("stdobj.stringio".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
-    an.obj_mut(oid).payload = Payload::Method("stdobj.stringio".into(), Value::new());
+    an.heap.obj_mut(oid).payload = Payload::Method("stdobj.stringio".into(), Value::new());
     // (the text as given: a literal, or a library's text label such as pandas' to_json)
     let t = if init.pts.is_empty() { init } else { Value::data(&format!("text@L{}", c.line)) };
     st.set_slot(oid, Ns::Attr, text_key(), t, true);
@@ -318,7 +316,7 @@ pub fn writer_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         None => true,
     };
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, &format!("{}@L{}", if dict { "DictWriter" } else { "writer" }, c.line), Payload::Method("stdobj.csvwriter".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
-    an.obj_mut(oid).payload = Payload::Method("stdobj.csvwriter".into(), Value::new());
+    an.heap.obj_mut(oid).payload = Payload::Method("stdobj.csvwriter".into(), Value::new());
     let known = plain && delim.is_some() && quote.is_some() && term.is_some();
     an.m.csv_writers.insert(
         oid,
@@ -417,7 +415,7 @@ pub fn m_stdobj(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 match t {
                     Text::Lit(s) => {
                         let lines: Vec<String> = s.split_inclusive('\n').map(|x| x.to_string()).collect();
-                        an.csv_str_list(&lines, &c.node, st, "lines")
+                        csv_str_list(an, &lines, &c.node, st, "lines")
                     }
                     _ => Value::data("lines"),
                 }
@@ -499,7 +497,7 @@ fn dict_row_text(an: &mut Analyzer, st: &mut State, r: &Value, w: &CsvWriter, _c
         }
         return Text::Unknown;
     };
-    let recs: Vec<ObjId> = r.pts.iter().filter(|o| an.kind(*o) == Kind::Dict).collect();
+    let recs: Vec<ObjId> = r.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Dict).collect();
     if recs.is_empty() || recs.len() != r.pts.len() {
         return Text::Unknown;
     }
@@ -555,22 +553,22 @@ pub fn reader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let plain = c.kwargs.keys().all(|k| matches!(&*intern::str_get(*k), "delimiter" | "quotechar"));
     if let (Text::Lit(text), Some(d), Some(q), true) = (text_in(an, st, &f), delim, quote, plain) {
         if let Some(rows) = parse_text(&text, d, q) {
-            let vals: Vec<Value> = rows.iter().enumerate().map(|(i, r)| an.csv_str_list(r, &c.node, st, &format!("csvr{}", i))).collect();
-            return an.csv_list(vals, &c.node, st, "csvrows", true);
+            let vals: Vec<Value> = rows.iter().enumerate().map(|(i, r)| csv_str_list(an, r, &c.node, st, &format!("csvr{}", i))).collect();
+            return csv_list(an, vals, &c.node, st, "csvrows", true);
         }
     }
     // unknown rows: lists of strings
     let e = Value::data(&format!("csv field@L{}", c.line));
-    let row = an.csv_list(vec![], &c.node, st, "csvrow", false);
+    let row = csv_list(an, vec![], &c.node, st, "csvrow", false);
     if let Some(o) = row.single() {
         st.set_slot(o, Ns::Elem, intern::STAR, e.clone(), true);
         st.elems.insert(o, e.kv.clone());
-        an.set_llen(o, st, None);
+        an.heap.set_llen(o, st, None);
     }
-    let lid = an.csv_list(vec![], &c.node, st, "csvrows", true);
+    let lid = csv_list(an, vec![], &c.node, st, "csvrows", true);
     if let Some(o) = lid.single() {
         st.set_slot(o, Ns::Elem, intern::STAR, row.clone(), true);
-        an.set_llen(o, st, None);
+        an.heap.set_llen(o, st, None);
     }
     lid
 }
@@ -616,7 +614,7 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                                 st.set_slot(did, Ns::Item, k, v, true);
                             }
                             if r.len() > fields.len() {
-                                let rest = an.csv_str_list(&r[fields.len()..].to_vec(), &c.node, st, &format!("csvrest{}", i));
+                                let rest = csv_str_list(an, &r[fields.len()..].to_vec(), &c.node, st, &format!("csvrest{}", i));
                                 row = row.store(rk, true);
                                 st.set_slot(did, Ns::Item, rk, rest, true);
                             }
@@ -624,10 +622,10 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             vals.push(Value::obj(did));
                         }
                     }
-                    let lv = an.csv_list(vals, &c.node, st, "csvdrows", true);
+                    let lv = csv_list(an, vals, &c.node, st, "csvdrows", true);
                     if let Some(o) = lv.single() {
                         let fv = match &fields {
-                            Some(fs) => an.csv_str_list(fs, &c.node, st, "csvfields"),
+                            Some(fs) => csv_str_list(an, fs, &c.node, st, "csvfields"),
                             None => an.none_v.clone(),
                         };
                         an.m.csv_readers.insert(o, fv);
@@ -652,17 +650,17 @@ pub fn dictreader_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         _ => Row::with_source(Source::new(&format!("csv.DictReader@L{}", c.line), SourceKind::External)),
     };
     let rid = an.alloc_at(Kind::Dict, &c.node, st, &format!("DictReader row@L{}", c.line), Payload::None, Some(row.clone()), Ns::Item, Some(false), None);
-    an.obj_mut(rid).iter_elem = true;
+    an.heap.obj_mut(rid).iter_elem = true;
     for k in row.present.iter() {
         let v = if Some(k) == rk { Value::data("csv rest") } else { Value::data(&format!("csv field@L{}", c.line)) };
         st.set_slot(rid, Ns::Item, k, v, false);
     }
     let ctx = an.frame().ctx.clone();
-    let vid = an.alloc_raw(Kind::View, &format!("view:elems:{}", c.site), &ctx, true, "DictReader", Payload::View(ViewKind::Elems, Value::obj(rid)));
-    an.obj_mut(vid).payload = Payload::View(ViewKind::Elems, Value::obj(rid));
+    let vid = an.heap.alloc_raw(Kind::View, &format!("view:elems:{}", c.site), &ctx, true, "DictReader", Payload::View(ViewKind::Elems, Value::obj(rid)));
+    an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Elems, Value::obj(rid));
     let fv = match (&text, &given, &fieldnames) {
-        (_, Some(g), _) => an.csv_str_list(g, &c.node, st, "csvfields"),
-        (Text::Hdr(_, fs), None, None) => an.csv_str_list(fs, &c.node, st, "csvfields"),
+        (_, Some(g), _) => csv_str_list(an, g, &c.node, st, "csvfields"),
+        (Text::Hdr(_, fs), None, None) => csv_str_list(an, fs, &c.node, st, "csvfields"),
         (_, None, Some(fv)) => fv.clone(),
         _ => Value::data("fieldnames"),
     };
@@ -693,7 +691,7 @@ pub fn print_into(an: &mut Analyzer, st: &mut State, c: &Call) {
 /// `contextlib.redirect_stdout(f)` / `redirect_stderr(f)`: a manager holding its target.
 pub fn redirect_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, "redirect", Payload::Method("stdobj.redirect".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
-    an.obj_mut(oid).payload = Payload::Method("stdobj.redirect".into(), Value::new());
+    an.heap.obj_mut(oid).payload = Payload::Method("stdobj.redirect".into(), Value::new());
     let target = c.arg(0, Some("new_target")).unwrap_or_default();
     st.set_slot(oid, Ns::Attr, key_str_lit("\u{1}target"), target, true);
     st.set_slot(oid, Ns::Attr, key_str_lit("\u{1}stderr"), Value::lit(intern::key_bool(c.qual.ends_with("stderr"))), true);
@@ -705,7 +703,7 @@ pub fn redirect_targets(an: &Analyzer, st: &State, managers: &[Value]) -> Vec<Va
     let mut out = Vec::new();
     for m in managers {
         for o in m.pts.iter() {
-            if an.kind(o) == Kind::Namespace && matches!(&an.obj(o).payload, Payload::Method(q, _) if q == "stdobj.redirect") {
+            if an.heap.kind(o) == Kind::Namespace && matches!(&an.heap.obj(o).payload, Payload::Method(q, _) if q == "stdobj.redirect") {
                 let err = st.slot(o, Ns::Attr, key_str_lit("\u{1}stderr")).kv.as_lit() == Some(intern::key_bool(true));
                 if !err {
                     out.push(st.slot(o, Ns::Attr, key_str_lit("\u{1}target")));
@@ -720,7 +718,7 @@ pub fn redirect_targets(an: &Analyzer, st: &State, managers: &[Value]) -> Vec<Va
 pub fn closing_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let kind = if c.qual.ends_with("closing") { "stdobj.closing" } else { "stdobj.nullcontext" };
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, kind, Payload::Method(kind.into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
-    an.obj_mut(oid).payload = Payload::Method(kind.into(), Value::new());
+    an.heap.obj_mut(oid).payload = Payload::Method(kind.into(), Value::new());
     let target = c.arg(0, Some("enter_result")).or_else(|| c.arg(0, Some("thing"))).unwrap_or_else(|| an.none_v.clone());
     st.set_slot(oid, Ns::Attr, key_str_lit("\u{1}target"), target, true);
     Value::obj(oid)
@@ -730,9 +728,9 @@ pub fn closing_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 pub fn enter_value(an: &Analyzer, st: &State, v: &Value) -> Option<Value> {
     let mut outs = Vec::new();
     for o in v.pts.iter() {
-        match &an.obj(o).payload {
-            Payload::Method(q, _) if an.kind(o) == Kind::Namespace && matches!(q.as_str(), "stdobj.closing" | "stdobj.nullcontext" | "stdobj.redirect") => outs.push(st.slot(o, Ns::Attr, key_str_lit("\u{1}target"))),
-            Payload::Method(q, _) if an.kind(o) == Kind::Namespace && q.starts_with("stdobj.") => outs.push(Value::obj(o)),
+        match &an.heap.obj(o).payload {
+            Payload::Method(q, _) if an.heap.kind(o) == Kind::Namespace && matches!(q.as_str(), "stdobj.closing" | "stdobj.nullcontext" | "stdobj.redirect") => outs.push(st.slot(o, Ns::Attr, key_str_lit("\u{1}target"))),
+            Payload::Method(q, _) if an.heap.kind(o) == Kind::Namespace && q.starts_with("stdobj.") => outs.push(Value::obj(o)),
             _ => return None,
         }
     }
@@ -746,7 +744,7 @@ pub fn enter_value(an: &Analyzer, st: &State, v: &Value) -> Option<Value> {
 /// `closing(x)`'s exit: `x.close()`.
 pub fn closing_exit(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) {
     for o in v.pts.iter() {
-        if an.kind(o) == Kind::Namespace && matches!(&an.obj(o).payload, Payload::Method(q, _) if q == "stdobj.closing") {
+        if an.heap.kind(o) == Kind::Namespace && matches!(&an.heap.obj(o).payload, Payload::Method(q, _) if q == "stdobj.closing") {
             let t = st.slot(o, Ns::Attr, key_str_lit("\u{1}target"));
             let m = an.load_attr(&t, "close", node, st, false);
             an.call_value(&m, node, None, st, Some(vec![]));
@@ -757,7 +755,7 @@ pub fn closing_exit(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node) {
 /// `contextlib.ExitStack()`.
 pub fn exitstack_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_at(Kind::Namespace, &c.node, st, "ExitStack", Payload::Method("stdobj.exitstack".into(), Value::new()), Some(Row::new()), Ns::Attr, None, None);
-    an.obj_mut(oid).payload = Payload::Method("stdobj.exitstack".into(), Value::new());
+    an.heap.obj_mut(oid).payload = Payload::Method("stdobj.exitstack".into(), Value::new());
     an.m.exit_callbacks.insert(oid, Vec::new());
     Value::obj(oid)
 }
@@ -774,7 +772,7 @@ pub fn exitstack_close(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node
             let mut nd = *node;
             nd.col = node.col.wrapping_add(3_000_000 + i as u32);
             for fo in f.pts.iter() {
-                if an.kind(fo) == Kind::Function {
+                if an.heap.kind(fo) == Kind::Function {
                     an.call_user(fo, None, args.clone(), kwargs.clone(), vec![], vec![], st, &nd, None, false);
                 } else {
                     an.call_value(&Value::obj(fo), &nd, None, st, Some(args.clone()));
@@ -799,8 +797,8 @@ fn m_exitstack(an: &mut Analyzer, st: &mut State, c: &Call, name: &str, recv: &V
             let Some(cm) = c.args.first().cloned() else { return Value::data("context") };
             let mut outs = Vec::new();
             for o in cm.pts.iter() {
-                match an.kind(o) {
-                    Kind::List if an.obj(o).iterator => {
+                match an.heap.kind(o) {
+                    Kind::List if an.heap.obj(o).iterator => {
                         let it = an.iterate(&Value::obj(o), &c.node, st);
                         outs.push(match it.items {
                             Some(items) if !items.is_empty() => items[0].clone(),
@@ -884,12 +882,12 @@ pub fn with_suppress(an: &mut Analyzer, w: &'static ast::StmtWith, state: &mut S
     }
     let mut probe = state.copy();
     let fv = an.eval(&call.func, &mut probe);
-    let is_suppress = !fv.pts.is_empty() && fv.pts.iter().all(|o| an.kind(o) == Kind::External && an.external_qual(o) == "contextlib.suppress");
+    let is_suppress = !fv.pts.is_empty() && fv.pts.iter().all(|o| an.heap.kind(o) == Kind::External && an.heap.external_qual(o) == "contextlib.suppress");
     if !is_suppress {
         return false;
     }
     // `try: body / except (E, …): pass`
-    let h = crate::interp::stmts::Handler { types: Some(call.arguments.args.iter().collect()), name: None, body: &[], line: crate::frontend::node(w).line };
-    an.stmt_try_parts(&w.body, vec![h], &[], std::rc::Rc::new(crate::interp::stmts::Finally::Block(&[])), state);
+    let h = crate::interp::Handler { types: Some(call.arguments.args.iter().collect()), name: None, body: &[], line: crate::frontend::node(w).line };
+    an.stmt_try_parts(&w.body, vec![h], &[], std::rc::Rc::new(crate::interp::Finally::Block(&[])), state);
     true
 }

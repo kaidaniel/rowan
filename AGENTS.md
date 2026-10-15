@@ -14,7 +14,7 @@ namespace packages).
 * **Values** (`Value`, `domain.rs`) are a set of object ids plus a scalar part (`KeyVal`): a
   literal, up to 64 literals, the keys of some objects, or `Data(label)`, an unknown named by
   where it comes from (`row["id"]`, `x.shape[0]`). A label can also hold a tensor shape.
-* **Objects** (`Obj`, `interp/mod.rs`) are identified by allocation site and context (the call
+* **Objects** (`Obj`, `interp/heap.rs`) are identified by allocation site and context (the call
   chain, 2 deep). A *single* object stands for one runtime object: stores into it are strong.
   Allocating a site again while its earlier object is live gives a variant (up to 8), then a
   *merged* object (stores only join). Garbage collection at returns, loop exits and try exits
@@ -24,6 +24,10 @@ namespace packages).
   its **rows** (`(object, namespace)` → `Row`), slots (the value under each key), elements,
   lengths, and the requirements recorded so far. The maps are persistent Patricia tries
   (`layered.rs`): a copy is O(1), and a join or diff costs what two states differ in.
+* **The analyzer** (`Analyzer`, `interp/mod.rs`) is components with private state, one file
+  each (Layout); models, the report and the driver see the `Heap`, their `m` and `api.rs`.
+  Its doc sorts the components for a call memo: running context (part of a key), state a run
+  changes outside `State` (to replay), output (appended), caches.
 * **Rows** are the key-set model: `present` (may be there) ⊇ `likely` (there unless unknown
   code removed it) ⊇ `definite` (there on every path), plus `absent`, open `sources` (inputs),
   and `mutators` (unknown calls). A row without sources or mutators is *closed*. A successful
@@ -47,14 +51,14 @@ namespace packages).
   run with open parameters (its lines then hold for the calls that did not run). Entry runs
   are not counted (one per function). So the work is bounded by functions times the budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation
-    reruns from the heaps of its recursive calls too (`rec_heap`), 8 rounds, then widened.
+    reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened.
   * **Unknown values** are not taken for instances of the program's classes: a method of an
     unknown object is an unknown call (no duck typing; it was a closed-world assumption).
   * **Unknown calls** may change everything they reach through what they are given, at any
     depth: records get a mutator, slots may hold anything (one shared unknown object, which
     no store changes: a value stored into it goes to unknown code, `escape`), lists and sets
     any items and length; the program's functions among it may run (`follow_code`). A walk
-    by the same code from the same values walks only what changed since (`havoc_memo`).
+    by the same code from the same values walks only what changed since (`Havoc`'s memo).
     They return an unknown and may raise anything. Library functions known to have no effect
     are `noeffect` (`ALLOWLIST_PREFIXES`), unless they change their arguments (`random.shuffle`)
     or are given the program's functions. Several callees run as `alternatives`.
@@ -64,7 +68,7 @@ namespace packages).
     become `param F.x` schemas.
 * **Generators** run whole at their first consumption (`force_gen`), in the creating call's
   context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`). If code
-  between items changes what the generator reads after a yield (`gen_watch`), it runs again
+  between items changes what the generator reads after a yield (`Gens::watch`), it runs again
   with that changed at each yield (`with_gen_restart`). `@contextmanager` bodies run at yields.
 * **Requirements and schemas:** reading a key from a row open through an input records a
   requirement on that input. A key read on every path is `always`, on some paths `sometimes`.
@@ -73,11 +77,13 @@ namespace packages).
 * **Verdicts:** every read, `del` and `pop` gets a tier per object from its row (`classify`):
   `proven`, `possibly`, `missing` and `input` are sound; `likely` / `likely-missing` are
   optimistic (they assume unknown code removed nothing).
-* **Models** (`models/`, by qualified name in `Registry`) compute CPython's result on known
-  values (str / bytes, formatting, json, re, datetime, decimal, sqlite, csv…), and simulate
-  pandas columns, pydantic / FastAPI validation and routing, and torch / numpy shapes (dims as
-  polynomials; an undecided condition is a requirement and then a fact on the path; in torch
-  modules `int` / `Tensor` annotations hold; a module-level unknown number names its dims).
+* **Models** (`models/`, by qualified name in `Registry`; free functions of `&mut Analyzer` that
+  see the `Heap`, their `models::Tables` and the interpreter's public methods) compute
+  CPython's result on known values (str / bytes, formatting, json, re, datetime, decimal,
+  sqlite, csv…), and simulate pandas columns, pydantic / FastAPI validation and routing, and
+  torch / numpy shapes (dims as polynomials; an undecided condition is a requirement and then a
+  fact on the path; in torch modules `int` / `Tensor` annotations hold; a module-level unknown
+  number names its dims).
 * **Deadline:** a safety net only (`ms`, 10 s): past it user calls become unknown calls and
   running calls stop where they are. The budget, not the deadline, bounds the work.
 * **Soundness** holds relative to the models and to annotations of values whose class is
@@ -155,24 +161,18 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
   no `timeout`; time a run inside the guard (`.guard/run /usr/bin/time -l rowan …`: the guard
   polls every 0.5 s). Compare builds on results (`--json` tier counts) and counters too.
 
-## Layout (`rowan/src/`, ~62k lines: the engine ~20.7k, the models ~42k)
+## Layout (`rowan/src/`, ~64k lines: the engine ~22k, the models ~42k)
 
 | file | role |
 | --- | --- |
-| `intern.rs`, `domain.rs` | interned keys, sources, lenses; `Row`, `KeyVal`, `Value`, transfers, `classify` |
-| `layered.rs`, `state.rs` | persistent maps (`LayerMap`, `TwoLevel`); `State`, joins, `diff_keys` |
-| `frontend.rs`, `scopes.rs` | ruff parsing, leaked `&'static` trees, module registry; lexical scopes |
-| `interp/mod.rs` | `Analyzer`, side tables, `Obj`, allocation (`alloc`, `live_among`), lengths, GC, entry runs |
-| `interp/stmts.rs` | statements, loops, try / with / match, `finally` |
-| `interp/exprs.rs`, `interp/funcs.rs` | expressions, comprehensions, yields; functions, iteration, generators |
-| `interp/narrow.rs`, `interp/access.rs` | tests (`split`), narrowing; attribute and item access, verdicts, requirements |
-| `interp/calls.rs`, `interp/effects.rs` | calls: per-call-site runs, budget, recursion, `__new__`, dataclass init; what skipped calls may change |
-| `models/shape.rs` | tensor shapes (dims as polynomials) for the torch and numpy models |
-| `report.rs`, `main.rs` | text / JSON / facts output; CLI (mimalloc), `rowan serve` (on a 1 GiB-stack thread) |
-| `models/` | `mod.rs` (`Registry`, builtins, containers); `tables` (what builtins / library calls raise, change, keep); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib (`enums`, `exceptions`, functools, itertools, …); `pandas`, `pydantic`, `fastapi`, `torch` |
-
-`rowan/py/` is a PyO3 binding (does not load on macOS 26); `vscode-rowan/` the editor
-extension (talks to `rowan serve`).
+| `intern.rs`, `domain.rs`, `layered.rs`, `state.rs`; `frontend.rs`, `scopes.rs` | interned keys, sources, lenses; `Row`, `KeyVal`, `Value`, transfers, `classify`; persistent maps (`LayerMap`, `TwoLevel`); `State`, joins, `diff_keys`; ruff parsing, leaked `&'static` trees, module registry; lexical scopes |
+| `interp/mod.rs`, `context.rs`, `program.rs`, `entry.rs`; `heap.rs`, `alloc.rs`, `gc.rs` | `Analyzer` and its components' map; `Context` (frames, callers, call chain), `Modes`; `Program` (paths, models, modules), imports; running the program, entry runs (`Entries`); the `Heap` (objects, payloads, lengths, class attributes, keys for objects); allocation policy (`alloc`: variants, recency); liveness (`live_among`, `gc_pinned`), collectors, `rename_recent` |
+| `interp/stmts.rs`, `loops.rs`, `classes.rs`, `tries.rs`; `exprs.rs`, `ops.rs`, `compare.rs`, `comps.rs` | statements, match; loops (unrolled, fixpoint); class definitions; raises, try contexts (`Unwind`), try / with, `finally`; expressions; operators, f-strings; comparisons, truth; comprehensions |
+| `interp/funcs.rs`, `gens.rs`, `narrow.rs`; `access.rs`, `items.rs`, `attrs.rs`, `keys.rs` | functions, names, iteration; generators and `@contextmanager` bodies (`Gens`); tests (`split`), narrowing; what accesses share (guards, requirements); item access; attribute access; keys standing for values |
+| `interp/calls.rs`, `recursion.rs`, `budget.rs`, `unknown.rs`, `effects.rs` | calls: per-call-site runs, `__new__`, dataclass init, bindings; `Recursion` (activations, fixpoint rounds); `Budget` (per code, deadline, work counters); unknown calls (`Havoc` walks); what skipped calls may change (`skipped_call`, `EffectsCache`) |
+| `interp/findings.rs`, `names.rs`, `report.rs`, `api.rs`; `main.rs` | `Findings` (verdicts, notes, row checks, hover facts), `Names` (symbols, origins); text / JSON / facts output; what models, report and driver may use; CLI (mimalloc), `rowan serve` (on a 1 GiB-stack thread) |
+| `models/` | `mod.rs` (`Registry`, builtins, containers, `Tables`); `tables` (what builtins / library calls raise, change, keep); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib (`enums`, `exceptions`, functools, itertools, …); `pandas`, `pydantic`, `fastapi`, `torch`; `shape.rs` (tensor dims as polynomials) |
+| `rowan/py/`, `vscode-rowan/` | a PyO3 binding (does not load on macOS 26); the editor extension (talks to `rowan serve`) |
 
 ## Implementation rules that are easy to break
 
