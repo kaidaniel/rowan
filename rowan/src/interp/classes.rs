@@ -3,8 +3,8 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{Ns, Value};
-use crate::frontend::{self};
+use crate::domain::{ObjId, Ns, Value};
+use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s};
 use crate::state::{Kind, State};
 
@@ -16,53 +16,7 @@ impl Analyzer {
         let fr_ctx = self.frame().ctx.clone();
         let fr_single = self.frame().single;
         let fr_cells = self.frame().cells.clone();
-        let mut bases: Vec<u32> = Vec::new();
-        let mut open_base = false;
-        let mut lib = crate::models::ClassBase::default();
-        let mut ek = crate::interp::EnumKind::default();
-        if let Some(args) = &c.arguments {
-            for b in args.args.iter() {
-                // `RootModel[list[int]]`, `Generic[T]`: the subscripted class decides
-                let b: &ast::Expr = match b {
-                    ast::Expr::Subscript(sb) => &sb.value,
-                    other => other,
-                };
-                let bv = self.eval(b, state);
-                for oid in bv.pts.iter() {
-                    match self.heap.kind(oid) {
-                        Kind::Class => {
-                            if let Some(k) = self.m.enum_kind.get(&oid) {
-                                ek.mixed |= k.mixed;
-                                ek.is_str |= k.is_str;
-                                ek.repr_value |= k.repr_value;
-                                ek.flag |= k.flag;
-                            }
-                            // (a base that derives from an external class — `list`, an unseen
-                            // library class — makes this one's instances open too)
-                            if self.heap.class_info_opt(oid).is_some_and(|ci| ci.open_base) {
-                                open_base = true;
-                            }
-                            bases.push(oid)
-                        }
-                        Kind::External => lib.join(crate::models::class_base(&self.heap.external_qual(oid))),
-                        _ => open_base = true,
-                    }
-                }
-                if bv.pts.is_empty() {
-                    open_base = true;
-                }
-            }
-            // a metaclass other than ABCMeta may add anything to the class and its instances
-            for kw in args.keywords.iter() {
-                if kw.arg.as_ref().map(|a| a.as_str() == "metaclass").unwrap_or(false) {
-                    let mv = self.eval(&kw.value, state);
-                    let abc = mv.pts.iter().all(|o| self.heap.kind(o) == Kind::External && self.heap.external_qual(o).ends_with("ABCMeta")) && !mv.pts.is_empty();
-                    if !abc {
-                        open_base = true;
-                    }
-                }
-            }
-        }
+        let (bases, mut open_base, lib, ek) = self.class_bases(c, state);
         open_base |= lib.open;
         let mut lek = lib.enum_kind;
         lek.join(ek);
@@ -112,18 +66,89 @@ impl Analyzer {
         if is_enum || enum_base {
             crate::models::enums::make_enum_members(self, c, coid, lek, str_mixin, state);
         }
-        // `__set_name__(owner, name)` on descriptor objects assigned in the class body
+        self.run_set_name(c, coid, &cnode, state);
+        self.run_init_subclass(c, coid, &info, &cnode, state);
+        let mut cv = Value::obj(coid);
+        if !is_dataclass && !c.decorator_list.is_empty() {
+            cv = self.apply_decorators(&c.decorator_list, cnode, cv, state);
+            if cv.pts.is_empty() {
+                cv = Value::obj(coid);
+            }
+        }
+        self.store_name(s(c.name.id.as_str()), cv, state);
+    }
+
+    /// The bases a class statement names: the program's classes, whether the class is open
+    /// (a base rowan does not see, a metaclass other than ABCMeta), what its library bases make
+    /// of it, and the Enum kind its Enum bases give.
+    fn class_bases(&mut self, c: &'static ast::StmtClassDef, state: &mut State) -> (Vec<u32>, bool, crate::models::ClassBase, crate::interp::EnumKind) {
+        let mut bases: Vec<u32> = Vec::new();
+        let mut open_base = false;
+        let mut lib = crate::models::ClassBase::default();
+        let mut ek = crate::interp::EnumKind::default();
+        if let Some(args) = &c.arguments {
+            for b in args.args.iter() {
+                // `RootModel[list[int]]`, `Generic[T]`: the subscripted class decides
+                let b: &ast::Expr = match b {
+                    ast::Expr::Subscript(sb) => &sb.value,
+                    other => other,
+                };
+                let bv = self.eval(b, state);
+                for oid in bv.pts.iter() {
+                    match self.heap.kind(oid) {
+                        Kind::Class => {
+                            if let Some(k) = self.m.enum_kind.get(&oid) {
+                                ek.mixed |= k.mixed;
+                                ek.is_str |= k.is_str;
+                                ek.repr_value |= k.repr_value;
+                                ek.flag |= k.flag;
+                            }
+                            // (a base that derives from an external class — `list`, an unseen
+                            // library class — makes this one's instances open too)
+                            if self.heap.class_info_opt(oid).is_some_and(|ci| ci.open_base) {
+                                open_base = true;
+                            }
+                            bases.push(oid)
+                        }
+                        Kind::External => lib.join(crate::models::class_base(&self.heap.external_qual(oid))),
+                        _ => open_base = true,
+                    }
+                }
+                if bv.pts.is_empty() {
+                    open_base = true;
+                }
+            }
+            // a metaclass other than ABCMeta may add anything to the class and its instances
+            for kw in args.keywords.iter() {
+                if kw.arg.as_ref().map(|a| a.as_str() == "metaclass").unwrap_or(false) {
+                    let mv = self.eval(&kw.value, state);
+                    let abc = mv.pts.iter().all(|o| self.heap.kind(o) == Kind::External && self.heap.external_qual(o).ends_with("ABCMeta")) && !mv.pts.is_empty();
+                    if !abc {
+                        open_base = true;
+                    }
+                }
+            }
+        }
+        (bases, open_base, lib, ek)
+    }
+
+    /// `__set_name__(owner, name)` on the descriptor objects assigned in the class body.
+    fn run_set_name(&mut self, c: &'static ast::StmtClassDef, coid: ObjId, cnode: &Node, state: &mut State) {
         for st in &c.body {
             let ast::Stmt::Assign(a) = st else { continue };
             let [ast::Expr::Name(n)] = &a.targets[..] else { continue };
             let v = self.heap.cls_slots.get(&(coid, Ns::Attr, key_str_lit(n.id.as_str()))).cloned().unwrap_or_default();
             for d in v.pts.iter() {
                 if self.heap.kind(d) == Kind::Instance && self.heap.instance_class(d).and_then(|dc| self.class_lookup(dc, "__set_name__")).is_some() {
-                    self.call_method_with(&Value::obj(d), "__set_name__", vec![Value::obj(coid), Value::lit(key_str_lit(n.id.as_str()))], &cnode, state);
+                    self.call_method_with(&Value::obj(d), "__set_name__", vec![Value::obj(coid), Value::lit(key_str_lit(n.id.as_str()))], cnode, state);
                 }
             }
         }
-        // a base's `__init_subclass__` runs for the new class (an implicit classmethod)
+    }
+
+    /// A base's `__init_subclass__` runs for the new class (an implicit classmethod), given the
+    /// class statement's keywords.
+    fn run_init_subclass(&mut self, c: &'static ast::StmtClassDef, coid: ObjId, info: &ClassInfo, cnode: &Node, state: &mut State) {
         let found = info.bases.iter().find_map(|b| self.class_lookup(*b, "__init_subclass__"));
         if let Some(defc) = found {
             let fv = self.heap.cls_slots.get(&(defc, Ns::Attr, key_str_lit("__init_subclass__"))).cloned().unwrap_or_default();
@@ -141,17 +166,9 @@ impl Analyzer {
             for f in fv.pts.iter() {
                 if self.heap.kind(f) == Kind::Function {
                     // concretely: the class's own attributes (`cls.__name__`) are known here
-                    self.call_user(f, Some(Value::obj(coid)), vec![], kwargs.clone(), vec![], vec![], state, &cnode, None, false);
+                    self.call_user(f, Some(Value::obj(coid)), vec![], kwargs.clone(), vec![], vec![], state, cnode, None, false);
                 }
             }
         }
-        let mut cv = Value::obj(coid);
-        if !is_dataclass && !c.decorator_list.is_empty() {
-            cv = self.apply_decorators(&c.decorator_list, cnode, cv, state);
-            if cv.pts.is_empty() {
-                cv = Value::obj(coid);
-            }
-        }
-        self.store_name(s(c.name.id.as_str()), cv, state);
     }
 }

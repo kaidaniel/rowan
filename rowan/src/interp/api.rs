@@ -189,11 +189,6 @@ impl Analyzer {
         r
     }
 
-    /// Is the access being recorded guarded?
-    pub fn verdict_is_guarded(&self) -> bool {
-        self.mode.verdict_guarded
-    }
-
     /// The report's names for unknown objects and calls.
     pub fn names(&self) -> &Names {
         &self.names
