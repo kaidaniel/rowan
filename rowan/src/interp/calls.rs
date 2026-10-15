@@ -656,37 +656,8 @@ impl Analyzer {
             if bound.contains_key(name) {
                 continue;
             }
-            // `**kwargs` holding the name wins over the default (joined with it when the key
-            // is only possibly there)
-            let nk = intern::key(intern::Key::Str(intern::str_get(*name)));
-            let kw_present = star_kwargs.iter().any(|sk| sk.pts.iter().any(|x| state.row(x, Ns::Item).present.contains(nk)));
-            let kw_definite = !star_kwargs.is_empty() && star_kwargs.iter().all(|sk| sk.pts.iter().all(|x| state.row(x, Ns::Item).definite.contains(nk)));
-            if let (Some(d), false) = (fi.defaults.get(name), kw_present) {
-                bound.insert(*name, d.clone());
-            } else if !star_kwargs.is_empty() {
-                let mut vals: Vec<Value> = star_kwargs.iter().flat_map(|sk| sk.pts.iter().map(|x| state.slot(x, Ns::Item, nk)).collect::<Vec<_>>()).collect();
-                if fi.defaults.get(name).is_none() && !kw_definite {
-                    // a required parameter only `**kw` can supply: read from it (a requirement on
-                    // an input; a missing key is a TypeError at the call)
-                    for sk in star_kwargs {
-                        let recs: Vec<u32> = self.record_objects(sk).into_iter().filter(|o| state.row(*o, Ns::Item).open()).collect();
-                        if !recs.is_empty() {
-                            let v = self.load_item(&Value::with_kv(crate::domain::ObjSet::from_vec(recs), sk.kv.clone()), Ns::Item, &Value::lit(nk), node, state, true);
-                            vals.push(v);
-                        }
-                    }
-                }
-                let mut v = if vals.is_empty() { Value::data("kw") } else { join_values(vals) };
-                if !kw_definite {
-                    v = match fi.defaults.get(name) {
-                        Some(d) => v.join(d),
-                        None => v.join(&Value::data("kw")),
-                    };
-                }
-                bound.insert(*name, v);
-            } else {
-                bound.insert(*name, Value::data(&format!("missing arg {}", intern::str_get(*name))));
-            }
+            let v = self.unbound_param_value(fi, *name, star_kwargs, node, state);
+            bound.insert(*name, v);
         }
         if let Some(va) = &a.vararg {
             let tid = self.alloc(Kind::Tuple, &format!("varargs:{}@{}", fi.qualname, self.site_of(node)), state, &format!("*{}", va.name.id), Payload::None, None, Ns::Item, None, None);
@@ -721,6 +692,41 @@ impl Analyzer {
             bound.insert(s(kw.name.id.as_str()), Value::obj(did));
         }
         bound
+    }
+
+    /// The value of a parameter no argument binds: `**kwargs` holding the name wins over the
+    /// default (joined with it when the key is only possibly there); a required one only
+    /// `**kw` supplies is read from it (a requirement on an input).
+    fn unbound_param_value(&mut self, fi: &FuncInfo, name: StrId, star_kwargs: &[Value], node: &Node, state: &mut State) -> Value {
+        let nk = intern::key(intern::Key::Str(intern::str_get(name)));
+        let kw_present = star_kwargs.iter().any(|sk| sk.pts.iter().any(|x| state.row(x, Ns::Item).present.contains(nk)));
+        let kw_definite = !star_kwargs.is_empty() && star_kwargs.iter().all(|sk| sk.pts.iter().all(|x| state.row(x, Ns::Item).definite.contains(nk)));
+        if let (Some(d), false) = (fi.defaults.get(&name), kw_present) {
+            d.clone()
+        } else if !star_kwargs.is_empty() {
+            let mut vals: Vec<Value> = star_kwargs.iter().flat_map(|sk| sk.pts.iter().map(|x| state.slot(x, Ns::Item, nk)).collect::<Vec<_>>()).collect();
+            if fi.defaults.get(&name).is_none() && !kw_definite {
+                // a required parameter only `**kw` can supply: read from it (a requirement on
+                // an input; a missing key is a TypeError at the call)
+                for sk in star_kwargs {
+                    let recs: Vec<u32> = self.record_objects(sk).into_iter().filter(|o| state.row(*o, Ns::Item).open()).collect();
+                    if !recs.is_empty() {
+                        let v = self.load_item(&Value::with_kv(crate::domain::ObjSet::from_vec(recs), sk.kv.clone()), Ns::Item, &Value::lit(nk), node, state, true);
+                        vals.push(v);
+                    }
+                }
+            }
+            let mut v = if vals.is_empty() { Value::data("kw") } else { join_values(vals) };
+            if !kw_definite {
+                v = match fi.defaults.get(&name) {
+                    Some(d) => v.join(d),
+                    None => v.join(&Value::data("kw")),
+                };
+            }
+            v
+        } else {
+            Value::data(&format!("missing arg {}", intern::str_get(name)))
+        }
     }
 }
 
