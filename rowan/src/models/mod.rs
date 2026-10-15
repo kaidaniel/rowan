@@ -3084,7 +3084,11 @@ fn m_set(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             Value::data("set")
         }
         "add" | "discard" | "remove" | "update" | "intersection_update" | "difference_update" | "symmetric_difference_update" | "clear" => {
-            let item = c.args.first().and_then(|a| a.kv.as_lit().filter(|_| a.pts.is_empty()));
+            // (a tuple of known values: its key)
+            let item = c.args.first().and_then(|a| match a.single() {
+                Some(o) if a.kv.is_bot() && an.heap.kind(o) == Kind::Tuple => an.value_key(o, st, 0),
+                _ => a.kv.as_lit().filter(|_| a.pts.is_empty()),
+            });
             for oid in recv.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Set).collect::<Vec<_>>() {
                 let strong = recv.pts.len() == 1 && an.heap.obj(oid).single;
                 let known = an.known_members(&Value::obj(oid), st);

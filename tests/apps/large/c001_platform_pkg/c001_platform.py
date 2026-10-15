@@ -211,8 +211,8 @@ if __name__ == "__main__":
     log_count = src_counts["log"]
     rej_b = beta["pipe"].rejected[0].errors[0]["loc"]
     totals_b = running_totals(beta["pipe"].events)
-    last_total_b = totals_b[-1]                         #@todo value last_total_b: exactly={35.0}
-    #@value last_total_b: includes={35.0}
+    last_total_b = totals_b[-1]                         #@value last_total_b: exactly={35.0}
+    # (validation decides each record: `ev.key() in seen` of a set of tuples)
 
     # ---------------------------------------------------------------- processing
     frame_a = pipe_a.frame                              #@row frame_a: present={id,user,amount,region,ts,source,day,currency} definite={id,user,amount,region,ts,source,day,currency} closed
@@ -232,8 +232,8 @@ if __name__ == "__main__":
     by_region_a = rep_a["by_region"]                    #@todo row by_region_a: present={north,south,unknown,west} definite={north,south} closed  (corrected: a batch size of 1 from os.environ leaves out unknown, DP_STRICT west)
     #@row by_region_a: present={north,south,unknown,west} closed
     unknown_a = by_region_a["unknown"]
-    by_region_b = rep_b["by_region"]                    #@todo row by_region_b: present={north,south,unknown} definite={north,south,unknown} absent={west} closed
-    #@row by_region_b: possible={north,south,unknown}
+    by_region_b = rep_b["by_region"]                    #@row by_region_b: present={north,south,unknown} definite={north,south,unknown} absent={west} closed
+    # (beta's environment is the scenario's own: every value is known)
     by_day_a = rep_a["by_day"]                          #@todo row by_day_a: present={"2024-03-01","2024-03-02","2024-03-03"} definite={"2024-03-01"} closed  (corrected: a batch size of 1 from os.environ keeps the first day only)
     #@row by_day_a: possible={"2024-03-01","2024-03-02","2024-03-03"}
     day1 = by_day_a["2024-03-01"]

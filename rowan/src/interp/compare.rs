@@ -219,9 +219,12 @@ impl Analyzer {
     fn compare_in(&mut self, op: ast::CmpOp, a: &Value, b: &Value, right: &'static ast::Expr, lits: &crate::intern::KeySet, state: &mut State) -> Option<bool> {
         let decide = |found: bool| Some(if op == ast::CmpOp::In { found } else { !found });
         // members of a Flag: bits; else a member is its key
-        if (!self.heap.keys.member_key.is_empty() || !self.heap.keys.identity_objs.borrow().is_empty()) && !a.pts.is_empty() {
-            if let Some(r) = crate::models::enums::flag_contains(self, a, &b, state) {
-                return decide(r);
+        // (and a tuple of known values: its key)
+        if !a.pts.is_empty() {
+            if !self.heap.keys.member_key.is_empty() {
+                if let Some(r) = crate::models::enums::flag_contains(self, a, &b, state) {
+                    return decide(r);
+                }
             }
             let ka = self.keyify_in(a, state);
             if ka.pts.is_empty() {
