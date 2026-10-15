@@ -48,6 +48,16 @@ pub fn cell_key() -> KeyId {
 /// The label of `enumerate`'s index when it is not known: an int.
 pub const ENUM_INDEX: &str = "index";
 
+/// What `iterate` gathers over the objects a value may be: their items in order (None: not
+/// known), their elements and (key, value) pairs, and whether one record's keys are all of it.
+struct ItemsAcc {
+    items: Option<Vec<Value>>,
+    elems: Vec<Value>,
+    pairs: Vec<(Value, Value)>,
+    pair: bool,
+    exhaustive: bool,
+}
+
 impl Analyzer {
     // ----------------------------------------------------------- functions
     pub(in crate::interp) fn make_function(&mut self, node: FuncNode, state: &mut State, name: Option<&str>) -> Value {
@@ -762,331 +772,46 @@ impl Analyzer {
         let n_alts = v.pts.len() + usize::from(!v.kv.is_bot());
         let multi_lits = v.pts.is_empty() && matches!(&v.kv, KeyVal::Lits(ks) if ks.len() > 1);
         let alts_mode = n_alts > 1 || multi_lits;
-        let mut alt_items: Option<Vec<Value>> = None;
-        if alts_mode {
-            let mut lists: Option<Vec<Vec<Value>>> = Some(Vec::new());
-            for o in v.pts.iter() {
-                let seq = matches!(self.heap.kind(o), Kind::List | Kind::Tuple) && !self.heap.obj(o).iterator;
-                match (seq, self.heap.llen(o, state), lists.as_mut()) {
-                    (true, Some(n), Some(ls)) if n <= UNROLL_MAX => ls.push((0..n).map(|i| state.slot(o, Ns::Pos, key_int(i as i64))).collect()),
-                    _ => lists = None,
-                }
-            }
-            match (&v.kv, lists.as_mut()) {
-                (KeyVal::Bot, _) => {}
-                (kv, Some(ls)) if kv.is_literal() => {
-                    for k in crate::domain::kv_literals(kv).iter() {
-                        match intern::key_as_str(k) {
-                            Some(s) if s.chars().count() <= UNROLL_MAX => ls.push(s.chars().map(|ch| Value::lit(intern::key_str_lit(&ch.to_string()))).collect()),
-                            _ => {
-                                lists = None;
-                                break;
-                            }
-                        }
-                    }
-                }
-                _ => lists = None,
-            }
-            alt_items = lists.filter(|ls| !ls.is_empty() && ls.iter().all(|l| l.len() == ls[0].len())).map(|ls| (0..ls[0].len()).map(|i| join_values(ls.iter().map(|l| l[i].clone()).collect::<Vec<_>>())).collect());
-        }
-        let mut items: Option<Vec<Value>> = Some(Vec::new());
-        let mut elems: Vec<Value> = Vec::new();
-        let mut pairs: Vec<(Value, Value)> = Vec::new();
-        let mut pair = false;
-        let mut exhaustive = true;
+        let alt_items: Option<Vec<Value>> = if alts_mode { self.alternative_items(v, state) } else { None };
+        let mut acc = ItemsAcc { items: Some(Vec::new()), elems: Vec::new(), pairs: Vec::new(), pair: false, exhaustive: true };
         let line_data = Value::data(&format!("L{}", node.line));
         for oid in v.pts.iter() {
             let kind = self.heap.kind(oid);
             match kind {
-                Kind::List | Kind::Tuple | Kind::Set => {
-                    let ll = self.heap.llen(oid, state);
-                    // a generator partly consumed by next(): iteration starts at its cursor
-                    let cursor = self.cursor_of(oid, state);
-                    match (ll, items.as_mut(), cursor) {
-                        (Some(n), Some(its), Some(cursor)) => {
-                            for i in cursor.min(n)..n {
-                                its.push(state.slot(oid, Ns::Pos, key_int(i as i64)));
-                            }
-                        }
-                        _ => items = None,
-                    }
-                    elems.push(self.elem_of(&Value::obj(oid), node, state));
-                }
-                Kind::Dict | Kind::Frame => {
-                    // (a dict with literal keys, a module constant: its items)
-                    let lit = self.literal_dict_items(oid, state);
-                    match (lit, items.as_mut()) {
-                        (Some(l), Some(its)) => its.extend(l.into_iter().map(|(k, _)| Value::lit(k))),
-                        _ => items = None,
-                    }
-                    elems.push(Value::kv_only(KeyVal::KeysOf(KeysOf::new(ObjSet::one(oid), Ns::Item))));
-                }
-                Kind::View => {
-                    let Payload::View(vk, recv) = self.heap.obj(oid).payload.clone() else { continue };
-                    if matches!(vk, ViewKind::Rows | ViewKind::Elems | ViewKind::Attrs) {
-                        items = None;
-                        exhaustive = false;
-                        if vk == ViewKind::Rows {
-                            pair = true;
-                            pairs.push((Value::data("index"), recv));
-                        } else {
-                            elems.push(recv);
-                        }
-                        continue;
-                    }
-                    let kv = KeyVal::KeysOf(KeysOf::new(recv.pts.clone(), Ns::Item));
-                    let vals = join_values(recv.pts.iter().map(|r| self.record_values(r, state)).collect::<Vec<_>>());
-                    let lit = if recv.pts.len() == 1 { self.literal_dict_items(recv.pts.first().unwrap(), state) } else { None };
-                    match (lit, items.as_mut()) {
-                        (Some(l), Some(its)) => {
-                            for (k, val) in l {
-                                match vk {
-                                    ViewKind::Keys | ViewKind::Proxy => its.push(Value::lit(k)),
-                                    ViewKind::Values => its.push(val),
-                                    _ => {
-                                        let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", oid, intern::key_repr(k)), "", true, "pair", Payload::Pair(Value::lit(k), val.clone()));
-                                        self.heap.obj_mut(pid).payload = Payload::Pair(Value::lit(k), val);
-                                        its.push(Value::obj(pid));
-                                    }
-                                }
-                            }
-                        }
-                        _ => items = None,
-                    }
-                    match vk {
-                        ViewKind::Keys | ViewKind::Proxy => elems.push(Value::kv_only(kv)),
-                        ViewKind::Values => elems.push(vals),
-                        _ => {
-                            pair = true;
-                            pairs.push((Value::kv_only(kv), vals));
-                        }
-                    }
-                }
+                Kind::List | Kind::Tuple | Kind::Set => self.iter_sequence(oid, node, state, &mut acc),
+                Kind::Dict | Kind::Frame => self.iter_mapping(oid, node, state, &mut acc),
+                Kind::View => self.iter_view(oid, node, state, &mut acc),
                 // an sqlite cursor: its remaining rows
-                Kind::Namespace if self.m.sql_cursors.contains_key(&oid) => {
-                    if let Some(rows) = crate::models::sqlite::cursor_rows(self, state, node, oid) {
-                        state.set_slot(oid, Ns::Attr, key_str_lit("\u{1}pos"), Value::data("pos"), true);
-                        let it = self.iterate(&rows, node, state);
-                        match (it.items, items.as_mut()) {
-                            (Some(xs), Some(its)) => its.extend(xs),
-                            _ => items = None,
-                        }
-                        elems.push(it.elem.flat());
-                    }
-                }
+                Kind::Namespace if self.m.sql_cursors.contains_key(&oid) => self.iter_cursor(oid, node, state, &mut acc),
                 // itertools.count / cycle / repeat: no end
                 Kind::Namespace if self.m.infinites.contains_key(&oid) => {
-                    items = None;
-                    exhaustive = false;
+                    acc.items = None;
+                    acc.exhaustive = false;
                     let inf = self.m.infinites[&oid].clone();
-                    elems.push(crate::models::itertools::infinite_elem(self, &inf));
+                    acc.elems.push(crate::models::itertools::infinite_elem(self, &inf));
                 }
-                Kind::Zip => {
-                    let Payload::Zip(ks, vs) = self.heap.obj(oid).payload.clone() else { continue };
-                    let mut ki = self.iterate(&ks, node, state);
-                    let mut vi = self.iterate(&vs, node, state);
-                    // an infinite side (or a generator known that far) yields as many items as the
-                    // other has
-                    if let (None, Some(n)) = (&ki.items, vi.items.as_ref().map(|x| x.len())) {
-                        if let Some(its) = crate::models::itertools::take_known(self, &ks, n, state) {
-                            ki.items = Some(its);
-                        }
-                    }
-                    if let (None, Some(n)) = (&vi.items, ki.items.as_ref().map(|x| x.len())) {
-                        if let Some(its) = crate::models::itertools::take_known(self, &vs, n, state) {
-                            vi.items = Some(its);
-                        }
-                    }
-                    // a strict zip that did not raise: both sides as long as the known one
-                    let strict = self.m.zip_strict.contains(&oid);
-                    let (ki_items, vi_items) = match (ki.items.clone(), vi.items.clone()) {
-                        (Some(k), None) if strict => {
-                            let e = self.elem_value(&vi.elem, node, "zv");
-                            let n = k.len();
-                            (Some(k), Some(vec![e; n]))
-                        }
-                        (None, Some(v)) if strict => {
-                            let e = self.elem_value(&ki.elem, node, "zk");
-                            let n = v.len();
-                            (Some(vec![e; n]), Some(v))
-                        }
-                        (k, v) => (k, v),
-                    };
-                    match (ki_items, vi_items, items.as_mut()) {
-                        (Some(kit), Some(vit), Some(its)) => {
-                            // zip stops at the shorter input
-                            let ctx = self.frame().ctx.clone();
-                            for (k, val) in kit.into_iter().zip(vit.into_iter()) {
-                                let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), its.len()), &ctx, true, "pair", Payload::Pair(k.clone(), val.clone()));
-                                self.heap.obj_mut(pid).payload = Payload::Pair(k, val);
-                                its.push(Value::obj(pid));
-                            }
-                        }
-                        _ => items = None,
-                    }
-                    pair = true;
-                    let (kv1, vv1) = (self.elem_value(&ki.elem, node, "zk"), self.elem_value(&vi.elem, node, "zv"));
-                    pairs.push((kv1, vv1));
-                }
-                Kind::Enumerate => {
-                    let Payload::Enumerate(inner, start) = self.heap.obj(oid).payload.clone() else { continue };
-                    let ii = self.iterate(&inner, node, state);
-                    match (ii.items, items.as_mut(), start) {
-                        (Some(inner_items), Some(its), Some(start)) => {
-                            // known items: (index, item) pairs with literal indices
-                            let ctx = self.frame().ctx.clone();
-                            for (i, item) in inner_items.into_iter().enumerate() {
-                                let idx = Value::lit(key_int(start + i as i64));
-                                let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), its.len()), &ctx, true, "pair", Payload::Pair(idx.clone(), item.clone()));
-                                self.heap.obj_mut(pid).payload = Payload::Pair(idx, item);
-                                its.push(Value::obj(pid));
-                            }
-                        }
-                        _ => items = None,
-                    }
-                    pair = true;
-                    let iv = self.elem_value(&ii.elem, node, "en");
-                    pairs.push((Value::data(ENUM_INDEX), iv));
-                }
+                Kind::Zip => self.iter_zip(oid, node, state, &mut acc),
+                Kind::Enumerate => self.iter_enumerate(oid, node, state, &mut acc),
                 Kind::Class if self.m.enum_members.contains_key(&oid) => {
                     // an Enum class: its members in order
                     let ms: Vec<Value> = self.m.enum_members[&oid].iter().map(|(_, m)| Value::obj(*m)).collect();
-                    if let Some(its) = items.as_mut() {
+                    if let Some(its) = acc.items.as_mut() {
                         its.extend(ms.iter().cloned());
                     }
-                    elems.push(join_values(ms));
+                    acc.elems.push(join_values(ms));
                 }
-                Kind::Instance if self.heap.instance_class(oid).and_then(|c| self.class_lookup(c, "__iter__")).is_some() => {
-                    // a user iterable: what its `__iter__` returns
-                    let r = self.call_method_with(&Value::obj(oid), "__iter__", Vec::new(), node, state).unwrap_or_default();
-                    // an iterator (`return self`, an object with `__next__`): its items are what
-                    // `__next__` returns (iterating it again would ask `__iter__` forever)
-                    let iters: Vec<u32> = r.pts.iter().filter(|p| *p == oid || (self.heap.kind(*p) == Kind::Instance && self.heap.instance_class(*p).and_then(|c| self.class_lookup(c, "__next__")).is_some())).collect();
-                    // (one iterator whose `__next__` is decided call by call — an item, or surely
-                    // StopIteration — and changes nothing but its own state and the items it makes:
-                    // its items, in order, up to UNROLL_MAX)
-                    if iters.len() == 1 && r.pts.len() == 1 && r.kv.is_bot() && items.is_some() {
-                        let it = iters[0];
-                        if let Some(seq) = self.unroll_next(it, node, state) {
-                            if let Some(its) = items.as_mut() {
-                                its.extend(seq.iter().cloned());
-                            }
-                            elems.push(join_values(seq));
-                            continue;
-                        }
-                    }
-                    if !iters.is_empty() {
-                        items = None;
-                        exhaustive = false;
-                        let mut none_taken = state.copy();
-                        let its = Value::objs(iters.iter().copied().collect());
-                        let (nexts, rest) = self.run_dunder(&its, &["__next__"], Vec::new(), node, state).unwrap_or((Value::new(), its));
-                        let nexts = if rest.empty() { nexts } else { nexts.join(&Value::data("next")) };
-                        // (the loop may take no item: StopIteration at once)
-                        let j = if state.reachable { state.join(&mut none_taken) } else { none_taken };
-                        state.replace_with(j);
-                        elems.push(nexts);
-                        let rest = Value::with_kv(r.pts.filter(|p| !iters.contains(&p)), r.kv.clone());
-                        if rest.empty() {
-                            continue;
-                        }
-                        let sub = self.iterate(&rest, node, state);
-                        match sub.elem {
-                            Elem::One(e) => elems.push(e),
-                            Elem::Pair(k, v) => {
-                                pair = true;
-                                pairs.push((k, v));
-                            }
-                        }
-                        continue;
-                    }
-                    let sub = self.iterate(&r, node, state);
-                    match (sub.items, items.as_mut()) {
-                        (Some(si), Some(its)) => its.extend(si),
-                        _ => items = None,
-                    }
-                    exhaustive = false;
-                    match sub.elem {
-                        Elem::One(e) => elems.push(e),
-                        Elem::Pair(k, v) => {
-                            pair = true;
-                            pairs.push((k, v));
-                        }
-                    }
-                }
-                Kind::Unknown => {
-                    items = None;
-                    exhaustive = false;
-                    if self.heap.obj(oid).depth >= PATH_DEPTH {
-                        elems.push(Value::data("deep"));
-                        continue;
-                    }
-                    let row = state.row(oid, Ns::Item);
-                    let label = format!("elem of {}", self.heap.obj(oid).label);
-                    let eid = self.heap.alloc_raw(Kind::Unknown, &format!("elem:{}", oid), "", false, &label, Payload::None);
-                    if let Some(sym) = self.names.access(&self.heap, oid, Ns::Item, STAR) {
-                        if !self.names.has(eid) {
-                            let scope = self.names.scope(oid);
-                            self.names.set(eid, sym, scope);
-                        }
-                    }
-                    self.heap.obj_mut(eid).iter_elem = true;
-                    let d = self.heap.obj(oid).depth + 1;
-                    self.heap.obj_mut(eid).depth = d;
-                    if !state.has_row(eid, Ns::Item) {
-                        let srcs = row.sources.map(|(src, _)| (crate::domain::source_extend(src, STAR), intern::EMPTY_LENS));
-                        // (an element was taken on this path: its source's requirements are
-                        // known here, none so far — see the nested-source join)
-                        for (cs, _) in srcs.iter() {
-                            state.reqs.mark(&cs, crate::domain::ReqInfo::default());
-                        }
-                        // (nothing known of the unknown value's content: neither of its elements')
-                        let r = if srcs.is_empty() && row.mutators.is_empty() {
-                            Row::top()
-                        } else {
-                            Row::from_data(crate::domain::RowData { sources: srcs, mutators: row.mutators.clone(), top: row.top, ..Default::default() })
-                        };
-                        state.set_row(eid, Ns::Item, r.clone());
-                        state.set_row(eid, Ns::Attr, r);
-                    }
-                    elems.push(Value::obj(eid));
-                }
+                Kind::Instance if self.heap.instance_class(oid).and_then(|c| self.class_lookup(c, "__iter__")).is_some() => self.iter_user(oid, node, state, &mut acc),
+                Kind::Unknown => self.iter_unknown(oid, node, state, &mut acc),
                 _ => {
-                    items = None;
-                    exhaustive = false;
-                    elems.push(line_data.clone());
+                    acc.items = None;
+                    acc.exhaustive = false;
+                    acc.elems.push(line_data.clone());
                 }
             }
         }
+        let ItemsAcc { mut items, mut elems, pairs, pair, mut exhaustive } = acc;
         if v.pts.is_empty() {
-            items = None;
-            exhaustive = false;
-            let one_str = v.kv.as_lit().and_then(intern::key_as_str);
-            if let Some(text) = one_str {
-                // one known string: its characters
-                let chars: Vec<KeyId> = text.chars().map(|ch| intern::key_str_lit(&ch.to_string())).collect();
-                if chars.len() <= UNROLL_MAX {
-                    items = Some(chars.iter().map(|k| Value::lit(*k)).collect());
-                }
-                let ks: KeySet = chars.into_iter().collect();
-                elems.push(Value::kv_only(KeyVal::lits(ks)));
-            } else if v.kv.is_literal() {
-                let ks = crate::domain::kv_literals(&v.kv);
-                // (one of several strings: its characters)
-                if ks.iter().all(intern::key_is_str) {
-                    let chars: KeySet = ks.iter().flat_map(|k| intern::key_as_str(k).map(|s| s.chars().map(|ch| intern::key_str_lit(&ch.to_string())).collect::<Vec<_>>()).unwrap_or_default()).collect();
-                    elems.push(Value::kv_only(KeyVal::lits(chars)));
-                } else {
-                    if ks.len() <= UNROLL_MAX {
-                        items = Some(intern::sorted_by_str(ks.iter()).into_iter().map(Value::lit).collect());
-                    }
-                    elems.push(Value::kv_only(KeyVal::lits(ks)));
-                }
-            } else if let Some(e) = self.m.torch_on.then(|| crate::models::torch::t_iter_elem(self, v, state)).flatten() {
-                elems.push(e);
-            } else {
-                elems.push(line_data.clone());
-            }
+            self.iter_scalar(v, state, &line_data, &mut items, &mut elems, &mut exhaustive);
         }
         if let Some(its) = &items {
             // no items *and* no containers: nothing is known; empty containers iterate zero times
@@ -1112,6 +837,323 @@ impl Analyzer {
             items = alt_items;
         }
         Iteration { items, elem: Elem::One(elem), exhaustive: exh }
+    }
+
+    /// The items of one of several containers (or strings), position by position: when every
+    /// one is a list / tuple / string of one known length (at most `UNROLL_MAX`), the join of
+    /// the alternatives at each position.
+    fn alternative_items(&self, v: &Value, state: &State) -> Option<Vec<Value>> {
+        let mut lists: Option<Vec<Vec<Value>>> = Some(Vec::new());
+        for o in v.pts.iter() {
+            let seq = matches!(self.heap.kind(o), Kind::List | Kind::Tuple) && !self.heap.obj(o).iterator;
+            match (seq, self.heap.llen(o, state), lists.as_mut()) {
+                (true, Some(n), Some(ls)) if n <= UNROLL_MAX => ls.push((0..n).map(|i| state.slot(o, Ns::Pos, key_int(i as i64))).collect()),
+                _ => lists = None,
+            }
+        }
+        match (&v.kv, lists.as_mut()) {
+            (KeyVal::Bot, _) => {}
+            (kv, Some(ls)) if kv.is_literal() => {
+                for k in crate::domain::kv_literals(kv).iter() {
+                    match intern::key_as_str(k) {
+                        Some(s) if s.chars().count() <= UNROLL_MAX => ls.push(s.chars().map(|ch| Value::lit(intern::key_str_lit(&ch.to_string()))).collect()),
+                        _ => {
+                            lists = None;
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => lists = None,
+        }
+        lists.filter(|ls| !ls.is_empty() && ls.iter().all(|l| l.len() == ls[0].len())).map(|ls| (0..ls[0].len()).map(|i| join_values(ls.iter().map(|l| l[i].clone()).collect::<Vec<_>>())).collect())
+    }
+
+    /// Iterating a value of no object (a str, several literals, a tensor's rows, unknown): its
+    /// characters / literals as the elements (and items, when few and known).
+    fn iter_scalar(&mut self, v: &Value, state: &State, line_data: &Value, items: &mut Option<Vec<Value>>, elems: &mut Vec<Value>, exhaustive: &mut bool) {
+        *items = None;
+        *exhaustive = false;
+        let one_str = v.kv.as_lit().and_then(intern::key_as_str);
+        if let Some(text) = one_str {
+            // one known string: its characters
+            let chars: Vec<KeyId> = text.chars().map(|ch| intern::key_str_lit(&ch.to_string())).collect();
+            if chars.len() <= UNROLL_MAX {
+                *items = Some(chars.iter().map(|k| Value::lit(*k)).collect());
+            }
+            let ks: KeySet = chars.into_iter().collect();
+            elems.push(Value::kv_only(KeyVal::lits(ks)));
+        } else if v.kv.is_literal() {
+            let ks = crate::domain::kv_literals(&v.kv);
+            // (one of several strings: its characters)
+            if ks.iter().all(intern::key_is_str) {
+                let chars: KeySet = ks.iter().flat_map(|k| intern::key_as_str(k).map(|s| s.chars().map(|ch| intern::key_str_lit(&ch.to_string())).collect::<Vec<_>>()).unwrap_or_default()).collect();
+                elems.push(Value::kv_only(KeyVal::lits(chars)));
+            } else {
+                if ks.len() <= UNROLL_MAX {
+                    *items = Some(intern::sorted_by_str(ks.iter()).into_iter().map(Value::lit).collect());
+                }
+                elems.push(Value::kv_only(KeyVal::lits(ks)));
+            }
+        } else if let Some(e) = self.m.torch_on.then(|| crate::models::torch::t_iter_elem(self, v, state)).flatten() {
+            elems.push(e);
+        } else {
+            elems.push(line_data.clone());
+        }
+    }
+
+    /// An unknown iterable: one element object standing for each of its elements.
+    fn iter_unknown(&mut self, oid: ObjId, _node: &Node, state: &mut State, acc: &mut ItemsAcc) {
+        acc.items = None;
+        acc.exhaustive = false;
+        if self.heap.obj(oid).depth >= PATH_DEPTH {
+            acc.elems.push(Value::data("deep"));
+            return;
+        }
+        let row = state.row(oid, Ns::Item);
+        let label = format!("elem of {}", self.heap.obj(oid).label);
+        let eid = self.heap.alloc_raw(Kind::Unknown, &format!("elem:{}", oid), "", false, &label, Payload::None);
+        if let Some(sym) = self.names.access(&self.heap, oid, Ns::Item, STAR) {
+            if !self.names.has(eid) {
+                let scope = self.names.scope(oid);
+                self.names.set(eid, sym, scope);
+            }
+        }
+        self.heap.obj_mut(eid).iter_elem = true;
+        let d = self.heap.obj(oid).depth + 1;
+        self.heap.obj_mut(eid).depth = d;
+        if !state.has_row(eid, Ns::Item) {
+            let srcs = row.sources.map(|(src, _)| (crate::domain::source_extend(src, STAR), intern::EMPTY_LENS));
+            // (an element was taken on this path: its source's requirements are
+            // known here, none so far — see the nested-source join)
+            for (cs, _) in srcs.iter() {
+                state.reqs.mark(&cs, crate::domain::ReqInfo::default());
+            }
+            // (nothing known of the unknown value's content: neither of its elements')
+            let r = if srcs.is_empty() && row.mutators.is_empty() {
+                Row::top()
+            } else {
+                Row::from_data(crate::domain::RowData { sources: srcs, mutators: row.mutators.clone(), top: row.top, ..Default::default() })
+            };
+            state.set_row(eid, Ns::Item, r.clone());
+            state.set_row(eid, Ns::Attr, r);
+        }
+        acc.elems.push(Value::obj(eid));
+    }
+
+    /// An instance of a class with `__iter__`: what its iterator's `__next__` gives (in order, when
+    /// decided call by call), or what the iterable `__iter__` returns gives.
+    fn iter_user(&mut self, oid: ObjId, node: &Node, state: &mut State, acc: &mut ItemsAcc) {
+        // a user iterable: what its `__iter__` returns
+        let r = self.call_method_with(&Value::obj(oid), "__iter__", Vec::new(), node, state).unwrap_or_default();
+        // an iterator (`return self`, an object with `__next__`): its items are what
+        // `__next__` returns (iterating it again would ask `__iter__` forever)
+        let iters: Vec<u32> = r.pts.iter().filter(|p| *p == oid || (self.heap.kind(*p) == Kind::Instance && self.heap.instance_class(*p).and_then(|c| self.class_lookup(c, "__next__")).is_some())).collect();
+        // (one iterator whose `__next__` is decided call by call — an item, or surely
+        // StopIteration — and changes nothing but its own state and the items it makes:
+        // its items, in order, up to UNROLL_MAX)
+        if iters.len() == 1 && r.pts.len() == 1 && r.kv.is_bot() && acc.items.is_some() {
+            let it = iters[0];
+            if let Some(seq) = self.unroll_next(it, node, state) {
+                if let Some(its) = acc.items.as_mut() {
+                    its.extend(seq.iter().cloned());
+                }
+                acc.elems.push(join_values(seq));
+                return;
+            }
+        }
+        if !iters.is_empty() {
+            acc.items = None;
+            acc.exhaustive = false;
+            let mut none_taken = state.copy();
+            let its = Value::objs(iters.iter().copied().collect());
+            let (nexts, rest) = self.run_dunder(&its, &["__next__"], Vec::new(), node, state).unwrap_or((Value::new(), its));
+            let nexts = if rest.empty() { nexts } else { nexts.join(&Value::data("next")) };
+            // (the loop may take no item: StopIteration at once)
+            let j = if state.reachable { state.join(&mut none_taken) } else { none_taken };
+            state.replace_with(j);
+            acc.elems.push(nexts);
+            let rest = Value::with_kv(r.pts.filter(|p| !iters.contains(&p)), r.kv.clone());
+            if rest.empty() {
+                return;
+            }
+            let sub = self.iterate(&rest, node, state);
+            match sub.elem {
+                Elem::One(e) => acc.elems.push(e),
+                Elem::Pair(k, v) => {
+                    acc.pair = true;
+                    acc.pairs.push((k, v));
+                }
+            }
+            return;
+        }
+        let sub = self.iterate(&r, node, state);
+        match (sub.items, acc.items.as_mut()) {
+            (Some(si), Some(its)) => its.extend(si),
+            _ => acc.items = None,
+        }
+        acc.exhaustive = false;
+        match sub.elem {
+            Elem::One(e) => acc.elems.push(e),
+            Elem::Pair(k, v) => {
+                acc.pair = true;
+                acc.pairs.push((k, v));
+            }
+        }
+    }
+
+    /// `enumerate(it, start)`: (index, item) pairs.
+    fn iter_enumerate(&mut self, oid: ObjId, node: &Node, state: &mut State, acc: &mut ItemsAcc) {
+        let Payload::Enumerate(inner, start) = self.heap.obj(oid).payload.clone() else { return };
+        let ii = self.iterate(&inner, node, state);
+        match (ii.items, acc.items.as_mut(), start) {
+            (Some(inner_items), Some(its), Some(start)) => {
+                // known items: (index, item) pairs with literal indices
+                let ctx = self.frame().ctx.clone();
+                for (i, item) in inner_items.into_iter().enumerate() {
+                    let idx = Value::lit(key_int(start + i as i64));
+                    let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), its.len()), &ctx, true, "pair", Payload::Pair(idx.clone(), item.clone()));
+                    self.heap.obj_mut(pid).payload = Payload::Pair(idx, item);
+                    its.push(Value::obj(pid));
+                }
+            }
+            _ => acc.items = None,
+        }
+        acc.pair = true;
+        let iv = self.elem_value(&ii.elem, node, "en");
+        acc.pairs.push((Value::data(ENUM_INDEX), iv));
+    }
+
+    /// `zip(a, b)`: (a item, b item) pairs, as many as the shorter side has.
+    fn iter_zip(&mut self, oid: ObjId, node: &Node, state: &mut State, acc: &mut ItemsAcc) {
+        let Payload::Zip(ks, vs) = self.heap.obj(oid).payload.clone() else { return };
+        let mut ki = self.iterate(&ks, node, state);
+        let mut vi = self.iterate(&vs, node, state);
+        // an infinite side (or a generator known that far) yields as many items as the
+        // other has
+        if let (None, Some(n)) = (&ki.items, vi.items.as_ref().map(|x| x.len())) {
+            if let Some(its) = crate::models::itertools::take_known(self, &ks, n, state) {
+                ki.items = Some(its);
+            }
+        }
+        if let (None, Some(n)) = (&vi.items, ki.items.as_ref().map(|x| x.len())) {
+            if let Some(its) = crate::models::itertools::take_known(self, &vs, n, state) {
+                vi.items = Some(its);
+            }
+        }
+        // a strict zip that did not raise: both sides as long as the known one
+        let strict = self.m.zip_strict.contains(&oid);
+        let (ki_items, vi_items) = match (ki.items.clone(), vi.items.clone()) {
+            (Some(k), None) if strict => {
+                let e = self.elem_value(&vi.elem, node, "zv");
+                let n = k.len();
+                (Some(k), Some(vec![e; n]))
+            }
+            (None, Some(v)) if strict => {
+                let e = self.elem_value(&ki.elem, node, "zk");
+                let n = v.len();
+                (Some(vec![e; n]), Some(v))
+            }
+            (k, v) => (k, v),
+        };
+        match (ki_items, vi_items, acc.items.as_mut()) {
+            (Some(kit), Some(vit), Some(its)) => {
+                // zip stops at the shorter input
+                let ctx = self.frame().ctx.clone();
+                for (k, val) in kit.into_iter().zip(vit.into_iter()) {
+                    let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", self.site_of(node), its.len()), &ctx, true, "pair", Payload::Pair(k.clone(), val.clone()));
+                    self.heap.obj_mut(pid).payload = Payload::Pair(k, val);
+                    its.push(Value::obj(pid));
+                }
+            }
+            _ => acc.items = None,
+        }
+        acc.pair = true;
+        let (kv1, vv1) = (self.elem_value(&ki.elem, node, "zk"), self.elem_value(&vi.elem, node, "zv"));
+        acc.pairs.push((kv1, vv1));
+    }
+
+    /// An sqlite cursor: its remaining rows.
+    fn iter_cursor(&mut self, oid: ObjId, node: &Node, state: &mut State, acc: &mut ItemsAcc) {
+        if let Some(rows) = crate::models::sqlite::cursor_rows(self, state, node, oid) {
+            state.set_slot(oid, Ns::Attr, key_str_lit("\u{1}pos"), Value::data("pos"), true);
+            let it = self.iterate(&rows, node, state);
+            match (it.items, acc.items.as_mut()) {
+                (Some(xs), Some(its)) => its.extend(xs),
+                _ => acc.items = None,
+            }
+            acc.elems.push(it.elem.flat());
+        }
+    }
+
+    /// A view: keys, values or (key, value) items of its dict; a frame's rows; an object's attributes.
+    fn iter_view(&mut self, oid: ObjId, _node: &Node, state: &mut State, acc: &mut ItemsAcc) {
+        let Payload::View(vk, recv) = self.heap.obj(oid).payload.clone() else { return };
+        if matches!(vk, ViewKind::Rows | ViewKind::Elems | ViewKind::Attrs) {
+            acc.items = None;
+            acc.exhaustive = false;
+            if vk == ViewKind::Rows {
+                acc.pair = true;
+                acc.pairs.push((Value::data("index"), recv));
+            } else {
+                acc.elems.push(recv);
+            }
+            return;
+        }
+        let kv = KeyVal::KeysOf(KeysOf::new(recv.pts.clone(), Ns::Item));
+        let vals = join_values(recv.pts.iter().map(|r| self.record_values(r, state)).collect::<Vec<_>>());
+        let lit = if recv.pts.len() == 1 { self.literal_dict_items(recv.pts.first().unwrap(), state) } else { None };
+        match (lit, acc.items.as_mut()) {
+            (Some(l), Some(its)) => {
+                for (k, val) in l {
+                    match vk {
+                        ViewKind::Keys | ViewKind::Proxy => its.push(Value::lit(k)),
+                        ViewKind::Values => its.push(val),
+                        _ => {
+                            let pid = self.heap.alloc_raw(Kind::Pair, &format!("pair:{}:{}", oid, intern::key_repr(k)), "", true, "pair", Payload::Pair(Value::lit(k), val.clone()));
+                            self.heap.obj_mut(pid).payload = Payload::Pair(Value::lit(k), val);
+                            its.push(Value::obj(pid));
+                        }
+                    }
+                }
+            }
+            _ => acc.items = None,
+        }
+        match vk {
+            ViewKind::Keys | ViewKind::Proxy => acc.elems.push(Value::kv_only(kv)),
+            ViewKind::Values => acc.elems.push(vals),
+            _ => {
+                acc.pair = true;
+                acc.pairs.push((Value::kv_only(kv), vals));
+            }
+        }
+    }
+
+    /// A dict or frame: its keys (in order when literal).
+    fn iter_mapping(&mut self, oid: ObjId, _node: &Node, state: &mut State, acc: &mut ItemsAcc) {
+        // (a dict with literal keys, a module constant: its items)
+        let lit = self.literal_dict_items(oid, state);
+        match (lit, acc.items.as_mut()) {
+            (Some(l), Some(its)) => its.extend(l.into_iter().map(|(k, _)| Value::lit(k))),
+            _ => acc.items = None,
+        }
+        acc.elems.push(Value::kv_only(KeyVal::KeysOf(KeysOf::new(ObjSet::one(oid), Ns::Item))));
+    }
+
+    /// A list, tuple or set: its positions from the cursor on (a generator partly consumed).
+    fn iter_sequence(&mut self, oid: ObjId, node: &Node, state: &mut State, acc: &mut ItemsAcc) {
+        let ll = self.heap.llen(oid, state);
+        // a generator partly consumed by next(): iteration starts at its cursor
+        let cursor = self.cursor_of(oid, state);
+        match (ll, acc.items.as_mut(), cursor) {
+            (Some(n), Some(its), Some(cursor)) => {
+                for i in cursor.min(n)..n {
+                    its.push(state.slot(oid, Ns::Pos, key_int(i as i64)));
+                }
+            }
+            _ => acc.items = None,
+        }
+        acc.elems.push(self.elem_of(&Value::obj(oid), node, state));
     }
 
     /// Requirements on the loop's own elements are per element, not per program run.
