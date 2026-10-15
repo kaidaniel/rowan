@@ -840,8 +840,9 @@ impl Analyzer {
     pub(super) fn skipped_call(&mut self, foid: ObjId, q: &str, self_v: Option<&Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
         // a method whose code touches its receiver only by attribute names (`self.x`, methods
         // run on it): the receiver's own attributes change only by those names, unless what
-        // the call reaches otherwise reaches the receiver too (`havoc_guard`)
-        let recv = self_v.and_then(|v| v.single()).filter(|o| self.heap.kind(*o) == Kind::Instance);
+        // the call reaches otherwise reaches the receiver too (`Havoc::guard`); one of several
+        // receivers (a method of each, past its budget) likewise, each by its names
+        let recvs: Vec<ObjId> = self_v.map(|v| v.pts.to_vec()).filter(|r| !r.is_empty() && r.iter().all(|o| self.heap.kind(*o) == Kind::Instance)).unwrap_or_default();
         // (a literal argument's text, for the names its templates make)
         let fi = self.heap.func_info(foid);
         let positional: Vec<String> = fi.node.params().map(|p| p.posonlyargs.iter().chain(p.args.iter()).skip(usize::from(self_v.is_some())).map(|a| a.parameter.name.id.to_string()).collect()).unwrap_or_default();
@@ -854,28 +855,27 @@ impl Analyzer {
             };
             v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_str).map(|x| x.to_string())
         };
-        let eff = recv.and_then(|o| Some((o, self.receiver_effects(foid, o, state, &bind)?)));
-        let must: Vec<KeyId> = match &eff {
-            Some((_, e)) if fi_is_method(self, foid) => self.must_stores(foid).into_iter().filter(|k| !e.deletes.contains(k)).collect(),
+        let effs: Vec<(ObjId, RecvEffects)> = recvs.iter().map(|&o| Some((o, self.receiver_effects(foid, o, state, &bind)?))).collect::<Option<_>>().unwrap_or_default();
+        // (on one receiver: the stores its code makes on every way it completes)
+        let must: Vec<KeyId> = match effs.as_slice() {
+            [(_, e)] if fi_is_method(self, foid) => self.must_stores(foid).into_iter().filter(|k| !e.deletes.contains(k)).collect(),
             _ => Vec::new(),
         };
-        if let Some((o, e)) = &eff {
-            self.havoc.guard = Some((*o, 0, std::rc::Rc::from(e.used.as_slice())));
-        }
+        self.havoc.guard = effs.iter().map(|(o, e)| (*o, 0, std::rc::Rc::from(e.used.as_slice()))).collect();
         let walked = self.havoc.visited;
-        let by_names = eff.is_some();
+        let by_names = !effs.is_empty();
         let r = self.unknown_call(q, self_v, args, kwargs, star_args, star_kwargs, state, node);
         let site = s(&format!("{}@L{}", q, node.line));
         self.names.skipped_sites.insert(site);
         let mut roots = vec![foid];
         roots.append(&mut self.havoc.code);
         // (the methods that run with the receiver: what its code reaches through it)
-        roots.extend(eff.iter().flat_map(|(_, e)| e.code.iter().copied()));
+        roots.extend(effs.iter().flat_map(|(_, e)| e.code.iter().copied()));
         let rid = r.single().unwrap_or(0);
         self.follow_code(roots, rid, site, state);
-        if let Some((o, super::effects::RecvEffects { stores, deletes, stores_like, .. })) = eff {
-            let reached_otherwise = self.havoc.guard.take().is_some_and(|(_, n, _)| n > 1);
-            if reached_otherwise {
+        let met: Vec<u32> = std::mem::take(&mut self.havoc.guard).into_iter().map(|(_, n, _)| n).collect();
+        for ((o, RecvEffects { stores, deletes, stores_like, .. }), n) in effs.into_iter().zip(met) {
+            if n > 1 {
                 let walk = self.havoc.new_walk();
                 self.havoc.walk_from(&mut self.heap, &[Value::obj(o)], rid, site, state, walk);
             } else {
@@ -902,7 +902,8 @@ impl Analyzer {
         self.flag_may_raise(state);
         // (what its own code stores on every way it completes is there after the call: the
         // raises above may come before)
-        if let (Some(o), false) = (recv, must.is_empty()) {
+        if let ([o], false) = (recvs.as_slice(), must.is_empty()) {
+            let o = *o;
             let any = Value::obj(crate::interp::any_object(&mut self.heap));
             let mut row = state.row(o, Ns::Attr);
             for k in must {

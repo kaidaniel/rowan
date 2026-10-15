@@ -25,8 +25,8 @@ pub struct HavocMemo {
     pub lens: crate::layered::LayerMap<ObjId, (Option<usize>, usize, u16)>,
     pub visited: FxHashSet<ObjId>,
     pub code: Vec<ObjId>,
-    /// the skipped method's receiver and names it was walked by, and how often it was met
-    pub guard: Option<(ObjId, std::rc::Rc<[KeyId]>, u32)>,
+    /// the skipped method's receivers and names they were walked by, and how often each was met
+    pub guard: Vec<(ObjId, std::rc::Rc<[KeyId]>, u32)>,
 }
 
 /// The havoc walks of unknown code: their marks, a memo of recent walks (a cache: a walk
@@ -41,8 +41,9 @@ pub struct Havoc {
     memo: FxHashMap<(StrId, u64), HavocMemo>,
     /// the code objects the last walk met (functions, classes, bound methods)
     pub code: Vec<ObjId>,
-    /// the receiver of a skipped method call (`skipped_call`) and how often a walk met it
-    pub guard: Option<(ObjId, u32, std::rc::Rc<[KeyId]>)>,
+    /// the receivers of a skipped method call (`skipped_call`), how often a walk met each, and
+    /// the names its code uses on it
+    pub guard: Vec<(ObjId, u32, std::rc::Rc<[KeyId]>)>,
     /// objects visited by walks: part of the work measure
     pub visited: usize,
 }
@@ -72,16 +73,16 @@ impl Havoc {
         // holds `any`, every row has the mutator —, and what they hold is met through them
         // unchanged, or changed and walked here: only the changed ones are walked again)
         // (a skipped method's receiver walked by names: by the same names)
-        let guard = self.guard.as_ref().map(|(g, _, used)| (*g, used.clone()));
+        let guard: Vec<(ObjId, std::rc::Rc<[KeyId]>)> = self.guard.iter().map(|(g, _, used)| (*g, used.clone())).collect();
         let key = (site, {
             let mut h = rustc_hash::FxHasher::default();
             std::hash::Hash::hash(&roots, &mut h);
-            std::hash::Hash::hash(&guard.as_ref().map(|(g, u)| (*g, u.to_vec())), &mut h);
+            std::hash::Hash::hash(&guard, &mut h);
             std::hash::Hasher::finish(&h)
         });
-        let memo = self.memo.remove(&key).filter(|m| m.roots == roots && m.guard.as_ref().map(|(g, u, _)| (*g, u.clone())) == guard);
+        let memo = self.memo.remove(&key).filter(|m| m.roots == roots && m.guard.iter().map(|(g, u, _)| (*g, u.clone())).eq(guard.iter().cloned()));
         // (met through something else then: still, as what met it is as it was)
-        let met = memo.as_ref().and_then(|m| m.guard.as_ref()).map_or(0, |(_, _, n)| *n);
+        let met: Vec<u32> = memo.as_ref().map(|m| m.guard.iter().map(|(_, _, n)| *n).collect()).unwrap_or_default();
         let mut work = roots.clone();
         let (mut visited, mut code, changed) = self.memo_restart(memo, state, &mut work);
         let replay = changed.is_some();
@@ -93,7 +94,7 @@ impl Havoc {
         while let Some(o) = work.pop() {
             // (a skipped method's receiver: what it holds is havocked, it is not, unless met
             // again through something else)
-            if let Some((_, n, used)) = self.guard.as_mut().filter(|(g, _, _)| *g == o) {
+            if let Some((_, n, used)) = self.guard.iter_mut().find(|(g, _, _)| *g == o) {
                 *n += 1;
                 if *n == 1 {
                     let used = used.clone();
@@ -136,15 +137,15 @@ impl Havoc {
             }
             havoc_object(heap, state, o, k, site, any_id, &any, &mut work);
         }
-        if let Some((_, n, _)) = self.guard.as_mut() {
-            *n = (*n).max(met);
+        for ((_, n, _), m) in self.guard.iter_mut().zip(met) {
+            *n = (*n).max(m);
         }
         if self.memo.len() >= HAVOC_MEMOS {
             self.memo.clear();
         }
         code.sort_unstable();
         code.dedup();
-        let guard = self.guard.as_ref().map(|(g, n, used)| (*g, used.clone(), *n));
+        let guard = self.guard.iter().map(|(g, n, used)| (*g, used.clone(), *n)).collect();
         self.memo.insert(key, HavocMemo { roots, rows: state.rows.clone(), slots: state.slots.clone(), elems: state.elems.clone(), lens: state.lens.clone(), visited, code, guard });
     }
 
