@@ -1597,7 +1597,9 @@ fn t_index_one(an: &mut Analyzer, e: &'static ruff_python_ast::Expr, v: Option<&
                 let ts = sh::norm_shape(&ts, &st.tf);
                 return ts.dims();
             }
-            if t_int(an, v).is_some() || dim_of_label(v).is_some() {
+            // (an int, or one of several ints: a loop's index run to a fixpoint)
+            let ints = v.pts.is_empty() && v.kv.is_literal() && crate::domain::kv_literals(&v.kv).iter().all(|k| matches!(intern::key_get(k), intern::Key::Int(_) | intern::Key::Bool(_)));
+            if ints || t_int(an, v).is_some() || dim_of_label(v).is_some() {
                 return Some(vec![]);
             }
             if v.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::List | Kind::Tuple)) {
@@ -4615,6 +4617,19 @@ pub fn t_name_number(an: &mut Analyzer, name: StrId, v: &Value) -> Option<Value>
     }
     let KeyVal::Data(l) = &v.kv else { return None };
     let l = intern::str_get(*l);
+    // (a dim of a tensor the module bound, `n = len(train)`: it keeps its value, printed `n`)
+    if let Some(d) = sh::parse_dim_label(&l) {
+        if let [(m, 1)] = &sh::poly(d)[..] {
+            if let [(a, 1)] = &m[..] {
+                if let sh::Atom::Dim(s, i) = sh::atom_get(*a) {
+                    if sh::sym_text(s).starts_with('\u{1}') {
+                        sh::name_hidden_dim(s, i, &intern::str_get(name));
+                        return None;
+                    }
+                }
+            }
+        }
+    }
     let unknown_dim = sh::parse_dim_label(&l).map(|d| sh::poly(d) == sh::poly(sh::unknown())).unwrap_or(false);
     if &*l != "len" && !unknown_dim {
         return None;
@@ -4624,6 +4639,37 @@ pub fn t_name_number(an: &mut Analyzer, name: StrId, v: &Value) -> Option<Value>
         return None;
     }
     Some(dim_value(sh::named(sy)))
+}
+
+/// `train = encode(text)` at module level (not in a loop): the unknown dims of a tensor the
+/// module binds once are its own, one value each (printed `?`): a window of it that its
+/// length bounds has a known length (`train[j : j + T]` for `j < len(train) - T`).
+pub fn t_name_tensor(an: &mut Analyzer, name: StrId, v: &Value) -> Option<Value> {
+    let fr = an.frame();
+    if fr.func.is_some() || fr.loop_depth > 0 || !fr.unroll.is_empty() || an.entry_function().is_some() || !v.pts.is_empty() {
+        return None;
+    }
+    let s = tensor_shape(v)?;
+    let dims = s.dims()?;
+    let unknown = sh::poly(sh::unknown());
+    if !dims.iter().any(|d| sh::poly(*d) == unknown) {
+        return None;
+    }
+    let sy = sh::sym(0, &format!("\u{1}{}", intern::str_get(name)));
+    if !an.m.t_named_numbers.insert(sy) {
+        return None;
+    }
+    let dims: Vec<DimId> = dims.iter().enumerate().map(|(i, d)| if sh::poly(*d) == unknown { sh::sdim(sy, i as i32) } else { *d }).collect();
+    let id = sh::shape_id(sh::canon(Shape { assume: s.assume.clone(), ..Shape::known(dims) }));
+    // (the label's kind and range kept: `B…`, `…^lo,hi`)
+    let l = label(v)?;
+    let r = l.strip_prefix(sh::TENSOR_PREFIX)?;
+    let (b, r) = match r.strip_prefix('B') {
+        Some(r) => ("B", r),
+        None => ("", r),
+    };
+    let tail = r.trim_start_matches(|c: char| c.is_ascii_digit());
+    Some(Value::data(&format!("{}{}{}{}", sh::TENSOR_PREFIX, b, id.0, tail)))
 }
 
 /// `w = load(...)`: an unknown call's result is named by the variable it is bound to

@@ -967,6 +967,18 @@ fn none_key() -> KeyId {
     intern::key(intern::Key::None)
 }
 
+/// A missing value of a column: pandas' NaN (None in an object column, which rowan's own
+/// producers do not make).
+fn nan_key() -> KeyId {
+    intern::key_float(f64::NAN)
+}
+
+/// The values but the missing ones (`groupby` / `get_dummies` / `crosstab` drop them).
+fn without_na(k: Known) -> Known {
+    let na = [none_key(), nan_key()];
+    Known { may: k.may.iter().filter(|x| !na.contains(x)).collect(), sure: k.sure.iter().filter(|x| !na.contains(x)).collect() }
+}
+
 pub fn index_levels(st: &State, f: u32) -> Option<Vec<Option<KeyId>>> {
     let Some(v) = st.slot_opt(f, Ns::Meta, mk("index")) else { return Some(vec![None]) };
     if !v.pts.is_empty() {
@@ -2182,6 +2194,16 @@ fn merge_impl(an: &mut Analyzer, st: &mut State, c: &Call, left: Value, right: V
         on = Some(c.args[pos_on].clone());
     }
     let cross = key_is(&c.kw("how"), "cross");
+    // (the sides whose rows may lack a match: their columns get NaN there; merge_asof is a
+    // left join)
+    let how = if mode == 2 { Some(Some("left".to_string())) } else { c.kw("how").or_else(|| c.args.get(pos_on - 1).cloned()).map(|v| v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_str).map(|s| s.to_string())) };
+    let unmatched = |left: bool| match how.as_ref().map(|h| h.as_deref()) {
+        None => false,
+        Some(Some("inner" | "cross")) => false,
+        Some(Some("left")) => !left,
+        Some(Some("right")) => left,
+        _ => true,
+    };
     let left_on = c.kw("left_on");
     let right_on = c.kw("right_on");
     let mut on_keys = on.as_ref().and_then(|o| an.lit_keys(o, st));
@@ -2236,17 +2258,19 @@ fn merge_impl(an: &mut Analyzer, st: &mut State, c: &Call, left: Value, right: V
     }
     // a column that keeps its name keeps its dtype
     if let Some(nid) = v.single() {
-        for (side, other) in [(&lf, &rrow), (&rf, &lrow)] {
+        for (left, side, other) in [(true, &lf, &rrow), (false, &rf, &lrow)] {
             if let [f] = side.as_slice() {
                 let src = st.row(*f, Ns::Item);
                 // (a plain name when the other side may have it too exists only where the other
                 // lacks it: this side's, if this side surely has it)
                 let keep = KeySet::from_iter(row.present.iter().filter(|k| src.present.contains(*k) && (keys.contains(*k) || !side_status(other, *k).0 || src.definite.contains(*k))));
                 copy_dtypes(st, *f, nid, &keep);
-                // values: some of this side's (a row without a match gets NaN)
+                // values: some of this side's (a row without a match gets NaN, but in the
+                // join columns)
                 for k in keep.iter() {
                     if let Some(v) = vals(st, *f, k) {
-                        let v = Known { may: v.may.insert(none_key()), sure: KeySet::new() };
+                        let may = if unmatched(left) && !keys.contains(k) { v.may.insert(nan_key()) } else { v.may };
+                        let v = Known { may, sure: KeySet::new() };
                         set_vals(st, nid, k, Some(&v));
                     }
                 }
@@ -3074,8 +3098,7 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // the group labels: the values of a single key column, when known
     let group_labels: Option<Known> = match (fs.as_slice(), by_seq.as_deref()) {
         ([f], Some([k])) if window.is_none() => vals(st, *f, *k).map(|v| {
-            let nk = none_key();
-            if key_is_bool(&c.kw("dropna"), false) { v } else { Known { may: v.may.remove(nk), sure: v.sure.remove(nk) } }
+            if key_is_bool(&c.kw("dropna"), false) { v } else { without_na(v) }
         }),
         _ => None,
     };
@@ -4134,8 +4157,7 @@ fn dummy_cols(st: &State, f: Option<u32>, col: KeyId, sv: Option<Known>, prefix:
         Some(k) => k,
         None => vals(st, f?, col)?,
     };
-    let nk = none_key();
-    let k = Known { may: k.may.remove(nk), sure: k.sure.remove(nk) };
+    let k = without_na(k);
     let name = |v: KeyId| -> KeyId {
         match &prefix {
             Some(p) => key_str_lit(&format!("{}{}{}", p, sep, intern::key_py_str(v))),
@@ -4365,7 +4387,7 @@ fn crosstab(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         // dropna=False keeps every category of a categorical
         ([one], true) if cats_of(st, *one).is_some() => cats_of(st, *one),
         _ if css.is_empty() => None,
-        _ => vals_join(st, &css, vkey()).map(|k| Known { may: k.may.remove(none_key()), sure: k.sure.remove(none_key()) }),
+        _ => vals_join(st, &css, vkey()).map(without_na),
     };
     let mut row = known_or_open(colvals, &Row::new(), c.line, "crosstab");
     if margins {

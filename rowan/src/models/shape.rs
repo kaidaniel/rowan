@@ -161,6 +161,16 @@ pub fn sym(scope: u32, text: &str) -> Sym {
 }
 thread_local! {
     static PARAM_ORDER: RefCell<FxHashMap<Sym, u32>> = RefCell::new(FxHashMap::default());
+    /// dims of tensors without a name in the program bound to a module-level name
+    /// (`n = len(train)`): printed by it
+    static DIM_NAMES: RefCell<FxHashMap<(Sym, i32), String>> = RefCell::new(FxHashMap::default());
+}
+
+/// `name` is bound to dim `i` of the unnamed symbol `s` (`t_name_tensor`) at module level.
+pub fn name_hidden_dim(s: Sym, i: i32, name: &str) {
+    DIM_NAMES.with(|m| {
+        m.borrow_mut().entry((s, i)).or_insert_with(|| name.to_string());
+    });
 }
 
 /// A new analysis on this thread: symbols are keyed by object ids, which start again.
@@ -177,6 +187,7 @@ pub fn reset() {
         t.shape_map.clear();
     });
     PARAM_ORDER.with(|m| m.borrow_mut().clear());
+    DIM_NAMES.with(|m| m.borrow_mut().clear());
 }
 
 /// `s` is the `i`-th parameter of its function (orients facts between parameters' dims).
@@ -1331,6 +1342,10 @@ pub fn sym_print(s: Sym) -> Option<String> {
         return None;
     }
     let text = sym_text(s);
+    // (an unknown with an identity but no name in the program: `t_name_tensor`)
+    if text.starts_with('\u{1}') {
+        return None;
+    }
     let sc = sym_scope(s);
     CTX.with(|c| {
         let c = c.borrow();
@@ -1384,7 +1399,7 @@ pub fn atom_text(a: AtomId) -> String {
             if let Some(n) = CTX.with(|c| c.borrow().atom_names.get(&a).cloned()) {
                 return n;
             }
-            let Some(t) = sym_print(s) else { return "?".into() };
+            let Some(t) = sym_print(s) else { return DIM_NAMES.with(|m| m.borrow().get(&(s, i)).cloned()).unwrap_or_else(|| "?".into()) };
             if i == 0 && CTX.with(|c| c.borrow().strs.contains(&s)) {
                 format!("len({})", t)
             } else if needs_parens(&t) {

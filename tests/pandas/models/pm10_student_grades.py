@@ -127,10 +127,10 @@ def report_rows(report):
     rows = []
     for rec in report.to_dict("records"):
         grade = str(rec["letter"])                                      #@ ok letter
-        # (a weighted score outside the bins would give NaN, "nan" here: the labels are what is
-        # known)
-        #@todo value grade: exactly={"A","B","C","D","F"}
-        #@value grade: includes={"A","B","C","D","F"}
+        # (a weighted score outside the bins gives NaN, "nan" here: the driver's grades are
+        # examples, an input may hold any score — the to-do `exactly={"A","B","C","D","F"}`
+        # held only for the driver's)
+        #@value grade: exactly={"A","B","C","D","F","nan"}
         status = "complete" if rec["n_missing"] == 0 else "incomplete"  #@ ok n_missing
         #@value status: exactly={"complete","incomplete"}
         entry = {"student": rec["student"], "name": rec["name"], "grade": grade, "status": status}  #@ ok student ; ok name

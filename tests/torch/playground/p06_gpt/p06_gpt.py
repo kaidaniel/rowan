@@ -119,11 +119,11 @@ if __name__ == "__main__":
 
     for step in range(STEPS):
         x, y = get_batch(train, B=68, T=64) # x: (B, T): int; y: (B, T): int
-        #@shape x: [68, _]; y: [68, _]
-        #@todo shape x: [68, 64]; y: [68, 64] (a slice j:j + T of an unknown start in get_batch: train's length is not known, so j + T <= len(train) is not shown)
+        #@shape x: [68, 64]; y: [68, 64]
+        # (j + T < len(train) for j from randint: train's unknown length is one value, not `?`)
         logits: Tensor = model(x) # (B, T, V)
-        #@shape logits: [68, _, V]
-        #@todo shape logits: [68, 64, V] (x above: its second dim is not known)
+        #@shape logits: [68, 64, V]
+        # (x above)
         loss = nn.functional.cross_entropy(logits.view(-1, V), y.view(-1))
         #@shape loss: []
         optim.zero_grad()
@@ -138,10 +138,10 @@ if __name__ == "__main__":
                 vals = []
                 for _ in range(10):                             # average several val batches: less noisy
                     xv, yv = get_batch(test, B=64, T=64) # I feel like rowan should be able to get the right number of dimensions here, so it should be T[64, 64, ?]. If it can show T[64, 64, len(idx)] it would be even more awesome.
-                    #@shape xv: [64, _]; yv: [64, _]
+                    #@shape xv: [64, 64]; yv: [64, 64]
                     lv = model(xv)
-                    #@shape lv: [64, _, V]
-                    #@todo shape lv: [64, 64, V] (xv above: its second dim is not known)
+                    #@shape lv: [64, 64, V]
+                    # (xv above: test's length is one value too)
                     vals.append(nn.functional.cross_entropy(lv.view(-1, V), yv.view(-1)))
                 val = torch.stack(vals).mean()
                 #@shape val: []
