@@ -145,9 +145,11 @@ impl Analyzer {
         self.entry.scope = Some(oid);
         let fake = Node::synthetic(mi.idx, fi.node.node().line);
         let saved_entry = self.entry.run.replace(oid);
+        let saved_general = self.entry.general.replace(oid);
         let r = f(self, &fake);
         self.entry.scope = None;
         self.entry.run = saved_entry;
+        self.entry.general = saved_general;
         self.cx.frames.pop();
         r
     }

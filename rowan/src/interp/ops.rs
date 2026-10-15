@@ -26,16 +26,66 @@ impl Analyzer {
         let c = self.eval(&b.right, state);
         let nd = frontend::node(node);
         let r = self.binop(b.op, &a, &c, &nd, state);
-        // an unknown result is named by the expression (`1 + b`)
-        if r.pts.is_empty() && matches!(r.kv, KeyVal::Data(l) if !intern::str_get(l).starts_with('\u{1}')) {
+        // an unknown result is named by the expression (`1 + b`), of its type when known
+        if let (true, KeyVal::Data(l)) = (r.pts.is_empty(), &r.kv) {
+            let l = intern::str_get(*l);
             let text = frontend::text_at(&nd).split_whitespace().collect::<Vec<_>>().join(" ");
-            if !text.is_empty() && text.len() <= 60 {
+            if !l.starts_with('\u{1}') && !text.is_empty() && text.len() <= 60 {
                 // the expression names the value only inside this function (its names)
                 let scope = self.frame().func.unwrap_or(0);
-                return Value::data(&format!("expr:{}:{}", scope, text));
+                let name = format!("expr:{}:{}", scope, text);
+                return Value::data(&match crate::domain::label_type(&l) {
+                    Some(t) => crate::domain::typed_label(t, &name),
+                    None => name,
+                });
             }
         }
         r
+    }
+
+    /// The builtin type every part of `v` has (`domain::TYPE_NAMES`): its literals', its typed
+    /// unknowns' (a label's, an annotated parameter's); None when a part's is not known or
+    /// they differ.
+    pub fn value_type(&self, v: &Value) -> Option<&'static str> {
+        let mut ty: Option<&'static str> = None;
+        let mut add = |t: Option<&'static str>| -> Option<()> {
+            let t = t?;
+            if ty.is_some_and(|u| u != t) {
+                return None;
+            }
+            ty = Some(t);
+            Some(())
+        };
+        for o in v.pts.iter() {
+            add(self.heap.obj(o).ty)?;
+        }
+        match &v.kv {
+            KeyVal::Bot => {}
+            KeyVal::Data(l) => add(crate::domain::label_type(&intern::str_get(*l)))?,
+            KeyVal::Lit(_) | KeyVal::Lits(_) => {
+                for k in crate::domain::kv_literals(&v.kv).iter() {
+                    add(crate::domain::TYPE_NAMES.iter().copied().find(|t| crate::domain::key_type(k, t)))?;
+                }
+            }
+            KeyVal::KeysOf(_) => return None,
+        }
+        ty
+    }
+
+    /// `v`, an unknown of type `ty` when it is an unknown scalar (named as it is, unless `named`
+    /// is false: its name is what it was made from, not what it is).
+    pub fn as_type(&self, v: Value, ty: Option<&'static str>, named: bool) -> Value {
+        let (Some(t), true, KeyVal::Data(l)) = (ty, v.pts.is_empty() && !self.m.torch_on, &v.kv) else { return v };
+        let l = intern::str_get(*l);
+        let name = crate::domain::label_name(&l);
+        // (labels that carry more than a name — a JSON text, a shape, a pattern — are the
+        // models': left as they are; `len` is kept, comparisons read it)
+        let plain = name.is_empty() || name.starts_with("expr:") || matches!(name, "str" | "int" | "bool" | "len") || (name.starts_with('L') && name[1..].chars().all(|c| c.is_ascii_digit()));
+        if !plain || crate::domain::label_type(&l) == Some(t) {
+            return v;
+        }
+        let keep = (named && !matches!(name, "str" | "int" | "bool")) || name == "len";
+        Value::data(&crate::domain::typed_label(t, if keep { name } else { "" }))
     }
 
     /// `-x`, `+x`, `~x`, `not x`.
@@ -60,6 +110,19 @@ impl Analyzer {
                 }
             }
         }
+        // (`-x` of an int is an int; `not x` a bool)
+        let ty = match (u.op, self.value_type(&v)) {
+            (ast::UnaryOp::Not, _) => Some("bool"),
+            (ast::UnaryOp::Invert, Some("int" | "bool")) => Some("int"),
+            (ast::UnaryOp::USub | ast::UnaryOp::UAdd, Some("int" | "bool")) => Some("int"),
+            (ast::UnaryOp::USub | ast::UnaryOp::UAdd, Some("float")) => Some("float"),
+            _ => None,
+        };
+        let r = self.unary_untyped(u, v, node, state);
+        self.as_type(r, ty, false)
+    }
+
+    fn unary_untyped(&mut self, u: &'static ast::ExprUnaryOp, v: Value, node: &'static ast::Expr, state: &mut State) -> Value {
         match u.op {
             ast::UnaryOp::Not => match self.truth_of(&v, state, &frontend::node(node)) {
                 Some(b) => Value::lit(intern::key_bool(!b)),
@@ -87,6 +150,12 @@ impl Analyzer {
     }
 
     pub fn binop(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Value {
+        let r = self.binop_untyped(op, a, b, node, state);
+        let ty = binop_type(op, self.value_type(a), self.value_type(b));
+        self.as_type(r, ty, true)
+    }
+
+    fn binop_untyped(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Value {
         if let Some(v) = self.binop_by_models(op, a, b, node, state) {
             return v;
         }
@@ -395,7 +464,13 @@ impl Analyzer {
         kv
     }
 
+    /// An f-string: a str, its text known as far as its parts are.
     pub(super) fn expr_fstring(&mut self, f: &'static ast::ExprFString, node: &'static ast::Expr, state: &mut State) -> Value {
+        let r = self.fstring_untyped(f, node, state);
+        self.as_type(r, Some("str"), false)
+    }
+
+    fn fstring_untyped(&mut self, f: &'static ast::ExprFString, node: &'static ast::Expr, state: &mut State) -> Value {
         let mut parts: Vec<Part> = Vec::new();
         for p in f.value.iter() {
             match p {
@@ -531,8 +606,7 @@ impl Analyzer {
         if all_lit {
             return Value::lit(key_str_lit(&text));
         }
-        let nd = frontend::node(node);
-        Value::data(&format!("fstring@L{}", nd.line))
+        Value::data(&crate::domain::typed_label("str", ""))
     }
 }
 
@@ -579,4 +653,28 @@ fn format_percent_alternatives(fmt: &str, b: &Value, state: &State, an: &Analyze
 /// `format(value, spec)` for a known literal and a plain spec: `[[fill]align][0][width][.prec][type]`.
 pub(crate) fn format_spec_literal(k: KeyId, spec: &str) -> Option<String> {
     crate::models::pyvalues::format_value(k, spec)
+}
+
+/// The builtin type of `a op b` for operands of builtin types `a`, `b` (None: not known, or
+/// not one: `**` may give a float or a complex).
+fn binop_type(op: ast::Operator, a: Option<&'static str>, b: Option<&'static str>) -> Option<&'static str> {
+    use ast::Operator::*;
+    let a = a?;
+    // (`text % args` formats, whatever the arguments)
+    if op == Mod && matches!(a, "str" | "bytes") {
+        return Some(a);
+    }
+    let b = b?;
+    let num = |t: &str| matches!(t, "int" | "bool" | "float");
+    let int = |t: &str| matches!(t, "int" | "bool");
+    match op {
+        Add if a == b && matches!(a, "str" | "bytes") => Some(a),
+        Mult if matches!(a, "str" | "bytes") && int(b) => Some(a),
+        Mult if matches!(b, "str" | "bytes") && int(a) => Some(b),
+        Div if num(a) && num(b) => Some("float"),
+        Add | Sub | Mult | FloorDiv | Mod if num(a) && num(b) => Some(if a == "float" || b == "float" { "float" } else { "int" }),
+        BitAnd | BitOr | BitXor if a == "bool" && b == "bool" => Some("bool"),
+        BitAnd | BitOr | BitXor | LShift | RShift if int(a) && int(b) => Some("int"),
+        _ => None,
+    }
 }

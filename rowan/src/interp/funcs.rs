@@ -1352,7 +1352,12 @@ impl Analyzer {
             (_, Some(r)) if (r as usize) < self.heap.len() => r,
             _ => oid,
         };
-        let label = format!("{} of {}@L{}", tag, self.heap.obj(root).label, node.line);
+        // (a copy of a copy made elsewhere is named by the first original: `copy of X@L5`)
+        let mut base: &str = &self.heap.obj(root).label;
+        while let Some(rest) = base.strip_prefix("copy of ").or_else(|| base.strip_prefix("deep of ")) {
+            base = rest.rsplit_once("@L").filter(|(_, l)| l.chars().all(|c| c.is_ascii_digit())).map(|(b, _)| b).unwrap_or(rest);
+        }
+        let label = format!("{} of {}@L{}", tag, base, node.line);
         let payload = self.heap.obj(oid).payload.clone();
         let nid = self.alloc(kind, &format!("{}{}:{}", prefix, kind.name(), root), state, &label, payload, None, if kind == Kind::Instance { Ns::Attr } else { Ns::Item }, None, None);
         self.heap.copy_root.insert(nid, root);

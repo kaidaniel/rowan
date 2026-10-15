@@ -328,7 +328,7 @@ fn golden_requests(an: &mut Analyzer, rel: &str, src: &str) {
             }
             push(an, name);
         }
-        // `#@value NAME: …; NAME2: …` (also under `#@todo value`), `#@shape[@Ln] NAME: …`,
+        // `#@value NAME: …; NAME2: …`, `#@general …` (also under `#@todo`), `#@shape[@Ln] NAME: …`,
         // `#@dim[@Ln] NAME: …`
         let shape_hit = ["#@shape", "#@dim", "#@todo shape", "#@todo dim"].iter().find_map(|d| {
             let p = line.find(d)? + d.len();
@@ -340,7 +340,7 @@ fn golden_requests(an: &mut Analyzer, rel: &str, src: &str) {
             let skip = if rest.starts_with("@L") { rest.find(char::is_whitespace).unwrap_or(rest.len()) } else { 0 };
             Some(p + skip)
         });
-        let vhit = line.find("#@value").map(|p| p + 7).or_else(|| line.find("#@todo value").map(|p| p + 12)).or(shape_hit);
+        let vhit = ["#@value", "#@todo value", "#@general", "#@todo general"].iter().find_map(|d| line.find(d).map(|p| p + d.len())).or(shape_hit);
         if let Some(pos) = vhit {
             for clause in line[pos..].split(';') {
                 let name: String = clause.trim_start().chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();

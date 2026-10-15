@@ -35,8 +35,16 @@ impl Analyzer {
         if all_true { Value::lit(intern::key_bool(true)) } else { Value::data("bool") }
     }
 
-    /// `a op b` for one comparison operator (`right`: b as written).
+    /// `a op b` for one comparison operator (`right`: b as written): a bool when it is `in`,
+    /// `is`, or compares values of builtin types.
     pub(super) fn compare(&mut self, op: ast::CmpOp, a: &Value, b: &Value, right: &'static ast::Expr, nd: &Node, state: &mut State) -> Value {
+        let r = self.compare_untyped(op, a, b, right, nd, state);
+        let always = matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn | ast::CmpOp::Is | ast::CmpOp::IsNot);
+        let ty = (always || (self.value_type(a).is_some() && self.value_type(b).is_some())).then_some("bool");
+        self.as_type(r, ty, false)
+    }
+
+    fn compare_untyped(&mut self, op: ast::CmpOp, a: &Value, b: &Value, right: &'static ast::Expr, nd: &Node, state: &mut State) -> Value {
         let lit = |t: bool| Value::lit(intern::key_bool(t));
         // a tensor is never None
         if matches!(op, ast::CmpOp::Is | ast::CmpOp::IsNot) && matches!(right, ast::Expr::NoneLiteral(_)) && crate::models::torch::is_tensor(a) && a.pts.is_empty() {
@@ -97,7 +105,7 @@ impl Analyzer {
         let known_lits = a.kv.is_literal() || a.kv.is_bot();
         // an unknown length against 0 (or a negative number): `len(xs) >= 0` holds
         if let (true, KeyVal::Data(d), ast::Expr::NumberLiteral(nl)) = (a.pts.is_empty(), &a.kv, right) {
-            if &*intern::str_get(*d) == "len" {
+            if crate::domain::label_name(&intern::str_get(*d)) == "len" {
                 if let ast::Number::Int(i) = &nl.value {
                     if let Some(n) = i.as_i64() {
                         match op {

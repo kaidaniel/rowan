@@ -295,6 +295,11 @@ impl Analyzer {
             (None, Some(m)) => self.run_model(m, state, &call),
             (None, None) => return self.unknown_call(&qual, Some(&recv), &call.args, kwargs, star_args, star_kwargs, state, node),
         };
+        // (a str method of a str: what it returns is known by the method)
+        let r = match self.value_type(&recv) {
+            Some(t @ ("str" | "bytes")) => self.as_type(r, crate::models::str_method_type(&qual, t), false),
+            _ => r,
+        };
         if call_ast.is_some() {
             crate::models::may_type_error(self, &qual, &call.args, kwargs, &r, state);
         }
@@ -307,7 +312,7 @@ impl Analyzer {
         let qual = qual.to_string();
         let call = Call { qual: qual.clone(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
         if let Some(v) = crate::models::pure::try_pure(self, state, &call) {
-            return v;
+            return self.as_type(v, crate::models::result_type(self, &qual, args), false);
         }
         // a builtin exception class: an exception object with its args
         if let Some(n) = qual.strip_prefix("builtins.").filter(|n| super::exprs::is_exception_name(n)) {
@@ -326,9 +331,17 @@ impl Analyzer {
             }
         }
         if let Some(m) = self.program.models.lookup(&qual) {
-            return self.run_model(m, state, &call);
+            let r = self.run_model(m, state, &call);
+            return self.as_type(r, crate::models::result_type(self, &qual, args), false);
         }
-        self.unknown_call(&qual, None, args, kwargs, star_args, star_kwargs, state, node)
+        let r = self.unknown_call(&qual, None, args, kwargs, star_args, star_kwargs, state, node);
+        // (`input()`: a str all the same)
+        if qual == "builtins.input" {
+            for o in r.pts.iter() {
+                self.heap.obj_mut(o).ty = Some("str");
+            }
+        }
+        r
     }
 
     /// A model call: objects it allocates at one site stay distinct from each other (one

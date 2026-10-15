@@ -1126,7 +1126,7 @@ pub fn scalar_attr(an: &mut Analyzer, obj: &Value, name: &str, report: bool, sta
             };
         }
         // a string whose text is not known (a validated `str` field, a str method's result)
-        if &*label == "str" && crate::interp::STR_METHOD_NAMES.contains(&name) {
+        if (&*label == "str" || crate::domain::label_type(&label) == Some("str")) && crate::interp::STR_METHOD_NAMES.contains(&name) {
             return an.method_value(&format!("str.{}", name), obj);
         }
         if matches!(&*label, "Decimal" | "Fraction") && crate::models::pynum::NAMES.contains(&name) {
@@ -2041,6 +2041,46 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     Value::data(&format!("type@L{}", c.line))
+}
+
+/// The builtin type a library function's result has, whatever its arguments (`len`: an int;
+/// `abs` of an int: an int), when it returns: None when that depends on more than this knows.
+pub fn result_type(an: &Analyzer, qual: &str, args: &[Value]) -> Option<&'static str> {
+    let arg_type = || args.first().and_then(|a| an.value_type(a));
+    match qual.strip_prefix("builtins.").unwrap_or(qual) {
+        "len" | "ord" | "hash" | "id" | "int" => Some("int"),
+        "str" | "repr" | "ascii" | "chr" | "format" | "json.dumps" => Some("str"),
+        "float" => Some("float"),
+        "bool" | "isinstance" | "issubclass" | "callable" | "hasattr" => Some("bool"),
+        "abs" => match arg_type()? {
+            "bool" | "int" => Some("int"),
+            "float" => Some("float"),
+            _ => None,
+        },
+        // (`round(x)` of a number: an int; `round(x, n)`: of x's type)
+        "round" if matches!(arg_type()?, "int" | "bool" | "float") => Some(if args.len() == 1 || arg_type() != Some("float") { "int" } else { "float" }),
+        _ => None,
+    }
+}
+
+/// The builtin type of what a method of a str (`ty`: or bytes) returns (`count`: an int).
+pub fn str_method_type(qual: &str, ty: &'static str) -> Option<&'static str> {
+    let name = last(qual);
+    if matches!(name, "count" | "find" | "rfind" | "index" | "rindex") {
+        return Some("int");
+    }
+    if name == "startswith" || name == "endswith" || name.starts_with("is") {
+        return Some("bool");
+    }
+    const SAME: &[&str] = &["upper", "lower", "strip", "lstrip", "rstrip", "title", "capitalize", "casefold", "swapcase", "removeprefix", "removesuffix", "zfill", "center", "ljust", "rjust", "replace", "expandtabs", "join", "format", "format_map", "translate"];
+    if SAME.contains(&name) {
+        return Some(if matches!(name, "format" | "format_map" | "casefold") { "str" } else { ty });
+    }
+    match (name, ty) {
+        ("encode", "str") => Some("bytes"),
+        ("decode", "bytes") => Some("str"),
+        _ => None,
+    }
 }
 
 fn m_str(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {

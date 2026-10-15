@@ -736,7 +736,7 @@ pub fn golden_json(an: &Analyzer) -> J {
         .row_checks
         .iter()
         .map(|rc| {
-            let value = json!({"lits": rc.value.lits.iter().map(|k| key_repr(*k)).collect::<Vec<_>>(), "unknown": rc.value.unknown, "objects": rc.value.objects});
+            let value = json!({"lits": rc.value.lits.iter().map(|k| key_repr(*k)).collect::<Vec<_>>(), "unknown": rc.value.unknown, "objects": rc.value.objects, "types": rc.value.types, "untyped": rc.value.untyped});
             let mut out = match &rc.row {
             None => json!({"file": rc.file, "line": rc.line, "name": rc.name, "row": J::Null, "value": value}),
             Some(r) => json!({
@@ -751,6 +751,10 @@ pub fn golden_json(an: &Analyzer) -> J {
                 }
             }),
             };
+            if let J::Object(o) = &mut out {
+                o.insert("general".into(), json!(rc.general));
+                o.insert("quiet".into(), json!(rc.quiet));
+            }
             if let (Some(J::Object(t)), J::Object(o)) = (&rc.tensor, &mut out) {
                 for (k, v) in t {
                     o.insert(k.clone(), v.clone());
@@ -837,6 +841,8 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
         parts.push(t);
     } else if let Some(expr) = data_expr(&v.kv) {
         parts.push(expr);
+    } else if let Some(t) = v.kv.data_site().and_then(|l| crate::domain::label_type(&intern::str_get(l))) {
+        parts.push(format!("{}(?)", t));
     } else if !v.kv.is_literal() && !v.kv.is_bot() {
         parts.push("?".into());
     }
@@ -918,7 +924,11 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         Kind::Class => an.heap.obj(o).label.trim_start_matches("class ").to_string(),
         Kind::Module => an.heap.obj(o).label.to_string(),
         // an unknown named in the program's terms (`a`, `a(b)`, `cfg["db"]`), else `?`
-        Kind::Unknown => an.names.visible(o).cloned().unwrap_or_else(|| "?".into()),
+        // (unnamed here: of its type when it has one, `int(?)`)
+        Kind::Unknown => an.names.visible(o).cloned().unwrap_or_else(|| match an.heap.obj(o).ty {
+            Some(t) => format!("{}(?)", t),
+            None => "?".into(),
+        }),
         Kind::External => an.heap.external_qual(o).trim_start_matches("builtins.").to_string(),
         Kind::Super => "super()".into(),
         // iterators, views, groupbys, parsers, responses…: by their type, as Python prints them
@@ -1102,7 +1112,7 @@ pub fn in_scope<R>(scope: u32, f: impl FnOnce() -> R) -> R {
 pub fn data_expr(kv: &KeyVal) -> Option<String> {
     let KeyVal::Data(s) = kv else { return None };
     let label = intern::str_get(*s);
-    let rest = label.strip_prefix("expr:")?;
+    let rest = crate::domain::label_name(&label).strip_prefix("expr:")?;
     let (scope, text) = rest.split_once(':')?;
     let here = RENDER_SCOPE.with(|c| c.get());
     (scope.parse::<u32>().ok()? == here).then(|| text.to_string())
@@ -1210,24 +1220,35 @@ pub fn facts_json(an: &Analyzer) -> J {
     for ((line, name), f) in &an.findings.facts {
         // (a hover lists the objects a name may hold: past `MAX_FACT_OBJECTS` only the count —
         // a name holding hundreds of objects made the document hundreds of MB)
-        let objects_total = f.rows.len();
+        let objects_total = f.shown_rows().len();
         let objects: Vec<J> = f
-            .rows
+            .shown_rows()
             .iter()
             .take(MAX_FACT_OBJECTS)
             .map(|(oid, (item, attr))| fact_object_json(an, f, *oid, item, attr))
             .collect();
+        // (the unknowns of the value for any call, when the objects shown are the calls': what
+        // the hover says of where the value's unknowns come from)
+        let general_unknowns: Option<Vec<J>> = (!f.rows.is_empty() && !f.general.is_empty()).then(|| {
+            f.general_rows.iter().filter(|(o, _)| an.heap.kind(**o) == Kind::Unknown).take(MAX_FACT_OBJECTS).map(|(oid, (item, attr))| fact_object_json(an, f, *oid, item, attr)).collect()
+        });
         // what the code reads of the inputs these objects come from, as access paths from the name
         let required = fact_required(an, f, *name);
         let required: Vec<J> = required.into_iter().map(|(p, a)| json!({"path": p, "always": a})).collect();
         // tensor-shape requirements recorded on this line (in the line's own analysis), in
         // the dim names of this fact
         let (requires, extra_legend) = fact_shape_requires(an, f, *line);
-        let (text, examples): (String, Vec<String>) = match &f.primary {
-            Some(p) => (p.clone(), f.texts.iter().filter(|t| *t != p).cloned().collect()),
-            None => (join_alternatives(&f.texts), vec![]),
+        // the value for any call (the general run's), and apart from it what the program's
+        // calls gave (with their lines); without a general run (a closure, a lambda) what the
+        // calls gave is the value
+        let (text, calls): (String, Vec<J>) = if f.general.is_empty() {
+            (join_alternatives(&f.calls.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>()), vec![])
+        } else {
+            let g = join_alternatives(&f.general);
+            let calls = f.calls.iter().filter(|(t, _)| *t != g).map(|(t, lines)| json!({"text": t, "lines": lines.iter().filter(|l| **l > 0).collect::<Vec<_>>()})).collect();
+            (g, calls)
         };
-        facts.push(json!({"line": line, "name": name.to_string(), "text": text, "examples": examples, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "required": required, "requires": requires}));
+        facts.push(json!({"line": line, "name": name.to_string(), "text": text, "calls": calls, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "general_unknowns": general_unknowns, "required": required, "requires": requires}));
     }
     // (columns in UTF-16 units, as editors count them; each finding with its message in words)
     let main_idx = an.heap.module_info(an.program.main_module).idx;
@@ -1288,7 +1309,7 @@ fn fact_object_json(an: &Analyzer, f: &crate::interp::Fact, oid: ObjId, item: &O
 fn fact_required(an: &Analyzer, f: &crate::interp::Fact, name: crate::intern::StrId) -> Vec<(String, bool)> {
     let mut required: Vec<(String, bool)> = Vec::new();
     if let Some(st) = &an.findings.final_state {
-        for (_, (item, attr)) in &f.rows {
+        for (_, (item, attr)) in f.shown_rows() {
             for r in [item, attr].into_iter().flatten() {
                 for (src, _) in r.sources.iter() {
                     if source_is_data(src) {

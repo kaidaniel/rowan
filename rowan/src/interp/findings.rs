@@ -46,45 +46,77 @@ impl Verdict {
     }
 }
 
-/// Facts about one name at one line of the main module, joined over every execution of
-/// the statement (hover support): the value it held and the rows of the objects it pointed to.
+/// Facts about one name at one line of the main module (hover support): the values it held and
+/// the rows of the objects it pointed to. Two sets of values, never joined into one: what holds
+/// for any call of the function the line is in (its general run, with open parameters of their
+/// annotated types; module code), and what the program's own calls gave (with their lines).
 #[derive(Clone)]
 pub struct Fact {
-    /// object -> (item row, attr row) as they were when the name was read / written
+    /// object -> (item row, attr row) as they were when the name was read / written: in the
+    /// program's calls, and in the general run (the objects a hover describes are the calls'
+    /// when there are some: those exist in the program's runs)
     pub rows: IndexMap<ObjId, (Option<Row>, Option<Row>)>,
-    /// the value rendered (`report::render_value`) at each recording, distinct texts
-    pub texts: Vec<String>,
+    pub general_rows: IndexMap<ObjId, (Option<Row>, Option<Row>)>,
+    /// the values (`report::render_value`) the general run recorded, distinct texts
+    pub general: Vec<String>,
+    /// the values the program's calls recorded, distinct texts, each with the lines of the
+    /// calls (of the function the line is in) that gave it
+    pub calls: Vec<(String, Vec<u32>)>,
     /// the symbols the texts mention, with what is known about each (`report::value_legend`)
     pub legend: Vec<(String, String)>,
     /// display names of the tensor dims the texts mention (`B` for x.shape[0])
     pub t_names: FxHashMap<crate::models::shape::AtomId, String>,
-    /// the text from the function's own analysis (open parameters), when there is one: the
-    /// hover leads with it; `texts` then holds what calls gave
-    pub primary: Option<String>,
     /// recorded by an assignment (whose value the hover shows, not the reads on the line)
     pub written: bool,
 }
 
+/// Distinct texts a fact keeps per set: more are not shown.
+const FACT_TEXTS: usize = 4;
+
 impl Fact {
-    /// The rows a recording saw, joined into the fact's.
-    fn join_rows(&mut self, rows: Vec<(ObjId, Option<Row>, Option<Row>)>) {
+    /// The objects a hover describes, with their rows: the program's calls', else the general
+    /// run's.
+    pub fn shown_rows(&self) -> &IndexMap<ObjId, (Option<Row>, Option<Row>)> {
+        if self.rows.is_empty() { &self.general_rows } else { &self.rows }
+    }
+
+    /// The rows a recording saw (in a call, or `general`), joined into the fact's.
+    fn join_rows(&mut self, rows: Vec<(ObjId, Option<Row>, Option<Row>)>, general: bool) {
+        let mine = if general { &mut self.general_rows } else { &mut self.rows };
         for (oid, item, attr) in rows {
-            match self.rows.get_mut(&oid) {
+            match mine.get_mut(&oid) {
                 Some((ci, ca)) => {
                     *ci = join_opt(ci, &item);
                     *ca = join_opt(ca, &attr);
                 }
                 None => {
-                    self.rows.insert(oid, (item, attr));
+                    mine.insert(oid, (item, attr));
                 }
             }
         }
     }
 
-    /// A recording's text (up to 4 distinct) and its legend (a symbol's descriptions joined).
-    fn add_text(&mut self, text: String, legend: Vec<(String, String)>) {
-        if !self.texts.contains(&text) && self.texts.len() < 4 {
-            self.texts.push(text);
+    /// Has the set a recording goes to (`call`: the line of the call, None: general) all the
+    /// texts it shows?
+    fn full(&self, call: Option<u32>) -> bool {
+        match call {
+            None => self.general.len() >= FACT_TEXTS,
+            Some(_) => self.calls.len() >= FACT_TEXTS,
+        }
+    }
+
+    /// A recording's text (up to `FACT_TEXTS` distinct per set; `call`: the line of the call
+    /// it was made in, None: the general run) and its legend (a symbol's descriptions joined).
+    fn add_text(&mut self, text: String, call: Option<u32>, legend: Vec<(String, String)>) {
+        match call {
+            None if !self.general.contains(&text) && self.general.len() < FACT_TEXTS => self.general.push(text),
+            None => {}
+            Some(line) => match self.calls.iter().position(|(t, _)| *t == text) {
+                Some(i) if !self.calls[i].1.contains(&line) => self.calls[i].1.push(line),
+                Some(_) => {}
+                None if self.calls.len() < FACT_TEXTS => self.calls.push((text, vec![line])),
+                None => {}
+            },
         }
         for (sym, desc) in legend {
             match self.legend.iter_mut().find(|(s0, _)| *s0 == sym) {
@@ -115,6 +147,10 @@ pub struct RowCheck {
     pub value: ValueInfo,
     /// tensor facts for the golden harness: {"shape", "dim", "chain", "entry"}
     pub tensor: Option<serde_json::Value>,
+    /// made where the function runs for any call (`in_general_run`), and in a
+    /// requirement-only run (whose lines checks of the program's calls do not count)
+    pub general: bool,
+    pub quiet: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -122,6 +158,9 @@ pub struct ValueInfo {
     pub lits: Vec<KeyId>,
     pub unknown: bool,
     pub objects: Vec<String>,
+    /// the types of its unknown parts known to have one (`int(?)`), and whether some has none
+    pub types: Vec<&'static str>,
+    pub untyped: bool,
 }
 
 
@@ -273,22 +312,38 @@ impl Analyzer {
         if t.contains('\n') { t.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ") } else { t }
     }
 
+    /// Does a fact recorded here hold for any call (module code, or the frame of the function
+    /// whose general run is going on), or for one call of the program's?
+    pub(in crate::interp) fn in_general_run(&self) -> bool {
+        match self.frame().func {
+            None => true,
+            f => self.entry.general.is_some() && self.entry.general == f,
+        }
+    }
+
     pub(in crate::interp) fn record_fact(&mut self, node: &Node, name: StrId, v: &Value, state: &State) {
-        if !self.findings.facts_on || node.addr == 0 || self.findings.quiet {
+        if !self.findings.facts_on || node.addr == 0 {
             return;
         }
         if node.module != self.heap.module_info(self.program.main_module).idx {
             return;
         }
+        // the set the value goes to: the general one, or that of the call (its line); a
+        // requirement-only run records only its function's own lines
+        let general = self.in_general_run();
+        if (self.findings.quiet && !general) || (self.entry.no_facts.is_some() && self.entry.no_facts == self.frame().func) {
+            return;
+        }
+        let call = if general { None } else { Some(self.cx.call_chain.last().copied().unwrap_or(0)) };
         let rows = self.fact_rows(v, state);
         let scope = self.frame().func.unwrap_or(0);
-        // (a fact that has all the texts it shows (4) only joins the value and rows: rendering a
+        // (a fact that has all the texts it shows only joins the value and rows: rendering a
         // large value at every run of the line is what costs — not in torch programs, whose
         // hover is the assignment's own value)
         if !self.m.torch_on {
             if let Some(e) = self.findings.facts.get_mut(&(node.line, name)) {
-                if e.texts.len() >= 4 {
-                    e.join_rows(rows);
+                if e.full(call) {
+                    e.join_rows(rows, general);
                     return;
                 }
             }
@@ -309,34 +364,28 @@ impl Analyzer {
         };
         legend.extend(tlegend);
         let writing = std::mem::take(&mut self.findings.t_fact_write);
-        let e = self.findings.facts.entry((node.line, name)).or_insert_with(|| Fact { rows: IndexMap::new(), texts: Vec::new(), legend: Vec::new(), t_names: FxHashMap::default(), primary: None, written: false });
+        let e = self.findings.facts.entry((node.line, name)).or_insert_with(|| Fact { rows: IndexMap::new(), general_rows: IndexMap::new(), general: Vec::new(), calls: Vec::new(), legend: Vec::new(), t_names: FxHashMap::default(), written: false });
         // in torch programs an assignment's value is what the hover shows (`y = f(y)`)
         if self.m.torch_on {
             if writing && !e.written {
                 e.written = true;
-                e.texts.clear();
+                e.general.clear();
+                e.calls.clear();
                 e.legend.clear();
-                e.primary = None;
             } else if !writing && e.written {
                 return;
             }
         }
-        // the function analysed on its own (not a call from elsewhere): the general answer
-        let own = self.entry.run.is_some() && self.cx.call_chain.len() <= 1 && self.m.torch_on;
-        if own {
+        // (the dims are named as the general run names them)
+        if general && self.m.torch_on {
             e.t_names = tnames;
-            e.primary = Some(match &e.primary {
-                Some(p) if *p != text && !p.split(" | ").any(|x| x == text) => format!("{} | {}", p, text),
-                Some(p) => p.clone(),
-                None => text.clone(),
-            });
         } else {
             for (a, n) in tnames {
                 e.t_names.entry(a).or_insert(n);
             }
         }
-        e.add_text(text, legend);
-        e.join_rows(rows);
+        e.add_text(text, call, legend);
+        e.join_rows(rows, general);
     }
 
     /// The rows a hover shows for the objects of `v`: item rows of records, attribute rows of
@@ -356,14 +405,23 @@ impl Analyzer {
     /// it may also be something unknown, and the (known) objects it may be.
     pub(in crate::interp) fn value_info(&self, v: &Value, state: &State) -> ValueInfo {
         let mut info = ValueInfo::default();
+        let typed = |info: &mut ValueInfo, t: Option<&'static str>| match t {
+            Some(t) if !info.types.contains(&t) => info.types.push(t),
+            Some(_) => {}
+            None => info.untyped = true,
+        };
         if v.kv.is_literal() {
             info.lits = crate::domain::kv_literals(&v.kv).iter().collect();
         } else if !v.kv.is_bot() {
             info.unknown = true;
+            typed(&mut info, v.kv.data_site().and_then(|l| crate::domain::label_type(&intern::str_get(l))));
         }
         for o in v.pts.iter() {
             match self.heap.kind(o) {
-                Kind::Unknown | Kind::External => info.unknown = true,
+                Kind::Unknown | Kind::External => {
+                    info.unknown = true;
+                    typed(&mut info, self.heap.obj(o).ty);
+                }
                 // a tuple of known literals is that literal (as Python prints it)
                 Kind::Tuple | Kind::Pair if self.heap.literal_tuple(o, state, 0).is_some() => info.lits.push(self.heap.literal_tuple(o, state, 0).unwrap()),
                 _ => info.objects.push(self.heap.obj(o).label.to_string()),
@@ -371,13 +429,15 @@ impl Analyzer {
         }
         if v.pts.is_empty() && v.kv.is_bot() {
             info.unknown = true;
+            info.untyped = true;
         }
         info
     }
 
     /// Row-check support for the golden harness: after a statement at a requested line.
     pub(in crate::interp) fn after_stmt(&mut self, stmt: &ast::Stmt, state: &mut State) {
-        if self.findings.row_check_requests.is_empty() || self.findings.quiet {
+        let general = self.in_general_run();
+        if self.findings.row_check_requests.is_empty() || (self.findings.quiet && !general) {
             return;
         }
         let n = frontend::node(stmt);
@@ -442,7 +502,7 @@ impl Analyzer {
             } else {
                 None
             };
-            self.findings.row_checks.push(RowCheck { file: file.clone(), line: ln, name, row, ns: ns_used, value, tensor });
+            self.findings.row_checks.push(RowCheck { file: file.clone(), line: ln, name, row, ns: ns_used, value, tensor, general, quiet: self.findings.quiet });
         }
     }
 }

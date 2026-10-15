@@ -812,7 +812,12 @@ impl Analyzer {
                 self.kill_facts_on(&[oid], state);
             }
             let q = if STR_METHOD_NAMES.contains(&name) { format!("str.{}", name) } else { format!("unknown.{}", name) };
-            return self.method_value(&q, &Value::data(&format!("L{}", node.line)));
+            // (a parameter annotated `str`: a str, its methods' results known by type)
+            let recv = match self.heap.obj(oid).ty {
+                Some(t @ ("str" | "bytes")) => Value::data(&crate::domain::typed_label(t, "")),
+                _ => Value::data(&format!("L{}", node.line)),
+            };
+            return self.method_value(&q, &recv);
         }
         let row = self.unknown_row(oid, Ns::Attr, state);
         if let Some(v) = state.slot_opt(oid, Ns::Attr, nk) {

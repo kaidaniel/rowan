@@ -12,7 +12,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 
 * **Values** (`Value`, `domain.rs`) are a set of object ids plus a scalar part (`KeyVal`): a
   literal, up to 64 literals, the keys of some objects, or `Data(label)`, an unknown named by
-  where it comes from (`row["id"]`, `x.shape[0]`). A label can also hold a tensor shape.
+  where it comes from (`row["id"]`, `x.shape[0]`). A label can also hold a tensor shape, or a
+  builtin type (`typed_label`: `int(?)`; from annotations in general runs, builtins, operators).
 * **Objects** (`Obj`, `interp/heap.rs`) are identified by allocation site and context (the call
   chain, 2 deep). A *single* object stands for one runtime object: stores into it are strong.
   Allocating a site again while its earlier object is live gives a variant (up to 8), then a
@@ -22,10 +23,9 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   its **rows** (`(object, namespace)` → `Row`), slots (the value under each key), elements,
   lengths, and the requirements recorded so far. The maps are persistent Patricia tries
   (`layered.rs`): a copy is O(1), and a join or diff costs what two states differ in.
-* **The analyzer** (`Analyzer`, `interp/mod.rs`) is components with private state, one file
-  each (Layout); models, the report and the driver see the `Heap`, their `m` and `api.rs`.
-  Its doc sorts the components for a call memo: running context (part of a key), state a run
-  changes outside `State` (to replay), output (appended), caches.
+* **The analyzer** (`Analyzer`, `interp/mod.rs`) is components with private state, one file each
+  (Layout); models, the report and the driver see the `Heap`, their `m` and `api.rs`. Its doc sorts
+  them for a call memo: running context (a key), state changed outside `State`, output, caches.
 * **Rows** are the key-set model: `present` (may be there) ⊇ `likely` (there unless unknown
   code removed it) ⊇ `definite` (there on every path), plus `absent`, open `sources` (inputs),
   and `mutators` (unknown calls). A row without sources or mutators is *closed*; a successful read narrows the key in.
@@ -63,8 +63,11 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     change their arguments (`random.shuffle`) or get the program's functions; several callees: `alternatives`.
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model
     is unknown code. A TypeError may come from those taken to fail only on wrong types.
-  * **Entry points:** functions the main run does not call (also those only entry runs call)
-    run with open parameters; their requirements become `param F.x` schemas.
+  * **Entry points, general runs:** functions the main run does not call (also those only entry
+    runs call) run with open parameters (`param F.x` schemas). A called function's requirement-only
+    run is its *general run* (`Entries::general`): parameters as annotated, a method on any instance
+    (`__init__` given any arguments); hovers keep what it records apart from the program's calls
+    (`Fact`). Verdict runs take `__init__`'s defaults; with facts on, a facts-only general run follows.
 * **Generators** run whole at their first consumption (`force_gen`), in the creating call's
   context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`; at a position
   not known, some yield's). If code between items (where the consumer asks for one:
@@ -86,14 +89,13 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   torch / numpy shapes (dims as polynomials; an undecided condition is a requirement and then a
   fact on the path; in torch modules `int` / `Tensor` annotations hold; a module-level unknown
   number names its dims, a module-level tensor's unknown dims are one value each).
-* **Deadline:** a safety net only (`ms`, 10 s): past it user calls become unknown calls and
-  running calls stop where they are. The budget, not the deadline, bounds the work.
-* **Soundness** holds relative to the models and to annotations of values whose class is
-  unknown. `exec`, `setattr` / `getattr` with unknown names (also in code a skipped call
-  reaches; a class attribute set there through data or a call's result, `f().x = 1`),
-  metaclasses and monkey-patching (rebinding a function or class too) are unknown or ignored.
-  List lengths are tracked up to 15 (a few per path: each one's positions; `xs[:n]` keeps xs's).
-  An object a path has no facts of reads as unknown (`read_row`).
+* **Deadline:** a safety net (`ms`, 10 s): past it user calls are unknown, running ones stop; the budget bounds the work.
+* **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
+  a general run's `x: int` is an int, not a subclass overriding int's operators). `exec`, `setattr` /
+  `getattr` with unknown names (also in skipped code; a class attribute set there through data or a
+  call's result, `f().x = 1`), metaclasses and monkey-patching (rebinding a function or class too)
+  are unknown or ignored. List lengths are tracked up to 15 (a few per path: each one's positions;
+  `xs[:n]` keeps xs's). An object a path has no facts of reads as unknown (`read_row`).
 
 ## Working conventions (the owner's standing instructions)
 
@@ -141,7 +143,7 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
   owner's programs); each has a `PENDING` list.
 * **Directives** (full rules in `tests/CONVENTIONS.md`, also `tests/{torch,pandas}/`):
   `#@ tier key`, `#@row NAME: present= definite= absent= closed|open`,
-  `#@value NAME: exactly= | unknown | includes=`, `#@schema src: always= sometimes= only=`,
+  `#@value NAME: exactly= | unknown | includes=` (`#@general`: for any call), `#@schema src: …`,
   `#@todo …`, `#@argv …`, `#@shape` (torch). Cost bounds for blow-up cases, N by hand:
   `#@objects`, `#@tabulations`, `#@joins`, `#@work`, `#@visits`, `#@havoc <= N`; `#@limits
   k=v,…` sets the case's `ROWAN_LIMITS`. A directive-only line applies to the code line above.
@@ -152,14 +154,12 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 
 ## Debugging switches
 
-* `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls (`skip F …`), entry runs, a `work:` line
-  (statements, units = statements + walk visits / 16, body runs, objects, row joins, visits,
-  havoc visits): deterministic counters (its lines cost ~25%: time without). `2`: raises, tries.
+* `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls, entry runs, a `work:` line of counters (statements,
+  units = statements + walk visits / 16, body runs, objects, row joins, visits, havoc visits; ~25% slower). `2`: raises.
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (the golden `#@limits` sets them per
   case; `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check` checks `#@todo`s too).
-* **Profiling:** the bench workflow's `perf` profiles (`sample` hangs on macOS 27). macOS has
-  no `timeout`; time a run inside the guard (`.guard/run /usr/bin/time -l rowan …`: the guard
-  polls every 0.5 s). Compare builds on results (`--json` tier counts) and counters too.
+* **Profiling:** the bench workflow's `perf` profiles (`sample` hangs on macOS 27). Time a run inside
+  the guard (`.guard/run /usr/bin/time -l rowan …`); compare builds on `--json` tier counts and counters too.
 
 ## Layout (`rowan/src/`, ~64k lines: the engine ~22k, the models ~42k)
 
@@ -190,8 +190,8 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.5 / ~2.4 / ~8.7 / ~6.3 s; 0.12 / 0.07 / 0.16 / 0.09 GB |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~12.8 / ~24 / ~29 / ~5.1 s; 0.29 / 0.75 / 0.46 / 0.29 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.3 / ~2.5 / ~8.8 / ~6.4 s; 0.12 / 0.07 / 0.16 / 0.09 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~13 / ~26 / ~23 / ~5.2 s; 0.30 / 0.75 / 0.39 / 0.30 GB |
 
 ## Known problems and next steps
 
