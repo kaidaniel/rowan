@@ -459,14 +459,8 @@ impl Analyzer {
             let roots: Vec<Value> = state.ret.iter().chain(pre.env.values()).chain(callers).cloned().collect();
             self.reach_among(&roots, &gids, at)
         };
-        let mut i = wmark;
-        while i < self.gens.watch.len() {
-            if kept.contains(&self.gens.watch[i].gid) {
-                i += 1;
-            } else {
-                self.gens.watch.remove(i);
-            }
-        }
+        let tail = self.gens.watch.split_off(wmark.min(self.gens.watch.len()));
+        self.gens.watch.extend(tail.into_iter().filter(|w| kept.contains(&w.gid)));
     }
 
     /// Whether a generator may give more items in `state` (not known to be used up).
@@ -816,23 +810,12 @@ impl Analyzer {
     /// The consumer asks a watched generator `o` for an item in `state`: what it changed by
     /// then, the generator sees after its yield (`gen_interference_of`).
     pub(in crate::interp) fn note_resume(&mut self, o: ObjId, state: &State) {
-        if !state.reachable {
-            return;
-        }
-        if !self.gens.watch.iter().any(|w| w.gid == o) {
+        if !state.reachable || !self.gens.watch.iter().any(|w| w.gid == o) {
             return;
         }
         // (the objects it changes itself: what the consumer changed of the facts it was given)
-        let own: Vec<Hit> = match self.gens.eff.get(&o).cloned() {
-            Some(ge) => match effects_given(state, o, &ge) {
-                Some(given) => {
-                    let others = ge.elems.iter().chain(ge.lens.iter()).copied().filter(|x| given.elems.get(x) != state.elems.get(x) || given.lens.get(x) != state.lens.get(x));
-                    self.changes_in(given, state, &ge.rows, &ge.slots, others.collect::<Vec<_>>().into_iter())
-                }
-                None => Vec::new(),
-            },
-            None => Vec::new(),
-        };
+        let ge = self.gens.eff.get(&o).cloned();
+        let own = ge.as_ref().and_then(|ge| effects_given(state, o, ge).map(|given| self.changes_in(given, state, &ge.rows, &ge.slots, ge.elems.iter().chain(&ge.lens).copied()))).unwrap_or_default();
         for w in self.gens.watch.iter_mut().filter(|w| w.gid == o) {
             w.resumed = Some(match w.resumed.take() {
                 Some(mut r) => r.join(&mut state.copy()),

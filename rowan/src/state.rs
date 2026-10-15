@@ -467,19 +467,14 @@ impl State {
     }
 
     pub fn set_row(&mut self, oid: ObjId, ns: Ns, row: Row) {
-        // (what unknown code holds is anything, whatever is stored into it)
-        if is_any(oid) {
-            return;
-        }
-        if has_views() {
-            self.mirror_row(oid, ns, &row);
-        }
+        self.mirror_row(oid, ns, &row);
         self.set_row_narrowed(oid, ns, row);
     }
 
     /// A row the path learned more about (a test, a read that succeeded), not one the program
     /// changed: the other objects of its family (`link_view`) keep theirs.
     pub fn set_row_narrowed(&mut self, oid: ObjId, ns: Ns, row: Row) {
+        // (what unknown code holds is anything, whatever is stored into it)
         if is_any(oid) {
             return;
         }
@@ -501,15 +496,12 @@ impl State {
     /// (A view's row set to what it is changes nothing: the record it stands for is as it was.
     /// The summary's always may: its row covers the record a change hits and others.)
     fn mirror_row(&mut self, oid: ObjId, ns: Ns, row: &Row) {
-        let Some(fam) = family(oid) else { return };
         if view_of(oid).is_some() && self.rows.get(&(oid, ns)).as_ref() == Some(row) {
             return;
         }
-        for m in fam {
+        for m in family(oid) {
             if let Some(cur) = self.rows.get(&(m, ns)) {
-                if view_of(m).is_some() {
-                    note_view_hit();
-                }
+                note_view_hit(m);
                 self.rows.insert((m, ns), cur.join(row));
             }
         }
@@ -528,20 +520,12 @@ impl State {
     }
 
     pub fn set_slot(&mut self, oid: ObjId, ns: Ns, key: KeyId, v: Value, strong: bool) {
-        if is_any(oid) {
-            return;
-        }
-        if has_views() {
-            if let Some(fam) = family(oid) {
-                for m in fam {
-                    if self.has_row(m, Ns::Item) || self.has_row(m, Ns::Attr) {
-                        if view_of(m).is_some() {
-                            note_view_hit();
-                        }
-                        let nv = self.slot(m, ns, key).join(&v);
-                        self.slots.set(&m, (ns, key), nv);
-                    }
-                }
+        // (a value stored into a loop's item or the records it is one of: maybe into the others)
+        for m in family(oid) {
+            if self.has_row(m, Ns::Item) || self.has_row(m, Ns::Attr) {
+                note_view_hit(m);
+                let nv = self.slot(m, ns, key).join(&v);
+                self.slots.set(&m, (ns, key), nv);
             }
         }
         self.set_slot_found(oid, ns, key, v, strong);
@@ -840,15 +824,21 @@ fn has_views() -> bool {
 }
 
 /// The other objects of `oid`'s family: its summary and the summary's other views, or its
-/// views (None: it has none).
-fn family(oid: ObjId) -> Option<Vec<ObjId>> {
+/// views.
+fn family(oid: ObjId) -> Vec<ObjId> {
+    if !has_views() {
+        return Vec::new();
+    }
     let root = view_of(oid).unwrap_or(oid);
-    let views = VIEWED.with(|v| v.borrow().get(&root).cloned())?;
-    Some(std::iter::once(root).chain(views).filter(|m| *m != oid).collect())
+    let views = VIEWED.with(|v| v.borrow().get(&root).cloned()).unwrap_or_default();
+    std::iter::once(root).chain(views).filter(|m| *m != oid).collect()
 }
 
-fn note_view_hit() {
-    VIEW_HITS.with(|c| c.set(c.get() + 1));
+/// (a view `m` got a change from another object of its family)
+fn note_view_hit(m: ObjId) {
+    if view_of(m).is_some() {
+        VIEW_HITS.with(|c| c.set(c.get() + 1));
+    }
 }
 
 /// How many changes views got from another object of their family so far.
