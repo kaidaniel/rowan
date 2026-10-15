@@ -79,31 +79,8 @@ impl Analyzer {
     }
 
     pub fn binop(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Value {
-        if let Some(v) = self.binop_dunder(op, a, b, node, state) {
+        if let Some(v) = self.binop_by_models(op, a, b, node, state) {
             return v;
-        }
-        if op == ast::Operator::Div {
-            if let Some(v) = crate::models::pathtext::path_div(self, state, a, b, node) {
-                return v;
-            }
-        }
-        if let Some(v) = crate::models::enums::flag_binop(self, op, a, b, node, state) {
-            return v;
-        }
-        if let Some(v) = crate::models::torch::t_binop(self, op, a, b, node, state) {
-            return v;
-        }
-        // Counter arithmetic
-        if let Some(ch) = match op {
-            ast::Operator::Add => Some('+'),
-            ast::Operator::Sub => Some('-'),
-            ast::Operator::BitAnd => Some('&'),
-            ast::Operator::BitOr => Some('|'),
-            _ => None,
-        } {
-            if let Some(v) = crate::models::counter::binop(self, state, ch, a, b, node) {
-                return v;
-            }
         }
         let both = a.pts.union(&b.pts);
         // arithmetic on a parameter (or a field of one): the result is decided per call site
@@ -130,60 +107,13 @@ impl Analyzer {
             }
         }
         if op == ast::Operator::Add {
-            let la = a.kv.as_lit();
-            let lb = b.kv.as_lit();
-            // (a known text before or after one of several texts, or keys)
-            match (la.and_then(intern::key_as_str), lb.and_then(intern::key_as_str)) {
-                (Some(x), _) if matches!(b.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) => return Value::kv_only(self.affix(&b.kv, &x, "")),
-                (_, Some(y)) if matches!(a.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) => return Value::kv_only(self.affix(&a.kv, "", &y)),
-                _ => {}
-            }
-            // two lists with known positions: the concatenation's positions
-            if let (Some(x), Some(y)) = (a.single(), b.single()) {
-                if matches!((self.heap.kind(x), self.heap.kind(y)), (Kind::List, Kind::List) | (Kind::Tuple, Kind::Tuple)) {
-                    let (px, py) = (self.heap.llen(x, state).map(|n| (0..n).map(|i| state.slot(x, Ns::Pos, key_int(i as i64))).collect::<Vec<_>>()), self.heap.llen(y, state).map(|n| (0..n).map(|i| state.slot(y, Ns::Pos, key_int(i as i64))).collect::<Vec<_>>()));
-                    if let (Some(mut px), Some(py)) = (px, py) {
-                        px.extend(py);
-                        let kv = kv_join(&state.elems.get(&x).unwrap_or(DATA), &state.elems.get(&y).unwrap_or(DATA));
-                        return self.alloc_positional(self.heap.kind(x), node, Some(px), Value::new(), kv, state);
-                    }
-                }
-            }
-            let lists: Vec<u32> = both.iter().filter(|o| self.heap.kind(*o) == Kind::List).collect();
-            if !lists.is_empty() {
-                let oid = self.alloc_at(Kind::List, node, state, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, None);
-                let mut acc = Value::new();
-                let mut kv: Option<KeyVal> = None;
-                for o in lists {
-                    acc = acc.join(&state.slot(o, Ns::Elem, STAR));
-                    let e = state.elems.get(&o).unwrap_or(DATA);
-                    kv = Some(match kv {
-                        None => e,
-                        Some(k) => kv_join(&k, &e),
-                    });
-                }
-                state.set_slot(oid, Ns::Elem, STAR, acc, true);
-                state.elems.insert(oid, kv.unwrap_or(DATA));
-                return Value::obj(oid);
+            if let Some(v) = self.binop_add_seq(a, b, &both, node, state) {
+                return v;
             }
         }
         if op == ast::Operator::Mult {
-            // a list with known positions times a known count
-            let (seq, cnt) = if a.pts.len() == 1 { (a, b) } else { (b, a) };
-            if let (Some(x), Some(n)) = (seq.single(), cnt.kv.as_lit().filter(|_| cnt.pts.is_empty()).and_then(intern::key_as_int)) {
-                if matches!(self.heap.kind(x), Kind::List | Kind::Tuple) {
-                    if let Some(len) = self.heap.llen(x, state) {
-                        if len * (n.max(0) as usize) <= 64 {
-                            let px: Vec<Value> = (0..len).map(|i| state.slot(x, Ns::Pos, key_int(i as i64))).collect();
-                            let mut out: Vec<Value> = Vec::new();
-                            for _ in 0..n.max(0) {
-                                out.extend(px.iter().cloned());
-                            }
-                            let kv = state.elems.get(&x).unwrap_or(DATA);
-                            return self.alloc_positional(self.heap.kind(x), node, Some(out), Value::new(), kv, state);
-                        }
-                    }
-                }
+            if let Some(v) = self.binop_mult_seq(a, b, node, state) {
+                return v;
             }
         }
         // two literals: exactly as Python computes it
@@ -213,67 +143,8 @@ impl Analyzer {
             }
         }
         if op == ast::Operator::Mod {
-            // `"%(name)s" % mapping`: each named field is a read of the mapping
-            if let Some(sx) = a.kv.as_lit().filter(|_| a.pts.is_empty()).and_then(intern::key_as_str) {
-                let recs = self.record_objects(b);
-                if !recs.is_empty() && sx.contains("%(") {
-                    let mut rest: &str = &sx;
-                    while let Some(i) = rest.find("%(") {
-                        let after = &rest[i + 2..];
-                        let Some(j) = after.find(')') else { break };
-                        let name = after[..j].to_string();
-                        self.load_item(b, Ns::Item, &Value::lit(key_str_lit(&name)), node, state, true);
-                        rest = &after[j..];
-                    }
-                    // a closed mapping of literals: the text
-                    if let ([m], false) = (&recs[..], false) {
-                        let row = state.row(*m, Ns::Item);
-                        if !row.open() && row.present == row.definite {
-                            let entries: Option<Vec<(String, KeyId)>> = row.present.iter().map(|k| {
-                                let v = state.slot(*m, Ns::Item, k);
-                                Some((intern::key_as_str(k)?.to_string(), v.kv.as_lit().filter(|_| v.pts.is_empty())?))
-                            }).collect();
-                            if let Some(es) = entries {
-                                if let Some(s0) = crate::models::pyvalues::percent_format(&sx, crate::models::pyvalues::PercentArgs::Mapping(&es)) {
-                                    return Value::lit(key_str_lit(&s0));
-                                }
-                            }
-                        }
-                    }
-                    return Value::data(&format!("fmt@L{}", node.line));
-                }
-            }
-            if let Some(x) = a.kv.as_lit() {
-                if let Some(sx) = intern::key_as_str(x) {
-                    // arguments that are each one of a few literals: every combination, as
-                    // Python formats it
-                    if let Some(rs) = format_percent_alternatives(&sx, b, state, self) {
-                        return Value::kv_only(KeyVal::lits(crate::intern::KeySet::from_iter(rs.iter().map(|r| key_str_lit(r)))));
-                    }
-                    // "a%sb%s" with one argument not a literal: the literal text around it (a
-                    // key built from a parameter keeps its prefix and suffix)
-                    let sx2 = sx.to_string();
-                    let n = sx2.matches("%s").count();
-                    if n >= 1 && !sx2.replace("%s", "").contains('%') {
-                        let segs: Vec<String> = sx2.split("%s").map(|s| s.to_string()).collect();
-                        let args: Vec<KeyVal> = if n == 1 {
-                            vec![b.kv.clone()]
-                        } else {
-                            match b.single() {
-                                Some(t) if matches!(self.heap.kind(t), Kind::Tuple) && self.heap.llen(t, state) == Some(n) => (0..n).map(|i| state.slot(t, Ns::Pos, key_int(i as i64)).kv).collect(),
-                                _ => Vec::new(),
-                            }
-                        };
-                        let lit = |i: usize| args[i].as_lit().map(intern::key_py_str);
-                        if let [h] = (0..args.len()).filter(|i| lit(*i).is_none()).collect::<Vec<_>>()[..] {
-                            if args.len() == n {
-                                let pre: String = (0..h).map(|i| format!("{}{}", segs[i], lit(i).unwrap())).collect::<String>() + &segs[h];
-                                let post: String = segs[h + 1].clone() + &(h + 1..n).map(|i| format!("{}{}", lit(i).unwrap(), segs[i + 1])).collect::<String>();
-                                return Value::kv_only(self.affix(&args[h], &pre, &post));
-                            }
-                        }
-                    }
-                }
+            if let Some(v) = self.binop_percent(a, b, node, state) {
+                return v;
             }
         }
         if crate::models::pandas::is_seriesish(self, &a) || crate::models::pandas::is_seriesish(self, &b) {
@@ -284,6 +155,169 @@ impl Analyzer {
             return Value::with_kv(frames, DATA);
         }
         Value::data(&format!("L{}", node.line))
+    }
+
+    /// `a op b` where the program's dunders or a library model decide it: `__add__` & co., a
+    /// path's `/`, Flag members, tensors, Counters.
+    fn binop_by_models(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Option<Value> {
+        if let Some(v) = self.binop_dunder(op, a, b, node, state) {
+            return Some(v);
+        }
+        if op == ast::Operator::Div {
+            if let Some(v) = crate::models::pathtext::path_div(self, state, a, b, node) {
+                return Some(v);
+            }
+        }
+        if let Some(v) = crate::models::enums::flag_binop(self, op, a, b, node, state) {
+            return Some(v);
+        }
+        if let Some(v) = crate::models::torch::t_binop(self, op, a, b, node, state) {
+            return Some(v);
+        }
+        // Counter arithmetic
+        if let Some(ch) = match op {
+            ast::Operator::Add => Some('+'),
+            ast::Operator::Sub => Some('-'),
+            ast::Operator::BitAnd => Some('&'),
+            ast::Operator::BitOr => Some('|'),
+            _ => None,
+        } {
+            if let Some(v) = crate::models::counter::binop(self, state, ch, a, b, node) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    /// `text % args`: `%(name)s` fields read the mapping; literal arguments format as Python does;
+    /// one unknown argument keeps the text around it.
+    fn binop_percent(&mut self, a: &Value, b: &Value, node: &Node, state: &mut State) -> Option<Value> {
+        // `"%(name)s" % mapping`: each named field is a read of the mapping
+        if let Some(sx) = a.kv.as_lit().filter(|_| a.pts.is_empty()).and_then(intern::key_as_str) {
+            let recs = self.record_objects(b);
+            if !recs.is_empty() && sx.contains("%(") {
+                let mut rest: &str = &sx;
+                while let Some(i) = rest.find("%(") {
+                    let after = &rest[i + 2..];
+                    let Some(j) = after.find(')') else { break };
+                    let name = after[..j].to_string();
+                    self.load_item(b, Ns::Item, &Value::lit(key_str_lit(&name)), node, state, true);
+                    rest = &after[j..];
+                }
+                // a closed mapping of literals: the text
+                if let ([m], false) = (&recs[..], false) {
+                    let row = state.row(*m, Ns::Item);
+                    if !row.open() && row.present == row.definite {
+                        let entries: Option<Vec<(String, KeyId)>> = row.present.iter().map(|k| {
+                            let v = state.slot(*m, Ns::Item, k);
+                            Some((intern::key_as_str(k)?.to_string(), v.kv.as_lit().filter(|_| v.pts.is_empty())?))
+                        }).collect();
+                        if let Some(es) = entries {
+                            if let Some(s0) = crate::models::pyvalues::percent_format(&sx, crate::models::pyvalues::PercentArgs::Mapping(&es)) {
+                                return Some(Value::lit(key_str_lit(&s0)));
+                            }
+                        }
+                    }
+                }
+                return Some(Value::data(&format!("fmt@L{}", node.line)));
+            }
+        }
+        if let Some(x) = a.kv.as_lit() {
+            if let Some(sx) = intern::key_as_str(x) {
+                // arguments that are each one of a few literals: every combination, as
+                // Python formats it
+                if let Some(rs) = format_percent_alternatives(&sx, b, state, self) {
+                    return Some(Value::kv_only(KeyVal::lits(crate::intern::KeySet::from_iter(rs.iter().map(|r| key_str_lit(r))))));
+                }
+                // "a%sb%s" with one argument not a literal: the literal text around it (a
+                // key built from a parameter keeps its prefix and suffix)
+                let sx2 = sx.to_string();
+                let n = sx2.matches("%s").count();
+                if n >= 1 && !sx2.replace("%s", "").contains('%') {
+                    let segs: Vec<String> = sx2.split("%s").map(|s| s.to_string()).collect();
+                    let args: Vec<KeyVal> = if n == 1 {
+                        vec![b.kv.clone()]
+                    } else {
+                        match b.single() {
+                            Some(t) if matches!(self.heap.kind(t), Kind::Tuple) && self.heap.llen(t, state) == Some(n) => (0..n).map(|i| state.slot(t, Ns::Pos, key_int(i as i64)).kv).collect(),
+                            _ => Vec::new(),
+                        }
+                    };
+                    let lit = |i: usize| args[i].as_lit().map(intern::key_py_str);
+                    if let [h] = (0..args.len()).filter(|i| lit(*i).is_none()).collect::<Vec<_>>()[..] {
+                        if args.len() == n {
+                            let pre: String = (0..h).map(|i| format!("{}{}", segs[i], lit(i).unwrap())).collect::<String>() + &segs[h];
+                            let post: String = segs[h + 1].clone() + &(h + 1..n).map(|i| format!("{}{}", lit(i).unwrap(), segs[i + 1])).collect::<String>();
+                            return Some(Value::kv_only(self.affix(&args[h], &pre, &post)));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// `seq * n` on a list / tuple with known positions and a known count (at most 64 items).
+    fn binop_mult_seq(&mut self, a: &Value, b: &Value, node: &Node, state: &mut State) -> Option<Value> {
+        // a list with known positions times a known count
+        let (seq, cnt) = if a.pts.len() == 1 { (a, b) } else { (b, a) };
+        if let (Some(x), Some(n)) = (seq.single(), cnt.kv.as_lit().filter(|_| cnt.pts.is_empty()).and_then(intern::key_as_int)) {
+            if matches!(self.heap.kind(x), Kind::List | Kind::Tuple) {
+                if let Some(len) = self.heap.llen(x, state) {
+                    if len * (n.max(0) as usize) <= 64 {
+                        let px: Vec<Value> = (0..len).map(|i| state.slot(x, Ns::Pos, key_int(i as i64))).collect();
+                        let mut out: Vec<Value> = Vec::new();
+                        for _ in 0..n.max(0) {
+                            out.extend(px.iter().cloned());
+                        }
+                        let kv = state.elems.get(&x).unwrap_or(DATA);
+                        return Some(self.alloc_positional(self.heap.kind(x), node, Some(out), Value::new(), kv, state));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// `a + b` on texts of known affixes, lists with known positions, lists of known elements.
+    fn binop_add_seq(&mut self, a: &Value, b: &Value, both: &crate::domain::ObjSet, node: &Node, state: &mut State) -> Option<Value> {
+        let la = a.kv.as_lit();
+        let lb = b.kv.as_lit();
+        // (a known text before or after one of several texts, or keys)
+        match (la.and_then(intern::key_as_str), lb.and_then(intern::key_as_str)) {
+            (Some(x), _) if matches!(b.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) => return Some(Value::kv_only(self.affix(&b.kv, &x, ""))),
+            (_, Some(y)) if matches!(a.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) => return Some(Value::kv_only(self.affix(&a.kv, "", &y))),
+            _ => {}
+        }
+        // two lists with known positions: the concatenation's positions
+        if let (Some(x), Some(y)) = (a.single(), b.single()) {
+            if matches!((self.heap.kind(x), self.heap.kind(y)), (Kind::List, Kind::List) | (Kind::Tuple, Kind::Tuple)) {
+                let (px, py) = (self.heap.llen(x, state).map(|n| (0..n).map(|i| state.slot(x, Ns::Pos, key_int(i as i64))).collect::<Vec<_>>()), self.heap.llen(y, state).map(|n| (0..n).map(|i| state.slot(y, Ns::Pos, key_int(i as i64))).collect::<Vec<_>>()));
+                if let (Some(mut px), Some(py)) = (px, py) {
+                    px.extend(py);
+                    let kv = kv_join(&state.elems.get(&x).unwrap_or(DATA), &state.elems.get(&y).unwrap_or(DATA));
+                    return Some(self.alloc_positional(self.heap.kind(x), node, Some(px), Value::new(), kv, state));
+                }
+            }
+        }
+        let lists: Vec<u32> = both.iter().filter(|o| self.heap.kind(*o) == Kind::List).collect();
+        if !lists.is_empty() {
+            let oid = self.alloc_at(Kind::List, node, state, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, None);
+            let mut acc = Value::new();
+            let mut kv: Option<KeyVal> = None;
+            for o in lists {
+                acc = acc.join(&state.slot(o, Ns::Elem, STAR));
+                let e = state.elems.get(&o).unwrap_or(DATA);
+                kv = Some(match kv {
+                    None => e,
+                    Some(k) => kv_join(&k, &e),
+                });
+            }
+            state.set_slot(oid, Ns::Elem, STAR, acc, true);
+            state.elems.insert(oid, kv.unwrap_or(DATA));
+            return Some(Value::obj(oid));
+        }
+        None
     }
 
     /// `a op b` where every object `a` (or else `b`) may be is an instance of a class defining
