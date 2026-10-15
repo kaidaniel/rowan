@@ -76,27 +76,7 @@ impl Havoc {
         });
         let memo = if self.guard.is_none() { self.memo.remove(&key).filter(|m| m.roots == roots) } else { None };
         let mut work = roots.clone();
-        let (mut visited, mut code, changed) = match memo {
-            Some(m) => {
-                let limit = (m.visited.len() / 4).max(32);
-                let changed: Option<FxHashSet<ObjId>> = (|| {
-                    let mut ch: FxHashSet<ObjId> = state.rows.diff_upto(&m.rows, limit)?.into_iter().map(|(o, _)| o).collect();
-                    ch.extend(state.slots.diff_upto(&m.slots, limit)?.into_iter().map(|(o, _)| o));
-                    ch.extend(state.elems.diff_upto(&m.elems, limit)?);
-                    ch.extend(state.lens.diff_upto(&m.lens, limit)?);
-                    Some(ch)
-                })();
-                match changed {
-                    Some(ch) => {
-                        work.extend(ch.iter().copied().filter(|o| m.visited.contains(o)));
-                        self.code.extend(m.code.iter().copied());
-                        (m.visited, m.code, Some(ch))
-                    }
-                    None => (FxHashSet::default(), Vec::new(), None),
-                }
-            }
-            None => (FxHashSet::default(), Vec::new(), None),
-        };
+        let (mut visited, mut code, changed) = self.memo_restart(memo, state, &mut work);
         let replay = changed.is_some();
         let unchanged = |o: ObjId, visited: &FxHashSet<ObjId>| replay && visited.contains(&o) && !changed.as_ref().is_some_and(|c| c.contains(&o));
         // (one object stands for "anything unknown code stored": a value per call would pile
@@ -109,21 +89,8 @@ impl Havoc {
             if let Some((_, n, used)) = self.guard.as_mut().filter(|(g, _, _)| *g == o) {
                 *n += 1;
                 if *n == 1 {
-                    // (its code reaches the receiver's attributes only by the names it uses:
-                    // its own, or its class's data)
                     let used = used.clone();
-                    let mro = heap.instance_class(o).map(|c| heap.mro(c)).unwrap_or_default();
-                    for k in used.iter() {
-                        // (`self.__class__` / `type(self)`: the class, and all it reaches)
-                        if intern::key_as_str(*k).as_deref() == Some("__class__") {
-                            work.extend(mro.first().copied());
-                        }
-                        work.extend(state.slot(o, Ns::Attr, *k).pts.iter());
-                        for c in &mro {
-                            let v = if state.has_slot(*c, Ns::Attr, *k) { state.slot(*c, Ns::Attr, *k) } else { heap.cls_slots.get(&(*c, Ns::Attr, *k)).cloned().unwrap_or_default() };
-                            work.extend(v.pts.iter().filter(|x| heap.kind(*x) != Kind::Function));
-                        }
-                    }
+                    receiver_by_names(heap, state, o, &used, &mut work);
                 }
                 continue;
             }
@@ -160,45 +127,7 @@ impl Havoc {
                 (Kind::Module | Kind::External | Kind::Method, _) => continue,
                 _ => {}
             }
-            let mut writes: Vec<(crate::state::SlotKey, Value)> = Vec::new();
-            state.slots.each(&o, &mut |sk, v| {
-                work.extend(v.pts.iter());
-                if matches!(sk.0, Ns::Item | Ns::Attr | Ns::Pos | Ns::Elem) && !v.pts.contains(any_id) {
-                    writes.push((*sk, v.join(&any)));
-                }
-            });
-            // (a tuple cannot change; an unknown object's content is unknown already)
-            if k == Kind::Tuple || (k == Kind::Unknown && !state.has_row(o, Ns::Item) && !state.has_row(o, Ns::Attr)) {
-                continue;
-            }
-            // (what an earlier havoc by the same code did already is not written again: code
-            // past its budget is often called in a loop)
-            for ns in [Ns::Item, Ns::Attr] {
-                let r0 = match state.rows.get(&(o, ns)) {
-                    Some(r) => r,
-                    None if (ns == Ns::Item && matches!(k, Kind::Dict | Kind::Frame)) || (ns == Ns::Attr && k == Kind::Instance) => Row::new(),
-                    None => continue,
-                };
-                let r = r0.mutate(site);
-                if r != r0 {
-                    state.set_row(o, ns, r);
-                }
-            }
-            // (each value holds what the slot held: written as it is)
-            for (sk, v) in writes {
-                state.set_slot(o, sk.0, sk.1, v, true);
-            }
-            let havocked = |state: &State| {
-                state.slot(o, Ns::Elem, intern::STAR).pts.contains(any_id) && state.lens.get(&o) == Some((None, 0, 0)) && !state.lasts.iter().any(|(x, _)| *x == o) && state.elems.get(&o).is_some_and(|kv| crate::domain::kv_join(&kv, &DATA) == kv)
-            };
-            if matches!(k, Kind::List | Kind::Set) && !heap.obj(o).site.starts_with("gen:") && !havocked(state) {
-                let e = state.slot(o, Ns::Elem, intern::STAR).join(&any);
-                state.set_slot(o, Ns::Elem, intern::STAR, e, false);
-                let kv = crate::domain::kv_join(&state.elems.get(&o).unwrap_or(DATA), &DATA);
-                state.elems.insert(o, kv);
-                state.clear_last(o);
-                heap.set_prefix(o, state, 0);
-            }
+            havoc_object(heap, state, o, k, site, any_id, &any, &mut work);
         }
         if self.guard.is_none() {
             if self.memo.len() >= HAVOC_MEMOS {
@@ -207,6 +136,34 @@ impl Havoc {
             code.sort_unstable();
             code.dedup();
             self.memo.insert(key, HavocMemo { roots, rows: state.rows.clone(), slots: state.slots.clone(), elems: state.elems.clone(), lens: state.lens.clone(), visited, code });
+        }
+    }
+
+    /// Where a walk from the same values by the same code left off (`memo`): the objects it
+    /// met, the code it met, and what changed since (none: walk all again). The changed objects
+    /// it met are walked again.
+    #[allow(clippy::type_complexity)]
+    fn memo_restart(&mut self, memo: Option<HavocMemo>, state: &State, work: &mut Vec<ObjId>) -> (FxHashSet<ObjId>, Vec<ObjId>, Option<FxHashSet<ObjId>>) {
+        match memo {
+            Some(m) => {
+                let limit = (m.visited.len() / 4).max(32);
+                let changed: Option<FxHashSet<ObjId>> = (|| {
+                    let mut ch: FxHashSet<ObjId> = state.rows.diff_upto(&m.rows, limit)?.into_iter().map(|(o, _)| o).collect();
+                    ch.extend(state.slots.diff_upto(&m.slots, limit)?.into_iter().map(|(o, _)| o));
+                    ch.extend(state.elems.diff_upto(&m.elems, limit)?);
+                    ch.extend(state.lens.diff_upto(&m.lens, limit)?);
+                    Some(ch)
+                })();
+                match changed {
+                    Some(ch) => {
+                        work.extend(ch.iter().copied().filter(|o| m.visited.contains(o)));
+                        self.code.extend(m.code.iter().copied());
+                        (m.visited, m.code, Some(ch))
+                    }
+                    None => (FxHashSet::default(), Vec::new(), None),
+                }
+            }
+            None => (FxHashSet::default(), Vec::new(), None),
         }
     }
 }
@@ -419,5 +376,70 @@ impl Analyzer {
         if kept.len() != state.facts.len() {
             state.facts = std::sync::Arc::new(kept);
         }
+    }
+}
+
+/// A skipped method's receiver met by a walk: its code reaches the receiver's attributes only
+/// by the names it uses (its own, or its class's data); `self.__class__` the class.
+fn receiver_by_names(heap: &Heap, state: &State, o: ObjId, used: &[KeyId], work: &mut Vec<ObjId>) {
+    // (its code reaches the receiver's attributes only by the names it uses: its own, or its
+    // class's data)
+    let mro = heap.instance_class(o).map(|c| heap.mro(c)).unwrap_or_default();
+    for k in used.iter() {
+        // (`self.__class__` / `type(self)`: the class, and all it reaches)
+        if intern::key_as_str(*k).as_deref() == Some("__class__") {
+            work.extend(mro.first().copied());
+        }
+        work.extend(state.slot(o, Ns::Attr, *k).pts.iter());
+        for c in &mro {
+            let v = if state.has_slot(*c, Ns::Attr, *k) { state.slot(*c, Ns::Attr, *k) } else { heap.cls_slots.get(&(*c, Ns::Attr, *k)).cloned().unwrap_or_default() };
+            work.extend(v.pts.iter().filter(|x| heap.kind(*x) != Kind::Function));
+        }
+    }
+}
+
+/// Unknown code may have changed object `o` (of kind `k`): its slots may hold anything
+/// (`any_id`), its rows have the call as a mutator, a list or set any items and length (what
+/// the slots hold is walked next).
+#[allow(clippy::too_many_arguments)]
+fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: StrId, any_id: ObjId, any: &Value, work: &mut Vec<ObjId>) {
+    let mut writes: Vec<(crate::state::SlotKey, Value)> = Vec::new();
+    state.slots.each(&o, &mut |sk, v| {
+        work.extend(v.pts.iter());
+        if matches!(sk.0, Ns::Item | Ns::Attr | Ns::Pos | Ns::Elem) && !v.pts.contains(any_id) {
+            writes.push((*sk, v.join(any)));
+        }
+    });
+    // (a tuple cannot change; an unknown object's content is unknown already)
+    if k == Kind::Tuple || (k == Kind::Unknown && !state.has_row(o, Ns::Item) && !state.has_row(o, Ns::Attr)) {
+        return;
+    }
+    // (what an earlier havoc by the same code did already is not written again: code
+    // past its budget is often called in a loop)
+    for ns in [Ns::Item, Ns::Attr] {
+        let r0 = match state.rows.get(&(o, ns)) {
+            Some(r) => r,
+            None if (ns == Ns::Item && matches!(k, Kind::Dict | Kind::Frame)) || (ns == Ns::Attr && k == Kind::Instance) => Row::new(),
+            None => continue,
+        };
+        let r = r0.mutate(site);
+        if r != r0 {
+            state.set_row(o, ns, r);
+        }
+    }
+    // (each value holds what the slot held: written as it is)
+    for (sk, v) in writes {
+        state.set_slot(o, sk.0, sk.1, v, true);
+    }
+    let havocked = |state: &State| {
+        state.slot(o, Ns::Elem, intern::STAR).pts.contains(any_id) && state.lens.get(&o) == Some((None, 0, 0)) && !state.lasts.iter().any(|(x, _)| *x == o) && state.elems.get(&o).is_some_and(|kv| crate::domain::kv_join(&kv, &DATA) == kv)
+    };
+    if matches!(k, Kind::List | Kind::Set) && !heap.obj(o).site.starts_with("gen:") && !havocked(state) {
+        let e = state.slot(o, Ns::Elem, intern::STAR).join(any);
+        state.set_slot(o, Ns::Elem, intern::STAR, e, false);
+        let kv = crate::domain::kv_join(&state.elems.get(&o).unwrap_or(DATA), &DATA);
+        state.elems.insert(o, kv);
+        state.clear_last(o);
+        heap.set_prefix(o, state, 0);
     }
 }
