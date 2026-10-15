@@ -54,197 +54,16 @@ impl Analyzer {
                     self.bind_target(&a.target, &v, state);
                 }
             }
-            ast::Stmt::AugAssign(a) => {
-                let n = frontend::node(a);
-                let tn = frontend::node(&*a.target);
-                // (the target's object and key are evaluated once: Python reads and stores
-                // through them; a tensor's subscript goes through the expression)
-                let place: Option<(Value, Result<Value, &str>)> = match &*a.target {
-                    ast::Expr::Subscript(sub) => Some((self.eval(&sub.value, state), Ok(self.eval_key(&sub.slice, state)))).filter(|(o, _)| !crate::models::torch::is_tensor(o)),
-                    ast::Expr::Attribute(at) => Some((self.eval(&at.value, state), Err(at.attr.id.as_str()))),
-                    _ => None,
-                };
-                let cur = match &place {
-                    Some((o, Ok(k))) => self.load_item(o, Ns::Item, k, &tn, state, true),
-                    Some((o, Err(name))) => self.load_attr(o, name, &tn, state, true),
-                    None => self.eval(&a.target, state),
-                };
-                let rhs = self.eval(&a.value, state);
-                let store = |an: &mut Analyzer, v: &Value, state: &mut State| match &place {
-                    Some((o, Ok(k))) => an.store_item(o, Ns::Item, k, v, &tn, state),
-                    Some((o, Err(name))) => an.store_attr(o, name, v, &tn, state),
-                    None => an.bind_target(&a.target, v, state),
-                };
-                // `xs += ys` on a list extends it in place (other names see it); `d |= e` on a
-                // dict updates it in place; `s |= t` (`&=`, `-=`, `^=`) on a set too
-                if !cur.pts.is_empty() {
-                    let all = |an: &Analyzer, k: Kind| cur.pts.iter().all(|o| an.heap.kind(o) == k);
-                    let m = match a.op {
-                        ast::Operator::Add if all(self, Kind::List) => Some("list.extend"),
-                        ast::Operator::BitOr if all(self, Kind::Dict) => Some("dict.update"),
-                        ast::Operator::BitOr if all(self, Kind::Set) => Some("set.update"),
-                        ast::Operator::BitAnd if all(self, Kind::Set) => Some("set.intersection_update"),
-                        ast::Operator::Sub if all(self, Kind::Set) => Some("set.difference_update"),
-                        ast::Operator::BitXor if all(self, Kind::Set) => Some("set.symmetric_difference_update"),
-                        _ => None,
-                    };
-                    if let Some(m) = m {
-                        let mv = self.method_value(m, &cur);
-                        self.call_value(&mv, &n, None, state, Some(vec![rhs]));
-                        store(self, &cur, state);
-                        return;
-                    }
-                }
-                let res = self.binop(a.op, &cur, &rhs, &n, state);
-                // `t += u` on a tensor is in place: the result must keep t's shape
-                if self.m.torch_on && crate::models::torch::is_definite_tensor(&cur) && !crate::models::torch::t_inplace_fits(self, &cur, &res, &n, state) {
-                    return;
-                }
-                // `d[k] += v` with an unknown key on a closed dict: the load raised unless k was
-                // one of its keys, so the store adds none
-                if let Some((obj, Ok(key))) = &place {
-                    let plain = !obj.pts.is_empty() && obj.kv.is_bot() && obj.pts.iter().all(|o| self.heap.kind(o) == Kind::Dict && !self.m.dd_factories.contains_key(&o) && !self.m.counters.contains(&o) && !crate::models::pandas::is_series_obj(self, o) && { let r = state.row(o, Ns::Item); r.closed() && !r.present.is_empty() });
-                    if plain && !key.kv.is_literal() {
-                        for o in obj.pts.iter() {
-                            for k in state.row(o, Ns::Item).present.iter() {
-                                state.set_slot(o, Ns::Item, k, res.clone(), false);
-                            }
-                        }
-                        return;
-                    }
-                }
-                store(self, &res, state);
-            }
-            ast::Stmt::Return(r) => {
-                let v = match &r.value {
-                    Some(e) => self.eval(e, state),
-                    None => self.none_v.clone(),
-                };
-                if !state.reachable {
-                    // the value's evaluation raised on every path (a guarded access that is
-                    // definitely missing): no normal exit from here
-                    return;
-                }
-                // (names a row check of this line reads after it are still there)
-                let mut keep = v.clone();
-                if !self.findings.row_check_requests.is_empty() {
-                    let n = frontend::node(r);
-                    let file = self.program.rel_file(n.module);
-                    let names: Vec<String> = self.findings.row_check_requests.iter().filter(|(f, ln, _)| *ln >= n.line && *ln <= n.end_line && *f == file).map(|(_, _, nm)| nm.clone()).collect();
-                    for nm in names {
-                        if let Some(x) = state.env.get(&s(&nm)) {
-                            keep = keep.join(x);
-                        }
-                    }
-                }
-                self.drop_garbage_at_return(&keep, state);
-                state.ret = Some(match &state.ret {
-                    None => v,
-                    Some(cur) => cur.join(&v),
-                });
-                state.record_exit();
-                state.reachable = false;
-            }
-            ast::Stmt::Raise(r) => {
-                let exc_v = match &r.exc {
-                    Some(e) => Some(self.eval(e, state)),
-                    // a bare raise re-raises what the running handler holds: not tracked
-                    None => None,
-                };
-                // `raise X from Y`: X.__cause__ is Y (None for `from None`)
-                if let (Some(xv), Some(ce)) = (&exc_v, &r.cause) {
-                    let cv = self.eval(ce, state);
-                    let ck = key_str_lit("__cause__");
-                    for o in xv.pts.iter() {
-                        if matches!(self.heap.kind(o), Kind::Instance | Kind::Namespace) || self.m.exc_objs.contains_key(&o) {
-                            let strong = xv.pts.len() == 1 && self.heap.obj(o).single;
-                            let row = state.row(o, Ns::Attr).store(ck, strong);
-                            state.set_row(o, Ns::Attr, row);
-                            state.set_slot(o, Ns::Attr, ck, cv.clone(), strong);
-                        }
-                    }
-                }
-                // a bare `raise` re-raises what the running handler caught
-                let names: Vec<String> = match &r.exc {
-                    Some(_) => vec![],
-                    None => self.unwind.handling.last().map(|h| h.iter().cloned().collect()).unwrap_or_default(),
-                };
-                self.unwind.cur_exc = exc_v.clone().filter(|v| v.pts.iter().any(|o| self.heap.kind(o) == Kind::Instance || self.m.exc_objs.contains_key(&o) || matches!(&self.heap.obj(o).payload, Payload::Method(q, _) if q == "fastapi.httpexc")));
-                // a bare raise: the exception the handler holds
-                if r.exc.is_none() {
-                    self.unwind.cur_exc = self.unwind.handling_values.last().cloned().filter(|v| !v.pts.is_empty());
-                }
-                // the class raised: of the exception object, of a raised class, or (a bare
-                // raise of something unknown) a subclass of what the handler catches
-                self.unwind.cur_exc_cls = match &self.unwind.cur_exc {
-                    Some(v) => self.exc_value_names(v),
-                    None => match &exc_v {
-                        Some(v) if v.kv.is_bot() && v.pts.len() == 1 && self.heap.class_info_opt(v.pts.iter().next().unwrap()).is_some() => self.exc_class_names(v.pts.iter().next().unwrap()),
-                        Some(v) if v.kv.is_bot() && v.pts.len() == 1 && self.heap.kind(v.pts.iter().next().unwrap()) == Kind::External => {
-                            let q = self.heap.external_qual(v.pts.iter().next().unwrap());
-                            q.strip_prefix("builtins.").map(crate::interp::builtin_exc_names)
-                        }
-                        _ => None,
-                    },
-                };
-                if self.unwind.cur_exc_cls.is_none() && r.exc.is_none() && names.len() == 1 && names[0] != "*" {
-                    self.unwind.cur_exc_cls = Some((crate::interp::builtin_exc_names(&names[0]).0, false));
-                }
-                // (the running try, if any, takes it with this state; else it leaves the program)
-                if state.reachable {
-                    self.record_raise_state(state);
-                }
-                self.unwind.cur_exc = None;
-                self.unwind.cur_exc_cls = None;
-                state.reachable = false;
-            }
+            ast::Stmt::AugAssign(a) => self.stmt_augassign(a, state),
+            ast::Stmt::Return(r) => self.stmt_return(r, state),
+            ast::Stmt::Raise(r) => self.stmt_raise(r, state),
             ast::Stmt::Assert(a) => {
                 let sp = self.split(&a.test, state.copy());
                 state.replace_with(sp.t);
             }
             ast::Stmt::Delete(d) => self.stmt_delete(d, state),
-            ast::Stmt::Import(i) => {
-                for a in &i.names {
-                    let name = a.name.id.to_string();
-                    let top = name.split('.').next().unwrap_or("").to_string();
-                    let n = frontend::node(i);
-                    // `import a.b.c` imports the whole chain and binds `a`
-                    let v = self.import_module(&name, &n, state);
-                    if let Some(asn) = &a.asname {
-                        self.store_name(s(asn.id.as_str()), v, state);
-                    } else {
-                        let tv = if top == name { v } else { self.import_module(&top, &n, state) };
-                        self.store_name(s(&top), tv, state);
-                    }
-                }
-            }
-            ast::Stmt::ImportFrom(i) => {
-                let n = frontend::node(i);
-                let modname = self.import_from_module(i);
-                let mod_v = if modname.is_empty() { Value::new() } else { self.import_module(&modname, &n, state) };
-                for a in &i.names {
-                    if a.name.id.as_str() == "*" {
-                        self.import_star(&mod_v, &modname, &n, state);
-                        continue;
-                    }
-                    let aname = a.name.id.as_str();
-                    let mut v = Value::new();
-                    if let Some(mo) = mod_v.single().filter(|o| self.heap.kind(*o) == Kind::Module) {
-                        // a name the module does not define may be one of its submodules
-                        if state.slot_opt(mo, Ns::Attr, key_str_lit(aname)).is_none() {
-                            let sub = self.import_module(&format!("{}.{}", modname, aname), &n, state);
-                            if sub.single().map(|o| self.heap.kind(o) == Kind::Module).unwrap_or(false) {
-                                v = sub;
-                            }
-                        }
-                    }
-                    if v.pts.is_empty() && !mod_v.pts.is_empty() {
-                        v = self.load_attr(&mod_v, aname, &n, state, false);
-                    }
-                    let target = a.asname.as_ref().map(|x| x.id.as_str()).unwrap_or(aname);
-                    self.store_name(s(target), v, state);
-                }
-            }
+            ast::Stmt::Import(i) => self.stmt_import(i, state),
+            ast::Stmt::ImportFrom(i) => self.stmt_import_from(i, state),
             ast::Stmt::If(i) => self.stmt_if(&i.test, &i.body, &i.elif_else_clauses, state),
             ast::Stmt::While(w) => {
                 let g = self.loop_gc_begin(state);
@@ -262,112 +81,319 @@ impl Analyzer {
                 self.gens.for_iters.truncate(depth);
                 self.loop_gc_end(g, state);
             }
-            ast::Stmt::Break(_) | ast::Stmt::Continue(_) => {
-                let mut st = state.copy();
-                state.reachable = false;
-                // (the finally blocks of the trys this leaves run first)
-                let n = self.unwind.loop_stack.len();
-                let pending: Vec<std::rc::Rc<Finally>> = self.unwind.finally_stack.iter().rev().take_while(|(l, _, _)| *l == n).filter(|(_, _, a)| *a).map(|(_, b, _)| b.clone()).collect();
-                for fin in pending {
-                    if st.reachable {
-                        self.run_finally(&fin, &mut st, false);
-                    }
-                }
-                if let (true, Some(ctx)) = (st.reachable, self.unwind.loop_stack.last_mut()) {
-                    let acc = if matches!(node, ast::Stmt::Break(_)) { &mut ctx.breaks } else { &mut ctx.continues };
-                    *acc = Some(match acc.take() {
-                        None => st,
-                        Some(mut b) => b.join(&mut st),
-                    });
-                }
-            }
+            ast::Stmt::Break(_) | ast::Stmt::Continue(_) => self.stmt_jump(node, state),
             ast::Stmt::Try(t) => self.stmt_try(t, state),
             ast::Stmt::With(w) if crate::models::csvio::with_suppress(self, w, state) => {}
             ast::Stmt::With(w) if self.with_contextmanager(w, state) => {}
-            ast::Stmt::With(w) => {
-                let mut managers: Vec<(Value, Node)> = Vec::new();
-                for item in &w.items {
-                    let v = self.eval(&item.context_expr, state);
-                    let n = frontend::node(&item.context_expr);
-                    let mut entered = self.call_method_if_defined(&v, "__enter__", &n, state);
-                    if entered.is_none() {
-                        entered = crate::models::csvio::enter_value(self, state, &v);
-                    }
-                    if entered.is_none() {
-                        entered = Some(if v.pts.iter().any(|o| self.heap.kind(o).is_record()) { v.clone() } else { Value::data(&format!("with@L{}", frontend::node(w).line)) });
-                    }
-                    if let Some(ov) = &item.optional_vars {
-                        self.bind_target(ov, &entered.unwrap(), state);
-                    }
-                    managers.push((v, n));
-                }
-                // `redirect_stdout(buf)`: prints in the body go to buf
-                let redirects = crate::models::csvio::redirect_targets(self, state, &managers.iter().map(|m| m.0.clone()).collect::<Vec<_>>());
-                let n_redirects = redirects.len();
-                self.m.stdout_redirect.extend(redirects);
-                // a try whose finally is the managers' `__exit__`: it runs however the body ends
-                // (normally, by return / break / continue, or by an exception); a manager whose
-                // `__exit__` returns True swallows the exception: a catch-all handler that does
-                // nothing
-                let swallows = managers.iter().any(|(v, _)| self.exit_swallows(v, state));
-                let handlers = if swallows { vec![Handler { types: None, name: None, body: &[], line: frontend::node(w).line }] } else { vec![] };
-                self.stmt_try_parts(&w.body, handlers, &[], std::rc::Rc::new(Finally::Exit(managers)), state);
-                for _ in 0..n_redirects {
-                    self.m.stdout_redirect.pop();
-                }
-            }
+            ast::Stmt::With(w) => self.stmt_with(w, state),
             ast::Stmt::FunctionDef(f) => {
                 let v = self.make_function(FuncNode::Def(f), state, None);
                 let v = self.apply_decorators(&f.decorator_list, frontend::node(f), v, state);
                 self.store_name(s(f.name.id.as_str()), v, state);
             }
             ast::Stmt::ClassDef(c) => self.stmt_classdef(c, state),
-            ast::Stmt::Match(m) => {
-                let subj = self.eval(&m.subject, state);
-                let mut outs: Vec<State> = Vec::new();
-                self.cx.cond_depth += 1;
-                self.cx.branch_depth += 1;
-                // cases in order: a case that cannot match is skipped, one that surely matches
-                // (with no guard, or a guard that is true) ends the match
-                let mut matched = false;
-                for case in &m.cases {
-                    let mut cs = state.copy();
-                    let decided = { self.match_pattern(&case.pattern, &subj, &mut cs) };
-                    if decided == Some(false) || !cs.reachable {
-                        continue;
-                    }
-                    let mut sure = decided == Some(true);
-                    if let Some(g) = &case.guard {
-                        let sp = self.split(g, cs);
-                        if !sp.t.reachable {
-                            continue;
-                        }
-                        sure &= !sp.f.reachable;
-                        cs = sp.t;
-                    }
-                    self.exec_block(&case.body, &mut cs);
-                    outs.push(cs);
-                    if sure {
-                        matched = true;
-                        break;
-                    }
-                }
-                self.cx.branch_depth -= 1;
-                self.cx.cond_depth -= 1;
-                if !matched {
-                    outs.push(state.copy());
-                }
-                let mut out = outs.remove(0);
-                for mut o in outs {
-                    out = out.join(&mut o);
-                }
-                state.replace_with(out);
-            }
+            ast::Stmt::Match(m) => self.stmt_match(m, state),
             ast::Stmt::IpyEscapeCommand(_) => {
                 let n = frontend::node(node);
                 self.findings.note(format!("unsupported statement IpyEscapeCommand at L{}", n.line));
             }
         }
+    }
+
+    /// `break` / `continue`: the finally blocks of the trys it leaves run first; the state joins
+    /// the loop's breaks / continues.
+    fn stmt_jump(&mut self, node: &'static ast::Stmt, state: &mut State) {
+        let mut st = state.copy();
+        state.reachable = false;
+        // (the finally blocks of the trys this leaves run first)
+        let n = self.unwind.loop_stack.len();
+        let pending: Vec<std::rc::Rc<Finally>> = self.unwind.finally_stack.iter().rev().take_while(|(l, _, _)| *l == n).filter(|(_, _, a)| *a).map(|(_, b, _)| b.clone()).collect();
+        for fin in pending {
+            if st.reachable {
+                self.run_finally(&fin, &mut st, false);
+            }
+        }
+        if let (true, Some(ctx)) = (st.reachable, self.unwind.loop_stack.last_mut()) {
+            let acc = if matches!(node, ast::Stmt::Break(_)) { &mut ctx.breaks } else { &mut ctx.continues };
+            *acc = Some(match acc.take() {
+                None => st,
+                Some(mut b) => b.join(&mut st),
+            });
+        }
+    }
+
+    /// `match`: each case's pattern narrows the subject on its path.
+    fn stmt_match(&mut self, m: &'static ast::StmtMatch, state: &mut State) {
+        let subj = self.eval(&m.subject, state);
+        let mut outs: Vec<State> = Vec::new();
+        self.cx.cond_depth += 1;
+        self.cx.branch_depth += 1;
+        // cases in order: a case that cannot match is skipped, one that surely matches
+        // (with no guard, or a guard that is true) ends the match
+        let mut matched = false;
+        for case in &m.cases {
+            let mut cs = state.copy();
+            let decided = { self.match_pattern(&case.pattern, &subj, &mut cs) };
+            if decided == Some(false) || !cs.reachable {
+                continue;
+            }
+            let mut sure = decided == Some(true);
+            if let Some(g) = &case.guard {
+                let sp = self.split(g, cs);
+                if !sp.t.reachable {
+                    continue;
+                }
+                sure &= !sp.f.reachable;
+                cs = sp.t;
+            }
+            self.exec_block(&case.body, &mut cs);
+            outs.push(cs);
+            if sure {
+                matched = true;
+                break;
+            }
+        }
+        self.cx.branch_depth -= 1;
+        self.cx.cond_depth -= 1;
+        if !matched {
+            outs.push(state.copy());
+        }
+        let mut out = outs.remove(0);
+        for mut o in outs {
+            out = out.join(&mut o);
+        }
+        state.replace_with(out);
+    }
+
+    /// `with`: a try whose finally is the managers' `__exit__`.
+    fn stmt_with(&mut self, w: &'static ast::StmtWith, state: &mut State) {
+        let mut managers: Vec<(Value, Node)> = Vec::new();
+        for item in &w.items {
+            let v = self.eval(&item.context_expr, state);
+            let n = frontend::node(&item.context_expr);
+            let mut entered = self.call_method_if_defined(&v, "__enter__", &n, state);
+            if entered.is_none() {
+                entered = crate::models::csvio::enter_value(self, state, &v);
+            }
+            if entered.is_none() {
+                entered = Some(if v.pts.iter().any(|o| self.heap.kind(o).is_record()) { v.clone() } else { Value::data(&format!("with@L{}", frontend::node(w).line)) });
+            }
+            if let Some(ov) = &item.optional_vars {
+                self.bind_target(ov, &entered.unwrap(), state);
+            }
+            managers.push((v, n));
+        }
+        // `redirect_stdout(buf)`: prints in the body go to buf
+        let redirects = crate::models::csvio::redirect_targets(self, state, &managers.iter().map(|m| m.0.clone()).collect::<Vec<_>>());
+        let n_redirects = redirects.len();
+        self.m.stdout_redirect.extend(redirects);
+        // a try whose finally is the managers' `__exit__`: it runs however the body ends
+        // (normally, by return / break / continue, or by an exception); a manager whose
+        // `__exit__` returns True swallows the exception: a catch-all handler that does
+        // nothing
+        let swallows = managers.iter().any(|(v, _)| self.exit_swallows(v, state));
+        let handlers = if swallows { vec![Handler { types: None, name: None, body: &[], line: frontend::node(w).line }] } else { vec![] };
+        self.stmt_try_parts(&w.body, handlers, &[], std::rc::Rc::new(Finally::Exit(managers)), state);
+        for _ in 0..n_redirects {
+            self.m.stdout_redirect.pop();
+        }
+    }
+
+    /// `from m import a [as x]`, `from m import *`.
+    fn stmt_import_from(&mut self, i: &'static ast::StmtImportFrom, state: &mut State) {
+        let n = frontend::node(i);
+        let modname = self.import_from_module(i);
+        let mod_v = if modname.is_empty() { Value::new() } else { self.import_module(&modname, &n, state) };
+        for a in &i.names {
+            if a.name.id.as_str() == "*" {
+                self.import_star(&mod_v, &modname, &n, state);
+                continue;
+            }
+            let aname = a.name.id.as_str();
+            let mut v = Value::new();
+            if let Some(mo) = mod_v.single().filter(|o| self.heap.kind(*o) == Kind::Module) {
+                // a name the module does not define may be one of its submodules
+                if state.slot_opt(mo, Ns::Attr, key_str_lit(aname)).is_none() {
+                    let sub = self.import_module(&format!("{}.{}", modname, aname), &n, state);
+                    if sub.single().map(|o| self.heap.kind(o) == Kind::Module).unwrap_or(false) {
+                        v = sub;
+                    }
+                }
+            }
+            if v.pts.is_empty() && !mod_v.pts.is_empty() {
+                v = self.load_attr(&mod_v, aname, &n, state, false);
+            }
+            let target = a.asname.as_ref().map(|x| x.id.as_str()).unwrap_or(aname);
+            self.store_name(s(target), v, state);
+        }
+    }
+
+    /// `import a.b.c [as x]`.
+    fn stmt_import(&mut self, i: &'static ast::StmtImport, state: &mut State) {
+        for a in &i.names {
+            let name = a.name.id.to_string();
+            let top = name.split('.').next().unwrap_or("").to_string();
+            let n = frontend::node(i);
+            // `import a.b.c` imports the whole chain and binds `a`
+            let v = self.import_module(&name, &n, state);
+            if let Some(asn) = &a.asname {
+                self.store_name(s(asn.id.as_str()), v, state);
+            } else {
+                let tv = if top == name { v } else { self.import_module(&top, &n, state) };
+                self.store_name(s(&top), tv, state);
+            }
+        }
+    }
+
+    /// `raise` (`from`, bare): the exception and its class go to the running try with this state.
+    fn stmt_raise(&mut self, r: &'static ast::StmtRaise, state: &mut State) {
+        let exc_v = match &r.exc {
+            Some(e) => Some(self.eval(e, state)),
+            // a bare raise re-raises what the running handler holds: not tracked
+            None => None,
+        };
+        // `raise X from Y`: X.__cause__ is Y (None for `from None`)
+        if let (Some(xv), Some(ce)) = (&exc_v, &r.cause) {
+            let cv = self.eval(ce, state);
+            let ck = key_str_lit("__cause__");
+            for o in xv.pts.iter() {
+                if matches!(self.heap.kind(o), Kind::Instance | Kind::Namespace) || self.m.exc_objs.contains_key(&o) {
+                    let strong = xv.pts.len() == 1 && self.heap.obj(o).single;
+                    let row = state.row(o, Ns::Attr).store(ck, strong);
+                    state.set_row(o, Ns::Attr, row);
+                    state.set_slot(o, Ns::Attr, ck, cv.clone(), strong);
+                }
+            }
+        }
+        // a bare `raise` re-raises what the running handler caught
+        let names: Vec<String> = match &r.exc {
+            Some(_) => vec![],
+            None => self.unwind.handling.last().map(|h| h.iter().cloned().collect()).unwrap_or_default(),
+        };
+        self.unwind.cur_exc = exc_v.clone().filter(|v| v.pts.iter().any(|o| self.heap.kind(o) == Kind::Instance || self.m.exc_objs.contains_key(&o) || matches!(&self.heap.obj(o).payload, Payload::Method(q, _) if q == "fastapi.httpexc")));
+        // a bare raise: the exception the handler holds
+        if r.exc.is_none() {
+            self.unwind.cur_exc = self.unwind.handling_values.last().cloned().filter(|v| !v.pts.is_empty());
+        }
+        // the class raised: of the exception object, of a raised class, or (a bare
+        // raise of something unknown) a subclass of what the handler catches
+        self.unwind.cur_exc_cls = match &self.unwind.cur_exc {
+            Some(v) => self.exc_value_names(v),
+            None => match &exc_v {
+                Some(v) if v.kv.is_bot() && v.pts.len() == 1 && self.heap.class_info_opt(v.pts.iter().next().unwrap()).is_some() => self.exc_class_names(v.pts.iter().next().unwrap()),
+                Some(v) if v.kv.is_bot() && v.pts.len() == 1 && self.heap.kind(v.pts.iter().next().unwrap()) == Kind::External => {
+                    let q = self.heap.external_qual(v.pts.iter().next().unwrap());
+                    q.strip_prefix("builtins.").map(crate::interp::builtin_exc_names)
+                }
+                _ => None,
+            },
+        };
+        if self.unwind.cur_exc_cls.is_none() && r.exc.is_none() && names.len() == 1 && names[0] != "*" {
+            self.unwind.cur_exc_cls = Some((crate::interp::builtin_exc_names(&names[0]).0, false));
+        }
+        // (the running try, if any, takes it with this state; else it leaves the program)
+        if state.reachable {
+            self.record_raise_state(state);
+        }
+        self.unwind.cur_exc = None;
+        self.unwind.cur_exc_cls = None;
+        state.reachable = false;
+    }
+
+    /// `return`: the value joins the call's result; what the frame made and nothing reaches is collected.
+    fn stmt_return(&mut self, r: &'static ast::StmtReturn, state: &mut State) {
+        let v = match &r.value {
+            Some(e) => self.eval(e, state),
+            None => self.none_v.clone(),
+        };
+        if !state.reachable {
+            // the value's evaluation raised on every path (a guarded access that is
+            // definitely missing): no normal exit from here
+            return;
+        }
+        // (names a row check of this line reads after it are still there)
+        let mut keep = v.clone();
+        if !self.findings.row_check_requests.is_empty() {
+            let n = frontend::node(r);
+            let file = self.program.rel_file(n.module);
+            let names: Vec<String> = self.findings.row_check_requests.iter().filter(|(f, ln, _)| *ln >= n.line && *ln <= n.end_line && *f == file).map(|(_, _, nm)| nm.clone()).collect();
+            for nm in names {
+                if let Some(x) = state.env.get(&s(&nm)) {
+                    keep = keep.join(x);
+                }
+            }
+        }
+        self.drop_garbage_at_return(&keep, state);
+        state.ret = Some(match &state.ret {
+            None => v,
+            Some(cur) => cur.join(&v),
+        });
+        state.record_exit();
+        state.reachable = false;
+    }
+
+    /// `t op= v`: the target's object and key evaluated once, read, combined, stored (in place for
+    /// lists, dicts and sets).
+    fn stmt_augassign(&mut self, a: &'static ast::StmtAugAssign, state: &mut State) {
+        let n = frontend::node(a);
+        let tn = frontend::node(&*a.target);
+        // (the target's object and key are evaluated once: Python reads and stores
+        // through them; a tensor's subscript goes through the expression)
+        let place: Option<(Value, Result<Value, &str>)> = match &*a.target {
+            ast::Expr::Subscript(sub) => Some((self.eval(&sub.value, state), Ok(self.eval_key(&sub.slice, state)))).filter(|(o, _)| !crate::models::torch::is_tensor(o)),
+            ast::Expr::Attribute(at) => Some((self.eval(&at.value, state), Err(at.attr.id.as_str()))),
+            _ => None,
+        };
+        let cur = match &place {
+            Some((o, Ok(k))) => self.load_item(o, Ns::Item, k, &tn, state, true),
+            Some((o, Err(name))) => self.load_attr(o, name, &tn, state, true),
+            None => self.eval(&a.target, state),
+        };
+        let rhs = self.eval(&a.value, state);
+        let store = |an: &mut Analyzer, v: &Value, state: &mut State| match &place {
+            Some((o, Ok(k))) => an.store_item(o, Ns::Item, k, v, &tn, state),
+            Some((o, Err(name))) => an.store_attr(o, name, v, &tn, state),
+            None => an.bind_target(&a.target, v, state),
+        };
+        // `xs += ys` on a list extends it in place (other names see it); `d |= e` on a
+        // dict updates it in place; `s |= t` (`&=`, `-=`, `^=`) on a set too
+        if !cur.pts.is_empty() {
+            let all = |an: &Analyzer, k: Kind| cur.pts.iter().all(|o| an.heap.kind(o) == k);
+            let m = match a.op {
+                ast::Operator::Add if all(self, Kind::List) => Some("list.extend"),
+                ast::Operator::BitOr if all(self, Kind::Dict) => Some("dict.update"),
+                ast::Operator::BitOr if all(self, Kind::Set) => Some("set.update"),
+                ast::Operator::BitAnd if all(self, Kind::Set) => Some("set.intersection_update"),
+                ast::Operator::Sub if all(self, Kind::Set) => Some("set.difference_update"),
+                ast::Operator::BitXor if all(self, Kind::Set) => Some("set.symmetric_difference_update"),
+                _ => None,
+            };
+            if let Some(m) = m {
+                let mv = self.method_value(m, &cur);
+                self.call_value(&mv, &n, None, state, Some(vec![rhs]));
+                store(self, &cur, state);
+                return;
+            }
+        }
+        let res = self.binop(a.op, &cur, &rhs, &n, state);
+        // `t += u` on a tensor is in place: the result must keep t's shape
+        if self.m.torch_on && crate::models::torch::is_definite_tensor(&cur) && !crate::models::torch::t_inplace_fits(self, &cur, &res, &n, state) {
+            return;
+        }
+        // `d[k] += v` with an unknown key on a closed dict: the load raised unless k was
+        // one of its keys, so the store adds none
+        if let Some((obj, Ok(key))) = &place {
+            let plain = !obj.pts.is_empty() && obj.kv.is_bot() && obj.pts.iter().all(|o| self.heap.kind(o) == Kind::Dict && !self.m.dd_factories.contains_key(&o) && !self.m.counters.contains(&o) && !crate::models::pandas::is_series_obj(self, o) && { let r = state.row(o, Ns::Item); r.closed() && !r.present.is_empty() });
+            if plain && !key.kv.is_literal() {
+                for o in obj.pts.iter() {
+                    for k in state.row(o, Ns::Item).present.iter() {
+                        state.set_slot(o, Ns::Item, k, res.clone(), false);
+                    }
+                }
+                return;
+            }
+        }
+        store(self, &res, state);
     }
 
     /// `with cm(...) as x: body` where `cm` is a `@contextmanager` generator function: the

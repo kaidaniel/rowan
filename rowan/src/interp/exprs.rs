@@ -67,130 +67,9 @@ impl Analyzer {
                 let nd = frontend::node(node);
                 self.load_attr(&obj, a.attr.id.as_str(), &nd, state, true)
             }
-            ast::Expr::Subscript(sub) => {
-                let obj = self.eval(&sub.value, state);
-                // a generic pydantic model parametrised: `Page[User]`
-                if let Some(c) = obj.single().filter(|c| self.heap.kind(*c) == Kind::Class && crate::models::pydantic::is_validated(self, *c)) {
-                    if let Some(v) = crate::models::pydantic::pyd_specialise(self, c, &sub.slice, state) {
-                        return v;
-                    }
-                }
-                {
-                    let nd = frontend::node(node);
-                    if let Some(v) = crate::models::torch::t_subscript(self, &obj, &sub.slice, &nd, state) {
-                        return v;
-                    }
-                }
-                let key = self.eval_key(&sub.slice, state);
-                let bounds = Self::slice_label_bounds(&key.kv);
-                if let Some(v) = bounds.and_then(|b| self.slice_positional(&obj, b, node, state)) {
-                    return v;
-                }
-                // a known string sliced / indexed by known numbers (an index out of range raises
-                // IndexError: on every string the value may be, or on some)
-                let strs: Option<Vec<Vec<char>>> = crate::domain::kv_literals(&obj.kv).iter().map(|k| intern::key_as_str(k).map(|t| t.chars().collect())).collect();
-                if let Some(strs) = strs.filter(|v| obj.pts.is_empty() && obj.kv.is_literal() && !v.is_empty()) {
-                    let index = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
-                    let out: Option<intern::KeySet> = match (bounds, index) {
-                        (Some((lo, hi, st)), _) => strs.iter().map(|cs| py_slice(cs, lo, hi, st).map(|t| key_str_lit(&t))).collect(),
-                        (None, Some(i)) => {
-                            let at = |cs: &Vec<char>| usize::try_from(if i < 0 { i + cs.len() as i64 } else { i }).ok().and_then(|j| cs.get(j).map(|c| key_str_lit(&c.to_string())));
-                            let inside: intern::KeySet = strs.iter().filter_map(at).collect();
-                            if inside.is_empty() {
-                                self.raise_here("IndexError", state);
-                                return Value::new();
-                            } else if strs.iter().any(|cs| at(cs).is_none()) {
-                                self.may_raise_here("IndexError", state);
-                            }
-                            Some(inside)
-                        }
-                        (None, None) => {
-                            if !matches!(&*sub.slice, ast::Expr::Slice(_)) {
-                                self.may_raise_here("IndexError", state);
-                            }
-                            None
-                        }
-                    };
-                    if let Some(o) = out {
-                        return Value::kv_only(KeyVal::lits(o));
-                    }
-                }
-                let nd = frontend::node(node);
-                // a key the name's object surely has (stored through the name): no failure
-                if let (ast::Expr::Name(nm), Some(k)) = (&*sub.value, key.kv.as_lit().filter(|_| key.pts.is_empty())) {
-                    if state.name_has_key(s(nm.id.as_str()), k) {
-                        let v = self.load_item(&obj, Ns::Item, &key, &nd, state, false);
-                        if let Some(o) = obj.pts.first() {
-                            self.verdict(&nd, k, &crate::domain::Classification::with_note(crate::domain::Tier::Proven, "is always there"), o, Ns::Item, None, None);
-                        }
-                        return v;
-                    }
-                }
-                self.load_item(&obj, Ns::Item, &key, &nd, state, true)
-            }
-            ast::Expr::Call(c) => {
-                // (the tensor model reads `x.dim` as a method only when it is called)
-                self.m.t_called_attr = frontend::node(&*c.func).addr;
-                self.mode.callee_nodes.insert(self.m.t_called_attr);
-                let fv = self.eval(&c.func, state);
-                let mut flag = false;
-                if !self.unwind.tries.is_empty() {
-                    let all_safe = fv.pts.iter().all(|o| match &self.heap.obj(o).payload {
-                        Payload::Method(q, _) if self.heap.kind(o) == Kind::Method => super::safe_method(q) || super::SELF_REPORTING.iter().any(|p| q.starts_with(p)),
-                        // user code: whether it raises is reported by its own analysis
-                        // builtins that raise only on wrong types (len, str, sorted, …)
-                        Payload::Str(q) if self.heap.kind(o) == Kind::External => q.strip_prefix("builtins.").map(|n| super::SAFE_BUILTINS.contains(&n) || is_exception_name(n)).unwrap_or(false) || super::SELF_REPORTING_EXTERNALS.contains(&q.as_str())
-                            // (making an exception object of a library class: `HTTPException(...)`)
-                            || (q.rsplit('.').next().map(|n| n.ends_with("Error") || n.ends_with("Exception")).unwrap_or(false)),
-                        _ => matches!(self.heap.kind(o), Kind::Function | Kind::Bound | Kind::Class | Kind::Partial),
-                    });
-                    if !all_safe {
-                        if super::debug_level() == 2 {
-                            let what: Vec<String> = fv.pts.iter().map(|o| match &self.heap.obj(o).payload { Payload::Method(q, _) | Payload::Str(q) => q.clone(), _ => self.heap.obj(o).label.to_string() }).collect();
-                            eprintln!("  call may raise at L{}: {}", frontend::node(node).line, what.join(", "));
-                        }
-                        flag = true;
-                    }
-                }
-                let nd = frontend::node(node);
-                let saved_node = self.unwind.exc_node.replace(nd);
-                if let (Some(a @ (ast::Expr::ListComp(_) | ast::Expr::Generator(_))), Some(o)) = (c.arguments.args.first(), fv.single()) {
-                    if fv.kv.is_bot() && self.heap.kind(o) == Kind::External && matches!(self.heap.external_qual(o).as_str(), "torch.cat" | "torch.concat" | "torch.concatenate" | "torch.stack") {
-                        self.mode.nonempty_comp = a as *const ast::Expr as usize;
-                    }
-                }
-                let r = self.call_value(&fv, &nd, Some(c), state, None);
-                self.unwind.exc_node = saved_node;
-                // (flagged after the call: what the call requires of its inputs, it requires on
-                // its raising paths too — a missing column is what makes `read_csv` raise)
-                if flag {
-                    self.flag_may_raise(state);
-                }
-                // `t.setdefault(k, …)` through a name: whichever object `t` is has k now
-                if let ast::Expr::Attribute(a) = &*c.func {
-                    if let (ast::Expr::Name(nm), "setdefault", Some(first)) = (&*a.value, a.attr.id.as_str(), c.arguments.args.first()) {
-                        if let ast::Expr::StringLiteral(sl) = first {
-                            state.add_name_key(s(nm.id.as_str()), key_str_lit(sl.value.to_str()));
-                        }
-                    }
-                }
-                r
-            }
-            ast::Expr::Dict(d) => {
-                let nd = frontend::node(node);
-                let oid = self.alloc_at(Kind::Dict, &nd, state, &format!("dict@L{}", nd.line), Payload::None, None, Ns::Item, None, None);
-                for item in &d.items {
-                    let val = self.eval(&item.value, state);
-                    match &item.key {
-                        None => self.copy_into(oid, Ns::Item, &val, state, true, &intern::KeySet::new()),
-                        Some(k) => {
-                            let kv = self.eval_key(k, state);
-                            self.store_key(oid, Ns::Item, &kv.kv, &val, true, &nd, state);
-                        }
-                    }
-                }
-                Value::obj(oid)
-            }
+            ast::Expr::Subscript(sub) => self.expr_subscript(sub, node, state),
+            ast::Expr::Call(c) => self.expr_call(c, node, state),
+            ast::Expr::Dict(d) => self.expr_dict(d, node, state),
             ast::Expr::List(l) => self.container(node, Kind::List, &l.elts, state),
             ast::Expr::Tuple(t) => self.container(node, Kind::Tuple, &t.elts, state),
             ast::Expr::Set(st) => self.container(node, Kind::Set, &st.elts, state),
@@ -221,89 +100,9 @@ impl Analyzer {
                 state.replace_with(st);
                 v
             }
-            ast::Expr::UnaryOp(u) => {
-                let v = self.eval(&u.operand, state);
-                if matches!(u.op, ast::UnaryOp::UAdd | ast::UnaryOp::USub) {
-                    let nd = frontend::node(node);
-                    if let Some(r) = crate::models::counter::unary(self, state, u.op == ast::UnaryOp::USub, &v, &nd) {
-                        return r;
-                    }
-                }
-                if u.op != ast::UnaryOp::Not {
-                    if crate::models::torch::is_tensor(&v) {
-                        return v;
-                    }
-                    if let Some(d) = crate::models::torch::dim_of_label(&v) {
-                        return crate::models::torch::dim_value(if u.op == ast::UnaryOp::USub { crate::models::shape::scale(d, -1) } else { d });
-                    }
-                    if u.op == ast::UnaryOp::USub {
-                        if let Some(r) = crate::models::torch::t_neg_named(self, &v, state) {
-                            return r;
-                        }
-                    }
-                }
-                match u.op {
-                    ast::UnaryOp::Not => match self.truth_of(&v, state, &frontend::node(node)) {
-                        Some(b) => Value::lit(intern::key_bool(!b)),
-                        None => Value::data("bool"),
-                    },
-                    ast::UnaryOp::USub => {
-                        if let Some(k) = v.kv.as_lit().filter(|_| v.pts.is_empty()) {
-                            if let Some(i) = intern::key_as_int(k) {
-                                if !intern::with_key(k, |kk| matches!(kk, intern::Key::Bool(_))) {
-                                    return Value::lit(key_int(-i));
-                                }
-                            }
-                            if let Some(f) = intern::with_key(k, |kk| if let intern::Key::Float(b) = kk { Some(f64::from_bits(*b)) } else { None }) {
-                                return Value::lit(key_float(-f));
-                            }
-                        }
-                        if crate::models::pandas::is_seriesish(self, &v) {
-                            return Value::with_kv(ObjSet::one(self.m.series), DATA);
-                        }
-                        Value::with_kv(v.pts.filter(|o| o == self.m.series), DATA)
-                    }
-                    _ if crate::models::pandas::is_seriesish(self, &v) => Value::with_kv(ObjSet::one(self.m.series), DATA),
-                    _ => Value::with_kv(v.pts.filter(|o| o == self.m.series), DATA),
-                }
-            }
-            ast::Expr::BinOp(b) => {
-                let a = self.eval(&b.left, state);
-                let c = self.eval(&b.right, state);
-                let nd = frontend::node(node);
-                let r = self.binop(b.op, &a, &c, &nd, state);
-                // an unknown result is named by the expression (`1 + b`)
-                if r.pts.is_empty() && matches!(r.kv, KeyVal::Data(l) if !intern::str_get(l).starts_with('\u{1}')) {
-                    let text = frontend::text_at(&nd).split_whitespace().collect::<Vec<_>>().join(" ");
-                    if !text.is_empty() && text.len() <= 60 {
-                        // the expression names the value only inside this function (its names)
-                        let scope = self.frame().func.unwrap_or(0);
-                        return Value::data(&format!("expr:{}:{}", scope, text));
-                    }
-                }
-                r
-            }
-            ast::Expr::Compare(c) => {
-                // (each comparator is evaluated once, as Python does; a false link of a chain ends it)
-                let nd = frontend::node(node);
-                let mut left = self.eval(&c.left, state);
-                let mut all_true = true;
-                for (op, cmp) in c.ops.iter().zip(c.comparators.iter()) {
-                    let b = self.eval(cmp, state);
-                    let r = self.compare(*op, &left, &b, cmp, &nd, state);
-                    if c.ops.len() == 1 {
-                        return r;
-                    }
-                    match r.kv.as_lit().filter(|_| r.pts.is_empty()) {
-                        Some(k) if k == intern::key_bool(false) => return r,
-                        Some(k) if k == intern::key_bool(true) => {}
-                        _ if crate::models::pandas::is_seriesish(self, &r) => return r,
-                        _ => all_true = false,
-                    }
-                    left = b;
-                }
-                if all_true { Value::lit(intern::key_bool(true)) } else { Value::data("bool") }
-            }
+            ast::Expr::UnaryOp(u) => self.expr_unaryop(u, node, state),
+            ast::Expr::BinOp(b) => self.expr_binop(b, node, state),
+            ast::Expr::Compare(c) => self.expr_compare(c, node, state),
             ast::Expr::FString(f) => self.expr_fstring(f, node, state),
             ast::Expr::TString(_) => {
                 let nd = frontend::node(node);
@@ -311,51 +110,8 @@ impl Analyzer {
             }
             ast::Expr::Starred(st) => self.eval(&st.value, state),
             ast::Expr::Await(a) => self.eval(&a.value, state),
-            ast::Expr::Yield(y) => {
-                let v = match &y.value {
-                    Some(v) => self.eval(v, state),
-                    None => self.none_v.clone(),
-                };
-                // (the with body runs at every yield the generator reaches: one per path)
-                if self.gens.cm_hook.as_ref().map(|h| (!h.ran || (h.multi)) && self.cx.frames.len() == h.depth + 1).unwrap_or(false) {
-                    self.run_cm_body(v, state);
-                    return self.none_v.clone();
-                }
-                // (a bare `yield` yields None)
-                self.yield_value(v, state, (y as *const _ as usize, 0));
-                // the value of the `yield` expression: what `send` passes, None when iterated
-                if crate::frontend::any_send_call() {
-                    Value::data("yield")
-                } else {
-                    self.none_v.clone()
-                }
-            }
-            ast::Expr::YieldFrom(y) => {
-                let v = self.eval(&y.value, state);
-                let nd = frontend::node(&*y.value);
-                let it = self.iterate(&v, &nd, state);
-                match it.items {
-                    // known items: yielded one by one, in order
-                    Some(items) => {
-                        for (i, item) in items.into_iter().enumerate() {
-                            self.yield_value(item, state, (y as *const _ as usize, i + 1));
-                        }
-                    }
-                    _ => {
-                        // an unknown number of items: positions after this are unknown
-                        if let Some(gid) = self.yield_value(it.elem.flat(), state, (y as *const _ as usize, 0)) {
-                            self.heap.set_llen(gid, state, None);
-                            state.drop_obj_ns(gid, Ns::Pos);
-                        }
-                    }
-                }
-                // the value: the delegated generator's return value
-                let rk = key_str_lit("\u{1}genret");
-                if !v.pts.is_empty() && v.kv.is_bot() && v.pts.iter().all(|o| state.slot_opt(o, Ns::Attr, rk).is_some()) {
-                    return crate::domain::join_values(v.pts.iter().map(|o| state.slot(o, Ns::Attr, rk)).collect::<Vec<_>>());
-                }
-                Value::data("yield")
-            }
+            ast::Expr::Yield(y) => self.expr_yield(y, state),
+            ast::Expr::YieldFrom(y) => self.expr_yield_from(y, state),
             ast::Expr::Slice(_) => self.eval_key(node, state),
             ast::Expr::DictComp(dc) => self.expr_dictcomp(dc, node, state),
             ast::Expr::ListComp(lc) => self.seq_comp(node, Kind::List, &lc.elt, &lc.generators, state),
@@ -373,6 +129,274 @@ impl Analyzer {
                 Value::data(&format!("L{}", nd.line))
             }
         }
+    }
+
+    /// `a op b` (`binop`).
+    fn expr_binop(&mut self, b: &'static ast::ExprBinOp, node: &'static ast::Expr, state: &mut State) -> Value {
+        let a = self.eval(&b.left, state);
+        let c = self.eval(&b.right, state);
+        let nd = frontend::node(node);
+        let r = self.binop(b.op, &a, &c, &nd, state);
+        // an unknown result is named by the expression (`1 + b`)
+        if r.pts.is_empty() && matches!(r.kv, KeyVal::Data(l) if !intern::str_get(l).starts_with('\u{1}')) {
+            let text = frontend::text_at(&nd).split_whitespace().collect::<Vec<_>>().join(" ");
+            if !text.is_empty() && text.len() <= 60 {
+                // the expression names the value only inside this function (its names)
+                let scope = self.frame().func.unwrap_or(0);
+                return Value::data(&format!("expr:{}:{}", scope, text));
+            }
+        }
+        r
+    }
+
+    /// A dict display (`**m` unpacked into it).
+    fn expr_dict(&mut self, d: &'static ast::ExprDict, node: &'static ast::Expr, state: &mut State) -> Value {
+        let nd = frontend::node(node);
+        let oid = self.alloc_at(Kind::Dict, &nd, state, &format!("dict@L{}", nd.line), Payload::None, None, Ns::Item, None, None);
+        for item in &d.items {
+            let val = self.eval(&item.value, state);
+            match &item.key {
+                None => self.copy_into(oid, Ns::Item, &val, state, true, &intern::KeySet::new()),
+                Some(k) => {
+                    let kv = self.eval_key(k, state);
+                    self.store_key(oid, Ns::Item, &kv.kv, &val, true, &nd, state);
+                }
+            }
+        }
+        Value::obj(oid)
+    }
+
+    /// `a < b < c`: the chained comparisons (`compare`) joined by `and`.
+    fn expr_compare(&mut self, c: &'static ast::ExprCompare, node: &'static ast::Expr, state: &mut State) -> Value {
+        // (each comparator is evaluated once, as Python does; a false link of a chain ends it)
+        let nd = frontend::node(node);
+        let mut left = self.eval(&c.left, state);
+        let mut all_true = true;
+        for (op, cmp) in c.ops.iter().zip(c.comparators.iter()) {
+            let b = self.eval(cmp, state);
+            let r = self.compare(*op, &left, &b, cmp, &nd, state);
+            if c.ops.len() == 1 {
+                return r;
+            }
+            match r.kv.as_lit().filter(|_| r.pts.is_empty()) {
+                Some(k) if k == intern::key_bool(false) => return r,
+                Some(k) if k == intern::key_bool(true) => {}
+                _ if crate::models::pandas::is_seriesish(self, &r) => return r,
+                _ => all_true = false,
+            }
+            left = b;
+        }
+        if all_true { Value::lit(intern::key_bool(true)) } else { Value::data("bool") }
+    }
+
+    /// `yield from it`: every item of `it` is yielded; the value is the sub-generator's return.
+    fn expr_yield_from(&mut self, y: &'static ast::ExprYieldFrom, state: &mut State) -> Value {
+        let v = self.eval(&y.value, state);
+        let nd = frontend::node(&*y.value);
+        let it = self.iterate(&v, &nd, state);
+        match it.items {
+            // known items: yielded one by one, in order
+            Some(items) => {
+                for (i, item) in items.into_iter().enumerate() {
+                    self.yield_value(item, state, (y as *const _ as usize, i + 1));
+                }
+            }
+            _ => {
+                // an unknown number of items: positions after this are unknown
+                if let Some(gid) = self.yield_value(it.elem.flat(), state, (y as *const _ as usize, 0)) {
+                    self.heap.set_llen(gid, state, None);
+                    state.drop_obj_ns(gid, Ns::Pos);
+                }
+            }
+        }
+        // the value: the delegated generator's return value
+        let rk = key_str_lit("\u{1}genret");
+        if !v.pts.is_empty() && v.kv.is_bot() && v.pts.iter().all(|o| state.slot_opt(o, Ns::Attr, rk).is_some()) {
+            return crate::domain::join_values(v.pts.iter().map(|o| state.slot(o, Ns::Attr, rk)).collect::<Vec<_>>());
+        }
+        Value::data("yield")
+    }
+
+    /// `yield v`: the item joins the generator's items; the state here is a suspension point.
+    fn expr_yield(&mut self, y: &'static ast::ExprYield, state: &mut State) -> Value {
+        let v = match &y.value {
+            Some(v) => self.eval(v, state),
+            None => self.none_v.clone(),
+        };
+        // (the with body runs at every yield the generator reaches: one per path)
+        if self.gens.cm_hook.as_ref().map(|h| (!h.ran || (h.multi)) && self.cx.frames.len() == h.depth + 1).unwrap_or(false) {
+            self.run_cm_body(v, state);
+            return self.none_v.clone();
+        }
+        // (a bare `yield` yields None)
+        self.yield_value(v, state, (y as *const _ as usize, 0));
+        // the value of the `yield` expression: what `send` passes, None when iterated
+        if crate::frontend::any_send_call() {
+            Value::data("yield")
+        } else {
+            self.none_v.clone()
+        }
+    }
+
+    /// `-x`, `+x`, `~x`, `not x`.
+    fn expr_unaryop(&mut self, u: &'static ast::ExprUnaryOp, node: &'static ast::Expr, state: &mut State) -> Value {
+        let v = self.eval(&u.operand, state);
+        if matches!(u.op, ast::UnaryOp::UAdd | ast::UnaryOp::USub) {
+            let nd = frontend::node(node);
+            if let Some(r) = crate::models::counter::unary(self, state, u.op == ast::UnaryOp::USub, &v, &nd) {
+                return r;
+            }
+        }
+        if u.op != ast::UnaryOp::Not {
+            if crate::models::torch::is_tensor(&v) {
+                return v;
+            }
+            if let Some(d) = crate::models::torch::dim_of_label(&v) {
+                return crate::models::torch::dim_value(if u.op == ast::UnaryOp::USub { crate::models::shape::scale(d, -1) } else { d });
+            }
+            if u.op == ast::UnaryOp::USub {
+                if let Some(r) = crate::models::torch::t_neg_named(self, &v, state) {
+                    return r;
+                }
+            }
+        }
+        match u.op {
+            ast::UnaryOp::Not => match self.truth_of(&v, state, &frontend::node(node)) {
+                Some(b) => Value::lit(intern::key_bool(!b)),
+                None => Value::data("bool"),
+            },
+            ast::UnaryOp::USub => {
+                if let Some(k) = v.kv.as_lit().filter(|_| v.pts.is_empty()) {
+                    if let Some(i) = intern::key_as_int(k) {
+                        if !intern::with_key(k, |kk| matches!(kk, intern::Key::Bool(_))) {
+                            return Value::lit(key_int(-i));
+                        }
+                    }
+                    if let Some(f) = intern::with_key(k, |kk| if let intern::Key::Float(b) = kk { Some(f64::from_bits(*b)) } else { None }) {
+                        return Value::lit(key_float(-f));
+                    }
+                }
+                if crate::models::pandas::is_seriesish(self, &v) {
+                    return Value::with_kv(ObjSet::one(self.m.series), DATA);
+                }
+                Value::with_kv(v.pts.filter(|o| o == self.m.series), DATA)
+            }
+            _ if crate::models::pandas::is_seriesish(self, &v) => Value::with_kv(ObjSet::one(self.m.series), DATA),
+            _ => Value::with_kv(v.pts.filter(|o| o == self.m.series), DATA),
+        }
+    }
+
+    /// A call: the callee, its arguments (`*` / `**` unpacked), `call_value`.
+    fn expr_call(&mut self, c: &'static ast::ExprCall, node: &'static ast::Expr, state: &mut State) -> Value {
+        // (the tensor model reads `x.dim` as a method only when it is called)
+        self.m.t_called_attr = frontend::node(&*c.func).addr;
+        self.mode.callee_nodes.insert(self.m.t_called_attr);
+        let fv = self.eval(&c.func, state);
+        let mut flag = false;
+        if !self.unwind.tries.is_empty() {
+            let all_safe = fv.pts.iter().all(|o| match &self.heap.obj(o).payload {
+                Payload::Method(q, _) if self.heap.kind(o) == Kind::Method => super::safe_method(q) || super::SELF_REPORTING.iter().any(|p| q.starts_with(p)),
+                // user code: whether it raises is reported by its own analysis
+                // builtins that raise only on wrong types (len, str, sorted, …)
+                Payload::Str(q) if self.heap.kind(o) == Kind::External => q.strip_prefix("builtins.").map(|n| super::SAFE_BUILTINS.contains(&n) || is_exception_name(n)).unwrap_or(false) || super::SELF_REPORTING_EXTERNALS.contains(&q.as_str())
+                    // (making an exception object of a library class: `HTTPException(...)`)
+                    || (q.rsplit('.').next().map(|n| n.ends_with("Error") || n.ends_with("Exception")).unwrap_or(false)),
+                _ => matches!(self.heap.kind(o), Kind::Function | Kind::Bound | Kind::Class | Kind::Partial),
+            });
+            if !all_safe {
+                if super::debug_level() == 2 {
+                    let what: Vec<String> = fv.pts.iter().map(|o| match &self.heap.obj(o).payload { Payload::Method(q, _) | Payload::Str(q) => q.clone(), _ => self.heap.obj(o).label.to_string() }).collect();
+                    eprintln!("  call may raise at L{}: {}", frontend::node(node).line, what.join(", "));
+                }
+                flag = true;
+            }
+        }
+        let nd = frontend::node(node);
+        let saved_node = self.unwind.exc_node.replace(nd);
+        if let (Some(a @ (ast::Expr::ListComp(_) | ast::Expr::Generator(_))), Some(o)) = (c.arguments.args.first(), fv.single()) {
+            if fv.kv.is_bot() && self.heap.kind(o) == Kind::External && matches!(self.heap.external_qual(o).as_str(), "torch.cat" | "torch.concat" | "torch.concatenate" | "torch.stack") {
+                self.mode.nonempty_comp = a as *const ast::Expr as usize;
+            }
+        }
+        let r = self.call_value(&fv, &nd, Some(c), state, None);
+        self.unwind.exc_node = saved_node;
+        // (flagged after the call: what the call requires of its inputs, it requires on
+        // its raising paths too — a missing column is what makes `read_csv` raise)
+        if flag {
+            self.flag_may_raise(state);
+        }
+        // `t.setdefault(k, …)` through a name: whichever object `t` is has k now
+        if let ast::Expr::Attribute(a) = &*c.func {
+            if let (ast::Expr::Name(nm), "setdefault", Some(first)) = (&*a.value, a.attr.id.as_str(), c.arguments.args.first()) {
+                if let ast::Expr::StringLiteral(sl) = first {
+                    state.add_name_key(s(nm.id.as_str()), key_str_lit(sl.value.to_str()));
+                }
+            }
+        }
+        r
+    }
+
+    /// `obj[key]`: an item read (a tensor's indexing goes to the torch model).
+    fn expr_subscript(&mut self, sub: &'static ast::ExprSubscript, node: &'static ast::Expr, state: &mut State) -> Value {
+        let obj = self.eval(&sub.value, state);
+        // a generic pydantic model parametrised: `Page[User]`
+        if let Some(c) = obj.single().filter(|c| self.heap.kind(*c) == Kind::Class && crate::models::pydantic::is_validated(self, *c)) {
+            if let Some(v) = crate::models::pydantic::pyd_specialise(self, c, &sub.slice, state) {
+                return v;
+            }
+        }
+        {
+            let nd = frontend::node(node);
+            if let Some(v) = crate::models::torch::t_subscript(self, &obj, &sub.slice, &nd, state) {
+                return v;
+            }
+        }
+        let key = self.eval_key(&sub.slice, state);
+        let bounds = Self::slice_label_bounds(&key.kv);
+        if let Some(v) = bounds.and_then(|b| self.slice_positional(&obj, b, node, state)) {
+            return v;
+        }
+        // a known string sliced / indexed by known numbers (an index out of range raises
+        // IndexError: on every string the value may be, or on some)
+        let strs: Option<Vec<Vec<char>>> = crate::domain::kv_literals(&obj.kv).iter().map(|k| intern::key_as_str(k).map(|t| t.chars().collect())).collect();
+        if let Some(strs) = strs.filter(|v| obj.pts.is_empty() && obj.kv.is_literal() && !v.is_empty()) {
+            let index = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
+            let out: Option<intern::KeySet> = match (bounds, index) {
+                (Some((lo, hi, st)), _) => strs.iter().map(|cs| py_slice(cs, lo, hi, st).map(|t| key_str_lit(&t))).collect(),
+                (None, Some(i)) => {
+                    let at = |cs: &Vec<char>| usize::try_from(if i < 0 { i + cs.len() as i64 } else { i }).ok().and_then(|j| cs.get(j).map(|c| key_str_lit(&c.to_string())));
+                    let inside: intern::KeySet = strs.iter().filter_map(at).collect();
+                    if inside.is_empty() {
+                        self.raise_here("IndexError", state);
+                        return Value::new();
+                    } else if strs.iter().any(|cs| at(cs).is_none()) {
+                        self.may_raise_here("IndexError", state);
+                    }
+                    Some(inside)
+                }
+                (None, None) => {
+                    if !matches!(&*sub.slice, ast::Expr::Slice(_)) {
+                        self.may_raise_here("IndexError", state);
+                    }
+                    None
+                }
+            };
+            if let Some(o) = out {
+                return Value::kv_only(KeyVal::lits(o));
+            }
+        }
+        let nd = frontend::node(node);
+        // a key the name's object surely has (stored through the name): no failure
+        if let (ast::Expr::Name(nm), Some(k)) = (&*sub.value, key.kv.as_lit().filter(|_| key.pts.is_empty())) {
+            if state.name_has_key(s(nm.id.as_str()), k) {
+                let v = self.load_item(&obj, Ns::Item, &key, &nd, state, false);
+                if let Some(o) = obj.pts.first() {
+                    self.verdict(&nd, k, &crate::domain::Classification::with_note(crate::domain::Tier::Proven, "is always there"), o, Ns::Item, None, None);
+                }
+                return v;
+            }
+        }
+        self.load_item(&obj, Ns::Item, &key, &nd, state, true)
     }
 
     pub(in crate::interp) fn eval_key(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {
