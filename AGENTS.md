@@ -89,9 +89,8 @@ namespace packages).
 * **Soundness** holds relative to the models and to annotations of values whose class is
   unknown. `exec`, `setattr` / `getattr` with unknown names (also in code a skipped call
   reaches), metaclasses and monkey-patching (rebinding a function or class too) are unknown or
-  ignored. Accepted imprecision: lengths past 15, slices by unknown bounds, weak stores through
-  names holding several objects, runs cut by a deadline; a generator does not see what unknown
-  code changes between its items. An object a path has no facts of reads as unknown (`read_row`).
+  ignored. List lengths are tracked up to 15. An object a path has no facts of reads as unknown
+  (`read_row`).
 
 ## Working conventions (the owner's standing instructions)
 
