@@ -131,8 +131,19 @@ impl Havoc {
                     let c = *c;
                     self.code.push(c);
                     code.push(c);
+                    // (an instance of a NamedTuple class is a tuple: no instance dict, its
+                    // fields read-only; what they hold is walked)
+                    if heap.class_info_opt(c).is_some_and(|ci| ci.lib.named_tuple) {
+                        havoc_object(heap, state, o, Kind::Tuple, site, any_id, &any, &mut work);
+                        continue;
+                    }
                 }
                 (Kind::Module | Kind::External | Kind::Method, _) => continue,
+                // (a compiled pattern, a match, a path: no attributes to set)
+                (Kind::Namespace, Payload::Method(q, _)) if matches!(q.as_str(), "stdobj.repattern" | "stdobj.rematch" | "stdobj.path") => {
+                    havoc_object(heap, state, o, Kind::Tuple, site, any_id, &any, &mut work);
+                    continue;
+                }
                 _ => {}
             }
             havoc_object(heap, state, o, k, site, any_id, &any, &mut work);
