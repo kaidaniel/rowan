@@ -77,7 +77,7 @@ impl Analyzer {
         let params: Vec<StrId> = fi.node.params().map(|p| p.iter().map(|x| s(x.name().id.as_str())).collect()).unwrap_or_default();
         let flow = super::flows::Flow::new(&locals, me, mi.pkg.clone());
         let out = match fi.node {
-            super::FuncNode::Def(f) => flow.scan(&params, first.map(s), &f.body, None),
+            super::FuncNode::Def(f) => flow.scan(&params, me.map(s), &f.body, None),
             super::FuncNode::Lambda(l) => flow.scan(&params, None, &[], Some(&l.body)),
         };
         let u = std::rc::Rc::new(out);
