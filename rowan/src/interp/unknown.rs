@@ -275,9 +275,16 @@ impl Analyzer {
             if matches!(self.heap.kind(*o), Kind::Unknown) {
                 continue;
             }
+            // (an object named by where it was made, `dict@L4`; one named by how it was made
+            // from others — a copy of an unknown call's result — is not shown)
             let g = self.heap.obj(*o).label.to_string();
+            let g = if g.contains(char::is_whitespace) { "…".to_string() } else { g };
             if !given.contains(&g) {
                 given.push(g);
+            }
+            // (a few: a call given a whole structure names its first objects only)
+            if given.len() >= 4 {
+                break;
             }
         }
         if !text.is_empty() {
