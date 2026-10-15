@@ -11,6 +11,14 @@ use crate::state::{Kind, State};
 
 use super::{Analyzer, Payload};
 
+/// A part of an f-string: literal text, a hole of known value, or a hole whose text is not
+/// known.
+enum Part {
+    Lit(String),
+    Hole(Value),
+    Opaque,
+}
+
 impl Analyzer {
     /// `a op b` (`binop`).
     pub(super) fn expr_binop(&mut self, b: &'static ast::ExprBinOp, node: &'static ast::Expr, state: &mut State) -> Value {
@@ -388,12 +396,6 @@ impl Analyzer {
     }
 
     pub(super) fn expr_fstring(&mut self, f: &'static ast::ExprFString, node: &'static ast::Expr, state: &mut State) -> Value {
-        // parts: Some(Ok(str)) literal, Some(Err(value)) hole, None opaque hole
-        enum Part {
-            Lit(String),
-            Hole(Value),
-            Opaque,
-        }
         let mut parts: Vec<Part> = Vec::new();
         for p in f.value.iter() {
             match p {
@@ -403,78 +405,92 @@ impl Analyzer {
                         match el {
                             ast::InterpolatedStringElement::Literal(l) => parts.push(Part::Lit(l.value.to_string())),
                             ast::InterpolatedStringElement::Interpolation(i) => {
-                                let v = self.eval(&i.expression, state);
-                                // the spec's text (`{n:03d}`, `{x:>{w}}`); None: a part of it is not known
-                                let spec_text: Option<Option<String>> = i.format_spec.as_ref().map(|spec| {
-                                    let mut text = String::new();
-                                    let mut literal = true;
-                                    for se in spec.elements.iter() {
-                                        match se {
-                                            ast::InterpolatedStringElement::Literal(l) => text.push_str(&l.value),
-                                            ast::InterpolatedStringElement::Interpolation(si) => {
-                                                let sv = self.eval(&si.expression, state);
-                                                match sv.kv.as_lit().filter(|_| sv.pts.is_empty() && si.conversion == ast::ConversionFlag::None && si.format_spec.is_none()) {
-                                                    Some(k) => text.push_str(&intern::key_py_str(k)),
-                                                    None => literal = false,
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Some(text).filter(|_| literal)
-                                });
-                                // an object of the program's classes: its `__format__` / `__str__` /
-                                // `__repr__` makes the text
-                                let nd = frontend::node(node);
-                                let ran = match i.conversion {
-                                    ast::ConversionFlag::None => {
-                                        let spec_v = match &spec_text {
-                                            None => Value::lit_str(""),
-                                            Some(Some(t)) => Value::lit_str(t),
-                                            Some(None) => Value::data("spec"),
-                                        };
-                                        crate::models::format_dunder(self, &v, spec_v, &nd, state)
-                                    }
-                                    ast::ConversionFlag::Str => self.run_dunder(&v, &["__str__", "__repr__"], vec![], &nd, state),
-                                    _ => self.run_dunder(&v, &["__repr__"], vec![], &nd, state),
-                                };
-                                if let Some((t, rest)) = ran {
-                                    let whole = rest.pts.is_empty() && rest.kv.is_bot() && (i.conversion == ast::ConversionFlag::None || spec_text.is_none());
-                                    parts.push(if whole { Part::Hole(t) } else { Part::Opaque });
-                                    continue;
-                                }
-                                // `{x!r}` / `{x!s}` / `{x!a}`: the converted text
-                                let v = match i.conversion {
-                                    ast::ConversionFlag::None => crate::models::enums::enum_text(self, &v, state).unwrap_or(v),
-                                    conv => {
-                                        let name = match conv {
-                                            ast::ConversionFlag::Repr => "repr",
-                                            ast::ConversionFlag::Ascii => "ascii",
-                                            _ => "str",
-                                        };
-                                        let v = if name == "str" { crate::models::enums::enum_text(self, &v, state).unwrap_or(v) } else { v };
-                                        match v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(|k| crate::models::pyvalues::builtin(name, &[k], &[])) {
-                                            Some(t) => Value::lit(t),
-                                            None => {
-                                                Value::data("conv")
-                                            }
-                                        }
-                                    }
-                                };
-                                match spec_text {
-                                    // a spec applied to a known value
-                                    Some(Some(t)) => match v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(|k| format_spec_literal(k, &t)) {
-                                        Some(s) => parts.push(Part::Lit(s)),
-                                        None => parts.push(Part::Opaque),
-                                    },
-                                    Some(None) => parts.push(Part::Opaque),
-                                    None => parts.push(Part::Hole(v)),
-                                }
+                                let part = self.fstring_hole(i, node, state);
+                                parts.push(part);
                             }
                         }
                     }
                 }
             }
         }
+        self.fstring_value(parts, node, state)
+    }
+
+    /// One `{expr!conv:spec}` of an f-string: its text when known, else what is known of it.
+    fn fstring_hole(&mut self, i: &'static ast::InterpolatedElement, node: &'static ast::Expr, state: &mut State) -> Part {
+        let v = self.eval(&i.expression, state);
+        // the spec's text (`{n:03d}`, `{x:>{w}}`); None: a part of it is not known
+        let spec_text: Option<Option<String>> = i.format_spec.as_ref().map(|spec| self.format_spec_text(spec, state));
+        // an object of the program's classes: its `__format__` / `__str__` /
+        // `__repr__` makes the text
+        let nd = frontend::node(node);
+        let ran = match i.conversion {
+            ast::ConversionFlag::None => {
+                let spec_v = match &spec_text {
+                    None => Value::lit_str(""),
+                    Some(Some(t)) => Value::lit_str(t),
+                    Some(None) => Value::data("spec"),
+                };
+                crate::models::format_dunder(self, &v, spec_v, &nd, state)
+            }
+            ast::ConversionFlag::Str => self.run_dunder(&v, &["__str__", "__repr__"], vec![], &nd, state),
+            _ => self.run_dunder(&v, &["__repr__"], vec![], &nd, state),
+        };
+        if let Some((t, rest)) = ran {
+            let whole = rest.pts.is_empty() && rest.kv.is_bot() && (i.conversion == ast::ConversionFlag::None || spec_text.is_none());
+            return if whole { Part::Hole(t) } else { Part::Opaque };
+        }
+        // `{x!r}` / `{x!s}` / `{x!a}`: the converted text
+        let v = match i.conversion {
+            ast::ConversionFlag::None => crate::models::enums::enum_text(self, &v, state).unwrap_or(v),
+            conv => {
+                let name = match conv {
+                    ast::ConversionFlag::Repr => "repr",
+                    ast::ConversionFlag::Ascii => "ascii",
+                    _ => "str",
+                };
+                let v = if name == "str" { crate::models::enums::enum_text(self, &v, state).unwrap_or(v) } else { v };
+                match v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(|k| crate::models::pyvalues::builtin(name, &[k], &[])) {
+                    Some(t) => Value::lit(t),
+                    None => {
+                        Value::data("conv")
+                    }
+                }
+            }
+        };
+        match spec_text {
+            // a spec applied to a known value
+            Some(Some(t)) => match v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(|k| format_spec_literal(k, &t)) {
+                Some(s) => Part::Lit(s),
+                None => Part::Opaque,
+            },
+            Some(None) => Part::Opaque,
+            None => Part::Hole(v),
+        }
+    }
+
+    /// The text of a format spec (`{n:03d}`, `{x:>{w}}`); None: a part of it is not known.
+    fn format_spec_text(&mut self, spec: &'static ast::InterpolatedStringFormatSpec, state: &mut State) -> Option<String> {
+        let mut text = String::new();
+        let mut literal = true;
+        for se in spec.elements.iter() {
+            match se {
+                ast::InterpolatedStringElement::Literal(l) => text.push_str(&l.value),
+                ast::InterpolatedStringElement::Interpolation(si) => {
+                    let sv = self.eval(&si.expression, state);
+                    match sv.kv.as_lit().filter(|_| sv.pts.is_empty() && si.conversion == ast::ConversionFlag::None && si.format_spec.is_none()) {
+                        Some(k) => text.push_str(&intern::key_py_str(k)),
+                        None => literal = false,
+                    }
+                }
+            }
+        }
+        Some(text).filter(|_| literal)
+    }
+
+    /// An f-string's value from its parts: the text when all are known; one hole between
+    /// known texts keeps them as affixes; else unknown.
+    fn fstring_value(&mut self, parts: Vec<Part>, node: &'static ast::Expr, state: &mut State) -> Value {
         let holes: Vec<usize> = parts.iter().enumerate().filter(|(_, p)| !matches!(p, Part::Lit(_))).map(|(i, _)| i).collect();
         if holes.is_empty() {
             let s: String = parts.iter().map(|p| if let Part::Lit(l) = p { l.as_str() } else { "" }).collect();
