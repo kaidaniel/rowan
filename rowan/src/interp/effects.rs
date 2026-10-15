@@ -2,7 +2,6 @@
 //! (past its function's budget, or cut at the deadline): the module globals and closure cells
 //! its code (and the code it can reach) names in a position where they may change or escape.
 
-use ruff_python_ast::visitor::{walk_expr, walk_stmt, Visitor};
 use ruff_python_ast::{Expr, Stmt};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -13,7 +12,7 @@ use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, str_get, KeyId, StrId};
 use crate::state::{Kind, State};
 
-use super::flows::{CodeUses, Flags};
+use super::flows::{CodeUses, Flags, Like};
 use super::{Analyzer, FuncInfo, Payload};
 
 /// What the cache of code closures (`code_closure`) may hold; past it the cache starts over.
@@ -31,242 +30,6 @@ pub struct EffectsCache {
     closures: FxHashMap<Vec<ObjId>, std::rc::Rc<Closure>>,
     /// what `closures` holds (roots, code, slots, values), bounded by `CLOSURE_CACHE`
     closures_size: usize,
-}
-
-/// How a method's own code uses its receiver: the attribute names it reads, stores, deletes and
-/// calls on it, the methods it calls through `super()`, or that the receiver escapes (passed
-/// on, aliased, compared, used by a computed name, captured by a nested function).
-#[derive(Default)]
-pub struct RecvUse {
-    escapes: bool,
-    loads: FxHashSet<StrId>,
-    stores: FxHashSet<StrId>,
-    deletes: FxHashSet<StrId>,
-    calls: FxHashSet<StrId>,
-    supers: FxHashSet<StrId>,
-    /// attribute names built from a template (`f"{name}_dynamic"`, as (start, end)) it reads,
-    /// stores and deletes by `getattr` / `hasattr`, `setattr` and `delattr`
-    loads_like: Vec<Like>,
-    stores_like: Vec<Like>,
-    deletes_like: Vec<Like>,
-}
-
-/// A name made by a template: its literal parts and its holes (a hole that is a name: the
-/// name). Not knowing what the holes hold, it is any name that starts and ends as it does.
-#[derive(Clone, PartialEq)]
-pub struct Like(Vec<Result<String, Option<String>>>);
-
-impl Like {
-    pub fn matches(&self, k: KeyId) -> bool {
-        let start: String = self.0.iter().map_while(|p| p.as_ref().ok()).cloned().collect();
-        let end: String = self.0.iter().rev().map_while(|p| p.as_ref().ok()).cloned().collect::<Vec<String>>().into_iter().rev().collect();
-        intern::key_as_str(k).is_some_and(|n| n.len() >= start.len() + end.len() && n.starts_with(&start) && n.ends_with(&end))
-    }
-
-    /// The one name it makes when each hole is a name `bind` knows the text of.
-    pub fn resolve(&self, bind: &dyn Fn(&str) -> Option<String>) -> Option<String> {
-        self.0.iter().map(|p| match p {
-            Ok(l) => Some(l.clone()),
-            Err(n) => bind(n.as_deref()?),
-        }).collect()
-    }
-}
-
-/// The scan behind `RecvUse` (`me`: the receiver's parameter name; `named`: locals bound to a
-/// template, None when bound to anything else too).
-struct RecvScan<'a> {
-    me: &'a str,
-    out: RecvUse,
-    named: FxHashMap<String, Option<Like>>,
-}
-
-/// The template an f-string with holes is (`f"{a}_dynamic"`: "", "_dynamic").
-fn template(e: &Expr) -> Option<Like> {
-    let Expr::FString(f) = e else { return None };
-    let mut parts: Vec<Result<String, Option<String>>> = Vec::new();
-    for p in f.value.iter() {
-        match p {
-            ruff_python_ast::FStringPart::Literal(sl) => parts.push(Ok(sl.value.to_string())),
-            ruff_python_ast::FStringPart::FString(fs) => {
-                for el in fs.elements.iter() {
-                    match el {
-                        ruff_python_ast::InterpolatedStringElement::Literal(l) => parts.push(Ok(l.value.to_string())),
-                        // (`{name}` without conversion or format: the name's text)
-                        ruff_python_ast::InterpolatedStringElement::Interpolation(i) => parts.push(Err(match (&*i.expression, i.conversion, &i.format_spec) {
-                            (Expr::Name(n), ruff_python_ast::ConversionFlag::None, None) => Some(n.id.to_string()),
-                            _ => None,
-                        })),
-                    }
-                }
-            }
-        }
-    }
-    parts.iter().any(|p| p.is_err()).then_some(Like(parts))
-}
-
-fn mentions(me: &str, st: Option<&Stmt>, e: Option<&Expr>) -> bool {
-    struct M<'a>(&'a str, bool);
-    impl<'b> Visitor<'b> for M<'_> {
-        fn visit_expr(&mut self, e: &'b Expr) {
-            match e {
-                Expr::Name(n) if n.id.as_str() == self.0 => self.1 = true,
-                _ => walk_expr(self, e),
-            }
-        }
-    }
-    let mut m = M(me, false);
-    if let Some(s) = st {
-        m.visit_stmt(s);
-    }
-    if let Some(e) = e {
-        m.visit_expr(e);
-    }
-    m.1
-}
-
-impl RecvScan<'_> {
-    /// `self.<name>` of an expression, if it is one.
-    fn attr_of_me<'e>(&self, e: &'e Expr) -> Option<&'e str> {
-        match e {
-            Expr::Attribute(a) if matches!(&*a.value, Expr::Name(n) if n.id.as_str() == self.me) => Some(a.attr.as_str()),
-            _ => None,
-        }
-    }
-
-    fn target(&mut self, t: &Expr) {
-        match t {
-            _ if self.attr_of_me(t).is_some() => drop(self.out.stores.insert(s(self.attr_of_me(t).unwrap()))),
-            Expr::Tuple(x) => x.elts.iter().for_each(|y| self.target(y)),
-            Expr::List(x) => x.elts.iter().for_each(|y| self.target(y)),
-            Expr::Starred(x) => self.target(&x.value),
-            Expr::Name(n) if n.id.as_str() == self.me => self.out.escapes = true,
-            // (a name bound again: no longer one template)
-            Expr::Name(n) => drop(self.named.insert(n.id.to_string(), None)),
-            _ => self.visit_expr(t),
-        }
-    }
-
-    /// A builtin applied to the receiver that reads (or by a literal or template name stores /
-    /// deletes) one of its attributes and keeps nothing.
-    fn builtin_on_me(&mut self, f: &str, args: &[Expr]) -> bool {
-        let lit = match args.get(1) {
-            Some(Expr::StringLiteral(l)) => Some(l.value.to_str().to_string()),
-            _ => None,
-        };
-        let like = match args.get(1) {
-            Some(Expr::Name(n)) => self.named.get(n.id.as_str()).cloned().flatten(),
-            Some(e) => template(e),
-            None => None,
-        };
-        match (f, lit, like) {
-            ("isinstance" | "issubclass" | "id" | "callable", _, _) => {}
-            // (`type(self)` is `self.__class__`)
-            ("type", _, _) => drop(self.out.loads.insert(s("__class__"))),
-            ("getattr" | "hasattr", Some(n), _) => drop(self.out.loads.insert(s(&n))),
-            ("setattr", Some(n), _) => drop(self.out.stores.insert(s(&n))),
-            ("delattr", Some(n), _) => drop(self.out.deletes.insert(s(&n))),
-            ("getattr" | "hasattr", _, Some(l)) => self.out.loads_like.push(l),
-            ("setattr", _, Some(l)) => self.out.stores_like.push(l),
-            ("delattr", _, Some(l)) => self.out.deletes_like.push(l),
-            _ => return false,
-        }
-        args.iter().skip(1).for_each(|a| self.visit_expr(a));
-        true
-    }
-}
-
-impl<'a> Visitor<'a> for RecvScan<'_> {
-    fn visit_stmt(&mut self, st: &'a Stmt) {
-        match st {
-            // (`return self`: the caller gets it back; no other code gets to change it)
-            Stmt::Return(r) if matches!(r.value.as_deref(), Some(Expr::Name(n)) if n.id.as_str() == self.me) => {}
-            Stmt::FunctionDef(_) | Stmt::ClassDef(_) => self.out.escapes |= mentions(self.me, Some(st), None),
-            Stmt::Assign(a) => {
-                for t in &a.targets {
-                    let v = matches!(t, Expr::Name(n) if !self.named.contains_key(n.id.as_str())).then(|| template(&a.value)).flatten();
-                    self.target(t);
-                    if let Expr::Name(n) = t {
-                        self.named.insert(n.id.to_string(), v);
-                    }
-                }
-                self.visit_expr(&a.value);
-            }
-            Stmt::AugAssign(a) => {
-                if let Some(n) = self.attr_of_me(&a.target) {
-                    self.out.loads.insert(s(n));
-                }
-                self.target(&a.target);
-                self.visit_expr(&a.value);
-            }
-            Stmt::AnnAssign(a) => {
-                if let Some(v) = &a.value {
-                    self.target(&a.target);
-                    self.visit_expr(v);
-                }
-            }
-            Stmt::Delete(d) => {
-                for t in &d.targets {
-                    match self.attr_of_me(t) {
-                        Some(n) => drop(self.out.deletes.insert(s(n))),
-                        None => self.visit_expr(t),
-                    }
-                }
-            }
-            Stmt::For(f) => {
-                self.target(&f.target);
-                self.visit_expr(&f.iter);
-                self.visit_body(&f.body);
-                self.visit_body(&f.orelse);
-            }
-            Stmt::With(w) => {
-                for it in &w.items {
-                    self.visit_expr(&it.context_expr);
-                    if let Some(v) = &it.optional_vars {
-                        self.target(v);
-                    }
-                }
-                self.visit_body(&w.body);
-            }
-            _ => walk_stmt(self, st),
-        }
-    }
-
-    fn visit_expr(&mut self, e: &'a Expr) {
-        match e {
-            Expr::Name(n) if n.id.as_str() == self.me => self.out.escapes = true,
-            Expr::Lambda(_) => self.out.escapes |= mentions(self.me, None, Some(e)),
-            _ if self.attr_of_me(e).is_some() => {
-                let n = self.attr_of_me(e).unwrap();
-                self.out.escapes |= n == "__dict__";
-                self.out.loads.insert(s(n));
-            }
-            Expr::Call(c) => {
-                let args = || c.arguments.args.iter().chain(c.arguments.keywords.iter().map(|k| &k.value));
-                if let Some(m) = self.attr_of_me(&c.func) {
-                    self.out.calls.insert(s(m));
-                    args().for_each(|a| self.visit_expr(a));
-                    return;
-                }
-                if let Expr::Attribute(a) = &*c.func {
-                    if let Expr::Call(sc) = &*a.value {
-                        let bare = sc.arguments.args.is_empty() || matches!(sc.arguments.args.get(1), Some(Expr::Name(n)) if n.id.as_str() == self.me);
-                        if matches!(&*sc.func, Expr::Name(f) if f.id.as_str() == "super") && bare {
-                            self.out.supers.insert(s(a.attr.as_str()));
-                            args().for_each(|x| self.visit_expr(x));
-                            return;
-                        }
-                    }
-                }
-                if let (Expr::Name(f), Some(Expr::Name(first))) = (&*c.func, c.arguments.args.first()) {
-                    if first.id.as_str() == self.me && c.arguments.keywords.is_empty() && self.builtin_on_me(f.id.as_str(), &c.arguments.args) {
-                        return;
-                    }
-                }
-                walk_expr(self, e)
-            }
-            _ => walk_expr(self, e),
-        }
-    }
 }
 
 /// What a skipped method may do to its receiver (`receiver_effects`): the attribute names it
@@ -313,15 +76,10 @@ impl Analyzer {
         let me = first.filter(|_| fi.cls.is_some() && !fi.is_static.get() && !fi.is_classmethod.get());
         let params: Vec<StrId> = fi.node.params().map(|p| p.iter().map(|x| s(x.name().id.as_str())).collect()).unwrap_or_default();
         let flow = super::flows::Flow::new(&locals, me, mi.pkg.clone());
-        let mut out = match fi.node {
-            super::FuncNode::Def(f) => flow.scan(&params, &f.body, None),
-            super::FuncNode::Lambda(l) => flow.scan(&params, &[], Some(&l.body)),
+        let out = match fi.node {
+            super::FuncNode::Def(f) => flow.scan(&params, first.map(s), &f.body, None),
+            super::FuncNode::Lambda(l) => flow.scan(&params, None, &[], Some(&l.body)),
         };
-        if let (super::FuncNode::Def(f), Some(me)) = (fi.node, first) {
-            let mut r = RecvScan { me, out: RecvUse::default(), named: FxHashMap::default() };
-            r.visit_body(&f.body);
-            out.recv = Some(r.out);
-        }
         let u = std::rc::Rc::new(out);
         self.effects.code_uses.insert(addr, u.clone());
         u

@@ -108,7 +108,71 @@ pub struct CodeUses {
     /// read, or for a dunder)
     pub reads: FxHashSet<StrId>,
     /// how it uses its first parameter (a method's receiver), None when it has none
-    pub recv: Option<super::effects::RecvUse>,
+    pub recv: Option<RecvUse>,
+}
+
+/// How a method's own code uses its receiver (its first parameter, and the locals bound to it):
+/// the attribute names it reads, stores, deletes and calls on it, the methods it calls through
+/// `super()`, or that the receiver escapes (passed on, compared, used by a computed name or a
+/// dunder, captured by a nested function).
+#[derive(Default)]
+pub struct RecvUse {
+    pub(in crate::interp) escapes: bool,
+    pub(in crate::interp) loads: FxHashSet<StrId>,
+    pub(in crate::interp) stores: FxHashSet<StrId>,
+    pub(in crate::interp) deletes: FxHashSet<StrId>,
+    pub(in crate::interp) calls: FxHashSet<StrId>,
+    pub(in crate::interp) supers: FxHashSet<StrId>,
+    /// attribute names built from a template (`f"{name}_dynamic"`) it reads, stores and
+    /// deletes by `getattr` / `hasattr`, `setattr` and `delattr`
+    pub(in crate::interp) loads_like: Vec<Like>,
+    pub(in crate::interp) stores_like: Vec<Like>,
+    pub(in crate::interp) deletes_like: Vec<Like>,
+}
+
+/// A name made by a template: its literal parts and its holes (a hole that is a name: the
+/// name). Not knowing what the holes hold, it is any name that starts and ends as it does.
+#[derive(Clone, PartialEq)]
+pub struct Like(Vec<Result<String, Option<String>>>);
+
+impl Like {
+    pub fn matches(&self, k: crate::intern::KeyId) -> bool {
+        let start: String = self.0.iter().map_while(|p| p.as_ref().ok()).cloned().collect();
+        let end: String = self.0.iter().rev().map_while(|p| p.as_ref().ok()).cloned().collect::<Vec<String>>().into_iter().rev().collect();
+        crate::intern::key_as_str(k).is_some_and(|n| n.len() >= start.len() + end.len() && n.starts_with(&start) && n.ends_with(&end))
+    }
+
+    /// The one name it makes when each hole is a name `bind` knows the text of.
+    pub fn resolve(&self, bind: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+        self.0.iter().map(|p| match p {
+            Ok(l) => Some(l.clone()),
+            Err(n) => bind(n.as_deref()?),
+        }).collect()
+    }
+}
+
+/// The template an f-string with holes is (`f"{a}_dynamic"`: "", "_dynamic").
+fn template(e: &Expr) -> Option<Like> {
+    let Expr::FString(f) = e else { return None };
+    let mut parts: Vec<Result<String, Option<String>>> = Vec::new();
+    for p in f.value.iter() {
+        match p {
+            ast::FStringPart::Literal(sl) => parts.push(Ok(sl.value.to_string())),
+            ast::FStringPart::FString(fs) => {
+                for el in fs.elements.iter() {
+                    match el {
+                        ast::InterpolatedStringElement::Literal(l) => parts.push(Ok(l.value.to_string())),
+                        // (`{name}` without conversion or format: the name's text)
+                        ast::InterpolatedStringElement::Interpolation(i) => parts.push(Err(match (&*i.expression, i.conversion, &i.format_spec) {
+                            (Expr::Name(n), ast::ConversionFlag::None, None) => Some(n.id.to_string()),
+                            _ => None,
+                        })),
+                    }
+                }
+            }
+        }
+    }
+    parts.iter().any(|p| p.is_err()).then_some(Like(parts))
 }
 
 /// Methods that change nothing and keep nothing of what they are given, and builtins likewise
@@ -131,17 +195,24 @@ pub struct Flow<'a> {
     flags: FxHashMap<Origin, Flags>,
     /// names read that the function does not bind, in order
     names: Vec<(StrId, Option<StrId>)>,
+    /// the first parameter (a method's receiver), what the code does with it, the locals bound
+    /// once to a template, and how deep in nested functions the scan is
+    first: Option<StrId>,
+    recv: RecvUse,
+    named: FxHashMap<StrId, Option<Like>>,
+    depth: u32,
     pub out: CodeUses,
 }
 
 impl<'a> Flow<'a> {
     pub fn new(locals: &'a dyn Fn(&str) -> bool, me: Option<&'a str>, pkg: String) -> Self {
-        Flow { locals, me, pkg, alias: FxHashMap::default(), flags: FxHashMap::default(), names: Vec::new(), out: CodeUses::default() }
+        Flow { locals, me, pkg, alias: FxHashMap::default(), flags: FxHashMap::default(), names: Vec::new(), first: None, recv: RecvUse::default(), named: FxHashMap::default(), depth: 0, out: CodeUses::default() }
     }
 
     /// Scan a function: its parameters, then its body (imports first: a use before the import
     /// statement binds the same name).
-    pub fn scan(mut self, params: &[StrId], body: &'static [Stmt], lambda: Option<&'static Expr>) -> CodeUses {
+    pub fn scan(mut self, params: &[StrId], first: Option<StrId>, body: &'static [Stmt], lambda: Option<&'static Expr>) -> CodeUses {
+        self.first = first;
         for st in super::access::walk_stmts(body) {
             match st {
                 Stmt::Import(i) => {
@@ -175,6 +246,11 @@ impl<'a> Flow<'a> {
         let mut binds: Vec<(StrId, &'static Expr, bool)> = Vec::new();
         for st in body {
             self.binds_stmt(st, &mut binds);
+        }
+        // (a local bound once, to a template: that template)
+        for (n, e, held) in &binds {
+            let like = (!*held && !self.named.contains_key(n)).then(|| template(e)).flatten();
+            self.named.insert(*n, like);
         }
         if let Some(e) = lambda {
             self.binds_expr(e, &mut binds);
@@ -231,6 +307,9 @@ impl<'a> Flow<'a> {
                 Origin::Attr(a) => self.out.attrs.entry(*a).or_default().join(f),
                 _ => {}
             }
+        }
+        if self.first.is_some() {
+            self.out.recv = Some(std::mem::take(&mut self.recv));
         }
         self.out
     }
@@ -403,6 +482,26 @@ impl<'a> Flow<'a> {
         self.names.push((n, attr));
     }
 
+    /// Whether `e` is a name that may hold the receiver (the first parameter, or a local bound
+    /// to it); one inside a nested function or lambda lets it escape.
+    fn recv_base(&mut self, e: &Expr) -> bool {
+        let (Expr::Name(n), Some(first)) = (e, self.first) else { return false };
+        let is = self.local(n.id.as_str()) && self.alias.get(&s(n.id.as_str())).is_some_and(|v| v.contains(&(Origin::Param(first), Level::Own)));
+        self.recv.escapes |= is && self.depth > 0;
+        is
+    }
+
+    /// A name for an attribute in a `getattr` / `setattr` / `delattr` call: a literal, or a
+    /// template (in place, or a local bound once to one).
+    fn attr_name(&self, e: Option<&Expr>) -> (Option<StrId>, Option<Like>) {
+        match e {
+            Some(Expr::StringLiteral(l)) => (Some(s(l.value.to_str())), None),
+            Some(Expr::Name(n)) => (None, self.named.get(&s(n.id.as_str())).cloned().flatten()),
+            Some(e) => (None, template(e)),
+            None => (None, None),
+        }
+    }
+
     // ------------------------------------------------------------- uses
     fn expr(&mut self, e: &'static Expr, pos: Pos) {
         if !matches!(pos, Pos::Read | Pos::Bind) {
@@ -417,11 +516,19 @@ impl<'a> Flow<'a> {
                 if !self.local(n.id.as_str()) {
                     self.name(s(n.id.as_str()), None);
                 }
+                // (the receiver itself, not bound to a local: it escapes)
+                if pos != Pos::Bind && self.recv_base(e) {
+                    self.recv.escapes = true;
+                }
             }
             Expr::Attribute(a) => {
                 self.out.reads.insert(s(a.attr.as_str()));
                 match &*a.value {
                     Expr::Name(n) if !self.local(n.id.as_str()) => self.name(s(n.id.as_str()), Some(s(a.attr.as_str()))),
+                    v if self.recv_base(v) => {
+                        self.recv.loads.insert(s(a.attr.as_str()));
+                        self.recv.escapes |= a.attr.as_str() == "__dict__";
+                    }
                     v => self.expr(v, Pos::Read),
                 }
             }
@@ -481,7 +588,9 @@ impl<'a> Flow<'a> {
                         self.expr(d, Pos::Change);
                     }
                 }
+                self.depth += 1;
                 self.expr(&l.body, Pos::Change);
+                self.depth -= 1;
             }
             _ => {
                 struct Sub<'s, 'b>(&'s mut Flow<'b>);
@@ -519,6 +628,12 @@ impl<'a> Flow<'a> {
                             self.mark(&[(Origin::NameAttr(s(n.id.as_str()), s(m)), Level::Own)], Pos::Call);
                         }
                     }
+                    v if self.recv_base(v) => drop(self.recv.calls.insert(s(m))),
+                    // (`super().m(…)`, `super(C, self).m(…)`: a method of a base on the receiver)
+                    Expr::Call(sc) if matches!(&*sc.func, Expr::Name(f) if f.id.as_str() == "super") && (sc.arguments.args.is_empty() || sc.arguments.args.get(1).is_some_and(|x| self.recv_base(x))) => {
+                        self.recv.supers.insert(s(m));
+                        sc.arguments.args.iter().take(1).for_each(|x| self.expr(x, Pos::Read));
+                    }
                     v => {
                         let recv = self.srcs(v);
                         self.mark(&recv, if pure { Pos::Read } else { Pos::Change });
@@ -531,6 +646,14 @@ impl<'a> Flow<'a> {
                 let f = f.id.as_str();
                 self.name(s(f), None);
                 self.mark(&[(Origin::Name(s(f)), Level::Own)], Pos::Call);
+                // (a builtin that only tells what the receiver is)
+                if matches!(f, "isinstance" | "issubclass" | "id" | "callable" | "type") && c.arguments.keywords.is_empty() && c.arguments.args.first().is_some_and(|x| self.recv_base(x)) {
+                    if f == "type" {
+                        self.recv.loads.insert(s("__class__"));
+                    }
+                    c.arguments.args.iter().skip(1).for_each(|x| self.expr(x, Pos::Read));
+                    return;
+                }
                 match f {
                     "setattr" | "delattr" | "getattr" | "hasattr" => self.attr_builtin(f, c),
                     // (`locals()` / `vars()`: every local's value)
@@ -559,12 +682,22 @@ impl<'a> Flow<'a> {
     /// computed name: not followed).
     fn attr_builtin(&mut self, f: &str, c: &'static ast::ExprCall) {
         let args = &c.arguments.args;
-        let lit = match args.get(1) {
-            Some(Expr::StringLiteral(l)) => Some(s(l.value.to_str())),
-            _ => None,
-        };
+        let (lit, like) = self.attr_name(args.get(1));
         if let Some(n) = lit {
             self.out.reads.insert(n);
+        }
+        // (on the receiver: that name, or any name the template makes; else it escapes)
+        if args.first().is_some_and(|x| self.recv_base(x)) {
+            let r = &mut self.recv;
+            match (f, lit, like) {
+                ("getattr" | "hasattr", Some(n), _) => drop(r.loads.insert(n)),
+                ("setattr", Some(n), _) => drop(r.stores.insert(n)),
+                ("delattr", Some(n), _) => drop(r.deletes.insert(n)),
+                ("getattr" | "hasattr", _, Some(l)) => r.loads_like.push(l),
+                ("setattr", _, Some(l)) => r.stores_like.push(l),
+                ("delattr", _, Some(l)) => r.deletes_like.push(l),
+                _ => r.escapes = true,
+            }
         }
         match f {
             "setattr" | "delattr" => {
@@ -575,11 +708,19 @@ impl<'a> Flow<'a> {
                         if f == "setattr" { &mut self.out.stored } else { &mut self.out.deleted }.insert(n);
                         self.class_store(x, n);
                     }
-                    self.expr(x, Pos::Read);
+                    if !self.recv_base(x) {
+                        self.expr(x, Pos::Read);
+                    }
                 }
                 args.iter().skip(1).for_each(|x| self.expr(x, Pos::Change));
             }
-            _ => args.iter().for_each(|x| self.expr(x, Pos::Read)),
+            _ => {
+                for (i, x) in args.iter().enumerate() {
+                    if i > 0 || !self.recv_base(x) {
+                        self.expr(x, Pos::Read);
+                    }
+                }
+            }
         }
         c.arguments.keywords.iter().for_each(|k| self.expr(&k.value, Pos::Change));
     }
@@ -626,6 +767,7 @@ impl<'a> Flow<'a> {
                     self.name(s(n.id.as_str()), None);
                     self.flags.entry(Origin::Name(s(n.id.as_str()))).or_default().rebinds = true;
                 }
+                self.recv.escapes |= self.first == Some(s(n.id.as_str()));
             }
             Expr::Attribute(a) => {
                 let n = s(a.attr.as_str());
@@ -639,6 +781,7 @@ impl<'a> Flow<'a> {
                         self.name(s(m.id.as_str()), Some(n));
                         self.flags.entry(Origin::NameAttr(s(m.id.as_str()), n)).or_default().rebinds = true;
                     }
+                    v if self.recv_base(v) => drop(if deleting { &mut self.recv.deletes } else { &mut self.recv.stores }.insert(n)),
                     v => {
                         let base = self.srcs(v);
                         self.mark(&base, Pos::Change);
@@ -727,8 +870,15 @@ impl<'a> Flow<'a> {
                 self.body(&w.body);
             }
             Stmt::Return(r) => {
-                if let Some(v) = &r.value {
-                    self.expr(v, Pos::Change);
+                // (`return self`: the caller gets the receiver back, no other code changes it)
+                match &r.value {
+                    Some(v) if self.depth == 0 && self.recv_base(v) => {
+                        let first = self.first.map(|f| (Origin::Param(f), Level::Own));
+                        let others: Vec<Src> = self.srcs(v).into_iter().filter(|x| Some(*x) != first).collect();
+                        self.mark(&others, Pos::Change);
+                    }
+                    Some(v) => self.expr(v, Pos::Change),
+                    None => {}
                 }
             }
             Stmt::Raise(r) => {
@@ -753,7 +903,9 @@ impl<'a> Flow<'a> {
                 for d in f.parameters.iter_non_variadic_params().filter_map(|p| p.default.as_deref()) {
                     self.expr(d, Pos::Change);
                 }
+                self.depth += 1;
                 self.body(&f.body);
+                self.depth -= 1;
             }
             Stmt::ClassDef(c) => {
                 c.decorator_list.iter().for_each(|d| self.expr(&d.expression, Pos::Change));
@@ -761,7 +913,9 @@ impl<'a> Flow<'a> {
                     a.args.iter().for_each(|x| self.expr(x, Pos::Change));
                     a.keywords.iter().for_each(|k| self.expr(&k.value, Pos::Change));
                 }
+                self.depth += 1;
                 self.body(&c.body);
+                self.depth -= 1;
             }
             // (what a pattern binds is part of the subject)
             Stmt::Match(m) => {
