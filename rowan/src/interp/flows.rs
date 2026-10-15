@@ -243,17 +243,14 @@ impl<'a> Flow<'a> {
             self.alias.insert(*p, vec![(Origin::Param(*p), Level::Own)]);
         }
         // what each local is bound to, to a fixpoint (a binding may name other locals)
-        let mut binds: Vec<(StrId, &'static Expr, bool)> = Vec::new();
-        for st in body {
-            self.binds_stmt(st, &mut binds);
-        }
+        let mut b = Binds(&self, Vec::new());
+        body.iter().for_each(|st| ast::visitor::Visitor::visit_stmt(&mut b, st));
+        lambda.iter().for_each(|e| ast::visitor::Visitor::visit_expr(&mut b, e));
+        let binds = b.1;
         // (a local bound once, to a template: that template)
         for (n, e, held) in &binds {
             let like = (!*held && !self.named.contains_key(n)).then(|| template(e)).flatten();
             self.named.insert(*n, like);
-        }
-        if let Some(e) = lambda {
-            self.binds_expr(e, &mut binds);
         }
         loop {
             let mut grew = false;
@@ -340,61 +337,6 @@ impl<'a> Flow<'a> {
             }
             _ => {}
         }
-    }
-
-    fn binds_stmt(&self, st: &'static Stmt, binds: &mut Vec<(StrId, &'static Expr, bool)>) {
-        match st {
-            Stmt::Assign(a) => a.targets.iter().for_each(|t| self.bind_target(t, &a.value, false, binds)),
-            Stmt::AnnAssign(a) => {
-                if let Some(v) = &a.value {
-                    self.bind_target(&a.target, v, false, binds);
-                }
-            }
-            // (`x += e`: x may hold what e holds)
-            Stmt::AugAssign(a) => self.bind_target(&a.target, &a.value, true, binds),
-            Stmt::For(f) => self.bind_target(&f.target, &f.iter, true, binds),
-            Stmt::With(w) => {
-                for it in &w.items {
-                    if let Some(v) = &it.optional_vars {
-                        self.bind_target(v, &it.context_expr, false, binds);
-                    }
-                }
-            }
-            _ => {}
-        }
-        // (nested statements, and the bindings inside expressions: walrus, comprehensions)
-        struct Sub<'s, 'a>(&'s Flow<'a>, &'s mut Vec<(StrId, &'static Expr, bool)>);
-        impl<'s, 'a> ast::visitor::Visitor<'static> for Sub<'s, 'a> {
-            fn visit_stmt(&mut self, st: &'static Stmt) {
-                self.0.binds_stmt(st, self.1);
-            }
-            fn visit_expr(&mut self, e: &'static Expr) {
-                self.0.binds_expr(e, self.1);
-            }
-        }
-        ast::visitor::walk_stmt(&mut Sub(self, binds), st);
-    }
-
-    fn binds_expr(&self, e: &'static Expr, binds: &mut Vec<(StrId, &'static Expr, bool)>) {
-        match e {
-            Expr::Named(n) => self.bind_target(&n.target, &n.value, false, binds),
-            Expr::ListComp(ast::ExprListComp { generators, .. }) | Expr::SetComp(ast::ExprSetComp { generators, .. }) | Expr::DictComp(ast::ExprDictComp { generators, .. }) | Expr::Generator(ast::ExprGenerator { generators, .. }) => {
-                for g in generators {
-                    self.bind_target(&g.target, &g.iter, true, binds);
-                }
-            }
-            _ => {}
-        }
-        struct Sub<'s, 'a>(&'s Flow<'a>, &'s mut Vec<(StrId, &'static Expr, bool)>);
-        impl<'s, 'a> ast::visitor::Visitor<'static> for Sub<'s, 'a> {
-            fn visit_expr(&mut self, e: &'static Expr) {
-                self.0.binds_expr(e, self.1);
-            }
-            fn visit_stmt(&mut self, st: &'static Stmt) {
-                self.0.binds_stmt(st, self.1);
-            }
-        }
-        ast::visitor::walk_expr(&mut Sub(self, binds), e);
     }
 
     // ------------------------------------------------------------- where values come from
@@ -941,5 +883,40 @@ impl<'a> Flow<'a> {
                 ast::visitor::walk_stmt(&mut Sub(self), st);
             }
         }
+    }
+}
+
+/// The first pass of `Flow::scan`: what each local is bound to (`held`: what it holds).
+struct Binds<'s, 'a>(&'s Flow<'a>, Vec<(StrId, &'static Expr, bool)>);
+
+impl ast::visitor::Visitor<'static> for Binds<'_, '_> {
+    fn visit_stmt(&mut self, st: &'static Stmt) {
+        match st {
+            Stmt::Assign(a) => a.targets.iter().for_each(|t| self.0.bind_target(t, &a.value, false, &mut self.1)),
+            Stmt::AnnAssign(ast::StmtAnnAssign { target, value: Some(v), .. }) => self.0.bind_target(target, v, false, &mut self.1),
+            // (`x += e`: x may hold what e holds)
+            Stmt::AugAssign(a) => self.0.bind_target(&a.target, &a.value, true, &mut self.1),
+            Stmt::For(f) => self.0.bind_target(&f.target, &f.iter, true, &mut self.1),
+            Stmt::With(w) => {
+                for it in &w.items {
+                    if let Some(v) = &it.optional_vars {
+                        self.0.bind_target(v, &it.context_expr, false, &mut self.1);
+                    }
+                }
+            }
+            _ => {}
+        }
+        ast::visitor::walk_stmt(self, st);
+    }
+
+    fn visit_expr(&mut self, e: &'static Expr) {
+        match e {
+            Expr::Named(n) => self.0.bind_target(&n.target, &n.value, false, &mut self.1),
+            Expr::ListComp(ast::ExprListComp { generators, .. }) | Expr::SetComp(ast::ExprSetComp { generators, .. }) | Expr::DictComp(ast::ExprDictComp { generators, .. }) | Expr::Generator(ast::ExprGenerator { generators, .. }) => {
+                generators.iter().for_each(|g| self.0.bind_target(&g.target, &g.iter, true, &mut self.1));
+            }
+            _ => {}
+        }
+        ast::visitor::walk_expr(self, e);
     }
 }
