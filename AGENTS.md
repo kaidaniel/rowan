@@ -148,14 +148,14 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 
 * `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls (`skip F …`), entry runs, a `work:` line
   (statements, units = statements + walk visits / 16, body runs, objects, row joins, visits,
-  havoc visits): deterministic counters to compare builds. `2`: also every raise and try.
+  havoc visits): deterministic counters (its lines cost ~25%: time without). `2`: raises, tries.
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (the golden `#@limits` sets them per
   case; `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check` checks `#@todo`s too).
 * **Profiling:** the bench workflow's `perf` profiles (`sample` hangs on macOS 27). macOS has
   no `timeout`; time a run inside the guard (`.guard/run /usr/bin/time -l rowan …`: the guard
   polls every 0.5 s). Compare builds on results (`--json` tier counts) and counters too.
 
-## Layout (`rowan/src/`, ~62k lines: the engine ~20.6k, the models ~41k)
+## Layout (`rowan/src/`, ~62k lines: the engine ~20.7k, the models ~42k)
 
 | file | role |
 | --- | --- |
@@ -168,7 +168,7 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 | `interp/narrow.rs`, `interp/access.rs` | tests (`split`), narrowing; attribute and item access, verdicts, requirements |
 | `interp/calls.rs`, `interp/effects.rs` | calls: per-call-site runs, budget, recursion, `__new__`, dataclass init; what skipped calls may change |
 | `models/shape.rs` | tensor shapes (dims as polynomials) for the torch and numpy models |
-| `report.rs`, `main.rs` | text / JSON / facts output; CLI, `rowan serve` (runs on a 1 GiB-stack thread) |
+| `report.rs`, `main.rs` | text / JSON / facts output; CLI (mimalloc), `rowan serve` (on a 1 GiB-stack thread) |
 | `models/` | `mod.rs` (`Registry`, builtins, containers); `tables` (what builtins / library calls raise, change, keep); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib (`enums`, `exceptions`, functools, itertools, …); `pandas`, `pydantic`, `fastapi`, `torch` |
 
 `rowan/py/` is a PyO3 binding (does not load on macOS 26); `vscode-rowan/` the editor
@@ -190,10 +190,10 @@ extension (talks to `rowan serve`).
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.6 / ~3 / ~2.2 / ~8 s; 0.13 / 0.07 / 0.13 / 0.09 GB |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~10 / ~33 / ~67 / ~7.5 s; 0.28 / 1.6 / 1.2 / 0.31 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.6 / ~2 / ~7 s; 0.12 / 0.07 / 0.12 / 0.08 GB |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~8.3 / ~29 / ~64 / ~6.6 s; 0.26 / 0.9 / 1.0 / 0.28 GB |
 
 ## Known problems and next steps
 
-Open items are in `SUGGESTED_CHANGES.md`, each with a repro. Parked branches:
-`parked/joined-summaries` (symbolic summaries: unsound, costly), `slotmap-trie`.
+Open items are in `SUGGESTED_CHANGES.md`, each with a repro; what was measured against the core
+design (and ruled out) is there too. Parked: `parked/joined-summaries` (unsound), `slotmap-trie`.

@@ -376,17 +376,6 @@ pub struct LayerMap<K, V> {
     root: Option<Tree<K, V>>,
 }
 
-impl<K, V> LayerMap<K, V> {
-    /// The same tree (a copy not changed since): equal without a look inside.
-    pub fn ptr_eq(&self, o: &Self) -> bool {
-        match (&self.root, &o.root) {
-            (None, None) => true,
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-            _ => false,
-        }
-    }
-}
-
 impl<K, V> Clone for LayerMap<K, V> {
     fn clone(&self) -> Self {
         LayerMap { root: self.root.clone() }
@@ -624,10 +613,6 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         Self::default()
     }
 
-    /// The same trie (a copy not changed since).
-    pub fn ptr_eq(&self, o: &Self) -> bool {
-        self.m.ptr_eq(&o.m)
-    }
 
     fn sub(&self, key: &K) -> Option<&Tree<Pair<K, IK>, V>> {
         self.m.root.as_ref().and_then(|t| find_hi(t, key.key64()))

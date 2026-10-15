@@ -240,11 +240,6 @@ impl State {
         }));
     }
 
-    /// Make self equal to o (o stays usable).
-    pub fn set_to(&mut self, o: &State) {
-        *self = o.clone();
-    }
-
     pub fn clear_last(&mut self, oid: ObjId) {
         // (an element changed: the length alternatives of the last join no longer hold either)
         if let Some((None, p, m)) = self.lens.get(&oid) {
@@ -274,24 +269,17 @@ impl State {
     // -- lattice -----------------------------------------------------------
     pub fn join(&mut self, o: &mut State) -> State {
         let ret = match (&self.ret, &o.ret) {
-            (None, r) => r.clone(),
-            (r, None) => r.clone(),
+            (None, r) | (r, None) => r.clone(),
             (Some(a), Some(b)) => Some(a.join(b)),
         };
         let exits = match (&self.exits, &o.exits) {
-            (None, e) => e.clone(),
-            (e, None) => e.clone(),
+            (None, e) | (e, None) => e.clone(),
             (Some(a), Some(b)) if Arc::ptr_eq(a, b) => Some(a.clone()),
             (Some(a), Some(b)) => Some(Arc::new(a.copy().join(&mut b.copy()))),
         };
-        if !o.reachable {
-            let mut s = self.copy();
-            s.ret = ret;
-            s.exits = exits;
-            return s;
-        }
-        if !self.reachable {
-            let mut s = o.copy();
+        // (an unreachable side adds nothing but its returns)
+        if !o.reachable || !self.reachable {
+            let mut s = if o.reachable { o.copy() } else { self.copy() };
             s.ret = ret;
             s.exits = exits;
             return s;

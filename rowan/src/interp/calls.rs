@@ -1248,7 +1248,7 @@ impl Analyzer {
                 }
             }
         }
-        state.set_to(&st);
+        *state = st.copy();
         if let Some(gid) = gen_id {
             // what `yield from` the generator evaluates to: its return value
             state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}genret"), ret.clone(), true);
