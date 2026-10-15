@@ -54,8 +54,7 @@ def done_with_alias():
         r["s"] = 1
         rows[0]["t"] = 1
     for r in rows:
-        print(r["s"])  #@ sound s
-        #@todo ok s (a store through the list may hit the item: rowan joins the records' row into the item's, not that one key)
+        print(r["s"])  #@ ok s
         print(r["t"])  #@ possibly t
 
 

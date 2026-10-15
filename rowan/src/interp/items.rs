@@ -742,7 +742,7 @@ impl Analyzer {
         let row = state.row(oid, ns);
         match kv {
             KeyVal::Lit(k) => {
-                state.set_row(oid, ns, row.store(*k, strong));
+                state.store_key_row(oid, ns, *k, strong);
                 state.set_slot(oid, ns, *k, v.clone(), strong);
             }
             KeyVal::Lits(ks) => {

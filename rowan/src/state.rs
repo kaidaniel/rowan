@@ -471,6 +471,18 @@ impl State {
         self.set_row_narrowed(oid, ns, row);
     }
 
+    /// Key `k` stored into `oid`'s row: maybe into the others of its family too (a weak store
+    /// there, not their rows joined: what else they hold is as it was).
+    pub fn store_key_row(&mut self, oid: ObjId, ns: Ns, k: KeyId, strong: bool) {
+        for m in family(oid) {
+            if let Some(cur) = self.rows.get(&(m, ns)) {
+                self.rows.insert((m, ns), cur.store(k, false));
+            }
+        }
+        let r = self.row(oid, ns).store(k, strong);
+        self.set_row_narrowed(oid, ns, r);
+    }
+
     /// A row the path learned more about (a test, a read that succeeded), not one the program
     /// changed: the other objects of its family (`link_view`) keep theirs.
     pub fn set_row_narrowed(&mut self, oid: ObjId, ns: Ns, row: Row) {
@@ -523,7 +535,6 @@ impl State {
         // (a value stored into a loop's item or the records it is one of: maybe into the others)
         for m in family(oid) {
             if self.has_row(m, Ns::Item) || self.has_row(m, Ns::Attr) {
-                note_view_hit(m);
                 let nv = self.slot(m, ns, key).join(&v);
                 self.slots.set(&m, (ns, key), nv);
             }
