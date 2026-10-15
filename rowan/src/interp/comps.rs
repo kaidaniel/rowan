@@ -60,26 +60,7 @@ impl Analyzer {
                 self.cx.summary_items.insert(own, items.len());
             }
             if items.len() <= limit && !same {
-                // known items: each is its own straight-line iteration; a filter decided
-                // for the item keeps it straight-line (positions survive), an undecided one
-                // makes the iteration conditional
-                self.cx.comp_known.push(true);
-                for (idx, item) in items.iter().enumerate() {
-                    let mut s2 = state.copy();
-                    self.frame_mut().unroll.push(idx);
-                    let decided = self.comp_run_one(g, gens, i, limit, &Elem::One(item.clone()), &mut s2, body, understood, own);
-                    self.frame_mut().unroll.pop();
-                    if s2.reachable {
-                        // (an undecided filter may skip this item: joined with skipping it)
-                        if decided {
-                            state.replace_with(s2);
-                        } else {
-                            let j = state.join(&mut s2);
-                            state.replace_with(j);
-                        }
-                    }
-                }
-                self.cx.comp_known.pop();
+                self.comp_unrolled(gens, i, limit, items, state, body, understood, own);
                 self.exhaust(&exhaust_after, state);
                 return;
             }
@@ -150,6 +131,25 @@ impl Analyzer {
         let ev = elem.value_part();
         self.promote_elem_reqs(&mut head, &s2, &ev, state);
         state.replace_with(head);
+    }
+
+    /// Known items: each is its own straight-line iteration; a filter decided for the item
+    /// keeps it straight-line (positions survive), an undecided one makes the iteration
+    /// conditional (joined with skipping the item).
+    #[allow(clippy::too_many_arguments)]
+    fn comp_unrolled(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, items: &[Value], state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) {
+        self.cx.comp_known.push(true);
+        for (idx, item) in items.iter().enumerate() {
+            let mut s2 = state.copy();
+            self.frame_mut().unroll.push(idx);
+            let decided = self.comp_run_one(&gens[i], gens, i, limit, &Elem::One(item.clone()), &mut s2, body, understood, own);
+            self.frame_mut().unroll.pop();
+            if s2.reachable {
+                let j = if decided { s2 } else { state.join(&mut s2) };
+                state.replace_with(j);
+            }
+        }
+        self.cx.comp_known.pop();
     }
 
     /// Runs one iteration of generator `i`; returns whether every filter was decided (then
