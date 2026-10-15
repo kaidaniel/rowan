@@ -407,11 +407,8 @@ fn rename_references(back: &mut State, head: &State, map: &FxHashMap<ObjId, ObjI
     for (k, nv) in nar_updates {
         back.narrowed.insert(k, nv);
     }
-    if let Some(r) = &back.ret {
-        if let Some(nv) = rename_value(r, map) {
-            back.ret = Some(nv);
-        }
-    }
+    // (not the value returned so far: the returns' states, `exits`, keep the recent objects'
+    // own facts, as the iteration that returned left them)
 }
 
 /// The recent objects' own facts move to their summary objects (weakly; positions only for
