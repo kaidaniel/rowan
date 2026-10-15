@@ -842,7 +842,6 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
 
 fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut Vec<ObjId>) -> String {
     let max_depth: u32 = VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed);
-    const MAX_ITEMS: usize = 8;
     if !an.heap.has_obj(o) {
         return "?".into();
     }
@@ -853,31 +852,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
     }
     let deeper = depth + 1;
     match kind {
-        Kind::Dict | Kind::Frame => {
-            let row = state.row(o, Ns::Item);
-            // (a frame by its columns, a Series / Counter / defaultdict by their keys, as
-            // Python prints them)
-            let label = an.heap.obj(o).label.clone();
-            let wrap = if kind == Kind::Frame { Some("DataFrame") } else { ["series@", "Counter@", "defaultdict@", "OrderedDict@"].iter().find(|p| label.starts_with(**p)).map(|p| p.trim_end_matches('@')) };
-            let body = if depth >= max_depth {
-                if row.present.is_empty() && row.closed() { "{}".into() } else { "{…}".into() }
-            } else if kind == Kind::Frame {
-                let mut cols: Vec<String> = intern::sorted_by_str(row.present.iter()).iter().map(|k| format!("{}{}", crate::domain::key_display(*k), row.mark(*k))).collect();
-                if !row.closed() {
-                    cols.push("**?".into());
-                }
-                return format!("DataFrame[{}]", cols.join(", "));
-            } else {
-                render_record(an, state, o, Ns::Item, None, depth, seen)
-            };
-            match wrap {
-                // (nothing known about its keys: the type alone)
-                Some(w) if body == "{**?}" => format!("<{}>", if w == "series" { "Series" } else { w }),
-                Some("series") => format!("Series({})", body),
-                Some(w) => format!("{}({})", w, body),
-                None => body,
-            }
-        }
+        Kind::Dict | Kind::Frame => render_mapping(an, state, o, kind, depth, seen),
         // objects of library models: their attributes when they have some (`Namespace(n=3)`),
         // else what made them (`re.compile('a+')`, `PosixPath('/tmp')`) or their type (`<Match>`)
         Kind::Namespace => {
@@ -907,71 +882,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
             seen.pop();
             out
         }
-        Kind::List | Kind::Tuple | Kind::Set => {
-            let (open, close, ty) = match kind {
-                Kind::List => ("[", "]", "list"),
-                Kind::Tuple => ("(", ")", "tuple"),
-                _ => ("{", "}", "set"),
-            };
-            seen.push(o);
-            let out = match an.heap.llen(o, state) {
-                // a generator: by its function (it runs when it is consumed)
-                _ if an.heap.obj(o).label.starts_with("generator ") => format!("<{}>", an.heap.obj(o).label),
-                // known positions: the elements in order
-                Some(n) if kind != Kind::Set => {
-                    if depth >= max_depth {
-                        seen.pop();
-                        return if n == 0 { format!("{}{}", open, close) } else { format!("{}…{}", open, close) };
-                    }
-                    let mut items: Vec<String> = (0..n.min(MAX_ITEMS)).map(|i| match state.slot_opt(o, Ns::Pos, intern::key_int(i as i64)) {
-                        Some(sv) => render_value(an, state, &sv, deeper, seen),
-                        None => "?".into(),
-                    }).collect();
-                    if n > MAX_ITEMS {
-                        items.push("…".into());
-                    }
-                    if kind == Kind::Tuple && n == 1 {
-                        format!("({},)", items[0])
-                    } else {
-                        format!("{}{}{}", open, items.join(", "), close)
-                    }
-                }
-                // a set of known literal members: them, sorted (a set has no order)
-                Some(n) if kind == Kind::Set && depth < max_depth && n <= MAX_ITEMS && set_members(state, o, n).is_some() => {
-                    let ms = set_members(state, o, n).unwrap();
-                    if ms.is_empty() {
-                        "set()".into()
-                    } else {
-                        format!("{{{}}}", ms.iter().map(|k| render_value(an, state, &Value::lit(*k), deeper, seen)).collect::<Vec<_>>().join(", "))
-                    }
-                }
-                // unknown length: what any element may be, in typing notation
-                _ => {
-                    let elem = state.slot_opt(o, Ns::Elem, STAR);
-                    let ekv = state.elems.get(&o);
-                    let known_empty = matches!(&ekv, Some(KeyVal::Lits(ks)) if ks.is_empty());
-                    let mut ev = elem.unwrap_or_default();
-                    if let Some(kv) = ekv {
-                        if kv.is_literal() && ev.kv.is_bot() {
-                            ev = Value::with_kv(ev.pts.clone(), kv);
-                        }
-                    }
-                    let inner = if depth >= max_depth { "…".to_string() } else if ev.empty() { "?".to_string() } else { render_value(an, state, &ev, deeper, seen) };
-                    if ev.empty() && known_empty {
-                        format!("{}{}", open, close)
-                    } else if kind == Kind::Tuple {
-                        format!("tuple[{}, ...]", inner)
-                    } else {
-                        format!("{}[{}]", ty, inner)
-                    }
-                }
-            };
-            seen.pop();
-            if an.heap.obj(o).label.starts_with("deque@") {
-                return format!("deque({})", out);
-            }
-            out
-        }
+        Kind::List | Kind::Tuple | Kind::Set => render_sequence(an, state, o, kind, depth, seen),
         Kind::Instance => {
             let name = an.heap.instance_class(o).and_then(|c| an.heap.class_info_opt(c)).map(|ci| ci.name.clone()).unwrap_or_else(|| "object".into());
             if depth >= max_depth {
@@ -999,6 +910,106 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         Kind::Super => "super()".into(),
         // iterators, views, groupbys, parsers, responses…: by their type, as Python prints them
         _ => opaque_name(&an.heap.obj(o).label),
+    }
+}
+
+/// A list, tuple or set: its known positions in order (a set's known literal members sorted),
+/// else what any element may be in typing notation (`list[int]`); a deque wrapped.
+fn render_sequence(an: &Analyzer, state: &State, o: ObjId, kind: Kind, depth: u32, seen: &mut Vec<ObjId>) -> String {
+    let max_depth: u32 = VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed);
+    const MAX_ITEMS: usize = 8;
+    let deeper = depth + 1;
+    let (open, close, ty) = match kind {
+        Kind::List => ("[", "]", "list"),
+        Kind::Tuple => ("(", ")", "tuple"),
+        _ => ("{", "}", "set"),
+    };
+    seen.push(o);
+    let out = match an.heap.llen(o, state) {
+        // a generator: by its function (it runs when it is consumed)
+        _ if an.heap.obj(o).label.starts_with("generator ") => format!("<{}>", an.heap.obj(o).label),
+        // known positions: the elements in order
+        Some(n) if kind != Kind::Set => {
+            if depth >= max_depth {
+                seen.pop();
+                return if n == 0 { format!("{}{}", open, close) } else { format!("{}…{}", open, close) };
+            }
+            let mut items: Vec<String> = (0..n.min(MAX_ITEMS)).map(|i| match state.slot_opt(o, Ns::Pos, intern::key_int(i as i64)) {
+                Some(sv) => render_value(an, state, &sv, deeper, seen),
+                None => "?".into(),
+            }).collect();
+            if n > MAX_ITEMS {
+                items.push("…".into());
+            }
+            if kind == Kind::Tuple && n == 1 {
+                format!("({},)", items[0])
+            } else {
+                format!("{}{}{}", open, items.join(", "), close)
+            }
+        }
+        // a set of known literal members: them, sorted (a set has no order)
+        Some(n) if kind == Kind::Set && depth < max_depth && n <= MAX_ITEMS && set_members(state, o, n).is_some() => {
+            let ms = set_members(state, o, n).unwrap();
+            if ms.is_empty() {
+                "set()".into()
+            } else {
+                format!("{{{}}}", ms.iter().map(|k| render_value(an, state, &Value::lit(*k), deeper, seen)).collect::<Vec<_>>().join(", "))
+            }
+        }
+        // unknown length: what any element may be, in typing notation
+        _ => {
+            let elem = state.slot_opt(o, Ns::Elem, STAR);
+            let ekv = state.elems.get(&o);
+            let known_empty = matches!(&ekv, Some(KeyVal::Lits(ks)) if ks.is_empty());
+            let mut ev = elem.unwrap_or_default();
+            if let Some(kv) = ekv {
+                if kv.is_literal() && ev.kv.is_bot() {
+                    ev = Value::with_kv(ev.pts.clone(), kv);
+                }
+            }
+            let inner = if depth >= max_depth { "…".to_string() } else if ev.empty() { "?".to_string() } else { render_value(an, state, &ev, deeper, seen) };
+            if ev.empty() && known_empty {
+                format!("{}{}", open, close)
+            } else if kind == Kind::Tuple {
+                format!("tuple[{}, ...]", inner)
+            } else {
+                format!("{}[{}]", ty, inner)
+            }
+        }
+    };
+    seen.pop();
+    if an.heap.obj(o).label.starts_with("deque@") {
+        return format!("deque({})", out);
+    }
+    out
+}
+
+/// A dict or frame: its keys and values (a frame by its columns; a Series / Counter /
+/// defaultdict / OrderedDict wrapped as Python prints them).
+fn render_mapping(an: &Analyzer, state: &State, o: ObjId, kind: Kind, depth: u32, seen: &mut Vec<ObjId>) -> String {
+    let max_depth: u32 = VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed);
+    let row = state.row(o, Ns::Item);
+    // (a frame by its columns, a Series / Counter / defaultdict by their keys, as
+    // Python prints them)
+    let label = an.heap.obj(o).label.clone();
+    let wrap = if kind == Kind::Frame { Some("DataFrame") } else { ["series@", "Counter@", "defaultdict@", "OrderedDict@"].iter().find(|p| label.starts_with(**p)).map(|p| p.trim_end_matches('@')) };
+    let body = if depth >= max_depth {
+        if row.present.is_empty() && row.closed() { "{}".into() } else { "{…}".into() }
+    } else if kind == Kind::Frame {
+        let mut cols: Vec<String> = intern::sorted_by_str(row.present.iter()).iter().map(|k| format!("{}{}", crate::domain::key_display(*k), row.mark(*k))).collect();
+        if !row.closed() {
+            cols.push("**?".into());
+        }
+        return format!("DataFrame[{}]", cols.join(", "));
+    } else {
+        render_record(an, state, o, Ns::Item, None, depth, seen)
+    };
+    match wrap {
+        // (nothing known about its keys: the type alone)
+        Some(w) if body == "{**?}" => format!("<{}>", if w == "series" { "Series" } else { w }),
+        Some("series") => format!("Series({})", body),
+        Some(w) => format!("{}({})", w, body),
+        None => body,
     }
 }
 
