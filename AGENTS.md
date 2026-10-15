@@ -64,8 +64,8 @@ namespace packages).
     or are given the program's functions. Several callees run as `alternatives`.
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model
     is unknown code. A TypeError may come from those taken to fail only on wrong types.
-  * **Entry points:** functions nothing calls run with open parameters; their requirements
-    become `param F.x` schemas.
+  * **Entry points:** functions the main run does not call (also those only entry runs call)
+    run with open parameters; their requirements become `param F.x` schemas.
 * **Generators** run whole at their first consumption (`force_gen`), in the creating call's
   context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`). If code
   between items changes what the generator reads after a yield (`Gens::watch`), it runs again

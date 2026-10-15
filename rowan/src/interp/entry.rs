@@ -1,6 +1,7 @@
-//! Running the program: the main module, then entry runs. Functions nothing calls run with
-//! open parameters (`param F.x` inputs; a method on an instance of its class or a subclass);
-//! functions the program calls get a requirement-only run for their own input contract; a
+//! Running the program: the main module, then entry runs. Functions the program's own run
+//! does not call run with open parameters (`param F.x` inputs; a method on an instance of its
+//! class or a subclass), also those only other entry runs call; functions the program calls
+//! get a requirement-only run for their own input contract; a
 //! function some call of which its budget refused gets a reporting run. Functions of torch
 //! modules get their own runs (shapes in terms of their parameters).
 //!
@@ -26,8 +27,12 @@ pub struct Entries {
     pub scope: Option<u32>,
     /// functions that had their entry run
     pub done: FxHashSet<ObjId>,
-    /// functions some call ran (their entry run is requirement-only)
+    /// functions some call ran
     pub analysed: FxHashSet<ObjId>,
+    /// the functions the program's own run called (their entry run is requirement-only), and
+    /// the objects made by then; a function an entry run makes is called when some run called
+    /// it (whichever entry runs come first, a function only they call gets its own run)
+    called: (ObjId, FxHashSet<ObjId>),
     /// per class: the instance its methods' entry runs take as `self` (None: its `__init__`
     /// does not complete with its defaults)
     pub instances: FxHashMap<ObjId, Option<ObjId>>,
@@ -67,6 +72,7 @@ impl Analyzer {
 
     /// Entry-point rule (§6.4): functions never called get analysed with open parameters.
     pub(super) fn analyse_uncalled(&mut self, state: &mut State) {
+        self.entry.called = (self.heap.len() as ObjId, self.entry.analysed.clone());
         // entry runs can make functions (closures, lambdas, inner defs) nobody calls either:
         // a few rounds, each over the functions made so far
         let mut start: ObjId = 1;
@@ -101,7 +107,8 @@ impl Analyzer {
             // a function the program calls: a requirement-only run with open parameters gives
             // its own input contract (`param F.x` schemas)
             let refused = self.budget.out.contains(&oid);
-            let quiet = self.entry.analysed.contains(&oid) && !self.entry.torch_modules.contains(&fi.module) && !handler && !refused;
+            let called = if oid < self.entry.called.0 { self.entry.called.1.contains(&oid) } else { self.entry.analysed.contains(&oid) };
+            let quiet = called && !self.entry.torch_modules.contains(&fi.module) && !handler && !refused;
             if quiet != quiet_pass && !(quiet_pass && refused) {
                 continue;
             }
