@@ -405,7 +405,9 @@ impl Analyzer {
                 return;
             }
             if super::debug_enabled() {
-                eprintln!("restart in {} (frames {}), round {}", self.frame().label, self.cx.frames.len(), round);
+                // (and what changed for the generators: the objects, the first few of each)
+                let what: Vec<String> = found.iter().flat_map(|(_, hs)| hs.iter().take(4)).map(|h| format!("{}{}", self.heap.obj(h.0).label, h.1.and_then(|k| intern::key_as_str(k.1)).map(|k| format!(".{}", k)).unwrap_or_default())).collect();
+                eprintln!("restart in {} (frames {}), round {}: {}", self.frame().label, self.cx.frames.len(), round, what.join(", "));
             }
             for (gid, objs) in found {
                 self.gens.havoc.entry(gid).or_default().extend(objs);

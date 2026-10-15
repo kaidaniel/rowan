@@ -83,6 +83,14 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   const res = JSON.parse(execFileSync(bin, [z440, "--facts"], { env: { ...process.env, ROWAN_LIMITS: "budget=2" }, maxBuffer: 64 * 1024 * 1024 }).toString());
   const h = hover(indexResult(res), fs.readFileSync(z440, "utf8").split("\n"), 58, "STATE");
   assert(h.includes("- may have been changed by `drop()` (line 57, a call rowan no longer follows)"), h);
+  // (a list too; a default the call only reads is not said to change)
+  const z525 = path.join(root, "tests", "cases", "z525_skipped_call_parameter_escape.py");
+  const r525 = JSON.parse(execFileSync(bin, [z525, "--facts"], { env: { ...process.env, ROWAN_LIMITS: "budget=1" }, maxBuffer: 64 * 1024 * 1024 }).toString());
+  const s525 = fs.readFileSync(z525, "utf8").split("\n");
+  const log = hover(indexResult(r525), s525, 46, "LOG");
+  assert(log.includes("- may have been changed by `update(2)` (line 39, a call rowan no longer follows)"), log);
+  const opts = hover(indexResult(r525), s525, 40, "OPTS");
+  assert(!opts.includes("may have been changed") && opts.includes("✓ always works"), opts);
 }
 
 // ---- diagnostics: only accesses that may fail, in words, with their call path

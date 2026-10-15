@@ -25,8 +25,8 @@ pub struct HavocMemo {
     pub lens: crate::layered::LayerMap<ObjId, (Option<usize>, usize, u16)>,
     pub visited: FxHashSet<ObjId>,
     pub code: Vec<ObjId>,
-    /// the skipped method's receiver and names it was walked by, and how often it was met
-    pub guard: Option<(ObjId, std::rc::Rc<[KeyId]>, u32)>,
+    /// the skipped method's receivers and names they were walked by, and how often each was met
+    pub guard: Vec<(ObjId, std::rc::Rc<[KeyId]>, u32)>,
 }
 
 /// The havoc walks of unknown code: their marks, a memo of recent walks (a cache: a walk
@@ -41,8 +41,9 @@ pub struct Havoc {
     memo: FxHashMap<(StrId, u64), HavocMemo>,
     /// the code objects the last walk met (functions, classes, bound methods)
     pub code: Vec<ObjId>,
-    /// the receiver of a skipped method call (`skipped_call`) and how often a walk met it
-    pub guard: Option<(ObjId, u32, std::rc::Rc<[KeyId]>)>,
+    /// the receivers of a skipped method call (`skipped_call`), how often a walk met each, and
+    /// the names its code uses on it
+    pub guard: Vec<(ObjId, u32, std::rc::Rc<[KeyId]>)>,
     /// objects visited by walks: part of the work measure
     pub visited: usize,
 }
@@ -72,16 +73,16 @@ impl Havoc {
         // holds `any`, every row has the mutator —, and what they hold is met through them
         // unchanged, or changed and walked here: only the changed ones are walked again)
         // (a skipped method's receiver walked by names: by the same names)
-        let guard = self.guard.as_ref().map(|(g, _, used)| (*g, used.clone()));
+        let guard: Vec<(ObjId, std::rc::Rc<[KeyId]>)> = self.guard.iter().map(|(g, _, used)| (*g, used.clone())).collect();
         let key = (site, {
             let mut h = rustc_hash::FxHasher::default();
             std::hash::Hash::hash(&roots, &mut h);
-            std::hash::Hash::hash(&guard.as_ref().map(|(g, u)| (*g, u.to_vec())), &mut h);
+            std::hash::Hash::hash(&guard, &mut h);
             std::hash::Hasher::finish(&h)
         });
-        let memo = self.memo.remove(&key).filter(|m| m.roots == roots && m.guard.as_ref().map(|(g, u, _)| (*g, u.clone())) == guard);
+        let memo = self.memo.remove(&key).filter(|m| m.roots == roots && m.guard.iter().map(|(g, u, _)| (*g, u.clone())).eq(guard.iter().cloned()));
         // (met through something else then: still, as what met it is as it was)
-        let met = memo.as_ref().and_then(|m| m.guard.as_ref()).map_or(0, |(_, _, n)| *n);
+        let met: Vec<u32> = memo.as_ref().map(|m| m.guard.iter().map(|(_, _, n)| *n).collect()).unwrap_or_default();
         let mut work = roots.clone();
         let (mut visited, mut code, changed) = self.memo_restart(memo, state, &mut work);
         let replay = changed.is_some();
@@ -93,7 +94,7 @@ impl Havoc {
         while let Some(o) = work.pop() {
             // (a skipped method's receiver: what it holds is havocked, it is not, unless met
             // again through something else)
-            if let Some((_, n, used)) = self.guard.as_mut().filter(|(g, _, _)| *g == o) {
+            if let Some((_, n, used)) = self.guard.iter_mut().find(|(g, _, _)| *g == o) {
                 *n += 1;
                 if *n == 1 {
                     let used = used.clone();
@@ -130,21 +131,36 @@ impl Havoc {
                     let c = *c;
                     self.code.push(c);
                     code.push(c);
+                    // (an instance of a NamedTuple class is a tuple: no instance dict, its
+                    // fields read-only; what they hold is walked)
+                    if heap.class_info_opt(c).is_some_and(|ci| ci.lib.named_tuple) {
+                        havoc_object(heap, state, o, Kind::Tuple, site, any_id, &any, &mut work);
+                        continue;
+                    }
                 }
                 (Kind::Module | Kind::External | Kind::Method, _) => continue,
+                // (a compiled pattern, a match, a path, a frozenset: nothing to change)
+                (Kind::Namespace, Payload::Method(q, _)) if matches!(q.as_str(), "stdobj.repattern" | "stdobj.rematch" | "stdobj.path") => {
+                    havoc_object(heap, state, o, Kind::Tuple, site, any_id, &any, &mut work);
+                    continue;
+                }
+                (Kind::Set, _) if heap.obj(o).label.starts_with("frozenset@") => {
+                    havoc_object(heap, state, o, Kind::Tuple, site, any_id, &any, &mut work);
+                    continue;
+                }
                 _ => {}
             }
             havoc_object(heap, state, o, k, site, any_id, &any, &mut work);
         }
-        if let Some((_, n, _)) = self.guard.as_mut() {
-            *n = (*n).max(met);
+        for ((_, n, _), m) in self.guard.iter_mut().zip(met) {
+            *n = (*n).max(m);
         }
         if self.memo.len() >= HAVOC_MEMOS {
             self.memo.clear();
         }
         code.sort_unstable();
         code.dedup();
-        let guard = self.guard.as_ref().map(|(g, n, used)| (*g, used.clone(), *n));
+        let guard = self.guard.iter().map(|(g, n, used)| (*g, used.clone(), *n)).collect();
         self.memo.insert(key, HavocMemo { roots, rows: state.rows.clone(), slots: state.slots.clone(), elems: state.elems.clone(), lens: state.lens.clone(), visited, code, guard });
     }
 
@@ -342,6 +358,16 @@ impl Analyzer {
             let cl = self.code_closure(&roots, state);
             let mut vals: Vec<Value> = cl.locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).collect();
             vals.extend(cl.values.iter().cloned());
+            // (values whose parts may change, not themselves: their parts)
+            let mut parts: Vec<ObjId> = Vec::new();
+            for v in cl.held_locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).chain(cl.held_values.iter().cloned()) {
+                for o in v.pts.iter() {
+                    self.obj_edges(o, state, &mut parts);
+                }
+            }
+            parts.sort_unstable();
+            parts.dedup();
+            vals.extend(parts.into_iter().map(Value::obj));
             self.havoc.walk_from(&mut self.heap, &vals, rid, site, state, walk);
             for (o, ns, k) in &cl.rebound {
                 let v = state.slot(*o, *ns, *k).join(&any);
@@ -421,6 +447,15 @@ fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: Str
     let havocked = |state: &State| {
         state.slot(o, Ns::Elem, intern::STAR).pts.contains(any_id) && state.lens.get(&o) == Some((None, 0, 0)) && !state.lasts.iter().any(|(x, _)| *x == o) && state.elems.get(&o).is_some_and(|kv| crate::domain::kv_join(&kv, &DATA) == kv)
     };
+    // (for people: which unknown code may have changed a list or set, on a row of its own —
+    // it has no attributes to read)
+    if matches!(k, Kind::List | Kind::Set) && !heap.obj(o).site.starts_with("gen:") {
+        let r0 = state.rows.get(&(o, Ns::Attr)).unwrap_or_else(Row::new);
+        let r = r0.mutate(site);
+        if r != r0 {
+            state.set_row(o, Ns::Attr, r);
+        }
+    }
     if matches!(k, Kind::List | Kind::Set) && !heap.obj(o).site.starts_with("gen:") && !havocked(state) {
         let e = state.slot(o, Ns::Elem, intern::STAR).join(any);
         state.set_slot(o, Ns::Elem, intern::STAR, e, false);

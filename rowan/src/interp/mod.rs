@@ -35,6 +35,7 @@ pub mod entry;
 pub use entry::Entries;
 pub mod exprs;
 pub mod findings;
+pub mod flows;
 pub use findings::*;
 pub mod funcs;
 pub mod gc;
@@ -499,14 +500,14 @@ pub fn is_generator(body: &[ast::Stmt]) -> bool {
             if matches!(e, ast::Expr::Yield(_) | ast::Expr::YieldFrom(_)) {
                 self.0 = true;
             }
-            if !self.0 {
+            // (a lambda owns its yields)
+            if !self.0 && !matches!(e, ast::Expr::Lambda(_)) {
                 ast::visitor::source_order::walk_expr(self, e);
             }
         }
         fn visit_stmt(&mut self, st: &'a ast::Stmt) {
-            // nested functions own their yields in Python too, but ast.walk descends into them:
-            // the prototype marks the outer function as well; keep that behaviour
-            if !self.0 {
+            // (nested functions and classes own their yields)
+            if !self.0 && !matches!(st, ast::Stmt::FunctionDef(_) | ast::Stmt::ClassDef(_)) {
                 ast::visitor::source_order::walk_stmt(self, st);
             }
         }

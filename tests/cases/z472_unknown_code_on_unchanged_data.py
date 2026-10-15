@@ -106,5 +106,5 @@ for x in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]:
     g = find(x)
 
 first = reg0["id"]                       #@ likely id
-n = len(ALL)
-#@value n: unknown
+n = len(ALL)  # (was `unknown`: find returns one of ALL's items, ALL itself does not change)
+#@value n: exactly={80}

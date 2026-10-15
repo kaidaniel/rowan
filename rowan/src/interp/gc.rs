@@ -342,6 +342,85 @@ impl Analyzer {
         }
     }
 
+    /// How many objects `drop_unreached` walks before it takes its target as held (a constructor
+    /// whose parts are a large graph, in a try around much: timm's models).
+    const DROP_WALK: usize = 256;
+    /// How many raise points of one construction `drop_unreached` looks at before it takes the
+    /// object as held (each looks at what the analyzer holds: timm's constructors raise often).
+    const DROP_LOOKS: u32 = 4;
+
+    /// Whether `target`, an instance under construction (`fresh_init`), is held by what
+    /// `roots` (and what the analyzer holds, callers' names up to `envs`) reach in `state`: if
+    /// not, it loses its state there.
+    /// Older objects reach it only through slots written since its construction began (gathered
+    /// from look to look); the walk expands only younger objects and ends when it finds the
+    /// target, or past `DROP_WALK` objects (then it is held, and stays so).
+    pub(in crate::interp) fn drop_unreached(&mut self, target: ObjId, roots: Vec<ObjId>, state: &mut State, envs: usize) {
+        let Some(mut b) = self.cx.fresh_init.remove(&target) else { return };
+        // (what was written since the last look: holders of the target, older objects' values)
+        let fp = state.footprint(&b.at);
+        for (o, sk) in fp.slots.iter() {
+            let Some(val) = state.slots.get(o, sk) else { continue };
+            if val.pts.contains(target) && *o != target {
+                b.holders.push(*o);
+            }
+            if self.heap.born_before(*o, b.mark) {
+                val.push_objs(&mut b.roots);
+            }
+        }
+        for o in fp.elems.iter() {
+            if let Some(KeyVal::KeysOf(ko)) = state.elems.get(o) {
+                if ko.objs.contains(target) {
+                    b.holders.push(*o);
+                }
+                if self.heap.born_before(*o, b.mark) {
+                    b.roots.extend(ko.objs.iter());
+                }
+            }
+        }
+        b.roots.sort_unstable();
+        b.roots.dedup();
+        b.at = state.copy();
+        b.looks += 1;
+        // (the roots without what the analyzer holds first: those are many, so a construction
+        // looked at many times is taken as held from then on)
+        let mut work: Vec<ObjId> = roots.into_iter().chain(b.roots.iter().copied()).collect();
+        b.held = b.looks > Self::DROP_LOOKS || self.reaches_young(&b, target, &mut work, state);
+        if !b.held {
+            self.gc_pinned(&mut work, Some(envs));
+            b.held = self.reaches_young(&b, target, &mut work, state);
+        }
+        if !b.held {
+            state.forget_obj(target);
+        }
+        self.cx.fresh_init.insert(target, b);
+    }
+
+    /// Whether the walk from `work` reaches `target` through objects made since `b` began (or
+    /// goes past `DROP_WALK` of them: taken as held). Held by nothing written since it began
+    /// nor by a root directly: not reached, without a walk.
+    fn reaches_young(&self, b: &super::context::Building, target: ObjId, work: &mut Vec<ObjId>, state: &State) -> bool {
+        if work.contains(&target) {
+            return true;
+        }
+        if b.holders.is_empty() {
+            work.clear();
+            return false;
+        }
+        let mut reached: FxHashSet<ObjId> = FxHashSet::default();
+        while let Some(o) = work.pop() {
+            if o == target || reached.len() > Self::DROP_WALK {
+                return true;
+            }
+            if self.heap.born_before(o, b.mark) || !reached.insert(o) {
+                continue;
+            }
+            self.budget.walk_visit();
+            self.obj_edges(o, state, work);
+        }
+        false
+    }
+
     /// Garbage collection at a loop's exit (in a function): objects the loop allocated that the
     /// frame's names, the enclosing frames and the analyzer no longer reach lose their state.
     pub(super) fn loop_gc_begin(&mut self, state: &mut State) -> Option<(u64, State)> {

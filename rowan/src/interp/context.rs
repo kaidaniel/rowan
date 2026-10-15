@@ -46,8 +46,8 @@ pub struct Context {
     pub model_epoch: u64,
     pub model_born: FxHashMap<ObjId, u64>,
     /// instances whose `__init__` is running for their construction (stores into them are
-    /// strong)
-    pub fresh_init: FxHashSet<ObjId>,
+    /// strong), with what raises found of them so far (`drop_unreached`)
+    pub fresh_init: FxHashMap<ObjId, Building>,
     /// per running summary comprehension (`[Block() for _ in range(n)]`: its iterations
     /// cannot be told apart; by the object it makes): the number of items its one iteration
     /// stands for
@@ -86,4 +86,17 @@ pub struct Modes {
     pub nonempty_gen: bool,
     /// whether the last `loop_fixpoint` converged (its last round ran from the fixpoint)
     pub loop_converged: bool,
+}
+
+/// An instance under construction, as raises see it (`Analyzer::drop_unreached`): the heap's
+/// serial when it began, the state at the last look, what older objects' slots written since it
+/// began held, the objects whose slots written since hold it, how many raises looked, and
+/// whether a raise found it held.
+pub struct Building {
+    pub mark: u64,
+    pub at: crate::state::State,
+    pub roots: Vec<ObjId>,
+    pub holders: Vec<ObjId>,
+    pub looks: u32,
+    pub held: bool,
 }

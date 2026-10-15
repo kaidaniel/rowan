@@ -83,29 +83,46 @@ impl Analyzer {
         if self.budget.over_hard_deadline() && targets.iter().all(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound)) {
             return self.unknown_call("?", None, &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
+        // (one method past its budget on each of several receivers: one call past the budget
+        // with all of them as the receiver, not one per receiver)
+        let (targets, batch) = match self.skipped_on_receivers(&targets) {
+            Some((f, recv, rest)) if rest.is_empty() => return self.skipped_on(f, &recv, &args, &kwargs, &star_args, &star_kwargs, state, node),
+            Some((f, recv, rest)) => (rest, Some((f, recv))),
+            None => (targets, None),
+        };
         // (several functions a value picks — a method of each of several receivers is the
         // receiver's own: not picked)
         let picked = targets.iter().all(|o| !matches!(self.heap.kind(*o), Kind::Bound) && !matches!(self.heap.obj(*o).payload, Payload::Method(..) | Payload::Bound(..))).then(|| self.node_text(node));
-        self.alternatives(targets.len(), false, state, &mut |an, i, st| {
-            let oid = targets[i];
-            // (a groupby method of one of several groupby objects: its results are its own)
-            let own = matches!(&an.heap.obj(oid).payload, Payload::Method(q, r) if q.starts_with("groupby.") && r.pts.iter().all(|g| an.heap.kind(g) == Kind::Groupby));
-            let saved = if own { an.cx.alloc_extra.replace(format!("gbm{}", oid)) } else { an.cx.alloc_extra.clone() };
-            if let Some(call) = &picked {
-                let name = match an.heap.kind(oid) {
-                    Kind::Function => an.heap.func_info(oid).qualname.clone(),
-                    Kind::Unknown => "code rowan cannot see".to_string(),
-                    _ => an.heap.obj(oid).label.to_string(),
-                };
-                an.cx.picked.push((call.clone(), name));
+        self.alternatives(targets.len() + usize::from(batch.is_some()), false, state, &mut |an, i, st| {
+            match (targets.get(i), &batch) {
+                (Some(&oid), _) => an.call_picked(oid, &picked, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast),
+                (None, Some((f, recv))) => an.skipped_on(*f, recv, &args, &kwargs, &star_args, &star_kwargs, st, node),
+                (None, None) => unreachable!(),
             }
-            let r = an.call_one(oid, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast);
-            if picked.is_some() {
-                an.cx.picked.pop();
-            }
-            an.cx.alloc_extra = saved;
-            r
         })
+    }
+
+    /// One of several callees a value picks (`call_value`; `picked`: the call's text, when the
+    /// value picks among functions).
+    #[allow(clippy::too_many_arguments)]
+    fn call_picked(&mut self, oid: ObjId, picked: &Option<String>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], st: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+        // (a groupby method of one of several groupby objects: its results are its own)
+        let own = matches!(&self.heap.obj(oid).payload, Payload::Method(q, r) if q.starts_with("groupby.") && r.pts.iter().all(|g| self.heap.kind(g) == Kind::Groupby));
+        let saved = if own { self.cx.alloc_extra.replace(format!("gbm{}", oid)) } else { self.cx.alloc_extra.clone() };
+        if let Some(call) = picked {
+            let name = match self.heap.kind(oid) {
+                Kind::Function => self.heap.func_info(oid).qualname.clone(),
+                Kind::Unknown => "code rowan cannot see".to_string(),
+                _ => self.heap.obj(oid).label.to_string(),
+            };
+            self.cx.picked.push((call.clone(), name));
+        }
+        let r = self.call_one(oid, args, kwargs, star_args, star_kwargs, st, node, call_ast);
+        if picked.is_some() {
+            self.cx.picked.pop();
+        }
+        self.cx.alloc_extra = saved;
+        r
     }
 
     /// Alternatives: `run(i)` for each of `n` callees, each on its own copy of the state, the
@@ -131,6 +148,34 @@ impl Analyzer {
             state.replace_with(j);
         }
         join_values(outs)
+    }
+
+    /// Among `targets`, bound methods of one function on several receivers whose calls would
+    /// not run (past the function's budget, no recursion of it running): the function, the
+    /// receivers, and the other targets.
+    fn skipped_on_receivers(&self, targets: &[ObjId]) -> Option<(ObjId, Value, Vec<ObjId>)> {
+        let bound = |o: ObjId| match &self.heap.obj(o).payload {
+            Payload::Bound(f, r) if self.heap.kind(o) == Kind::Bound && r.pts.len() == 1 => Some((*f, r)),
+            _ => None,
+        };
+        let skips = |f: ObjId| {
+            let fi = self.heap.func_info(f);
+            let runs = self.m.sdispatch.contains_key(&f) || fi.is_memo.get() || matches!(fi.node, FuncNode::Def(d) if is_generator(&d.body));
+            !runs && self.budget.exhausted(fi.node.addr()) && self.recursion.depth(f) == 0
+        };
+        let f = targets.iter().find_map(|o| bound(*o).map(|b| b.0).filter(|f| skips(*f)))?;
+        let (mine, rest): (Vec<ObjId>, Vec<ObjId>) = targets.iter().partition(|o| bound(**o).is_some_and(|b| b.0 == f));
+        (mine.len() > 1).then(|| (f, join_values(mine.iter().filter_map(|o| bound(*o).map(|b| b.1.clone())).collect::<Vec<Value>>()), rest))
+    }
+
+    /// A call of method `f` past its budget on `recv` (one or several receivers).
+    #[allow(clippy::too_many_arguments)]
+    fn skipped_on(&mut self, f: ObjId, recv: &Value, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
+        let q = self.heap.func_info(f).qualname.clone();
+        self.findings.note(format!("{} ran out of its budget: later calls are unknown code", q));
+        self.budget.out.insert(f);
+        self.entry.analysed.insert(f);
+        self.skipped_call(f, &q, Some(recv), args, kwargs, star_args, star_kwargs, state, node)
     }
 
     /// Several definitions of one method (conditional ones) on one receiver.
@@ -344,7 +389,7 @@ impl Analyzer {
         }
         if let Some(init) = self.class_lookup(cls, "__init__") {
             let fv = self.heap.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
-            self.cx.fresh_init.insert(inst);
+            self.cx.fresh_init.insert(inst, super::context::Building { mark: self.heap.serial(), at: state.copy(), roots: Vec::new(), holders: Vec::new(), looks: 0, held: false });
             for f in fv.pts.iter() {
                 if self.heap.kind(f) == Kind::Function {
                     self.call_user(f, Some(Value::obj(inst)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, false);

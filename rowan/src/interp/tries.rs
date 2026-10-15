@@ -226,6 +226,7 @@ impl Analyzer {
             here.ret = t.pre.ret.clone();
             here.exits = t.pre.exits.clone();
         }
+        let Some(t) = self.unwind.tries.last() else { return false };
         // (the same state, class and exception as the last raise recorded in this try — a loop
         // of calls raising at one point: nothing to add)
         if let Some((ls, lc, le)) = &t.last {
@@ -234,6 +235,23 @@ impl Analyzer {
             }
         }
         self.unwind.tries.last_mut().unwrap().last = Some((here.copy(), cls.clone(), exc.clone()));
+        // (an object whose constructor the raise leaves, made in the try, is garbage in this
+        // raise state unless what the try's frame reaches holds it: it is not the object a
+        // later raise point holds once built)
+        if self.cx.frames.len() > fl {
+            let mark = self.unwind.tries.last().unwrap().mark;
+            let half: Vec<ObjId> = self.cx.fresh_init.iter().filter(|(o, b)| !b.held && !self.heap.born_before(**o, mark)).map(|(o, _)| *o).collect();
+            for o in half {
+                let mut roots: Vec<ObjId> = Vec::new();
+                self.state_roots(&here, el, fl, &mut roots);
+                for (x, v) in here.lasts.iter() {
+                    roots.push(*x);
+                    v.push_objs(&mut roots);
+                }
+                exc.push_objs(&mut roots);
+                self.drop_unreached(o, roots, &mut here, el);
+            }
+        }
         // (joined per class: a handler takes every raise of a class or none of them; what
         // callees made is collected when the try ends)
         let recs = &mut self.unwind.tries.last_mut().unwrap().recs;

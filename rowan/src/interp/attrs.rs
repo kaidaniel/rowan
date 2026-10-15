@@ -871,7 +871,7 @@ impl Analyzer {
             if self.store_by_class(oid, kind, name, nk, v, strong, node, state) {
                 continue;
             }
-            let strong_key = strong || (targets.len() == 1 && self.cx.fresh_init.contains(&oid));
+            let strong_key = strong || (targets.len() == 1 && self.cx.fresh_init.contains_key(&oid));
             if kind == Kind::Unknown && !strong && state.slot_opt(oid, Ns::Attr, nk).is_none() {
                 // a weak store on open content (an element under an unknown key, say)
                 // joins with what was there, which is unknown
@@ -897,7 +897,7 @@ impl Analyzer {
         // a frozen dataclass: assignment raises FrozenInstanceError (an AttributeError)
         if kind == Kind::Instance {
             if let Some(cls) = self.heap.instance_class(oid) {
-                if self.heap.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.dc_frozen.get()).unwrap_or(false)) && !self.cx.fresh_init.contains(&oid) {
+                if self.heap.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.dc_frozen.get()).unwrap_or(false)) && !self.cx.fresh_init.contains_key(&oid) {
                     self.raise_here("FrozenInstanceError", state);
                     return true;
                 }
