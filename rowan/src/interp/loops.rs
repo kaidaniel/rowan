@@ -308,14 +308,7 @@ impl Analyzer {
         join_breaks(&mut exit_s, exit_acc);
         if f.orelse.is_empty() && !has_jump && !prefixed && back.reachable && pre.reachable && exit_s.reachable {
             self.loop_ran_facts(f, &back, &pre, &mut exit_s);
-            if let Some(rounds) = self.loop_rounds(f, &pre) {
-                self.counted_appends(f, rounds, &pre, &mut exit_s);
-                if self.m.torch_on {
-                    for (name, v) in crate::models::torch::counted_cats(self, f, rounds, &pre, &back) {
-                        self.store_name(name, v, &mut exit_s);
-                    }
-                }
-            }
+            self.counted_rounds(f, &pre, &back, &mut exit_s);
         }
         join_breaks(&mut exit_s, prefix_breaks);
         state.replace_with(exit_s);
@@ -347,6 +340,18 @@ impl Analyzer {
             new.extend(cond_facts_for(s(&format!("{}@{}", text, func)), true, deps, back, pre, exit_s));
         }
         add_facts(exit_s, new);
+    }
+
+    /// What a loop of a known number of rounds that ran to its end left: lists appended to
+    /// and tensors grown by `cat` once per round.
+    fn counted_rounds(&mut self, f: &'static ast::StmtFor, pre: &State, back: &State, exit_s: &mut State) {
+        let Some(rounds) = self.loop_rounds(f, pre) else { return };
+        self.counted_appends(f, rounds, pre, exit_s);
+        if self.m.torch_on {
+            for (name, v) in crate::models::torch::counted_cats(self, f, rounds, pre, back) {
+                self.store_name(name, v, exit_s);
+            }
+        }
     }
 
     /// `for _ in range(T): … xs.append(x) …` with no `break` / `continue`, the append a statement
