@@ -13,7 +13,7 @@ use ruff_python_ast as ast;
 use crate::domain::{join_values, KeyVal, Ns, ObjId, Row, Source, SourceKind, Value};
 use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, StrId};
-use crate::interp::{dotted_last, Analyzer, Call, Frame, FrameKind, FuncNode, Payload};
+use crate::interp::{dotted_last, Analyzer, Call, FuncNode, Payload};
 use crate::models::pydantic::{Ann, DumpOpts};
 use crate::state::{Kind, State};
 
@@ -140,11 +140,7 @@ impl Analyzer {
     }
 
     pub(crate) fn eval_in_module(&mut self, module: ObjId, e: &'static ast::Expr, state: &mut State) -> Value {
-        let mi = self.heap.module_info(module);
-        self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), module, "fastapi", true, "<fastapi>"));
-        let v = self.eval(e, state);
-        self.cx.frames.pop();
-        v
+        self.in_module(module, "fastapi", "<fastapi>", |an| an.eval(e, state))
     }
 
     /// All routes of `app`: its own and those of the routers included in it (with prefixes),
@@ -741,10 +737,10 @@ impl Analyzer {
             let r = an.fa_run_handler(func, gens, req, entry, st, &nd);
             an.m.fa_gen_ret = Some(an.m.fa_gen_ret.take().unwrap_or_default().join(&r));
         });
-        let prev = self.gens.cm_hook.replace(crate::interp::CmHook { body: &[], target: None, depth: self.cx.frames.len(), env_after: None, ran: false, then: Some(then), body_died: false, env_before: None, multi: false, body_exits: None, body_ret: None });
         let outer = self.m.fa_gen_ret.take();
-        self.call_user(g, None, vec![], kwargs, vec![], vec![], state, node, None, false);
-        let h = std::mem::replace(&mut self.gens.cm_hook, prev);
+        let h = self.with_cm_then(then, |an| {
+            an.call_user(g, None, vec![], kwargs, vec![], vec![], state, node, None, false);
+        });
         let ret = std::mem::replace(&mut self.m.fa_gen_ret, outer).unwrap_or_default();
         match h {
             Some(h) if h.ran => {
@@ -1579,7 +1575,7 @@ pub fn apply_route(an: &mut Analyzer, dv: &Value, f: &Value) {
                     if an.heap.kind(fo) == Kind::Function {
                         an.m.fa_hooks[idx].3 = Some(fo);
                         // (run around each handler, not on its own)
-                        an.entry.done.insert(fo);
+                        an.mark_entry_done(fo);
                     }
                 }
             }
@@ -1646,23 +1642,17 @@ impl crate::interp::Analyzer {
     pub(crate) fn fa_entry_run(&mut self, oid: ObjId, fi: &crate::interp::FuncInfo, state: &mut State) {
         let mut st = state.copy();
         st.ret = None;
-        let mi = self.heap.module_info(fi.module);
-        self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
-        self.entry.scope = Some(oid);
-        let fake = Node::synthetic(mi.idx, fi.node.node().line);
-        let saved_entry = self.entry.run.replace(oid);
-        if self.fa_entry_through_middleware(oid, &mut st, &fake).is_none() {
-            self.m.fa_dep_cache.push(rustc_hash::FxHashMap::default());
-            if let Some(idx) = self.m.fa_routes.iter().position(|r| r.func == Some(oid)) {
-                self.fa_route_deps(idx, None, &mut st, &fake);
+        self.as_entry_run(oid, fi, |an, fake| {
+            if an.fa_entry_through_middleware(oid, &mut st, fake).is_none() {
+                an.m.fa_dep_cache.push(rustc_hash::FxHashMap::default());
+                if let Some(idx) = an.m.fa_routes.iter().position(|r| r.func == Some(oid)) {
+                    an.fa_route_deps(idx, None, &mut st, fake);
+                }
+                let gens = an.fa_yield_deps(oid, &mut st);
+                an.fa_run_handler(oid, gens, None, true, &mut st, fake);
+                an.m.fa_dep_cache.pop();
             }
-            let gens = self.fa_yield_deps(oid, &mut st);
-            self.fa_run_handler(oid, gens, None, true, &mut st, &fake);
-            self.m.fa_dep_cache.pop();
-        }
-        self.entry.scope = None;
-        self.entry.run = saved_entry;
-        self.cx.frames.pop();
+        });
         for (src, k) in st.reqs.diff_keys(&state.reqs) {
             let Some(info) = st.reqs.get(&src, &k) else { continue };
             let nv = match state.reqs.get(&src, &k) {

@@ -397,7 +397,7 @@ pub fn may_type_error(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &In
         an.raise_here("TypeError", state);
         return;
     }
-    if an.unwind.tries.is_empty() {
+    if !an.in_try() {
         return;
     }
     // (known: literals and the program's containers of literals; not an unknown value, an
@@ -1463,7 +1463,7 @@ fn m_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let strong = recs.len() == 1 && an.strongable(recs[0]);
                 for o in recs {
                     // a user `__setattr__` takes the store, whatever the name
-                    let hook = an.heap.kind(o) == Kind::Instance && !an.mode.bypass_setattr && an.heap.instance_class(o).is_some_and(|cls| an.class_lookup(cls, "__setattr__").is_some());
+                    let hook = an.heap.kind(o) == Kind::Instance && !an.setattr_bypassed() && an.heap.instance_class(o).is_some_and(|cls| an.class_lookup(cls, "__setattr__").is_some());
                     if hook {
                         an.call_method_with(&Value::obj(o), "__setattr__", vec![c.args[1].clone(), c.args[2].clone()], &c.node, st);
                         continue;
@@ -1530,9 +1530,7 @@ fn m_op_setitem(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// `object.__setattr__(obj, "name", v)`: the plain store (no user `__setattr__`).
 fn m_object_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    let saved = std::mem::replace(&mut an.mode.bypass_setattr, true);
-    m_setattr(an, st, c);
-    an.mode.bypass_setattr = saved;
+    an.plain_setattr(|an| m_setattr(an, st, c));
     an.none_v.clone()
 }
 
@@ -1932,8 +1930,8 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             for ch in choices {
                 let names: Vec<String> = (0..ch.len()).map(|i| format!("__b{}", i)).collect();
                 let modname = format!("<type {} {:?}>", crate::interp::site_string(&c.node), ch);
-                let moid = match an.program.modules.get(&modname) {
-                    Some(&m) => m,
+                let moid = match an.module(&modname) {
+                    Some(m) => m,
                     None => {
                         let Ok((idx, tree)) = crate::frontend::parse(&modname, None, format!("class {}({}):\n    pass\n", name, names.join(", "))) else { return Value::data("type") };
                         an.make_module(&modname, None, idx, tree)
@@ -3150,8 +3148,8 @@ pub fn generated_class(an: &mut Analyzer, st: &mut State, qual: &str) -> Option<
             _ => return None,
         },
     };
-    let moid = match an.program.modules.get(modname) {
-        Some(&m) => m,
+    let moid = match an.module(&modname) {
+        Some(m) => m,
         None => {
             let (idx, tree) = crate::frontend::parse(modname, None, src.to_string()).ok()?;
             let m = an.make_module(modname, None, idx, tree);
@@ -4210,9 +4208,7 @@ fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             an.store_key(o, Ns::Attr, &KeyVal::Lit(intern::key_str_lit(name)), &v, strong, &c.node, st);
                         }
                     }
-                    an.unwind.cur_exc = Some(e);
-                    an.raise_here("JSONDecodeError", st);
-                    an.unwind.cur_exc = None;
+                    an.raise_exc("JSONDecodeError", Some(e), None, true, st);
                     return Value::new();
                 }
                 _ => {}
@@ -4235,7 +4231,7 @@ fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let text = crate::frontend::text_at(&c.node);
     if !text.is_empty() {
         let scope = an.frame().func.unwrap_or(0);
-        an.names.set(oid, text.split_whitespace().collect::<Vec<_>>().join(" "), scope);
+        an.set_symbol(oid, text.split_whitespace().collect::<Vec<_>>().join(" "), scope);
     }
     Value::obj(oid)
 }
@@ -4260,7 +4256,7 @@ fn m_response_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let text = crate::frontend::text_at(&c.node);
             if !text.is_empty() {
                 let scope = an.frame().func.unwrap_or(0);
-        an.names.set(oid, text.split_whitespace().collect::<Vec<_>>().join(" "), scope);
+        an.set_symbol(oid, text.split_whitespace().collect::<Vec<_>>().join(" "), scope);
             }
             outs.push(Value::obj(oid));
         }
@@ -4315,7 +4311,7 @@ fn m_namedtuple(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let dvals: Vec<Value> = c.kw("defaults").map(|d| an.iterate(&d, &c.node, st).items.unwrap_or_default()).unwrap_or_default();
     let ndefaults = dvals.len();
     let modname = format!("<namedtuple {} {}>", tname, c.site);
-    if let Some(&moid) = an.program.modules.get(&modname) {
+    if let Some(moid) = an.module(&modname) {
         return st.slot(moid, Ns::Attr, key_str_lit(&tname));
     }
     let mut src = format!("from typing import NamedTuple\n\n\nclass {}(NamedTuple):\n", tname);
@@ -4363,8 +4359,8 @@ fn m_getter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let body = if parts.len() == 1 { parts[0].clone() } else { format!("({},)", parts.join(", ")) };
     let modname = format!("<{} {}>", if item { "itemgetter" } else { "attrgetter" }, body);
-    let moid = match an.program.modules.get(&modname) {
-        Some(&m) => m,
+    let moid = match an.module(&modname) {
+        Some(m) => m,
         None => {
             let src = format!("def getter(obj):\n    return {}\n", body);
             let Ok((idx, tree)) = crate::frontend::parse(&modname, None, src) else { return Value::data("getter") };
@@ -4535,8 +4531,8 @@ pub fn re_match_generated(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
     }
     let ngroups = pat.matches('(').count().saturating_sub(pat.matches("(?").count()) + names.len();
     let modname = format!("<re.Match {:?}>", &*pat);
-    let moid = match an.program.modules.get(&modname) {
-        Some(&m) => m,
+    let moid = match an.module(&modname) {
+        Some(m) => m,
         None => {
             // (an unknown text's groups: unknown strings, shown as `?`, not the helper's name)
             let items = names.iter().map(|n| format!("{:?}: str(_GROUP)", n)).collect::<Vec<_>>().join(", ");
@@ -4671,7 +4667,7 @@ fn m_make_dataclass(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     let modname = format!("<make_dataclass {} {}>", tname, c.site);
-    if let Some(&moid) = an.program.modules.get(&modname) {
+    if let Some(moid) = an.module(&modname) {
         return st.slot(moid, Ns::Attr, key_str_lit(&tname));
     }
     let mut src = format!("from dataclasses import dataclass\n\n\n@dataclass\nclass {}:\n", tname);

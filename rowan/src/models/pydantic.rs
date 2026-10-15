@@ -527,12 +527,12 @@ impl Analyzer {
                 if found.is_none() {
                     // by name among the program's classes (this module's first): the state at
                     // hand may be a summary's, without the module's names
-                    let cands: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| self.heap.class_info_opt(*c).map(|ci| ci.name == n).unwrap_or(false) && is_validated(self, *c)).collect();
+                    let cands: Vec<ObjId> = self.user_classes().iter().copied().filter(|c| self.heap.class_info_opt(*c).map(|ci| ci.name == n).unwrap_or(false) && is_validated(self, *c)).collect();
                     found = cands.iter().copied().find(|c| self.heap.class_info(*c).module == module).or_else(|| cands.first().copied());
                 }
                 if found.is_none() {
                     let td = v.pts.iter().find(|o| self.heap.kind(*o) == Kind::Class && self.heap.class_info_opt(*o).map(|ci| ci.lib.typed_dict).unwrap_or(false)).or_else(|| {
-                        let c: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| self.heap.class_info_opt(*c).map(|ci| ci.name == n && ci.lib.typed_dict).unwrap_or(false)).collect();
+                        let c: Vec<ObjId> = self.user_classes().iter().copied().filter(|c| self.heap.class_info_opt(*c).map(|ci| ci.name == n && ci.lib.typed_dict).unwrap_or(false)).collect();
                         c.iter().copied().find(|x| self.heap.class_info(*x).module == module).or_else(|| c.first().copied())
                     });
                     if let Some(t) = td {
@@ -573,7 +573,7 @@ impl Analyzer {
                 }
                 if found.is_none() {
                     let ec = v.pts.iter().find(|o| self.m.enum_members.contains_key(o)).or_else(|| {
-                        let c: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| self.m.enum_members.contains_key(c) && self.heap.class_info_opt(*c).map(|ci| ci.name == n).unwrap_or(false)).collect();
+                        let c: Vec<ObjId> = self.user_classes().iter().copied().filter(|c| self.m.enum_members.contains_key(c) && self.heap.class_info_opt(*c).map(|ci| ci.name == n).unwrap_or(false)).collect();
                         c.iter().copied().find(|x| self.heap.class_info(*x).module == module).or_else(|| c.first().copied())
                     });
                     if let Some(c) = ec {
@@ -841,9 +841,8 @@ impl Analyzer {
                     let mut branches: Vec<State> = Vec::new();
                     for &o in &recs {
                         let mut b = state.copy();
-                        self.cx.branch_depth += 1;
-                        let x = self.load_item_or_attr(&Value::obj(o), ns_of(self, o), kk, node, &mut b);
-                        self.cx.branch_depth -= 1;
+                        let ns = ns_of(self, o);
+                        let x = self.in_branch(|an| an.load_item_or_attr(&Value::obj(o), ns, kk, node, &mut b));
                         val = val.join(&x);
                         branches.push(b);
                     }
@@ -875,11 +874,7 @@ impl Analyzer {
                             for k in &keys {
                                 let mut b = state.copy();
                                 let ns = ns_of(self, open[0]);
-                                let saved = std::mem::replace(&mut self.findings.quiet, true);
-                                self.cx.branch_depth += 1;
-                                let x = self.load_item_or_attr(&ov, ns, *k, node, &mut b);
-                                self.cx.branch_depth -= 1;
-                                self.findings.quiet = saved;
+                                let x = self.quietly(|an| an.in_branch(|an| an.load_item_or_attr(&ov, ns, *k, node, &mut b)));
                                 val = val.join(&x);
                                 branches.push(b);
                             }
@@ -1124,17 +1119,8 @@ impl Analyzer {
         }
         self.heap.obj_mut(eo).payload = Payload::Method(format!("pydverr.{}", use_idx), Value::new());
         state.set_row(eo, Ns::Attr, Row::new().data_store(crate::domain::Source::new("ValidationError", crate::domain::SourceKind::Data)));
-        self.unwind.cur_exc = Some(Value::obj(eo));
-        if cls != "ValidationError" {
-            self.unwind.cur_exc_cls = Some(crate::interp::builtin_exc_names(cls));
-        }
-        if sure {
-            self.raise_here(cls, state);
-        } else {
-            self.may_raise_here(cls, state);
-        }
-        self.unwind.cur_exc = None;
-        self.unwind.cur_exc_cls = None;
+        let exc_cls = (cls != "ValidationError").then(|| crate::interp::builtin_exc_names(cls));
+        self.raise_exc(cls, Some(Value::obj(eo)), exc_cls, sure, state);
     }
 
     /// Field constraints on known values: an error when every value breaks one (maybe when
@@ -1380,14 +1366,9 @@ impl Analyzer {
     /// requirements as for the program's own reads).
     fn load_item_or_attr(&mut self, recv: &Value, ns: Ns, k: KeyId, node: &Node, state: &mut State) -> Value {
         // a ValidationError the program (or FastAPI: a 422) handles: no diagnostic
-        let saved = self.mode.verdict_guarded;
-        self.mode.verdict_guarded |= self.validation_caught();
+        let caught = self.validation_caught();
         // (a missing field is pydantic's ValidationError, not a KeyError)
-        let saved_exc = std::mem::replace(&mut self.unwind.item_exc_force, Some("ValidationError"));
-        let v = if ns == Ns::Attr { self.load_attr(recv, &intern::key_py_str(k), node, state, true) } else { self.load_item(recv, Ns::Item, &Value::lit(k), node, state, true) };
-        self.unwind.item_exc_force = saved_exc;
-        self.mode.verdict_guarded = saved;
-        v
+        self.guarded_if(caught, |an| an.with_item_exc("ValidationError", |an| if ns == Ns::Attr { an.load_attr(recv, &intern::key_py_str(k), node, state, true) } else { an.load_item(recv, Ns::Item, &Value::lit(k), node, state, true) }))
     }
 
     /// A try around here catches a ValidationError.
@@ -1497,7 +1478,7 @@ impl Analyzer {
         let here = self.heap.module_info(self.frame().module).idx;
         let owner = crate::frontend::module_of_addr(d as *const ast::Expr as usize);
         if let Some(idx) = owner.filter(|i| *i != here) {
-            if let Some(moid) = self.program.modules.values().copied().find(|m| self.heap.module_info(*m).idx == idx) {
+            if let Some(moid) = self.module_of_idx(idx) {
                 return self.eval_in_module(moid, d, state);
             }
         }
@@ -1647,9 +1628,7 @@ impl Analyzer {
                     let mut branches: Vec<State> = Vec::new();
                     for m in chosen {
                         let mut b = state.copy();
-                        self.cx.branch_depth += 1;
-                        let x = self.pyd_validate_opts(m, &Value::obj(o), &mut b, node, true);
-                        self.cx.branch_depth -= 1;
+                        let x = self.in_branch(|an| an.pyd_validate_opts(m, &Value::obj(o), &mut b, node, true));
                         outs.push(x);
                         if b.reachable {
                             branches.push(b);
@@ -1864,11 +1843,8 @@ impl Analyzer {
                     let definite = recs.iter().all(|o| state.row(*o, Ns::Item).definite.contains(k));
                     let maybe = recs.iter().any(|o| state.row(*o, Ns::Item).present.contains(k) || state.row(*o, Ns::Item).open());
                     let v = if required && !definite {
-                        let saved = self.mode.verdict_guarded;
-                        self.mode.verdict_guarded |= self.validation_caught();
-                        let v = self.load_item(&recv, Ns::Item, &Value::lit(k), node, state, true);
-                        self.mode.verdict_guarded = saved;
-                        v
+                        let caught = self.validation_caught();
+                        self.guarded_if(caught, |an| an.load_item(&recv, Ns::Item, &Value::lit(k), node, state, true))
                     } else if maybe {
                         self.pyd_read_guarded(&recs, k, state)
                     } else {

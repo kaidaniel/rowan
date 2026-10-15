@@ -222,13 +222,10 @@ impl Analyzer {
         let here = self.heap.module_info(self.frame().module).idx;
         let owner = crate::frontend::module_of_addr(d as *const ast::Expr as usize);
         if let Some(idx) = owner.filter(|i| *i != here) {
-            if let Some(moid) = self.program.modules.values().copied().find(|m| self.heap.module_info(*m).idx == idx) {
+            if let Some(moid) = self.module_of_idx(idx) {
                 let mi = self.heap.module_info(moid);
                 let (ctx, single) = (self.frame().ctx.clone(), self.frame().single);
-                self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), moid, &ctx, single, "<default>"));
-                let v = self.dataclass_default_here(d, node, state);
-                self.cx.frames.pop();
-                return v;
+                return self.in_frame(Frame::new(FrameKind::Module, mi.scopes.module(), moid, &ctx, single, "<default>"), |an| an.dataclass_default_here(d, node, state));
             }
         }
         self.dataclass_default_here(d, node, state)
@@ -556,7 +553,7 @@ impl Analyzer {
             return None;
         }
         let call = crate::interp::Call { qual: "builtins.dict".into(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
-        let m = self.program.models.lookup("builtins.dict")?;
+        let m = self.model("builtins.dict")?;
         Some(m(self, state, &call))
     }
 

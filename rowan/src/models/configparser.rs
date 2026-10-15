@@ -230,13 +230,7 @@ pub fn rebuild(an: &mut Analyzer, st: &mut State, node: &Node, oid: u32) {
 fn cfg_raise(an: &mut Analyzer, st: &mut State, name: &str, sure: bool) {
     // (its class: configparser's hierarchy, `except configparser.Error` catches it too)
     let q = if name == "ValueError" { name.to_string() } else { format!("configparser.{}", name) };
-    an.unwind.cur_exc_cls = Some(crate::interp::builtin_exc_names(&q));
-    if sure {
-        an.raise_here(&q, st);
-    } else {
-        an.may_raise_here(&q, st);
-    }
-    an.unwind.cur_exc_cls = None;
+    an.raise_exc(&q, None, Some(crate::interp::builtin_exc_names(&q)), sure, st);
 }
 
 fn convert(kind: &str, s: &str) -> Option<intern::KeyId> {
@@ -486,13 +480,13 @@ pub fn m_parser(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 Some(k) => {
                     let sv = st.slot(oid, Ns::Item, k);
                     let call = Call { qual: "dict.items".into(), recv: Some(sv), args: vec![], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: c.node, call_ast: c.call_ast, site: c.site.clone(), line: c.line };
-                    let views = an.program.models.lookup("dict.items");
+                    let views = an.model("dict.items");
                     let v = match views {
                         Some(m) => m(an, st, &call),
                         None => return Value::data("items"),
                     };
                     let call2 = Call { qual: "builtins.list".into(), recv: None, args: vec![v], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: c.node, call_ast: c.call_ast, site: c.site.clone(), line: c.line };
-                    match an.program.models.lookup("builtins.list") {
+                    match an.model("builtins.list") {
                         Some(m) => m(an, st, &call2),
                         None => Value::data("items"),
                     }

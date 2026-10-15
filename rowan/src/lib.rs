@@ -5,7 +5,7 @@ pub mod intern;
 pub mod interp;
 pub mod layered;
 pub mod models;
-pub mod report;
+pub use interp::report;
 pub mod scopes;
 
 pub mod state;

@@ -418,7 +418,7 @@ pub fn m_deque(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = c.qual.rsplit('.').next().unwrap_or("").to_string();
     let Some(oid) = c.recv.as_ref().and_then(|r| r.single()) else { return Value::data("deque") };
     let maxlen = an.m.deques.get(&oid).copied().flatten();
-    let strong = an.heap.obj(oid).single && an.frame().loop_depth == 0 && an.cx.cond_depth == 0;
+    let strong = an.heap.obj(oid).single && an.frame().loop_depth == 0 && an.cond_depth() == 0;
     let cur = known_items(an, oid, st).filter(|_| strong);
     let arg = c.args.first().cloned().unwrap_or_default();
     let fit = |mut items: Vec<Value>, left: bool| -> Vec<Value> {

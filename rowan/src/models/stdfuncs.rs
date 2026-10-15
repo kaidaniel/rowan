@@ -457,8 +457,8 @@ pub fn m_methodcaller(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     call_args.extend(kws.iter().map(|(k, g)| format!("{}={}", k, g)));
     let modname = format!("<methodcaller {} {}>", mname, c.site);
     let src = format!("def caller(obj):\n    return obj.{}({})\n", mname, call_args.join(", "));
-    let moid = match an.program.modules.get(&modname) {
-        Some(&m) => m,
+    let moid = match an.module(&modname) {
+        Some(m) => m,
         None => {
             let Ok((idx, tree)) = crate::frontend::parse(&modname, None, src) else { return Value::data("methodcaller") };
             an.make_module(&modname, None, idx, tree)

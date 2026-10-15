@@ -22,6 +22,7 @@ pub mod context;
 pub use context::{Context, Modes};
 pub mod effects;
 pub mod alloc;
+pub mod api;
 pub mod entry;
 pub use entry::Entries;
 pub mod exprs;
@@ -40,6 +41,7 @@ pub mod program;
 pub use program::{package_of_file, package_root_of_file, Program};
 pub use crate::models::tables::*;
 pub mod recursion;
+pub mod report;
 pub use recursion::{ActKey, Recursion};
 pub mod stmts;
 pub mod tries;
@@ -330,34 +332,34 @@ pub struct Analyzer {
     /// the library models' own tables (`models::Tables`)
     pub m: crate::models::Tables,
     /// the main file, import paths, models, modules imported (`interp/program.rs`)
-    pub program: Program,
+    pub(in crate::interp) program: Program,
     /// the objects (`interp/heap.rs`)
     pub heap: Heap,
     /// what the analysis found: verdicts, notes, summaries, golden row checks, hover facts
     /// (`interp/findings.rs`)
-    pub findings: Findings,
+    pub(in crate::interp) findings: Findings,
     /// the report's names for unknown objects and calls (`interp/names.rs`)
-    pub names: Names,
+    pub(in crate::interp) names: Names,
     /// unknown code's havoc walks (`interp/unknown.rs`)
-    pub havoc: Havoc,
+    pub(in crate::interp) havoc: Havoc,
     /// what code may change when it does not run (`interp/effects.rs`)
-    pub effects: effects::EffectsCache,
+    pub(in crate::interp) effects: effects::EffectsCache,
     /// budgets, the deadline and the work counters (`interp/budget.rs`)
-    pub budget: Budget,
+    pub(in crate::interp) budget: Budget,
     /// the running activations, recursion's fixpoints (`interp/recursion.rs`)
-    pub recursion: Recursion,
+    pub(in crate::interp) recursion: Recursion,
     /// entry runs: which functions had one, their receivers (`interp/entry.rs`)
-    pub entry: Entries,
+    pub(in crate::interp) entry: Entries,
     /// generators and `@contextmanager` bodies run at their consumers (`interp/gens.rs`)
-    pub gens: Gens,
+    pub(in crate::interp) gens: Gens,
     /// the ways out of running code: raises, try contexts, handlers, break / continue, finally
     /// (`interp/tries.rs`)
-    pub unwind: Unwind,
+    pub(in crate::interp) unwind: Unwind,
     /// the context the running code is in: frames, callers' names, call chain, branch depth
     /// (`interp/context.rs`)
-    pub cx: Context,
+    pub(in crate::interp) cx: Context,
     /// modes an evaluation sets for the code it calls (`interp/context.rs`)
-    pub mode: Modes,
+    pub(in crate::interp) mode: Modes,
     /// `None`
     pub none_v: Value,
 }

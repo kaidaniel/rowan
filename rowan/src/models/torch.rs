@@ -93,11 +93,11 @@ impl Analyzer {
             return Some(*sy);
         }
         // the result of an unknown call that no variable names: nothing to name its dims by
-        if self.heap.kind(o) == Kind::Unknown && self.names.origins.contains_key(&o) && self.m.torch_on {
+        if self.heap.kind(o) == Kind::Unknown && self.names().origins.contains_key(&o) && self.m.torch_on {
             return None;
         }
-        let text = self.names.get(o)?;
-        let scope = self.names.scope(o);
+        let text = self.names().get(o)?;
+        let scope = self.names().scope(o);
         Some(sh::sym(scope, text))
     }
 
@@ -353,7 +353,7 @@ impl Analyzer {
     /// number, not a tensor, `d ** 0.5`) or as a `Tensor` (`data[j:j + T]` is a tensor's
     /// slice, not a list's): an unknown known to be one. None for other annotations.
     pub fn t_param(&mut self, ann: &'static ruff_python_ast::Expr, fi: &crate::interp::FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
-        if !self.entry.torch_modules.contains(&fi.module) {
+        if !self.is_torch_module(fi.module) {
             return None;
         }
         let node = Analyzer::strip_annotation(ann)?;
@@ -478,8 +478,8 @@ impl Analyzer {
 
     // ---------------------------------------------------------------- notes
     fn t_note_ctx(&self) -> (Vec<u32>, bool) {
-        let entry = self.entry.run.is_some();
-        let mut chain = self.cx.call_chain.clone();
+        let entry = self.entry_function().is_some();
+        let mut chain = self.call_chain().to_vec();
         if entry && !chain.is_empty() {
             chain.remove(0);
         }
@@ -494,15 +494,15 @@ impl Analyzer {
     }
 
     pub fn t_print_ctx(&self, st: &State) -> sh::PrintCtx {
-        let scope = self.cx.frames.iter().rev().find_map(|fr| fr.func).unwrap_or(0);
+        let scope = self.frames().iter().rev().find_map(|fr| fr.func).unwrap_or(0);
         self.t_print_ctx_at(scope, &st.env, st)
     }
 
     /// The printing context of the run's outermost function (an entry run's function): a
     /// requirement found in a callee is stated in the caller's terms at the call line.
     pub fn t_outer_print_ctx(&self, st: &State) -> sh::PrintCtx {
-        let funcs: Vec<u32> = self.cx.frames.iter().filter(|f| f.kind == crate::interp::FrameKind::Function).filter_map(|f| f.func).collect();
-        let target = match self.entry.run {
+        let funcs: Vec<u32> = self.frames().iter().filter(|f| f.kind == crate::interp::FrameKind::Function).filter_map(|f| f.func).collect();
+        let target = match self.entry_function() {
             Some(e) => funcs.iter().position(|f| *f == e),
             None => if funcs.is_empty() { None } else { Some(0) },
         };
@@ -512,10 +512,7 @@ impl Analyzer {
             return self.t_print_ctx(st);
         }
         let back = total - 1 - j;
-        if back > self.cx.env_stack.len() {
-            return self.t_print_ctx(st);
-        }
-        let env = &self.cx.env_stack[self.cx.env_stack.len() - back];
+        let Some(env) = self.caller_env(back) else { return self.t_print_ctx(st) };
         self.t_print_ctx_at(funcs[j], env, st)
     }
 
@@ -1196,7 +1193,7 @@ impl Analyzer {
                     _ => "",
                 };
                 let q = format!("{}.{}", fam, name);
-                if !fam.is_empty() && !MODULE_METHODS.contains(&name) && self.program.models.lookup(&q).is_some() {
+                if !fam.is_empty() && !MODULE_METHODS.contains(&name) && self.model(&q).is_some() {
                     return Some(self.method_value(&q, obj));
                 }
                 return Some(if MODULE_METHODS.contains(&name) { self.method_value(&format!("nnmodule.{}", name), obj) } else { Value::data(&format!("{}.{}", self.heap.obj(o).label, name)) });
@@ -1235,7 +1232,7 @@ impl Analyzer {
         }
         // an unknown may be an instance of a user class defining this name, or a tensor:
         // both readings
-        if unknown_tensorish && !self.m.t_skip_user && self.program.user_classes.iter().any(|c| self.heap.cls_slots.contains_key(&(*c, Ns::Attr, key_str_lit(name)))) {
+        if unknown_tensorish && !self.m.t_skip_user && self.user_classes().iter().any(|c| self.heap.cls_slots.contains_key(&(*c, Ns::Attr, key_str_lit(name)))) {
             self.m.t_getattr_plain = true;
             let plain = self.load_attr(obj, name, node, st, false);
             self.m.t_getattr_plain = false;
@@ -4381,7 +4378,7 @@ impl Analyzer {
         } else if !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Unknown)) {
             // a parameter / read: its shape; an unknown call's result: only once facts say
             // something about it
-            let call_result = v.pts.iter().any(|o| self.names.origins.contains_key(&o) || self.names.get(o).map(|t| t.contains('(')).unwrap_or(false));
+            let call_result = v.pts.iter().any(|o| self.names().origins.contains_key(&o) || self.names().get(o).map(|t| t.contains('(')).unwrap_or(false));
             self.t_shape(v, st).filter(|s| !call_result || !(s.prefix.is_empty() && s.suffix.is_empty() && matches!(s.rest, Some(Rest::Slice(_, 0, 0)) | Some(Rest::Any))))
         } else {
             None
@@ -4627,7 +4624,7 @@ impl Analyzer {
     /// binding of the name keeps its value unnamed (one name, one value).
     pub fn t_name_number(&mut self, name: StrId, v: &Value) -> Option<Value> {
         let fr = self.frame();
-        if fr.func.is_some() || fr.loop_depth > 0 || !fr.unroll.is_empty() || self.entry.run.is_some() || !v.pts.is_empty() {
+        if fr.func.is_some() || fr.loop_depth > 0 || !fr.unroll.is_empty() || self.entry_function().is_some() || !v.pts.is_empty() {
             return None;
         }
         let KeyVal::Data(l) = &v.kv else { return None };
@@ -4650,10 +4647,10 @@ impl Analyzer {
             return;
         }
         let o = v.pts.first().unwrap();
-        if self.heap.kind(o) != Kind::Unknown || !self.names.origins.contains_key(&o) || self.m.t_var_names.contains_key(&o) {
+        if self.heap.kind(o) != Kind::Unknown || !self.names().origins.contains_key(&o) || self.m.t_var_names.contains_key(&o) {
             return;
         }
-        let scope = self.cx.frames.iter().rev().find_map(|fr| fr.func).unwrap_or(0);
+        let scope = self.frames().iter().rev().find_map(|fr| fr.func).unwrap_or(0);
         let sy = sh::sym(scope, &intern::str_get(name));
         // (a name already given to a number stays that number's)
         if !self.m.t_named_numbers.contains(&sy) {
@@ -4864,7 +4861,7 @@ pub fn m_tensor_or_builtin(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
     if builtin {
         let q = if name == "split" { "str.split" } else { "list.sort" };
         let call = Call { qual: q.to_string(), recv: c.recv.clone(), args: c.args.clone(), kwargs: c.kwargs.clone(), star_args: c.star_args.clone(), star_kwargs: c.star_kwargs.clone(), node: c.node, call_ast: c.call_ast, site: c.site.clone(), line: c.line };
-        if let Some(m) = an.program.models.lookup(q) {
+        if let Some(m) = an.model(q) {
             return m(an, st, &call);
         }
         return Value::data(&format!("L{}", c.line));
