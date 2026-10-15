@@ -37,6 +37,8 @@ pub mod names;
 pub use names::Names;
 pub mod narrow;
 pub use crate::models::tables::*;
+pub mod recursion;
+pub use recursion::{ActKey, Recursion};
 pub mod stmts;
 pub mod tries;
 pub use tries::*;
@@ -353,6 +355,8 @@ pub struct Analyzer {
     pub effects: effects::EffectsCache,
     /// budgets, the deadline and the work counters (`interp/budget.rs`)
     pub budget: Budget,
+    /// the running activations, recursion's fixpoints (`interp/recursion.rs`)
+    pub recursion: Recursion,
     /// generators and `@contextmanager` bodies run at their consumers (`interp/gens.rs`)
     pub gens: Gens,
     /// the ways out of running code: raises, try contexts, handlers, break / continue, finally
@@ -360,15 +364,6 @@ pub struct Analyzer {
     pub unwind: Unwind,
     pub models: Registry,
     pub frames: Vec<Frame>,
-    pub active: FxHashMap<(ObjId, String), bool>,
-    pub active_by_func: FxHashMap<ObjId, Vec<(ObjId, String)>>,
-    pub rec_table: FxHashMap<(ObjId, String), (Value, State, crate::state::Footprint)>,
-    pub rec_hit: FxHashSet<(ObjId, String)>,
-    pub rec_entry: FxHashMap<(ObjId, String), (Option<Value>, Vec<Value>, IndexMap<StrId, Value>)>,
-    pub rec_widened: FxHashSet<(ObjId, String)>,
-    /// per running activation: the heap it started from, that heap grown by the heaps its
-    /// recursive calls were made in (on older objects they reach), and its birth mark
-    pub rec_heap: FxHashMap<(ObjId, String), (std::rc::Rc<State>, Option<State>, u64)>,
     /// lazy iterators (zip / islice / map …) over one-shot iterators: what consuming them
     /// takes from each source (Some(n): n items, None: all)
     pub lazy_src: FxHashMap<ObjId, Vec<(ObjId, Option<usize>)>>,

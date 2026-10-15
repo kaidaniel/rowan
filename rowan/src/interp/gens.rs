@@ -16,7 +16,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::{Analyzer, Payload};
 use crate::domain::{join_values, kv_join, KeyVal, Ns, ObjId, Value, DATA};
 use crate::frontend::Node;
-use crate::intern::{self, key_int, key_str_lit, StrId, STAR};
+use crate::intern::{self, key_int, key_str_lit, KeySet, StrId, STAR};
 use crate::state::{Kind, State};
 
 /// a generator's suspension point: the yield node, the `yield from` item, the unrolled loop
@@ -831,6 +831,85 @@ pub fn gen_copy_facts(dst: &mut State, src: &State, ge: &crate::interp::GenEffec
     for (o, sk) in &ge.slots {
         if matches!(sk.0, Ns::Pos | Ns::Elem) {
             dst.clear_last(*o);
+        }
+    }
+
+}
+
+impl Analyzer {
+    /// A generator activation begins (its frame pushed): its object of yielded values, new;
+    /// what the activation's site held before (a running activation's yields, put back after).
+    pub(super) fn gen_activation_begin(&mut self, ygid: ObjId, foid: ObjId, fi: &super::FuncInfo, ctx: &str, state: &mut State) -> Option<YieldStates> {
+        // the yielded values of this activation
+        let gid = self.alloc(Kind::List, &format!("gen:{}", foid), state, &format!("generator {}", fi.qualname), Payload::None, None, Ns::Item, None, Some(ctx));
+        self.heap.set_llen(gid, state, Some(0));
+        state.elems.insert(gid, KeyVal::Lits(KeySet::new()));
+        // (a new activation: not consumed yet, its own item states; a running one's
+        // yields are put back after it)
+        // (keyed as `yield_value` finds it: the site's object, not a variant `alloc` made)
+        let saved = self.gens.yield_states.remove(&ygid);
+        state.slots.remove(&gid, &(Ns::Attr, key_str_lit("__cursor")));
+        state.slots.remove(&gid, &(Ns::Attr, key_str_lit("\u{1}effpos")));
+        self.gens.pos_states.remove(&gid);
+        self.gens.pos_conflict.retain(|(g, _)| *g != gid);
+        self.gens.eff.remove(&gid);
+        saved
+    }
+
+    /// A generator activation's body ran (to `st`): the generator's body runs at the call,
+    /// eagerly, but its caller sees the heap only where the body is suspended: before the first
+    /// item, at a yield, or at its end. The objects that existed before the call and that the
+    /// body changed hold the join of those states (`gen_suspension_join`), and its effects per
+    /// item are kept (`GenEffects`).
+    pub(super) fn gen_activation_end(&mut self, gid: ObjId, gen_cm: bool, st: &mut State, pre_bind: &State, born_mark: u64) {
+        let gen_yields = (!gen_cm).then(|| self.gens.yield_states.get(&gid).map(|v| v.states().map(|s| s.copy()).collect::<Vec<State>>()).unwrap_or_default());
+        // (a generator that ran to its end: the state there, for a consumer that uses it up)
+        let finite_end = if gen_yields.is_some() && st.reachable { Some(st.copy()) } else { None };
+        // a generator whose body never ends (`while True: yield …`): the caller resumes from
+        // one of its yields, and the yields go on (their number is unknown)
+        if !st.reachable {
+            let joined = self.gens.yield_states.remove(&gid).and_then(|v| {
+                let mut it = v.list.into_iter().map(|(_, s)| s);
+                let mut acc = it.next()?;
+                for mut s in it {
+                    acc = acc.join(&mut s);
+                }
+                Some(acc)
+            });
+            if let Some(mut ys) = joined {
+                let mut p = self.heap.prefix(gid, &ys).unwrap_or(0);
+                // (the yields joined: every position some yield made is there — the items
+                // the endless loop is known to give first)
+                while ys.has_slot(gid, Ns::Pos, intern::key_int(p as i64)) {
+                    p += 1;
+                }
+                if p > 0 {
+                    self.heap.obj_mut(gid).known_prefix = Some(p);
+                }
+                ys.lens.insert(gid, (None, p, 0));
+                *st = ys;
+            }
+        }
+        if let Some(ys) = gen_yields {
+            self.gen_suspension_join(st, pre_bind, &ys, gid, born_mark);
+            // the effects per item: before the first, the objects are as before the call
+            if st.reachable {
+                let fp = st.footprint(pre_bind);
+                let old = |o: ObjId| self.heap.born_before(o, born_mark) && o != gid;
+                let rows: Vec<(ObjId, Ns)> = fp.rows.iter().copied().filter(|(o, _)| old(*o)).collect();
+                let slots: Vec<(ObjId, crate::state::SlotKey)> = fp.slots.iter().copied().filter(|(o, _)| old(*o)).collect();
+                let elems: Vec<ObjId> = fp.elems.iter().copied().filter(|o| old(*o)).collect();
+                let mut lens: Vec<ObjId> = slots.iter().map(|(o, _)| *o).chain(elems.iter().copied()).collect();
+                lens.sort_unstable();
+                lens.dedup();
+                if !rows.is_empty() || !slots.is_empty() || !elems.is_empty() {
+                    let at = self.gens.pos_states.remove(&gid).unwrap_or_default();
+                    let ge = GenEffects { rows, slots, elems, lens, pre: pre_bind.copy(), at, end: finite_end, join: st.copy() };
+                    gen_copy_facts(st, pre_bind, &ge);
+                    st.set_slot(gid, Ns::Attr, key_str_lit("\u{1}effpos"), Value::lit(key_str_lit("pre")), true);
+                    self.gens.eff.insert(gid, Rc::new(ge));
+                }
+            }
         }
     }
 }
