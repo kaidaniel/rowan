@@ -39,7 +39,7 @@ const NOTATION = [
   [(t) => / \| |(^|\n)\| /.test(t), "`a | b` one of these, depending on the path or the call"],
   [(t) => t.includes("[*]"), "`[*]` any element"],
   [(t) => t.includes("…"), "`…` not shown"],
-  [(t) => t.includes("- in calls: "), "the value holds for any call; `in calls`: what this program's calls give"],
+  [(t) => t.includes("- in calls: "), "the value holds for any call once the module has run; `in calls`: what this program's calls give"],
 ];
 
 /**

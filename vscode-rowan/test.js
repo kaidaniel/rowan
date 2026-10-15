@@ -88,7 +88,7 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   const idx = indexResult(facts(z532));
   const y = hover(idx, src, 6, "y");
   assert(y.includes("```python\n3 | x\n```") && y.includes("- in calls: `3` (line 44), `7` (line 45)"), y);
-  assert(y.includes("the value holds for any call; `in calls`: what this program's calls give"), y);
+  assert(y.includes("the value holds for any call once the module has run; `in calls`: what this program's calls give"), y);
   const b = hover(idx, src, 6, "b");
   assert(b.includes("- not known here: argument `b` of `pick`") && b.includes("- in calls: `False` (line 44), `True` (line 45)"), b);
   const m = hover(idx, src, 13, "m");

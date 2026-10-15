@@ -36,7 +36,7 @@ fields — and the **values** of names when they follow from the program text.
   `types={int,str}` (every unknown part is known to be of one of these types: `int(?)`; the
   oracle checks the runtime value's type) / `untyped` (some unknown part's type is not known).
 * `#@general NAME: …` (the same clauses): NAME's value for **any** call of the function the line
-  is in — its parameters anything their annotations allow, a method's receiver any instance (its
+  is in, once the module has run — its parameters anything their annotations allow, a method's receiver any instance (its
   `__init__` given any arguments) — not only the program's calls. The oracle checks an `exactly`
   here against every call the program makes (they pass what the annotations say).
 * `#@ TIER key` on an access line (`d["k"]`, `o.k`, `d.pop("k")`, `M(**d)`, …): `ok` (never
