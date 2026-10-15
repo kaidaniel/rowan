@@ -494,10 +494,10 @@ impl Analyzer {
             // the access raises here: the rest of the try body is unreachable
             state.reachable = false;
         }
-        if try_guard && !model_read && cls.tier != Tier::Missing && is_lit && single_target && self.strongable(oid) {
+        if try_guard && !model_read && cls.tier != Tier::Missing && is_lit && single_target && self.heap.obj(oid).single {
             // no exception raised: the key is present from here on
             *row = row.narrow_in(k, true);
-            state.set_row(oid, ns, row.clone());
+            state.set_row_narrowed(oid, ns, row.clone());
         }
     }
 
@@ -520,9 +520,9 @@ impl Analyzer {
                 }
             }
         }
-        if cls.tier != Tier::Missing && is_lit && single_target && self.strongable(oid) {
+        if cls.tier != Tier::Missing && is_lit && single_target && self.heap.obj(oid).single {
             *row = row.narrow_in(k, true);
-            state.set_row(oid, ns, row.clone());
+            state.set_row_narrowed(oid, ns, row.clone());
             self.propagate_narrowing(oid, ns, k, state);
         }
     }
@@ -549,7 +549,7 @@ impl Analyzer {
             let p = self.path_placeholder_value(oid, ns, k, row, state);
             v = v.join(&p);
             if is_lit {
-                state.set_slot(oid, ns, k, v.clone(), false);
+                state.set_slot_found(oid, ns, k, v.clone(), false);
             }
         }
         v
@@ -584,7 +584,9 @@ impl Analyzer {
         let label = format!("{}[{}]", self.heap.obj(oid).label, intern::key_repr(k));
         // the content under an unknown key stands for many values: stores on it are weak
         let single = k != STAR;
-        let pid = self.heap.alloc_raw(Kind::Unknown, &format!("path:{}:{}:{}", oid, ns, intern::key_repr(k)), "", single, &label, Payload::None);
+        // (a loop's item holds there what the records it is one of hold: their placeholder)
+        let base = crate::state::view_of(oid).unwrap_or(oid);
+        let pid = self.heap.alloc_raw(Kind::Unknown, &format!("path:{}:{}:{}", base, ns, intern::key_repr(k)), "", single, &label, Payload::None);
         self.fill_placeholder(pid, oid, ns, k, row, false, state);
         Value::obj(pid)
     }
@@ -619,8 +621,8 @@ impl Analyzer {
         } else {
             Row::from_data(crate::domain::RowData { sources: srcs, mutators: row.mutators.clone(), top: elem && row.top, ..Default::default() })
         };
-        state.set_row(pid, Ns::Item, r.clone());
-        state.set_row(pid, Ns::Attr, r);
+        state.set_row_narrowed(pid, Ns::Item, r.clone());
+        state.set_row_narrowed(pid, Ns::Attr, r);
     }
 
     /// A key whose value includes objects (an unknown value, a non-literal tuple, an instance):
@@ -649,7 +651,7 @@ impl Analyzer {
         let targets: Vec<u32> = obj.pts.iter().filter(|o| !matches!(self.heap.kind(*o), Kind::Series | Kind::External | Kind::Function | Kind::Bound | Kind::Class | Kind::Method)).collect();
         for &oid in &targets {
             let kind = self.heap.kind(oid);
-            let strong = targets.len() == 1 && self.strongable(oid);
+            let strong = targets.len() == 1 && self.heap.obj(oid).single;
             match kind {
                 Kind::Locidx => {
                     crate::models::pandas::loc_set(self, oid, key, v, node, state);
@@ -684,7 +686,7 @@ impl Analyzer {
                     if let Payload::View(ViewKind::Attrs, inst) = self.heap.obj(oid).payload.clone() {
                         let insts: Vec<u32> = inst.pts.iter().collect();
                         for i in &insts {
-                            let s1 = strong && insts.len() == 1 && self.strongable(*i);
+                            let s1 = strong && insts.len() == 1 && self.heap.obj(*i).single;
                             self.store_key(*i, Ns::Attr, &key.kv, v, s1, node, state);
                         }
                     }
@@ -694,20 +696,20 @@ impl Analyzer {
                     // a ChainMap: the write lands in its first map too
                     let first = self.m.chainmaps[&oid].first().cloned().unwrap_or_default();
                     for m in self.record_objects(&first) {
-                        let s1 = strong && first.pts.len() == 1 && self.strongable(m);
+                        let s1 = strong && first.pts.len() == 1 && self.heap.obj(m).single;
                         self.store_key(m, Ns::Item, &key.kv, v, s1, node, state);
                     }
                     if self.m.chainmaps[&oid].len() > 1 {
                         self.refresh_chainmap(oid, state);
                     } else {
-                        let s1 = strong && self.strongable(oid);
+                        let s1 = strong && self.heap.obj(oid).single;
                         self.store_key(oid, Ns::Item, &key.kv, v, s1, node, state);
                     }
                 }
                 Kind::Dict if self.m.attr_mirrors.contains_key(&oid) => {
                     // a `vars(obj)` dict: obj's attributes change with it
                     let inst = self.m.attr_mirrors[&oid];
-                    let s1 = strong && self.strongable(inst);
+                    let s1 = strong && self.heap.obj(inst).single;
                     self.store_key(inst, Ns::Attr, &key.kv, v, s1, node, state);
                 }
                 Kind::Instance if ns == Ns::Item => {
@@ -740,7 +742,7 @@ impl Analyzer {
         let row = state.row(oid, ns);
         match kv {
             KeyVal::Lit(k) => {
-                state.set_row(oid, ns, row.store(*k, strong));
+                state.store_key_row(oid, ns, *k, strong);
                 state.set_slot(oid, ns, *k, v.clone(), strong);
             }
             KeyVal::Lits(ks) => {

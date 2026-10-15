@@ -28,6 +28,17 @@ pub fn dedupe(an: &Analyzer, verdicts: &[Verdict]) -> Vec<Verdict> {
                 }
             }
         }
+        // (an object the access fails on in some runs of the line — an iteration, a call — and
+        // finds the key in others: it may fail)
+        let mut mixed: Vec<Verdict> = Vec::new();
+        for (o, v) in by_obj.iter() {
+            if matches!(v.tier, Tier::Missing | Tier::LikelyMissing) && vs.iter().any(|w| w.oid == *o && w.tier.rank() < Tier::Possibly.rank()) {
+                mixed.push(Verdict { tier: Tier::Possibly, note: "is missing on some of the times this line runs".into(), ..(*v).clone() });
+            }
+        }
+        for m in mixed.iter() {
+            by_obj.insert(m.oid, m);
+        }
         let names: IndexMap<u32, String> = by_obj.iter().map(|(o, v)| (*o, v.obj.clone())).collect();
         let mut tiers: Vec<Tier> = by_obj.values().map(|v| v.tier).collect();
         tiers.sort();

@@ -52,10 +52,6 @@ pub struct Context {
     /// cannot be told apart; by the object it makes): the number of items its one iteration
     /// stands for
     pub summary_items: FxHashMap<ObjId, usize>,
-    /// summary records a running loop takes its items from (`for r in rows` over
-    /// `[dict(x) for x in data]`): within an iteration the item is one record, so stores into
-    /// it and keys a read or test proves are strong, as for an input's element (`iter_elem`)
-    pub focus: Vec<ObjId>,
     /// running calls of one of several functions or classes a value picks (`CONVERTERS[k](x)`
     /// with `k` not known): the call as written and the one running. Rowan cannot tell which
     /// one the program picks for the arguments it is given: what fails in one fails where the

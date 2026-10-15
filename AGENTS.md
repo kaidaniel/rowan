@@ -34,12 +34,13 @@ namespace packages).
   (`split`, `narrow.rs`: narrowing reads its parts' values, `traced`); both branches run, join.
   Loops over at most 16 known items are unrolled (comprehensions calling nothing per item: 64);
   others run to a fixpoint (40 rounds, then widened; verdicts are the last round's), making
-  summaries; a summary record a loop goes through is one record per iteration (`focus`). A running `try`
-  (`TryCtx`) records the state at every point of its body and callees that may raise (a raise,
-  a failing read, a model's raise, any unknown call: class `any_exc`), joined per class;
-  handlers start from the raises they may catch, the rest go on through the `finally` to the
-  enclosing try. `with` is a `try` whose `finally` is `__exit__`. `finally` runs on every way
-  out, `break` / `continue` / `return` included.
+  summaries; a target bound to one of the records a summary (or an input's element) stands for
+  is a strong *view* per iteration (`bind_views`; `link_view`: changes join both ways). A
+  running `try` (`TryCtx`) records the state at every point of its body and callees that may
+  raise (a raise, a failing read, a model's raise, any unknown call: class `any_exc`), joined
+  per class; handlers start from the raises they may catch, the rest go on through the
+  `finally` to the enclosing try. `with` is a `try` whose `finally` is `__exit__`. `finally`
+  runs on every way out, `break` / `continue` / `return` included.
 * **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site, in
   a context of the innermost `chain` (2) call sites. **Budget:** each function code (all
   closures of one `def`) may run 4,096 statements in all (`budget`); past that its calls are
@@ -51,8 +52,7 @@ namespace packages).
   run). Entry runs are not counted (one per function): work is bounded by functions × budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation
     reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened.
-  * **Unknown values** are not taken for instances of the program's classes: a method of an
-    unknown object is an unknown call (no duck typing; it was a closed-world assumption).
+  * **Unknown values** are not taken for the program's instances: their methods are unknown calls.
   * **Unknown calls** may change everything they reach through what they are given, at any
     depth: records get a mutator, slots may hold anything (one shared unknown object, which
     no store changes: a value stored into it goes to unknown code, `escape`), lists and sets
@@ -67,8 +67,10 @@ namespace packages).
     run with open parameters; their requirements become `param F.x` schemas.
 * **Generators** run whole at their first consumption (`force_gen`), in the creating call's
   context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`). If code
-  between items changes what the generator reads after a yield (`Gens::watch`), it runs again
-  with that changed at each yield (`with_gen_restart`). `@contextmanager` bodies run at yields.
+  between items (where the consumer asks for one: `note_resume`; unknown code, deletes too)
+  changes what the generator reads after a yield (`Gens::watch`, also after the call that
+  started it while held), it runs again with that changed at each yield (`with_gen_restart`).
+  `@contextmanager` bodies run at yields.
 * **Requirements and schemas:** reading a key from a row open through an input records a
   requirement on that input. A key read on every path is `always`, on some paths `sometimes`.
   A read guarded by a handler for its `KeyError` still counts (a frame column read behind a
@@ -89,9 +91,8 @@ namespace packages).
 * **Soundness** holds relative to the models and to annotations of values whose class is
   unknown. `exec`, `setattr` / `getattr` with unknown names (also in code a skipped call
   reaches), metaclasses and monkey-patching (rebinding a function or class too) are unknown or
-  ignored. Accepted imprecision: lengths past 15, slices by unknown bounds, weak stores through
-  names holding several objects, runs cut by a deadline; a generator does not see what unknown
-  code changes between its items. An object a path has no facts of reads as unknown (`read_row`).
+  ignored. List lengths are tracked up to 15. An object a path has no facts of reads as unknown
+  (`read_row`).
 
 ## Working conventions (the owner's standing instructions)
 
@@ -146,9 +147,8 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
   k=v,…` sets the case's `ROWAN_LIMITS`. A directive-only line applies to the code line above.
 * **Oracle** (`tests/oracle.py`): reruns each case under CPython with a tracer and checks every
   directive; schemas by dropping keys from the input. Strict on the library suites.
-* **Snapshots** (`tests/snapshots/`): `--json` on `examples/etl_report.py` and
-  `tests/fixtures/proto_*.py`: the guard for internals (object ids may shift). **Unit tests**
-  in `rowan/src`: CPython-exact value functions, the regex engine, the tries.
+* **Snapshots** (`tests/snapshots/`): `--json` on `examples/etl_report.py`, `tests/fixtures/proto_*.py`:
+  the guard for internals (ids may shift). **Unit tests**: CPython values, the regex engine, tries.
 
 ## Debugging switches
 
@@ -190,8 +190,8 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.1 / ~2.4 / ~1.9 / ~6.4 s; 0.13 / 0.07 / 0.13 / 0.10 GB |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~8.6 / ~24 / ~34 / ~5.1 s; 0.30 / 0.88 / 0.57 / 0.27 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.4 / ~2.4 / ~4 / ~6.6 s; 0.12 / 0.07 / 0.16 / 0.10 GB |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~9.7 / ~24 / ~34 / ~5.1 s; 0.30 / 0.88 / 0.56 / 0.27 GB |
 
 ## Known problems and next steps
 

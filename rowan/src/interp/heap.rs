@@ -103,7 +103,8 @@ pub struct Obj {
     pub literal_len: Option<usize>,
     /// after appends of unknown count: positions below this are still valid
     pub known_prefix: Option<usize>,
-    /// the object standing for "the current element" of a loop
+    /// an element record a model or an iteration made (a frame's row, a csv row, an input's
+    /// element): a loop takes one of its own per iteration (`bind_views`)
     pub iter_elem: bool,
     /// record this object is a view of (virtual row -> frame)
     pub derived_from: Option<ObjId>,

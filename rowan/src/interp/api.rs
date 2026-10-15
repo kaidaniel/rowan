@@ -24,7 +24,7 @@
 //!     `construct`, `call_method_if_defined`, `call_method_with`, `run_dunder`,
 //!     `decorator_qualname`;
 //!   - allocation: `alloc`, `alloc_at`, `alloc_simple`, `alloc_instance`, `alloc_positional`,
-//!     `alloc_positional_sfx`, `unknown_source`, `strongable`;
+//!     `alloc_positional_sfx`, `unknown_source`;
 //!   - raises: `raise_here`, `may_raise_here`, `flag_may_raise`, `enter_try`, `leave_try`,
 //!     `reraise_rec`, `guards`;
 //!   - verdicts and requirements: `verdict`, `verdict_guarded`, `is_guarded`,

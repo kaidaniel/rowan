@@ -93,6 +93,10 @@ pub struct GenEffects {
 /// What code changed of an object: one stored key, or anything (None).
 pub type Change = (ObjId, Option<crate::state::SlotKey>);
 
+/// A change code between a generator's items made, as the generator sees it at its yields: a
+/// `Change`, and whether the key may have been deleted.
+pub type Hit = (ObjId, Option<crate::state::SlotKey>, bool);
+
 /// A generator run whole for a consumer that runs code between its items: the state after
 /// the run, the objects the run changed, what it read after a yield, the budgets before it.
 pub struct GenWatch {
@@ -104,6 +108,10 @@ pub struct GenWatch {
     pub budget: std::rc::Rc<FxHashMap<usize, usize>>,
     /// the birth mark after the run: objects born since are new
     pub born: u64,
+    /// the consumer's states where it asked for a later item (`note_resume`), and what it had
+    /// changed then of the facts of the objects the generator changes itself
+    pub resumed: Option<State>,
+    pub own_hits: Vec<Hit>,
 }
 
 /// A generator call whose body has not run: it runs at the first consumption, from the state
@@ -138,7 +146,7 @@ pub struct Gens {
     pub last_reads: Option<rustc_hash::FxHashSet<Change>>,
     /// generators whose consumer changes objects they reach: those objects, changed for the
     /// generator at each of its yields (`consumer_between`)
-    pub havoc: FxHashMap<ObjId, Vec<Change>>,
+    pub havoc: FxHashMap<ObjId, Vec<Hit>>,
     /// the call site and context of the generator `force_gen` is running
     pub force_at: Option<(String, String)>,
     /// a generator's effects on older objects, per item: see `set_cursor`
@@ -230,15 +238,9 @@ impl Analyzer {
                 if let Some(ge) = self.gens.eff.get(&o) {
                     own.extend(ge.rows.iter().map(|k| k.0).chain(ge.slots.iter().map(|k| k.0)).chain(ge.elems.iter().copied()).chain(ge.lens.iter().copied()));
                 }
+                // (what it reads after a yield: through what it was given, its globals, its cells)
                 let reads = self.gens.last_reads.take().unwrap_or_default();
-                // (what it reads that the consumer can reach: from what it was given)
-                let roots: Vec<Value> = lg.self_v.iter().chain(lg.args.iter()).chain(lg.kwargs.values()).cloned().collect();
-                let mut targets: Vec<ObjId> = reads.iter().map(|r| r.0).collect();
-                targets.sort_unstable();
-                targets.dedup();
-                let reach = if targets.is_empty() { FxHashSet::default() } else { self.reach_among(&roots, &targets, state) };
-                let reads = reads.into_iter().filter(|r| reach.contains(&r.0)).collect();
-                let w = super::GenWatch { gid: o, own, after: state.copy(), reads, budget, born: self.heap.serial() };
+                let w = super::GenWatch { gid: o, own, after: state.copy(), reads, budget, born: self.heap.serial(), resumed: None, own_hits: Vec::new() };
                 self.gens.watch.push(w);
             }
             if !r.pts.contains(o) && state.reachable {
@@ -372,7 +374,7 @@ impl Analyzer {
             let found = self.gen_interference(wmark, state, round == 3);
             if found.is_empty() || round == 3 {
                 if close {
-                    self.gens.watch.truncate(wmark);
+                    self.close_watches(wmark, &pre, state);
                 }
                 return;
             }
@@ -404,55 +406,111 @@ impl Analyzer {
         }
     }
 
+    /// What code changed from `a` to `b` (a read that narrows a row is no change): a whole
+    /// object (unknown code), a key no longer surely there (maybe deleted), one stored. Only
+    /// objects with facts in `a` (one without was garbage there: nothing read it since).
+    fn changes_between(&self, a: &State, b: &State) -> Vec<Hit> {
+        let fp = b.footprint(a);
+        self.changes_in(a, b, &fp.rows, &fp.slots, fp.elems.into_iter().chain(b.lens.diff_keys(&a.lens)))
+    }
+
+    /// `changes_between` on these facts (and these objects' elements and lengths).
+    fn changes_in(&self, a: &State, b: &State, rows: &[(ObjId, Ns)], slots: &[(ObjId, crate::state::SlotKey)], others: impl Iterator<Item = ObjId>) -> Vec<Hit> {
+        let mut changed: Vec<Hit> = Vec::new();
+        for &(o, ns) in rows {
+            let Some(ra) = a.rows.get(&(o, ns)) else { continue };
+            let rb = b.row(o, ns);
+            if ra.mutators != rb.mutators || ra.top != rb.top {
+                changed.push((o, None, false));
+                continue;
+            }
+            let lost = ra.definite.iter().filter(|k| !rb.definite.contains(*k)).chain(ra.likely.iter().filter(|k| !rb.likely.contains(*k)));
+            changed.extend(lost.map(|k| (o, Some((ns, k)), true)).collect::<Vec<_>>());
+            changed.extend(ra.absent.iter().filter(|k| !rb.absent.contains(*k)).map(|k| (o, Some((ns, k)), false)).collect::<Vec<_>>());
+        }
+        for &(o, sk) in slots {
+            let va = a.slots.get(&o, &sk);
+            if va == b.slots.get(&o, &sk) || (va.is_none() && !a.slots.has_key(&o) && !a.has_row(o, sk.0)) {
+                continue;
+            }
+            let any = b.slots.get(&o, &sk).is_some_and(|v| v.pts.iter().any(|p| self.is_any(p)));
+            let key = (!any && matches!(sk.0, Ns::Item | Ns::Attr) && sk.1 != intern::STAR).then_some(sk);
+            changed.push((o, key, false));
+        }
+        // (a record's length entry marks its birth, not a change)
+        let differs = |o: &ObjId| (a.elems.get(o).is_some() && a.elems.get(o) != b.elems.get(o)) || (a.lens.get(o).is_some() && a.lens.get(o) != b.lens.get(o) && self.heap.kind(*o).is_container());
+        changed.extend(others.filter(differs).map(|o| (o, None, false)).collect::<Vec<_>>());
+        changed
+    }
+
+    /// The generators watched since `wmark` are used up or out of reach: no longer watched, but
+    /// those that may give more items and that what the code returns or what it was given
+    /// (`pre`'s names) hold (a generator started in a call and returned from it, or kept in an
+    /// attribute of its receiver for the next call).
+    fn close_watches(&mut self, wmark: usize, pre: &State, state: &State) {
+        let at = if state.reachable { state } else { state.exits.as_deref().unwrap_or(state) };
+        let mut gids: Vec<ObjId> = self.gens.watch[wmark.min(self.gens.watch.len())..].iter().map(|w| w.gid).filter(|g| self.may_resume(*g, at)).collect();
+        gids.sort_unstable();
+        gids.dedup();
+        let kept = if gids.is_empty() {
+            FxHashSet::default()
+        } else {
+            let roots: Vec<Value> = state.ret.iter().chain(pre.env.values()).cloned().collect();
+            self.reach_among(&roots, &gids, at)
+        };
+        let tail = self.gens.watch.split_off(wmark.min(self.gens.watch.len()));
+        self.gens.watch.extend(tail.into_iter().filter(|w| kept.contains(&w.gid)));
+    }
+
+    /// Whether a generator may give more items in `state` (not known to be used up).
+    fn may_resume(&self, g: ObjId, state: &State) -> bool {
+        if state.slot_opt(g, Ns::Attr, key_str_lit("__cursor")) == Some(Value::data("cursor-end")) {
+            return false;
+        }
+        !matches!((self.cursor_of(g, state), self.heap.llen(g, state)), (Some(c), Some(n)) if c >= n)
+    }
+
     /// The watched generators since `wmark` and what later code changed by `fin` of the
     /// objects they reach from what they were given (in the state after their run): a key
     /// stored, or a whole object; beyond what is already changed for them (`all`: everything
     /// they reach).
-    pub(super) fn gen_interference(&self, wmark: usize, fin: &State, all: bool) -> Vec<(ObjId, Vec<super::Change>)> {
+    pub(super) fn gen_interference(&self, wmark: usize, fin: &State, all: bool) -> Vec<(ObjId, Vec<Hit>)> {
         (wmark..self.gens.watch.len()).map(|i| (self.gens.watch[i].gid, self.gen_interference_of(i, fin, all))).filter(|(_, h)| !h.is_empty()).collect()
     }
 
     /// `gen_interference` for one watched generator: the keys / objects it reads after a
-    /// yield that later code changed (beyond those it changes itself, whose facts follow its
-    /// items, and what unknown code may have changed: nothing tells what such code does).
-    pub(super) fn gen_interference_of(&self, i: usize, fin: &State, all: bool) -> Vec<super::Change> {
+    /// yield that later code changed by `fin` or by the time it asked for an item (unknown
+    /// code too; of the objects it changes itself, what changed of the facts it gave).
+    pub(super) fn gen_interference_of(&self, i: usize, fin: &State, all: bool) -> Vec<Hit> {
         let w = &self.gens.watch[i];
         if !fin.reachable {
             return Vec::new();
         }
-        let (f, fp) = (&w.after, fin.footprint(&w.after));
-        let mut changed: Vec<super::Change> = Vec::new();
-        let mut unknown: FxHashSet<ObjId> = FxHashSet::default();
-        // (a read that narrows a row is no change)
-        for k in fp.rows {
-            let (a, b) = (f.row(k.0, k.1), fin.row(k.0, k.1));
-            if a.mutators != b.mutators || a.top != b.top {
-                unknown.insert(k.0);
-            } else if a.absent != b.absent {
-                changed.push((k.0, None));
+        // (what the consumer changed by the time it asked for an item, or by the end)
+        let joined;
+        let fin = match &w.resumed {
+            Some(r) if r.reachable => {
+                joined = fin.copy().join(&mut r.copy());
+                &joined
             }
-        }
-        for (o, sk) in fp.slots {
-            if fin.slots.get(&o, &sk).is_some_and(|v| v.pts.iter().any(|p| self.is_any(p))) {
-                unknown.insert(o);
-            } else {
-                changed.push((o, (matches!(sk.0, Ns::Item | Ns::Attr) && sk.1 != intern::STAR).then_some(sk)));
-            }
-        }
-        changed.extend(fp.elems.into_iter().chain(fin.lens.diff_keys(&f.lens)).map(|o| (o, None)));
-        let read = |(o, k): &super::Change| w.reads.contains(&(*o, *k)) || w.reads.contains(&(*o, None)) || (k.is_none() && w.reads.iter().any(|r| r.0 == *o));
+            _ => fin,
+        };
+        let changed = self.changes_between(&w.after, fin);
+        let read = |(o, k, _): &Hit| w.reads.contains(&(*o, *k)) || w.reads.contains(&(*o, None)) || (k.is_none() && w.reads.iter().any(|r| r.0 == *o));
         // (an object made since is not the one the generator read, whatever its site)
         let older = |o: ObjId| self.heap.born_before(o, w.born);
-        let mut hit: Vec<super::Change> = changed.into_iter().filter(|c| c.0 != w.gid && older(c.0) && !w.own.contains(&c.0) && !unknown.contains(&c.0) && read(c)).collect();
+        // (the objects it changes itself: as the consumer changed what it was given of them)
+        let own = w.own_hits.iter().filter(|c| read(c)).cloned();
+        let mut hit: Vec<Hit> = changed.into_iter().filter(|c| c.0 != w.gid && older(c.0) && !w.own.contains(&c.0) && read(c)).chain(own).collect();
         if all && !hit.is_empty() {
-            hit = w.reads.iter().map(|r| (r.0, None)).collect();
+            hit = w.reads.iter().map(|r| (r.0, None, false)).collect();
         }
         hit.sort_unstable();
         hit.dedup();
         let have = self.gens.havoc.get(&w.gid);
-        hit.retain(|c| !have.is_some_and(|h| h.contains(c) || h.contains(&(c.0, None))));
+        hit.retain(|c| !have.is_some_and(|h| h.contains(c) || h.contains(&(c.0, None, false))));
         if !hit.is_empty() && super::debug_enabled() {
-            eprintln!("generator {} sees changes of {:?}", self.heap.obj(w.gid).label, hit.iter().map(|(o, k)| format!("{}{:?}", self.heap.obj(*o).label, k.map(|k| intern::key_repr(k.1)))).collect::<Vec<_>>());
+            eprintln!("generator {} sees changes of {:?}", self.heap.obj(w.gid).label, hit.iter().map(|(o, k, _)| format!("{}{:?}", self.heap.obj(*o).label, k.map(|k| intern::key_repr(k.1)))).collect::<Vec<_>>());
         }
         hit
     }
@@ -562,12 +620,16 @@ impl Analyzer {
         // it holds aside: those it changed are listed too)
         let whole: Vec<ObjId> = changes.iter().filter(|c| c.1.is_none()).map(|c| c.0).collect();
         self.change_objects(&whole, rid, site, state);
-        // (a key that code stored: any value, maybe stored)
-        for (o, sk) in changes.iter().filter_map(|(o, k)| k.map(|k| (*o, k))) {
+        // (a key that code stored: any value, maybe stored; one it deleted: maybe deleted)
+        for (o, sk, del) in changes.iter().filter_map(|(o, k, d)| k.map(|k| (*o, k, *d))) {
+            let r = state.row(o, sk.0);
+            if del {
+                state.set_row(o, sk.0, r.delete(sk.1, false));
+                continue;
+            }
             let v = state.slot(o, sk.0, sk.1).join(&Value::obj(rid));
             state.set_slot(o, sk.0, sk.1, v, false);
-            let r = state.row(o, sk.0).store(sk.1, false);
-            state.set_row(o, sk.0, r);
+            state.set_row(o, sk.0, r.store(sk.1, false));
         }
     }
 
@@ -717,6 +779,7 @@ impl Analyzer {
 
     /// `set_cursor`; `at_end`: used up (its length may not be known).
     pub(in crate::interp) fn set_cursor_ex(&mut self, o: u32, c: Option<usize>, at_end: bool, state: &mut State) {
+        self.note_resume(o, state);
         let cv = match c {
             Some(n) => Value::lit(key_int(n as i64)),
             None => Value::data(if at_end { "cursor-end" } else { "cursor" }),
@@ -724,15 +787,7 @@ impl Analyzer {
         state.set_slot(o, Ns::Attr, key_str_lit("__cursor"), cv, true);
         let Some(ge) = self.gens.eff.get(&o).cloned() else { return };
         let tk = key_str_lit("\u{1}effpos");
-        let tag = state.slot_opt(o, Ns::Attr, tk).and_then(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).and_then(intern::key_as_str).map(|s| s.to_string());
-        let expected: Option<&State> = match tag.as_deref() {
-            Some("pre") => Some(&ge.pre),
-            Some("join") => Some(&ge.join),
-            Some("end") => ge.end.as_ref(),
-            Some(t) => t.strip_prefix("at").and_then(|k| k.parse::<usize>().ok()).and_then(|k| ge.at.get(k)).and_then(|x| x.as_ref()),
-            None => None,
-        };
-        let Some(expected) = expected else { return };
+        let Some(expected) = effects_given(state, o, &ge) else { return };
         if !gen_facts_equal(state, expected, &ge) {
             state.set_slot(o, Ns::Attr, tk, Value::data("effpos"), true);
             return;
@@ -749,6 +804,33 @@ impl Analyzer {
         };
         gen_copy_facts(state, target, &ge);
         state.set_slot(o, Ns::Attr, tk, Value::lit(key_str_lit(&ntag)), true);
+    }
+
+    /// The consumer asks a watched generator `o` for an item in `state`: what it changed by
+    /// then, the generator sees after its yield (`gen_interference_of`).
+    pub(in crate::interp) fn note_resume(&mut self, o: ObjId, state: &State) {
+        if !state.reachable || !self.gens.watch.iter().any(|w| w.gid == o) {
+            return;
+        }
+        // (the objects it changes itself: what the consumer changed of the facts it was given)
+        let ge = self.gens.eff.get(&o).cloned();
+        let own = ge.as_ref().and_then(|ge| effects_given(state, o, ge).map(|given| self.changes_in(given, state, &ge.rows, &ge.slots, ge.elems.iter().chain(&ge.lens).copied()))).unwrap_or_default();
+        for w in self.gens.watch.iter_mut().filter(|w| w.gid == o) {
+            w.resumed = Some(match w.resumed.take() {
+                Some(mut r) => r.join(&mut state.copy()),
+                None => state.copy(),
+            });
+            w.own_hits.extend(own.iter().cloned());
+        }
+    }
+
+    /// `note_resume` for what the innermost running `for` iterates.
+    pub(in crate::interp) fn note_resumes(&mut self, state: &State) {
+        if let Some(objs) = self.gens.for_iters.last().filter(|_| !self.gens.watch.is_empty()).cloned() {
+            for o in objs.iter() {
+                self.note_resume(o, state);
+            }
+        }
     }
 
     /// How many items a one-shot iterator has given (None: not known).
@@ -770,6 +852,18 @@ impl Analyzer {
                 }
             }
         }
+    }
+}
+
+/// The facts of a generator's effects its consumer was last given in `state` (`set_cursor_ex`).
+fn effects_given<'a>(state: &State, o: ObjId, ge: &'a crate::interp::GenEffects) -> Option<&'a State> {
+    let tag = state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}effpos")).and_then(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).and_then(intern::key_as_str).map(|s| s.to_string());
+    match tag.as_deref() {
+        Some("pre") => Some(&ge.pre),
+        Some("join") => Some(&ge.join),
+        Some("end") => ge.end.as_ref(),
+        Some(t) => t.strip_prefix("at").and_then(|k| k.parse::<usize>().ok()).and_then(|k| ge.at.get(k)).and_then(|x| x.as_ref()),
+        None => None,
     }
 }
 

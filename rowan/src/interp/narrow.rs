@@ -413,7 +413,7 @@ impl Analyzer {
             NarrowTarget::Attr(a, whole) => {
                 let Some(base) = self.traced(&a.value) else { return };
                 let recs: Vec<u32> = base.pts.iter().filter(|o| matches!(self.heap.kind(*o), Kind::Instance | Kind::Namespace)).collect();
-                if recs.len() != 1 || base.pts.len() != 1 || !self.strongable(recs[0]) {
+                if recs.len() != 1 || base.pts.len() != 1 || !self.heap.obj(recs[0]).single {
                     let Some(key) = chain_text(whole) else { return };
                     if !truth {
                         return;
@@ -845,8 +845,8 @@ impl Analyzer {
                     state.reachable = false;
                     continue;
                 }
-                let strong = single && self.strongable(oid);
-                state.set_row(oid, ns, row.narrow_in(k, strong));
+                let strong = single && self.heap.obj(oid).single;
+                state.set_row_narrowed(oid, ns, row.narrow_in(k, strong));
                 if strong {
                     self.propagate_narrowing(oid, ns, k, state);
                 }
@@ -854,14 +854,9 @@ impl Analyzer {
                 if row.definite.contains(k) {
                     state.reachable = false;
                 }
-                state.set_row(oid, ns, row.narrow_out(k));
+                state.set_row_narrowed(oid, ns, row.narrow_out(k));
             }
         }
-    }
-
-    pub fn strongable(&self, oid: u32) -> bool {
-        let o = self.heap.obj(oid);
-        o.single || o.iter_elem || self.cx.focus.contains(&oid)
     }
 
     /// A key proven on a view of a record is proven on the record it was derived from.
@@ -875,7 +870,7 @@ impl Analyzer {
             seen.push(sid);
             if self.heap.obj(sid).single && state.has_row(sid, ns) {
                 let r = state.row(sid, ns).narrow_in(k, true);
-                state.set_row(sid, ns, r);
+                state.set_row_narrowed(sid, ns, r);
             }
             src = self.heap.obj(sid).derived_from;
         }

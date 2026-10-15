@@ -69,7 +69,7 @@ and write down what you chose and why.
       easier to follow than you found it.
 
 **Which libraries matter.** The owner cares most about the builtins, PyTorch, pydantic and
-pandas. If dropping another model (or accepting imprecision on it) makes things materially
+pandas. If dropping another model (or trading some of its precision for simpler code) makes things materially
 easier, you may decide to do that. Examples are sqlite, configparser, argparse, csv, the regex
 engine, datetime and FastAPI. When you drop a model:
 * calls into the module become unknown calls, so the results stay sound;

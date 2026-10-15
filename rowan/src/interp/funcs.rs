@@ -374,7 +374,7 @@ impl Analyzer {
                 let row = state.row(fr_module, Ns::Attr);
                 if row.present.contains(k) && !row.definite.contains(k) && row.mutators.is_empty() && !row.top && row.sources.is_empty() {
                     self.unbound_read(name, fr_module, node, state, "NameError");
-                    state.set_row(fr_module, Ns::Attr, row.narrow_in(k, true));
+                    state.set_row_narrowed(fr_module, Ns::Attr, row.narrow_in(k, true));
                 }
             }
             return v;
@@ -414,7 +414,7 @@ impl Analyzer {
             if let Some(o) = one {
                 let r = state.row(o, Ns::Item);
                 if !r.definite.contains(k) {
-                    state.set_row(o, Ns::Item, r.narrow_in(k, true));
+                    state.set_row_narrowed(o, Ns::Item, r.narrow_in(k, true));
                 }
             }
         }
