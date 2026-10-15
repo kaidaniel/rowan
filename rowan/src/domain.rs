@@ -825,6 +825,22 @@ impl Row {
         Row::from_data(d)
     }
 
+    /// `mutate` of the keys `like` names only: unknown code may have stored such keys (new
+    /// ones too) or removed them; the others are as they were.
+    pub fn mutate_like(&self, site: StrId, like: &dyn Fn(KeyId) -> bool) -> Row {
+        let mut d = self.data();
+        let (moved, kept): (Vec<KeyId>, Vec<KeyId>) = d.definite.iter().partition(|k| like(*k));
+        d.likely = d.likely.union(&KeySet::from_iter(moved));
+        d.definite = KeySet::from_iter(kept);
+        let (moved, kept): (Vec<KeyId>, Vec<KeyId>) = d.absent.iter().partition(|k| like(*k));
+        d.absent_likely = d.absent_likely.union(&KeySet::from_iter(moved));
+        d.absent = KeySet::from_iter(kept);
+        if !d.mutators.contains(site) {
+            d.mutators = cap_mutators(d.mutators.insert(site));
+        }
+        Row::from_data(d)
+    }
+
     pub fn narrow_in(&self, k: KeyId, strong: bool) -> Row {
         // (the key was there: the program did not store it)
         let was = self.stored.contains(k);

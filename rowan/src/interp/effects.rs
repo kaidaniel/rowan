@@ -70,12 +70,64 @@ pub struct RecvUse {
     deletes: FxHashSet<StrId>,
     calls: FxHashSet<StrId>,
     supers: FxHashSet<StrId>,
+    /// attribute names built from a template (`f"{name}_dynamic"`, as (start, end)) it reads,
+    /// stores and deletes by `getattr` / `hasattr`, `setattr` and `delattr`
+    loads_like: Vec<Like>,
+    stores_like: Vec<Like>,
+    deletes_like: Vec<Like>,
 }
 
-/// The scan behind `RecvUse` (`me`: the receiver's parameter name).
+/// A name made by a template: its literal parts and its holes (a hole that is a name: the
+/// name). Not knowing what the holes hold, it is any name that starts and ends as it does.
+#[derive(Clone, PartialEq)]
+pub struct Like(Vec<Result<String, Option<String>>>);
+
+impl Like {
+    pub fn matches(&self, k: KeyId) -> bool {
+        let start: String = self.0.iter().map_while(|p| p.as_ref().ok()).cloned().collect();
+        let end: String = self.0.iter().rev().map_while(|p| p.as_ref().ok()).cloned().collect::<Vec<String>>().into_iter().rev().collect();
+        intern::key_as_str(k).is_some_and(|n| n.len() >= start.len() + end.len() && n.starts_with(&start) && n.ends_with(&end))
+    }
+
+    /// The one name it makes when each hole is a name `bind` knows the text of.
+    pub fn resolve(&self, bind: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+        self.0.iter().map(|p| match p {
+            Ok(l) => Some(l.clone()),
+            Err(n) => bind(n.as_deref()?),
+        }).collect()
+    }
+}
+
+/// The scan behind `RecvUse` (`me`: the receiver's parameter name; `named`: locals bound to a
+/// template, None when bound to anything else too).
 struct RecvScan<'a> {
     me: &'a str,
     out: RecvUse,
+    named: FxHashMap<String, Option<Like>>,
+}
+
+/// The template an f-string with holes is (`f"{a}_dynamic"`: "", "_dynamic").
+fn template(e: &Expr) -> Option<Like> {
+    let Expr::FString(f) = e else { return None };
+    let mut parts: Vec<Result<String, Option<String>>> = Vec::new();
+    for p in f.value.iter() {
+        match p {
+            ruff_python_ast::FStringPart::Literal(sl) => parts.push(Ok(sl.value.to_string())),
+            ruff_python_ast::FStringPart::FString(fs) => {
+                for el in fs.elements.iter() {
+                    match el {
+                        ruff_python_ast::InterpolatedStringElement::Literal(l) => parts.push(Ok(l.value.to_string())),
+                        // (`{name}` without conversion or format: the name's text)
+                        ruff_python_ast::InterpolatedStringElement::Interpolation(i) => parts.push(Err(match (&*i.expression, i.conversion, &i.format_spec) {
+                            (Expr::Name(n), ruff_python_ast::ConversionFlag::None, None) => Some(n.id.to_string()),
+                            _ => None,
+                        })),
+                    }
+                }
+            }
+        }
+    }
+    parts.iter().any(|p| p.is_err()).then_some(Like(parts))
 }
 
 fn mentions(me: &str, st: Option<&Stmt>, e: Option<&Expr>) -> bool {
@@ -114,24 +166,34 @@ impl RecvScan<'_> {
             Expr::List(x) => x.elts.iter().for_each(|y| self.target(y)),
             Expr::Starred(x) => self.target(&x.value),
             Expr::Name(n) if n.id.as_str() == self.me => self.out.escapes = true,
+            // (a name bound again: no longer one template)
+            Expr::Name(n) => drop(self.named.insert(n.id.to_string(), None)),
             _ => self.visit_expr(t),
         }
     }
 
-    /// A builtin applied to the receiver that reads (or by a literal name stores / deletes)
-    /// one of its attributes and keeps nothing.
+    /// A builtin applied to the receiver that reads (or by a literal or template name stores /
+    /// deletes) one of its attributes and keeps nothing.
     fn builtin_on_me(&mut self, f: &str, args: &[Expr]) -> bool {
         let lit = match args.get(1) {
             Some(Expr::StringLiteral(l)) => Some(l.value.to_str().to_string()),
             _ => None,
         };
-        match (f, lit) {
-            ("isinstance" | "issubclass" | "id" | "callable", _) => {}
+        let like = match args.get(1) {
+            Some(Expr::Name(n)) => self.named.get(n.id.as_str()).cloned().flatten(),
+            Some(e) => template(e),
+            None => None,
+        };
+        match (f, lit, like) {
+            ("isinstance" | "issubclass" | "id" | "callable", _, _) => {}
             // (`type(self)` is `self.__class__`)
-            ("type", _) => drop(self.out.loads.insert(s("__class__"))),
-            ("getattr" | "hasattr", Some(n)) => drop(self.out.loads.insert(s(&n))),
-            ("setattr", Some(n)) => drop(self.out.stores.insert(s(&n))),
-            ("delattr", Some(n)) => drop(self.out.deletes.insert(s(&n))),
+            ("type", _, _) => drop(self.out.loads.insert(s("__class__"))),
+            ("getattr" | "hasattr", Some(n), _) => drop(self.out.loads.insert(s(&n))),
+            ("setattr", Some(n), _) => drop(self.out.stores.insert(s(&n))),
+            ("delattr", Some(n), _) => drop(self.out.deletes.insert(s(&n))),
+            ("getattr" | "hasattr", _, Some(l)) => self.out.loads_like.push(l),
+            ("setattr", _, Some(l)) => self.out.stores_like.push(l),
+            ("delattr", _, Some(l)) => self.out.deletes_like.push(l),
             _ => return false,
         }
         args.iter().skip(1).for_each(|a| self.visit_expr(a));
@@ -146,7 +208,13 @@ impl<'a> Visitor<'a> for RecvScan<'_> {
             Stmt::Return(r) if matches!(r.value.as_deref(), Some(Expr::Name(n)) if n.id.as_str() == self.me) => {}
             Stmt::FunctionDef(_) | Stmt::ClassDef(_) => self.out.escapes |= mentions(self.me, Some(st), None),
             Stmt::Assign(a) => {
-                a.targets.iter().for_each(|t| self.target(t));
+                for t in &a.targets {
+                    let v = matches!(t, Expr::Name(n) if !self.named.contains_key(n.id.as_str())).then(|| template(&a.value)).flatten();
+                    self.target(t);
+                    if let Expr::Name(n) = t {
+                        self.named.insert(n.id.to_string(), v);
+                    }
+                }
                 self.visit_expr(&a.value);
             }
             Stmt::AugAssign(a) => {
@@ -228,12 +296,15 @@ impl<'a> Visitor<'a> for RecvScan<'_> {
 }
 
 /// What a skipped method may do to its receiver (`receiver_effects`): the attribute names it
-/// may store and delete, those it uses at all, and the methods that run with the receiver.
+/// may store and delete, those it reads (what it reaches through the receiver), and the methods
+/// that run with the receiver.
 pub struct RecvEffects {
     pub stores: Vec<KeyId>,
     pub deletes: Vec<KeyId>,
     pub used: Vec<KeyId>,
     pub code: Vec<ObjId>,
+    /// the templates of names it may store (new attributes too)
+    pub stores_like: Vec<Like>,
 }
 
 /// A slot: (object, namespace, key).
@@ -501,7 +572,7 @@ impl Analyzer {
             super::FuncNode::Lambda(l) => c.expr(&l.body, true),
         }
         if let (super::FuncNode::Def(f), Some(p)) = (fi.node, fi.node.params().and_then(|p| p.posonlyargs.iter().chain(p.args.iter()).next())) {
-            let mut r = RecvScan { me: p.parameter.name.id.as_str(), out: RecvUse::default() };
+            let mut r = RecvScan { me: p.parameter.name.id.as_str(), out: RecvUse::default(), named: FxHashMap::default() };
             r.visit_body(&f.body);
             c.out.recv = Some(r.out);
         }
@@ -539,16 +610,17 @@ impl Analyzer {
 
     /// What a call of method `foid` that does not run may do to its receiver `recv` itself, by
     /// its own code and the methods and properties of the receiver's class that run with it:
-    /// the attribute names it may store and delete, and all the names it uses on it (what it
-    /// can reach through the receiver is under those). None: anything (the receiver escapes,
+    /// the attribute names it may store and delete, and the names it reads on it (what it can
+    /// reach through the receiver is under those). None: anything (the receiver escapes,
     /// the class hooks attribute access or has a base rowan does not see, a descriptor).
-    pub(in crate::interp) fn receiver_effects(&mut self, foid: ObjId, recv: ObjId) -> Option<RecvEffects> {
+    pub(in crate::interp) fn receiver_effects(&mut self, foid: ObjId, recv: ObjId, state: &State, bind: &dyn Fn(&str) -> Option<String>) -> Option<RecvEffects> {
         let cls = self.heap.instance_class(recv)?;
         let mro = self.heap.mro(cls);
         if mro.iter().any(|c| self.heap.class_info_opt(*c).is_none_or(|ci| ci.open_base)) || ["__getattr__", "__getattribute__", "__setattr__", "__delattr__"].iter().any(|h| self.class_lookup(cls, h).is_some()) {
             return None;
         }
         let (mut stores, mut deletes, mut used): (FxHashSet<StrId>, FxHashSet<StrId>, FxHashSet<StrId>) = Default::default();
+        let (mut loads_like, mut stores_like, mut deletes_like): (Vec<Like>, Vec<Like>, Vec<Like>) = Default::default();
         let mut work = vec![foid];
         let mut done: FxHashSet<ObjId> = FxHashSet::default();
         let runs_with_recv = |an: &Analyzer, g: ObjId| an.heap.kind(g) == Kind::Function && !an.heap.func_info(g).is_static.get() && !an.heap.func_info(g).is_classmethod.get();
@@ -562,8 +634,25 @@ impl Analyzer {
             let u = uses.recv.as_ref().filter(|u| !u.escapes)?;
             stores.extend(u.stores.iter().copied());
             deletes.extend(u.deletes.iter().copied());
+            // (the called method's own templates: the names its arguments make)
+            let named = |an: &Analyzer, likes: &[Like], to: &mut FxHashSet<StrId>, rest: &mut Vec<Like>| -> Option<()> {
+                for l in likes {
+                    match l.resolve(bind).filter(|_| f == foid) {
+                        Some(n) if an.class_lookup(cls, &n).is_some() => return None,
+                        Some(n) => drop(to.insert(s(&n))),
+                        None => rest.push(l.clone()),
+                    }
+                }
+                Some(())
+            };
+            named(self, &u.loads_like, &mut used, &mut loads_like)?;
+            named(self, &u.stores_like, &mut stores, &mut stores_like)?;
+            named(self, &u.deletes_like, &mut deletes, &mut deletes_like)?;
             for &n in u.loads.iter().chain(u.stores.iter()).chain(u.deletes.iter()).chain(u.calls.iter()) {
-                used.insert(n);
+                // (what a name only stored into or deleted held before is not the code's to reach)
+                if u.loads.contains(&n) || u.calls.contains(&n) {
+                    used.insert(n);
+                }
                 // (a name the class does not define is the instance's own attribute)
                 let k = key_str_lit(&str_get(n));
                 let Some(owner) = self.class_lookup(cls, &str_get(n)) else { continue };
@@ -589,6 +678,25 @@ impl Analyzer {
                 }
             }
         }
+        // (names by a template: the receiver's attributes they name now — not one of the
+        // class's, which may be a method bound to the receiver or a descriptor —, and new ones)
+        let any_like = |likes: &[Like], k: KeyId| likes.iter().any(|l| l.matches(k));
+        let all_like: Vec<Like> = loads_like.iter().chain(&stores_like).chain(&deletes_like).cloned().collect();
+        if !all_like.is_empty() && mro.iter().any(|c| state.obj_slots(*c, Ns::Attr).iter().any(|(k, _)| any_like(&all_like, *k))) {
+            return None;
+        }
+        let as_str = |k: KeyId| s(&intern::key_as_str(k).unwrap_or_default());
+        for k in state.row(recv, Ns::Attr).present.iter() {
+            if any_like(&loads_like, k) {
+                used.insert(as_str(k));
+            }
+            if any_like(&stores_like, k) {
+                stores.insert(as_str(k));
+            }
+            if any_like(&deletes_like, k) {
+                deletes.insert(as_str(k));
+            }
+        }
         let keys = |set: FxHashSet<StrId>| {
             let mut ks: Vec<KeyId> = set.into_iter().map(|a| key_str_lit(&str_get(a))).collect();
             ks.sort_unstable();
@@ -596,7 +704,9 @@ impl Analyzer {
         };
         let mut code: Vec<ObjId> = done.into_iter().collect();
         code.sort_unstable();
-        Some(RecvEffects { stores: keys(stores), deletes: keys(deletes), used: keys(used), code })
+        // (a deleted name stored again: as a store, the row opened for both)
+        stores_like.extend(deletes_like);
+        Some(RecvEffects { stores: keys(stores), deletes: keys(deletes), used: keys(used), code, stores_like })
     }
 
     /// The attribute names a method's own code stores on its receiver on every way it
@@ -732,7 +842,19 @@ impl Analyzer {
         // run on it): the receiver's own attributes change only by those names, unless what
         // the call reaches otherwise reaches the receiver too (`havoc_guard`)
         let recv = self_v.and_then(|v| v.single()).filter(|o| self.heap.kind(*o) == Kind::Instance);
-        let eff = recv.and_then(|o| Some((o, self.receiver_effects(foid, o)?)));
+        // (a literal argument's text, for the names its templates make)
+        let fi = self.heap.func_info(foid);
+        let positional: Vec<String> = fi.node.params().map(|p| p.posonlyargs.iter().chain(p.args.iter()).skip(usize::from(self_v.is_some())).map(|a| a.parameter.name.id.to_string()).collect()).unwrap_or_default();
+        let bind = |n: &str| -> Option<String> {
+            let given = positional.iter().position(|p| p == n).filter(|_| star_args.is_empty()).and_then(|i| args.get(i)).or_else(|| kwargs.get(&s(n)));
+            let v = match given {
+                Some(v) => v,
+                None if star_kwargs.is_empty() && !positional.iter().position(|p| p == n).is_some_and(|i| i < args.len() || !star_args.is_empty()) => fi.defaults.get(&s(n))?,
+                None => return None,
+            };
+            v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_str).map(|x| x.to_string())
+        };
+        let eff = recv.and_then(|o| Some((o, self.receiver_effects(foid, o, state, &bind)?)));
         let must: Vec<KeyId> = match &eff {
             Some((_, e)) if fi_is_method(self, foid) => self.must_stores(foid).into_iter().filter(|k| !e.deletes.contains(k)).collect(),
             _ => Vec::new(),
@@ -751,7 +873,7 @@ impl Analyzer {
         roots.extend(eff.iter().flat_map(|(_, e)| e.code.iter().copied()));
         let rid = r.single().unwrap_or(0);
         self.follow_code(roots, rid, site, state);
-        if let Some((o, super::effects::RecvEffects { stores, deletes, .. })) = eff {
+        if let Some((o, super::effects::RecvEffects { stores, deletes, stores_like, .. })) = eff {
             let reached_otherwise = self.havoc.guard.take().is_some_and(|(_, n, _)| n > 1);
             if reached_otherwise {
                 let walk = self.havoc.new_walk();
@@ -766,6 +888,9 @@ impl Analyzer {
                 }
                 for k in deletes {
                     row = row.delete(k, false);
+                }
+                if !stores_like.is_empty() {
+                    row = row.mutate_like(site, &|k| stores_like.iter().any(|l| l.matches(k)));
                 }
                 state.set_row(o, Ns::Attr, row);
             }
