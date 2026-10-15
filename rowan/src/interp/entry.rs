@@ -258,6 +258,19 @@ impl Analyzer {
                 let subs: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| *c == cls || (!torch && self.heap.mro(*c).contains(&cls))).collect();
                 let mut insts: Vec<ObjId> = Vec::new();
                 for c in subs {
+                    // (the instance made with the defaults is made too, whichever run needs a
+                    // receiver first: its `__init__` run's verdicts carry much of a library's
+                    // coverage — pip, sktime)
+                    if self.entry.any_instance && !torch && !self.entry.instances.contains_key(&c) {
+                        let saved = (self.entry.any_instance, self.entry.used_defaults);
+                        self.entry.any_instance = false;
+                        let cname = self.heap.class_info(c).name.clone();
+                        let i = self.fresh_instance(c, state, &format!("entry:{}", cname));
+                        self.entry.instances.insert(c, i);
+                        (self.entry.any_instance, self.entry.used_defaults) = saved;
+                        *st = state.copy();
+                        st.ret = None;
+                    }
                     let made = if self.entry.any_instance { self.entry.general_instances.get(&c) } else { self.entry.instances.get(&c) };
                     self.entry.used_defaults |= !self.entry.any_instance;
                     let inst = match made {
