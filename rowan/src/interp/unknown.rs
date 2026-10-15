@@ -139,8 +139,12 @@ impl Havoc {
                     }
                 }
                 (Kind::Module | Kind::External | Kind::Method, _) => continue,
-                // (a compiled pattern, a match, a path: no attributes to set)
+                // (a compiled pattern, a match, a path, a frozenset: nothing to change)
                 (Kind::Namespace, Payload::Method(q, _)) if matches!(q.as_str(), "stdobj.repattern" | "stdobj.rematch" | "stdobj.path") => {
+                    havoc_object(heap, state, o, Kind::Tuple, site, any_id, &any, &mut work);
+                    continue;
+                }
+                (Kind::Set, _) if heap.obj(o).label.starts_with("frozenset@") => {
                     havoc_object(heap, state, o, Kind::Tuple, site, any_id, &any, &mut work);
                     continue;
                 }
