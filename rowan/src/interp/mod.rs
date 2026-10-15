@@ -35,6 +35,7 @@ pub mod entry;
 pub use entry::Entries;
 pub mod exprs;
 pub mod findings;
+pub mod flows;
 pub use findings::*;
 pub mod funcs;
 pub mod gc;

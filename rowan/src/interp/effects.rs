@@ -13,6 +13,7 @@ use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, str_get, KeyId, StrId};
 use crate::state::{Kind, State};
 
+use super::flows::{CodeUses, Flags};
 use super::{Analyzer, FuncInfo, Payload};
 
 /// What the cache of code closures (`code_closure`) may hold; past it the cache starts over.
@@ -30,33 +31,6 @@ pub struct EffectsCache {
     closures: FxHashMap<Vec<ObjId>, std::rc::Rc<Closure>>,
     /// what `closures` holds (roots, code, slots, values), bounded by `CLOSURE_CACHE`
     closures_size: usize,
-}
-
-/// A name the code reads that is not its own local: (name, the attribute read on it, whether
-/// what it holds may change or escape — stored into, deleted from, given to a call that may
-/// keep or change it, returned, aliased —, whether the code rebinds it).
-pub struct Use {
-    name: StrId,
-    attr: Option<StrId>,
-    changes: bool,
-    rebinds: bool,
-}
-
-/// The names a function's code (its nested functions, lambdas and comprehensions included)
-/// reads beyond its locals, the modules its own imports bind, and the attribute names it may
-/// change on any object.
-pub struct CodeUses {
-    uses: Vec<Use>,
-    imports: FxHashMap<StrId, String>,
-    attrs: FxHashSet<StrId>,
-    /// the attribute names it assigns (`x.a = …`, `setattr(x, "a", …)`) and deletes
-    stored: FxHashSet<StrId>,
-    deleted: FxHashSet<StrId>,
-    /// the attribute names it reads at all (a method of a class runs only when its name is
-    /// read, or for a dunder)
-    reads: FxHashSet<StrId>,
-    /// how it uses its first parameter (a method's receiver), None when it has none
-    recv: Option<RecvUse>,
 }
 
 /// How a method's own code uses its receiver: the attribute names it reads, stores, deletes and
@@ -310,239 +284,18 @@ pub struct RecvEffects {
 /// A slot: (object, namespace, key).
 type Loc = (ObjId, Ns, KeyId);
 
-/// What a piece of code may change beyond what it is given (`code_closure`).
+/// What a piece of code may change beyond what it is given (`code_closure`): the slots whose
+/// values may change, those whose values' parts may (`held_locs`: a container iterated, an
+/// attribute's value given away), those it may rebind, and other values likewise.
 #[derive(Default)]
 pub struct Closure {
     /// the code it reaches
     pub code: FxHashSet<ObjId>,
     pub locs: Vec<Loc>,
+    pub held_locs: Vec<Loc>,
     pub rebound: Vec<Loc>,
     pub values: Vec<Value>,
-}
-
-struct Collect<'a> {
-    locals: &'a dyn Fn(&str) -> bool,
-    esc: bool,
-    out: CodeUses,
-    pkg: String,
-}
-
-impl Collect<'_> {
-    fn name(&mut self, n: &str, attr: Option<&str>, changes: bool, rebinds: bool) {
-        if !(self.locals)(n) || self.out.imports.contains_key(&s(n)) {
-            self.out.uses.push(Use { name: s(n), attr: attr.map(s), changes, rebinds });
-        }
-    }
-
-    fn expr(&mut self, e: &Expr, esc: bool) {
-        match e {
-            Expr::Name(n) => self.name(n.id.as_str(), None, esc, false),
-            Expr::Attribute(a) => {
-                self.out.reads.insert(s(a.attr.as_str()));
-                if esc {
-                    self.attr(a.attr.as_str());
-                }
-                match &*a.value {
-                    Expr::Name(n) => self.name(n.id.as_str(), Some(a.attr.as_str()), esc, false),
-                    v => self.expr(v, esc),
-                }
-            }
-            Expr::Subscript(x) => {
-                self.expr(&x.value, esc);
-                self.expr(&x.slice, false);
-            }
-            Expr::Call(c) => {
-                let pure = match &*c.func {
-                    Expr::Attribute(a) => {
-                        self.out.reads.insert(s(a.attr.as_str()));
-                        let pure = super::PURE_METHODS.contains(&a.attr.as_str());
-                        match &*a.value {
-                            Expr::Name(n) => self.name(n.id.as_str(), Some(a.attr.as_str()), esc || !pure, false),
-                            v => self.expr(v, esc || !pure),
-                        }
-                        pure
-                    }
-                    Expr::Name(n) => {
-                        self.name(n.id.as_str(), None, true, false);
-                        // (an attribute by a name in the text: that one; else any — read,
-                        // and changed where the value escapes or is set)
-                        let f = n.id.as_str();
-                        if matches!(f, "setattr" | "delattr" | "getattr" | "hasattr" | "vars") {
-                            let changes = matches!(f, "setattr" | "delattr") || (esc && matches!(f, "getattr" | "vars"));
-                            match c.arguments.args.get(1) {
-                                Some(Expr::StringLiteral(l)) if f != "vars" => {
-                                    self.out.reads.insert(s(l.value.to_str()));
-                                    match f {
-                                        "delattr" => drop(self.out.deleted.insert(s(l.value.to_str()))),
-                                        "setattr" => drop(self.out.stored.insert(s(l.value.to_str()))),
-                                        _ => {}
-                                    }
-                                    if changes {
-                                        self.attr(l.value.to_str());
-                                    }
-                                }
-                                // (an attribute by a computed name: not followed)
-                                _ => {}
-                            }
-                        }
-                        super::PURE_BUILTINS.contains(&n.id.as_str())
-                    }
-                    f => {
-                        self.expr(f, true);
-                        false
-                    }
-                };
-                for a in c.arguments.args.iter().chain(c.arguments.keywords.iter().map(|k| &k.value)) {
-                    self.expr(a, !pure);
-                }
-            }
-            Expr::Compare(c) => {
-                self.expr(&c.left, false);
-                c.comparators.iter().for_each(|x| self.expr(x, false));
-            }
-            Expr::UnaryOp(u) => self.expr(&u.operand, false),
-            Expr::If(i) => {
-                self.expr(&i.test, false);
-                self.expr(&i.body, esc);
-                self.expr(&i.orelse, esc);
-            }
-            Expr::FString(_) => self.walk(e, false),
-            Expr::Yield(_) | Expr::YieldFrom(_) | Expr::Await(_) | Expr::Named(_) | Expr::Lambda(_) => self.walk(e, true),
-            _ => self.walk(e, esc),
-        }
-    }
-
-    fn walk(&mut self, e: &Expr, esc: bool) {
-        let saved = std::mem::replace(&mut self.esc, esc);
-        walk_expr(self, e);
-        self.esc = saved;
-    }
-
-    /// An assignment / deletion / loop target.
-    fn target(&mut self, t: &Expr) {
-        match t {
-            Expr::Name(n) => self.name(n.id.as_str(), None, false, true),
-            Expr::Attribute(a) => {
-                self.out.reads.insert(s(a.attr.as_str()));
-                self.out.stored.insert(s(a.attr.as_str()));
-                self.attr(a.attr.as_str());
-                match &*a.value {
-                    Expr::Name(n) => self.name(n.id.as_str(), Some(a.attr.as_str()), true, true),
-                    v => self.expr(v, true),
-                }
-            }
-            Expr::Subscript(x) => {
-                self.expr(&x.value, true);
-                self.expr(&x.slice, false);
-            }
-            Expr::Tuple(t) => t.elts.iter().for_each(|x| self.target(x)),
-            Expr::List(t) => t.elts.iter().for_each(|x| self.target(x)),
-            Expr::Starred(x) => self.target(&x.value),
-            e => self.expr(e, true),
-        }
-    }
-
-    fn attr(&mut self, a: &str) {
-        self.out.attrs.insert(s(a));
-    }
-
-    fn import(&mut self, local: &str, module: String) {
-        self.out.imports.insert(s(local), module);
-    }
-}
-
-impl<'a> Visitor<'a> for Collect<'_> {
-    fn visit_expr(&mut self, e: &'a Expr) {
-        let esc = self.esc;
-        self.expr(e, esc);
-    }
-
-    fn visit_stmt(&mut self, st: &'a Stmt) {
-        self.esc = true;
-        match st {
-            Stmt::Expr(x) => self.expr(&x.value, false),
-            Stmt::Assign(a) => {
-                self.expr(&a.value, true);
-                a.targets.iter().for_each(|t| self.target(t));
-            }
-            Stmt::AugAssign(a) => {
-                self.expr(&a.value, true);
-                self.expr(&a.target, true);
-                self.target(&a.target);
-            }
-            Stmt::AnnAssign(a) => {
-                if let Some(v) = &a.value {
-                    self.expr(v, true);
-                    self.target(&a.target);
-                }
-            }
-            Stmt::Delete(d) => {
-                for t in &d.targets {
-                    if let Expr::Attribute(a) = t {
-                        self.out.deleted.insert(s(a.attr.as_str()));
-                    }
-                    self.target(t);
-                }
-            }
-            Stmt::For(f) => {
-                self.expr(&f.iter, true);
-                self.target(&f.target);
-                self.visit_body(&f.body);
-                self.visit_body(&f.orelse);
-            }
-            Stmt::If(i) => {
-                self.expr(&i.test, false);
-                self.visit_body(&i.body);
-                for c in &i.elif_else_clauses {
-                    if let Some(t) = &c.test {
-                        self.expr(t, false);
-                    }
-                    self.visit_body(&c.body);
-                }
-            }
-            Stmt::While(w) => {
-                self.expr(&w.test, false);
-                self.visit_body(&w.body);
-                self.visit_body(&w.orelse);
-            }
-            Stmt::Assert(a) => {
-                self.expr(&a.test, false);
-                if let Some(m) = &a.msg {
-                    self.expr(m, false);
-                }
-            }
-            Stmt::With(w) => {
-                for it in &w.items {
-                    self.expr(&it.context_expr, true);
-                    if let Some(v) = &it.optional_vars {
-                        self.target(v);
-                    }
-                }
-                self.visit_body(&w.body);
-            }
-            Stmt::Import(i) => {
-                for a in &i.names {
-                    let full = a.name.id.as_str();
-                    match &a.asname {
-                        Some(x) => self.import(x.as_str(), full.to_string()),
-                        None => self.import(full.split('.').next().unwrap_or(full), full.split('.').next().unwrap_or(full).to_string()),
-                    }
-                }
-            }
-            Stmt::ImportFrom(i) => {
-                let mut base: Vec<String> = if i.level > 0 { self.pkg.split('.').filter(|x| !x.is_empty()).map(String::from).collect() } else { Vec::new() };
-                for _ in 1..i.level {
-                    base.pop();
-                }
-                base.extend(i.module.iter().map(|m| m.id.to_string()));
-                for a in i.names.iter().filter(|a| a.name.as_str() != "*") {
-                    let local = a.asname.as_ref().unwrap_or(&a.name).as_str();
-                    self.import(local, format!("{}.{}", base.join("."), a.name.as_str()));
-                }
-            }
-            _ => walk_stmt(self, st),
-        }
-    }
+    pub held_values: Vec<Value>,
 }
 
 impl Analyzer {
@@ -555,28 +308,21 @@ impl Analyzer {
         let mi = self.heap.module_info(fi.module);
         let scope = mi.scopes.get(fi.scope);
         let locals = |n: &str| scope.is_local(n);
-        let mut c = Collect { locals: &locals, esc: true, out: CodeUses { uses: Vec::new(), imports: FxHashMap::default(), attrs: FxHashSet::default(), stored: FxHashSet::default(), deleted: FxHashSet::default(), reads: FxHashSet::default(), recv: None }, pkg: mi.pkg.clone() };
-        // (imports first: a use before the import statement in the text binds the same name)
-        for st in super::access::walk_stmts(fi.node.body()) {
-            if matches!(st, Stmt::Import(_) | Stmt::ImportFrom(_)) {
-                c.visit_stmt(st);
-            }
-        }
-        match fi.node {
-            super::FuncNode::Def(f) => {
-                for d in f.parameters.iter_non_variadic_params().filter_map(|p| p.default.as_deref()) {
-                    c.expr(d, true);
-                }
-                c.visit_body(&f.body);
-            }
-            super::FuncNode::Lambda(l) => c.expr(&l.body, true),
-        }
-        if let (super::FuncNode::Def(f), Some(p)) = (fi.node, fi.node.params().and_then(|p| p.posonlyargs.iter().chain(p.args.iter()).next())) {
-            let mut r = RecvScan { me: p.parameter.name.id.as_str(), out: RecvUse::default(), named: FxHashMap::default() };
+        let first = fi.node.params().and_then(|p| p.posonlyargs.iter().chain(p.args.iter()).next()).map(|p| p.parameter.name.id.as_str());
+        // (a method run with its instance: stores on it are not on its class)
+        let me = first.filter(|_| fi.cls.is_some() && !fi.is_static.get() && !fi.is_classmethod.get());
+        let params: Vec<StrId> = fi.node.params().map(|p| p.iter().map(|x| s(x.name().id.as_str())).collect()).unwrap_or_default();
+        let flow = super::flows::Flow::new(&locals, me, mi.pkg.clone());
+        let mut out = match fi.node {
+            super::FuncNode::Def(f) => flow.scan(&params, &f.body, None),
+            super::FuncNode::Lambda(l) => flow.scan(&params, &[], Some(&l.body)),
+        };
+        if let (super::FuncNode::Def(f), Some(me)) = (fi.node, first) {
+            let mut r = RecvScan { me, out: RecvUse::default(), named: FxHashMap::default() };
             r.visit_body(&f.body);
-            c.out.recv = Some(r.out);
+            out.recv = Some(r.out);
         }
-        let u = std::rc::Rc::new(c.out);
+        let u = std::rc::Rc::new(out);
         self.effects.code_uses.insert(addr, u.clone());
         u
     }
@@ -762,7 +508,7 @@ impl Analyzer {
         }
         let mut out = Closure::default();
         let mut work: Vec<ObjId> = roots.to_vec();
-        let (mut attrs, mut reads): (FxHashSet<StrId>, FxHashSet<StrId>) = Default::default();
+        let (mut attrs, mut reads, mut class_stores): (FxHashMap<StrId, Flags>, FxHashSet<StrId>, FxHashSet<StrId>) = Default::default();
         let mut classes: Vec<ObjId> = Vec::new();
         let (mut done, mut done_attrs): (FxHashSet<(ObjId, KeyId)>, FxHashSet<(ObjId, KeyId)>) = Default::default();
         let code = |an: &Analyzer, v: &Value, work: &mut Vec<ObjId>| work.extend(v.pts.iter().filter(|x| matches!(an.heap.kind(*x), Kind::Function | Kind::Class | Kind::Bound | Kind::Instance | Kind::Partial | Kind::Module)));
@@ -774,7 +520,7 @@ impl Analyzer {
                 match (self.heap.kind(o), &self.heap.obj(o).payload) {
                     (Kind::Function, Payload::Func(fi)) => {
                         let fi = fi.clone();
-                        self.function_closure(&fi, state, &mut out, &mut attrs, &mut reads, &mut work);
+                        self.function_closure(&fi, state, &mut out, &mut attrs, &mut reads, &mut class_stores, &mut work);
                     }
                     (Kind::Module, _) => {
                         // (a module used as a value: any of its globals)
@@ -802,26 +548,30 @@ impl Analyzer {
                 }
             }
             // the methods of the classes reached that the code reads (dunders run implicitly),
-            // and their attributes it may change
+            // and their attributes it may change or rebind
             for &c in &classes {
                 for (k, v) in state.obj_slots(c, Ns::Attr) {
                     let name = intern::key_as_str(k).map(|n| s(&n));
-                    let has = |set: &FxHashSet<StrId>| name.is_some_and(|n| set.contains(&n));
-                    if (has(&reads) || name.is_some_and(|n| str_get(n).starts_with("__"))) && done.insert((c, k)) {
+                    if (name.is_some_and(|n| reads.contains(&n) || str_get(n).starts_with("__"))) && done.insert((c, k)) {
                         code(self, &v, &mut work);
                     }
-                    if has(&attrs) && done_attrs.insert((c, k)) {
-                        out.locs.push((c, Ns::Attr, k));
+                    let (flags, rebinds) = name.map(|n| (attrs.get(&n).copied(), class_stores.contains(&n))).unwrap_or_default();
+                    if (flags.is_some() || rebinds) && done_attrs.insert((c, k)) {
+                        let mut f = flags.unwrap_or_default();
+                        f.rebinds = rebinds;
+                        self.apply_flags(&f, (c, Ns::Attr, k), state, &mut out);
                     }
                 }
             }
             if work.is_empty() {
-                out.locs.sort_unstable();
-                out.locs.dedup();
+                for l in [&mut out.locs, &mut out.held_locs, &mut out.rebound] {
+                    l.sort_unstable();
+                    l.dedup();
+                }
                 let c = std::rc::Rc::new(out);
                 // (a cache of what the program's code reaches, by root set: on large programs
                 // the root sets rarely repeat, so it is emptied past a bound on what it holds)
-                let size = roots.len() + c.code.len() + c.locs.len() + c.rebound.len() + c.values.len();
+                let size = roots.len() + c.code.len() + c.locs.len() + c.held_locs.len() + c.rebound.len() + c.values.len() + c.held_values.len();
                 self.effects.closures_size += size;
                 if self.effects.closures_size > CLOSURE_CACHE {
                     self.effects.closures.clear();
@@ -915,22 +665,35 @@ impl Analyzer {
         r
     }
 
-    /// What a function's code adds to a closure: the attribute names it changes and reads, its
-    /// mutable defaults, and the slots of the names it reads (changed, rebound) with the code
-    /// they hold.
-    fn function_closure(&mut self, fi: &FuncInfo, state: &State, out: &mut Closure, attrs: &mut FxHashSet<StrId>, reads: &mut FxHashSet<StrId>, work: &mut Vec<ObjId>) {
+    /// What a function's code adds to a closure: what may happen to the values of the names it
+    /// reads (globals, cells, modules' globals) and of its defaults, the code they hold, and
+    /// what may happen to attributes by name (`attrs`, `class_stores`: class attributes).
+    #[allow(clippy::too_many_arguments)]
+    fn function_closure(&mut self, fi: &FuncInfo, state: &State, out: &mut Closure, attrs: &mut FxHashMap<StrId, Flags>, reads: &mut FxHashSet<StrId>, class_stores: &mut FxHashSet<StrId>, work: &mut Vec<ObjId>) {
         let code = |an: &Analyzer, v: &Value, work: &mut Vec<ObjId>| work.extend(v.pts.iter().filter(|x| matches!(an.heap.kind(*x), Kind::Function | Kind::Class | Kind::Bound | Kind::Instance | Kind::Partial | Kind::Module)));
-        let uses = self.code_uses(&fi);
-        attrs.extend(uses.attrs.iter().copied());
+        let uses = self.code_uses(fi);
+        for (a, f) in &uses.attrs {
+            attrs.entry(*a).or_default().join(f);
+        }
         reads.extend(uses.reads.iter().copied());
-        // (a mutable default is the function's own state)
-        for v in fi.defaults.values() {
-            out.values.push(v.clone());
+        class_stores.extend(uses.class_stores.iter().copied());
+        // (a default is the function's own state: it changes where its parameter does)
+        for (p, v) in fi.defaults.iter() {
             code(self, v, work);
+            if let Some(f) = uses.params.get(p) {
+                let (own, held) = self.flag_effect(f, v, state);
+                if own {
+                    out.values.push(v.clone());
+                } else if held {
+                    out.held_values.push(v.clone());
+                }
+            }
         }
         for u in &uses.uses {
-            // (`m.x` of a module m: its global x)
-            let (loc, in_module) = match (self.resolve_use(&fi, &uses, u.name), u.attr) {
+            // (`m.x` of a module m: its global x; of anything else: what m holds, and a class
+            // attribute x — a method call on it may change it, a store changes it)
+            let mut f = u.flags;
+            let (loc, in_module) = match (self.resolve_use(fi, &uses, u.name), u.attr) {
                 (Ok(l), None) => (l, false),
                 (Ok(l), Some(a)) => match state.slot(l.0, l.1, l.2).single().filter(|m| self.heap.kind(*m) == Kind::Module) {
                     Some(m) => ((m, Ns::Attr, key_str_lit(&str_get(a))), true),
@@ -942,14 +705,50 @@ impl Analyzer {
                     continue;
                 }
             };
-            if u.rebinds && (u.attr.is_none() || in_module) {
-                out.rebound.push(loc);
+            if let (Some(a), false) = (u.attr, in_module) {
+                let by_name = Flags { rebinds: false, called: false, ..f };
+                attrs.entry(a).or_default().join(&by_name);
+                // (`K.x = …` of a class K: K's attribute rebound)
+                if f.rebinds {
+                    let k = key_str_lit(&str_get(a));
+                    out.rebound.extend(state.slot(loc.0, loc.1, loc.2).pts.iter().filter(|c| self.heap.kind(*c) == Kind::Class).map(|c| (c, Ns::Attr, k)));
+                }
+                f = Flags { changes: f.called || f.rebinds, held: f.changes || f.held || f.iterated, ..Flags::default() };
             }
-            if u.changes {
-                out.locs.push(loc);
-            }
+            self.apply_flags(&f, loc, state, out);
             code(self, &state.slot(loc.0, loc.1, loc.2), work);
         }
+    }
+
+    /// What `f` makes of a slot's value: it may change, what it holds may, it may be rebound.
+    fn apply_flags(&self, f: &Flags, loc: Loc, state: &State, out: &mut Closure) {
+        let (own, held) = self.flag_effect(f, &state.slot(loc.0, loc.1, loc.2), state);
+        if own {
+            out.locs.push(loc);
+        } else if held {
+            out.held_locs.push(loc);
+        }
+        if f.rebinds {
+            out.rebound.push(loc);
+        }
+    }
+
+    /// Whether value `v` (own) or what it holds (held) may change by `f`: iterating a plain
+    /// container uses what it holds (an iterator advances); calling code runs it (the closure
+    /// follows it), calling a library method that keeps nothing changes nothing.
+    fn flag_effect(&self, f: &Flags, v: &Value, _state: &State) -> (bool, bool) {
+        let plain = |o: ObjId| match self.heap.kind(o) {
+            Kind::Dict | Kind::Set | Kind::Tuple => true,
+            Kind::List => self.heap.obj(o).label.starts_with("list@"),
+            _ => false,
+        };
+        let code_only = |o: ObjId| match (self.heap.kind(o), &self.heap.obj(o).payload) {
+            (Kind::Function | Kind::Class | Kind::Partial | Kind::Module | Kind::External, _) => true,
+            (Kind::Method, Payload::Method(q, _)) => q.rsplit('.').next().is_some_and(|m| super::PURE_METHODS.contains(&m)),
+            _ => false,
+        };
+        let own = f.changes || (f.iterated && !v.pts.iter().all(plain)) || (f.called && !v.pts.iter().all(code_only));
+        (own, f.held || f.iterated)
     }
 }
 

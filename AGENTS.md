@@ -7,9 +7,8 @@ must be true at the last commit. The details live in the code's doc comments.
 ## How rowan works
 
 rowan is a whole-program **abstract interpreter** for Python (Rust, `rowan/`). It parses with
-ruff (private names mangled as CPython does) and walks the syntax tree, running the program
-on abstract values. Imports run as Python runs them (`TYPE_CHECKING` is False, `import *`,
-namespace packages).
+ruff (private names mangled as CPython does) and walks the syntax tree, running the program on
+abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import *`, namespaces).
 
 * **Values** (`Value`, `domain.rs`) are a set of object ids plus a scalar part (`KeyVal`): a
   literal, up to 64 literals, the keys of some objects, or `Data(label)`, an unknown named by
@@ -41,15 +40,16 @@ namespace packages).
   per class; handlers start from the raises they may catch, the rest go on through the
   `finally` to the enclosing try. `with` is a `try` whose `finally` is `__exit__`. `finally`
   runs on every way out, `break` / `continue` / `return` included.
-* **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site, in
-  a context of the innermost `chain` (2) call sites. **Budget:** each function code (all
-  closures of one `def`) may run 4,096 statements in all (`budget`); past that its calls are
-  unknown calls that may also change what its code reaches beyond its arguments (`effects.rs`:
-  the globals and cells its code, and the code it reaches by name, reads where they may change
-  or escape; class attributes by name; mutable defaults; a method's receiver only by the names
-  its code uses on it, f-strings too, unless it escapes, `receiver_effects`), and the function
-  gets a reporting run with open parameters (its lines then hold for the calls that did not
-  run). Entry runs are not counted (one per function): work is bounded by functions × budget.
+* **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site, in a
+  context of the innermost `chain` (2) call sites. **Budget:** each function code (all closures
+  of one `def`) may run 4,096 statements in all (`budget`); past that its calls are unknown
+  calls that may also change what its code reaches (`effects.rs`, by `flows.rs`'s reading of
+  function texts: globals, cells, defaults whose value, or what it holds, the code may change or
+  give away, a local aliasing what it is bound to; class attributes by name, rebound where a
+  store's base may be the class; a receiver by the names its code uses unless it escapes,
+  `receiver_effects`; one call for several receivers), and the function gets a reporting run
+  with open parameters (for the calls that did not run). Entry runs are not counted (one per
+  function): work is bounded by functions × budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation
     reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened.
   * **Unknown values** are not taken for the program's instances: their methods are unknown calls.
@@ -90,14 +90,14 @@ namespace packages).
   running calls stop where they are. The budget, not the deadline, bounds the work.
 * **Soundness** holds relative to the models and to annotations of values whose class is
   unknown. `exec`, `setattr` / `getattr` with unknown names (also in code a skipped call
-  reaches), metaclasses and monkey-patching (rebinding a function or class too) are unknown or
-  ignored. List lengths are tracked up to 15 (a few per path: each one's positions; `xs[:n]` keeps
-  xs's). An object a path has no facts of reads as unknown (`read_row`).
+  reaches; a class attribute set there through data or a call's result, `f().x = 1`),
+  metaclasses and monkey-patching (rebinding a function or class too) are unknown or ignored.
+  List lengths are tracked up to 15 (a few per path: each one's positions; `xs[:n]` keeps xs's).
+  An object a path has no facts of reads as unknown (`read_row`).
 
 ## Working conventions (the owner's standing instructions)
 
-* Python runs only through `uv run --no-project python` (`.python-version` pins 3.14). The
-  Python side is only the test harnesses.
+* Python runs only through `uv run --no-project python` (3.14 pinned), for the test harnesses.
 * **New test cases are specifications.** Write the expected rows and verdicts by hand from
   the program text first, then make the engine produce them. Never derive an expectation from
   engine output. When an expectation turns out wrong, fix it with a comment saying why,
@@ -169,7 +169,7 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 | `interp/mod.rs`, `context.rs`, `program.rs`, `entry.rs`; `heap.rs`, `alloc.rs`, `gc.rs` | `Analyzer` and its components' map; `Context` (frames, callers, call chain), `Modes`; `Program` (paths, models, modules), imports; running the program, entry runs (`Entries`); the `Heap` (objects, payloads, lengths, class attributes, keys for objects); allocation policy (`alloc`: variants, recency); liveness (`live_among`, `gc_pinned`), collectors, `rename_recent` |
 | `interp/stmts.rs`, `loops.rs`, `classes.rs`, `tries.rs`; `exprs.rs`, `ops.rs`, `compare.rs`, `comps.rs` | statements, match; loops (unrolled, fixpoint); class definitions; raises, try contexts (`Unwind`), try / with, `finally`; expressions; operators, f-strings; comparisons, truth; comprehensions |
 | `interp/funcs.rs`, `gens.rs`, `narrow.rs`; `access.rs`, `items.rs`, `attrs.rs`, `keys.rs` | functions, names, iteration; generators and `@contextmanager` bodies (`Gens`); tests (`split`), narrowing; what accesses share (guards, requirements); item access; attribute access; keys standing for values |
-| `interp/calls.rs`, `recursion.rs`, `budget.rs`, `unknown.rs`, `effects.rs` | calls: per-call-site runs, `__new__`, dataclass init, bindings; `Recursion` (activations, fixpoint rounds); `Budget` (per code, deadline, work counters); unknown calls (`Havoc` walks); what skipped calls may change (`skipped_call`, `EffectsCache`) |
+| `interp/calls.rs`, `recursion.rs`, `budget.rs`, `unknown.rs`, `effects.rs`, `flows.rs` | calls: per-call-site runs, `__new__`, dataclass init, bindings; `Recursion` (activations, fixpoint rounds); `Budget` (per code, deadline, work counters); unknown calls (`Havoc` walks); what skipped calls may change (`skipped_call`, `EffectsCache`); what a function's text does with values (`Flow`: aliases, escapes) |
 | `interp/findings.rs`, `names.rs`, `report.rs`, `api.rs`; `main.rs` | `Findings` (verdicts, notes, row checks, hover facts), `Names` (symbols, origins); text / JSON / facts output; what models, report and driver may use; CLI (mimalloc), `rowan serve` (on a 1 GiB-stack thread) |
 | `models/` | `mod.rs` (`Registry`, builtins, containers, `Tables`); `tables` (what builtins / library calls raise, change, keep); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib (`enums`, `exceptions`, functools, itertools, …); `pandas`, `pydantic`, `fastapi`, `torch`; `shape.rs` (tensor dims as polynomials) |
 | `rowan/py/`, `vscode-rowan/` | a PyO3 binding (does not load on macOS 26); the editor extension (talks to `rowan serve`) |
