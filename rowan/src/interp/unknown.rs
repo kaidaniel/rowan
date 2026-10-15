@@ -25,6 +25,8 @@ pub struct HavocMemo {
     pub lens: crate::layered::LayerMap<ObjId, (Option<usize>, usize, u16)>,
     pub visited: FxHashSet<ObjId>,
     pub code: Vec<ObjId>,
+    /// the skipped method's receiver and names it was walked by, and how often it was met
+    pub guard: Option<(ObjId, std::rc::Rc<[KeyId]>, u32)>,
 }
 
 /// The havoc walks of unknown code: their marks, a memo of recent walks (a cache: a walk
@@ -69,12 +71,17 @@ impl Havoc {
         // objects that walk met and no write changed since are as it left them — every slot
         // holds `any`, every row has the mutator —, and what they hold is met through them
         // unchanged, or changed and walked here: only the changed ones are walked again)
+        // (a skipped method's receiver walked by names: by the same names)
+        let guard = self.guard.as_ref().map(|(g, _, used)| (*g, used.clone()));
         let key = (site, {
             let mut h = rustc_hash::FxHasher::default();
             std::hash::Hash::hash(&roots, &mut h);
+            std::hash::Hash::hash(&guard.as_ref().map(|(g, u)| (*g, u.to_vec())), &mut h);
             std::hash::Hasher::finish(&h)
         });
-        let memo = if self.guard.is_none() { self.memo.remove(&key).filter(|m| m.roots == roots) } else { None };
+        let memo = self.memo.remove(&key).filter(|m| m.roots == roots && m.guard.as_ref().map(|(g, u, _)| (*g, u.clone())) == guard);
+        // (met through something else then: still, as what met it is as it was)
+        let met = memo.as_ref().and_then(|m| m.guard.as_ref()).map_or(0, |(_, _, n)| *n);
         let mut work = roots.clone();
         let (mut visited, mut code, changed) = self.memo_restart(memo, state, &mut work);
         let replay = changed.is_some();
@@ -129,14 +136,16 @@ impl Havoc {
             }
             havoc_object(heap, state, o, k, site, any_id, &any, &mut work);
         }
-        if self.guard.is_none() {
-            if self.memo.len() >= HAVOC_MEMOS {
-                self.memo.clear();
-            }
-            code.sort_unstable();
-            code.dedup();
-            self.memo.insert(key, HavocMemo { roots, rows: state.rows.clone(), slots: state.slots.clone(), elems: state.elems.clone(), lens: state.lens.clone(), visited, code });
+        if let Some((_, n, _)) = self.guard.as_mut() {
+            *n = (*n).max(met);
         }
+        if self.memo.len() >= HAVOC_MEMOS {
+            self.memo.clear();
+        }
+        code.sort_unstable();
+        code.dedup();
+        let guard = self.guard.as_ref().map(|(g, n, used)| (*g, used.clone(), *n));
+        self.memo.insert(key, HavocMemo { roots, rows: state.rows.clone(), slots: state.slots.clone(), elems: state.elems.clone(), lens: state.lens.clone(), visited, code, guard });
     }
 
     /// Where a walk from the same values by the same code left off (`memo`): the objects it

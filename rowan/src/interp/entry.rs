@@ -1,6 +1,7 @@
-//! Running the program: the main module, then entry runs. Functions nothing calls run with
-//! open parameters (`param F.x` inputs; a method on an instance of its class or a subclass);
-//! functions the program calls get a requirement-only run for their own input contract; a
+//! Running the program: the main module, then entry runs. Functions the program's own run
+//! does not call run with open parameters (`param F.x` inputs; a method on an instance of its
+//! class or a subclass), also those only other entry runs call; functions the program calls
+//! get a requirement-only run for their own input contract; a
 //! function some call of which its budget refused gets a reporting run. Functions of torch
 //! modules get their own runs (shapes in terms of their parameters).
 //!
@@ -26,10 +27,15 @@ pub struct Entries {
     pub scope: Option<u32>,
     /// functions that had their entry run
     pub done: FxHashSet<ObjId>,
-    /// functions some call ran (their entry run is requirement-only)
+    /// functions some call ran
     pub analysed: FxHashSet<ObjId>,
-    /// per class: the instance its methods' entry runs take as `self`
-    pub instances: FxHashMap<ObjId, ObjId>,
+    /// the functions the program's own run called (their entry run is requirement-only), and
+    /// the objects made by then; a function an entry run makes is called when some run called
+    /// it (whichever entry runs come first, a function only they call gets its own run)
+    called: (ObjId, FxHashSet<ObjId>),
+    /// per class: the instance its methods' entry runs take as `self` (None: its `__init__`
+    /// does not complete with its defaults)
+    pub instances: FxHashMap<ObjId, Option<ObjId>>,
     /// classes whose entry instance is being made (`fresh_instance`)
     pub fresh_in_progress: FxHashSet<ObjId>,
     /// modules that import torch (their functions all get entry runs)
@@ -66,6 +72,7 @@ impl Analyzer {
 
     /// Entry-point rule (§6.4): functions never called get analysed with open parameters.
     pub(super) fn analyse_uncalled(&mut self, state: &mut State) {
+        self.entry.called = (self.heap.len() as ObjId, self.entry.analysed.clone());
         // entry runs can make functions (closures, lambdas, inner defs) nobody calls either:
         // a few rounds, each over the functions made so far
         let mut start: ObjId = 1;
@@ -100,7 +107,8 @@ impl Analyzer {
             // a function the program calls: a requirement-only run with open parameters gives
             // its own input contract (`param F.x` schemas)
             let refused = self.budget.out.contains(&oid);
-            let quiet = self.entry.analysed.contains(&oid) && !self.entry.torch_modules.contains(&fi.module) && !handler && !refused;
+            let called = if oid < self.entry.called.0 { self.entry.called.1.contains(&oid) } else { self.entry.analysed.contains(&oid) };
+            let quiet = called && !self.entry.torch_modules.contains(&fi.module) && !handler && !refused;
             if quiet != quiet_pass && !(quiet_pass && refused) {
                 continue;
             }
@@ -213,7 +221,12 @@ impl Analyzer {
                             i
                         }
                     };
-                    insts.push(inst);
+                    insts.extend(inst);
+                }
+                // (no `__init__` with its defaults completes: an instance some other call made)
+                if insts.is_empty() {
+                    let ci = self.heap.class_info(cls);
+                    insts.push(self.open_instance(cls, &ci, st, &format!("entry:{}", ci.name)));
                 }
                 self_val = Some(Value::objs(crate::domain::ObjSet::from_vec(insts)));
                 if !params.is_empty() {
@@ -390,7 +403,7 @@ impl Analyzer {
                     }
                     let inst = self.alloc(
                         Kind::Instance,
-                        &format!("param:{}:{}", fi.qualname, ci.name),
+                        &format!("param:{}.{}:{}#{}", fi.qualname, pname, ci.name, oid),
                         state,
                         &format!("{} param", ci.name),
                         Payload::Cls(oid),
@@ -408,8 +421,8 @@ impl Analyzer {
                     }
                     return Some(Value::obj(inst));
                 }
-                let inst = self.fresh_instance(oid, state, &format!("entry:{}", fi.qualname));
-                return Some(Value::obj(inst));
+                // (None: a caller's instance, made otherwise)
+                return self.fresh_instance(oid, state, &format!("entry:{}.{}", fi.qualname, pname)).map(Value::obj);
             }
             if o == Kind::External && self.heap.external_qual(oid).ends_with("DataFrame") {
                 let src = Source::new(&format!("param {}", fi.qualname), SourceKind::Param);
@@ -430,11 +443,13 @@ impl Analyzer {
         None
     }
 
-    pub(in crate::interp) fn fresh_instance(&mut self, cls_oid: ObjId, state: &mut State, ctx: &str) -> ObjId {
+    /// An instance of `cls_oid` as its `__init__` makes it given its defaults (None: no path of
+    /// it completes; `state` is then as it was).
+    pub(in crate::interp) fn fresh_instance(&mut self, cls_oid: ObjId, state: &mut State, ctx: &str) -> Option<ObjId> {
         let ci = self.heap.class_info(cls_oid);
         if self.entry.fresh_in_progress.contains(&cls_oid) {
             // self-referential annotation: open instance
-            return self.unknown_source(&format!("instance {}", ci.name), SourceKind::Class, state, &format!("{} (recursive)", ci.name), "", Ns::Attr, vec![]);
+            return Some(self.unknown_source(&format!("instance {}", ci.name), SourceKind::Class, state, &format!("{} (recursive)", ci.name), "", Ns::Attr, vec![]));
         }
         self.entry.fresh_in_progress.insert(cls_oid);
         let r = self.fresh_instance_inner(cls_oid, &ci, state, ctx);
@@ -442,15 +457,16 @@ impl Analyzer {
         r
     }
 
-    pub(super) fn fresh_instance_inner(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> ObjId {
-        let has_init = self.class_lookup(cls_oid, "__init__").is_some();
-        let has_fields = self.heap.mro(cls_oid).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.has_fields()).unwrap_or(false));
-        // a class that never initialises its own attributes is only used through subclasses
-        let open_inst = ci.open_base || !(has_init || has_fields);
-        let row = if open_inst { Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)) } else { Row::new() };
-        let inst = self.alloc(
+    /// An instance of `cls_oid` whose attributes are unknown (`instance C`).
+    fn open_instance(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> ObjId {
+        self.instance_with(cls_oid, ci, Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)), state, ctx)
+    }
+
+    fn instance_with(&mut self, cls_oid: ObjId, ci: &ClassInfo, row: Row, state: &mut State, ctx: &str) -> ObjId {
+        self.alloc(
             Kind::Instance,
-            &format!("instance:{}:{}", ci.name, ctx),
+            // (the class's own object: two classes may share a name)
+            &format!("instance:{}#{}:{}", ci.name, cls_oid, ctx),
             state,
             &format!("{}()", ci.name),
             Payload::Cls(cls_oid),
@@ -458,7 +474,15 @@ impl Analyzer {
             Ns::Attr,
             Some(true),
             Some(ctx),
-        );
+        )
+    }
+
+    fn fresh_instance_inner(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> Option<ObjId> {
+        let has_init = self.class_lookup(cls_oid, "__init__").is_some();
+        let has_fields = self.heap.mro(cls_oid).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.has_fields()).unwrap_or(false));
+        // a class that never initialises its own attributes is only used through subclasses
+        let row = if ci.open_base || !(has_init || has_fields) { Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)) } else { Row::new() };
+        let inst = self.instance_with(cls_oid, ci, row, state, ctx);
         // dataclass / TypedDict / NamedTuple fields (own and inherited) are present on a fresh instance
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
         let mut order = vec![cls_oid];
@@ -479,6 +503,7 @@ impl Analyzer {
             }
             order.extend(cinfo.bases.iter().copied());
         }
+        let pre = state.copy();
         if let Some(init_cls) = self.class_lookup(cls_oid, "__init__") {
             let inits = self.heap.cls_slots.get(&(init_cls, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
             for init in inits.pts.iter() {
@@ -507,8 +532,16 @@ impl Analyzer {
                 }
                 self.entry.scope = saved_scope;
                 let fake = if self.entry.torch_modules.contains(&fi.module) { Node::synthetic(fi.node.node().module, frontend::node(ci.node).line) } else { Node::synthetic(fi.node.node().module, fi.node.node().line) };
+                // (with its verdicts, also for an entry run that has none: made once, whichever
+                // entry run needs the instance first)
+                let saved_quiet = std::mem::replace(&mut self.findings.quiet, false);
                 self.call_user(init, Some(Value::obj(inst)), args, kwargs, vec![], vec![], state, &fake, true);
+                self.findings.quiet = saved_quiet;
             }
+        }
+        if !state.reachable {
+            *state = pre;
+            return None;
         }
         // (an instance a caller made may have had any of its methods called since: what they
         // set and `__init__` did not may be there too, holding anything; what they delete may
@@ -530,7 +563,7 @@ impl Analyzer {
             }
             state.set_row(inst, Ns::Attr, row);
         }
-        inst
+        Some(inst)
     }
 }
 

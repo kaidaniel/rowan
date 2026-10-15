@@ -798,6 +798,10 @@ impl Analyzer {
     }
 
     pub(in crate::interp) fn load_unknown_attr(&mut self, oid: u32, name: &str, node: &Node, state: &mut State, guarded: bool) -> Value {
+        // (its class, as `type(x)`: calling it does not give it the object, so not a method of it)
+        if name == "__class__" {
+            return Value::data(&format!("type@L{}", node.line));
+        }
         let nk = key_str_lit(name);
         if DICT_METHOD_NAMES.contains(&name) {
             return self.method_value(&format!("dict.{}", name), &Value::obj(oid));

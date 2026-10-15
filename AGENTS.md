@@ -47,9 +47,9 @@ namespace packages).
   unknown calls that may also change what its code reaches beyond its arguments (`effects.rs`:
   the globals and cells its code, and the code it reaches by name, reads where they may change
   or escape; class attributes by name; mutable defaults; a method's receiver only by the names
-  its code uses on it unless it escapes, `receiver_effects`), and the function gets a reporting
-  run with open parameters (its lines then hold for the calls that did not run). Entry runs
-  are not counted (one per function). So the work is bounded by functions times the budget.
+  its code uses on it, f-strings too, unless it escapes, `receiver_effects`), and the function
+  gets a reporting run with open parameters (its lines then hold for the calls that did not
+  run). Entry runs are not counted (one per function): work is bounded by functions × budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation
     reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened.
   * **Unknown values** are not taken for instances of the program's classes: a method of an
@@ -64,8 +64,8 @@ namespace packages).
     or are given the program's functions. Several callees run as `alternatives`.
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model
     is unknown code. A TypeError may come from those taken to fail only on wrong types.
-  * **Entry points:** functions nothing calls run with open parameters; their requirements
-    become `param F.x` schemas.
+  * **Entry points:** functions the main run does not call (also those only entry runs call)
+    run with open parameters; their requirements become `param F.x` schemas.
 * **Generators** run whole at their first consumption (`force_gen`), in the creating call's
   context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`). If code
   between items changes what the generator reads after a yield (`Gens::watch`), it runs again
@@ -190,8 +190,8 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.6 / ~2 / ~7 s; 0.12 / 0.07 / 0.12 / 0.08 GB |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~8.3 / ~29 / ~64 / ~6.6 s; 0.26 / 0.9 / 1.0 / 0.28 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.2 / ~2.8 / ~2.2 / ~6.6 s; 0.12 / 0.07 / 0.12 / 0.09 GB |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~8.8 / ~30 / ~35 / ~5 s; 0.26 / 0.9 / 0.53 / 0.26 GB |
 
 ## Known problems and next steps
 

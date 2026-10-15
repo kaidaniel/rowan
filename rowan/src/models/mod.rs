@@ -81,6 +81,7 @@ impl Registry {
         r(&["operator.setitem"], m_op_setitem);
         r(&["builtins.object.__setattr__"], m_object_setattr);
         r(&["builtins.object.__new__"], m_object_new);
+        r(&["builtins.object.__init__"], m_object_init);
         r(&["builtins.delattr"], m_delattr);
         r(&["builtins.hasattr"], m_hasattr);
         r(&["builtins.vars", "attr.asdict", "attrs.asdict"], m_vars);
@@ -1534,8 +1535,19 @@ fn m_object_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     an.none_v.clone()
 }
 
-/// `object.__new__(cls)`: a fresh instance of each user class `cls` may be, without attributes;
-/// anything else (a class only a call site knows, an external class) is unknown.
+/// `object.__init__(self)` (`super().__init__()` in a class whose bases are the program's):
+/// nothing; given more, as CPython decides by the class (unknown code).
+fn m_object_init(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
+    if c.args.len() == 1 && c.kwargs.is_empty() && c.star_args.is_empty() && c.star_kwargs.is_empty() {
+        return an.none_v.clone();
+    }
+    an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node)
+}
+
+/// `object.__new__(cls)`: a fresh instance of each user class `cls` may be, without attributes
+/// (a NamedTuple's: its fields from the other arguments, as `super().__new__(cls, …)` in a
+/// subclass's `__new__` makes it); anything else (a class only a call site knows, an external
+/// class) is unknown.
 fn m_object_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(cv) = c.args.first().cloned() else { return Value::new() };
     let mut out = Value::new();
@@ -1543,6 +1555,9 @@ fn m_object_new(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     for o in cv.pts.iter() {
         if an.heap.kind(o) == Kind::Class && an.heap.class_info_opt(o).is_some() {
             let inst = an.alloc_instance(o, &c.node, st);
+            if crate::models::dataclasses::is_named_tuple_class(an, o) {
+                crate::models::dataclasses::dataclass_init(an, o, inst, &c.args[1..], &c.star_args, &c.kwargs, &c.star_kwargs, st, &c.node);
+            }
             out = out.join(&Value::obj(inst));
         } else {
             other = true;

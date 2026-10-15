@@ -35,7 +35,7 @@ const NOTATION = [
   [(t) => /["'\w]\?[:=]/.test(t), '`"k"?:` set on some paths only'],
   [(t) => /["'\w]~[:=]/.test(t), '`"k"~:` there unless code rowan cannot see removed it'],
   [(t) => t.includes("**?"), "`**?` other keys may exist"],
-  [(t) => / \| /.test(t), "`a | b` one of these, depending on the path or the call"],
+  [(t) => / \| |(^|\n)\| /.test(t), "`a | b` one of these, depending on the path or the call"],
   [(t) => t.includes("[*]"), "`[*]` any element"],
   [(t) => t.includes("…"), "`…` not shown"],
 ];
@@ -207,6 +207,11 @@ function hoverValue(text, maxLines = 16) {
   if (lines.length > maxLines && alts.length > 1) {
     lines = alts.map((a, k) => (k ? "| " : "  ") + shorten(a, VALUE_WIDTH));
   }
+  // (alternatives one line each that cutting made alike — they differ in what `…` hides: once)
+  if (alts.length > 1 && lines.length === alts.length) {
+    const kept = [...new Set(lines.map((l) => l.slice(2)))];
+    if (kept.length < lines.length) lines = kept.length === 1 ? kept : kept.map((l, k) => (k ? "| " : "  ") + l);
+  }
   if (lines.length > maxLines) lines = lines.slice(0, maxLines - 1).concat([`… (${lines.length - maxLines + 1} more lines)`]);
   return lines;
 }
@@ -233,8 +238,11 @@ function objectLines(f) {
   const total = Math.max(f.objects_total || 0, objs.length) - (objs.length - known.length);
   // (functions, classes, modules, library objects: their name in the value says it)
   const made = known.filter((o) => ["dict", "list", "tuple", "set", "frame", "instance", "namespace", "series"].includes(o.kind));
-  const lines = [...new Set(made.map((o) => (/@L(\d+)$/.exec(o.label) || [])[1]).filter(Boolean))].map(Number).sort((a, b) => a - b);
-  if (total > 1) out.push(`- one of ${total} objects${lines.length ? `, created on line${lines.length > 1 ? "s" : ""} ${lines.join(", ")}` : ""}`);
+  // (where any object the program made comes from: a parser, a model object too)
+  const named = known.filter((o) => !["function", "class", "module", "external", "bound", "method"].includes(o.kind));
+  const lines = [...new Set(named.map((o) => (/@L(\d+)$/.exec(o.label) || [])[1]).filter(Boolean))].map(Number).sort((a, b) => a - b);
+  const where = lines.length > 1 ? `, created on lines ${lines.join(", ")}` : lines.length ? `, all created on line ${lines[0]} (by different calls or loop iterations)` : "";
+  if (total > 1) out.push(`- one of ${total} objects${where}`);
   else if (lines.length === 1) out.push(`- created on line ${lines[0]}`);
   const changed = [...new Set(known.flatMap((o) => o.changed_by || []))].sort((a, b) => (a === "other calls") - (b === "other calls"));
   const more = changed.length - 2;
@@ -273,8 +281,10 @@ function renderHover(name, facts, verdicts) {
       const o = unknown.find((o) => o.origin);
       info.push(o ? `- not known statically: the result of \`${o.origin.text}\` (line ${o.origin.line})` : "- not known statically");
     } else {
-      texts.push(text);
-      out.push("```python", ...hoverValue(text), "```", "");
+      // (the legend explains the marks shown: not those of parts the cut leaves out)
+      const shown = hoverValue(text);
+      texts.push(shown.join("\n"));
+      out.push("```python", ...shown, "```", "");
       // what particular calls gave (the value above holds for any call)
       const ex = f.examples || [];
       if (ex.length) info.push(`- in calls: ${codeList(ex, 3)}`);
@@ -309,9 +319,14 @@ function renderHover(name, facts, verdicts) {
   const groups = new Map();
   // (an input's key is in "the code reads" already)
   const reads = facts.some((f) => (f.required || []).length);
+  // (one access with one mark is one line, whichever of its explanations came first)
+  const seen = new Set();
   for (const v of verdicts) {
     const mark = MARK[v.tier];
     if (!mark || (mark === "◌" && reads)) continue;
+    const ak = `${mark}\u0000${v.text}\u0000${v.key_str}`;
+    if (seen.has(ak)) continue;
+    seen.add(ak);
     const msg = v.message || v.tier;
     const keyText = typeof v.key_str === "string" ? `key ${JSON.stringify(v.key_str)}` : null;
     const shape = keyText && msg.startsWith(keyText + " ") ? msg.slice(keyText.length) : null;

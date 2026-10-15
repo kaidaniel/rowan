@@ -44,6 +44,22 @@ const r8 = hover(a01idx, a01src, 8, "r");
 assert(r8.includes('```python\n{"id": u.id, "role"?: "admin"}\n```'), r8);
 assert(r8.includes('`"k"?:` set on some paths only'), r8);
 assert(r8.includes("- created on line 2"), r8);
+// ---- several objects made on one line (one parser per call of build_parser): where from
+const a002 = path.join(root, "tests", "apps", "small", "a002_deploy_cli.py");
+const p28 = hover(indexResult(facts(a002)), fs.readFileSync(a002, "utf8").split("\n"), 28, "p");
+assert(p28.includes("- one of 7 objects, all created on line 28 (by different calls or loop iterations)"), p28);
+// (two Settings that differ only past the cut — retries=2 / retries=5 — are one line, not two alike)
+const s57 = hover(indexResult(facts(a002)), fs.readFileSync(a002, "utf8").split("\n"), 57, "s");
+const s57lines = s57.split("\n").filter((l) => /^(  |\| )Settings\(/.test(l)).map((l) => l.slice(2));
+assert(s57lines.length === 3 && new Set(s57lines).size === 3, s57);
+// (the legend explains only marks the shown value uses: `**?` and `[*]` are in the cut parts)
+const a002idx = indexResult(facts(a002));
+const a002src = fs.readFileSync(a002, "utf8").split("\n");
+const set96 = hover(a002idx, a002src, 96, "settings");
+assert(!set96.includes("`**?` other keys") && !set96.includes("`[*]` any element") && set96.includes("`a | b` one of these"), set96);
+// (one access, two explanations of why it works: one line)
+const cfg63 = hover(a002idx, a002src, 63, "cfg");
+assert(cfg63.split("\n").filter((l) => l.startsWith('- ✓ `cfg["notify"]`')).length === 1, cfg63);
 const r9 = hover(a01idx, a01src, 9, "r");
 assert(r9.includes('- ⚠ `r["role"]`: key "role" is only set on some paths'), r9);
 assert(r9.includes("⚠ fails on some paths"), r9);

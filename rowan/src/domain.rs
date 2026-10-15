@@ -449,6 +449,11 @@ pub fn source_is_nested(s: SourceId) -> bool {
     with_source(s, |src| !src.path.is_empty())
 }
 
+/// How many keys below its input a source is (`json.loads@L3['db']['host']`: 2).
+pub fn source_depth(s: SourceId) -> usize {
+    with_source(s, |src| src.path.len())
+}
+
 pub fn source_is_data(s: SourceId) -> bool {
     with_source(s, |src| src.kind == SourceKind::Data)
 }
@@ -814,6 +819,22 @@ impl Row {
         d.definite = KeySet::new();
         d.absent_likely = d.absent_likely.union(&d.absent);
         d.absent = KeySet::new();
+        if !d.mutators.contains(site) {
+            d.mutators = cap_mutators(d.mutators.insert(site));
+        }
+        Row::from_data(d)
+    }
+
+    /// `mutate` of the keys `like` names only: unknown code may have stored such keys (new
+    /// ones too) or removed them; the others are as they were.
+    pub fn mutate_like(&self, site: StrId, like: &dyn Fn(KeyId) -> bool) -> Row {
+        let mut d = self.data();
+        let (moved, kept): (Vec<KeyId>, Vec<KeyId>) = d.definite.iter().partition(|k| like(*k));
+        d.likely = d.likely.union(&KeySet::from_iter(moved));
+        d.definite = KeySet::from_iter(kept);
+        let (moved, kept): (Vec<KeyId>, Vec<KeyId>) = d.absent.iter().partition(|k| like(*k));
+        d.absent_likely = d.absent_likely.union(&KeySet::from_iter(moved));
+        d.absent = KeySet::from_iter(kept);
         if !d.mutators.contains(site) {
             d.mutators = cap_mutators(d.mutators.insert(site));
         }
