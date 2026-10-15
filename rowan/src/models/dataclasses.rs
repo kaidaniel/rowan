@@ -149,7 +149,7 @@ impl Analyzer {
         }
         // the generated __init__ ends by calling __post_init__ when the class defines one
         if let Some(pc) = self.class_lookup(cls, "__post_init__") {
-            let fv = self.cls_slots.get(&(pc, Ns::Attr, key_str_lit("__post_init__"))).cloned().unwrap_or_default();
+            let fv = self.heap.cls_slots.get(&(pc, Ns::Attr, key_str_lit("__post_init__"))).cloned().unwrap_or_default();
             for f in fv.pts.iter() {
                 if self.heap.kind(f) == Kind::Function {
                     self.call_user(f, Some(Value::obj(inst)), initvars.clone(), IndexMap::new(), Vec::new(), Vec::new(), state, node, None, false);
@@ -225,9 +225,9 @@ impl Analyzer {
             if let Some(moid) = self.program.modules.values().copied().find(|m| self.heap.module_info(*m).idx == idx) {
                 let mi = self.heap.module_info(moid);
                 let (ctx, single) = (self.frame().ctx.clone(), self.frame().single);
-                self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), moid, &ctx, single, "<default>"));
+                self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), moid, &ctx, single, "<default>"));
                 let v = self.dataclass_default_here(d, node, state);
-                self.frames.pop();
+                self.cx.frames.pop();
                 return v;
             }
         }
@@ -480,7 +480,7 @@ impl Analyzer {
     /// comes first in the MRO).
     pub fn dataclass_init_owner(&self, cls: u32) -> Option<u32> {
         for c in self.heap.mro(cls) {
-            if self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) {
+            if self.heap.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) {
                 return None;
             }
             if self.heap.class_info_opt(c).map(|x| x.has_fields()).unwrap_or(false) {
@@ -568,7 +568,7 @@ impl Analyzer {
     pub fn construct_library(&mut self, cls: u32, inst: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Option<Value> {
         let ci = self.heap.class_info(cls);
         if crate::models::pydantic::is_validated(self, cls) {
-            let own_init = self.class_lookup(cls, "__init__").map(|c| crate::models::pydantic::is_validated(self, c) && self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__")))).unwrap_or(false);
+            let own_init = self.class_lookup(cls, "__init__").map(|c| crate::models::pydantic::is_validated(self, c) && self.heap.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__")))).unwrap_or(false);
             if !own_init {
                 // a pydantic dataclass takes its fields positionally too
                 let mut kw = kwargs.clone();
@@ -603,7 +603,7 @@ impl Analyzer {
             return Some(Value::obj(inst));
         }
         // the generated `__init__` of a dataclass base applies to a subclass without its own
-        let owner = self.heap.mro(cls).into_iter().find_map(|c| if self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) { Some(false) } else if self.heap.class_info_opt(c).is_some_and(|x| x.has_fields()) { Some(true) } else { None });
+        let owner = self.heap.mro(cls).into_iter().find_map(|c| if self.heap.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) { Some(false) } else if self.heap.class_info_opt(c).is_some_and(|x| x.has_fields()) { Some(true) } else { None });
         if ci.has_fields() || owner == Some(true) {
             self.dataclass_init(cls, inst, args, star_args, kwargs, star_kwargs, state, node);
             return Some(Value::obj(inst));

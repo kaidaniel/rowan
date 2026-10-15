@@ -6,7 +6,7 @@ use std::cell::{Cell, RefCell};
 
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 
 use crate::domain::{Ns, ObjId, Value};
 use crate::frontend::{self, Node};
@@ -18,6 +18,8 @@ pub mod access;
 pub mod budget;
 pub use budget::{Budget, Clock};
 pub mod calls;
+pub mod context;
+pub use context::{Context, Modes};
 pub mod effects;
 pub mod alloc;
 pub mod entry;
@@ -327,14 +329,6 @@ pub enum StoreTarget {
 pub struct Analyzer {
     /// the library models' own tables (`models::Tables`)
     pub m: crate::models::Tables,
-    /// `__next__` functions whose calls were not decided once (`unroll_next`)
-    pub no_unroll_next: FxHashSet<ObjId>,
-    pub fresh_init: FxHashSet<ObjId>,
-    /// per comprehension generator level: whether its items are known (unrolled)
-    pub comp_known: Vec<bool>,
-    /// recency abstraction: per loop iteration being analysed (innermost last), the recent
-    /// objects allocated in it: (recent oid, kind, site, ctx)
-    pub recent_stack: Vec<Vec<(ObjId, Kind, String, String)>>,
     /// the main file, import paths, models, modules imported (`interp/program.rs`)
     pub program: Program,
     /// the objects (`interp/heap.rs`)
@@ -359,56 +353,13 @@ pub struct Analyzer {
     /// the ways out of running code: raises, try contexts, handlers, break / continue, finally
     /// (`interp/tries.rs`)
     pub unwind: Unwind,
-    pub frames: Vec<Frame>,
-    /// a context part every allocation adds (a model run once per receiver)
-    pub alloc_extra: Option<String>,
-    /// per running comprehension: the cells of its variables (closed over by functions made
-    /// inside it, which see the variable's latest value)
-    pub comp_cells: Vec<FxHashMap<StrId, ObjId>>,
-    /// (canonical key, key as written) while an access with a numerically-equal key runs
-    pub key_alias: Option<(KeyId, KeyId)>,
-    /// model calls running (`run_model`), the outermost one's number, and the objects
-    /// allocated in it
-    pub model_depth: u32,
-    pub model_epoch: u64,
-    pub model_born: FxHashMap<ObjId, u64>,
-    /// the verdict being recorded is on a guarded access
-    pub verdict_guarded: bool,
-    /// expressions in call position (`x.m` of `x.m(…)`): a method read of an input is not a
-    /// key of it
-    pub callee_nodes: FxHashSet<usize>,
-    /// the access being made is on a value that may also be a scalar (a str, a number): no
-    /// object's lack of the key makes it fail for sure
-    pub recv_scalar: bool,
-    /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
-    pub bypass_setattr: bool,
-    pub cond_depth: i32,
-    /// like `cond_depth` without loops: a requirement recorded under an `if`/`try`/boolean
-    /// operator is "sometimes"; one inside a loop body is per element (always)
-    pub branch_depth: i32,
-    pub call_chain: Vec<u32>,
-    /// class attributes (flow-insensitive)
-    pub cls_slots: FxHashMap<(ObjId, Ns, KeyId), Value>,
-
+    /// the context the running code is in: frames, callers' names, call chain, branch depth
+    /// (`interp/context.rs`)
+    pub cx: Context,
+    /// modes an evaluation sets for the code it calls (`interp/context.rs`)
+    pub mode: Modes,
+    /// `None`
     pub none_v: Value,
-    /// the comprehension written as the first argument of `torch.cat` / `torch.stack` being
-    /// called (its address): those raise on no tensors, so it ran at least once
-    pub nonempty_comp: usize,
-    /// set by a comprehension above for its generator: at least one iteration ran
-    pub nonempty_gen: bool,
-    /// whether the last `loop_fixpoint` converged (its last round ran from the fixpoint)
-    pub loop_converged: bool,
-    /// while a test is evaluated (`split`): its frame depth and the value each node of it had
-    pub trace: Option<(usize, FxHashMap<usize, Value>)>,
-    /// the values the test being narrowed had (`split`, read by `traced`)
-    pub traced: FxHashMap<usize, Value>,
-    /// a copy's original (through copies made at the same node: `out = deepcopy(out)` in a loop
-    /// makes one copy site, not a new one per round)
-    pub copy_root: FxHashMap<ObjId, ObjId>,
-    /// locals of the callers of the running call (innermost last), for liveness
-    pub env_stack: Vec<IndexMap<StrId, Value>>,
-    /// `@name.setter` functions by (defining class, attribute)
-    pub prop_setters: FxHashMap<(ObjId, KeyId), ObjId>,
 }
 
 /// `ROWAN_DEBUG` as a number (0 when unset), read once.
@@ -445,10 +396,10 @@ impl Analyzer {
     }
 
     pub fn frame(&self) -> &Frame {
-        self.frames.last().expect("no frame")
+        self.cx.frames.last().expect("no frame")
     }
     pub fn frame_mut(&mut self) -> &mut Frame {
-        self.frames.last_mut().expect("no frame")
+        self.cx.frames.last_mut().expect("no frame")
     }
 
     // ------------------------------------------------------------- entry
@@ -460,7 +411,7 @@ impl Analyzer {
         if !self.budget.tick() {
             return false;
         }
-        if self.frames.last().is_some_and(|f| f.kind == FrameKind::Function) {
+        if self.cx.frames.last().is_some_and(|f| f.kind == FrameKind::Function) {
             state.reachable = false;
             return true;
         }

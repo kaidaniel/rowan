@@ -1463,7 +1463,7 @@ fn m_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let strong = recs.len() == 1 && an.strongable(recs[0]);
                 for o in recs {
                     // a user `__setattr__` takes the store, whatever the name
-                    let hook = an.heap.kind(o) == Kind::Instance && !an.bypass_setattr && an.heap.instance_class(o).is_some_and(|cls| an.class_lookup(cls, "__setattr__").is_some());
+                    let hook = an.heap.kind(o) == Kind::Instance && !an.mode.bypass_setattr && an.heap.instance_class(o).is_some_and(|cls| an.class_lookup(cls, "__setattr__").is_some());
                     if hook {
                         an.call_method_with(&Value::obj(o), "__setattr__", vec![c.args[1].clone(), c.args[2].clone()], &c.node, st);
                         continue;
@@ -1530,9 +1530,9 @@ fn m_op_setitem(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 /// `object.__setattr__(obj, "name", v)`: the plain store (no user `__setattr__`).
 fn m_object_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    let saved = std::mem::replace(&mut an.bypass_setattr, true);
+    let saved = std::mem::replace(&mut an.mode.bypass_setattr, true);
     m_setattr(an, st, c);
-    an.bypass_setattr = saved;
+    an.mode.bypass_setattr = saved;
     an.none_v.clone()
 }
 
@@ -1949,11 +1949,11 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let cv = st.slot(moid, Ns::Attr, key_str_lit(&name));
                 if let Some(cls) = cv.single() {
                     for k in row.present.iter().filter(|k| intern::key_as_str(*k).is_some()) {
-                        an.cls_slots.insert((cls, Ns::Attr, k), st.slot(ns, Ns::Item, k));
+                        an.heap.cls_slots.insert((cls, Ns::Attr, k), st.slot(ns, Ns::Item, k));
                     }
                     if lit_name.is_none() {
                         for k in ["__name__", "__qualname__"] {
-                            an.cls_slots.insert((cls, Ns::Attr, key_str_lit(k)), c.args[0].clone());
+                            an.heap.cls_slots.insert((cls, Ns::Attr, key_str_lit(k)), c.args[0].clone());
                         }
                     }
                 }

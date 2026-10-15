@@ -42,7 +42,7 @@ impl Analyzer {
             Some(x) => (x, false),
             None => {
                 let strong = fr.single && fr.loop_depth == 0;
-                if !strong && fr.single_nl && !self.recent_stack.is_empty() {
+                if !strong && fr.single_nl && !self.cx.recent_stack.is_empty() {
                     (true, true)
                 } else {
                     (strong, false)
@@ -52,7 +52,7 @@ impl Analyzer {
         let oid = if recent {
             let rsite = format!("{}#recent", site);
             let oid = self.heap.alloc_raw(kind, &rsite, &ctx, true, &label, payload);
-            let top = self.recent_stack.last_mut().unwrap();
+            let top = self.cx.recent_stack.last_mut().unwrap();
             if !top.iter().any(|(o, _, _, _)| *o == oid) {
                 top.push((oid, kind, site.to_string(), ctx.clone()));
             }
@@ -62,9 +62,9 @@ impl Analyzer {
             let payload2 = payload.clone();
             let mut oid = self.heap.alloc_raw(kind, site, &ctx, single, &label, payload);
             // (made earlier in the same model call: held by the model's own code)
-            let model_held = self.model_depth > 0 && self.model_born.get(&oid) == Some(&self.model_epoch);
-            if self.model_depth > 0 {
-                self.model_born.insert(oid, self.model_epoch);
+            let model_held = self.cx.model_depth > 0 && self.cx.model_born.get(&oid) == Some(&self.cx.model_epoch);
+            if self.cx.model_depth > 0 {
+                self.cx.model_born.insert(oid, self.cx.model_epoch);
             }
             // (past the hard deadline no walk: the site's object is taken as still in use,
             // so it is merged — weak, always sound)
@@ -76,12 +76,12 @@ impl Analyzer {
             if existed == Some(oid) && (hard || model_held || (self.has_facts(oid, state) && self.is_live(oid, state))) {
                 // allocated again while the earlier object is still reachable (a method run
                 // twice on one receiver, a call repeated in a loop)
-                if single && !self.recent_stack.is_empty() && !hard {
+                if single && !self.cx.recent_stack.is_empty() && !hard {
                     // inside a loop: a strong recent object, folded into the summary object
                     // at the loop's back-edge (the earlier object becomes that summary)
                     let rsite = format!("{}#recent", site);
                     let r = self.heap.alloc_raw(kind, &rsite, &ctx, true, &label, payload2);
-                    let top = self.recent_stack.last_mut().unwrap();
+                    let top = self.cx.recent_stack.last_mut().unwrap();
                     if !top.iter().any(|(o, _, _, _)| *o == r) {
                         top.push((r, kind, site.to_string(), ctx.clone()));
                     }
@@ -151,7 +151,7 @@ impl Analyzer {
     /// contexts makes two objects.
     pub fn alloc_at(&mut self, kind: Kind, node: &Node, state: &mut State, label: &str, payload: Payload, row: Option<Row>, ns: Ns, single: Option<bool>, ctx: Option<&str>) -> ObjId {
         let site = site_string(node);
-        let joined: Option<String> = match (&self.alloc_extra, ctx) {
+        let joined: Option<String> = match (&self.cx.alloc_extra, ctx) {
             (Some(x), Some(c)) => Some(format!("{}/{}", x, c)),
             (Some(x), None) => Some(x.clone()),
             (None, c) => c.map(|c| c.to_string()),

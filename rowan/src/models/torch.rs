@@ -479,7 +479,7 @@ impl Analyzer {
     // ---------------------------------------------------------------- notes
     fn t_note_ctx(&self) -> (Vec<u32>, bool) {
         let entry = self.entry.run.is_some();
-        let mut chain = self.call_chain.clone();
+        let mut chain = self.cx.call_chain.clone();
         if entry && !chain.is_empty() {
             chain.remove(0);
         }
@@ -494,14 +494,14 @@ impl Analyzer {
     }
 
     pub fn t_print_ctx(&self, st: &State) -> sh::PrintCtx {
-        let scope = self.frames.iter().rev().find_map(|fr| fr.func).unwrap_or(0);
+        let scope = self.cx.frames.iter().rev().find_map(|fr| fr.func).unwrap_or(0);
         self.t_print_ctx_at(scope, &st.env, st)
     }
 
     /// The printing context of the run's outermost function (an entry run's function): a
     /// requirement found in a callee is stated in the caller's terms at the call line.
     pub fn t_outer_print_ctx(&self, st: &State) -> sh::PrintCtx {
-        let funcs: Vec<u32> = self.frames.iter().filter(|f| f.kind == crate::interp::FrameKind::Function).filter_map(|f| f.func).collect();
+        let funcs: Vec<u32> = self.cx.frames.iter().filter(|f| f.kind == crate::interp::FrameKind::Function).filter_map(|f| f.func).collect();
         let target = match self.entry.run {
             Some(e) => funcs.iter().position(|f| *f == e),
             None => if funcs.is_empty() { None } else { Some(0) },
@@ -512,10 +512,10 @@ impl Analyzer {
             return self.t_print_ctx(st);
         }
         let back = total - 1 - j;
-        if back > self.env_stack.len() {
+        if back > self.cx.env_stack.len() {
             return self.t_print_ctx(st);
         }
-        let env = &self.env_stack[self.env_stack.len() - back];
+        let env = &self.cx.env_stack[self.cx.env_stack.len() - back];
         self.t_print_ctx_at(funcs[j], env, st)
     }
 
@@ -532,7 +532,7 @@ impl Analyzer {
             }
             if let Some(cls) = self.heap.func_info(scope).cls {
                 for c in self.heap.mro(cls) {
-                    if let Some(v) = self.cls_slots.get(&(c, Ns::Attr, key_str_lit("__init__"))) {
+                    if let Some(v) = self.heap.cls_slots.get(&(c, Ns::Attr, key_str_lit("__init__"))) {
                         for f in v.pts.iter() {
                             ctx.extra.push(f);
                         }
@@ -1235,7 +1235,7 @@ impl Analyzer {
         }
         // an unknown may be an instance of a user class defining this name, or a tensor:
         // both readings
-        if unknown_tensorish && !self.m.t_skip_user && self.program.user_classes.iter().any(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, key_str_lit(name)))) {
+        if unknown_tensorish && !self.m.t_skip_user && self.program.user_classes.iter().any(|c| self.heap.cls_slots.contains_key(&(*c, Ns::Attr, key_str_lit(name)))) {
             self.m.t_getattr_plain = true;
             let plain = self.load_attr(obj, name, node, st, false);
             self.m.t_getattr_plain = false;
@@ -4653,7 +4653,7 @@ impl Analyzer {
         if self.heap.kind(o) != Kind::Unknown || !self.names.origins.contains_key(&o) || self.m.t_var_names.contains_key(&o) {
             return;
         }
-        let scope = self.frames.iter().rev().find_map(|fr| fr.func).unwrap_or(0);
+        let scope = self.cx.frames.iter().rev().find_map(|fr| fr.func).unwrap_or(0);
         let sy = sh::sym(scope, &intern::str_get(name));
         // (a name already given to a number stays that number's)
         if !self.m.t_named_numbers.contains(&sy) {

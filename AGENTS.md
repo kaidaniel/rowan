@@ -162,7 +162,7 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 | `intern.rs`, `domain.rs` | interned keys, sources, lenses; `Row`, `KeyVal`, `Value`, transfers, `classify` |
 | `layered.rs`, `state.rs` | persistent maps (`LayerMap`, `TwoLevel`); `State`, joins, `diff_keys` |
 | `frontend.rs`, `scopes.rs`, `interp/program.rs` | ruff parsing, leaked `&'static` trees, module registry; lexical scopes; `Program` (paths, models, modules imported), imports |
-| `interp/mod.rs`; `entry.rs`; `heap.rs`, `alloc.rs`, `gc.rs` | `Analyzer`, side tables; running the program, entry runs (`Entries`); the `Heap` (objects, lengths, birth marks), allocation policy (`alloc`: variants, recency), liveness (`live_among`, `gc_pinned`) and collectors |
+| `interp/mod.rs`; `context.rs`; `entry.rs`; `heap.rs`, `alloc.rs`, `gc.rs` | `Analyzer` (its components); `Context` (frames, callers, call chain), `Modes`; running the program, entry runs (`Entries`); the `Heap` (objects, lengths, birth marks), allocation policy (`alloc`: variants, recency), liveness (`live_among`, `gc_pinned`) and collectors |
 | `interp/stmts.rs`, `interp/tries.rs` | statements, loops, match; raises, try contexts (`Unwind`), try / with, `finally` |
 | `interp/exprs.rs`, `interp/funcs.rs`, `interp/gens.rs` | expressions, comprehensions; functions, names, iteration; generators and `@contextmanager` bodies (`Gens`: lazy runs, per-yield states, watched runs) |
 | `interp/narrow.rs`, `interp/access.rs` | tests (`split`), narrowing; attribute and item access, verdicts, requirements |

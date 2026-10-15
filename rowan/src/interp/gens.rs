@@ -126,6 +126,8 @@ pub struct LazyGen {
 /// The generators made and run so far, and the `@contextmanager` bodies running.
 #[derive(Default)]
 pub struct Gens {
+    /// `__next__` functions whose calls were not decided once (`unroll_next`)
+    pub no_unroll_next: FxHashSet<ObjId>,
     /// generators made but not run yet: the call that made each (`force_gen`)
     pub lazy: FxHashMap<ObjId, std::rc::Rc<LazyGen>>,
     /// generators run whole for a consumer that runs code between their items: (generator,
@@ -202,7 +204,7 @@ impl Analyzer {
         let keep = join_values(self_v.iter().chain(args.iter()).chain(kwargs.values()).cloned().collect::<Vec<Value>>());
         state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}lazyargs"), keep, true);
         state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}lazy"), Value::lit(intern::key_int(1)), true);
-        let lg = super::LazyGen { foid, self_v, args, kwargs, node: *node, site, ctx, chain: self.call_chain.clone() };
+        let lg = super::LazyGen { foid, self_v, args, kwargs, node: *node, site, ctx, chain: self.cx.call_chain.clone() };
         self.gens.lazy.insert(gid, Rc::new(lg));
         Value::obj(gid)
     }
@@ -220,11 +222,11 @@ impl Analyzer {
             // (run already on some of the paths joined here: those keep their state)
             let before = if run { Some(state.copy()) } else { None };
             self.gens.force_at = Some((lg.site.clone(), lg.ctx.0.clone(), lg.ctx.1));
-            let saved = std::mem::replace(&mut self.call_chain, lg.chain.clone());
+            let saved = std::mem::replace(&mut self.cx.call_chain, lg.chain.clone());
             let pre = if between { Some((state.copy(), self.budget.snapshot())) } else { None };
             self.gens.last_reads = None;
             let r = self.call_user(lg.foid, lg.self_v.clone(), lg.args.clone(), lg.kwargs.clone(), vec![], vec![], state, &lg.node, None, false);
-            self.call_chain = saved;
+            self.cx.call_chain = saved;
             if let (Some((pre, budget)), true) = (pre, state.reachable) {
                 let fp = state.footprint(&pre);
                 let mut own: FxHashSet<ObjId> = fp.rows.iter().map(|k| k.0).chain(fp.slots.iter().map(|k| k.0)).chain(fp.elems.iter().copied()).chain(state.lens.diff_keys(&pre.lens)).collect();
@@ -379,7 +381,7 @@ impl Analyzer {
                 return;
             }
             if super::debug_enabled() {
-                eprintln!("restart in {} (frames {}), round {}", self.frame().label, self.frames.len(), round);
+                eprintln!("restart in {} (frames {}), round {}", self.frame().label, self.cx.frames.len(), round);
             }
             for (gid, objs) in found {
                 self.gens.havoc.entry(gid).or_default().extend(objs);
@@ -500,11 +502,11 @@ impl Analyzer {
     /// the target bound to the yielded value, then the generator goes on.
     pub(super) fn run_cm_body(&mut self, v: Value, state: &mut State) {
         let Some(mut h) = self.gens.cm_hook.take() else { return };
-        let callee_fr = self.frames.pop().unwrap();
+        let callee_fr = self.cx.frames.pop().unwrap();
         let caller_env = match &h.env_before {
             Some(e) => e.clone(),
             None => {
-                let e = self.env_stack.last().cloned().unwrap_or_default();
+                let e = self.cx.env_stack.last().cloned().unwrap_or_default();
                 h.env_before = Some(e.clone());
                 e
             }
@@ -515,7 +517,7 @@ impl Analyzer {
         if let Some(t) = h.target {
             self.bind_target(t, &v, state);
         }
-        self.gens.cm_frames.push((self.frames.len() + 1, callee_env.clone(), self.env_stack.len()));
+        self.gens.cm_frames.push((self.cx.frames.len() + 1, callee_env.clone(), self.cx.env_stack.len()));
         match h.then.take() {
             Some(f) => f(self, v, state),
             None => self.exec_block(h.body, state),
@@ -542,14 +544,14 @@ impl Analyzer {
             Some(prev) if h.ran => crate::state::join_env(&prev, &after),
             _ => after,
         };
-        if let Some(top) = self.env_stack.last_mut() {
+        if let Some(top) = self.cx.env_stack.last_mut() {
             *top = after.clone();
         }
         h.env_after = Some(after);
         h.ran = true;
         state.ret = callee_ret;
         state.exits = callee_exits;
-        self.frames.push(callee_fr);
+        self.cx.frames.push(callee_fr);
         self.gens.cm_hook = Some(h);
     }
 
@@ -612,7 +614,7 @@ impl Analyzer {
         state.elems.insert(gid, kv_join(&cur, &v.kv));
         // straight-line yields keep their order; in a branch too (a length per path, joined
         // to the shorter known prefix, like appends)
-        let in_branch = self.cond_depth > 0;
+        let in_branch = self.cx.cond_depth > 0;
         let positional = self.frame().single && self.frame().loop_depth == 0 && self.heap.obj(gid).single;
         let ll = if fresh { Some(0) } else { self.heap.llen(gid, state) };
         match (positional, ll) {

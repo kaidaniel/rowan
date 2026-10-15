@@ -61,7 +61,7 @@ impl Havoc {
 
     /// Unknown code ran on `vals`, past the objects walk `walk` met already (marking those it
     /// meets; the code met is added to `code`).
-    pub fn walk_from(&mut self, heap: &mut Heap, cls_slots: &FxHashMap<(ObjId, Ns, KeyId), Value>, vals: &[Value], rid: ObjId, site: StrId, state: &mut State, walk: u32) {
+    pub fn walk_from(&mut self, heap: &mut Heap, vals: &[Value], rid: ObjId, site: StrId, state: &mut State, walk: u32) {
         let mut roots: Vec<ObjId> = vals.iter().flat_map(|v| v.pts.iter()).collect();
         roots.sort_unstable();
         roots.dedup();
@@ -120,7 +120,7 @@ impl Havoc {
                         }
                         work.extend(state.slot(o, Ns::Attr, *k).pts.iter());
                         for c in &mro {
-                            let v = if state.has_slot(*c, Ns::Attr, *k) { state.slot(*c, Ns::Attr, *k) } else { cls_slots.get(&(*c, Ns::Attr, *k)).cloned().unwrap_or_default() };
+                            let v = if state.has_slot(*c, Ns::Attr, *k) { state.slot(*c, Ns::Attr, *k) } else { heap.cls_slots.get(&(*c, Ns::Attr, *k)).cloned().unwrap_or_default() };
                             work.extend(v.pts.iter().filter(|x| heap.kind(*x) != Kind::Function));
                         }
                     }
@@ -225,7 +225,7 @@ impl Analyzer {
         };
         // unknown code may raise
         if crate::interp::debug_level() == 2 {
-            eprintln!("  unknown call {} in {} (may raise)", site, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
+            eprintln!("  unknown call {} in {} (may raise)", site, self.cx.frames.last().map(|f| f.label.clone()).unwrap_or_default());
         }
         // unknown code may remove keys stored through names
         state.drop_name_keys(None);
@@ -381,7 +381,7 @@ impl Analyzer {
     pub fn havoc_reachable(&mut self, vals: &[Value], rid: ObjId, site: StrId, state: &mut State) {
         self.havoc.code.clear();
         let walk = self.havoc.new_walk();
-        self.havoc.walk_from(&mut self.heap, &self.cls_slots, vals, rid, site, state, walk);
+        self.havoc.walk_from(&mut self.heap, vals, rid, site, state, walk);
     }
 
     /// What the code `roots` hold may change when it runs where rowan does not run it: the
@@ -398,7 +398,7 @@ impl Analyzer {
             let cl = self.code_closure(&roots, state);
             let mut vals: Vec<Value> = cl.locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).collect();
             vals.extend(cl.values.iter().cloned());
-            self.havoc.walk_from(&mut self.heap, &self.cls_slots, &vals, rid, site, state, walk);
+            self.havoc.walk_from(&mut self.heap, &vals, rid, site, state, walk);
             for (o, ns, k) in &cl.rebound {
                 let v = state.slot(*o, *ns, *k).join(&any);
                 state.set_slot(*o, *ns, *k, v, false);

@@ -1729,7 +1729,7 @@ pub fn cursor_rows(an: &mut Analyzer, st: &mut State, node: &Node, cur: u32) -> 
 
 fn exec_on(an: &mut Analyzer, st: &mut State, c: &Call, con: u32, existing: Option<u32>, many: bool) -> Value {
     let sql = c.arg(0, Some("sql")).and_then(|v| lit(&v)).and_then(intern::key_as_str).map(|s| s.to_string());
-    let uncertain = an.cond_depth > 0 || an.frame().loop_depth as usize > an.frame().unroll.len();
+    let uncertain = an.cx.cond_depth > 0 || an.frame().loop_depth as usize > an.frame().unroll.len();
     let Some(sql) = sql else {
         // unknown SQL: every table may have changed
         if let Some(db) = an.m.sql_dbs.get_mut(&con) {
@@ -1782,7 +1782,7 @@ pub fn m_sql(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         (_, "executemany") => exec_on(an, st, c, con, if is_con { None } else { Some(o) }, true),
         (_, "executescript") => {
             if let Some(script) = c.arg(0, Some("sql_script")).and_then(|v| lit(&v)).and_then(intern::key_as_str) {
-                let uncertain = an.cond_depth > 0 || an.frame().loop_depth as usize > an.frame().unroll.len();
+                let uncertain = an.cx.cond_depth > 0 || an.frame().loop_depth as usize > an.frame().unroll.len();
                 for part in script.split(';') {
                     if !part.trim().is_empty() {
                         run(an, con, part, Some((Vec::new(), IndexMap::new())), uncertain);

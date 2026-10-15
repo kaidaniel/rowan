@@ -355,7 +355,7 @@ impl Analyzer {
                     }
                     ast::Stmt::FunctionDef(fd) => {
                         let fname = fd.name.id.to_string();
-                        let fv = self.cls_slots.get(&(c, Ns::Attr, key_str_lit(&fname))).cloned().unwrap_or_default();
+                        let fv = self.heap.cls_slots.get(&(c, Ns::Attr, key_str_lit(&fname))).cloned().unwrap_or_default();
                         let Some(func) = fv.pts.iter().find(|o| self.heap.kind(*o) == Kind::Function) else { continue };
                         for d in &fd.decorator_list {
                             let (callee, call) = match &d.expression {
@@ -841,9 +841,9 @@ impl Analyzer {
                     let mut branches: Vec<State> = Vec::new();
                     for &o in &recs {
                         let mut b = state.copy();
-                        self.branch_depth += 1;
+                        self.cx.branch_depth += 1;
                         let x = self.load_item_or_attr(&Value::obj(o), ns_of(self, o), kk, node, &mut b);
-                        self.branch_depth -= 1;
+                        self.cx.branch_depth -= 1;
                         val = val.join(&x);
                         branches.push(b);
                     }
@@ -876,9 +876,9 @@ impl Analyzer {
                                 let mut b = state.copy();
                                 let ns = ns_of(self, open[0]);
                                 let saved = std::mem::replace(&mut self.findings.quiet, true);
-                                self.branch_depth += 1;
+                                self.cx.branch_depth += 1;
                                 let x = self.load_item_or_attr(&ov, ns, *k, node, &mut b);
-                                self.branch_depth -= 1;
+                                self.cx.branch_depth -= 1;
                                 self.findings.quiet = saved;
                                 val = val.join(&x);
                                 branches.push(b);
@@ -1256,7 +1256,7 @@ impl Analyzer {
             state.set_slot(inst, Ns::Attr, priv_key(&name), v, true);
         }
         if let Some(defc) = self.class_lookup(cls, "model_post_init") {
-            let fv = self.cls_slots.get(&(defc, Ns::Attr, key_str_lit("model_post_init"))).cloned().unwrap_or_default();
+            let fv = self.heap.cls_slots.get(&(defc, Ns::Attr, key_str_lit("model_post_init"))).cloned().unwrap_or_default();
             for f in fv.pts.iter().filter(|f| self.heap.kind(*f) == Kind::Function).collect::<Vec<_>>() {
                 self.call_user(f, Some(Value::obj(inst)), vec![self.none_v.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
             }
@@ -1380,13 +1380,13 @@ impl Analyzer {
     /// requirements as for the program's own reads).
     fn load_item_or_attr(&mut self, recv: &Value, ns: Ns, k: KeyId, node: &Node, state: &mut State) -> Value {
         // a ValidationError the program (or FastAPI: a 422) handles: no diagnostic
-        let saved = self.verdict_guarded;
-        self.verdict_guarded |= self.validation_caught();
+        let saved = self.mode.verdict_guarded;
+        self.mode.verdict_guarded |= self.validation_caught();
         // (a missing field is pydantic's ValidationError, not a KeyError)
         let saved_exc = std::mem::replace(&mut self.unwind.item_exc_force, Some("ValidationError"));
         let v = if ns == Ns::Attr { self.load_attr(recv, &intern::key_py_str(k), node, state, true) } else { self.load_item(recv, Ns::Item, &Value::lit(k), node, state, true) };
         self.unwind.item_exc_force = saved_exc;
-        self.verdict_guarded = saved;
+        self.mode.verdict_guarded = saved;
         v
     }
 
@@ -1647,9 +1647,9 @@ impl Analyzer {
                     let mut branches: Vec<State> = Vec::new();
                     for m in chosen {
                         let mut b = state.copy();
-                        self.branch_depth += 1;
+                        self.cx.branch_depth += 1;
                         let x = self.pyd_validate_opts(m, &Value::obj(o), &mut b, node, true);
-                        self.branch_depth -= 1;
+                        self.cx.branch_depth -= 1;
                         outs.push(x);
                         if b.reachable {
                             branches.push(b);
@@ -1864,10 +1864,10 @@ impl Analyzer {
                     let definite = recs.iter().all(|o| state.row(*o, Ns::Item).definite.contains(k));
                     let maybe = recs.iter().any(|o| state.row(*o, Ns::Item).present.contains(k) || state.row(*o, Ns::Item).open());
                     let v = if required && !definite {
-                        let saved = self.verdict_guarded;
-                        self.verdict_guarded |= self.validation_caught();
+                        let saved = self.mode.verdict_guarded;
+                        self.mode.verdict_guarded |= self.validation_caught();
                         let v = self.load_item(&recv, Ns::Item, &Value::lit(k), node, state, true);
-                        self.verdict_guarded = saved;
+                        self.mode.verdict_guarded = saved;
                         v
                     } else if maybe {
                         self.pyd_read_guarded(&recs, k, state)

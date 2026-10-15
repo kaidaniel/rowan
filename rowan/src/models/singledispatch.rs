@@ -19,9 +19,9 @@ impl Analyzer {
         let p = ps.get(if method { 1 } else { 0 })?;
         let ann: &'static ast::Expr = p.parameter.annotation.as_deref()?;
         let mi = self.heap.module_info(fi.module);
-        self.frames.push(crate::interp::Frame::new(crate::interp::FrameKind::Module, mi.scopes.module(), fi.module, "sdispatch", true, "<ann>"));
+        self.cx.frames.push(crate::interp::Frame::new(crate::interp::FrameKind::Module, mi.scopes.module(), fi.module, "sdispatch", true, "<ann>"));
         let v = self.eval(ann, state);
-        self.frames.pop();
+        self.cx.frames.pop();
         Some(v)
     }
 

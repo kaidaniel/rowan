@@ -45,11 +45,11 @@ impl Analyzer {
                 Split { v, t, f, ops: None }
             }
             _ => {
-                let saved = self.trace.replace((self.frames.len(), Default::default()));
+                let saved = self.mode.trace.replace((self.cx.frames.len(), Default::default()));
                 let v = self.eval(test, &mut st);
-                let vals = std::mem::replace(&mut self.trace, saved).map(|t| t.1).unwrap_or_default();
+                let vals = std::mem::replace(&mut self.mode.trace, saved).map(|t| t.1).unwrap_or_default();
                 let truth = if st.reachable { self.truth_of(&v, &mut st, &frontend::node(test)) } else { None };
-                let saved = std::mem::replace(&mut self.traced, vals);
+                let saved = std::mem::replace(&mut self.mode.traced, vals);
                 let ops = match test {
                     ast::Expr::Compare(c) if c.ops.len() == 1 => self.traced(&c.left).zip(self.traced(&c.comparators[0])),
                     _ => None,
@@ -60,7 +60,7 @@ impl Analyzer {
                 f.reachable &= truth != Some(true);
                 self.narrow(test, true, &mut t);
                 self.narrow(test, false, &mut f);
-                self.traced = saved;
+                self.mode.traced = saved;
                 Split { v, t, f, ops }
             }
         }
@@ -100,8 +100,8 @@ impl Analyzer {
                 });
                 // the rest runs on some paths only
                 if !depth_added {
-                    self.cond_depth += 1;
-                    self.branch_depth += 1;
+                    self.cx.cond_depth += 1;
+                    self.cx.branch_depth += 1;
                     depth_added = true;
                 }
             }
@@ -111,8 +111,8 @@ impl Analyzer {
             }
         }
         if depth_added {
-            self.branch_depth -= 1;
-            self.cond_depth -= 1;
+            self.cx.branch_depth -= 1;
+            self.cx.cond_depth -= 1;
         }
         (v, st, stops)
     }
@@ -120,7 +120,7 @@ impl Analyzer {
     /// The value a part of the test being narrowed had when it was evaluated (None: it was
     /// not, as an operand after a short circuit).
     pub(crate) fn traced(&self, e: &'static ast::Expr) -> Option<Value> {
-        self.traced.get(&(e as *const ast::Expr as usize)).cloned()
+        self.mode.traced.get(&(e as *const ast::Expr as usize)).cloned()
     }
 
     /// Narrow `state` to the paths where the evaluated `test` is `truth`.
@@ -641,7 +641,7 @@ impl Analyzer {
         if !insts.is_empty() && rv.pts.len() == 1 {
             if let Some(cls) = self.heap.instance_class(insts[0]) {
                 if let Some(m) = self.class_lookup(cls, "__contains__") {
-                    let fv = self.cls_slots.get(&(m, Ns::Attr, key_str_lit("__contains__"))).cloned().unwrap_or_default();
+                    let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__contains__"))).cloned().unwrap_or_default();
                     for f in fv.pts.iter() {
                         if self.heap.kind(f) != Kind::Function {
                             continue;

@@ -567,7 +567,7 @@ impl Analyzer {
                 // (a name the class does not define is the instance's own attribute)
                 let k = key_str_lit(&str_get(n));
                 let Some(owner) = self.class_lookup(cls, &str_get(n)) else { continue };
-                for g in self.cls_slots.get(&(owner, Ns::Attr, k)).cloned().unwrap_or_default().pts.iter() {
+                for g in self.heap.cls_slots.get(&(owner, Ns::Attr, k)).cloned().unwrap_or_default().pts.iter() {
                     match self.heap.kind(g) {
                         // (a method read without a call: a bound method holding the receiver)
                         Kind::Function if runs_with_recv(self, g) && u.loads.contains(&n) && !self.heap.func_info(g).is_property.get() => return None,
@@ -578,13 +578,13 @@ impl Analyzer {
                     }
                 }
                 if u.stores.contains(&n) {
-                    work.extend(self.prop_setters.get(&(owner, k)).copied());
+                    work.extend(self.heap.prop_setters.get(&(owner, k)).copied());
                 }
             }
             for &n in u.supers.iter() {
                 let k = key_str_lit(&str_get(n));
                 for c in &mro {
-                    let fv = self.cls_slots.get(&(*c, Ns::Attr, k)).cloned().unwrap_or_default();
+                    let fv = self.heap.cls_slots.get(&(*c, Ns::Attr, k)).cloned().unwrap_or_default();
                     work.extend(fv.pts.iter().filter(|g| runs_with_recv(self, *g)));
                 }
             }
@@ -784,7 +784,7 @@ impl Analyzer {
             let reached_otherwise = self.havoc.guard.take().is_some_and(|(_, n, _)| n > 1);
             if reached_otherwise {
                 let walk = self.havoc.new_walk();
-                self.havoc.walk_from(&mut self.heap, &self.cls_slots, &[Value::obj(o)], rid, site, state, walk);
+                self.havoc.walk_from(&mut self.heap, &[Value::obj(o)], rid, site, state, walk);
             } else {
                 let any = Value::obj(crate::interp::any_object(&mut self.heap));
                 let mut row = state.row(o, Ns::Attr);

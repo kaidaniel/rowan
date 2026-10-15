@@ -32,11 +32,11 @@ impl Analyzer {
     pub fn state_roots(&self, state: &State, envs: usize, frames: usize, work: &mut Vec<ObjId>) {
         // (a walk takes the last pushed first: the running code's names before the modules'
         // globals, where an object made again is most often still held)
-        for fr in self.frames.iter().take(frames) {
+        for fr in self.cx.frames.iter().take(frames) {
             work.push(fr.module);
             work.extend(fr.cells.values().copied());
         }
-        let callers = self.env_stack.iter().take(envs).flat_map(|e| e.values());
+        let callers = self.cx.env_stack.iter().take(envs).flat_map(|e| e.values());
         for v in callers.chain(state.ret.iter()).chain(state.narrowed.values()).chain(state.env.values()) {
             v.push_objs(work);
         }
@@ -134,7 +134,7 @@ impl Analyzer {
         }
         each(&self.m.partial_star, o).flatten().for_each(|v| v.push_objs(work));
         each(&self.m.lazy_src, o).flatten().for_each(|(s, _)| work.push(*s));
-        for m in [&self.m.attr_mirrors, &self.entry.instances, &self.copy_root, &self.m.sql_cursors] {
+        for m in [&self.m.attr_mirrors, &self.entry.instances, &self.heap.copy_root, &self.m.sql_cursors] {
             work.extend(each(m, o).copied());
         }
         each(&self.m.sorted_items, o).flat_map(|items| items.iter()).for_each(|(_, v, _)| v.push_objs(work));
@@ -167,7 +167,7 @@ impl Analyzer {
             v.push_objs(work);
             work.extend(f.iter().copied());
         }
-        for env in self.env_stack.iter().take(unwind.unwrap_or(usize::MAX)) {
+        for env in self.cx.env_stack.iter().take(unwind.unwrap_or(usize::MAX)) {
             env.values().for_each(|v| v.push_objs(work));
         }
         // (the managers of the with statements running: their `__exit__` runs on the way out)
@@ -179,10 +179,10 @@ impl Analyzer {
         for (_, env, _) in &self.gens.cm_frames {
             env.values().for_each(|v| v.push_objs(work));
         }
-        for cells in &self.comp_cells {
+        for cells in &self.cx.comp_cells {
             work.extend(cells.values().copied());
         }
-        for rs in self.recent_stack.iter().filter(|_| unwind.is_none()) {
+        for rs in self.cx.recent_stack.iter().filter(|_| unwind.is_none()) {
             work.extend(rs.iter().map(|(o, _, _, _)| *o));
         }
         for rs in &self.m.fa_out_resp {
@@ -192,7 +192,7 @@ impl Analyzer {
         if let Some(any) = self.heap.find(Kind::Unknown, "any", "") {
             work.push(any);
         }
-        for fr in &self.frames {
+        for fr in &self.cx.frames {
             work.push(fr.module);
             work.extend(fr.cells.values().copied());
         }
@@ -347,9 +347,9 @@ impl Analyzer {
             };
         }
         // 4. flow-insensitive class attributes
-        let ups: Vec<((ObjId, Ns, KeyId), Value)> = self.cls_slots.iter().filter_map(|(k, v)| rename_value(v, &map).map(|nv| (*k, nv))).collect();
+        let ups: Vec<((ObjId, Ns, KeyId), Value)> = self.heap.cls_slots.iter().filter_map(|(k, v)| rename_value(v, &map).map(|nv| (*k, nv))).collect();
         for (k, nv) in ups {
-            self.cls_slots.insert(k, nv);
+            self.heap.cls_slots.insert(k, nv);
         }
     }
 

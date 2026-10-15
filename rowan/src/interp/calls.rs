@@ -87,9 +87,9 @@ impl Analyzer {
             let oid = targets[i];
             // (a groupby method of one of several groupby objects: its results are its own)
             let own = matches!(&an.heap.obj(oid).payload, Payload::Method(q, r) if q.starts_with("groupby.") && r.pts.iter().all(|g| an.heap.kind(g) == Kind::Groupby));
-            let saved = if own { an.alloc_extra.replace(format!("gbm{}", oid)) } else { an.alloc_extra.clone() };
+            let saved = if own { an.cx.alloc_extra.replace(format!("gbm{}", oid)) } else { an.cx.alloc_extra.clone() };
             let r = an.call_one(oid, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast);
-            an.alloc_extra = saved;
+            an.cx.alloc_extra = saved;
             r
         })
     }
@@ -136,7 +136,7 @@ impl Analyzer {
             if let Some(cls) = self.heap.instance_class(oid) {
                 if self.class_lookup(cls, "__call__").is_none() {
                     if let Some(m) = self.class_lookup(cls, "forward") {
-                        let f = self.cls_slots.get(&(m, Ns::Attr, key_str_lit("forward"))).cloned().unwrap_or_default();
+                        let f = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("forward"))).cloned().unwrap_or_default();
                         let fns: Vec<u32> = f.pts.iter().filter(|x| self.heap.kind(*x) == Kind::Function).collect();
                         let r = self.call_alternatives(&fns, oid, args, kwargs, star_args, star_kwargs, state, node, call_ast);
                         return self.t_forward_hooks(oid, args, r, state, node);
@@ -184,9 +184,9 @@ impl Analyzer {
                     let gs: Vec<ObjId> = recv.pts.to_vec();
                     return self.alternatives(gs.len(), false, state, &mut |an, i, st| {
                         let Some(mo) = an.method_value(&qual, &Value::obj(gs[i])).single() else { return Value::new() };
-                        let saved = an.alloc_extra.replace(format!("gb{}", gs[i]));
+                        let saved = an.cx.alloc_extra.replace(format!("gb{}", gs[i]));
                         let r = an.call_one(mo, args, kwargs, star_args, star_kwargs, st, node, call_ast);
-                        an.alloc_extra = saved;
+                        an.cx.alloc_extra = saved;
                         r
                     });
                 }
@@ -219,7 +219,7 @@ impl Analyzer {
             Kind::Instance => {
                 if let Some(cls) = self.heap.instance_class(oid) {
                     if let Some(m) = self.class_lookup(cls, "__call__") {
-                        let f = self.cls_slots.get(&(m, Ns::Attr, key_str_lit("__call__"))).cloned().unwrap_or_default();
+                        let f = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__call__"))).cloned().unwrap_or_default();
                         if f.pts.is_empty() {
                             return Value::new();
                         }
@@ -270,12 +270,12 @@ impl Analyzer {
     /// A model call: objects it allocates at one site stay distinct from each other (one
     /// weak object) even while only the model's own code holds them.
     pub fn run_model(&mut self, m: crate::models::Model, state: &mut State, call: &Call) -> Value {
-        if self.model_depth == 0 {
-            self.model_epoch += 1;
+        if self.cx.model_depth == 0 {
+            self.cx.model_epoch += 1;
         }
-        self.model_depth += 1;
+        self.cx.model_depth += 1;
         let r = m(self, state, call);
-        self.model_depth -= 1;
+        self.cx.model_depth -= 1;
         self.after_model_consume(call, &r, state);
         r
     }
@@ -296,7 +296,7 @@ impl Analyzer {
         // a class with its own `__new__`: the instance is what it returns, and `__init__` runs
         // on it when it is an instance of the class
         if let Some(owner) = self.class_lookup(cls, "__new__") {
-            let fv = self.cls_slots.get(&(owner, Ns::Attr, key_str_lit("__new__"))).cloned().unwrap_or_default();
+            let fv = self.heap.cls_slots.get(&(owner, Ns::Attr, key_str_lit("__new__"))).cloned().unwrap_or_default();
             let fns: Vec<ObjId> = fv.pts.iter().filter(|f| self.heap.kind(*f) == Kind::Function).collect();
             if !fns.is_empty() {
                 let mut nargs = vec![Value::obj(cls)];
@@ -307,7 +307,7 @@ impl Analyzer {
                     out = out.join(&r);
                 }
                 if let Some(init) = self.class_lookup(cls, "__init__") {
-                    let iv = self.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
+                    let iv = self.heap.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
                     let insts: Vec<ObjId> = out.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Instance && self.heap.instance_class(*o).is_some_and(|c| self.heap.mro(c).contains(&cls))).collect();
                     for inst in insts {
                         for f in iv.pts.iter().filter(|f| self.heap.kind(*f) == Kind::Function).collect::<Vec<_>>() {
@@ -324,14 +324,14 @@ impl Analyzer {
             return v;
         }
         if let Some(init) = self.class_lookup(cls, "__init__") {
-            let fv = self.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
-            self.fresh_init.insert(inst);
+            let fv = self.heap.cls_slots.get(&(init, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
+            self.cx.fresh_init.insert(inst);
             for f in fv.pts.iter() {
                 if self.heap.kind(f) == Kind::Function {
                     self.call_user(f, Some(Value::obj(inst)), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), state, node, None, false);
                 }
             }
-            self.fresh_init.remove(&inst);
+            self.cx.fresh_init.remove(&inst);
         } else if self.builtin_exc_base(cls) {
             self.exception_init(cls, inst, args, node, state);
         }
@@ -423,21 +423,21 @@ impl Analyzer {
         // a generator's body runs when it is consumed (`force_gen`), not here
         let lazy = !entry
             && self.gens.force_at.is_none()
-            && self.model_depth == 0
+            && self.cx.model_depth == 0
             && star_args.is_empty()
             && star_kwargs.is_empty()
-            && !self.gens.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth == self.frames.len())
+            && !self.gens.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth == self.cx.frames.len())
             && matches!(self.heap.func_info(foid).node, FuncNode::Def(f) if is_generator(&f.body));
         if lazy {
             return self.make_lazy_gen(foid, self_v, args, kwargs, state, node);
         }
         // (user code called back by a model allocates as user code)
-        let saved_md = std::mem::replace(&mut self.model_depth, 0);
+        let saved_md = std::mem::replace(&mut self.cx.model_depth, 0);
         // (the arguments, for the unknown call that replaces this one when the hard deadline cuts it)
         let was_cut = self.budget.hard_cut;
         let keep = (self_v.clone(), args.clone(), kwargs.clone(), star_args.clone(), star_kwargs.clone());
         let r = self.call_user_inner(foid, self_v, args, kwargs, star_args, star_kwargs, state, node, _call_ast, entry);
-        self.model_depth = saved_md;
+        self.cx.model_depth = saved_md;
         if self.budget.hard_cut && !was_cut {
             let q = self.heap.func_info(foid).qualname.clone();
             self.findings.note(format!("analysis cut at the deadline ({} ms) inside {}: the call is unknown code", super::limit("ms", super::DEADLINE_MS), q));
@@ -479,7 +479,7 @@ impl Analyzer {
             return self.skipped_call(foid, &q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
         if super::debug_enabled() {
-            eprintln!("run {} at {} frames={} chain={:?}", fi.qualname, site, self.frames.len(), self.call_chain);
+            eprintln!("run {} at {} frames={} chain={:?}", fi.qualname, site, self.cx.frames.len(), self.cx.call_chain);
         }
         // context for allocations inside the callee (§3)
         let (ctx, ctx_single) = match forced {
@@ -491,25 +491,25 @@ impl Analyzer {
         let new_fr = self.callee_frame(foid, &fi, &ctx, ctx_single);
         let saved_env = std::mem::take(&mut state.env);
         let saved_unbound = std::mem::take(&mut state.unbound);
-        self.env_stack.push(saved_env.clone());
+        self.cx.env_stack.push(saved_env.clone());
         let saved_ret = state.ret.take();
         // (the caller's recorded returns are not the callee's: its end must not join them in)
         let saved_exits = { state.exits.take() };
-        self.frames.push(new_fr);
+        self.cx.frames.push(new_fr);
         let saved_yields = gen_id.map(|ygid| (ygid, self.gen_activation_begin(ygid, foid, &fi, &ctx, state)));
-        let saved_chain = std::mem::take(&mut self.call_chain);
-        self.call_chain = chain_extend(&saved_chain, &[node.line]);
+        let saved_chain = std::mem::take(&mut self.cx.call_chain);
+        self.cx.call_chain = chain_extend(&saved_chain, &[node.line]);
         let pre_bind = state.copy();
         // (objects made from here on, by birth: a run again of code makes them anew)
         let born_mark = self.heap.serial();
         let pre_rc = std::rc::Rc::new(pre_bind.copy());
         self.recursion.begin(&key, (self_v.clone(), args.clone(), kwargs.clone()), pre_rc.clone(), born_mark);
         if gen_id.is_none() {
-            if let Some(fr) = self.frames.last_mut() {
+            if let Some(fr) = self.cx.frames.last_mut() {
                 fr.pre_call = Some(super::PreCall(self.heap.serial(), pre_rc));
             }
         }
-        let gen_cm = self.gens.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth + 1 == self.frames.len());
+        let gen_cm = self.gens.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth + 1 == self.cx.frames.len());
         self.bind_params(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
         let (mut ret, mut st) = self.run_rounds(&key, &fi, gen_id, &pre_bind, &star_args, &star_kwargs, state, node);
         if let Some(gid) = gen_id {
@@ -537,9 +537,9 @@ impl Analyzer {
         self.findings.summaries.insert((fi.qualname.clone(), if entry { "entry".into() } else { ctx.clone() }), (ret.clone(), rows));
         // cleanup
         self.recursion.end(&key);
-        self.call_chain = saved_chain;
-        self.frames.pop();
-        self.env_stack.pop();
+        self.cx.call_chain = saved_chain;
+        self.cx.frames.pop();
+        self.cx.env_stack.pop();
         state.env = saved_env;
         state.unbound = saved_unbound;
         state.ret = saved_ret;
@@ -582,13 +582,13 @@ impl Analyzer {
         }
         let saved_env = std::mem::take(&mut state.env);
         let saved_unbound = std::mem::take(&mut state.unbound);
-        self.env_stack.push(saved_env.clone());
-        self.frames.push(new_fr);
+        self.cx.env_stack.push(saved_env.clone());
+        self.cx.frames.push(new_fr);
         let fake = Node::synthetic(fi.node.node().module, fi.node.node().line);
         self.bind_params(&fi, &Some(self_v), &args, &IndexMap::new(), &[], &[], state, &fake);
         f(self, state);
-        self.frames.pop();
-        self.env_stack.pop();
+        self.cx.frames.pop();
+        self.cx.env_stack.pop();
         state.env = saved_env;
         state.unbound = saved_unbound;
     }

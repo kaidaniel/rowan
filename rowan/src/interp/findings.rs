@@ -169,14 +169,14 @@ impl Analyzer {
             return;
         }
         let weakened;
-        let cls = if self.recv_scalar && cls.tier == Tier::Missing {
+        let cls = if self.mode.recv_scalar && cls.tier == Tier::Missing {
             weakened = Classification::with_note(Tier::Possibly, format!("{}, unless the value is a plain one such as a str", cls.note));
             &weakened
         } else {
             cls
         };
         // a key written as `True` that reached the dict's `1`: reported as written
-        let key = match self.key_alias {
+        let key = match self.mode.key_alias {
             Some((c, o)) if c == key => o,
             _ => key,
         };
@@ -188,9 +188,9 @@ impl Analyzer {
             Some(f) => f.to_string(),
             None => self.file_of_frame(),
         };
-        let chain = self.call_chain.clone();
+        let chain = self.cx.call_chain.clone();
         let dk = (fname.clone(), node.line, node.col, intern::key_repr(key), cls.tier, oid, chain.clone());
-        let (obj, guarded) = (self.heap.obj(oid).label.to_string(), self.verdict_guarded);
+        let (obj, guarded) = (self.heap.obj(oid).label.to_string(), self.mode.verdict_guarded);
         self.findings.add(dk, || Verdict {
             line: node.line,
             col: node.col,
@@ -212,9 +212,9 @@ impl Analyzer {
     /// A verdict on an access the program guards (a try handling the failure): recorded for
     /// the golden harness and the hover, never a diagnostic.
     pub fn verdict_guarded(&mut self, node: &Node, key: KeyId, cls: &Classification, oid: ObjId, ns: Ns) {
-        let saved = std::mem::replace(&mut self.verdict_guarded, true);
+        let saved = std::mem::replace(&mut self.mode.verdict_guarded, true);
         self.verdict(node, key, cls, oid, ns, None, None);
-        self.verdict_guarded = saved;
+        self.mode.verdict_guarded = saved;
     }
 
     pub fn node_text(&self, node: &Node) -> String {
@@ -299,7 +299,7 @@ impl Analyzer {
             }
         }
         // the function analysed on its own (not a call from elsewhere): the general answer
-        let own = self.entry.run.is_some() && self.call_chain.len() <= 1 && self.m.torch_on;
+        let own = self.entry.run.is_some() && self.cx.call_chain.len() <= 1 && self.m.torch_on;
         if own {
             e.t_names = tnames;
             e.primary = Some(match &e.primary {
@@ -414,7 +414,7 @@ impl Analyzer {
             let value = self.value_info(&v, state);
             let tensor = if self.m.torch_on {
                 // a line run several times in one analysis (a loop body): the join of its values
-                let (chain, entry) = (self.call_chain.clone(), self.entry.run.is_some());
+                let (chain, entry) = (self.cx.call_chain.clone(), self.entry.run.is_some());
                 let prev = self.findings.t_row_values.get(&(ln, name.clone(), chain.clone(), entry)).cloned();
                 let joined = match prev {
                     Some(p) => p.join(&v),

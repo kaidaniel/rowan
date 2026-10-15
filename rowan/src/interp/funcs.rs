@@ -85,14 +85,14 @@ impl Analyzer {
         }
         // a function made inside a comprehension closes over the comprehension's variables
         // (at module level they are not "free" in the scope analysis: look at the uses)
-        if !self.comp_cells.is_empty() {
+        if !self.cx.comp_cells.is_empty() {
             let sc = mi.scopes.get(scope);
             for n in sc.uses.iter().filter(|n| !sc.is_local(n)) {
                 let sid = s(n);
                 if closure.contains_key(&sid) {
                     continue;
                 }
-                if let Some(cid) = self.comp_cells.iter().rev().find_map(|m| m.get(&sid).copied()) {
+                if let Some(cid) = self.cx.comp_cells.iter().rev().find_map(|m| m.get(&sid).copied()) {
                     closure.insert(sid, cid);
                 }
             }
@@ -127,7 +127,7 @@ impl Analyzer {
         let oid = self.alloc_at(Kind::Function, &n, state, &format!("def {}", qual), Payload::Func(Rc::new(info)), None, Ns::Item, None, None);
         // a closure made inside a concrete call (not an entry run): its own analysis with
         // open parameters comes from the closure the factory's entry run makes
-        let creator = self.frames.iter().rev().find_map(|f| f.func);
+        let creator = self.cx.frames.iter().rev().find_map(|f| f.func);
         if self.m.torch_on && has_closure && creator.is_some() && self.entry.run != creator {
             self.entry.concrete_closures.insert(oid);
         }
@@ -200,8 +200,8 @@ impl Analyzer {
                     if let ast::Expr::Attribute(a) = &d.expression {
                         if let ast::Expr::Name(n) = &*a.value {
                             let nk = key_str_lit(n.id.as_str());
-                            self.prop_setters.insert((cls, nk), f);
-                            if let Some(getter) = self.cls_slots.get(&(cls, Ns::Attr, nk)).cloned() {
+                            self.heap.prop_setters.insert((cls, nk), f);
+                            if let Some(getter) = self.heap.cls_slots.get(&(cls, Ns::Attr, nk)).cloned() {
                                 if !getter.pts.is_empty() {
                                     fv = getter;
                                 }
@@ -280,7 +280,7 @@ impl Analyzer {
             let found = cls.and_then(|c| names.iter().find_map(|n| Some((self.class_lookup(c, n)?, *n))));
             match found {
                 Some((m, n)) => {
-                    let fv = self.cls_slots.get(&(m, Ns::Attr, key_str_lit(n))).cloned().unwrap_or_default();
+                    let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit(n))).cloned().unwrap_or_default();
                     calls.extend(fv.pts.iter().filter(|f| self.heap.kind(*f) == Kind::Function).map(|f| (o, f)));
                 }
                 None => rest.pts = rest.pts.insert(o),
@@ -456,11 +456,11 @@ impl Analyzer {
             let r = state.row(cls, Ns::Attr).store(key, true);
             state.set_row(cls, Ns::Attr, r);
             let k = (cls, Ns::Attr, key);
-            let nv = match self.cls_slots.get(&k) {
+            let nv = match self.heap.cls_slots.get(&k) {
                 Some(cur) => cur.join(&v),
                 None => v,
             };
-            self.cls_slots.insert(k, nv);
+            self.heap.cls_slots.insert(k, nv);
             return;
         }
         // a module-level binding inside a loop is strong under the recency abstraction (the
@@ -676,12 +676,12 @@ impl Analyzer {
             Payload::Bound(f, _) => *f,
             _ => b,
         }).collect();
-        if fkey.iter().any(|f| self.no_unroll_next.contains(f)) {
+        if fkey.iter().any(|f| self.gens.no_unroll_next.contains(f)) {
             return None;
         }
         let r = self.unroll_next_inner(it, &m, node, state);
         if r.is_none() {
-            self.no_unroll_next.extend(fkey);
+            self.gens.no_unroll_next.extend(fkey);
         }
         r
     }
@@ -1325,7 +1325,7 @@ impl Analyzer {
         // copy of a copy made at this node counts as a copy of the first original)
         let prefix = format!("{}:{}:", tag, self.site_of(node));
         let site_root = self.heap.obj(oid).site.strip_prefix(&prefix).and_then(|rest| rest.split(['#', ':']).nth(1)).and_then(|r| r.parse::<u32>().ok());
-        let root = match (self.copy_root.get(&oid), site_root) {
+        let root = match (self.heap.copy_root.get(&oid), site_root) {
             (Some(&r), _) if self.heap.obj(oid).site.starts_with(&prefix) => r,
             (_, Some(r)) if (r as usize) < self.heap.len() => r,
             _ => oid,
@@ -1333,7 +1333,7 @@ impl Analyzer {
         let label = format!("{} of {}@L{}", tag, self.heap.obj(root).label, node.line);
         let payload = self.heap.obj(oid).payload.clone();
         let nid = self.alloc(kind, &format!("{}{}:{}", prefix, kind.name(), root), state, &label, payload, None, if kind == Kind::Instance { Ns::Attr } else { Ns::Item }, None, None);
-        self.copy_root.insert(nid, root);
+        self.heap.copy_root.insert(nid, root);
         seen.insert(oid, nid);
         let ll = self.heap.llen(oid, state);
         self.heap.set_llen(nid, state, ll);

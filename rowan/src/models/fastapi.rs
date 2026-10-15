@@ -141,9 +141,9 @@ impl Analyzer {
 
     pub(crate) fn eval_in_module(&mut self, module: ObjId, e: &'static ast::Expr, state: &mut State) -> Value {
         let mi = self.heap.module_info(module);
-        self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), module, "fastapi", true, "<fastapi>"));
+        self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), module, "fastapi", true, "<fastapi>"));
         let v = self.eval(e, state);
-        self.frames.pop();
+        self.cx.frames.pop();
         v
     }
 
@@ -676,7 +676,7 @@ impl Analyzer {
                     }
                 }
                 Kind::Class => {
-                    let kwargs = match self.class_lookup(o, "__init__").and_then(|c| self.cls_slots.get(&(c, Ns::Attr, key_str_lit("__init__"))).cloned()) {
+                    let kwargs = match self.class_lookup(o, "__init__").and_then(|c| self.heap.cls_slots.get(&(c, Ns::Attr, key_str_lit("__init__"))).cloned()) {
                         Some(fv) => match fv.pts.iter().find(|f| self.heap.kind(*f) == Kind::Function) {
                             Some(init) => self.fa_bind(init, req, state, node, depth),
                             None => IndexMap::new(),
@@ -741,7 +741,7 @@ impl Analyzer {
             let r = an.fa_run_handler(func, gens, req, entry, st, &nd);
             an.m.fa_gen_ret = Some(an.m.fa_gen_ret.take().unwrap_or_default().join(&r));
         });
-        let prev = self.gens.cm_hook.replace(crate::interp::CmHook { body: &[], target: None, depth: self.frames.len(), env_after: None, ran: false, then: Some(then), body_died: false, env_before: None, multi: false, body_exits: None, body_ret: None });
+        let prev = self.gens.cm_hook.replace(crate::interp::CmHook { body: &[], target: None, depth: self.cx.frames.len(), env_after: None, ran: false, then: Some(then), body_died: false, env_before: None, multi: false, body_exits: None, body_ret: None });
         let outer = self.m.fa_gen_ret.take();
         self.call_user(g, None, vec![], kwargs, vec![], vec![], state, node, None, false);
         let h = std::mem::replace(&mut self.gens.cm_hook, prev);
@@ -1647,7 +1647,7 @@ impl crate::interp::Analyzer {
         let mut st = state.copy();
         st.ret = None;
         let mi = self.heap.module_info(fi.module);
-        self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
+        self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
         self.entry.scope = Some(oid);
         let fake = Node::synthetic(mi.idx, fi.node.node().line);
         let saved_entry = self.entry.run.replace(oid);
@@ -1662,7 +1662,7 @@ impl crate::interp::Analyzer {
         }
         self.entry.scope = None;
         self.entry.run = saved_entry;
-        self.frames.pop();
+        self.cx.frames.pop();
         for (src, k) in st.reqs.diff_keys(&state.reqs) {
             let Some(info) = st.reqs.get(&src, &k) else { continue };
             let nv = match state.reqs.get(&src, &k) {

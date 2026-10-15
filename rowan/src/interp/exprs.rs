@@ -23,8 +23,8 @@ impl Analyzer {
     /// narrowing: `split`).
     pub fn eval(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {
         let v = self.eval_inner(node, state);
-        if let Some((depth, vals)) = &mut self.trace {
-            if *depth == self.frames.len() {
+        if let Some((depth, vals)) = &mut self.mode.trace {
+            if *depth == self.cx.frames.len() {
                 vals.insert(node as *const ast::Expr as usize, v.clone());
             }
         }
@@ -131,7 +131,7 @@ impl Analyzer {
             ast::Expr::Call(c) => {
                 // (the tensor model reads `x.dim` as a method only when it is called)
                 self.m.t_called_attr = frontend::node(&*c.func).addr;
-                self.callee_nodes.insert(self.m.t_called_attr);
+                self.mode.callee_nodes.insert(self.m.t_called_attr);
                 let fv = self.eval(&c.func, state);
                 let mut flag = false;
                 if !self.unwind.tries.is_empty() {
@@ -156,7 +156,7 @@ impl Analyzer {
                 let saved_node = self.unwind.exc_node.replace(nd);
                 if let (Some(a @ (ast::Expr::ListComp(_) | ast::Expr::Generator(_))), Some(o)) = (c.arguments.args.first(), fv.single()) {
                     if fv.kv.is_bot() && self.heap.kind(o) == Kind::External && matches!(self.heap.external_qual(o).as_str(), "torch.cat" | "torch.concat" | "torch.concatenate" | "torch.stack") {
-                        self.nonempty_comp = a as *const ast::Expr as usize;
+                        self.mode.nonempty_comp = a as *const ast::Expr as usize;
                     }
                 }
                 let r = self.call_value(&fv, &nd, Some(c), state, None);
@@ -317,7 +317,7 @@ impl Analyzer {
                     None => self.none_v.clone(),
                 };
                 // (the with body runs at every yield the generator reaches: one per path)
-                if self.gens.cm_hook.as_ref().map(|h| (!h.ran || (h.multi)) && self.frames.len() == h.depth + 1).unwrap_or(false) {
+                if self.gens.cm_hook.as_ref().map(|h| (!h.ran || (h.multi)) && self.cx.frames.len() == h.depth + 1).unwrap_or(false) {
                     self.run_cm_body(v, state);
                     return self.none_v.clone();
                 }
@@ -1355,9 +1355,9 @@ impl Analyzer {
         names.dedup();
         let outer: Vec<Option<Value>> = names.iter().map(|n| state.env.get(n).cloned()).collect();
         self.frame_mut().comp_names.push(names.clone());
-        self.comp_cells.push(Default::default());
+        self.cx.comp_cells.push(Default::default());
         self.comp_gen(gens, 0, limit, state, body, own);
-        self.comp_cells.pop();
+        self.cx.comp_cells.pop();
         self.frame_mut().comp_names.pop();
         // (the comprehension's variables are its own: the enclosing names are as before)
         for (n, v) in names.into_iter().zip(outer) {
@@ -1378,7 +1378,7 @@ impl Analyzer {
             return;
         }
         let g = &gens[i];
-        let nonempty = std::mem::take(&mut self.nonempty_gen);
+        let nonempty = std::mem::take(&mut self.mode.nonempty_gen);
         let itv = self.eval(&g.iter, state);
         let exhaust_after = itv.clone();
         let gn = frontend::node(&g.iter);
@@ -1390,7 +1390,7 @@ impl Analyzer {
                 // known items: each is its own straight-line iteration; a filter decided
                 // for the item keeps it straight-line (positions survive), an undecided one
                 // makes the iteration conditional
-                self.comp_known.push(true);
+                self.cx.comp_known.push(true);
                 for (idx, item) in items.iter().enumerate() {
                     let mut s2 = state.copy();
                     self.frame_mut().unroll.push(idx);
@@ -1406,13 +1406,13 @@ impl Analyzer {
                         }
                     }
                 }
-                self.comp_known.pop();
+                self.cx.comp_known.pop();
                 self.exhaust(&exhaust_after, state);
                 return;
             }
         }
-        self.comp_known.push(false);
-        let depth = self.cond_depth;
+        self.cx.comp_known.push(false);
+        let depth = self.cx.cond_depth;
         let mut elem = it.elem.clone();
         if it.exhaustive && understood {
             match &elem {
@@ -1433,7 +1433,7 @@ impl Analyzer {
         let vmark = self.findings.mark();
         self.comp_run_one(g, gens, i, limit, &elem, &mut s2, body, understood, own);
         if it.exhaustive && understood && s2.reachable {
-            self.comp_known.pop();
+            self.cx.comp_known.pop();
             state.replace_with(s2);
             return;
         }
@@ -1448,7 +1448,7 @@ impl Analyzer {
         let same_env = s2.env.iter().all(|(n, v)| own_var(n) || state.env.get(n) == Some(v)) && state.env.keys().all(|n| own_var(n) || s2.env.contains_key(n));
         let quiet = same_env && fp.rows.iter().all(|(o, _)| !older(*o)) && fp.slots.iter().all(|(o, _)| !older(*o)) && fp.elems.iter().all(|o| !older(*o)) && s2.lens.diff_keys(&state.lens).iter().all(|o| !older(*o));
         if quiet {
-            self.comp_known.pop();
+            self.cx.comp_known.pop();
             let mut joined = if nonempty { s2.copy() } else { state.join(&mut s2) };
             let ev = elem.value_part();
             self.promote_elem_reqs(&mut joined, &s2, &ev, state);
@@ -1462,9 +1462,9 @@ impl Analyzer {
         let (mut head, _, s2) = self.loop_fixpoint(state, &mut |an, body_s| {
             an.comp_run_one(g, gens, i, limit, &elem, body_s, body, understood, own);
         });
-        self.comp_known.pop();
+        self.cx.comp_known.pop();
         // (at least one iteration: the states after one, from the fixpoint)
-        if nonempty && self.loop_converged && s2.reachable {
+        if nonempty && self.mode.loop_converged && s2.reachable {
             head = s2.copy();
         }
         let ev = elem.value_part();
@@ -1487,18 +1487,18 @@ impl Analyzer {
         }
         let conditional = !decided && !understood;
         if conditional {
-            self.cond_depth += 1;
+            self.cx.cond_depth += 1;
         }
         self.comp_gen(gens, i + 1, limit, st, body, own);
         if conditional {
-            self.cond_depth -= 1;
+            self.cx.cond_depth -= 1;
         }
         decided
     }
 
     fn comp_bind(&mut self, target: &'static ast::Expr, it: &Elem, state: &mut State) {
         self.bind_iter_target(target, it, state);
-        if !self.comp_cells.is_empty() {
+        if !self.cx.comp_cells.is_empty() {
             // the variable's cell holds its latest value
             let ctx = self.frame().ctx.clone();
             let addr = target as *const ast::Expr as usize;
@@ -1507,7 +1507,7 @@ impl Analyzer {
                 let cid = self.heap.alloc_raw(Kind::Cell, &format!("compcell:{}:{}", addr, n), &ctx, true, &format!("cell {}", n), Payload::None);
                 let v = state.env.get(&sid).cloned().unwrap_or_default();
                 state.set_slot(cid, Ns::Cell, super::funcs::cell_key(), v, true);
-                self.comp_cells.last_mut().unwrap().insert(sid, cid);
+                self.cx.comp_cells.last_mut().unwrap().insert(sid, cid);
             }
         }
     }
@@ -1515,13 +1515,13 @@ impl Analyzer {
     fn expr_dictcomp(&mut self, dc: &'static ast::ExprDictComp, node: &'static ast::Expr, state: &mut State) -> Value {
         let nd = frontend::node(node);
         let oid = self.alloc_at(Kind::Dict, &nd, state, &format!("dictcomp@L{}", nd.line), Payload::None, None, Ns::Item, None, None);
-        let base_depth = self.cond_depth;
+        let base_depth = self.cx.cond_depth;
         let key_e: &'static ast::Expr = &dc.key;
         let val_e: &'static ast::Expr = &dc.value;
         let mut body = |an: &mut Analyzer, st: &mut State| {
             let k = an.eval_key(key_e, st);
             let v = an.eval(val_e, st);
-            let strong = an.heap.obj(oid).single && an.cond_depth == base_depth;
+            let strong = an.heap.obj(oid).single && an.cx.cond_depth == base_depth;
             an.store_key(oid, Ns::Item, &k.kv, &v, strong, &nd, st);
         };
         let limit = comp_unroll_limit(&[key_e, val_e]);
@@ -1534,7 +1534,7 @@ impl Analyzer {
         let oid = self.alloc_at(kind, &nd, state, &format!("{}comp@L{}", kind.name(), nd.line), Payload::None, None, Ns::Item, None, None);
         self.heap.set_llen(oid, state, None);
         state.drop_obj_ns(oid, Ns::Pos);
-        let base_depth = self.cond_depth;
+        let base_depth = self.cx.cond_depth;
         let strong = self.heap.obj(oid).single && matches!(kind, Kind::List | Kind::Tuple | Kind::Set);
         // positions: every item known and every filter decided (straight-line iterations)
         let mut n: usize = 0;
@@ -1548,7 +1548,7 @@ impl Analyzer {
                 seen.push(k);
                 false
             }) == Some(true);
-            let straight = positional && an.comp_known.iter().all(|k| *k) && an.cond_depth == base_depth;
+            let straight = positional && an.cx.comp_known.iter().all(|k| *k) && an.cx.cond_depth == base_depth;
             if straight && dup {
                 // (already a member)
             } else if straight && n < limit {
@@ -1572,13 +1572,13 @@ impl Analyzer {
             }
             _ => false,
         };
-        let mark = self.comp_known.len();
+        let mark = self.cx.comp_known.len();
         // (the tensors `torch.cat` joins: at least one iteration ran, or it raised)
-        if std::mem::take(&mut self.nonempty_comp) == node as *const ast::Expr as usize && gens.len() == 1 && gens[0].ifs.is_empty() {
-            self.nonempty_gen = true;
+        if std::mem::take(&mut self.mode.nonempty_comp) == node as *const ast::Expr as usize && gens.len() == 1 && gens[0].ifs.is_empty() {
+            self.mode.nonempty_gen = true;
         }
         self.comp(gens, limit, state, &mut body, oid);
-        self.comp_known.truncate(mark);
+        self.cx.comp_known.truncate(mark);
         if positional {
             self.heap.set_llen(oid, state, Some(n));
         } else {
@@ -1736,7 +1736,7 @@ impl Analyzer {
                 }
                 let cls = an.heap.instance_class(o)?;
                 let owner = an.class_lookup(cls, dunder)?;
-                let f = an.cls_slots.get(&(owner, Ns::Attr, key_str_lit(dunder)))?.single()?;
+                let f = an.heap.cls_slots.get(&(owner, Ns::Attr, key_str_lit(dunder)))?.single()?;
                 if an.heap.kind(f) != Kind::Function {
                     return None;
                 }
@@ -1794,7 +1794,7 @@ impl Analyzer {
         }
         let cls = self.heap.instance_class(o)?;
         let owner = self.class_lookup(cls, name)?;
-        let fv = self.cls_slots.get(&(owner, Ns::Attr, key_str_lit(name)))?;
+        let fv = self.heap.cls_slots.get(&(owner, Ns::Attr, key_str_lit(name)))?;
         fv.pts.iter().find(|f| self.heap.kind(*f) == Kind::Function)
     }
 

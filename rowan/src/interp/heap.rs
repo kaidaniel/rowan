@@ -141,12 +141,19 @@ pub struct Heap {
     serial: u64,
     /// keys standing for objects
     pub keys: ObjKeys,
+    /// class attributes no path's state holds (flow-insensitive)
+    pub cls_slots: FxHashMap<(ObjId, crate::domain::Ns, KeyId), Value>,
+    /// `@name.setter` functions by (defining class, attribute)
+    pub prop_setters: FxHashMap<(ObjId, KeyId), ObjId>,
+    /// a copy's original (through copies made at the same node: `out = deepcopy(out)` in a loop
+    /// makes one copy site, not a new one per round)
+    pub copy_root: FxHashMap<ObjId, ObjId>,
 }
 
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, literal_len: None, known_prefix: None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0 };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default() }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default() }
     }
 }
 

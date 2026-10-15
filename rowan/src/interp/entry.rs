@@ -54,11 +54,11 @@ impl Analyzer {
     pub fn run_module(&mut self, moid: ObjId, state: &mut State) {
         let info = self.heap.module_info(moid);
         let fr = Frame::new(FrameKind::Module, info.scopes.module(), moid, "", true, &format!("<module {}>", info.name));
-        self.frames.push(fr);
+        self.cx.frames.push(fr);
         // (imported from inside a function: the function's returns so far are its own)
         let (exits, ret) = (state.exits.take(), state.ret.take());
         self.with_gen_restart(state, true, &mut |an, s| an.exec_block(&info.tree.body, s));
-        self.frames.pop();
+        self.cx.frames.pop();
         state.reachable = true;
         state.exits = exits;
         state.ret = ret;
@@ -128,10 +128,10 @@ impl Analyzer {
                 let mut st = state.copy();
                 st.ret = None;
                 let mi = self.heap.module_info(fi.module);
-                self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
+                self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
                 let fake = Node::synthetic(mi.idx, fi.node.node().line);
                 self.call_user(oid, None, vec![], IndexMap::new(), vec![], vec![], &mut st, &fake, None, true);
-                self.frames.pop();
+                self.cx.frames.pop();
             }
             return;
         };
@@ -150,7 +150,7 @@ impl Analyzer {
         };
         st.ret = None;
         let mi = self.heap.module_info(fi.module);
-        self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
+        self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
         self.entry.scope = Some(oid);
         let mut params = scopemod::all_params(fparams);
         let self_val = self.entry_receiver(fi, &mut params, &mut st, state);
@@ -185,7 +185,7 @@ impl Analyzer {
                 }
             }
         }
-        self.frames.pop();
+        self.cx.frames.pop();
         self.keep_entry_requirements(fi, quiet, &st, state);
     }
 
@@ -480,7 +480,7 @@ impl Analyzer {
             order.extend(cinfo.bases.iter().copied());
         }
         if let Some(init_cls) = self.class_lookup(cls_oid, "__init__") {
-            let inits = self.cls_slots.get(&(init_cls, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
+            let inits = self.heap.cls_slots.get(&(init_cls, Ns::Attr, key_str_lit("__init__"))).cloned().unwrap_or_default();
             for init in inits.pts.iter() {
                 if self.heap.kind(init) != Kind::Function {
                     continue;

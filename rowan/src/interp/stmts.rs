@@ -23,7 +23,7 @@ impl Analyzer {
     }
 
     pub fn exec_stmt(&mut self, node: &'static ast::Stmt, state: &mut State) {
-        self.budget.charge(self.frames.last().map(|f| f.code).unwrap_or(0));
+        self.budget.charge(self.cx.frames.last().map(|f| f.code).unwrap_or(0));
         if self.cut_body(state) {
             return;
         }
@@ -32,7 +32,7 @@ impl Analyzer {
         self.exec_stmt_inner(node, state);
         if dbg2 && was && !state.reachable && !matches!(node, ast::Stmt::Return(_) | ast::Stmt::Raise(_) | ast::Stmt::Break(_) | ast::Stmt::Continue(_)) {
             let n = frontend::node(node);
-            eprintln!("  unreachable after M{}:L{} in {}", n.module, n.line, self.frames.last().map(|f| f.label.clone()).unwrap_or_default());
+            eprintln!("  unreachable after M{}:L{} in {}", n.module, n.line, self.cx.frames.last().map(|f| f.label.clone()).unwrap_or_default());
         }
     }
 
@@ -325,8 +325,8 @@ impl Analyzer {
             ast::Stmt::Match(m) => {
                 let subj = self.eval(&m.subject, state);
                 let mut outs: Vec<State> = Vec::new();
-                self.cond_depth += 1;
-                self.branch_depth += 1;
+                self.cx.cond_depth += 1;
+                self.cx.branch_depth += 1;
                 // cases in order: a case that cannot match is skipped, one that surely matches
                 // (with no guard, or a guard that is true) ends the match
                 let mut matched = false;
@@ -352,8 +352,8 @@ impl Analyzer {
                         break;
                     }
                 }
-                self.branch_depth -= 1;
-                self.cond_depth -= 1;
+                self.cx.branch_depth -= 1;
+                self.cx.cond_depth -= 1;
                 if !matched {
                     outs.push(state.copy());
                 }
@@ -388,7 +388,7 @@ impl Analyzer {
         if self.heap.kind(f) != Kind::Function || !self.heap.func_info(f).is_contextmanager.get() {
             return false;
         }
-        let prev = self.gens.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.frames.len(), env_after: None, ran: false, then: None, body_died: false, env_before: None, multi: true, body_exits: None, body_ret: None });
+        let prev = self.gens.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.cx.frames.len(), env_after: None, ran: false, then: None, body_died: false, env_before: None, multi: true, body_exits: None, body_ret: None });
         let n = frontend::node(&item.context_expr);
         let fv = self.eval(&call.func, state);
         self.call_value(&fv, &n, Some(call), state, None);
@@ -627,8 +627,8 @@ impl Analyzer {
             self.apply_cond_facts(*key, !*pos, &mut pre, &mut else_s);
         }
         if conditional {
-            self.cond_depth += 1;
-            self.branch_depth += 1;
+            self.cx.cond_depth += 1;
+            self.cx.branch_depth += 1;
         }
         if then_s.reachable {
             self.exec_block(body, &mut then_s);
@@ -637,8 +637,8 @@ impl Analyzer {
             self.exec_orelse(rest, &mut else_s);
         }
         if conditional {
-            self.branch_depth -= 1;
-            self.cond_depth -= 1;
+            self.cx.branch_depth -= 1;
+            self.cx.cond_depth -= 1;
         }
         // `if k not in d: raise …`: the input must hold k (else the program raises)
         if let (true, Some((kv, target))) = (conditional, &sp.ops) {
@@ -909,7 +909,7 @@ impl Analyzer {
         let mut breaks: Option<State> = None;
         let mut back = State::bottom();
         self.frame_mut().loop_depth += 1;
-        self.cond_depth += 1;
+        self.cx.cond_depth += 1;
         let mut converged = false;
         let mut prev_head = head.copy();
         let mut vmark = self.findings.mark();
@@ -920,7 +920,7 @@ impl Analyzer {
             vmark = self.findings.mark();
             let mut body_s = head.copy();
             let mark = self.heap.len() as u32;
-            self.recent_stack.push(Vec::new());
+            self.cx.recent_stack.push(Vec::new());
             self.unwind.loop_stack.push(LoopCtx::default());
             round(self, &mut body_s);
             let ctx = self.unwind.loop_stack.pop().unwrap();
@@ -931,7 +931,7 @@ impl Analyzer {
                 None => body_s,
                 Some(mut c) => body_s.join(&mut c),
             };
-            let recs = self.recent_stack.pop().unwrap_or_default();
+            let recs = self.cx.recent_stack.pop().unwrap_or_default();
             self.rename_recent(&mut back, &head, recs, mark);
             let new_head = head.join_loop(&mut back);
             if new_head.same(&head) {
@@ -940,18 +940,18 @@ impl Analyzer {
             }
             prev_head = std::mem::replace(&mut head, new_head);
         }
-        self.loop_converged = converged;
+        self.mode.loop_converged = converged;
         if !converged {
             self.widen_unconverged(&mut head, &prev_head);
             // (the accesses as the widened states make them)
             self.findings.drop_since(vmark);
             self.unwind.loop_stack.push(LoopCtx::default());
-            self.recent_stack.push(Vec::new());
+            self.cx.recent_stack.push(Vec::new());
             round(self, &mut head.copy());
-            self.recent_stack.pop();
+            self.cx.recent_stack.pop();
             self.unwind.loop_stack.pop();
         }
-        self.cond_depth -= 1;
+        self.cx.cond_depth -= 1;
         self.frame_mut().loop_depth -= 1;
         (head, breaks, back)
     }
@@ -1223,7 +1223,7 @@ impl Analyzer {
         cf.single_nl = fr_single_nl;
         cf.class_oid = Some(coid);
         cf.cells = fr_cells;
-        self.frames.push(cf);
+        self.cx.frames.push(cf);
         for st in &c.body {
             if let ast::Stmt::AnnAssign(a) = st {
                 if a.value.is_none() {
@@ -1232,7 +1232,7 @@ impl Analyzer {
             }
             self.exec_stmt(st, state);
         }
-        self.frames.pop();
+        self.cx.frames.pop();
         let enum_base = info.bases.iter().any(|b| self.m.enum_members.contains_key(b));
         if is_enum || enum_base {
             self.make_enum_members(c, coid, lek, str_mixin, state);
@@ -1241,7 +1241,7 @@ impl Analyzer {
         for st in &c.body {
             let ast::Stmt::Assign(a) = st else { continue };
             let [ast::Expr::Name(n)] = &a.targets[..] else { continue };
-            let v = self.cls_slots.get(&(coid, Ns::Attr, key_str_lit(n.id.as_str()))).cloned().unwrap_or_default();
+            let v = self.heap.cls_slots.get(&(coid, Ns::Attr, key_str_lit(n.id.as_str()))).cloned().unwrap_or_default();
             for d in v.pts.iter() {
                 if self.heap.kind(d) == Kind::Instance && self.heap.instance_class(d).and_then(|dc| self.class_lookup(dc, "__set_name__")).is_some() {
                     self.call_method_with(&Value::obj(d), "__set_name__", vec![Value::obj(coid), Value::lit(key_str_lit(n.id.as_str()))], &cnode, state);
@@ -1251,7 +1251,7 @@ impl Analyzer {
         // a base's `__init_subclass__` runs for the new class (an implicit classmethod)
         let found = info.bases.iter().find_map(|b| self.class_lookup(*b, "__init_subclass__"));
         if let Some(defc) = found {
-            let fv = self.cls_slots.get(&(defc, Ns::Attr, key_str_lit("__init_subclass__"))).cloned().unwrap_or_default();
+            let fv = self.heap.cls_slots.get(&(defc, Ns::Attr, key_str_lit("__init_subclass__"))).cloned().unwrap_or_default();
             let mut kwargs: indexmap::IndexMap<intern::StrId, Value> = indexmap::IndexMap::new();
             if let Some(args) = &c.arguments {
                 for kw in args.keywords.iter() {

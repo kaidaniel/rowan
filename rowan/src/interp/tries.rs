@@ -171,7 +171,7 @@ impl Analyzer {
     /// A try context begins: raises inside it record the state there for its handlers and
     /// its finally; `pre` is the state before the body.
     pub fn enter_try(&mut self, caught: FxHashSet<String>, pre: &mut State) {
-        let (frames, envs, mark) = (self.frames.len(), self.env_stack.len(), self.heap.serial());
+        let (frames, envs, mark) = (self.cx.frames.len(), self.cx.env_stack.len(), self.heap.serial());
         self.unwind.tries.push(TryCtx { caught, frames, envs, pre: pre.copy(), mark, recs: Vec::new(), last: None });
     }
 
@@ -215,13 +215,13 @@ impl Analyzer {
         if let Some(env) = in_cm {
             here.env = env;
             here.narrowed = Default::default();
-        } else if self.frames.len() < fl {
+        } else if self.cx.frames.len() < fl {
             if let Some((_, env, _)) = self.gens.cm_frames.iter().rev().find(|(d, _, _)| *d == fl) {
                 here.env = env.clone();
                 here.narrowed = Default::default();
             }
-        } else if self.frames.len() > fl {
-            here.env = self.env_stack.get(el).cloned().unwrap_or_else(|| t.pre.env.clone());
+        } else if self.cx.frames.len() > fl {
+            here.env = self.cx.env_stack.get(el).cloned().unwrap_or_else(|| t.pre.env.clone());
             here.narrowed = t.pre.narrowed.clone();
             here.ret = t.pre.ret.clone();
             here.exits = t.pre.exits.clone();
@@ -390,7 +390,7 @@ impl Analyzer {
             }
             let Some(cls) = self.heap.instance_class(oid) else { continue };
             let Some(m) = self.class_lookup(cls, "__exit__") else { continue };
-            let fv = self.cls_slots.get(&(m, Ns::Attr, key_str_lit("__exit__"))).cloned().unwrap_or_default();
+            let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__exit__"))).cloned().unwrap_or_default();
             if fv.pts.iter().any(|f| self.heap.kind(f) == Kind::Function && may_return_true(self.heap.func_info(f).node.body())) {
                 return true;
             }
@@ -468,8 +468,8 @@ impl Analyzer {
         let outer_exits = if has_finally { state.exits.take() } else { None };
         let mut pre = state.copy();
         self.enter_try(caught, &mut pre);
-        self.cond_depth += 1;
-        self.branch_depth += 1;
+        self.cx.cond_depth += 1;
+        self.cx.branch_depth += 1;
         self.exec_block(body, state);
         let TryExit { mut recs } = self.leave_try();
         // the handlers' classes: which recorded raise each one catches (Python takes the
@@ -564,8 +564,8 @@ impl Analyzer {
             self.unwind.handling.pop();
             results.push(hs);
         }
-        self.branch_depth -= 1;
-        self.cond_depth -= 1;
+        self.cx.branch_depth -= 1;
+        self.cx.cond_depth -= 1;
         // two ways out of the try (the body and one handler) that set a flag differently: a
         // later test of the flag tells which ran
         let two: Vec<usize> = (0..results.len()).filter(|i| results[*i].reachable).collect();

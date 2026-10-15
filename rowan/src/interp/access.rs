@@ -361,7 +361,7 @@ impl Analyzer {
             return true;
         }
         let Some(dc) = self.class_lookup(c, name) else { return false };
-        let cv = self.cls_slots.get(&(dc, Ns::Attr, key_str_lit(name))).cloned().unwrap_or_default();
+        let cv = self.heap.cls_slots.get(&(dc, Ns::Attr, key_str_lit(name))).cloned().unwrap_or_default();
         let runs = cv.pts.iter().any(|f| (self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_property.get()) || (self.heap.kind(f) == Kind::Instance && self.heap.instance_class(f).is_some_and(|fc| self.class_lookup(fc, if store { "__set__" } else { "__get__" }).is_some())));
         runs
     }
@@ -375,9 +375,9 @@ impl Analyzer {
         let exc = if ns == Ns::Item { self.unwind.item_exc_force.or(exc) } else { exc };
         let saved = std::mem::replace(&mut self.unwind.item_exc, exc);
         let scalar = self.may_be_scalar(obj);
-        let saved_scalar = std::mem::replace(&mut self.recv_scalar, scalar);
+        let saved_scalar = std::mem::replace(&mut self.mode.recv_scalar, scalar);
         let v = self.load_item_inner(obj, ns, key, node, state, report);
-        self.recv_scalar = saved_scalar;
+        self.mode.recv_scalar = saved_scalar;
         self.unwind.item_exc = saved;
         v
     }
@@ -441,9 +441,9 @@ impl Analyzer {
                 Kind::Groupby => {
                     // (several groupby objects: each selection is an object of its own)
                     let several = obj.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Groupby).count() > 1;
-                    let saved = if several { self.alloc_extra.replace(format!("gb{}", oid)) } else { self.alloc_extra.clone() };
+                    let saved = if several { self.cx.alloc_extra.replace(format!("gb{}", oid)) } else { self.cx.alloc_extra.clone() };
                     let v = crate::models::pandas::groupby_select(self, oid, key, node, state);
-                    self.alloc_extra = saved;
+                    self.cx.alloc_extra = saved;
                     parts.push(v);
                     continue;
                 }
@@ -451,7 +451,7 @@ impl Analyzer {
                     let cls = self.heap.instance_class(oid);
                     if let Some(cls) = cls {
                         if let Some(m) = self.class_lookup(cls, "__getitem__") {
-                            let fv = self.cls_slots.get(&(m, Ns::Attr, key_str_lit("__getitem__"))).cloned().unwrap_or_default();
+                            let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__getitem__"))).cloned().unwrap_or_default();
                             for f in fv.pts.iter() {
                                 if self.heap.kind(f) == Kind::Function {
                                     let r = self.call_user(f, Some(Value::obj(oid)), vec![key.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
@@ -611,13 +611,13 @@ impl Analyzer {
                 k if k.is_record() => {
                     let ckv = self.canon_kv(oid, ns, &key.kv, state);
                     let v = if ckv != key.kv {
-                        let saved = self.key_alias.take();
+                        let saved = self.mode.key_alias.take();
                         if let (KeyVal::Lit(c), KeyVal::Lit(o)) = (&ckv, &key.kv) {
-                            self.key_alias = Some((*c, *o));
+                            self.mode.key_alias = Some((*c, *o));
                         }
                         let ck = Value::with_kv(key.pts.clone(), ckv);
                         let v = self.load_record(oid, ns, &ck, node, state, guarded, single_target, try_guard);
-                        self.key_alias = saved;
+                        self.mode.key_alias = saved;
                         v
                     } else {
                         self.load_record(oid, ns, key, node, state, guarded, single_target, try_guard)
@@ -734,7 +734,7 @@ impl Analyzer {
                         if let Some(src) = self.m.td_param_src.get(&oid).copied() {
                             let fresh = !state.reqs.contains(&src, &k);
                             state.require(src, k, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
-                            if fresh && (self.branch_depth > 0 || self.cond_depth > 0) {
+                            if fresh && (self.cx.branch_depth > 0 || self.cx.cond_depth > 0) {
                                 if let Some(cur) = state.reqs.get(&src, &k) {
                                     state.reqs.set(&src, k, crate::domain::ReqInfo { always: false, ..cur });
                                 }
@@ -938,7 +938,7 @@ impl Analyzer {
                 Kind::Instance if ns == Ns::Item => {
                     if let Some(cls) = self.heap.instance_class(oid) {
                         if let Some(m) = self.class_lookup(cls, "__setitem__") {
-                            let fv = self.cls_slots.get(&(m, Ns::Attr, key_str_lit("__setitem__"))).cloned().unwrap_or_default();
+                            let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__setitem__"))).cloned().unwrap_or_default();
                             for f in fv.pts.iter() {
                                 if self.heap.kind(f) == Kind::Function {
                                     self.call_user(f, Some(Value::obj(oid)), vec![key.clone(), v.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
@@ -976,7 +976,7 @@ impl Analyzer {
             }
             KeyVal::KeysOf(ko) => {
                 let srcrow = join_rows(ko.objs.iter().map(|x| state.row(x, ko.ns)));
-                let exhaustive = strong && ko.exhaustive_depth == self.cond_depth;
+                let exhaustive = strong && ko.exhaustive_depth == self.cx.cond_depth;
                 state.set_row(oid, ns, row.copy_from(&srcrow, exhaustive, &ko.exclude, ko.chain));
                 for x in ko.objs.iter() {
                     for k in state.slot_keys(x, ko.ns) {
@@ -1102,7 +1102,7 @@ impl Analyzer {
             if kind == Kind::Instance && ns == Ns::Item {
                 if let Some(cls) = self.heap.instance_class(oid) {
                     if let Some(m) = self.class_lookup(cls, "__delitem__") {
-                        let fv = self.cls_slots.get(&(m, Ns::Attr, key_str_lit("__delitem__"))).cloned().unwrap_or_default();
+                        let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__delitem__"))).cloned().unwrap_or_default();
                         for f in fv.pts.iter() {
                             if self.heap.kind(f) == Kind::Function {
                                 self.call_user(f, Some(Value::obj(oid)), vec![key.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
@@ -1177,7 +1177,7 @@ impl Analyzer {
         // object's lack of it makes the read fail for sure)
         let scalar = self.may_be_scalar(obj);
         let single = obj.pts.len() == 1 && !scalar;
-        let saved_scalar = std::mem::replace(&mut self.recv_scalar, scalar);
+        let saved_scalar = std::mem::replace(&mut self.mode.recv_scalar, scalar);
         let nk = key_str_lit(name);
         for oid in obj.pts.iter() {
             let k = self.heap.kind(oid);
@@ -1384,7 +1384,7 @@ impl Analyzer {
                     if let [rc] = recv_cls[..] {
                         let order = self.heap.mro(rc);
                         if let Some(pos) = order.iter().position(|c| *c == cls) {
-                            found = order[pos + 1..].iter().copied().find(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, nk)));
+                            found = order[pos + 1..].iter().copied().find(|c| self.heap.cls_slots.contains_key(&(*c, Ns::Attr, nk)));
                         }
                     }
                     if found.is_none() {
@@ -1400,13 +1400,13 @@ impl Analyzer {
                     let ids = self_v.pts.iter().map(|x| x.to_string()).collect::<Vec<String>>().join(",");
                     match found {
                         // (`__new__` is a static method: `super().__new__(cls)` passes the class)
-                        Some(fc) if name == "__new__" => self.cls_slots.get(&(fc, Ns::Attr, nk)).cloned().unwrap_or_default(),
+                        Some(fc) if name == "__new__" => self.heap.cls_slots.get(&(fc, Ns::Attr, nk)).cloned().unwrap_or_default(),
                         None if name == "__new__" => {
                             let q = "builtins.object.__new__";
                             Value::obj(self.heap.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, q, Payload::Str(q.to_string())))
                         }
                         Some(fc) => {
-                            let fv = self.cls_slots.get(&(fc, Ns::Attr, nk)).cloned().unwrap_or_default();
+                            let fv = self.heap.cls_slots.get(&(fc, Ns::Attr, nk)).cloned().unwrap_or_default();
                             let mut out = Value::new();
                             for f in fv.pts.iter() {
                                 if self.heap.kind(f) == Kind::Function {
@@ -1446,7 +1446,7 @@ impl Analyzer {
             };
             parts.push(v);
         }
-        self.recv_scalar = saved_scalar;
+        self.mode.recv_scalar = saved_scalar;
         acc = acc.join(&crate::domain::join_values(parts));
         if obj.pts.is_empty() {
             return crate::models::scalar_attr(self, obj, name, report, state);
@@ -1472,7 +1472,7 @@ impl Analyzer {
         let nk = key_str_lit(name);
         let order = self.heap.mro(cls);
         if !order.is_empty() {
-            return order.into_iter().find(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, nk)));
+            return order.into_iter().find(|c| self.heap.cls_slots.contains_key(&(*c, Ns::Attr, nk)));
         }
         let mut seen: Vec<u32> = Vec::new();
         let mut order = vec![cls];
@@ -1482,7 +1482,7 @@ impl Analyzer {
                 continue;
             }
             seen.push(c);
-            if self.cls_slots.contains_key(&(c, Ns::Attr, nk)) {
+            if self.heap.cls_slots.contains_key(&(c, Ns::Attr, nk)) {
                 return Some(c);
             }
             if let Some(ci) = self.heap.class_info_opt(c) {
@@ -1498,7 +1498,7 @@ impl Analyzer {
     pub fn class_attr_value(&self, cls: u32, name: &str, state: &State) -> Value {
         match self.class_lookup(cls, name) {
             None => Value::new(),
-            Some(c) => state.slot_opt(c, Ns::Attr, key_str_lit(name)).or_else(|| self.cls_slots.get(&(c, Ns::Attr, key_str_lit(name))).cloned()).unwrap_or_default(),
+            Some(c) => state.slot_opt(c, Ns::Attr, key_str_lit(name)).or_else(|| self.heap.cls_slots.get(&(c, Ns::Attr, key_str_lit(name))).cloned()).unwrap_or_default(),
         }
     }
 
@@ -1644,7 +1644,7 @@ impl Analyzer {
             // class's — the read cannot fail)
             let class_attr = cls_of.filter(|c| !row.definite.contains(nk) && !self.dataclass_fields_mro(*c).iter().any(|(f, _)| f == name)).and_then(|c| self.class_lookup(c, name));
             if let (true, Some(defc)) = (row.present.contains(nk), class_attr) {
-                let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
+                let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
                 let plain = !cv.pts.iter().any(|f| matches!(self.heap.kind(f), Kind::Function | Kind::Bound));
                 if plain {
                     if !guarded {
@@ -1672,7 +1672,7 @@ impl Analyzer {
         if let Some(c) = cls_of {
             let is_field = self.dataclass_fields_mro(c).iter().any(|(f, _)| f == name);
             if let (Some(defc), false) = (self.class_lookup(c, name), is_field) {
-                let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
+                let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
                 // a class attribute: the access succeeds (a method read counts only where the
                 // receiver may be other objects too, which may lack it)
                 let plain = !cv.pts.iter().any(|f| matches!(self.heap.kind(f), Kind::Function | Kind::Bound) && !(self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_property.get()));
@@ -1798,7 +1798,7 @@ impl Analyzer {
         if !guarded && cls.tier != Tier::Map {
             self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
             // (a method called on an input — `df.groupby(…)` — is not a key the input must have)
-            if cls.tier == Tier::Input && !self.callee_nodes.contains(&node.addr) {
+            if cls.tier == Tier::Input && !self.mode.callee_nodes.contains(&node.addr) {
                 self.require_providers_k(&cls, &row, false, state, Some(nk), Ns::Attr);
             }
         }
@@ -1844,7 +1844,7 @@ impl Analyzer {
             // a frozen dataclass: assignment raises FrozenInstanceError (an AttributeError)
             if kind == Kind::Instance {
                 if let Some(cls) = self.heap.instance_class(oid) {
-                    if self.heap.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.dc_frozen.get()).unwrap_or(false)) && !self.fresh_init.contains(&oid) {
+                    if self.heap.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.dc_frozen.get()).unwrap_or(false)) && !self.cx.fresh_init.contains(&oid) {
                         self.raise_here("FrozenInstanceError", state);
                         continue;
                     }
@@ -1866,20 +1866,20 @@ impl Analyzer {
             };
             if let Some(cls) = cls_of {
                 if let Some(defc) = self.class_lookup(cls, name) {
-                    if let Some(&setter) = self.prop_setters.get(&(defc, nk)) {
+                    if let Some(&setter) = self.heap.prop_setters.get(&(defc, nk)) {
                         self.call_user(setter, Some(Value::obj(oid)), vec![v.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
                         continue;
                     }
                     // a property without a setter: the assignment raises
                     if kind == Kind::Instance {
-                        let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
+                        let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
                         if !cv.pts.is_empty() && cv.pts.iter().all(|f| self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_property.get()) {
                             self.raise_here("AttributeError", state);
                             continue;
                         }
                     }
                     // a data descriptor (an object whose class has `__set__`) takes the store
-                    let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
+                    let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
                     let descs: Vec<u32> = cv.pts.iter().filter(|d| self.heap.kind(*d) == Kind::Instance && self.heap.instance_class(*d).and_then(|dc| self.class_lookup(dc, "__set__")).is_some()).collect();
                     if !descs.is_empty() {
                         for d in descs {
@@ -1889,7 +1889,7 @@ impl Analyzer {
                     }
                 }
                 // a user `__setattr__` takes every assignment (`object.__setattr__` bypasses it)
-                if !self.bypass_setattr && self.class_lookup(cls, "__setattr__").is_some() {
+                if !self.mode.bypass_setattr && self.class_lookup(cls, "__setattr__").is_some() {
                     self.call_method_with(&Value::obj(oid), "__setattr__", vec![Value::lit(nk), v.clone()], node, state);
                     continue;
                 }
@@ -1903,7 +1903,7 @@ impl Analyzer {
                     }
                 }
             }
-            let strong_key = strong || (targets.len() == 1 && self.fresh_init.contains(&oid));
+            let strong_key = strong || (targets.len() == 1 && self.cx.fresh_init.contains(&oid));
             if kind == Kind::Unknown && !strong && state.slot_opt(oid, Ns::Attr, nk).is_none() {
                 // a weak store on open content (an element under an unknown key, say)
                 // joins with what was there, which is unknown
@@ -1915,7 +1915,7 @@ impl Analyzer {
             state.set_row(oid, Ns::Attr, r);
             state.set_slot(oid, Ns::Attr, nk, v.clone(), strong);
             if kind == Kind::Class {
-                self.cls_slots.insert((oid, Ns::Attr, nk), v.clone());
+                self.heap.cls_slots.insert((oid, Ns::Attr, nk), v.clone());
             }
         }
     }
