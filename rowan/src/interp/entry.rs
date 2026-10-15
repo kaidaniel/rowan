@@ -174,7 +174,7 @@ impl Analyzer {
             return;
         };
         if debug_enabled() {
-            eprintln!("[rowan] entry {} L{} t={:.1}s objs={} verdicts={} quiet={}", fi.qualname, fi.node.node().line, self.budget.now(), self.heap.len(), self.findings.mark(), quiet);
+            eprintln!("[rowan] entry {} L{} t={:.1}s objs={} verdicts={} run={:?} stmts={}", fi.qualname, fi.node.node().line, self.budget.now(), self.heap.len(), self.findings.mark(), run, self.budget.statements);
         }
         // a closure made by a factory's entry run starts from that run's state (its cells)
         let mut st = match self.entry.closure_states.get(&oid) {
@@ -667,7 +667,7 @@ impl Analyzer {
 
 /// What an entry run is for: verdicts (a function nothing calls), its own requirements (a
 /// function the program calls: quiet), or hover facts only (`facts_runs`).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Run {
     Verdicts,
     Quiet,
