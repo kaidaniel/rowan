@@ -366,4 +366,55 @@ impl Heap {
         }
         Some(intern::key_tuple(items))
     }
+
+    // ------------------------------------------------------------ classes
+    /// Breadth-first linearisation of the user classes above `cls` (when C3 fails).
+    pub fn mro_bfs(&self, cls: u32) -> Vec<u32> {
+        let mut seen: Vec<u32> = Vec::new();
+        let mut order = vec![cls];
+        let mut out: Vec<u32> = Vec::new();
+        while !order.is_empty() {
+            let c = order.remove(0);
+            if seen.contains(&c) || !self.has_obj(c) {
+                continue;
+            }
+            seen.push(c);
+            out.push(c);
+            if let Some(ci) = self.class_info_opt(c) {
+                order.extend(ci.bases.iter().copied());
+            }
+        }
+        out
+    }
+
+    /// The C3 method resolution order of a user class (user classes only).
+    pub fn mro(&self, cls: u32) -> Vec<u32> {
+        fn c3(an: &Heap, cls: u32, depth: usize) -> Option<Vec<u32>> {
+            if depth > 64 {
+                return None;
+            }
+            let bases: Vec<u32> = an.class_info_opt(cls).map(|ci| ci.bases.clone()).unwrap_or_default();
+            let mut seqs: Vec<Vec<u32>> = Vec::new();
+            for b in &bases {
+                seqs.push(c3(an, *b, depth + 1)?);
+            }
+            seqs.push(bases.clone());
+            let mut out = vec![cls];
+            loop {
+                seqs.retain(|s| !s.is_empty());
+                if seqs.is_empty() {
+                    return Some(out);
+                }
+                // the first head that is in no other sequence's tail
+                let head = seqs.iter().map(|s| s[0]).find(|h| seqs.iter().all(|s| !s[1..].contains(h)))?;
+                out.push(head);
+                for s in seqs.iter_mut() {
+                    if s[0] == head {
+                        s.remove(0);
+                    }
+                }
+            }
+        }
+        c3(self, cls, 0).unwrap_or_else(|| self.mro_bfs(cls))
+    }
 }

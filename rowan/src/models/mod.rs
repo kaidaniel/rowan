@@ -949,7 +949,7 @@ fn m_callable(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
         let b = match an.heap.kind(o) {
             Kind::Function | Kind::Bound | Kind::Class | Kind::Partial | Kind::Method => true,
             Kind::Instance => match an.heap.instance_class(o) {
-                Some(cls) if !an.mro(cls).iter().any(|x| an.heap.class_info_opt(*x).is_none_or(|ci| ci.open_base)) => an.class_lookup(cls, "__call__").is_some(),
+                Some(cls) if !an.heap.mro(cls).iter().any(|x| an.heap.class_info_opt(*x).is_none_or(|ci| ci.open_base)) => an.class_lookup(cls, "__call__").is_some(),
                 _ => return Value::data("callable"),
             },
             Kind::Dict | Kind::List | Kind::Tuple | Kind::Set => false,
@@ -1436,7 +1436,7 @@ fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     // a name not known: any of the object's attributes (of a library object, anything), or the
     // default; known in part: that attribute, or one rowan does not follow (AGENTS.md: getattr
     // by unknown names is not followed; every attribute and method of `self` was too costly)
-    let mut v = if lit.is_some() { Value::obj(an.any_object(st)) } else { join_values(obj.pts.iter().map(|o| an.all_values(o, Ns::Attr, st))) };
+    let mut v = if lit.is_some() { Value::obj(crate::interp::any_object(&mut an.heap)) } else { join_values(obj.pts.iter().map(|o| an.all_values(o, Ns::Attr, st))) };
     if obj.pts.iter().any(|o| an.heap.kind(o) == Kind::External) {
         let lib: Vec<Value> = vec![Value::with_kv(obj.pts.filter(|o| an.heap.kind(o) == Kind::External), crate::domain::BOT)];
         v = v.join(&an.unknown_call(&c.qual, None, &lib, &IndexMap::new(), &[], &[], st, &c.node));
@@ -5076,7 +5076,7 @@ pub fn annotated_names(an: &Analyzer, o: crate::domain::ObjId, mro: bool) -> Opt
     match an.heap.kind(o) {
         Kind::Class => {
             let mut out: Vec<String> = Vec::new();
-            let classes: Vec<crate::domain::ObjId> = if mro { an.mro(o).iter().rev().copied().collect() } else { vec![o] };
+            let classes: Vec<crate::domain::ObjId> = if mro { an.heap.mro(o).iter().rev().copied().collect() } else { vec![o] };
             let mut any = false;
             for c in classes {
                 let Some(ci) = an.heap.class_info_opt(c) else { continue };

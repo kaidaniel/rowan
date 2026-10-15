@@ -10,7 +10,7 @@ use ruff_python_ast as ast;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::domain::{
-    KeyVal, Ns, ObjId, Row, Source, SourceKind, Value,
+    Ns, ObjId, Row, Source, SourceKind, Value,
 };
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
@@ -34,6 +34,8 @@ pub use names::Names;
 pub mod narrow;
 pub use crate::models::tables::*;
 pub mod stmts;
+pub mod unknown;
+pub use unknown::{any_object, Havoc, HavocMemo};
 
 pub const UNROLL_MAX: usize = 16;
 pub const LOOP_MAX_ITER: usize = 40;
@@ -78,21 +80,7 @@ impl YieldStates {
         self.list.iter().map(|(_, s)| s)
     }
 }
-/// havoc walks remembered (`havoc_with`); past this many the table starts over
-pub const HAVOC_MEMOS: usize = 1024;
-/// what the cache of code closures (`code_closure`) may hold; past it the cache starts over
-pub const CLOSURE_CACHE: usize = 1 << 18;
 
-/// What a havoc walk met and the heap it left (`havoc_with`).
-pub struct HavocMemo {
-    pub roots: Vec<ObjId>,
-    pub rows: crate::layered::LayerMap<(ObjId, Ns), Row>,
-    pub slots: crate::layered::TwoLevel<ObjId, crate::state::SlotKey, Value>,
-    pub elems: crate::layered::LayerMap<ObjId, KeyVal>,
-    pub lens: crate::layered::LayerMap<ObjId, (Option<usize>, usize, u16)>,
-    pub visited: FxHashSet<ObjId>,
-    pub code: Vec<ObjId>,
-}
 /// Call sites kept in an allocation context (deeper chains: a hash of the prefix).
 pub const CHAIN: usize = 2;
 /// Statements a function code may run in all its calls (`ROWAN_LIMITS=budget=N`): past them
@@ -552,6 +540,10 @@ pub struct Analyzer {
     pub findings: Findings,
     /// the report's names for unknown objects and calls (`interp/names.rs`)
     pub names: Names,
+    /// unknown code's havoc walks (`interp/unknown.rs`)
+    pub havoc: Havoc,
+    /// what code may change when it does not run (`interp/effects.rs`)
+    pub effects: effects::EffectsCache,
     pub models: Registry,
     pub frames: Vec<Frame>,
     pub active: FxHashMap<(ObjId, String), bool>,
@@ -701,28 +693,11 @@ pub struct Analyzer {
     pub work: usize,
     /// objects visited by reachability walks (liveness, GC): part of the work measure
     pub walked: std::cell::Cell<usize>,
-    /// objects visited by unknown code's havoc walks (`havoc_with`)
-    pub havoc_walked: usize,
     /// when the analysis started (see `DEADLINE_MS`)
     pub started: Clock,
     /// the hard deadline passed: function bodies stop, the calls they are in become unknown calls
     pub hard_cut: bool,
     cut_tick: u32,
-    /// per function code (`FuncNode::addr`): the names it reads beyond its locals
-    pub code_uses: FxHashMap<usize, Rc<effects::CodeUses>>,
-    /// per code object: what it may change when a call of it does not run (`code_closure`)
-    pub closures: FxHashMap<Vec<ObjId>, Rc<effects::Closure>>,
-    /// what `closures` holds (roots, code, slots, values), bounded by `CLOSURE_CACHE`
-    pub closures_size: usize,
-    /// the code objects the last `havoc_reachable` met (functions, classes, bound methods)
-    pub havoc_code: Vec<ObjId>,
-    /// the receiver of a skipped method call (`skipped_call`) and how often a havoc met it
-    pub havoc_guard: Option<(ObjId, u32, std::rc::Rc<[KeyId]>)>,
-    /// per object, the last havoc walk that met it (`havoc_walk`)
-    pub havoc_marks: Vec<u32>,
-    pub havoc_walks: u32,
-    /// per (unknown code, values given): what its last havoc walk met, and the heap it left
-    pub havoc_memo: FxHashMap<(StrId, u64), HavocMemo>,
 
     pub entry_instances: FxHashMap<ObjId, ObjId>,
     pub fresh_in_progress: FxHashSet<ObjId>,
@@ -1046,7 +1021,7 @@ impl Analyzer {
                     // `__init__`s set may be there; a torch module's method is analysed in
                     // its own terms: its attributes as symbols)
                     let torch = self.torch_modules.contains(&fi.module);
-                    let subs: Vec<ObjId> = self.user_classes.iter().copied().filter(|c| *c == cls || (!torch && self.mro(*c).contains(&cls))).collect();
+                    let subs: Vec<ObjId> = self.user_classes.iter().copied().filter(|c| *c == cls || (!torch && self.heap.mro(*c).contains(&cls))).collect();
                     let mut insts: Vec<ObjId> = Vec::new();
                     for c in subs {
                         let inst = match self.entry_instances.get(&c) {
@@ -1312,7 +1287,7 @@ impl Analyzer {
 
     fn fresh_instance_inner(&mut self, cls_oid: ObjId, ci: &ClassInfo, state: &mut State, ctx: &str) -> ObjId {
         let has_init = self.class_lookup(cls_oid, "__init__").is_some();
-        let has_fields = self.mro(cls_oid).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.has_fields()).unwrap_or(false));
+        let has_fields = self.heap.mro(cls_oid).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.has_fields()).unwrap_or(false));
         // a class that never initialises its own attributes is only used through subclasses
         let open_inst = ci.open_base || !(has_init || has_fields);
         let row = if open_inst { Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)) } else { Row::new() };
@@ -1383,7 +1358,7 @@ impl Analyzer {
         // be gone)
         let (set, deleted) = self.attrs_set_by_methods(cls_oid, state);
         if !(set.is_empty() && deleted.is_empty()) && state.has_row(inst, Ns::Attr) {
-            let any = Value::obj(self.any_object(state));
+            let any = Value::obj(crate::interp::any_object(&mut self.heap));
             let mut row = state.row(inst, Ns::Attr);
             // (a name the class itself defines — a property, a class-level default — reads
             // through the class anyway)

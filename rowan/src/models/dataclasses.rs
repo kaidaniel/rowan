@@ -163,7 +163,7 @@ impl Analyzer {
     /// `field(kw_only=True)`, `@dataclass(kw_only=True)`).
     pub fn dc_specs(&self, cls: u32) -> Vec<DcSpec> {
         let mut out: Vec<DcSpec> = Vec::new();
-        for c in self.mro(cls).into_iter().rev() {
+        for c in self.heap.mro(cls).into_iter().rev() {
             let Some(ci) = self.heap.class_info_opt(c) else { continue };
             if !ci.has_fields() {
                 continue;
@@ -257,7 +257,7 @@ impl Analyzer {
     /// Dataclass fields in constructor order: base classes' fields first (MRO, nearest last).
     pub fn dataclass_fields_mro(&self, cls: u32) -> Vec<(String, Option<&'static ast::Expr>)> {
         let mut out: Vec<(String, Option<&'static ast::Expr>)> = Vec::new();
-        for c in self.mro(cls).into_iter().rev() {
+        for c in self.heap.mro(cls).into_iter().rev() {
             if let Some(ci) = self.heap.class_info_opt(c) {
                 for (name, d) in ci.fields() {
                     if let Some(e) = out.iter_mut().find(|(n, _)| *n == name) {
@@ -275,7 +275,7 @@ impl Analyzer {
 impl crate::interp::Analyzer {
     /// An ABC with abstract methods no class of its MRO implements: `cls()` raises TypeError.
     pub fn abstract_unimplemented(&self, cls: u32) -> bool {
-        let mro = self.mro(cls);
+        let mro = self.heap.mro(cls);
         let is_abc = mro.iter().any(|c| {
             self.heap.class_info_opt(*c).map(|ci| {
                 ci.node.arguments.as_ref().map(|a| a.args.iter().any(|b| crate::interp::dotted_last(b) == "ABC") || a.keywords.iter().any(|k| k.arg.as_ref().map(|x| x.as_str()) == Some("metaclass") && crate::interp::dotted_last(&k.value) == "ABCMeta")).unwrap_or(false)
@@ -479,7 +479,7 @@ impl Analyzer {
     /// The dataclass whose generated `__init__` `cls` inherits (none when a user `__init__`
     /// comes first in the MRO).
     pub fn dataclass_init_owner(&self, cls: u32) -> Option<u32> {
-        for c in self.mro(cls) {
+        for c in self.heap.mro(cls) {
             if self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) {
                 return None;
             }
@@ -583,7 +583,7 @@ impl Analyzer {
                 return Some(self.pyd_construct(cls, args, &kw, star_kwargs, state, node));
             }
         }
-        let dict_based = self.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).map(|x| x.lib.dict_base).unwrap_or(false));
+        let dict_based = self.heap.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).map(|x| x.lib.dict_base).unwrap_or(false));
         if dict_based && self.class_lookup(cls, "__init__").is_none() {
             state.set_row(inst, Ns::Item, crate::domain::Row::new());
             if let Some(a0) = args.first() {
@@ -603,7 +603,7 @@ impl Analyzer {
             return Some(Value::obj(inst));
         }
         // the generated `__init__` of a dataclass base applies to a subclass without its own
-        let owner = self.mro(cls).into_iter().find_map(|c| if self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) { Some(false) } else if self.heap.class_info_opt(c).is_some_and(|x| x.has_fields()) { Some(true) } else { None });
+        let owner = self.heap.mro(cls).into_iter().find_map(|c| if self.cls_slots.contains_key(&(c, Ns::Attr, key_str_lit("__init__"))) { Some(false) } else if self.heap.class_info_opt(c).is_some_and(|x| x.has_fields()) { Some(true) } else { None });
         if ci.has_fields() || owner == Some(true) {
             self.dataclass_init(cls, inst, args, star_args, kwargs, star_kwargs, state, node);
             return Some(Value::obj(inst));

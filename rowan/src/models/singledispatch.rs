@@ -90,7 +90,7 @@ impl Analyzer {
                     let q = self.heap.external_qual(r);
                     if q.ends_with(".object") || q == "object" { Some(1000) } else { None }
                 }
-                (Kind::Class, Err(c)) => self.mro(*c).iter().position(|m| *m == r),
+                (Kind::Class, Err(c)) => self.heap.mro(*c).iter().position(|m| *m == r),
                 _ => None,
             };
             if let Some(d) = d {

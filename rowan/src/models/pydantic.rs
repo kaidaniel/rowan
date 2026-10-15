@@ -139,12 +139,12 @@ pub fn attr_value(an: &mut Analyzer, st: &mut State, recv: ObjId, name: &str, no
 
 /// Is `cls` a pydantic model class (a `BaseModel` / `BaseSettings` / `RootModel` above it)?
 pub fn is_model(an: &Analyzer, cls: ObjId) -> bool {
-    an.heap.class_info_opt(cls).is_some() && an.mro(cls).iter().any(|c| an.heap.class_info_opt(*c).map(|x| x.lib.pydantic).unwrap_or(false))
+    an.heap.class_info_opt(cls).is_some() && an.heap.mro(cls).iter().any(|c| an.heap.class_info_opt(*c).map(|x| x.lib.pydantic).unwrap_or(false))
 }
 
 /// Is `cls` validated by pydantic (a model or a pydantic dataclass)?
 pub fn is_validated(an: &Analyzer, cls: ObjId) -> bool {
-    is_model(an, cls) || (an.heap.class_info_opt(cls).is_some() && an.mro(cls).iter().any(|c| an.heap.class_info_opt(*c).map(|x| x.pyd_dataclass.get()).unwrap_or(false)))
+    is_model(an, cls) || (an.heap.class_info_opt(cls).is_some() && an.heap.mro(cls).iter().any(|c| an.heap.class_info_opt(*c).map(|x| x.pyd_dataclass.get()).unwrap_or(false)))
 }
 
 /// Is `oid` an instance of a pydantic model class?
@@ -212,7 +212,7 @@ impl Analyzer {
         let mut field_serializers: Vec<Validator> = Vec::new();
         let mut model_serializer: Option<Validator> = None;
         // bases first: a subclass overrides fields, config and validators keep accumulating
-        for c in self.mro(cls).into_iter().rev() {
+        for c in self.heap.mro(cls).into_iter().rev() {
             let Some(ci) = self.heap.class_info_opt(c) else { continue };
             if !is_validated(self, c) {
                 continue;
@@ -744,7 +744,7 @@ impl Analyzer {
         }
         let mut outs: Vec<Value> = Vec::new();
         // an instance of the class itself validates to itself
-        let (insts, rest): (Vec<ObjId>, Vec<ObjId>) = data.pts.iter().partition(|o| self.heap.kind(*o) == Kind::Instance && self.heap.instance_class(*o).map(|c| self.mro(c).contains(&cls)).unwrap_or(false));
+        let (insts, rest): (Vec<ObjId>, Vec<ObjId>) = data.pts.iter().partition(|o| self.heap.kind(*o) == Kind::Instance && self.heap.instance_class(*o).map(|c| self.heap.mro(c).contains(&cls)).unwrap_or(false));
         for i in insts {
             outs.push(Value::obj(i));
         }
@@ -1353,7 +1353,7 @@ impl Analyzer {
     /// and `NotRequired[...]` make a key optional, `Required[...]` required.
     pub fn typed_dict_fields(&mut self, cls: ObjId, state: &State) -> Vec<(String, bool, Ann)> {
         let mut out: Vec<(String, bool, Ann)> = Vec::new();
-        for c in self.mro(cls).into_iter().rev() {
+        for c in self.heap.mro(cls).into_iter().rev() {
             let Some(ci) = self.heap.class_info_opt(c) else { continue };
             if !ci.lib.typed_dict {
                 continue;
@@ -1602,7 +1602,7 @@ impl Analyzer {
                 }
                 for o in val.pts.iter() {
                     // an instance of a member stays
-                    if self.heap.kind(o) == Kind::Instance && self.heap.instance_class(o).map(|c| models.iter().any(|m| self.mro(c).contains(m))).unwrap_or(false) {
+                    if self.heap.kind(o) == Kind::Instance && self.heap.instance_class(o).map(|c| models.iter().any(|m| self.heap.mro(c).contains(m))).unwrap_or(false) {
                         outs.push(Value::obj(o));
                         continue;
                     }

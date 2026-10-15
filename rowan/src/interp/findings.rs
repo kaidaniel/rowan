@@ -389,7 +389,7 @@ impl Analyzer {
             let mut ns_used = Ns::Item;
             for oid in v.pts.iter() {
                 // a UserDict's keys are those of its `data`
-                if self.heap.kind(oid) == Kind::Instance && self.heap.instance_class(oid).map(|c| self.mro(c).iter().any(|m| self.m.userdict_classes.contains(m))).unwrap_or(false) {
+                if self.heap.kind(oid) == Kind::Instance && self.heap.instance_class(oid).map(|c| self.heap.mro(c).iter().any(|m| self.m.userdict_classes.contains(m))).unwrap_or(false) {
                     let d = state.slot(oid, Ns::Attr, key_str_lit("data"));
                     if let Some(dd) = d.single().filter(|x| self.heap.kind(*x) == Kind::Dict) {
                         ns_used = Ns::Item;
@@ -406,7 +406,7 @@ impl Analyzer {
                 }
                 // (a numpy structured array is keyed by its fields)
                 // (an instance of a dict subclass: its items)
-                let dict_sub = self.heap.kind(oid) == Kind::Instance && self.heap.instance_class(oid).is_some_and(|c| self.mro(c).iter().any(|x| self.heap.class_info_opt(*x).map(|ci| ci.lib.dict_base).unwrap_or(false)));
+                let dict_sub = self.heap.kind(oid) == Kind::Instance && self.heap.instance_class(oid).is_some_and(|c| self.heap.mro(c).iter().any(|x| self.heap.class_info_opt(*x).map(|ci| ci.lib.dict_base).unwrap_or(false)));
                 let ns = if matches!(self.heap.kind(oid), Kind::Instance | Kind::Namespace) && !self.m.np_struct.contains(&oid) && !dict_sub { Ns::Attr } else { Ns::Item };
                 ns_used = ns;
                 rows.push(state.row(oid, ns));

@@ -61,7 +61,7 @@ impl Analyzer {
     /// Some class of `cls`'s MRO derives from a builtin exception class directly.
     pub fn builtin_exc_base(&self, cls: u32) -> bool {
         // (external bases are not in `bases`: read the class statement's base expressions)
-        self.mro(cls).iter().any(|c| {
+        self.heap.mro(cls).iter().any(|c| {
             self.heap.class_info_opt(*c)
                 .map(|ci| {
                     let user: Vec<String> = ci.bases.iter().filter_map(|b| self.heap.class_info_opt(*b).map(|x| x.name.clone())).collect();
@@ -78,7 +78,7 @@ impl Analyzer {
     /// declares them (literally) and none gives a `__dict__`.
     pub fn slots_of(&self, cls: u32) -> Option<Vec<String>> {
         let mut out: Vec<String> = Vec::new();
-        for c in self.mro(cls) {
+        for c in self.heap.mro(cls) {
             let Some(ci) = self.heap.class_info_opt(c) else {
                 // (`object` at the end of the MRO has no instance dict of its own)
                 if self.heap.kind(c) == Kind::External && self.heap.external_qual(c) == "builtins.object" {
@@ -1382,7 +1382,7 @@ impl Analyzer {
                         })
                         .collect();
                     if let [rc] = recv_cls[..] {
-                        let order = self.mro(rc);
+                        let order = self.heap.mro(rc);
                         if let Some(pos) = order.iter().position(|c| *c == cls) {
                             found = order[pos + 1..].iter().copied().find(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, nk)));
                         }
@@ -1467,60 +1467,10 @@ impl Analyzer {
         Value::obj(self.heap.alloc_raw(Kind::Method, &key, "", true, qual, Payload::Method(qual.to_string(), recv.clone())))
     }
 
-    /// Breadth-first linearisation of the user classes above `cls` (when C3 fails).
-    pub fn mro_bfs(&self, cls: u32) -> Vec<u32> {
-        let mut seen: Vec<u32> = Vec::new();
-        let mut order = vec![cls];
-        let mut out: Vec<u32> = Vec::new();
-        while !order.is_empty() {
-            let c = order.remove(0);
-            if seen.contains(&c) || !self.heap.has_obj(c) {
-                continue;
-            }
-            seen.push(c);
-            out.push(c);
-            if let Some(ci) = self.heap.class_info_opt(c) {
-                order.extend(ci.bases.iter().copied());
-            }
-        }
-        out
-    }
-
     /// Return the class oid (in MRO) that defines `name`, or None.
-    /// The C3 method resolution order of a user class (user classes only).
-    pub fn mro(&self, cls: u32) -> Vec<u32> {
-        fn c3(an: &Analyzer, cls: u32, depth: usize) -> Option<Vec<u32>> {
-            if depth > 64 {
-                return None;
-            }
-            let bases: Vec<u32> = an.heap.class_info_opt(cls).map(|ci| ci.bases.clone()).unwrap_or_default();
-            let mut seqs: Vec<Vec<u32>> = Vec::new();
-            for b in &bases {
-                seqs.push(c3(an, *b, depth + 1)?);
-            }
-            seqs.push(bases.clone());
-            let mut out = vec![cls];
-            loop {
-                seqs.retain(|s| !s.is_empty());
-                if seqs.is_empty() {
-                    return Some(out);
-                }
-                // the first head that is in no other sequence's tail
-                let head = seqs.iter().map(|s| s[0]).find(|h| seqs.iter().all(|s| !s[1..].contains(h)))?;
-                out.push(head);
-                for s in seqs.iter_mut() {
-                    if s[0] == head {
-                        s.remove(0);
-                    }
-                }
-            }
-        }
-        c3(self, cls, 0).unwrap_or_else(|| self.mro_bfs(cls))
-    }
-
     pub fn class_lookup(&self, cls: u32, name: &str) -> Option<u32> {
         let nk = key_str_lit(name);
-        let order = self.mro(cls);
+        let order = self.heap.mro(cls);
         if !order.is_empty() {
             return order.into_iter().find(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, nk)));
         }
@@ -1647,7 +1597,7 @@ impl Analyzer {
         // a `threading.Thread` subclass's `start()` runs its `run()`
         if matches!(name, "start" | "join") {
             if let Some(cls) = self.heap.instance_class(oid).filter(|c| self.class_lookup(*c, name).is_none()) {
-                if self.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).is_some_and(|ci| ci.lib.quals.iter().any(|q| q == "threading.Thread"))) {
+                if self.heap.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).is_some_and(|ci| ci.lib.quals.iter().any(|q| q == "threading.Thread"))) {
                     return self.method_value(&format!("threadsub.{}", name), &Value::obj(oid));
                 }
             }
@@ -1772,7 +1722,7 @@ impl Analyzer {
 
     /// Is the attribute declared `Any` (or `object`) in the class body or its bases?
     pub fn field_is_any(&self, cls: u32, name: &str) -> bool {
-        for c in self.mro(cls) {
+        for c in self.heap.mro(cls) {
             let Some(ci) = self.heap.class_info_opt(c) else { continue };
             let mut cache = ci.any_fields.borrow_mut();
             if cache.is_none() {
@@ -1894,7 +1844,7 @@ impl Analyzer {
             // a frozen dataclass: assignment raises FrozenInstanceError (an AttributeError)
             if kind == Kind::Instance {
                 if let Some(cls) = self.heap.instance_class(oid) {
-                    if self.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.dc_frozen.get()).unwrap_or(false)) && !self.fresh_init.contains(&oid) {
+                    if self.heap.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.dc_frozen.get()).unwrap_or(false)) && !self.fresh_init.contains(&oid) {
                         self.raise_here("FrozenInstanceError", state);
                         continue;
                     }

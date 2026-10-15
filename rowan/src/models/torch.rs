@@ -531,7 +531,7 @@ impl Analyzer {
                 }
             }
             if let Some(cls) = self.heap.func_info(scope).cls {
-                for c in self.mro(cls) {
+                for c in self.heap.mro(cls) {
                     if let Some(v) = self.cls_slots.get(&(c, Ns::Attr, key_str_lit("__init__"))) {
                         for f in v.pts.iter() {
                             ctx.extra.push(f);
@@ -3155,7 +3155,7 @@ impl Analyzer {
 
     pub fn t_is_module_instance(&self, o: u32) -> bool {
         let Some(cls) = self.heap.instance_class(o) else { return false };
-        self.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.lib.nn_module).unwrap_or(false))
+        self.heap.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.lib.nn_module).unwrap_or(false))
     }
 
     /// `self.register_buffer` & co. on a user module (None: a user attribute).

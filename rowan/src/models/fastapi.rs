@@ -915,7 +915,7 @@ impl Analyzer {
                 let cls = if self.heap.kind(o) == Kind::Instance { self.heap.instance_class(o) } else { None };
                 let httpexc = payload_of(self, o).map(|(q, _)| q == "fastapi.httpexc").unwrap_or(false);
                 let hit = hooks.iter().find(|(n, hv, _)| match cls {
-                    Some(c) => hv.pts.iter().any(|h| self.heap.kind(h) == Kind::Class && self.mro(c).contains(&h)) || self.mro(c).iter().any(|m| self.heap.class_info_opt(*m).map(|ci| ci.name == *n).unwrap_or(false)),
+                    Some(c) => hv.pts.iter().any(|h| self.heap.kind(h) == Kind::Class && self.heap.mro(c).contains(&h)) || self.heap.mro(c).iter().any(|m| self.heap.class_info_opt(*m).map(|ci| ci.name == *n).unwrap_or(false)),
                     None => n == "KeyError" && self.heap.obj(o).label.starts_with("KeyError") || n == "Exception" || httpexc && n == "HTTPException",
                 }).cloned();
                 match hit {

@@ -438,7 +438,7 @@ impl Analyzer {
     fn consumer_between(&mut self, gid: ObjId, state: &mut State) {
         let Some(changes) = self.gen_havoc.get(&gid).cloned().filter(|c| !c.is_empty()) else { return };
         let site = intern::s(&format!("consumer@{}", self.heap.obj(gid).label.trim_start_matches("generator ")));
-        let rid = self.any_object(state);
+        let rid = crate::interp::any_object(&mut self.heap);
         // (an object that code changed in a way not one key: any of its facts, the objects
         // it holds aside: those it changed are listed too)
         let whole: Vec<ObjId> = changes.iter().filter(|c| c.1.is_none()).map(|c| c.0).collect();
@@ -1180,7 +1180,7 @@ impl Analyzer {
     /// An instance of a class deriving from a class rowan does not see (a builtin, a library
     /// class): the base may define what the class body does not.
     pub fn external_based(&self, oid: u32) -> bool {
-        self.heap.instance_class(oid).is_some_and(|c| self.mro(c).iter().any(|x| self.heap.class_info_opt(*x).is_some_and(|ci| ci.open_base || ci.lib.dict_base)))
+        self.heap.instance_class(oid).is_some_and(|c| self.heap.mro(c).iter().any(|x| self.heap.class_info_opt(*x).is_some_and(|ci| ci.open_base || ci.lib.dict_base)))
     }
 
     pub fn has_truth_dunder(&self, oid: u32) -> bool {
@@ -2123,7 +2123,7 @@ impl Analyzer {
             }
         }
         // @total_ordering: one ordering method and __eq__ give the others
-        let ordered = |an: &Analyzer, o: Option<ObjId>| o.and_then(|o| an.heap.instance_class(o)).map(|c| an.mro(c).iter().any(|m| an.total_ordering.contains(m))).unwrap_or(false);
+        let ordered = |an: &Analyzer, o: Option<ObjId>| o.and_then(|o| an.heap.instance_class(o)).map(|c| an.heap.mro(c).iter().any(|m| an.total_ordering.contains(m))).unwrap_or(false);
         if matches!(op, ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE) && ordered(self, ai) {
             if let Some(f) = ai.and_then(|o| self.cmp_dunder(o, "__lt__")) {
                 let lt = call(self, f, a, b, state);

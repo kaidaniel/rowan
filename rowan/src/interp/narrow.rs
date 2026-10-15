@@ -529,7 +529,7 @@ impl Analyzer {
             // (a class deriving from a builtin / library class, or one an ABC may recognise by
             // its methods: not decided)
             let ic = self.heap.instance_class(o)?;
-            let open = self.mro(ic).iter().any(|c| self.heap.class_info_opt(*c).is_some_and(|ci| ci.open_base || ci.lib.dict_base));
+            let open = self.heap.mro(ic).iter().any(|c| self.heap.class_info_opt(*c).is_some_and(|ci| ci.open_base || ci.lib.dict_base));
             return (!open && !structural).then_some(false);
         }
         let container = matches!(k, Kind::Dict | Kind::List | Kind::Tuple | Kind::Pair | Kind::Set | Kind::Frame | Kind::Series);
