@@ -151,7 +151,7 @@ pub fn dataclass_init(an: &mut Analyzer, cls: u32, inst: ObjId, args: &[Value], 
         let fv = an.heap.cls_slots.get(&(pc, Ns::Attr, key_str_lit("__post_init__"))).cloned().unwrap_or_default();
         for f in fv.pts.iter() {
             if an.heap.kind(f) == Kind::Function {
-                an.call_user(f, Some(Value::obj(inst)), initvars.clone(), IndexMap::new(), Vec::new(), Vec::new(), state, node, None, false);
+                an.call_user(f, Some(Value::obj(inst)), initvars.clone(), IndexMap::new(), Vec::new(), Vec::new(), state, node, false);
             }
         }
     }

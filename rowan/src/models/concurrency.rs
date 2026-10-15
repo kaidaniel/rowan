@@ -38,7 +38,7 @@ pub fn call_catching(an: &mut Analyzer, f: &Value, args: Vec<Value>, kwargs: Ind
         let mut outs = Vec::new();
         for fo in f.pts.iter() {
             let v = match an.heap.kind(fo) {
-                Kind::Function => an.call_user(fo, None, args.clone(), kwargs.clone(), vec![], vec![], state, node, None, false),
+                Kind::Function => an.call_user(fo, None, args.clone(), kwargs.clone(), vec![], vec![], state, node, false),
                 _ => an.call_value(&Value::obj(fo), node, None, state, Some(args.clone())),
             };
             outs.push(v);

@@ -1002,7 +1002,7 @@ pub fn pyd_validate_opts(an: &mut Analyzer, cls: ObjId, data: &Value, state: &mu
             }
         }
         state.set_row(did, Ns::Item, vrow);
-        let out = an.call_user(v.func, Some(Value::obj(cls)), vec![Value::obj(did)], IndexMap::new(), vec![], vec![], state, node, None, false);
+        let out = an.call_user(v.func, Some(Value::obj(cls)), vec![Value::obj(did)], IndexMap::new(), vec![], vec![], state, node, false);
         let outs: Vec<ObjId> = out.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Dict).collect();
         let strong = outs.len() == 1 && out.kv.is_bot();
         for d in outs {
@@ -1188,7 +1188,7 @@ fn pyd_catching(an: &mut Analyzer, f: ObjId, self_v: Value, args: Vec<Value>, st
     let mut pre = state.copy();
     an.enter_try(rustc_hash::FxHashSet::from_iter(PYD_CAUGHT.iter().map(|x| x.to_string())), &mut pre);
     // (run with the validated values: `v.strip()` of a str field is a str method there)
-    let out = an.call_user(f, Some(self_v), args, IndexMap::new(), vec![], vec![], state, node, None, false);
+    let out = an.call_user(f, Some(self_v), args, IndexMap::new(), vec![], vec![], state, node, false);
     // an exception of another class (a KeyError, one of code rowan cannot see) is no
     // validation error: it escapes to the enclosing try / call
     let validation = |c: &Option<crate::interp::ExcNames>| c.as_ref().is_some_and(|(n, _)| n.iter().any(|x| PYD_CAUGHT.contains(&x.as_str())));
@@ -1243,7 +1243,7 @@ fn pyd_init_privates(an: &mut Analyzer, cls: ObjId, inst: ObjId, state: &mut Sta
     if let Some(defc) = an.class_lookup(cls, "model_post_init") {
         let fv = an.heap.cls_slots.get(&(defc, Ns::Attr, key_str_lit("model_post_init"))).cloned().unwrap_or_default();
         for f in fv.pts.iter().filter(|f| an.heap.kind(*f) == Kind::Function).collect::<Vec<_>>() {
-            an.call_user(f, Some(Value::obj(inst)), vec![an.none_v.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
+            an.call_user(f, Some(Value::obj(inst)), vec![an.none_v.clone()], IndexMap::new(), vec![], vec![], state, node, false);
         }
     }
 }
@@ -2360,7 +2360,7 @@ fn pyd_dump_inner(an: &mut Analyzer, oid: ObjId, opts: &DumpOpts, state: &mut St
                     let h = an.heap.alloc_raw(Kind::Method, &format!("pyddump:{}", oid), "", true, "serializer handler", Payload::Method("pydantic.dumphandler".into(), Value::obj(oid)));
                     args.push(Value::obj(h));
                 }
-                return an.call_user(ms.func, Some(Value::obj(oid)), args, IndexMap::new(), vec![], vec![], state, node, None, false);
+                return an.call_user(ms.func, Some(Value::obj(oid)), args, IndexMap::new(), vec![], vec![], state, node, false);
             }
         }
     }
@@ -2403,7 +2403,7 @@ fn pyd_dump_inner(an: &mut Analyzer, oid: ObjId, opts: &DumpOpts, state: &mut St
             if nparams >= 3 {
                 args.push(Value::data("info"));
             }
-            dv = an.call_user(fs.func, Some(Value::obj(oid)), args, IndexMap::new(), vec![], vec![], state, node, None, false);
+            dv = an.call_user(fs.func, Some(Value::obj(oid)), args, IndexMap::new(), vec![], vec![], state, node, false);
         }
         // per option: Some(true) kept, Some(false) left out, None either
         let none_lit = intern::key_none();

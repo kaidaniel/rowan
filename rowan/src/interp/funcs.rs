@@ -5,7 +5,7 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{join_values, KeyVal, KeysOf, Ns, ObjId, ObjSet, Row, SourceKind, Value, DATA};
+use crate::domain::{join_values, KeyVal, KeysOf, Ns, ObjId, ObjSet, SourceKind, Value, DATA};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_int, key_str_lit, s, str_get, KeyId, KeySet, StrId, STAR};
 use crate::state::{Kind, State};
@@ -277,7 +277,7 @@ impl Analyzer {
         if calls.is_empty() {
             return None;
         }
-        Some(self.alternatives(calls.len(), false, state, &mut |an, i, st| an.call_user(calls[i].1, Some(Value::obj(calls[i].0)), args.clone(), IndexMap::new(), vec![], vec![], st, node, None, false)))
+        Some(self.alternatives(calls.len(), false, state, &mut |an, i, st| an.call_user(calls[i].1, Some(Value::obj(calls[i].0)), args.clone(), IndexMap::new(), vec![], vec![], st, node, false)))
     }
 
     /// The (receiver, function) pairs of the instances among `v` whose class defines one of
@@ -310,7 +310,7 @@ impl Analyzer {
             return None;
         }
         let keep = !rest.empty();
-        let r = self.alternatives(calls.len(), keep, state, &mut |an, i, st| an.call_user(calls[i].1, Some(Value::obj(calls[i].0)), args.clone(), IndexMap::new(), vec![], vec![], st, node, None, false));
+        let r = self.alternatives(calls.len(), keep, state, &mut |an, i, st| an.call_user(calls[i].1, Some(Value::obj(calls[i].0)), args.clone(), IndexMap::new(), vec![], vec![], st, node, false));
         Some((r, rest))
     }
 
@@ -917,31 +917,7 @@ impl Analyzer {
         let row = state.row(oid, Ns::Item);
         let label = format!("elem of {}", self.heap.obj(oid).label);
         let eid = self.heap.alloc_raw(Kind::Unknown, &format!("elem:{}", oid), "", false, &label, Payload::None);
-        if let Some(sym) = self.names.access(&self.heap, oid, Ns::Item, STAR) {
-            if !self.names.has(eid) {
-                let scope = self.names.scope(oid);
-                self.names.set(eid, sym, scope);
-            }
-        }
-        self.heap.obj_mut(eid).iter_elem = true;
-        let d = self.heap.obj(oid).depth + 1;
-        self.heap.obj_mut(eid).depth = d;
-        if !state.has_row(eid, Ns::Item) {
-            let srcs = row.sources.map(|(src, _)| (crate::domain::source_extend(src, STAR), intern::EMPTY_LENS));
-            // (an element was taken on this path: its source's requirements are
-            // known here, none so far — see the nested-source join)
-            for (cs, _) in srcs.iter() {
-                state.reqs.mark(&cs, crate::domain::ReqInfo::default());
-            }
-            // (nothing known of the unknown value's content: neither of its elements')
-            let r = if srcs.is_empty() && row.mutators.is_empty() {
-                Row::top()
-            } else {
-                Row::from_data(crate::domain::RowData { sources: srcs, mutators: row.mutators.clone(), top: row.top, ..Default::default() })
-            };
-            state.set_row(eid, Ns::Item, r.clone());
-            state.set_row(eid, Ns::Attr, r);
-        }
+        self.fill_placeholder(eid, oid, Ns::Item, STAR, &row, true, state);
         acc.elems.push(Value::obj(eid));
     }
 

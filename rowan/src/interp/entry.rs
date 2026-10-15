@@ -130,7 +130,7 @@ impl Analyzer {
                 let mi = self.heap.module_info(fi.module);
                 self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
                 let fake = Node::synthetic(mi.idx, fi.node.node().line);
-                self.call_user(oid, None, vec![], IndexMap::new(), vec![], vec![], &mut st, &fake, None, true);
+                self.call_user(oid, None, vec![], IndexMap::new(), vec![], vec![], &mut st, &fake, true);
                 self.cx.frames.pop();
             }
             return;
@@ -162,7 +162,7 @@ impl Analyzer {
         let saved_quiet = std::mem::replace(&mut self.findings.quiet, quiet);
         let called_torch = self.entry.analysed.contains(&oid) && self.entry.torch_modules.contains(&fi.module);
         let saved_qr = std::mem::replace(&mut self.findings.quiet_records, called_torch);
-        self.call_user(oid, self_val, args, kwargs, star_args, star_kwargs, &mut st, &fake, None, true);
+        self.call_user(oid, self_val, args, kwargs, star_args, star_kwargs, &mut st, &fake, true);
         self.findings.quiet_records = saved_qr;
         self.findings.quiet = saved_quiet;
         self.entry.run = saved_entry;
@@ -507,7 +507,7 @@ impl Analyzer {
                 }
                 self.entry.scope = saved_scope;
                 let fake = if self.entry.torch_modules.contains(&fi.module) { Node::synthetic(fi.node.node().module, frontend::node(ci.node).line) } else { Node::synthetic(fi.node.node().module, fi.node.node().line) };
-                self.call_user(init, Some(Value::obj(inst)), args, kwargs, vec![], vec![], state, &fake, None, true);
+                self.call_user(init, Some(Value::obj(inst)), args, kwargs, vec![], vec![], state, &fake, true);
             }
         }
         // (an instance a caller made may have had any of its methods called since: what they

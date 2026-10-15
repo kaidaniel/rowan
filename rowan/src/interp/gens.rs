@@ -221,7 +221,7 @@ impl Analyzer {
             let saved = std::mem::replace(&mut self.cx.call_chain, lg.chain.clone());
             let pre = if between { Some((state.copy(), self.budget.snapshot())) } else { None };
             self.gens.last_reads = None;
-            let r = self.call_user(lg.foid, lg.self_v.clone(), lg.args.clone(), lg.kwargs.clone(), vec![], vec![], state, &lg.node, None, false);
+            let r = self.call_user(lg.foid, lg.self_v.clone(), lg.args.clone(), lg.kwargs.clone(), vec![], vec![], state, &lg.node, false);
             self.cx.call_chain = saved;
             if let (Some((pre, budget)), true) = (pre, state.reachable) {
                 let fp = state.footprint(&pre);

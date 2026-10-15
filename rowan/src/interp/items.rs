@@ -337,7 +337,7 @@ impl Analyzer {
                 let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__getitem__"))).cloned().unwrap_or_default();
                 for f in fv.pts.iter() {
                     if self.heap.kind(f) == Kind::Function {
-                        let r = self.call_user(f, Some(Value::obj(oid)), vec![key.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
+                        let r = self.call_user(f, Some(Value::obj(oid)), vec![key.clone()], IndexMap::new(), vec![], vec![], state, node, false);
                         parts.push(r);
                     }
                 }
@@ -580,30 +580,39 @@ impl Analyzer {
         // the content under an unknown key stands for many values: stores on it are weak
         let single = k != STAR;
         let pid = self.heap.alloc_raw(Kind::Unknown, &format!("path:{}:{}:{}", oid, ns, intern::key_repr(k)), "", single, &label, Payload::None);
-        if let Some(sym) = self.names.access(&self.heap, oid, ns, k) {
-            if !self.names.has(pid) {
-                let scope = self.names.scope(oid);
-                self.names.set(pid, sym, scope);
-            }
+        self.fill_placeholder(pid, oid, ns, k, row, false, state);
+        Value::obj(pid)
+    }
+
+    /// The placeholder `pid` for what `oid` holds under `k` (`elem`: the element a loop takes,
+    /// also of an input's own data): named after its parent, a level deeper, its rows open
+    /// through the parent's inputs at `k`.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::interp) fn fill_placeholder(&mut self, pid: ObjId, oid: ObjId, ns: Ns, k: KeyId, row: &Row, elem: bool, state: &mut State) {
+        if let Some(sym) = self.names.access(&self.heap, oid, ns, k).filter(|_| !self.names.has(pid)) {
+            let scope = self.names.scope(oid);
+            self.names.set(pid, sym, scope);
         }
         let d = self.heap.obj(oid).depth + 1;
-        self.heap.obj_mut(pid).depth = d;
-        if !state.has_row(pid, Ns::Item) {
-            let srcs = row.sources.filter(|(src, _)| !crate::domain::source_is_data(src)).map(|(src, _)| (crate::domain::source_extend(src, k), intern::EMPTY_LENS));
-            // (the parent's value was read on this path: its requirements are known here, none
-            // so far — a path without the entry never read it)
-            for (cs, _) in srcs.iter() {
-                state.reqs.mark(&cs, crate::domain::ReqInfo::default());
-            }
-            let r = if srcs.is_empty() && row.mutators.is_empty() {
-                Row::top()
-            } else {
-                Row::from_data(crate::domain::RowData { sources: srcs, mutators: row.mutators.clone(), ..Default::default() })
-            };
-            state.set_row(pid, Ns::Item, r.clone());
-            state.set_row(pid, Ns::Attr, r);
+        let o = self.heap.obj_mut(pid);
+        o.depth = d;
+        o.iter_elem |= elem;
+        if state.has_row(pid, Ns::Item) {
+            return;
         }
-        Value::obj(pid)
+        let srcs = row.sources.filter(|(src, _)| elem || !crate::domain::source_is_data(src)).map(|(src, _)| (crate::domain::source_extend(src, k), intern::EMPTY_LENS));
+        // (the parent's value was read on this path: its requirements are known here, none so
+        // far — a path without the entry never read it)
+        for (cs, _) in srcs.iter() {
+            state.reqs.mark(&cs, crate::domain::ReqInfo::default());
+        }
+        let r = if srcs.is_empty() && row.mutators.is_empty() {
+            Row::top()
+        } else {
+            Row::from_data(crate::domain::RowData { sources: srcs, mutators: row.mutators.clone(), top: elem && row.top, ..Default::default() })
+        };
+        state.set_row(pid, Ns::Item, r.clone());
+        state.set_row(pid, Ns::Attr, r);
     }
 
     /// A key whose value includes objects (an unknown value, a non-literal tuple, an instance):
@@ -699,7 +708,7 @@ impl Analyzer {
                             let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__setitem__"))).cloned().unwrap_or_default();
                             for f in fv.pts.iter() {
                                 if self.heap.kind(f) == Kind::Function {
-                                    self.call_user(f, Some(Value::obj(oid)), vec![key.clone(), v.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
+                                    self.call_user(f, Some(Value::obj(oid)), vec![key.clone(), v.clone()], IndexMap::new(), vec![], vec![], state, node, false);
                                 }
                             }
                             continue;
@@ -863,7 +872,7 @@ impl Analyzer {
                         let fv = self.heap.cls_slots.get(&(m, Ns::Attr, key_str_lit("__delitem__"))).cloned().unwrap_or_default();
                         for f in fv.pts.iter() {
                             if self.heap.kind(f) == Kind::Function {
-                                self.call_user(f, Some(Value::obj(oid)), vec![key.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
+                                self.call_user(f, Some(Value::obj(oid)), vec![key.clone()], IndexMap::new(), vec![], vec![], state, node, false);
                             }
                         }
                         continue;
