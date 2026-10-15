@@ -30,7 +30,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   code removed it) ⊇ `definite` (there on every path), plus `absent`, open `sources` (inputs),
   and `mutators` (unknown calls). A row without sources or mutators is *closed*; a successful read narrows the key in.
 * **Statements.** A test is evaluated once into the states where it is true and false
-  (`split`, `narrow.rs`: narrowing reads its parts' values, `traced`); both branches run, join.
+  (`split`, `narrow.rs`: narrowing reads its parts' values, `traced`); both branches run, join;
+  a pure test's branch rows come back when it recurs (`CondFact`, while no write changed them).
   Loops over at most 16 known items are unrolled (comprehensions calling nothing per item: 64);
   others run to a fixpoint (40 rounds, then widened; verdicts are the last round's), making
   summaries; a target bound to one of the records a summary (or an input's element) stands for
@@ -75,13 +76,13 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   (`Gens::watch`, also after the call that started it while held), it runs again with that
   changed at each yield (`with_gen_restart`). `@contextmanager` bodies run at yields.
 * **Requirements and schemas:** reading a key from a row open through an input records a
-  requirement on that input. A key read on every path is `always`, on some paths `sometimes`.
-  A read guarded by a handler for its `KeyError` still counts (a frame column read behind a
-  `try`, here or in a caller, is a probe: it does not).
+  requirement on that input: `always` (every path), `sometimes`; `only_if`: tests of the
+  function's parameters as passed that all its readers passed (`State::path`, `guards.rs`). A
+  read guarded by a `KeyError` handler counts (a frame column read in a `try` is a probe: not).
 * **Verdicts:** every read, `del` and `pop` gets a tier per object from its row (`classify`):
-  `proven`, `possibly`, `missing` and `input` are sound; `likely` / `likely-missing` are
-  optimistic (they assume unknown code removed nothing). In one of several functions a value
-  picks (`CONVERTERS[k](x)`, `k` unknown: `cx.picked`) a `missing` is `possibly`.
+  `proven`, `possibly`, `missing`, `input` are sound; `likely` / `likely-missing` optimistic
+  (unknown code removed nothing). In one of several functions a value picks
+  (`CONVERTERS[k](x)`, `k` unknown: `cx.picked`) a `missing` is `possibly`.
 * **Models** (`models/`, by qualified name in `Registry`; free functions of `&mut Analyzer` that
   see the `Heap`, their `models::Tables` and the interpreter's public methods) compute
   CPython's result on known values (str / bytes, formatting, json, re, datetime, decimal,
@@ -138,13 +139,12 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 
 ## Tests
 
-* **Golden suites** `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/`, about a
-  thousand programs; library suites have `small/` and `models/` (torch also `playground/`, the
-  owner's programs); each has a `PENDING` list.
+* **Golden suites** `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/`, ~1200
+  programs; library suites have `small/`, `models/` (torch `playground/`: the owner's), `PENDING`.
 * **Directives** (full rules in `tests/CONVENTIONS.md`, also `tests/{torch,pandas}/`):
   `#@ tier key`, `#@row NAME: present= definite= absent= closed|open`,
   `#@value NAME: exactly= | unknown | includes=` (`#@general`: for any call), `#@schema src: …`,
-  `#@todo …`, `#@argv …`, `#@shape` (torch). Cost bounds for blow-up cases, N by hand:
+  `#@only src: KEY if TEST | KEY none`, `#@todo …`, `#@argv`, `#@shape` (torch). Cost bounds, by hand:
   `#@objects`, `#@tabulations`, `#@joins`, `#@work`, `#@visits`, `#@havoc <= N`; `#@limits
   k=v,…` sets the case's `ROWAN_LIMITS`. A directive-only line applies to the code line above.
 * **Oracle** (`tests/oracle.py`): reruns each case under CPython with a tracer and checks every
@@ -168,7 +168,7 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 | `intern.rs`, `domain.rs`, `layered.rs`, `state.rs`; `frontend.rs`, `scopes.rs` | interned keys, sources, lenses; `Row`, `KeyVal`, `Value`, transfers, `classify`; persistent maps (`LayerMap`, `TwoLevel`); `State`, joins, `diff_keys`; ruff parsing, leaked `&'static` trees, module registry; lexical scopes |
 | `interp/mod.rs`, `context.rs`, `program.rs`, `entry.rs`; `heap.rs`, `alloc.rs`, `gc.rs` | `Analyzer` and its components' map; `Context` (frames, callers, call chain), `Modes`; `Program` (paths, models, modules), imports; running the program, entry runs (`Entries`); the `Heap` (objects, payloads, lengths, class attributes, keys for objects); allocation policy (`alloc`: variants, recency); liveness (`live_among`, `gc_pinned`), collectors, `rename_recent` |
 | `interp/stmts.rs`, `loops.rs`, `classes.rs`, `tries.rs`; `exprs.rs`, `ops.rs`, `compare.rs`, `comps.rs` | statements, match; loops (unrolled, fixpoint); class definitions; raises, try contexts (`Unwind`), try / with, `finally`; expressions; operators, f-strings; comparisons, truth; comprehensions |
-| `interp/funcs.rs`, `gens.rs`, `narrow.rs`; `access.rs`, `items.rs`, `attrs.rs`, `keys.rs` | functions, names, iteration; generators and `@contextmanager` bodies (`Gens`); tests (`split`), narrowing; what accesses share (guards, requirements); item access; attribute access; keys standing for values |
+| `interp/funcs.rs`, `gens.rs`, `narrow.rs`, `guards.rs`; `access.rs`, `items.rs`, `attrs.rs`, `keys.rs` | functions, names, iteration; generators and `@contextmanager` bodies (`Gens`); tests (`split`), narrowing; tests of parameters on a path; what accesses share (guards, requirements); item access; attribute access; keys standing for values |
 | `interp/calls.rs`, `recursion.rs`, `budget.rs`, `unknown.rs`, `effects.rs`, `flows.rs` | calls: per-call-site runs, `__new__`, dataclass init, bindings; `Recursion` (activations, fixpoint rounds); `Budget` (per code, deadline, work counters); unknown calls (`Havoc` walks); what skipped calls may change (`skipped_call`, `EffectsCache`); what a function's text does with values (`Flow`: aliases, escapes) |
 | `interp/findings.rs`, `names.rs`, `report.rs`, `api.rs`; `main.rs` | `Findings` (verdicts, notes, row checks, hover facts), `Names` (symbols, origins); text / JSON / facts output; what models, report and driver may use; CLI (mimalloc), `rowan serve` (on a 1 GiB-stack thread) |
 | `models/` | `mod.rs` (`Registry`, builtins, containers, `Tables`); `tables` (what builtins / library calls raise, change, keep); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib (`enums`, `exceptions`, functools, itertools, …); `pandas`, `pydantic`, `fastapi`, `torch`; `shape.rs` (tensor dims as polynomials) |

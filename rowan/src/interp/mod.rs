@@ -40,6 +40,7 @@ pub use findings::*;
 pub mod funcs;
 pub mod gc;
 pub mod gens;
+pub mod guards;
 pub use gens::*;
 pub mod heap;
 pub use heap::*;

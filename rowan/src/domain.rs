@@ -1442,6 +1442,9 @@ pub struct ReqInfo {
     pub alt_keys: KeySet,
     /// read as an attribute (`x.k`), not as an item (`x["k"]`): for reports
     pub attr: bool,
+    /// tests of the function's parameters (Python text, true at its call: `admin`, `"email"
+    /// not in row`) every path that read it passed: needed only if they hold (`State::path`)
+    pub only_if: StrSet,
 }
 
 impl ReqInfo {
@@ -1452,6 +1455,7 @@ impl ReqInfo {
             caveats: self.caveats.union(&o.caveats),
             alt_keys: self.alt_keys.union(&o.alt_keys),
             attr: self.attr || o.attr,
+            only_if: self.only_if.intersection(&o.only_if),
         }
     }
     /// Same path, second requirement on the same key: always if either is.
@@ -1466,14 +1470,20 @@ impl ReqInfo {
             caveats: self.caveats.union(&o.caveats),
             alt_keys: if !self.alt_keys.is_empty() && !o.alt_keys.is_empty() { self.alt_keys.intersection(&o.alt_keys) } else { KeySet::new() },
             attr: self.attr || o.attr,
+            // (every path here reads it now, and passed the tests that hold here)
+            only_if: o.only_if.clone(),
         }
     }
+    /// Needed on some paths only (the other side of a join does not read it).
     pub fn demote(&self) -> ReqInfo {
         if !self.always {
             self.clone()
         } else {
-            ReqInfo { always: false, ..self.clone() }
+            self.sometimes()
         }
+    }
+    pub fn sometimes(&self) -> ReqInfo {
+        ReqInfo { always: false, ..self.clone() }
     }
 }
 

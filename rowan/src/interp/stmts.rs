@@ -653,6 +653,10 @@ impl Analyzer {
         // stay positional, requirements stay "always")
         let conditional = then_s.reachable && else_s.reachable;
         let cond = if conditional { self.cond_key(test) } else { None };
+        if let Some((owner, pt, nt)) = if conditional { self.branch_tests(test, &mut pre) } else { None } {
+            super::guards::add_test(&mut then_s, owner, pt);
+            super::guards::add_test(&mut else_s, owner, nt);
+        }
         if let Some((key, pos, _)) = &cond {
             // an earlier join on the same test: each branch gets back the rows it had then (the
             // test is pure: the state before it is the one it was evaluated in)

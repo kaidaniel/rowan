@@ -535,7 +535,7 @@ impl Analyzer {
                 state.require(src, k, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
                 if fresh && (self.cx.branch_depth > 0 || self.cx.cond_depth > 0) {
                     if let Some(cur) = state.reqs.get(&src, &k) {
-                        state.reqs.set(&src, k, crate::domain::ReqInfo { always: false, ..cur });
+                        state.reqs.set(&src, k, cur.sometimes());
                     }
                 }
             }

@@ -79,7 +79,7 @@ impl Analyzer {
                 }
                 if sometimes && !was_always {
                     if let Some(cur) = state.reqs.get(src, &t) {
-                        state.reqs.set(src, t, crate::domain::ReqInfo { always: false, ..cur });
+                        state.reqs.set(src, t, cur.sometimes());
                     }
                 }
             }

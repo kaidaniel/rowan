@@ -558,6 +558,12 @@ impl Analyzer {
         let new_fr = self.callee_frame(foid, &fi, &ctx);
         let saved_env = std::mem::take(&mut state.env);
         let saved_unbound = std::mem::take(&mut state.unbound);
+        // (the tests of this function's parameters on the caller's path are another call's)
+        let saved_path = state.path.clone();
+        let own = s(&format!("param {}.", fi.py_qualname()));
+        if state.path.iter().any(|(o, _)| *o == own) {
+            state.path = std::sync::Arc::new(state.path.iter().filter(|(o, _)| *o != own).copied().collect());
+        }
         self.cx.env_stack.push(saved_env.clone());
         let saved_ret = state.ret.take();
         // (the caller's recorded returns are not the callee's: its end must not join them in)
@@ -609,6 +615,7 @@ impl Analyzer {
         self.cx.env_stack.pop();
         state.env = saved_env;
         state.unbound = saved_unbound;
+        state.path = saved_path;
         state.ret = saved_ret;
         if saved_exits.is_some() {
             state.exits = saved_exits;

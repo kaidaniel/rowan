@@ -118,6 +118,9 @@ pub struct State {
     /// locals bound on some paths only (a join of a path that bound the name with one that did
     /// not): reading one may raise UnboundLocalError
     pub unbound: Arc<Vec<StrId>>,
+    /// tests of the running functions' parameters every path here passed, as Python text true
+    /// at the call (`interp/guards.rs`): (`param F.` of the function, the test)
+    pub path: Arc<Vec<(StrId, StrId)>>,
 }
 
 /// At the join of a branch on a pure test: when `cond` (a canonical test text) is `truth`,
@@ -213,6 +216,7 @@ impl State {
             lasts: Arc::new(Vec::new()),
             tf: Arc::new(crate::models::shape::TFacts::default()),
             unbound: Arc::new(Vec::new()),
+            path: Arc::new(Vec::new()),
         }
     }
 
@@ -304,6 +308,7 @@ impl State {
         s.name_keys = if Arc::ptr_eq(&self.name_keys, &o.name_keys) { self.name_keys.clone() } else { Arc::new(self.name_keys.iter().filter(|x| o.name_keys.contains(x)).copied().collect()) };
         s.lasts = join_lasts(&self.lasts, &o.lasts);
         s.unbound = join_unbound(self, o);
+        s.path = if Arc::ptr_eq(&self.path, &o.path) { self.path.clone() } else { Arc::new(self.path.iter().filter(|t| o.path.contains(t)).copied().collect()) };
         s
     }
 
@@ -650,12 +655,24 @@ impl State {
             caveats,
             alt_keys: if alt_keys.len() > 1 { alt_keys } else { IdSet::new() },
             attr: false,
+            only_if: self.path_tests(src, term),
         };
         let nv = match self.reqs.get(&src, &term) {
             Some(cur) => cur.seq(&info),
             None => info,
         };
         self.reqs.set(&src, term, nv);
+    }
+
+    /// The tests of `src`'s function's parameters every path here passed (`param F.x`: F's),
+    /// but `"k" in x` for `x["k"]` itself (the read a test of the key guards says nothing more).
+    fn path_tests(&self, src: SourceId, term: KeyId) -> IdSet<StrId> {
+        if self.path.is_empty() {
+            return IdSet::new();
+        }
+        let (site, top) = crate::intern::with_source(src, |s| (s.site.clone(), s.path.is_empty()));
+        let own = |t: StrId| top && site.rsplit_once('.').is_some_and(|(_, x)| *crate::intern::str_get(t).replace('\'', "\"") == format!("{} in {}", crate::domain::key_display(term), x));
+        IdSet::from_iter(self.path.iter().filter(|(o, t)| site.starts_with(&*crate::intern::str_get(*o)) && !own(*t)).map(|(_, t)| *t))
     }
 
     pub fn require_simple(&mut self, src: SourceId, term: KeyId) {

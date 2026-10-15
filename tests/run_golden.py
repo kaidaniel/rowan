@@ -125,6 +125,7 @@ def collect_expectations(src: str):
             line = re.sub(r"#@todo\s+value\b", "#@value", line)
             line = re.sub(r"#@todo\s+general\b", "#@general", line)
             line = re.sub(r"#@todo\s+schema\b", "#@schema", line)
+            line = re.sub(r"#@todo\s+only\b", "#@only", line)
             line = re.sub(r"#@todo\s+(shape|dim|requires)\b", r"#@\1", line)
             line = re.sub(r"#@todo\s+", "#@ ", line)
         if SHAPES[0].parse_line(i0, line):
@@ -160,6 +161,11 @@ def collect_expectations(src: str):
                 elif part[2]:
                     spec[part[2]] = True
             row_exp.setdefault(i, []).append((m.group(1), spec))
+            continue
+        # `#@only SOURCE: KEY if TEST` (read only on calls where TEST holds) / `KEY none`
+        m = re.search(r"#@only\s+([^:]+):\s*(\S+)\s+(?:if\s+(.*\S)|none)\s*$", line)
+        if m:
+            schema_exp.append((m.group(1).strip(), {"only_if": (parse_key(m.group(2)), m.group(3))}))
             continue
         m = re.search(r"#@schema\s+([^:]+):\s*(.*)$", line)
         if m:
@@ -257,6 +263,14 @@ def check_results(verdict_exp, row_exp_checks, schema_exp, vs, sch) -> List[str]
         merged: Dict[str, Any] = {}
         for e in hits.values():
             merged.update(e)
+        if "only_if" in spec:
+            k, cond = spec["only_if"]
+            got = merged.get(key_str(k), {}).get("only_if")
+            if key_str(k) not in merged:
+                failures.append(f"schema {label}: {k!r} missing")
+            elif got != cond:
+                failures.append(f"schema {label}: {k!r} should be read {'only if ' + cond if cond else 'under no test'}; got {'only if ' + got if got else 'no test'}")
+            continue
         always = {k for k, e in merged.items() if e["always"]}
         allk = set(merged)
         for k in spec.get("always", set()):

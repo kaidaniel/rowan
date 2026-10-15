@@ -5288,7 +5288,7 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
                 for (src, had) in before {
                     if !had {
                         if let Some(cur) = state.reqs.get(&src, &k) {
-                            state.reqs.set(&src, k, crate::domain::ReqInfo { always: false, ..cur });
+                            state.reqs.set(&src, k, cur.sometimes());
                         }
                     }
                 }
