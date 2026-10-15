@@ -444,9 +444,9 @@ impl Analyzer {
     }
 
     /// The generators watched since `wmark` are used up or out of reach: no longer watched, but
-    /// those that may give more items and that what the code returns, what it was given (`pre`'s
-    /// names) or its callers hold (a generator started in a call and returned from it, or kept
-    /// in an attribute of its receiver for the next call).
+    /// those that may give more items and that what the code returns or what it was given
+    /// (`pre`'s names) hold (a generator started in a call and returned from it, or kept in an
+    /// attribute of its receiver for the next call).
     fn close_watches(&mut self, wmark: usize, pre: &State, state: &State) {
         let at = if state.reachable { state } else { state.exits.as_deref().unwrap_or(state) };
         let mut gids: Vec<ObjId> = self.gens.watch[wmark.min(self.gens.watch.len())..].iter().map(|w| w.gid).filter(|g| self.may_resume(*g, at)).collect();
@@ -455,8 +455,7 @@ impl Analyzer {
         let kept = if gids.is_empty() {
             FxHashSet::default()
         } else {
-            let callers = self.cx.env_stack.iter().flat_map(|e| e.values());
-            let roots: Vec<Value> = state.ret.iter().chain(pre.env.values()).chain(callers).cloned().collect();
+            let roots: Vec<Value> = state.ret.iter().chain(pre.env.values()).cloned().collect();
             self.reach_among(&roots, &gids, at)
         };
         let tail = self.gens.watch.split_off(wmark.min(self.gens.watch.len()));
