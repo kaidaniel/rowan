@@ -253,13 +253,13 @@ impl Analyzer {
             self.torch_on = true;
             self.torch_real = true;
             let m = self.frame().module;
-            self.torch_modules.insert(m);
+            self.entry.torch_modules.insert(m);
         }
         // numpy arrays are tensors to the shape model
         if name == "numpy" || name.starts_with("numpy.") {
             self.torch_on = true;
             let m = self.frame().module;
-            self.torch_modules.insert(m);
+            self.entry.torch_modules.insert(m);
         }
         let oid = self.heap.alloc_raw(Kind::External, &format!("ext:{}", name), "", true, name, Payload::Str(name.to_string()));
         Value::obj(oid)

@@ -299,7 +299,7 @@ impl Analyzer {
             }
         }
         // the function analysed on its own (not a call from elsewhere): the general answer
-        let own = self.entry_run.is_some() && self.call_chain.len() <= 1 && self.torch_on;
+        let own = self.entry.run.is_some() && self.call_chain.len() <= 1 && self.torch_on;
         if own {
             e.t_names = tnames;
             e.primary = Some(match &e.primary {
@@ -414,7 +414,7 @@ impl Analyzer {
             let value = self.value_info(&v, state);
             let tensor = if self.torch_on {
                 // a line run several times in one analysis (a loop body): the join of its values
-                let (chain, entry) = (self.call_chain.clone(), self.entry_run.is_some());
+                let (chain, entry) = (self.call_chain.clone(), self.entry.run.is_some());
                 let prev = self.findings.t_row_values.get(&(ln, name.clone(), chain.clone(), entry)).cloned();
                 let joined = match prev {
                     Some(p) => p.join(&v),

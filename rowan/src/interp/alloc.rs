@@ -191,7 +191,7 @@ impl Analyzer {
                 _ => None,
             };
             if let Some(sym) = sym.filter(|x| !x.is_empty()) {
-                let scope = if kind == SourceKind::Param { self.entry_scope.unwrap_or_else(|| self.frame().func.unwrap_or(0)) } else { 0 };
+                let scope = if kind == SourceKind::Param { self.entry.scope.unwrap_or_else(|| self.frame().func.unwrap_or(0)) } else { 0 };
                 self.names.set(oid, sym, scope);
             }
         }

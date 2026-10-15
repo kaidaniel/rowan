@@ -134,7 +134,7 @@ impl Analyzer {
         }
         each(&self.m.partial_star, o).flatten().for_each(|v| v.push_objs(work));
         each(&self.lazy_src, o).flatten().for_each(|(s, _)| work.push(*s));
-        for m in [&self.attr_mirrors, &self.entry_instances, &self.copy_root, &self.m.sql_cursors] {
+        for m in [&self.attr_mirrors, &self.entry.instances, &self.copy_root, &self.m.sql_cursors] {
             work.extend(each(m, o).copied());
         }
         each(&self.m.sorted_items, o).flat_map(|items| items.iter()).for_each(|(_, v, _)| v.push_objs(work));

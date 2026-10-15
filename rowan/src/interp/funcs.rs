@@ -128,8 +128,8 @@ impl Analyzer {
         // a closure made inside a concrete call (not an entry run): its own analysis with
         // open parameters comes from the closure the factory's entry run makes
         let creator = self.frames.iter().rev().find_map(|f| f.func);
-        if self.torch_on && has_closure && creator.is_some() && self.entry_run != creator {
-            self.t_concrete_closures.insert(oid);
+        if self.torch_on && has_closure && creator.is_some() && self.entry.run != creator {
+            self.entry.concrete_closures.insert(oid);
         }
         if self.torch_on {
             self.m.t_funcs_by_qual.entry(qual.clone()).or_default().push(oid);

@@ -1579,7 +1579,7 @@ pub fn apply_route(an: &mut Analyzer, dv: &Value, f: &Value) {
                     if an.heap.kind(fo) == Kind::Function {
                         an.m.fa_hooks[idx].3 = Some(fo);
                         // (run around each handler, not on its own)
-                        an.entry_done.insert(fo);
+                        an.entry.done.insert(fo);
                     }
                 }
             }
@@ -1648,9 +1648,9 @@ impl crate::interp::Analyzer {
         st.ret = None;
         let mi = self.heap.module_info(fi.module);
         self.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
-        self.entry_scope = Some(oid);
+        self.entry.scope = Some(oid);
         let fake = Node::synthetic(mi.idx, fi.node.node().line);
-        let saved_entry = self.entry_run.replace(oid);
+        let saved_entry = self.entry.run.replace(oid);
         if self.fa_entry_through_middleware(oid, &mut st, &fake).is_none() {
             self.m.fa_dep_cache.push(rustc_hash::FxHashMap::default());
             if let Some(idx) = self.m.fa_routes.iter().position(|r| r.func == Some(oid)) {
@@ -1660,8 +1660,8 @@ impl crate::interp::Analyzer {
             self.fa_run_handler(oid, gens, None, true, &mut st, &fake);
             self.m.fa_dep_cache.pop();
         }
-        self.entry_scope = None;
-        self.entry_run = saved_entry;
+        self.entry.scope = None;
+        self.entry.run = saved_entry;
         self.frames.pop();
         for (src, k) in st.reqs.diff_keys(&state.reqs) {
             let Some(info) = st.reqs.get(&src, &k) else { continue };

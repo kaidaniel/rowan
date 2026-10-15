@@ -353,7 +353,7 @@ impl Analyzer {
     /// number, not a tensor, `d ** 0.5`) or as a `Tensor` (`data[j:j + T]` is a tensor's
     /// slice, not a list's): an unknown known to be one. None for other annotations.
     pub fn t_param(&mut self, ann: &'static ruff_python_ast::Expr, fi: &crate::interp::FuncInfo, pname: &str, state: &mut State) -> Option<Value> {
-        if !self.torch_modules.contains(&fi.module) {
+        if !self.entry.torch_modules.contains(&fi.module) {
             return None;
         }
         let node = Analyzer::strip_annotation(ann)?;
@@ -478,7 +478,7 @@ impl Analyzer {
 
     // ---------------------------------------------------------------- notes
     fn t_note_ctx(&self) -> (Vec<u32>, bool) {
-        let entry = self.entry_run.is_some();
+        let entry = self.entry.run.is_some();
         let mut chain = self.call_chain.clone();
         if entry && !chain.is_empty() {
             chain.remove(0);
@@ -502,7 +502,7 @@ impl Analyzer {
     /// requirement found in a callee is stated in the caller's terms at the call line.
     pub fn t_outer_print_ctx(&self, st: &State) -> sh::PrintCtx {
         let funcs: Vec<u32> = self.frames.iter().filter(|f| f.kind == crate::interp::FrameKind::Function).filter_map(|f| f.func).collect();
-        let target = match self.entry_run {
+        let target = match self.entry.run {
             Some(e) => funcs.iter().position(|f| *f == e),
             None => if funcs.is_empty() { None } else { Some(0) },
         };
@@ -4627,7 +4627,7 @@ impl Analyzer {
     /// binding of the name keeps its value unnamed (one name, one value).
     pub fn t_name_number(&mut self, name: StrId, v: &Value) -> Option<Value> {
         let fr = self.frame();
-        if fr.func.is_some() || fr.loop_depth > 0 || !fr.unroll.is_empty() || self.entry_run.is_some() || !v.pts.is_empty() {
+        if fr.func.is_some() || fr.loop_depth > 0 || !fr.unroll.is_empty() || self.entry.run.is_some() || !v.pts.is_empty() {
             return None;
         }
         let KeyVal::Data(l) = &v.kv else { return None };

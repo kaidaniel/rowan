@@ -464,7 +464,7 @@ impl Analyzer {
             Some((site, _, _)) => site.clone(),
             None => self.callee_site(node),
         };
-        self.analysed_funcs.insert(foid);
+        self.entry.analysed.insert(foid);
         let key = self.activation_key(foid, &site, entry, &args, &kwargs, &star_args, &star_kwargs);
         if self.recursion.is_active(&key) {
             return self.recursive_call(&key, &self_v, &args, &kwargs, state);
