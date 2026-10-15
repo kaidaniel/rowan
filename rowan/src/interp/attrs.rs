@@ -5,7 +5,7 @@
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
 
-use crate::domain::{classify, join_values, Classification, KeyVal, Ns, Row, Tier, Value};
+use crate::domain::{ObjId, classify, join_values, Classification, KeyVal, Ns, Row, Tier, Value};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, KeyId};
 use crate::state::{Kind, State};
@@ -132,44 +132,12 @@ impl Analyzer {
         for oid in obj.pts.iter() {
             let k = self.heap.kind(oid);
             let v: Value = match k {
-                Kind::Module => match state.slot_opt(oid, Ns::Attr, nk) {
-                    Some(v) => v,
-                    // (what every module has)
-                    None if matches!(name, "__name__" | "__file__" | "__doc__" | "__package__" | "__spec__" | "__loader__" | "__path__" | "__cached__" | "__builtins__") => {
-                        if name == "__name__" { Value::lit_str(&self.heap.module_info(oid).name) } else { Value::data(&format!("module {}", name)) }
-                    }
-                    // (inside a try that catches the AttributeError: the handler's way)
-                    None if report && guarded => self.load_record(oid, Ns::Attr, &Value::lit(nk), node, state, guarded, single, true),
-                    None => {
-                        // (a namespace changed by code rowan cannot see — `globals().update(…)`
-                        // with unknown names — may have it)
-                        let row = state.row(oid, Ns::Attr);
-                        let cls = if row.closed() { Classification::with_note(Tier::Missing, "is not defined in the module") } else { classify(&row, nk) };
-                        if !guarded {
-                            self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
-                        }
-                        Value::data(&format!("L{}", node.line))
-                    }
-                },
+                Kind::Module => self.module_attr(oid, name, nk, node, state, report, guarded, single),
                 Kind::External if matches!(name, "__name__" | "__qualname__") && self.heap.external_qual(oid).starts_with("builtins.") => {
                     let q = self.heap.external_qual(oid);
                     Value::lit(key_str_lit(q.rsplit('.').next().unwrap_or("")))
                 }
-                Kind::External => {
-                    let q = format!("{}.{}", self.heap.external_qual(oid), name);
-                    if let Some(v) = crate::models::generated_class(self, state, &q) {
-                        parts.push(v);
-                        continue;
-                    }
-                    if let Some(v) = crate::models::external_constant(self, &q) {
-                        parts.push(v);
-                        continue;
-                    }
-                    match crate::models::external_record(self, &q, state) {
-                        Some(rec) => Value::obj(rec),
-                        None => Value::obj(self.heap.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, &q, Payload::Str(q.clone()))),
-                    }
-                }
+                Kind::External => self.external_attr(oid, name, state),
                 Kind::Partial if matches!(name, "func" | "args" | "keywords") => crate::models::partial_attr(self, oid, name, node, state),
                 Kind::Parser | Kind::Groupby | Kind::Partial => self.method_value(&format!("{}.{}", k.name(), name), &Value::obj(oid)),
                 Kind::Instance if name == "__class__" => match self.heap.instance_class(oid) {
@@ -192,78 +160,13 @@ impl Analyzer {
                     let n = self.heap.class_info_opt(oid).map(|ci| ci.name.clone()).unwrap_or_default();
                     Value::lit(key_str_lit(&n))
                 }
-                Kind::Class => {
-                    if self.class_lookup(oid, name).is_some() {
-                        // a classmethod reached through a class binds that class (not the
-                        // class that defines it): `Sub.make()` constructs `Sub`
-                        let v = self.class_attr_value(oid, name, state);
-                        let mut out = Value::new();
-                        let mut changed = false;
-                        for f in v.pts.iter() {
-                            if self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_classmethod.get() {
-                                let label = format!("{} bound", self.heap.obj(f).label);
-                                out = out.join(&Value::obj(self.heap.alloc_raw(Kind::Bound, &format!("bound:{}:cls{}", f, oid), "", true, &label, Payload::Bound(f, Value::obj(oid)))));
-                                changed = true;
-                            } else {
-                                out = out.join(&Value::obj(f));
-                            }
-                        }
-                        if changed { Value::with_kv(out.pts, v.kv.clone()) } else { v }
-                    } else if self.m.enum_members.contains_key(&oid) && (name == "__members__" || (!name.starts_with("__") && !self.heap.class_info(oid).open_base)) {
-                        crate::models::enums::class_attr(self, oid, name, node, guarded, state)
-                    } else if crate::models::pydantic::PYD_ATTRS.contains(&name) && crate::models::pydantic::is_model(self, oid) {
-                        crate::models::pydantic::attr_value(self, state, oid, name, node)
-                    } else if crate::models::pydantic::PYD_METHODS.contains(&name) && crate::models::pydantic::is_model(self, oid) {
-                        self.method_value(&format!("pydantic.cls.{}", name), &Value::obj(oid))
-                    } else if name == "__init__" && crate::models::dataclasses::dataclass_init_owner(self, oid).is_some() {
-                        let dc = crate::models::dataclasses::dataclass_init_owner(self, oid).unwrap();
-                        Value::obj(self.heap.alloc_raw(Kind::Method, &format!("dcinit:{}", oid), "", true, &format!("{}.__init__", self.heap.obj(oid).label), Payload::Method(format!("dcinit.class.{}", dc), Value::obj(oid))))
-                    } else {
-                        let label = format!("{}.{}", self.heap.obj(oid).label, name);
-                        Value::obj(self.heap.alloc_raw(Kind::Method, &format!("classattr:{}.{}", oid, name), "", true, &label, Payload::Method(format!("class.{}", name), Value::obj(oid))))
-                    }
-                }
-                Kind::Dict if crate::models::pandas::is_series_obj(self, oid) => crate::models::pandas::series_getattr(self, oid, name, node, state),
-                Kind::Dict if self.m.cfg_parsers.contains_key(&oid) && crate::models::configparser::PARSER_METHODS.contains(&name) => self.method_value(&format!("cfgparser.{}", name), &Value::obj(oid)),
-                Kind::Dict if self.m.cfg_sections.contains_key(&oid) && crate::models::configparser::SECTION_METHODS.contains(&name) => self.method_value(&format!("cfgsection.{}", name), &Value::obj(oid)),
-                Kind::Dict if self.m.cfg_sections.contains_key(&oid) && name == "name" => Value::lit_str(&self.m.cfg_sections[&oid].1),
-                Kind::Dict if self.m.counters.contains(&oid) && crate::models::counter::COUNTER_METHODS.contains(&name) => self.method_value(&format!("counter.{}", name), &Value::obj(oid)),
-                Kind::Dict if self.m.chainmaps.contains_key(&oid) && matches!(name, "maps" | "parents") => {
-                    let c = super::Call { qual: format!("chainmap.{}", name), recv: Some(Value::obj(oid)), args: vec![], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
-                    match self.program.models.lookup(&c.qual) {
-                        Some(m) => m(self, state, &c),
-                        None => Value::data("chainmap"),
-                    }
-                }
-                Kind::Dict if self.m.chainmaps.contains_key(&oid) && name == "new_child" => self.method_value("chainmap.new_child", &Value::obj(oid)),
-                // a TestClient cookie jar's set / delete
-                Kind::Dict if matches!(name, "set" | "delete") && self.m.cookie_jars.contains(&oid) => self.method_value(&format!("fastapi.cookies.{}", name), &Value::obj(oid)),
-                Kind::Dict => self.method_value(&format!("dict.{}", name), &Value::obj(oid)),
-                Kind::List if self.m.deques.contains_key(&oid) && crate::models::counter::DEQUE_METHODS.contains(&name) => {
-                    if name == "maxlen" {
-                        match self.m.deques[&oid] {
-                            Some(m) => Value::lit(intern::key_int(m)),
-                            None => self.none_v.clone(),
-                        }
-                    } else {
-                        self.method_value(&format!("deque.{}", name), &Value::obj(oid))
-                    }
-                }
+                Kind::Class => self.class_attr(oid, name, node, state, guarded),
+                Kind::Dict => self.dict_attr(oid, name, node, state),
+                Kind::List if self.m.deques.contains_key(&oid) && crate::models::counter::DEQUE_METHODS.contains(&name) => self.deque_attr(oid, name),
                 Kind::List | Kind::Tuple | Kind::Set => self.method_value(&format!("{}.{}", k.name(), name), &Value::obj(oid)),
                 Kind::Frame => crate::models::pandas::frame_getattr(self, oid, name, node, state, guarded),
                 Kind::Series => crate::models::pandas::series_getattr(self, oid, name, node, state),
-                Kind::Locidx if matches!(&self.heap.obj(oid).payload, Payload::Locidx(a, _) if matches!(a.as_str(), "str" | "dt" | "cat" | "sparse" | "list" | "struct")) => {
-                    let Payload::Locidx(a, recv) = self.heap.obj(oid).payload.clone() else { unreachable!() };
-                    if a == "dt" && name == "components" {
-                        // a property: the timedelta parts as columns
-                        let ks: Vec<KeyId> = ["days", "hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds"].iter().map(|x| key_str_lit(x)).collect();
-                        let row = Row::closed_with(crate::intern::KeySet::from_iter(ks.iter().copied())).with_order(ks);
-                        let nid = self.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(row), Ns::Item, None, None);
-                        Value::obj(nid)
-                    } else {
-                        self.method_value(&format!("Series.{}.{}", a, name), &Value::obj(recv))
-                    }
-                }
+                Kind::Locidx if matches!(&self.heap.obj(oid).payload, Payload::Locidx(a, _) if matches!(a.as_str(), "str" | "dt" | "cat" | "sparse" | "list" | "struct")) => self.accessor_attr(oid, name, node, state),
                 Kind::Unknown => self.load_unknown_attr(oid, name, node, state, guarded),
                 // an lru_cache'd function's cache_info / cache_clear
                 Kind::Function if matches!(name, "cache_info" | "cache_clear") && self.heap.func_info(oid).is_memo.get() => self.method_value(&format!("memo.{}", name), &Value::obj(oid)),
@@ -272,126 +175,25 @@ impl Analyzer {
                     let names = crate::models::annotated_names(self, oid, false).unwrap_or_default();
                     crate::models::names_dict(self, state, node, &names, None, "annotation")
                 }
-                Kind::Function if matches!(name, "__name__" | "__qualname__" | "__module__" | "__wrapped__" | "__doc__") && state.slot_opt(oid, Ns::Attr, nk).is_none() => {
-                    match self.m.wrapped.get(&oid).cloned() {
-                        Some(w) if name == "__wrapped__" => w,
-                        Some(w) => self.load_attr(&w, name, node, state, false),
-                        None => {
-                            let fi = self.heap.func_info(oid);
-                            match name {
-                                "__name__" => Value::lit_str(fi.qualname.rsplit('.').next().unwrap_or(&fi.qualname)),
-                                "__qualname__" => Value::lit_str(&fi.py_qualname()),
-                                "__module__" => Value::lit_str(&self.heap.module_info(fi.module).name),
-                                "__doc__" => Value::data("doc"),
-                                _ => {
-                                    let _ = report;
-                                    Value::data(name)
-                                }
-                            }
-                        }
-                    }
-                }
+                Kind::Function if matches!(name, "__name__" | "__qualname__" | "__module__" | "__wrapped__" | "__doc__") && state.slot_opt(oid, Ns::Attr, nk).is_none() => self.function_name_attr(oid, name, node, state, report),
                 // a singledispatch function's register
                 Kind::Function if name == "register" && self.m.sdispatch.contains_key(&oid) => self.method_value("sdispatch.register", &Value::obj(oid)),
                 Kind::Function => state.slot_opt(oid, Ns::Attr, nk).unwrap_or_else(|| Value::data(&format!("L{}", node.line))),
                 Kind::Bound => Value::data(&format!("L{}", node.line)),
-                Kind::View => {
-                    // a proxy's read methods are the dict's (it has no mutators)
-                    if let Payload::View(ViewKind::Proxy, inner) = self.heap.obj(oid).payload.clone() {
-                        if matches!(name, "get" | "keys" | "values" | "items" | "copy") {
-                            acc = acc.join(&self.method_value(&format!("dict.{}", name), &inner));
-                        } else {
-                            acc = acc.join(&self.load_attr(&Value::data("proxy"), name, node, state, report));
-                        }
+                Kind::View => match self.view_attr(oid, name, node, state, report) {
+                    Ok(v) => v,
+                    Err(v) => {
+                        acc = acc.join(&v);
                         continue;
                     }
-                    if let Payload::View(ViewKind::Keys, recv) = &self.heap.obj(oid).payload {
-                        if name == "str" {
-                            acc = acc.join(&Value::kv_only(KeyVal::KeysOf(crate::domain::KeysOf::new(recv.pts.clone(), Ns::Item))));
-                            continue;
-                        }
-                    }
-                    self.method_value(&format!("view.{}", name), &Value::obj(oid))
-                }
+                },
                 Kind::Zip | Kind::Enumerate => self.method_value(&format!("{}.{}", k.name(), name), &Value::obj(oid)),
                 Kind::Response => self.method_value(&format!("response.{}", name), &Value::obj(oid)),
                 Kind::Locidx => Value::data("loc"),
-                Kind::Super => {
-                    let Payload::Super(cls, self_v) = self.heap.obj(oid).payload.clone() else { continue };
-                    let ci = self.heap.class_info(cls);
-                    let mut found: Option<u32> = None;
-                    // the receiver's own class decides the order: the classes after `cls` in
-                    // its MRO (one receiver class; otherwise the defining class's bases)
-                    let recv_cls: Vec<u32> = self_v
-                        .pts
-                        .iter()
-                        .filter_map(|o| match self.heap.kind(o) {
-                            Kind::Instance => self.heap.instance_class(o),
-                            Kind::Class => Some(o),
-                            _ => None,
-                        })
-                        .collect();
-                    if let [rc] = recv_cls[..] {
-                        let order = self.heap.mro(rc);
-                        if let Some(pos) = order.iter().position(|c| *c == cls) {
-                            found = order[pos + 1..].iter().copied().find(|c| self.heap.cls_slots.contains_key(&(*c, Ns::Attr, nk)));
-                        }
-                    }
-                    if found.is_none() {
-                        for b in &ci.bases {
-                            found = self.class_lookup(*b, name);
-                            if found.is_some() {
-                                break;
-                            }
-                        }
-                    }
-                    // (a builtin base answers nothing here: its own methods are not user code)
-                    let found = found.filter(|fc| self.heap.kind(*fc) != Kind::External);
-                    let ids = self_v.pts.iter().map(|x| x.to_string()).collect::<Vec<String>>().join(",");
-                    match found {
-                        // (`__new__` is a static method: `super().__new__(cls)` passes the class)
-                        Some(fc) if name == "__new__" => self.heap.cls_slots.get(&(fc, Ns::Attr, nk)).cloned().unwrap_or_default(),
-                        None if name == "__new__" => {
-                            let q = "builtins.object.__new__";
-                            Value::obj(self.heap.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, q, Payload::Str(q.to_string())))
-                        }
-                        Some(fc) => {
-                            let fv = self.heap.cls_slots.get(&(fc, Ns::Attr, nk)).cloned().unwrap_or_default();
-                            let mut out = Value::new();
-                            for f in fv.pts.iter() {
-                                if self.heap.kind(f) == Kind::Function {
-                                    let label = format!("{} via super", self.heap.obj(f).label);
-                                    let b = self.heap.alloc_raw(Kind::Bound, &format!("bound:{}:{}", f, ids), "", true, &label, Payload::Bound(f, self_v.clone()));
-                                    out = out.join(&Value::obj(b));
-                                }
-                            }
-                            out
-                        }
-                        None if name == "__init__" && ci.bases.iter().any(|b| crate::models::dataclasses::dataclass_init_owner(self, *b).is_some()) => {
-                            let dc = ci.bases.iter().find_map(|b| crate::models::dataclasses::dataclass_init_owner(self, *b)).unwrap();
-                            Value::obj(self.heap.alloc_raw(Kind::Method, &format!("dcinit:{}:{}", dc, ids), "", true, "dataclass __init__ via super", Payload::Method(format!("dcinit.{}", dc), self_v.clone())))
-                        }
-                        // `super().__init__(msg)` in an Exception subclass: the instance's args
-                        None if name == "__init__" && self.builtin_exc_base(cls) => {
-                            Value::obj(self.heap.alloc_raw(Kind::Method, &format!("excinit:{}", ids), "", true, "Exception.__init__ via super", Payload::Method("excinit".to_string(), self_v.clone())))
-                        }
-                        // `object`'s own method (or a library base's), run on the receiver:
-                        // `object.__setattr__` as modelled, a library base's as unknown code
-                        // given the receiver (it was a call given nothing)
-                        None => {
-                            let closed = match recv_cls[..] {
-                                [rc] => self.hierarchy_closed(rc),
-                                _ => self.hierarchy_closed(cls),
-                            };
-                            let q = if closed { format!("builtins.object.{}", name) } else { format!("super.{}", name) };
-                            let f = self.heap.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, &q, Payload::Str(q.clone()));
-                            let payload = Payload::Partial(Value::obj(f), vec![self_v.clone()], IndexMap::new());
-                            let b = self.heap.alloc_raw(Kind::Partial, &format!("super:{}:{}", q, ids), "", true, &format!("super().{}", name), payload.clone());
-                            self.heap.obj_mut(b).payload = payload;
-                            Value::obj(b)
-                        }
-                    }
-                }
+                Kind::Super => match self.super_attr(oid, name, nk) {
+                    Some(v) => v,
+                    None => continue,
+                },
                 _ => Value::data(&format!("L{}", node.line)),
             };
             parts.push(v);
@@ -402,6 +204,259 @@ impl Analyzer {
             return crate::models::scalar_attr(self, obj, name, report, state);
         }
         acc
+    }
+
+    /// A deque's `maxlen` and methods.
+    fn deque_attr(&mut self, oid: ObjId, name: &str) -> Value {
+        if name == "maxlen" {
+            match self.m.deques[&oid] {
+                Some(m) => Value::lit(intern::key_int(m)),
+                None => self.none_v.clone(),
+            }
+        } else {
+            self.method_value(&format!("deque.{}", name), &Value::obj(oid))
+        }
+    }
+
+    /// An attribute of a Series accessor (`.str`, `.dt`, …): its methods; `.dt.components` a frame.
+    fn accessor_attr(&mut self, oid: ObjId, name: &str, node: &Node, state: &mut State) -> Value {
+        let Payload::Locidx(a, recv) = self.heap.obj(oid).payload.clone() else { unreachable!() };
+        if a == "dt" && name == "components" {
+            // a property: the timedelta parts as columns
+            let ks: Vec<KeyId> = ["days", "hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds"].iter().map(|x| key_str_lit(x)).collect();
+            let row = Row::closed_with(crate::intern::KeySet::from_iter(ks.iter().copied())).with_order(ks);
+            let nid = self.alloc_at(Kind::Frame, node, state, &format!("frame@L{}", node.line), Payload::None, Some(row), Ns::Item, None, None);
+            Value::obj(nid)
+        } else {
+            self.method_value(&format!("Series.{}.{}", a, name), &Value::obj(recv))
+        }
+    }
+
+    /// An attribute of a view: a mapping proxy's read methods are its dict's (Err: joined
+    /// beside the other objects' values, not one of them), a keys view's `.str`, else the view's
+    /// methods.
+    fn view_attr(&mut self, oid: ObjId, name: &str, node: &Node, state: &mut State, report: bool) -> Result<Value, Value> {
+        // a proxy's read methods are the dict's (it has no mutators)
+        if let Payload::View(ViewKind::Proxy, inner) = self.heap.obj(oid).payload.clone() {
+            if matches!(name, "get" | "keys" | "values" | "items" | "copy") {
+                return Err(self.method_value(&format!("dict.{}", name), &inner));
+            } else {
+                return Err(self.load_attr(&Value::data("proxy"), name, node, state, report));
+            }
+        }
+        if let Payload::View(ViewKind::Keys, recv) = &self.heap.obj(oid).payload {
+            if name == "str" {
+                return Err(Value::kv_only(KeyVal::KeysOf(crate::domain::KeysOf::new(recv.pts.clone(), Ns::Item))));
+            }
+        }
+        Ok(self.method_value(&format!("view.{}", name), &Value::obj(oid)))
+    }
+
+    /// An attribute of a module: its global, what every module has, else missing (open when
+    /// unknown code may have added names).
+    #[allow(clippy::too_many_arguments)]
+    fn module_attr(&mut self, oid: ObjId, name: &str, nk: KeyId, node: &Node, state: &mut State, report: bool, guarded: bool, single: bool) -> Value {
+        match state.slot_opt(oid, Ns::Attr, nk) {
+            Some(v) => v,
+            // (what every module has)
+            None if matches!(name, "__name__" | "__file__" | "__doc__" | "__package__" | "__spec__" | "__loader__" | "__path__" | "__cached__" | "__builtins__") => {
+                if name == "__name__" { Value::lit_str(&self.heap.module_info(oid).name) } else { Value::data(&format!("module {}", name)) }
+            }
+            // (inside a try that catches the AttributeError: the handler's way)
+            None if report && guarded => self.load_record(oid, Ns::Attr, &Value::lit(nk), node, state, guarded, single, true),
+            None => {
+                // (a namespace changed by code rowan cannot see — `globals().update(…)`
+                // with unknown names — may have it)
+                let row = state.row(oid, Ns::Attr);
+                let cls = if row.closed() { Classification::with_note(Tier::Missing, "is not defined in the module") } else { classify(&row, nk) };
+                if !guarded {
+                    self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
+                }
+                Value::data(&format!("L{}", node.line))
+            }
+        }
+    }
+
+    /// An attribute of a library object rowan sees only by name: a class a model generates, a
+    /// constant, a record, else the external object `qual.name`.
+    fn external_attr(&mut self, oid: ObjId, name: &str, state: &mut State) -> Value {
+        let q = format!("{}.{}", self.heap.external_qual(oid), name);
+        if let Some(v) = crate::models::generated_class(self, state, &q) {
+            return v;
+        }
+        if let Some(v) = crate::models::external_constant(self, &q) {
+            return v;
+        }
+        match crate::models::external_record(self, &q, state) {
+            Some(rec) => Value::obj(rec),
+            None => Value::obj(self.heap.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, &q, Payload::Str(q.clone()))),
+        }
+    }
+
+    /// An attribute of a dict: a Series', a config parser's or section's, a Counter's, a
+    /// ChainMap's, a cookie jar's methods, else `dict`'s.
+    fn dict_attr(&mut self, oid: ObjId, name: &str, node: &Node, state: &mut State) -> Value {
+        if crate::models::pandas::is_series_obj(self, oid) {
+            crate::models::pandas::series_getattr(self, oid, name, node, state)
+        } else if self.m.cfg_parsers.contains_key(&oid) && crate::models::configparser::PARSER_METHODS.contains(&name) {
+            self.method_value(&format!("cfgparser.{}", name), &Value::obj(oid))
+        } else if self.m.cfg_sections.contains_key(&oid) && crate::models::configparser::SECTION_METHODS.contains(&name) {
+            self.method_value(&format!("cfgsection.{}", name), &Value::obj(oid))
+        } else if self.m.cfg_sections.contains_key(&oid) && name == "name" {
+            Value::lit_str(&self.m.cfg_sections[&oid].1)
+        } else if self.m.counters.contains(&oid) && crate::models::counter::COUNTER_METHODS.contains(&name) {
+            self.method_value(&format!("counter.{}", name), &Value::obj(oid))
+        } else if self.m.chainmaps.contains_key(&oid) && matches!(name, "maps" | "parents") {
+            let c = super::Call { qual: format!("chainmap.{}", name), recv: Some(Value::obj(oid)), args: vec![], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
+            match self.program.models.lookup(&c.qual) {
+                Some(m) => m(self, state, &c),
+                None => Value::data("chainmap"),
+            }
+        } else if self.m.chainmaps.contains_key(&oid) && name == "new_child" {
+            self.method_value("chainmap.new_child", &Value::obj(oid))
+        } else if matches!(name, "set" | "delete") && self.m.cookie_jars.contains(&oid) {
+            // a TestClient cookie jar's set / delete
+            self.method_value(&format!("fastapi.cookies.{}", name), &Value::obj(oid))
+        } else {
+            self.method_value(&format!("dict.{}", name), &Value::obj(oid))
+        }
+    }
+
+    /// `super().name` on a `super()` object: the method after the defining class in the
+    /// receiver's MRO, bound to the receiver; `object`'s own (or a library base's) as modelled /
+    /// unknown code given the receiver. None: not a `super()` object.
+    fn super_attr(&mut self, oid: ObjId, name: &str, nk: KeyId) -> Option<Value> {
+        let Payload::Super(cls, self_v) = self.heap.obj(oid).payload.clone() else { return None };
+        let ci = self.heap.class_info(cls);
+        let mut found: Option<u32> = None;
+        // the receiver's own class decides the order: the classes after `cls` in
+        // its MRO (one receiver class; otherwise the defining class's bases)
+        let recv_cls: Vec<u32> = self_v
+            .pts
+            .iter()
+            .filter_map(|o| match self.heap.kind(o) {
+                Kind::Instance => self.heap.instance_class(o),
+                Kind::Class => Some(o),
+                _ => None,
+            })
+            .collect();
+        if let [rc] = recv_cls[..] {
+            let order = self.heap.mro(rc);
+            if let Some(pos) = order.iter().position(|c| *c == cls) {
+                found = order[pos + 1..].iter().copied().find(|c| self.heap.cls_slots.contains_key(&(*c, Ns::Attr, nk)));
+            }
+        }
+        if found.is_none() {
+            for b in &ci.bases {
+                found = self.class_lookup(*b, name);
+                if found.is_some() {
+                    break;
+                }
+            }
+        }
+        // (a builtin base answers nothing here: its own methods are not user code)
+        let found = found.filter(|fc| self.heap.kind(*fc) != Kind::External);
+        let ids = self_v.pts.iter().map(|x| x.to_string()).collect::<Vec<String>>().join(",");
+        Some(match found {
+            // (`__new__` is a static method: `super().__new__(cls)` passes the class)
+            Some(fc) if name == "__new__" => self.heap.cls_slots.get(&(fc, Ns::Attr, nk)).cloned().unwrap_or_default(),
+            None if name == "__new__" => {
+                let q = "builtins.object.__new__";
+                Value::obj(self.heap.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, q, Payload::Str(q.to_string())))
+            }
+            Some(fc) => {
+                let fv = self.heap.cls_slots.get(&(fc, Ns::Attr, nk)).cloned().unwrap_or_default();
+                let mut out = Value::new();
+                for f in fv.pts.iter() {
+                    if self.heap.kind(f) == Kind::Function {
+                        let label = format!("{} via super", self.heap.obj(f).label);
+                        let b = self.heap.alloc_raw(Kind::Bound, &format!("bound:{}:{}", f, ids), "", true, &label, Payload::Bound(f, self_v.clone()));
+                        out = out.join(&Value::obj(b));
+                    }
+                }
+                out
+            }
+            None if name == "__init__" && ci.bases.iter().any(|b| crate::models::dataclasses::dataclass_init_owner(self, *b).is_some()) => {
+                let dc = ci.bases.iter().find_map(|b| crate::models::dataclasses::dataclass_init_owner(self, *b)).unwrap();
+                Value::obj(self.heap.alloc_raw(Kind::Method, &format!("dcinit:{}:{}", dc, ids), "", true, "dataclass __init__ via super", Payload::Method(format!("dcinit.{}", dc), self_v.clone())))
+            }
+            // `super().__init__(msg)` in an Exception subclass: the instance's args
+            None if name == "__init__" && self.builtin_exc_base(cls) => {
+                Value::obj(self.heap.alloc_raw(Kind::Method, &format!("excinit:{}", ids), "", true, "Exception.__init__ via super", Payload::Method("excinit".to_string(), self_v.clone())))
+            }
+            // `object`'s own method (or a library base's), run on the receiver:
+            // `object.__setattr__` as modelled, a library base's as unknown code
+            // given the receiver (it was a call given nothing)
+            None => {
+                let closed = match recv_cls[..] {
+                    [rc] => self.hierarchy_closed(rc),
+                    _ => self.hierarchy_closed(cls),
+                };
+                let q = if closed { format!("builtins.object.{}", name) } else { format!("super.{}", name) };
+                let f = self.heap.alloc_raw(Kind::External, &format!("ext:{}", q), "", true, &q, Payload::Str(q.clone()));
+                let payload = Payload::Partial(Value::obj(f), vec![self_v.clone()], IndexMap::new());
+                let b = self.heap.alloc_raw(Kind::Partial, &format!("super:{}:{}", q, ids), "", true, &format!("super().{}", name), payload.clone());
+                self.heap.obj_mut(b).payload = payload;
+                Value::obj(b)
+            }
+        })
+    }
+
+    /// A function's `__name__` / `__qualname__` / `__module__` / `__wrapped__` / `__doc__` (a
+    /// `@wraps(fn)` wrapper: fn's).
+    fn function_name_attr(&mut self, oid: ObjId, name: &str, node: &Node, state: &mut State, report: bool) -> Value {
+        match self.m.wrapped.get(&oid).cloned() {
+            Some(w) if name == "__wrapped__" => w,
+            Some(w) => self.load_attr(&w, name, node, state, false),
+            None => {
+                let fi = self.heap.func_info(oid);
+                match name {
+                    "__name__" => Value::lit_str(fi.qualname.rsplit('.').next().unwrap_or(&fi.qualname)),
+                    "__qualname__" => Value::lit_str(&fi.py_qualname()),
+                    "__module__" => Value::lit_str(&self.heap.module_info(fi.module).name),
+                    "__doc__" => Value::data("doc"),
+                    _ => {
+                        let _ = report;
+                        Value::data(name)
+                    }
+                }
+            }
+        }
+    }
+
+    /// An attribute of a class object: a class attribute (a classmethod bound to this class), an Enum
+    /// member, a pydantic model's attribute or method, a dataclass `__init__`, else a method of the
+    /// class object.
+    fn class_attr(&mut self, oid: ObjId, name: &str, node: &Node, state: &mut State, guarded: bool) -> Value {
+        if self.class_lookup(oid, name).is_some() {
+            // a classmethod reached through a class binds that class (not the
+            // class that defines it): `Sub.make()` constructs `Sub`
+            let v = self.class_attr_value(oid, name, state);
+            let mut out = Value::new();
+            let mut changed = false;
+            for f in v.pts.iter() {
+                if self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_classmethod.get() {
+                    let label = format!("{} bound", self.heap.obj(f).label);
+                    out = out.join(&Value::obj(self.heap.alloc_raw(Kind::Bound, &format!("bound:{}:cls{}", f, oid), "", true, &label, Payload::Bound(f, Value::obj(oid)))));
+                    changed = true;
+                } else {
+                    out = out.join(&Value::obj(f));
+                }
+            }
+            if changed { Value::with_kv(out.pts, v.kv.clone()) } else { v }
+        } else if self.m.enum_members.contains_key(&oid) && (name == "__members__" || (!name.starts_with("__") && !self.heap.class_info(oid).open_base)) {
+            crate::models::enums::class_attr(self, oid, name, node, guarded, state)
+        } else if crate::models::pydantic::PYD_ATTRS.contains(&name) && crate::models::pydantic::is_model(self, oid) {
+            crate::models::pydantic::attr_value(self, state, oid, name, node)
+        } else if crate::models::pydantic::PYD_METHODS.contains(&name) && crate::models::pydantic::is_model(self, oid) {
+            self.method_value(&format!("pydantic.cls.{}", name), &Value::obj(oid))
+        } else if name == "__init__" && crate::models::dataclasses::dataclass_init_owner(self, oid).is_some() {
+            let dc = crate::models::dataclasses::dataclass_init_owner(self, oid).unwrap();
+            Value::obj(self.heap.alloc_raw(Kind::Method, &format!("dcinit:{}", oid), "", true, &format!("{}.__init__", self.heap.obj(oid).label), Payload::Method(format!("dcinit.class.{}", dc), Value::obj(oid))))
+        } else {
+            let label = format!("{}.{}", self.heap.obj(oid).label, name);
+            Value::obj(self.heap.alloc_raw(Kind::Method, &format!("classattr:{}.{}", oid, name), "", true, &label, Payload::Method(format!("class.{}", name), Value::obj(oid))))
+        }
     }
 
     pub fn method_value(&mut self, qual: &str, recv: &Value) -> Value {
