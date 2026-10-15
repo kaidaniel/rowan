@@ -93,7 +93,7 @@ impl Analyzer {
             return Some(*sy);
         }
         // the result of an unknown call that no variable names: nothing to name its dims by
-        if self.heap.kind(o) == Kind::Unknown && self.names.origins.contains_key(&o) && self.torch_on {
+        if self.heap.kind(o) == Kind::Unknown && self.names.origins.contains_key(&o) && self.m.torch_on {
             return None;
         }
         let text = self.names.get(o)?;
@@ -852,7 +852,7 @@ impl Analyzer {
                 None
             };
             let is_size = |an: &Analyzer, v: &Value| size_shape(v).is_some() || v.single().map(|o| matches!(&an.heap.obj(o).payload, Payload::Str(q) if q == "torch.Size")).unwrap_or(false);
-            if (is_size(self, a) || is_size(self, b)) && self.torch_on {
+            if (is_size(self, a) || is_size(self, b)) && self.m.torch_on {
                 if let (Some(x), Some(y)) = (size_of(self, a), size_of(self, b)) {
                     let r = concat(&x, &y);
                     return Some(self.t_size_value(&r, node, st));
@@ -893,14 +893,14 @@ impl Analyzer {
                         if &*t == sh::NUM_LABEL || t.starts_with(QUOT_PREFIX) {
                             return Some(K::Num);
                         }
-                        if t.starts_with("expr:") && an.torch_on {
+                        if t.starts_with("expr:") && an.m.torch_on {
                             return Some(K::Named);
                         }
                         if t.starts_with(SIZE_PREFIX) {
                             return None;
                         }
                         // an unnamed unknown number (a loop counter, `float(...)`)
-                        if an.torch_on {
+                        if an.m.torch_on {
                             return Some(K::Int);
                         }
                         None
@@ -915,13 +915,13 @@ impl Analyzer {
             } else if let Some(&int) = v.single().and_then(|o| an.m.t_numbers.get(&o)).filter(|_| v.kv.is_bot()) {
                 // a parameter annotated as a number
                 Some(if int { K::Int } else { K::Num })
-            } else if an.torch_on && v.kv.is_bot() && v.pts.len() == 1 && an.t_sym_of_obj(v.pts.first().unwrap()).is_some() {
+            } else if an.m.torch_on && v.kv.is_bot() && v.pts.len() == 1 && an.t_sym_of_obj(v.pts.first().unwrap()).is_some() {
                 // a name used as a size on this path is an int
                 if st.tf.ints.contains(&an.t_sym_of_obj(v.pts.first().unwrap()).unwrap()) {
                     return Some(K::Int);
                 }
                 Some(K::Named)
-            } else if an.torch_on && v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::Unknown)) {
+            } else if an.m.torch_on && v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::Unknown)) {
                 // an unknown without a name (an unknown call's result): any shape
                 Some(K::Named)
             } else {
@@ -1209,7 +1209,7 @@ impl Analyzer {
         let no_scalar = obj.kv.is_bot()
             || (obj.kv.is_literal() && crate::domain::kv_literals(&obj.kv).iter().all(|k| k == intern::key_none()))
             || matches!(&obj.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with('\u{1}'));
-        let unknown_tensorish = !tensor && self.torch_on && obj.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Unknown)) && ((!obj.pts.is_empty() && no_scalar) || matches!(&obj.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with("expr:")));
+        let unknown_tensorish = !tensor && self.m.torch_on && obj.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Unknown)) && ((!obj.pts.is_empty() && no_scalar) || matches!(&obj.kv, KeyVal::Data(l) if intern::str_get(*l).starts_with("expr:")));
         if !tensor && !unknown_tensorish {
             return None;
         }
@@ -1261,7 +1261,7 @@ impl Analyzer {
             "shape" => return Some(self.t_size_value(&s, node, st)),
             "ndim" => return Some(self.t_rank_value(&s)),
             // numpy's `size` is an attribute (the element count), torch's a method
-            "size" if !self.torch_real => {
+            "size" if !self.m.torch_real => {
                 return Some(match s.dims() {
                     Some(d) => dim_value(sh::product(&d)),
                     None => Value::data("size"),
@@ -1357,7 +1357,7 @@ impl Analyzer {
             E::Tuple(t) => t.elts.iter().collect(),
             e => vec![e],
         };
-        let named = !tensor && self.torch_on && obj.kv.is_bot() && obj.pts.len() == 1 && obj.pts.iter().all(|o| self.t_sym_of_obj(o).is_some());
+        let named = !tensor && self.m.torch_on && obj.kv.is_bot() && obj.pts.len() == 1 && obj.pts.iter().all(|o| self.t_sym_of_obj(o).is_some());
         if !tensor && !named {
             return None;
         }
@@ -1715,7 +1715,7 @@ impl Analyzer {
         let a0 = self.t_kw(c, args, 0, "dim").or_else(|| kw(c, "axis").cloned());
         let keepdim = kw(c, "keepdim").or_else(|| kw(c, "keepdims")).and_then(|v| self.t_bool(v)).unwrap_or(false);
         // numpy arrays (torch not imported): where numpy's methods differ from torch's
-        if !self.torch_real {
+        if !self.m.torch_real {
             match name {
                 // `transpose(*axes)` permutes (no axes: reversed)
                 "transpose" if args.len() != 2 || s.rank().map(|r| r != 2).unwrap_or(true) => {
@@ -4431,7 +4431,7 @@ impl Analyzer {
         if let Some(s) = size_shape(v) {
             return Some(self.t_rank_value(&sh::norm_shape(&s, &st.tf)));
         }
-        if is_tensor(v) || (self.torch_on && !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Unknown) && self.t_sym_of_obj(o).is_some())) {
+        if is_tensor(v) || (self.m.torch_on && !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Unknown) && self.t_sym_of_obj(o).is_some())) {
             let s = self.t_shape(v, st)?;
             let (e, p) = self.t_locate(&s, 0, node, st, "len")?;
             return Some(dim_value(get_at(&e, p)));
@@ -4597,7 +4597,7 @@ impl Analyzer {
 
     /// Unary minus on a named unknown (tensor or int).
     pub fn t_neg_named(&self, v: &Value, st: &State) -> Option<Value> {
-        if !self.torch_on || !(v.kv.is_bot() && v.pts.len() == 1) {
+        if !self.m.torch_on || !(v.kv.is_bot() && v.pts.len() == 1) {
             return None;
         }
         let o = v.pts.first()?;
@@ -4609,7 +4609,7 @@ impl Analyzer {
 
     /// `a < b` & co. where `a` is a named unknown in a torch module: a bool tensor (or bool).
     pub fn t_compare_named(&mut self, a: &Value, b: &Value, node: &Node, st: &mut State) -> Option<Value> {
-        if !self.torch_on || !(a.kv.is_bot() && a.pts.len() == 1 && self.t_sym_of_obj(a.pts.first()?).is_some()) {
+        if !self.m.torch_on || !(a.kv.is_bot() && a.pts.len() == 1 && self.t_sym_of_obj(a.pts.first()?).is_some()) {
             return None;
         }
         let numeric = |v: &Value| v.pts.is_empty() && (matches!(&v.kv, KeyVal::Lit(k) if intern::key_is_number(*k)) || tensor_shape(v).is_some() || dim_of_label(v).is_some());
@@ -4704,7 +4704,7 @@ impl Analyzer {
     /// expression, a size.
     /// The shape of a named unknown (a parameter) when facts say something about it.
     pub fn t_known_param_shape(&self, v: &Value, st: &State) -> Option<Shape> {
-        if !self.torch_on || !v.kv.is_bot() || v.pts.len() != 1 {
+        if !self.m.torch_on || !v.kv.is_bot() || v.pts.len() != 1 {
             return None;
         }
         let o = v.pts.first()?;
@@ -4985,7 +4985,7 @@ pub fn m_numpy(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if matches!(q, "random.shuffle" | "copyto" | "put" | "place" | "putmask" | "fill_diagonal") {
         return an.unknown_call(&c.qual, None, &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node);
     }
-    if !an.torch_on {
+    if !an.m.torch_on {
         return Value::data(&format!("L{}", c.line));
     }
     let node = c.node;
@@ -5063,7 +5063,7 @@ fn numpy_fn(an: &mut Analyzer, st: &mut State, c: &Call, q: &str) -> Value {
         let Some(recv) = c.args.first().cloned().filter(|v| is_tensor(v) || (!v.kv.is_literal() && v.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::Unknown)))) else { return unknown() };
         let rest: Vec<Value> = c.args[1..].to_vec();
         let call = Call { qual: format!("tensor.{}", q), recv: Some(recv.clone()), args: rest.clone(), kwargs: c.kwargs.clone(), star_args: vec![], star_kwargs: vec![], node: c.node, call_ast: None, site: c.site.clone(), line: c.line };
-        let saved = std::mem::replace(&mut an.torch_real, false);
+        let saved = std::mem::replace(&mut an.m.torch_real, false);
         let name = match q {
             "absolute" => "abs",
             "around" => "round",
@@ -5071,7 +5071,7 @@ fn numpy_fn(an: &mut Analyzer, st: &mut State, c: &Call, q: &str) -> Value {
             other => other,
         };
         let r = an.t_method(name, &recv, &rest, &call, st);
-        an.torch_real = saved;
+        an.m.torch_real = saved;
         return r;
     }
     if BINARY.contains(&q) && c.args.len() >= 2 {

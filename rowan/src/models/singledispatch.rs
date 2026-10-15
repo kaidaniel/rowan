@@ -102,7 +102,7 @@ impl Analyzer {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn sdispatch_call(&mut self, foid: ObjId, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, entry: bool) -> Value {
-        let reg = self.sdispatch.get(&foid).cloned().unwrap_or_default();
+        let reg = self.m.sdispatch.get(&foid).cloned().unwrap_or_default();
         let mut groups: Vec<(ObjId, Value)> = Vec::new();
         let add = |f: ObjId, v: Value, groups: &mut Vec<(ObjId, Value)>| match groups.iter_mut().find(|(g, _)| *g == f) {
             Some((_, cur)) => *cur = cur.join(&v),
@@ -142,10 +142,10 @@ impl Analyzer {
             let mut a = args.clone();
             a[0] = part;
             if f == foid {
-                self.sd_bypass = Some(foid);
+                self.m.sd_bypass = Some(foid);
             }
             outs.push(self.call_user(f, self_v.clone(), a, kwargs.clone(), vec![], star_kwargs.clone(), &mut st, node, None, entry));
-            self.sd_bypass = None;
+            self.m.sd_bypass = None;
             states.push(st);
         }
         let mut it = states.into_iter();
@@ -218,9 +218,9 @@ impl crate::interp::Analyzer {
         // first argument
         if matches!(q, "functools.singledispatch" | "functools.singledispatchmethod") {
             if let Some(f) = fobj.filter(|o| self.heap.kind(*o) == Kind::Function) {
-                self.sdispatch.insert(f, Vec::new());
+                self.m.sdispatch.insert(f, Vec::new());
                 if q.ends_with("method") {
-                    self.sdispatch_method.insert(f);
+                    self.m.sdispatch_method.insert(f);
                 }
             }
             return true;
@@ -239,9 +239,9 @@ impl crate::interp::Analyzer {
                 // the type: `@f.register(T)`, else the first parameter's annotation
                 let ty = match &d.expression {
                     ast::Expr::Call(c) if !c.arguments.args.is_empty() => Some(self.eval(&c.arguments.args[0], state)),
-                    _ => self.sdispatch_annotation(impl_f, self.sdispatch_method.contains(&base), state),
+                    _ => self.sdispatch_annotation(impl_f, self.m.sdispatch_method.contains(&base), state),
                 };
-                if let (Some(ty), Some(reg)) = (ty, self.sdispatch.get_mut(&base)) {
+                if let (Some(ty), Some(reg)) = (ty, self.m.sdispatch.get_mut(&base)) {
                     reg.push((ty, impl_f));
                 }
             }
@@ -261,7 +261,7 @@ impl crate::interp::Analyzer {
             if let (ast::Expr::Call(cl), Some(f)) = (&d.expression, fobj) {
                 if let Some(a0) = cl.arguments.args.first() {
                     let wv = self.eval(a0, state);
-                    self.wrapped.insert(f, wv);
+                    self.m.wrapped.insert(f, wv);
                 }
             }
             return true;

@@ -404,7 +404,7 @@ impl Analyzer {
                     }
                     if ci.lib.typed_dict {
                         let src = Source::new(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param);
-                        self.td_param_src.insert(inst, src);
+                        self.m.td_param_src.insert(inst, src);
                     }
                     return Some(Value::obj(inst));
                 }

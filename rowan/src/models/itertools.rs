@@ -609,7 +609,7 @@ impl crate::interp::Analyzer {
     /// itself; anything else leaves their position unknown.
     pub(crate) fn after_model_consume(&mut self, call: &Call, r: &Value, state: &mut State) {
         // (one-shot iterators, and lazy iterators over them)
-        let its: Vec<(usize, u32)> = call.args.iter().chain(call.star_args.iter()).enumerate().filter_map(|(i, a)| a.single().filter(|o| a.kv.is_bot() && ((self.heap.obj(*o).iterator && self.heap.obj(*o).single && matches!(self.heap.kind(*o), Kind::List)) || self.lazy_src.contains_key(o))).map(|o| (i, o))).collect();
+        let its: Vec<(usize, u32)> = call.args.iter().chain(call.star_args.iter()).enumerate().filter_map(|(i, a)| a.single().filter(|o| a.kv.is_bot() && ((self.heap.obj(*o).iterator && self.heap.obj(*o).single && matches!(self.heap.kind(*o), Kind::List)) || self.m.lazy_src.contains_key(o))).map(|o| (i, o))).collect();
         if its.is_empty() {
             return;
         }
@@ -642,24 +642,24 @@ impl crate::interp::Analyzer {
                 _ => None,
             };
             if let (Some(ro), Some(n)) = (robj, n) {
-                self.lazy_src.insert(ro, vec![(its[0].1, Some(n.max(0) as usize))]);
+                self.m.lazy_src.insert(ro, vec![(its[0].1, Some(n.max(0) as usize))]);
                 return;
             }
         }
         if q == "builtins.zip" {
             if let (Some(ro), Some(pulls)) = (robj, self.zip_pulls(call, state)) {
-                self.lazy_src.insert(ro, pulls);
+                self.m.lazy_src.insert(ro, pulls);
                 return;
             }
         }
         if LAZY_ALL.contains(&q) {
             if let Some(ro) = robj {
-                self.lazy_src.insert(ro, its.iter().map(|(_, o)| (*o, None)).collect());
+                self.m.lazy_src.insert(ro, its.iter().map(|(_, o)| (*o, None)).collect());
                 return;
             }
         }
         for (_, o) in its {
-            if self.lazy_src.contains_key(&o) {
+            if self.m.lazy_src.contains_key(&o) {
                 self.consume_lazy(&Value::obj(o), false, state);
             } else {
                 self.set_cursor(o, None, state);

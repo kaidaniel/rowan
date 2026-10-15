@@ -259,12 +259,12 @@ impl Analyzer {
                             }
                         }
                         if crate::models::pandas::is_seriesish(self, &v) {
-                            return Value::with_kv(ObjSet::one(self.series), DATA);
+                            return Value::with_kv(ObjSet::one(self.m.series), DATA);
                         }
-                        Value::with_kv(v.pts.filter(|o| o == self.series), DATA)
+                        Value::with_kv(v.pts.filter(|o| o == self.m.series), DATA)
                     }
-                    _ if crate::models::pandas::is_seriesish(self, &v) => Value::with_kv(ObjSet::one(self.series), DATA),
-                    _ => Value::with_kv(v.pts.filter(|o| o == self.series), DATA),
+                    _ if crate::models::pandas::is_seriesish(self, &v) => Value::with_kv(ObjSet::one(self.m.series), DATA),
+                    _ => Value::with_kv(v.pts.filter(|o| o == self.m.series), DATA),
                 }
             }
             ast::Expr::BinOp(b) => {
@@ -418,7 +418,7 @@ impl Analyzer {
         let single = self.heap.obj(oid).single;
         let mut vals: Vec<Value> = Vec::new();
         let mut literal = true;
-        let mut size_parts: Option<Vec<Result<Value, Value>>> = if self.torch_on && elts.iter().any(|e| matches!(e, ast::Expr::Starred(_))) { Some(Vec::new()) } else { None };
+        let mut size_parts: Option<Vec<Result<Value, Value>>> = if self.m.torch_on && elts.iter().any(|e| matches!(e, ast::Expr::Starred(_))) { Some(Vec::new()) } else { None };
         for e in elts {
             if let ast::Expr::Starred(st) = e {
                 literal = false;
@@ -564,7 +564,7 @@ impl Analyzer {
             return self.t_compare(a, b, nd, state);
         }
         // a named unknown against a number / tensor
-        if ordering && self.torch_on && a.kv.is_bot() && a.pts.len() == 1 && a.pts.iter().all(|o| self.heap.kind(o) == Kind::Unknown) {
+        if ordering && self.m.torch_on && a.kv.is_bot() && a.pts.len() == 1 && a.pts.iter().all(|o| self.heap.kind(o) == Kind::Unknown) {
             if let Some(r) = self.t_compare_named(a, b, nd, state) {
                 return r;
             }
@@ -595,7 +595,7 @@ impl Analyzer {
             return lit(r);
         }
         if crate::models::pandas::is_seriesish(self, a) || crate::models::pandas::is_seriesish(self, b) {
-            return Value::with_kv(ObjSet::one(self.series), DATA);
+            return Value::with_kv(ObjSet::one(self.m.series), DATA);
         }
         // (tuples holding parameters: decided per call site)
         let both = a.pts.union(&b.pts);
@@ -675,7 +675,7 @@ impl Analyzer {
             ast::CmpOp::In | ast::CmpOp::NotIn => {
                 let decide = |found: bool| Some(if op == ast::CmpOp::In { found } else { !found });
                 // members of a Flag: bits; else a member is its key
-                if (!self.member_key.is_empty() || !self.identity_objs.borrow().is_empty()) && !a.pts.is_empty() {
+                if (!self.heap.keys.member_key.is_empty() || !self.heap.keys.identity_objs.borrow().is_empty()) && !a.pts.is_empty() {
                     if let Some(r) = self.flag_contains(a, &b, state) {
                         return decide(r);
                     }
@@ -751,7 +751,7 @@ impl Analyzer {
             }
             ast::CmpOp::Eq | ast::CmpOp::NotEq => {
                 // Enum members: their keys (a mixed-in one: its value)
-                let (a, b, lits) = if self.member_key.is_empty() {
+                let (a, b, lits) = if self.heap.keys.member_key.is_empty() {
                     (a.clone(), b.clone(), lits)
                 } else {
                     let ka = self.member_base(&self.keyify(a));
@@ -1184,7 +1184,7 @@ impl Analyzer {
             }
         }
         if crate::models::pandas::is_seriesish(self, &a) || crate::models::pandas::is_seriesish(self, &b) {
-            return Value::with_kv(ObjSet::one(self.series), DATA);
+            return Value::with_kv(ObjSet::one(self.m.series), DATA);
         }
         let frames = both.filter(|o| self.heap.kind(o) == Kind::Frame);
         if !frames.is_empty() {
@@ -1845,7 +1845,7 @@ impl Analyzer {
             }
         }
         // @total_ordering: one ordering method and __eq__ give the others
-        let ordered = |an: &Analyzer, o: Option<ObjId>| o.and_then(|o| an.heap.instance_class(o)).map(|c| an.heap.mro(c).iter().any(|m| an.total_ordering.contains(m))).unwrap_or(false);
+        let ordered = |an: &Analyzer, o: Option<ObjId>| o.and_then(|o| an.heap.instance_class(o)).map(|c| an.heap.mro(c).iter().any(|m| an.m.total_ordering.contains(m))).unwrap_or(false);
         if matches!(op, ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE) && ordered(self, ai) {
             if let Some(f) = ai.and_then(|o| self.cmp_dunder(o, "__lt__")) {
                 let lt = call(self, f, a, b, state);
@@ -1880,7 +1880,7 @@ impl Analyzer {
             let mixed = |an: &Analyzer, o: Option<ObjId>| -> Option<Value> {
                 let o = o?;
                 let c = an.heap.instance_class(o)?;
-                if !an.enum_kind.get(&c).map(|k| k.mixed).unwrap_or(false) {
+                if !an.m.enum_kind.get(&c).map(|k| k.mixed).unwrap_or(false) {
                     return None;
                 }
                 let v = state.slot(o, Ns::Attr, key_str_lit("value"));

@@ -129,12 +129,12 @@ impl Analyzer {
             }
         }
         each(&self.m.chainmaps, o).flatten().for_each(|m| m.push_objs(work));
-        for m in [&self.m.dd_factories, &self.m.csv_readers, &self.wrapped] {
+        for m in [&self.m.dd_factories, &self.m.csv_readers, &self.m.wrapped] {
             each(m, o).for_each(|v| v.push_objs(work));
         }
         each(&self.m.partial_star, o).flatten().for_each(|v| v.push_objs(work));
-        each(&self.lazy_src, o).flatten().for_each(|(s, _)| work.push(*s));
-        for m in [&self.attr_mirrors, &self.entry.instances, &self.copy_root, &self.m.sql_cursors] {
+        each(&self.m.lazy_src, o).flatten().for_each(|(s, _)| work.push(*s));
+        for m in [&self.m.attr_mirrors, &self.entry.instances, &self.copy_root, &self.m.sql_cursors] {
             work.extend(each(m, o).copied());
         }
         each(&self.m.sorted_items, o).flat_map(|items| items.iter()).for_each(|(_, v, _)| v.push_objs(work));
@@ -143,7 +143,7 @@ impl Analyzer {
             args.iter().for_each(|a| a.push_objs(work));
             kw.values().for_each(|v| v.push_objs(work));
         }
-        for (v, f) in each(&self.sdispatch, o).flatten() {
+        for (v, f) in each(&self.m.sdispatch, o).flatten() {
             v.push_objs(work);
             work.push(*f);
         }

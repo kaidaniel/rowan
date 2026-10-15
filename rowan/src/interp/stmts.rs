@@ -97,7 +97,7 @@ impl Analyzer {
                 }
                 let res = self.binop(a.op, &cur, &rhs, &n, state);
                 // `t += u` on a tensor is in place: the result must keep t's shape
-                if self.torch_on && crate::models::torch::is_definite_tensor(&cur) && !self.t_inplace_fits(&cur, &res, &n, state) {
+                if self.m.torch_on && crate::models::torch::is_definite_tensor(&cur) && !self.t_inplace_fits(&cur, &res, &n, state) {
                     return;
                 }
                 // `d[k] += v` with an unknown key on a closed dict: the load raised unless k was
@@ -156,7 +156,7 @@ impl Analyzer {
                     let cv = self.eval(ce, state);
                     let ck = key_str_lit("__cause__");
                     for o in xv.pts.iter() {
-                        if matches!(self.heap.kind(o), Kind::Instance | Kind::Namespace) || self.exc_objs.contains_key(&o) {
+                        if matches!(self.heap.kind(o), Kind::Instance | Kind::Namespace) || self.m.exc_objs.contains_key(&o) {
                             let strong = xv.pts.len() == 1 && self.heap.obj(o).single;
                             let row = state.row(o, Ns::Attr).store(ck, strong);
                             state.set_row(o, Ns::Attr, row);
@@ -169,7 +169,7 @@ impl Analyzer {
                     Some(_) => vec![],
                     None => self.unwind.handling.last().map(|h| h.iter().cloned().collect()).unwrap_or_default(),
                 };
-                self.unwind.cur_exc = exc_v.clone().filter(|v| v.pts.iter().any(|o| self.heap.kind(o) == Kind::Instance || self.exc_objs.contains_key(&o) || matches!(&self.heap.obj(o).payload, Payload::Method(q, _) if q == "fastapi.httpexc")));
+                self.unwind.cur_exc = exc_v.clone().filter(|v| v.pts.iter().any(|o| self.heap.kind(o) == Kind::Instance || self.m.exc_objs.contains_key(&o) || matches!(&self.heap.obj(o).payload, Payload::Method(q, _) if q == "fastapi.httpexc")));
                 // a bare raise: the exception the handler holds
                 if r.exc.is_none() {
                     self.unwind.cur_exc = self.unwind.handling_values.last().cloned().filter(|v| !v.pts.is_empty());
@@ -1156,7 +1156,7 @@ impl Analyzer {
                 for oid in bv.pts.iter() {
                     match self.heap.kind(oid) {
                         Kind::Class => {
-                            if let Some(k) = self.enum_kind.get(&oid) {
+                            if let Some(k) = self.m.enum_kind.get(&oid) {
                                 ek.mixed |= k.mixed;
                                 ek.is_str |= k.is_str;
                                 ek.repr_value |= k.repr_value;
@@ -1233,7 +1233,7 @@ impl Analyzer {
             self.exec_stmt(st, state);
         }
         self.frames.pop();
-        let enum_base = info.bases.iter().any(|b| self.enum_members.contains_key(b));
+        let enum_base = info.bases.iter().any(|b| self.m.enum_members.contains_key(b));
         if is_enum || enum_base {
             self.make_enum_members(c, coid, lek, str_mixin, state);
         }

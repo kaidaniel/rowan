@@ -338,7 +338,7 @@ pub fn class_decorators(an: &mut Analyzer, c: &'static ast::StmtClassDef, coid: 
     for d in &c.decorator_list {
         let Some(q) = an.decorator_qualname(&d.expression, state) else { continue };
         if q == "functools.total_ordering" {
-            an.total_ordering.insert(coid);
+            an.m.total_ordering.insert(coid);
         }
         if q.ends_with("dataclass") || q.ends_with("attrs.define") || q.ends_with("attr.s") {
             is_dataclass = true;
@@ -520,7 +520,7 @@ impl Analyzer {
         }
         let name = self.heap.obj(c).label.trim_start_matches("class ").to_string();
         let k = intern::key_member(&format!("{}({})", name, parts.join(", ")), None);
-        self.identity_objs.borrow_mut().entry(k).or_insert(o);
+        self.heap.keys.identity_objs.borrow_mut().entry(k).or_insert(o);
         Some(k)
     }
 
@@ -617,6 +617,6 @@ impl Analyzer {
         let t = self.alloc_positional(Kind::Tuple, node, Some(args.to_vec()), Value::new(), crate::domain::DATA, state);
         let strong = self.heap.obj(inst).single;
         self.store_key(inst, Ns::Attr, &crate::domain::KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
-        self.exc_objs.insert(inst, name);
+        self.m.exc_objs.insert(inst, name);
     }
 }

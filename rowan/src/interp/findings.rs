@@ -252,7 +252,7 @@ impl Analyzer {
         // (a fact that has all the texts it shows (4) only joins the value and rows: rendering a
         // large value at every run of the line is what costs — not in torch programs, whose
         // hover is the assignment's own value)
-        if !self.torch_on {
+        if !self.m.torch_on {
             if let Some(e) = self.findings.facts.get_mut(&(node.line, name)) {
                 if e.texts.len() >= 4 {
                     for (oid, item, attr) in rows {
@@ -271,7 +271,7 @@ impl Analyzer {
             }
         }
         // tensors: dims named by locals / letters, printed in the function's own terms
-        let (pctx, tnames, tlegend) = if self.torch_on {
+        let (pctx, tnames, tlegend) = if self.m.torch_on {
             let mut ctx = self.t_print_ctx(state);
             let (names, legend) = crate::models::shape::with_ctx(ctx.clone(), || self.t_hover_names(v, state));
             ctx.atom_names = names.clone();
@@ -288,7 +288,7 @@ impl Analyzer {
         let writing = std::mem::take(&mut self.findings.t_fact_write);
         let e = self.findings.facts.entry((node.line, name)).or_insert_with(|| Fact { rows: IndexMap::new(), texts: Vec::new(), legend: Vec::new(), t_names: FxHashMap::default(), primary: None, written: false });
         // in torch programs an assignment's value is what the hover shows (`y = f(y)`)
-        if self.torch_on {
+        if self.m.torch_on {
             if writing && !e.written {
                 e.written = true;
                 e.texts.clear();
@@ -299,7 +299,7 @@ impl Analyzer {
             }
         }
         // the function analysed on its own (not a call from elsewhere): the general answer
-        let own = self.entry.run.is_some() && self.call_chain.len() <= 1 && self.torch_on;
+        let own = self.entry.run.is_some() && self.call_chain.len() <= 1 && self.m.torch_on;
         if own {
             e.t_names = tnames;
             e.primary = Some(match &e.primary {
@@ -412,7 +412,7 @@ impl Analyzer {
                 }
             }
             let value = self.value_info(&v, state);
-            let tensor = if self.torch_on {
+            let tensor = if self.m.torch_on {
                 // a line run several times in one analysis (a loop body): the join of its values
                 let (chain, entry) = (self.call_chain.clone(), self.entry.run.is_some());
                 let prev = self.findings.t_row_values.get(&(ln, name.clone(), chain.clone(), entry)).cloned();

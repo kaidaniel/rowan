@@ -128,7 +128,7 @@ impl Analyzer {
         if !state.reachable {
             return;
         }
-        if self.torch_on {
+        if self.m.torch_on {
             self.t_narrow(test, truth, state);
             if !state.reachable {
                 return;

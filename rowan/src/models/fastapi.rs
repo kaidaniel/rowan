@@ -571,7 +571,7 @@ impl Analyzer {
             ast::Expr::Subscript(sb) => dotted_last(&sb.value) == "Literal",
             ast::Expr::Name(_) | ast::Expr::Attribute(_) => {
                 let cv = self.eval_in_module(fi.module, ann, state);
-                cv.single().map(|c| self.heap.kind(c) == Kind::Class && self.enum_members.contains_key(&c)).unwrap_or(false)
+                cv.single().map(|c| self.heap.kind(c) == Kind::Class && self.m.enum_members.contains_key(&c)).unwrap_or(false)
             }
             _ => false,
         }
@@ -605,9 +605,9 @@ impl Analyzer {
             out
         } else {
             let cv = self.eval_in_module(fi.module, ann, state);
-            let Some(cls) = cv.single().filter(|c| self.heap.kind(*c) == Kind::Class && self.enum_members.contains_key(c)) else { return v };
+            let Some(cls) = cv.single().filter(|c| self.heap.kind(*c) == Kind::Class && self.m.enum_members.contains_key(c)) else { return v };
             let vk = key_str_lit("value");
-            self.enum_members[&cls].clone().iter().map(|(_, m)| (Value::obj(*m), state.slot(*m, Ns::Attr, vk).kv.as_lit())).collect()
+            self.m.enum_members[&cls].clone().iter().map(|(_, m)| (Value::obj(*m), state.slot(*m, Ns::Attr, vk).kv.as_lit())).collect()
         };
         if allowed.is_empty() {
             return v;

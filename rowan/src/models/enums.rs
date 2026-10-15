@@ -24,7 +24,7 @@ impl crate::interp::Analyzer {
 
     /// The class and literal `value` of a member object of a Flag / Enum.
     pub fn member_value(&self, o: u32, state: &State) -> Option<(u32, KeyId)> {
-        if !self.member_key.contains_key(&o) {
+        if !self.heap.keys.member_key.contains_key(&o) {
             return None;
         }
         let Payload::Cls(cls) = self.heap.obj(o).payload else { return None };
@@ -44,9 +44,9 @@ impl crate::interp::Analyzer {
         }
         let mut out: Vec<KeyId> = Vec::new();
         for o in v.pts.iter() {
-            let mk = *self.member_key.get(&o)?;
+            let mk = *self.heap.keys.member_key.get(&o)?;
             let Payload::Cls(cls) = self.heap.obj(o).payload else { return None };
-            let ek = self.enum_kind.get(&cls).copied()?;
+            let ek = self.m.enum_kind.get(&cls).copied()?;
             if ek.repr_value {
                 let (_, val) = self.member_value(o, state)?;
                 out.push(key_str_lit(&intern::key_py_str(val)));
@@ -61,7 +61,7 @@ impl crate::interp::Analyzer {
     /// `a | b`, `a & b`, `a ^ b` on members of one Flag class with known values: the member
     /// with the resulting value, else a combination (`Perm.R|W`) allocated here.
     pub fn flag_binop(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Option<Value> {
-        if !matches!(op, ast::Operator::BitOr | ast::Operator::BitAnd | ast::Operator::BitXor) || self.member_key.is_empty() {
+        if !matches!(op, ast::Operator::BitOr | ast::Operator::BitAnd | ast::Operator::BitXor) || self.heap.keys.member_key.is_empty() {
             return None;
         }
         if a.pts.len() != 1 || b.pts.len() != 1 || !a.kv.is_bot() || !b.kv.is_bot() {
@@ -69,7 +69,7 @@ impl crate::interp::Analyzer {
         }
         let (ca, va) = self.member_value(a.pts.first()?, state)?;
         let (cb, vb) = self.member_value(b.pts.first()?, state)?;
-        if ca != cb || !self.enum_kind.get(&ca).map(|k| k.flag).unwrap_or(false) {
+        if ca != cb || !self.m.enum_kind.get(&ca).map(|k| k.flag).unwrap_or(false) {
             return None;
         }
         let (x, y) = (intern::key_as_int(va)?, intern::key_as_int(vb)?);
@@ -84,7 +84,7 @@ impl crate::interp::Analyzer {
     /// The member of Flag class `cls` with value `r`: a defined one, else a combination object.
     pub fn flag_member(&mut self, cls: u32, r: i64, node: &Node, state: &mut State) -> u32 {
         let vk = key_str_lit("value");
-        let ms = self.enum_members.get(&cls).cloned().unwrap_or_default();
+        let ms = self.m.enum_members.get(&cls).cloned().unwrap_or_default();
         for (_, m) in &ms {
             if state.slot(*m, Ns::Attr, vk).kv.as_lit() == Some(intern::key_int(r)) {
                 return *m;
@@ -117,22 +117,22 @@ impl crate::interp::Analyzer {
             Some(n) => format!("{}.{}", cname, n),
             None => qual,
         };
-        let ek = self.enum_kind.get(&cls).copied().unwrap_or_default();
+        let ek = self.m.enum_kind.get(&cls).copied().unwrap_or_default();
         let mk = intern::key_member(&text, if ek.mixed { Some(intern::key_int(r)) } else { None });
-        self.member_key.insert(mid, mk);
-        self.key_member.insert(mk, mid);
+        self.heap.keys.member_key.insert(mid, mk);
+        self.heap.keys.key_member.insert(mk, mid);
         let _ = node;
         mid
     }
 
     /// `a in b` on members of one Flag class with known values: `a & b == a`.
     pub fn flag_contains(&self, a: &Value, b: &Value, state: &State) -> Option<bool> {
-        if self.member_key.is_empty() || a.pts.len() != 1 || b.pts.len() != 1 || !a.kv.is_bot() || !b.kv.is_bot() {
+        if self.heap.keys.member_key.is_empty() || a.pts.len() != 1 || b.pts.len() != 1 || !a.kv.is_bot() || !b.kv.is_bot() {
             return None;
         }
         let (ca, va) = self.member_value(a.pts.first()?, state)?;
         let (cb, vb) = self.member_value(b.pts.first()?, state)?;
-        if ca != cb || !self.enum_kind.get(&ca).map(|k| k.flag).unwrap_or(false) {
+        if ca != cb || !self.m.enum_kind.get(&ca).map(|k| k.flag).unwrap_or(false) {
             return None;
         }
         let (x, y) = (intern::key_as_int(va)?, intern::key_as_int(vb)?);
@@ -150,7 +150,7 @@ impl crate::interp::Analyzer {
         match lits {
             Some(ls) => {
                 let mut all_hit = true;
-                let is_flag = self.enum_kind.get(&cls).map(|k| k.flag).unwrap_or(false);
+                let is_flag = self.m.enum_kind.get(&cls).map(|k| k.flag).unwrap_or(false);
                 let all_bits: i64 = ms.iter().filter_map(|(_, m)| state.slot(*m, Ns::Attr, vk).kv.as_lit().and_then(intern::key_as_int)).fold(0, |a, b| a | b);
                 for l in ls.iter() {
                     let hit = ms.iter().find(|(_, m)| state.slot(*m, Ns::Attr, vk).kv.as_lit() == Some(l));
@@ -193,7 +193,7 @@ impl crate::interp::Analyzer {
     /// class with known `name` and `value`, in definition order.
     pub(crate) fn make_enum_members(&mut self, c: &'static ast::StmtClassDef, coid: u32, ek: crate::interp::EnumKind, str_mixin: bool, state: &mut State) {
         let mut members: Vec<(String, u32)> = Vec::new();
-        self.enum_kind.insert(coid, ek);
+        self.m.enum_kind.insert(coid, ek);
         // `auto()`: the lower-cased name (StrEnum), the next power of two (Flag), else the
         // last int value + 1
         let mut last_int: i64 = 0;
@@ -238,7 +238,7 @@ impl crate::interp::Analyzer {
             if let Some(prev) = vlit.and_then(|l| member_vals.iter().find(|(x, _)| *x == l)).map(|(_, m)| *m) {
                 self.cls_slots.insert((coid, Ns::Attr, nk), Value::obj(prev));
                 state.set_slot(coid, Ns::Attr, nk, Value::obj(prev), true);
-                self.enum_aliases.entry(coid).or_default().push((name, prev));
+                self.m.enum_aliases.entry(coid).or_default().push((name, prev));
                 continue;
             }
             let mid = self.heap.alloc_raw(Kind::Instance, &format!("enum:{}:{}", coid, name), "", true, &format!("{}.{}", c.name.id, name), Payload::Cls(coid));
@@ -253,15 +253,15 @@ impl crate::interp::Analyzer {
             state.set_slot(coid, Ns::Attr, nk, Value::obj(mid), true);
             let mval = if ek.mixed { v.kv.as_lit().filter(|_| v.pts.is_empty()) } else { None };
             let mk = crate::intern::key_member(&format!("{}.{}", c.name.id, name), mval);
-            self.member_key.insert(mid, mk);
-            self.key_member.insert(mk, mid);
+            self.heap.keys.member_key.insert(mid, mk);
+            self.heap.keys.key_member.insert(mk, mid);
             if let Some(l) = vlit {
                 member_vals.push((l, mid));
             }
-            self.enum_aliases.entry(coid).or_default().push((name.clone(), mid));
+            self.m.enum_aliases.entry(coid).or_default().push((name.clone(), mid));
             members.push((name, mid));
         }
-        self.enum_members.insert(coid, members);
+        self.m.enum_members.insert(coid, members);
     }
 }
 
@@ -269,8 +269,8 @@ impl crate::interp::Analyzer {
 pub fn member_by_name(an: &mut Analyzer, obj: &Value, key: &Value, node: &Node, guarded: bool, state: &mut State) -> Value {
     let mut out = Value::new();
     for oid in obj.pts.iter() {
-        let ms = an.enum_members[&oid].clone();
-        let aliases = an.enum_aliases.get(&oid).cloned().unwrap_or_default();
+        let ms = an.m.enum_members[&oid].clone();
+        let aliases = an.m.enum_aliases.get(&oid).cloned().unwrap_or_default();
         match key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_str) {
             Some(nm) => match aliases.iter().chain(ms.iter()).find(|(n, _)| *n == *nm) {
                 Some((_, m)) => {
@@ -308,7 +308,7 @@ pub(crate) fn class_attr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, g
         }
         return Value::data(&format!("L{}", node.line));
     }
-    let ms = an.enum_aliases.get(&oid).cloned().unwrap_or_else(|| an.enum_members[&oid].clone());
+    let ms = an.m.enum_aliases.get(&oid).cloned().unwrap_or_else(|| an.m.enum_members[&oid].clone());
     let d = an.heap.alloc_raw(Kind::Dict, &format!("enum-members:{}", oid), "", true, "__members__", Payload::None);
     let mut row = Row::new();
     let mut order = Vec::new();

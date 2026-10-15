@@ -321,7 +321,7 @@ fn m_round_abs(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             return Value::lit(intern::key_int(r as i64));
         }
     }
-    if c.qual == "builtins.abs" && an.torch_on {
+    if c.qual == "builtins.abs" && an.m.torch_on {
         if let Some(d) = crate::models::torch::dim_of_label(a) {
             // dims are not negative
             if crate::models::shape::poly(d).iter().all(|(_, k)| *k > 0) {
@@ -352,7 +352,7 @@ fn m_math(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
         }
     }
-    if an.torch_real && !matches!(c.qual.as_str(), "math.floor" | "math.ceil" | "math.isclose" | "math.isnan" | "math.isinf" | "math.prod" | "math.gcd" | "math.comb" | "math.factorial") {
+    if an.m.torch_real && !matches!(c.qual.as_str(), "math.floor" | "math.ceil" | "math.isclose" | "math.isnan" | "math.isinf" | "math.prod" | "math.gcd" | "math.comb" | "math.factorial") {
         return crate::models::torch::num_value();
     }
     Value::data(&format!("L{}", c.line))
@@ -616,7 +616,7 @@ pub fn external_constant(an: &Analyzer, qual: &str) -> Option<Value> {
         "os.pathsep" => st(":"),
         "os.curdir" => st("."),
         "os.pardir" => st(".."),
-        _ if an.torch_real => None,
+        _ if an.m.torch_real => None,
         "math.pi" => Some(Value::lit(intern::key_float(std::f64::consts::PI))),
         "math.e" => Some(Value::lit(intern::key_float(std::f64::consts::E))),
         "math.tau" => Some(Value::lit(intern::key_float(std::f64::consts::TAU))),
@@ -770,7 +770,7 @@ fn m_fromkeys(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 }
 
 fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    if an.torch_on && matches!(c.qual.as_str(), "builtins.tuple" | "builtins.list") {
+    if an.m.torch_on && matches!(c.qual.as_str(), "builtins.tuple" | "builtins.list") {
         if let Some(a) = c.args.first() {
             if crate::models::torch::size_shape(a).is_some() {
                 return a.clone();
@@ -969,7 +969,7 @@ fn m_callable(an: &mut Analyzer, _st: &mut State, c: &Call) -> Value {
 fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let (Some(v), Some(cv)) = (c.args.first(), c.args.get(1)) else { return Value::data("bool") };
     // isinstance(x, torch.Tensor): decided for tensors and for containers / literals
-    if an.torch_on {
+    if an.m.torch_on {
         if let Some(q) = cv.single().filter(|o| an.heap.kind(*o) == Kind::External).map(|o| an.heap.external_qual(o)) {
             if q == "torch.Tensor" || q == "torch.nn.Parameter" || q == "torch.nn.parameter.Parameter" {
                 let tensor = crate::models::torch::is_tensor(v);
@@ -1186,7 +1186,7 @@ pub fn protocol_members(an: &Analyzer, cls: u32) -> Option<Vec<String>> {
 /// `max(xs, key=f)` / `min(xs)`: an element of the container (the key function runs on it);
 /// with several arguments, any of them.
 fn m_minmax(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
-    if an.torch_on {
+    if an.m.torch_on {
         if let Some(v) = an.t_minmax(c.qual.ends_with("max"), &c.args, st) {
             return v;
         }
@@ -1776,7 +1776,7 @@ fn m_vars(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("vars@L{}", c.line));
     if c.qual == "builtins.vars" {
         if let Some(inst) = a.single().filter(|o| an.heap.kind(*o) == Kind::Instance) {
-            an.attr_mirrors.insert(oid, inst);
+            an.m.attr_mirrors.insert(oid, inst);
         }
     }
     for x in an.record_objects(a) {
@@ -1975,7 +1975,7 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let mut known = true;
         for o in a.pts.iter() {
             // a builtin exception object: its class
-            if let Some(en) = an.exc_objs.get(&o).cloned().filter(|_| an.heap.kind(o) == Kind::Namespace) {
+            if let Some(en) = an.m.exc_objs.get(&o).cloned().filter(|_| an.heap.kind(o) == Kind::Namespace) {
                 outs.push(builtin(an, &en));
                 continue;
             }
@@ -2915,7 +2915,7 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         if let (Some(items), Kind::List) = (&ext_items, an.heap.kind(oid)) {
             let ll = an.heap.llen(oid, st);
             if let Some(n) = ll {
-                let cap = if an.torch_on { 64 } else { 16 };
+                let cap = if an.m.torch_on { 64 } else { 16 };
                 if an.heap.obj(oid).single && an.frame().loop_depth == 0 && n + items.len() <= cap {
                     for (i, item) in items.iter().enumerate() {
                         st.set_slot(oid, Ns::Pos, intern::key_int((n + i) as i64), item.clone(), true);
@@ -2940,7 +2940,7 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let ll = an.heap.llen(oid, st);
         let single = an.heap.obj(oid).single;
         if let Some(n) = ll {
-            if single && name == "append" && an.frame().loop_depth == 0 && n < if an.torch_on { 64 } else { 16 } {
+            if single && name == "append" && an.frame().loop_depth == 0 && n < if an.m.torch_on { 64 } else { 16 } {
                 st.set_slot(oid, Ns::Pos, intern::key_int(n as i64), elem, true);
                 an.heap.set_llen(oid, st, Some(n + 1));
                 continue;
@@ -3894,7 +3894,7 @@ pub fn json_wire(an: &mut Analyzer, st: &mut State, node: &crate::frontend::Node
         let mut out = Value::kv_only(kv);
         for o in x.pts.iter() {
             let m = orig.get(&o).copied().unwrap_or(o);
-            if an.member_key.contains_key(&m) {
+            if an.heap.keys.member_key.contains_key(&m) {
                 out = out.join(&st.slot(m, Ns::Attr, key_str_lit("value")));
             } else {
                 out = out.join(&Value::obj(o));
@@ -3915,7 +3915,7 @@ pub fn json_wire(an: &mut Analyzer, st: &mut State, node: &crate::frontend::Node
         let mut copies: Vec<u32> = seen.values().copied().collect();
         copies.push(n);
         for c in copies {
-            if orig.get(&c).map(|m| an.member_key.contains_key(m)).unwrap_or(false) {
+            if orig.get(&c).map(|m| an.heap.keys.member_key.contains_key(m)).unwrap_or(false) {
                 continue;
             }
             for ns in [Ns::Item, Ns::Pos, Ns::Elem] {
@@ -5278,7 +5278,7 @@ fn m_range(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let oid = an.alloc_simple(Kind::List, &c.node, st, &format!("range@L{}", c.line));
         an.heap.set_llen(oid, st, None);
         // (for the tensor model: an int of unknown value)
-        st.elems.insert(oid, if an.torch_on { KeyVal::data(&crate::models::shape::dim_label(crate::models::shape::unknown())) } else { DATA });
+        st.elems.insert(oid, if an.m.torch_on { KeyVal::data(&crate::models::shape::dim_label(crate::models::shape::unknown())) } else { DATA });
         return Value::obj(oid);
     };
     let len = if step > 0 { (hi - lo + step - 1).max(0) / step } else { (lo - hi - step - 1).max(0) / -step };
@@ -5318,7 +5318,7 @@ fn m_any_all(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 /// length, a closed record whose keys are all definite), else unknown data.
 fn m_len(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(v) = c.args.first() else { return Value::data("len") };
-    if an.torch_on {
+    if an.m.torch_on {
         if let Some(r) = an.t_len(v, &c.node, st) {
             return r;
         }
@@ -5391,7 +5391,7 @@ fn m_sum(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let it = an.iterate(v, &c.node, st);
     an.exhaust(v, st);
     // a sum of tensors: the elements' (broadcast) shape
-    if an.torch_on {
+    if an.m.torch_on {
         let e = it.elem.flat();
         if crate::models::torch::is_tensor(&e) {
             if let Some(s) = an.t_shape(&e, st) {
@@ -5715,6 +5715,39 @@ pub struct Tables {
     pub userdict_classes: FxHashSet<ObjId>,
     /// `defaultdict(factory)`: the factory, called once per inserted key
     pub dd_factories: FxHashMap<ObjId, Value>,
+    // ---- library state the interpreter also reads
+    /// Enum classes: their members in definition order
+    pub enum_members: FxHashMap<ObjId, Vec<(String, ObjId)>>,
+    /// every name of an Enum in definition order, aliases (a name whose value an earlier
+    /// member has) included: name → member (`Color[name]`, `__members__`)
+    pub enum_aliases: FxHashMap<ObjId, Vec<(String, ObjId)>>,
+    /// Enum classes: (mixes in str / int: equal to its value, `str()` is the value (ReprEnum:
+    /// StrEnum, IntEnum, IntFlag), a Flag)
+    pub enum_kind: FxHashMap<ObjId, crate::interp::EnumKind>,
+    /// singledispatch functions: (type, implementation) in registration order; the methods
+    pub sdispatch: FxHashMap<ObjId, Vec<(Value, ObjId)>>,
+    pub sdispatch_method: FxHashSet<ObjId>,
+    pub sd_bypass: Option<ObjId>,
+    /// builtin exception objects: their class names
+    pub exc_objs: FxHashMap<ObjId, String>,
+    /// entry parameters annotated with a TypedDict: the declared row's reads are still the
+    /// input's schema (the parameter's source)
+    pub td_param_src: FxHashMap<ObjId, crate::domain::SourceId>,
+    /// `@functools.wraps(fn)` wrappers: fn
+    pub wrapped: FxHashMap<ObjId, Value>,
+    /// classes decorated with functools.total_ordering
+    pub total_ordering: FxHashSet<ObjId>,
+    /// `vars(obj)` dicts: stores into them are stores of obj's attributes
+    pub attr_mirrors: FxHashMap<ObjId, ObjId>,
+    /// lazy iterators (zip / islice / map …) over one-shot iterators: what consuming them
+    /// takes from each source (Some(n): n items, None: all)
+    pub lazy_src: FxHashMap<ObjId, Vec<(ObjId, Option<usize>)>>,
+    /// some module imported torch: tensor semantics for `@`, tensor methods on unknowns, …
+    pub torch_on: bool,
+    /// torch itself is imported (numpy alone turns the tensor model on too, but keeps exact
+    /// literal arithmetic)
+    pub torch_real: bool,
+    pub series: ObjId,
 }
 
 /// A partial's `func` / `args` / `keywords`.

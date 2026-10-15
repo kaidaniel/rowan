@@ -360,9 +360,6 @@ pub struct Analyzer {
     /// (`interp/tries.rs`)
     pub unwind: Unwind,
     pub frames: Vec<Frame>,
-    /// lazy iterators (zip / islice / map …) over one-shot iterators: what consuming them
-    /// takes from each source (Some(n): n items, None: all)
-    pub lazy_src: FxHashMap<ObjId, Vec<(ObjId, Option<usize>)>>,
     /// a context part every allocation adds (a model run once per receiver)
     pub alloc_extra: Option<String>,
     /// per running comprehension: the cells of its variables (closed over by functions made
@@ -370,13 +367,6 @@ pub struct Analyzer {
     pub comp_cells: Vec<FxHashMap<StrId, ObjId>>,
     /// (canonical key, key as written) while an access with a numerically-equal key runs
     pub key_alias: Option<(KeyId, KeyId)>,
-    /// `vars(obj)` dicts: stores into them are stores of obj's attributes
-    pub attr_mirrors: FxHashMap<ObjId, ObjId>,
-    /// some module imported torch: tensor semantics for `@`, tensor methods on unknowns, …
-    pub torch_on: bool,
-    /// torch itself is imported (numpy alone turns the tensor model on too, but keeps exact
-    /// literal arithmetic)
-    pub torch_real: bool,
     /// model calls running (`run_model`), the outermost one's number, and the objects
     /// allocated in it
     pub model_depth: u32,
@@ -390,33 +380,6 @@ pub struct Analyzer {
     /// the access being made is on a value that may also be a scalar (a str, a number): no
     /// object's lack of the key makes it fail for sure
     pub recv_scalar: bool,
-    /// Enum classes: their members in definition order
-    pub enum_members: FxHashMap<ObjId, Vec<(String, ObjId)>>,
-    /// every name of an Enum in definition order, aliases (a name whose value an earlier
-    /// member has) included: name → member (`Color[name]`, `__members__`)
-    pub enum_aliases: FxHashMap<ObjId, Vec<(String, ObjId)>>,
-    /// Enum classes: (mixes in str / int: equal to its value, `str()` is the value (ReprEnum:
-    /// StrEnum, IntEnum, IntFlag), a Flag)
-    pub enum_kind: FxHashMap<ObjId, EnumKind>,
-    /// members and Flag combinations ↔ their keys (`Key::Member`)
-    pub member_key: FxHashMap<ObjId, intern::KeyId>,
-    pub key_member: FxHashMap<intern::KeyId, ObjId>,
-    /// singledispatch functions: (type, implementation) in registration order; the methods
-    pub sdispatch: FxHashMap<ObjId, Vec<(Value, ObjId)>>,
-    pub sdispatch_method: FxHashSet<ObjId>,
-    pub sd_bypass: Option<ObjId>,
-    /// identity-hashed objects used as dict keys ↔ their keys
-    pub identity_keys: RefCell<FxHashMap<ObjId, KeyId>>,
-    /// builtin exception objects: their class names
-    pub exc_objs: FxHashMap<ObjId, String>,
-    /// entry parameters annotated with a TypedDict: the declared row's reads are still the
-    /// input's schema (the parameter's source)
-    pub td_param_src: FxHashMap<ObjId, crate::domain::SourceId>,
-    /// `@functools.wraps(fn)` wrappers: fn
-    pub wrapped: FxHashMap<ObjId, Value>,
-    /// classes decorated with functools.total_ordering
-    pub total_ordering: FxHashSet<ObjId>,
-    pub identity_objs: RefCell<FxHashMap<KeyId, ObjId>>,
     /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
     pub bypass_setattr: bool,
     pub cond_depth: i32,
@@ -427,7 +390,6 @@ pub struct Analyzer {
     /// class attributes (flow-insensitive)
     pub cls_slots: FxHashMap<(ObjId, Ns, KeyId), Value>,
 
-    pub series: ObjId,
     pub none_v: Value,
     /// the comprehension written as the first argument of `torch.cat` / `torch.stack` being
     /// called (its address): those raise on no tensors, so it ran at least once
@@ -478,7 +440,7 @@ impl Analyzer {
             ..Default::default()
         };
         an.program.main_module = an.make_module("__main__", Some(filename), idx, tree);
-        an.series = an.alloc_global(Kind::Series, "builtin:Series", "Series", Payload::None);
+        an.m.series = an.alloc_global(Kind::Series, "builtin:Series", "Series", Payload::None);
         Ok(an)
     }
 

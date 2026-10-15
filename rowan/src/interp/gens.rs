@@ -683,7 +683,7 @@ impl Analyzer {
     /// sources.
     pub fn consume_lazy(&mut self, v: &Value, full: bool, state: &mut State) {
         for lo in v.pts.iter() {
-            let Some(srcs) = self.lazy_src.get(&lo).cloned() else { continue };
+            let Some(srcs) = self.m.lazy_src.get(&lo).cloned() else { continue };
             // (consumed once on a path: a one-shot iterator itself)
             let done = key_str_lit("\u{1}consumed");
             if state.has_slot(lo, Ns::Attr, done) {

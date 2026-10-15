@@ -265,7 +265,7 @@ impl Analyzer {
         for o in v.pts.iter() {
             let names = if let Some(c) = self.heap.instance_class(o) {
                 self.exc_class_names(c)?
-            } else if let Some(n) = self.exc_objs.get(&o) {
+            } else if let Some(n) = self.m.exc_objs.get(&o) {
                 super::builtin_exc_names(n)
             } else if self.heap.kind(o) == Kind::External && self.heap.class_info_opt(o).is_none() {
                 // (a raised class: `raise KeyError`)
@@ -329,7 +329,7 @@ impl Analyzer {
                     state.set_row(o, Ns::Attr, crate::domain::Row::with_source(crate::domain::Source::new(n, crate::domain::SourceKind::Data)));
                 }
                 state.set_slot(o, Ns::Attr, key_str_lit("args"), Value::data("args"), false);
-                self.exc_objs.insert(o, n.to_string());
+                self.m.exc_objs.insert(o, n.to_string());
                 self.unwind.cur_exc = Some(Value::obj(o));
             }
         }

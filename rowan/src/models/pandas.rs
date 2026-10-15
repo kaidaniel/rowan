@@ -188,7 +188,7 @@ fn last(q: &str) -> &str {
 }
 
 fn series(an: &Analyzer) -> Value {
-    Value::with_kv(ObjSet::one(an.series), DATA)
+    Value::with_kv(ObjSet::one(an.m.series), DATA)
 }
 
 fn series_call(an: &mut Analyzer, _st: &mut State, _c: &Call) -> Value {
@@ -210,7 +210,7 @@ pub fn is_series_obj(an: &Analyzer, o: u32) -> bool {
 
 /// Any Series: the generic one or a tracked one.
 pub fn is_seriesish(an: &Analyzer, v: &Value) -> bool {
-    v.pts.iter().any(|o| o == an.series || is_series_obj(an, o))
+    v.pts.iter().any(|o| o == an.m.series || is_series_obj(an, o))
 }
 
 fn vkey() -> KeyId {
@@ -237,7 +237,7 @@ pub fn new_series(an: &mut Analyzer, st: &mut State, node: &Node, idx: Row, name
 }
 
 fn series_name(an: &Analyzer, st: &State, sid: u32) -> Value {
-    if sid == an.series {
+    if sid == an.m.series {
         return Value::data("name");
     }
     st.slot_opt(sid, Ns::Meta, mk("name")).unwrap_or_else(|| Value::data("name"))
@@ -310,14 +310,14 @@ pub fn series_getattr(an: &mut Analyzer, oid: u32, name: &str, node: &Node, st: 
             an.heap.obj_mut(lid).payload = Payload::Locidx(name.to_string(), oid);
             Value::obj(lid)
         }
-        "index" if oid != an.series => {
+        "index" if oid != an.m.series => {
             let vid = an.heap.alloc_raw(Kind::View, &format!("view:keys:{}", oid), "", true, "index", Payload::View(ViewKind::Keys, Value::obj(oid)));
             an.heap.obj_mut(vid).payload = Payload::View(ViewKind::Keys, Value::obj(oid));
             Value::obj(vid)
         }
         "name" => series_name(an, st, oid),
         "values" | "array" | "dtype" | "shape" | "size" | "empty" | "nbytes" | "ndim" | "hasnans" | "is_unique" | "is_monotonic_increasing" | "is_monotonic_decreasing" | "index" | "axes" | "dtypes" | "flags" | "attrs" => Value::data(&format!("{}@L{}", name, node.line)),
-        "iloc" | "loc" | "at" | "iat" if oid != an.series => {
+        "iloc" | "loc" | "at" | "iat" if oid != an.m.series => {
             let label = format!("{} of {}", name, an.heap.obj(oid).label);
             let lid = an.heap.alloc_raw(Kind::Locidx, &format!("sloc:{}:{}", name, oid), "", true, &label, Payload::Locidx(format!("s{}", name), oid));
             an.heap.obj_mut(lid).payload = Payload::Locidx(format!("s{}", name), oid);

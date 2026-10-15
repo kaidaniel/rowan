@@ -118,6 +118,18 @@ pub struct Obj {
 }
 
 
+/// Keys standing for objects: Enum members and Flag combinations (`Key::Member`), objects
+/// hashed by identity used as dict keys (`Analyzer::identity_key`), read back by `unkey`.
+#[derive(Default)]
+pub struct ObjKeys {
+    /// members and Flag combinations ↔ their keys
+    pub member_key: FxHashMap<ObjId, KeyId>,
+    pub key_member: FxHashMap<KeyId, ObjId>,
+    /// identity-hashed objects used as dict keys ↔ their keys
+    pub identity_keys: std::cell::RefCell<FxHashMap<ObjId, KeyId>>,
+    pub identity_objs: std::cell::RefCell<FxHashMap<KeyId, ObjId>>,
+}
+
 /// The objects made so far (object 0 is a placeholder: no value points to it).
 pub struct Heap {
     objects: Vec<Obj>,
@@ -127,12 +139,14 @@ pub struct Heap {
     site_clones: FxHashMap<String, usize>,
     /// allocations so far (`Obj::born`): the collectors' marks
     serial: u64,
+    /// keys standing for objects
+    pub keys: ObjKeys,
 }
 
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, literal_len: None, known_prefix: None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0 };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0 }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default() }
     }
 }
 

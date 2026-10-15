@@ -128,10 +128,10 @@ impl Analyzer {
         // a closure made inside a concrete call (not an entry run): its own analysis with
         // open parameters comes from the closure the factory's entry run makes
         let creator = self.frames.iter().rev().find_map(|f| f.func);
-        if self.torch_on && has_closure && creator.is_some() && self.entry.run != creator {
+        if self.m.torch_on && has_closure && creator.is_some() && self.entry.run != creator {
             self.entry.concrete_closures.insert(oid);
         }
-        if self.torch_on {
+        if self.m.torch_on {
             self.m.t_funcs_by_qual.entry(qual.clone()).or_default().push(oid);
         }
         Value::obj(oid)
@@ -475,9 +475,9 @@ impl Analyzer {
         match t {
             ast::Expr::Name(n) => {
                 let name = s(n.id.as_str());
-                let named = if self.torch_on { self.t_name_number(name, v) } else { None };
+                let named = if self.m.torch_on { self.t_name_number(name, v) } else { None };
                 let v = named.as_ref().unwrap_or(v);
-                if self.torch_on {
+                if self.m.torch_on {
                     self.t_name_result(name, v);
                 }
                 self.store_name(name, v.clone(), state);
@@ -506,7 +506,7 @@ impl Analyzer {
                 }
             }
             ast::Expr::Tuple(ast::ExprTuple { elts, .. }) | ast::Expr::List(ast::ExprList { elts, .. })
-                if self.torch_on && {
+                if self.m.torch_on && {
                     let star = elts.iter().position(|e| matches!(e, ast::Expr::Starred(_)));
                     let n = frontend::node(t);
                     match self.t_unpack(v, elts.len(), star, &n, state) {
@@ -948,9 +948,9 @@ impl Analyzer {
                     let iv = self.elem_value(&ii.elem, node, "en");
                     pairs.push((Value::data(ENUM_INDEX), iv));
                 }
-                Kind::Class if self.enum_members.contains_key(&oid) => {
+                Kind::Class if self.m.enum_members.contains_key(&oid) => {
                     // an Enum class: its members in order
-                    let ms: Vec<Value> = self.enum_members[&oid].iter().map(|(_, m)| Value::obj(*m)).collect();
+                    let ms: Vec<Value> = self.m.enum_members[&oid].iter().map(|(_, m)| Value::obj(*m)).collect();
                     if let Some(its) = items.as_mut() {
                         its.extend(ms.iter().cloned());
                     }
@@ -1082,7 +1082,7 @@ impl Analyzer {
                     }
                     elems.push(Value::kv_only(KeyVal::lits(ks)));
                 }
-            } else if let Some(e) = self.torch_on.then(|| self.t_iter_elem(v, state)).flatten() {
+            } else if let Some(e) = self.m.torch_on.then(|| self.t_iter_elem(v, state)).flatten() {
                 elems.push(e);
             } else {
                 elems.push(line_data.clone());

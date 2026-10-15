@@ -98,7 +98,7 @@ impl crate::interp::Analyzer {
         let oid = self.alloc_at(Kind::Namespace, node, state, &format!("{}@L{}", cls_name, node.line), Payload::None, Some(row), Ns::Attr, None, None);
         let strong = self.heap.obj(oid).single;
         self.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, node, state);
-        self.exc_objs.insert(oid, cls_name.to_string());
+        self.m.exc_objs.insert(oid, cls_name.to_string());
         Value::obj(oid)
     }
 
@@ -109,7 +109,7 @@ impl crate::interp::Analyzer {
         }
         let mut out = Vec::new();
         for o in v.pts.iter() {
-            let name = self.exc_objs.get(&o)?;
+            let name = self.m.exc_objs.get(&o)?;
             let t = state.slot(o, Ns::Attr, key_str_lit("args"));
             let tid = t.single()?;
             let n = self.heap.llen(tid, state)?;
@@ -146,7 +146,7 @@ pub fn m_excinit(an: &mut crate::interp::Analyzer, st: &mut State, c: &crate::in
         let t = an.alloc_positional(Kind::Tuple, &c.node, Some(c.args.clone()), Value::new(), DATA, st);
         let strong = recv.pts.len() == 1 && an.heap.obj(o).single;
         an.store_key(o, Ns::Attr, &KeyVal::Lit(key_str_lit("args")), &t, strong, &c.node, st);
-        an.exc_objs.insert(o, name);
+        an.m.exc_objs.insert(o, name);
     }
     an.none_v.clone()
 }

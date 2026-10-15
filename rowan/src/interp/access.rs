@@ -166,7 +166,7 @@ impl Analyzer {
                 return key_str_lit(&s.to_lowercase());
             }
         }
-        let members = !self.member_key.is_empty();
+        let members = !self.heap.keys.member_key.is_empty();
         let base = |k: KeyId| if members { intern::key_member_value(k).unwrap_or(k) } else { k };
         let kb = base(k);
         let x = numeric_of(kb);
@@ -194,7 +194,7 @@ impl Analyzer {
         let mut ks: Vec<KeyId> = Vec::new();
         let mut rest: Vec<u32> = Vec::new();
         for o in v.pts.iter() {
-            match self.member_key.get(&o).copied().or_else(|| self.identity_key(o)) {
+            match self.heap.keys.member_key.get(&o).copied().or_else(|| self.identity_key(o)) {
                 Some(k) => ks.push(k),
                 None => rest.push(o),
             }
@@ -257,7 +257,7 @@ impl Analyzer {
     /// A key standing for one object hashed by its identity (a future, a function, an instance
     /// of a class without `__eq__` / `__hash__`), while that object is one runtime object.
     pub fn identity_key(&self, o: u32) -> Option<KeyId> {
-        if let Some(k) = self.identity_keys.borrow().get(&o) {
+        if let Some(k) = self.heap.keys.identity_keys.borrow().get(&o) {
             return Some(*k);
         }
         let ob = self.heap.obj(o);
@@ -270,7 +270,7 @@ impl Analyzer {
             Kind::Instance => match self.heap.instance_class(o) {
                 Some(c) => {
                     let ci = self.heap.class_info(c);
-                    !ci.open_base && ci.dataclass_fields.borrow().is_none() && !ci.lib.pydantic && !crate::models::pydantic::is_model(self, c) && !ci.lib.named_tuple && !ci.lib.dict_base && !ci.lib.typed_dict && !ci.pyd_dataclass.get() && self.class_lookup(c, "__eq__").is_none() && self.class_lookup(c, "__hash__").is_none() && !self.enum_members.contains_key(&c)
+                    !ci.open_base && ci.dataclass_fields.borrow().is_none() && !ci.lib.pydantic && !crate::models::pydantic::is_model(self, c) && !ci.lib.named_tuple && !ci.lib.dict_base && !ci.lib.typed_dict && !ci.pyd_dataclass.get() && self.class_lookup(c, "__eq__").is_none() && self.class_lookup(c, "__hash__").is_none() && !self.m.enum_members.contains_key(&c)
                 }
                 None => false,
             },
@@ -280,14 +280,14 @@ impl Analyzer {
             return None;
         }
         let k = intern::key_member(&format!("<{} #{}>", ob.label, o), None);
-        self.identity_keys.borrow_mut().insert(o, k);
-        self.identity_objs.borrow_mut().insert(k, o);
+        self.heap.keys.identity_keys.borrow_mut().insert(o, k);
+        self.heap.keys.identity_objs.borrow_mut().insert(k, o);
         Some(k)
     }
 
     /// Member keys (read back from a record's keys) are the member objects.
     pub fn unkey(&self, v: &Value) -> Value {
-        if self.key_member.is_empty() && self.identity_objs.borrow().is_empty() {
+        if self.heap.keys.key_member.is_empty() && self.heap.keys.identity_objs.borrow().is_empty() {
             return v.clone();
         }
         let lits = crate::domain::kv_literals(&v.kv);
@@ -297,7 +297,7 @@ impl Analyzer {
         let mut pts = v.pts.clone();
         let mut rest: Vec<KeyId> = Vec::new();
         for k in lits.iter() {
-            match self.key_member.get(&k).copied().or_else(|| self.identity_objs.borrow().get(&k).copied()) {
+            match self.heap.keys.key_member.get(&k).copied().or_else(|| self.heap.keys.identity_objs.borrow().get(&k).copied()) {
                 Some(m) => pts = pts.union(&crate::domain::ObjSet::one(m)),
                 None => rest.push(k),
             }
@@ -419,7 +419,7 @@ impl Analyzer {
             }
         }
         // `Color["RED"]`: an Enum's member by name
-        if ns == Ns::Item && !obj.pts.is_empty() && obj.pts.iter().all(|o| self.enum_members.contains_key(&o)) {
+        if ns == Ns::Item && !obj.pts.is_empty() && obj.pts.iter().all(|o| self.m.enum_members.contains_key(&o)) {
             return crate::models::enums::member_by_name(self, obj, key, node, guarded, state);
         }
         // (all targets' values joined at once: a pairwise join over many targets is quadratic)
@@ -603,7 +603,7 @@ impl Analyzer {
                         }
                     }
                 }
-                Kind::Series => parts.push(Value::with_kv(ObjSet::one(self.series), DATA)),
+                Kind::Series => parts.push(Value::with_kv(ObjSet::one(self.m.series), DATA)),
                 Kind::Frame if ns == Ns::Item => {
                     let v = crate::models::pandas::frame_getitem_n(self, oid, key, node, state, guarded, report);
                     parts.push(v);
@@ -731,7 +731,7 @@ impl Analyzer {
                         self.require_providers_k(&cls, &row, true, state, Some(k), ns);
                     }
                     if cls.tier == Tier::Proven && ns == Ns::Item {
-                        if let Some(src) = self.td_param_src.get(&oid).copied() {
+                        if let Some(src) = self.m.td_param_src.get(&oid).copied() {
                             let fresh = !state.reqs.contains(&src, &k);
                             state.require(src, k, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
                             if fresh && (self.branch_depth > 0 || self.cond_depth > 0) {
@@ -929,9 +929,9 @@ impl Analyzer {
                         self.store_key(oid, Ns::Item, &key.kv, v, s1, node, state);
                     }
                 }
-                Kind::Dict if self.attr_mirrors.contains_key(&oid) => {
+                Kind::Dict if self.m.attr_mirrors.contains_key(&oid) => {
                     // a `vars(obj)` dict: obj's attributes change with it
-                    let inst = self.attr_mirrors[&oid];
+                    let inst = self.m.attr_mirrors[&oid];
                     let s1 = strong && self.strongable(inst);
                     self.store_key(inst, Ns::Attr, &key.kv, v, s1, node, state);
                 }
@@ -1259,7 +1259,7 @@ impl Analyzer {
                             }
                         }
                         if changed { Value::with_kv(out.pts, v.kv.clone()) } else { v }
-                    } else if self.enum_members.contains_key(&oid) && (name == "__members__" || (!name.starts_with("__") && !self.heap.class_info(oid).open_base)) {
+                    } else if self.m.enum_members.contains_key(&oid) && (name == "__members__" || (!name.starts_with("__") && !self.heap.class_info(oid).open_base)) {
                         crate::models::enums::class_attr(self, oid, name, node, guarded, state)
                     } else if crate::models::pydantic::PYD_ATTRS.contains(&name) && crate::models::pydantic::is_model(self, oid) {
                         crate::models::pydantic::attr_value(self, state, oid, name, node)
@@ -1323,7 +1323,7 @@ impl Analyzer {
                     crate::models::names_dict(self, state, node, &names, None, "annotation")
                 }
                 Kind::Function if matches!(name, "__name__" | "__qualname__" | "__module__" | "__wrapped__" | "__doc__") && state.slot_opt(oid, Ns::Attr, nk).is_none() => {
-                    match self.wrapped.get(&oid).cloned() {
+                    match self.m.wrapped.get(&oid).cloned() {
                         Some(w) if name == "__wrapped__" => w,
                         Some(w) => self.load_attr(&w, name, node, state, false),
                         None => {
@@ -1342,7 +1342,7 @@ impl Analyzer {
                     }
                 }
                 // a singledispatch function's register
-                Kind::Function if name == "register" && self.sdispatch.contains_key(&oid) => self.method_value("sdispatch.register", &Value::obj(oid)),
+                Kind::Function if name == "register" && self.m.sdispatch.contains_key(&oid) => self.method_value("sdispatch.register", &Value::obj(oid)),
                 Kind::Function => state.slot_opt(oid, Ns::Attr, nk).unwrap_or_else(|| Value::data(&format!("L{}", node.line))),
                 Kind::Bound => Value::data(&format!("L{}", node.line)),
                 Kind::View => {

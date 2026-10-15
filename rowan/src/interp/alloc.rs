@@ -112,8 +112,8 @@ impl Analyzer {
                         None => {
                             self.heap.obj_mut(oid).single = false;
                             crate::state::mark_merged(oid);
-                            if let Some(k) = self.identity_keys.borrow_mut().remove(&oid) {
-                                self.identity_objs.borrow_mut().remove(&k);
+                            if let Some(k) = self.heap.keys.identity_keys.borrow_mut().remove(&oid) {
+                                self.heap.keys.identity_objs.borrow_mut().remove(&k);
                             }
                         }
                     }

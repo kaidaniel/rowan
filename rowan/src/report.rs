@@ -180,7 +180,7 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
     }
     section(&mut lines, "accesses that may fail", problems);
     // tensor shapes: definite mismatches, then what each line needs of its inputs
-    if an.torch_on {
+    if an.m.torch_on {
         let mut shapes: Vec<String> = Vec::new();
         let mut errs: Vec<&crate::models::torch::ShapeNote> = an.m.shape_errors.iter().collect();
         // (a line of another module is named with its file: `pkg/layers.py:L12`)
@@ -1088,7 +1088,7 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
             items.push(format!("{}{}={}", intern::key_py_str(*k), row.mark(*k), val));
         } else {
             // (an object used as a key: the object, by name)
-            let key = match an.identity_objs.borrow().get(k).copied() {
+            let key = match an.heap.keys.identity_objs.borrow().get(k).copied() {
                 Some(ko) => render_object(an, state, ko, VALUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed), seen),
                 None => crate::domain::key_display(*k),
             };

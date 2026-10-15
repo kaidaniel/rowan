@@ -132,7 +132,7 @@ impl Analyzer {
             let r = self.t_layer_call(oid, args, kwargs, node, state);
             return self.t_forward_hooks(oid, args, r, state, node);
         }
-        if kind == Kind::Instance && self.torch_on && self.t_is_module_instance(oid) {
+        if kind == Kind::Instance && self.m.torch_on && self.t_is_module_instance(oid) {
             if let Some(cls) = self.heap.instance_class(oid) {
                 if self.class_lookup(cls, "__call__").is_none() {
                     if let Some(m) = self.class_lookup(cls, "forward") {
@@ -286,7 +286,7 @@ impl Analyzer {
             return Value::new();
         }
         // `Color(3)`: the Enum member with that value, else ValueError
-        if let (Some(ms), Some(a)) = (self.enum_members.get(&cls).cloned(), args.first()) {
+        if let (Some(ms), Some(a)) = (self.m.enum_members.get(&cls).cloned(), args.first()) {
             return self.enum_lookup(cls, &ms, a, node, state);
         }
         // a TypedDict class makes a plain dict
@@ -452,7 +452,7 @@ impl Analyzer {
     fn call_user_inner(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, _call_ast: Option<&'static ast::ExprCall>, entry: bool) -> Value {
         let forced = self.gens.force_at.take();
         // a singledispatch function: the implementation for the first argument's type
-        if self.sdispatch.contains_key(&foid) && self.sd_bypass.take() != Some(foid) && !args.is_empty() && star_args.is_empty() {
+        if self.m.sdispatch.contains_key(&foid) && self.m.sd_bypass.take() != Some(foid) && !args.is_empty() && star_args.is_empty() {
             return self.sdispatch_call(foid, self_v, args, kwargs, star_kwargs, state, node, entry);
         }
         if !state.narrowed.is_empty() {

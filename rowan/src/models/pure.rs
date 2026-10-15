@@ -105,7 +105,7 @@ pub fn try_pure(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
         }
         "math" => {
             // (torch programs: math results stay the tensor model's numbers)
-            if !c.kwargs.is_empty() || an.torch_real {
+            if !c.kwargs.is_empty() || an.m.torch_real {
                 return None;
             }
             pyvalues::math_call(name, &args?).map(Value::lit)

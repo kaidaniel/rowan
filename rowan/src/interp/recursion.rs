@@ -88,7 +88,7 @@ impl Analyzer {
                     if let Some(k) = a.kv.as_lit().filter(|_| a.pts.is_empty()) {
                         return Some(intern::key_repr(k));
                     }
-                    if self.torch_on {
+                    if self.m.torch_on {
                         if let Some(sh) = crate::models::torch::tensor_shape(a) {
                             if sh.rest.is_none() && sh.suffix.is_empty() && sh.assume.is_empty() {
                                 let dims: Option<Vec<i64>> = sh.prefix.iter().map(|d| crate::models::shape::as_lit(*d)).collect();

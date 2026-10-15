@@ -572,8 +572,8 @@ impl Analyzer {
                     }
                 }
                 if found.is_none() {
-                    let ec = v.pts.iter().find(|o| self.enum_members.contains_key(o)).or_else(|| {
-                        let c: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| self.enum_members.contains_key(c) && self.heap.class_info_opt(*c).map(|ci| ci.name == n).unwrap_or(false)).collect();
+                    let ec = v.pts.iter().find(|o| self.m.enum_members.contains_key(o)).or_else(|| {
+                        let c: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| self.m.enum_members.contains_key(c) && self.heap.class_info_opt(*c).map(|ci| ci.name == n).unwrap_or(false)).collect();
                         c.iter().copied().find(|x| self.heap.class_info(*x).module == module).or_else(|| c.first().copied())
                     });
                     if let Some(c) = ec {
@@ -1807,7 +1807,7 @@ impl Analyzer {
             }
             Ann::Enum(c) => {
                 let vk = key_str_lit("value");
-                let members: Vec<(ObjId, Option<KeyId>)> = self.enum_members.get(c).cloned().unwrap_or_default().iter().map(|(_, m)| (*m, state.slot(*m, Ns::Attr, vk).kv.as_lit())).collect();
+                let members: Vec<(ObjId, Option<KeyId>)> = self.m.enum_members.get(c).cloned().unwrap_or_default().iter().map(|(_, m)| (*m, state.slot(*m, Ns::Attr, vk).kv.as_lit())).collect();
                 let all = Value::objs(crate::domain::ObjSet::from_vec(members.iter().map(|(m, _)| *m).collect()));
                 let mut out = Value::new();
                 let (mut bad, mut total, mut unsure) = (0, 0, false);
@@ -2541,7 +2541,7 @@ impl Analyzer {
         }
         for o in v.pts.iter() {
             // JSON mode: an Enum member is its value
-            if opts.json && self.member_key.contains_key(&o) {
+            if opts.json && self.heap.keys.member_key.contains_key(&o) {
                 outs.push(state.slot(o, Ns::Attr, key_str_lit("value")));
                 continue;
             }
