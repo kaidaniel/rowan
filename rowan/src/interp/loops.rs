@@ -206,6 +206,8 @@ impl Analyzer {
             }
             if let Some((o, c0)) = cursor {
                 self.set_cursor(o, Some(c0 + idx + 1), state);
+            } else if idx > 0 {
+                self.note_resumes(state);
             }
             let skipped = if *sure { None } else { Some(state.copy()) };
             self.unrolled_iteration(idx, &f.body, state, &mut breaks, &mut |an, st| an.bind_iter_target(&f.target, &Elem::One(item.clone()), st));
@@ -290,6 +292,8 @@ impl Analyzer {
             let hits0 = crate::state::view_hits();
             an.exec_block(&f.body, body_s);
             ends = an.view_ends(&views, hits0, body_s);
+            // (a generator's next item is asked for at the back edge)
+            an.note_resumes(body_s);
         });
         let mut exit_s = head.copy();
         let elem_v = it.elem.value_part();
