@@ -55,7 +55,11 @@ impl Analyzer {
         let it = self.iterate(&itv, &gn, state);
         let understood = g.ifs.iter().all(|c| cond_is_exclusion(c, &g.target));
         if let Some(items) = &it.items {
-            if items.len() <= limit {
+            let same = self.identical_summaries(items);
+            if i == 0 && gens.len() == 1 && g.ifs.is_empty() && (same || items.len() > limit) {
+                self.cx.summary_items.insert(own, items.len());
+            }
+            if items.len() <= limit && !same {
                 // known items: each is its own straight-line iteration; a filter decided
                 // for the item keeps it straight-line (positions survive), an undecided one
                 // makes the iteration conditional
@@ -100,7 +104,14 @@ impl Analyzer {
         let mut s2 = state.copy();
         let mark0 = self.heap.serial();
         let vmark = self.findings.mark();
+        // (one pass stands for every item: what it makes is one object per item, a summary)
+        let hmark = self.heap.len() as u32;
+        self.frame_mut().loop_depth += 1;
+        self.cx.recent_stack.push(Vec::new());
         self.comp_run_one(g, gens, i, limit, &elem, &mut s2, body, understood, own);
+        let recs = self.cx.recent_stack.pop().unwrap_or_default();
+        self.frame_mut().loop_depth -= 1;
+        self.rename_recent(&mut s2, state, recs, hmark);
         if it.exhaustive && understood && s2.reachable {
             self.cx.comp_known.pop();
             state.replace_with(s2);
@@ -195,6 +206,7 @@ impl Analyzer {
         };
         let limit = comp_unroll_limit(&[key_e, val_e]);
         self.comp(&dc.generators, limit, state, &mut body, oid);
+        self.cx.summary_items.remove(&oid);
         Value::obj(oid)
     }
 
@@ -248,7 +260,17 @@ impl Analyzer {
         }
         self.comp(gens, limit, state, &mut body, oid);
         self.cx.comp_known.truncate(mark);
+        let summary_n = self.cx.summary_items.remove(&oid).filter(|_| strong && kind != Kind::Set);
         if positional {
+            self.heap.set_llen(oid, state, Some(n));
+        } else if let Some(n) = summary_n.filter(|n| *n <= 64) {
+            // (known items in one pass: as many as there were, each the pass's element)
+            let e = state.slot(oid, Ns::Elem, STAR);
+            let ev = Value::with_kv(e.pts, state.elems.get(&oid).unwrap_or(crate::domain::DATA));
+            state.drop_obj_ns(oid, Ns::Pos);
+            for i in 0..n {
+                state.set_slot(oid, Ns::Pos, key_int(i as i64), ev.clone(), true);
+            }
             self.heap.set_llen(oid, state, Some(n));
         } else {
             self.heap.set_llen(oid, state, None);

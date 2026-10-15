@@ -30,12 +30,12 @@ namespace packages).
   changes outside `State` (to replay), output (appended), caches.
 * **Rows** are the key-set model: `present` (may be there) ⊇ `likely` (there unless unknown
   code removed it) ⊇ `definite` (there on every path), plus `absent`, open `sources` (inputs),
-  and `mutators` (unknown calls). A row without sources or mutators is *closed*. A successful
-  read narrows the key in.
+  and `mutators` (unknown calls). A row without sources or mutators is *closed*; a successful read narrows the key in.
 * **Statements.** A test is evaluated once into the states where it is true and false
   (`split`, `narrow.rs`: narrowing reads its parts' values, `traced`); both branches run, join.
   Loops over at most 16 known items are unrolled (comprehensions calling nothing per item: 64);
-  others run to a fixpoint (40 rounds, then widened; verdicts are the last round's). A running `try`
+  others run to a fixpoint (40 rounds, then widened; verdicts are the last round's), making
+  summaries; a summary record a loop goes through is one record per iteration (`focus`). A running `try`
   (`TryCtx`) records the state at every point of its body and callees that may raise (a raise,
   a failing read, a model's raise, any unknown call: class `any_exc`), joined per class;
   handlers start from the raises they may catch, the rest go on through the `finally` to the

@@ -861,7 +861,7 @@ impl Analyzer {
 
     pub fn strongable(&self, oid: u32) -> bool {
         let o = self.heap.obj(oid);
-        o.single || o.iter_elem
+        o.single || o.iter_elem || self.cx.focus.contains(&oid)
     }
 
     /// A key proven on a view of a record is proven on the record it was derived from.

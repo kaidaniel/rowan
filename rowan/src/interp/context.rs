@@ -48,6 +48,14 @@ pub struct Context {
     /// instances whose `__init__` is running for their construction (stores into them are
     /// strong)
     pub fresh_init: FxHashSet<ObjId>,
+    /// per running summary comprehension (`[Block() for _ in range(n)]`: its iterations
+    /// cannot be told apart; by the object it makes): the number of items its one iteration
+    /// stands for
+    pub summary_items: FxHashMap<ObjId, usize>,
+    /// summary records a running loop takes its items from (`for r in rows` over
+    /// `[dict(x) for x in data]`): within an iteration the item is one record, so stores into
+    /// it and keys a read or test proves are strong, as for an input's element (`iter_elem`)
+    pub focus: Vec<ObjId>,
 }
 
 /// Modes an evaluation sets for the code it calls, restored after: how an access reports, how

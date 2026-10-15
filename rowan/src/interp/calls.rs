@@ -377,7 +377,7 @@ impl Analyzer {
                     } else {
                         format!("o{}/{}", recv.id, site)
                     };
-                    return (ctx, recv.single);
+                    return (ctx, true);
                 }
             }
         }
