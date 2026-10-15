@@ -187,7 +187,8 @@ assert(!hover(ki, ksrc, 12, "d").includes("✗"), hover(ki, ksrc, 12, "d"));
   assert(hl.includes("Tensor[64, ?, V]"), hl);
 }
 
-// ---- the owner's GPT: its 96 heads within their budget, the model's output keeps its rank;
+// ---- the owner's GPT: its 96 heads within their budget, the model's output keeps its rank (and
+// the batch window's length: train's unknown length is one value);
 // a dim bound to `_` (`_ , T = ids.shape`) is not named `_` (it reads as "any dim")
 {
   const gpt = path.join(root, "tests", "torch", "playground", "p06_gpt", "p06_gpt.py");
@@ -195,9 +196,22 @@ assert(!hover(ki, ksrc, 12, "d").includes("✗"), hover(ki, ksrc, 12, "d"));
   const idx = indexResult(facts(gpt));
   const at = (pre) => src.findIndex((l) => l.startsWith(pre)) + 1;
   const hl = hover(idx, src, at("        logits: Tensor = model(x)"), "logits");
-  assert(hl.includes("Tensor[68, ?, V]"), hl);
+  assert(hl.includes("Tensor[68, 64, V]"), hl);
   const hx = hover(idx, src, at("            x = block(x)"), "x");
   assert(hx.includes("Tensor[A, T, d]") && hx.includes("- `A, T` = `ids.shape`"), hx);
+}
+
+// ---- a list appended to on some paths: each list it may be, not `list[?]`; an item of a
+// slice to a bound not known is the list's own
+{
+  const f = path.join(root, "tests", "cases", "z517_prefix_slice_unknown_bound.py");
+  const src = fs.readFileSync(f, "utf8").split("\n");
+  const idx = indexResult(facts(f));
+  const at = (pre) => src.findIndex((l) => l.startsWith(pre)) + 1;
+  const hz = hover(idx, src, at("z1 = zs[1]"), "zs");
+  assert(hz.includes('["x"] | ["x", "y"]'), hz);
+  const hr = hover(idx, src, at("r1 = first[1]"), "r1");
+  assert(hr.includes('"tags"'), hr);
 }
 
 // ---- a function one of several a dict holds, picked by a key rowan cannot compute: what

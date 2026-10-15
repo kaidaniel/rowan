@@ -266,33 +266,26 @@ impl Analyzer {
     /// elements), else any element (may raise IndexError). True: the read is done.
     fn item_of_sequence(&mut self, oid: ObjId, kind: Kind, key: &Value, node: &Node, state: &mut State, single_target: bool, parts: &mut Vec<Value>) -> bool {
         let is_slice = matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice"));
-        // a slice object with known bounds (`xs[slice(0, n)]`) on known positions
-        if is_slice && kind != Kind::Set && single_target {
-            if let (Some((lo, hi, step)), Some(n)) = (Self::slice_label_bounds(&key.kv), self.heap.llen(oid, state)) {
-                let step = step.unwrap_or(1);
-                if step != 0 {
-                    let idx = crate::interp::exprs::slice_positions(n as i64, lo, hi, step);
-                    let vals: Vec<Value> = idx.iter().map(|i| state.slot(oid, Ns::Pos, intern::key_int(*i))).collect();
-                    let kv = state.elems.get(&oid).unwrap_or(DATA);
-                    parts.push(self.alloc_positional(kind, node, Some(vals), Value::new(), kv, state));
-                    return true;
-                }
+        // known positions: a slice with known bounds (`xs[1:3]`, `xs[slice(0, n)]`), or one from
+        // the start to a bound not known (`xs[:n]`: each position it has is xs's, its length one
+        // of 0..=len(xs))
+        let known = match (is_slice && kind != Kind::Set && single_target, self.heap.llen(oid, state)) {
+            (true, Some(n)) => match Self::slice_label_bounds(&key.kv) {
+                Some((lo, hi, step)) if step != Some(0) => Some((crate::interp::exprs::slice_positions(n as i64, lo, hi, step.unwrap_or(1)), None)),
+                None if n < 16 && matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice-prefix@")) => Some(((0..n as i64).collect(), Some(((1u32 << (n + 1)) - 1) as u16))),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((idx, mask)) = known {
+            let vals: Vec<Value> = idx.iter().map(|i| state.slot(oid, Ns::Pos, intern::key_int(*i))).collect();
+            let kv = state.elems.get(&oid).unwrap_or(DATA);
+            let v = self.alloc_positional(kind, node, Some(vals), Value::new(), kv, state);
+            if let (Some(m), Some(nid)) = (mask, v.single()) {
+                state.lens.insert(nid, (None, 0, m));
             }
-        }
-        // `xs[:n]` with n not known on known positions: each position it has is xs's (its length
-        // one of 0..=len(xs))
-        let prefix = matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice-prefix@"));
-        if prefix && kind != Kind::Set && single_target {
-            if let Some(n) = self.heap.llen(oid, state).filter(|n| *n < 16) {
-                let vals: Vec<Value> = (0..n).map(|i| state.slot(oid, Ns::Pos, intern::key_int(i as i64))).collect();
-                let kv = state.elems.get(&oid).unwrap_or(DATA);
-                let v = self.alloc_positional(kind, node, Some(vals), Value::new(), kv, state);
-                if let Some(nid) = v.single() {
-                    state.lens.insert(nid, (None, 0, ((1u32 << (n + 1)) - 1) as u16));
-                }
-                parts.push(v);
-                return true;
-            }
+            parts.push(v);
+            return true;
         }
         if is_slice && kind != Kind::Set {
             // a slice is a container of the same elements (positions unknown)
