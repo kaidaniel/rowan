@@ -610,7 +610,7 @@ impl Analyzer {
             _ => None,
         };
         let mut out = Vec::new();
-        for st in f.body.iter().take_while(|st| !super::stmts::may_return(std::slice::from_ref(*st))) {
+        for st in f.body.iter().take_while(|st| !super::stmts::contains_return(std::slice::from_ref(*st)) && !super::is_generator(std::slice::from_ref(*st))) {
             match st {
                 Stmt::Assign(a) => out.extend(a.targets.iter().filter_map(mine)),
                 Stmt::AnnAssign(a) if a.value.is_some() => out.extend(mine(&a.target)),

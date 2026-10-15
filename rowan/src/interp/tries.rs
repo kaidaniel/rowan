@@ -251,11 +251,6 @@ impl Analyzer {
         true
     }
 
-    /// Does some running try's guard catch exceptions of this class?
-    pub(in crate::interp) fn class_guarded(&self, c: &super::ExcNames) -> bool {
-        self.guards().any(|g| g.contains("*") || c.0.iter().any(|n| g.contains(n)) || (!c.1 && (g.contains("Exception") || g.contains("BaseException"))))
-    }
-
     /// The class names of an exception value (one class; None: not known).
     pub(in crate::interp) fn exc_value_names(&self, v: &Value) -> Option<super::ExcNames> {
         if !v.kv.is_bot() || v.pts.is_empty() {
@@ -320,7 +315,9 @@ impl Analyzer {
         let cls = self.unwind.cur_exc_cls.take().unwrap_or_else(|| super::builtin_exc_names(name));
         // a builtin exception a model raises, for a handler that may catch it: an object of its
         // class, one per class (its args not known)
-        if self.unwind.cur_exc.is_none() && self.class_guarded(&cls) && self.unwind.exc_node.is_some() {
+        // (some running try's guard catches exceptions of this class)
+        let guarded = self.guards().any(|g| g.contains("*") || cls.0.iter().any(|n| g.contains(n)) || (!cls.1 && (g.contains("Exception") || g.contains("BaseException"))));
+        if self.unwind.cur_exc.is_none() && guarded && self.unwind.exc_node.is_some() {
             let n = name.rsplit('.').next().unwrap_or(name);
             if super::builtin_exc_names(n).1 && super::is_builtin_name(n) {
                 let o = self.heap.alloc_raw(Kind::Namespace, &format!("exc:{}", n), "", false, n, Payload::None);

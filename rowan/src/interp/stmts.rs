@@ -666,8 +666,12 @@ impl Analyzer {
         if then_s.reachable {
             self.exec_block(body, &mut then_s);
         }
-        if else_s.reachable {
-            self.exec_orelse(rest, &mut else_s);
+        match rest.first() {
+            Some(first) if else_s.reachable => match &first.test {
+                None => self.exec_block(&first.body, &mut else_s),
+                Some(t) => self.stmt_if(t, &first.body, &rest[1..], &mut else_s),
+            },
+            _ => {}
         }
         if conditional {
             self.cx.branch_depth -= 1;
@@ -817,22 +821,9 @@ impl Analyzer {
         }
     }
 
-    fn exec_orelse(&mut self, rest: &'static [ast::ElifElseClause], state: &mut State) {
-        let Some(first) = rest.first() else { return };
-        match &first.test {
-            None => self.exec_block(&first.body, state),
-            Some(t) => self.stmt_if(t, &first.body, &rest[1..], state),
-        }
-    }
-
 }
 
 /// A `return` somewhere in these statements (not inside nested functions or classes).
-/// May this code leave its function early (a `return`, or a `yield`: a generator)?
-pub fn may_return(body: &[ast::Stmt]) -> bool {
-    contains_return(body) || crate::interp::is_generator(body)
-}
-
 pub(super) fn contains_return(body: &[ast::Stmt]) -> bool {
     body.iter().any(|s| match s {
         ast::Stmt::Return(_) => true,
