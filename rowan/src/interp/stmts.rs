@@ -481,26 +481,7 @@ impl Analyzer {
                 }
                 if any_unknown { None } else { Some(false) }
             }
-            ast::Pattern::MatchValue(v) => {
-                let pv = self.eval(&v.value, state);
-                let a = crate::domain::kv_literals(&subj.kv);
-                let b = crate::domain::kv_literals(&pv.kv);
-                if subj.pts.is_empty() && pv.pts.is_empty() && subj.kv.is_literal() && pv.kv.is_literal() && b.len() == 1 && !a.is_empty() {
-                    let k = b.iter().next().unwrap();
-                    if a.len() == 1 {
-                        return Some(a.contains(k));
-                    }
-                    if !a.contains(k) {
-                        return Some(false);
-                    }
-                    return None;
-                }
-                if !subj.pts.is_empty() && subj.pts.iter().all(|o| self.heap.kind(o).is_container() || self.heap.kind(o) == Kind::Instance && self.heap.instance_class(o).map(|c| self.class_lookup(c, "__eq__").is_none()).unwrap_or(false)) {
-                    // containers / plain instances never equal a literal
-                    return Some(false);
-                }
-                None
-            }
+            ast::Pattern::MatchValue(v) => self.match_value(v, subj, state),
             ast::Pattern::MatchSingleton(sg) => {
                 let want = match sg.value {
                     ast::Singleton::None => intern::key_none(),
@@ -519,55 +500,7 @@ impl Analyzer {
                 }
                 None
             }
-            ast::Pattern::MatchMapping(mm) => {
-                if subj.pts.is_empty() {
-                    if subj.kv.is_literal() {
-                        return Some(false);
-                    }
-                    return None;
-                }
-                let recs: Vec<u32> = subj.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Dict).collect();
-                if recs.len() != subj.pts.len() {
-                    if subj.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::List | Kind::Tuple | Kind::Set)) {
-                        return Some(false);
-                    }
-                    for p in &mm.patterns {
-                        self.match_pattern(p, &Value::data("match"), state);
-                    }
-                    return None;
-                }
-                let mut result = Some(true);
-                let node = frontend::node(pat);
-                for (kexpr, p) in mm.keys.iter().zip(mm.patterns.iter()) {
-                    let kv = self.eval(kexpr, state);
-                    let Some(k) = kv.kv.as_lit().filter(|_| kv.pts.is_empty()) else {
-                        result = None;
-                        continue;
-                    };
-                    let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
-                    let present = if rows.iter().all(|r| r.definite.contains(k)) {
-                        Some(true)
-                    } else if rows.iter().all(|r| r.closed() && !r.present.contains(k)) {
-                        Some(false)
-                    } else {
-                        None
-                    };
-                    if present == Some(false) {
-                        return Some(false);
-                    }
-                    let sv = self.load_item(subj, Ns::Item, &kv, &node, state, false);
-                    let sub = self.match_pattern(p, &sv, state);
-                    result = match (result, present, sub) {
-                        (_, _, Some(false)) => return Some(false),
-                        (Some(true), Some(true), Some(true)) => Some(true),
-                        _ => None,
-                    };
-                }
-                if let Some(rest) = &mm.rest {
-                    self.store_name(s(rest.id.as_str()), Value::data("match rest"), state);
-                }
-                result
-            }
+            ast::Pattern::MatchMapping(mm) => self.match_mapping(pat, mm, subj, state),
             ast::Pattern::MatchClass(c) => {
                 for p in c.arguments.patterns.iter() {
                     self.match_pattern(p, &Value::data("match"), state);
@@ -591,6 +524,79 @@ impl Analyzer {
                 Some(true)
             }
         }
+    }
+
+    /// `case 1` / `case Color.RED`: equal to the value.
+    fn match_value(&mut self, v: &'static ast::PatternMatchValue, subj: &Value, state: &mut State) -> Option<bool> {
+        let pv = self.eval(&v.value, state);
+        let a = crate::domain::kv_literals(&subj.kv);
+        let b = crate::domain::kv_literals(&pv.kv);
+        if subj.pts.is_empty() && pv.pts.is_empty() && subj.kv.is_literal() && pv.kv.is_literal() && b.len() == 1 && !a.is_empty() {
+            let k = b.iter().next().unwrap();
+            if a.len() == 1 {
+                return Some(a.contains(k));
+            }
+            if !a.contains(k) {
+                return Some(false);
+            }
+            return None;
+        }
+        if !subj.pts.is_empty() && subj.pts.iter().all(|o| self.heap.kind(o).is_container() || self.heap.kind(o) == Kind::Instance && self.heap.instance_class(o).map(|c| self.class_lookup(c, "__eq__").is_none()).unwrap_or(false)) {
+            // containers / plain instances never equal a literal
+            return Some(false);
+        }
+        None
+    }
+
+    /// `case {"k": p, **rest}`: a mapping with the keys (each value matching its pattern).
+    fn match_mapping(&mut self, pat: &'static ast::Pattern, mm: &'static ast::PatternMatchMapping, subj: &Value, state: &mut State) -> Option<bool> {
+        if subj.pts.is_empty() {
+            if subj.kv.is_literal() {
+                return Some(false);
+            }
+            return None;
+        }
+        let recs: Vec<u32> = subj.pts.iter().filter(|o| self.heap.kind(*o) == Kind::Dict).collect();
+        if recs.len() != subj.pts.len() {
+            if subj.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::List | Kind::Tuple | Kind::Set)) {
+                return Some(false);
+            }
+            for p in &mm.patterns {
+                self.match_pattern(p, &Value::data("match"), state);
+            }
+            return None;
+        }
+        let mut result = Some(true);
+        let node = frontend::node(pat);
+        for (kexpr, p) in mm.keys.iter().zip(mm.patterns.iter()) {
+            let kv = self.eval(kexpr, state);
+            let Some(k) = kv.kv.as_lit().filter(|_| kv.pts.is_empty()) else {
+                result = None;
+                continue;
+            };
+            let rows: Vec<Row> = recs.iter().map(|o| state.row(*o, Ns::Item)).collect();
+            let present = if rows.iter().all(|r| r.definite.contains(k)) {
+                Some(true)
+            } else if rows.iter().all(|r| r.closed() && !r.present.contains(k)) {
+                Some(false)
+            } else {
+                None
+            };
+            if present == Some(false) {
+                return Some(false);
+            }
+            let sv = self.load_item(subj, Ns::Item, &kv, &node, state, false);
+            let sub = self.match_pattern(p, &sv, state);
+            result = match (result, present, sub) {
+                (_, _, Some(false)) => return Some(false),
+                (Some(true), Some(true), Some(true)) => Some(true),
+                _ => None,
+            };
+        }
+        if let Some(rest) = &mm.rest {
+            self.store_name(s(rest.id.as_str()), Value::data("match rest"), state);
+        }
+        result
     }
 
     fn stmt_delete(&mut self, d: &'static ast::StmtDelete, state: &mut State) {
