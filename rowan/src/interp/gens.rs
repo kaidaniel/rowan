@@ -88,6 +88,27 @@ pub struct GenEffects {
     pub at: Vec<Option<State>>,
     pub end: Option<State>,
     pub join: State,
+    /// joined over the yields and the end, when each yield has its state in `at`: after an
+    /// item was taken, at a position not known
+    pub taken: std::cell::OnceCell<Option<State>>,
+}
+
+impl GenEffects {
+    fn taken(&self) -> Option<&State> {
+        self.taken
+            .get_or_init(|| {
+                if self.at.is_empty() || self.at.iter().any(|s| s.is_none()) {
+                    return None;
+                }
+                let mut it = self.at.iter().flatten().chain(self.end.as_ref());
+                let mut acc = it.next()?.copy();
+                for s in it {
+                    acc = acc.join(&mut s.copy());
+                }
+                Some(acc)
+            })
+            .as_ref()
+    }
 }
 
 /// What code changed of an object: one stored key, or anything (None).
@@ -225,6 +246,11 @@ impl Analyzer {
             let Some(lg) = self.gens.lazy.get(&o).cloned() else { continue };
             // (run already on some of the paths joined here: those keep their state)
             let before = if run { Some(state.copy()) } else { None };
+            // (its items on the paths where it ran are in `before`: this run's start afresh)
+            if run {
+                state.drop_obj_ns(o, Ns::Pos);
+                state.slots.remove(&o, &(Ns::Elem, STAR));
+            }
             self.gens.force_at = Some((lg.site.clone(), lg.ctx.clone()));
             let saved = std::mem::replace(&mut self.cx.call_chain, lg.chain.clone());
             let pre = if between { Some((state.copy(), self.budget.snapshot())) } else { None };
@@ -806,6 +832,25 @@ impl Analyzer {
         state.set_slot(o, Ns::Attr, tk, Value::lit(key_str_lit(&ntag)), true);
     }
 
+    /// An item of generator `o` was taken at a position not known: its effects are those of
+    /// some yield or of its end, not those before its first item.
+    pub fn gen_took_item(&mut self, o: ObjId, state: &mut State) {
+        if self.cursor_of(o, state).is_some() {
+            return;
+        }
+        let Some(ge) = self.gens.eff.get(&o).cloned() else { return };
+        // (every item has its yield's state: the generator yields a known number of items)
+        if self.heap.llen(o, state) != Some(ge.at.len()) {
+            return;
+        }
+        let (Some(expected), Some(taken)) = (effects_given(state, o, &ge), ge.taken()) else { return };
+        if !gen_facts_equal(state, expected, &ge) {
+            return;
+        }
+        gen_copy_facts(state, taken, &ge);
+        state.set_slot(o, Ns::Attr, key_str_lit("\u{1}effpos"), Value::lit(key_str_lit("taken")), true);
+    }
+
     /// The consumer asks a watched generator `o` for an item in `state`: what it changed by
     /// then, the generator sees after its yield (`gen_interference_of`).
     pub(in crate::interp) fn note_resume(&mut self, o: ObjId, state: &State) {
@@ -861,6 +906,7 @@ fn effects_given<'a>(state: &State, o: ObjId, ge: &'a crate::interp::GenEffects)
     match tag.as_deref() {
         Some("pre") => Some(&ge.pre),
         Some("join") => Some(&ge.join),
+        Some("taken") => ge.taken(),
         Some("end") => ge.end.as_ref(),
         Some(t) => t.strip_prefix("at").and_then(|k| k.parse::<usize>().ok()).and_then(|k| ge.at.get(k)).and_then(|x| x.as_ref()),
         None => None,
@@ -996,7 +1042,7 @@ impl Analyzer {
                 lens.dedup();
                 if !rows.is_empty() || !slots.is_empty() || !elems.is_empty() {
                     let at = self.gens.pos_states.remove(&gid).unwrap_or_default();
-                    let ge = GenEffects { rows, slots, elems, lens, pre: pre_bind.copy(), at, end: finite_end, join: st.copy() };
+                    let ge = GenEffects { rows, slots, elems, lens, pre: pre_bind.copy(), at, end: finite_end, join: st.copy(), taken: Default::default() };
                     gen_copy_facts(st, pre_bind, &ge);
                     st.set_slot(gid, Ns::Attr, key_str_lit("\u{1}effpos"), Value::lit(key_str_lit("pre")), true);
                     self.gens.eff.insert(gid, Rc::new(ge));

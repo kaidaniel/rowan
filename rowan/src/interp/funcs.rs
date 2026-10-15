@@ -485,7 +485,7 @@ impl Analyzer {
         match t {
             ast::Expr::Name(n) => {
                 let name = s(n.id.as_str());
-                let named = if self.m.torch_on { crate::models::torch::t_name_number(self, name, v) } else { None };
+                let named = if self.m.torch_on { crate::models::torch::t_name_number(self, name, v).or_else(|| crate::models::torch::t_name_tensor(self, name, v)) } else { None };
                 let v = named.as_ref().unwrap_or(v);
                 if self.m.torch_on {
                     crate::models::torch::t_name_result(self, name, v);

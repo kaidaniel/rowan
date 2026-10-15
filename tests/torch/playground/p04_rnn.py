@@ -137,8 +137,8 @@ print(f"parameters: {sum(p.numel() for p in model.parameters())}")
 
 for step in range(STEPS):
     x, y = get_batch(train, B=64, T=32) # x: (B, T): int; y: (B, T): int
-    #@shape x: [64, _]; y: [64, _]
-    #@todo shape x: [64, 32]; y: [64, 32] (a slice j:j + T of an unknown start in get_batch: train's length is not known, so j + T <= len(train) is not shown)
+    #@shape x: [64, 32]; y: [64, 32]
+    # (j + T < len(train) for j from randint: train's unknown length is one value, not `?`)
     logits: Tensor
     logits, _ = model(x) # logits: (B, T, V)
     #@shape logits: [64, _, V]
@@ -155,7 +155,7 @@ for step in range(STEPS):
             vals = []
             for _ in range(10):                             # average several val batches: less noisy
                 xv, yv = get_batch(test, B=64, T=32)
-                #@shape xv: [64, _]; yv: [64, _]
+                #@shape xv: [64, 32]; yv: [64, 32]
                 lv, _ = model(xv)
                 #@shape lv: [64, _, V]
                 vals.append(F.cross_entropy(lv.view(-1, V), yv.view(-1)))

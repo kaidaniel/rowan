@@ -1403,6 +1403,10 @@ fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     let it = an.iterate(a, &c.node, st);
+    // (a generator at a position not known: it ran to one of its yields at least)
+    if let Some(g) = a.single() {
+        an.gen_took_item(g, st);
+    }
     match it.elem {
         Elem::Pair(k, v) => {
             let ctx = an.frame().ctx.clone();
@@ -2915,6 +2919,8 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             continue;
         }
         let mut ext_items: Option<Vec<Value>> = None;
+        // (the lengths it may have, before a store of an element voids them)
+        let alts = an.heap.len_alts(oid, st);
         let elem = if (name == "extend" || name == "update") && !c.args.is_empty() {
             let it = an.iterate(&c.args[0], &c.node, st);
             if name == "extend" {
@@ -2965,7 +2971,20 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             st.drop_obj_ns(oid, Ns::Pos);
         } else if name == "append" || name == "extend" {
-            // the length was unknown already: the known prefix stays
+            // the length was unknown already: the known prefix stays; one of a few lengths: the
+            // items at each one's end (as each path has them)
+            if let Some(alts) = alts {
+                match if name == "append" { Some(vec![elem.clone()]) } else { ext_items.clone() } {
+                    Some(items) => {
+                        for n in alts {
+                            for (i, item) in items.iter().enumerate() {
+                                st.set_slot(oid, Ns::Pos, intern::key_int((n + i) as i64), item.clone(), false);
+                            }
+                        }
+                    }
+                    None => an.heap.set_prefix(oid, st, alts[0]),
+                }
+            }
             continue;
         }
         an.heap.set_llen(oid, st, None);
@@ -3080,7 +3099,11 @@ fn m_set(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             Value::data("set")
         }
         "add" | "discard" | "remove" | "update" | "intersection_update" | "difference_update" | "symmetric_difference_update" | "clear" => {
-            let item = c.args.first().and_then(|a| a.kv.as_lit().filter(|_| a.pts.is_empty()));
+            // (a tuple of known values: its key)
+            let item = c.args.first().and_then(|a| match a.single() {
+                Some(o) if a.kv.is_bot() && an.heap.kind(o) == Kind::Tuple => an.value_key(o, st, 0),
+                _ => a.kv.as_lit().filter(|_| a.pts.is_empty()),
+            });
             for oid in recv.pts.iter().filter(|o| an.heap.kind(*o) == Kind::Set).collect::<Vec<_>>() {
                 let strong = recv.pts.len() == 1 && an.heap.obj(oid).single;
                 let known = an.known_members(&Value::obj(oid), st);

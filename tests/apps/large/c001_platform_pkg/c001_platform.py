@@ -179,8 +179,8 @@ if __name__ == "__main__":
     rec_csv_region = rec_csv["region"]
     rec_csv_seq = rec_csv["seq"]
     rec_json = batches_a["jsonl"][2]
-    rec_json_tags = batches_a["jsonl"][1]               #@todo row rec_json_tags: present={id,user,amount,region,ts,tags,source,seq} definite={id,user,amount,region,ts,tags,source,seq} closed
-    #@row rec_json_tags: present={id,user,amount,region,ts,tags,source,seq} closed
+    rec_json_tags = batches_a["jsonl"][1]               #@row rec_json_tags: present={id,user,amount,region,ts,tags,source,seq} definite={id,user,amount,region,ts,tags,source,seq} closed
+    # (a batch is the records cut at a size the environment may set: item 1, where there is one)
     #@schema param JsonLinesSource.normalize.obj: always={id,user,ts} only={id,user,ts}
     json_err = pipe_a.sources["jsonl"].errors[0]["error"]  #@value json_err: exactly={"bad json: Expecting value"}
     rec_log = batches_a["log"][1]                       #@row rec_log: present={id,user,amount,ts,region,level,source,seq} definite={id,user,amount,ts,region,level,source,seq} closed
@@ -190,8 +190,8 @@ if __name__ == "__main__":
     parsed_region = parsed["region"]
     mix = source_mix(batches_a)                         #@row mix: present={csv,jsonl,log} definite={csv,jsonl,log} closed
     mix_csv = mix["csv"]
-    share_csv = mix_csv["share"]                        #@todo value share_csv: exactly={0.455}
-    #@value share_csv: includes={0.455}
+    share_csv = mix_csv["share"]                        #@value share_csv: includes={0.455}
+    # (not exactly 0.455, a to-do before: alpha's batch size may come from os.environ)
 
     # ---------------------------------------------------------------- validation
     events_a = pipe_a.events
@@ -206,13 +206,13 @@ if __name__ == "__main__":
     rej1_loc = pipe_a.rejected[1].errors[0]["loc"]
     tags_a = all_tags(events_a)
     src_counts = merge_counts(counts_by(events_a, "source"), counts_by(beta["pipe"].events, "source"))
-    #@todo row src_counts: present={csv,jsonl,log} definite={csv,jsonl,log} closed
+    #@todo row src_counts: present={csv,jsonl,log} definite={csv,log} closed  (corrected from definite jsonl: a DP_STRICT in os.environ ends alpha's validation at csv's bad amount)
     #@row src_counts: possible={csv,jsonl,log}
     log_count = src_counts["log"]
     rej_b = beta["pipe"].rejected[0].errors[0]["loc"]
     totals_b = running_totals(beta["pipe"].events)
-    last_total_b = totals_b[-1]                         #@todo value last_total_b: exactly={35.0}
-    #@value last_total_b: includes={35.0}
+    last_total_b = totals_b[-1]                         #@value last_total_b: exactly={35.0}
+    # (validation decides each record: `ev.key() in seen` of a set of tuples)
 
     # ---------------------------------------------------------------- processing
     frame_a = pipe_a.frame                              #@row frame_a: present={id,user,amount,region,ts,source,day,currency} definite={id,user,amount,region,ts,source,day,currency} closed
@@ -227,32 +227,32 @@ if __name__ == "__main__":
         pass
     user0 = rep_a["users"][0]                           #@row user0: present={user,n,total,regions,tier,since} definite={user,n,total,regions,tier,since} closed
     user0_tier = user0["tier"]
-    total_a = rep_a["total"]                            #@todo value total_a: exactly={124.12}
-    #@value total_a: includes={124.12}
-    by_region_a = rep_a["by_region"]                    #@todo row by_region_a: present={north,south,unknown,west} definite={north,south,unknown,west} closed
+    total_a = rep_a["total"]                            #@value total_a: includes={124.12}
+    # (not exactly 124.12, a to-do before: DP_BATCH_SIZE / DP_THRESHOLD may be in os.environ)
+    by_region_a = rep_a["by_region"]                    #@todo row by_region_a: present={north,south,unknown,west} definite={north,south} closed  (corrected: a batch size of 1 from os.environ leaves out unknown, DP_STRICT west)
     #@row by_region_a: present={north,south,unknown,west} closed
     unknown_a = by_region_a["unknown"]
-    by_region_b = rep_b["by_region"]                    #@todo row by_region_b: present={north,south,unknown} definite={north,south,unknown} absent={west} closed
-    #@row by_region_b: possible={north,south,unknown}
-    by_day_a = rep_a["by_day"]                          #@todo row by_day_a: present={"2024-03-01","2024-03-02","2024-03-03"} definite={"2024-03-01","2024-03-02","2024-03-03"} closed
+    by_region_b = rep_b["by_region"]                    #@row by_region_b: present={north,south,unknown} definite={north,south,unknown} absent={west} closed
+    # (beta's environment is the scenario's own: every value is known)
+    by_day_a = rep_a["by_day"]                          #@todo row by_day_a: present={"2024-03-01","2024-03-02","2024-03-03"} definite={"2024-03-01"} closed  (corrected: a batch size of 1 from os.environ keeps the first day only)
     #@row by_day_a: possible={"2024-03-01","2024-03-02","2024-03-03"}
     day1 = by_day_a["2024-03-01"]
     day1_count = day1["count"]
     by_day_b = rep_b["by_day"]
-    pivot_a = rep_a["pivot"]                            #@todo row pivot_a: present={csv,jsonl,log} definite={csv,jsonl,log} closed
+    pivot_a = rep_a["pivot"]                            #@todo row pivot_a: present={csv,jsonl,log} definite={} closed  (corrected: a DP_THRESHOLD from os.environ may drop every row)
     #@row pivot_a: possible={csv,jsonl,log}
     pivot_b = rep_b["pivot"]                            #@todo row pivot_b: present={csv,log} definite={csv,log} absent={jsonl} closed
     #@row pivot_b: possible={csv,log}
     pivot_b_log = pivot_b["log"]
     top_a = rep_a["top"]
     top_b0 = rep_b["top"][0]
-    errors_a = rep_a["errors"]                          #@todo row errors_a: present={"csv:float_parsing","jsonl:value_error"} definite={"csv:float_parsing","jsonl:value_error"} closed
+    errors_a = rep_a["errors"]                          #@todo row errors_a: present={"csv:float_parsing","jsonl:value_error"} definite={} closed  (corrected: a batch size under 3 from os.environ rejects nothing)
     #@row errors_a: possible={"csv:float_parsing","jsonl:value_error"}
 
     # ---------------------------------------------------------------- export
     exp_a = alpha["export"]
-    chars_a = exp_a["chars"]                            #@todo value chars_a: exactly={119}
-    #@value chars_a: includes={119}
+    chars_a = exp_a["chars"]                            #@value chars_a: includes={119}
+    # (not exactly 119, a to-do before: alpha's report depends on os.environ)
     exporter_a = exp_a["exporter"]
     exp_b = beta["export"]
     chars_b = exp_b["chars"]                            #@todo value chars_b: exactly={104}

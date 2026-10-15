@@ -266,18 +266,26 @@ impl Analyzer {
     /// elements), else any element (may raise IndexError). True: the read is done.
     fn item_of_sequence(&mut self, oid: ObjId, kind: Kind, key: &Value, node: &Node, state: &mut State, single_target: bool, parts: &mut Vec<Value>) -> bool {
         let is_slice = matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice"));
-        // a slice object with known bounds (`xs[slice(0, n)]`) on known positions
-        if is_slice && kind != Kind::Set && single_target {
-            if let (Some((lo, hi, step)), Some(n)) = (Self::slice_label_bounds(&key.kv), self.heap.llen(oid, state)) {
-                let step = step.unwrap_or(1);
-                if step != 0 {
-                    let idx = crate::interp::exprs::slice_positions(n as i64, lo, hi, step);
-                    let vals: Vec<Value> = idx.iter().map(|i| state.slot(oid, Ns::Pos, intern::key_int(*i))).collect();
-                    let kv = state.elems.get(&oid).unwrap_or(DATA);
-                    parts.push(self.alloc_positional(kind, node, Some(vals), Value::new(), kv, state));
-                    return true;
-                }
+        // known positions: a slice with known bounds (`xs[1:3]`, `xs[slice(0, n)]`), or one from
+        // the start to a bound not known (`xs[:n]`: each position it has is xs's, its length one
+        // of 0..=len(xs))
+        let known = match (is_slice && kind != Kind::Set && single_target, self.heap.llen(oid, state)) {
+            (true, Some(n)) => match Self::slice_label_bounds(&key.kv) {
+                Some((lo, hi, step)) if step != Some(0) => Some((crate::interp::exprs::slice_positions(n as i64, lo, hi, step.unwrap_or(1)), None)),
+                None if n < 16 && matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice-prefix@")) => Some(((0..n as i64).collect(), Some(((1u32 << (n + 1)) - 1) as u16))),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((idx, mask)) = known {
+            let vals: Vec<Value> = idx.iter().map(|i| state.slot(oid, Ns::Pos, intern::key_int(*i))).collect();
+            let kv = state.elems.get(&oid).unwrap_or(DATA);
+            let v = self.alloc_positional(kind, node, Some(vals), Value::new(), kv, state);
+            if let (Some(m), Some(nid)) = (mask, v.single()) {
+                state.lens.insert(nid, (None, 0, m));
             }
+            parts.push(v);
+            return true;
         }
         if is_slice && kind != Kind::Set {
             // a slice is a container of the same elements (positions unknown)
@@ -302,6 +310,18 @@ impl Analyzer {
             if 0 <= i && (i as usize) < p {
                 parts.push(state.slot(oid, Ns::Pos, intern::key_int(i)));
                 return true;
+            }
+        }
+        // (one of a few lengths: the position where it is there; a negative one from each end)
+        if let (Some(i), None, Some(alts)) = (idx, ll, self.heap.len_alts(oid, state).filter(|_| kind != Kind::Set)) {
+            let at: Vec<i64> = alts.iter().map(|n| if i < 0 { *n as i64 + i } else { i }).collect();
+            let inside: Vec<i64> = alts.iter().zip(&at).filter(|(n, p)| **p >= 0 && **p < **n as i64).map(|(_, p)| *p).collect();
+            if !inside.is_empty() && inside.iter().all(|p| state.has_slot(oid, Ns::Pos, intern::key_int(*p))) {
+                if inside.len() < alts.len() {
+                    self.may_raise_here("IndexError", state);
+                }
+                parts.push(join_values(inside.iter().map(|p| state.slot(oid, Ns::Pos, intern::key_int(*p))).collect::<Vec<Value>>()));
+                return false;
             }
         }
         match (idx, ll) {
@@ -524,7 +544,65 @@ impl Analyzer {
             *row = row.narrow_in(k, true);
             state.set_row_narrowed(oid, ns, row.clone());
             self.propagate_narrowing(oid, ns, k, state);
+            // (the input's key read through a shallow copy: the original has it too, while it
+            // holds the input's there)
+            if cls.tier == Tier::Input {
+                if let Some(r) = self.shallow_copy_root(oid).filter(|r| self.heap.obj(*r).single && !state.has_slot(*r, ns, k)) {
+                    let rr = state.row(r, ns);
+                    if rr.open() && !rr.absent.contains(k) {
+                        state.set_row_narrowed(r, ns, rr.narrow_in(k, true));
+                    }
+                }
+            }
         }
+    }
+
+    /// `seq[i] = v`: the position (from either end, of each length it may have; any known one
+    /// when i is not known); `seq[a:b] = items`: positions and length not known any more.
+    fn store_in_sequence(&mut self, oid: ObjId, key: &Value, v: &Value, strong: bool, node: &Node, state: &mut State) {
+        if matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice")) {
+            // known bounds (step 1) on a known length, known items: the list spliced
+            let it = self.iterate(v, node, state);
+            if let (Some((lo, hi, None | Some(1))), Some(n), Some(items), true) = (Self::slice_label_bounds(&key.kv), self.heap.llen(oid, state), it.items.as_ref(), strong) {
+                let norm = |x: i64| if x < 0 { (n as i64 + x).max(0) } else { x.min(n as i64) } as usize;
+                let (a, b) = (norm(lo.unwrap_or(0)), norm(hi.unwrap_or(n as i64)));
+                let b = b.max(a);
+                let mut vals: Vec<Value> = (0..a).map(|i| state.slot(oid, Ns::Pos, intern::key_int(i as i64))).collect();
+                vals.extend(items.iter().cloned());
+                vals.extend((b..n).map(|i| state.slot(oid, Ns::Pos, intern::key_int(i as i64))));
+                if vals.len() < 16 {
+                    state.drop_obj_ns(oid, Ns::Pos);
+                    for (i, x) in vals.iter().enumerate() {
+                        state.set_slot(oid, Ns::Pos, intern::key_int(i as i64), x.clone(), true);
+                        state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(x.pts.clone(), crate::models::torch::elem_kv(&x.kv)), false);
+                    }
+                    self.heap.set_llen(oid, state, Some(vals.len()));
+                    return;
+                }
+            }
+            let e = self.elem_value(&it.elem, node, "el");
+            state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv)), false);
+            let kv = crate::domain::kv_join(&state.elems.get(&oid).unwrap_or(KeyVal::Bot), &e.kv);
+            state.elems.insert(oid, kv);
+            state.drop_obj_ns(oid, Ns::Pos);
+            self.heap.set_llen(oid, state, None);
+            return;
+        }
+        state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), crate::models::torch::elem_kv(&v.kv)), false);
+        let idx = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
+        let at: Vec<i64> = match (idx, self.heap.len_alts(oid, state)) {
+            (Some(i), Some(alts)) => alts.iter().map(|n| if i < 0 { *n as i64 + i } else { i }).zip(alts.iter()).filter(|(p, n)| 0 <= *p && *p < **n as i64).map(|(p, _)| p).collect(),
+            _ => state.slots_of(oid).into_iter().filter(|((ns, _), _)| *ns == Ns::Pos).filter_map(|((_, k), _)| intern::key_as_int(k)).collect(),
+        };
+        let one = idx.is_some() && self.heap.llen(oid, state).is_some();
+        for p in at {
+            state.set_slot(oid, Ns::Pos, intern::key_int(p), v.clone(), strong && one);
+        }
+    }
+
+    /// The object a shallow copy (`copy.copy`, `dict.copy`) was made of.
+    pub(in crate::interp) fn shallow_copy_root(&self, oid: ObjId) -> Option<ObjId> {
+        self.heap.copy_root.get(&oid).copied().filter(|_| self.heap.obj(oid).site.starts_with("copy:"))
     }
 
     /// The value under key `k`: the slot's, a map's stored values, or the open record's
@@ -586,8 +664,18 @@ impl Analyzer {
         let single = k != STAR;
         // (a loop's item holds there what the records it is one of hold: their placeholder)
         let base = crate::state::view_of(oid).unwrap_or(oid);
+        // (a shallow copy holds the original's values: under a key neither stored since, the
+        // same part of the input — which the original holds there too while it has no other)
+        let root = self.shallow_copy_root(base);
+        let base = root.unwrap_or(base);
         let pid = self.heap.alloc_raw(Kind::Unknown, &format!("path:{}:{}:{}", base, ns, intern::key_repr(k)), "", single, &label, Payload::None);
         self.fill_placeholder(pid, oid, ns, k, row, false, state);
+        if let Some(r) = root.filter(|r| k != STAR && !state.has_slot(*r, ns, k)) {
+            let rr = state.row(r, ns);
+            if rr.open() && !rr.absent.contains(k) {
+                state.set_slot_found(r, ns, k, Value::obj(pid), false);
+            }
+        }
         Value::obj(pid)
     }
 
@@ -658,14 +746,7 @@ impl Analyzer {
                     continue;
                 }
                 Kind::List | Kind::Tuple | Kind::Set => {
-                    state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), crate::models::torch::elem_kv(&v.kv)), false);
-                    if let (Some(k), Some(n)) = (key.kv.as_lit(), self.heap.llen(oid, state)) {
-                        if let Some(i) = intern::key_as_int(k) {
-                            if 0 <= i && (i as usize) < n {
-                                state.set_slot(oid, Ns::Pos, intern::key_int(i), v.clone(), strong);
-                            }
-                        }
-                    }
+                    self.store_in_sequence(oid, key, v, strong, node, state);
                     continue;
                 }
                 Kind::Frame => {

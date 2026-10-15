@@ -969,6 +969,12 @@ fn render_sequence(an: &Analyzer, state: &State, o: ObjId, kind: Kind, depth: u3
                 format!("{{{}}}", ms.iter().map(|k| render_value(an, state, &Value::lit(*k), deeper, seen)).collect::<Vec<_>>().join(", "))
             }
         }
+        // one of a few lengths (an append on some paths): each list (`["a"] | ["a", "b"]`)
+        None if kind != Kind::Set && depth < max_depth && alt_lists(an, state, o).is_some() => {
+            let alts = alt_lists(an, state, o).unwrap();
+            let items: Vec<String> = (0..*alts.last().unwrap()).map(|i| render_value(an, state, &state.slot(o, Ns::Pos, intern::key_int(i as i64)), deeper, seen)).collect();
+            alts.iter().map(|n| if kind == Kind::Tuple && *n == 1 { format!("({},)", items[0]) } else { format!("{}{}{}", open, items[..*n].join(", "), close) }).collect::<Vec<_>>().join(" | ")
+        }
         // unknown length: what any element may be, in typing notation
         _ => {
             let elem = state.slot_opt(o, Ns::Elem, STAR);
@@ -995,6 +1001,13 @@ fn render_sequence(an: &Analyzer, state: &State, o: ObjId, kind: Kind, depth: u3
         return format!("deque({})", out);
     }
     out
+}
+
+/// The lengths a list may have, when they are 2 or 3 short ones whose positions are known.
+fn alt_lists(an: &Analyzer, state: &State, o: ObjId) -> Option<Vec<usize>> {
+    let alts = an.heap.len_alts(o, state)?;
+    let max = *alts.last()?;
+    ((2..=3).contains(&alts.len()) && max <= 4 && (0..max).all(|i| state.has_slot(o, Ns::Pos, intern::key_int(i as i64)))).then_some(alts)
 }
 
 /// A dict or frame: its keys and values (a frame by its columns; a Series / Counter /

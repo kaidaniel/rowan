@@ -16,8 +16,8 @@ df["amount"] = df.apply(amount, axis=1)
 regions = []
 for t in df.itertuples(index=False):
     regions.append(t.region)                             #@ input region
-    # (absent={Index} needs the file: an input column named Index would be a field)
-    #@todo row t: absent={Index}
+    # (not absent={Index}, a to-do before: the driver's file is an example, and an input column
+    # named Index would be a field — only the file could tell)
     #@row t: definite={region,amount} open
 ids = []
 for rec in df.to_dict("records"):
