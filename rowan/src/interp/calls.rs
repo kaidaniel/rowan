@@ -377,25 +377,17 @@ impl Analyzer {
         inst
     }
 
-    pub(super) fn receiver_ctx(&self, self_v: &Option<Value>, site: &str) -> (String, bool) {
-        if let Some(sv) = self_v {
-            if let Some(r) = sv.single() {
-                if self.heap.kind(r) == Kind::Instance {
-                    let recv = self.heap.obj(r);
-                    // per receiver and call site: two calls of one method on one receiver
-                    // allocate distinct objects
-                    let ctx = if !recv.single {
-                        site.to_string()
-                    } else if self.heap.clones(&recv.site) >= MAX_CLONES {
-                        String::new()
-                    } else {
-                        format!("o{}/{}", recv.id, site)
-                    };
-                    return (ctx, true);
-                }
-            }
+    /// The allocation context of a call: per receiver (a single one) and call site, so two
+    /// calls of one method on one receiver allocate distinct objects. A summary receiver's
+    /// call is one call on one of the objects it stands for: its allocations are strong as any
+    /// call's (made again while in use, a variant).
+    pub(super) fn receiver_ctx(&self, self_v: &Option<Value>, site: &str) -> String {
+        let recv = self_v.as_ref().and_then(|sv| sv.single()).filter(|r| self.heap.kind(*r) == Kind::Instance).map(|r| self.heap.obj(r));
+        match recv {
+            Some(recv) if recv.single && self.heap.clones(&recv.site) >= MAX_CLONES => String::new(),
+            Some(recv) if recv.single => format!("o{}/{}", recv.id, site),
+            _ => site.to_string(),
         }
-        (site.to_string(), true)
     }
 
     /// The context of a call's allocations: its site (line and column), chained to the
@@ -478,7 +470,7 @@ impl Analyzer {
         let fi = self.heap.func_info(foid);
         let fnode = fi.node;
         let site = match forced.as_ref() {
-            Some((site, _, _)) => site.clone(),
+            Some((site, _)) => site.clone(),
             None => self.callee_site(node),
         };
         self.entry.analysed.insert(foid);
@@ -499,13 +491,13 @@ impl Analyzer {
             eprintln!("run {} at {} frames={} chain={:?}", fi.qualname, site, self.cx.frames.len(), self.cx.call_chain);
         }
         // context for allocations inside the callee (§3)
-        let (ctx, ctx_single) = match forced {
-            Some((_, ctx, single)) => (ctx, single),
+        let ctx = match forced {
+            Some((_, ctx)) => ctx,
             None => self.receiver_ctx(&self_v, &site),
         };
         // (a generator's object: the one its run returns, keyed as `yield_value` finds it)
         let gen_id = matches!(fnode, FuncNode::Def(f) if is_generator(&f.body)).then(|| self.heap.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx, true, &format!("generator {}", fi.qualname), Payload::None));
-        let new_fr = self.callee_frame(foid, &fi, &ctx, ctx_single);
+        let new_fr = self.callee_frame(foid, &fi, &ctx);
         let saved_env = std::mem::take(&mut state.env);
         let saved_unbound = std::mem::take(&mut state.unbound);
         self.cx.env_stack.push(saved_env.clone());
@@ -567,9 +559,9 @@ impl Analyzer {
     }
 
     /// The frame a call of `fi` runs in: context `ctx`, its own cells and its closure's.
-    fn callee_frame(&mut self, foid: ObjId, fi: &FuncInfo, ctx: &str, ctx_single: bool) -> Frame {
-        let fr_single = self.frame().single && self.frame().loop_depth == 0 && ctx_single;
-        let fr_single_nl = self.frame().single_nl && ctx_single;
+    fn callee_frame(&mut self, foid: ObjId, fi: &FuncInfo, ctx: &str) -> Frame {
+        let fr_single = self.frame().single && self.frame().loop_depth == 0;
+        let fr_single_nl = self.frame().single_nl;
         let mut new_fr = Frame::new(FrameKind::Function, fi.scope, fi.module, ctx, fr_single, &fi.qualname);
         new_fr.single_nl = fr_single_nl;
         new_fr.func = Some(foid);

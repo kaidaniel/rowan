@@ -32,7 +32,8 @@ pub fn dedupe(an: &Analyzer, verdicts: &[Verdict]) -> Vec<Verdict> {
         let mut tiers: Vec<Tier> = by_obj.values().map(|v| v.tier).collect();
         tiers.sort();
         tiers.dedup();
-        if tiers.contains(&Tier::Unknown) {
+        // (an object rowan knows nothing of says nothing; the others still do)
+        if tiers.iter().all(|t| *t == Tier::Unknown) {
             continue;
         }
         let first = vs[0];
@@ -56,9 +57,9 @@ pub fn dedupe(an: &Analyzer, verdicts: &[Verdict]) -> Vec<Verdict> {
         let breakdown: Vec<String> = by_tier.iter().rev().filter_map(|(t, ns)| word(t).map(|w| format!("{} {}", w, object_list(ns.iter())))).collect();
         let tier = if tiers.iter().all(|t| matches!(t, Tier::Proven | Tier::Likely)) {
             Tier::Likely
-        } else if tiers.iter().all(|t| matches!(t, Tier::Input | Tier::Proven | Tier::Likely)) {
+        } else if tiers.iter().all(|t| matches!(t, Tier::Input | Tier::Proven | Tier::Likely | Tier::Unknown)) {
             Tier::Input
-        } else if tiers.iter().all(|t| matches!(t, Tier::Input | Tier::Proven | Tier::Likely | Tier::LikelyMissing)) {
+        } else if tiers.iter().all(|t| matches!(t, Tier::Input | Tier::Proven | Tier::Likely | Tier::LikelyMissing | Tier::Unknown)) {
             // (missing on some objects only unless code rowan cannot see set it: as hedged)
             Tier::LikelyMissing
         } else {

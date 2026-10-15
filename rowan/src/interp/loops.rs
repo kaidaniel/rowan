@@ -347,12 +347,12 @@ impl Analyzer {
     /// still in use was an item.)
     fn elements_done(&mut self, elem_v: &Value, list: Option<ObjId>, target: &ast::Expr, back: &State, exit_s: &mut State) {
         for oid in elem_v.pts.iter() {
+            // (rows the body changed; for a summary, only then the walk)
+            let rows: Vec<Ns> = [Ns::Item, Ns::Attr].into_iter().filter(|ns| back.has_row(oid, *ns) && back.row(oid, *ns) != exit_s.row(oid, *ns)).collect();
             let held = |an: &Analyzer| list.is_some_and(|l| an.held_only_by(oid, l, target, exit_s));
-            if self.heap.is_record_like(oid) && (self.heap.obj(oid).single || held(self)) {
-                for ns in [Ns::Item, Ns::Attr] {
-                    if back.has_row(oid, ns) {
-                        exit_s.set_row(oid, ns, back.row(oid, ns));
-                    }
+            if !rows.is_empty() && self.heap.is_record_like(oid) && (self.heap.obj(oid).single || held(self)) {
+                for ns in rows {
+                    exit_s.set_row(oid, ns, back.row(oid, ns));
                 }
             }
         }
