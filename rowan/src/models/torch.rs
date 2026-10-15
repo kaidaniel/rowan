@@ -4762,6 +4762,10 @@ pub fn t_hover_names(an: &Analyzer, v: &Value, st: &State) -> (FxHashMap<sh::Ato
     for (n, val) in st.env.iter() {
         let name = intern::str_get(*n).to_string();
         used.push(name.clone());
+        // (`_, T = x.shape`: `_` says the dim is not used, it names nothing)
+        if name == "_" {
+            continue;
+        }
         if let Some(d0) = dim_of_label(val) {
             // the dim as bound and as it is now (a fact may have rewritten it)
             for d in [d0, sh::norm(d0, &st.tf)] {
