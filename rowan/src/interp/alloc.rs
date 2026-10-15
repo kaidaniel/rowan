@@ -67,7 +67,7 @@ impl Analyzer {
             // (an object already merged — its site made again while in use, past its variants —
             // stays merged without a walk: such walks found nothing in their budget)
             let hard = existed == Some(oid) && (self.budget.over_hard_deadline() || (kind == Kind::Unknown) || !self.heap.obj(oid).single);
-            if existed == Some(oid) && (hard || model_held || (self.has_facts(oid, state) && self.is_live(oid, state))) {
+            if existed == Some(oid) && (hard || model_held || (self.has_facts(oid, state) && !self.live_among(&[oid], state).is_empty())) {
                 // allocated again while the earlier object is still reachable (a method run
                 // twice on one receiver, a call repeated in a loop)
                 if single && !self.cx.recent_stack.is_empty() && !hard {

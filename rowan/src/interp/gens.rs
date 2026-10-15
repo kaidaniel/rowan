@@ -221,7 +221,7 @@ impl Analyzer {
             let saved = std::mem::replace(&mut self.cx.call_chain, lg.chain.clone());
             let pre = if between { Some((state.copy(), self.budget.snapshot())) } else { None };
             self.gens.last_reads = None;
-            let r = self.call_user(lg.foid, lg.self_v.clone(), lg.args.clone(), lg.kwargs.clone(), vec![], vec![], state, &lg.node, None, false);
+            let r = self.call_user(lg.foid, lg.self_v.clone(), lg.args.clone(), lg.kwargs.clone(), vec![], vec![], state, &lg.node, false);
             self.cx.call_chain = saved;
             if let (Some((pre, budget)), true) = (pre, state.reachable) {
                 let fp = state.footprint(&pre);
@@ -614,7 +614,7 @@ impl Analyzer {
         let positional = self.frame().single && self.frame().loop_depth == 0 && self.heap.obj(gid).single;
         let ll = if fresh { Some(0) } else { self.heap.llen(gid, state) };
         match (positional, ll) {
-            (true, Some(n)) if n < 16 => {
+            (true, Some(n)) if n < super::UNROLL_MAX => {
                 state.set_slot(gid, Ns::Pos, key_int(n as i64), v, true);
                 self.heap.set_llen(gid, state, Some(n + 1));
                 // (the state at this item: what a consumer that took it sees of the effects)

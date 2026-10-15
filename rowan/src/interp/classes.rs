@@ -166,7 +166,7 @@ impl Analyzer {
             for f in fv.pts.iter() {
                 if self.heap.kind(f) == Kind::Function {
                     // concretely: the class's own attributes (`cls.__name__`) are known here
-                    self.call_user(f, Some(Value::obj(coid)), vec![], kwargs.clone(), vec![], vec![], state, cnode, None, false);
+                    self.call_user(f, Some(Value::obj(coid)), vec![], kwargs.clone(), vec![], vec![], state, cnode, false);
                 }
             }
         }

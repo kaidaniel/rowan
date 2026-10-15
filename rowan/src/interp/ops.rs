@@ -372,7 +372,7 @@ impl Analyzer {
         };
         let mut outs = Vec::new();
         for (o, f) in calls {
-            outs.push(self.call_user(f, Some(Value::obj(o)), vec![other.clone()], IndexMap::new(), vec![], vec![], state, node, None, false));
+            outs.push(self.call_user(f, Some(Value::obj(o)), vec![other.clone()], IndexMap::new(), vec![], vec![], state, node, false));
         }
         Some(crate::domain::join_values(outs))
     }

@@ -773,7 +773,7 @@ pub fn exitstack_close(an: &mut Analyzer, st: &mut State, v: &Value, node: &Node
             nd.col = node.col.wrapping_add(3_000_000 + i as u32);
             for fo in f.pts.iter() {
                 if an.heap.kind(fo) == Kind::Function {
-                    an.call_user(fo, None, args.clone(), kwargs.clone(), vec![], vec![], st, &nd, None, false);
+                    an.call_user(fo, None, args.clone(), kwargs.clone(), vec![], vec![], st, &nd, false);
                 } else {
                     an.call_value(&Value::obj(fo), &nd, None, st, Some(args.clone()));
                 }

@@ -522,7 +522,7 @@ impl Analyzer {
             if self.heap.kind(f) == Kind::Function {
                 let fi = self.heap.func_info(f);
                 if fi.is_property.get() {
-                    let r = self.call_user(f, Some(Value::obj(oid)), vec![], IndexMap::new(), vec![], vec![], state, node, None, false);
+                    let r = self.call_user(f, Some(Value::obj(oid)), vec![], IndexMap::new(), vec![], vec![], state, node, false);
                     if fi.is_cached.get() && matches!(self.heap.kind(oid), Kind::Instance) {
                         // stored on the instance: later accesses find this value
                         let strong = self.strongable(oid);
@@ -916,7 +916,7 @@ impl Analyzer {
         if let Some(cls) = cls_of {
             if let Some(defc) = self.class_lookup(cls, name) {
                 if let Some(&setter) = self.heap.prop_setters.get(&(defc, nk)) {
-                    self.call_user(setter, Some(Value::obj(oid)), vec![v.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
+                    self.call_user(setter, Some(Value::obj(oid)), vec![v.clone()], IndexMap::new(), vec![], vec![], state, node, false);
                     return true;
                 }
                 // a property without a setter: the assignment raises

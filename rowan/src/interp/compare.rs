@@ -295,12 +295,6 @@ impl Analyzer {
     }
 
     /// An instance whose class (or a base) defines `__bool__` or `__len__`.
-    /// An instance of a class deriving from a class rowan does not see (a builtin, a library
-    /// class): the base may define what the class body does not.
-    pub(in crate::interp) fn external_based(&self, oid: u32) -> bool {
-        self.heap.instance_class(oid).is_some_and(|c| self.heap.mro(c).iter().any(|x| self.heap.class_info_opt(*x).is_some_and(|ci| ci.open_base || ci.lib.dict_base)))
-    }
-
     pub(in crate::interp) fn has_truth_dunder(&self, oid: u32) -> bool {
         match self.heap.instance_class(oid) {
             Some(c) => self.class_lookup(c, "__bool__").is_some() || self.class_lookup(c, "__len__").is_some(),
@@ -368,7 +362,7 @@ impl Analyzer {
                 },
                 // (a class deriving from a builtin / library class — `class C(list)` — may have
                 // its `__len__` / `__bool__`)
-                Kind::Instance if self.has_truth_dunder(oid) || self.external_based(oid) => return None,
+                Kind::Instance if self.has_truth_dunder(oid) || self.heap.instance_class(oid).is_some_and(|c| self.heap.mro(c).iter().any(|x| self.heap.class_info_opt(*x).is_some_and(|ci| ci.open_base || ci.lib.dict_base))) => return None,
                 Kind::Instance | Kind::Function | Kind::Bound | Kind::Class | Kind::Module | Kind::Namespace => verdicts.push(true),
                 _ => return None,
             }
@@ -419,7 +413,7 @@ impl Analyzer {
             ast::CmpOp::NotEq => ("__ne__", "__ne__"),
             _ => return None,
         };
-        let call = |an: &mut Analyzer, f: ObjId, recv: &Value, other: &Value, state: &mut State| an.call_user(f, Some(recv.clone()), vec![other.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
+        let call = |an: &mut Analyzer, f: ObjId, recv: &Value, other: &Value, state: &mut State| an.call_user(f, Some(recv.clone()), vec![other.clone()], IndexMap::new(), vec![], vec![], state, node, false);
         if let Some(f) = ai.and_then(|o| self.cmp_dunder(o, name)) {
             return Some(call(self, f, a, b, state));
         }
@@ -472,7 +466,7 @@ impl Analyzer {
 
     /// `@total_ordering`: `a op b` from the class's `__lt__` (run on `a`, `f`) and `__eq__`.
     fn total_ordering_compare(&mut self, op: ast::CmpOp, a: &Value, b: &Value, f: ObjId, node: &Node, state: &mut State) -> Option<bool> {
-        let lt = self.call_user(f, Some(a.clone()), vec![b.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
+        let lt = self.call_user(f, Some(a.clone()), vec![b.clone()], IndexMap::new(), vec![], vec![], state, node, false);
         let lt = self.truth_of(&lt, state, node);
         let eqv = self.rich_compare(ast::CmpOp::Eq, a, b, node, state).unwrap_or_else(|| Value::data("bool"));
         let eq = self.truth_of(&eqv, state, node);

@@ -240,35 +240,24 @@ impl Analyzer {
                 self.exhaust(&itv, state);
             }
         }
-        if let Some(items) = &it.items {
-            if items.len() <= UNROLL_MAX {
-                // unrolled: `continue` rejoins at the next iteration, `break` at the exit
-                let items: Vec<(Value, bool)> = items.iter().map(|i| (i.clone(), true)).collect();
-                let breaks = self.unroll_for(f, &items, once.filter(|_| has_jump).map(|o| (o, c0)), state);
-                if !f.orelse.is_empty() && state.reachable {
-                    self.exec_block(&f.orelse, state);
-                }
-                if let (Some(_), true) = (once, has_jump) {
-                    // (run to the end: used up)
-                    if state.reachable {
-                        self.exhaust(&itv, state);
-                    }
-                }
-                join_breaks(state, breaks);
-                return;
+        // unrolled: `continue` rejoins at the next iteration, `break` at the exit; a closed dict
+        // with some keys only maybe there: a maybe one runs on one path and is skipped on the other
+        let unrolled = match &it.items {
+            Some(items) if items.len() <= UNROLL_MAX => Some((items.iter().map(|i| (i.clone(), true)).collect(), once.filter(|_| has_jump).map(|o| (o, c0)))),
+            None => self.maybe_dict_items(&itv, state).map(|items| (items, None)),
+            _ => None,
+        };
+        if let Some((items, cursor)) = unrolled {
+            let breaks = self.unroll_for(f, &items, cursor, state);
+            if !f.orelse.is_empty() && state.reachable {
+                self.exec_block(&f.orelse, state);
             }
-        }
-        // a closed dict with some keys only maybe there: each item unrolled, a maybe one run
-        // on one path and skipped on the other
-        if it.items.is_none() {
-            if let Some(mitems) = self.maybe_dict_items(&itv, state) {
-                let breaks = self.unroll_for(f, &mitems, None, state);
-                if !f.orelse.is_empty() && state.reachable {
-                    self.exec_block(&f.orelse, state);
-                }
-                join_breaks(state, breaks);
-                return;
+            // (a one-shot iterator a `break` may leave: run to the end, used up)
+            if cursor.is_some() && state.reachable {
+                self.exhaust(&itv, state);
             }
+            join_breaks(state, breaks);
+            return;
         }
         // a list of unknown length whose first items are known on every path: those
         // iterations are unrolled, the loop runs on from there (any later item)

@@ -12,12 +12,6 @@ use crate::intern::{KeyId, StrId};
 use crate::state::{Kind, State};
 
 impl Analyzer {
-    /// Is `oid` reachable from a binding the program can still use: the locals of every
-    /// active frame, cells, module objects, narrowed values, the return value?
-    pub(in crate::interp) fn is_live(&self, oid: ObjId, state: &State) -> bool {
-        !self.live_among(&[oid], state).is_empty()
-    }
-
     /// May the program still hold `oid` on this path? Every allocation records the object's
     /// length entry in the state, and only the collector (at returns and loop exits) forgets
     /// an object's facts: an object without them was never made on this path or was
@@ -407,11 +401,8 @@ fn rename_references(back: &mut State, head: &State, map: &FxHashMap<ObjId, ObjI
     for (k, nv) in nar_updates {
         back.narrowed.insert(k, nv);
     }
-    if let Some(r) = &back.ret {
-        if let Some(nv) = rename_value(r, map) {
-            back.ret = Some(nv);
-        }
-    }
+    // (not the value returned so far: the returns' states, `exits`, keep the recent objects'
+    // own facts, as the iteration that returned left them)
 }
 
 /// The recent objects' own facts move to their summary objects (weakly; positions only for

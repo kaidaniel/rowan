@@ -140,7 +140,7 @@ pub(crate) fn sdispatch_call(an: &mut Analyzer, foid: ObjId, self_v: Option<Valu
         if f == foid {
             an.m.sd_bypass = Some(foid);
         }
-        outs.push(an.call_user(f, self_v.clone(), a, kwargs.clone(), vec![], star_kwargs.clone(), &mut st, node, None, entry));
+        outs.push(an.call_user(f, self_v.clone(), a, kwargs.clone(), vec![], star_kwargs.clone(), &mut st, node, entry));
         an.m.sd_bypass = None;
         states.push(st);
     }
@@ -155,7 +155,7 @@ pub(crate) fn sdispatch_call(an: &mut Analyzer, foid: ObjId, self_v: Option<Valu
 
 /// A call of a `functools.lru_cache` / `cache` function: with known arguments, the first
 /// call's result is the result of every later call with the same arguments.
-pub(crate) fn memo_call(an: &mut Analyzer, oid: ObjId, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+pub(crate) fn memo_call(an: &mut Analyzer, oid: ObjId, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &mut State, node: &Node) -> Value {
     // a memoised function with known arguments: the first call's result is the
     // result of every later call with the same arguments
     let lit = |v: &Value| v.kv.as_lit().filter(|_| v.pts.is_empty());
@@ -171,7 +171,7 @@ pub(crate) fn memo_call(an: &mut Analyzer, oid: ObjId, args: &[Value], kwargs: &
         intern::key_tuple(parts)
     });
     let Some(mk) = key else {
-        return an.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, call_ast, false);
+        return an.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, false);
     };
     let memo = an.heap.alloc_raw(Kind::Dict, &format!("memo:{}", oid), "", true, "lru_cache", Payload::None);
     let row = state.row(memo, Ns::Item);
@@ -195,7 +195,7 @@ pub(crate) fn memo_call(an: &mut Analyzer, oid: ObjId, args: &[Value], kwargs: &
     } else {
         bump(state, "misses", true);
     }
-    let r = an.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, call_ast, false);
+    let r = an.call_user(oid, None, args.to_vec(), kwargs.clone(), vec![], vec![], state, node, false);
     let out = if row.present.contains(mk) { r.join(&state.slot(memo, Ns::Item, mk)) } else { r };
     let row = state.row(memo, Ns::Item).store(mk, true);
     state.set_row(memo, Ns::Item, row);
