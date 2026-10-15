@@ -1,9 +1,24 @@
 # Release of the VS Code extension with the engine bundled, per platform. Manual only:
 # Actions → Release → Run workflow, with the new version (`dry_run`: everything but the Release). Tests run first (as in ci.yml);
 # then one `rowan` binary per target is built, packed into a platform-specific .vsix
-# (`vsce package --target`), and everything is attached to a GitHub Release `v<version>`.
-# Uploading the .vsix files to the Marketplace is still manual (manage page → Update);
-# automatic publishing needs a Marketplace token (`vsce publish`), not set up yet.
+# (`vsce package --target`), everything is attached to a GitHub Release `v<version>`, and the
+# five .vsix files are published to the Visual Studio Marketplace (`vsce publish --azure-credential`).
+#
+# Marketplace sign-in is a Microsoft Entra ID identity through workload identity federation (no
+# token stored: GitHub's OIDC token is exchanged for an Azure one at run time; Azure DevOps global
+# PATs are retired on 2026-12-01). One-time setup:
+#   1. Entra admin center → App registrations → New (any name, e.g. rowan-marketplace; an Azure
+#      subscription is not needed). Note its Application (client) ID and Directory (tenant) ID.
+#   2. Its Certificates & secrets → Federated credentials → Add → "GitHub Actions deploying Azure
+#      resources": organization kaidaniel, repository rowan, entity type Environment, name
+#      `marketplace` (so the subject is `repo:kaidaniel/rowan:environment:marketplace`).
+#   3. GitHub → Settings → Environments → New environment `marketplace` (no protection rules needed);
+#      Settings → Secrets and variables → Actions → Variables: AZURE_CLIENT_ID, AZURE_TENANT_ID
+#      (identifiers, not secrets).
+#   4. Actions → "Marketplace identity" → Run workflow: it prints the identity's Azure DevOps
+#      profile id. At https://marketplace.visualstudio.com/manage/publishers/rowan → Members → Add,
+#      enter that id with the Contributor role.
+# The sign-in is verified before anything is built, so a broken setup fails the run in seconds.
 name: Release
 
 on:
@@ -31,6 +46,10 @@ jobs:
   check:
     name: check the version
     runs-on: ubuntu-latest
+    environment: marketplace
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - name: Semver, and no release of it yet
         env:
@@ -42,6 +61,22 @@ jobs:
           if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "::error::release v$VERSION exists already"; exit 1
           fi
+
+      - uses: azure/login@v3
+        if: ${{ !inputs.dry_run }}
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - uses: actions/setup-node@v7
+        if: ${{ !inputs.dry_run }}
+        with:
+          node-version: 22
+
+      - name: The identity may publish for the Rowan publisher
+        if: ${{ !inputs.dry_run }}
+        run: npx --yes @vscode/vsce verify-pat --azure-credential Rowan
 
   test:
     name: test (${{ matrix.os }})
@@ -199,5 +234,38 @@ jobs:
             --title "rowan $VERSION" \
             --notes "VS Code extension with the rowan engine bundled, one .vsix per platform (darwin-arm64, darwin-x64, linux-x64, linux-arm64, win32-x64), and the bare \`rowan\` binaries.
 
-          **Marketplace:** upload each .vsix at https://marketplace.visualstudio.com/manage (the extension's ⋯ menu → Update).
+          **Marketplace:** https://marketplace.visualstudio.com/items?itemName=Rowan.rowan (published by this run; it may take a few minutes to show).
           **Manual install:** \`code --install-extension rowan-<platform>-$VERSION.vsix\`."
+
+  publish:
+    name: Marketplace
+    needs: release
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    environment: marketplace
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # One call for all five: each .vsix carries its own --target, and they share the version.
+      # If this fails after the Release exists, fix the cause and "Re-run failed jobs".
+      - name: Publish the .vsix files
+        run: |
+          ls -l dist/*.vsix
+          npx --yes @vscode/vsce publish --azure-credential --packagePath dist/*.vsix
