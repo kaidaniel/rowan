@@ -480,10 +480,48 @@ fn needs_text(an: &Analyzer) -> (Vec<String>, Vec<String>) {
         }
         let pad = format!("  {:<w$}", "", w = width);
         for (i, (label, ps)) in [("always", &always), ("sometimes", &sometimes)].into_iter().filter(|(_, ps)| !ps.is_empty()).enumerate() {
-            out.push(format!("{}  {:<10} {}", if i == 0 { &head } else { &pad }, format!("{}:", label), ps.join(", ")));
+            out.push(format!("{}  {:<10} {}", if i == 0 { &head } else { &pad }, format!("{}:", label), index_runs(ps).join(", ")));
         }
     }
     (inputs, funcs)
+}
+
+/// Access paths with runs of three or more consecutive indexes of one path written once:
+/// `t[0], t[1], t[2]` as `t[0..2]`.
+fn index_runs(paths: &[&str]) -> Vec<String> {
+    let split = |p: &str| -> Option<(String, i64)> {
+        let (pre, idx) = p.strip_suffix(']')?.rsplit_once('[')?;
+        Some((pre.to_string(), idx.parse().ok()?))
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut done: Vec<String> = Vec::new();
+    for p in paths {
+        let Some((pre, _)) = split(p) else {
+            out.push(p.to_string());
+            continue;
+        };
+        if done.contains(&pre) {
+            continue;
+        }
+        let mut idx: Vec<i64> = paths.iter().filter_map(|q| split(q)).filter(|(q, _)| *q == pre).map(|(_, i)| i).collect();
+        idx.sort_unstable();
+        idx.dedup();
+        let mut i = 0;
+        while i < idx.len() {
+            let mut j = i;
+            while j + 1 < idx.len() && idx[j + 1] == idx[j] + 1 {
+                j += 1;
+            }
+            if j - i >= 2 {
+                out.push(format!("{}[{}..{}]", pre, idx[i], idx[j]));
+            } else {
+                out.extend(idx[i..=j].iter().map(|n| format!("{}[{}]", pre, n)));
+            }
+            i = j + 1;
+        }
+        done.push(pre);
+    }
+    out
 }
 
 /// What the code reads of input `src` and of what lies below it, as access paths from
@@ -622,6 +660,7 @@ fn legend(text: &str) -> Vec<String> {
     add(text.contains("  always:"), "always", "read on every path through the code");
     add(text.contains("  sometimes:"), "sometimes", "read on some paths only");
     add(text.contains("[*]"), "[*]", "any element");
+    add(text.lines().any(|l| (l.contains("  always:") || l.contains("  sometimes:")) && l.contains("..")), "[0..6]", "each index from 0 to 6");
     let values = ["\n== what functions return", "\n== module-level variables"].iter().find_map(|h| text.find(h)).map(|i| &text[i..]).unwrap_or("");
     let values = values.split("\n== limits").next().unwrap_or("");
     let plain = values.replace("**?", "").replace("\"?", "").replace("?=", "=").replace("?:", ":");
@@ -1279,6 +1318,11 @@ fn set_members(state: &State, o: ObjId, n: usize) -> Option<Vec<crate::intern::K
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn index_runs() {
+        assert_eq!(super::index_runs(&["t[1]", "t[0]", "t[2]", "x", "t[4]", "u[1]", "u[2]"]), ["t[0..2]", "t[4]", "x", "u[1]", "u[2]"]);
+    }
+
     #[test]
     fn join_alternatives_dedupes_top_level() {
         let t = |xs: &[&str]| super::join_alternatives(&xs.iter().map(|x| x.to_string()).collect::<Vec<_>>());
