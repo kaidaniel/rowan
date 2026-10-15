@@ -35,7 +35,7 @@ impl Analyzer {
     pub fn call_catching(&mut self, f: &Value, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, state: &mut State, node: &Node) -> (Value, Raised) {
         let mut pre = state.copy();
         self.enter_try(rustc_hash::FxHashSet::from_iter(["*".to_string()]), &mut pre);
-        self.catching_depth += 1;
+        self.unwind.catching_depth += 1;
         let mut outs = Vec::new();
         for fo in f.pts.iter() {
             let v = match self.heap.kind(fo) {
@@ -44,7 +44,7 @@ impl Analyzer {
             };
             outs.push(v);
         }
-        self.catching_depth -= 1;
+        self.unwind.catching_depth -= 1;
         let out = self.leave_try();
         let (flagged, raised_at, raised_v) = (out.any(), out.raised(), out.value());
         let died = !state.reachable;
@@ -327,9 +327,9 @@ fn thread_sub(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let recv = c.recv.clone().unwrap_or_default();
         let mut pre = st.copy();
         an.enter_try(rustc_hash::FxHashSet::from_iter(["*".to_string()]), &mut pre);
-        an.catching_depth += 1;
+        an.unwind.catching_depth += 1;
         an.call_method_with(&recv, "run", vec![], &c.node, st);
-        an.catching_depth -= 1;
+        an.unwind.catching_depth -= 1;
         an.leave_try();
     }
     an.none_v.clone()

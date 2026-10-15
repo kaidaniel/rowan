@@ -38,6 +38,8 @@ pub use names::Names;
 pub mod narrow;
 pub use crate::models::tables::*;
 pub mod stmts;
+pub mod tries;
+pub use tries::*;
 pub mod unknown;
 pub use unknown::{any_object, Havoc, HavocMemo};
 
@@ -153,71 +155,6 @@ impl FuncInfo {
     }
 }
 
-/// An exception class's name and its bases' names; `true`: that is the whole MRO.
-pub type ExcNames = (std::rc::Rc<Vec<String>>, bool);
-pub type RaiseRec = (Option<ExcNames>, State, Value);
-
-/// The states of a try's recorded raises, joined (None: no raise recorded).
-pub fn join_raise_recs(recs: &[RaiseRec]) -> Option<State> {
-    State::join_all(recs.iter().map(|r| r.1.copy()).collect())
-}
-
-/// The class of an exception that code rowan cannot see (or a model that does not say which)
-/// may raise: any class, which no handler surely catches or surely misses.
-pub fn any_exc() -> ExcNames {
-    (std::rc::Rc::new(Vec::new()), false)
-}
-
-/// Is this the class `any_exc` stands for?
-pub fn is_any_exc(c: &Option<ExcNames>) -> bool {
-    c.as_ref().is_some_and(|(n, full)| n.is_empty() && !full)
-}
-
-/// A running try context. Every point of its body (and of the calls it makes) that may raise
-/// records the state there: a handler starts from the join of the states whose exceptions it
-/// may catch, a finally on an exceptional way out from those it does not.
-pub struct TryCtx {
-    /// the exception class names its handlers catch (`*`: a bare except; `!reraise`: every
-    /// handler ends by re-raising)
-    pub caught: FxHashSet<String>,
-    /// the frame depth and caller-env depth it runs in: a raise inside a callee hands the
-    /// handler the try frame's locals
-    pub frames: usize,
-    pub envs: usize,
-    /// the state before it and the allocation serial then (what was made since, and nothing
-    /// reaches after the unwind, is garbage in a raise state)
-    pub pre: State,
-    pub mark: u64,
-    /// the raises recorded, per class: (class, the states, the exceptions), joined when it ends
-    pub recs: Vec<(Option<ExcNames>, crate::state::Joins, Value)>,
-    /// the last raise recorded, before collection (a loop of calls raising at one point adds
-    /// nothing)
-    pub last: Option<(State, Option<ExcNames>, Value)>,
-}
-
-/// What a try context recorded while its body ran (`Analyzer::leave_try`).
-pub struct TryExit {
-    /// the states and exceptions at the recorded raises, joined per class
-    pub recs: Vec<RaiseRec>,
-}
-
-impl TryExit {
-    /// The join of the states at the recorded raises (None: none recorded).
-    pub fn raised(&self) -> Option<State> {
-        join_raise_recs(&self.recs)
-    }
-
-    /// The exceptions raised at the recorded points.
-    pub fn value(&self) -> Value {
-        crate::domain::join_values(self.recs.iter().map(|r| r.2.clone()).collect::<Vec<_>>())
-    }
-
-    /// Code that may raise anything ran (a raise of `any_exc`).
-    pub fn any(&self) -> bool {
-        self.recs.iter().any(|r| is_any_exc(&r.0))
-    }
-}
-
 pub use crate::models::exceptions::{builtin_exc_names, EXC_BASES};
 
 #[derive(Debug)]
@@ -329,12 +266,6 @@ impl Frame {
     }
 }
 
-#[derive(Default)]
-pub struct LoopCtx {
-    pub breaks: Option<State>,
-    pub continues: Option<State>,
-}
-
 #[derive(Clone, Copy, Default, Debug)]
 pub struct EnumKind {
     pub mixed: bool,
@@ -424,6 +355,9 @@ pub struct Analyzer {
     pub budget: Budget,
     /// generators and `@contextmanager` bodies run at their consumers (`interp/gens.rs`)
     pub gens: Gens,
+    /// the ways out of running code: raises, try contexts, handlers, break / continue, finally
+    /// (`interp/tries.rs`)
+    pub unwind: Unwind,
     pub models: Registry,
     pub frames: Vec<Frame>,
     pub active: FxHashMap<(ObjId, String), bool>,
@@ -435,29 +369,11 @@ pub struct Analyzer {
     /// per running activation: the heap it started from, that heap grown by the heaps its
     /// recursive calls were made in (on older objects they reach), and its birth mark
     pub rec_heap: FxHashMap<(ObjId, String), (std::rc::Rc<State>, Option<State>, u64)>,
-    pub loop_stack: Vec<LoopCtx>,
-    /// the finally blocks of the running `try` statements: (`loop_stack` depth at the try,
-    /// the block, not running yet): a `break` / `continue` runs those of its loop first
-    pub finally_stack: Vec<(usize, std::rc::Rc<crate::interp::stmts::Finally>, bool)>,
-    /// the running try contexts (innermost last): `try` statements, swallowing `with`s and the
-    /// models' own catching frames
-    pub tries: Vec<TryCtx>,
-    /// the exception the next `record_raise_state` is about
-    pub cur_exc: Option<Value>,
-    /// exception names handled by the running `except` clauses (innermost last): what a bare
-    /// `raise` re-raises
-    pub handling: Vec<FxHashSet<String>>,
-    /// the exception values the running handlers hold (a bare `raise` re-raises them)
-    pub handling_values: Vec<Value>,
-    /// inside a call whose exceptions a thread / future keeps: reads still require their keys
-    pub catching_depth: u32,
     /// lazy iterators (zip / islice / map …) over one-shot iterators: what consuming them
     /// takes from each source (Some(n): n items, None: all)
     pub lazy_src: FxHashMap<ObjId, Vec<(ObjId, Option<usize>)>>,
     /// a context part every allocation adds (a model run once per receiver)
     pub alloc_extra: Option<String>,
-    /// a load guarded by a `try` handler is running (its key is still required)
-    pub caught_load: bool,
     /// per running comprehension: the cells of its variables (closed over by functions made
     /// inside it, which see the variable's latest value)
     pub comp_cells: Vec<FxHashMap<StrId, ObjId>>,
@@ -558,14 +474,6 @@ pub struct Analyzer {
     /// a copy's original (through copies made at the same node: `out = deepcopy(out)` in a loop
     /// makes one copy site, not a new one per round)
     pub copy_root: FxHashMap<ObjId, ObjId>,
-    /// the class of the exception being recorded (set beside `cur_exc`)
-    pub cur_exc_cls: Option<ExcNames>,
-    /// the call being evaluated: where an exception a model raises is allocated
-    pub exc_node: Option<Node>,
-    pub item_exc: Option<&'static str>,
-    /// what a missing key raises in the reads a model makes (pydantic's field reads: a
-    /// ValidationError)
-    pub item_exc_force: Option<&'static str>,
     /// locals of the callers of the running call (innermost last), for liveness
     pub env_stack: Vec<IndexMap<StrId, Value>>,
     /// `@name.setter` functions by (defining class, attribute)
@@ -619,38 +527,6 @@ impl Analyzer {
         let oid = self.alloc_global(Kind::Module, &format!("module:{}", name), &format!("module {}", name), Payload::Module(Rc::new(info)));
         self.modules.insert(name.to_string(), oid);
         oid
-    }
-
-    /// A try context begins: raises inside it record the state there for its handlers and
-    /// its finally; `pre` is the state before the body.
-    pub fn enter_try(&mut self, caught: FxHashSet<String>, pre: &mut State) {
-        let (frames, envs, mark) = (self.frames.len(), self.env_stack.len(), self.heap.serial());
-        self.tries.push(TryCtx { caught, frames, envs, pre: pre.copy(), mark, recs: Vec::new(), last: None });
-    }
-
-    /// The try context ends: what it recorded. What callees made since the try began and
-    /// nothing reaches after the unwind (the try's names, the frames below it, the exception)
-    /// is garbage in a raise state: a try around a large recursion would otherwise join every
-    /// callee's objects into its handlers.
-    pub fn leave_try(&mut self) -> TryExit {
-        let Some(t) = self.tries.pop() else { return TryExit { recs: Vec::new() } };
-        let mut recs: Vec<RaiseRec> = t.recs.into_iter().filter_map(|(c, sts, e)| Some((c, sts.finish()?, e))).collect();
-        for (_, st, exc) in recs.iter_mut() {
-            let mut roots: Vec<ObjId> = Vec::new();
-            self.state_roots(st, t.envs, t.frames, &mut roots);
-            for (o, v) in st.lasts.iter() {
-                roots.push(*o);
-                v.push_objs(&mut roots);
-            }
-            exc.push_objs(&mut roots);
-            self.collect_since(t.mark, &t.pre, roots, st, Some(t.envs));
-        }
-        TryExit { recs }
-    }
-
-    /// The exception classes the running try contexts catch (innermost last).
-    pub fn guards(&self) -> impl DoubleEndedIterator<Item = &FxHashSet<String>> {
-        self.tries.iter().map(|t| &t.caught)
     }
 
     pub fn frame(&self) -> &Frame {

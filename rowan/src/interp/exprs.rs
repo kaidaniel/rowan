@@ -134,7 +134,7 @@ impl Analyzer {
                 self.callee_nodes.insert(self.m.t_called_attr);
                 let fv = self.eval(&c.func, state);
                 let mut flag = false;
-                if !self.tries.is_empty() {
+                if !self.unwind.tries.is_empty() {
                     let all_safe = fv.pts.iter().all(|o| match &self.heap.obj(o).payload {
                         Payload::Method(q, _) if self.heap.kind(o) == Kind::Method => super::safe_method(q) || super::SELF_REPORTING.iter().any(|p| q.starts_with(p)),
                         // user code: whether it raises is reported by its own analysis
@@ -153,14 +153,14 @@ impl Analyzer {
                     }
                 }
                 let nd = frontend::node(node);
-                let saved_node = self.exc_node.replace(nd);
+                let saved_node = self.unwind.exc_node.replace(nd);
                 if let (Some(a @ (ast::Expr::ListComp(_) | ast::Expr::Generator(_))), Some(o)) = (c.arguments.args.first(), fv.single()) {
                     if fv.kv.is_bot() && self.heap.kind(o) == Kind::External && matches!(self.heap.external_qual(o).as_str(), "torch.cat" | "torch.concat" | "torch.concatenate" | "torch.stack") {
                         self.nonempty_comp = a as *const ast::Expr as usize;
                     }
                 }
                 let r = self.call_value(&fv, &nd, Some(c), state, None);
-                self.exc_node = saved_node;
+                self.unwind.exc_node = saved_node;
                 // (flagged after the call: what the call requires of its inputs, it requires on
                 // its raising paths too — a missing column is what makes `read_csv` raise)
                 if flag {

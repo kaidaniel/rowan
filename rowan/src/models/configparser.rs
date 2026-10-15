@@ -230,13 +230,13 @@ pub fn rebuild(an: &mut Analyzer, st: &mut State, node: &Node, oid: u32) {
 fn cfg_raise(an: &mut Analyzer, st: &mut State, name: &str, sure: bool) {
     // (its class: configparser's hierarchy, `except configparser.Error` catches it too)
     let q = if name == "ValueError" { name.to_string() } else { format!("configparser.{}", name) };
-    an.cur_exc_cls = Some(crate::interp::builtin_exc_names(&q));
+    an.unwind.cur_exc_cls = Some(crate::interp::builtin_exc_names(&q));
     if sure {
         an.raise_here(&q, st);
     } else {
         an.may_raise_here(&q, st);
     }
-    an.cur_exc_cls = None;
+    an.unwind.cur_exc_cls = None;
 }
 
 fn convert(kind: &str, s: &str) -> Option<intern::KeyId> {

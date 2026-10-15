@@ -397,7 +397,7 @@ pub fn may_type_error(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &In
         an.raise_here("TypeError", state);
         return;
     }
-    if an.tries.is_empty() {
+    if an.unwind.tries.is_empty() {
         return;
     }
     // (known: literals and the program's containers of literals; not an unknown value, an
@@ -4210,9 +4210,9 @@ fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             an.store_key(o, Ns::Attr, &KeyVal::Lit(intern::key_str_lit(name)), &v, strong, &c.node, st);
                         }
                     }
-                    an.cur_exc = Some(e);
+                    an.unwind.cur_exc = Some(e);
                     an.raise_here("JSONDecodeError", st);
-                    an.cur_exc = None;
+                    an.unwind.cur_exc = None;
                     return Value::new();
                 }
                 _ => {}

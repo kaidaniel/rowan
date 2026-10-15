@@ -1124,17 +1124,17 @@ impl Analyzer {
         }
         self.heap.obj_mut(eo).payload = Payload::Method(format!("pydverr.{}", use_idx), Value::new());
         state.set_row(eo, Ns::Attr, Row::new().data_store(crate::domain::Source::new("ValidationError", crate::domain::SourceKind::Data)));
-        self.cur_exc = Some(Value::obj(eo));
+        self.unwind.cur_exc = Some(Value::obj(eo));
         if cls != "ValidationError" {
-            self.cur_exc_cls = Some(crate::interp::builtin_exc_names(cls));
+            self.unwind.cur_exc_cls = Some(crate::interp::builtin_exc_names(cls));
         }
         if sure {
             self.raise_here(cls, state);
         } else {
             self.may_raise_here(cls, state);
         }
-        self.cur_exc = None;
-        self.cur_exc_cls = None;
+        self.unwind.cur_exc = None;
+        self.unwind.cur_exc_cls = None;
     }
 
     /// Field constraints on known values: an error when every value breaks one (maybe when
@@ -1383,9 +1383,9 @@ impl Analyzer {
         let saved = self.verdict_guarded;
         self.verdict_guarded |= self.validation_caught();
         // (a missing field is pydantic's ValidationError, not a KeyError)
-        let saved_exc = std::mem::replace(&mut self.item_exc_force, Some("ValidationError"));
+        let saved_exc = std::mem::replace(&mut self.unwind.item_exc_force, Some("ValidationError"));
         let v = if ns == Ns::Attr { self.load_attr(recv, &intern::key_py_str(k), node, state, true) } else { self.load_item(recv, Ns::Item, &Value::lit(k), node, state, true) };
-        self.item_exc_force = saved_exc;
+        self.unwind.item_exc_force = saved_exc;
         self.verdict_guarded = saved;
         v
     }

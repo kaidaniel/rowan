@@ -163,7 +163,7 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 | `layered.rs`, `state.rs` | persistent maps (`LayerMap`, `TwoLevel`); `State`, joins, `diff_keys` |
 | `frontend.rs`, `scopes.rs` | ruff parsing, leaked `&'static` trees, module registry; lexical scopes |
 | `interp/mod.rs`; `heap.rs`, `alloc.rs`, `gc.rs` | `Analyzer`, side tables, entry runs; the `Heap` (objects, lengths, birth marks), allocation policy (`alloc`: variants, recency), liveness (`live_among`, `gc_pinned`) and collectors |
-| `interp/stmts.rs` | statements, loops, try / with / match, `finally` |
+| `interp/stmts.rs`, `interp/tries.rs` | statements, loops, match; raises, try contexts (`Unwind`), try / with, `finally` |
 | `interp/exprs.rs`, `interp/funcs.rs`, `interp/gens.rs` | expressions, comprehensions; functions, names, iteration; generators and `@contextmanager` bodies (`Gens`: lazy runs, per-yield states, watched runs) |
 | `interp/narrow.rs`, `interp/access.rs` | tests (`split`), narrowing; attribute and item access, verdicts, requirements |
 | `interp/calls.rs`, `budget.rs`, `unknown.rs`, `effects.rs` | calls: per-call-site runs, recursion; `Budget` (per code, deadline, work counters); `__new__`, dataclass init; unknown calls (`Havoc` walks); what skipped calls may change (`skipped_call`, `EffectsCache`) |

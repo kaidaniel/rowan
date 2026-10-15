@@ -889,7 +889,7 @@ pub fn with_suppress(an: &mut Analyzer, w: &'static ast::StmtWith, state: &mut S
         return false;
     }
     // `try: body / except (E, …): pass`
-    let h = crate::interp::stmts::Handler { types: Some(call.arguments.args.iter().collect()), name: None, body: &[], line: crate::frontend::node(w).line };
-    an.stmt_try_parts(&w.body, vec![h], &[], std::rc::Rc::new(crate::interp::stmts::Finally::Block(&[])), state);
+    let h = crate::interp::Handler { types: Some(call.arguments.args.iter().collect()), name: None, body: &[], line: crate::frontend::node(w).line };
+    an.stmt_try_parts(&w.body, vec![h], &[], std::rc::Rc::new(crate::interp::Finally::Block(&[])), state);
     true
 }

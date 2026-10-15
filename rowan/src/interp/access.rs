@@ -49,7 +49,7 @@ impl Analyzer {
 
     /// The innermost handler that catches this namespace's error re-raises it.
     pub fn guard_reraises(&self, ns: Ns) -> bool {
-        let want: &[&str] = if ns == Ns::Item { match self.item_exc { Some("ValueError") => super::VALUE_GUARDS, Some("ValidationError") => super::VALIDATION_GUARDS, _ => ITEM_GUARDS } } else { ATTR_GUARDS };
+        let want: &[&str] = if ns == Ns::Item { match self.unwind.item_exc { Some("ValueError") => super::VALUE_GUARDS, Some("ValidationError") => super::VALIDATION_GUARDS, _ => ITEM_GUARDS } } else { ATTR_GUARDS };
         for g in self.guards().rev() {
             if g.iter().any(|x| want.contains(&x.as_str())) {
                 return g.contains("!reraise");
@@ -116,7 +116,7 @@ impl Analyzer {
     }
 
     pub fn is_guarded(&self, ns: Ns) -> bool {
-        let want: &[&str] = if ns == Ns::Item { match self.item_exc { Some("ValueError") => super::VALUE_GUARDS, Some("ValidationError") => super::VALIDATION_GUARDS, _ => ITEM_GUARDS } } else { ATTR_GUARDS };
+        let want: &[&str] = if ns == Ns::Item { match self.unwind.item_exc { Some("ValueError") => super::VALUE_GUARDS, Some("ValidationError") => super::VALIDATION_GUARDS, _ => ITEM_GUARDS } } else { ATTR_GUARDS };
         self.guards().any(|g| g.iter().any(|x| want.contains(&x.as_str())))
     }
 
@@ -372,13 +372,13 @@ impl Analyzer {
         }
         // a numpy structured array's missing field raises ValueError
         let exc = if ns == Ns::Item && !obj.pts.is_empty() && !self.m.np_struct.is_empty() && obj.pts.iter().all(|o| self.m.np_struct.contains(&o)) { Some("ValueError") } else { None };
-        let exc = if ns == Ns::Item { self.item_exc_force.or(exc) } else { exc };
-        let saved = std::mem::replace(&mut self.item_exc, exc);
+        let exc = if ns == Ns::Item { self.unwind.item_exc_force.or(exc) } else { exc };
+        let saved = std::mem::replace(&mut self.unwind.item_exc, exc);
         let scalar = self.may_be_scalar(obj);
         let saved_scalar = std::mem::replace(&mut self.recv_scalar, scalar);
         let v = self.load_item_inner(obj, ns, key, node, state, report);
         self.recv_scalar = saved_scalar;
-        self.item_exc = saved;
+        self.unwind.item_exc = saved;
         v
     }
 
@@ -653,9 +653,9 @@ impl Analyzer {
         // (a load a `try` handler guards: its exception still fires when the key is missing, so
         // the key is required of the input all the same — the runtime oracle's rule)
         let caught = try_guard;
-        let saved = std::mem::replace(&mut self.caught_load, caught);
+        let saved = std::mem::replace(&mut self.unwind.caught_load, caught);
         let v = self.load_record_inner(oid, ns, key, node, state, guarded, single_target, try_guard);
-        self.caught_load = saved;
+        self.unwind.caught_load = saved;
         v
     }
 
@@ -678,32 +678,32 @@ impl Analyzer {
                     }
                     // (a model's own read — pydantic collecting its field errors — raises nothing here:
                     // the model raises its ValidationError, with every error, afterwards)
-                    let model_read = ns == Ns::Item && self.item_exc == Some("ValidationError");
+                    let model_read = ns == Ns::Item && self.unwind.item_exc == Some("ValidationError");
                     if model_read {
-                        if self.caught_load && cls.tier == Tier::Input {
+                        if self.unwind.caught_load && cls.tier == Tier::Input {
                             self.require_providers_k(&cls, &row, true, state, Some(k), ns);
                         }
                     }
                     // the handler sees the state as it is here (and a KeyError / AttributeError
                     // carrying the key)
                     if model_read {
-                    } else if !self.tries.is_empty() {
-                        let cname = if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" };
+                    } else if !self.unwind.tries.is_empty() {
+                        let cname = if ns == Ns::Item { self.unwind.item_exc.unwrap_or("KeyError") } else { "AttributeError" };
                         let e = self.exception_object(cname, vec![Value::lit(k)], node, state);
-                        self.cur_exc = Some(e);
+                        self.unwind.cur_exc = Some(e);
                     }
                     // (required on the handler's path too: the exception fired for the key)
-                    if !model_read && self.caught_load && cls.tier == Tier::Input {
+                    if !model_read && self.unwind.caught_load && cls.tier == Tier::Input {
                         self.require_providers_k(&cls, &row, true, state, Some(k), ns);
                     }
                     if !model_read {
-                        self.cur_exc_cls = Some(super::builtin_exc_names(if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" }));
+                        self.unwind.cur_exc_cls = Some(super::builtin_exc_names(if ns == Ns::Item { self.unwind.item_exc.unwrap_or("KeyError") } else { "AttributeError" }));
                         self.record_raise_state(state);
-                        self.cur_exc_cls = None;
+                        self.unwind.cur_exc_cls = None;
                         // (an object of unknown kind indexed by a number may be a sequence: an
                         // IndexError then)
                         if ns == Ns::Item && intern::key_as_int(k).is_some() && matches!(kind, Kind::Unknown | Kind::External) {
-                            self.cur_exc = None;
+                            self.unwind.cur_exc = None;
                             self.may_raise_here("IndexError", state);
                         }
                     }
@@ -722,7 +722,7 @@ impl Analyzer {
                     self.verdict_guarded(node, k, &cls, oid, ns);
                 }
                 // (a handler that re-raises, a thread / future: the input still needs the key)
-                if guarded && cls.tier == Tier::Input && (self.catching_depth > 0 || self.guard_reraises(ns) || self.caught_load) {
+                if guarded && cls.tier == Tier::Input && (self.unwind.catching_depth > 0 || self.guard_reraises(ns) || self.unwind.caught_load) {
                     self.require_providers_k(&cls, &row, true, state, Some(k), ns);
                 }
                 if !guarded {
@@ -791,8 +791,8 @@ impl Analyzer {
         }
         // Data key: it may be one the record lacks (KeyError), unless the read cannot fail
         if !guarded || try_guard {
-            self.cur_exc = None;
-            self.may_raise_here(if ns == Ns::Item { self.item_exc.unwrap_or("KeyError") } else { "AttributeError" }, state);
+            self.unwind.cur_exc = None;
+            self.may_raise_here(if ns == Ns::Item { self.unwind.item_exc.unwrap_or("KeyError") } else { "AttributeError" }, state);
         }
         if !guarded && row.closed() && !row.is_map() && !row.present.is_empty() && matches!(kind, Kind::Dict | Kind::Frame) {
             let k = key_str_lit(&format!("<data {}>", kv));
@@ -1136,16 +1136,16 @@ impl Analyzer {
             if let Some((surely, k)) = raise.filter(|_| ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) {
                 state.set_row(oid, ns, row.clone());
                 let exc = if ns == Ns::Item { "KeyError" } else { "AttributeError" };
-                if !self.tries.is_empty() {
+                if !self.unwind.tries.is_empty() {
                     let e = self.exception_object(exc, vec![Value::lit(k)], node, state);
-                    self.cur_exc = Some(e);
+                    self.unwind.cur_exc = Some(e);
                 }
                 if surely {
                     self.raise_here(exc, state);
                 } else {
                     self.may_raise_here(exc, state);
                 }
-                self.cur_exc = None;
+                self.unwind.cur_exc = None;
                 if surely {
                     continue;
                 }

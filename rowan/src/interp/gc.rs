@@ -157,7 +157,7 @@ impl Analyzer {
     pub fn gc_pinned(&self, work: &mut Vec<ObjId>, unwind: Option<usize>) {
         // (the side tables' entries: their keys themselves may be dead)
         self.side_edges(None, work);
-        for v in self.cur_exc.iter().chain(self.tries.iter().flat_map(|t| t.recs.iter().map(|r| &r.2))).chain(self.handling_values.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
+        for v in self.unwind.cur_exc.iter().chain(self.unwind.tries.iter().flat_map(|t| t.recs.iter().map(|r| &r.2))).chain(self.unwind.handling_values.iter()).chain(self.m.stdout_redirect.iter()).chain(std::iter::once(&self.m.fa_status)).chain(self.m.fa_gen_ret.iter()) {
             v.push_objs(work);
         }
         for c in &self.m.fa_dep_cache {
@@ -171,8 +171,8 @@ impl Analyzer {
             env.values().for_each(|v| v.push_objs(work));
         }
         // (the managers of the with statements running: their `__exit__` runs on the way out)
-        for (_, fin, _) in &self.finally_stack {
-            if let crate::interp::stmts::Finally::Exit(ms) = &**fin {
+        for (_, fin, _) in &self.unwind.finally_stack {
+            if let crate::interp::Finally::Exit(ms) = &**fin {
                 ms.iter().for_each(|(v, _)| v.push_objs(work));
             }
         }
