@@ -37,9 +37,9 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   is a strong *view* per iteration (`bind_views`; `link_view`: changes join both ways). A
   running `try` (`TryCtx`) records the state at every point of its body and callees that may
   raise (a raise, a failing read, a model's raise, any unknown call: class `any_exc`), joined
-  per class; handlers start from the raises they may catch, the rest go on through the
-  `finally` to the enclosing try. `with` is a `try` whose `finally` is `__exit__`. `finally`
-  runs on every way out, `break` / `continue` / `return` included.
+  per class (an object a raise leaves half-built is dropped there unless held, `drop_unreached`);
+  handlers start from the raises they may catch, the rest go on through the `finally` to the
+  enclosing try. `with` is a `try` whose `finally` is `__exit__`; `finally` runs on every way out.
 * **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site, in a
   context of the innermost `chain` (2) call sites. **Budget:** each function code (all closures
   of one `def`) may run 4,096 statements in all (`budget`); past that its calls are unknown
