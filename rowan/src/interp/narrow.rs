@@ -136,242 +136,11 @@ impl Analyzer {
         }
         match test {
             ast::Expr::Named(n) => self.narrow(&n.target, truth, state),
-            ast::Expr::Compare(c) if c.ops.len() == 1 => {
-                let op = c.ops[0];
-                let left: &'static ast::Expr = &c.left;
-                let right: &'static ast::Expr = &c.comparators[0];
-                match op {
-                    ast::CmpOp::In | ast::CmpOp::NotIn => {
-                        let member = if op == ast::CmpOp::In { truth } else { !truth };
-                        self.narrow_membership(left, right, member, state);
-                    }
-                    ast::CmpOp::Eq | ast::CmpOp::NotEq => {
-                        if let ast::Expr::Name(l) = left {
-                            let eq = if op == ast::CmpOp::Eq { truth } else { !truth };
-                            let Some(rv) = self.traced(right) else { return };
-                            let ks = kv_literals(&rv.kv);
-                            // (Decimal / Fraction / datetime literals equal others by value, not
-                            // as keys: no narrowing by key identity)
-                            let lv0 = self.load_name(s(l.id.as_str()), &Node::none(), state);
-                            // (numbers too: `1 == 1.0 == True` though their keys differ)
-                            let valued = |k: KeyId| crate::models::pynum::is_num_key(k) || crate::models::chrono::is_chrono_key(k) || intern::key_is_number(k) || intern::with_key(k, |kk| matches!(kk, intern::Key::Bool(_)));
-                            let by_value = ks.iter().any(valued) || kv_literals(&lv0.kv).iter().any(valued);
-                            if !ks.is_empty() && !by_value {
-                                self.narrow_kv(s(l.id.as_str()), &ks, eq, state);
-                            }
-                        } else if let Some(la) = match left { ast::Expr::Attribute(la) if matches!(&*la.value, ast::Expr::Name(_)) => Some(la), _ => None } {
-                            // `obj.attr == lit` on one object whose attribute holds known
-                            // literals: the attribute narrows (`self.unit == "F"`)
-                            let eq = if op == ast::CmpOp::Eq { truth } else { !truth };
-                            let (Some(rv), Some(ov)) = (self.traced(right), self.traced(&la.value)) else { return };
-                            let ks = kv_literals(&rv.kv);
-                            let ak = key_str_lit(la.attr.id.as_str());
-                            if let Some(o) = ov.single().filter(|o| self.heap.obj(*o).single && matches!(self.heap.kind(*o), Kind::Instance | Kind::Namespace) && rv.pts.is_empty() && ks.len() == 1) {
-                                let cur = state.slot_opt(o, Ns::Attr, ak);
-                                if let Some(cur) = cur.filter(|c| c.pts.is_empty() && c.kv.is_literal()) {
-                                    let lits = kv_literals(&cur.kv);
-                                    let valued = |k: KeyId| crate::models::pynum::is_num_key(k) || crate::models::chrono::is_chrono_key(k) || intern::key_is_number(k);
-                                    if !lits.iter().any(valued) && !ks.iter().any(valued) {
-                                        let keep: KeySet = if eq { lits.intersection(&ks) } else { lits.difference(&ks) };
-                                        if keep.is_empty() {
-                                            state.reachable = false;
-                                        } else if keep.len() < lits.len() {
-                                            state.set_slot(o, Ns::Attr, ak, Value::kv_only(KeyVal::lits(keep)), true);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    ast::CmpOp::Is | ast::CmpOp::IsNot if !matches!(right, ast::Expr::NoneLiteral(_)) => {
-                        // `t is a` with `a` one object: on the true side t is a, on the false side
-                        // a is not among t's objects
-                        let same = if op == ast::CmpOp::Is { truth } else { !truth };
-                        for (name_e, other_e) in [(left, right), (right, left)] {
-                            let ast::Expr::Name(nm) = name_e else { continue };
-                            let name = s(nm.id.as_str());
-                            let cur = self.load_name(name, &Node::none(), state);
-                            let Some(o) = self.traced(other_e) else { continue };
-                            let Some(target) = o.single().filter(|x| o.kv.is_bot() && self.heap.obj(*x).single && !crate::state::is_merged(*x)) else { continue };
-                            if !cur.pts.contains(target) || cur.pts.len() < 2 || !cur.kv.is_bot() {
-                                continue;
-                            }
-                            if same {
-                                self.rebind_name(name, Value::obj(target), state);
-                            } else {
-                                let rest = cur.pts.filter(|x| x != target);
-                                self.rebind_name(name, Value::objs(rest), state);
-                            }
-                            break;
-                        }
-                    }
-                    ast::CmpOp::Is | ast::CmpOp::IsNot => {
-                        if matches!(right, ast::Expr::NoneLiteral(_)) {
-                            let is_none = if op == ast::CmpOp::Is { truth } else { !truth };
-                            if !is_none {
-                                self.narrow_get_truthy(left, state);
-                            }
-                            // the name is None / is not None
-                            if let ast::Expr::Name(l) = left {
-                                let cur = self.load_name(s(l.id.as_str()), &Node::none(), state);
-                                let has_none = kv_literals(&cur.kv).contains(intern::key_none());
-                                if has_none || is_none {
-                                    self.narrow_kv(s(l.id.as_str()), &KeySet::one(intern::key_none()), is_none, state);
-                                }
-                            }
-                        }
-                    }
-                    ast::CmpOp::LtE | ast::CmpOp::Lt => {
-                        if let ast::Expr::Call(rc) = right {
-                            if let ast::Expr::Attribute(ra) = &*rc.func {
-                                if ra.attr.id.as_str() == "keys" {
-                                    let (Some(lv), Some(rec)) = (self.traced(left), self.traced(&ra.value)) else { return };
-                                    let ks = self.lit_keys(&lv, state);
-                                    if let Some(ks) = ks {
-                                        if truth {
-                                            for k in ks.iter() {
-                                                self.narrow_record(&rec, Ns::Item, k, true, state);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            ast::Expr::Call(call) => {
-                let args = &call.arguments.args;
-                // `isclass(x)` / `inspect.isclass(x)`
-                let fname = match &*call.func {
-                    ast::Expr::Name(n) => Some(n.id.as_str()),
-                    ast::Expr::Attribute(a) => Some(a.attr.id.as_str()),
-                    _ => None,
-                };
-                if let (Some("isclass"), [ast::Expr::Name(n)]) = (fname, &args[..]) {
-                    self.narrow_isclass(s(n.id.as_str()), truth, state);
-                    return;
-                }
-                if let ast::Expr::Name(fnm) = &*call.func {
-                    let fname = fnm.id.as_str();
-                    if fname == "isinstance" && args.len() == 2 {
-                        match &args[0] {
-                            ast::Expr::Name(n) => self.narrow_isinstance(NarrowTarget::Name(n.id.to_string()), &args[1], truth, state),
-                            ast::Expr::Attribute(a) => self.narrow_isinstance(NarrowTarget::Attr(a, &args[0]), &args[1], truth, state),
-                            _ => {}
-                        }
-                        return;
-                    }
-                    if fname == "hasattr" && args.len() == 2 {
-                        let (Some(kv), Some(mut rec)) = (self.traced(&args[1]), self.traced(&args[0])) else { return };
-                        if let Some(k) = kv.kv.as_lit() {
-                            // (an attribute row describes instances and namespaces; a builtin
-                            // container's attributes are its type's: decided by the type, or not)
-                            let builtin = |an: &Analyzer, o: u32| matches!(an.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set);
-                            if !rec.pts.is_empty() && rec.pts.iter().all(|o| builtin(self, o)) {
-                                if let Some(name) = intern::key_as_str(k) {
-                                    if rec.pts.iter().all(|o| crate::models::builtin_has_attr(self, o, &name) == Some(!truth)) {
-                                        state.reachable = false;
-                                    }
-                                }
-                                return;
-                            }
-                            // (an instance whose class defines the name has it whatever its own
-                            // attributes are: its row says nothing about it)
-                            let by_class = |an: &Analyzer, o: u32| intern::key_as_str(k).is_some_and(|n| an.class_resolves(o, &n));
-                            rec = Value::with_kv(rec.pts.filter(|o| !builtin(self, o) && !by_class(self, o)), KeyVal::Bot);
-                            self.narrow_record(&rec, Ns::Attr, k, truth, state);
-                        }
-                        return;
-                    }
-                    if fname == "all" && args.len() == 1 {
-                        if let ast::Expr::Generator(g) = &args[0] {
-                            if truth && g.generators.len() == 1 {
-                                if let ast::Expr::Compare(cmp) = &*g.elt {
-                                    if cmp.ops.first() == Some(&ast::CmpOp::In) {
-                                        let (Some(itv), Some(rec)) = (self.traced(&g.generators[0].iter), self.traced(&cmp.comparators[0])) else { return };
-                                        let ks = self.lit_keys(&itv, state);
-                                        if let Some(ks) = ks {
-                                            if matches!(&*cmp.left, ast::Expr::Name(_)) {
-                                                for k in ks.iter() {
-                                                    self.narrow_record(&rec, Ns::Item, k, true, state);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        return;
-                    }
-                }
-                if let ast::Expr::Attribute(fa) = &*call.func {
-                    if fa.attr.id.as_str() == "issubset" && args.len() == 1 && truth {
-                        let (Some(v), Some(rec)) = (self.traced(&fa.value), self.traced(&args[0])) else { return };
-                        let ks = self.lit_keys(&v, state);
-                        if let Some(ks) = ks {
-                            for k in ks.iter() {
-                                self.narrow_record(&rec, Ns::Item, k, true, state);
-                            }
-                        }
-                        return;
-                    }
-                    if fa.attr.id.as_str() == "get" && truth {
-                        self.narrow_get_truthy(test, state);
-                    }
-                }
-            }
+            ast::Expr::Compare(c) if c.ops.len() == 1 => self.narrow_compare(c, truth, state),
+            ast::Expr::Call(call) => self.narrow_call(test, call, truth, state),
             // `if items:` / `if not items:` on a list of unknown length: on this path it has a
             // first element / is empty (this path's length only, not the object's)
-            ast::Expr::Name(n) => {
-                let mut v = self.load_name(s(n.id.as_str()), &Node::none(), state);
-                if let Some(nv) = truth_narrowed(&v, truth) {
-                    if nv.empty() {
-                        state.reachable = false;
-                        return;
-                    }
-                    self.rebind_name(s(n.id.as_str()), nv.clone(), state);
-                    v = nv;
-                }
-                // several containers: on the truthy path the ones known to be empty are not it
-                if truth && v.pts.len() > 1 && v.kv.is_bot() {
-                    let keep: Vec<u32> = v.pts.iter().filter(|o| !(matches!(self.heap.kind(*o), Kind::List | Kind::Tuple | Kind::Set) && self.heap.llen(*o, state) == Some(0))).collect();
-                    if !keep.is_empty() && keep.len() < v.pts.len() {
-                        v = Value::objs(crate::domain::ObjSet::from_vec(keep));
-                        self.rebind_name(s(n.id.as_str()), v.clone(), state);
-                    }
-                }
-                if v.pts.len() == 1 && v.kv.is_bot() {
-                    let o = v.pts.first().unwrap();
-                    if matches!(self.heap.kind(o), Kind::List | Kind::Tuple) && self.heap.obj(o).single && self.heap.llen(o, state).is_none() {
-                        if truth {
-                            if self.heap.prefix(o, state).is_none() {
-                                let e = state.slot(o, Ns::Elem, intern::STAR);
-                                let ekv = state.elems.get(&o).unwrap_or(crate::domain::DATA);
-                                state.set_slot(o, Ns::Pos, intern::key_int(0), Value::with_kv(e.pts, ekv), true);
-                                state.lens.insert(o, (None, 1, 0));
-                            }
-                        } else if self.heap.prefix(o, state).is_none() {
-                            state.lens.insert(o, (Some(0), 0, 0));
-                        }
-                    }
-                    // a falsy dict is empty on this path (`while queue:` ends with no keys)
-                    if !truth && self.heap.kind(o) == Kind::Dict && self.heap.obj(o).single {
-                        state.set_row(o, Ns::Item, crate::domain::Row::new());
-                        state.drop_obj_ns(o, Ns::Item);
-                    }
-                    // a falsy unknown value (a JSON document, an input): an empty container if
-                    // len() or a key read accepts it at all (a falsy number makes them raise)
-                    if !truth && self.heap.kind(o) == Kind::Unknown && self.heap.obj(o).single && v.kv.is_bot() {
-                        state.set_row(o, Ns::Item, crate::domain::Row::new());
-                        state.drop_obj_ns(o, Ns::Item);
-                        state.drop_obj_ns(o, Ns::Pos);
-                        state.drop_obj_ns(o, Ns::Elem);
-                        state.lens.insert(o, (Some(0), 0, 0));
-                    }
-                }
-            }
+            ast::Expr::Name(n) => self.narrow_name(n, truth, state),
             // `if obj.attr:` — the attribute chain's literals of the other truth are not it here
             ast::Expr::Attribute(_) => {
                 if let (Some(key), Some(v)) = (chain_text(test), self.traced(test)) {
@@ -385,6 +154,252 @@ impl Analyzer {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// `if x:` / `if not x:` on the path where it is `truth`: the literals of the other truth are
+    /// not `x`; a list of unknown length has a first element / is empty (on this path only).
+    fn narrow_name(&mut self, n: &'static ast::ExprName, truth: bool, state: &mut State) {
+        let mut v = self.load_name(s(n.id.as_str()), &Node::none(), state);
+        if let Some(nv) = truth_narrowed(&v, truth) {
+            if nv.empty() {
+                state.reachable = false;
+                return;
+            }
+            self.rebind_name(s(n.id.as_str()), nv.clone(), state);
+            v = nv;
+        }
+        // several containers: on the truthy path the ones known to be empty are not it
+        if truth && v.pts.len() > 1 && v.kv.is_bot() {
+            let keep: Vec<u32> = v.pts.iter().filter(|o| !(matches!(self.heap.kind(*o), Kind::List | Kind::Tuple | Kind::Set) && self.heap.llen(*o, state) == Some(0))).collect();
+            if !keep.is_empty() && keep.len() < v.pts.len() {
+                v = Value::objs(crate::domain::ObjSet::from_vec(keep));
+                self.rebind_name(s(n.id.as_str()), v.clone(), state);
+            }
+        }
+        if v.pts.len() == 1 && v.kv.is_bot() {
+            let o = v.pts.first().unwrap();
+            if matches!(self.heap.kind(o), Kind::List | Kind::Tuple) && self.heap.obj(o).single && self.heap.llen(o, state).is_none() {
+                if truth {
+                    if self.heap.prefix(o, state).is_none() {
+                        let e = state.slot(o, Ns::Elem, intern::STAR);
+                        let ekv = state.elems.get(&o).unwrap_or(crate::domain::DATA);
+                        state.set_slot(o, Ns::Pos, intern::key_int(0), Value::with_kv(e.pts, ekv), true);
+                        state.lens.insert(o, (None, 1, 0));
+                    }
+                } else if self.heap.prefix(o, state).is_none() {
+                    state.lens.insert(o, (Some(0), 0, 0));
+                }
+            }
+            // a falsy dict is empty on this path (`while queue:` ends with no keys)
+            if !truth && self.heap.kind(o) == Kind::Dict && self.heap.obj(o).single {
+                state.set_row(o, Ns::Item, crate::domain::Row::new());
+                state.drop_obj_ns(o, Ns::Item);
+            }
+            // a falsy unknown value (a JSON document, an input): an empty container if
+            // len() or a key read accepts it at all (a falsy number makes them raise)
+            if !truth && self.heap.kind(o) == Kind::Unknown && self.heap.obj(o).single && v.kv.is_bot() {
+                state.set_row(o, Ns::Item, crate::domain::Row::new());
+                state.drop_obj_ns(o, Ns::Item);
+                state.drop_obj_ns(o, Ns::Pos);
+                state.drop_obj_ns(o, Ns::Elem);
+                state.lens.insert(o, (Some(0), 0, 0));
+            }
+        }
+    }
+
+    /// A test that is a call on the path where it is `truth`: `isinstance`, `hasattr`, `callable`,
+    /// `d.get(k)`, a user predicate, …
+    fn narrow_call(&mut self, test: &'static ast::Expr, call: &'static ast::ExprCall, truth: bool, state: &mut State) {
+        let args = &call.arguments.args;
+        // `isclass(x)` / `inspect.isclass(x)`
+        let fname = match &*call.func {
+            ast::Expr::Name(n) => Some(n.id.as_str()),
+            ast::Expr::Attribute(a) => Some(a.attr.id.as_str()),
+            _ => None,
+        };
+        if let (Some("isclass"), [ast::Expr::Name(n)]) = (fname, &args[..]) {
+            self.narrow_isclass(s(n.id.as_str()), truth, state);
+            return;
+        }
+        if let ast::Expr::Name(fnm) = &*call.func {
+            let fname = fnm.id.as_str();
+            if fname == "isinstance" && args.len() == 2 {
+                match &args[0] {
+                    ast::Expr::Name(n) => self.narrow_isinstance(NarrowTarget::Name(n.id.to_string()), &args[1], truth, state),
+                    ast::Expr::Attribute(a) => self.narrow_isinstance(NarrowTarget::Attr(a, &args[0]), &args[1], truth, state),
+                    _ => {}
+                }
+                return;
+            }
+            if fname == "hasattr" && args.len() == 2 {
+                let (Some(kv), Some(mut rec)) = (self.traced(&args[1]), self.traced(&args[0])) else { return };
+                if let Some(k) = kv.kv.as_lit() {
+                    // (an attribute row describes instances and namespaces; a builtin
+                    // container's attributes are its type's: decided by the type, or not)
+                    let builtin = |an: &Analyzer, o: u32| matches!(an.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set);
+                    if !rec.pts.is_empty() && rec.pts.iter().all(|o| builtin(self, o)) {
+                        if let Some(name) = intern::key_as_str(k) {
+                            if rec.pts.iter().all(|o| crate::models::builtin_has_attr(self, o, &name) == Some(!truth)) {
+                                state.reachable = false;
+                            }
+                        }
+                        return;
+                    }
+                    // (an instance whose class defines the name has it whatever its own
+                    // attributes are: its row says nothing about it)
+                    let by_class = |an: &Analyzer, o: u32| intern::key_as_str(k).is_some_and(|n| an.class_resolves(o, &n));
+                    rec = Value::with_kv(rec.pts.filter(|o| !builtin(self, o) && !by_class(self, o)), KeyVal::Bot);
+                    self.narrow_record(&rec, Ns::Attr, k, truth, state);
+                }
+                return;
+            }
+            if fname == "all" && args.len() == 1 {
+                if let ast::Expr::Generator(g) = &args[0] {
+                    if truth && g.generators.len() == 1 {
+                        if let ast::Expr::Compare(cmp) = &*g.elt {
+                            if cmp.ops.first() == Some(&ast::CmpOp::In) {
+                                let (Some(itv), Some(rec)) = (self.traced(&g.generators[0].iter), self.traced(&cmp.comparators[0])) else { return };
+                                let ks = self.lit_keys(&itv, state);
+                                if let Some(ks) = ks {
+                                    if matches!(&*cmp.left, ast::Expr::Name(_)) {
+                                        for k in ks.iter() {
+                                            self.narrow_record(&rec, Ns::Item, k, true, state);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+        }
+        if let ast::Expr::Attribute(fa) = &*call.func {
+            if fa.attr.id.as_str() == "issubset" && args.len() == 1 && truth {
+                let (Some(v), Some(rec)) = (self.traced(&fa.value), self.traced(&args[0])) else { return };
+                let ks = self.lit_keys(&v, state);
+                if let Some(ks) = ks {
+                    for k in ks.iter() {
+                        self.narrow_record(&rec, Ns::Item, k, true, state);
+                    }
+                }
+                return;
+            }
+            if fa.attr.id.as_str() == "get" && truth {
+                self.narrow_get_truthy(test, state);
+            }
+        }
+    }
+
+    /// A test `a op b` on the path where it is `truth`: `is None`, `==` literals, `in` a
+    /// record or a container, `len(x) == n`, …
+    fn narrow_compare(&mut self, c: &'static ast::ExprCompare, truth: bool, state: &mut State) {
+        let op = c.ops[0];
+        let left: &'static ast::Expr = &c.left;
+        let right: &'static ast::Expr = &c.comparators[0];
+        match op {
+            ast::CmpOp::In | ast::CmpOp::NotIn => {
+                let member = if op == ast::CmpOp::In { truth } else { !truth };
+                self.narrow_membership(left, right, member, state);
+            }
+            ast::CmpOp::Eq | ast::CmpOp::NotEq => self.narrow_eq(op, left, right, truth, state),
+            ast::CmpOp::Is | ast::CmpOp::IsNot if !matches!(right, ast::Expr::NoneLiteral(_)) => {
+                // `t is a` with `a` one object: on the true side t is a, on the false side
+                // a is not among t's objects
+                let same = if op == ast::CmpOp::Is { truth } else { !truth };
+                for (name_e, other_e) in [(left, right), (right, left)] {
+                    let ast::Expr::Name(nm) = name_e else { continue };
+                    let name = s(nm.id.as_str());
+                    let cur = self.load_name(name, &Node::none(), state);
+                    let Some(o) = self.traced(other_e) else { continue };
+                    let Some(target) = o.single().filter(|x| o.kv.is_bot() && self.heap.obj(*x).single && !crate::state::is_merged(*x)) else { continue };
+                    if !cur.pts.contains(target) || cur.pts.len() < 2 || !cur.kv.is_bot() {
+                        continue;
+                    }
+                    if same {
+                        self.rebind_name(name, Value::obj(target), state);
+                    } else {
+                        let rest = cur.pts.filter(|x| x != target);
+                        self.rebind_name(name, Value::objs(rest), state);
+                    }
+                    break;
+                }
+            }
+            ast::CmpOp::Is | ast::CmpOp::IsNot => {
+                if matches!(right, ast::Expr::NoneLiteral(_)) {
+                    let is_none = if op == ast::CmpOp::Is { truth } else { !truth };
+                    if !is_none {
+                        self.narrow_get_truthy(left, state);
+                    }
+                    // the name is None / is not None
+                    if let ast::Expr::Name(l) = left {
+                        let cur = self.load_name(s(l.id.as_str()), &Node::none(), state);
+                        let has_none = kv_literals(&cur.kv).contains(intern::key_none());
+                        if has_none || is_none {
+                            self.narrow_kv(s(l.id.as_str()), &KeySet::one(intern::key_none()), is_none, state);
+                        }
+                    }
+                }
+            }
+            ast::CmpOp::LtE | ast::CmpOp::Lt => {
+                if let ast::Expr::Call(rc) = right {
+                    if let ast::Expr::Attribute(ra) = &*rc.func {
+                        if ra.attr.id.as_str() == "keys" {
+                            let (Some(lv), Some(rec)) = (self.traced(left), self.traced(&ra.value)) else { return };
+                            let ks = self.lit_keys(&lv, state);
+                            if let Some(ks) = ks {
+                                if truth {
+                                    for k in ks.iter() {
+                                        self.narrow_record(&rec, Ns::Item, k, true, state);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `a == b` / `a != b` on the path where the test is `truth`.
+    fn narrow_eq(&mut self, op: ast::CmpOp, left: &'static ast::Expr, right: &'static ast::Expr, truth: bool, state: &mut State) {
+        if let ast::Expr::Name(l) = left {
+            let eq = if op == ast::CmpOp::Eq { truth } else { !truth };
+            let Some(rv) = self.traced(right) else { return };
+            let ks = kv_literals(&rv.kv);
+            // (Decimal / Fraction / datetime literals equal others by value, not
+            // as keys: no narrowing by key identity)
+            let lv0 = self.load_name(s(l.id.as_str()), &Node::none(), state);
+            // (numbers too: `1 == 1.0 == True` though their keys differ)
+            let valued = |k: KeyId| crate::models::pynum::is_num_key(k) || crate::models::chrono::is_chrono_key(k) || intern::key_is_number(k) || intern::with_key(k, |kk| matches!(kk, intern::Key::Bool(_)));
+            let by_value = ks.iter().any(valued) || kv_literals(&lv0.kv).iter().any(valued);
+            if !ks.is_empty() && !by_value {
+                self.narrow_kv(s(l.id.as_str()), &ks, eq, state);
+            }
+        } else if let Some(la) = match left { ast::Expr::Attribute(la) if matches!(&*la.value, ast::Expr::Name(_)) => Some(la), _ => None } {
+            // `obj.attr == lit` on one object whose attribute holds known
+            // literals: the attribute narrows (`self.unit == "F"`)
+            let eq = if op == ast::CmpOp::Eq { truth } else { !truth };
+            let (Some(rv), Some(ov)) = (self.traced(right), self.traced(&la.value)) else { return };
+            let ks = kv_literals(&rv.kv);
+            let ak = key_str_lit(la.attr.id.as_str());
+            if let Some(o) = ov.single().filter(|o| self.heap.obj(*o).single && matches!(self.heap.kind(*o), Kind::Instance | Kind::Namespace) && rv.pts.is_empty() && ks.len() == 1) {
+                let cur = state.slot_opt(o, Ns::Attr, ak);
+                if let Some(cur) = cur.filter(|c| c.pts.is_empty() && c.kv.is_literal()) {
+                    let lits = kv_literals(&cur.kv);
+                    let valued = |k: KeyId| crate::models::pynum::is_num_key(k) || crate::models::chrono::is_chrono_key(k) || intern::key_is_number(k);
+                    if !lits.iter().any(valued) && !ks.iter().any(valued) {
+                        let keep: KeySet = if eq { lits.intersection(&ks) } else { lits.difference(&ks) };
+                        if keep.is_empty() {
+                            state.reachable = false;
+                        } else if keep.len() < lits.len() {
+                            state.set_slot(o, Ns::Attr, ak, Value::kv_only(KeyVal::lits(keep)), true);
+                        }
+                    }
+                }
+            }
         }
     }
 
