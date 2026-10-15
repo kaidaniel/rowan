@@ -65,6 +65,45 @@ pub struct Fact {
     pub written: bool,
 }
 
+impl Fact {
+    /// The rows a recording saw, joined into the fact's.
+    fn join_rows(&mut self, rows: Vec<(ObjId, Option<Row>, Option<Row>)>) {
+        for (oid, item, attr) in rows {
+            match self.rows.get_mut(&oid) {
+                Some((ci, ca)) => {
+                    *ci = join_opt(ci, &item);
+                    *ca = join_opt(ca, &attr);
+                }
+                None => {
+                    self.rows.insert(oid, (item, attr));
+                }
+            }
+        }
+    }
+
+    /// A recording's text (up to 4 distinct) and its legend (a symbol's descriptions joined).
+    fn add_text(&mut self, text: String, legend: Vec<(String, String)>) {
+        if !self.texts.contains(&text) && self.texts.len() < 4 {
+            self.texts.push(text);
+        }
+        for (sym, desc) in legend {
+            match self.legend.iter_mut().find(|(s0, _)| *s0 == sym) {
+                Some((_, d)) if *d != desc && !d.split(" | ").any(|p| p == desc) => *d = format!("{} | {}", d, desc),
+                Some(_) => {}
+                None => self.legend.push((sym, desc)),
+            }
+        }
+    }
+}
+
+fn join_opt(a: &Option<Row>, b: &Option<Row>) -> Option<Row> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.join(y)),
+        (Some(x), None) | (None, Some(x)) => Some(x.clone()),
+        _ => None,
+    }
+}
+
 pub struct RowCheck {
     /// the module's path relative to the main file's directory ("" for the main file)
     pub file: String,
@@ -234,20 +273,7 @@ impl Analyzer {
         if node.module != self.heap.module_info(self.program.main_module).idx {
             return;
         }
-        let mut rows: Vec<(ObjId, Option<Row>, Option<Row>)> = Vec::new();
-        for oid in v.pts.iter() {
-            let k = self.heap.kind(oid);
-            let item = if matches!(k, Kind::Dict | Kind::Frame | Kind::Unknown | Kind::Namespace | Kind::Module | Kind::Class) || state.has_row(oid, Ns::Item) { Some(state.row(oid, Ns::Item)) } else { None };
-            let attr = if matches!(k, Kind::Instance | Kind::Namespace | Kind::Unknown | Kind::Module | Kind::Class) || state.has_row(oid, Ns::Attr) { Some(state.row(oid, Ns::Attr)) } else { None };
-            rows.push((oid, item, attr));
-        }
-        let join_opt = |a: &Option<Row>, b: &Option<Row>| -> Option<Row> {
-            match (a, b) {
-                (Some(x), Some(y)) => Some(x.join(y)),
-                (Some(x), None) | (None, Some(x)) => Some(x.clone()),
-                _ => None,
-            }
-        };
+        let rows = self.fact_rows(v, state);
         let scope = self.frame().func.unwrap_or(0);
         // (a fact that has all the texts it shows (4) only joins the value and rows: rendering a
         // large value at every run of the line is what costs — not in torch programs, whose
@@ -255,17 +281,7 @@ impl Analyzer {
         if !self.m.torch_on {
             if let Some(e) = self.findings.facts.get_mut(&(node.line, name)) {
                 if e.texts.len() >= 4 {
-                    for (oid, item, attr) in rows {
-                        match e.rows.get_mut(&oid) {
-                            Some((ci, ca)) => {
-                                *ci = join_opt(ci, &item);
-                                *ca = join_opt(ca, &attr);
-                            }
-                            None => {
-                                e.rows.insert(oid, (item, attr));
-                            }
-                        }
-                    }
+                    e.join_rows(rows);
                     return;
                 }
             }
@@ -312,27 +328,21 @@ impl Analyzer {
                 e.t_names.entry(a).or_insert(n);
             }
         }
-        if !e.texts.contains(&text) && e.texts.len() < 4 {
-            e.texts.push(text);
+        e.add_text(text, legend);
+        e.join_rows(rows);
+    }
+
+    /// The rows a hover shows for the objects of `v`: item rows of records, attribute rows of
+    /// instances (and of what has either).
+    fn fact_rows(&self, v: &Value, state: &State) -> Vec<(ObjId, Option<Row>, Option<Row>)> {
+        let mut rows: Vec<(ObjId, Option<Row>, Option<Row>)> = Vec::new();
+        for oid in v.pts.iter() {
+            let k = self.heap.kind(oid);
+            let item = if matches!(k, Kind::Dict | Kind::Frame | Kind::Unknown | Kind::Namespace | Kind::Module | Kind::Class) || state.has_row(oid, Ns::Item) { Some(state.row(oid, Ns::Item)) } else { None };
+            let attr = if matches!(k, Kind::Instance | Kind::Namespace | Kind::Unknown | Kind::Module | Kind::Class) || state.has_row(oid, Ns::Attr) { Some(state.row(oid, Ns::Attr)) } else { None };
+            rows.push((oid, item, attr));
         }
-        for (sym, desc) in legend {
-            match e.legend.iter_mut().find(|(s0, _)| *s0 == sym) {
-                Some((_, d)) if *d != desc && !d.split(" | ").any(|p| p == desc) => *d = format!("{} | {}", d, desc),
-                Some(_) => {}
-                None => e.legend.push((sym, desc)),
-            }
-        }
-        for (oid, item, attr) in rows {
-            match e.rows.get_mut(&oid) {
-                Some((ci, ca)) => {
-                    *ci = join_opt(ci, &item);
-                    *ca = join_opt(ca, &attr);
-                }
-                None => {
-                    e.rows.insert(oid, (item, attr));
-                }
-            }
-        }
+        rows
     }
 
     /// What a value is, for the golden harness's `#@value` checks: literals it may be, whether

@@ -176,38 +176,7 @@ impl Analyzer {
                 }
                 r
             }
-            Kind::Method => {
-                let Payload::Method(qual, recv) = self.heap.obj(oid).payload.clone() else { return Value::new() };
-                // several groupby objects (`groupby` over one of several columns): the model runs
-                // once per object, each making its own results
-                if qual.starts_with("groupby.") && recv.pts.len() > 1 && recv.pts.iter().all(|o| self.heap.kind(o) == Kind::Groupby) {
-                    let gs: Vec<ObjId> = recv.pts.to_vec();
-                    return self.alternatives(gs.len(), false, state, &mut |an, i, st| {
-                        let Some(mo) = an.method_value(&qual, &Value::obj(gs[i])).single() else { return Value::new() };
-                        let saved = an.cx.alloc_extra.replace(format!("gb{}", gs[i]));
-                        let r = an.call_one(mo, args, kwargs, star_args, star_kwargs, st, node, call_ast);
-                        an.cx.alloc_extra = saved;
-                        r
-                    });
-                }
-                let mut args = args.to_vec();
-                if qual.starts_with("dict.") || qual.starts_with("set.") {
-                    if let Some(a) = args.first_mut() {
-                        *a = self.keyify(a);
-                    }
-                }
-                let call = Call { qual: qual.clone(), recv: Some(recv.clone()), args, kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
-                let pure = if qual.starts_with("str.") { crate::models::pure::try_pure(self, state, &call) } else { None };
-                let r = match (pure, self.program.models.lookup(&qual)) {
-                    (Some(v), _) => v,
-                    (None, Some(m)) => self.run_model(m, state, &call),
-                    (None, None) => return self.unknown_call(&qual, Some(&recv), &call.args, kwargs, star_args, star_kwargs, state, node),
-                };
-                if call_ast.is_some() {
-                    crate::models::may_type_error(self, &qual, &call.args, kwargs, &r, state);
-                }
-                r
-            }
+            Kind::Method => self.call_method_object(oid, args, kwargs, star_args, star_kwargs, state, node, call_ast),
             Kind::Unknown => {
                 let q = format!("call of {}", self.heap.obj(oid).label);
                 self.unknown_call(&q, Some(&Value::obj(oid)), args, kwargs, star_args, star_kwargs, state, node)
@@ -235,6 +204,42 @@ impl Analyzer {
                 self.unknown_call(&q, None, args, kwargs, star_args, star_kwargs, state, node)
             }
         }
+    }
+
+    /// A call of a library method value (`dict.get` bound to its receiver): its model (a str
+    /// method on known text: exactly), else unknown code; over several groupby objects, once each.
+    #[allow(clippy::too_many_arguments)]
+    fn call_method_object(&mut self, oid: u32, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+        let Payload::Method(qual, recv) = self.heap.obj(oid).payload.clone() else { return Value::new() };
+        // several groupby objects (`groupby` over one of several columns): the model runs
+        // once per object, each making its own results
+        if qual.starts_with("groupby.") && recv.pts.len() > 1 && recv.pts.iter().all(|o| self.heap.kind(o) == Kind::Groupby) {
+            let gs: Vec<ObjId> = recv.pts.to_vec();
+            return self.alternatives(gs.len(), false, state, &mut |an, i, st| {
+                let Some(mo) = an.method_value(&qual, &Value::obj(gs[i])).single() else { return Value::new() };
+                let saved = an.cx.alloc_extra.replace(format!("gb{}", gs[i]));
+                let r = an.call_one(mo, args, kwargs, star_args, star_kwargs, st, node, call_ast);
+                an.cx.alloc_extra = saved;
+                r
+            });
+        }
+        let mut args = args.to_vec();
+        if qual.starts_with("dict.") || qual.starts_with("set.") {
+            if let Some(a) = args.first_mut() {
+                *a = self.keyify(a);
+            }
+        }
+        let call = Call { qual: qual.clone(), recv: Some(recv.clone()), args, kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
+        let pure = if qual.starts_with("str.") { crate::models::pure::try_pure(self, state, &call) } else { None };
+        let r = match (pure, self.program.models.lookup(&qual)) {
+            (Some(v), _) => v,
+            (None, Some(m)) => self.run_model(m, state, &call),
+            (None, None) => return self.unknown_call(&qual, Some(&recv), &call.args, kwargs, star_args, star_kwargs, state, node),
+        };
+        if call_ast.is_some() {
+            crate::models::may_type_error(self, &qual, &call.args, kwargs, &r, state);
+        }
+        r
     }
 
     /// A call of a library function or class (a model, or unknown code).
