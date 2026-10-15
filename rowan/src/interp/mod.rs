@@ -1,6 +1,7 @@
-//! Abstract interpreter over the Python AST.  Port of
-//! `rowan/interp.py`; the statement/expression/narrowing/access/call parts live in the
-//! sibling files of this module.
+//! The abstract interpreter: an `Analyzer` walks the program's syntax tree on abstract
+//! `State`s. The `Analyzer` is a set of components, each in its own file with its own state;
+//! the walk itself (statements, expressions, calls, accesses) is `impl Analyzer` across the
+//! sibling files, one concern per file (see `AGENTS.md`, Layout).
 
 use std::cell::{Cell, RefCell};
 
@@ -332,6 +333,28 @@ pub enum StoreTarget {
     Slot(ObjId, Ns, KeyId),
 }
 
+/// The analyzer: the components below. Everything a path knows is in its `State`; what the
+/// components hold is the rest, and falls in four classes — what a call memo keyed by the
+/// entry state would have to treat apart (a hit skips the body run):
+///
+/// * the **context** of the running code, saved and restored around each call: `cx` (frames,
+///   callers' names, call chain, branch depth, loop recency), `mode`, `recursion` (the running
+///   activations), `unwind` (exceptions in flight, running tries). Part of a memo key, beyond
+///   the state and the arguments: `Frame::ctx` / `single` / `unroll`, the call chain, the
+///   branch depth.
+/// * **flow-insensitive state a run changes**, which a hit would have to replay: `heap` (the
+///   objects a run makes, their payloads and fallback lengths, class attributes, property
+///   setters, copy roots, keys standing for objects), `m` (the library models' tables),
+///   `program` (modules imported, classes defined, `TYPE_CHECKING` names), `entry` (functions
+///   a call ran, closures a run made), `budget` (statements charged, functions refused), `gens`
+///   (lazy generators, per-yield states and effects, watched runs), the raise states recorded
+///   into the callers' tries (`unwind`), and the code closures of `effects` (computed once, from
+///   the first state that asks).
+/// * **output** a run appends, replayable as recorded: `findings` (verdicts, which a superseded
+///   round drops again, notes, summaries, row checks, hover facts) and `names` (which the torch
+///   model also reads back: an unknown that is a call's result).
+/// * **caches**, safe to skip: `havoc` (the memo of walks; its marks and counters), and
+///   `effects`' per-code name uses.
 #[derive(Default)]
 pub struct Analyzer {
     /// the library models' own tables (`models::Tables`)

@@ -24,6 +24,10 @@ namespace packages).
   its **rows** (`(object, namespace)` → `Row`), slots (the value under each key), elements,
   lengths, and the requirements recorded so far. The maps are persistent Patricia tries
   (`layered.rs`): a copy is O(1), and a join or diff costs what two states differ in.
+* **The analyzer** (`Analyzer`, `interp/mod.rs`) is components with private state, one file
+  each (Layout); models, the report and the driver see the `Heap`, their `m` and `api.rs`.
+  Its doc sorts the components for a call memo: running context (part of a key), state a run
+  changes outside `State` (to replay), output (appended), caches.
 * **Rows** are the key-set model: `present` (may be there) ⊇ `likely` (there unless unknown
   code removed it) ⊇ `definite` (there on every path), plus `absent`, open `sources` (inputs),
   and `mutators` (unknown calls). A row without sources or mutators is *closed*. A successful
@@ -157,22 +161,18 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
   no `timeout`; time a run inside the guard (`.guard/run /usr/bin/time -l rowan …`: the guard
   polls every 0.5 s). Compare builds on results (`--json` tier counts) and counters too.
 
-## Layout (`rowan/src/`, ~62k lines: the engine ~20.7k, the models ~42k)
+## Layout (`rowan/src/`, ~64k lines: the engine ~22k, the models ~42k)
 
 | file | role |
 | --- | --- |
-| `intern.rs`, `domain.rs`, `layered.rs`, `state.rs` | interned keys, sources, lenses; `Row`, `KeyVal`, `Value`, transfers, `classify`; persistent maps (`LayerMap`, `TwoLevel`); `State`, joins, `diff_keys` |
-| `frontend.rs`, `scopes.rs`, `interp/program.rs` | ruff parsing, leaked `&'static` trees, module registry; lexical scopes; `Program` (paths, models, modules imported), imports |
-| `interp/mod.rs`; `context.rs`; `entry.rs`; `heap.rs`, `alloc.rs`, `gc.rs` | `Analyzer` (its components); `Context` (frames, callers, call chain), `Modes`; running the program, entry runs (`Entries`); the `Heap` (objects, lengths, birth marks), allocation policy (`alloc`: variants, recency), liveness (`live_among`, `gc_pinned`) and collectors |
-| `interp/stmts.rs`, `loops.rs`, `classes.rs`, `tries.rs` | statements, match; loops (unrolled, fixpoint); class definitions; raises, try contexts (`Unwind`), try / with, `finally` |
-| `interp/exprs.rs`, `ops.rs`, `compare.rs`, `comps.rs`, `funcs.rs`, `gens.rs` | expressions; operators, f-strings; comparisons, truth; comprehensions; functions, names, iteration; generators and `@contextmanager` bodies (`Gens`: lazy runs, per-yield states, watched runs) |
-| `interp/narrow.rs`; `access.rs`, `items.rs`, `attrs.rs`, `keys.rs` | tests (`split`), narrowing; what accesses share (guards, requirements); item access, attribute access; keys standing for values |
-| `interp/calls.rs`, `recursion.rs`, `budget.rs`, `unknown.rs`, `effects.rs` | calls: per-call-site runs; recursion (`Recursion`: activations, fixpoint rounds); `Budget` (per code, deadline, work counters); `__new__`, dataclass init; unknown calls (`Havoc` walks); what skipped calls may change (`skipped_call`, `EffectsCache`) |
-| `interp/findings.rs`, `names.rs`, `report.rs`, `api.rs`; `main.rs` | `Findings` (verdicts, notes, row checks, hover facts) and `Names` (symbols, origins) collected; text / JSON / facts output; what models, report and driver may use; CLI (mimalloc), `rowan serve` (on a 1 GiB-stack thread) |
-| `models/` | `mod.rs` (`Registry`, builtins, containers); `tables` (what builtins / library calls raise, change, keep); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib (`enums`, `exceptions`, functools, itertools, …); `pandas`, `pydantic`, `fastapi`, `torch`; `shape.rs` (tensor dims as polynomials) |
-
-`rowan/py/` is a PyO3 binding (does not load on macOS 26); `vscode-rowan/` the editor
-extension (talks to `rowan serve`).
+| `intern.rs`, `domain.rs`, `layered.rs`, `state.rs`; `frontend.rs`, `scopes.rs` | interned keys, sources, lenses; `Row`, `KeyVal`, `Value`, transfers, `classify`; persistent maps (`LayerMap`, `TwoLevel`); `State`, joins, `diff_keys`; ruff parsing, leaked `&'static` trees, module registry; lexical scopes |
+| `interp/mod.rs`, `context.rs`, `program.rs`, `entry.rs`; `heap.rs`, `alloc.rs`, `gc.rs` | `Analyzer` and its components' map; `Context` (frames, callers, call chain), `Modes`; `Program` (paths, models, modules), imports; running the program, entry runs (`Entries`); the `Heap` (objects, payloads, lengths, class attributes, keys for objects); allocation policy (`alloc`: variants, recency); liveness (`live_among`, `gc_pinned`), collectors, `rename_recent` |
+| `interp/stmts.rs`, `loops.rs`, `classes.rs`, `tries.rs`; `exprs.rs`, `ops.rs`, `compare.rs`, `comps.rs` | statements, match; loops (unrolled, fixpoint); class definitions; raises, try contexts (`Unwind`), try / with, `finally`; expressions; operators, f-strings; comparisons, truth; comprehensions |
+| `interp/funcs.rs`, `gens.rs`, `narrow.rs`; `access.rs`, `items.rs`, `attrs.rs`, `keys.rs` | functions, names, iteration; generators and `@contextmanager` bodies (`Gens`); tests (`split`), narrowing; what accesses share (guards, requirements); item access; attribute access; keys standing for values |
+| `interp/calls.rs`, `recursion.rs`, `budget.rs`, `unknown.rs`, `effects.rs` | calls: per-call-site runs, `__new__`, dataclass init, bindings; `Recursion` (activations, fixpoint rounds); `Budget` (per code, deadline, work counters); unknown calls (`Havoc` walks); what skipped calls may change (`skipped_call`, `EffectsCache`) |
+| `interp/findings.rs`, `names.rs`, `report.rs`, `api.rs`; `main.rs` | `Findings` (verdicts, notes, row checks, hover facts), `Names` (symbols, origins); text / JSON / facts output; what models, report and driver may use; CLI (mimalloc), `rowan serve` (on a 1 GiB-stack thread) |
+| `models/` | `mod.rs` (`Registry`, builtins, containers, `Tables`); `tables` (what builtins / library calls raise, change, keep); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib (`enums`, `exceptions`, functools, itertools, …); `pandas`, `pydantic`, `fastapi`, `torch`; `shape.rs` (tensor dims as polynomials) |
+| `rowan/py/`, `vscode-rowan/` | a PyO3 binding (does not load on macOS 26); the editor extension (talks to `rowan serve`) |
 
 ## Implementation rules that are easy to break
 

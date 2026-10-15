@@ -2,7 +2,8 @@
 //! terms (`a`, `a(b)`, `cfg["db"]`, `rows[*]`, `json.loads(text)`, printed instead of `?`),
 //! where unknown results came from, and unknown call sites as written (sources and mutators
 //! are named by them). Write-once side tables for the text report, the JSON and the hovers;
-//! no verdict depends on them, except torch's names for dims (`x.shape[0]` as `B`).
+//! no verdict depends on them, but the torch model reads them back (names for dims,
+//! `x.shape[0]` as `B`; whether an unknown is a call's result).
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
