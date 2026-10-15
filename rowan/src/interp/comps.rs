@@ -56,7 +56,7 @@ impl Analyzer {
         let understood = g.ifs.iter().all(|c| cond_is_exclusion(c, &g.target));
         if let Some(items) = &it.items {
             let same = self.identical_summaries(items);
-            if i == 0 && gens.len() == 1 && g.ifs.is_empty() && (same || items.len() > limit) {
+            if i == 0 && gens.len() == 1 && g.ifs.is_empty() && (limit == SUMMARY || same || items.len() > limit) {
                 self.cx.summary_items.insert(own, items.len());
             }
             if items.len() <= limit && !same {
@@ -204,7 +204,7 @@ impl Analyzer {
             let strong = an.heap.obj(oid).single && an.cx.cond_depth == base_depth;
             an.store_key(oid, Ns::Item, &k.kv, &v, strong, &nd, st);
         };
-        let limit = comp_unroll_limit(&[key_e, val_e]);
+        let limit = comp_unroll_limit(&dc.generators, &[key_e, val_e], self.is_torch_module(self.frame().module));
         self.comp(&dc.generators, limit, state, &mut body, oid);
         self.cx.summary_items.remove(&oid);
         Value::obj(oid)
@@ -220,7 +220,7 @@ impl Analyzer {
         // positions: every item known and every filter decided (straight-line iterations)
         let mut n: usize = 0;
         let mut positional = strong;
-        let limit = comp_unroll_limit(&[elt]);
+        let limit = comp_unroll_limit(gens, &[elt], self.is_torch_module(self.frame().module));
         // (a set's positions are its distinct members: a literal seen before adds none)
         let mut seen: Vec<KeyId> = Vec::new();
         let mut body = |an: &mut Analyzer, st: &mut State| {
@@ -295,15 +295,33 @@ impl Analyzer {
 
 /// How many known items a comprehension's generators unroll: up to 64 (as many literals as a
 /// value keeps) when what it makes of each item calls nothing (`{w: i for i, w in
-/// enumerate(words)}`: each word a sure key), else UNROLL_MAX.
-fn comp_unroll_limit(parts: &[&ast::Expr]) -> usize {
+/// enumerate(words)}`: each word a sure key), else UNROLL_MAX. In a torch module, the
+/// iterations of a comprehension that cannot be told apart (one generator, no filter, a target
+/// its element does not use: `[Block(d) for _ in range(n)]`, a model's repeated layers) and
+/// call something run as one summary iteration standing for all of them (its objects
+/// summaries, the count kept): unrolled, every forward would run each layer's methods again
+/// (a GPT of 12 blocks of 8 heads: 96 head runs per forward).
+fn comp_unroll_limit(gens: &[ast::Comprehension], parts: &[&ast::Expr], torch: bool) -> usize {
     let costly = |e: &ast::Expr| matches!(e, ast::Expr::Call(_) | ast::Expr::Lambda(_) | ast::Expr::ListComp(_) | ast::Expr::SetComp(_) | ast::Expr::DictComp(_) | ast::Expr::Generator(_) | ast::Expr::Await(_) | ast::Expr::Yield(_) | ast::Expr::YieldFrom(_) | ast::Expr::Named(_));
-    if parts.iter().any(|p| ruff_python_ast::helpers::any_over_expr(p, &costly)) {
-        UNROLL_MAX
+    if !parts.iter().any(|p| ruff_python_ast::helpers::any_over_expr(p, &costly)) {
+        return 64;
+    }
+    let indistinct = match gens {
+        [g] if g.ifs.is_empty() && !g.is_async => {
+            let t = names_in(&g.target);
+            !parts.iter().any(|p| names_in(p).iter().any(|n| t.contains(n)))
+        }
+        _ => false,
+    };
+    if indistinct && torch {
+        SUMMARY
     } else {
-        64
+        UNROLL_MAX
     }
 }
+
+/// `comp_unroll_limit` of a summary comprehension: no unrolling.
+const SUMMARY: usize = 0;
 
 /// `k != "x"`, `k not in (...)`, `k in (...)`, and conjunctions of those, on the key target.
 pub fn cond_is_exclusion(cond: &ast::Expr, target: &ast::Expr) -> bool {

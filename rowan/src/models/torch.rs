@@ -4203,6 +4203,15 @@ pub fn m_nnmodule(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             for m in order {
                 an.call_value(&f, &c.node, None, st, Some(vec![Value::obj(m)]));
+                // (a summary module — `[Block() for _ in range(n)]` — stands for several: fn
+                // runs on each of them, any number of times more)
+                if !an.heap.obj(m).single {
+                    let node = c.node;
+                    let (head, _, _) = an.loop_fixpoint(st, &mut |an, s| {
+                        an.call_value(&f, &node, None, s, Some(vec![Value::obj(m)]));
+                    });
+                    st.replace_with(head);
+                }
             }
             recv
         }
