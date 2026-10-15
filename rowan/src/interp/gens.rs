@@ -374,7 +374,7 @@ impl Analyzer {
             let found = self.gen_interference(wmark, state, round == 3);
             if found.is_empty() || round == 3 {
                 if close {
-                    self.close_watches(wmark, state);
+                    self.close_watches(wmark, &pre, state);
                 }
                 return;
             }
@@ -444,16 +444,20 @@ impl Analyzer {
     }
 
     /// The generators watched since `wmark` are used up or out of reach: no longer watched, but
-    /// those the value returned holds (a generator started in a call and returned from it).
-    fn close_watches(&mut self, wmark: usize, state: &State) {
-        let gids: Vec<ObjId> = self.gens.watch[wmark.min(self.gens.watch.len())..].iter().map(|w| w.gid).collect();
-        let kept = match &state.ret {
-            Some(r) if !gids.is_empty() => {
-                let mut sorted = gids.clone();
-                sorted.sort_unstable();
-                self.reach_among(std::slice::from_ref(r), &sorted, state)
-            }
-            _ => FxHashSet::default(),
+    /// those that may give more items and that what the code returns, what it was given (`pre`'s
+    /// names) or its callers hold (a generator started in a call and returned from it, or kept
+    /// in an attribute of its receiver for the next call).
+    fn close_watches(&mut self, wmark: usize, pre: &State, state: &State) {
+        let at = if state.reachable { state } else { state.exits.as_deref().unwrap_or(state) };
+        let mut gids: Vec<ObjId> = self.gens.watch[wmark.min(self.gens.watch.len())..].iter().map(|w| w.gid).filter(|g| self.may_resume(*g, at)).collect();
+        gids.sort_unstable();
+        gids.dedup();
+        let kept = if gids.is_empty() {
+            FxHashSet::default()
+        } else {
+            let callers = self.cx.env_stack.iter().flat_map(|e| e.values());
+            let roots: Vec<Value> = state.ret.iter().chain(pre.env.values()).chain(callers).cloned().collect();
+            self.reach_among(&roots, &gids, at)
         };
         let mut i = wmark;
         while i < self.gens.watch.len() {
@@ -463,6 +467,14 @@ impl Analyzer {
                 self.gens.watch.remove(i);
             }
         }
+    }
+
+    /// Whether a generator may give more items in `state` (not known to be used up).
+    fn may_resume(&self, g: ObjId, state: &State) -> bool {
+        if state.slot_opt(g, Ns::Attr, key_str_lit("__cursor")) == Some(Value::data("cursor-end")) {
+            return false;
+        }
+        !matches!((self.cursor_of(g, state), self.heap.llen(g, state)), (Some(c), Some(n)) if c >= n)
     }
 
     /// The watched generators since `wmark` and what later code changed by `fin` of the

@@ -1,6 +1,7 @@
 # What code between a generator's items changes, the generator sees after its yield: unknown
 # code given what it reads, a `del` of a key it reads (also of an object it changes itself), and
-# code run while a partly consumed generator was returned out of the call that started it.
+# code run while a partly consumed generator was returned out of the call that started it, or
+# kept in an attribute for the next call.
 # A consumer holding the item of an earlier step still holds that item, not the next one.
 import json
 import os
@@ -76,6 +77,31 @@ if drop:
     del cfg2["k"]
 try:
     print(next(g2))
+except KeyError:
+    pass
+
+# a generator kept in an attribute: each call of a method takes an item
+cfg3 = {"k": 1}
+
+
+class Feeder:
+    def __init__(self):
+        self.g = self._gen()
+
+    def _gen(self):
+        yield 0
+        yield cfg3["k"]  #@ possibly k
+
+    def step(self):
+        return next(self.g)
+
+
+feeder = Feeder()
+feeder.step()
+if drop:
+    del cfg3["k"]
+try:
+    feeder.step()
 except KeyError:
     pass
 
