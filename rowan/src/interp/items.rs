@@ -524,7 +524,22 @@ impl Analyzer {
             *row = row.narrow_in(k, true);
             state.set_row_narrowed(oid, ns, row.clone());
             self.propagate_narrowing(oid, ns, k, state);
+            // (the input's key read through a shallow copy: the original has it too, while it
+            // holds the input's there)
+            if cls.tier == Tier::Input {
+                if let Some(r) = self.shallow_copy_root(oid).filter(|r| self.heap.obj(*r).single && !state.has_slot(*r, ns, k)) {
+                    let rr = state.row(r, ns);
+                    if rr.open() && !rr.absent.contains(k) {
+                        state.set_row_narrowed(r, ns, rr.narrow_in(k, true));
+                    }
+                }
+            }
         }
+    }
+
+    /// The object a shallow copy (`copy.copy`, `dict.copy`) was made of.
+    pub(in crate::interp) fn shallow_copy_root(&self, oid: ObjId) -> Option<ObjId> {
+        self.heap.copy_root.get(&oid).copied().filter(|_| self.heap.obj(oid).site.starts_with("copy:"))
     }
 
     /// The value under key `k`: the slot's, a map's stored values, or the open record's
@@ -586,8 +601,18 @@ impl Analyzer {
         let single = k != STAR;
         // (a loop's item holds there what the records it is one of hold: their placeholder)
         let base = crate::state::view_of(oid).unwrap_or(oid);
+        // (a shallow copy holds the original's values: under a key neither stored since, the
+        // same part of the input — which the original holds there too while it has no other)
+        let root = self.shallow_copy_root(base);
+        let base = root.unwrap_or(base);
         let pid = self.heap.alloc_raw(Kind::Unknown, &format!("path:{}:{}:{}", base, ns, intern::key_repr(k)), "", single, &label, Payload::None);
         self.fill_placeholder(pid, oid, ns, k, row, false, state);
+        if let Some(r) = root.filter(|r| k != STAR && !state.has_slot(*r, ns, k)) {
+            let rr = state.row(r, ns);
+            if rr.open() && !rr.absent.contains(k) {
+                state.set_slot_found(r, ns, k, Value::obj(pid), false);
+            }
+        }
         Value::obj(pid)
     }
 

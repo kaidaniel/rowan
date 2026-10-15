@@ -1403,6 +1403,10 @@ fn m_next(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     let it = an.iterate(a, &c.node, st);
+    // (a generator at a position not known: it ran to one of its yields at least)
+    if let Some(g) = a.single() {
+        an.gen_took_item(g, st);
+    }
     match it.elem {
         Elem::Pair(k, v) => {
             let ctx = an.frame().ctx.clone();
