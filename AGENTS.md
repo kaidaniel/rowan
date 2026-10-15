@@ -66,11 +66,11 @@ namespace packages).
   * **Entry points:** functions the main run does not call (also those only entry runs call)
     run with open parameters; their requirements become `param F.x` schemas.
 * **Generators** run whole at their first consumption (`force_gen`), in the creating call's
-  context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`). If code
-  between items (where the consumer asks for one: `note_resume`; unknown code, deletes too)
-  changes what the generator reads after a yield (`Gens::watch`, also after the call that
-  started it while held), it runs again with that changed at each yield (`with_gen_restart`).
-  `@contextmanager` bodies run at yields.
+  context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`; at a position
+  not known, some yield's). If code between items (where the consumer asks for one:
+  `note_resume`; unknown code, deletes too) changes what the generator reads after a yield
+  (`Gens::watch`, also after the call that started it while held), it runs again with that
+  changed at each yield (`with_gen_restart`). `@contextmanager` bodies run at yields.
 * **Requirements and schemas:** reading a key from a row open through an input records a
   requirement on that input. A key read on every path is `always`, on some paths `sometimes`.
   A read guarded by a handler for its `KeyError` still counts (a frame column read behind a
@@ -85,14 +85,14 @@ namespace packages).
   sqlite, csv…), and simulate pandas columns, pydantic / FastAPI validation and routing, and
   torch / numpy shapes (dims as polynomials; an undecided condition is a requirement and then a
   fact on the path; in torch modules `int` / `Tensor` annotations hold; a module-level unknown
-  number names its dims).
+  number names its dims, a module-level tensor's unknown dims are one value each).
 * **Deadline:** a safety net only (`ms`, 10 s): past it user calls become unknown calls and
   running calls stop where they are. The budget, not the deadline, bounds the work.
 * **Soundness** holds relative to the models and to annotations of values whose class is
   unknown. `exec`, `setattr` / `getattr` with unknown names (also in code a skipped call
   reaches), metaclasses and monkey-patching (rebinding a function or class too) are unknown or
-  ignored. List lengths are tracked up to 15. An object a path has no facts of reads as unknown
-  (`read_row`).
+  ignored. List lengths are tracked up to 15 (a few per path: each one's positions; `xs[:n]` keeps
+  xs's). An object a path has no facts of reads as unknown (`read_row`).
 
 ## Working conventions (the owner's standing instructions)
 
