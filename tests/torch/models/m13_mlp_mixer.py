@@ -90,7 +90,7 @@ class MlpMixer(nn.Module):
         for blk in self.blocks:
             x = blk(x)
         # the token count joins Hp*Wp (no block ran) with self.num_patches (a block ran): `?`,
-        # unless the engine relates them; either is accepted
+        # unless the engine relates them (known to be hard: a dim equality across the loop)
         h = self.norm(x)  #@shape h: [images.shape[0], _, self.dim]
         #@requires none
         #@shape@L111 h: [2, 16, 24]
