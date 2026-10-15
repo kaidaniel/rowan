@@ -23,6 +23,10 @@ use crate::state::{Kind, State};
 pub struct Entries {
     /// the function an entry run (open parameters) is analysing
     pub run: Option<ObjId>,
+    /// the function whose general run is going on (an entry run, or the `__init__` run that
+    /// makes an entry run's instance, with any arguments): what its own lines record holds for
+    /// any call
+    pub general: Option<ObjId>,
     /// while an entry run's parameters are made: the function they belong to
     pub scope: Option<u32>,
     /// functions that had their entry run
@@ -36,6 +40,20 @@ pub struct Entries {
     /// per class: the instance its methods' entry runs take as `self` (None: its `__init__`
     /// does not complete with its defaults)
     pub instances: FxHashMap<ObjId, Option<ObjId>>,
+    /// per class: the instance general runs take, its `__init__` given any arguments (as
+    /// annotated, or the defaults): any instance a construction may make
+    pub general_instances: FxHashMap<ObjId, Option<ObjId>>,
+    /// instances made for this run are general ones (`general_instances`)
+    any_instance: bool,
+    /// an instance made with `__init__`'s defaults was made for this run: its values are not
+    /// those of any call
+    used_defaults: bool,
+    /// the function whose own lines record no hover facts (a run with an instance made with
+    /// `__init__`'s defaults: neither any call's nor the program's)
+    pub no_facts: Option<ObjId>,
+    /// functions whose entry run took an instance made with defaults: when hover facts are
+    /// collected, a general run of their own (facts only) follows
+    facts_runs: Vec<ObjId>,
     /// classes whose entry instance is being made (`fresh_instance`)
     pub fresh_in_progress: FxHashSet<ObjId>,
     /// modules that import torch (their functions all get entry runs)
@@ -88,6 +106,17 @@ impl Analyzer {
         // while quiet hold no verdicts)
         let n = self.heap.len() as ObjId;
         self.analyse_uncalled_range(1, n, state, true);
+        // the general runs (hover facts only) of functions whose entry run took an instance
+        // made with `__init__`'s defaults
+        if self.findings.facts_on || !self.findings.row_check_requests.is_empty() {
+            for oid in std::mem::take(&mut self.entry.facts_runs) {
+                if self.budget.over_hard_deadline() {
+                    break;
+                }
+                let fi = self.heap.func_info(oid);
+                self.entry_run(oid, &fi, Run::FactsOnly, state);
+            }
+        }
     }
 
     pub(super) fn analyse_uncalled_range(&mut self, from: ObjId, n: ObjId, state: &mut State, quiet_pass: bool) {
@@ -123,13 +152,14 @@ impl Analyzer {
                 crate::models::fastapi::fa_entry_run(self, oid, &fi, state);
                 continue;
             }
-            self.entry_run(oid, &fi, quiet, state);
+            self.entry_run(oid, &fi, if quiet { Run::Quiet } else { Run::Verdicts }, state);
         }
     }
 
-    /// The entry run of `oid` (`quiet`: requirement-only) with open parameters, from `state`;
-    /// the requirements it finds on the inputs are kept in `state`.
-    fn entry_run(&mut self, oid: ObjId, fi: &FuncInfo, quiet: bool, state: &mut State) {
+    /// The entry run of `oid` with open parameters, from `state`; the requirements it finds on
+    /// the inputs are kept in `state` (not those of a facts-only run).
+    fn entry_run(&mut self, oid: ObjId, fi: &FuncInfo, run: Run, state: &mut State) {
+        let quiet = run != Run::Verdicts;
         let Some(fparams) = fi.node.params() else {
             // a lambda without parameters
             if let FuncNode::Lambda(_) = fi.node {
@@ -160,12 +190,26 @@ impl Analyzer {
         let mi = self.heap.module_info(fi.module);
         self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
         self.entry.scope = Some(oid);
+        // (a run with verdicts takes instances made with `__init__`'s defaults, as a caller
+        // that passes nothing — its verdicts are those; the others, and torch modules', any
+        // instance)
+        let saved_any = std::mem::replace(&mut self.entry.any_instance, quiet || self.entry.torch_modules.contains(&fi.module));
+        let saved_used = std::mem::replace(&mut self.entry.used_defaults, false);
+        let saved_q = std::mem::replace(&mut self.findings.quiet, quiet);
         let mut params = scopemod::all_params(fparams);
         let self_val = self.entry_receiver(fi, &mut params, &mut st, state);
         let (args, kwargs, star_args, star_kwargs) = self.entry_arguments(oid, fi, fparams, params, &mut st);
+        self.findings.quiet = saved_q;
+        let defaults = std::mem::replace(&mut self.entry.used_defaults, saved_used);
+        self.entry.any_instance = saved_any;
         self.entry.scope = None;
+        if defaults && run == Run::Verdicts && (self.findings.facts_on || !self.findings.row_check_requests.is_empty()) {
+            self.entry.facts_runs.push(oid);
+        }
         let fake = Node::synthetic(mi.idx, fi.node.node().line);
         let saved_entry = self.entry.run.replace(oid);
+        let saved_general = std::mem::replace(&mut self.entry.general, (!defaults).then_some(oid));
+        let saved_nofacts = std::mem::replace(&mut self.entry.no_facts, defaults.then_some(oid));
         let before = self.heap.len() as ObjId;
         let saved_quiet = std::mem::replace(&mut self.findings.quiet, quiet);
         let called_torch = self.entry.analysed.contains(&oid) && self.entry.torch_modules.contains(&fi.module);
@@ -174,6 +218,8 @@ impl Analyzer {
         self.findings.quiet_records = saved_qr;
         self.findings.quiet = saved_quiet;
         self.entry.run = saved_entry;
+        self.entry.general = saved_general;
+        self.entry.no_facts = saved_nofacts;
         if quiet {
             // functions made by a requirement-only run are not the program's
             let after = self.heap.len() as ObjId;
@@ -194,7 +240,9 @@ impl Analyzer {
             }
         }
         self.cx.frames.pop();
-        self.keep_entry_requirements(fi, quiet, &st, state);
+        if run != Run::FactsOnly {
+            self.keep_entry_requirements(fi, quiet, &st, state);
+        }
     }
 
     /// The receiver of a method's entry run: an instance of its class or of one of its
@@ -210,12 +258,18 @@ impl Analyzer {
                 let subs: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| *c == cls || (!torch && self.heap.mro(*c).contains(&cls))).collect();
                 let mut insts: Vec<ObjId> = Vec::new();
                 for c in subs {
-                    let inst = match self.entry.instances.get(&c) {
+                    let made = if self.entry.any_instance { self.entry.general_instances.get(&c) } else { self.entry.instances.get(&c) };
+                    self.entry.used_defaults |= !self.entry.any_instance;
+                    let inst = match made {
                         Some(&i) => i,
                         None => {
                             let cname = self.heap.class_info(c).name.clone();
                             let i = self.fresh_instance(c, state, &format!("entry:{}", cname));
-                            self.entry.instances.insert(c, i);
+                            if self.entry.any_instance {
+                                self.entry.general_instances.insert(c, i);
+                            } else {
+                                self.entry.instances.insert(c, i);
+                            }
                             *st = state.copy();
                             st.ret = None;
                             i
@@ -443,17 +497,21 @@ impl Analyzer {
         None
     }
 
-    /// An instance of `cls_oid` as its `__init__` makes it given its defaults (None: no path of
-    /// it completes; `state` is then as it was).
+    /// An instance of `cls_oid` as its `__init__` makes it (None: no path of it completes;
+    /// `state` is then as it was): given any arguments in a general run (`any_instance`), else
+    /// its defaults. Made once of each kind per class.
     pub(in crate::interp) fn fresh_instance(&mut self, cls_oid: ObjId, state: &mut State, ctx: &str) -> Option<ObjId> {
         let ci = self.heap.class_info(cls_oid);
         if self.entry.fresh_in_progress.contains(&cls_oid) {
             // self-referential annotation: open instance
             return Some(self.unknown_source(&format!("instance {}", ci.name), SourceKind::Class, state, &format!("{} (recursive)", ci.name), "", Ns::Attr, vec![]));
         }
+        let any = self.entry.any_instance;
         self.entry.fresh_in_progress.insert(cls_oid);
-        let r = self.fresh_instance_inner(cls_oid, &ci, state, ctx);
+        let ctx = if any { format!("any:{}", ctx) } else { ctx.to_string() };
+        let r = self.fresh_instance_inner(cls_oid, &ci, state, &ctx);
         self.entry.fresh_in_progress.remove(&cls_oid);
+        self.entry.used_defaults |= !any;
         r
     }
 
@@ -518,12 +576,20 @@ impl Analyzer {
                 }
                 let mut args = Vec::new();
                 let mut kwargs: IndexMap<StrId, Value> = IndexMap::new();
+                let (mut star_args, mut star_kwargs) = (Vec::new(), Vec::new());
+                // (any arguments, as annotated, or the defaults: the instance any construction
+                // may make, so that a method run on it holds for any call; or the defaults, as a
+                // caller that passes nothing)
                 for a in scopemod::all_params(params_all).into_iter().skip(1) {
-                    if [&params_all.vararg, &params_all.kwarg].iter().any(|v| v.as_deref().map(|v| std::ptr::eq(v, a)).unwrap_or(false)) {
+                    if params_all.vararg.as_deref().is_some_and(|v| std::ptr::eq(v, a)) {
+                        star_args.push(Value::obj(self.param_source(&fi, a, state)));
                         continue;
                     }
-                    // (outside torch modules: the defaults, as a caller that passes nothing)
-                    let v = self.open_param(&fi, a, !self.entry.torch_modules.contains(&fi.module), state);
+                    if params_all.kwarg.as_deref().is_some_and(|v| std::ptr::eq(v, a)) {
+                        star_kwargs.push(Value::obj(self.param_source(&fi, a, state)));
+                        continue;
+                    }
+                    let v = self.open_param(&fi, a, !self.entry.any_instance, state);
                     if params_all.kwonlyargs.iter().any(|k| std::ptr::eq(&k.parameter, a)) {
                         kwargs.insert(s(a.name.id.as_str()), v);
                     } else {
@@ -532,10 +598,19 @@ impl Analyzer {
                 }
                 self.entry.scope = saved_scope;
                 let fake = if self.entry.torch_modules.contains(&fi.module) { Node::synthetic(fi.node.node().module, frontend::node(ci.node).line) } else { Node::synthetic(fi.node.node().module, fi.node.node().line) };
-                // (with its verdicts, also for an entry run that has none: made once, whichever
-                // entry run needs the instance first)
-                let saved_quiet = std::mem::replace(&mut self.findings.quiet, false);
-                self.call_user(init, Some(Value::obj(inst)), args, kwargs, vec![], vec![], state, &fake, true);
+                // (made with its defaults: with its verdicts, also for an entry run that has
+                // none — made once, whichever entry run needs the instance first; with any
+                // arguments, as quiet as the run it is made for)
+                let saved_quiet = self.findings.quiet;
+                self.findings.quiet &= self.entry.any_instance;
+                // (with any arguments, a run of `__init__` for any call; with its defaults,
+                // not one of the program's calls either: no hover facts)
+                let any = self.entry.any_instance;
+                let saved_general = std::mem::replace(&mut self.entry.general, any.then_some(init));
+                let saved_nofacts = std::mem::replace(&mut self.entry.no_facts, (!any).then_some(init));
+                self.call_user(init, Some(Value::obj(inst)), args, kwargs, star_args, star_kwargs, state, &fake, true);
+                self.entry.general = saved_general;
+                self.entry.no_facts = saved_nofacts;
                 self.findings.quiet = saved_quiet;
             }
         }
@@ -565,6 +640,15 @@ impl Analyzer {
         }
         Some(inst)
     }
+}
+
+/// What an entry run is for: verdicts (a function nothing calls), its own requirements (a
+/// function the program calls: quiet), or hover facts only (`facts_runs`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Run {
+    Verdicts,
+    Quiet,
+    FactsOnly,
 }
 
 /// A requirement-only run keeps what the function itself demands: of its parameters, and of

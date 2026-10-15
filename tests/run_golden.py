@@ -14,6 +14,9 @@ unless unknown code added it", is a hedged and true statement).
 Values: `#@value NAME: exactly={12}` (the value is one of these literals and nothing else),
 `#@value NAME: unknown` (rowan claims no specific value), `#@value NAME: includes={1,100}`
 (floor: unknown, or a set holding these); several names on one line separated by `;`.
+These check the program's calls of the function the line is in (joined; an uncalled function's
+run with open parameters counts too). `#@general NAME: …` (same clauses) checks the value for
+any call: the function's general run, with open parameters of their annotated types.
 Row checks beyond present/definite/closed/open: `possible={..}` (each key is present, or the
 row is open) and `definite_within={..}` (every definite key is listed): soundness floors for
 cases whose precise answer is a `#@todo`.  Keys are bare words or Python literals.
@@ -50,6 +53,7 @@ ROOT = os.path.dirname(HERE)
 
 TODO_COUNT = [0]
 SHAPES = [ShapeExpectations()]  # `#@shape` / `#@dim` / `#@requires` / `#@shape-error` (tests/shapes.py)
+GENERAL_EXP: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}  # line -> [(name, spec)] for `#@general`
 VALUE_EXP: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}  # line -> [(name, spec)] for `#@value`  # `#@todo` directives seen: expectations the engine does not meet yet
 
 TIER_ALIASES = {"ok": "proven", "proven": "proven", "likely": "likely", "possibly": "possibly",
@@ -99,6 +103,7 @@ def collect_expectations(src: str):
     verdict_exp: Dict[int, List[Tuple[str, Any]]] = {}
     row_exp: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}
     VALUE_EXP.clear()
+    GENERAL_EXP.clear()
     SHAPES[0] = ShapeExpectations()
     SHAPES[0].eff = directive_lines(src)
     schema_exp: List[Tuple[str, Dict[str, Any]]] = []
@@ -116,14 +121,16 @@ def collect_expectations(src: str):
             line = re.sub(r"\s\((?=[A-Za-z0-9`])[^\n]*$", "", line)
             line = re.sub(r"#@todo\s+row\b", "#@row", line)
             line = re.sub(r"#@todo\s+value\b", "#@value", line)
+            line = re.sub(r"#@todo\s+general\b", "#@general", line)
             line = re.sub(r"#@todo\s+schema\b", "#@schema", line)
             line = re.sub(r"#@todo\s+(shape|dim|requires)\b", r"#@\1", line)
             line = re.sub(r"#@todo\s+", "#@ ", line)
         if SHAPES[0].parse_line(i0, line):
             continue
-        m = re.search(r"#@value\s+(.*)$", line)
+        m = re.search(r"#@(value|general)\s+(.*)$", line)
         if m:
-            for clause in m.group(1).split(";"):
+            table = VALUE_EXP if m.group(1) == "value" else GENERAL_EXP
+            for clause in m.group(2).split(";"):
                 cm = re.match(r"\s*(\w+)\s*:\s*(.*)$", clause)
                 if not cm:
                     if from_todo:
@@ -135,7 +142,7 @@ def collect_expectations(src: str):
                     spec[part[0]] = parse_set(part[1])
                 if re.search(r"\bunknown\b", re.sub(r"\{[^}]*\}", "", cm.group(2))):
                     spec["unknown"] = True
-                VALUE_EXP.setdefault(i, []).append((cm.group(1), spec))
+                table.setdefault(i, []).append((cm.group(1), spec))
             continue
         m = re.search(r"#@row\s+(\w+)\s*:\s*(.*)$", line)
         if m:
@@ -351,7 +358,9 @@ def check_file(src: str, rel: str, res: Dict[str, Any]) -> List[str]:
     """Check the directives of one file of a case (`rel`: "" for the entry) against rowan's
     golden output for the whole case."""
     verdict_exp, row_exp, schema_exp = collect_expectations(src)
-    rows_here = [rc for rc in res["rows"] if rc.get("file", "") == rel]
+    # (a requirement-only run's rows hold for any call: only `#@general` checks them)
+    general_here = [rc for rc in res["rows"] if rc.get("file", "") == rel and rc.get("general")]
+    rows_here = [rc for rc in res["rows"] if rc.get("file", "") == rel and not rc.get("quiet")]
     # verdicts in this file (or reached through a call on one of its lines: the chain)
     vs_here = [v for v in res["verdicts"] if (v.get("file") or "") == rel or v.get("chain")]
     # a line can run several times (a function called from several places, or analysed as an
@@ -400,8 +409,18 @@ def check_file(src: str, rel: str, res: Dict[str, Any]) -> List[str]:
             if (ln, name) not in seen_rows:
                 row_checks.append((ln, name, spec, "statement never executed"))
     # values: joined over the runs of the line like rows
+    row_checks += value_checks(rows_here, VALUE_EXP, "value")
+    row_checks += value_checks(general_here, GENERAL_EXP, "general value")
+    failures = check_results(verdict_exp, row_checks, schema_exp, [v if (v.get("file") or "") == rel else dict(v, line=-1) for v in vs_here], res["schemas"])
+    failures += SHAPES[0].check(res, rel)
+    return failures
+
+
+def value_checks(rows: List[Dict[str, Any]], exp: Dict[int, List[Tuple[str, Dict[str, Any]]]], what: str) -> List[Tuple[int, str, Dict[str, Any], str]]:
+    """`#@value` / `#@general` checks of the values `rows` recorded, joined per (line, name)."""
+    out = []
     values: Dict[Tuple[int, str], Dict[str, Any]] = {}
-    for rc in rows_here:
+    for rc in rows:
         v = rc.get("value")
         if v is None:
             continue
@@ -409,11 +428,11 @@ def check_file(src: str, rel: str, res: Dict[str, Any]) -> List[str]:
         j["lits"] |= set(v["lits"])
         j["unknown"] = j["unknown"] or v["unknown"]
         j["objects"] |= set(v["objects"])
-    for ln, specs in VALUE_EXP.items():
+    for ln, specs in exp.items():
         for name, spec in specs:
             got = values.get((ln, name))
             if got is None:
-                row_checks.append((ln, name, spec, "statement never executed"))
+                out.append((ln, name, spec, "statement never executed"))
                 continue
             desc = f"lits={sorted(got['lits'])} unknown={got['unknown']} objects={sorted(got['objects'])}"
             prob = ""
@@ -427,10 +446,8 @@ def check_file(src: str, rel: str, res: Dict[str, Any]) -> List[str]:
                 lost = {key_str(k) for k in spec["includes"]} - got["lits"]
                 if lost:
                     prob = f"value {desc} leaves out {sorted(lost)}"
-            row_checks.append((ln, f"value of {name}", spec, prob))
-    failures = check_results(verdict_exp, row_checks, schema_exp, [v if (v.get("file") or "") == rel else dict(v, line=-1) for v in vs_here], res["schemas"])
-    failures += SHAPES[0].check(res, rel)
-    return failures
+            out.append((ln, f"{what} of {name}", spec, prob))
+    return out
 
 
 SUITES = ("torch", "pandas", "pydantic", "fastapi", "stdlib", "apps", "numpy")

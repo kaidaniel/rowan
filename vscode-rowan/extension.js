@@ -38,6 +38,7 @@ const NOTATION = [
   [(t) => / \| |(^|\n)\| /.test(t), "`a | b` one of these, depending on the path or the call"],
   [(t) => t.includes("[*]"), "`[*]` any element"],
   [(t) => t.includes("…"), "`…` not shown"],
+  [(t) => t.includes("- in calls: "), "the value holds for any call; `in calls`: what this program's calls give"],
 ];
 
 /**
@@ -230,6 +231,26 @@ function codeList(items, max = 6) {
   return shown.join(", ") + (items.length > max ? ` and ${items.length - max} more` : "");
 }
 
+/**
+ * What the program's own calls gave, apart from the value for any call: "- in calls: `3`
+ * (line 5), `7` (lines 6, 9)" (null when there is nothing apart).
+ */
+function callsLine(f) {
+  const calls = f.calls || [];
+  if (!calls.length) return null;
+  // (values the cut makes alike — they differ in what `…` hides: once, with all their lines)
+  const merged = new Map();
+  for (const c of calls) {
+    const t = shorten(c.text, VALUE_WIDTH);
+    const ls = merged.get(t) || [];
+    merged.set(t, ls.concat((c.lines || []).filter((l) => !ls.includes(l))));
+  }
+  const lines = (ls) => (ls.length ? ` (line${ls.length > 1 ? "s" : ""} ${ls.slice(0, 3).join(", ")}${ls.length > 3 ? ", …" : ""})` : "");
+  const all = [...merged];
+  const shown = all.slice(0, 3).map(([t, ls]) => "`" + t + "`" + lines(ls));
+  return `- in calls: ${shown.join(", ")}${all.length > 3 ? ` and ${all.length - 3} more` : ""}`;
+}
+
 /** The objects of a fact rowan knows (not unknown values): where they were created. */
 function objectLines(f) {
   const out = [];
@@ -268,8 +289,13 @@ function renderHover(name, facts, verdicts) {
   for (const f of facts) {
     const text = (f.text || "").trim() || "?";
     const objs = f.objects || [];
-    const unknown = objs.filter((o) => o.kind === "unknown");
+    // (the unknowns of the value shown: the objects are the calls' when there are some)
+    const unknown = (f.general_unknowns || objs).filter((o) => o.kind === "unknown");
     const info = [];
+    // what the program's calls gave (the value shown holds for any call): after the value
+    const calls = callsLine(f);
+    let valueShown = false;
+    texts.push(...(f.calls || []).map((c) => shorten(c.text, VALUE_WIDTH)));
     // an unknown named by itself (a parameter, a name defined elsewhere): where it comes from
     if (text === name && !objs.length && !(f.legend || []).length) {
       // a number the module computes from data rowan cannot see, named by its variable
@@ -283,12 +309,9 @@ function renderHover(name, facts, verdicts) {
     } else {
       // (the legend explains the marks shown: not those of parts the cut leaves out)
       const shown = hoverValue(text);
+      valueShown = true;
       texts.push(shown.join("\n"));
       out.push("```python", ...shown, "```", "");
-      // what particular calls gave (the value above holds for any call)
-      const ex = f.examples || [];
-      if (ex.length) info.push(`- in calls: ${codeList(ex, 3)}`);
-      texts.push(...ex);
       // the names the value mentions, with what is known about each
       for (const [sym, desc] of f.legend || []) {
         texts.push(desc);
@@ -300,6 +323,7 @@ function renderHover(name, facts, verdicts) {
         else if ((o.from || []).length) info.push(`- \`?\` comes from ${o.from.join(" or ")}`);
       }
     }
+    if (calls) info.splice(valueShown ? 0 : 1, 0, calls);
     // tensor shapes: what this line needs of its inputs (rowan could not decide it here)
     for (const r of f.requires || []) info.push(`- needs \`${r}\``);
     // what the code reads of it, when it comes from outside (an argument, an input)

@@ -486,7 +486,7 @@ class ShapeExpectations:
         `#@shape-error` lines. In another module, `#@requires` sees that module's own
         requirements (its functions' entry runs), not those its callees add through calls."""
         fails: List[str] = []
-        rows = [r for r in res.get("rows", []) if r.get("file", "") == rel]
+        rows = [r for r in res.get("rows", []) if r.get("file", "") == rel and not r.get("quiet")]
 
         def runs(line: int, name: str, at: Optional[int]):
             # the engine joins a line's values within one run: its last record is the join

@@ -48,15 +48,18 @@ assert(r8.includes("- created on line 2"), r8);
 const a002 = path.join(root, "tests", "apps", "small", "a002_deploy_cli.py");
 const p28 = hover(indexResult(facts(a002)), fs.readFileSync(a002, "utf8").split("\n"), 28, "p");
 assert(p28.includes("- one of 7 objects, all created on line 28 (by different calls or loop iterations)"), p28);
-// (two Settings that differ only past the cut — retries=2 / retries=5 — are one line, not two alike)
+// (two Settings the calls give that differ only past the cut — retries=2 / retries=5 — are one
+// entry, not two alike)
 const s57 = hover(indexResult(facts(a002)), fs.readFileSync(a002, "utf8").split("\n"), 57, "s");
-const s57lines = s57.split("\n").filter((l) => /^(  |\| )Settings\(/.test(l)).map((l) => l.slice(2));
-assert(s57lines.length === 3 && new Set(s57lines).size === 3, s57);
+const s57calls = (s57.split("\n").find((l) => l.startsWith("- in calls: ")) || "").match(/`Settings\([^`]*`/g) || [];
+assert(s57calls.length === 3 && new Set(s57calls).size === 3, s57);
 // (the legend explains only marks the shown value uses: `**?` and `[*]` are in the cut parts)
 const a002idx = indexResult(facts(a002));
 const a002src = fs.readFileSync(a002, "utf8").split("\n");
 const set96 = hover(a002idx, a002src, 96, "settings");
-assert(!set96.includes("`**?` other keys") && !set96.includes("`[*]` any element") && set96.includes("`a | b` one of these"), set96);
+// (the legend explains the marks the hover shows, not those of parts the cuts leave out)
+const body96 = set96.split("\n").filter((l) => !l.startsWith("*")).join("\n");
+assert(set96.includes("`**?` other keys") === body96.includes("**?") && set96.includes("`[*]` any element") === body96.includes("[*]") && set96.includes("`a | b` one of these"), set96);
 // (one access, two explanations of why it works: one line)
 const cfg63 = hover(a002idx, a002src, 63, "cfg");
 assert(cfg63.split("\n").filter((l) => l.startsWith('- ✓ `cfg["notify"]`')).length === 1, cfg63);
@@ -68,14 +71,38 @@ assert(r13.includes('- ✗ `r["rolle"]`: key "rolle" is never set'), r13);
 const u8 = hover(a01idx, a01src, 8, "u");
 assert(u8.includes("- the code reads `u.id`"), u8);
 assert(u8.includes("not defined in this file"), u8);
-// a parameter: what callers pass (`u`), what the function reads of it
+// a parameter: any argument (the function's value for any call), what the program's call passes
+// (`u`, line 8), what the function reads of it
 const user2 = hover(a01idx, a01src, 2, "user");
-assert(user2.includes("```python\nu\n```") && user2.includes("- the code reads `user.id`"), user2);
+assert(user2.includes("- not known here: argument `user` of `build`") && user2.includes("- in calls: `u` (line 8)") && user2.includes("- the code reads `user.id`"), user2);
 assert.strictEqual(renderHover("zzz", [], []), null);
 // an alternative too wide for its line keeps whole items (`…` for the rest), not a cut word
 assert.strictEqual(shorten('{"id": 1, "owner": "bo", "priority": 2, "tags": [], "title": "printer jam"}', 60), '{"id": 1, "owner": "bo", "priority": 2, "tags": [], …}');
 assert.strictEqual(shorten('Ticket(id=1, title="a very long title that goes on and on and on")', 30), "Ticket(id=1, …)");
 assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
+
+// ---- a function's value for any call, apart from what the program's calls give (with their lines)
+{
+  const z532 = path.join(root, "tests", "cases", "z532_general_and_call_values.py");
+  const src = fs.readFileSync(z532, "utf8").split("\n");
+  const idx = indexResult(facts(z532));
+  const y = hover(idx, src, 6, "y");
+  assert(y.includes("```python\n3 | x\n```") && y.includes("- in calls: `3` (line 44), `7` (line 45)"), y);
+  assert(y.includes("the value holds for any call; `in calls`: what this program's calls give"), y);
+  const b = hover(idx, src, 6, "b");
+  assert(b.includes("- not known here: argument `b` of `pick`") && b.includes("- in calls: `False` (line 44), `True` (line 45)"), b);
+  const m = hover(idx, src, 13, "m");
+  assert(m.includes("```python\nn * 2\n```") && m.includes("- in calls: `10` (line 46), `14` (line 46)"), m);
+  // a function nothing calls: only the value for any call
+  const z = hover(idx, src, 27, "z");
+  assert(z.includes("```python\nk + 1\n```") && !z.includes("in calls"), z);
+  // a method: on any instance (its `__init__` given any arguments), apart from the program's
+  const v = hover(idx, src, 38, "v");
+  assert(v.includes("- in calls: `4` (line 49)") && !v.includes("```python\n0\n```"), v);
+  // a method nothing calls: on any instance, not only one made with `__init__`'s defaults
+  const a = hover(idx, src, 58, "a");
+  assert(a.includes("```python\nself.size * self.size\n```") && !a.includes("in calls"), a);
+}
 
 // ---- a call rowan no longer follows (past its function's budget): said where it changes a value
 {
@@ -144,7 +171,7 @@ const gi = indexResult(facts(g));
 const qkv = hover(gi, gsrc, 64, "qkv");
 assert(qkv.includes("```python\nTensor[B, T, 3*self.n_embd]\n```"), qkv);
 assert(qkv.includes("- `B` = `x.shape[0]`") && qkv.includes("- needs `C == self.n_embd`"), qkv);
-assert(qkv.includes("- in calls: `Tensor[3, 10, 96]`"), qkv);
+assert(qkv.includes("- in calls: `Tensor[3, 10, 96]` (line "), qkv);
 const gx = hover(gi, gsrc, 64, "x");
 assert(gx.includes("Tensor[B, T, C]") && gx.includes("- `B, T, C` = `x.shape`"), gx);
 

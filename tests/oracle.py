@@ -11,7 +11,8 @@ in every run that reaches it (one process per case, scratch working directory, t
 * `#@row NAME: …` — the keys K of NAME's value (a DataFrame's columns, a dict's keys, a Series'
   index (an `iterrows` row), a namedtuple's fields, an object's attributes): `definite ⊆ K`,
   `absent ∩ K = ∅`, `K ⊆ present` when `closed`;
-* `#@value NAME: exactly={…}` — the value is one of these;
+* `#@value NAME: exactly={…}` — the value is one of these; `#@general NAME: exactly={…}` too
+  (the value for any call holds for the program's calls, which pass what the annotations say);
 * `#@ ok k` — the line never raised a KeyError / AttributeError for k (also from a call made
   on it); `#@ missing k` — every run of the line raised one; `#@ possibly k` (strict only) —
   some run raised one and some did not;
@@ -80,6 +81,9 @@ CHECKED_TIERS = {"proven", "missing", "possibly"}
 def parse(src: str):
     verdict_exp, row_exp, schema_exp = run_golden.collect_expectations(src)
     value_exp = {k: list(v) for k, v in run_golden.VALUE_EXP.items()}
+    # (a value for any call holds for the program's calls too: theirs are type-correct)
+    for k, v in run_golden.GENERAL_EXP.items():
+        value_exp.setdefault(k, []).extend(v)
     verdicts = {ln: [(t, k) for t, k in vs if t in CHECKED_TIERS and k is not None] for ln, vs in verdict_exp.items()}
     verdicts = {ln: vs for ln, vs in verdicts.items() if vs}
     return verdicts, row_exp, value_exp, schema_exp
