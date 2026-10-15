@@ -474,53 +474,12 @@ impl Analyzer {
         let TryExit { mut recs } = self.leave_try();
         // the handlers' classes: which recorded raise each one catches (Python takes the
         // first handler that matches)
-        let hclasses: Vec<(FxHashSet<String>, bool)> = handlers.iter().map(|h| {
-            let Some(elts) = &h.types else { return (h.names(), true) };
-            // (no decided miss unless every name is a known exception class)
-            let known = elts.iter().all(|e| {
-                let n = dotted_last(e);
-                let builtin = crate::interp::builtin_exc_names(&n);
-                let user = matches!(e, ast::Expr::Name(_)) && {
-                    let v = self.eval(e, &mut pre.copy());
-                    v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| self.heap.class_info_opt(o).is_some_and(|ci| ci.name == n))
-                };
-                user || (builtin.1 && builtin.0.len() > 1) || n == "BaseException"
-            });
-            (elts.iter().map(|e| dotted_last(e)).collect(), known)
-        }).collect();
-        let hmatch = |hc: &(FxHashSet<String>, bool), cls: &Option<crate::interp::ExcNames>| -> Option<bool> {
-            if hc.0.contains("*") {
-                return Some(true);
-            }
-            let (names, full) = cls.as_ref()?;
-            if names.iter().any(|n| hc.0.contains(n)) {
-                Some(true)
-            } else if *full && hc.1 {
-                Some(false)
-            } else {
-                None
-            }
-        };
+        let hclasses = self.handler_classes(handlers, &pre);
         // raises no handler surely catches go on to the enclosing try (or out of the call),
         // through the finally (unless a return / jump in it swallows them)
         let swallowing = !fin.is_empty() && fin.swallows();
         if !swallowing {
-            for (cls, st, ev) in recs.iter_mut() {
-                if hclasses.iter().any(|hc| hmatch(hc, cls) == Some(true)) {
-                    continue;
-                }
-                let mut st2 = st.copy();
-                if !fin.is_empty() {
-                    st2.reachable = true;
-                    st2.ret = None;
-                    st2.exits = None;
-                    self.run_finally(fin, &mut st2, true);
-                    if !st2.reachable {
-                        continue;
-                    }
-                }
-                self.reraise_rec((cls.clone(), st2, ev.clone()));
-            }
+            self.reraise_uncaught(&mut recs, &hclasses, fin);
         }
         // where an exception leaves the body (for a finally without handlers)
         let mut finally_escape = if has_finally && handlers.is_empty() && fin.swallows() { crate::interp::join_raise_recs(&recs) } else { None };
@@ -533,6 +492,64 @@ impl Analyzer {
             self.exec_block(orelse, &mut body_end);
         }
         results.push(body_end);
+        self.run_handlers(handlers, &hclasses, &mut recs, &mut results);
+        self.cx.branch_depth -= 1;
+        self.cx.cond_depth -= 1;
+        let mut out = self.join_try_ways(body, orelse, handlers, results);
+        if has_finally {
+            self.finally_ways(fin, &mut out, outer_exits, finally_escape.take());
+        } else if !fin.is_empty() {
+            if !out.reachable {
+                out = pre.copy();
+            }
+            self.run_finally(fin, &mut out, false);
+        }
+        state.replace_with(out);
+    }
+
+    /// The classes each handler names (with whether every name is a known exception class: a
+    /// decided miss needs it).
+    fn handler_classes(&mut self, handlers: &[Handler], pre: &State) -> Vec<(FxHashSet<String>, bool)> {
+        handlers.iter().map(|h| {
+        let Some(elts) = &h.types else { return (h.names(), true) };
+        // (no decided miss unless every name is a known exception class)
+        let known = elts.iter().all(|e| {
+            let n = dotted_last(e);
+            let builtin = crate::interp::builtin_exc_names(&n);
+            let user = matches!(e, ast::Expr::Name(_)) && {
+                let v = self.eval(e, &mut pre.copy());
+                v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| self.heap.class_info_opt(o).is_some_and(|ci| ci.name == n))
+            };
+            user || (builtin.1 && builtin.0.len() > 1) || n == "BaseException"
+        });
+        (elts.iter().map(|e| dotted_last(e)).collect(), known)
+    }).collect()
+    }
+
+    /// Raises no handler surely catches go on to the enclosing try (or out of the call),
+    /// through the finally.
+    fn reraise_uncaught(&mut self, recs: &mut [crate::interp::RaiseRec], hclasses: &[(FxHashSet<String>, bool)], fin: &std::rc::Rc<Finally>) {
+        for (cls, st, ev) in recs.iter_mut() {
+            if hclasses.iter().any(|hc| handler_matches(hc, cls) == Some(true)) {
+                continue;
+            }
+            let mut st2 = st.copy();
+            if !fin.is_empty() {
+                st2.reachable = true;
+                st2.ret = None;
+                st2.exits = None;
+                self.run_finally(fin, &mut st2, true);
+                if !st2.reachable {
+                    continue;
+                }
+            }
+            self.reraise_rec((cls.clone(), st2, ev.clone()));
+        }
+    }
+
+    /// Each handler runs from the raises it may catch that no earlier one surely catches; its
+    /// end state is one way out of the try.
+    fn run_handlers(&mut self, handlers: &[Handler], hclasses: &[(FxHashSet<String>, bool)], recs: &mut [crate::interp::RaiseRec], results: &mut Vec<State>) {
         for (hi, h) in handlers.iter().enumerate() {
             // the exceptions raised at the recorded points (anything else: unknown)
             let unknown = Value::data(&format!("exc@L{}", h.line));
@@ -541,7 +558,7 @@ impl Analyzer {
                 let mut e = State::bottom();
                 let mut ev: Option<Value> = None;
                 for (cls, st, x) in recs.iter_mut() {
-                    if hmatch(&hclasses[hi], cls) == Some(false) || hclasses[..hi].iter().any(|hc| hmatch(hc, cls) == Some(true)) {
+                    if handler_matches(&hclasses[hi], cls) == Some(false) || hclasses[..hi].iter().any(|hc| handler_matches(hc, cls) == Some(true)) {
                         continue;
                     }
                     let mut r = st.copy();
@@ -564,8 +581,11 @@ impl Analyzer {
             self.unwind.handling.pop();
             results.push(hs);
         }
-        self.cx.branch_depth -= 1;
-        self.cx.cond_depth -= 1;
+    }
+
+    /// The ways out of a try (the body, each handler) joined; two that set a flag differently
+    /// leave facts a later test of the flag uses.
+    fn join_try_ways(&mut self, body: &'static [ast::Stmt], orelse: &'static [ast::Stmt], handlers: &[Handler], mut results: Vec<State>) -> State {
         // two ways out of the try (the body and one handler) that set a flag differently: a
         // later test of the flag tells which ran
         let two: Vec<usize> = (0..results.len()).filter(|i| results[*i].reachable).collect();
@@ -586,65 +606,80 @@ impl Analyzer {
             let new = name_facts(&vals, &a, &b, &out, self.frame().func.unwrap_or(0));
             add_facts(&mut out, new);
         }
-        if has_finally {
-            let inner_exits = out.exits.take();
-            let mut ret_acc = out.ret.take();
-            let mut exits_acc: Option<State> = None;
-            let add_exits = |e: Option<std::sync::Arc<State>>, acc: &mut Option<State>| {
-                if let Some(e) = e {
-                    let mut s2 = e.copy();
-                    *acc = Some(match acc.take() {
-                        None => s2,
-                        Some(mut a) => a.join(&mut s2),
-                    });
-                }
-            };
-            // the normal way out
-            if out.reachable {
-                self.run_finally(fin, &mut out, false);
+        out
+    }
+
+    /// A try's finally on every way out: the normal end, the returns made inside it, an
+    /// exception a `return` / jump in the finally swallows.
+    fn finally_ways(&mut self, fin: &std::rc::Rc<Finally>, out: &mut State, outer_exits: Option<std::sync::Arc<State>>, finally_escape: Option<State>) {
+        let mut finally_escape = finally_escape;
+        let inner_exits = out.exits.take();
+        let mut ret_acc = out.ret.take();
+        let mut exits_acc: Option<State> = None;
+        let add_exits = |e: Option<std::sync::Arc<State>>, acc: &mut Option<State>| {
+            if let Some(e) = e {
+                let mut s2 = e.copy();
+                *acc = Some(match acc.take() {
+                    None => s2,
+                    Some(mut a) => a.join(&mut s2),
+                });
             }
-            add_exits(out.exits.take(), &mut exits_acc);
-            if let Some(r) = out.ret.take() {
+        };
+        // the normal way out
+        if out.reachable {
+            self.run_finally(fin, out, false);
+        }
+        add_exits(out.exits.take(), &mut exits_acc);
+        if let Some(r) = out.ret.take() {
+            ret_acc = Some(match ret_acc { None => r, Some(a) => a.join(&r) });
+        }
+        // returns made inside the try: the finally runs before the function returns
+        let mut ways: Vec<State> = Vec::new();
+        if let Some(ie) = inner_exits {
+            ways.push(ie.copy());
+        }
+        // an exception leaving the try (no handler here) that a `return` in the finally
+        // swallows
+        let n_exit_ways = ways.len();
+        // (a `break` / `continue` in the finally swallows it as well)
+        if let Some(esc) = finally_escape.take() {
+            ways.push(esc);
+        }
+        for (wi, mut w) in ways.into_iter().enumerate() {
+            let is_escape = wi >= n_exit_ways;
+            w.reachable = true;
+            w.ret = None;
+            w.exits = None;
+            self.run_finally(fin, &mut w, is_escape);
+            if is_escape {
+                // a finally that completes re-raises: nothing continues from here
+                w.reachable = false;
+            } else if w.reachable {
+                w.record_exit();
+            }
+            add_exits(w.exits.take(), &mut exits_acc);
+            if let Some(r) = w.ret.take() {
                 ret_acc = Some(match ret_acc { None => r, Some(a) => a.join(&r) });
             }
-            // returns made inside the try: the finally runs before the function returns
-            let mut ways: Vec<State> = Vec::new();
-            if let Some(ie) = inner_exits {
-                ways.push(ie.copy());
-            }
-            // an exception leaving the try (no handler here) that a `return` in the finally
-            // swallows
-            let n_exit_ways = ways.len();
-            // (a `break` / `continue` in the finally swallows it as well)
-            if let Some(esc) = finally_escape.take() {
-                ways.push(esc);
-            }
-            for (wi, mut w) in ways.into_iter().enumerate() {
-                let is_escape = wi >= n_exit_ways;
-                w.reachable = true;
-                w.ret = None;
-                w.exits = None;
-                self.run_finally(fin, &mut w, is_escape);
-                if is_escape {
-                    // a finally that completes re-raises: nothing continues from here
-                    w.reachable = false;
-                } else if w.reachable {
-                    w.record_exit();
-                }
-                add_exits(w.exits.take(), &mut exits_acc);
-                if let Some(r) = w.ret.take() {
-                    ret_acc = Some(match ret_acc { None => r, Some(a) => a.join(&r) });
-                }
-            }
-            add_exits(outer_exits, &mut exits_acc);
-            out.exits = exits_acc.map(std::sync::Arc::new);
-            out.ret = ret_acc;
-        } else if !fin.is_empty() {
-            if !out.reachable {
-                out = pre.copy();
-            }
-            self.run_finally(fin, &mut out, false);
         }
-        state.replace_with(out);
+        add_exits(outer_exits, &mut exits_acc);
+        out.exits = exits_acc.map(std::sync::Arc::new);
+        out.ret = ret_acc;
+    }
+}
+
+/// Does a handler (its class names, and whether they are all known exception classes) catch a
+/// raise of this class: surely (Some(true)), surely not (Some(false)), or maybe (None)?
+fn handler_matches(hc: &(FxHashSet<String>, bool), cls: &Option<crate::interp::ExcNames>) -> Option<bool> {
+    if hc.0.contains("*") {
+        return Some(true);
+    }
+    let (names, full) = cls.as_ref()?;
+    if names.iter().any(|n| hc.0.contains(n)) {
+        Some(true)
+    } else if *full && hc.1 {
+        Some(false)
+    } else {
+        None
     }
 }
