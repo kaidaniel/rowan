@@ -1189,96 +1189,14 @@ pub fn facts_json(an: &Analyzer) -> J {
             .rows
             .iter()
             .take(MAX_FACT_OBJECTS)
-            .map(|(oid, (item, attr))| {
-                let o = an.heap.obj(*oid);
-                let origin = an.names.origins.get(oid).map(|(t, l, g)| json!({"text": t, "line": l, "given": g}));
-                // for people: what may have changed it, what it never has, where it comes from
-                let rows = [item, attr].into_iter().flatten();
-                let mut changed_by: Vec<String> = Vec::new();
-                let mut from: Vec<String> = Vec::new();
-                let mut absent: Vec<String> = Vec::new();
-                for r in rows {
-                    for m in r.mutators.iter() {
-                        let t = site_text(an, &intern::str_get(m));
-                        if !changed_by.contains(&t) {
-                            changed_by.push(t);
-                        }
-                        changed_by.sort_by_key(|n| n == "other calls");
-                    }
-                    for (src, _) in r.sources.iter() {
-                        let t = source_id_text(an, src);
-                        if !from.contains(&t) {
-                            from.push(t);
-                        }
-                    }
-                    absent.extend(intern::sorted_by_str(r.absent.iter()).iter().map(|k| crate::domain::key_display(*k)));
-                }
-                json!({
-                    "changed_by": changed_by,
-                    "from": from,
-                    "absent": absent,
-                    "label": &*o.label,
-                    "kind": o.kind.name(),
-                    "origin": origin,
-                    "symbol": an.names.get(*oid).filter(|_| f.legend.iter().any(|(s0, _)| Some(s0) == an.names.get(*oid))),
-                })
-            })
+            .map(|(oid, (item, attr))| fact_object_json(an, f, *oid, item, attr))
             .collect();
         // what the code reads of the inputs these objects come from, as access paths from the name
-        let mut required: Vec<(String, bool)> = Vec::new();
-        if let Some(st) = &an.findings.final_state {
-            for (_, (item, attr)) in &f.rows {
-                for r in [item, attr].into_iter().flatten() {
-                    for (src, _) in r.sources.iter() {
-                        if source_is_data(src) {
-                            continue;
-                        }
-                        for need in reads_below(st, src, &intern::str_get(*name), false) {
-                            if !required.iter().any(|(p, _)| *p == need.0) {
-                                required.push(need);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let required = fact_required(an, f, *name);
         let required: Vec<J> = required.into_iter().map(|(p, a)| json!({"path": p, "always": a})).collect();
         // tensor-shape requirements recorded on this line (in the line's own analysis), in
         // the dim names of this fact
-        let mut requires: Vec<String> = Vec::new();
-        let mut extra_legend: Vec<(String, String)> = Vec::new();
-        for n in &an.m.shape_reqs {
-            if n.line != *line || !n.chain.is_empty() || n.module != an.program.main_idx {
-                continue;
-            }
-            let t = match &n.cons {
-                Some((c, ctx)) => {
-                    let mut ctx = ctx.clone();
-                    ctx.atom_names = f.t_names.clone();
-                    crate::models::shape::with_ctx(ctx, || crate::models::shape::cons_text(c))
-                }
-                None => n.text.clone(),
-            };
-            // the dim names the requirement uses, in the legend too
-            if let Some((c, ctx)) = &n.cons {
-                let mut atoms = Vec::new();
-                cons_atoms(c, &mut atoms);
-                for a in atoms {
-                    if let (Some(nm), crate::models::shape::Atom::Dim(sy, i)) = (f.t_names.get(&a), crate::models::shape::atom_get(a)) {
-                        let base = crate::models::shape::with_ctx(ctx.clone(), || crate::models::shape::sym_print(sy));
-                        if let Some(b) = base {
-                            let entry = (nm.clone(), format!("{}.shape[{}]", b, i));
-                            if !extra_legend.contains(&entry) && !f.legend.iter().any(|(s0, _)| s0.split(", ").any(|x| x == nm)) {
-                                extra_legend.push(entry);
-                            }
-                        }
-                    }
-                }
-            }
-            if !requires.contains(&t) {
-                requires.push(t);
-            }
-        }
+        let (requires, extra_legend) = fact_shape_requires(an, f, *line);
         let (text, examples): (String, Vec<String>) = match &f.primary {
             Some(p) => (p.clone(), f.texts.iter().filter(|t| *t != p).cloned().collect()),
             None => (join_alternatives(&f.texts), vec![]),
@@ -1300,6 +1218,107 @@ pub fn facts_json(an: &Analyzer) -> J {
         .collect();
     let shape_errors: Vec<J> = an.m.shape_errors.iter().map(|n| json!({"file": an.program.rel_file(n.module), "line": n.line, "chain": n.chain, "message": n.text})).collect();
     json!({"file": an.program.filename, "facts": facts, "verdicts": verdicts, "shape_errors": shape_errors})
+}
+
+/// One object a hover's name may hold: what may have changed it, where it comes from, what it
+/// never has, its label, kind, origin and symbol.
+fn fact_object_json(an: &Analyzer, f: &crate::interp::Fact, oid: ObjId, item: &Option<Row>, attr: &Option<Row>) -> J {
+    let o = an.heap.obj(oid);
+    let origin = an.names.origins.get(&oid).map(|(t, l, g)| json!({"text": t, "line": l, "given": g}));
+    // for people: what may have changed it, what it never has, where it comes from
+    let rows = [item, attr].into_iter().flatten();
+    let mut changed_by: Vec<String> = Vec::new();
+    let mut from: Vec<String> = Vec::new();
+    let mut absent: Vec<String> = Vec::new();
+    for r in rows {
+        for m in r.mutators.iter() {
+            let t = site_text(an, &intern::str_get(m));
+            if !changed_by.contains(&t) {
+                changed_by.push(t);
+            }
+            changed_by.sort_by_key(|n| n == "other calls");
+        }
+        for (src, _) in r.sources.iter() {
+            let t = source_id_text(an, src);
+            if !from.contains(&t) {
+                from.push(t);
+            }
+        }
+        absent.extend(intern::sorted_by_str(r.absent.iter()).iter().map(|k| crate::domain::key_display(*k)));
+    }
+    json!({
+        "changed_by": changed_by,
+        "from": from,
+        "absent": absent,
+        "label": &*o.label,
+        "kind": o.kind.name(),
+        "origin": origin,
+        "symbol": an.names.get(oid).filter(|_| f.legend.iter().any(|(s0, _)| Some(s0) == an.names.get(oid))),
+    })
+}
+
+/// What the code reads of the inputs a hover's objects come from, as access paths from the
+/// name (with whether every path reads it).
+fn fact_required(an: &Analyzer, f: &crate::interp::Fact, name: crate::intern::StrId) -> Vec<(String, bool)> {
+    let mut required: Vec<(String, bool)> = Vec::new();
+    if let Some(st) = &an.findings.final_state {
+        for (_, (item, attr)) in &f.rows {
+            for r in [item, attr].into_iter().flatten() {
+                for (src, _) in r.sources.iter() {
+                    if source_is_data(src) {
+                        continue;
+                    }
+                    for need in reads_below(st, src, &intern::str_get(name), false) {
+                        if !required.iter().any(|(p, _)| *p == need.0) {
+                            required.push(need);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    required
+}
+
+/// The tensor-shape requirements recorded on a hover's line (in the line's own analysis), in
+/// the fact's dim names, with the legend entries for the names they use.
+#[allow(clippy::type_complexity)]
+fn fact_shape_requires(an: &Analyzer, f: &crate::interp::Fact, line: u32) -> (Vec<String>, Vec<(String, String)>) {
+    let mut requires: Vec<String> = Vec::new();
+    let mut extra_legend: Vec<(String, String)> = Vec::new();
+    for n in &an.m.shape_reqs {
+        if n.line != line || !n.chain.is_empty() || n.module != an.program.main_idx {
+            continue;
+        }
+        let t = match &n.cons {
+            Some((c, ctx)) => {
+                let mut ctx = ctx.clone();
+                ctx.atom_names = f.t_names.clone();
+                crate::models::shape::with_ctx(ctx, || crate::models::shape::cons_text(c))
+            }
+            None => n.text.clone(),
+        };
+        // the dim names the requirement uses, in the legend too
+        if let Some((c, ctx)) = &n.cons {
+            let mut atoms = Vec::new();
+            cons_atoms(c, &mut atoms);
+            for a in atoms {
+                if let (Some(nm), crate::models::shape::Atom::Dim(sy, i)) = (f.t_names.get(&a), crate::models::shape::atom_get(a)) {
+                    let base = crate::models::shape::with_ctx(ctx.clone(), || crate::models::shape::sym_print(sy));
+                    if let Some(b) = base {
+                        let entry = (nm.clone(), format!("{}.shape[{}]", b, i));
+                        if !extra_legend.contains(&entry) && !f.legend.iter().any(|(s0, _)| s0.split(", ").any(|x| x == nm)) {
+                            extra_legend.push(entry);
+                        }
+                    }
+                }
+            }
+        }
+        if !requires.contains(&t) {
+            requires.push(t);
+        }
+    }
+    (requires, extra_legend)
 }
 
 fn cons_atoms(c: &crate::models::shape::Cons, out: &mut Vec<crate::models::shape::AtomId>) {
