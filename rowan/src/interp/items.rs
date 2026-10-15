@@ -33,8 +33,12 @@ fn slice_text(kv: &KeyVal) -> Option<String> {
     let t = intern::str_get(*d);
     let rest = t.strip_prefix("slice")?;
     let b = rest.rsplit_once('@').map(|(b, _)| b).unwrap_or(rest);
-    let b = b.strip_prefix('[').and_then(|b| b.strip_suffix(']')).map(|b| b.trim_end_matches(':')).unwrap_or("…");
-    Some(format!("[{}]", if b.is_empty() { ":" } else { b }))
+    let b = match b.strip_prefix('[').and_then(|b| b.strip_suffix(']')).map(|b| b.split(':').collect::<Vec<_>>()).as_deref() {
+        Some([lo, hi, ""]) => format!("{}:{}", lo, hi),
+        Some([lo, hi, st]) => format!("{}:{}:{}", lo, hi, st),
+        _ => "…".to_string(),
+    };
+    Some(format!("[{}]", b))
 }
 
 impl Analyzer {
@@ -233,7 +237,12 @@ impl Analyzer {
                 // (an object that cannot be sliced: a TypeError)
                 self.may_raise_here("TypeError", state);
                 let label = format!("{}{}", self.heap.obj(base).label, bounds);
-                Value::obj(self.heap.alloc_raw(Kind::Unknown, &format!("slice:{}", base), "", false, &label, Payload::View(ViewKind::Elems, Value::obj(base))))
+                let sid = self.heap.alloc_raw(Kind::Unknown, &format!("slice:{}", base), "", false, &label, Payload::View(ViewKind::Elems, Value::obj(base)));
+                if let Some(sym) = self.names.get(base).filter(|_| !self.names.has(sid)).map(|b| format!("{}{}", b, bounds)) {
+                    let scope = self.names.scope(base);
+                    self.names.set(sid, sym, scope);
+                }
+                Value::obj(sid)
             }
             None => self.load_record(base, Ns::Item, &Value::data("index"), rd.node, state, rd.guarded, rd.single_target, rd.try_guard),
         }
