@@ -44,23 +44,23 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   context of the innermost `chain` (2) call sites. **Budget:** each function code (all closures
   of one `def`) may run 4,096 statements in all (`budget`); past that its calls are unknown
   calls that may also change what its code reaches (`effects.rs`, by `flows.rs`'s reading of
-  function texts: globals, cells, defaults whose value, or what it holds, the code may change or
-  give away, a local aliasing what it is bound to; class attributes by name, rebound where a
-  store's base may be the class; a receiver by the names its code uses unless it escapes,
-  `receiver_effects`; one call for several receivers), and the function gets a reporting run
-  with open parameters (for the calls that did not run). Entry runs are not counted (one per
-  function): work is bounded by functions × budget.
+  function texts: globals, cells, defaults and arguments whose value, or what it holds, the code
+  may change or give away, a local aliasing what it is bound to; class attributes by name,
+  rebound where a store's base may be the class; a receiver by the names its code uses unless it
+  escapes, `receiver_effects`; one call for several receivers), and the function gets a
+  reporting run with open parameters (for the calls that did not run). Entry runs are not
+  counted (one per function): work is bounded by functions × budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation
     reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened.
   * **Unknown values** are not taken for the program's instances: their methods are unknown calls.
-  * **Unknown calls** may change everything they reach through what they are given, at any
-    depth: records get a mutator, slots may hold anything (one shared unknown object, which
-    no store changes: a value stored into it goes to unknown code, `escape`), lists and sets
-    any items and length; the program's functions among it may run (`follow_code`). A walk
-    by the same code from the same values walks only what changed since (`Havoc`'s memo).
-    They return an unknown and may raise anything. Library functions known to have no effect
-    are `noeffect` (`ALLOWLIST_PREFIXES`), unless they change their arguments (`random.shuffle`)
-    or are given the program's functions. Several callees run as `alternatives`.
+  * **Unknown calls** may change everything they reach through what they are given, at any depth:
+    records get a mutator, slots may hold anything (one shared unknown object, which no store
+    changes: a value stored into it goes to unknown code, `escape`), lists and sets any items
+    and length (NamedTuples, patterns, matches, paths, frozensets cannot change); the program's
+    functions among it may run (`follow_code`). A walk by the same code from the same values
+    redoes only what changed (`Havoc`'s memo). They return an unknown and may raise anything.
+    Library functions known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`) unless they
+    change their arguments (`random.shuffle`) or get the program's functions; several callees: `alternatives`.
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model
     is unknown code. A TypeError may come from those taken to fail only on wrong types.
   * **Entry points:** functions the main run does not call (also those only entry runs call)
@@ -190,8 +190,8 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.4 / ~2.4 / ~4 / ~6.6 s; 0.12 / 0.07 / 0.16 / 0.10 GB |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~9.7 / ~24 / ~34 / ~5.1 s; 0.30 / 0.88 / 0.56 / 0.27 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.5 / ~2.4 / ~8.7 / ~6.3 s; 0.12 / 0.07 / 0.16 / 0.09 GB |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~12.8 / ~24 / ~29 / ~5.1 s; 0.29 / 0.75 / 0.46 / 0.29 GB |
 
 ## Known problems and next steps
 
