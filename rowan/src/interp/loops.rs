@@ -308,7 +308,14 @@ impl Analyzer {
         join_breaks(&mut exit_s, exit_acc);
         if f.orelse.is_empty() && !has_jump && !prefixed && back.reachable && pre.reachable && exit_s.reachable {
             self.loop_ran_facts(f, &back, &pre, &mut exit_s);
-            self.counted_appends(f, &pre, &mut exit_s);
+            if let Some(rounds) = self.loop_rounds(f, &pre) {
+                self.counted_appends(f, rounds, &pre, &mut exit_s);
+                if self.m.torch_on {
+                    for (name, v) in crate::models::torch::counted_cats(self, f, rounds, &pre, &back) {
+                        self.store_name(name, v, &mut exit_s);
+                    }
+                }
+            }
         }
         join_breaks(&mut exit_s, prefix_breaks);
         state.replace_with(exit_s);
@@ -346,13 +353,7 @@ impl Analyzer {
     /// of the body itself, `xs` named nowhere else in it and held by nothing else: every round
     /// that ends appended once, so after the loop `len(xs)` is its length before plus `T` (a
     /// tensor dim, `sym_lens`).
-    fn counted_appends(&mut self, f: &'static ast::StmtFor, pre: &State, exit_s: &mut State) {
-        let ast::Expr::Call(c) = &*f.iter else { return };
-        let (true, [ast::Expr::Name(n)], true) = (matches!(&*c.func, ast::Expr::Name(r) if r.id.as_str() == "range"), &c.arguments.args[..], c.arguments.keywords.is_empty()) else { return };
-        if self.frame().kind != super::FrameKind::Function {
-            return;
-        }
-        let Some(rounds) = self.name_value(pre, s(n.id.as_str())).and_then(|v| crate::models::torch::t_dim(self, &v, pre)).filter(|d| crate::models::shape::nonneg(*d)) else { return };
+    fn counted_appends(&mut self, f: &'static ast::StmtFor, rounds: crate::models::shape::DimId, pre: &State, exit_s: &mut State) {
         let appended: Vec<&'static ast::ExprName> = f.body.iter().filter_map(|st| match st {
             ast::Stmt::Expr(e) => match &*e.value {
                 ast::Expr::Call(c) if c.arguments.args.len() == 1 && c.arguments.keywords.is_empty() => match &*c.func {
@@ -381,6 +382,22 @@ impl Analyzer {
             let len = crate::models::shape::add(crate::models::shape::lit(n0 as i64), rounds);
             exit_s.set_sym_len(o, s(&crate::models::shape::dim_label(len)));
         }
+    }
+
+    /// The number of rounds of `for _ in range(T)` in a function, `T` a name or a literal, as a
+    /// dim surely not negative (a literal, tensors' dims: not a named int, which may be).
+    fn loop_rounds(&mut self, f: &'static ast::StmtFor, pre: &State) -> Option<crate::models::shape::DimId> {
+        let ast::Expr::Call(c) = &*f.iter else { return None };
+        let (true, [arg], true) = (matches!(&*c.func, ast::Expr::Name(r) if r.id.as_str() == "range"), &c.arguments.args[..], c.arguments.keywords.is_empty()) else { return None };
+        if self.frame().kind != super::FrameKind::Function {
+            return None;
+        }
+        let v = match arg {
+            ast::Expr::Name(n) => self.name_value(pre, s(n.id.as_str()))?,
+            ast::Expr::NumberLiteral(_) => self.eval(arg, &mut pre.copy()),
+            _ => return None,
+        };
+        crate::models::torch::t_dim(self, &v, pre).filter(|d| crate::models::shape::tensor_count(*d))
     }
 
     /// Whether nothing but the local `name` holds `o` in `state` (what the code holds, walked).
@@ -593,7 +610,7 @@ impl Analyzer {
 }
 
 /// How many times the plain name `name` occurs in these statements (nested functions too).
-fn body_mentions(body: &[ast::Stmt], name: &str) -> usize {
+pub(crate) fn body_mentions(body: &[ast::Stmt], name: &str) -> usize {
     struct V<'n>(&'n str, usize);
     impl<'a> ast::visitor::source_order::SourceOrderVisitor<'a> for V<'_> {
         fn visit_expr(&mut self, e: &'a ast::Expr) {

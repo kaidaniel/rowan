@@ -169,8 +169,8 @@ def complete(prompt: str, n: int, **kw) -> str:
     ids = encode(prompt)[None, :]                           # (1, T)
     #@shape@L177 ids: [1, 3]
     completion = model.generate(ids, n, **kw)               # (1, T+n)
-    #@shape@L177 completion: [1, ?]
-    #@todo shape@L177 completion: [1, 63] (60 steps of a cat along dim 1 in a loop that is not unrolled)
+    #@shape@L177 completion: [1, 63]
+    # (60 rounds of a loop that is not unrolled, each a cat of one more along dim 1)
     return decode(completion[0])
 
 
