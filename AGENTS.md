@@ -34,14 +34,13 @@ namespace packages).
   (`split`, `narrow.rs`: narrowing reads its parts' values, `traced`); both branches run, join.
   Loops over at most 16 known items are unrolled (comprehensions calling nothing per item: 64);
   others run to a fixpoint (40 rounds, then widened; verdicts are the last round's), making
-  summaries. A loop's target bound to a record a summary or an input's element stands for is a
-  *view* each iteration (`bind_views`): one record, strong; a change of it or of the others
-  joins into them (`link_view`); folded into the summary at the back edge. A running `try`
-  (`TryCtx`) records the state at every point of its body and callees that may raise (a raise,
-  a failing read, a model's raise, any unknown call: class `any_exc`), joined per class;
-  handlers start from the raises they may catch, the rest go on through the `finally` to the
-  enclosing try. `with` is a `try` whose `finally` is `__exit__`. `finally` runs on every way
-  out, `break` / `continue` / `return` included.
+  summaries; a target bound to one of the records a summary (or an input's element) stands for
+  is a strong *view* per iteration (`bind_views`; `link_view`: changes join both ways). A
+  running `try` (`TryCtx`) records the state at every point of its body and callees that may
+  raise (a raise, a failing read, a model's raise, any unknown call: class `any_exc`), joined
+  per class; handlers start from the raises they may catch, the rest go on through the
+  `finally` to the enclosing try. `with` is a `try` whose `finally` is `__exit__`. `finally`
+  runs on every way out, `break` / `continue` / `return` included.
 * **Calls** (`calls.rs`): every call of user code runs the callee's body at the call site, in
   a context of the innermost `chain` (2) call sites. **Budget:** each function code (all
   closures of one `def`) may run 4,096 statements in all (`budget`); past that its calls are
@@ -68,8 +67,10 @@ namespace packages).
     run with open parameters; their requirements become `param F.x` schemas.
 * **Generators** run whole at their first consumption (`force_gen`), in the creating call's
   context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`). If code
-  between items changes what the generator reads after a yield (`Gens::watch`), it runs again
-  with that changed at each yield (`with_gen_restart`). `@contextmanager` bodies run at yields.
+  between items (where the consumer asks for one: `note_resume`; unknown code, deletes too)
+  changes what the generator reads after a yield (`Gens::watch`, also after the call that
+  started it while held), it runs again with that changed at each yield (`with_gen_restart`).
+  `@contextmanager` bodies run at yields.
 * **Requirements and schemas:** reading a key from a row open through an input records a
   requirement on that input. A key read on every path is `always`, on some paths `sometimes`.
   A read guarded by a handler for its `KeyError` still counts (a frame column read behind a
@@ -146,9 +147,8 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
   k=v,…` sets the case's `ROWAN_LIMITS`. A directive-only line applies to the code line above.
 * **Oracle** (`tests/oracle.py`): reruns each case under CPython with a tracer and checks every
   directive; schemas by dropping keys from the input. Strict on the library suites.
-* **Snapshots** (`tests/snapshots/`): `--json` on `examples/etl_report.py` and
-  `tests/fixtures/proto_*.py`: the guard for internals (object ids may shift). **Unit tests**
-  in `rowan/src`: CPython-exact value functions, the regex engine, the tries.
+* **Snapshots** (`tests/snapshots/`): `--json` on `examples/etl_report.py`, `tests/fixtures/proto_*.py`:
+  the guard for internals (ids may shift). **Unit tests**: CPython values, the regex engine, tries.
 
 ## Debugging switches
 
