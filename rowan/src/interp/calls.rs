@@ -616,7 +616,7 @@ impl Analyzer {
             }
             code.sort_unstable();
             code.dedup();
-            self.havoc_memo.insert(key, super::HavocMemo { roots, rows: state.rows.copy_ref(), slots: state.slots.copy_ref(), elems: state.elems.copy_ref(), lens: state.lens.copy_ref(), visited, code });
+            self.havoc_memo.insert(key, super::HavocMemo { roots, rows: state.rows.clone(), slots: state.slots.clone(), elems: state.elems.clone(), lens: state.lens.clone(), visited, code });
         }
     }
 
@@ -1248,7 +1248,7 @@ impl Analyzer {
                 }
             }
         }
-        state.set_to(&mut st);
+        state.set_to(&st);
         if let Some(gid) = gen_id {
             // what `yield from` the generator evaluates to: its return value
             state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}genret"), ret.clone(), true);

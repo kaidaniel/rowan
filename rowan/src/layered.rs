@@ -468,14 +468,6 @@ impl<K: PKey, V: Clone + PartialEq> LayerMap<K, V> {
         Some(v)
     }
 
-    pub fn copy(&mut self) -> LayerMap<K, V> {
-        self.clone()
-    }
-
-    pub fn copy_ref(&self) -> LayerMap<K, V> {
-        self.clone()
-    }
-
     /// Keys on one side only are kept; keys on both sides are combined with f (unless equal).
     pub fn join(&self, o: &LayerMap<K, V>, f: &mut dyn FnMut(&V, &V) -> V) -> LayerMap<K, V> {
         let mut both = |_: &K, a: &V, b: &V| Some(f(a, b));
@@ -615,6 +607,12 @@ pub struct TwoLevel<K, IK, V> {
     m: LayerMap<Pair<K, IK>, V>,
 }
 
+impl<K, IK, V> Clone for TwoLevel<K, IK, V> {
+    fn clone(&self) -> Self {
+        TwoLevel { m: self.m.clone() }
+    }
+}
+
 impl<K: PKey, IK: IKey, V: Clone + PartialEq> Default for TwoLevel<K, IK, V> {
     fn default() -> Self {
         TwoLevel { m: LayerMap::new() }
@@ -624,14 +622,6 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> Default for TwoLevel<K, IK, V> {
 impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn copy(&mut self) -> Self {
-        TwoLevel { m: self.m.copy() }
-    }
-
-    pub fn copy_ref(&self) -> Self {
-        TwoLevel { m: self.m.copy_ref() }
     }
 
     /// The same trie (a copy not changed since).
@@ -737,18 +727,18 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         }
     }
 
-    pub fn join(&mut self, o: &mut Self, f: &mut dyn FnMut(&V, &V) -> V) -> Self {
+    pub fn join(&self, o: &Self, f: &mut dyn FnMut(&V, &V) -> V) -> Self {
         TwoLevel { m: self.m.join(&o.m, f) }
     }
 
     /// Join where inner entries present on one side only are transformed by `one_side`.
-    pub fn join_with(&mut self, o: &mut Self, both: &mut dyn FnMut(&V, &V) -> V, one_side: &mut dyn FnMut(&V) -> V) -> Self {
+    pub fn join_with(&self, o: &Self, both: &mut dyn FnMut(&V, &V) -> V, one_side: &mut dyn FnMut(&V) -> V) -> Self {
         self.join_with_keep(o, both, one_side, &|_| false)
     }
 
     /// `join_with`, but an outer key whose inner entries one side lacks entirely keeps the
     /// other side's values unchanged when `keep_whole` says so.
-    pub fn join_with_keep(&mut self, o: &mut Self, both: &mut dyn FnMut(&V, &V) -> V, one_side: &mut dyn FnMut(&V) -> V, keep_whole: &dyn Fn(&K) -> bool) -> Self {
+    pub fn join_with_keep(&self, o: &Self, both: &mut dyn FnMut(&V, &V) -> V, one_side: &mut dyn FnMut(&V) -> V, keep_whole: &dyn Fn(&K) -> bool) -> Self {
         let one_side = std::cell::RefCell::new(one_side);
         let (a, b) = (&self.m, &o.m);
         let mut inner_both = |_: &Pair<K, IK>, x: &V, y: &V| Some(if x == y { x.clone() } else { both(x, y) });
@@ -786,8 +776,8 @@ mod tests {
         let mut m: LayerMap<u32, u32> = LayerMap::new();
         m.insert(1, 10);
         m.insert(2, 20);
-        let mut a = m.copy();
-        let mut b = m.copy();
+        let mut a = m.clone();
+        let mut b = m.clone();
         a.insert(1, 11);
         b.insert(3, 30);
         b.remove(&2);
@@ -802,7 +792,7 @@ mod tests {
         let mut d = b.diff_keys(&m);
         d.sort();
         assert_eq!(d, vec![2, 3]);
-        let ac = a.copy(); assert!(a.same(&ac));
+        let ac = a.clone(); assert!(a.same(&ac));
     }
 
     #[test]
@@ -810,7 +800,7 @@ mod tests {
         let mut m: LayerMap<u32, u32> = LayerMap::new();
         for i in 0..40 {
             m.insert(i, i);
-            m = m.copy();
+            m = m.clone();
         }
         assert_eq!(m.get(&3), Some(3));
         assert_eq!(m.len(), 40);
@@ -820,11 +810,11 @@ mod tests {
     fn two_level() {
         let mut t: TwoLevel<u32, u32, u32> = TwoLevel::new();
         t.set(&1, 1, 5);
-        let mut c = t.copy();
+        let mut c = t.clone();
         c.set(&1, 2, 6);
         assert_eq!(t.get(&1, &2), None);
         assert_eq!(c.get(&1, &2), Some(6));
-        let j = t.join(&mut c, &mut |a, b| *a.max(b));
+        let j = t.join(&c, &mut |a, b| *a.max(b));
         assert_eq!(j.get(&1, &1), Some(5));
         assert_eq!(j.get(&1, &2), Some(6));
         let d = c.diff_keys(&t);
@@ -836,7 +826,7 @@ mod tests {
                 m.set(&k, ik, k * 10 + ik);
             }
         }
-        let keep = m.copy();
+        let keep = m.clone();
         m.drop_key(&3);
         m.drop_key(&9);
         assert!(!m.has_key(&3) && keep.has_key(&3));
@@ -857,8 +847,8 @@ mod row_tests {
         let r0 = Row::new().store(key_str_lit("id"), true);
         m.insert((3, Ns::Item), r0.clone());
         m.insert((1, Ns::Attr), Row::new());
-        let mut a = m.copy();
-        let mut b = m.copy();
+        let mut a = m.clone();
+        let mut b = m.clone();
         let r1 = r0.store(key_str_lit("role"), true);
         a.insert((3, Ns::Item), r1.clone());
         assert_ne!(r0, r1);
@@ -943,7 +933,7 @@ mod prop_tests {
                         models[i].entry(k).or_default().insert(ik, v);
                     }
                     2 => {
-                        let c = maps[i].copy();
+                        let c = maps[i].clone();
                         let m = models[i].clone();
                         maps.push(c);
                         models.push(m);
@@ -1013,7 +1003,7 @@ mod prop_tests {
                         models[i].insert(k, v);
                     }
                     2 => {
-                        let c = maps[i].copy();
+                        let c = maps[i].clone();
                         maps.push(c);
                         models.push(models[i].clone());
                     }
@@ -1107,7 +1097,7 @@ mod wide_key_tests {
                         models[i].insert(k, v);
                     }
                     3 => {
-                        let c = maps[i].copy();
+                        let c = maps[i].clone();
                         maps.push(c);
                         models.push(models[i].clone());
                     }
@@ -1178,7 +1168,7 @@ mod wide_key_tests {
                         models[i].entry(k).or_default().insert(ik, v);
                     }
                     2 => {
-                        let c = maps[i].copy();
+                        let c = maps[i].clone();
                         maps.push(c);
                         models.push(models[i].clone());
                     }
@@ -1196,9 +1186,9 @@ mod wide_key_tests {
                     4 => {
                         let j = rng.below(maps.len() as u64) as usize;
                         if j != i {
-                            let mut a = maps[i].copy();
-                            let mut b = maps[j].copy();
-                            let joined = a.join_with(&mut b, &mut |p, q| p.max(q) + 1, &mut |p| p + 1000);
+                            let mut a = maps[i].clone();
+                            let mut b = maps[j].clone();
+                            let joined = a.join_with(&b, &mut |p, q| p.max(q) + 1, &mut |p| p + 1000);
                             let mut exp: Model = FxHashMap::default();
                             for k in models[i].keys().chain(models[j].keys()) {
                                 let mut m: FxHashMap<u32, u32> = FxHashMap::default();

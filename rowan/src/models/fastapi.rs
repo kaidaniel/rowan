@@ -984,7 +984,7 @@ impl Analyzer {
             // (an error response is an exceptional exit: what the handler needs on its normal
             // path stays needed — `always`)
             if state.reachable {
-                after.reqs = state.reqs.copy().join_with(&mut rs.reqs, &mut |a, b| a.join(b), &mut |a| a.clone());
+                after.reqs = state.reqs.join_with(&rs.reqs, &mut |a, b| a.join(b), &mut |a| a.clone());
             }
             state.replace_with(after);
         }

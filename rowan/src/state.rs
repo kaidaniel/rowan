@@ -85,6 +85,7 @@ impl Kind {
 pub type SlotKey = (Ns, KeyId);
 
 /// Mutable analysis state at one program point.
+#[derive(Clone)]
 pub struct State {
     /// current frame's plain locals (small; copied eagerly)
     pub env: IndexMap<StrId, Value>,
@@ -222,25 +223,9 @@ impl State {
     }
 
     // -- copying -----------------------------------------------------------
-    /// Copy from a shared reference (used for `exits`, which are shared and never mutated).
+    /// A copy (O(1): the maps are persistent).
     pub fn copy(&self) -> State {
-        State {
-            env: self.env.clone(),
-            narrowed: self.narrowed.clone(),
-            rows: self.rows.copy_ref(),
-            slots: self.slots.copy_ref(),
-            elems: self.elems.copy_ref(),
-            lens: self.lens.copy_ref(),
-            reqs: self.reqs.copy_ref(),
-            ret: self.ret.clone(),
-            reachable: self.reachable,
-            exits: self.exits.clone(),
-            facts: self.facts.clone(),
-            name_keys: self.name_keys.clone(),
-            lasts: self.lasts.clone(),
-            tf: self.tf.clone(),
-            unbound: self.unbound.clone(),
-        }
+        self.clone()
     }
 
     /// Snapshot the heap at a `return` so the caller sees it joined over all return points.
@@ -255,23 +240,9 @@ impl State {
         }));
     }
 
-    /// Make self equal to o (o stays usable: both get their own private top layers).
-    pub fn set_to(&mut self, o: &mut State) {
-        self.env = o.env.clone();
-        self.narrowed = o.narrowed.clone();
-        self.rows = o.rows.copy();
-        self.slots = o.slots.copy();
-        self.elems = o.elems.copy();
-        self.lens = o.lens.copy();
-        self.reqs = o.reqs.copy();
-        self.ret = o.ret.clone();
-        self.reachable = o.reachable;
-        self.exits = o.exits.clone();
-        self.facts = o.facts.clone();
-        self.name_keys = o.name_keys.clone();
-        self.lasts = o.lasts.clone();
-        self.tf = o.tf.clone();
-        self.unbound = o.unbound.clone();
+    /// Make self equal to o (o stays usable).
+    pub fn set_to(&mut self, o: &State) {
+        *self = o.clone();
     }
 
     pub fn clear_last(&mut self, oid: ObjId) {
@@ -296,8 +267,8 @@ impl State {
         self.lasts.iter().find(|(o, _)| *o == oid).map(|(_, v)| v.clone())
     }
 
-    pub fn replace_with(&mut self, mut o: State) {
-        self.set_to(&mut o);
+    pub fn replace_with(&mut self, o: State) {
+        *self = o;
     }
 
     // -- lattice -----------------------------------------------------------
@@ -333,10 +304,10 @@ impl State {
             s.narrowed = self.narrowed.iter().filter(|(k, v)| o.narrowed.get(*k) == Some(*v)).map(|(k, v)| (*k, v.clone())).collect();
         }
         s.rows = self.rows.join(&o.rows, &mut |a, b| a.join(b));
-        s.slots = self.slots.join(&mut o.slots, &mut |a, b| a.join(b));
+        s.slots = self.slots.join(&o.slots, &mut |a, b| a.join(b));
         s.elems = self.elems.join(&o.elems, &mut |a, b| kv_join(a, b));
         s.lens = self.lens.join(&o.lens, &mut join_len);
-        s.reqs = self.reqs.join_with_keep(&mut o.reqs, &mut |a, b| a.join(b), &mut |a| a.demote(), &nested_keep);
+        s.reqs = self.reqs.join_with_keep(&o.reqs, &mut |a, b| a.join(b), &mut |a| a.demote(), &nested_keep);
         s.ret = ret;
         s.exits = exits;
         s.reachable = true;
@@ -368,12 +339,9 @@ impl State {
     /// The join at a loop head: like `join`, but a requirement recorded only in the loop body
     /// stays "always" (per element of the iteration; spec: in-loop demands are not conditional).
     pub fn join_loop(&mut self, o: &mut State) -> State {
-        let demoted = self.reqs.copy();
         let mut s = self.join(o);
-        let mut a = demoted;
-        let mut b = o.reqs.copy();
         if self.reachable && o.reachable {
-            s.reqs = a.join_with(&mut b, &mut |x, y| x.join(y), &mut |x| x.clone());
+            s.reqs = self.reqs.join_with(&o.reqs, &mut |x, y| x.join(y), &mut |x| x.clone());
         }
         s
     }
