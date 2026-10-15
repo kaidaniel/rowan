@@ -195,5 +195,5 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 
 ## Known problems and next steps
 
-Open items are in `SUGGESTED_CHANGES.md`, each with a repro; what was measured against the core
-design (and ruled out) is there too. Parked: `parked/joined-summaries` (unsound), `slotmap-trie`.
+Open items are in `SUGGESTED_CHANGES.md`, each with a repro, and what was ruled out. Parked:
+`parked/joined-summaries` (unsound), `slotmap-trie`, `parked/memo-probe` (the call memo, measured).
