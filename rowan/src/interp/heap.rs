@@ -112,7 +112,7 @@ pub struct Obj {
     /// a one-shot iterator (generator, generator expression, `iter(...)`): a full iteration
     /// exhausts it
     pub iterator: bool,
-    /// when its state was last made new (`Analyzer::serial` then): a strong re-allocation of
+    /// when its state was last made new (`Heap::serial` then): a strong re-allocation of
     /// its site starts it over, so it is younger than any mark taken before
     pub born: u64,
 }
@@ -464,6 +464,6 @@ impl Heap {
                 Payload::Locidx(nm, x) => Payload::Locidx(nm.clone(), *map.get(x).unwrap_or(x)),
                 other => other.clone(),
             };
-    }
+        }
     }
 }

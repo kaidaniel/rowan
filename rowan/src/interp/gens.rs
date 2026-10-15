@@ -207,7 +207,7 @@ impl Analyzer {
 
     /// Runs the bodies of the generators among `v` not run yet, from this state. `between`:
     /// the consumer runs code between the items (a loop, `next`), which may change what the
-    /// generator reads after a yield: watched (`gen_watch`, `with_gen_restart`).
+    /// generator reads after a yield: watched (`Gens::watch`, `with_gen_restart`).
     pub(in crate::interp) fn force_gen(&mut self, v: &Value, state: &mut State, between: bool) {
         for o in v.pts.iter() {
             let (lazy, run) = lazy_state(state, o);
@@ -357,7 +357,7 @@ impl Analyzer {
     }
 
     /// Run `body` from `state`. A generator it ran whole for a consumer that runs code between
-    /// the items (`gen_watch`) did not see what that code changed: when the code changed objects
+    /// the items (`Gens::watch`) did not see what that code changed: when the code changed objects
     /// the generator reaches, `body` runs again, those objects changed for the generator at each
     /// of its yields (`gen_havoc`; at most three rounds, then everything it reaches). `close`:
     /// the generators run in `body` are used up or out of reach after it (a loop without

@@ -511,19 +511,19 @@ impl Analyzer {
     /// decided miss needs it).
     fn handler_classes(&mut self, handlers: &[Handler], pre: &State) -> Vec<(FxHashSet<String>, bool)> {
         handlers.iter().map(|h| {
-        let Some(elts) = &h.types else { return (h.names(), true) };
-        // (no decided miss unless every name is a known exception class)
-        let known = elts.iter().all(|e| {
-            let n = dotted_last(e);
-            let builtin = crate::interp::builtin_exc_names(&n);
-            let user = matches!(e, ast::Expr::Name(_)) && {
-                let v = self.eval(e, &mut pre.copy());
-                v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| self.heap.class_info_opt(o).is_some_and(|ci| ci.name == n))
-            };
-            user || (builtin.1 && builtin.0.len() > 1) || n == "BaseException"
-        });
-        (elts.iter().map(|e| dotted_last(e)).collect(), known)
-    }).collect()
+            let Some(elts) = &h.types else { return (h.names(), true) };
+            // (no decided miss unless every name is a known exception class)
+            let known = elts.iter().all(|e| {
+                let n = dotted_last(e);
+                let builtin = crate::interp::builtin_exc_names(&n);
+                let user = matches!(e, ast::Expr::Name(_)) && {
+                    let v = self.eval(e, &mut pre.copy());
+                    v.kv.is_bot() && !v.pts.is_empty() && v.pts.iter().all(|o| self.heap.class_info_opt(o).is_some_and(|ci| ci.name == n))
+                };
+                user || (builtin.1 && builtin.0.len() > 1) || n == "BaseException"
+            });
+            (elts.iter().map(|e| dotted_last(e)).collect(), known)
+        }).collect()
     }
 
     /// Raises no handler surely catches go on to the enclosing try (or out of the call),

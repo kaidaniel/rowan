@@ -47,14 +47,14 @@ namespace packages).
   run with open parameters (its lines then hold for the calls that did not run). Entry runs
   are not counted (one per function). So the work is bounded by functions times the budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation
-    reruns from the heaps of its recursive calls too (`rec_heap`), 8 rounds, then widened.
+    reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened.
   * **Unknown values** are not taken for instances of the program's classes: a method of an
     unknown object is an unknown call (no duck typing; it was a closed-world assumption).
   * **Unknown calls** may change everything they reach through what they are given, at any
     depth: records get a mutator, slots may hold anything (one shared unknown object, which
     no store changes: a value stored into it goes to unknown code, `escape`), lists and sets
     any items and length; the program's functions among it may run (`follow_code`). A walk
-    by the same code from the same values walks only what changed since (`havoc_memo`).
+    by the same code from the same values walks only what changed since (`Havoc`'s memo).
     They return an unknown and may raise anything. Library functions known to have no effect
     are `noeffect` (`ALLOWLIST_PREFIXES`), unless they change their arguments (`random.shuffle`)
     or are given the program's functions. Several callees run as `alternatives`.
@@ -64,7 +64,7 @@ namespace packages).
     become `param F.x` schemas.
 * **Generators** run whole at their first consumption (`force_gen`), in the creating call's
   context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`). If code
-  between items changes what the generator reads after a yield (`gen_watch`), it runs again
+  between items changes what the generator reads after a yield (`Gens::watch`), it runs again
   with that changed at each yield (`with_gen_restart`). `@contextmanager` bodies run at yields.
 * **Requirements and schemas:** reading a key from a row open through an input records a
   requirement on that input. A key read on every path is `always`, on some paths `sometimes`.

@@ -359,50 +359,7 @@ impl Analyzer {
             for k in intern::sorted_by_str(ks.iter()) {
                 let cls = classify(&row, k);
                 if guarded && cls.tier != Tier::Proven && (try_guard) {
-                    if crate::interp::debug_level() == 2 {
-                        eprintln!("  guarded access may raise: {:?} tier {:?} at L{}", intern::key_repr(k), cls.tier, node.line);
-                    }
-                    // (a model's own read — pydantic collecting its field errors — raises nothing here:
-                    // the model raises its ValidationError, with every error, afterwards)
-                    let model_read = ns == Ns::Item && self.unwind.item_exc == Some("ValidationError");
-                    if model_read {
-                        if self.unwind.caught_load && cls.tier == Tier::Input {
-                            self.require_providers_k(&cls, &row, true, state, Some(k), ns);
-                        }
-                    }
-                    // the handler sees the state as it is here (and a KeyError / AttributeError
-                    // carrying the key)
-                    if model_read {
-                    } else if !self.unwind.tries.is_empty() {
-                        let cname = if ns == Ns::Item { self.unwind.item_exc.unwrap_or("KeyError") } else { "AttributeError" };
-                        let e = crate::models::exceptions::exception_object(self, cname, vec![Value::lit(k)], node, state);
-                        self.unwind.cur_exc = Some(e);
-                    }
-                    // (required on the handler's path too: the exception fired for the key)
-                    if !model_read && self.unwind.caught_load && cls.tier == Tier::Input {
-                        self.require_providers_k(&cls, &row, true, state, Some(k), ns);
-                    }
-                    if !model_read {
-                        self.unwind.cur_exc_cls = Some(super::builtin_exc_names(if ns == Ns::Item { self.unwind.item_exc.unwrap_or("KeyError") } else { "AttributeError" }));
-                        self.record_raise_state(state);
-                        self.unwind.cur_exc_cls = None;
-                        // (an object of unknown kind indexed by a number may be a sequence: an
-                        // IndexError then)
-                        if ns == Ns::Item && intern::key_as_int(k).is_some() && matches!(kind, Kind::Unknown | Kind::External) {
-                            self.unwind.cur_exc = None;
-                            self.may_raise_here("IndexError", state);
-                        }
-                    }
-                    if model_read {
-                    } else if try_guard && cls.tier == Tier::Missing && is_lit && single_target {
-                        // the access raises here: the rest of the try body is unreachable
-                        state.reachable = false;
-                    }
-                    if try_guard && !model_read && cls.tier != Tier::Missing && is_lit && single_target && self.strongable(oid) {
-                        // no exception raised: the key is present from here on
-                        row = row.narrow_in(k, true);
-                        state.set_row(oid, ns, row.clone());
-                    }
+                    self.guarded_read_raises(oid, ns, k, kind, &cls, &mut row, node, state, single_target, try_guard, is_lit);
                 }
                 if guarded {
                     self.verdict_guarded(node, k, &cls, oid, ns);
@@ -412,68 +369,15 @@ impl Analyzer {
                     self.require_providers_k(&cls, &row, true, state, Some(k), ns);
                 }
                 if !guarded {
-                    self.verdict(node, k, &cls, oid, ns, None, None);
-                    if cls.tier == Tier::Input {
-                        self.require_providers_k(&cls, &row, true, state, Some(k), ns);
-                    }
-                    if cls.tier == Tier::Proven && ns == Ns::Item {
-                        if let Some(src) = self.m.td_param_src.get(&oid).copied() {
-                            let fresh = !state.reqs.contains(&src, &k);
-                            state.require(src, k, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
-                            if fresh && (self.cx.branch_depth > 0 || self.cx.cond_depth > 0) {
-                                if let Some(cur) = state.reqs.get(&src, &k) {
-                                    state.reqs.set(&src, k, crate::domain::ReqInfo { always: false, ..cur });
-                                }
-                            }
-                        }
-                    }
-                    if cls.tier != Tier::Missing && is_lit && single_target && self.strongable(oid) {
-                        row = row.narrow_in(k, true);
-                        state.set_row(oid, ns, row.clone());
-                        self.propagate_narrowing(oid, ns, k, state);
-                    }
+                    self.unguarded_read(oid, ns, k, &cls, &mut row, node, state, single_target, is_lit);
                 }
-                let mut v = state.slot(oid, ns, k);
-                let star = state.slot(oid, ns, STAR);
-                // (a map only the program filled, under keys it computed: a key it has holds one
-                // of the values stored, `idx["a"]` of `{c: i for i, c in enumerate(chars)}`)
-                let own_map = !row.top && row.mutators.is_empty() && !row.sources.is_empty() && row.sources.iter().all(|(src, _)| crate::domain::source_is_data(src));
-                let from_map = own_map && v.empty() && !star.empty();
-                if from_map {
-                    v = star;
-                } else if !star.pts.is_empty() {
-                    v = v.join(&Value::with_kv(star.pts, DATA));
-                }
-                // (a key of an open record stored on some paths only: on the others its value is
-                // the input's, which a slot one path made does not cover)
-                let partly_stored = !v.empty() && row0.has_input() && !(row0.definite.contains(k) && row0.stored.contains(k));
-                if !from_map && (partly_stored || (v.pts.is_empty() && matches!(v.kv, KeyVal::Data(_) | KeyVal::Bot) && (row.open() || cls.tier == Tier::Map))) {
-                    let p = self.path_placeholder_value(oid, ns, k, &row, state);
-                    v = v.join(&p);
-                    if is_lit {
-                        state.set_slot(oid, ns, k, v.clone(), false);
-                    }
-                }
+                let v = self.literal_key_value(oid, ns, k, &cls, &row, &row0, state, is_lit);
                 acc = acc.join(&v);
             }
             return acc;
         }
         if let KeyVal::KeysOf(ko) = kv {
-            let srcrow = join_rows(ko.objs.iter().map(|x| state.row(x, ko.ns)));
-            if !guarded && srcrow.closed() && row.closed() {
-                let mut missing: Vec<KeyId> = Vec::new();
-                for k in srcrow.present.difference(&ko.exclude).iter() {
-                    if let Some(k2) = lens_apply(ko.chain, k) {
-                        if !row.present.contains(k2) && !missing.contains(&k2) {
-                            missing.push(k2);
-                        }
-                    }
-                }
-                for k in intern::sorted_by_str(missing) {
-                    self.verdict(node, k, &Classification::with_note(Tier::Possibly, "may be missing: the key comes from another object's keys"), oid, ns, None, None);
-                }
-            }
-            return self.all_values(oid, ns, state).join(&Value::kv_only(DATA));
+            return self.keys_of_key_read(oid, ns, ko, &row, node, state, guarded);
         }
         // Data key: it may be one the record lacks (KeyError), unless the read cannot fail
         if !guarded || try_guard {
@@ -496,6 +400,132 @@ impl Analyzer {
             v = v.join(&p);
         }
         Value::with_kv(v.pts, DATA)
+    }
+
+    /// A guarded read of key `k` that may fail: the handler starts from this state (with a
+    /// KeyError / AttributeError carrying the key); a sure miss ends the try body here; else
+    /// the key is there from here on.
+    #[allow(clippy::too_many_arguments)]
+    fn guarded_read_raises(&mut self, oid: ObjId, ns: Ns, k: KeyId, kind: Kind, cls: &Classification, row: &mut Row, node: &Node, state: &mut State, single_target: bool, try_guard: bool, is_lit: bool) {
+        if crate::interp::debug_level() == 2 {
+            eprintln!("  guarded access may raise: {:?} tier {:?} at L{}", intern::key_repr(k), cls.tier, node.line);
+        }
+        // (a model's own read — pydantic collecting its field errors — raises nothing here:
+        // the model raises its ValidationError, with every error, afterwards)
+        let model_read = ns == Ns::Item && self.unwind.item_exc == Some("ValidationError");
+        if model_read {
+            if self.unwind.caught_load && cls.tier == Tier::Input {
+                self.require_providers_k(cls, row, true, state, Some(k), ns);
+            }
+        }
+        // the handler sees the state as it is here (and a KeyError / AttributeError
+        // carrying the key)
+        if model_read {
+        } else if !self.unwind.tries.is_empty() {
+            let cname = if ns == Ns::Item { self.unwind.item_exc.unwrap_or("KeyError") } else { "AttributeError" };
+            let e = crate::models::exceptions::exception_object(self, cname, vec![Value::lit(k)], node, state);
+            self.unwind.cur_exc = Some(e);
+        }
+        // (required on the handler's path too: the exception fired for the key)
+        if !model_read && self.unwind.caught_load && cls.tier == Tier::Input {
+            self.require_providers_k(cls, row, true, state, Some(k), ns);
+        }
+        if !model_read {
+            self.unwind.cur_exc_cls = Some(super::builtin_exc_names(if ns == Ns::Item { self.unwind.item_exc.unwrap_or("KeyError") } else { "AttributeError" }));
+            self.record_raise_state(state);
+            self.unwind.cur_exc_cls = None;
+            // (an object of unknown kind indexed by a number may be a sequence: an
+            // IndexError then)
+            if ns == Ns::Item && intern::key_as_int(k).is_some() && matches!(kind, Kind::Unknown | Kind::External) {
+                self.unwind.cur_exc = None;
+                self.may_raise_here("IndexError", state);
+            }
+        }
+        if model_read {
+        } else if try_guard && cls.tier == Tier::Missing && is_lit && single_target {
+            // the access raises here: the rest of the try body is unreachable
+            state.reachable = false;
+        }
+        if try_guard && !model_read && cls.tier != Tier::Missing && is_lit && single_target && self.strongable(oid) {
+            // no exception raised: the key is present from here on
+            *row = row.narrow_in(k, true);
+            state.set_row(oid, ns, row.clone());
+        }
+    }
+
+    /// An unguarded read of key `k`: its verdict, the input's requirement (a TypedDict
+    /// parameter's too), and the key narrowed in on success.
+    #[allow(clippy::too_many_arguments)]
+    fn unguarded_read(&mut self, oid: ObjId, ns: Ns, k: KeyId, cls: &Classification, row: &mut Row, node: &Node, state: &mut State, single_target: bool, is_lit: bool) {
+        self.verdict(node, k, cls, oid, ns, None, None);
+        if cls.tier == Tier::Input {
+            self.require_providers_k(cls, row, true, state, Some(k), ns);
+        }
+        if cls.tier == Tier::Proven && ns == Ns::Item {
+            if let Some(src) = self.m.td_param_src.get(&oid).copied() {
+                let fresh = !state.reqs.contains(&src, &k);
+                state.require(src, k, intern::IdSet::new(), intern::IdSet::new(), intern::IdSet::new());
+                if fresh && (self.cx.branch_depth > 0 || self.cx.cond_depth > 0) {
+                    if let Some(cur) = state.reqs.get(&src, &k) {
+                        state.reqs.set(&src, k, crate::domain::ReqInfo { always: false, ..cur });
+                    }
+                }
+            }
+        }
+        if cls.tier != Tier::Missing && is_lit && single_target && self.strongable(oid) {
+            *row = row.narrow_in(k, true);
+            state.set_row(oid, ns, row.clone());
+            self.propagate_narrowing(oid, ns, k, state);
+        }
+    }
+
+    /// The value under key `k`: the slot's, a map's stored values, or the open record's
+    /// placeholder for what the input holds there.
+    #[allow(clippy::too_many_arguments)]
+    fn literal_key_value(&mut self, oid: ObjId, ns: Ns, k: KeyId, cls: &Classification, row: &Row, row0: &Row, state: &mut State, is_lit: bool) -> Value {
+        let mut v = state.slot(oid, ns, k);
+        let star = state.slot(oid, ns, STAR);
+        // (a map only the program filled, under keys it computed: a key it has holds one
+        // of the values stored, `idx["a"]` of `{c: i for i, c in enumerate(chars)}`)
+        let own_map = !row.top && row.mutators.is_empty() && !row.sources.is_empty() && row.sources.iter().all(|(src, _)| crate::domain::source_is_data(src));
+        let from_map = own_map && v.empty() && !star.empty();
+        if from_map {
+            v = star;
+        } else if !star.pts.is_empty() {
+            v = v.join(&Value::with_kv(star.pts, DATA));
+        }
+        // (a key of an open record stored on some paths only: on the others its value is
+        // the input's, which a slot one path made does not cover)
+        let partly_stored = !v.empty() && row0.has_input() && !(row0.definite.contains(k) && row0.stored.contains(k));
+        if !from_map && (partly_stored || (v.pts.is_empty() && matches!(v.kv, KeyVal::Data(_) | KeyVal::Bot) && (row.open() || cls.tier == Tier::Map))) {
+            let p = self.path_placeholder_value(oid, ns, k, row, state);
+            v = v.join(&p);
+            if is_lit {
+                state.set_slot(oid, ns, k, v.clone(), false);
+            }
+        }
+        v
+    }
+
+    /// A read by a key that is one of another object's keys: possibly missing where that
+    /// object's keys are not all this one's; any of the values.
+    #[allow(clippy::too_many_arguments)]
+    fn keys_of_key_read(&mut self, oid: ObjId, ns: Ns, ko: &crate::domain::KeysOf, row: &Row, node: &Node, state: &mut State, guarded: bool) -> Value {
+        let srcrow = join_rows(ko.objs.iter().map(|x| state.row(x, ko.ns)));
+        if !guarded && srcrow.closed() && row.closed() {
+            let mut missing: Vec<KeyId> = Vec::new();
+            for k in srcrow.present.difference(&ko.exclude).iter() {
+                if let Some(k2) = lens_apply(ko.chain, k) {
+                    if !row.present.contains(k2) && !missing.contains(&k2) {
+                        missing.push(k2);
+                    }
+                }
+            }
+            for k in intern::sorted_by_str(missing) {
+                self.verdict(node, k, &Classification::with_note(Tier::Possibly, "may be missing: the key comes from another object's keys"), oid, ns, None, None);
+            }
+        }
+        self.all_values(oid, ns, state).join(&Value::kv_only(DATA))
     }
 
     /// `_path_placeholder`: the (unknown) content of an open object's slot.
