@@ -405,7 +405,7 @@ fn source_id_text(an: &Analyzer, src: SourceId) -> String {
     let (site, kind, path) = intern::with_source(src, |s| (s.site.clone(), s.kind, s.path.clone()));
     let t = site_text(an, &site);
     let Some(st) = an.findings.final_state.as_ref().filter(|_| !path.is_empty()) else { return t };
-    let steps = path_steps(st, &site, kind, 0, &path).map(|(p, _)| p).unwrap_or_else(|| "…".into());
+    let steps = path_steps(st, &site, kind, 0, &path).map(|p| p.0).unwrap_or_else(|| "…".into());
     match t.find("` ").or_else(|| t.ends_with('`').then(|| t.len() - 1)) {
         Some(i) if t[..i].contains('`') => format!("{}{}{}", &t[..i], steps, &t[i..]),
         _ => format!("{} {}", t, steps),
@@ -416,20 +416,27 @@ fn source_id_text(an: &Analyzer, src: SourceId) -> String {
 /// the parent's requirement says it was read; whether a step is an attribute; None for a
 /// path through what a method returned (`df.groupby(…)["amount"]`: a step the code called,
 /// with no requirement of its own).
-fn path_steps(st: &State, site: &std::sync::Arc<str>, kind: crate::domain::SourceKind, from: usize, path: &[KeyId]) -> Option<(String, bool)> {
+/// Also: whether every step is read on every path, and the tests of the parameters the steps'
+/// reads are under (a path below is read only where the steps to it are).
+fn path_steps(st: &State, site: &std::sync::Arc<str>, kind: crate::domain::SourceKind, from: usize, path: &[KeyId]) -> Option<(String, bool, bool, intern::IdSet<intern::StrId>)> {
     let mut out = String::new();
     let mut attr_step = false;
+    let (mut always, mut only_if) = (true, intern::IdSet::new());
     for i in from..path.len() {
         let parent = intern::source(crate::domain::Source { site: site.clone(), kind, path: path[..i].to_vec() });
         let attr = match st.reqs.get(&parent, &path[i]) {
-            Some(r) => r.attr,
+            Some(r) => {
+                always &= r.always;
+                only_if = only_if.union(&r.only_if);
+                r.attr
+            }
             None if path[i] != STAR && intern::key_as_str(path[i]).is_some() => return None,
             None => false,
         };
         attr_step |= attr;
         out += &step_text(path[i], attr);
     }
-    Some((out, attr_step))
+    Some((out, attr_step, always, only_if))
 }
 
 /// Is an unknown call's result an input worth listing (a library function the program
@@ -487,8 +494,15 @@ fn needs_text(an: &Analyzer) -> (Vec<String>, Vec<String>) {
         if needs.is_empty() {
             continue;
         }
-        let shown: Vec<String> = needs.iter().map(|n| n.shown()).collect();
-        let lines: Vec<(String, Vec<&str>)> = ["always:", "sometimes:"].iter().map(|l| (l.to_string(), needs.iter().zip(&shown).filter(|(n, _)| n.always == (*l == "always:")).map(|(_, t)| t.as_str()).collect())).collect();
+        // (always, sometimes, then a line per test of the parameters the reads are under)
+        let mut lines: Vec<(String, Vec<&str>)> = ["always:", "sometimes:"].iter().map(|l| (l.to_string(), needs.iter().filter(|n| n.always == (*l == "always:") && n.only_if.is_none()).map(|n| n.path.as_str()).collect())).collect();
+        for n in needs.iter().filter(|n| n.only_if.is_some()) {
+            let label = format!("only if {}:", n.only_if.as_deref().unwrap_or(""));
+            match lines.iter_mut().find(|(l, _)| *l == label) {
+                Some((_, ps)) => ps.push(n.path.as_str()),
+                None => lines.push((label, vec![n.path.as_str()])),
+            }
+        }
         let out = if param { &mut funcs } else { &mut inputs };
         let mut head = format!("  {:<w$}", header, w = width);
         if header.chars().count() > width {
@@ -552,7 +566,7 @@ pub fn reads_below(st: &State, src: SourceId, base: &str, data_only: bool) -> Ve
         if site2 != site || kind2 != kind || !path.starts_with(&top) {
             continue;
         }
-        let Some((prefix, attr_step)) = path_steps(st, &site, kind, top.len(), &path) else { continue };
+        let Some((prefix, attr_step, steps_always, steps_only_if)) = path_steps(st, &site, kind, top.len(), &path) else { continue };
         if data_only && attr_step {
             continue;
         }
@@ -561,12 +575,13 @@ pub fn reads_below(st: &State, src: SourceId, base: &str, data_only: bool) -> Ve
                 continue;
             }
             // (a key unknown code or another input may supply is needed only sometimes)
-            let always = info.always && info.caveats.is_empty() && info.alternatives.is_empty();
+            let always = info.always && steps_always && info.caveats.is_empty() && info.alternatives.is_empty();
+            let info_only_if = info.only_if.union(&steps_only_if);
             // (a group of alternatives reads the same from any of its keys: in one order)
             let mut alts: Vec<String> = std::iter::once(*k).chain(info.alt_keys.iter()).map(|a| format!("{}{}{}", base, prefix, step_text(a, info.attr))).collect();
             alts.sort();
             alts.dedup();
-            let only_if = (!always && !info.only_if.is_empty()).then(|| only_if_text(&info.only_if));
+            let only_if = (!always && !info_only_if.is_empty()).then(|| only_if_text(&info_only_if));
             needs.push(Need { path: alts.join(" or "), always, only_if });
         }
     }
@@ -589,16 +604,6 @@ pub struct Need {
     pub path: String,
     pub always: bool,
     pub only_if: Option<String>,
-}
-
-impl Need {
-    /// `row["role"] (only if admin)`
-    fn shown(&self) -> String {
-        match &self.only_if {
-            Some(t) => format!("{} (only if {})", self.path, t),
-            None => self.path.clone(),
-        }
-    }
 }
 
 /// Tests that all hold, as Python: `a and b is None`.
@@ -703,7 +708,7 @@ fn legend(text: &str) -> Vec<String> {
     add(text.contains("  via L"), "via L5→L9", "the calls (by line) through which the code was reached");
     add(text.contains("  always:"), "always", "read on every path through the code");
     add(text.contains("  sometimes:"), "sometimes", "read on some paths only");
-    add(text.contains(" (only if "), "(only if x)", "read only on calls where this holds of the arguments as passed");
+    add(text.contains("  only if "), "only if x:", "read only on calls where x holds of the arguments as passed");
     add(text.contains("[*]"), "[*]", "any element");
     add(text.lines().any(|l| (l.contains("  always:") || l.contains("  sometimes:")) && l.contains("..")), "[0..6]", "each index from 0 to 6");
     let values = ["\n== what functions return", "\n== module-level variables"].iter().find_map(|h| text.find(h)).map(|i| &text[i..]).unwrap_or("");
