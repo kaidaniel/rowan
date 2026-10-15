@@ -435,10 +435,14 @@ impl Analyzer {
             Some(v) => v,
             None => {
                 let o = self.param_source(fi, a, st);
-                // (`x: int`: an int, as the annotation says — not `float`, which an int may be
-                // given for)
-                self.heap.obj_mut(o).ty = ann.and_then(builtin_annotation);
-                Value::obj(o)
+                // (`x: int`: an int, as the annotation says; `x: int | None` an int or None)
+                match ann.and_then(builtin_annotation) {
+                    Some((t, none)) => {
+                        self.heap.obj_mut(o).ty = Some(t);
+                        if none { Value::obj(o).join(&self.none_v) } else { Value::obj(o) }
+                    }
+                    None => Value::obj(o),
+                }
             }
         };
         match d {
@@ -670,15 +674,24 @@ enum Run {
     FactsOnly,
 }
 
-/// The builtin type an annotation names (`int`, `"str"`): one whose instances a run for any
-/// call may take its parameter to be (`float` is left out: an int may be given for it).
-fn builtin_annotation(ann: &ast::Expr) -> Option<&'static str> {
-    let name = match ann {
-        ast::Expr::Name(n) => n.id.to_string(),
-        ast::Expr::StringLiteral(sl) => sl.value.to_str().trim().to_string(),
-        _ => return None,
-    };
-    ["bool", "bytes", "int", "str"].into_iter().find(|t| *t == name)
+/// The builtin type an annotation names (`int`, `"str"`, `list[int]`, `Optional[str]`, `int |
+/// None`), and whether it allows None: a type whose instances a run for any call may take its
+/// parameter to be (`float` is left out: an int may be given for it).
+fn builtin_annotation(ann: &ast::Expr) -> Option<(&'static str, bool)> {
+    const TYPES: [(&str, &str); 14] = [("bool", "bool"), ("bytes", "bytes"), ("int", "int"), ("str", "str"), ("list", "list"), ("dict", "dict"), ("set", "set"), ("tuple", "tuple"), ("frozenset", "frozenset"), ("List", "list"), ("Dict", "dict"), ("Set", "set"), ("Tuple", "tuple"), ("FrozenSet", "frozenset")];
+    let is_none = |e: &ast::Expr| matches!(e, ast::Expr::NoneLiteral(_)) || matches!(e, ast::Expr::Name(n) if n.id.as_str() == "None");
+    let named = |e: &ast::Expr| TYPES.iter().find(|(n, _)| *n == dotted_last(e)).map(|(_, t)| *t);
+    match ann {
+        ast::Expr::Name(_) | ast::Expr::Attribute(_) => named(ann).map(|t| (t, false)),
+        ast::Expr::StringLiteral(sl) => frontend::parse_expression(sl.value.to_str()).and_then(builtin_annotation),
+        // (`list[int]`: a list; `Optional[str]`: a str or None)
+        ast::Expr::Subscript(sub) if dotted_last(&sub.value) == "Optional" => builtin_annotation(&sub.slice).map(|(t, _)| (t, true)),
+        ast::Expr::Subscript(sub) => named(&sub.value).filter(|t| !matches!(*t, "bool" | "bytes" | "int" | "str")).map(|t| (t, false)),
+        ast::Expr::BinOp(b) if b.op == ast::Operator::BitOr && (is_none(&b.left) || is_none(&b.right)) => {
+            builtin_annotation(if is_none(&b.right) { &b.left } else { &b.right }).map(|(t, _)| (t, true))
+        }
+        _ => None,
+    }
 }
 
 /// A requirement-only run keeps what the function itself demands: of its parameters, and of

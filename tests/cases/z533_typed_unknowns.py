@@ -44,3 +44,30 @@ shown = repr(sys.argv)
 #@value shown: types={str}
 out = describe(3, "ab", True, 0.5)
 w = loose(2)
+
+
+def tidy(tag: str | None, items: list[int]):
+    # (`str | None`: a str or None; narrowed by the test, a str)
+    got = tag
+    #@general got: types={str, NoneType}
+    if tag is not None:
+        low = tag.lower()
+        #@general low: types={str}
+    first = items
+    #@general first: types={list}
+    return got
+
+
+class Bag:
+    def __init__(self, items: list):
+        self.items = items
+
+    def held(self):
+        # (nothing calls it: any Bag, whose items are any list)
+        h = self.items
+        #@general h: types={list}
+        return h
+
+
+tidy("Ab", [1])
+tidy(None, [])
