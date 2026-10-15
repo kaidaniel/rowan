@@ -164,7 +164,7 @@ impl Findings {
 
 impl Analyzer {
     pub fn verdict(&mut self, node: &Node, key: KeyId, cls: &Classification, oid: ObjId, ns: Ns, file_override: Option<&str>, text_override: Option<&str>) {
-        self.gen_read(oid, Some((ns, key)));
+        self.gens.read(oid, Some((ns, key)));
         if matches!(cls.tier, Tier::Map) || self.findings.quiet || self.findings.quiet_records {
             return;
         }
@@ -207,15 +207,6 @@ impl Analyzer {
             file: fname,
             guarded,
         });
-    }
-
-    /// A running generator that yielded reads `o` (one key, or all of it).
-    pub fn gen_read(&mut self, o: ObjId, k: Option<crate::state::SlotKey>) {
-        for (_, yielded, reads) in self.gen_reads.iter_mut() {
-            if *yielded {
-                reads.insert((o, k));
-            }
-        }
     }
 
     /// A verdict on an access the program guards (a try handling the failure): recorded for

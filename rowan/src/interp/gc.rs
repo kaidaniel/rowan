@@ -176,7 +176,7 @@ impl Analyzer {
                 ms.iter().for_each(|(v, _)| v.push_objs(work));
             }
         }
-        for (_, env, _) in &self.cm_frames {
+        for (_, env, _) in &self.gens.cm_frames {
             env.values().for_each(|v| v.push_objs(work));
         }
         for cells in &self.comp_cells {

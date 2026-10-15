@@ -29,6 +29,8 @@ pub mod findings;
 pub use findings::*;
 pub mod funcs;
 pub mod gc;
+pub mod gens;
+pub use gens::*;
 pub mod heap;
 pub use heap::*;
 pub mod names;
@@ -46,43 +48,6 @@ pub const PATH_DEPTH: u32 = 3;
 pub const MAX_ACTIVE: usize = 4;
 /// records an unknown call's result joins at most (past that: an open row)
 pub const MAX_ARG_JOIN: usize = 64;
-/// a generator's suspension point: the yield node, the `yield from` item, the unrolled loop
-/// positions
-pub type YieldKey = (usize, usize, Vec<usize>);
-
-/// The states of one generator activation at its suspension points, in order, keyed by the
-/// yield site and its unroll path (a key may repeat), with the first index of each key.
-#[derive(Default)]
-pub struct YieldStates {
-    pub list: Vec<(YieldKey, State)>,
-    first: FxHashMap<YieldKey, usize>,
-}
-
-impl YieldStates {
-    pub fn len(&self) -> usize {
-        self.list.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.list.is_empty()
-    }
-
-    pub fn push(&mut self, key: YieldKey, st: State) {
-        self.first.entry(key.clone()).or_insert(self.list.len());
-        self.list.push((key, st));
-    }
-
-    /// The first state recorded under `key`.
-    pub fn get_mut(&mut self, key: &YieldKey) -> Option<&mut State> {
-        let i = *self.first.get(key)?;
-        Some(&mut self.list[i].1)
-    }
-
-    pub fn states(&self) -> impl Iterator<Item = &State> {
-        self.list.iter().map(|(_, s)| s)
-    }
-}
-
 /// Call sites kept in an allocation context (deeper chains: a hash of the prefix).
 pub const CHAIN: usize = 2;
 /// Statements a function code may run in all its calls (`ROWAN_LIMITS=budget=N`): past them
@@ -186,33 +151,6 @@ impl FuncInfo {
     pub fn py_qualname(&self) -> String {
         self.qualname.replace("class ", "")
     }
-}
-
-impl FuncInfo {
-}
-
-/// The body of a `with` whose manager is a `@contextmanager` generator: run where the
-/// generator (one frame above `depth`) yields.
-pub struct CmHook {
-    pub body: &'static [ast::Stmt],
-    pub target: Option<&'static ast::Expr>,
-    pub depth: usize,
-    pub env_after: Option<IndexMap<StrId, Value>>,
-    pub ran: bool,
-    /// instead of a body: code run with the yielded value (a FastAPI yield dependency: the rest
-    /// of the request)
-    pub then: Option<Box<dyn FnOnce(&mut Analyzer, Value, &mut State)>>,
-    /// the body did not finish normally (it raised or returned) — on every run
-    pub body_died: bool,
-    /// the caller's names before the body (each run at another yield starts from them)
-    pub env_before: Option<IndexMap<StrId, Value>>,
-    /// the body may run again at another reachable yield (not a `then` callback: it runs once)
-    pub multi: bool,
-    /// the caller's exits from the body (its `return`s), joined over the runs: the caller's
-    /// once the with statement ends (the generator's own are restored after each run)
-    pub body_exits: Option<State>,
-    /// the values the body returned (with `body_exits`)
-    pub body_ret: Option<Value>,
 }
 
 /// An exception class's name and its bases' names; `true`: that is the whole MRO.
@@ -359,49 +297,6 @@ pub struct Frame {
     pub pre_call: Option<PreCall>,
 }
 
-/// What a generator's body does to objects older than its call, by how far it has run: the
-/// facts of those objects before it ran (`pre`), at its k-th yield (`at[k]`), at its end,
-/// and joined over all of them.
-pub struct GenEffects {
-    pub rows: Vec<(ObjId, Ns)>,
-    pub slots: Vec<(ObjId, crate::state::SlotKey)>,
-    pub elems: Vec<ObjId>,
-    pub lens: Vec<ObjId>,
-    pub pre: State,
-    pub at: Vec<Option<State>>,
-    pub end: Option<State>,
-    pub join: State,
-}
-
-/// What code changed of an object: one stored key, or anything (None).
-pub type Change = (ObjId, Option<crate::state::SlotKey>);
-
-/// A generator run whole for a consumer that runs code between its items: the state after
-/// the run, the objects the run changed, what it read after a yield, the budgets before it.
-pub struct GenWatch {
-    pub gid: ObjId,
-    pub after: State,
-    pub own: rustc_hash::FxHashSet<ObjId>,
-    pub reads: rustc_hash::FxHashSet<Change>,
-    /// the budgets spent before the run (a run again of the code gets them back)
-    pub budget: std::rc::Rc<FxHashMap<usize, usize>>,
-    /// the birth mark after the run: objects born since are new
-    pub born: u64,
-}
-
-/// A generator call whose body has not run: it runs at the first consumption, from the state
-/// there (`force_gen`), in the call's own site and context, so the generator object is the same.
-pub struct LazyGen {
-    pub foid: ObjId,
-    pub self_v: Option<Value>,
-    pub args: Vec<Value>,
-    pub kwargs: IndexMap<StrId, Value>,
-    pub node: Node,
-    pub site: String,
-    pub ctx: (String, bool),
-    pub chain: Vec<u32>,
-}
-
 /// (see `Frame::pre_call`)
 #[derive(Clone)]
 pub struct PreCall(pub u64, pub std::rc::Rc<State>);
@@ -527,6 +422,8 @@ pub struct Analyzer {
     pub effects: effects::EffectsCache,
     /// budgets, the deadline and the work counters (`interp/budget.rs`)
     pub budget: Budget,
+    /// generators and `@contextmanager` bodies run at their consumers (`interp/gens.rs`)
+    pub gens: Gens,
     pub models: Registry,
     pub frames: Vec<Frame>,
     pub active: FxHashMap<(ObjId, String), bool>,
@@ -554,29 +451,6 @@ pub struct Analyzer {
     pub handling_values: Vec<Value>,
     /// inside a call whose exceptions a thread / future keeps: reads still require their keys
     pub catching_depth: u32,
-    /// generators made but not run yet: the call that made each (`force_gen`)
-    pub lazy_gens: FxHashMap<ObjId, std::rc::Rc<LazyGen>>,
-    /// generators run whole for a consumer that runs code between their items: (generator,
-    /// the state after its run, what it was given and yields) — see `with_gen_restart`
-    pub gen_watch: Vec<GenWatch>,
-    /// what the running `for` statements iterate (`gen_used_up`)
-    pub for_iters: Vec<crate::domain::ObjSet>,
-    /// running generator activations: whether they yielded, and what they read since (an
-    /// object's key, or the whole object) — what code between their items may change for them
-    pub gen_reads: Vec<(ObjId, bool, rustc_hash::FxHashSet<Change>)>,
-    /// the reads of the last generator run (`force_gen` takes them)
-    pub gen_last_reads: Option<rustc_hash::FxHashSet<Change>>,
-    /// generators whose consumer changes objects they reach: those objects, changed for the
-    /// generator at each of its yields (`consumer_between`)
-    pub gen_havoc: FxHashMap<ObjId, Vec<Change>>,
-    /// the call site and context of the generator `force_gen` is running
-    pub force_at: Option<(String, String, bool)>,
-    /// a generator's effects on older objects, per item: see `set_cursor`
-    pub gen_eff: FxHashMap<ObjId, std::rc::Rc<GenEffects>>,
-    /// the state at each positioned yield of the running generator activations
-    pub gen_pos_states: FxHashMap<ObjId, Vec<Option<State>>>,
-    /// positions of a generator's activation that two paths yield (no single state)
-    pub gen_pos_conflict: rustc_hash::FxHashSet<(ObjId, usize)>,
     /// lazy iterators (zip / islice / map …) over one-shot iterators: what consuming them
     /// takes from each source (Some(n): n items, None: all)
     pub lazy_src: FxHashMap<ObjId, Vec<(ObjId, Option<usize>)>>,
@@ -589,13 +463,6 @@ pub struct Analyzer {
     pub comp_cells: Vec<FxHashMap<StrId, ObjId>>,
     /// (canonical key, key as written) while an access with a numerically-equal key runs
     pub key_alias: Option<(KeyId, KeyId)>,
-    /// a `with` over a `@contextmanager` call: its body runs at the generator's yield
-    pub cm_hook: Option<CmHook>,
-    /// while a `@contextmanager` body runs: (generator frame depth, its locals), so a try in
-    /// the generator around the yield sees its own names when the body raises
-    /// `@contextmanager` generators whose with body is running: (their frame depth, their env
-    /// at the yield, the env stack's length then)
-    pub cm_frames: Vec<(usize, IndexMap<StrId, Value>, usize)>,
     /// `vars(obj)` dicts: stores into them are stores of obj's attributes
     pub attr_mirrors: FxHashMap<ObjId, ObjId>,
     /// while an entry run's parameters are made: the function they belong to
@@ -688,9 +555,6 @@ pub struct Analyzer {
     pub trace: Option<(usize, FxHashMap<usize, Value>)>,
     /// the values the test being narrowed had (`split`, read by `traced`)
     pub traced: FxHashMap<usize, Value>,
-    /// the states at the yields of a generator's running activation (copies, read per key
-    /// where the caller needs them: joining whole heaps per yield was the cost)
-    pub gen_yield_states: FxHashMap<ObjId, YieldStates>,
     /// a copy's original (through copies made at the same node: `out = deepcopy(out)` in a loop
     /// makes one copy site, not a new one per round)
     pub copy_root: FxHashMap<ObjId, ObjId>,

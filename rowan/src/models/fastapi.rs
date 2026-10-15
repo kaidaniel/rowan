@@ -741,10 +741,10 @@ impl Analyzer {
             let r = an.fa_run_handler(func, gens, req, entry, st, &nd);
             an.m.fa_gen_ret = Some(an.m.fa_gen_ret.take().unwrap_or_default().join(&r));
         });
-        let prev = self.cm_hook.replace(crate::interp::CmHook { body: &[], target: None, depth: self.frames.len(), env_after: None, ran: false, then: Some(then), body_died: false, env_before: None, multi: false, body_exits: None, body_ret: None });
+        let prev = self.gens.cm_hook.replace(crate::interp::CmHook { body: &[], target: None, depth: self.frames.len(), env_after: None, ran: false, then: Some(then), body_died: false, env_before: None, multi: false, body_exits: None, body_ret: None });
         let outer = self.m.fa_gen_ret.take();
         self.call_user(g, None, vec![], kwargs, vec![], vec![], state, node, None, false);
-        let h = std::mem::replace(&mut self.cm_hook, prev);
+        let h = std::mem::replace(&mut self.gens.cm_hook, prev);
         let ret = std::mem::replace(&mut self.m.fa_gen_ret, outer).unwrap_or_default();
         match h {
             Some(h) if h.ran => {

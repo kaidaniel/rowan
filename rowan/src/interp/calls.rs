@@ -1,8 +1,6 @@
 //! Calls: dispatch, unknown calls, construction, user functions, bindings (port of the
 //! "calls" section of `rowan/interp.py`).
 
-use std::rc::Rc;
-
 use indexmap::IndexMap;
 use rustc_hash::FxHashSet;
 use ruff_python_ast as ast;
@@ -57,13 +55,13 @@ impl Analyzer {
             return Value::new();
         }
         // (what a running generator reads through library code: its arguments, its receiver)
-        if self.gen_reads.iter().any(|r| r.1) && !fv.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Function | Kind::Bound | Kind::Class)) {
+        if self.gens.reads.iter().any(|r| r.1) && !fv.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Function | Kind::Bound | Kind::Class)) {
             let objs: Vec<ObjId> = fv.pts.iter().filter_map(|o| match &self.heap.obj(o).payload {
                 Payload::Method(_, r) => Some(r.pts.to_vec()),
                 _ => None,
             }).flatten().chain(args.iter().chain(kwargs.values()).chain(star_args.iter()).flat_map(|a| a.pts.iter())).collect();
             for o in objs {
-                self.gen_read(o, None);
+                self.gens.read(o, None);
             }
         }
         // (generators passed or called through a method run now; unless the callee takes all
@@ -372,7 +370,7 @@ impl Analyzer {
 
 
 
-    fn receiver_ctx(&self, self_v: &Option<Value>, site: &str) -> (String, bool) {
+    pub(super) fn receiver_ctx(&self, self_v: &Option<Value>, site: &str) -> (String, bool) {
         if let Some(sv) = self_v {
             if let Some(r) = sv.single() {
                 if self.heap.kind(r) == Kind::Instance {
@@ -395,7 +393,7 @@ impl Analyzer {
 
     /// The context of a call's allocations: its site (line and column), chained to the
     /// calling frame's context (bounded depth; beyond it a hash of the prefix).
-    fn callee_site(&self, node: &Node) -> String {
+    pub(super) fn callee_site(&self, node: &Node) -> String {
         let site = if node.addr != 0 { format!("{}L{}:{}", crate::frontend::site_prefix(node.module), node.line, node.col) } else { format!("{}L{}", crate::frontend::site_prefix(node.module), node.line) };
         // chained to the calling frame's context, so two activations of the caller give
         // distinct objects
@@ -422,122 +420,23 @@ impl Analyzer {
         }
     }
 
-    /// A generator call: the generator object (the one its run returns), its body not run yet.
-    /// Its slot `\u{1}lazy` is 1 while not run, 0 after (both: run on some paths). Two calls at
-    /// one site before either is consumed: one run with their arguments joined.
-    fn make_lazy_gen(&mut self, foid: u32, self_v: Option<Value>, mut args: Vec<Value>, mut kwargs: IndexMap<StrId, Value>, state: &mut State, node: &Node) -> Value {
-        let site = self.callee_site(node);
-        let ctx = self.receiver_ctx(&self_v, &site);
-        let q = self.heap.func_info(foid).qualname.clone();
-        let gid = self.heap.alloc_raw(Kind::List, &format!("gen:{}", foid), &ctx.0, true, &format!("generator {}", q), Payload::None);
-        self.heap.obj_mut(gid).iterator = true;
-        let mut self_v = self_v;
-        if let Some(old) = self.lazy_gens.get(&gid).filter(|_| lazy_state(state, gid).0) {
-            self_v = match (&self_v, &old.self_v) {
-                (Some(a), Some(b)) => Some(a.join(b)),
-                (a, b) => a.clone().or_else(|| b.clone()),
-            };
-            for (i, a) in old.args.iter().enumerate() {
-                match args.get_mut(i) {
-                    Some(x) => *x = x.join(a),
-                    None => args.push(a.clone()),
-                }
-            }
-            for (k, v) in old.kwargs.iter() {
-                let nv = kwargs.get(k).map_or_else(|| v.clone(), |x| x.join(v));
-                kwargs.insert(*k, nv);
-            }
-        }
-        // (what the run will read, reachable from the generator for the collector)
-        let keep = join_values(self_v.iter().chain(args.iter()).chain(kwargs.values()).cloned().collect::<Vec<Value>>());
-        state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}lazyargs"), keep, true);
-        state.set_slot(gid, Ns::Attr, key_str_lit("\u{1}lazy"), Value::lit(intern::key_int(1)), true);
-        let lg = super::LazyGen { foid, self_v, args, kwargs, node: *node, site, ctx, chain: self.call_chain.clone() };
-        self.lazy_gens.insert(gid, Rc::new(lg));
-        Value::obj(gid)
-    }
-
-    /// Runs the bodies of the generators among `v` not run yet, from this state. `between`:
-    /// the consumer runs code between the items (a loop, `next`), which may change what the
-    /// generator reads after a yield: watched (`gen_watch`, `with_gen_restart`).
-    pub fn force_gen(&mut self, v: &Value, state: &mut State, between: bool) {
-        for o in v.pts.iter() {
-            let (lazy, run) = lazy_state(state, o);
-            if !state.reachable || !lazy {
-                continue;
-            }
-            let Some(lg) = self.lazy_gens.get(&o).cloned() else { continue };
-            // (run already on some of the paths joined here: those keep their state)
-            let before = if run { Some(state.copy()) } else { None };
-            self.force_at = Some((lg.site.clone(), lg.ctx.0.clone(), lg.ctx.1));
-            let saved = std::mem::replace(&mut self.call_chain, lg.chain.clone());
-            let pre = if between { Some((state.copy(), self.budget.snapshot())) } else { None };
-            self.gen_last_reads = None;
-            let r = self.call_user(lg.foid, lg.self_v.clone(), lg.args.clone(), lg.kwargs.clone(), vec![], vec![], state, &lg.node, None, false);
-            self.call_chain = saved;
-            if let (Some((pre, budget)), true) = (pre, state.reachable) {
-                let fp = state.footprint(&pre);
-                let mut own: FxHashSet<ObjId> = fp.rows.iter().map(|k| k.0).chain(fp.slots.iter().map(|k| k.0)).chain(fp.elems.iter().copied()).chain(state.lens.diff_keys(&pre.lens)).collect();
-                // (and those whose facts follow its items, installed as a consumer takes them)
-                if let Some(ge) = self.gen_eff.get(&o) {
-                    own.extend(ge.rows.iter().map(|k| k.0).chain(ge.slots.iter().map(|k| k.0)).chain(ge.elems.iter().copied()).chain(ge.lens.iter().copied()));
-                }
-                let reads = self.gen_last_reads.take().unwrap_or_default();
-                // (what it reads that the consumer can reach: from what it was given)
-                let roots: Vec<Value> = lg.self_v.iter().chain(lg.args.iter()).chain(lg.kwargs.values()).cloned().collect();
-                let mut targets: Vec<ObjId> = reads.iter().map(|r| r.0).collect();
-                targets.sort_unstable();
-                targets.dedup();
-                let reach = if targets.is_empty() { FxHashSet::default() } else { self.reach_among(&roots, &targets, state) };
-                let reads = reads.into_iter().filter(|r| reach.contains(&r.0)).collect();
-                let w = super::GenWatch { gid: o, own, after: state.copy(), reads, budget, born: self.heap.serial() };
-                self.gen_watch.push(w);
-            }
-            if !r.pts.contains(o) && state.reachable {
-                // (its body did not run — past its budget, cut at the deadline: unknown code
-                // gives any number of unknown items, and returns something unknown)
-                let it = self.iterate(&r, &lg.node, state);
-                let e = self.elem_value(&it.elem, &lg.node, "gen");
-                let e = state.slot(o, Ns::Elem, intern::STAR).join(&e);
-                state.set_slot(o, Ns::Elem, intern::STAR, Value::objs(e.pts.clone()), false);
-                let kv = crate::domain::kv_join(&state.elems.get(&o).unwrap_or(DATA), &e.kv);
-                state.elems.insert(o, kv);
-                self.heap.set_llen(o, state, None);
-                state.drop_obj_ns(o, Ns::Pos);
-                state.set_slot(o, Ns::Attr, key_str_lit("\u{1}genret"), Value::data("generator result"), true);
-            }
-            if let Some(mut b) = before {
-                let j = state.join(&mut b);
-                state.replace_with(j);
-                // (how far it has run differs by path: not known, its effects any of its steps')
-                if let Some(ge) = self.gen_eff.get(&o).cloned() {
-                    crate::interp::exprs::gen_copy_facts(state, &ge.join, &ge);
-                    state.set_slot(o, Ns::Attr, key_str_lit("\u{1}effpos"), Value::lit(key_str_lit("join")), true);
-                }
-                self.set_cursor(o, None, state);
-            }
-            state.slots.remove(&o, &(Ns::Attr, key_str_lit("\u{1}lazyargs")));
-            state.set_slot(o, Ns::Attr, key_str_lit("\u{1}lazy"), Value::lit(intern::key_int(0)), true);
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn call_user(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, _call_ast: Option<&'static ast::ExprCall>, entry: bool) -> Value {
         // past the hard deadline a user function is unknown code (its result unknown, its
         // arguments possibly changed, it may raise): the run ends in bounded time
         if self.budget.over_hard_deadline() {
-            self.force_at = None;
+            self.gens.force_at = None;
             let q = self.heap.func_info(foid).qualname.clone();
             self.findings.note(format!("analysis cut at the deadline ({} ms): later calls are unknown code", super::limit("ms", super::DEADLINE_MS)));
             return self.skipped_call(foid, &q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
         // a generator's body runs when it is consumed (`force_gen`), not here
         let lazy = !entry
-            && self.force_at.is_none()
+            && self.gens.force_at.is_none()
             && self.model_depth == 0
             && star_args.is_empty()
             && star_kwargs.is_empty()
-            && !self.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth == self.frames.len())
+            && !self.gens.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth == self.frames.len())
             && matches!(self.heap.func_info(foid).node, FuncNode::Def(f) if is_generator(&f.body));
         if lazy {
             return self.make_lazy_gen(foid, self_v, args, kwargs, state, node);
@@ -561,7 +460,7 @@ impl Analyzer {
 
     #[allow(clippy::too_many_arguments)]
     fn call_user_inner(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, _call_ast: Option<&'static ast::ExprCall>, entry: bool) -> Value {
-        let forced = self.force_at.take();
+        let forced = self.gens.force_at.take();
         // a singledispatch function: the implementation for the first argument's type
         if self.sdispatch.contains_key(&foid) && self.sd_bypass.take() != Some(foid) && !args.is_empty() && star_args.is_empty() {
             return self.sdispatch_call(foid, self_v, args, kwargs, star_kwargs, state, node, entry);
@@ -727,12 +626,12 @@ impl Analyzer {
             // (a new activation: not consumed yet, its own item states; a running one's
             // yields are put back after it)
             // (keyed as `yield_value` finds it: the site's object, not a variant `alloc` made)
-            saved_yields = Some((ygid, self.gen_yield_states.remove(&ygid)));
+            saved_yields = Some((ygid, self.gens.yield_states.remove(&ygid)));
             state.slots.remove(&gid, &(Ns::Attr, key_str_lit("__cursor")));
             state.slots.remove(&gid, &(Ns::Attr, key_str_lit("\u{1}effpos")));
-            self.gen_pos_states.remove(&gid);
-            self.gen_pos_conflict.retain(|(g, _)| *g != gid);
-            self.gen_eff.remove(&gid);
+            self.gens.pos_states.remove(&gid);
+            self.gens.pos_conflict.retain(|(g, _)| *g != gid);
+            self.gens.eff.remove(&gid);
         }
         let saved_chain = std::mem::take(&mut self.call_chain);
         self.call_chain = chain_extend(&saved_chain, &[node.line]);
@@ -750,7 +649,7 @@ impl Analyzer {
                 fr.pre_call = Some(super::PreCall(self.heap.serial(), pre_rc));
             }
         }
-        let gen_cm = self.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth + 1 == self.frames.len());
+        let gen_cm = self.gens.cm_hook.as_ref().is_some_and(|h| !h.ran && h.depth + 1 == self.frames.len());
         self.bind_params(&fi, &self_v, &args, &kwargs, &star_args, &star_kwargs, state, node);
         let mut entry_state = state.copy();
         let mut ret = Value::new();
@@ -763,7 +662,7 @@ impl Analyzer {
             self.budget.runs += 1;
             let mut st = entry_state.copy();
             if let Some(g) = gen_id {
-                self.gen_reads.push((g, false, Default::default()));
+                self.gens.reads.push((g, false, Default::default()));
             }
             match fnode {
                 FuncNode::Lambda(l) => {
@@ -775,7 +674,7 @@ impl Analyzer {
                 FuncNode::Def(f) => self.with_gen_restart(&mut st, true, &mut |an, s| an.exec_block(&f.body, s)),
             }
             if gen_id.is_some() {
-                self.gen_last_reads = self.gen_reads.pop().map(|r| r.2);
+                self.gens.last_reads = self.gens.reads.pop().map(|r| r.2);
             }
             ret = st.ret.clone().unwrap_or_default();
             if st.reachable {
@@ -848,13 +747,13 @@ impl Analyzer {
         // the generator's body runs here, eagerly, but its caller sees the heap only where the
         // body is suspended: before the first item, at a yield, or at its end. The objects that
         // existed before the call and that the body changed hold the join of those states.
-        let gen_yields = gen_id.filter(|_| !gen_cm).map(|gid| (gid, self.gen_yield_states.get(&gid).map(|v| v.states().map(|s| s.copy()).collect::<Vec<State>>()).unwrap_or_default()));
+        let gen_yields = gen_id.filter(|_| !gen_cm).map(|gid| (gid, self.gens.yield_states.get(&gid).map(|v| v.states().map(|s| s.copy()).collect::<Vec<State>>()).unwrap_or_default()));
         // (a generator that ran to its end: the state there, for a consumer that uses it up)
         let finite_end = if gen_yields.is_some() && st.reachable { Some(st.copy()) } else { None };
         // a generator whose body never ends (`while True: yield …`): the caller resumes from
         // one of its yields, and the yields go on (their number is unknown)
         if let Some(gid) = gen_id.filter(|_| !st.reachable) {
-            let joined = self.gen_yield_states.remove(&gid).and_then(|v| {
+            let joined = self.gens.yield_states.remove(&gid).and_then(|v| {
                 let mut it = v.list.into_iter().map(|(_, s)| s);
                 let mut acc = it.next()?;
                 for mut s in it {
@@ -889,21 +788,21 @@ impl Analyzer {
                 lens.sort_unstable();
                 lens.dedup();
                 if !rows.is_empty() || !slots.is_empty() || !elems.is_empty() {
-                    let at = self.gen_pos_states.remove(&gid).unwrap_or_default();
+                    let at = self.gens.pos_states.remove(&gid).unwrap_or_default();
                     let ge = super::GenEffects { rows, slots, elems, lens, pre: pre_bind.copy(), at, end: finite_end, join: st.copy() };
-                    crate::interp::exprs::gen_copy_facts(&mut st, &pre_bind, &ge);
+                    crate::interp::gens::gen_copy_facts(&mut st, &pre_bind, &ge);
                     st.set_slot(gid, Ns::Attr, key_str_lit("\u{1}effpos"), Value::lit(key_str_lit("pre")), true);
-                    self.gen_eff.insert(gid, std::rc::Rc::new(ge));
+                    self.gens.eff.insert(gid, std::rc::Rc::new(ge));
                 }
             }
         }
         if let Some((gid, prev)) = saved_yields {
             match prev {
                 Some(v) => {
-                    self.gen_yield_states.insert(gid, v);
+                    self.gens.yield_states.insert(gid, v);
                 }
                 None => {
-                    self.gen_yield_states.remove(&gid);
+                    self.gens.yield_states.remove(&gid);
                 }
             }
         }
@@ -950,12 +849,12 @@ impl Analyzer {
         let mut here = state.copy();
         // the try is in a `@contextmanager` generator whose with body is running (also from a
         // callee of the body): the generator's names
-        let in_cm = self.cm_frames.iter().rev().find(|(d, _, el0)| *d == fl && el <= *el0).map(|(_, env, _)| env.clone());
+        let in_cm = self.gens.cm_frames.iter().rev().find(|(d, _, el0)| *d == fl && el <= *el0).map(|(_, env, _)| env.clone());
         if let Some(env) = in_cm {
             here.env = env;
             here.narrowed = Default::default();
         } else if self.frames.len() < fl {
-            if let Some((_, env, _)) = self.cm_frames.iter().rev().find(|(d, _, _)| *d == fl) {
+            if let Some((_, env, _)) = self.gens.cm_frames.iter().rev().find(|(d, _, _)| *d == fl) {
                 here.env = env.clone();
                 here.narrowed = Default::default();
             }
@@ -988,93 +887,6 @@ impl Analyzer {
             }
         }
         true
-    }
-
-    /// The heap a generator's caller sees (see the call): the touched objects older than
-    /// `mark` (but the generator's own item list) joined over `pre`, the yield states and `st`.
-    fn gen_suspension_join(&mut self, st: &mut State, pre: &State, yields: &[State], gid: ObjId, mark: u64) {
-        if !st.reachable {
-            return;
-        }
-        let fp = st.footprint(pre);
-        let old = |o: ObjId| self.heap.born_before(o, mark) && o != gid;
-        let ys: Vec<&State> = yields.iter().filter(|y| y.reachable).collect();
-        // Each fact of `st` is joined with `pre`'s and every yield state's. Yield states are
-        // copies of one another changed by the body, sharing structure: each is diffed against
-        // the one before it (the first against `pre`), and only the keys the diff names are
-        // joined. A fact a state does not change equals the previous state's, joined already
-        // (a generator can hold thousands of yield states, and joining every touched fact with
-        // each was facts × yields).
-        let entry = |an: &Analyzer, s: &State, o: ObjId| -> (Option<usize>, usize, u16) {
-            s.lens.get(&o).unwrap_or_else(|| {
-                let ob = an.heap.obj(o);
-                (ob.literal_len, ob.literal_len.or(ob.known_prefix).unwrap_or(0), 0)
-            })
-        };
-        // (with the distinct rows already joined: most yield states share their rows)
-        let mut rows: rustc_hash::FxHashMap<(ObjId, Ns), (crate::domain::Row, rustc_hash::FxHashSet<crate::domain::Row>)> = rustc_hash::FxHashMap::default();
-        for (o, ns) in fp.rows.iter().copied().filter(|(o, _)| old(*o)) {
-            let (a, b) = (st.row(o, ns), pre.row(o, ns));
-            let j = a.join(&b);
-            rows.insert((o, ns), (j, [a, b].into_iter().collect()));
-        }
-        let mut slots: rustc_hash::FxHashMap<(ObjId, crate::state::SlotKey), Value> = rustc_hash::FxHashMap::default();
-        let mut touched: Vec<ObjId> = Vec::new();
-        for (o, sk) in fp.slots.iter().copied().filter(|(o, _)| old(*o)) {
-            touched.push(o);
-            slots.insert((o, sk), st.slots.get(&o, &sk).unwrap_or_default().join(&pre.slots.get(&o, &sk).unwrap_or_default()));
-        }
-        let mut elems: rustc_hash::FxHashMap<ObjId, KeyVal> = rustc_hash::FxHashMap::default();
-        for o in fp.elems.iter().copied().filter(|o| old(*o)) {
-            touched.push(o);
-            elems.insert(o, crate::domain::kv_join(&st.elems.get(&o).unwrap_or(DATA), &pre.elems.get(&o).unwrap_or(DATA)));
-        }
-        touched.sort_unstable();
-        touched.dedup();
-        let mut lens: rustc_hash::FxHashMap<ObjId, (Option<usize>, usize, u16)> = touched.iter().map(|o| (*o, crate::state::join_len(&entry(self, st, *o), &entry(self, pre, *o)))).collect();
-        let mut prev = pre;
-        for y in ys {
-            let base = std::mem::replace(&mut prev, y);
-            for k in y.rows.diff_keys(&base.rows) {
-                if let Some((r, seen)) = rows.get_mut(&k) {
-                    let yr = y.row(k.0, k.1);
-                    if !seen.contains(&yr) {
-                        *r = r.join(&yr);
-                        seen.insert(yr);
-                    }
-                }
-            }
-            for (o, sk) in y.slots.diff_keys(&base.slots) {
-                if let Some(v) = slots.get_mut(&(o, sk)) {
-                    *v = v.join(&y.slots.get(&o, &sk).unwrap_or_default());
-                }
-            }
-            for o in y.elems.diff_keys(&base.elems) {
-                if let Some(kv) = elems.get_mut(&o) {
-                    *kv = crate::domain::kv_join(kv, &y.elems.get(&o).unwrap_or(DATA));
-                }
-            }
-            for o in y.lens.diff_keys(&base.lens) {
-                if let Some(l) = lens.get_mut(&o) {
-                    *l = crate::state::join_len(l, &entry(self, y, o));
-                }
-            }
-        }
-        for ((o, ns), (r, _)) in rows {
-            st.set_row(o, ns, r);
-        }
-        for ((o, sk), v) in slots {
-            st.slots.set(&o, sk, v);
-            if matches!(sk.0, Ns::Pos | Ns::Elem) {
-                st.clear_last(o);
-            }
-        }
-        for (o, kv) in elems {
-            st.elems.insert(o, kv);
-        }
-        for (o, l) in lens {
-            st.lens.insert(o, l);
-        }
     }
 
     /// Does some running try's guard catch exceptions of this class?
@@ -1331,154 +1143,6 @@ impl Analyzer {
     }
 }
 
-/// (not run on some path, run on some path) for a generator `make_lazy_gen` made
-fn lazy_state(state: &State, o: ObjId) -> (bool, bool) {
-    match state.slot_opt(o, Ns::Attr, key_str_lit("\u{1}lazy")) {
-        Some(v) => {
-            let ks = crate::domain::kv_literals(&v.kv);
-            (ks.contains(intern::key_int(1)), ks.contains(intern::key_int(0)))
-        }
-        None => (false, false),
-    }
-}
-
 impl Analyzer {
-    /// Run `body` from `state`. A generator it ran whole for a consumer that runs code between
-    /// the items (`gen_watch`) did not see what that code changed: when the code changed objects
-    /// the generator reaches, `body` runs again, those objects changed for the generator at each
-    /// of its yields (`gen_havoc`; at most three rounds, then everything it reaches). `close`:
-    /// the generators run in `body` are used up or out of reach after it (a loop without
-    /// `break`, a call's end): no later code changes anything for them.
-    pub fn with_gen_restart(&mut self, state: &mut State, close: bool, body: &mut dyn FnMut(&mut Analyzer, &mut State)) {
-        let pre = state.copy();
-        let vmark = self.findings.mark();
-        let mmark = self.modules.len();
-        for round in 0..4 {
-            let wmark = self.gen_watch.len();
-            body(self, state);
-            let found = self.gen_interference(wmark, state, round == 3);
-            if found.is_empty() || round == 3 {
-                if close {
-                    self.gen_watch.truncate(wmark);
-                }
-                return;
-            }
-            if super::debug_enabled() {
-                eprintln!("restart in {} (frames {}), round {}", self.frame().label, self.frames.len(), round);
-            }
-            for (gid, objs) in found {
-                self.gen_havoc.entry(gid).or_default().extend(objs);
-            }
-            self.findings.drop_since(vmark);
-            // (the budgets as before the first generator run: the run again spends them)
-            if let Some(w) = self.gen_watch.get(wmark) {
-                self.budget.restore(&w.budget);
-            }
-            self.gen_watch.truncate(wmark);
-            // (modules it imported stay imported: their facts go on)
-            let mods: Vec<Value> = self.modules.values().skip(mmark).map(|m| Value::obj(*m)).collect();
-            let mut again = pre.copy();
-            if !mods.is_empty() {
-                let fp = state.footprint(&pre);
-                let mut targets: Vec<ObjId> = fp.rows.iter().map(|k| k.0).chain(fp.slots.iter().map(|k| k.0)).chain(fp.elems.iter().copied()).collect();
-                targets.sort_unstable();
-                targets.dedup();
-                let reach = self.reach_among(&mods, &targets, state);
-                let keep = crate::state::Footprint { rows: fp.rows.into_iter().filter(|k| reach.contains(&k.0)).collect(), slots: fp.slots.into_iter().filter(|k| reach.contains(&k.0)).collect(), elems: fp.elems.into_iter().filter(|o| reach.contains(o)).collect() };
-                again.join_heap_fp(state, &keep);
-            }
-            state.replace_with(again);
-        }
-    }
-
-    /// The watched generators since `wmark` and what later code changed by `fin` of the
-    /// objects they reach from what they were given (in the state after their run): a key
-    /// stored, or a whole object; beyond what is already changed for them (`all`: everything
-    /// they reach).
-    fn gen_interference(&self, wmark: usize, fin: &State, all: bool) -> Vec<(ObjId, Vec<super::Change>)> {
-        (wmark..self.gen_watch.len()).map(|i| (self.gen_watch[i].gid, self.gen_interference_of(i, fin, all))).filter(|(_, h)| !h.is_empty()).collect()
-    }
-
-    /// `gen_interference` for one watched generator: the keys / objects it reads after a
-    /// yield that later code changed (beyond those it changes itself, whose facts follow its
-    /// items, and what unknown code may have changed: nothing tells what such code does).
-    fn gen_interference_of(&self, i: usize, fin: &State, all: bool) -> Vec<super::Change> {
-        let w = &self.gen_watch[i];
-        if !fin.reachable {
-            return Vec::new();
-        }
-        let (f, fp) = (&w.after, fin.footprint(&w.after));
-        let mut changed: Vec<super::Change> = Vec::new();
-        let mut unknown: FxHashSet<ObjId> = FxHashSet::default();
-        // (a read that narrows a row is no change)
-        for k in fp.rows {
-            let (a, b) = (f.row(k.0, k.1), fin.row(k.0, k.1));
-            if a.mutators != b.mutators || a.top != b.top {
-                unknown.insert(k.0);
-            } else if a.absent != b.absent {
-                changed.push((k.0, None));
-            }
-        }
-        for (o, sk) in fp.slots {
-            if fin.slots.get(&o, &sk).is_some_and(|v| v.pts.iter().any(|p| self.is_any(p))) {
-                unknown.insert(o);
-            } else {
-                changed.push((o, (matches!(sk.0, Ns::Item | Ns::Attr) && sk.1 != intern::STAR).then_some(sk)));
-            }
-        }
-        changed.extend(fp.elems.into_iter().chain(fin.lens.diff_keys(&f.lens)).map(|o| (o, None)));
-        let read = |(o, k): &super::Change| w.reads.contains(&(*o, *k)) || w.reads.contains(&(*o, None)) || (k.is_none() && w.reads.iter().any(|r| r.0 == *o));
-        // (an object made since is not the one the generator read, whatever its site)
-        let older = |o: ObjId| self.heap.born_before(o, w.born);
-        let mut hit: Vec<super::Change> = changed.into_iter().filter(|c| c.0 != w.gid && older(c.0) && !w.own.contains(&c.0) && !unknown.contains(&c.0) && read(c)).collect();
-        if all && !hit.is_empty() {
-            hit = w.reads.iter().map(|r| (r.0, None)).collect();
-        }
-        hit.sort_unstable();
-        hit.dedup();
-        let have = self.gen_havoc.get(&w.gid);
-        hit.retain(|c| !have.is_some_and(|h| h.contains(c) || h.contains(&(c.0, None))));
-        if !hit.is_empty() && super::debug_enabled() {
-            eprintln!("generator {} sees changes of {:?}", self.heap.obj(w.gid).label, hit.iter().map(|(o, k)| format!("{}{:?}", self.heap.obj(*o).label, k.map(|k| intern::key_repr(k.1)))).collect::<Vec<_>>());
-        }
-        hit
-    }
-
-    /// A loop used up the generators among `used`: no later code runs between their items. Those
-    /// that saw no change by `fin` are no longer watched; the others are left to the run that
-    /// made them, to run again.
-    pub fn gen_used_up(&mut self, used: &crate::domain::ObjSet, fin: &State) {
-        let mut i = 0;
-        while i < self.gen_watch.len() {
-            if used.contains(self.gen_watch[i].gid) && self.gen_interference_of(i, fin, false).is_empty() {
-                self.gen_watch.remove(i);
-            } else {
-                i += 1;
-            }
-        }
-    }
-
-    /// Which of `targets` are reachable from `roots` in `st` (the walk ends when all are found).
-    fn reach_among(&self, roots: &[Value], targets: &[ObjId], st: &State) -> FxHashSet<ObjId> {
-        let mut found: FxHashSet<ObjId> = FxHashSet::default();
-        let mut seen: FxHashSet<ObjId> = FxHashSet::default();
-        let mut work: Vec<ObjId> = roots.iter().flat_map(|v| v.pts.iter()).collect();
-        while let Some(o) = work.pop() {
-            if !seen.insert(o) {
-                continue;
-            }
-            self.budget.walk_visit();
-            if targets.binary_search(&o).is_ok() {
-                found.insert(o);
-                if found.len() == targets.len() {
-                    break;
-                }
-            }
-            if !matches!(self.heap.kind(o), Kind::Module | Kind::Class | Kind::Function) {
-                self.obj_edges(o, st, &mut work);
-            }
-        }
-        found
-    }
 
 }

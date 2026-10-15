@@ -754,7 +754,7 @@ impl Analyzer {
     pub fn iterate(&mut self, v: &Value, node: &Node, state: &mut State) -> Iteration {
         self.force_gen(v, state, false);
         for o in v.pts.iter() {
-            self.gen_read(o, None);
+            self.gens.read(o, None);
         }
         // one of several containers (or strings): their items are alternatives, not one
         // sequence — joined position by position when every one is a sequence of one known

@@ -332,12 +332,12 @@ impl Analyzer {
             ast::Stmt::For(f) => {
                 let g = self.loop_gc_begin(state);
                 // (a generator the loop runs: what the body changes, it may read at its yields)
-                let depth = self.for_iters.len();
+                let depth = self.gens.for_iters.len();
                 self.with_gen_restart(state, false, &mut |an, st| an.stmt_for(f, st));
-                if let Some(used) = self.for_iters.get(depth).cloned().filter(|_| !contains_jump(&f.body)) {
+                if let Some(used) = self.gens.for_iters.get(depth).cloned().filter(|_| !contains_jump(&f.body)) {
                     self.gen_used_up(&used, state);
                 }
-                self.for_iters.truncate(depth);
+                self.gens.for_iters.truncate(depth);
                 self.loop_gc_end(g, state);
             }
             ast::Stmt::Break(_) | ast::Stmt::Continue(_) => {
@@ -466,11 +466,11 @@ impl Analyzer {
         if self.heap.kind(f) != Kind::Function || !self.heap.func_info(f).is_contextmanager.get() {
             return false;
         }
-        let prev = self.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.frames.len(), env_after: None, ran: false, then: None, body_died: false, env_before: None, multi: true, body_exits: None, body_ret: None });
+        let prev = self.gens.cm_hook.replace(super::CmHook { body: &w.body, target: item.optional_vars.as_deref(), depth: self.frames.len(), env_after: None, ran: false, then: None, body_died: false, env_before: None, multi: true, body_exits: None, body_ret: None });
         let n = frontend::node(&item.context_expr);
         let fv = self.eval(&call.func, state);
         self.call_value(&fv, &n, Some(call), state, None);
-        let h = std::mem::replace(&mut self.cm_hook, prev);
+        let h = std::mem::replace(&mut self.gens.cm_hook, prev);
         match h {
             Some(mut h) if h.ran => {
                 if let Some(env) = h.env_after.take() {
@@ -1074,7 +1074,7 @@ impl Analyzer {
         let itv = self.eval(&f.iter, state);
         let iter_node = frontend::node(&*f.iter);
         self.force_gen(&itv, state, true);
-        self.for_iters.push(itv.pts.clone());
+        self.gens.for_iters.push(itv.pts.clone());
         let it = self.iterate(&itv, &iter_node, state);
         let has_jump = contains_jump(&f.body);
         // a one-shot iterator is used up by the loop; a `break` leaves the rest: the cursor
