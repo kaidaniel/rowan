@@ -136,7 +136,7 @@ pub const MAX_CHAINS_PER_FINDING: usize = 8;
 /// What the program reads of each input, by its label: {key -> read on every path}.
 pub fn schema_rows(an: &Analyzer) -> IndexMap<String, IndexMap<String, bool>> {
     let mut out: IndexMap<String, IndexMap<String, bool>> = IndexMap::new();
-    let Some(st) = &an.final_state else { return out };
+    let Some(st) = &an.findings.final_state else { return out };
     for (src, d) in st.reqs.items().into_iter().filter(|(s, _)| !source_is_data(*s)) {
         let entry = out.entry(source_label(src)).or_default();
         for (k, info) in d.iter() {
@@ -206,7 +206,7 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
     if show_summaries {
         section(&mut lines, "what functions return", result_lines(an));
     }
-    if let Some(st) = an.final_state.as_ref().filter(|_| show_rows) {
+    if let Some(st) = an.findings.final_state.as_ref().filter(|_| show_rows) {
         let mut names: Vec<(String, crate::domain::Value)> = st.obj_slots(an.main_module, Ns::Attr).into_iter().map(|(k, v)| (intern::key_py_str(k), v)).collect();
         names.sort_by(|a, b| a.0.cmp(&b.0));
         // definitions (functions, classes, imported modules) are not values worth listing;
@@ -350,10 +350,10 @@ pub fn site_text(an: &Analyzer, site: &str) -> String {
         let f = an.rel_file(m);
         if f.is_empty() { format!("line {}", line) } else { format!("{} line {}", f, line) }
     };
-    if let Some((text, m, line)) = an.site_names.get(&intern::s(site)) {
+    if let Some((text, m, line)) = an.names.site_names.get(&intern::s(site)) {
         let t: String = if text.chars().count() > 50 { format!("{}…", text.chars().take(49).collect::<String>()) } else { text.clone() };
         // (a call of the program's own code that rowan no longer follows: say why it is unknown)
-        let not_followed = if an.skipped_sites.contains(&intern::s(site)) { ", a call rowan no longer follows" } else { "" };
+        let not_followed = if an.names.skipped_sites.contains(&intern::s(site)) { ", a call rowan no longer follows" } else { "" };
         return format!("`{}` ({}{})", t, in_file(*m, *line), not_followed);
     }
     if site == "…" {
@@ -387,7 +387,7 @@ pub fn site_text(an: &Analyzer, site: &str) -> String {
 fn source_id_text(an: &Analyzer, src: SourceId) -> String {
     let (site, kind, path) = intern::with_source(src, |s| (s.site.clone(), s.kind, s.path.clone()));
     let t = site_text(an, &site);
-    let Some(st) = an.final_state.as_ref().filter(|_| !path.is_empty()) else { return t };
+    let Some(st) = an.findings.final_state.as_ref().filter(|_| !path.is_empty()) else { return t };
     let steps = path_steps(st, &site, kind, 0, &path).map(|(p, _)| p).unwrap_or_else(|| "…".into());
     match t.find("` ").or_else(|| t.ends_with('`').then(|| t.len() - 1)) {
         Some(i) if t[..i].contains('`') => format!("{}{}{}", &t[..i], steps, &t[i..]),
@@ -428,12 +428,12 @@ fn named_call(site: &str) -> bool {
 /// paths: (inputs, functions).
 fn needs_text(an: &Analyzer) -> (Vec<String>, Vec<String>) {
     use crate::domain::SourceKind;
-    let Some(st) = &an.final_state else { return (vec![], vec![]) };
+    let Some(st) = &an.findings.final_state else { return (vec![], vec![]) };
     // (functions of the program that rowan did not follow are not inputs)
     let program: std::collections::HashSet<String> = (0..an.heap.len() as ObjId).filter_map(|o| an.heap.func_info_opt(o)).map(|fi| fi.py_qualname()).collect();
     // (an input made in another module: its file, from the reads that needed it)
     let mut files: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for v in an.verdicts.iter().filter(|v| !v.file.is_empty()) {
+    for v in an.findings.verdicts().iter().filter(|v| !v.file.is_empty()) {
         for p in &v.providers {
             files.entry(intern::with_source(*p, |s| s.site.to_string())).or_insert_with(|| v.file.clone());
         }
@@ -580,7 +580,7 @@ fn result_lines(an: &Analyzer) -> Vec<String> {
     // (function of the program, a frame?) -> the rows of what it returned, joined
     let program: std::collections::HashSet<String> = (0..an.heap.len() as ObjId).filter_map(|o| an.heap.func_info_opt(o)).filter(|fi| an.is_local_module(fi.module)).map(|fi| fi.qualname.clone()).collect();
     let mut by_func: IndexMap<(String, bool), Row> = IndexMap::new();
-    for ((qual, _), (_, rows)) in an.summaries.iter().filter(|((q, _), _)| program.contains(q)) {
+    for ((qual, _), (_, rows)) in an.findings.summaries.iter().filter(|((q, _), _)| program.contains(q)) {
         for (oid, row) in rows.iter().filter(|(o, r)| matches!(an.heap.kind(*o), Kind::Dict | Kind::Frame) && !r.present.is_empty()) {
             let key = (qual.trim_start_matches("class ").to_string(), an.heap.kind(*oid) == Kind::Frame);
             let joined = by_func.get(&key).map(|r| r.join(row)).unwrap_or_else(|| row.clone());
@@ -606,10 +606,10 @@ fn limit_lines(an: &Analyzer) -> Vec<String> {
     let (mut n_unknown, mut n_skipped) = (0, 0);
     let mut budget: Vec<String> = Vec::new();
     let mut out: Vec<String> = Vec::new();
-    for n in &an.notes {
+    for n in an.findings.notes() {
         if let Some(site) = n.strip_prefix("unknown call ") {
             // (calls of the program's own functions rowan stopped following: counted with them)
-            if an.skipped_sites.contains(&crate::intern::s(site)) {
+            if an.names.skipped_sites.contains(&crate::intern::s(site)) {
                 n_skipped += 1;
                 continue;
             }
@@ -707,18 +707,19 @@ pub fn to_json(an: &Analyzer) -> Vec<J> {
 
 /// The verdicts that are diagnostics: not those on accesses the program guards.
 fn reported(an: &Analyzer) -> Vec<Verdict> {
-    dedupe(an, &an.verdicts).into_iter().filter(|v| !v.guarded).collect()
+    dedupe(an, an.findings.verdicts()).into_iter().filter(|v| !v.guarded).collect()
 }
 
 /// Everything the golden harness needs, as one JSON document (guarded verdicts included).
 pub fn golden_json(an: &Analyzer) -> J {
-    let verdicts: Vec<J> = dedupe(an, &an.verdicts).iter().map(|v| verdict_json(an, v)).collect();
+    let verdicts: Vec<J> = dedupe(an, an.findings.verdicts()).iter().map(|v| verdict_json(an, v)).collect();
     let mut schemas = serde_json::Map::new();
     for (label, entry) in schema_rows(an) {
         let keys: serde_json::Map<String, J> = entry.iter().map(|(k, a)| (k.clone(), json!({"always": a}))).collect();
         schemas.insert(label, J::Object(keys));
     }
     let rows: Vec<J> = an
+        .findings
         .row_checks
         .iter()
         .map(|rc| {
@@ -748,7 +749,7 @@ pub fn golden_json(an: &Analyzer) -> J {
     let note = |n: &crate::models::torch::ShapeNote| json!({"file": an.rel_file(n.module), "line": n.line, "chain": n.chain, "entry": n.entry, "text": n.text, "message": n.text});
     let requires: Vec<J> = an.m.shape_reqs.iter().map(note).collect();
     let shape_errors: Vec<J> = an.m.shape_errors.iter().map(note).collect();
-    json!({"verdicts": verdicts, "schemas": schemas, "rows": rows, "notes": an.notes, "report": format_text(an, true, true), "requires": requires, "shape_errors": shape_errors, "objects": an.heap.len(), "tabulations": an.tab_runs, "joins": crate::domain::row_joins(), "work": an.work, "visits": an.walked.get() + crate::state::fp_visits(), "havoc": an.havoc_walked})
+    json!({"verdicts": verdicts, "schemas": schemas, "rows": rows, "notes": an.findings.notes(), "report": format_text(an, true, true), "requires": requires, "shape_errors": shape_errors, "objects": an.heap.len(), "tabulations": an.tab_runs, "joins": crate::domain::row_joins(), "work": an.work, "visits": an.walked.get() + crate::state::fp_visits(), "havoc": an.havoc_walked})
 }
 
 
@@ -993,7 +994,7 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         Kind::Class => an.heap.obj(o).label.trim_start_matches("class ").to_string(),
         Kind::Module => an.heap.obj(o).label.to_string(),
         // an unknown named in the program's terms (`a`, `a(b)`, `cfg["db"]`), else `?`
-        Kind::Unknown => an.symbol_for(o).cloned().unwrap_or_else(|| "?".into()),
+        Kind::Unknown => an.names.visible(o).cloned().unwrap_or_else(|| "?".into()),
         Kind::External => an.heap.external_qual(o).trim_start_matches("builtins.").to_string(),
         Kind::Super => "super()".into(),
         // iterators, views, groupbys, parsers, responses…: by their type, as Python prints them
@@ -1122,7 +1123,7 @@ pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, Str
             seen.push(o);
             match an.heap.kind(o) {
                 Kind::Unknown => {
-                    let Some(sym) = an.symbol_for(o) else { continue };
+                    let Some(sym) = an.names.visible(o) else { continue };
                     if out.iter().any(|(s, _)| s == sym) {
                         continue;
                     }
@@ -1135,12 +1136,12 @@ pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, Str
                     if !attr.present.is_empty() {
                         parts.push(render_record(an, state, o, Ns::Attr, None, depth, &mut Vec::new()));
                     }
-                    if let Some((_, _, given)) = an.origins.get(&o) {
+                    if let Some((_, _, given)) = an.names.origins.get(&o) {
                         parts.extend(given.iter().cloned());
                     }
                     // keys seen on it describe it; objects an unknown call was given are what it
                     // may also be (besides anything else)
-                    let given = an.origins.get(&o).map(|(_, _, g)| !g.is_empty()).unwrap_or(false);
+                    let given = an.names.origins.get(&o).map(|(_, _, g)| !g.is_empty()).unwrap_or(false);
                     let desc = if parts.is_empty() { "?".to_string() } else if given { format!("{} | ?", parts.join(" | ")) } else { parts.join(" | ") };
                     out.push((sym.clone(), desc));
                 }
@@ -1169,7 +1170,7 @@ pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, Str
 /// code reads of it, and the findings in words.
 pub fn facts_json(an: &Analyzer) -> J {
     let mut facts: Vec<J> = Vec::new();
-    for ((line, name), f) in &an.facts {
+    for ((line, name), f) in &an.findings.facts {
         // (a hover lists the objects a name may hold: past `MAX_FACT_OBJECTS` only the count —
         // a name holding hundreds of objects made the document hundreds of MB)
         let objects_total = f.rows.len();
@@ -1179,7 +1180,7 @@ pub fn facts_json(an: &Analyzer) -> J {
             .take(MAX_FACT_OBJECTS)
             .map(|(oid, (item, attr))| {
                 let o = an.heap.obj(*oid);
-                let origin = an.origins.get(oid).map(|(t, l, g)| json!({"text": t, "line": l, "given": g}));
+                let origin = an.names.origins.get(oid).map(|(t, l, g)| json!({"text": t, "line": l, "given": g}));
                 // for people: what may have changed it, what it never has, where it comes from
                 let rows = [item, attr].into_iter().flatten();
                 let mut changed_by: Vec<String> = Vec::new();
@@ -1208,13 +1209,13 @@ pub fn facts_json(an: &Analyzer) -> J {
                     "label": &*o.label,
                     "kind": o.kind.name(),
                     "origin": origin,
-                    "symbol": an.symbols.get(oid).filter(|_| f.legend.iter().any(|(s0, _)| Some(s0) == an.symbols.get(oid))),
+                    "symbol": an.names.get(*oid).filter(|_| f.legend.iter().any(|(s0, _)| Some(s0) == an.names.get(*oid))),
                 })
             })
             .collect();
         // what the code reads of the inputs these objects come from, as access paths from the name
         let mut required: Vec<(String, bool)> = Vec::new();
-        if let Some(st) = &an.final_state {
+        if let Some(st) = &an.findings.final_state {
             for (_, (item, attr)) in &f.rows {
                 for r in [item, attr].into_iter().flatten() {
                     for (src, _) in r.sources.iter() {

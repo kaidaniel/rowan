@@ -18,7 +18,7 @@ fn lit_of(an: &Analyzer, st: &State, v: &Value, as_seq: bool) -> Option<KeyId> {
     }
     let o: ObjId = v.single()?;
     match an.heap.kind(o) {
-        Kind::Tuple => an.literal_tuple(o, st, 0),
+        Kind::Tuple => an.heap.literal_tuple(o, st, 0),
         Kind::List if as_seq => {
             let n = an.heap.llen(o, st)?;
             let items: Option<Vec<KeyId>> = (0..n)

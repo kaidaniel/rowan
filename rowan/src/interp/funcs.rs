@@ -251,7 +251,7 @@ impl Analyzer {
                 continue;
             }
             let txt = if q.is_empty() { frontend::text(&d.expression) } else { q.clone() };
-            self.note(format!("line {}: decorator `{}` is not modelled (taken to return the function unchanged)", fnode.line, txt));
+            self.findings.note(format!("line {}: decorator `{}` is not modelled (taken to return the function unchanged)", fnode.line, txt));
         }
         fv
     }
@@ -481,11 +481,11 @@ impl Analyzer {
                     self.t_name_result(name, v);
                 }
                 self.store_name(name, v.clone(), state);
-                if self.facts_on {
+                if self.findings.facts_on {
                     let nd = frontend::node(t);
-                    self.t_fact_write = true;
+                    self.findings.t_fact_write = true;
                     self.record_fact(&nd, name, v, state);
-                    self.t_fact_write = false;
+                    self.findings.t_fact_write = false;
                 }
             }
             ast::Expr::Attribute(a) => {
@@ -1024,10 +1024,10 @@ impl Analyzer {
                     let row = state.row(oid, Ns::Item);
                     let label = format!("elem of {}", self.heap.obj(oid).label);
                     let eid = self.heap.alloc_raw(Kind::Unknown, &format!("elem:{}", oid), "", false, &label, Payload::None);
-                    if let Some(sym) = self.sym_access(oid, Ns::Item, STAR) {
-                        if !self.symbols.contains_key(&eid) {
-                            let scope = self.symbol_scope.get(&oid).copied().unwrap_or(0);
-                            self.set_symbol(eid, sym, scope);
+                    if let Some(sym) = self.names.access(&self.heap, oid, Ns::Item, STAR) {
+                        if !self.names.has(eid) {
+                            let scope = self.names.scope(oid);
+                            self.names.set(eid, sym, scope);
                         }
                     }
                     self.heap.obj_mut(eid).iter_elem = true;

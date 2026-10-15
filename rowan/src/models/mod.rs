@@ -4235,7 +4235,7 @@ fn m_json_load(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let text = crate::frontend::text_at(&c.node);
     if !text.is_empty() {
         let scope = an.frame().func.unwrap_or(0);
-        an.set_symbol(oid, text.split_whitespace().collect::<Vec<_>>().join(" "), scope);
+        an.names.set(oid, text.split_whitespace().collect::<Vec<_>>().join(" "), scope);
     }
     Value::obj(oid)
 }
@@ -4260,7 +4260,7 @@ fn m_response_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let text = crate::frontend::text_at(&c.node);
             if !text.is_empty() {
                 let scope = an.frame().func.unwrap_or(0);
-        an.set_symbol(oid, text.split_whitespace().collect::<Vec<_>>().join(" "), scope);
+        an.names.set(oid, text.split_whitespace().collect::<Vec<_>>().join(" "), scope);
             }
             outs.push(Value::obj(oid));
         }

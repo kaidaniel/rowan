@@ -821,10 +821,10 @@ impl Analyzer {
         // the content under an unknown key stands for many values: stores on it are weak
         let single = k != STAR;
         let pid = self.heap.alloc_raw(Kind::Unknown, &format!("path:{}:{}:{}", oid, ns, intern::key_repr(k)), "", single, &label, Payload::None);
-        if let Some(sym) = self.sym_access(oid, ns, k) {
-            if !self.symbols.contains_key(&pid) {
-                let scope = self.symbol_scope.get(&oid).copied().unwrap_or(0);
-                self.set_symbol(pid, sym, scope);
+        if let Some(sym) = self.names.access(&self.heap, oid, ns, k) {
+            if !self.names.has(pid) {
+                let scope = self.names.scope(oid);
+                self.names.set(pid, sym, scope);
             }
         }
         let d = self.heap.obj(oid).depth + 1;

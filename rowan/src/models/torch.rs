@@ -93,11 +93,11 @@ impl Analyzer {
             return Some(*sy);
         }
         // the result of an unknown call that no variable names: nothing to name its dims by
-        if self.heap.kind(o) == Kind::Unknown && self.origins.contains_key(&o) && self.torch_on {
+        if self.heap.kind(o) == Kind::Unknown && self.names.origins.contains_key(&o) && self.torch_on {
             return None;
         }
-        let text = self.symbols.get(&o)?;
-        let scope = self.symbol_scope.get(&o).copied().unwrap_or(0);
+        let text = self.names.get(o)?;
+        let scope = self.names.scope(o);
         Some(sh::sym(scope, text))
     }
 
@@ -4381,7 +4381,7 @@ impl Analyzer {
         } else if !v.pts.is_empty() && v.pts.iter().all(|o| matches!(self.heap.kind(o), Kind::Unknown)) {
             // a parameter / read: its shape; an unknown call's result: only once facts say
             // something about it
-            let call_result = v.pts.iter().any(|o| self.origins.contains_key(&o) || self.symbols.get(&o).map(|t| t.contains('(')).unwrap_or(false));
+            let call_result = v.pts.iter().any(|o| self.names.origins.contains_key(&o) || self.names.get(o).map(|t| t.contains('(')).unwrap_or(false));
             self.t_shape(v, st).filter(|s| !call_result || !(s.prefix.is_empty() && s.suffix.is_empty() && matches!(s.rest, Some(Rest::Slice(_, 0, 0)) | Some(Rest::Any))))
         } else {
             None
@@ -4650,7 +4650,7 @@ impl Analyzer {
             return;
         }
         let o = v.pts.first().unwrap();
-        if self.heap.kind(o) != Kind::Unknown || !self.origins.contains_key(&o) || self.m.t_var_names.contains_key(&o) {
+        if self.heap.kind(o) != Kind::Unknown || !self.names.origins.contains_key(&o) || self.m.t_var_names.contains_key(&o) {
             return;
         }
         let scope = self.frames.iter().rev().find_map(|fr| fr.func).unwrap_or(0);

@@ -875,11 +875,11 @@ impl Analyzer {
                             for k in &keys {
                                 let mut b = state.copy();
                                 let ns = ns_of(self, open[0]);
-                                let saved = std::mem::replace(&mut self.quiet, true);
+                                let saved = std::mem::replace(&mut self.findings.quiet, true);
                                 self.branch_depth += 1;
                                 let x = self.load_item_or_attr(&ov, ns, *k, node, &mut b);
                                 self.branch_depth -= 1;
-                                self.quiet = saved;
+                                self.findings.quiet = saved;
                                 val = val.join(&x);
                                 branches.push(b);
                             }

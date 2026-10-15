@@ -184,7 +184,7 @@ impl Analyzer {
                 state.set_row(oid, n, Row::with_source(src));
             }
         }
-        if !self.symbols.contains_key(&oid) {
+        if !self.names.has(oid) {
             let sym = match kind {
                 SourceKind::Param => Some(label.trim_start_matches("param ").to_string()),
                 SourceKind::Name => Some(label.trim_start_matches('?').to_string()),
@@ -192,7 +192,7 @@ impl Analyzer {
             };
             if let Some(sym) = sym.filter(|x| !x.is_empty()) {
                 let scope = if kind == SourceKind::Param { self.entry_scope.unwrap_or_else(|| self.frame().func.unwrap_or(0)) } else { 0 };
-                self.set_symbol(oid, sym, scope);
+                self.names.set(oid, sym, scope);
             }
         }
         oid

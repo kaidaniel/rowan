@@ -14,8 +14,8 @@ use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
 
 use super::{ClassInfo, FuncInfo, ModuleInfo};
-use crate::domain::{ObjId, Value};
-use crate::intern::{self, KeySet, StrId};
+use crate::domain::{KeyVal, Ns, ObjId, Value};
+use crate::intern::{self, KeyId, KeySet, StrId};
 use crate::state::{Kind, State};
 
 /// Objects one allocation site may have across contexts; past it the site's objects collapse
@@ -327,5 +327,43 @@ impl Heap {
         st.lens.insert(o, (None, n, 0));
         self.objects[o as usize].literal_len = None;
         self.objects[o as usize].known_prefix = Some(n);
+    }
+
+    /// The literal a tuple object stands for: every position one known literal (nested
+    /// tuples too).
+    pub fn literal_tuple(&self, o: ObjId, state: &State, depth: u32) -> Option<KeyId> {
+        if depth > 4 {
+            return None;
+        }
+        // a (key, value) pair (zip / enumerate / items): a 2-tuple
+        if self.kind(o) == Kind::Pair {
+            let Payload::Pair(k, v) = &self.obj(o).payload else { return None };
+            let one = |x: &Value| -> Option<KeyId> {
+                match (x.pts.len(), &x.kv) {
+                    (0, KeyVal::Lit(k)) => Some(*k),
+                    (1, KeyVal::Bot) if matches!(self.kind(x.pts.first().unwrap()), Kind::Tuple | Kind::Pair) => self.literal_tuple(x.pts.first().unwrap(), state, depth + 1),
+                    _ => None,
+                }
+            };
+            return Some(intern::key_tuple(vec![one(k)?, one(v)?]));
+        }
+        let n = self.llen(o, state)?;
+        let mut items = Vec::with_capacity(n);
+        for i in 0..n {
+            let v = state.slot(o, Ns::Pos, intern::key_int(i as i64));
+            let k = match (v.pts.len(), &v.kv) {
+                (0, KeyVal::Lit(k)) => *k,
+                (1, KeyVal::Bot) => {
+                    let x = v.pts.first().unwrap();
+                    if !matches!(self.kind(x), Kind::Tuple | Kind::Pair) {
+                        return None;
+                    }
+                    self.literal_tuple(x, state, depth + 1)?
+                }
+                _ => return None,
+            };
+            items.push(k);
+        }
+        Some(intern::key_tuple(items))
     }
 }

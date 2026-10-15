@@ -2216,7 +2216,7 @@ fn merge_impl(an: &mut Analyzer, st: &mut State, c: &Call, left: Value, right: V
         // the common columns are the keys
         keys = lrow.present.intersection(&rrow.present);
         if lrow.open() || rrow.open() {
-            an.note(format!("line {}: merge without on= (the join columns are not known)", c.line));
+            an.findings.note(format!("line {}: merge without on= (the join columns are not known)", c.line));
         }
     }
     let mut row = combine_overlap(&lrow, &rrow, &keys, &lsuf, &rsuf);
@@ -2423,7 +2423,7 @@ fn df_rename(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let row = rows_of(st, &fs);
     let steps = rename_step(an, st, &cols, c, &fs);
     let Some(steps) = steps else {
-        an.note(format!("line {}: rename with a column mapping rowan cannot read", c.line));
+        an.findings.note(format!("line {}: rename with a column mapping rowan cannot read", c.line));
         let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.insert((Source::new(&format!("rename@L{}", c.line), SourceKind::Call), EMPTY_LENS)), mutators: row.mutators.clone(), ..Default::default() });
         return new_frame(an, st, c, r, None, None);
     };
@@ -2502,7 +2502,7 @@ fn df_drop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.clone(), mutators: row.mutators.clone(), ..Default::default() });
             return new_frame(an, st, c, r, None, None);
         }
-        an.note(format!("line {}: drop of columns rowan cannot read", c.line));
+        an.findings.note(format!("line {}: drop of columns rowan cannot read", c.line));
         let r = Row::from_data(RowData { present: row.present.clone(), sources: row.sources.clone(), mutators: row.mutators.clone(), ..Default::default() });
         return new_frame(an, st, c, r, None, None);
     };
@@ -5008,7 +5008,7 @@ fn df_generic(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     if matches!(name.as_str(), "xs") {
         return new_frame(an, st, c, row, None, None);
     }
-    an.note(format!("line {}: DataFrame.{} is not modelled (its result may have other columns)", c.line, name));
+    an.findings.note(format!("line {}: DataFrame.{} is not modelled (its result may have other columns)", c.line, name));
     let r = Row::from_data(RowData {
         present: row.present.clone(),
         likely: row.definite.clone(),
@@ -5160,7 +5160,7 @@ pub fn frame_setattr(an: &mut Analyzer, oid: u32, name: &str, v: &Value, node: &
             }
         }
         state.set_row(oid, Ns::Item, Row::with_source(Source::new(&format!("columns=@L{}", node.line), SourceKind::Call)));
-        an.note(format!("line {}: df.columns set from a value rowan cannot read", node.line));
+        an.findings.note(format!("line {}: df.columns set from a value rowan cannot read", node.line));
         return;
     }
     // `df.x = v` sets column x when the frame has it, else an instance attribute (a pandas

@@ -233,7 +233,7 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
     }
     roots.extend(search);
     let mut an = Analyzer::new(src.clone(), file, roots, entry, imports)?;
-    an.facts_on = facts;
+    an.findings.facts_on = facts;
     an.follow = follow;
     if !an.follow.is_empty() {
         an.site_paths = site_packages_for(file, &site);
@@ -312,8 +312,8 @@ fn golden_requests(an: &mut Analyzer, rel: &str, src: &str) {
         };
         let push = |an: &mut Analyzer, name: String| {
             let req = (rel.to_string(), i as u32 + 1, name);
-            if !req.2.is_empty() && !an.row_check_requests.contains(&req) {
-                an.row_check_requests.push(req);
+            if !req.2.is_empty() && !an.findings.row_check_requests.contains(&req) {
+                an.findings.row_check_requests.push(req);
             }
         };
         // (`#@todo row NAME:` too: the harness checks those with ROWAN_TODO=check)
@@ -327,7 +327,7 @@ fn golden_requests(an: &mut Analyzer, rel: &str, src: &str) {
                         Ok(n) => rowan::intern::key_int(n),
                         Err(_) => rowan::intern::key_str_lit(k.trim_matches(|c| c == '"' || c == '\'')),
                     };
-                    an.row_absent_probes.push((rel.to_string(), i as u32 + 1, name.clone(), key));
+                    an.findings.row_absent_probes.push((rel.to_string(), i as u32 + 1, name.clone(), key));
                 }
             }
             push(an, name);

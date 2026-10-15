@@ -50,7 +50,7 @@ impl Analyzer {
                 let nd = frontend::node(node);
                 let name = s(n.id.as_str());
                 let v = self.load_name(name, &nd, state);
-                if self.facts_on {
+                if self.findings.facts_on {
                     self.record_fact(&nd, name, &v, state);
                 }
                 v
@@ -369,7 +369,7 @@ impl Analyzer {
             }
             ast::Expr::IpyEscapeCommand(_) => {
                 let nd = frontend::node(node);
-                self.note(format!("unsupported expression IpyEscapeCommand at L{}", nd.line));
+                self.findings.note(format!("unsupported expression IpyEscapeCommand at L{}", nd.line));
                 Value::data(&format!("L{}", nd.line))
             }
         }
@@ -1708,7 +1708,7 @@ impl Analyzer {
         }
         let mut s2 = state.copy();
         let mark0 = self.heap.serial();
-        let vmark = self.verdicts.len();
+        let vmark = self.findings.mark();
         self.comp_run_one(g, gens, i, limit, &elem, &mut s2, body, understood, own);
         if it.exhaustive && understood && s2.reachable {
             self.comp_known.pop();
@@ -1736,7 +1736,7 @@ impl Analyzer {
         // items of unknown number: what one iteration did, the next one sees too (a walrus
         // accumulator, a `pop` from a dict): rounds to a fixpoint, as a `for` loop has (whose
         // verdicts supersede the first pass's)
-        self.drop_verdicts_since(vmark);
+        self.findings.drop_since(vmark);
         let (mut head, _, s2) = self.loop_fixpoint(state, &mut |an, body_s| {
             an.comp_run_one(g, gens, i, limit, &elem, body_s, body, understood, own);
         });

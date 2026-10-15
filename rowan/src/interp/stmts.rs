@@ -208,10 +208,10 @@ impl Analyzer {
                 }
                 // (names a row check of this line reads after it are still there)
                 let mut keep = v.clone();
-                if !self.row_check_requests.is_empty() {
+                if !self.findings.row_check_requests.is_empty() {
                     let n = frontend::node(r);
                     let file = self.rel_file(n.module);
-                    let names: Vec<String> = self.row_check_requests.iter().filter(|(f, ln, _)| *ln >= n.line && *ln <= n.end_line && *f == file).map(|(_, _, nm)| nm.clone()).collect();
+                    let names: Vec<String> = self.findings.row_check_requests.iter().filter(|(f, ln, _)| *ln >= n.line && *ln <= n.end_line && *f == file).map(|(_, _, nm)| nm.clone()).collect();
                     for nm in names {
                         if let Some(x) = state.env.get(&s(&nm)) {
                             keep = keep.join(x);
@@ -446,7 +446,7 @@ impl Analyzer {
             }
             ast::Stmt::IpyEscapeCommand(_) => {
                 let n = frontend::node(node);
-                self.note(format!("unsupported statement IpyEscapeCommand at L{}", n.line));
+                self.findings.note(format!("unsupported statement IpyEscapeCommand at L{}", n.line));
             }
         }
     }
@@ -993,12 +993,12 @@ impl Analyzer {
         self.cond_depth += 1;
         let mut converged = false;
         let mut prev_head = head.copy();
-        let mut vmark = self.verdicts.len();
+        let mut vmark = self.findings.mark();
         for _ in 0..LOOP_MAX_ITER {
             // (a round before the fixpoint ran on less than the loop's states: what its accesses
             // said is superseded by the next round's)
-            self.drop_verdicts_since(vmark);
-            vmark = self.verdicts.len();
+            self.findings.drop_since(vmark);
+            vmark = self.findings.mark();
             let mut body_s = head.copy();
             let mark = self.heap.len() as u32;
             self.recent_stack.push(Vec::new());
@@ -1025,7 +1025,7 @@ impl Analyzer {
         if !converged {
             self.widen_unconverged(&mut head, &prev_head);
             // (the accesses as the widened states make them)
-            self.drop_verdicts_since(vmark);
+            self.findings.drop_since(vmark);
             self.loop_stack.push(LoopCtx::default());
             self.recent_stack.push(Vec::new());
             round(self, &mut head.copy());
@@ -1752,7 +1752,7 @@ impl Analyzer {
                     Some(Value::obj(moid))
                 }
                 Err(e) => {
-                    self.note(format!("could not parse {}: {}", ps, e));
+                    self.findings.note(format!("could not parse {}: {}", ps, e));
                     None
                 }
             };

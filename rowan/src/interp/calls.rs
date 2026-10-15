@@ -362,10 +362,10 @@ impl Analyzer {
             }
             if !text.is_empty() {
                 let t = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                self.site_names.entry(site_id).or_insert_with(|| (t.clone(), node.module, node.line));
+                self.names.site_names.entry(site_id).or_insert_with(|| (t.clone(), node.module, node.line));
                 let scope = self.frame().func.unwrap_or(0);
-                self.set_symbol(rid, t.clone(), scope);
-                self.origins.insert(rid, (t, node.line, given));
+                self.names.set(rid, t.clone(), scope);
+                self.names.origins.insert(rid, (t, node.line, given));
             }
         }
         // (many records given — a value joined over many contexts: the result is any record,
@@ -394,7 +394,7 @@ impl Analyzer {
             state.set_row(rid, Ns::Item, mutated(Row::with_source(src)));
             state.set_row(rid, Ns::Attr, mutated(Row::with_source(src)));
         }
-        self.note(format!("unknown call {}", site));
+        self.findings.note(format!("unknown call {}", site));
         // (it may raise anything, after any part of its effects: the state with all of them
         // stands for those with some)
         self.flag_may_raise(state);
@@ -869,7 +869,7 @@ impl Analyzer {
         if self.over_hard_deadline() {
             self.force_at = None;
             let q = self.heap.func_info(foid).qualname.clone();
-            self.note(format!("analysis cut at the deadline ({} ms): later calls are unknown code", super::limit("ms", super::DEADLINE_MS)));
+            self.findings.note(format!("analysis cut at the deadline ({} ms): later calls are unknown code", super::limit("ms", super::DEADLINE_MS)));
             return self.skipped_call(foid, &q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
         // a generator's body runs when it is consumed (`force_gen`), not here
@@ -892,7 +892,7 @@ impl Analyzer {
         self.model_depth = saved_md;
         if self.hard_cut && !was_cut {
             let q = self.heap.func_info(foid).qualname.clone();
-            self.note(format!("analysis cut at the deadline ({} ms) inside {}: the call is unknown code", super::limit("ms", super::DEADLINE_MS), q));
+            self.findings.note(format!("analysis cut at the deadline ({} ms) inside {}: the call is unknown code", super::limit("ms", super::DEADLINE_MS), q));
             state.reachable = true;
             let (sv, a, kw, sa, skw) = keep;
             return self.skipped_call(foid, &q, sv.as_ref(), &a, &kw, &sa, &skw, state, node);
@@ -1020,7 +1020,7 @@ impl Analyzer {
         // number of functions times the budget
         if !entry && self.tab_count.get(&fi.node.addr()).copied().unwrap_or(0) > super::limit("budget", super::FN_BUDGET) {
             let q = fi.qualname.clone();
-            self.note(format!("{} ran out of its budget: later calls are unknown code", q));
+            self.findings.note(format!("{} ran out of its budget: later calls are unknown code", q));
             self.budget_out.insert(foid);
             return self.skipped_call(foid, &q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
@@ -1096,11 +1096,11 @@ impl Analyzer {
         let mut entry_state = state.copy();
         let mut ret = Value::new();
         let mut st_final: Option<State> = None;
-        let mut vmark = self.verdicts.len();
+        let mut vmark = self.findings.mark();
         for _round in 0..REC_MAX_ITER {
             // (a round of a recursion before its fixpoint: its accesses' verdicts are superseded)
-            self.drop_verdicts_since(vmark);
-            vmark = self.verdicts.len();
+            self.findings.drop_since(vmark);
+            vmark = self.findings.mark();
             self.tab_runs += 1;
             let mut st = entry_state.copy();
             if let Some(g) = gen_id {
@@ -1257,7 +1257,7 @@ impl Analyzer {
             ret = Value::obj(gid);
         }
         let rows: Vec<(u32, Row)> = ret.pts.iter().filter(|o| self.heap.is_record_like(*o)).map(|o| (o, state.row(o, Ns::Item))).collect();
-        self.summaries.insert((fi.qualname.clone(), if entry { "entry".into() } else { ctx.clone() }), (ret.clone(), rows));
+        self.findings.summaries.insert((fi.qualname.clone(), if entry { "entry".into() } else { ctx.clone() }), (ret.clone(), rows));
         // cleanup
         self.active.remove(&key);
         if let Some(lst) = self.active_by_func.get_mut(&foid) {
@@ -1301,7 +1301,7 @@ impl Analyzer {
         let by_names = eff.is_some();
         let r = self.unknown_call(q, self_v, args, kwargs, star_args, star_kwargs, state, node);
         let site = s(&format!("{}@L{}", q, node.line));
-        self.skipped_sites.insert(site);
+        self.names.skipped_sites.insert(site);
         let mut roots = vec![foid];
         roots.append(&mut self.havoc_code);
         // (the methods that run with the receiver: what its code reaches through it)
@@ -1795,7 +1795,7 @@ impl Analyzer {
     /// `break`, a call's end): no later code changes anything for them.
     pub fn with_gen_restart(&mut self, state: &mut State, close: bool, body: &mut dyn FnMut(&mut Analyzer, &mut State)) {
         let pre = state.copy();
-        let vmark = self.verdicts.len();
+        let vmark = self.findings.mark();
         let mmark = self.modules.len();
         for round in 0..4 {
             let wmark = self.gen_watch.len();
@@ -1813,7 +1813,7 @@ impl Analyzer {
             for (gid, objs) in found {
                 self.gen_havoc.entry(gid).or_default().extend(objs);
             }
-            self.drop_verdicts_since(vmark);
+            self.findings.drop_since(vmark);
             // (the budgets as before the first generator run: the run again spends them)
             if let Some(w) = self.gen_watch.get(wmark) {
                 self.tab_count = (*w.budget).clone();
