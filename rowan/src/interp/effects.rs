@@ -128,6 +128,7 @@ impl Analyzer {
         let (mut loads_like, mut stores_like, mut deletes_like): (Vec<Like>, Vec<Like>, Vec<Like>) = Default::default();
         let mut work = vec![foid];
         let mut done: FxHashSet<ObjId> = FxHashSet::default();
+        let mut by_setter: FxHashSet<StrId> = FxHashSet::default();
         let runs_with_recv = |an: &Analyzer, g: ObjId| an.heap.kind(g) == Kind::Function && !an.heap.func_info(g).is_static.get() && !an.heap.func_info(g).is_classmethod.get();
         while let Some(f) = work.pop() {
             if !done.insert(f) {
@@ -171,8 +172,10 @@ impl Analyzer {
                         _ => {}
                     }
                 }
-                if u.stores.contains(&n) {
-                    work.extend(self.heap.prop_setters.get(&(owner, k)).copied());
+                // (a property with a setter: the setter runs, nothing is stored on the instance)
+                if let (true, Some(&setter)) = (u.stores.contains(&n), self.heap.prop_setters.get(&(owner, k))) {
+                    work.push(setter);
+                    by_setter.insert(n);
                 }
             }
             for &n in u.supers.iter() {
@@ -207,6 +210,7 @@ impl Analyzer {
             ks.sort_unstable();
             ks
         };
+        stores.retain(|n| !by_setter.contains(n));
         let mut code: Vec<ObjId> = done.into_iter().collect();
         code.sort_unstable();
         // (a deleted name stored again: as a store, the row opened for both)
@@ -367,7 +371,7 @@ impl Analyzer {
         let effs: Vec<(ObjId, RecvEffects)> = recvs.iter().map(|&o| Some((o, self.receiver_effects(foid, o, state, &bind)?))).collect::<Option<_>>().unwrap_or_default();
         // (on one receiver: the stores its code makes on every way it completes)
         let must: Vec<KeyId> = match effs.as_slice() {
-            [(_, e)] if fi_is_method(self, foid) => self.must_stores(foid).into_iter().filter(|k| !e.deletes.contains(k)).collect(),
+            [(_, e)] if fi_is_method(self, foid) => self.must_stores(foid).into_iter().filter(|k| !e.deletes.contains(k) && !self.setter_of(recvs[0], *k)).collect(),
             _ => Vec::new(),
         };
         self.havoc.guard = effs.iter().map(|(o, e)| (*o, 0, std::rc::Rc::from(e.used.as_slice()))).collect();
@@ -553,6 +557,14 @@ impl Analyzer {
         };
         let own = f.changes || (f.iterated && !v.pts.iter().all(plain)) || (f.called && !v.pts.iter().all(code_only));
         (own, f.held || f.iterated)
+    }
+}
+
+impl Analyzer {
+    /// Whether attribute `k` of instance `o` is a property with a setter (a store runs it).
+    fn setter_of(&self, o: ObjId, k: KeyId) -> bool {
+        let Some(c) = self.heap.instance_class(o) else { return false };
+        intern::key_as_str(k).and_then(|n| self.class_lookup(c, &n)).is_some_and(|owner| self.heap.prop_setters.contains_key(&(owner, k)))
     }
 }
 
