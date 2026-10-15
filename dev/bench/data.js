@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792056957181,
+  "lastUpdate": 1792065280585,
   "repoUrl": "https://github.com/kaidaniel/rowan",
   "entries": {
     "rowan": [
@@ -8494,6 +8494,324 @@ window.BENCHMARK_DATA = {
           {
             "name": "timm: objects",
             "value": 272003,
+            "unit": "count",
+            "extra": "finished"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kaiingodaniel@gmail.com",
+            "name": "Kai Daniel",
+            "username": "kaidaniel"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0b42a1172ea435ae7cc41f05ad29bcbb19ca14e8",
+          "message": "Merge pull request #18 from kaidaniel/iter/loop-items\n\nLoop items as views of their summary (soundness)",
+          "timestamp": "2026-10-15T12:51:09+01:00",
+          "tree_id": "6453898e86d9e372dfc9a426c21becb0851fc582",
+          "url": "https://github.com/kaidaniel/rowan/commit/0b42a1172ea435ae7cc41f05ad29bcbb19ca14e8"
+        },
+        "date": 1792065279962,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "click: wall time",
+            "value": 24.52,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "click: peak memory",
+            "value": 109,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "click: work",
+            "value": 428055,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "click: work units",
+            "value": 464240,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "click: tabulations",
+            "value": 99727,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "click: objects",
+            "value": 28283,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "email: wall time",
+            "value": 6.37,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "email: peak memory",
+            "value": 95,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "email: work",
+            "value": 283365,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "email: work units",
+            "value": 313041,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "email: tabulations",
+            "value": 50029,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "email: objects",
+            "value": 23722,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "functional: wall time",
+            "value": 17.7,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "functional: peak memory",
+            "value": 272,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "functional: work",
+            "value": 399288,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "functional: work units",
+            "value": 469804,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "functional: tabulations",
+            "value": 97894,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "functional: objects",
+            "value": 97813,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "golden tab=0: failing cases",
+            "value": 641,
+            "unit": "cases",
+            "extra": "537 passing"
+          },
+          {
+            "name": "pip: wall time",
+            "value": 28.52,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "pip: peak memory",
+            "value": 276,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "pip: work",
+            "value": 828760,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "pip: work units",
+            "value": 909097,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "pip: tabulations",
+            "value": 175363,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "pip: objects",
+            "value": 68373,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "rich: wall time",
+            "value": 14.45,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "rich: peak memory",
+            "value": 172,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "rich: work",
+            "value": 253565,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "rich: work units",
+            "value": 283214,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "rich: tabulations",
+            "value": 39333,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "rich: objects",
+            "value": 23780,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "sktime: wall time",
+            "value": 89.55,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "sktime: peak memory",
+            "value": 546,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "sktime: work",
+            "value": 387426,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "sktime: work units",
+            "value": 692924,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "sktime: tabulations",
+            "value": 95759,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "sktime: objects",
+            "value": 250948,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: wall time",
+            "value": 10.59,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: peak memory",
+            "value": 121,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work",
+            "value": 413510,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: work units",
+            "value": 429555,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: tabulations",
+            "value": 65680,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "stdlib12k: objects",
+            "value": 31512,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "timm: wall time",
+            "value": 69.55,
+            "unit": "s",
+            "extra": "finished"
+          },
+          {
+            "name": "timm: peak memory",
+            "value": 740,
+            "unit": "MB",
+            "extra": "finished"
+          },
+          {
+            "name": "timm: work",
+            "value": 834729,
+            "unit": "statements",
+            "extra": "finished"
+          },
+          {
+            "name": "timm: work units",
+            "value": 886569,
+            "unit": "units",
+            "extra": "finished"
+          },
+          {
+            "name": "timm: tabulations",
+            "value": 166680,
+            "unit": "count",
+            "extra": "finished"
+          },
+          {
+            "name": "timm: objects",
+            "value": 273120,
             "unit": "count",
             "extra": "finished"
           }
