@@ -864,67 +864,8 @@ impl Analyzer {
                 crate::models::pandas::frame_setattr(self, oid, name, v, node, state, strong);
                 continue;
             }
-            // a frozen dataclass: assignment raises FrozenInstanceError (an AttributeError)
-            if kind == Kind::Instance {
-                if let Some(cls) = self.heap.instance_class(oid) {
-                    if self.heap.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.dc_frozen.get()).unwrap_or(false)) && !self.cx.fresh_init.contains(&oid) {
-                        self.raise_here("FrozenInstanceError", state);
-                        continue;
-                    }
-                    // a NamedTuple's fields are read-only, and it has no instance dict
-                    if crate::models::dataclasses::is_named_tuple_class(self, cls) && self.class_lookup(cls, "__setattr__").is_none() {
-                        self.raise_here("AttributeError", state);
-                        continue;
-                    }
-                }
-            }
-            // a pydantic model's field / private attribute (`models::pydantic::model_setattr`)
-            if kind == Kind::Instance && crate::models::pydantic::model_setattr(self, oid, name, v, strong, node, state) {
+            if self.store_by_class(oid, kind, name, nk, v, strong, node, state) {
                 continue;
-            }
-            // a property with a setter: the setter runs instead of the store
-            let cls_of = match kind {
-                Kind::Instance => self.heap.instance_class(oid),
-                _ => None,
-            };
-            if let Some(cls) = cls_of {
-                if let Some(defc) = self.class_lookup(cls, name) {
-                    if let Some(&setter) = self.heap.prop_setters.get(&(defc, nk)) {
-                        self.call_user(setter, Some(Value::obj(oid)), vec![v.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
-                        continue;
-                    }
-                    // a property without a setter: the assignment raises
-                    if kind == Kind::Instance {
-                        let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
-                        if !cv.pts.is_empty() && cv.pts.iter().all(|f| self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_property.get()) {
-                            self.raise_here("AttributeError", state);
-                            continue;
-                        }
-                    }
-                    // a data descriptor (an object whose class has `__set__`) takes the store
-                    let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
-                    let descs: Vec<u32> = cv.pts.iter().filter(|d| self.heap.kind(*d) == Kind::Instance && self.heap.instance_class(*d).and_then(|dc| self.class_lookup(dc, "__set__")).is_some()).collect();
-                    if !descs.is_empty() {
-                        for d in descs {
-                            self.call_method_with(&Value::obj(d), "__set__", vec![Value::obj(oid), v.clone()], node, state);
-                        }
-                        continue;
-                    }
-                }
-                // a user `__setattr__` takes every assignment (`object.__setattr__` bypasses it)
-                if !self.mode.bypass_setattr && self.class_lookup(cls, "__setattr__").is_some() {
-                    self.call_method_with(&Value::obj(oid), "__setattr__", vec![Value::lit(nk), v.clone()], node, state);
-                    continue;
-                }
-            }
-            // `__slots__` on every class of the MRO (no `__dict__`): another name raises
-            if kind == Kind::Instance {
-                if let Some(allowed) = self.heap.instance_class(oid).and_then(|c| self.slots_of(c)) {
-                    if !allowed.iter().any(|a| a == name) {
-                        self.raise_here("AttributeError", state);
-                        continue;
-                    }
-                }
             }
             let strong_key = strong || (targets.len() == 1 && self.cx.fresh_init.contains(&oid));
             if kind == Kind::Unknown && !strong && state.slot_opt(oid, Ns::Attr, nk).is_none() {
@@ -941,5 +882,76 @@ impl Analyzer {
                 self.heap.cls_slots.insert((oid, Ns::Attr, nk), v.clone());
             }
         }
+    }
+
+    /// What the class does with a store of `name` on instance `oid`: a frozen dataclass or a
+    /// NamedTuple raises, a pydantic model validates, a property's setter, a data descriptor's
+    /// `__set__` or the class's `__setattr__` runs instead, `__slots__` refuses other names.
+    /// True: the store is done (or raised).
+    #[allow(clippy::too_many_arguments)]
+    fn store_by_class(&mut self, oid: ObjId, kind: Kind, name: &str, nk: KeyId, v: &Value, strong: bool, node: &Node, state: &mut State) -> bool {
+        // a frozen dataclass: assignment raises FrozenInstanceError (an AttributeError)
+        if kind == Kind::Instance {
+            if let Some(cls) = self.heap.instance_class(oid) {
+                if self.heap.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.dc_frozen.get()).unwrap_or(false)) && !self.cx.fresh_init.contains(&oid) {
+                    self.raise_here("FrozenInstanceError", state);
+                    return true;
+                }
+                // a NamedTuple's fields are read-only, and it has no instance dict
+                if crate::models::dataclasses::is_named_tuple_class(self, cls) && self.class_lookup(cls, "__setattr__").is_none() {
+                    self.raise_here("AttributeError", state);
+                    return true;
+                }
+            }
+        }
+        // a pydantic model's field / private attribute (`models::pydantic::model_setattr`)
+        if kind == Kind::Instance && crate::models::pydantic::model_setattr(self, oid, name, v, strong, node, state) {
+            return true;
+        }
+        // a property with a setter: the setter runs instead of the store
+        let cls_of = match kind {
+            Kind::Instance => self.heap.instance_class(oid),
+            _ => None,
+        };
+        if let Some(cls) = cls_of {
+            if let Some(defc) = self.class_lookup(cls, name) {
+                if let Some(&setter) = self.heap.prop_setters.get(&(defc, nk)) {
+                    self.call_user(setter, Some(Value::obj(oid)), vec![v.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
+                    return true;
+                }
+                // a property without a setter: the assignment raises
+                if kind == Kind::Instance {
+                    let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
+                    if !cv.pts.is_empty() && cv.pts.iter().all(|f| self.heap.kind(f) == Kind::Function && self.heap.func_info(f).is_property.get()) {
+                        self.raise_here("AttributeError", state);
+                        return true;
+                    }
+                }
+                // a data descriptor (an object whose class has `__set__`) takes the store
+                let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
+                let descs: Vec<u32> = cv.pts.iter().filter(|d| self.heap.kind(*d) == Kind::Instance && self.heap.instance_class(*d).and_then(|dc| self.class_lookup(dc, "__set__")).is_some()).collect();
+                if !descs.is_empty() {
+                    for d in descs {
+                        self.call_method_with(&Value::obj(d), "__set__", vec![Value::obj(oid), v.clone()], node, state);
+                    }
+                    return true;
+                }
+            }
+            // a user `__setattr__` takes every assignment (`object.__setattr__` bypasses it)
+            if !self.mode.bypass_setattr && self.class_lookup(cls, "__setattr__").is_some() {
+                self.call_method_with(&Value::obj(oid), "__setattr__", vec![Value::lit(nk), v.clone()], node, state);
+                return true;
+            }
+        }
+        // `__slots__` on every class of the MRO (no `__dict__`): another name raises
+        if kind == Kind::Instance {
+            if let Some(allowed) = self.heap.instance_class(oid).and_then(|c| self.slots_of(c)) {
+                if !allowed.iter().any(|a| a == name) {
+                    self.raise_here("AttributeError", state);
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
