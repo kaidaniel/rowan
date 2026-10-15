@@ -46,8 +46,8 @@ pub struct Context {
     pub model_epoch: u64,
     pub model_born: FxHashMap<ObjId, u64>,
     /// instances whose `__init__` is running for their construction (stores into them are
-    /// strong)
-    pub fresh_init: FxHashSet<ObjId>,
+    /// strong), with the heap's serial and the state when it began
+    pub fresh_init: FxHashMap<ObjId, (u64, crate::state::State)>,
     /// per running summary comprehension (`[Block() for _ in range(n)]`: its iterations
     /// cannot be told apart; by the object it makes): the number of items its one iteration
     /// stands for

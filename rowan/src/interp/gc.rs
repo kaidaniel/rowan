@@ -342,6 +342,45 @@ impl Analyzer {
         }
     }
 
+    /// Whether `target`, made just before `mark` (its construction began at `pre`), is held
+    /// by what `roots` (and what the analyzer holds, callers' names up to `envs`) reach: if not,
+    /// it loses its state. Older objects reach it only through slots written since `pre`; the
+    /// walk expands only younger objects and ends when it finds the target.
+    pub(in crate::interp) fn drop_unreached(&mut self, mark: u64, pre: &State, mut work: Vec<ObjId>, target: ObjId, state: &mut State, envs: usize) {
+        let young = |an: &Analyzer, o: u32| !an.heap.born_before(o, mark);
+        let fp = state.footprint(pre);
+        for (o, sk) in fp.slots.iter().filter(|(o, _)| !young(self, *o)) {
+            if let Some(val) = state.slots.get(o, sk) {
+                val.push_objs(&mut work);
+            }
+        }
+        for o in fp.elems.iter().filter(|o| !young(self, **o)) {
+            if let Some(KeyVal::KeysOf(ko)) = state.elems.get(o) {
+                work.extend(ko.objs.iter());
+            }
+        }
+        self.gc_pinned(&mut work, Some(envs));
+        let mut reached: FxHashSet<ObjId> = FxHashSet::default();
+        while let Some(o) = work.pop() {
+            if o == target {
+                return;
+            }
+            if !young(self, o) || !reached.insert(o) {
+                continue;
+            }
+            self.budget.walk_visit();
+            self.obj_edges(o, state, &mut work);
+        }
+        // (and what was made since that nothing reached: the parts built for it; a part of an
+        // input is found again by its path)
+        let fresh: FxHashSet<ObjId> = fp.rows.iter().map(|(o, _)| *o).chain(fp.slots.iter().map(|(o, _)| *o)).chain(fp.elems.iter().copied()).filter(|o| young(self, *o) && !reached.contains(o)).collect();
+        for o in fresh.into_iter().chain([target]) {
+            if !(matches!(self.heap.kind(o), Kind::Unknown) && crate::state::view_of(o).is_none()) {
+                state.forget_obj(o);
+            }
+        }
+    }
+
     /// Garbage collection at a loop's exit (in a function): objects the loop allocated that the
     /// frame's names, the enclosing frames and the analyzer no longer reach lose their state.
     pub(super) fn loop_gc_begin(&mut self, state: &mut State) -> Option<(u64, State)> {
