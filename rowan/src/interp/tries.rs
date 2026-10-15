@@ -619,7 +619,7 @@ impl Analyzer {
             for h in handlers {
                 h.body.iter().for_each(|x| collect_assigned(x, &mut assigned));
             }
-            let vals: Vec<(intern::StrId, Option<Value>, Option<Value>, Option<Value>)> = assigned.iter().map(|n| (*n, self.name_value(&a, *n), self.name_value(&b, *n), self.name_value(&out, *n))).collect();
+            let vals: Vec<(intern::StrId, Option<Value>, Option<Value>, Option<Value>)> = assigned.iter().filter(|n| self.tested(**n) >= 1).map(|n| (*n, self.name_value(&a, *n), self.name_value(&b, *n), self.name_value(&out, *n))).collect();
             let new = name_facts(&vals, &a, &b, &out, self.frame().func.unwrap_or(0));
             add_facts(&mut out, new);
         }

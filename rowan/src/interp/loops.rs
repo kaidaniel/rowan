@@ -330,7 +330,7 @@ impl Analyzer {
         };
         let mut new = Vec::new();
         for (text, name) in tests {
-            if assigned.contains(&name) {
+            if assigned.contains(&name) || self.tested(s(&text)) == 0 {
                 continue;
             }
             let deps = vec![(name, self.dep_value(exit_s, name))];

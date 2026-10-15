@@ -713,7 +713,7 @@ impl Analyzer {
                     collect_assigned(st, &mut assigned);
                 }
             }
-            if let Some((key, pos, names)) = cond {
+            if let Some((key, pos, names)) = cond.filter(|(k, _, _)| self.tested(*k) >= 2) {
                 // the test's names keep their values through the branches (narrowing aside):
                 // their joined values stand for them; a branch that assigns one gives no fact
                 let deps: Vec<(intern::StrId, Value)> = names.iter().map(|n| (*n, self.dep_value(&mut j, *n))).collect();
@@ -722,7 +722,7 @@ impl Analyzer {
                     new.extend(cond_facts_for(key, pos, deps, &then_s, &else_s, &j));
                 }
             }
-            let vals: Vec<(intern::StrId, Option<Value>, Option<Value>, Option<Value>)> = assigned.iter().map(|n| (*n, self.name_value(&then_s, *n), self.name_value(&else_s, *n), self.name_value(&j, *n))).collect();
+            let vals: Vec<(intern::StrId, Option<Value>, Option<Value>, Option<Value>)> = assigned.iter().filter(|n| self.tested(**n) >= 1).map(|n| (*n, self.name_value(&then_s, *n), self.name_value(&else_s, *n), self.name_value(&j, *n))).collect();
             new.extend(name_facts(&vals, &then_s, &else_s, &j, self.frame().func.unwrap_or(0)));
             add_facts(&mut j, new);
         }
@@ -795,6 +795,25 @@ impl Analyzer {
         }
         let names: Vec<intern::StrId> = super::names_in(inner).iter().map(|n| s(n)).collect();
         Some((s(&format!("{}@{}", text, self.frame().func.unwrap_or(0))), pos, names))
+    }
+
+    /// How often the running function tests this text (`if` / `elif` / `while`, a `not` taken
+    /// off; a test in a loop counts twice: it runs again): a branch fact (`CondFact`) serves
+    /// only a later test of its text. Outside functions: always enough.
+    pub(super) fn tested(&self, text: intern::StrId) -> u32 {
+        let t = intern::str_get(text);
+        let t = t.rsplit_once('@').map(|(a, _)| a).unwrap_or(&t);
+        let Some(fi) = self.frame().func.and_then(|f| self.heap.func_info_opt(f)) else { return u32::MAX };
+        let body = fi.node.body();
+        TESTED.with(|m| {
+            let mut m = m.borrow_mut();
+            let counts = m.entry(body.as_ptr() as usize).or_insert_with(|| {
+                let mut c = rustc_hash::FxHashMap::default();
+                count_tests(body, false, &mut c);
+                c
+            });
+            counts.get(t).copied().unwrap_or(0)
+        })
     }
 
     /// The value a plain name has in `st` (a local, else a module-level name), if bound.
@@ -986,5 +1005,57 @@ pub(super) fn collect_assigned(st: &ast::Stmt, out: &mut Vec<intern::StrId>) {
         }
         ast::Stmt::With(w) => w.body.iter().for_each(|x| collect_assigned(x, out)),
         _ => {}
+    }
+}
+
+thread_local! {
+    /// per function body: how often it tests each text (`Analyzer::tested`)
+    static TESTED: std::cell::RefCell<rustc_hash::FxHashMap<usize, rustc_hash::FxHashMap<String, u32>>> = Default::default();
+}
+
+/// Count the tests of these statements by their text (`cond_key`'s), twice in a loop.
+fn count_tests(body: &[ast::Stmt], in_loop: bool, out: &mut rustc_hash::FxHashMap<String, u32>) {
+    let add = |e: &ast::Expr, out: &mut rustc_hash::FxHashMap<String, u32>| {
+        let inner = match e {
+            ast::Expr::UnaryOp(u) if u.op == ast::UnaryOp::Not => &*u.operand,
+            other => other,
+        };
+        let text: String = frontend::text(inner).split_whitespace().collect::<Vec<_>>().join(" ");
+        *out.entry(text).or_insert(0) += if in_loop { 2 } else { 1 };
+    };
+    for st in body {
+        match st {
+            ast::Stmt::If(i) => {
+                add(&i.test, out);
+                count_tests(&i.body, in_loop, out);
+                for c in &i.elif_else_clauses {
+                    if let Some(t) = &c.test {
+                        add(t, out);
+                    }
+                    count_tests(&c.body, in_loop, out);
+                }
+            }
+            ast::Stmt::While(w) => {
+                add(&w.test, out);
+                count_tests(&w.body, true, out);
+                count_tests(&w.orelse, in_loop, out);
+            }
+            ast::Stmt::For(f) => {
+                count_tests(&f.body, true, out);
+                count_tests(&f.orelse, in_loop, out);
+            }
+            ast::Stmt::With(w) => count_tests(&w.body, in_loop, out),
+            ast::Stmt::Try(t) => {
+                count_tests(&t.body, in_loop, out);
+                for h in &t.handlers {
+                    let ast::ExceptHandler::ExceptHandler(h) = h;
+                    count_tests(&h.body, in_loop, out);
+                }
+                count_tests(&t.orelse, in_loop, out);
+                count_tests(&t.finalbody, in_loop, out);
+            }
+            ast::Stmt::Match(m) => m.cases.iter().for_each(|c| count_tests(&c.body, in_loop, out)),
+            _ => {}
+        }
     }
 }

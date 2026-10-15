@@ -32,7 +32,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   and `mutators` (unknown calls). A row without sources or mutators is *closed*; a successful read narrows the key in.
 * **Statements.** A test is evaluated once into the states where it is true and false
   (`split`, `narrow.rs`: narrowing reads its parts' values, `traced`); both branches run, join;
-  a pure test's branch rows come back when it recurs (`CondFact`, while no write changed them).
+  a pure test's branch rows come back when it recurs (`CondFact`: tests a function repeats, until a write).
   Loops over at most 16 known items are unrolled (comprehensions calling nothing per item: 64);
   others run to a fixpoint (40 rounds, then widened; verdicts are the last round's), making
   summaries; a target bound to one of the records a summary (or an input's element) stands for
