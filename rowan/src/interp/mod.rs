@@ -19,6 +19,8 @@ use crate::scopes::{self as scopemod, Scopes};
 use crate::state::{Kind, State};
 
 pub mod access;
+pub mod budget;
+pub use budget::{Budget, Clock};
 pub mod calls;
 pub mod effects;
 pub mod alloc;
@@ -493,32 +495,11 @@ pub enum StoreTarget {
     Slot(ObjId, Ns, KeyId),
 }
 
-/// When the analysis started (the deadline counts from it).
-#[derive(Clone, Copy)]
-pub struct Clock(std::time::Instant);
-
-impl Default for Clock {
-    fn default() -> Self {
-        Clock(std::time::Instant::now())
-    }
-}
-
-impl Clock {
-    pub fn elapsed(&self) -> std::time::Duration {
-        self.0.elapsed()
-    }
-}
-
 #[derive(Default)]
 pub struct Analyzer {
     /// the library models' own tables (`models::Tables`)
     pub m: crate::models::Tables,
     pub filename: String,
-    /// statements run per function code (`FuncNode::addr`: every closure object made from one
-    /// `def` shares the budget)
-    pub tab_count: FxHashMap<usize, usize>,
-    /// every body run of a call (the golden `#@tabulations <= N` bound)
-    pub tab_runs: usize,
     /// `__next__` functions whose calls were not decided once (`unroll_next`)
     pub no_unroll_next: FxHashSet<ObjId>,
     pub fresh_init: FxHashSet<ObjId>,
@@ -544,6 +525,8 @@ pub struct Analyzer {
     pub havoc: Havoc,
     /// what code may change when it does not run (`interp/effects.rs`)
     pub effects: effects::EffectsCache,
+    /// budgets, the deadline and the work counters (`interp/budget.rs`)
+    pub budget: Budget,
     pub models: Registry,
     pub frames: Vec<Frame>,
     pub active: FxHashMap<(ObjId, String), bool>,
@@ -633,9 +616,6 @@ pub struct Analyzer {
     pub entry_run: Option<ObjId>,
     /// functions that had their entry run
     pub entry_done: FxHashSet<ObjId>,
-    /// functions some call of which their budget refused: their own lines then need a reporting
-    /// run with open parameters (it covers the calls that did not run)
-    pub budget_out: FxHashSet<ObjId>,
     /// closures made inside concrete calls in torch modules (no entry run of their own)
     pub t_concrete_closures: FxHashSet<ObjId>,
     /// the state a factory's entry run ended in, for the closures it made
@@ -689,15 +669,6 @@ pub struct Analyzer {
     pub user_classes: Vec<ObjId>,
     /// class attributes (flow-insensitive)
     pub cls_slots: FxHashMap<(ObjId, Ns, KeyId), Value>,
-    /// statements executed plus objects instantiated (debug output)
-    pub work: usize,
-    /// objects visited by reachability walks (liveness, GC): part of the work measure
-    pub walked: std::cell::Cell<usize>,
-    /// when the analysis started (see `DEADLINE_MS`)
-    pub started: Clock,
-    /// the hard deadline passed: function bodies stop, the calls they are in become unknown calls
-    pub hard_cut: bool,
-    cut_tick: u32,
 
     pub entry_instances: FxHashMap<ObjId, ObjId>,
     pub fresh_in_progress: FxHashSet<ObjId>,
@@ -825,10 +796,6 @@ impl Analyzer {
         self.frames.last_mut().expect("no frame")
     }
 
-    pub fn now(&self) -> f64 {
-        self.started.elapsed().as_secs_f64()
-    }
-
     // ------------------------------------------------------------ reporting
     pub fn file_of_frame(&self) -> String {
         let m = self.frame().module;
@@ -879,27 +846,12 @@ impl Analyzer {
         std::path::Path::new(&canon(p)).strip_prefix(&dir).ok().map(|r| r.to_string_lossy().to_string())
     }
 
-    /// The work done so far: statements run and objects visited by reachability walks (16 to a
-    /// unit): a deterministic cost measure (`ROWAN_DEBUG=1`, the golden `#@work` bound).
-    pub fn work_units(&self) -> usize {
-        self.work + self.walked.get() / 16
-    }
-
-    /// Past the deadline (`DEADLINE_MS`): calls of user code are unknown code from there on.
-    pub fn over_hard_deadline(&self) -> bool {
-        self.started.elapsed().as_millis() as usize > limit("ms", DEADLINE_MS)
-    }
-
     /// Past the deadline a statement in a function body does not run: its path ends, and
     /// the call it belongs to is replaced by an unknown call (`call_user`). Module code goes on
     /// (its calls are unknown calls). Checked every 64 statements.
     pub fn cut_body(&mut self, state: &mut State) -> bool {
-        if !self.hard_cut {
-            self.cut_tick = self.cut_tick.wrapping_add(1);
-            if self.cut_tick % 64 != 0 || !self.over_hard_deadline() {
-                return false;
-            }
-            self.hard_cut = true;
+        if !self.budget.tick() {
+            return false;
         }
         if self.frames.last().is_some_and(|f| f.kind == FrameKind::Function) {
             state.reachable = false;
@@ -952,7 +904,7 @@ impl Analyzer {
 
     fn analyse_uncalled_range(&mut self, from: ObjId, n: ObjId, state: &mut State, quiet_pass: bool) {
         for oid in from..n {
-            if self.over_hard_deadline() {
+            if self.budget.over_hard_deadline() {
                 break;
             }
             if self.heap.kind(oid) != Kind::Function || self.entry_done.contains(&oid) {
@@ -966,7 +918,7 @@ impl Analyzer {
             let handler = self.m.fa_handlers.contains(&oid);
             // a function the program calls: a requirement-only run with open parameters gives
             // its own input contract (`param F.x` schemas)
-            let refused = self.budget_out.contains(&oid);
+            let refused = self.budget.out.contains(&oid);
             let quiet = self.analysed_funcs.contains(&oid) && !self.torch_modules.contains(&fi.module) && !handler && !refused;
             if quiet != quiet_pass && !(quiet_pass && refused) {
                 continue;
@@ -996,7 +948,7 @@ impl Analyzer {
                 continue;
             };
             if debug_enabled() {
-                eprintln!("[rowan] entry {} L{} t={:.1}s objs={} verdicts={} quiet={}", fi.qualname, fi.node.node().line, self.now(), self.heap.len(), self.findings.mark(), quiet);
+                eprintln!("[rowan] entry {} L{} t={:.1}s objs={} verdicts={} quiet={}", fi.qualname, fi.node.node().line, self.budget.now(), self.heap.len(), self.findings.mark(), quiet);
             }
             // a closure made by a factory's entry run starts from that run's state (its cells)
             let mut st = match self.t_closure_states.get(&oid) {

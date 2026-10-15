@@ -59,7 +59,7 @@ impl Analyzer {
             if !seen.insert(o) {
                 continue;
             }
-            self.walked.set(self.walked.get() + 1);
+            self.budget.walk_visit();
             if seen.len() > budget {
                 return targets.iter().copied().collect();
             }
@@ -415,7 +415,7 @@ impl Analyzer {
             if !reached.insert(o) || !young(self, o) {
                 continue;
             }
-            self.walked.set(self.walked.get() + 1);
+            self.budget.walk_visit();
             self.obj_edges(o, state, &mut work);
         }
         // (a part of an input — an unknown object, a placeholder — is found again by its path

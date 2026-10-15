@@ -101,10 +101,7 @@ impl Analyzer {
     }
 
     pub fn exec_stmt(&mut self, node: &'static ast::Stmt, state: &mut State) {
-        self.work += 1;
-        if let Some(code) = self.frames.last().map(|f| f.code).filter(|c| *c != 0) {
-            *self.tab_count.entry(code).or_default() += 1;
-        }
+        self.budget.charge(self.frames.last().map(|f| f.code).unwrap_or(0));
         if self.cut_body(state) {
             return;
         }

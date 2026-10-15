@@ -92,7 +92,7 @@ impl Analyzer {
             return self.call_one(targets[0], &args, &kwargs, &star_args, &star_kwargs, state, node, call_ast);
         }
         // (past the hard deadline: one unknown call for all of them)
-        if self.over_hard_deadline() && targets.iter().all(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound)) {
+        if self.budget.over_hard_deadline() && targets.iter().all(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound)) {
             return self.unknown_call("?", None, &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
         self.alternatives(targets.len(), false, state, &mut |an, i, st| {
@@ -471,7 +471,7 @@ impl Analyzer {
             let before = if run { Some(state.copy()) } else { None };
             self.force_at = Some((lg.site.clone(), lg.ctx.0.clone(), lg.ctx.1));
             let saved = std::mem::replace(&mut self.call_chain, lg.chain.clone());
-            let pre = if between { Some((state.copy(), std::rc::Rc::new(self.tab_count.clone()))) } else { None };
+            let pre = if between { Some((state.copy(), self.budget.snapshot())) } else { None };
             self.gen_last_reads = None;
             let r = self.call_user(lg.foid, lg.self_v.clone(), lg.args.clone(), lg.kwargs.clone(), vec![], vec![], state, &lg.node, None, false);
             self.call_chain = saved;
@@ -525,7 +525,7 @@ impl Analyzer {
     pub fn call_user(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, _call_ast: Option<&'static ast::ExprCall>, entry: bool) -> Value {
         // past the hard deadline a user function is unknown code (its result unknown, its
         // arguments possibly changed, it may raise): the run ends in bounded time
-        if self.over_hard_deadline() {
+        if self.budget.over_hard_deadline() {
             self.force_at = None;
             let q = self.heap.func_info(foid).qualname.clone();
             self.findings.note(format!("analysis cut at the deadline ({} ms): later calls are unknown code", super::limit("ms", super::DEADLINE_MS)));
@@ -545,11 +545,11 @@ impl Analyzer {
         // (user code called back by a model allocates as user code)
         let saved_md = std::mem::replace(&mut self.model_depth, 0);
         // (the arguments, for the unknown call that replaces this one when the hard deadline cuts it)
-        let was_cut = self.hard_cut;
+        let was_cut = self.budget.hard_cut;
         let keep = (self_v.clone(), args.clone(), kwargs.clone(), star_args.clone(), star_kwargs.clone());
         let r = self.call_user_inner(foid, self_v, args, kwargs, star_args, star_kwargs, state, node, _call_ast, entry);
         self.model_depth = saved_md;
-        if self.hard_cut && !was_cut {
+        if self.budget.hard_cut && !was_cut {
             let q = self.heap.func_info(foid).qualname.clone();
             self.findings.note(format!("analysis cut at the deadline ({} ms) inside {}: the call is unknown code", super::limit("ms", super::DEADLINE_MS), q));
             state.reachable = true;
@@ -677,10 +677,10 @@ impl Analyzer {
         // every statement a function code runs counts against its budget (entry runs aside: one
         // per function); past it a call is unknown code, so the whole analysis is bounded by the
         // number of functions times the budget
-        if !entry && self.tab_count.get(&fi.node.addr()).copied().unwrap_or(0) > super::limit("budget", super::FN_BUDGET) {
+        if !entry && self.budget.exhausted(fi.node.addr()) {
             let q = fi.qualname.clone();
             self.findings.note(format!("{} ran out of its budget: later calls are unknown code", q));
-            self.budget_out.insert(foid);
+            self.budget.out.insert(foid);
             return self.skipped_call(foid, &q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
         if super::debug_enabled() {
@@ -760,7 +760,7 @@ impl Analyzer {
             // (a round of a recursion before its fixpoint: its accesses' verdicts are superseded)
             self.findings.drop_since(vmark);
             vmark = self.findings.mark();
-            self.tab_runs += 1;
+            self.budget.runs += 1;
             let mut st = entry_state.copy();
             if let Some(g) = gen_id {
                 self.gen_reads.push((g, false, Default::default()));
@@ -1372,7 +1372,7 @@ impl Analyzer {
             self.findings.drop_since(vmark);
             // (the budgets as before the first generator run: the run again spends them)
             if let Some(w) = self.gen_watch.get(wmark) {
-                self.tab_count = (*w.budget).clone();
+                self.budget.restore(&w.budget);
             }
             self.gen_watch.truncate(wmark);
             // (modules it imported stay imported: their facts go on)
@@ -1467,7 +1467,7 @@ impl Analyzer {
             if !seen.insert(o) {
                 continue;
             }
-            self.walked.set(self.walked.get() + 1);
+            self.budget.walk_visit();
             if targets.binary_search(&o).is_ok() {
                 found.insert(o);
                 if found.len() == targets.len() {

@@ -166,7 +166,7 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 | `interp/stmts.rs` | statements, loops, try / with / match, `finally` |
 | `interp/exprs.rs`, `interp/funcs.rs` | expressions, comprehensions, yields; functions, iteration, generators |
 | `interp/narrow.rs`, `interp/access.rs` | tests (`split`), narrowing; attribute and item access, verdicts, requirements |
-| `interp/calls.rs`, `interp/unknown.rs`, `interp/effects.rs` | calls: per-call-site runs, budget, recursion, `__new__`, dataclass init; unknown calls (`Havoc` walks); what skipped calls may change (`skipped_call`, `EffectsCache`) |
+| `interp/calls.rs`, `budget.rs`, `unknown.rs`, `effects.rs` | calls: per-call-site runs, recursion; `Budget` (per code, deadline, work counters); `__new__`, dataclass init; unknown calls (`Havoc` walks); what skipped calls may change (`skipped_call`, `EffectsCache`) |
 | `models/shape.rs` | tensor shapes (dims as polynomials) for the torch and numpy models |
 | `interp/findings.rs`, `interp/names.rs`, `report.rs`, `main.rs` | `Findings` (verdicts, notes, row checks, hover facts) and `Names` (symbols, origins) collected; text / JSON / facts output; CLI (mimalloc), `rowan serve` (on a 1 GiB-stack thread) |
 | `models/` | `mod.rs` (`Registry`, builtins, containers); `tables` (what builtins / library calls raise, change, keep); CPython-exact values (`pyvalues`, `pytext`, `pynum`, `chrono`, `pathtext`); `re` (`pyre`, `remodel`); stdlib (`enums`, `exceptions`, functools, itertools, …); `pandas`, `pydantic`, `fastapi`, `torch` |
