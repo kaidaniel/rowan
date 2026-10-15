@@ -279,6 +279,21 @@ impl Analyzer {
                 }
             }
         }
+        // `xs[:n]` with n not known on known positions: each position it has is xs's (its length
+        // one of 0..=len(xs))
+        let prefix = matches!(&key.kv, KeyVal::Data(s) if intern::str_get(*s).starts_with("slice-prefix@"));
+        if prefix && kind != Kind::Set && single_target {
+            if let Some(n) = self.heap.llen(oid, state).filter(|n| *n < 16) {
+                let vals: Vec<Value> = (0..n).map(|i| state.slot(oid, Ns::Pos, intern::key_int(i as i64))).collect();
+                let kv = state.elems.get(&oid).unwrap_or(DATA);
+                let v = self.alloc_positional(kind, node, Some(vals), Value::new(), kv, state);
+                if let Some(nid) = v.single() {
+                    state.lens.insert(nid, (None, 0, ((1u32 << (n + 1)) - 1) as u16));
+                }
+                parts.push(v);
+                return true;
+            }
+        }
         if is_slice && kind != Kind::Set {
             // a slice is a container of the same elements (positions unknown)
             let elem = state.slot(oid, Ns::Elem, STAR);
@@ -302,6 +317,18 @@ impl Analyzer {
             if 0 <= i && (i as usize) < p {
                 parts.push(state.slot(oid, Ns::Pos, intern::key_int(i)));
                 return true;
+            }
+        }
+        // (one of a few lengths: the position where it is there; a negative one from each end)
+        if let (Some(i), None, Some(alts)) = (idx, ll, self.heap.len_alts(oid, state).filter(|_| kind != Kind::Set)) {
+            let at: Vec<i64> = alts.iter().map(|n| if i < 0 { *n as i64 + i } else { i }).collect();
+            let inside: Vec<i64> = alts.iter().zip(&at).filter(|(n, p)| **p >= 0 && **p < **n as i64).map(|(_, p)| *p).collect();
+            if !inside.is_empty() && inside.iter().all(|p| state.has_slot(oid, Ns::Pos, intern::key_int(*p))) {
+                if inside.len() < alts.len() {
+                    self.may_raise_here("IndexError", state);
+                }
+                parts.push(join_values(inside.iter().map(|p| state.slot(oid, Ns::Pos, intern::key_int(*p))).collect::<Vec<Value>>()));
+                return false;
             }
         }
         match (idx, ll) {

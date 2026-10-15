@@ -320,14 +320,19 @@ impl Analyzer {
             }
             ast::Expr::Slice(sl) => {
                 let nd = frontend::node(node);
-                // known bounds are kept in the label (`slice[1:3:1]@L5`; a missing bound is empty)
+                // known bounds are kept in the label (`slice[1:3:1]@L5`; a missing bound is empty;
+                // `slice-prefix`: from the start by one, to a bound not known)
                 let mut b: Vec<String> = Vec::new();
                 for e in [&sl.lower, &sl.upper, &sl.step] {
                     match e.as_deref() {
                         None => b.push(String::new()),
                         Some(e) => match self.int_value(e, state) {
                             Some(i) => b.push(i.to_string()),
-                            None => return Value::data(&format!("slice@L{}", nd.line)),
+                            None => {
+                                let prefix = matches!(b.first().map(|x| x.as_str()), Some("" | "0")) && b.len() == 1;
+                                let step1 = sl.step.as_deref().is_none_or(|s| self.int_value(s, state) == Some(1));
+                                return Value::data(&format!("slice{}@L{}", if prefix && step1 { "-prefix" } else { "" }, nd.line));
+                            }
                         },
                     }
                 }

@@ -179,8 +179,8 @@ if __name__ == "__main__":
     rec_csv_region = rec_csv["region"]
     rec_csv_seq = rec_csv["seq"]
     rec_json = batches_a["jsonl"][2]
-    rec_json_tags = batches_a["jsonl"][1]               #@todo row rec_json_tags: present={id,user,amount,region,ts,tags,source,seq} definite={id,user,amount,region,ts,tags,source,seq} closed
-    #@row rec_json_tags: present={id,user,amount,region,ts,tags,source,seq} closed
+    rec_json_tags = batches_a["jsonl"][1]               #@row rec_json_tags: present={id,user,amount,region,ts,tags,source,seq} definite={id,user,amount,region,ts,tags,source,seq} closed
+    # (a batch is the records cut at a size the environment may set: item 1, where there is one)
     #@schema param JsonLinesSource.normalize.obj: always={id,user,ts} only={id,user,ts}
     json_err = pipe_a.sources["jsonl"].errors[0]["error"]  #@value json_err: exactly={"bad json: Expecting value"}
     rec_log = batches_a["log"][1]                       #@row rec_log: present={id,user,amount,ts,region,level,source,seq} definite={id,user,amount,ts,region,level,source,seq} closed
