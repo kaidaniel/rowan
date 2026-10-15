@@ -231,59 +231,37 @@ impl Analyzer {
             self.follow_code(callables, rid, site_id, state);
         }
         self.havoc.code = found;
-        // for people: the call as written and the known objects it was given (unknown code may
-        // return one of them; given unknowns add nothing to `?`)
-        {
-            let text = crate::frontend::text_at(node);
-            let mut given: Vec<String> = Vec::new();
-            for (o, _) in &arg_recs {
-                if matches!(self.heap.kind(*o), Kind::Unknown) {
-                    continue;
-                }
-                let g = self.heap.obj(*o).label.to_string();
-                if !given.contains(&g) {
-                    given.push(g);
-                }
-            }
-            if !text.is_empty() {
-                let t = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                self.names.site_names.entry(site_id).or_insert_with(|| (t.clone(), node.module, node.line));
-                let scope = self.frame().func.unwrap_or(0);
-                self.names.set(rid, t.clone(), scope);
-                self.names.origins.insert(rid, (t, node.line, given));
-            }
-        }
-        // (many records given — a value joined over many contexts: the result is any record,
-        // an open row, rather than the join of them all and a copy of all their slots)
-        // (its items: those of the mappings it was given; an instance's attributes are not
-        // items)
-        let item_recs: Vec<ObjId> = arg_recs.iter().filter(|(_, ns)| *ns == Ns::Item).map(|(o, _)| *o).collect();
-        if !item_recs.is_empty() && item_recs.len() <= MAX_ARG_JOIN {
-            let row = join_rows(item_recs.iter().map(|o| state.row(*o, Ns::Item)));
-            let mut d = row.data();
-            d.definite = KeySet::new();
-            d.absent = KeySet::new();
-            d.mutators = d.mutators.insert(site_id);
-            state.set_row(rid, Ns::Item, Row::from_data(d));
-            // as an object the result is unknown: its attributes come from the call
-            let src = Source::new(&site, SourceKind::Call);
-            state.set_row(rid, Ns::Attr, Row::with_source(src).mutate(site_id));
-            for oid in &item_recs {
-                for (k, v) in state.obj_slots(*oid, Ns::Item) {
-                    state.set_slot(rid, Ns::Item, k, v, false);
-                }
-            }
-        } else {
-            let src = Source::new(&site, SourceKind::Call);
-            let mutated = |r: Row| if arg_recs.is_empty() { r } else { r.mutate(site_id) };
-            state.set_row(rid, Ns::Item, mutated(Row::with_source(src)));
-            state.set_row(rid, Ns::Attr, mutated(Row::with_source(src)));
-        }
+        self.name_unknown_result(rid, site_id, &arg_recs, node);
+        unknown_result_rows(state, rid, &site, site_id, &arg_recs);
         self.findings.note(format!("unknown call {}", site));
         // (it may raise anything, after any part of its effects: the state with all of them
         // stands for those with some)
         self.flag_may_raise(state);
         Value::obj(rid)
+    }
+
+    /// For people: the call as written names its result (and its site, for sources and
+    /// mutators), with the known objects it was given (unknown code may return one of them;
+    /// given unknowns add nothing to `?`).
+    fn name_unknown_result(&mut self, rid: ObjId, site_id: StrId, arg_recs: &[(u32, Ns)], node: &Node) {
+        let text = crate::frontend::text_at(node);
+        let mut given: Vec<String> = Vec::new();
+        for (o, _) in arg_recs {
+            if matches!(self.heap.kind(*o), Kind::Unknown) {
+                continue;
+            }
+            let g = self.heap.obj(*o).label.to_string();
+            if !given.contains(&g) {
+                given.push(g);
+            }
+        }
+        if !text.is_empty() {
+            let t = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            self.names.site_names.entry(site_id).or_insert_with(|| (t.clone(), node.module, node.line));
+            let scope = self.frame().func.unwrap_or(0);
+            self.names.set(rid, t.clone(), scope);
+            self.names.origins.insert(rid, (t, node.line, given));
+        }
     }
 
     /// The shared unknown object (`any_object`).
@@ -441,5 +419,37 @@ fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: Str
         state.elems.insert(o, kv);
         state.clear_last(o);
         heap.set_prefix(o, state, 0);
+    }
+}
+
+/// The rows of an unknown call's result: the items of the mappings it was given (up to
+/// `MAX_ARG_JOIN`; past that any record), else open through the call; changed by the call when
+/// it was given records.
+fn unknown_result_rows(state: &mut State, rid: ObjId, site: &str, site_id: StrId, arg_recs: &[(u32, Ns)]) {
+    // (many records given — a value joined over many contexts: the result is any record,
+    // an open row, rather than the join of them all and a copy of all their slots)
+    // (its items: those of the mappings it was given; an instance's attributes are not
+    // items)
+    let item_recs: Vec<ObjId> = arg_recs.iter().filter(|(_, ns)| *ns == Ns::Item).map(|(o, _)| *o).collect();
+    if !item_recs.is_empty() && item_recs.len() <= MAX_ARG_JOIN {
+        let row = join_rows(item_recs.iter().map(|o| state.row(*o, Ns::Item)));
+        let mut d = row.data();
+        d.definite = KeySet::new();
+        d.absent = KeySet::new();
+        d.mutators = d.mutators.insert(site_id);
+        state.set_row(rid, Ns::Item, Row::from_data(d));
+        // as an object the result is unknown: its attributes come from the call
+        let src = Source::new(site, SourceKind::Call);
+        state.set_row(rid, Ns::Attr, Row::with_source(src).mutate(site_id));
+        for oid in &item_recs {
+            for (k, v) in state.obj_slots(*oid, Ns::Item) {
+                state.set_slot(rid, Ns::Item, k, v, false);
+            }
+        }
+    } else {
+        let src = Source::new(site, SourceKind::Call);
+        let mutated = |r: Row| if arg_recs.is_empty() { r } else { r.mutate(site_id) };
+        state.set_row(rid, Ns::Item, mutated(Row::with_source(src)));
+        state.set_row(rid, Ns::Attr, mutated(Row::with_source(src)));
     }
 }
