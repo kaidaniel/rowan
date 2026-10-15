@@ -190,8 +190,8 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.5 / ~2.4 / ~8.7 / ~6.3 s; 0.12 / 0.07 / 0.16 / 0.09 GB |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~12.8 / ~24 / ~29 / ~5.1 s; 0.29 / 0.75 / 0.46 / 0.29 GB |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.3 / ~2.5 / ~8.8 / ~6.4 s; 0.12 / 0.07 / 0.16 / 0.09 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~13 / ~26 / ~23 / ~5.2 s; 0.30 / 0.75 / 0.39 / 0.30 GB |
 
 ## Known problems and next steps
 
