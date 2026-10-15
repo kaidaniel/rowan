@@ -3371,8 +3371,8 @@ fn groupby_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
 }
 
-/// A row of a frame (iterrows / itertuples / apply / records): accesses on it narrow the
-/// row, not the frame (a frame without rows never runs them).
+/// A row of a frame (iterrows / itertuples / apply / records): one record of its own for each
+/// iteration of a loop over the rows (`bind_views`).
 fn mark_view(an: &mut Analyzer, vrow: u32, _fs: &[u32]) {
     an.heap.obj_mut(vrow).iter_elem = true;
 }
@@ -5235,7 +5235,7 @@ pub fn frame_getitem_n(an: &mut Analyzer, oid: u32, key: &Value, node: &Node, st
         }
         // the program went on: the column was there (also under a try that handles the miss)
         if narrow && cls.tier != Tier::Missing && an.heap.obj(oid).single {
-            state.set_row(oid, Ns::Item, row.narrow_in(k, true));
+            state.set_row_narrowed(oid, Ns::Item, row.narrow_in(k, true));
         }
         return column_series(an, state, oid, k, node);
     }

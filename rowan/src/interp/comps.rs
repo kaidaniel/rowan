@@ -178,6 +178,10 @@ impl Analyzer {
 
     pub(super) fn comp_bind(&mut self, target: &'static ast::Expr, it: &Elem, state: &mut State) {
         self.bind_iter_target(target, it, state);
+        // (a pass standing for every item: each one an object of its own)
+        if self.cx.comp_known.last() == Some(&false) {
+            self.bind_views(target, state);
+        }
         if !self.cx.comp_cells.is_empty() {
             // the variable's cell holds its latest value
             let ctx = self.frame().ctx.clone();

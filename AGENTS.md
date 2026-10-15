@@ -34,7 +34,9 @@ namespace packages).
   (`split`, `narrow.rs`: narrowing reads its parts' values, `traced`); both branches run, join.
   Loops over at most 16 known items are unrolled (comprehensions calling nothing per item: 64);
   others run to a fixpoint (40 rounds, then widened; verdicts are the last round's), making
-  summaries; a summary record a loop goes through is one record per iteration (`focus`). A running `try`
+  summaries. A loop's target bound to a record a summary or an input's element stands for is a
+  *view* each iteration (`bind_views`): one record, strong; a change of it or of the others
+  joins into them (`link_view`); folded into the summary at the back edge. A running `try`
   (`TryCtx`) records the state at every point of its body and callees that may raise (a raise,
   a failing read, a model's raise, any unknown call: class `any_exc`), joined per class;
   handlers start from the raises they may catch, the rest go on through the `finally` to the
@@ -51,8 +53,7 @@ namespace packages).
   run). Entry runs are not counted (one per function): work is bounded by functions × budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation
     reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened.
-  * **Unknown values** are not taken for instances of the program's classes: a method of an
-    unknown object is an unknown call (no duck typing; it was a closed-world assumption).
+  * **Unknown values** are not taken for the program's instances: their methods are unknown calls.
   * **Unknown calls** may change everything they reach through what they are given, at any
     depth: records get a mutator, slots may hold anything (one shared unknown object, which
     no store changes: a value stored into it goes to unknown code, `escape`), lists and sets

@@ -471,6 +471,18 @@ impl State {
         if is_any(oid) {
             return;
         }
+        if has_views() {
+            self.mirror_row(oid, ns, &row);
+        }
+        self.set_row_narrowed(oid, ns, row);
+    }
+
+    /// A row the path learned more about (a test, a read that succeeded), not one the program
+    /// changed: the other objects of its family (`link_view`) keep theirs.
+    pub fn set_row_narrowed(&mut self, oid: ObjId, ns: Ns, row: Row) {
+        if is_any(oid) {
+            return;
+        }
         // (an object several runtime objects share: what is installed joins what is there)
         if is_merged(oid) {
             if let Some(cur) = self.rows.get(&(oid, ns)) {
@@ -482,6 +494,25 @@ impl State {
             }
         }
         self.rows.insert((oid, ns), row);
+    }
+
+    /// A change of `oid`'s row may be a change of each object of its family (a loop's item
+    /// and the records it is one of, `link_view`): theirs on this path join it.
+    /// (A view's row set to what it is changes nothing: the record it stands for is as it was.
+    /// The summary's always may: its row covers the record a change hits and others.)
+    fn mirror_row(&mut self, oid: ObjId, ns: Ns, row: &Row) {
+        let Some(fam) = family(oid) else { return };
+        if view_of(oid).is_some() && self.rows.get(&(oid, ns)).as_ref() == Some(row) {
+            return;
+        }
+        for m in fam {
+            if let Some(cur) = self.rows.get(&(m, ns)) {
+                if view_of(m).is_some() {
+                    note_view_hit();
+                }
+                self.rows.insert((m, ns), cur.join(row));
+            }
+        }
     }
 
     pub fn slot(&self, oid: ObjId, ns: Ns, key: KeyId) -> Value {
@@ -497,6 +528,28 @@ impl State {
     }
 
     pub fn set_slot(&mut self, oid: ObjId, ns: Ns, key: KeyId, v: Value, strong: bool) {
+        if is_any(oid) {
+            return;
+        }
+        if has_views() {
+            if let Some(fam) = family(oid) {
+                for m in fam {
+                    if self.has_row(m, Ns::Item) || self.has_row(m, Ns::Attr) {
+                        if view_of(m).is_some() {
+                            note_view_hit();
+                        }
+                        let nv = self.slot(m, ns, key).join(&v);
+                        self.slots.set(&m, (ns, key), nv);
+                    }
+                }
+            }
+        }
+        self.set_slot_found(oid, ns, key, v, strong);
+    }
+
+    /// A value a read found under a key (an input's, a placeholder for it), not one the program
+    /// stored: the other objects of its family (`link_view`) keep theirs.
+    pub fn set_slot_found(&mut self, oid: ObjId, ns: Ns, key: KeyId, v: Value, strong: bool) {
         if is_any(oid) {
             return;
         }
@@ -752,6 +805,57 @@ pub fn is_any(oid: ObjId) -> bool {
     ANY.with(|a| a.get() == oid)
 }
 
+thread_local! {
+    /// a loop's item (a view) -> the object standing for the records it is one of
+    static VIEWS: std::cell::RefCell<rustc_hash::FxHashMap<ObjId, ObjId>> = std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+    /// such an object -> its views
+    static VIEWED: std::cell::RefCell<rustc_hash::FxHashMap<ObjId, Vec<ObjId>>> = std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+    /// changes a view got from another object of its family (`view_hits`)
+    static VIEW_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// `i` is one of the runtime objects `s` stands for (a loop's current item): a change of
+/// either, or of another view of `s`, may be a change of the others (they join it).
+pub fn link_view(i: ObjId, s: ObjId) {
+    VIEWS.with(|v| v.borrow_mut().insert(i, s));
+    VIEWED.with(|v| {
+        let mut v = v.borrow_mut();
+        let e = v.entry(s).or_default();
+        if !e.contains(&i) {
+            e.push(i);
+        }
+    });
+}
+
+/// The object a view is one of.
+pub fn view_of(i: ObjId) -> Option<ObjId> {
+    if !has_views() {
+        return None;
+    }
+    VIEWS.with(|v| v.borrow().get(&i).copied())
+}
+
+fn has_views() -> bool {
+    VIEWS.with(|v| !v.borrow().is_empty())
+}
+
+/// The other objects of `oid`'s family: its summary and the summary's other views, or its
+/// views (None: it has none).
+fn family(oid: ObjId) -> Option<Vec<ObjId>> {
+    let root = view_of(oid).unwrap_or(oid);
+    let views = VIEWED.with(|v| v.borrow().get(&root).cloned())?;
+    Some(std::iter::once(root).chain(views).filter(|m| *m != oid).collect())
+}
+
+fn note_view_hit() {
+    VIEW_HITS.with(|c| c.set(c.get() + 1));
+}
+
+/// How many changes views got from another object of their family so far.
+pub fn view_hits() -> u64 {
+    VIEW_HITS.with(|c| c.get())
+}
+
 pub fn is_merged(oid: ObjId) -> bool {
     MERGED.with(|m| m.borrow().contains(&oid))
 }
@@ -760,6 +864,8 @@ pub fn is_merged(oid: ObjId) -> bool {
 /// again, so the merged set and the cost counters do too.
 pub fn reset_thread_state() {
     MERGED.with(|m| m.borrow_mut().clear());
+    VIEWS.with(|v| v.borrow_mut().clear());
+    VIEWED.with(|v| v.borrow_mut().clear());
     ANY.with(|a| a.set(ObjId::MAX));
     FP_VISITS.with(|c| c.set(0));
     crate::domain::reset_row_joins();

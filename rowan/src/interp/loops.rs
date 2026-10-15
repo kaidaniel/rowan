@@ -4,7 +4,7 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{ObjId, KeyVal, Ns, Value};
+use crate::domain::{ObjId, KeyVal, Ns, Row, Value};
 use crate::frontend::{self};
 use crate::intern::{self, s};
 use crate::state::{Kind, State};
@@ -283,23 +283,20 @@ impl Analyzer {
             self.set_cursor(o, None, state);
         }
         let pre = state.copy();
-        let focus0 = self.cx.focus.len();
-        if let Elem::One(v) = &it.elem {
-            if let Some(o) = v.single().filter(|o| !self.heap.obj(*o).single && self.heap.is_record_like(*o)) {
-                self.cx.focus.push(o);
-            }
-        }
+        let mut ends: Vec<(ObjId, [Row; 2])> = Vec::new();
         let (head, exit_acc, back) = self.loop_fixpoint(state, &mut |an, body_s| {
             an.bind_iter_target(&f.target, &it.elem, body_s);
+            let views = an.bind_views(&f.target, body_s);
+            let hits0 = crate::state::view_hits();
             an.exec_block(&f.body, body_s);
+            ends = an.view_ends(&views, hits0, body_s);
         });
-        self.cx.focus.truncate(focus0);
         let mut exit_s = head.copy();
         let elem_v = it.elem.value_part();
         self.promote_elem_reqs(&mut exit_s, &back, &elem_v, state);
         if exit_acc.is_none() && back.reachable {
             let own = itv.single().filter(|l| self.heap.obj(*l).single && matches!(self.heap.kind(*l), Kind::List | Kind::Tuple) && back.slots_of(*l) == pre.slots_of(*l) && back.lens.get(l) == pre.lens.get(l));
-            self.elements_done(&elem_v, own, &f.target, &back, &mut exit_s);
+            self.elements_done(&elem_v, own, &f.target, &back, &ends, &mut exit_s);
         }
         if !f.orelse.is_empty() && exit_s.reachable {
             self.exec_block(&f.orelse, &mut exit_s);
@@ -345,17 +342,110 @@ impl Analyzer {
     /// (A summary record — `[dict(x) for x in data]` — too, when nothing but the list the loop
     /// went through, which the body did not change, holds it: every one it stands for that is
     /// still in use was an item.)
-    fn elements_done(&mut self, elem_v: &Value, list: Option<ObjId>, target: &ast::Expr, back: &State, exit_s: &mut State) {
+    /// (`ends`: the rows the item of a summary had at the end of the body, when nothing else
+    /// of its family changed it there)
+    fn elements_done(&mut self, elem_v: &Value, list: Option<ObjId>, target: &ast::Expr, back: &State, ends: &[(ObjId, [Row; 2])], exit_s: &mut State) {
         for oid in elem_v.pts.iter() {
+            let end = ends.iter().find(|(s, _)| *s == oid).map(|(_, r)| r);
+            let row_at = |ns: Ns| match (end, ns) {
+                (Some(r), Ns::Item) => r[0].clone(),
+                (Some(r), _) => r[1].clone(),
+                _ => back.row(oid, ns),
+            };
             // (rows the body changed; for a summary, only then the walk)
-            let rows: Vec<Ns> = [Ns::Item, Ns::Attr].into_iter().filter(|ns| back.has_row(oid, *ns) && back.row(oid, *ns) != exit_s.row(oid, *ns)).collect();
+            let rows: Vec<Ns> = [Ns::Item, Ns::Attr].into_iter().filter(|ns| back.has_row(oid, *ns) && row_at(*ns) != exit_s.row(oid, *ns)).collect();
             let held = |an: &Analyzer| list.is_some_and(|l| an.held_only_by(oid, l, target, exit_s));
             if !rows.is_empty() && self.heap.is_record_like(oid) && (self.heap.obj(oid).single || held(self)) {
                 for ns in rows {
-                    exit_s.set_row(oid, ns, back.row(oid, ns));
+                    exit_s.set_row_narrowed(oid, ns, row_at(ns));
                 }
             }
         }
+    }
+
+    /// Each name a loop's target bound to one of the records an object stands for (a summary,
+    /// an input's element) is bound to an object of its own for the iteration instead: one
+    /// record (`link_view`: what changes it may change the others, and the other way round),
+    /// its facts a copy of theirs, folded back into them at the back edge (as a recent object).
+    /// (The view an earlier iteration left in use — a `break` out of an inner loop — is not
+    /// made again: the name keeps the summary.)
+    pub(super) fn bind_views(&mut self, target: &'static ast::Expr, state: &mut State) -> Vec<(ObjId, ObjId)> {
+        let mut out = Vec::new();
+        if self.cx.recent_stack.is_empty() {
+            return out;
+        }
+        for n in super::names_in(target) {
+            let sid = intern::s(&n);
+            let Some(v) = self.name_value(state, sid).filter(|v| v.pts.len() == 1) else { continue };
+            let o = v.pts.iter().next().unwrap();
+            if let Some(i) = self.loop_view(o, target, state) {
+                self.store_name(sid, Value::with_kv(Value::obj(i).pts, v.kv.clone()), state);
+                out.push((i, o));
+            }
+        }
+        out
+    }
+
+    fn loop_view(&mut self, o: ObjId, target: &'static ast::Expr, state: &mut State) -> Option<ObjId> {
+        let ob = self.heap.obj(o);
+        if ob.single || crate::state::is_any(o) || !(matches!(ob.kind, Kind::Dict | Kind::Instance | Kind::Unknown) || ob.iter_elem) || crate::state::view_of(o).is_some() {
+            return None;
+        }
+        let (kind, label, payload, derived, depth) = (ob.kind, ob.label.to_string(), ob.payload.clone(), ob.derived_from, ob.depth);
+        let ctx = self.frame().ctx.clone();
+        let site = format!("view:{}:{}", o, target as *const ast::Expr as usize);
+        let i = self.heap.alloc_raw(kind, &site, &ctx, true, &label, payload);
+        if !self.heap.obj(i).single || self.has_facts(i, state) {
+            return None;
+        }
+        let (ll, kp) = (self.heap.obj(o).literal_len, self.heap.obj(o).known_prefix);
+        let io = self.heap.obj_mut(i);
+        (io.literal_len, io.known_prefix) = (ll, kp);
+        io.derived_from = derived;
+        io.depth = depth;
+        self.heap.renew(i);
+        for ns in [Ns::Item, Ns::Attr] {
+            if let Some(r) = state.rows.get(&(o, ns)) {
+                state.rows.insert((i, ns), r);
+            }
+        }
+        for (sk, v) in state.slots_of(o) {
+            state.slots.set(&i, sk, v);
+        }
+        if let Some(l) = state.lens.get(&o) {
+            state.lens.insert(i, l);
+        }
+        if let Some(e) = state.elems.get(&o) {
+            state.elems.insert(i, e);
+        }
+        crate::state::link_view(i, o);
+        if let Some(sym) = self.names.get(o).cloned() {
+            let scope = self.names.scope(o);
+            self.names.set(i, sym, scope);
+        }
+        self.cx.recent_stack.last_mut().unwrap().push((i, kind, site, ctx));
+        Some(i)
+    }
+
+    /// The rows of each view at the end of the body (the continues' joined in), when no other
+    /// object of its family changed it since `hits0` (`view_hits`).
+    fn view_ends(&self, views: &[(ObjId, ObjId)], hits0: u64, body_s: &State) -> Vec<(ObjId, [Row; 2])> {
+        if views.is_empty() || crate::state::view_hits() != hits0 {
+            return Vec::new();
+        }
+        let cont = self.unwind.loop_stack.last().and_then(|c| c.continues.as_ref());
+        let ends = [Some(body_s), cont].into_iter().flatten().filter(|s| s.reachable);
+        let mut out: Vec<(ObjId, [Row; 2])> = Vec::new();
+        for st in ends {
+            for (i, s) in views {
+                let rows = [st.row(*i, Ns::Item), st.row(*i, Ns::Attr)];
+                match out.iter_mut().find(|(o, _)| o == s) {
+                    Some((_, r)) => *r = [r[0].join(&rows[0]), r[1].join(&rows[1])],
+                    None => out.push((*s, rows)),
+                }
+            }
+        }
+        out
     }
 
     /// An endless generator with known first items (`o`, from its cursor `c0`): those

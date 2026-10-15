@@ -85,6 +85,9 @@ impl Analyzer {
         if !self.heap.has_obj(o) {
             return;
         }
+        // (a loop's item is one of the records its summary stands for: the summary's facts
+        // take its changes)
+        work.extend(crate::state::view_of(o));
         match &self.heap.obj(o).payload {
             Payload::Func(fi) => work.extend(fi.closure.values().copied()),
             Payload::Cls(c) => work.push(*c),
@@ -221,6 +224,11 @@ impl Analyzer {
         // block's `nn.Sequential` its layers)
         let mut keep_pos: FxHashSet<ObjId> = FxHashSet::default();
         for (r, kind, site, ctx) in recs {
+            if let Some(s) = crate::state::view_of(*r) {
+                back.lens.remove(r);
+                map.insert(*r, s);
+                continue;
+            }
             let (label, payload, iter_elem, derived, depth) = {
                 let o = self.heap.obj(*r);
                 (o.label.clone(), o.payload.clone(), o.iter_elem, o.derived_from, o.depth)
@@ -312,7 +320,9 @@ impl Analyzer {
         self.gc_pinned(&mut work, unwind);
         // (unknown objects stand for objects outside the call — a parameter's record, an
         // input's part: what they hold is reachable from there)
-        work.extend(fresh.iter().copied().filter(|o| matches!(self.heap.kind(*o), Kind::Unknown)));
+        // (a loop's item is not found again by a path: garbage when nothing holds it)
+        let input_part = |an: &Analyzer, o: ObjId| matches!(an.heap.kind(o), Kind::Unknown) && crate::state::view_of(o).is_none();
+        work.extend(fresh.iter().copied().filter(|o| input_part(self, *o)));
         // (older objects reach young ones only through those roots: a young one was made
         // since, so whatever refers to it was written since; only young ones expand)
         let mut reached: rustc_hash::FxHashSet<u32> = Default::default();
@@ -326,7 +336,7 @@ impl Analyzer {
         // (a part of an input — an unknown object, a placeholder — is found again by its path
         // whenever that path is read: its rows belong to the input, never garbage)
         for o in fresh {
-            if !reached.contains(&o) && !matches!(self.heap.kind(o), Kind::Unknown) {
+            if !reached.contains(&o) && !input_part(self, o) {
                 state.forget_obj(o);
             }
         }

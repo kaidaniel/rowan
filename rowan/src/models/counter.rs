@@ -539,7 +539,7 @@ pub fn default_on_read(an: &mut Analyzer, oid: ObjId, key: &Value, node: &Node, 
     }
     if key.kv.is_literal() {
         let ks = crate::domain::kv_literals(&key.kv);
-        let strong = single_target && ks.len() == 1 && an.strongable(oid);
+        let strong = single_target && ks.len() == 1 && an.heap.obj(oid).single;
         let mut r = row.clone();
         for k in ks.iter() {
             if !r.definite.contains(k) {

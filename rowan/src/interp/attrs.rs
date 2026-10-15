@@ -525,7 +525,7 @@ impl Analyzer {
                     let r = self.call_user(f, Some(Value::obj(oid)), vec![], IndexMap::new(), vec![], vec![], state, node, false);
                     if fi.is_cached.get() && matches!(self.heap.kind(oid), Kind::Instance) {
                         // stored on the instance: later accesses find this value
-                        let strong = self.strongable(oid);
+                        let strong = self.heap.obj(oid).single;
                         self.store_key(oid, Ns::Attr, &KeyVal::Lit(key_str_lit(name)), &r, strong, node, state);
                     }
                     outs.push(r);
@@ -608,8 +608,8 @@ impl Analyzer {
             if cls.tier == Tier::Input {
                 self.require_providers_k(&cls, &row, false, state, Some(nk), Ns::Attr);
             }
-            if cls.tier != Tier::Missing && single_target && self.strongable(oid) {
-                state.set_row(oid, Ns::Attr, row.narrow_in(nk, true));
+            if cls.tier != Tier::Missing && single_target && self.heap.obj(oid).single {
+                state.set_row_narrowed(oid, Ns::Attr, row.narrow_in(nk, true));
                 self.propagate_narrowing(oid, Ns::Attr, nk, state);
             }
         } else {

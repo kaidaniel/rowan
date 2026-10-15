@@ -1461,7 +1461,7 @@ fn m_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             Some(name) => an.store_attr(&c.args[0], &name, &c.args[2], &c.node, st),
             None => {
                 let recs = an.record_objects(&c.args[0]);
-                let strong = recs.len() == 1 && an.strongable(recs[0]);
+                let strong = recs.len() == 1 && an.heap.obj(recs[0]).single;
                 for o in recs {
                     // a user `__setattr__` takes the store, whatever the name
                     let hook = an.heap.kind(o) == Kind::Instance && !an.setattr_bypassed() && an.heap.instance_class(o).is_some_and(|cls| an.class_lookup(cls, "__setattr__").is_some());
