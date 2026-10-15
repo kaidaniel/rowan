@@ -904,6 +904,10 @@ impl Analyzer {
 
     /// An unknown iterable: one element object standing for each of its elements.
     fn iter_unknown(&mut self, oid: ObjId, _node: &Node, state: &mut State, acc: &mut ItemsAcc) {
+        // (a slice of an unknown sequence: its elements)
+        if let Some(b) = self.slice_base(oid) {
+            return self.iter_unknown(b, _node, state, acc);
+        }
         acc.items = None;
         acc.exhaustive = false;
         if self.heap.obj(oid).depth >= PATH_DEPTH {
