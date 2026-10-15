@@ -57,4 +57,5 @@ class Box:
         # (nothing calls it: its value for any Box, not only one made with the default size)
         a = self.size * self.size
         #@general a: unknown
+        #@general a: types={int}
         return a

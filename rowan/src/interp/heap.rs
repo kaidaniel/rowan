@@ -116,6 +116,9 @@ pub struct Obj {
     /// when its state was last made new (`Heap::serial` then): a strong re-allocation of
     /// its site starts it over, so it is younger than any mark taken before
     pub born: u64,
+    /// an unknown known to be of a builtin type (`domain::TYPE_NAMES`): a parameter annotated
+    /// so, in a run for any call
+    pub ty: Option<&'static str>,
 }
 
 
@@ -153,7 +156,7 @@ pub struct Heap {
 
 impl Default for Heap {
     fn default() -> Heap {
-        let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, literal_len: None, known_prefix: None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0 };
+        let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, literal_len: None, known_prefix: None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None };
         Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default() }
     }
 }
@@ -247,6 +250,7 @@ impl Heap {
             depth: 0,
             iterator: site.starts_with("gen:"),
             born: self.serial,
+            ty: None,
         });
         self.serial += 1;
         self.index.insert(key, oid);

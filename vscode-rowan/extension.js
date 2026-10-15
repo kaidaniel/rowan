@@ -32,6 +32,7 @@ const MARK_TEXT = {
 /** The notation of values (as the engine prints them): a test on the text, and its meaning. */
 const NOTATION = [
   [(t) => /(^|[\s:=(\[,|])\?($|[\s,)\]}|])/.test(t.replace(/\*\*\?/g, "")), "`?` not known statically"],
+  [(t) => /\b(int|str|bool|bytes|float)\(\?\)/.test(t), "`int(?)` an int not known statically (`str(?)` a str, …)"],
   [(t) => /["'\w]\?[:=]/.test(t), '`"k"?:` set on some paths only'],
   [(t) => /["'\w]~[:=]/.test(t), '`"k"~:` there unless code rowan cannot see removed it'],
   [(t) => t.includes("**?"), "`**?` other keys may exist"],

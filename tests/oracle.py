@@ -11,7 +11,8 @@ in every run that reaches it (one process per case, scratch working directory, t
 * `#@row NAME: …` — the keys K of NAME's value (a DataFrame's columns, a dict's keys, a Series'
   index (an `iterrows` row), a namedtuple's fields, an object's attributes): `definite ⊆ K`,
   `absent ∩ K = ∅`, `K ⊆ present` when `closed`;
-* `#@value NAME: exactly={…}` — the value is one of these; `#@general NAME: exactly={…}` too
+* `#@value NAME: exactly={…}` — the value is one of these (`types={int}`: an instance of these);
+  `#@general NAME: exactly={…}` too
   (the value for any call holds for the program's calls, which pass what the annotations say);
 * `#@ ok k` — the line never raised a KeyError / AttributeError for k (also from a call made
   on it); `#@ missing k` — every run of the line raised one; `#@ possibly k` (strict only) —
@@ -76,6 +77,8 @@ def validation_missing(e: BaseException) -> List[Any]:
         return []
 
 CHECKED_TIERS = {"proven", "missing", "possibly"}
+# `types={…}` names: the builtin classes (an annotated `int` may be given a bool, a subclass)
+BUILTIN_TYPES = {"int": int, "str": str, "bool": bool, "float": float, "bytes": bytes}
 
 
 def parse(src: str):
@@ -348,6 +351,10 @@ class Run:
                 if p:
                     self.fails.append(f"{where}L{line} row {name}: {p}")
         for name, spec in self.exp.values.get(key, []):
+            if "types" in spec and (name in loc or name in glb):
+                v = loc[name] if name in loc else glb[name]
+                if type(v).__name__ not in spec["types"] and not any(isinstance(v, BUILTIN_TYPES.get(t, ())) for t in spec["types"]):
+                    self.fails.append(f"{where}L{line} value {name}: {v!r} of type {type(v).__name__}, claimed one of {sorted(spec['types'])}")
             if "exactly" in spec and (name in loc or name in glb):
                 v = loc[name] if name in loc else glb[name]
                 try:

@@ -1235,6 +1235,57 @@ impl fmt::Display for KeyVal {
     }
 }
 
+/// The builtin types an unknown may be known to have (`int(?)`): from an annotation trusted in a
+/// run for any call, a builtin's result, an operator on operands of these types.
+pub const TYPE_NAMES: [&str; 5] = ["bool", "bytes", "float", "int", "str"];
+
+/// The label of an unknown of type `ty` (one of `TYPE_NAMES`), named `name` (a label as
+/// `Value::data` takes it, "" for none): `\u{2}int\u{2}expr:3:x + 1`.
+pub fn typed_label(ty: &str, name: &str) -> String {
+    format!("\u{2}{}\u{2}{}", ty, label_name(name))
+}
+
+/// The type of an unknown by its label: a typed label's (`typed_label`), and the labels that
+/// name a type (`"str"`: a text not known, a str method's result; `"int"`).
+pub fn label_type(label: &str) -> Option<&'static str> {
+    let ty = match label.strip_prefix('\u{2}') {
+        Some(rest) => rest.split('\u{2}').next()?,
+        None if matches!(label, "str" | "int") => label,
+        None => return None,
+    };
+    TYPE_NAMES.iter().copied().find(|t| *t == ty)
+}
+
+/// A label without its type: what names the unknown (`expr:3:x + 1`, "" for none).
+pub fn label_name(label: &str) -> &str {
+    match label.strip_prefix('\u{2}').and_then(|rest| rest.split_once('\u{2}')) {
+        Some((_, name)) => name,
+        None => label,
+    }
+}
+
+/// The builtin type of a literal key (`int` for a bool too: an int it is), None for others.
+pub fn key_type(k: KeyId, ty: &str) -> bool {
+    crate::intern::with_key(k, |kk| match kk {
+        crate::intern::Key::Str(_) => ty == "str",
+        crate::intern::Key::Int(_) => ty == "int",
+        crate::intern::Key::Bool(_) => ty == "bool" || ty == "int",
+        crate::intern::Key::Float(_) => ty == "float",
+        crate::intern::Key::Bytes(_) => ty == "bytes",
+        _ => false,
+    })
+}
+
+/// A typed label's type dropped (the value may be of another type now), its name kept.
+fn untyped(label: StrId) -> KeyVal {
+    let l = crate::intern::str_get(label);
+    if label_type(&l).is_none() {
+        return KeyVal::Data(label);
+    }
+    let name = label_name(&l);
+    if name == &*l { DATA } else { KeyVal::data(name) }
+}
+
 pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
     if a == b {
         return a.clone();
@@ -1259,10 +1310,15 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
         }
     }
     if let (KeyVal::Data(x), KeyVal::Data(y)) = (a, b) {
-        if let Some(j) = crate::models::shape::join_labels(&crate::intern::str_get(*x), &crate::intern::str_get(*y)) {
+        let (lx, ly) = (crate::intern::str_get(*x), crate::intern::str_get(*y));
+        if let Some(j) = crate::models::shape::join_labels(&lx, &ly) {
             return KeyVal::data(&j);
         }
-        return DATA;
+        // (two unknowns of one type: an unknown of that type)
+        return match (label_type(&lx), label_type(&ly)) {
+            (Some(t), Some(u)) if t == u => KeyVal::data(&typed_label(t, "")),
+            _ => DATA,
+        };
     }
     // a symbolic dim joined with a literal: an unknown dim (not "anything": the literal stays
     // possible); a tensor joined with a number: rank 0 possible
@@ -1282,11 +1338,12 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
             }
         }
     }
-    if let KeyVal::Data(_) = a {
-        return a.clone();
-    }
-    if let KeyVal::Data(_) = b {
-        return b.clone();
+    // an unknown joined with literals: the unknown, of its type if they are of it too
+    for (d, l) in [(a, b), (b, a)] {
+        if let KeyVal::Data(x) = d {
+            let fits = label_type(&crate::intern::str_get(*x)).is_some_and(|t| kv_literals(l).iter().all(|k| key_type(k, t)));
+            return if fits || !l.is_literal() { d.clone() } else { untyped(*x) };
+        }
     }
     DATA
 }

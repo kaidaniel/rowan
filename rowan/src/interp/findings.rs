@@ -158,6 +158,9 @@ pub struct ValueInfo {
     pub lits: Vec<KeyId>,
     pub unknown: bool,
     pub objects: Vec<String>,
+    /// the types of its unknown parts known to have one (`int(?)`), and whether some has none
+    pub types: Vec<&'static str>,
+    pub untyped: bool,
 }
 
 
@@ -402,14 +405,23 @@ impl Analyzer {
     /// it may also be something unknown, and the (known) objects it may be.
     pub(in crate::interp) fn value_info(&self, v: &Value, state: &State) -> ValueInfo {
         let mut info = ValueInfo::default();
+        let typed = |info: &mut ValueInfo, t: Option<&'static str>| match t {
+            Some(t) if !info.types.contains(&t) => info.types.push(t),
+            Some(_) => {}
+            None => info.untyped = true,
+        };
         if v.kv.is_literal() {
             info.lits = crate::domain::kv_literals(&v.kv).iter().collect();
         } else if !v.kv.is_bot() {
             info.unknown = true;
+            typed(&mut info, v.kv.data_site().and_then(|l| crate::domain::label_type(&intern::str_get(l))));
         }
         for o in v.pts.iter() {
             match self.heap.kind(o) {
-                Kind::Unknown | Kind::External => info.unknown = true,
+                Kind::Unknown | Kind::External => {
+                    info.unknown = true;
+                    typed(&mut info, self.heap.obj(o).ty);
+                }
                 // a tuple of known literals is that literal (as Python prints it)
                 Kind::Tuple | Kind::Pair if self.heap.literal_tuple(o, state, 0).is_some() => info.lits.push(self.heap.literal_tuple(o, state, 0).unwrap()),
                 _ => info.objects.push(self.heap.obj(o).label.to_string()),
@@ -417,6 +429,7 @@ impl Analyzer {
         }
         if v.pts.is_empty() && v.kv.is_bot() {
             info.unknown = true;
+            info.untyped = true;
         }
         info
     }

@@ -12,7 +12,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 
 * **Values** (`Value`, `domain.rs`) are a set of object ids plus a scalar part (`KeyVal`): a
   literal, up to 64 literals, the keys of some objects, or `Data(label)`, an unknown named by
-  where it comes from (`row["id"]`, `x.shape[0]`). A label can also hold a tensor shape.
+  where it comes from (`row["id"]`, `x.shape[0]`). A label can also hold a tensor shape, or a
+  builtin type (`typed_label`: `int(?)`; from annotations in general runs, builtins, operators).
 * **Objects** (`Obj`, `interp/heap.rs`) are identified by allocation site and context (the call
   chain, 2 deep). A *single* object stands for one runtime object: stores into it are strong.
   Allocating a site again while its earlier object is live gives a variant (up to 8), then a
@@ -89,12 +90,12 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   fact on the path; in torch modules `int` / `Tensor` annotations hold; a module-level unknown
   number names its dims, a module-level tensor's unknown dims are one value each).
 * **Deadline:** a safety net (`ms`, 10 s): past it user calls are unknown, running ones stop; the budget bounds the work.
-* **Soundness** holds relative to the models and to annotations of values whose class is
-  unknown. `exec`, `setattr` / `getattr` with unknown names (also in code a skipped call
-  reaches; a class attribute set there through data or a call's result, `f().x = 1`),
-  metaclasses and monkey-patching (rebinding a function or class too) are unknown or ignored.
-  List lengths are tracked up to 15 (a few per path: each one's positions; `xs[:n]` keeps xs's).
-  An object a path has no facts of reads as unknown (`read_row`).
+* **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
+  a general run's `x: int` is an int, not a subclass overriding int's operators). `exec`, `setattr` /
+  `getattr` with unknown names (also in skipped code; a class attribute set there through data or a
+  call's result, `f().x = 1`), metaclasses and monkey-patching (rebinding a function or class too)
+  are unknown or ignored. List lengths are tracked up to 15 (a few per path: each one's positions;
+  `xs[:n]` keeps xs's). An object a path has no facts of reads as unknown (`read_row`).
 
 ## Working conventions (the owner's standing instructions)
 
@@ -153,9 +154,8 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 
 ## Debugging switches
 
-* `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls (`skip F …`), entry runs, a `work:` line
-  (statements, units = statements + walk visits / 16, body runs, objects, row joins, visits,
-  havoc visits): deterministic counters (its lines cost ~25%: time without). `2`: raises, tries.
+* `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls, entry runs, a `work:` line of counters (statements,
+  units = statements + walk visits / 16, body runs, objects, row joins, visits, havoc visits; ~25% slower). `2`: raises.
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (the golden `#@limits` sets them per
   case; `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check` checks `#@todo`s too).
 * **Profiling:** the bench workflow's `perf` profiles (`sample` hangs on macOS 27). Time a run inside

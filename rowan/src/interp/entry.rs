@@ -420,7 +420,13 @@ impl Analyzer {
         let ann = a.annotation.as_deref();
         let given = match ann.and_then(|ann| if d.is_some() { crate::models::torch::t_param(self, ann, fi, a.name.id.as_str(), st) } else { self.param_from_annotation(ann, fi, a.name.id.as_str(), st) }) {
             Some(v) => v,
-            None => Value::obj(self.param_source(fi, a, st)),
+            None => {
+                let o = self.param_source(fi, a, st);
+                // (`x: int`: an int, as the annotation says — not `float`, which an int may be
+                // given for)
+                self.heap.obj_mut(o).ty = ann.and_then(builtin_annotation);
+                Value::obj(o)
+            }
         };
         match d {
             Some(d) if !(self.entry.torch_modules.contains(&fi.module) && d.pts.is_empty() && d.kv.as_lit().map(intern::key_is_number).unwrap_or(false)) => d.join(&given),
@@ -649,6 +655,17 @@ enum Run {
     Verdicts,
     Quiet,
     FactsOnly,
+}
+
+/// The builtin type an annotation names (`int`, `"str"`): one whose instances a run for any
+/// call may take its parameter to be (`float` is left out: an int may be given for it).
+fn builtin_annotation(ann: &ast::Expr) -> Option<&'static str> {
+    let name = match ann {
+        ast::Expr::Name(n) => n.id.to_string(),
+        ast::Expr::StringLiteral(sl) => sl.value.to_str().trim().to_string(),
+        _ => return None,
+    };
+    ["bool", "bytes", "int", "str"].into_iter().find(|t| *t == name)
 }
 
 /// A requirement-only run keeps what the function itself demands: of its parameters, and of

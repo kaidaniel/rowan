@@ -17,6 +17,8 @@ Values: `#@value NAME: exactly={12}` (the value is one of these literals and not
 These check the program's calls of the function the line is in (joined; an uncalled function's
 run with open parameters counts too). `#@general NAME: …` (same clauses) checks the value for
 any call: the function's general run, with open parameters of their annotated types.
+`types={int,str}`: every unknown part of the value is known to be of one of these types
+(`int(?)`); `untyped`: some unknown part has no known type.
 Row checks beyond present/definite/closed/open: `possible={..}` (each key is present, or the
 row is open) and `definite_within={..}` (every definite key is listed): soundness floors for
 cases whose precise answer is a `#@todo`.  Keys are bare words or Python literals.
@@ -142,6 +144,11 @@ def collect_expectations(src: str):
                     spec[part[0]] = parse_set(part[1])
                 if re.search(r"\bunknown\b", re.sub(r"\{[^}]*\}", "", cm.group(2))):
                     spec["unknown"] = True
+                if re.search(r"\buntyped\b", re.sub(r"\{[^}]*\}", "", cm.group(2))):
+                    spec["untyped"] = True
+                m2 = re.search(r"\btypes=\{([^}]*)\}", cm.group(2))
+                if m2:
+                    spec["types"] = {t.strip() for t in m2.group(1).split(",") if t.strip()}
                 table.setdefault(i, []).append((cm.group(1), spec))
             continue
         m = re.search(r"#@row\s+(\w+)\s*:\s*(.*)$", line)
@@ -424,18 +431,24 @@ def value_checks(rows: List[Dict[str, Any]], exp: Dict[int, List[Tuple[str, Dict
         v = rc.get("value")
         if v is None:
             continue
-        j = values.setdefault((rc["line"], rc["name"]), {"lits": set(), "unknown": False, "objects": set()})
+        j = values.setdefault((rc["line"], rc["name"]), {"lits": set(), "unknown": False, "objects": set(), "types": set(), "untyped": False})
         j["lits"] |= set(v["lits"])
         j["unknown"] = j["unknown"] or v["unknown"]
         j["objects"] |= set(v["objects"])
+        j["types"] |= set(v.get("types", []))
+        j["untyped"] = j["untyped"] or v.get("untyped", v["unknown"])
     for ln, specs in exp.items():
         for name, spec in specs:
             got = values.get((ln, name))
             if got is None:
                 out.append((ln, name, spec, "statement never executed"))
                 continue
-            desc = f"lits={sorted(got['lits'])} unknown={got['unknown']} objects={sorted(got['objects'])}"
+            desc = f"lits={sorted(got['lits'])} unknown={got['unknown']} objects={sorted(got['objects'])} types={sorted(got['types'])} untyped={got['untyped']}"
             prob = ""
+            if "types" in spec and (got["untyped"] or not got["types"] or not got["types"] <= spec["types"]):
+                prob = f"value {desc}, want unknowns of types {sorted(spec['types'])}"
+            if spec.get("untyped") and not got["untyped"]:
+                prob = f"value {desc}, but its type is not known: rowan must not claim one"
             if "exactly" in spec:
                 want = {key_str(k) for k in spec["exactly"]}
                 if got["unknown"] or got["objects"] or got["lits"] != want:

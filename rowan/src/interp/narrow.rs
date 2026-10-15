@@ -90,7 +90,7 @@ impl Analyzer {
             } else if stop.reachable {
                 // (what ends it here is a value of that truth: `x and y` is x only when x is
                 // falsy; a bool is that bool)
-                let is_bool = sp.v.pts.is_empty() && matches!(sp.v.kv, KeyVal::Data(d) if &*intern::str_get(d) == "bool");
+                let is_bool = sp.v.pts.is_empty() && matches!(sp.v.kv, KeyVal::Data(d) if &*intern::str_get(d) == "bool" || crate::domain::label_type(&intern::str_get(d)) == Some("bool"));
                 v = v.join(&if is_bool { Value::lit(intern::key_bool(!is_and)) } else { truth_narrowed(&sp.v, !is_and).unwrap_or(sp.v) });
             }
             if stop.reachable {

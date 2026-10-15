@@ -98,10 +98,24 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   assert(z.includes("```python\nk + 1\n```") && !z.includes("in calls"), z);
   // a method: on any instance (its `__init__` given any arguments), apart from the program's
   const v = hover(idx, src, 38, "v");
-  assert(v.includes("- in calls: `4` (line 49)") && !v.includes("```python\n0\n```"), v);
+  assert(v.includes("```python\n0 | int(?)\n```") && v.includes("- in calls: `4` (line 49)"), v);
+  assert(v.includes("`int(?)` an int not known statically"), v);
   // a method nothing calls: on any instance, not only one made with `__init__`'s defaults
   const a = hover(idx, src, 58, "a");
   assert(a.includes("```python\nself.size * self.size\n```") && !a.includes("in calls"), a);
+}
+
+// ---- unknowns of a known type: `str(?)`, from an annotation, a builtin, an operator
+{
+  const z533 = path.join(root, "tests", "cases", "z533_typed_unknowns.py");
+  const src = fs.readFileSync(z533, "utf8").split("\n");
+  const idx = indexResult(facts(z533));
+  const label = hover(idx, src, 10, "label");
+  assert(label.includes("```python\nstr(?)\n```") && label.includes("- in calls: `\"AB\"` (line 45)"), label);
+  const size = hover(idx, src, 13, "size");
+  assert(size.includes("```python\nint(?)\n```"), size);
+  const shown = hover(idx, src, 43, "shown");
+  assert(shown.includes("```python\nstr(?)\n```") && shown.includes("`int(?)` an int not known statically (`str(?)` a str, …)"), shown);
 }
 
 // ---- a call rowan no longer follows (past its function's budget): said where it changes a value

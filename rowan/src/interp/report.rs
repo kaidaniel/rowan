@@ -736,7 +736,7 @@ pub fn golden_json(an: &Analyzer) -> J {
         .row_checks
         .iter()
         .map(|rc| {
-            let value = json!({"lits": rc.value.lits.iter().map(|k| key_repr(*k)).collect::<Vec<_>>(), "unknown": rc.value.unknown, "objects": rc.value.objects});
+            let value = json!({"lits": rc.value.lits.iter().map(|k| key_repr(*k)).collect::<Vec<_>>(), "unknown": rc.value.unknown, "objects": rc.value.objects, "types": rc.value.types, "untyped": rc.value.untyped});
             let mut out = match &rc.row {
             None => json!({"file": rc.file, "line": rc.line, "name": rc.name, "row": J::Null, "value": value}),
             Some(r) => json!({
@@ -841,6 +841,8 @@ pub fn render_value(an: &Analyzer, state: &State, v: &Value, depth: u32, seen: &
         parts.push(t);
     } else if let Some(expr) = data_expr(&v.kv) {
         parts.push(expr);
+    } else if let Some(t) = v.kv.data_site().and_then(|l| crate::domain::label_type(&intern::str_get(l))) {
+        parts.push(format!("{}(?)", t));
     } else if !v.kv.is_literal() && !v.kv.is_bot() {
         parts.push("?".into());
     }
@@ -922,7 +924,11 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         Kind::Class => an.heap.obj(o).label.trim_start_matches("class ").to_string(),
         Kind::Module => an.heap.obj(o).label.to_string(),
         // an unknown named in the program's terms (`a`, `a(b)`, `cfg["db"]`), else `?`
-        Kind::Unknown => an.names.visible(o).cloned().unwrap_or_else(|| "?".into()),
+        // (unnamed here: of its type when it has one, `int(?)`)
+        Kind::Unknown => an.names.visible(o).cloned().unwrap_or_else(|| match an.heap.obj(o).ty {
+            Some(t) => format!("{}(?)", t),
+            None => "?".into(),
+        }),
         Kind::External => an.heap.external_qual(o).trim_start_matches("builtins.").to_string(),
         Kind::Super => "super()".into(),
         // iterators, views, groupbys, parsers, responses…: by their type, as Python prints them
@@ -1106,7 +1112,7 @@ pub fn in_scope<R>(scope: u32, f: impl FnOnce() -> R) -> R {
 pub fn data_expr(kv: &KeyVal) -> Option<String> {
     let KeyVal::Data(s) = kv else { return None };
     let label = intern::str_get(*s);
-    let rest = label.strip_prefix("expr:")?;
+    let rest = crate::domain::label_name(&label).strip_prefix("expr:")?;
     let (scope, text) = rest.split_once(':')?;
     let here = RENDER_SCOPE.with(|c| c.get());
     (scope.parse::<u32>().ok()? == here).then(|| text.to_string())
