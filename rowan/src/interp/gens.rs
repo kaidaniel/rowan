@@ -407,17 +407,19 @@ impl Analyzer {
     }
 
     /// What code changed from `a` to `b` (a read that narrows a row is no change): a whole
-    /// object (unknown code), a key no longer surely there (maybe deleted), one stored.
+    /// object (unknown code), a key no longer surely there (maybe deleted), one stored. Only
+    /// objects with facts in `a` (one without was garbage there: nothing read it since).
     fn changes_between(&self, a: &State, b: &State) -> Vec<Hit> {
         let fp = b.footprint(a);
         self.changes_in(a, b, &fp.rows, &fp.slots, fp.elems.into_iter().chain(b.lens.diff_keys(&a.lens)))
     }
 
-    /// `changes_between` on these facts (and these objects as wholes).
+    /// `changes_between` on these facts (and these objects' elements and lengths).
     fn changes_in(&self, a: &State, b: &State, rows: &[(ObjId, Ns)], slots: &[(ObjId, crate::state::SlotKey)], others: impl Iterator<Item = ObjId>) -> Vec<Hit> {
         let mut changed: Vec<Hit> = Vec::new();
         for &(o, ns) in rows {
-            let (ra, rb) = (a.row(o, ns), b.row(o, ns));
+            let Some(ra) = a.rows.get(&(o, ns)) else { continue };
+            let rb = b.row(o, ns);
             if ra.mutators != rb.mutators || ra.top != rb.top {
                 changed.push((o, None, false));
                 continue;
@@ -427,14 +429,17 @@ impl Analyzer {
             changed.extend(ra.absent.iter().filter(|k| !rb.absent.contains(*k)).map(|k| (o, Some((ns, k)), false)).collect::<Vec<_>>());
         }
         for &(o, sk) in slots {
-            if a.slots.get(&o, &sk) == b.slots.get(&o, &sk) {
+            let va = a.slots.get(&o, &sk);
+            if va == b.slots.get(&o, &sk) || (va.is_none() && !a.slots.has_key(&o) && !a.has_row(o, sk.0)) {
                 continue;
             }
             let any = b.slots.get(&o, &sk).is_some_and(|v| v.pts.iter().any(|p| self.is_any(p)));
             let key = (!any && matches!(sk.0, Ns::Item | Ns::Attr) && sk.1 != intern::STAR).then_some(sk);
             changed.push((o, key, false));
         }
-        changed.extend(others.map(|o| (o, None, false)));
+        // (a record's length entry marks its birth, not a change)
+        let differs = |o: &ObjId| (a.elems.get(o).is_some() && a.elems.get(o) != b.elems.get(o)) || (a.lens.get(o).is_some() && a.lens.get(o) != b.lens.get(o) && self.heap.kind(*o).is_container());
+        changed.extend(others.filter(differs).map(|o| (o, None, false)).collect::<Vec<_>>());
         changed
     }
 
