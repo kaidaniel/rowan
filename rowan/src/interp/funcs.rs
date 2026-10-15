@@ -372,7 +372,7 @@ impl Analyzer {
         let nm = str_get(name);
         // (the module's own name: `__main__` for the program's entry)
         if &*nm == "__name__" {
-            let own = if fr_module == self.main_module { "__main__".to_string() } else { self.heap.module_info(fr_module).name.clone() };
+            let own = if fr_module == self.program.main_module { "__main__".to_string() } else { self.heap.module_info(fr_module).name.clone() };
             return Value::lit_str(&own);
         }
         if is_builtin_name(&nm) {

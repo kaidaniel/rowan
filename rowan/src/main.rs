@@ -234,9 +234,9 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
     roots.extend(search);
     let mut an = Analyzer::new(src.clone(), file, roots, entry, imports)?;
     an.findings.facts_on = facts;
-    an.follow = follow;
-    if !an.follow.is_empty() {
-        an.site_paths = site_packages_for(file, &site);
+    an.program.follow = follow;
+    if !an.program.follow.is_empty() {
+        an.program.site_paths = site_packages_for(file, &site);
     }
     if golden {
         // `#@row NAME:` / `#@value` / `#@shape` expectations of the main file and, in a package
@@ -271,7 +271,7 @@ fn run_with_deps(file: &str, opts: Opts, json: bool, golden: bool, facts: bool, 
     }
     an.run();
     let mut deps: Vec<String> = vec![file.to_string()];
-    for (_, &m) in an.modules.iter() {
+    for (_, &m) in an.program.modules.iter() {
         if let Some(p) = &an.heap.module_info(m).path {
             // (a namespace package's directory has no text to hash)
             if !deps.contains(p) && !std::path::Path::new(p).is_dir() {

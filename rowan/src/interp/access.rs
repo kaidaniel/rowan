@@ -1280,7 +1280,7 @@ impl Analyzer {
                 Kind::Dict if self.m.counters.contains(&oid) && crate::models::counter::COUNTER_METHODS.contains(&name) => self.method_value(&format!("counter.{}", name), &Value::obj(oid)),
                 Kind::Dict if self.m.chainmaps.contains_key(&oid) && matches!(name, "maps" | "parents") => {
                     let c = super::Call { qual: format!("chainmap.{}", name), recv: Some(Value::obj(oid)), args: vec![], kwargs: IndexMap::new(), star_args: vec![], star_kwargs: vec![], node: *node, call_ast: None, site: format!("L{}", node.line), line: node.line };
-                    match self.models.lookup(&c.qual) {
+                    match self.program.models.lookup(&c.qual) {
                         Some(m) => m(self, state, &c),
                         None => Value::data("chainmap"),
                     }

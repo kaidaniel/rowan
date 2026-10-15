@@ -628,10 +628,10 @@ impl Analyzer {
             return Ok((cell, Ns::Cell, super::funcs::cell_key()));
         }
         if let Some(full) = uses.imports.get(&name) {
-            if let Some(&m) = self.modules.get(full) {
+            if let Some(&m) = self.program.modules.get(full) {
                 return Err(m);
             }
-            if let Some((m, a)) = full.rsplit_once('.').and_then(|(m, a)| self.modules.get(m).map(|mo| (*mo, a))) {
+            if let Some((m, a)) = full.rsplit_once('.').and_then(|(m, a)| self.program.modules.get(m).map(|mo| (*mo, a))) {
                 return Ok((m, Ns::Attr, key_str_lit(a)));
             }
         }

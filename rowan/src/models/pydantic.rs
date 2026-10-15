@@ -527,12 +527,12 @@ impl Analyzer {
                 if found.is_none() {
                     // by name among the program's classes (this module's first): the state at
                     // hand may be a summary's, without the module's names
-                    let cands: Vec<ObjId> = self.user_classes.iter().copied().filter(|c| self.heap.class_info_opt(*c).map(|ci| ci.name == n).unwrap_or(false) && is_validated(self, *c)).collect();
+                    let cands: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| self.heap.class_info_opt(*c).map(|ci| ci.name == n).unwrap_or(false) && is_validated(self, *c)).collect();
                     found = cands.iter().copied().find(|c| self.heap.class_info(*c).module == module).or_else(|| cands.first().copied());
                 }
                 if found.is_none() {
                     let td = v.pts.iter().find(|o| self.heap.kind(*o) == Kind::Class && self.heap.class_info_opt(*o).map(|ci| ci.lib.typed_dict).unwrap_or(false)).or_else(|| {
-                        let c: Vec<ObjId> = self.user_classes.iter().copied().filter(|c| self.heap.class_info_opt(*c).map(|ci| ci.name == n && ci.lib.typed_dict).unwrap_or(false)).collect();
+                        let c: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| self.heap.class_info_opt(*c).map(|ci| ci.name == n && ci.lib.typed_dict).unwrap_or(false)).collect();
                         c.iter().copied().find(|x| self.heap.class_info(*x).module == module).or_else(|| c.first().copied())
                     });
                     if let Some(t) = td {
@@ -573,7 +573,7 @@ impl Analyzer {
                 }
                 if found.is_none() {
                     let ec = v.pts.iter().find(|o| self.enum_members.contains_key(o)).or_else(|| {
-                        let c: Vec<ObjId> = self.user_classes.iter().copied().filter(|c| self.enum_members.contains_key(c) && self.heap.class_info_opt(*c).map(|ci| ci.name == n).unwrap_or(false)).collect();
+                        let c: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| self.enum_members.contains_key(c) && self.heap.class_info_opt(*c).map(|ci| ci.name == n).unwrap_or(false)).collect();
                         c.iter().copied().find(|x| self.heap.class_info(*x).module == module).or_else(|| c.first().copied())
                     });
                     if let Some(c) = ec {
@@ -1497,7 +1497,7 @@ impl Analyzer {
         let here = self.heap.module_info(self.frame().module).idx;
         let owner = crate::frontend::module_of_addr(d as *const ast::Expr as usize);
         if let Some(idx) = owner.filter(|i| *i != here) {
-            if let Some(moid) = self.modules.values().copied().find(|m| self.heap.module_info(*m).idx == idx) {
+            if let Some(moid) = self.program.modules.values().copied().find(|m| self.heap.module_info(*m).idx == idx) {
                 return self.eval_in_module(moid, d, state);
             }
         }

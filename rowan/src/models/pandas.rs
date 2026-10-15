@@ -483,7 +483,7 @@ fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     match name.as_str() {
         "get" | "keys" | "items" | "iteritems" | "pop" | "__contains__" => {
             let q = format!("dict.{}", if name == "iteritems" { "items" } else { name.as_str() });
-            match an.models.lookup(&q) {
+            match an.program.models.lookup(&q) {
                 Some(m) => m(an, st, c),
                 None => series(an),
             }

@@ -367,7 +367,7 @@ impl Analyzer {
     pub fn with_gen_restart(&mut self, state: &mut State, close: bool, body: &mut dyn FnMut(&mut Analyzer, &mut State)) {
         let pre = state.copy();
         let vmark = self.findings.mark();
-        let mmark = self.modules.len();
+        let mmark = self.program.modules.len();
         for round in 0..4 {
             let wmark = self.gens.watch.len();
             body(self, state);
@@ -391,7 +391,7 @@ impl Analyzer {
             }
             self.gens.watch.truncate(wmark);
             // (modules it imported stay imported: their facts go on)
-            let mods: Vec<Value> = self.modules.values().skip(mmark).map(|m| Value::obj(*m)).collect();
+            let mods: Vec<Value> = self.program.modules.values().skip(mmark).map(|m| Value::obj(*m)).collect();
             let mut again = pre.copy();
             if !mods.is_empty() {
                 let fp = state.footprint(&pre);

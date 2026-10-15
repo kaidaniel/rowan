@@ -1932,7 +1932,7 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             for ch in choices {
                 let names: Vec<String> = (0..ch.len()).map(|i| format!("__b{}", i)).collect();
                 let modname = format!("<type {} {:?}>", crate::interp::site_string(&c.node), ch);
-                let moid = match an.modules.get(&modname) {
+                let moid = match an.program.modules.get(&modname) {
                     Some(&m) => m,
                     None => {
                         let Ok((idx, tree)) = crate::frontend::parse(&modname, None, format!("class {}({}):\n    pass\n", name, names.join(", "))) else { return Value::data("type") };
@@ -3150,7 +3150,7 @@ pub fn generated_class(an: &mut Analyzer, st: &mut State, qual: &str) -> Option<
             _ => return None,
         },
     };
-    let moid = match an.modules.get(modname) {
+    let moid = match an.program.modules.get(modname) {
         Some(&m) => m,
         None => {
             let (idx, tree) = crate::frontend::parse(modname, None, src.to_string()).ok()?;
@@ -4315,7 +4315,7 @@ fn m_namedtuple(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let dvals: Vec<Value> = c.kw("defaults").map(|d| an.iterate(&d, &c.node, st).items.unwrap_or_default()).unwrap_or_default();
     let ndefaults = dvals.len();
     let modname = format!("<namedtuple {} {}>", tname, c.site);
-    if let Some(&moid) = an.modules.get(&modname) {
+    if let Some(&moid) = an.program.modules.get(&modname) {
         return st.slot(moid, Ns::Attr, key_str_lit(&tname));
     }
     let mut src = format!("from typing import NamedTuple\n\n\nclass {}(NamedTuple):\n", tname);
@@ -4363,7 +4363,7 @@ fn m_getter(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     let body = if parts.len() == 1 { parts[0].clone() } else { format!("({},)", parts.join(", ")) };
     let modname = format!("<{} {}>", if item { "itemgetter" } else { "attrgetter" }, body);
-    let moid = match an.modules.get(&modname) {
+    let moid = match an.program.modules.get(&modname) {
         Some(&m) => m,
         None => {
             let src = format!("def getter(obj):\n    return {}\n", body);
@@ -4535,7 +4535,7 @@ pub fn re_match_generated(an: &mut Analyzer, st: &mut State, c: &Call) -> Value 
     }
     let ngroups = pat.matches('(').count().saturating_sub(pat.matches("(?").count()) + names.len();
     let modname = format!("<re.Match {:?}>", &*pat);
-    let moid = match an.modules.get(&modname) {
+    let moid = match an.program.modules.get(&modname) {
         Some(&m) => m,
         None => {
             // (an unknown text's groups: unknown strings, shown as `?`, not the helper's name)
@@ -4671,7 +4671,7 @@ fn m_make_dataclass(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     let modname = format!("<make_dataclass {} {}>", tname, c.site);
-    if let Some(&moid) = an.modules.get(&modname) {
+    if let Some(&moid) = an.program.modules.get(&modname) {
         return st.slot(moid, Ns::Attr, key_str_lit(&tname));
     }
     let mut src = format!("from dataclasses import dataclass\n\n\n@dataclass\nclass {}:\n", tname);

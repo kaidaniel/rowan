@@ -1196,7 +1196,7 @@ impl Analyzer {
                     _ => "",
                 };
                 let q = format!("{}.{}", fam, name);
-                if !fam.is_empty() && !MODULE_METHODS.contains(&name) && self.models.lookup(&q).is_some() {
+                if !fam.is_empty() && !MODULE_METHODS.contains(&name) && self.program.models.lookup(&q).is_some() {
                     return Some(self.method_value(&q, obj));
                 }
                 return Some(if MODULE_METHODS.contains(&name) { self.method_value(&format!("nnmodule.{}", name), obj) } else { Value::data(&format!("{}.{}", self.heap.obj(o).label, name)) });
@@ -1235,7 +1235,7 @@ impl Analyzer {
         }
         // an unknown may be an instance of a user class defining this name, or a tensor:
         // both readings
-        if unknown_tensorish && !self.m.t_skip_user && self.user_classes.iter().any(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, key_str_lit(name)))) {
+        if unknown_tensorish && !self.m.t_skip_user && self.program.user_classes.iter().any(|c| self.cls_slots.contains_key(&(*c, Ns::Attr, key_str_lit(name)))) {
             self.m.t_getattr_plain = true;
             let plain = self.load_attr(obj, name, node, st, false);
             self.m.t_getattr_plain = false;
@@ -4864,7 +4864,7 @@ pub fn m_tensor_or_builtin(an: &mut Analyzer, st: &mut State, c: &Call) -> Value
     if builtin {
         let q = if name == "split" { "str.split" } else { "list.sort" };
         let call = Call { qual: q.to_string(), recv: c.recv.clone(), args: c.args.clone(), kwargs: c.kwargs.clone(), star_args: c.star_args.clone(), star_kwargs: c.star_kwargs.clone(), node: c.node, call_ast: c.call_ast, site: c.site.clone(), line: c.line };
-        if let Some(m) = an.models.lookup(q) {
+        if let Some(m) = an.program.models.lookup(q) {
             return m(an, st, &call);
         }
         return Value::data(&format!("L{}", c.line));

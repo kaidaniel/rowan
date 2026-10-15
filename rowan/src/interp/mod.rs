@@ -3,7 +3,6 @@
 //! sibling files of this module.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 
 use indexmap::IndexMap;
 use ruff_python_ast as ast;
@@ -14,7 +13,6 @@ use crate::domain::{
 };
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
-use crate::models::Registry;
 use crate::scopes::{self as scopemod, Scopes};
 use crate::state::{Kind, State};
 
@@ -36,6 +34,8 @@ pub use heap::*;
 pub mod names;
 pub use names::Names;
 pub mod narrow;
+pub mod program;
+pub use program::{package_of_file, package_root_of_file, Program};
 pub use crate::models::tables::*;
 pub mod recursion;
 pub use recursion::{ActKey, Recursion};
@@ -327,7 +327,6 @@ pub enum StoreTarget {
 pub struct Analyzer {
     /// the library models' own tables (`models::Tables`)
     pub m: crate::models::Tables,
-    pub filename: String,
     /// `__next__` functions whose calls were not decided once (`unroll_next`)
     pub no_unroll_next: FxHashSet<ObjId>,
     pub fresh_init: FxHashSet<ObjId>,
@@ -336,12 +335,8 @@ pub struct Analyzer {
     /// recency abstraction: per loop iteration being analysed (innermost last), the recent
     /// objects allocated in it: (recent oid, kind, site, ctx)
     pub recent_stack: Vec<Vec<(ObjId, Kind, String, String)>>,
-    pub search_paths: Vec<String>,
-    /// installed packages to follow into site-packages (top-level names; `*` for all)
-    pub follow: Vec<String>,
-    /// site-packages directories searched for followed packages
-    pub site_paths: Vec<String>,
-    pub analyse_entry_points: bool,
+    /// the main file, import paths, models, modules imported (`interp/program.rs`)
+    pub program: Program,
     /// the objects (`interp/heap.rs`)
     pub heap: Heap,
     /// what the analysis found: verdicts, notes, summaries, golden row checks, hover facts
@@ -362,7 +357,6 @@ pub struct Analyzer {
     /// the ways out of running code: raises, try contexts, handlers, break / continue, finally
     /// (`interp/tries.rs`)
     pub unwind: Unwind,
-    pub models: Registry,
     pub frames: Vec<Frame>,
     /// lazy iterators (zip / islice / map …) over one-shot iterators: what consuming them
     /// takes from each source (Some(n): n items, None: all)
@@ -441,16 +435,11 @@ pub struct Analyzer {
     pub branch_depth: i32,
     pub call_chain: Vec<u32>,
     pub analysed_funcs: FxHashSet<ObjId>,
-    pub modules: IndexMap<String, ObjId>,
-    /// names imported under `if TYPE_CHECKING:` (module, name) -> (module imported, name in it)
-    pub type_only: FxHashMap<(ObjId, StrId), (String, Option<String>)>,
-    pub user_classes: Vec<ObjId>,
     /// class attributes (flow-insensitive)
     pub cls_slots: FxHashMap<(ObjId, Ns, KeyId), Value>,
 
     pub entry_instances: FxHashMap<ObjId, ObjId>,
     pub fresh_in_progress: FxHashSet<ObjId>,
-    pub main_module: ObjId,
     pub series: ObjId,
     pub none_v: Value,
     /// the comprehension written as the first argument of `torch.cat` / `torch.stack` being
@@ -460,8 +449,6 @@ pub struct Analyzer {
     pub nonempty_gen: bool,
     /// whether the last `loop_fixpoint` converged (its last round ran from the fixpoint)
     pub loop_converged: bool,
-    /// module index -> its path relative to the main file's directory (`rel_file`)
-    pub rel_files: std::cell::RefCell<FxHashMap<u32, String>>,
     /// while a test is evaluated (`split`): its frame depth and the value each node of it had
     pub trace: Option<(usize, FxHashMap<usize, Value>)>,
     /// the values the test being narrowed had (`split`, read by `traced`)
@@ -497,31 +484,15 @@ impl Analyzer {
         crate::models::chrono::reset_used();
         let (idx, tree) = frontend::parse("__main__", Some(filename), source)?;
         frontend::set_main(idx);
+        let program = Program::new(filename, idx, if follow_imports { search_paths } else { Vec::new() }, analyse_entry_points);
         let mut an = Analyzer {
-            filename: filename.to_string(),
-            search_paths: if follow_imports { search_paths } else { Vec::new() },
-            analyse_entry_points,
+            program,
             none_v: Value::lit(intern::key_none()),
             ..Default::default()
         };
-        an.main_module = an.make_module("__main__", Some(filename), idx, tree);
+        an.program.main_module = an.make_module("__main__", Some(filename), idx, tree);
         an.series = an.alloc_global(Kind::Series, "builtin:Series", "Series", Payload::None);
         Ok(an)
-    }
-
-    // ------------------------------------------------------------------ setup
-    /// A module object (registered under `name`) for a parsed tree; `path` is its file, a
-    /// namespace package's directory, or None (a module made by a model).
-    pub fn make_module(&mut self, name: &str, path: Option<&str>, idx: u32, tree: &'static ast::ModModule) -> ObjId {
-        let pkg = match path {
-            Some(p) if name == "__main__" => package_of_file(p),
-            Some(p) if p.ends_with("__init__.py") || std::path::Path::new(p).is_dir() => name.to_string(),
-            _ => name.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or_default(),
-        };
-        let info = ModuleInfo { name: name.to_string(), path: path.map(|p| p.to_string()), pkg, idx, tree, scopes: scopemod::analyse(tree) };
-        let oid = self.alloc_global(Kind::Module, &format!("module:{}", name), &format!("module {}", name), Payload::Module(Rc::new(info)));
-        self.modules.insert(name.to_string(), oid);
-        oid
     }
 
     pub fn frame(&self) -> &Frame {
@@ -531,55 +502,7 @@ impl Analyzer {
         self.frames.last_mut().expect("no frame")
     }
 
-    // ------------------------------------------------------------ reporting
-    pub fn file_of_frame(&self) -> String {
-        let m = self.frame().module;
-        if m == self.main_module {
-            return String::new();
-        }
-        let idx = self.heap.module_info(m).idx;
-        self.rel_file(idx)
-    }
-
-    /// The main module's frontend index.
-    pub fn main_idx(&self) -> u32 {
-        self.heap.module_info(self.main_module).idx
-    }
-
-    /// The path of module `idx` relative to the main file's directory ("" for the main
-    /// module; the file name when it lies elsewhere, the module name when it has no file).
-    pub fn rel_file(&self, idx: u32) -> String {
-        if idx == self.main_idx() {
-            return String::new();
-        }
-        if let Some(f) = self.rel_files.borrow().get(&idx) {
-            return f.clone();
-        }
-        let f = match frontend::module_path(idx) {
-            Some(p) => self.rel_to_main(&p).unwrap_or_else(|| std::path::Path::new(&p).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or(p)),
-            None => frontend::module_name(idx),
-        };
-        self.rel_files.borrow_mut().insert(idx, f.clone());
-        f
-    }
-
     // ------------------------------------------------------------- entry
-
-    /// A module of the program itself: the main file's directory or below.
-    pub fn is_local_module(&self, m: ObjId) -> bool {
-        if m == self.main_module {
-            return true;
-        }
-        let idx = self.heap.module_info(m).idx;
-        frontend::module_path(idx).map(|p| !p.contains("site-packages") && self.rel_to_main(&p).is_some()).unwrap_or(false)
-    }
-
-    /// Path `p` relative to the main file's directory, when it lies there or below.
-    fn rel_to_main(&self, p: &str) -> Option<String> {
-        let canon = |p: &str| std::fs::canonicalize(p).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string());
-        let dir = std::path::Path::new(&canon(&self.filename)).parent()?.to_path_buf();
-        std::path::Path::new(&canon(p)).strip_prefix(&dir).ok().map(|r| r.to_string_lossy().to_string())
-    }
 
     /// Past the deadline a statement in a function body does not run: its path ends, and
     /// the call it belongs to is replaced by an unknown call (`call_user`). Module code goes on
@@ -597,9 +520,9 @@ impl Analyzer {
 
     pub fn run(&mut self) {
         let mut state = State::new();
-        let main = self.main_module;
+        let main = self.program.main_module;
         self.run_module(main, &mut state);
-        if self.analyse_entry_points {
+        if self.program.analyse_entry_points {
             self.analyse_uncalled(&mut state);
         }
         self.findings.final_state = Some(state);
@@ -662,7 +585,7 @@ impl Analyzer {
                 continue;
             }
             self.entry_done.insert(oid);
-            if fi.module != self.main_module && !handler && !((quiet || refused) && self.is_local_module(fi.module)) {
+            if fi.module != self.program.main_module && !handler && !((quiet || refused) && self.is_local_module(fi.module)) {
                 continue;
             }
             if handler {
@@ -708,7 +631,7 @@ impl Analyzer {
                     // `__init__`s set may be there; a torch module's method is analysed in
                     // its own terms: its attributes as symbols)
                     let torch = self.torch_modules.contains(&fi.module);
-                    let subs: Vec<ObjId> = self.user_classes.iter().copied().filter(|c| *c == cls || (!torch && self.heap.mro(*c).contains(&cls))).collect();
+                    let subs: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| *c == cls || (!torch && self.heap.mro(*c).contains(&cls))).collect();
                     let mut insts: Vec<ObjId> = Vec::new();
                     for c in subs {
                         let inst = match self.entry_instances.get(&c) {
@@ -792,7 +715,7 @@ impl Analyzer {
             // of the function's own parameters)
             let own = format!("param {}.", fi.py_qualname());
             let span = (fi.node.node().line, fi.node.node().end_line);
-            let in_main = fi.module == self.main_module;
+            let in_main = fi.module == self.program.main_module;
             for (src, k) in st.reqs.diff_keys(&state.reqs) {
                 if quiet && !own_source(&crate::domain::source_label(src), &own, span, in_main) {
                     continue;
@@ -1192,38 +1115,6 @@ pub fn is_constant(e: &ast::Expr) -> bool {
     )
 }
 
-
-/// The dotted package a file belongs to: the chain of enclosing directories that have an
-/// `__init__.py` (empty for a file outside any package).
-pub fn package_of_file(path: &str) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    let mut dir = std::path::Path::new(path).parent().map(|p| p.to_path_buf());
-    while let Some(d) = dir {
-        if !d.join("__init__.py").exists() {
-            break;
-        }
-        match d.file_name() {
-            Some(n) => parts.push(n.to_string_lossy().to_string()),
-            None => break,
-        }
-        dir = d.parent().map(|p| p.to_path_buf());
-    }
-    parts.reverse();
-    parts.join(".")
-}
-
-/// The directory that holds the outermost package of `path` (the import root for `import
-/// pkg.sub` from inside the package), when the file is inside a package.
-pub fn package_root_of_file(path: &str) -> Option<String> {
-    let mut dir = std::path::Path::new(path).parent().map(|p| p.to_path_buf())?;
-    if !dir.join("__init__.py").exists() {
-        return None;
-    }
-    while dir.join("__init__.py").exists() {
-        dir = dir.parent()?.to_path_buf();
-    }
-    Some(dir.to_string_lossy().to_string())
-}
 
 /// A requirement-only run keeps what the function itself demands: of its parameters, and of
 /// the inputs it reads on its own lines (`json.loads@L20` inside it; main module only, where

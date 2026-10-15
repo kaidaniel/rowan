@@ -11,83 +11,6 @@ use super::{Finally, Handler, contains_jump, is_constant, Analyzer, ClassInfo, F
 use super::funcs::Elem;
 
 impl Analyzer {
-    /// The module `from M import …` names (relative imports resolve against the current
-    /// module's package).
-    fn import_from_module(&self, i: &ast::StmtImportFrom) -> String {
-        if i.level > 0 {
-            let pkg = self.heap.module_info(self.frame().module).pkg.clone();
-            let mut base: Vec<&str> = pkg.split('.').filter(|x| !x.is_empty()).collect();
-            for _ in 1..i.level {
-                base.pop();
-            }
-            let mut full = base.join(".");
-            if let Some(m) = &i.module {
-                if !full.is_empty() {
-                    full.push('.');
-                }
-                full.push_str(m.id.as_str());
-            }
-            full
-        } else {
-            i.module.as_ref().map(|m| m.id.to_string()).unwrap_or_default()
-        }
-    }
-
-    /// The names an `if TYPE_CHECKING:` block imports (it does not run): for annotations only,
-    /// resolved once the module they name is loaded (`type_only_name`).
-    fn note_type_only_imports(&mut self, body: &'static [ast::Stmt]) {
-        let m = self.frame().module;
-        for st in body {
-            match st {
-                ast::Stmt::ImportFrom(i) => {
-                    let modname = self.import_from_module(i);
-                    for a in &i.names {
-                        let bound = a.asname.as_ref().unwrap_or(&a.name).id.as_str();
-                        self.type_only.insert((m, s(bound)), (modname.clone(), Some(a.name.id.to_string())));
-                    }
-                }
-                ast::Stmt::Import(i) => {
-                    for a in i.names.iter().filter(|a| a.asname.is_some() || !a.name.id.contains('.')) {
-                        let bound = a.asname.as_ref().unwrap_or(&a.name).id.as_str();
-                        self.type_only.insert((m, s(bound)), (a.name.id.to_string(), None));
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// A name an `if TYPE_CHECKING:` block of the running module imports, once its module is
-    /// loaded (nothing is imported for it).
-    pub fn type_only_name(&self, name: &str, state: &State) -> Option<Value> {
-        let (modname, attr) = self.type_only.get(&(self.frame().module, s(name)))?;
-        let mo = *self.modules.get(modname)?;
-        match attr {
-            Some(a) => state.slot_opt(mo, Ns::Attr, key_str_lit(a)),
-            None => Some(Value::obj(mo)),
-        }
-    }
-
-    /// `from M import *`: the names in M's `__all__` (a submodule of a package for a name it
-    /// does not define), or without a known one every name of M not starting with `_`.
-    fn import_star(&mut self, mod_v: &Value, modname: &str, n: &Node, state: &mut State) {
-        let Some(mo) = mod_v.single().filter(|o| self.heap.kind(*o) == Kind::Module) else { return };
-        let all = state.slot_opt(mo, Ns::Attr, key_str_lit("__all__")).map(|v| self.iterate(&v, n, state).items);
-        let names: Vec<String> = match all.flatten().and_then(|items| items.iter().map(|v| v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_str)).collect::<Option<Vec<_>>>()) {
-            Some(ns) => ns.iter().map(|x| x.to_string()).collect(),
-            None => state.obj_slots(mo, Ns::Attr).into_iter().filter_map(|(k, _)| intern::key_as_str(k)).filter(|x| !x.starts_with('_')).map(|x| x.to_string()).collect(),
-        };
-        for name in names {
-            let mut v = state.slot_opt(mo, Ns::Attr, key_str_lit(&name)).unwrap_or_default();
-            if v.pts.is_empty() && v.kv.is_bot() {
-                v = self.import_module(&format!("{}.{}", modname, name), n, state);
-            }
-            if v.pts.is_empty() && v.kv.is_bot() {
-                v = self.load_attr(mod_v, &name, n, state, false);
-            }
-            self.store_name(s(&name), v, state);
-        }
-    }
 
     pub fn exec_block(&mut self, stmts: &'static [ast::Stmt], state: &mut State) {
         for st in stmts {
@@ -206,7 +129,7 @@ impl Analyzer {
                 let mut keep = v.clone();
                 if !self.findings.row_check_requests.is_empty() {
                     let n = frontend::node(r);
-                    let file = self.rel_file(n.module);
+                    let file = self.program.rel_file(n.module);
                     let names: Vec<String> = self.findings.row_check_requests.iter().filter(|(f, ln, _)| *ln >= n.line && *ln <= n.end_line && *f == file).map(|(_, _, nm)| nm.clone()).collect();
                     for nm in names {
                         if let Some(x) = state.env.get(&s(&nm)) {
@@ -1287,7 +1210,7 @@ impl Analyzer {
         let info = std::rc::Rc::new(info);
         let cnode = frontend::node(c);
         let coid = self.alloc_at(Kind::Class, &cnode, state, &format!("class {}", c.name.id), Payload::Class(info.clone()), None, Ns::Attr, None, None);
-        self.user_classes.push(coid);
+        self.program.user_classes.push(coid);
         let is_dataclass = crate::models::dataclasses::class_decorators(self, c, coid, &info, state);
         if is_dataclass || typed_dict || named_tuple || pydantic {
             *info.dataclass_fields.borrow_mut() = Some(crate::models::dataclasses::declared_fields(c, pydantic));
@@ -1357,126 +1280,6 @@ impl Analyzer {
         self.store_name(s(c.name.id.as_str()), cv, state);
     }
 
-    /// `import a.b.c`: the parents are imported first and each submodule becomes an attribute
-    /// of its package; a module that is not found is an external object.
-    pub fn import_module(&mut self, name: &str, node: &Node, state: &mut State) -> Value {
-        if let Some(&m) = self.modules.get(name) {
-            return Value::obj(m);
-        }
-        if let Some((parent, leaf)) = name.rsplit_once('.') {
-            let pv = self.import_module(parent, node, state);
-            let mut found: Option<Value> = None;
-            if let Some(po) = pv.single() {
-                if self.heap.kind(po) == Kind::Module {
-                    // (a package's directory: its `__init__.py`'s, or a namespace package's own)
-                    let ppath = self.heap.module_info(po).path.clone().map(std::path::PathBuf::from);
-                    let dir = ppath.and_then(|p| if p.ends_with("__init__.py") { p.parent().map(|d| d.to_path_buf()) } else if p.is_dir() { Some(p) } else { None });
-                    if let Some(dir) = dir {
-                        found = self.load_module_file(name, &dir, leaf, state).or_else(|| self.load_namespace(name, &dir, leaf));
-                    }
-                    if let Some(v) = &found {
-                        state.set_slot(po, Ns::Attr, key_str_lit(leaf), v.clone(), true);
-                    }
-                }
-            }
-            if let Some(v) = found {
-                return v;
-            }
-        } else {
-            for base in self.search_paths.clone() {
-                let dir = std::path::PathBuf::from(&base);
-                if let Some(v) = self.load_module_file(name, &dir, name, state) {
-                    return v;
-                }
-            }
-            // a directory without `__init__.py` is a namespace package (PEP 420) when no module
-            // or regular package of the name is found (a modelled library's name is not taken)
-            if !crate::models::has_module_models(name) {
-                for base in self.search_paths.clone() {
-                    if let Some(v) = self.load_namespace(name, std::path::Path::new(&base), name) {
-                        return v;
-                    }
-                }
-            }
-            // an installed package on the allowlist is analysed from site-packages, unless a
-            // model covers it (the model knows more than its source would yield)
-            let followed = self.follow.iter().any(|f| f == name || f == "*");
-            if followed && !crate::models::has_module_models(name) {
-                for base in self.site_paths.clone() {
-                    let dir = std::path::PathBuf::from(&base);
-                    if let Some(v) = self.load_module_file(name, &dir, name, state) {
-                        return v;
-                    }
-                }
-            }
-        }
-        let _ = node;
-        if name == "torch" || name.starts_with("torch.") {
-            self.torch_on = true;
-            self.torch_real = true;
-            let m = self.frame().module;
-            self.torch_modules.insert(m);
-        }
-        // numpy arrays are tensors to the shape model
-        if name == "numpy" || name.starts_with("numpy.") {
-            self.torch_on = true;
-            let m = self.frame().module;
-            self.torch_modules.insert(m);
-        }
-        let oid = self.heap.alloc_raw(Kind::External, &format!("ext:{}", name), "", true, name, Payload::Str(name.to_string()));
-        Value::obj(oid)
-    }
-
-    /// Load `dir/leaf/__init__.py` or `dir/leaf.py` as module `name` (a file already loaded
-    /// under another name is shared).
-    fn load_module_file(&mut self, name: &str, dir: &std::path::Path, leaf: &str, state: &mut State) -> Option<Value> {
-        let cands = [dir.join(leaf).join("__init__.py"), dir.join(format!("{}.py", leaf))];
-        for p in cands.iter() {
-            if !p.exists() {
-                continue;
-            }
-            let real = std::fs::canonicalize(p).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string_lossy().to_string());
-            for (_, &moid) in self.modules.clone().iter() {
-                let mi = self.heap.module_info(moid);
-                if let Some(mp) = &mi.path {
-                    let mreal = std::fs::canonicalize(mp).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| mp.clone());
-                    if mreal == real {
-                        self.modules.insert(name.to_string(), moid);
-                        return Some(Value::obj(moid));
-                    }
-                }
-            }
-            let src = match std::fs::read_to_string(p) {
-                Ok(s) => s,
-                Err(_) => return None,
-            };
-            let ps = p.to_string_lossy().to_string();
-            return match frontend::parse(name, Some(&ps), src) {
-                Ok((idx, tree)) => {
-                    let moid = self.make_module(name, Some(&ps), idx, tree);
-                    self.run_module(moid, state);
-                    Some(Value::obj(moid))
-                }
-                Err(e) => {
-                    self.findings.note(format!("could not parse {}: {}", ps, e));
-                    None
-                }
-            };
-        }
-        None
-    }
-
-    /// `dir/leaf`, a directory without `__init__.py`, as namespace package `name`: an empty
-    /// module whose path is the directory (its submodules are found there).
-    fn load_namespace(&mut self, name: &str, dir: &std::path::Path, leaf: &str) -> Option<Value> {
-        let d = dir.join(leaf);
-        if !d.is_dir() || d.join("__init__.py").exists() {
-            return None;
-        }
-        let ps = d.to_string_lossy().to_string();
-        let (idx, tree) = frontend::parse(name, Some(&ps), String::new()).ok()?;
-        Some(Value::obj(self.make_module(name, Some(&ps), idx, tree)))
-    }
 }
 
 /// A `return` somewhere in these statements (not inside nested functions or classes).

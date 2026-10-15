@@ -231,7 +231,7 @@ impl Analyzer {
         if !self.findings.facts_on || node.addr == 0 || self.findings.quiet {
             return;
         }
-        if node.module != self.heap.module_info(self.main_module).idx {
+        if node.module != self.heap.module_info(self.program.main_module).idx {
             return;
         }
         let mut rows: Vec<(ObjId, Option<Row>, Option<Row>)> = Vec::new();
@@ -364,7 +364,7 @@ impl Analyzer {
             return;
         }
         let n = frontend::node(stmt);
-        let file = self.rel_file(n.module);
+        let file = self.program.rel_file(n.module);
         if !state.reachable && !matches!(stmt, ast::Stmt::Return(_) | ast::Stmt::Break(_) | ast::Stmt::Continue(_)) {
             // the statement raised on this path: nothing to observe after it
             return;

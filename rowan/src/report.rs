@@ -184,14 +184,14 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
         let mut shapes: Vec<String> = Vec::new();
         let mut errs: Vec<&crate::models::torch::ShapeNote> = an.m.shape_errors.iter().collect();
         // (a line of another module is named with its file: `pkg/layers.py:L12`)
-        let at = |n: &crate::models::torch::ShapeNote| match an.rel_file(n.module) {
+        let at = |n: &crate::models::torch::ShapeNote| match an.program.rel_file(n.module) {
             f if f.is_empty() => format!("L{:<5}", n.line),
             f => format!("{}:L{}", f, n.line),
         };
-        errs.sort_by_key(|e| (e.module != an.main_idx(), e.module, e.line, e.chain.len()));
+        errs.sort_by_key(|e| (e.module != an.program.main_idx, e.module, e.line, e.chain.len()));
         errs.dedup_by(|a, b| (a.module, a.line, &a.text) == (b.module, b.line, &b.text));
         shapes.extend(errs.iter().map(|e| format!("  {} ✗  shape mismatch: {}{}", at(e), e.text, via_text(&e.chain, 0))));
-        let mut reqs: Vec<(bool, u32, u32, String, String)> = an.m.shape_reqs.iter().filter(|r| r.chain.is_empty()).map(|r| (r.module != an.main_idx(), r.module, r.line, at(r), r.text.clone())).collect();
+        let mut reqs: Vec<(bool, u32, u32, String, String)> = an.m.shape_reqs.iter().filter(|r| r.chain.is_empty()).map(|r| (r.module != an.program.main_idx, r.module, r.line, at(r), r.text.clone())).collect();
         reqs.sort();
         reqs.dedup();
         shapes.extend(reqs.iter().map(|(_, _, _, at, text)| format!("  {}    needs {}", at, text)));
@@ -207,7 +207,7 @@ pub fn format_text(an: &Analyzer, show_rows: bool, show_summaries: bool) -> Stri
         section(&mut lines, "what functions return", result_lines(an));
     }
     if let Some(st) = an.findings.final_state.as_ref().filter(|_| show_rows) {
-        let mut names: Vec<(String, crate::domain::Value)> = st.obj_slots(an.main_module, Ns::Attr).into_iter().map(|(k, v)| (intern::key_py_str(k), v)).collect();
+        let mut names: Vec<(String, crate::domain::Value)> = st.obj_slots(an.program.main_module, Ns::Attr).into_iter().map(|(k, v)| (intern::key_py_str(k), v)).collect();
         names.sort_by(|a, b| a.0.cmp(&b.0));
         // definitions (functions, classes, imported modules) are not values worth listing;
         // one line each, cut at 150 characters (the hover has the rest)
@@ -347,7 +347,7 @@ fn code_list(an: &Analyzer, sites: &[String]) -> String {
 /// (`` `json.loads(…)` (line 6) ``).
 pub fn site_text(an: &Analyzer, site: &str) -> String {
     let in_file = |m: u32, line: u32| {
-        let f = an.rel_file(m);
+        let f = an.program.rel_file(m);
         if f.is_empty() { format!("line {}", line) } else { format!("{} line {}", f, line) }
     };
     if let Some((text, m, line)) = an.names.site_names.get(&intern::s(site)) {
@@ -676,7 +676,7 @@ fn legend(text: &str) -> Vec<String> {
 pub fn verdict_json(an: &Analyzer, v: &Verdict) -> J {
     json!({
         "kind": "verdict",
-        "site": format!("{}:{}:{}", if v.file.is_empty() { an.filename.clone() } else { v.file.clone() }, v.line, v.col),
+        "site": format!("{}:{}:{}", if v.file.is_empty() { an.program.filename.clone() } else { v.file.clone() }, v.line, v.col),
         "file": v.file,
         "line": v.line,
         "col": v.col,
@@ -746,7 +746,7 @@ pub fn golden_json(an: &Analyzer) -> J {
             out
         })
         .collect();
-    let note = |n: &crate::models::torch::ShapeNote| json!({"file": an.rel_file(n.module), "line": n.line, "chain": n.chain, "entry": n.entry, "text": n.text, "message": n.text});
+    let note = |n: &crate::models::torch::ShapeNote| json!({"file": an.program.rel_file(n.module), "line": n.line, "chain": n.chain, "entry": n.entry, "text": n.text, "message": n.text});
     let requires: Vec<J> = an.m.shape_reqs.iter().map(note).collect();
     let shape_errors: Vec<J> = an.m.shape_errors.iter().map(note).collect();
     json!({"verdicts": verdicts, "schemas": schemas, "rows": rows, "notes": an.findings.notes(), "report": format_text(an, true, true), "requires": requires, "shape_errors": shape_errors, "objects": an.heap.len(), "tabulations": an.budget.runs, "joins": crate::domain::row_joins(), "work": an.budget.statements, "visits": an.budget.walked.get() + crate::state::fp_visits(), "havoc": an.havoc.visited})
@@ -1237,7 +1237,7 @@ pub fn facts_json(an: &Analyzer) -> J {
         let mut requires: Vec<String> = Vec::new();
         let mut extra_legend: Vec<(String, String)> = Vec::new();
         for n in &an.m.shape_reqs {
-            if n.line != *line || !n.chain.is_empty() || n.module != an.main_idx() {
+            if n.line != *line || !n.chain.is_empty() || n.module != an.program.main_idx {
                 continue;
             }
             let t = match &n.cons {
@@ -1275,7 +1275,7 @@ pub fn facts_json(an: &Analyzer) -> J {
         facts.push(json!({"line": line, "name": name.to_string(), "text": text, "examples": examples, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "required": required, "requires": requires}));
     }
     // (columns in UTF-16 units, as editors count them; each finding with its message in words)
-    let main_idx = an.heap.module_info(an.main_module).idx;
+    let main_idx = an.heap.module_info(an.program.main_module).idx;
     let verdicts: Vec<J> = reported(an)
         .iter()
         .map(|v| {
@@ -1287,8 +1287,8 @@ pub fn facts_json(an: &Analyzer) -> J {
             j
         })
         .collect();
-    let shape_errors: Vec<J> = an.m.shape_errors.iter().map(|n| json!({"file": an.rel_file(n.module), "line": n.line, "chain": n.chain, "message": n.text})).collect();
-    json!({"file": an.filename, "facts": facts, "verdicts": verdicts, "shape_errors": shape_errors})
+    let shape_errors: Vec<J> = an.m.shape_errors.iter().map(|n| json!({"file": an.program.rel_file(n.module), "line": n.line, "chain": n.chain, "message": n.text})).collect();
+    json!({"file": an.program.filename, "facts": facts, "verdicts": verdicts, "shape_errors": shape_errors})
 }
 
 fn cons_atoms(c: &crate::models::shape::Cons, out: &mut Vec<crate::models::shape::AtomId>) {

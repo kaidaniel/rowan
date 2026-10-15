@@ -198,7 +198,7 @@ impl Analyzer {
                 }
                 let call = Call { qual: qual.clone(), recv: Some(recv.clone()), args, kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
                 let pure = if qual.starts_with("str.") { crate::models::pure::try_pure(self, state, &call) } else { None };
-                let r = match (pure, self.models.lookup(&qual)) {
+                let r = match (pure, self.program.models.lookup(&qual)) {
                     (Some(v), _) => v,
                     (None, Some(m)) => self.run_model(m, state, &call),
                     (None, None) => return self.unknown_call(&qual, Some(&recv), &call.args, kwargs, star_args, star_kwargs, state, node),
@@ -247,7 +247,7 @@ impl Analyzer {
         }
         // a builtin exception class: an exception object with its args
         if let Some(n) = qual.strip_prefix("builtins.").filter(|n| super::exprs::is_exception_name(n)) {
-            if kwargs.is_empty() && star_args.is_empty() && !self.models.has_exact(&qual) {
+            if kwargs.is_empty() && star_args.is_empty() && !self.program.models.has_exact(&qual) {
                 let n = n.to_string();
                 return self.exception_object(&n, args.to_vec(), node, state);
             }
@@ -257,11 +257,11 @@ impl Analyzer {
         if let Some(base) = qual.strip_suffix(".__get__").filter(|_| !args.is_empty() && kwargs.is_empty()) {
             let f = self.heap.alloc_raw(Kind::External, &format!("ext:{}", base), "", true, base, Payload::Str(base.to_string()));
             let pc = Call { qual: "functools.partial".into(), args: vec![Value::obj(f), args[0].clone()], ..call.clone() };
-            if let Some(m) = self.models.lookup("functools.partial") {
+            if let Some(m) = self.program.models.lookup("functools.partial") {
                 return self.run_model(m, state, &pc);
             }
         }
-        if let Some(m) = self.models.lookup(&qual) {
+        if let Some(m) = self.program.models.lookup(&qual) {
             return self.run_model(m, state, &call);
         }
         self.unknown_call(&qual, None, args, kwargs, star_args, star_kwargs, state, node)
