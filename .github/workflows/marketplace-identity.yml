@@ -1,0 +1,31 @@
+# One-off helper for the Marketplace sign-in that release.yml uses (see its header): signs in as
+# the Entra ID identity and prints its Azure DevOps profile id, which is what the Marketplace's
+# publisher page needs to make the identity a Contributor. The id can only be read while signed
+# in as the identity, hence a workflow. Run it once after setting the AZURE_* variables.
+name: Marketplace identity
+
+on:
+  workflow_dispatch:
+
+jobs:
+  profile:
+    name: the identity's profile id
+    runs-on: ubuntu-latest
+    environment: marketplace
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      # 499b84ac-… is the Azure DevOps resource id: the token is for Azure DevOps, not Azure
+      - name: Profile id
+        run: |
+          id=$(az rest --url https://app.vssps.visualstudio.com/_apis/profile/profiles/me \
+                       --resource 499b84ac-1321-427f-aa17-267ca6975798 --query id --output tsv)
+          echo "profile id: $id"
+          echo "::notice::Marketplace member id for the Rowan publisher (Contributor): $id"
