@@ -442,24 +442,7 @@ impl Analyzer {
         let ordered = |an: &Analyzer, o: Option<ObjId>| o.and_then(|o| an.heap.instance_class(o)).map(|c| an.heap.mro(c).iter().any(|m| an.m.total_ordering.contains(m))).unwrap_or(false);
         if matches!(op, ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE) && ordered(self, ai) {
             if let Some(f) = ai.and_then(|o| self.cmp_dunder(o, "__lt__")) {
-                let lt = call(self, f, a, b, state);
-                let lt = self.truth_of(&lt, state, node);
-                let eqv = self.rich_compare(ast::CmpOp::Eq, a, b, node, state).unwrap_or_else(|| Value::data("bool"));
-                let eq = self.truth_of(&eqv, state, node);
-                let r = match op {
-                    ast::CmpOp::LtE => match (lt, eq) {
-                        (Some(true), _) | (_, Some(true)) => Some(true),
-                        (Some(false), Some(false)) => Some(false),
-                        _ => None,
-                    },
-                    ast::CmpOp::Gt => match (lt, eq) {
-                        (Some(true), _) | (_, Some(true)) => Some(false),
-                        (Some(false), Some(false)) => Some(true),
-                        _ => None,
-                    },
-                    ast::CmpOp::GtE => lt.map(|t| !t),
-                    _ => lt,
-                };
+                let r = self.total_ordering_compare(op, a, b, f, node, state);
                 return Some(lit(r));
             }
         }
@@ -470,26 +453,7 @@ impl Analyzer {
                 ast::CmpOp::Gt => o.is_gt(),
                 _ => o.is_ge(),
             };
-            // a member of an Enum mixing in int / str (IntEnum, StrEnum): its value
-            let mixed = |an: &Analyzer, o: Option<ObjId>| -> Option<Value> {
-                let o = o?;
-                let c = an.heap.instance_class(o)?;
-                if !an.m.enum_kind.get(&c).map(|k| k.mixed).unwrap_or(false) {
-                    return None;
-                }
-                let v = state.slot(o, Ns::Attr, key_str_lit("value"));
-                v.kv.as_lit().filter(|_| v.pts.is_empty()).map(|_| v)
-            };
-            let (ma, mb) = (mixed(self, ai), mixed(self, bi));
-            if ma.is_some() || mb.is_some() {
-                let x = ma.unwrap_or_else(|| a.clone());
-                let y = mb.unwrap_or_else(|| b.clone());
-                if let Some(o) = crate::models::stdfuncs::value_order(self, state, &x, &y) {
-                    return Some(lit(Some(decide(o))));
-                }
-            }
-            // `@dataclass(order=True)`: two instances of the class compare their fields
-            if let Some(o) = ai.zip(bi).and_then(|(x, y)| crate::models::dataclasses::dataclass_order(self, x, y, state)) {
+            if let Some(o) = self.ordered_instances(a, b, ai, bi, state) {
                 return Some(lit(Some(decide(o))));
             }
         }
@@ -504,6 +468,53 @@ impl Analyzer {
             }
         }
         None
+    }
+
+    /// `@total_ordering`: `a op b` from the class's `__lt__` (run on `a`, `f`) and `__eq__`.
+    fn total_ordering_compare(&mut self, op: ast::CmpOp, a: &Value, b: &Value, f: ObjId, node: &Node, state: &mut State) -> Option<bool> {
+        let lt = self.call_user(f, Some(a.clone()), vec![b.clone()], IndexMap::new(), vec![], vec![], state, node, None, false);
+        let lt = self.truth_of(&lt, state, node);
+        let eqv = self.rich_compare(ast::CmpOp::Eq, a, b, node, state).unwrap_or_else(|| Value::data("bool"));
+        let eq = self.truth_of(&eqv, state, node);
+        match op {
+            ast::CmpOp::LtE => match (lt, eq) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (Some(false), Some(false)) => Some(false),
+                _ => None,
+            },
+            ast::CmpOp::Gt => match (lt, eq) {
+                (Some(true), _) | (_, Some(true)) => Some(false),
+                (Some(false), Some(false)) => Some(true),
+                _ => None,
+            },
+            ast::CmpOp::GtE => lt.map(|t| !t),
+            _ => lt,
+        }
+    }
+
+    /// The order of two values of which some are instances: an Enum member mixing in int / str
+    /// by its value, two `@dataclass(order=True)` instances by their fields.
+    fn ordered_instances(&mut self, a: &Value, b: &Value, ai: Option<ObjId>, bi: Option<ObjId>, state: &mut State) -> Option<std::cmp::Ordering> {
+        // a member of an Enum mixing in int / str (IntEnum, StrEnum): its value
+        let mixed = |an: &Analyzer, o: Option<ObjId>| -> Option<Value> {
+            let o = o?;
+            let c = an.heap.instance_class(o)?;
+            if !an.m.enum_kind.get(&c).map(|k| k.mixed).unwrap_or(false) {
+                return None;
+            }
+            let v = state.slot(o, Ns::Attr, key_str_lit("value"));
+            v.kv.as_lit().filter(|_| v.pts.is_empty()).map(|_| v)
+        };
+        let (ma, mb) = (mixed(self, ai), mixed(self, bi));
+        if ma.is_some() || mb.is_some() {
+            let x = ma.unwrap_or_else(|| a.clone());
+            let y = mb.unwrap_or_else(|| b.clone());
+            if let Some(o) = crate::models::stdfuncs::value_order(self, state, &x, &y) {
+                return Some(o);
+            }
+        }
+        // `@dataclass(order=True)`: two instances of the class compare their fields
+        ai.zip(bi).and_then(|(x, y)| crate::models::dataclasses::dataclass_order(self, x, y, state))
     }
 
     /// The order of two tuples (objects with known items, or literal tuples) item by item.
