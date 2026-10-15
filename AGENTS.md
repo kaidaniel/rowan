@@ -17,9 +17,8 @@ namespace packages).
 * **Objects** (`Obj`, `interp/heap.rs`) are identified by allocation site and context (the call
   chain, 2 deep). A *single* object stands for one runtime object: stores into it are strong.
   Allocating a site again while its earlier object is live gives a variant (up to 8), then a
-  *merged* object (stores only join). Garbage collection at returns, loop exits and try exits
-  drops the state of objects made since (`Obj::born`, renewed by a strong re-allocation) that
-  nothing reaches.
+  *merged* object (stores only join). Garbage collection at returns, loop and try exits drops
+  the state of objects made since (`Obj::born`, renewed by a strong re-allocation) nothing reaches.
 * **State** (`State`, `state.rs`) is one point on one path: names → values, and per object
   its **rows** (`(object, namespace)` → `Row`), slots (the value under each key), elements,
   lengths, and the requirements recorded so far. The maps are persistent Patricia tries
@@ -76,7 +75,8 @@ namespace packages).
   `try`, here or in a caller, is a probe: it does not).
 * **Verdicts:** every read, `del` and `pop` gets a tier per object from its row (`classify`):
   `proven`, `possibly`, `missing` and `input` are sound; `likely` / `likely-missing` are
-  optimistic (they assume unknown code removed nothing).
+  optimistic (they assume unknown code removed nothing). In one of several functions a value
+  picks (`CONVERTERS[k](x)`, `k` unknown: `cx.picked`) a `missing` is `possibly`.
 * **Models** (`models/`, by qualified name in `Registry`; free functions of `&mut Analyzer` that
   see the `Heap`, their `models::Tables` and the interpreter's public methods) compute
   CPython's result on known values (str / bytes, formatting, json, re, datetime, decimal,
@@ -147,8 +147,8 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 * **Oracle** (`tests/oracle.py`): reruns each case under CPython with a tracer and checks every
   directive; schemas by dropping keys from the input. Strict on the library suites.
 * **Snapshots** (`tests/snapshots/`): `--json` on `examples/etl_report.py` and
-  `tests/fixtures/proto_*.py`. The regression guard for internals; object ids may shift.
-* **Unit tests** in `rowan/src`: CPython-exact value functions, the regex engine, the tries.
+  `tests/fixtures/proto_*.py`: the guard for internals (object ids may shift). **Unit tests**
+  in `rowan/src`: CPython-exact value functions, the regex engine, the tries.
 
 ## Debugging switches
 

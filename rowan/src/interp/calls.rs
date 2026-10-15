@@ -83,12 +83,26 @@ impl Analyzer {
         if self.budget.over_hard_deadline() && targets.iter().all(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound)) {
             return self.unknown_call("?", None, &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
+        // (several functions a value picks — a method of each of several receivers is the
+        // receiver's own: not picked)
+        let picked = targets.iter().all(|o| !matches!(self.heap.kind(*o), Kind::Bound) && !matches!(self.heap.obj(*o).payload, Payload::Method(..) | Payload::Bound(..))).then(|| self.node_text(node));
         self.alternatives(targets.len(), false, state, &mut |an, i, st| {
             let oid = targets[i];
             // (a groupby method of one of several groupby objects: its results are its own)
             let own = matches!(&an.heap.obj(oid).payload, Payload::Method(q, r) if q.starts_with("groupby.") && r.pts.iter().all(|g| an.heap.kind(g) == Kind::Groupby));
             let saved = if own { an.cx.alloc_extra.replace(format!("gbm{}", oid)) } else { an.cx.alloc_extra.clone() };
+            if let Some(call) = &picked {
+                let name = match an.heap.kind(oid) {
+                    Kind::Function => an.heap.func_info(oid).qualname.clone(),
+                    Kind::Unknown => "code rowan cannot see".to_string(),
+                    _ => an.heap.obj(oid).label.to_string(),
+                };
+                an.cx.picked.push((call.clone(), name));
+            }
             let r = an.call_one(oid, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast);
+            if picked.is_some() {
+                an.cx.picked.pop();
+            }
             an.cx.alloc_extra = saved;
             r
         })

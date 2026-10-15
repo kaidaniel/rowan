@@ -208,11 +208,18 @@ impl Analyzer {
             return;
         }
         let weakened;
-        let cls = if self.mode.recv_scalar && cls.tier == Tier::Missing {
-            weakened = Classification::with_note(Tier::Possibly, format!("{}, unless the value is a plain one such as a str", cls.note));
-            &weakened
-        } else {
-            cls
+        let cls = match self.cx.picked.last() {
+            _ if cls.tier != Tier::Missing => cls,
+            _ if self.mode.recv_scalar => {
+                weakened = Classification::with_note(Tier::Possibly, format!("{}, unless the value is a plain one such as a str", cls.note));
+                &weakened
+            }
+            // (in one of several functions a value picks: where the program picks this one)
+            Some((call, f)) => {
+                weakened = Classification::with_note(Tier::Possibly, format!("{}, where `{}` calls {}", cls.note, call, f));
+                &weakened
+            }
+            None => cls,
         };
         // a key written as `True` that reached the dict's `1`: reported as written
         let key = match self.mode.key_alias {
