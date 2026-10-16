@@ -21,9 +21,12 @@ saved, or with **Rowan: Analyse current file**. When a whole file takes longer t
 rowan analyses each function when you first hover in it, for any call of it (usually well under
 a second), and says so in the status bar.
 
-A hover shows `name = value` (a parameter: `name = (parameter)`), then what the code needs of it
-(**Requirements**: `row["id"]`, `row["since"] (only if admin)`, `x.dim() == 3`), what the
-program's own calls give or pass (**In Calls**: `{"id": 2} on line 24: ✗ row["since"]`), and
-what each mark it uses means (**Notes**). Accesses that may fail are diagnostics.
+A hover shows `name = value` (a parameter: `name = (parameter)`, with its type or default when
+known: `(parameter) int(?)`), then what the code needs of a parameter (**Requirements**:
+`row["id"]`, `row["since"] (only if admin)`, `x.dim() == 3`), what the program's own calls give or
+pass (**In Calls**: `{"id": 2} on line 24: ✗ row["since"]`), where its objects were made
+(**Allocation Sites**: `created on line 12`, `never has key "b" here`), and what each mark it uses
+means (**Notes**; last, when the analysis was cut or ran on demand). Accesses that may fail are
+diagnostics.
 
 Source, documentation and issues: [github.com/kaidaniel/rowan](https://github.com/kaidaniel/rowan).

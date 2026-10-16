@@ -1271,9 +1271,10 @@ pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, Str
 pub fn facts_json(an: &Analyzer) -> J {
     let mut facts: Vec<J> = Vec::new();
     for ((line, name), f) in &an.findings.facts {
-        // (the objects a name may hold, for where its unknowns come from and what changed them:
-        // the first `MAX_FACT_OBJECTS` — a name holding hundreds of objects made the document
-        // hundreds of MB)
+        // (the objects a name may hold, for where they were made, where its unknowns come from
+        // and what changed them: the first `MAX_FACT_OBJECTS` — a name holding hundreds of
+        // objects made the document hundreds of MB — and how many there are)
+        let objects_total = f.shown_rows().len();
         let objects: Vec<J> = f
             .shown_rows()
             .iter()
@@ -1322,11 +1323,16 @@ pub fn facts_json(an: &Analyzer) -> J {
             let calls = f.calls.iter().filter(|(t, _)| *t != g || f.param_of.is_some()).map(|(t, lines)| call(t, lines)).collect();
             (g, calls)
         };
-        let mut fact = json!({"line": line, "name": name.to_string(), "text": text, "general": !f.general.is_empty(), "calls": calls, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "general_unknowns": general_unknowns, "required": required, "requires": requires});
+        let mut fact = json!({"line": line, "name": name.to_string(), "text": text, "general": !f.general.is_empty(), "calls": calls, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "general_unknowns": general_unknowns, "required": required, "requires": requires});
         // a parameter at its `def`: what the function reads of it for any call (its contract)
         if let Some(foid) = f.param_of {
             fact["param"] = json!(true);
             fact["contract"] = param_contract(an, foid, *name);
+        }
+        // (an unknown the name stands for, of the builtin type its annotation gives it: `x: int`)
+        let own = |o: &ObjId| an.heap.kind(*o) == Kind::Unknown && an.names.get(*o).is_some_and(|n| *n == name.to_string());
+        if let Some(t) = f.general_rows.keys().chain(f.rows.keys()).filter(|o| own(o)).find_map(|o| an.heap.obj(*o).ty) {
+            fact["type"] = json!(t);
         }
         facts.push(fact);
     }
@@ -1344,7 +1350,7 @@ pub fn facts_json(an: &Analyzer) -> J {
         })
         .collect();
     let shape_errors: Vec<J> = an.m.shape_errors.iter().map(|n| json!({"file": an.program.rel_file(n.module), "line": n.line, "chain": n.chain, "message": n.text})).collect();
-    json!({"file": an.program.filename, "facts": facts, "verdicts": verdicts, "shape_errors": shape_errors})
+    json!({"file": an.program.filename, "facts": facts, "verdicts": verdicts, "shape_errors": shape_errors, "analysis": an.analysis_json()})
 }
 
 /// One object a hover's name may hold: what may have changed it, where it comes from, its kind,
@@ -1355,6 +1361,8 @@ fn fact_object_json(an: &Analyzer, f: &crate::interp::Fact, oid: ObjId, item: &O
     let rows = [item, attr].into_iter().flatten();
     let mut changed_by: Vec<String> = Vec::new();
     let mut from: Vec<String> = Vec::new();
+    // (keys and attributes it never has here)
+    let absent = |r: &Option<Row>| r.as_ref().map(|r| intern::sorted_by_str(r.absent.iter()).iter().filter(|k| !is_internal_key(**k)).map(|k| crate::domain::key_display(*k)).collect::<Vec<_>>()).unwrap_or_default();
     for r in rows {
         for m in r.mutators.iter() {
             let t = site_text(an, &intern::str_get(m));
@@ -1370,9 +1378,23 @@ fn fact_object_json(an: &Analyzer, f: &crate::interp::Fact, oid: ObjId, item: &O
             }
         }
     }
+    // where the program made it: its file (empty: the hovered one) and line
+    let site = an.heap.obj(oid).site.clone();
+    let (module, rest) = match site.strip_prefix('M').and_then(|r| r.split_once(':')) {
+        Some((m, r)) => (m.parse::<u32>().ok(), r),
+        None => (Some(an.program.main_idx), &*site),
+    };
+    let line = rest.strip_prefix('L').and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next()).and_then(|l| l.parse::<u32>().ok());
+    let created = match (module, line) {
+        (Some(m), Some(l)) if an.heap.kind(oid) != Kind::Unknown => json!({"file": an.program.rel_file(m), "line": l}),
+        _ => J::Null,
+    };
     json!({
         "changed_by": changed_by,
         "from": from,
+        "created": created,
+        "absent": absent(item),
+        "absent_attrs": absent(attr),
         "kind": an.heap.kind(oid).name(),
         "origin": origin,
         "symbol": an.names.get(oid).filter(|_| f.legend.iter().any(|(s0, _)| Some(s0) == an.names.get(oid))),
