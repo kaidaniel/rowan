@@ -1183,6 +1183,14 @@ impl Analyzer {
         let lit = self.literal_dict_items(oid, state);
         match (lit, acc.items.as_mut()) {
             (Some(l), Some(its)) => its.extend(l.into_iter().map(|(k, _)| Value::lit(k))),
+            // (known keys in no known order: each item is any of them, as a set's)
+            (None, Some(its)) => match self.unordered_dict_keys(oid, state) {
+                Some(ks) => {
+                    its.extend(ks.into_iter().map(Value::lit));
+                    acc.unordered = true;
+                }
+                None => acc.items = None,
+            },
             _ => acc.items = None,
         }
         acc.elems.push(Value::kv_only(KeyVal::KeysOf(KeysOf::new(ObjSet::one(oid), Ns::Item))));
@@ -1293,6 +1301,13 @@ impl Analyzer {
             out.push((item, sure));
         }
         Some(out)
+    }
+
+    /// The keys of a closed dict whose keys are all known but not their order.
+    fn unordered_dict_keys(&self, oid: u32, state: &State) -> Option<Vec<KeyId>> {
+        let row = state.row(oid, Ns::Item);
+        let plain = !row.open() && row.present == row.definite && row.present.len() <= UNROLL_MAX && !state.has_slot(oid, Ns::Item, STAR) && !self.m.counters.contains(&oid);
+        (plain && row.ordered_keys().is_none()).then(|| intern::sorted_by_str(row.present.iter()))
     }
 
     pub fn literal_dict_items(&mut self, oid: u32, state: &State) -> Option<Vec<(KeyId, Value)>> {

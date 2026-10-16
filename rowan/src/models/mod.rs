@@ -910,7 +910,7 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             st.set_slot(oid, Ns::Pos, intern::key_int(pos as i64), v, true);
                         }
                         // the items of a set come in an order Python does not promise
-                        let from_set = a.pts.iter().any(|o| an.heap.kind(o) == Kind::Set);
+                        let from_set = it.unordered || a.pts.iter().any(|o| an.heap.kind(o) == Kind::Set);
                         if from_set && kind != Kind::Set && !sorted {
                             for i in 0..n {
                                 st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), all.clone(), true);

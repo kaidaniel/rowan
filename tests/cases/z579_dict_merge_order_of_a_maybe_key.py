@@ -8,8 +8,7 @@ if n > 2:
     del d["k"]
 d["m"] = None
 e = d | {"k": 0}
-first_e = list(e)[0]                         #@value first_e: includes={"k", "m"}
+first_e = list(e)[0]                         #@value first_e: exactly={"k", "m"}
 f = dict(d)
 f.update({"k": 0})
-first_f = list(f)[0]                         #@value first_f: includes={"k", "m"}
-#@todo value first_f: exactly={"k", "m"}  (the keys of a dict in no known order are not taken as literals)
+first_f = list(f)[0]                         #@value first_f: exactly={"k", "m"}
