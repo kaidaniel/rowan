@@ -90,14 +90,32 @@ impl Analyzer {
         }
         // (on demand, past the work its run may do, several functions of the program none of
         // which runs here: one call that does not run, for all of them)
+        // (a class among them whose instance only its `__init__` makes: its instance, made here,
+        // is that `__init__`'s receiver — `cls(**params)` for any of a thousand classes)
         if unknown.is_none() && targets.len() > 1 && self.budget.past_hover_work(self.cx.frames.len(), self.hover_work()) {
-            let fns: Option<Vec<(ObjId, Option<Value>)>> = targets.iter().map(|&o| match (self.heap.kind(o), &self.heap.obj(o).payload) {
-                (Kind::Function, Payload::Func(_)) => Some((o, None)),
-                (Kind::Bound, Payload::Bound(f, r)) if self.heap.kind(*f) == Kind::Function => Some((*f, Some(r.clone()))),
+            let callees: Option<Vec<(Option<ObjId>, Option<Value>, bool)>> = targets.iter().map(|&o| match (self.heap.kind(o), &self.heap.obj(o).payload) {
+                (Kind::Function, Payload::Func(_)) => Some((Some(o), None, false)),
+                (Kind::Bound, Payload::Bound(f, r)) if self.heap.kind(*f) == Kind::Function => Some((Some(*f), Some(r.clone()), false)),
+                (Kind::Class, _) => self.plain_init(o).map(|init| (init, Some(Value::obj(o)), true)),
                 _ => None,
             }).collect();
-            if let Some(fns) = fns {
-                return self.skipped_calls(&fns, &args, &kwargs, &star_args, &star_kwargs, state, node, call_ast);
+            if let Some(callees) = callees {
+                let mut fns: Vec<(ObjId, Option<Value>)> = Vec::new();
+                let mut made = Value::new();
+                for (f, r, class) in callees {
+                    let r = match r.as_ref().and_then(|c| c.single()).filter(|_| class) {
+                        Some(cls) => {
+                            let inst = Value::obj(self.alloc_instance(cls, node, state));
+                            made = made.join(&inst);
+                            Some(inst)
+                        }
+                        None => r,
+                    };
+                    fns.extend(f.map(|f| (f, r)));
+                }
+                let funcs = fns.len() > made.pts.len();
+                let r = if fns.is_empty() { Value::new() } else { self.skipped_calls(&fns, &args, &kwargs, &star_args, &star_kwargs, state, node, call_ast) };
+                return if made.pts.is_empty() || funcs { r.join(&made) } else { made };
             }
         }
         let (groups, targets) = self.receiver_groups(targets);
@@ -471,6 +489,23 @@ impl Analyzer {
             crate::models::dataclasses::exception_init(self, cls, inst, args, node, state);
         }
         Value::obj(inst)
+    }
+
+    /// A class whose call only makes an instance and runs its `__init__` on it (no `__new__`,
+    /// no generated or library construction, not abstract): Some(its `__init__`, if the
+    /// program defines one); None otherwise.
+    fn plain_init(&self, cls: ObjId) -> Option<Option<ObjId>> {
+        let ci = self.heap.class_info_opt(cls)?;
+        let fields = self.heap.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).is_some_and(|x| x.has_fields() || x.lib.dict_base || x.lib.typed_dict));
+        if fields || ci.lib.typed_dict || self.m.enum_members.contains_key(&cls) || self.class_lookup(cls, "__new__").is_some() || crate::models::pydantic::is_validated(self, cls) || self.builtin_exc_base(cls) || crate::models::dataclasses::abstract_unimplemented(self, cls) {
+            return None;
+        }
+        let Some(owner) = self.class_lookup(cls, "__init__") else { return Some(None) };
+        let fv = self.heap.cls_slots.get(&(owner, Ns::Attr, key_str_lit("__init__")))?;
+        match fv.single() {
+            Some(f) if self.heap.kind(f) == Kind::Function && fv.kv.is_bot() => Some(Some(f)),
+            _ => None,
+        }
     }
 
     /// A fresh instance of user class `cls` allocated at `node`, without attributes (an
