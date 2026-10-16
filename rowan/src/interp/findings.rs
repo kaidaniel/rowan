@@ -331,7 +331,8 @@ impl Analyzer {
         // the set the value goes to: the general one, or that of the call (its line); a
         // requirement-only run records only its function's own lines
         let general = self.in_general_run();
-        if (self.findings.quiet && !general) || (self.entry.no_facts.is_some() && self.entry.no_facts == self.frame().func) {
+        // (on demand, what the program's calls give is not known: only the values for any call)
+        if ((self.findings.quiet || self.entry.on_demand) && !general) || (self.entry.no_facts.is_some() && self.entry.no_facts == self.frame().func) {
             return;
         }
         let call = if general { None } else { Some(self.cx.call_chain.last().copied().unwrap_or(0)) };

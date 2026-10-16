@@ -80,7 +80,24 @@ pub fn content_hash(source: &str) -> u64 {
     h.finish()
 }
 
+thread_local! {
+    /// time spent parsing on this thread (`parse_time`)
+    static PARSE_TIME: std::cell::Cell<std::time::Duration> = const { std::cell::Cell::new(std::time::Duration::ZERO) };
+}
+
+/// The time this thread spent parsing modules so far (`rowan hovers`' setup report).
+pub fn parse_time() -> std::time::Duration {
+    PARSE_TIME.with(|t| t.get())
+}
+
 pub fn parse(name: &str, path: Option<&str>, source: String) -> Result<(u32, &'static ast::ModModule), String> {
+    let t0 = std::time::Instant::now();
+    let r = parse_uncounted(name, path, source);
+    PARSE_TIME.with(|t| t.set(t.get() + t0.elapsed()));
+    r
+}
+
+fn parse_uncounted(name: &str, path: Option<&str>, source: String) -> Result<(u32, &'static ast::ModModule), String> {
     // (Windows line ends as `\n`: lines and columns are the same, texts over lines read alike)
     let source = if source.contains("\r\n") { source.replace("\r\n", "\n") } else { source };
     let key = path.map(|p| (p.to_string(), content_hash(&source)));

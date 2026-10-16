@@ -47,6 +47,10 @@ pub struct Budget {
     /// the hard deadline passed: function bodies stop, the calls they are in become unknown calls
     pub hard_cut: bool,
     cut_tick: u32,
+    /// a function's run on demand: the work done when it began (`Analyzer::hover_work`), and
+    /// the frames it runs in (its own calls run; past `past_hover_work`, its callees' calls are
+    /// unknown)
+    pub hover: Option<(usize, usize)>,
 }
 
 impl Budget {
@@ -99,6 +103,21 @@ impl Budget {
     /// Past the deadline (`DEADLINE_MS`): calls of user code are unknown code from there on.
     pub fn over_hard_deadline(&self) -> bool {
         self.started.elapsed().as_millis() as usize > limit("ms", DEADLINE_MS)
+    }
+
+    /// A fresh budget for one function's run on demand (`general_run_of`): no statements
+    /// spent, no calls refused, the deadline counted from now (the counters go on).
+    pub fn fresh(&mut self) {
+        self.spent.clear();
+        self.out.clear();
+        self.started = Clock::default();
+        self.hard_cut = false;
+    }
+
+    /// A call made with `frames` frames running, on demand, the work done so far `work`: is it
+    /// one of a callee's, past the work a function's run on demand may do (four budgets)?
+    pub fn past_hover_work(&self, frames: usize, work: usize) -> bool {
+        self.hover.is_some_and(|(w0, depth)| frames > depth && work - w0 > 4 * limit("budget", FN_BUDGET))
     }
 
     /// Has the deadline cut the analysis? Checked every 64 statements (`cut_body`).

@@ -92,6 +92,9 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   fact on the path; in torch modules `int` / `Tensor` annotations hold; a module-level unknown
   number names its dims, a module-level tensor's unknown dims are one value each).
 * **Deadline:** a safety net (`ms`, 10 s): past it user calls are unknown, running ones stop; the budget bounds the work.
+  **On demand** (`rowan serve` when it cuts a whole run; `on_demand`, `general_run_of`): back to the
+  module's end state, its module-level facts only; a hovered function gets its general run (fresh
+  budget; past four budgets of work its callees' calls are unknown), cached until a file changes.
 * **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
   a general run's `x: int` is an int, not a subclass overriding int's operators). `exec`, `setattr` /
   `getattr` with unknown names (also in skipped code; a class attribute set there through data or a
@@ -132,11 +135,11 @@ uv run --no-project --with pandas --with pydantic --with pydantic-settings --wit
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py [case…]
 cd vscode-rowan && node test.js && npm run package  # hovers; the .vsix (test_package.js X.vsix TARGET)
 uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"  # also email, stdlib12k, click; pip, timm, sktime, functional
+uv run --no-project python bench/hovers.py rowan/target/release/rowan pip  # each function on demand, timed; tests/ondemand_check.py: vs whole runs
 ```
 
-Run the oracle on the cases you touched, and in full before a commit that changes models. CI
-(`ci.yml`) runs the above but torch and the benchmark (`bench.yml`, also the `budget=0` golden
-count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win32-x64).
+Run the oracle on the cases you touched, in full before a commit that changes models. CI (`ci.yml`) runs the above but
+torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a packed .vsix per native target.
 
 ## Tests
 
@@ -156,8 +159,7 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 
 * `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls, entry runs, a `work:` line of counters (statements,
   units = statements + walk visits / 16, body runs, objects, row joins, visits, havoc visits; ~25% slower). `2`: raises.
-* `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (the golden `#@limits` sets them per
-  case; `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check` checks `#@todo`s too).
+* `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (golden `#@limits` per case); `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check`.
 * **Profiling:** the bench workflow's `perf` profiles (`sample` hangs on macOS 27). Time a run inside
   the guard (`.guard/run /usr/bin/time -l rowan …`); compare builds on `--json` tier counts and counters too.
 
@@ -180,10 +182,8 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 * **Callees** run with the caller's `state.exits` taken out and restored (y438).
 * **GC roots.** A side table keyed by objects goes into `side_edges`; anything else the
   analyzer holds (a running with's managers) into `gc_pinned`: else a read gets an empty row.
-* **Generator yields** use `alloc_raw` for their per-yield states, not `alloc`.
-* **Stdlib objects** (`stdobj.<kind>`) keep attributes in Attr slots, dispatch via `m_stdobj`.
-* **Attributes resolved by class** (`class_resolves`): class objects, model objects and
-  `__getattr__` classes have more than their rows show.
+* **Generator yields** use `alloc_raw` for per-yield states. **Stdlib objects** (`stdobj.<kind>`): Attr slots, `m_stdobj`.
+* **Attributes resolved by class** (`class_resolves`): class, model and `__getattr__` objects have more than their rows show.
 
 ## Measured (release build, Apple M-series)
 
@@ -192,8 +192,8 @@ count), and tests a packed .vsix per native target (linux-x64, darwin-arm64, win
 | golden / oracle | ~5 s / ~1.5 min |
 | stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.3 / ~2.5 / ~8.8 / ~6.4 s; 0.12 / 0.07 / 0.16 / 0.09 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
 | pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~13 / ~26 / ~23 / ~5.2 s; 0.30 / 0.75 / 0.39 / 0.30 GB |
+| on demand (`bench/hovers.py`, every function): pip / timm / sktime / rich | setup (all modules) ~9 / 5 / 27 / 0.2 s; per function p50 ≤1 ms, p99 0.25-0.8 s, max 0.6-20 s |
 
 ## Known problems and next steps
 
-Open items are in `SUGGESTED_CHANGES.md`, each with a repro, and what was ruled out. Parked:
-`parked/joined-summaries` (unsound), `slotmap-trie`, `parked/memo-probe` (the call memo, measured).
+Open items, with repros and what was ruled out: `SUGGESTED_CHANGES.md`. Parked: `parked/joined-summaries` (unsound), `slotmap-trie`, `parked/memo-probe`.

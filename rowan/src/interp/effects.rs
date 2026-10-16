@@ -31,6 +31,9 @@ pub struct EffectsCache {
     closures: FxHashMap<Vec<ObjId>, std::rc::Rc<Closure>>,
     /// what `closures` holds (roots, code, slots, values), bounded by `CLOSURE_CACHE`
     closures_size: usize,
+    /// on demand: what the program's functions may do to attributes by name, and the names
+    /// they store (`program_uses`)
+    program: Option<std::rc::Rc<(FxHashMap<StrId, Flags>, FxHashSet<StrId>)>>,
 }
 
 /// What a skipped method may do to its receiver (`receiver_effects`): the attribute names it
@@ -111,6 +114,120 @@ impl Analyzer {
             ks
         };
         (keys(out), keys(del))
+    }
+
+    /// On demand, an instance any call may get: any of the program's functions may have run with
+    /// it since it was made, given anything. An attribute some function stores may hold
+    /// anything; what their code may do to the values of attributes, by name (`CodeUses::attrs`),
+    /// is done: instances and torch layers held there (layers in a list, a called member)
+    /// likewise, other values walked by unknown code. A method of its class whose receiver escapes is a call that does
+    /// not run (`skipped_call`).
+    pub(in crate::interp) fn methods_may_have_run(&mut self, inst: ObjId, state: &mut State) {
+        let site = s("program@");
+        let any = Value::obj(crate::interp::any_object(&mut self.heap));
+        let uses = self.program_uses();
+        let (by_name, stored) = (&uses.0, &uses.1);
+        let mut work: Vec<ObjId> = vec![inst];
+        let mut seen: FxHashSet<ObjId> = FxHashSet::default();
+        let mut walk: Vec<Value> = Vec::new();
+        let mut escaping: Vec<(ObjId, ObjId)> = Vec::new();
+        while let Some(inst) = work.pop() {
+            if !seen.insert(inst) {
+                continue;
+            }
+            if let Some(cls) = self.heap.instance_class(inst) {
+                escaping.extend(self.escaping_methods(cls, state).into_iter().map(|m| (m, inst)));
+            }
+            for (k, v) in state.obj_slots(inst, Ns::Attr) {
+                let Some(name) = intern::key_as_str(k).map(|n| s(&n)) else { continue };
+                if stored.contains(&name) {
+                    state.set_slot(inst, Ns::Attr, k, v.join(&any), false);
+                }
+                let Some(f) = by_name.get(&name).copied() else { continue };
+                let (own, held) = self.flag_effect(&f, &v, state);
+                // (a value given to code rowan does not follow is walked; one only called or
+                // iterated: its instances likewise by name, the rest walked)
+                let mut objs: Vec<ObjId> = Vec::new();
+                if own && f.changes {
+                    walk.push(v.clone());
+                } else {
+                    if own {
+                        objs.extend(v.pts.iter());
+                    }
+                    if held {
+                        for o in v.pts.iter() {
+                            self.obj_edges(o, state, &mut objs);
+                        }
+                    }
+                }
+                for o in objs {
+                    // (a torch layer, called, runs its model: it changes by name as an instance does)
+                    if self.heap.kind(o) == Kind::Instance || crate::models::torch::t_layer_type(self, o).is_some() {
+                        work.push(o);
+                    } else {
+                        walk.push(Value::obj(o));
+                    }
+                }
+            }
+        }
+        let rid = crate::interp::any_object(&mut self.heap);
+        let w = self.havoc.new_walk();
+        self.havoc.walk_from(&mut self.heap, &walk, rid, site, state, w);
+        for (m, inst) in escaping {
+            let fi = self.heap.func_info(m);
+            let n = fi.node.params().map(|p| p.posonlyargs.len() + p.args.len()).unwrap_or(1).saturating_sub(1);
+            let node = Node::synthetic(self.heap.module_info(fi.module).idx, fi.node.node().line);
+            self.skipped_call(m, &fi.qualname, Some(&Value::obj(inst)), &vec![any.clone(); n], &IndexMap::new(), &[], &[], state, &node);
+        }
+    }
+
+    /// What the program's own functions may do to the values of attributes by name, and the
+    /// attribute names they store (computed once; an `__init__`'s on its own receiver aside).
+    fn program_uses(&mut self) -> std::rc::Rc<(FxHashMap<StrId, Flags>, FxHashSet<StrId>)> {
+        if let Some(u) = &self.effects.program {
+            return u.clone();
+        }
+        let (mut by_name, mut stored): (FxHashMap<StrId, Flags>, FxHashSet<StrId>) = Default::default();
+        let mut seen: FxHashSet<usize> = FxHashSet::default();
+        for o in 1..self.heap.len() as ObjId {
+            let Payload::Func(fi) = &self.heap.obj(o).payload else { continue };
+            if !self.is_local_module(fi.module) || !seen.insert(fi.node.addr()) {
+                continue;
+            }
+            let fi = fi.clone();
+            let uses = self.code_uses(&fi);
+            // (an `__init__` runs on an instance being made: what it does to its receiver's
+            // attributes is not done again; what it does through other objects is)
+            let init = fi.name == "__init__";
+            let own = |a: &StrId| init && uses.recv.as_ref().is_some_and(|r| !r.escapes && (r.loads.contains(a) || r.stores.contains(a) || r.calls.contains(a)));
+            for (a, f) in uses.attrs.iter().filter(|(a, _)| !own(a)) {
+                by_name.entry(*a).or_default().join(f);
+            }
+            stored.extend(if init { uses.class_stores.iter() } else { uses.stored.iter() }.copied());
+        }
+        let u = std::rc::Rc::new((by_name, stored));
+        self.effects.program = Some(u.clone());
+        u
+    }
+
+    /// The methods of `cls` and its bases (but `__init__`, static and class methods) whose
+    /// receiver escapes.
+    fn escaping_methods(&mut self, cls: ObjId, state: &State) -> Vec<ObjId> {
+        let mut methods: Vec<ObjId> = Vec::new();
+        for c in self.heap.mro(cls) {
+            for (k, v) in state.obj_slots(c, Ns::Attr) {
+                if intern::key_as_str(k).as_deref() != Some("__init__") {
+                    methods.extend(v.pts.iter().filter(|f| matches!(self.heap.obj(*f).payload, Payload::Func(_))));
+                }
+            }
+        }
+        methods.sort_unstable();
+        methods.dedup();
+        methods.retain(|&m| {
+            let fi = self.heap.func_info(m);
+            !fi.is_static.get() && !fi.is_classmethod.get() && self.code_uses(&fi).recv.as_ref().is_none_or(|r| r.escapes)
+        });
+        methods
     }
 
     /// What a call of method `foid` that does not run may do to its receiver `recv` itself, by
