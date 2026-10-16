@@ -64,6 +64,8 @@ def f_ret(xs, v):
     if v in xs:
         return xs
     return [v]
+def pick(x, y):
+    return x if n > 2 else y
 n = len(sys.argv)
 a = [1, 2]
 b = ["s"]
@@ -85,6 +87,9 @@ def lists_op() -> list:
         [f"f_set({x}, {v})"], [f"{x} = f_new({y})"], [f"{x} = f_ret({y}, {v})"], [f"d[{v}] = {x}"], [f"{x} = d.get({v}, {y})"],
         [f"d.setdefault({v}, []).append({w})"], [f"{x} = list(d)"], [f"s.add({v})"], [f"{x} = sorted(s, key=str)"], [f"s.discard({v})"],
         [f"{x} = [e for e in {y} if e in s] + [e for e in s if e not in {y}]"],
+        [f"pick({x}, {y}).append({v})"], [f"pick({x}, {y}).insert(0, {v})"], [f"pick({x}, {y}).sort(key=str)"],
+        [f"if pick({x}, {y}):", f"    pick({x}, {y})[0] = {v}"], [f"pick({x}, {y}).extend([{v}])"], [f"pick({x}, {y}).clear()"],
+        [f"pick(d, {{}})[{v}] = {w}"], [f"pick(s, set()).add({v})"],
     ])
 
 
@@ -120,6 +125,8 @@ def make(v):
     def cb():
         return v
     return cb
+def pick(x, y):
+    return x if n > 2 else y
 n = len(sys.argv)
 d = {"k": 0}
 e = {}
@@ -143,6 +150,8 @@ def objects_op() -> list:
         [f"if isinstance({o}.v, int):", f"    {o}.v += 1"], [f"{o}.v = {o}.items[-1] if {o}.items else {v}"],
         [f"for kk in list({d}):", f"    if kk == {k}:", f"        {d2}[kk] = {v}"], [f"{o}.v = getattr({o2}, 'w', {v})"], [f"{d}.clear()"],
         [f"{o}.items.extend({d}.keys())"], [f"{o}.items.insert(0, {v})"],
+        [f"pick({d}, {d2})[{k}] = {v}"], [f"pick({d}, {d2}).pop({k}, None)"], [f"pick({d}, {d2}).update({{{k}: {v}}})"],
+        [f"pick({o}, {o2}).v = {v}"], [f"pick({o}, {o2}).add({v})"], [f"pick({d}, {d2}).setdefault({k}, {v})"],
     ])
 
 
