@@ -47,3 +47,10 @@ def build(model_cls, pretrained, **kwargs):
     return model
 #@schema param build.kwargs: only={}
 #@schema param build.model_cls: only={}
+
+
+def render(indent_size: int, lib):
+    # (an int has no items: what the call returns holds none of it)
+    out = lib.expand(indent_size)
+    return out["x"]
+#@schema param render.indent_size: only={}

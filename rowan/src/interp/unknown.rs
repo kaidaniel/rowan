@@ -280,10 +280,11 @@ impl Analyzer {
         self.havoc.code = found;
         self.name_unknown_result(rid, site_id, &arg_recs, node);
         // (the mappings it was given itself: `f(**d)` gives the code d's values, not d; an
-        // unknown callable called, `cls(x)`, is not given its own items)
+        // unknown callable called, `cls(x)`, is not given its own items; an `int` has none)
         let callee = recv.and_then(|r| r.single()).is_some_and(|o| qual == format!("call of {}", self.heap.obj(o).label));
         let recv_given = recv.filter(|_| !callee);
-        let given: Vec<ObjId> = arg_recs.iter().filter(|(o, ns)| *ns == Ns::Item && args.iter().chain(kwargs.values()).chain(recv_given).any(|v| v.pts.contains(*o))).map(|(o, _)| *o).collect();
+        let scalar = |o: ObjId| self.heap.obj(o).ty.is_some_and(|t| crate::domain::TYPE_NAMES.contains(&t));
+        let given: Vec<ObjId> = arg_recs.iter().filter(|(o, ns)| *ns == Ns::Item && !scalar(*o) && args.iter().chain(kwargs.values()).chain(recv_given).any(|v| v.pts.contains(*o))).map(|(o, _)| *o).collect();
         unknown_result_rows(state, rid, &site, site_id, &arg_recs, &given, callee);
         self.findings.note(format!("unknown call {}", site));
         // (it may raise anything, after any part of its effects: the state with all of them
