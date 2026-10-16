@@ -451,6 +451,7 @@ impl Analyzer {
             let scope = self.frame().scope;
             let mi = self.heap.module_info(fr_module);
             if mi.scopes.get(scope).globals_decl.contains(&*str_get(name)) {
+                self.gens.global_held.extend(v.pts.iter().filter(|o| self.gens.lazy.contains_key(o)));
                 state.set_slot(fr_module, Ns::Attr, key, v, true);
                 return;
             }

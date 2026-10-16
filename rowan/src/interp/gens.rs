@@ -185,6 +185,8 @@ pub struct Gens {
     /// at the yield, the env stack's length then), so a try in the generator around the
     /// yield sees its own names when the body raises
     pub cm_frames: Vec<(usize, IndexMap<StrId, Value>, usize)>,
+    /// generators stored into a module's global (watched after the call that started them)
+    pub global_held: FxHashSet<ObjId>,
 }
 
 impl Gens {
@@ -479,7 +481,10 @@ impl Analyzer {
             FxHashSet::default()
         } else {
             let roots: Vec<Value> = state.ret.iter().chain(pre.env.values()).cloned().collect();
-            self.reach_among(&roots, &gids, at)
+            let mut kept = self.reach_among(&roots, &gids, at);
+            // (a generator a global holds is resumed by later calls)
+            kept.extend(gids.iter().filter(|g| self.gens.global_held.contains(g)));
+            kept
         };
         let tail = self.gens.watch.split_off(wmark.min(self.gens.watch.len()));
         self.gens.watch.extend(tail.into_iter().filter(|w| kept.contains(&w.gid)));
