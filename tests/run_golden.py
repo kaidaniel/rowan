@@ -10,7 +10,8 @@ Expectations are comments inside the case files:
 Tiers: ok|proven, likely, possibly, missing, likely-missing, input, datakey, none (no verdict for
 that key at this line), any (some verdict for the key), sound (no `missing` verdict for the
 key: the key may really be there, so only that would be wrong; `likely-missing`, "missing
-unless unknown code added it", is a hedged and true statement).
+unless unknown code added it", is a hedged and true statement), fails (no `ok` verdict: the
+access may fail; the fuzzer's floor, as `sound` is).
 Values: `#@value NAME: exactly={12}` (the value is one of these literals and nothing else),
 `#@value NAME: unknown` (rowan claims no specific value), `#@value NAME: includes={1,100}`
 (floor: unknown, or a set holding these); several names on one line separated by `;`.
@@ -60,7 +61,7 @@ VALUE_EXP: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}  # line -> [(name, s
 
 TIER_ALIASES = {"ok": "proven", "proven": "proven", "likely": "likely", "possibly": "possibly",
                 "missing": "missing", "likely-missing": "likely-missing", "input": "input",
-                "datakey": "datakey", "none": "none", "any": "any", "map": "none", "sound": "sound"}
+                "datakey": "datakey", "none": "none", "any": "any", "map": "none", "sound": "sound", "fails": "fails"}
 
 
 def key_str(k: Any) -> str:
@@ -219,6 +220,11 @@ def check_results(verdict_exp, row_exp_checks, schema_exp, vs, sch) -> List[str]
                 if wrong:
                     failures.append(f"L{ln}: {key!r} may be present, but rowan says " + ", ".join(sorted({v['tier'] for v in wrong})))
                 continue
+            if tier == "fails":
+                wrong = [v for v in matches if v["tier"] == "proven"]
+                if wrong:
+                    failures.append(f"L{ln}: {key!r} may fail, but rowan says " + ", ".join(sorted({v['tier'] for v in wrong})))
+                continue
             if tier == "any":
                 if not matches:
                     failures.append(f"L{ln}: expected some verdict for {key!r}, got none")
@@ -308,6 +314,8 @@ def row_problems(row: Dict[str, Any], spec: Dict[str, Any]) -> str:
         lost = {key_str(k) for k in spec["possible"]} - present
         if lost:
             problems.append(f"possible keys {sorted(lost)} not in present={sorted(present)} of a closed row")
+    if "possible" in spec and {key_str(k) for k in spec["possible"]} & set(row["absent"]):
+        problems.append(f"possible keys {sorted({key_str(k) for k in spec['possible']} & set(row['absent']))} rowan says is absent")
     if "definite_within" in spec:
         extra = definite - {key_str(k) for k in spec["definite_within"]}
         if extra:
@@ -469,8 +477,10 @@ def value_checks(rows: List[Dict[str, Any]], exp: Dict[int, List[Tuple[str, Dict
                     prob = f"value {desc}, want exactly {sorted(want)}"
             if spec.get("unknown") and not got["unknown"]:
                 prob = f"value {desc}, but it may be anything: rowan must not claim a specific value"
-            if "includes" in spec and not got["unknown"]:
-                lost = {key_str(k) for k in spec["includes"]} - got["lits"]
+            if "includes" in spec:
+                # (an unknown of known types holds only values of those: a bool is an int)
+                admits = lambda k: got["untyped"] or any(t == type(k).__name__ or (t == "int" and type(k) is bool) for t in got["types"])
+                lost = {key_str(k) for k in spec["includes"] if key_str(k) not in got["lits"] and not (got["unknown"] and admits(k))}
                 if lost:
                     prob = f"value {desc} leaves out {sorted(lost)}"
             out.append((ln, f"{what} of {name}", spec, prob))
