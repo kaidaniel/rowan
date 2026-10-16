@@ -554,6 +554,7 @@ impl Analyzer {
             }
             ast::Expr::Tuple(ast::ExprTuple { elts, .. }) | ast::Expr::List(ast::ExprList { elts, .. }) => {
                 let n = frontend::node(t);
+                self.check_unpack_len(v, elts.len(), state);
                 let parts = self.unpack(v, elts.len(), state, &n);
                 for (sub, pv) in elts.iter().zip(parts.iter()) {
                     if let ast::Expr::Starred(st) = sub {
@@ -613,6 +614,29 @@ impl Analyzer {
             self.may_raise_here("TypeError", state);
         }
         out
+    }
+
+    /// Unpacking into `n` names raises ValueError for a sequence of another known length (a
+    /// list, tuple or generator's items, a known string): on every path when each part does.
+    fn check_unpack_len(&mut self, v: &Value, n: usize, state: &mut State) {
+        self.force_gen(v, state, false);
+        let mut parts: Vec<Option<bool>> = v.pts.iter().map(|o| match (self.heap.kind(o), self.heap.llen(o, state)) {
+            (Kind::List | Kind::Tuple, Some(l)) => Some(l != n),
+            _ => None,
+        }).collect();
+        if !v.kv.is_bot() {
+            let ks = crate::domain::kv_literals(&v.kv);
+            if v.kv.is_literal() && ks.iter().all(intern::key_is_str) {
+                parts.extend(ks.iter().map(|k| Some(intern::key_as_str(k).is_some_and(|t| t.chars().count() != n))));
+            } else {
+                parts.push(None);
+            }
+        }
+        if parts.iter().all(|p| *p == Some(true)) && !parts.is_empty() {
+            self.raise_here("ValueError", state);
+        } else if parts.iter().any(|p| *p == Some(true)) {
+            self.may_raise_here("ValueError", state);
+        }
     }
 
     pub fn unpack(&mut self, v: &Value, n: usize, state: &mut State, node: &Node) -> Vec<Value> {
