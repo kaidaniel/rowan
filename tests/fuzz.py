@@ -21,7 +21,7 @@ import random
 import re
 import sys
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from run_golden import run_case  # noqa: E402
@@ -360,8 +360,9 @@ def main() -> int:
             with open(path, "w") as f:
                 f.write(text)
             cases.append((path, head, body, probes))
-    with ThreadPoolExecutor(a.j) as ex:
-        results = list(ex.map(lambda c: fails(c[0]), cases))
+    # (processes: the golden harness keeps a case's expectations in module globals)
+    with ProcessPoolExecutor(a.j) as ex:
+        results = list(ex.map(fails, [c[0] for c in cases]))
     bad = [(c, r) for c, r in zip(cases, results) if r]
     for (path, head, body, probes), problems in bad:
         print(f"FAIL {path}")
