@@ -289,6 +289,11 @@ impl Analyzer {
         self.findings.row_absent_probes.push(probe);
     }
 
+    /// The work done so far: statements, body runs, objects, havoc visits (see `work_line`).
+    pub fn work_counts(&self) -> [usize; 4] {
+        [self.budget.statements, self.budget.runs, self.heap.len(), self.havoc.visited as usize]
+    }
+
     /// The deterministic work counters (`ROWAN_DEBUG=1`'s `work:` line).
     pub fn work_line(&self) -> String {
         format!("work: {} (units {}, tabulations {}, objects {}, {} ms{}; budgeted tabulations {}, row joins {}, visits {} (walks {}, joins {}), havoc visits {})", self.budget.statements, self.budget.work_units(), self.budget.runs, self.heap.len(), self.budget.elapsed_ms(), if self.budget.hard_cut { ", cut at the deadline" } else { "" }, self.budget.spent_total(), crate::domain::row_joins(), self.budget.walked.get() + crate::state::fp_visits(), self.budget.walked.get(), crate::state::fp_visits(), self.havoc.visited)

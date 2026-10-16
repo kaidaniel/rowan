@@ -479,6 +479,12 @@ impl Analyzer {
 
     #[allow(clippy::too_many_arguments)]
     pub fn call_user(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, entry: bool) -> Value {
+        // (on demand, past the work a function's run may do, its callees' calls are unknown)
+        if self.budget.past_hover_work(self.cx.frames.len(), self.hover_work()) {
+            self.gens.force_at = None;
+            let q = self.heap.func_info(foid).qualname.clone();
+            return self.skipped_call(foid, &q, self_v.as_ref(), &args, &kwargs, &star_args, &star_kwargs, state, node);
+        }
         // past the hard deadline a user function is unknown code (its result unknown, its
         // arguments possibly changed, it may raise): the run ends in bounded time
         if self.budget.over_hard_deadline() {

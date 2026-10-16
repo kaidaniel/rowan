@@ -373,6 +373,10 @@ pub fn site_text(an: &Analyzer, site: &str) -> String {
         let not_followed = if an.names.skipped_sites.contains(&intern::s(site)) { ", a call rowan no longer follows" } else { "" };
         return format!("`{}` ({}{})", t, in_file(*m, *line), not_followed);
     }
+    if site == "program@" {
+        // (on demand: what the program's functions may have changed before a call)
+        return "the program's functions called before".into();
+    }
     if site == "…" {
         // (a row names its first few unknown calls, then this)
         return "other calls".into();
@@ -1291,7 +1295,7 @@ pub fn facts_json(an: &Analyzer) -> J {
             let calls = f.calls.iter().filter(|(t, _)| *t != g).map(|(t, lines)| json!({"text": t, "lines": lines.iter().filter(|l| **l > 0).collect::<Vec<_>>()})).collect();
             (g, calls)
         };
-        facts.push(json!({"line": line, "name": name.to_string(), "text": text, "calls": calls, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "general_unknowns": general_unknowns, "required": required, "requires": requires}));
+        facts.push(json!({"line": line, "name": name.to_string(), "text": text, "general": !f.general.is_empty(), "calls": calls, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "general_unknowns": general_unknowns, "required": required, "requires": requires}));
     }
     // (columns in UTF-16 units, as editors count them; each finding with its message in words)
     let main_idx = an.heap.module_info(an.program.main_module).idx;

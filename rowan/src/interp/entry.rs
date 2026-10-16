@@ -62,6 +62,20 @@ pub struct Entries {
     pub concrete_closures: FxHashSet<ObjId>,
     /// the state a factory's entry run ended in, for the closures it made
     pub closure_states: FxHashMap<ObjId, std::rc::Rc<State>>,
+    /// where the main module's run ended (`on_demand` goes back to it)
+    module_end: Option<ModuleEnd>,
+    /// functions run one at a time when asked (`general_run_of`): no instances made with
+    /// `__init__`'s defaults
+    pub on_demand: bool,
+}
+
+/// The analysis as the main module's run left it, before the entry runs: its state, the hover
+/// facts and verdicts recorded by then, and whether the deadline cut it.
+struct ModuleEnd {
+    state: State,
+    facts: IndexMap<(u32, StrId), super::Fact>,
+    verdicts: usize,
+    cut: bool,
 }
 
 impl Analyzer {
@@ -69,6 +83,8 @@ impl Analyzer {
         let mut state = State::new();
         let main = self.program.main_module;
         self.run_module(main, &mut state);
+        let facts = if self.findings.facts_on { self.findings.facts.clone() } else { IndexMap::new() };
+        self.entry.module_end = Some(ModuleEnd { state: state.copy(), facts, verdicts: self.findings.mark(), cut: self.budget.hard_cut });
         if self.program.analyse_entry_points {
             self.analyse_uncalled(&mut state);
         }
@@ -86,6 +102,98 @@ impl Analyzer {
         state.reachable = true;
         state.exits = exits;
         state.ret = ret;
+    }
+
+    /// Did the deadline cut the analysis (`run`)?
+    pub fn was_cut(&self) -> bool {
+        self.budget.hard_cut
+    }
+
+    /// Go over to running functions on demand (`general_run_of`), after `run`: back to the
+    /// state the main module's run ended in, with the hover facts it recorded for any call (module
+    /// code; not what the program's calls gave) and its verdicts (none if the deadline cut it).
+    pub fn on_demand(&mut self) {
+        let Some(end) = self.entry.module_end.take() else { return };
+        self.entry.on_demand = true;
+        // (the instances entry runs made live in their states, not in the module's)
+        self.entry.instances.clear();
+        self.entry.general_instances.clear();
+        // (a call may come after any of the program's functions ran: what they may change of
+        // what the module made is changed)
+        let mut state = end.state;
+        let code: Vec<ObjId> = (1..self.heap.len() as ObjId).filter(|o| self.heap.kind(*o) == Kind::Function && self.is_local_module(self.heap.func_info(*o).module)).collect();
+        let rid = crate::interp::any_object(&mut self.heap);
+        self.follow_code(code, rid, s("program@"), &mut state);
+        self.findings.final_state = Some(state);
+        self.findings.drop_since(if end.cut { 0 } else { end.verdicts });
+        self.findings.facts = end.facts;
+        self.findings.facts.retain(|_, f| {
+            f.rows.clear();
+            f.calls.clear();
+            !f.general.is_empty()
+        });
+    }
+
+    /// On demand: the general run (hover facts and verdicts) of the function of the main module whose
+    /// definition spans `line` (the outermost one: a nested function runs in its run), from the
+    /// state the module ended in, with a fresh budget and deadline. Its first and last lines;
+    /// None if no function defined there exists.
+    pub fn general_run_at(&mut self, line: u32) -> Option<(u32, u32)> {
+        let main = self.program.main_module;
+        let (oid, first, last) = self.outermost_functions(|m| m == main).into_iter().find(|(_, a, b)| *a <= line && line <= *b)?;
+        self.general_run_of(oid).then_some((first, last))
+    }
+
+    /// The functions of the modules `pick` picks that are no other function's own (module-level
+    /// defs, methods of classes outside functions), with their first and last lines.
+    pub fn outermost_functions(&self, pick: impl Fn(ObjId) -> bool) -> Vec<(ObjId, u32, u32)> {
+        let mut all: Vec<(ObjId, u32, u32, u32)> = Vec::new();
+        let mut seen: FxHashSet<usize> = FxHashSet::default();
+        for oid in 1..self.heap.len() as ObjId {
+            if self.heap.kind(oid) != Kind::Function {
+                continue;
+            }
+            let fi = self.heap.func_info(oid);
+            if !matches!(fi.node, FuncNode::Def(_)) || !pick(fi.module) || !seen.insert(fi.node.addr()) {
+                continue;
+            }
+            let n = fi.node.node();
+            all.push((oid, n.module, n.line, n.end_line));
+        }
+        // (by module, then by first line, the wider first: a function inside the last one kept is not)
+        all.sort_by_key(|&(_, m, a, b)| (m, a, std::cmp::Reverse(b)));
+        let mut out: Vec<(ObjId, u32, u32)> = Vec::new();
+        let mut last: Option<(u32, u32)> = None;
+        for (oid, m, a, b) in all {
+            if last.is_some_and(|(lm, lb)| lm == m && a <= lb) {
+                continue;
+            }
+            last = Some((m, b));
+            out.push((oid, a, b));
+        }
+        out
+    }
+
+    /// The work a run on demand is measured by: statements, objects made, objects visited by
+    /// unknown code's walks (16 to a unit).
+    pub(in crate::interp) fn hover_work(&self) -> usize {
+        self.budget.statements + self.heap.len() + self.havoc.visited as usize / 16
+    }
+
+    /// On demand: the general run of function `oid` (hover facts and verdicts), from the state
+    /// the module ended in, with a fresh budget and deadline; false if nothing is set up.
+    pub fn general_run_of(&mut self, oid: ObjId) -> bool {
+        let Some(mut state) = self.findings.final_state.take() else { return false };
+        self.budget.fresh();
+        // (the verdicts kept are this run's)
+        self.findings.drop_since(0);
+        let fi = self.heap.func_info(oid);
+        // (its own calls run whole; theirs, past the work a run on demand may do, are unknown)
+        self.budget.hover = Some((self.hover_work(), 2));
+        self.entry_run(oid, &fi, Run::OnDemand, &mut state);
+        self.budget.hover = None;
+        self.findings.final_state = Some(state);
+        true
     }
 
     /// Entry-point rule (§6.4): functions never called get analysed with open parameters.
@@ -159,7 +267,8 @@ impl Analyzer {
     /// The entry run of `oid` with open parameters, from `state`; the requirements it finds on
     /// the inputs are kept in `state` (not those of a facts-only run).
     fn entry_run(&mut self, oid: ObjId, fi: &FuncInfo, run: Run, state: &mut State) {
-        let quiet = run != Run::Verdicts;
+        // (on demand: verdicts, for any call)
+        let quiet = !matches!(run, Run::Verdicts | Run::OnDemand);
         let Some(fparams) = fi.node.params() else {
             // a lambda without parameters
             if let FuncNode::Lambda(_) = fi.node {
@@ -193,7 +302,7 @@ impl Analyzer {
         // (a run with verdicts takes instances made with `__init__`'s defaults, as a caller
         // that passes nothing — its verdicts are those; the others, and torch modules', any
         // instance)
-        let saved_any = std::mem::replace(&mut self.entry.any_instance, quiet || self.entry.torch_modules.contains(&fi.module));
+        let saved_any = std::mem::replace(&mut self.entry.any_instance, run != Run::Verdicts || self.entry.torch_modules.contains(&fi.module));
         let saved_used = std::mem::replace(&mut self.entry.used_defaults, false);
         let saved_q = std::mem::replace(&mut self.findings.quiet, quiet);
         let mut params = scopemod::all_params(fparams);
@@ -241,7 +350,7 @@ impl Analyzer {
         }
         self.cx.frames.pop();
         if run != Run::FactsOnly {
-            self.keep_entry_requirements(fi, quiet, &st, state);
+            self.keep_entry_requirements(fi, quiet || run == Run::OnDemand, &st, state);
         }
     }
 
@@ -261,7 +370,7 @@ impl Analyzer {
                     // (the instance made with the defaults is made too, whichever run needs a
                     // receiver first: its `__init__` run's verdicts carry much of a library's
                     // coverage — pip, sktime)
-                    if self.entry.any_instance && !torch && !self.entry.instances.contains_key(&c) {
+                    if self.entry.any_instance && !torch && !self.entry.on_demand && !self.entry.instances.contains_key(&c) {
                         let saved = (self.entry.any_instance, self.entry.used_defaults);
                         self.entry.any_instance = false;
                         let cname = self.heap.class_info(c).name.clone();
@@ -563,7 +672,10 @@ impl Analyzer {
         let has_init = self.class_lookup(cls_oid, "__init__").is_some();
         let has_fields = self.heap.mro(cls_oid).iter().any(|c| self.heap.class_info_opt(*c).map(|ci| ci.has_fields()).unwrap_or(false));
         // a class that never initialises its own attributes is only used through subclasses
-        let row = if ci.open_base || !(has_init || has_fields) { Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)) } else { Row::new() };
+        // (any construction of a pydantic model without an `__init__` of the program's: what its
+        // validation sets — a RootModel's `root` — is not in the fields)
+        let pydantic = self.entry.any_instance && !has_init && self.heap.mro(cls_oid).iter().any(|c| self.heap.class_info_opt(*c).is_some_and(|ci| ci.lib.pydantic));
+        let row = if ci.open_base || !(has_init || has_fields) || pydantic { Row::with_source(Source::new(&format!("instance {}", ci.name), SourceKind::Class)) } else { Row::new() };
         let inst = self.instance_with(cls_oid, ci, row, state, ctx);
         // dataclass / TypedDict / NamedTuple fields (own and inherited) are present on a fresh instance
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
@@ -645,17 +757,22 @@ impl Analyzer {
             }
             state.set_row(inst, Ns::Attr, row);
         }
+        if self.entry.on_demand && self.entry.any_instance {
+            self.methods_may_have_run(inst, state);
+        }
         Some(inst)
     }
 }
 
 /// What an entry run is for: verdicts (a function nothing calls), its own requirements (a
-/// function the program calls: quiet), or hover facts only (`facts_runs`).
+/// function the program calls: quiet), hover facts only (`facts_runs`), or hover facts and its
+/// own requirements and verdicts for any call, asked for on demand (`general_run_of`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Run {
     Verdicts,
     Quiet,
     FactsOnly,
+    OnDemand,
 }
 
 /// The builtin type an annotation names (`int`, `"str"`, `list[int]`, `Optional[str]`, `int |

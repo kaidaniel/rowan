@@ -7,7 +7,7 @@ const fs = require("fs");
 const os = require("os");
 const { execFileSync } = require("child_process");
 const path = require("path");
-const { renderHover, indexResult, prettyValue, verdictsForWord, severityFor, diagnosticMessage, shorten } = require("./extension.js");
+const { renderHover, indexResult, prettyValue, verdictsForWord, severityFor, diagnosticMessage, shorten, hoverServer, mergeResult, stopServers } = require("./extension.js");
 
 const root = path.join(__dirname, "..");
 const bin = process.env.ROWAN_BIN || path.join(root, "rowan", "target", "release", "rowan");
@@ -314,9 +314,65 @@ for (const f of files) {
   }
 }
 assert(n > 100, `only ${n} hovers checked`);
+// ---- on demand (`rowan serve`'s `hover`: one function run alone, for any call): what the
+// hovers of real programs say, with the same rules
+async function onDemand() {
+  let m = 0;
+  // (a01's build: any `user`, the code reads `user.id`; "role" set only when `admin` holds)
+  const b = await hoverServer(bin, a01, 3, [], 60);
+  assert.deepStrictEqual(b.span, [1, 5]);
+  const bidx = indexResult(b.result);
+  const d5 = hover(bidx, a01src, 5, "d");
+  assert(d5.includes('{"id": user.id, "role"?: "admin"}') && d5.includes("from its own analysis") && d5.includes('`"k"?:` set on some paths only'), d5);
+  const u2 = hover(bidx, a01src, 2, "user");
+  assert(u2.includes("- the code reads `user.id`") && !u2.includes("in calls"), u2);
+  // (a second hover in the same function: the cached document, merged once into the index)
+  const again = await hoverServer(bin, a01, 4, [], 60);
+  assert.deepStrictEqual(again.span, [1, 5]);
+  mergeResult(bidx, { facts: [], verdicts: [] });
+  for (const f of [path.join(root, "tests", "apps", "medium", "b001_shop_pkg", "shop", "repo.py"), path.join(root, "tests", "apps", "small", "a002_deploy_cli.py"), path.join(root, "tests", "apps", "large", "c001_platform_pkg", "dp", "pipeline.py")]) {
+    const src = fs.readFileSync(f, "utf8").split("\n");
+    const idx = indexResult({ facts: [], verdicts: [] });
+    const spans = [];
+    for (let line = 1; line <= src.length; line++) {
+      if (!/^\s*def /.test(src[line - 1]) || spans.some(([a, z2]) => a <= line && line <= z2)) continue;
+      let r;
+      try {
+        r = await hoverServer(bin, f, line + 1, [], 60);
+      } catch (e) {
+        continue; // (a nested def of a function not made by the module's own code)
+      }
+      spans.push(r.span);
+      mergeResult(idx, r.result);
+    }
+    assert(spans.length > 3, `${f}: ${spans.length} functions`);
+    for (const [key, fs_] of idx.facts) {
+      const [line, name] = [Number(key.split(":")[0]), key.split(":").slice(1).join(":")];
+      const h = hover(idx, src, line, name);
+      if (!h) continue;
+      m++;
+      const where = `${path.basename(f)}:${line} ${name} (on demand)\n${h}`;
+      for (const re of INTERNAL) assert(!re.test(h), `internal name ${re} in ${where}`);
+      assert(!h.includes("- in calls: "), where);
+      const legend = h.split("\n").filter((l) => l.startsWith("*")).join(" ");
+      for (const mk of ["✗", "⚠", "◌"]) if (h.includes(`- ${mk} `)) assert(legend.includes(mk), `unexplained ${mk} in ${where}`);
+    }
+  }
+  stopServers();
+  assert(m > 50, `only ${m} on-demand hovers checked`);
+  return { m, d5 };
+}
+
+onDemand().then(({ m, d5 }) => {
 fs.rmSync(tmp, { recursive: true, force: true });
-console.log(`ok (${n} hovers checked)`);
+console.log(`ok (${n} hovers checked, ${m} on demand)`);
 console.log("\n--- sample hover for qkv (nanoGPT attention) ---\n" + qkv);
 console.log("\n--- sample hover for r at line 9 ---\n" + r9);
 console.log("\n--- sample hover for u at line 8 ---\n" + u8);
 console.log("\n--- sample hover for row in contract (z535) ---\n" + row11);
+console.log("\n--- sample hover on demand for d at line 5 ---\n" + d5);
+}, (e) => {
+  stopServers();
+  console.error(e);
+  process.exit(1);
+});
