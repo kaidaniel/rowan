@@ -13,7 +13,7 @@ use ruff_python_ast as ast;
 use crate::intern::{self, key_str_lit, s, str_get, KeyId, StrId};
 use crate::state::{Kind, State};
 
-use super::flows::{CodeUses, Flags, Like};
+use super::flows::{Callee, CodeUses, Flags, Level, Like, NameUses, Origin, Pass, Slot};
 use super::{Analyzer, FuncInfo, Payload};
 
 /// What the cache of code closures (`code_closure`) may hold; past it the cache starts over.
@@ -34,6 +34,10 @@ pub struct EffectsCache {
     /// on demand: what the program's functions may do to attributes by name, and the names
     /// they store (`program_uses`)
     program: Option<std::rc::Rc<(FxHashMap<StrId, Flags>, FxHashSet<StrId>)>>,
+    /// while the program's code is followed whole (`after_any_code`): per function code
+    /// (`FuncNode::addr`) whose callers are all the program's code by name, what they may do
+    /// with its result (`caller_returns`); a function not here gives its result away
+    pub whole: Option<std::rc::Rc<FxHashMap<usize, Flags>>>,
 }
 
 /// What a skipped method may do to its receiver (`receiver_effects`): the attribute names it
@@ -379,7 +383,9 @@ impl Analyzer {
     /// methods called by a computed name are not followed; the code in the data those values
     /// hold is followed where the call is (`skipped_call`).
     pub(in crate::interp) fn code_closure(&mut self, roots: &[ObjId], state: &State) -> std::rc::Rc<Closure> {
-        if let Some(c) = self.effects.closures.get(roots) {
+        // (the program followed whole is not the cache's: its returns go to known callers)
+        let whole = self.effects.whole.is_some();
+        if let Some(c) = self.effects.closures.get(roots).filter(|_| !whole) {
             return c.clone();
         }
         let mut out = Closure::default();
@@ -447,6 +453,9 @@ impl Analyzer {
                 let c = std::rc::Rc::new(out);
                 // (a cache of what the program's code reaches, by root set: on large programs
                 // the root sets rarely repeat, so it is emptied past a bound on what it holds)
+                if whole {
+                    return c;
+                }
                 let size = roots.len() + c.code.len() + c.locs.len() + c.held_locs.len() + c.rebound.len() + c.values.len() + c.held_values.len();
                 self.effects.closures_size += size;
                 if self.effects.closures_size > CLOSURE_CACHE {
@@ -610,10 +619,27 @@ impl Analyzer {
                 }
             }
         }
+        // (what the program's functions it calls by name do with the names' values it gives them,
+        // and its callers with what it returns)
+        let mut more: FxHashMap<Callee, Flags> = FxHashMap::default();
+        let mut add = |o: &Origin, f: Flags| match *o {
+            Origin::Name(n) => more.entry((n, None)).or_default().join(&f),
+            Origin::NameAttr(n, a) => more.entry((n, Some(a))).or_default().join(&f),
+            _ => {}
+        };
+        for p in &uses.passes {
+            let f = self.passed_flags(fi, &uses, p, state);
+            p.srcs.iter().for_each(|(o, l)| add(o, f.lift(*l)));
+        }
+        let ret = self.return_flags(fi);
+        uses.returns.iter().for_each(|(o, l)| add(o, ret.lift(*l)));
         for u in &uses.uses {
             // (`m.x` of a module m: its global x; of anything else: what m holds, and a class
             // attribute x — a method call on it may change it, a store changes it)
             let mut f = u.flags;
+            if let Some(m) = more.get(&(u.name, u.attr)) {
+                f.join(m);
+            }
             let (loc, in_module) = match (self.resolve_use(fi, &uses, u.name), u.attr) {
                 (Ok(l), None) => (l, false),
                 (Ok(l), Some(a)) => match state.slot(l.0, l.1, l.2).single().filter(|m| self.heap.kind(*m) == Kind::Module) {
@@ -642,6 +668,143 @@ impl Analyzer {
             }
             self.apply_flags(&f, loc, state, out);
             code(self, &state.slot(loc.0, loc.1, loc.2), work);
+        }
+    }
+
+    /// The program's functions a call by name in the code of `fi` calls (`callee`): those the name
+    /// holds; with `all`, None unless it holds nothing else.
+    fn program_callees(&self, fi: &FuncInfo, uses: &CodeUses, callee: Callee, state: &State, all: bool) -> Option<Vec<ObjId>> {
+        let loc = match (self.resolve_use(fi, uses, callee.0), callee.1) {
+            (Ok(l), None) => l,
+            (Ok(l), Some(a)) => {
+                let m = state.slot(l.0, l.1, l.2).single().filter(|m| self.heap.kind(*m) == Kind::Module)?;
+                (m, Ns::Attr, key_str_lit(&str_get(a)))
+            }
+            (Err(m), Some(a)) => (m, Ns::Attr, key_str_lit(&str_get(a))),
+            (Err(_), None) => return None,
+        };
+        let v = state.slot(loc.0, loc.1, loc.2);
+        let fs: Vec<ObjId> = v.pts.iter().filter(|o| matches!(self.heap.obj(*o).payload, Payload::Func(_)) && self.heap.kind(*o) == Kind::Function).collect();
+        let whole = fs.len() == v.pts.len() && matches!(v.kv, crate::domain::KeyVal::Bot);
+        (!fs.is_empty() && (whole || !all)).then_some(fs)
+    }
+
+    /// What the code of function `f` may do with the argument in `slot` (given away when it is
+    /// a generator's or a coroutine's, or a part of `*args` / `**kw` it uses).
+    fn param_flags(&mut self, f: ObjId, slot: Slot) -> Flags {
+        let fi = self.heap.func_info(f);
+        let Some(ps) = fi.node.params() else { return Flags::CHANGE };
+        if let super::FuncNode::Def(d) = fi.node {
+            if d.is_async || super::is_generator(&d.body) {
+                return Flags::CHANGE;
+            }
+        }
+        let uses = self.code_uses(&fi);
+        let flags = |p: &ast::Parameter| uses.params.get(&s(p.name.id.as_str())).copied().unwrap_or_default();
+        let rest = |p: Option<&ast::Parameter>| p.map_or(Flags::CHANGE, |p| if flags(p).any() { Flags::CHANGE } else { Flags::default() });
+        match slot {
+            Slot::Pos(i) => match ps.posonlyargs.iter().chain(ps.args.iter()).nth(i) {
+                Some(p) => flags(&p.parameter),
+                None => rest(ps.vararg.as_deref()),
+            },
+            Slot::Kw(k) => match ps.args.iter().chain(ps.kwonlyargs.iter()).find(|p| s(p.parameter.name.id.as_str()) == k) {
+                Some(p) => flags(&p.parameter),
+                None => rest(ps.kwarg.as_deref()),
+            },
+        }
+    }
+
+    /// What may happen to a value the code of `fi` gives to a call by name: what the callee does
+    /// with that parameter, when the name holds only the program's functions; else anything.
+    fn passed_flags(&mut self, fi: &FuncInfo, uses: &CodeUses, p: &Pass, state: &State) -> Flags {
+        let Some(fs) = self.program_callees(fi, uses, p.callee, state, true) else { return Flags::CHANGE };
+        let mut out = Flags::default();
+        fs.into_iter().for_each(|f| out.join(&self.param_flags(f, p.slot)));
+        out
+    }
+
+    /// What may happen to what the code of `fi` returns: what its callers do with it, when the
+    /// program is followed whole and they are all its code (`caller_returns`); else anything.
+    fn return_flags(&self, fi: &FuncInfo) -> Flags {
+        self.effects.whole.as_ref().and_then(|w| w.get(&fi.node.addr()).copied()).unwrap_or(Flags::CHANGE)
+    }
+
+    /// For the program followed whole: per module-level function the program calls by name and
+    /// never uses as a value (its callers are the program's code), what they may do with its
+    /// result: where they use it, give it to the program's functions (their parameters'
+    /// flags) or return it in turn (their own callers', to a fixpoint). Generators and coroutines
+    /// give theirs away (their code runs later).
+    pub(in crate::interp) fn caller_returns(&mut self, state: &State) -> FxHashMap<usize, Flags> {
+        let mut names = NameUses::default();
+        for m in 1..self.heap.len() as ObjId {
+            if let Payload::Module(mi) = &self.heap.obj(m).payload {
+                names.scan(&mi.tree.body);
+            }
+        }
+        let mut funcs: Vec<std::rc::Rc<FuncInfo>> = Vec::new();
+        let mut seen: FxHashSet<usize> = FxHashSet::default();
+        for o in 1..self.heap.len() as ObjId {
+            if let Payload::Func(fi) = &self.heap.obj(o).payload {
+                if seen.insert(fi.node.addr()) {
+                    funcs.push(fi.clone());
+                }
+            }
+        }
+        for fi in &funcs {
+            names.values.extend(self.code_uses(fi).untracked.iter().copied());
+        }
+        names.close();
+        let by_name = |fi: &FuncInfo| match fi.node {
+            super::FuncNode::Def(d) => fi.cls.is_none() && fi.qualname == fi.name && !d.is_async && !super::is_generator(&d.body) && names.called.contains(&s(&fi.name)) && !names.values.contains(&s(&fi.name)),
+            super::FuncNode::Lambda(_) => false,
+        };
+        let mut ret: FxHashMap<usize, Flags> = funcs.iter().filter(|fi| by_name(fi)).map(|fi| (fi.node.addr(), Flags::default())).collect();
+        let mut chained: Vec<(usize, Level, usize)> = Vec::new();
+        let mut fixed: Vec<(usize, Flags)> = Vec::new();
+        for fi in &funcs {
+            let uses = self.code_uses(fi);
+            let to = |an: &Analyzer, callee: Callee, f: Flags, out: &mut Vec<(usize, Flags)>| {
+                for c in an.program_callees(fi, &uses, callee, state, false).unwrap_or_default() {
+                    out.push((an.heap.func_info(c).node.addr(), f));
+                }
+            };
+            for (c, f) in &uses.results {
+                to(self, *c, *f, &mut fixed);
+            }
+            for p in &uses.passes {
+                let f = self.passed_flags(fi, &uses, p, state);
+                for (o, l) in &p.srcs {
+                    if let Origin::Result(n, a) = o {
+                        to(self, (*n, *a), f.lift(*l), &mut fixed);
+                    }
+                }
+            }
+            for (o, l) in &uses.returns {
+                if let Origin::Result(n, a) = o {
+                    for c in self.program_callees(fi, &uses, (*n, *a), state, false).unwrap_or_default() {
+                        chained.push((fi.node.addr(), *l, self.heap.func_info(c).node.addr()));
+                    }
+                }
+            }
+        }
+        for (f, fl) in fixed {
+            if let Some(r) = ret.get_mut(&f) {
+                r.join(&fl);
+            }
+        }
+        loop {
+            let mut grew = false;
+            for &(g, l, f) in &chained {
+                let fl = ret.get(&g).copied().unwrap_or(Flags::CHANGE).lift(l);
+                if let Some(r) = ret.get_mut(&f) {
+                    let before = *r;
+                    r.join(&fl);
+                    grew |= *r != before;
+                }
+            }
+            if !grew {
+                return ret;
+            }
         }
     }
 

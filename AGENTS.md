@@ -46,11 +46,11 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   of one `def`) may run 4,096 statements in all (`budget`); past that its calls are unknown
   calls that may also change what its code reaches (`effects.rs`, by `flows.rs`'s reading of
   function texts: globals, cells, defaults and arguments whose value, or what it holds, the code
-  may change or give away, a local aliasing what it is bound to; class attributes by name,
-  rebound where a store's base may be the class; a receiver by the names its code uses unless it
-  escapes, `receiver_effects`; one call for several receivers), and the function gets a
-  reporting run with open parameters (for the calls that did not run). Entry runs are not
-  counted (one per function): work is bounded by functions × budget.
+  may change or give away (to the program's functions: as their code uses the parameter), a local
+  aliasing what it is bound to; class attributes by name, rebound where a store's base may be the
+  class; a receiver by the names its code uses unless it escapes, `receiver_effects`; one call for
+  several receivers), and the function gets a reporting run with open parameters (for the calls
+  that did not run). Entry runs are not counted (one per function): work is bounded by functions × budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation
     reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened.
   * **Unknown values** are not taken for the program's instances: their methods are unknown calls.
@@ -68,9 +68,9 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     runs call) run with open parameters (`param F.x` schemas), from the module's end; a called
     function gets a requirement-only run so too. A *general run* (`Entries::general`: hover values
     for any call, apart from the program's calls, `Fact`) starts from `after_any_code`: the module's
-    end after any of the program's functions ran (`follow_code` over all; instances by name,
-    `methods_may_have_run`), joined with the heaps at module code's calls (`note_call`); parameters
-    as annotated, a method on any instance. With facts on, a facts-only general run follows where needed.
+    end after any of the program's functions ran (`follow_code` over all, a result as its callers
+    use it, `caller_returns`; instances by name, `methods_may_have_run`), joined with the heaps at
+    module code's calls (`note_call`); parameters as annotated, a method on any instance. Facts on: a facts-only general run where needed.
 * **Generators** run whole at their first consumption (`force_gen`), in the creating call's
   context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`; at a position
   not known, some yield's). If code between items (where the consumer asks for one:
@@ -99,8 +99,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
   a general run's `x: int` is an int, not a subclass overriding int's operators). `exec`, `setattr` /
   `getattr` with unknown names (also in skipped code; a class attribute set there through data or a
-  call's result, `f().x = 1`), metaclasses and monkey-patching (rebinding a function or class too)
-  are unknown or ignored. List lengths are tracked up to 15 (a few per path: each one's positions;
+  call's result, `f().x = 1`), metaclasses and monkey-patching (rebinding a function or class too;
+  a module's function the program calls only by name has no other callers) are unknown or ignored. List lengths are tracked up to 15 (a few per path: each one's positions;
   `xs[:n]` keeps xs's). An object a path has no facts of reads as unknown (`read_row`).
 
 ## Working conventions (the owner's standing instructions)

@@ -27,16 +27,37 @@ pub enum Origin {
     Attr(StrId),
     /// the class of a value (`type(e)`, `e.__class__`)
     TypeOf,
+    /// what a call of a name the function does not bind returns (`f(…)`; `n.f(…)`: Some(f))
+    Result(StrId, Option<StrId>),
 }
 
 /// The value an origin gives, or something it holds.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Level {
+pub enum Level {
     Own,
     Held,
 }
 
-type Src = (Origin, Level);
+pub type Src = (Origin, Level);
+
+/// A callee by the name the code calls it: `f(…)` (f, None), `m.f(…)` (m, Some(f)).
+pub type Callee = (StrId, Option<StrId>);
+
+/// Where an argument goes in a call: the i-th positional one, or a keyword.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Slot {
+    Pos(usize),
+    Kw(StrId),
+}
+
+/// A value given to a call of a name the function does not bind: what may happen to it is what
+/// the callee's code does with that parameter, when the name holds the program's functions
+/// (`effects.rs`), else anything. Only values of names (and calls' results) are put off so.
+pub struct Pass {
+    pub callee: Callee,
+    pub slot: Slot,
+    pub srcs: Vec<Src>,
+}
 
 /// What may happen to an origin's value where the code does not run.
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
@@ -57,6 +78,17 @@ pub struct Flags {
 }
 
 impl Flags {
+    /// Given away: anything may happen to it.
+    pub const CHANGE: Flags = Flags { changes: true, held: false, iterated: false, called: false, methods: false, rebinds: false };
+
+    /// What happens to a value, for its source at `level`: itself, or what holds it.
+    pub fn lift(&self, level: Level) -> Flags {
+        match level {
+            Level::Own => Flags { rebinds: false, ..*self },
+            Level::Held => Flags { held: self.any(), ..Flags::default() },
+        }
+    }
+
     pub fn any(&self) -> bool {
         self.changes || self.held || self.iterated || self.called || self.rebinds || self.methods
     }
@@ -115,6 +147,16 @@ pub struct CodeUses {
     pub reads: FxHashSet<StrId>,
     /// how it uses its first parameter (a method's receiver), None when it has none
     pub recv: Option<RecvUse>,
+    /// what may happen to the results of the calls it makes by name, where it uses them
+    pub results: FxHashMap<Callee, Flags>,
+    /// what its own `return`s give back of names and calls' results (what may happen to them
+    /// is what the callers do with the result, `effects::caller_returns`)
+    pub returns: Vec<Src>,
+    /// names and calls' results it gives to calls by name
+    pub passes: Vec<Pass>,
+    /// the attribute names it calls on what is not a name it does not bind (`x.f(…)` of a
+    /// local x, `a.b.f(…)`): what such a call returns is not followed (`Origin::Result`)
+    pub untracked: FxHashSet<StrId>,
 }
 
 /// How a method's own code uses its receiver (its first parameter, and the locals bound to it):
@@ -308,6 +350,7 @@ impl<'a> Flow<'a> {
             match o {
                 Origin::Param(p) => drop(self.out.params.insert(*p, *f)),
                 Origin::Attr(a) => self.out.attrs.entry(*a).or_default().join(f),
+                Origin::Result(n, a) => drop(self.out.results.insert((*n, *a), *f)),
                 _ => {}
             }
         }
@@ -403,6 +446,10 @@ impl<'a> Flow<'a> {
                         // (`abs` / `round` may give back their argument, by its dunder; `sorted`,
                         // `min`, … what they were given; `len`, `str`, `isinstance`, … a new value)
                         f if PASSING_BUILTINS.contains(&f) || matches!(f, "abs" | "round") => args().flat_map(|x| self.srcs(x)).collect(),
+                        f => vec![(Origin::Result(s(f), None), Level::Own)],
+                    },
+                    Expr::Attribute(a) => match &*a.value {
+                        Expr::Name(n) if !self.local(n.id.as_str()) => vec![(Origin::Result(s(n.id.as_str()), Some(s(a.attr.as_str()))), Level::Own)],
                         _ => Vec::new(),
                     },
                     _ => Vec::new(),
@@ -561,6 +608,48 @@ impl<'a> Flow<'a> {
         }
     }
 
+    /// `e` given to code whose effects are put off (a callee by name, the callers of a return):
+    /// the values of names and calls' results it is go to `out`; what else it is may change,
+    /// and its parts are kept.
+    fn give(&mut self, e: &'static Expr, out: &mut Vec<Src>) {
+        let srcs = self.srcs(e);
+        self.expr(e, Pos::Bind);
+        let (later, now): (Vec<Src>, Vec<Src>) = srcs.into_iter().partition(|(o, _)| matches!(o, Origin::Name(_) | Origin::NameAttr(..) | Origin::Result(..)));
+        self.mark(&now, Pos::Change);
+        // (the receiver itself: it escapes)
+        self.recv.escapes |= self.first.is_some_and(|f| now.contains(&(Origin::Param(f), Level::Own)));
+        out.extend(later);
+    }
+
+    /// The arguments of a call of a name the function does not bind (after a `*xs`, or in a
+    /// `**kw`: given away).
+    fn pass_args(&mut self, callee: Callee, c: &'static ast::ExprCall) {
+        let mut known = true;
+        for (i, x) in c.arguments.args.iter().enumerate() {
+            known &= !matches!(x, Expr::Starred(_));
+            if !known {
+                self.expr(x, Pos::Change);
+                continue;
+            }
+            let mut srcs = Vec::new();
+            self.give(x, &mut srcs);
+            if !srcs.is_empty() {
+                self.out.passes.push(Pass { callee, slot: Slot::Pos(i), srcs });
+            }
+        }
+        for k in &c.arguments.keywords {
+            let Some(a) = &k.arg else {
+                self.expr(&k.value, Pos::Change);
+                continue;
+            };
+            let mut srcs = Vec::new();
+            self.give(&k.value, &mut srcs);
+            if !srcs.is_empty() {
+                self.out.passes.push(Pass { callee, slot: Slot::Kw(s(a.as_str())), srcs });
+            }
+        }
+    }
+
     fn call(&mut self, c: &'static ast::ExprCall) {
         let args: Vec<&'static Expr> = c.arguments.args.iter().chain(c.arguments.keywords.iter().map(|k| &k.value)).collect();
         match &*c.func {
@@ -575,6 +664,7 @@ impl<'a> Flow<'a> {
                         self.name(s(n.id.as_str()), Some(s(m)));
                         if !pure {
                             self.mark(&[(Origin::NameAttr(s(n.id.as_str()), s(m)), Level::Own)], Pos::Call);
+                            return self.pass_args((s(n.id.as_str()), Some(s(m))), c);
                         }
                     }
                     v if self.recv_base(v) => drop(self.recv.calls.insert(s(m))),
@@ -587,6 +677,8 @@ impl<'a> Flow<'a> {
                         let recv = self.srcs(v);
                         self.mark(&recv, if pure { Pos::Read } else { Pos::Method });
                         self.expr(v, Pos::Read);
+                        // (a module's function called through a local, say: its result is not followed)
+                        self.out.untracked.insert(s(m));
                     }
                 }
                 args.iter().for_each(|x| self.expr(x, if pure { Pos::Read } else { Pos::Change }));
@@ -617,7 +709,7 @@ impl<'a> Flow<'a> {
                         }
                         c.arguments.keywords.iter().for_each(|k| self.expr(&k.value, Pos::Change));
                     }
-                    _ => args.iter().for_each(|x| self.expr(x, Pos::Change)),
+                    _ => self.pass_args((s(f), None), c),
                 }
             }
             // (the receiver called: its `__call__` runs, a torch module's `forward`)
@@ -831,6 +923,12 @@ impl<'a> Flow<'a> {
                         let others: Vec<Src> = self.srcs(v).into_iter().filter(|x| Some(*x) != first).collect();
                         self.mark(&others, Pos::Change);
                     }
+                    // (names' values and calls' results go to the callers)
+                    Some(v) if self.depth == 0 => {
+                        let mut srcs = Vec::new();
+                        self.give(v, &mut srcs);
+                        self.out.returns.extend(srcs);
+                    }
                     Some(v) => self.expr(v, Pos::Change),
                     None => {}
                 }
@@ -934,6 +1032,75 @@ impl ast::visitor::Visitor<'static> for Binds<'_, '_> {
             Expr::ListComp(ast::ExprListComp { generators, .. }) | Expr::SetComp(ast::ExprSetComp { generators, .. }) | Expr::DictComp(ast::ExprDictComp { generators, .. }) | Expr::Generator(ast::ExprGenerator { generators, .. }) => {
                 generators.iter().for_each(|g| self.0.bind_target(&g.target, &g.iter, true, &mut self.1));
             }
+            _ => {}
+        }
+        ast::visitor::walk_expr(self, e);
+    }
+}
+
+/// The names some code calls (`f(…)`, `m.f(…)`: f), and those it uses otherwise, as values that
+/// any code may call later (`g(f)`, `x = f`, `m.f` read, `getattr(m, "f")`, a decorated `def`'s
+/// name; an import's alias: the name it binds too).
+#[derive(Default)]
+pub struct NameUses {
+    pub called: FxHashSet<StrId>,
+    pub values: FxHashSet<StrId>,
+    aliases: Vec<(StrId, StrId)>,
+}
+
+impl NameUses {
+    pub fn scan(&mut self, body: &'static [Stmt]) {
+        body.iter().for_each(|st| ast::visitor::Visitor::visit_stmt(self, st));
+    }
+
+    /// The names used as values, through the imports' aliases too.
+    pub fn close(&mut self) {
+        while let Some(&(_, n)) = self.aliases.iter().find(|(a, n)| self.values.contains(a) && !self.values.contains(n)) {
+            self.values.insert(n);
+        }
+    }
+}
+
+impl ast::visitor::Visitor<'static> for NameUses {
+    fn visit_stmt(&mut self, st: &'static Stmt) {
+        match st {
+            Stmt::FunctionDef(f) if !f.decorator_list.is_empty() => drop(self.values.insert(s(f.name.as_str()))),
+            Stmt::ImportFrom(i) => self.aliases.extend(i.names.iter().filter_map(|a| Some((s(a.asname.as_ref()?.as_str()), s(a.name.as_str()))))),
+            // (an import in a class body binds class attributes: methods' `self.f(…)`)
+            Stmt::ClassDef(c) => {
+                for st in c.body.iter() {
+                    if let Stmt::ImportFrom(i) = st {
+                        self.values.extend(i.names.iter().map(|a| s(a.name.as_str())));
+                    }
+                }
+            }
+            _ => {}
+        }
+        ast::visitor::walk_stmt(self, st);
+    }
+
+    fn visit_expr(&mut self, e: &'static Expr) {
+        match e {
+            Expr::Call(c) => {
+                match &*c.func {
+                    Expr::Name(n) => drop(self.called.insert(s(n.id.as_str()))),
+                    Expr::Attribute(a) => {
+                        self.called.insert(s(a.attr.as_str()));
+                        self.visit_expr(&a.value);
+                    }
+                    f => self.visit_expr(f),
+                }
+                if let (Expr::Name(f), Some(Expr::StringLiteral(l))) = (&*c.func, c.arguments.args.get(1)) {
+                    if f.id.as_str() == "getattr" {
+                        self.values.insert(s(l.value.to_str()));
+                    }
+                }
+                c.arguments.args.iter().for_each(|x| self.visit_expr(x));
+                c.arguments.keywords.iter().for_each(|k| self.visit_expr(&k.value));
+                return;
+            }
+            Expr::Name(n) if n.ctx.is_load() => drop(self.values.insert(s(n.id.as_str()))),
+            Expr::Attribute(a) if a.ctx.is_load() => drop(self.values.insert(s(a.attr.as_str()))),
             _ => {}
         }
         ast::visitor::walk_expr(self, e);

@@ -163,7 +163,11 @@ impl Analyzer {
     fn after_any_code(&mut self, state: &mut State) {
         let code: Vec<ObjId> = (1..self.heap.len() as ObjId).filter(|o| self.heap.kind(*o) == Kind::Function && self.is_local_module(self.heap.func_info(*o).module)).collect();
         let rid = crate::interp::any_object(&mut self.heap);
+        // (all of the program's code runs: what it does with a function's result is known
+        // where the program is all its callers)
+        self.effects.whole = Some(std::rc::Rc::new(self.caller_returns(state)));
         self.follow_code(code, rid, s("program@"), state);
+        self.effects.whole = None;
         // (and as module code's calls saw it: what it changed later, of the objects it still has)
         if let Some((_, joined)) = &self.entry.calls_heap {
             state.join_known(joined);
