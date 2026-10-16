@@ -442,7 +442,9 @@ impl Analyzer {
         for &(o, ns) in rows {
             let Some(ra) = a.rows.get(&(o, ns)) else { continue };
             let rb = b.row(o, ns);
-            if ra.mutators != rb.mutators || ra.top != rb.top {
+            // (unknown code may have changed it — a key surely there now there unless unknown
+            // code removed it is that too, not a delete)
+            if ra.mutators != rb.mutators || ra.top != rb.top || ra.definite.iter().any(|k| !rb.definite.contains(k) && rb.likely.contains(k)) {
                 changed.push((o, None, false));
                 continue;
             }
