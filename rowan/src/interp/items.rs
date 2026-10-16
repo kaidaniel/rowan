@@ -268,32 +268,48 @@ impl Analyzer {
     /// `seq[a:b]` on an unknown sequence: a sequence of its elements (`slice_base`, whatever the
     /// bounds); an element of such a slice is an element of the sequence, at a position not known.
     fn item_of_slice(&mut self, oid: ObjId, rd: &ItemRead, state: &mut State) -> Value {
-        let base = self.slice_base(oid).unwrap_or(oid);
+        let bases = self.slice_base(oid).unwrap_or_else(|| ObjSet::one(oid));
         match slice_text(&rd.key.kv) {
             Some(bounds) => {
                 // (an object that cannot be sliced: a TypeError)
                 self.may_raise_here("TypeError", state);
-                let label = format!("{}{}", self.heap.obj(base).label, bounds);
-                let sid = self.heap.alloc_raw(Kind::Unknown, &format!("slice:{}", base), "", false, &label, Payload::View(ViewKind::Elems, Value::obj(base)));
-                // (its own content is not known: what a copy of it holds, say)
-                if !state.has_row(sid, Ns::Item) {
-                    state.set_row(sid, Ns::Item, Row::top());
-                    state.set_row(sid, Ns::Attr, Row::top());
-                }
-                if let Some(sym) = self.names.get(base).filter(|_| !self.names.has(sid)).map(|b| format!("{}{}", b, bounds)) {
-                    let scope = self.names.scope(base);
+                let sid = self.elems_of(&bases, &bounds, state);
+                let one = (bases.len() == 1).then(|| bases.to_vec()[0]);
+                if let Some((b, sym)) = one.and_then(|b| self.names.get(b).map(|n| (b, n))).filter(|_| !self.names.has(sid)).map(|(b, n)| (b, format!("{}{}", n, bounds))) {
+                    let scope = self.names.scope(b);
                     self.names.set(sid, sym, scope);
                 }
                 Value::obj(sid)
             }
-            None => self.load_record(base, Ns::Item, &Value::data("index"), rd.node, state, rd.guarded, rd.single_target, rd.try_guard),
+            None => {
+                let mut out: Vec<Value> = Vec::new();
+                for b in bases.iter() {
+                    out.push(self.load_record(b, Ns::Item, &Value::data("index"), rd.node, state, rd.guarded, rd.single_target, rd.try_guard));
+                }
+                crate::domain::join_values(out)
+            }
         }
     }
 
-    /// The sequence an unknown slice holds the elements of (`item_of_slice`).
-    pub(in crate::interp) fn slice_base(&self, oid: ObjId) -> Option<ObjId> {
+    /// An unknown sequence of the elements of the unknown sequences `bases` (a slice of one,
+    /// `bounds` `[1:]`; a concatenation of several, `+`), whatever its own content.
+    pub(in crate::interp) fn elems_of(&mut self, bases: &ObjSet, bounds: &str, state: &mut State) -> ObjId {
+        let ids: Vec<String> = bases.iter().map(|b| b.to_string()).collect();
+        let label = bases.iter().map(|b| self.heap.obj(b).label.to_string()).collect::<Vec<_>>().join(" + ") + bounds;
+        let kind = if bounds.is_empty() { "concat" } else { "slice" };
+        let sid = self.heap.alloc_raw(Kind::Unknown, &format!("{}:{}", kind, ids.join(",")), "", false, &label, Payload::View(ViewKind::Elems, Value::objs(bases.clone())));
+        // (its own content is not known: what a copy of it holds, say)
+        if !state.has_row(sid, Ns::Item) {
+            state.set_row(sid, Ns::Item, Row::top());
+            state.set_row(sid, Ns::Attr, Row::top());
+        }
+        sid
+    }
+
+    /// The sequences an unknown slice or concatenation holds the elements of (`elems_of`).
+    pub(in crate::interp) fn slice_base(&self, oid: ObjId) -> Option<ObjSet> {
         match &self.heap.obj(oid).payload {
-            Payload::View(ViewKind::Elems, v) if self.heap.kind(oid) == Kind::Unknown => v.single(),
+            Payload::View(ViewKind::Elems, v) if self.heap.kind(oid) == Kind::Unknown && !v.pts.is_empty() => Some(v.pts.clone()),
             _ => None,
         }
     }
