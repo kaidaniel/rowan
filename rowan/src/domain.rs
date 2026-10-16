@@ -127,6 +127,21 @@ impl RenameFn {
         })
     }
 
+    /// About how long `apply`'s text is (in bytes) for `k`, without computing it.
+    pub fn out_len(&self, k: KeyId) -> usize {
+        let Some(s) = key_as_str(k) else { return 0 };
+        match self.fn_ {
+            FnKind::Replace => match self.replace_pair() {
+                Some((a, b)) if a.is_empty() => s.len() + (s.chars().count() + 1) * b.len(),
+                Some((a, b)) => s.len() + s.matches(&*a).count() * b.len(),
+                None => s.len(),
+            },
+            FnKind::Prefix | FnKind::Suffix => s.len() + self.arg_str().len(),
+            FnKind::Join => s.len() * (1 + self.arg_str().len()),
+            _ => s.len() * 4,
+        }
+    }
+
     pub fn apply(&self, k: KeyId) -> KeyId {
         if self.fn_ == FnKind::Join {
             let sep = self.arg_str();
@@ -1399,7 +1414,14 @@ pub fn kv_literals(kv: &KeyVal) -> KeySet {
     }
 }
 
+/// Texts longer than this are not computed: a str not known (`s.replace("", "ab")` in a loop
+/// triples each round).
+pub const TEXT_MAX: usize = 1 << 16;
+
 pub fn kv_map(kv: &KeyVal, step: &RenameFn) -> KeyVal {
+    if kv_literals(kv).iter().any(|k| step.out_len(k) > TEXT_MAX) {
+        return KeyVal::data(&typed_label("str", ""));
+    }
     match kv {
         KeyVal::Lit(k) => KeyVal::Lit(step.apply(*k)),
         KeyVal::Lits(ks) => KeyVal::Lits(ks.map(|k| step.apply(k))),
