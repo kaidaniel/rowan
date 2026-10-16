@@ -423,10 +423,13 @@ fn receiver_by_names(heap: &Heap, state: &State, o: ObjId, used: &[KeyId], work:
 /// the slots hold is walked next).
 #[allow(clippy::too_many_arguments)]
 fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: StrId, any_id: ObjId, any: &Value, work: &mut Vec<ObjId>) {
+    // (an enum member's `name` and `value` cannot be set or deleted)
+    let member = heap.keys.member_key.contains_key(&o);
+    let fixed = |ns: Ns, k: KeyId| member && ns == Ns::Attr && intern::key_as_str(k).is_some_and(|n| matches!(&*n, "name" | "value"));
     let mut writes: Vec<(crate::state::SlotKey, Value)> = Vec::new();
     state.slots.each(&o, &mut |sk, v| {
         work.extend(v.pts.iter());
-        if matches!(sk.0, Ns::Item | Ns::Attr | Ns::Pos | Ns::Elem) && !v.pts.contains(any_id) {
+        if matches!(sk.0, Ns::Item | Ns::Attr | Ns::Pos | Ns::Elem) && !v.pts.contains(any_id) && !fixed(sk.0, sk.1) {
             writes.push((*sk, v.join(any)));
         }
     });
@@ -442,7 +445,7 @@ fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: Str
             None if (ns == Ns::Item && matches!(k, Kind::Dict | Kind::Frame)) || (ns == Ns::Attr && k == Kind::Instance) => Row::new(),
             None => continue,
         };
-        let r = r0.mutate(site);
+        let r = if member { r0.mutate_like(site, &|k| !fixed(ns, k)) } else { r0.mutate(site) };
         if r != r0 {
             state.set_row(o, ns, r);
         }
