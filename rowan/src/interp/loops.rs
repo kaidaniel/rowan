@@ -576,7 +576,7 @@ impl Analyzer {
         if ob.single || crate::state::is_any(o) || !(matches!(ob.kind, Kind::Dict | Kind::Instance | Kind::Unknown) || ob.iter_elem) || crate::state::view_of(o).is_some() {
             return None;
         }
-        let (kind, label, payload, derived, depth) = (ob.kind, ob.label.to_string(), ob.payload.clone(), ob.derived_from, ob.depth);
+        let (kind, label, payload, derived, depth, ty) = (ob.kind, ob.label.to_string(), ob.payload.clone(), ob.derived_from, ob.depth, ob.ty);
         let ctx = self.frame().ctx.clone();
         let site = format!("view:{}:{}", o, target as *const ast::Expr as usize);
         let i = self.heap.alloc_raw(kind, &site, &ctx, true, &label, payload);
@@ -589,6 +589,10 @@ impl Analyzer {
         let io = self.heap.obj_mut(i);
         io.derived_from = derived;
         io.depth = depth;
+        io.ty = ty;
+        if let Some(a) = self.heap.ann.get(&o).copied() {
+            self.heap.ann.insert(i, a);
+        }
         self.heap.renew(i);
         for ns in [Ns::Item, Ns::Attr] {
             if let Some(r) = state.rows.get(&(o, ns)) {

@@ -181,6 +181,10 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
     "    return out",
     "",
     "",
+    "def h(hits: list[dict[str, str]], opt: dict[str, list[int | None]] | None, t: tuple[int, ...]):",
+    "    return hits, opt, t",
+    "",
+    "",
     "f(1, 2)",
     "",
   ].join("\n"));
@@ -201,6 +205,11 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   const out = hover(idx, src, 8, "out");
   assert(out.includes('out = {"nums": list[int(?)], "sizes": dict[?, int(?)]}'), out);
   assert(out.includes("- `int(?)`: an int not known statically"), out);
+  // (a builtin container annotation: with its parts' types)
+  assert.strictEqual(head("hits", 12), "hits = (parameter) list[dict[str(?), str(?)]]");
+  assert.strictEqual(head("opt", 12), "opt = (parameter) None | dict[str(?), list[int(?) | None]]");
+  assert.strictEqual(head("t", 12), "t = (parameter) tuple[int(?), ...]");
+  assert(hover(idx, src, 12, "hits").includes("- `str(?)`: a str not known statically"), hover(idx, src, 12, "hits"));
   fs.rmSync(path.dirname(f), { recursive: true, force: true });
 }
 

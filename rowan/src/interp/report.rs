@@ -968,9 +968,10 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
         Kind::Module => an.heap.obj(o).label.to_string(),
         // an unknown named in the program's terms (`a`, `a(b)`, `cfg["db"]`), else `?`
         // (unnamed here: of its type when it has one, `int(?)`)
-        Kind::Unknown => an.names.visible(o).cloned().unwrap_or_else(|| match an.heap.obj(o).ty {
-            Some(t) => format!("{}(?)", t),
-            None => "?".into(),
+        Kind::Unknown => an.names.visible(o).cloned().unwrap_or_else(|| match (an.heap.ann.get(&o), an.heap.obj(o).ty) {
+            (Some(a), _) => crate::interp::entry::annotation_text(a),
+            (None, Some(t)) => format!("{}(?)", t),
+            (None, None) => "?".into(),
         }),
         Kind::External => an.heap.external_qual(o).trim_start_matches("builtins.").to_string(),
         Kind::Super => "super()".into(),
@@ -1331,8 +1332,12 @@ pub fn facts_json(an: &Analyzer) -> J {
         }
         // (an unknown the name stands for, of the builtin type its annotation gives it: `x: int`)
         let own = |o: &ObjId| an.heap.kind(*o) == Kind::Unknown && an.names.get(*o).is_some_and(|n| *n == name.to_string());
-        if let Some(t) = f.general_rows.keys().chain(f.rows.keys()).filter(|o| own(o)).find_map(|o| an.heap.obj(*o).ty) {
-            fact["type"] = json!(t);
+        // (a builtin container's: with its parts' types, `list[dict[str(?), int(?)]]`)
+        if let Some(o) = f.general_rows.keys().chain(f.rows.keys()).filter(|o| own(o)).find(|o| an.heap.obj(**o).ty.is_some()) {
+            fact["type"] = match an.heap.ann.get(o) {
+                Some(a) => json!(crate::interp::entry::annotation_text(a)),
+                None => json!(an.heap.obj(*o).ty),
+            };
         }
         facts.push(fact);
     }

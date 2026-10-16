@@ -152,12 +152,15 @@ pub struct Heap {
     /// a copy's original (through copies made at the same node: `out = deepcopy(out)` in a loop
     /// makes one copy site, not a new one per round)
     pub copy_root: FxHashMap<ObjId, ObjId>,
+    /// the builtin container annotation an unknown follows (`list[dict[str, int]]`): its
+    /// parts' types (`entry::part_annotation`)
+    pub ann: FxHashMap<ObjId, &'static ruff_python_ast::Expr>,
 }
 
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default() }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default(), ann: FxHashMap::default() }
     }
 }
 

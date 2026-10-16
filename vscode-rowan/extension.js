@@ -261,6 +261,9 @@ function headLines(name, value, tag) {
   return [pre + lines[0], ...lines.slice(1)];
 }
 
+/** An annotated type as shown: `int(?)`; a container's with its parts' (`list[dict[str(?), int(?)]]`). */
+const typeText = (type) => (type.includes("[") ? type : `${type}(?)`);
+
 /**
  * A parameter's value for any call, after `(parameter)`: its default, its annotated type
  * (`int(?)`) or both (`4 | int(?)`); the unknown argument itself (`x`, named by the parameter)
@@ -268,7 +271,7 @@ function headLines(name, value, tag) {
  * nothing is known of it.
  */
 function paramValue(text, name, type) {
-  const own = type ? `${type}(?)` : "?";
+  const own = type ? typeText(type) : "?";
   const alts = [...new Set(alternatives(text).map((a) => (a === name ? own : a)))];
   if (alts.length === 1 && alts[0] === "?") return "";
   return alts.filter((a) => a !== "?").concat(alts.includes("?") ? ["?"] : []).join(" | ");
@@ -436,7 +439,7 @@ function renderHover(name, facts, verdicts) {
       value = paramValue(value, name, f.type);
       if (/(^| )\?$/.test(value)) add(origins, ["whatever a call passes"]);
     } else if (own && f.type) {
-      value = `${f.type}(?)`;
+      value = typeText(f.type);
     } else if (own && !objs.length) {
       // a number the module computes from data rowan cannot see, named by its variable
       value = "?";

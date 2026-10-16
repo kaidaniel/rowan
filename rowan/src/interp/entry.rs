@@ -750,6 +750,9 @@ impl Analyzer {
                 match ann.and_then(builtin_annotation) {
                     Some((t, none)) => {
                         self.heap.obj_mut(o).ty = Some(t);
+                        if let Some(c) = ann.and_then(container_annotation) {
+                            self.heap.ann.insert(o, c);
+                        }
                         if none { Value::obj(o).join(&self.none_v) } else { Value::obj(o) }
                     }
                     None => Value::obj(o),
@@ -979,7 +982,7 @@ enum Run {
 /// The builtin type an annotation names (`int`, `"str"`, `list[int]`, `Optional[str]`, `int |
 /// None`), and whether it allows None: a type whose instances a run for any call may take its
 /// parameter to be (`float` is left out: an int may be given for it).
-fn builtin_annotation(ann: &ast::Expr) -> Option<(&'static str, bool)> {
+pub(in crate::interp) fn builtin_annotation(ann: &ast::Expr) -> Option<(&'static str, bool)> {
     const TYPES: [(&str, &str); 14] = [("bool", "bool"), ("bytes", "bytes"), ("int", "int"), ("str", "str"), ("list", "list"), ("dict", "dict"), ("set", "set"), ("tuple", "tuple"), ("frozenset", "frozenset"), ("List", "list"), ("Dict", "dict"), ("Set", "set"), ("Tuple", "tuple"), ("FrozenSet", "frozenset")];
     let is_none = |e: &ast::Expr| matches!(e, ast::Expr::NoneLiteral(_)) || matches!(e, ast::Expr::Name(n) if n.id.as_str() == "None");
     let named = |e: &ast::Expr| TYPES.iter().find(|(n, _)| *n == dotted_last(e)).map(|(_, t)| *t);
@@ -994,6 +997,60 @@ fn builtin_annotation(ann: &ast::Expr) -> Option<(&'static str, bool)> {
         }
         _ => None,
     }
+}
+
+/// The annotation of a builtin container a value follows (`list[dict[str, int]]`; quotes,
+/// `Optional` and `| None` stripped); None for a bare type or anything else.
+pub(in crate::interp) fn container_annotation(ann: &'static ast::Expr) -> Option<&'static ast::Expr> {
+    let is_none = |e: &ast::Expr| matches!(e, ast::Expr::NoneLiteral(_)) || matches!(e, ast::Expr::Name(n) if n.id.as_str() == "None");
+    match ann {
+        ast::Expr::StringLiteral(sl) => frontend::parse_expression(sl.value.to_str()).and_then(container_annotation),
+        ast::Expr::Subscript(sub) if dotted_last(&sub.value) == "Optional" => container_annotation(&sub.slice),
+        ast::Expr::Subscript(_) => builtin_annotation(ann).map(|_| ann),
+        ast::Expr::BinOp(b) if b.op == ast::Operator::BitOr && (is_none(&b.left) || is_none(&b.right)) => container_annotation(if is_none(&b.right) { &b.left } else { &b.right }),
+        _ => None,
+    }
+}
+
+/// The annotation of a part of a value annotated `ann` (`container_annotation`): of a list's or
+/// set's element, a dict's value, a tuple's position `k`.
+pub(in crate::interp) fn part_annotation(ann: &'static ast::Expr, k: KeyId) -> Option<&'static ast::Expr> {
+    let ast::Expr::Subscript(sub) = ann else { return None };
+    let args: Vec<&'static ast::Expr> = match &*sub.slice {
+        ast::Expr::Tuple(t) => t.elts.iter().collect(),
+        e => vec![e],
+    };
+    match (builtin_annotation(ann)?.0, args.as_slice()) {
+        ("list" | "set" | "frozenset", [e]) => Some(e),
+        // (any key's value and an element share one unknown, `d[*]`: typed only when both are
+        // of one type)
+        ("dict", [kt, vt]) if k == intern::STAR => (annotation_text(kt) == annotation_text(vt)).then_some(*vt),
+        ("dict", [_, vt]) => Some(vt),
+        ("tuple", [e, ast::Expr::EllipsisLiteral(_)]) => Some(e),
+        ("tuple", ts) => intern::key_as_int(k).and_then(|i| ts.get(usize::try_from(i).ok()?).copied()),
+        _ => None,
+    }
+}
+
+/// For people: the type an annotation gives, unknowns of builtin types marked (`list[dict[str(?),
+/// int(?)]]`; anything else `?`); a part that may be None says so, the whole does not (the
+/// value it is shown for has the None).
+pub(in crate::interp) fn annotation_text(ann: &'static ast::Expr) -> String {
+    fn text(ann: &'static ast::Expr, top: bool) -> String {
+        let Some((t, none)) = builtin_annotation(ann) else { return "?".into() };
+        let s = match container_annotation(ann) {
+            Some(ast::Expr::Subscript(sub)) => {
+                let args: Vec<String> = match &*sub.slice {
+                    ast::Expr::Tuple(tu) => tu.elts.iter().map(|e| if e.is_ellipsis_literal_expr() { "...".into() } else { text(e, false) }).collect(),
+                    e => vec![text(e, false)],
+                };
+                format!("{}[{}]", t, args.join(", "))
+            }
+            _ => format!("{}(?)", t),
+        };
+        if none && !top { format!("{} | None", s) } else { s }
+    }
+    text(ann, true)
 }
 
 /// A requirement-only run keeps what the function itself demands: of its parameters, and of

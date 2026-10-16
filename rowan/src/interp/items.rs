@@ -778,8 +778,18 @@ impl Analyzer {
             self.names.set(pid, sym, scope);
         }
         let d = self.heap.obj(oid).depth + 1;
+        // (a part of a value annotated `list[int]`, `dict[str, float]`: of that type)
+        let part = self.heap.ann.get(&oid).and_then(|a| crate::interp::entry::part_annotation(a, k));
+        let shared = self.heap.obj(pid).site.starts_with("path@");
+        if let (Some(p), false) = (part, shared) {
+            if let Some((t, false)) = crate::interp::entry::builtin_annotation(p) {
+                self.heap.obj_mut(pid).ty = Some(t);
+                if let Some(c) = crate::interp::entry::container_annotation(p) {
+                    self.heap.ann.insert(pid, c);
+                }
+            }
+        }
         let o = self.heap.obj_mut(pid);
-        let shared = o.site.starts_with("path@");
         o.depth = if shared { o.depth.max(d) } else { d };
         o.iter_elem |= elem;
         if state.has_row(pid, Ns::Item) && !shared {
