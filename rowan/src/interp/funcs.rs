@@ -1311,6 +1311,31 @@ impl Analyzer {
         }
     }
 
+    /// The literals a container surely holds, whichever of its objects it is: of a list,
+    /// tuple or set of known length the positions that are one literal, of a dict its keys
+    /// there on every path (the literals `lit_keys` gives may be there; these are).
+    pub fn sure_lit_keys(&mut self, v: &Value, state: &State) -> Option<KeySet> {
+        if v.pts.is_empty() || !v.kv.is_bot() {
+            return None;
+        }
+        let mut out: Option<KeySet> = None;
+        for oid in v.pts.iter() {
+            let ks: KeySet = match self.heap.kind(oid) {
+                Kind::List | Kind::Tuple | Kind::Set if self.heap.obj(oid).single && !crate::state::is_merged(oid) => {
+                    let n = self.heap.llen(oid, state)?;
+                    (0..n).filter_map(|i| { let sv = state.slot(oid, Ns::Pos, key_int(i as i64)); sv.kv.as_lit().filter(|_| sv.pts.is_empty()) }).collect()
+                }
+                Kind::Dict => state.row(oid, Ns::Item).definite.clone(),
+                _ => return None,
+            };
+            out = Some(match out {
+                None => ks,
+                Some(o) => o.filter(|k| ks.contains(k)),
+            });
+        }
+        out
+    }
+
     pub fn literal_mapping(&mut self, v: &Value, state: &State) -> Option<Vec<(KeyId, KeyId)>> {
         let mut out: Vec<(KeyId, KeyId)> = Vec::new();
         for oid in v.pts.iter() {

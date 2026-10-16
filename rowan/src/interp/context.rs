@@ -32,6 +32,8 @@ pub struct Context {
     pub branch_depth: i32,
     /// per comprehension generator level: whether its items are known (unrolled)
     pub comp_known: Vec<bool>,
+    /// filters not decided for the comprehension item being run (it may be dropped)
+    pub comp_maybe: usize,
     /// per running comprehension: the cells of its variables (closed over by functions made
     /// inside it, which see the variable's latest value)
     pub comp_cells: Vec<FxHashMap<StrId, ObjId>>,
