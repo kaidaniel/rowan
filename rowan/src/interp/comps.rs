@@ -100,6 +100,7 @@ impl Analyzer {
         if it.exhaustive && understood && s2.reachable {
             self.cx.comp_known.pop();
             state.replace_with(s2);
+            self.exhaust(&exhaust_after, state);
             return;
         }
         // (an iteration that changed nothing an older object or a name holds, but the result
@@ -118,6 +119,7 @@ impl Analyzer {
             let ev = elem.value_part();
             self.promote_elem_reqs(&mut joined, &s2, &ev, state);
             state.replace_with(joined);
+            self.exhaust(&exhaust_after, state);
             return;
         }
         // items of unknown number: what one iteration did, the next one sees too (a walrus
@@ -135,6 +137,8 @@ impl Analyzer {
         let ev = elem.value_part();
         self.promote_elem_reqs(&mut head, &s2, &ev, state);
         state.replace_with(head);
+        // (a generator iterated: used up, its effects at its end)
+        self.exhaust(&exhaust_after, state);
     }
 
     /// Known items: each is its own straight-line iteration; a filter decided for the item

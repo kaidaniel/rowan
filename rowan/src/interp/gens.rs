@@ -900,7 +900,14 @@ impl Analyzer {
                     // (used up, its length not known: at its end all the same)
                     None => self.set_cursor_ex(o, None, true, state),
                 }
+                return;
             }
+        }
+        // (a generator object that stands for several, or one of several: its run's effects,
+        // at its end when it is the one used up, else at any point)
+        let one = v.pts.len() == 1 && v.kv.is_bot();
+        for o in v.pts.iter().filter(|o| self.gens.eff.contains_key(o)).collect::<Vec<_>>() {
+            self.set_cursor_ex(o, None, one, state);
         }
     }
 }
