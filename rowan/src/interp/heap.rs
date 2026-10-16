@@ -144,6 +144,9 @@ pub struct Heap {
     pub keys: ObjKeys,
     /// class attributes no path's state holds (flow-insensitive)
     pub cls_slots: FxHashMap<(ObjId, crate::domain::Ns, KeyId), Value>,
+    /// class attributes the program stores after the class is made (`Cls.x = 1`): those a
+    /// path may lack (`class_lookup_on_path`)
+    pub cls_late: rustc_hash::FxHashSet<(ObjId, KeyId)>,
     /// `@name.setter` functions by (defining class, attribute)
     pub prop_setters: FxHashMap<(ObjId, KeyId), ObjId>,
     /// a copy's original (through copies made at the same node: `out = deepcopy(out)` in a loop
@@ -154,7 +157,7 @@ pub struct Heap {
 impl Default for Heap {
     fn default() -> Heap {
         let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None };
-        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default() }
+        Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), cls_late: Default::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default() }
     }
 }
 

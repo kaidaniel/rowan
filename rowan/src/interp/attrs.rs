@@ -538,8 +538,9 @@ impl Analyzer {
                 continue;
             }
             let row = state.row(c, Ns::Attr);
-            // (or there unless unknown code removed it: as optimistic as a `likely` read)
-            if !state.has_row(c, Ns::Attr) || row.definite.contains(nk) || row.likely.contains(nk) {
+            // (made with the class — its body, a model — it is there; or there unless unknown
+            // code removed it: as optimistic as a `likely` read)
+            if !self.heap.cls_late.contains(&(c, nk)) || !state.has_row(c, Ns::Attr) || row.definite.contains(nk) || row.likely.contains(nk) {
                 out.push(c);
                 return (out, true);
             }
@@ -627,6 +628,12 @@ impl Analyzer {
         let row = self.read_row(oid, Ns::Attr, state);
         let cls_of = self.heap.instance_class(oid);
         if let Some(mut v) = v {
+            // (stored on some paths only, on an object unknown code changed: on the others it
+            // holds what that code put there — of a class of the program's only: a library
+            // base's own code is taken not to set the program's names, `nn.Module`'s)
+            if !row.mutators.is_empty() && !row.definite.contains(nk) && cls_of.is_some_and(|c| self.hierarchy_closed(c)) {
+                v = v.join(&self.path_placeholder_value(oid, Ns::Attr, nk, &row, state));
+            }
             // (set on some paths only, over a class attribute of the name: the others read the
             // class's — the read cannot fail where the class surely has it)
             let class_attr = cls_of.filter(|c| !row.definite.contains(nk) && !crate::models::dataclasses::dataclass_fields_mro(self, *c).iter().any(|(f, _)| f == name)).map(|c| self.class_lookup_on_path(c, name, state));
@@ -644,12 +651,6 @@ impl Analyzer {
             }
             if let Some(cv) = class_v {
                 v = v.join(&cv);
-            }
-            // (stored on some paths only, on an object unknown code changed: on the others it
-            // holds what that code put there — of a class of the program's only: a library
-            // base's own code is taken not to set the program's names, `nn.Module`'s)
-            if !row.mutators.is_empty() && !(row.definite.contains(nk) && row.stored.contains(nk)) && cls_of.is_some_and(|c| self.hierarchy_closed(c)) {
-                v = v.join(&self.path_placeholder_value(oid, Ns::Attr, nk, &row, state));
             }
             if row.present.contains(nk) {
                 let cls = classify(&row, nk);
@@ -692,8 +693,8 @@ impl Analyzer {
                 let out = self.bound_outs(&cv, oid, c, name, node, state);
                 // (an instance of a class of the program unknown code changed: it may hold the
                 // data name itself, over the class's)
-                if plain && !row.mutators.is_empty() && !row.absent.contains(nk) && self.hierarchy_closed(c) {
-                    return out.join(&self.path_placeholder_value(oid, Ns::Attr, nk, &row, state));
+                if cv.pts.is_empty() && !row.mutators.is_empty() && !row.absent.contains(nk) && self.hierarchy_closed(c) {
+                    return out.join(&Value::data(&format!("L{}", node.line)));
                 }
                 return out;
             }
@@ -985,6 +986,7 @@ impl Analyzer {
             state.set_slot(oid, Ns::Attr, nk, v.clone(), strong);
             if kind == Kind::Class {
                 self.heap.cls_slots.insert((oid, Ns::Attr, nk), v.clone());
+                self.heap.cls_late.insert((oid, nk));
             }
         }
     }
