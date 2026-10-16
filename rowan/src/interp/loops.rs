@@ -219,8 +219,7 @@ impl Analyzer {
     pub(super) fn stmt_for(&mut self, f: &'static ast::StmtFor, state: &mut State) {
         let itv = self.eval(&f.iter, state);
         let iter_node = frontend::node(&*f.iter);
-        if let Some(it) = self.user_iterator(&itv, &iter_node, state) {
-            self.for_user_iterator(f, it, state);
+        if self.for_user_iterator(f, &itv, &iter_node, state) {
             return;
         }
         self.force_gen(&itv, state, true);
@@ -365,8 +364,8 @@ impl Analyzer {
     /// iteration, after the body before it changed what it reads. Unrolled while each call is
     /// decided (an item, or StopIteration), then to a fixpoint; the loop ends where StopIteration
     /// was raised.
-    fn for_user_iterator(&mut self, f: &'static ast::StmtFor, it: ObjId, state: &mut State) {
-        let node = frontend::node(&*f.iter);
+    fn for_user_iterator(&mut self, f: &'static ast::StmtFor, itv: &Value, node: &frontend::Node, state: &mut State) -> bool {
+        let Some(it) = self.user_iterator(itv, node, state) else { return false };
         let mut stops: Option<State> = None;
         let mut breaks: Option<State> = None;
         let mut decided = true;
@@ -375,7 +374,7 @@ impl Analyzer {
                 break;
             }
             let mut probe = state.copy();
-            let (v, stop) = self.next_step(it, &node, &mut probe);
+            let (v, stop) = self.next_step(it, node, &mut probe);
             match (probe.reachable, stop) {
                 (true, None) if idx < UNROLL_MAX => {
                     state.replace_with(probe);
@@ -394,7 +393,7 @@ impl Analyzer {
         }
         if !decided {
             let (_, exit_acc, _) = self.loop_fixpoint(state, &mut |an, body_s| {
-                let (v, stop) = an.next_step(it, &node, body_s);
+                let (v, stop) = an.next_step(it, node, body_s);
                 if let Some(s) = stop {
                     join_into(&mut stops, s);
                 }
@@ -417,6 +416,7 @@ impl Analyzer {
         }
         join_breaks(&mut exit_s, breaks);
         state.replace_with(exit_s);
+        true
     }
 
     /// The loop ran at least once exactly when its iterable was non-empty: a later test of
