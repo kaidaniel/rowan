@@ -2444,8 +2444,8 @@ fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual);
     let kv = c.recv.as_ref().map(|r| r.kv.clone()).unwrap_or(DATA);
     match name {
-        "upper" | "lower" | "strip" | "title" => Value::kv_only(an.rename_kv(&kv, &RenameFn::new(FnKind::from_name(name).unwrap()))),
-        "lstrip" | "rstrip" => Value::kv_only(an.rename_kv(&kv, &RenameFn::new(FnKind::Strip))),
+        // (`strip(chars)`, `lstrip()`, `rstrip()` are not `strip()`: a str not known)
+        "upper" | "lower" | "title" | "strip" if c.args.is_empty() && c.kwargs.is_empty() => Value::kv_only(an.rename_kv(&kv, &RenameFn::new(FnKind::from_name(name).unwrap()))),
         // positions / counts of a known substring in a known string
         "find" | "index" | "rfind" | "rindex" | "count" if c.args.len() == 1 => {
             let recv_s = kv.as_lit().and_then(intern::key_as_str);

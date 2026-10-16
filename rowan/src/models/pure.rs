@@ -45,27 +45,29 @@ fn choices(v: &Value) -> Option<Vec<KeyId>> {
     }
 }
 
-fn result_value(an: &mut Analyzer, st: &mut State, c: &Call, r: PyResult) -> Value {
+/// A computed result as a value; `sfx` sets apart the objects of one call's several results
+/// (each receiver of several, each nested tuple), which would otherwise be one object.
+fn result_value(an: &mut Analyzer, st: &mut State, c: &Call, r: PyResult, sfx: &str) -> Value {
     match r {
-        PyResult::Key(k) => key_value(an, st, c, k),
+        PyResult::Key(k) => key_value(an, st, c, k, sfx),
         PyResult::List(ks) => {
             let vals: Vec<Value> = ks.iter().map(|k| Value::lit(*k)).collect();
             let kv = if ks.is_empty() { KeyVal::Lits(KeySet::new()) } else { KeyVal::lits(KeySet::from_iter(ks.iter().copied())) };
-            an.alloc_positional(Kind::List, &c.node, Some(vals), Value::new(), kv, st)
+            an.alloc_positional_sfx(Kind::List, &c.node, sfx, Some(vals), Value::new(), kv, st)
         }
     }
 }
 
 /// A result key as a value: a tuple key becomes a tuple object (positions), others literals.
-fn key_value(an: &mut Analyzer, st: &mut State, c: &Call, k: KeyId) -> Value {
+fn key_value(an: &mut Analyzer, st: &mut State, c: &Call, k: KeyId, sfx: &str) -> Value {
     let items = intern::with_key(k, |kk| match kk {
         intern::Key::Tuple(xs) => Some(xs.clone()),
         _ => None,
     });
     match items {
         Some(xs) => {
-            let vals: Vec<Value> = xs.iter().map(|k| key_value(an, st, c, *k)).collect();
-            an.alloc_positional(Kind::Tuple, &c.node, Some(vals), Value::new(), crate::domain::DATA, st)
+            let vals: Vec<Value> = xs.iter().enumerate().map(|(i, k)| key_value(an, st, c, *k, &format!("{}.{}", sfx, i))).collect();
+            an.alloc_positional_sfx(Kind::Tuple, &c.node, sfx, Some(vals), Value::new(), crate::domain::DATA, st)
         }
         None => Value::lit(k),
     }
@@ -96,12 +98,12 @@ pub fn try_pure(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
             let (args, kwargs) = (args?, kwargs?);
             let kw: Vec<(&str, KeyId)> = kwargs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
             let r = crate::models::pytext::module_call(f, name, &args, &kw)?;
-            Some(result_value(an, st, c, r))
+            Some(result_value(an, st, c, r, ""))
         }
         "builtins" if BUILTINS.contains(&name) && !c.args.is_empty() => {
             let (args, kwargs) = (args?, kwargs?);
             let kw: Vec<(&str, KeyId)> = kwargs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-            pyvalues::builtin(name, &args, &kw).map(|k| key_value(an, st, c, k))
+            pyvalues::builtin(name, &args, &kw).map(|k| key_value(an, st, c, k, ""))
         }
         "math" => {
             // (torch programs: math results stay the tensor model's numbers)
@@ -114,7 +116,7 @@ pub fn try_pure(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
             if !c.kwargs.is_empty() {
                 return None;
             }
-            pyvalues::operator_call(name, &args?).map(|k| key_value(an, st, c, k))
+            pyvalues::operator_call(name, &args?).map(|k| key_value(an, st, c, k, ""))
         }
         "statistics" => {
             let a = args?;
@@ -146,12 +148,13 @@ pub fn try_pure(an: &mut Analyzer, st: &mut State, c: &Call) -> Option<Value> {
             let (args, kwargs) = (args?, kwargs?);
             let kw: Vec<(&str, KeyId)> = kwargs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
             let mut outs: Vec<Value> = Vec::new();
-            for r in rs {
+            for (i, r) in rs.into_iter().enumerate() {
                 let res = match intern::key_get(r) {
                     intern::Key::Bytes(b) => crate::models::pytext::bytes_method(&b, name, &args, &kw)?,
                     _ => pyvalues::str_method(&intern::key_as_str(r)?, name, &args, &kw)?,
                 };
-                outs.push(result_value(an, st, c, res));
+                let sfx = if i == 0 { String::new() } else { format!("#r{}", i) };
+                outs.push(result_value(an, st, c, res, &sfx));
             }
             Some(join_values(outs))
         }
