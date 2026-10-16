@@ -438,7 +438,7 @@ impl Analyzer {
 
     /// Past the deadline a statement in a function body does not run: its path ends, and
     /// the call it belongs to is replaced by an unknown call (`call_user`). Module code goes on
-    /// (its calls are unknown calls). Checked every 64 statements.
+    /// (its calls are unknown calls). Checked at every statement.
     pub(in crate::interp) fn cut_body(&mut self, state: &mut State) -> bool {
         if !self.budget.tick() {
             return false;
