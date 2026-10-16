@@ -646,6 +646,14 @@ impl Analyzer {
         if matches!(test, ast::Expr::Name(n) if n.id.as_str() == "TYPE_CHECKING") || matches!(test, ast::Expr::Attribute(a) if a.attr.as_str() == "TYPE_CHECKING") {
             self.note_type_only_imports(body);
         }
+        // (setting the module code up for runs on demand: the calls of the main module's
+        // `if __name__ == "__main__":` block — a script's work, often a demo — run no body)
+        if self.entry.main_block_unrun && !self.budget.skip_calls && self.cx.frames.len() == 1 && is_main_test(test) {
+            self.budget.skip_calls = true;
+            self.stmt_if(test, body, rest, state);
+            self.budget.skip_calls = false;
+            return;
+        }
         let mut pre = state.copy();
         let sp = self.split(test, state.copy());
         let (mut then_s, mut else_s) = (sp.t, sp.f);
@@ -1058,4 +1066,14 @@ fn count_tests(body: &[ast::Stmt], in_loop: bool, out: &mut rustc_hash::FxHashMa
             _ => {}
         }
     }
+}
+
+/// `__name__ == "__main__"` (either way round).
+fn is_main_test(test: &ast::Expr) -> bool {
+    let ast::Expr::Compare(c) = test else { return false };
+    let [op] = &c.ops[..] else { return false };
+    let [right] = &c.comparators[..] else { return false };
+    let name = |e: &ast::Expr| matches!(e, ast::Expr::Name(n) if n.id.as_str() == "__name__");
+    let main = |e: &ast::Expr| matches!(e, ast::Expr::StringLiteral(s) if s.value.to_str() == "__main__");
+    *op == ast::CmpOp::Eq && ((name(&c.left) && main(right)) || (main(&c.left) && name(right)))
 }

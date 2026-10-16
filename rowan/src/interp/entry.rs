@@ -70,6 +70,8 @@ pub struct Entries {
     /// functions run one at a time when asked (`general_run_of`): no instances made with
     /// `__init__`'s defaults
     pub on_demand: bool,
+    /// set up for runs on demand: the main module's `__main__` block's calls run no body
+    pub main_block_unrun: bool,
     /// per class: the instance runs for any call take, made in their start state (`base`)
     pub any_instances: FxHashMap<ObjId, Option<ObjId>>,
     /// the module's end is where any call starts: no function of the program may change what
@@ -186,6 +188,12 @@ impl Analyzer {
     /// Did the deadline cut the analysis (`run`)?
     pub fn was_cut(&self) -> bool {
         self.budget.hard_cut
+    }
+
+    /// Before `run`, for runs on demand: the calls of the main module's `__main__` block run no
+    /// body (they are skipped calls: what they may change, changed).
+    pub fn main_block_unrun(&mut self) {
+        self.entry.main_block_unrun = true;
     }
 
     /// Go over to running functions on demand (`general_run_of`), after `run`: back to the

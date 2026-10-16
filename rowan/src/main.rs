@@ -19,6 +19,7 @@ fn main() {
     let mut site: Vec<String> = Vec::new();
     let mut serve = false;
     let mut hovers: Option<(usize, usize)> = None;
+    let mut only: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -32,6 +33,8 @@ fn main() {
                     std::process::exit(2);
                 }
             },
+            // (with `hovers`: only the functions whose qualified name contains this)
+            "--only" => only = it.next().cloned(),
             "--follow" => match it.next() {
                 Some(n) => follow.extend(n.split(',').filter(|s| !s.is_empty()).map(|s| s.trim().to_string())),
                 None => {
@@ -84,7 +87,7 @@ fn main() {
         std::process::exit(2);
     };
     if let Some(part) = hovers {
-        on_big_stack(move || time_hovers(&file, opts, part));
+        on_big_stack(move || time_hovers(&file, opts, part, only));
         return;
     }
     let text = on_big_stack(move || run(&file, opts, json, golden, facts, show_rows, show_summaries));
@@ -111,9 +114,12 @@ fn on_big_stack<R: Send + 'static>(f: impl FnOnce() -> Result<R, String> + Send 
 
 /// `rowan serve`: JSON lines over stdio. Requests:
 /// * `{"cmd":"analyse","path":P}` (also `"facts"`) returns the `--facts` document for `P`, from
-///   a cache when `P` and every module it loaded are unchanged (content hashes). When the
-///   deadline cuts the whole program's analysis, the result is the main module's own (its module
-///   code: `on_demand: true`) and its functions are analysed one at a time when asked (`hover`).
+///   a cache when `P` and every module it loaded are unchanged (content hashes). The whole
+///   program's analysis and one of the main module's own code start together: unless the whole
+///   program's completes within `EARLY`, the result is the module code's (`on_demand: true`;
+///   its functions are analysed one at a time when asked, `hover`), with `pending: true` while
+///   the whole program's goes on; when that completes (not cut by its deadline) its document
+///   follows as an event line `{"event":"analysed","path":P,"ms":…,"deps":…,"result":…}`.
 /// * `{"cmd":"hover","path":P,"line":L}` returns the `--facts` document of the function of `P`
 ///   defined over line L, from its run for any call (open parameters as annotated, from the
 ///   state the module ended in), cached per function until a file it depends on changes; it
@@ -122,7 +128,7 @@ fn on_big_stack<R: Send + 'static>(f: impl FnOnce() -> Result<R, String> + Send 
 ///   `{"cmd":"shutdown"}` exits.
 ///
 /// Every response echoes the request's `id` and carries `ok`; a result has `cached`, `ms`,
-/// `deps` and `result`. Each analysis runs on a thread of its own (the engine's tables are
+/// `deps` and `result` (responses come in order; an event has no `id`). Each analysis runs on a thread of its own (the engine's tables are
 /// per thread); an analysis kept for `hover` keeps its thread (at most `SESSIONS`).
 /// Import options shared by the CLI and the server.
 #[derive(Clone)]
@@ -195,12 +201,27 @@ struct Session {
 /// and whether it went on demand (its thread then waits for `hover` requests).
 type First = Result<(String, Vec<String>, bool), String>;
 
-/// Analyse `path` on a thread of its own: the whole program (`whole`; on demand if the deadline
-/// cuts it), or its module code alone, ready for `hover` requests. Returns the first report and,
-/// when on demand, the thread's request channel.
-fn spawn_analysis(path: String, opts: Opts, whole: bool) -> (First, Option<std::sync::mpsc::Sender<HoverReq>>) {
+/// What an analysis thread runs (`start_analysis`).
+#[derive(Clone, Copy, PartialEq)]
+enum Start {
+    /// the whole program, ending if the deadline cuts it (an analysis of the module code
+    /// answers then)
+    Whole,
+    /// its module code alone, then its functions on demand
+    Module,
+}
+
+/// How long `analyse` waits for the whole program's analysis before it answers from the
+/// module code's (its functions then run when hovered while the whole program's goes on).
+const EARLY: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// Analyse `path` on a thread of its own (`start`): the channel its first report comes on and
+/// the thread's request channel (for `hover` requests, when it goes on demand; dropping it
+/// ends the thread).
+fn start_analysis(path: String, opts: Opts, start: Start) -> (std::sync::mpsc::Receiver<First>, std::sync::mpsc::Sender<HoverReq>) {
     let (first_tx, first_rx) = std::sync::mpsc::channel::<First>();
     let (req_tx, req_rx) = std::sync::mpsc::channel::<HoverReq>();
+    let whole = start != Start::Module;
     let spawned = std::thread::Builder::new().stack_size(1 << 30).spawn(move || {
         let mut an = match analyser(&path, Opts { entry: opts.entry && whole, ..opts.clone() }, true) {
             Ok(an) => an,
@@ -209,11 +230,18 @@ fn spawn_analysis(path: String, opts: Opts, whole: bool) -> (First, Option<std::
                 return;
             }
         };
+        if !whole {
+            an.main_block_unrun();
+        }
         an.run();
         let deps = deps_of(&an, &path);
         let demand = !whole || an.was_cut();
         if !demand {
             let _ = first_tx.send(Ok((serde_json::to_string(&report::facts_json(&an)).unwrap(), deps, false)));
+            return;
+        }
+        if start == Start::Whole {
+            let _ = first_tx.send(Ok((String::new(), deps, true)));
             return;
         }
         an.on_demand();
@@ -251,6 +279,7 @@ fn spawn_analysis(path: String, opts: Opts, whole: bool) -> (First, Option<std::
             if an.work_counts()[2] > setup_objects + REBUILD_OBJECTS {
                 let Ok(fresh) = analyser(&path, Opts { entry: false, ..opts.clone() }, true) else { break };
                 an = fresh;
+                an.main_block_unrun();
                 an.run();
                 an.on_demand();
                 setup_objects = an.work_counts()[2];
@@ -258,8 +287,16 @@ fn spawn_analysis(path: String, opts: Opts, whole: bool) -> (First, Option<std::
         }
     });
     if let Err(e) = spawned {
-        return (Err(format!("cannot start an analysis thread: {}", e)), None);
+        let (tx, rx) = std::sync::mpsc::channel::<First>();
+        let _ = tx.send(Err(format!("cannot start an analysis thread: {}", e)));
+        return (rx, req_tx);
     }
+    (first_rx, req_tx)
+}
+
+/// `start_analysis`, waiting for its first report; the request channel when it went on demand.
+fn spawn_analysis(path: String, opts: Opts, start: Start) -> (First, Option<std::sync::mpsc::Sender<HoverReq>>) {
+    let (first_rx, req_tx) = start_analysis(path, opts, start);
     match first_rx.recv() {
         Ok(Ok((r, deps, true))) => (Ok((r, deps, true)), Some(req_tx)),
         Ok(other) => (other, None),
@@ -267,13 +304,39 @@ fn spawn_analysis(path: String, opts: Opts, whole: bool) -> (First, Option<std::
     }
 }
 
+/// The server's state shared with the threads that wait for a whole program's analysis: the
+/// documents kept per file (with the files they depend on and their hashes), the analyses kept
+/// for `hover`, and per file the number of its latest `analyse` (a late answer to an earlier
+/// one is dropped).
+#[derive(Default)]
+struct Shared {
+    cache: std::collections::HashMap<String, (Vec<(String, u64)>, String)>,
+    sessions: Vec<Session>,
+    latest: std::collections::HashMap<String, u64>,
+}
+
+type Out = std::sync::Arc<std::sync::Mutex<std::io::Stdout>>;
+
+fn send_line(out: &Out, line: &str) {
+    use std::io::Write;
+    let mut o = out.lock().unwrap();
+    let _ = writeln!(o, "{}", line);
+    let _ = o.flush();
+}
+
+fn file_hash(p: &str) -> Option<u64> {
+    std::fs::read_to_string(p).ok().map(|s| rowan::frontend::content_hash(&s))
+}
+
+fn hashed(deps: &[String]) -> Vec<(String, u64)> {
+    deps.iter().map(|p| (p.clone(), file_hash(p).unwrap_or(0))).collect()
+}
+
 fn serve_loop(opts: Opts) {
-    use std::io::{BufRead, Write};
+    use std::io::BufRead;
     let stdin = std::io::stdin();
-    let mut out = std::io::stdout();
-    let mut cache: std::collections::HashMap<String, (Vec<(String, u64)>, String)> = std::collections::HashMap::new();
-    let mut sessions: Vec<Session> = Vec::new();
-    let file_hash = |p: &str| -> Option<u64> { std::fs::read_to_string(p).ok().map(|s| rowan::frontend::content_hash(&s)) };
+    let out: Out = std::sync::Arc::new(std::sync::Mutex::new(std::io::stdout()));
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(Shared::default()));
     let fresh = |deps: &[(String, u64)]| deps.iter().all(|(p, h)| file_hash(p) == Some(*h));
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -283,8 +346,7 @@ fn serve_loop(opts: Opts) {
         let req: serde_json::Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                let _ = writeln!(out, "{}", serde_json::json!({"ok": false, "error": format!("bad request: {}", e)}));
-                let _ = out.flush();
+                send_line(&out, &serde_json::json!({"ok": false, "error": format!("bad request: {}", e)}).to_string());
                 continue;
             }
         };
@@ -292,72 +354,153 @@ fn serve_loop(opts: Opts) {
         let cmd = req.get("cmd").and_then(|c| c.as_str()).unwrap_or("").to_string();
         let path = req.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
         // (an analysis kept for `hover` whose files changed is dropped: its thread ends)
-        sessions.retain(|s| fresh(&s.deps));
+        shared.lock().unwrap().sessions.retain(|s| fresh(&s.deps));
         let reply = match cmd.as_str() {
             "analyse" | "facts" => {
                 let t0 = std::time::Instant::now();
-                let kept = cache.get(&path).filter(|(deps, _)| fresh(deps)).map(|(deps, r)| (deps.clone(), r.clone()));
+                let kept = shared.lock().unwrap().cache.get(&path).filter(|(deps, _)| fresh(deps)).map(|(deps, r)| (deps.clone(), r.clone()));
                 match kept {
                     Some((deps, result)) => {
                         let dep_paths: Vec<&str> = deps.iter().map(|(p, _)| p.as_str()).collect();
                         format!("{{\"id\":{},\"ok\":true,\"path\":{},\"cached\":true,\"ms\":{},\"deps\":{},\"result\":{}}}", id, serde_json::json!(path), t0.elapsed().as_millis(), serde_json::json!(dep_paths), result)
                     }
-                    None => {
-                        sessions.retain(|s| s.path != path);
-                        match spawn_analysis(path.clone(), opts.clone(), true) {
-                            (Ok((result, deps, demand)), tx) => {
-                                let hashed: Vec<(String, u64)> = deps.iter().map(|p| (p.clone(), file_hash(p).unwrap_or(0))).collect();
-                                // (on demand, the module's own document is kept too: asked again, it is
-                                // answered at once while the analysis waits for hovers)
-                                if let (Some(tx), true) = (tx, demand) {
-                                    keep_session(&mut sessions, Session { path: path.clone(), deps: hashed.clone(), tx });
-                                }
-                                cache.insert(path.clone(), (hashed, result.clone()));
-                                format!("{{\"id\":{},\"ok\":true,\"path\":{},\"cached\":false,\"ms\":{},\"deps\":{},\"result\":{}}}", id, serde_json::json!(path), t0.elapsed().as_millis(), serde_json::json!(deps), result)
-                            }
-                            (Err(e), _) => serde_json::json!({"id": id, "ok": false, "path": path, "error": e}).to_string(),
-                        }
-                    }
+                    None => analyse_request(&shared, &out, &opts, &id, &path),
                 }
             }
             "hover" => {
                 let line_no = req.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as u32;
-                hover_request(&mut sessions, &opts, &id, &path, line_no)
+                hover_request(&shared, &opts, &id, &path, line_no)
             }
             "changed" => {
                 let paths: Vec<String> = req.get("paths").and_then(|p| p.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()).unwrap_or_default();
-                let before = cache.len() + sessions.len();
-                cache.retain(|_, (deps, _)| !deps.iter().any(|(p, _)| paths.contains(p)));
-                sessions.retain(|s| !s.deps.iter().any(|(p, _)| paths.contains(p)));
-                serde_json::json!({"id": id, "ok": true, "dropped": before - cache.len() - sessions.len()}).to_string()
+                let mut sh = shared.lock().unwrap();
+                let before = sh.cache.len() + sh.sessions.len();
+                sh.cache.retain(|_, (deps, _)| !deps.iter().any(|(p, _)| paths.contains(p)));
+                sh.sessions.retain(|s| !s.deps.iter().any(|(p, _)| paths.contains(p)));
+                let dropped = before - sh.cache.len() - sh.sessions.len();
+                // (a whole program's analysis still running for a changed file answers nothing)
+                for p in &paths {
+                    *sh.latest.entry(p.clone()).or_default() += 1;
+                }
+                serde_json::json!({"id": id, "ok": true, "dropped": dropped}).to_string()
             }
             "shutdown" => {
-                let _ = writeln!(out, "{}", serde_json::json!({"id": id, "ok": true}));
-                let _ = out.flush();
+                send_line(&out, &serde_json::json!({"id": id, "ok": true}).to_string());
                 break;
             }
             other => serde_json::json!({"id": id, "ok": false, "error": format!("unknown command {:?}", other)}).to_string(),
         };
-        let _ = writeln!(out, "{}", reply);
-        let _ = out.flush();
+        send_line(&out, &reply);
     }
 }
 
-/// `rowan hovers FILE [--part I/N]` (a measurement, `bench/hovers.py`): `FILE`'s module code
+/// An `analyse` request with nothing kept: the whole program's analysis and its module code's
+/// alone start together. The whole program's document answers if it comes within `EARLY`;
+/// else the module code's, once it is set up (`on_demand`, `pending`: its functions run when
+/// hovered), and when the whole program's analysis completes later (not cut by its deadline)
+/// its document follows as an event, `{"event":"analysed","path":P,…,"result":…}`.
+fn analyse_request(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out, opts: &Opts, id: &serde_json::Value, path: &str) -> String {
+    let t0 = std::time::Instant::now();
+    let generation = {
+        let mut sh = shared.lock().unwrap();
+        sh.sessions.retain(|s| s.path != path);
+        let g = sh.latest.entry(path.to_string()).or_default();
+        *g += 1;
+        *g
+    };
+    let (whole_rx, _whole_tx) = start_analysis(path.to_string(), opts.clone(), Start::Whole);
+    let (module_rx, module_tx) = start_analysis(path.to_string(), opts.clone(), Start::Module);
+    let whole_doc = |r: First| -> Option<Result<(String, Vec<String>), String>> {
+        match r {
+            Ok((doc, deps, false)) => Some(Ok((doc, deps))),
+            Ok((_, _, true)) => None,
+            Err(e) => Some(Err(e)),
+        }
+    };
+    let answer = |res: Result<(String, Vec<String>), String>, pending: bool| -> String {
+        match res {
+            Ok((doc, deps)) => {
+                shared.lock().unwrap().cache.insert(path.to_string(), (hashed(&deps), doc.clone()));
+                format!("{{\"id\":{},\"ok\":true,\"path\":{},\"cached\":false,\"pending\":{},\"ms\":{},\"deps\":{},\"result\":{}}}", id, serde_json::json!(path), pending, t0.elapsed().as_millis(), serde_json::json!(deps), doc)
+            }
+            Err(e) => serde_json::json!({"id": id, "ok": false, "path": path, "error": e}).to_string(),
+        }
+    };
+    // (the whole program's answer, if it comes early)
+    let early = match whole_rx.recv_timeout(EARLY) {
+        Ok(r) => whole_doc(r),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+        Err(_) => Some(Err("analysis panicked".to_string())),
+    };
+    if let Some(r) = early {
+        return answer(r, false);
+    }
+    let module = module_rx.recv().unwrap_or_else(|_| Err("analysis panicked".to_string()));
+    // (done meanwhile: the whole program's)
+    if let Ok(r) = whole_rx.try_recv() {
+        if let Some(r) = whole_doc(r) {
+            return answer(r, false);
+        }
+        // (cut at its deadline: the module code's analysis answers, nothing follows)
+        return match module {
+            Ok((doc, deps, _)) => {
+                keep_session(&mut shared.lock().unwrap().sessions, Session { path: path.to_string(), deps: hashed(&deps), tx: module_tx });
+                answer(Ok((doc, deps)), false)
+            }
+            Err(e) => answer(Err(e), false),
+        };
+    }
+    let (doc, deps) = match module {
+        Ok((doc, deps, _)) => (doc, deps),
+        // (the module code cannot be analysed alone: wait for the whole program)
+        Err(_) => return match whole_rx.recv().map(whole_doc) {
+            Ok(Some(r)) => answer(r, false),
+            _ => answer(Err("the file could not be analysed".to_string()), false),
+        },
+    };
+    keep_session(&mut shared.lock().unwrap().sessions, Session { path: path.to_string(), deps: hashed(&deps), tx: module_tx });
+    // (the whole program's document, when its analysis completes, replaces this one)
+    let (shared2, out2, path2) = (shared.clone(), out.clone(), path.to_string());
+    let waiter = std::thread::Builder::new().spawn(move || {
+        let _keep = _whole_tx;
+        let Ok(Some(Ok((doc, deps)))) = whole_rx.recv().map(whole_doc) else { return };
+        let mut sh = shared2.lock().unwrap();
+        if sh.latest.get(&path2) != Some(&generation) {
+            return;
+        }
+        let deps_h = hashed(&deps);
+        if !deps_h.iter().all(|(p, h)| file_hash(p) == Some(*h)) {
+            return;
+        }
+        sh.cache.insert(path2.clone(), (deps_h, doc.clone()));
+        sh.sessions.retain(|s| s.path != path2);
+        drop(sh);
+        send_line(&out2, &format!("{{\"event\":\"analysed\",\"ok\":true,\"path\":{},\"ms\":{},\"deps\":{},\"result\":{}}}", serde_json::json!(path2), t0.elapsed().as_millis(), serde_json::json!(deps), doc));
+    });
+    let pending = waiter.is_ok();
+    answer(Ok((doc, deps)), pending)
+}
+
+/// `rowan hovers FILE [--part I/N] [--only NAME]` (a measurement, `bench/hovers.py`): `FILE`'s module code
 /// once, then the run on demand of every function of the program's own modules (of part I of
 /// N), each timed: JSON lines, the setup first.
-fn time_hovers(file: &str, opts: Opts, (part, parts): (usize, usize)) -> Result<(), String> {
+fn time_hovers(file: &str, opts: Opts, (part, parts): (usize, usize), only: Option<String>) -> Result<(), String> {
     use std::io::Write;
     let t0 = std::time::Instant::now();
     let setup = |opts: &Opts| -> Result<Analyzer, String> {
         let mut an = analyser(file, Opts { entry: false, ..opts.clone() }, true)?;
+        an.main_block_unrun();
         an.run();
         an.on_demand();
         Ok(an)
     };
     let mut an = setup(&opts)?;
     let setup_objects = an.work_counts()[2];
-    let mut fns = an.outermost_functions(|m| an.is_local_module(m));
+    let pick = |an: &Analyzer| -> Vec<(u32, u32, u32)> {
+        let fns = an.outermost_functions(|m| an.is_local_module(m));
+        fns.into_iter().filter(|(o, _, _)| only.as_ref().is_none_or(|q| an.heap.func_info(*o).py_qualname().contains(q.as_str()))).collect()
+    };
+    let mut fns = pick(&an);
     let mut so = std::io::stdout().lock();
     let report = serde_json::json!({"setup_ms": t0.elapsed().as_millis(), "parse_ms": rowan::frontend::parse_time().as_millis(), "modules": an.modules().len(), "objects": an.work_counts()[2], "statements": an.work_counts()[0], "functions": fns.len()});
     let _ = writeln!(so, "{}", report);
@@ -378,7 +521,7 @@ fn time_hovers(file: &str, opts: Opts, (part, parts): (usize, usize)) -> Result<
         if after[2] > setup_objects + REBUILD_OBJECTS {
             let t = std::time::Instant::now();
             an = setup(&opts)?;
-            fns = an.outermost_functions(|m| an.is_local_module(m));
+            fns = pick(&an);
             let _ = writeln!(so, "{}", serde_json::json!({"rebuild_ms": t.elapsed().as_millis()}));
         }
     }
@@ -387,15 +530,14 @@ fn time_hovers(file: &str, opts: Opts, (part, parts): (usize, usize)) -> Result<
 
 /// A `hover` request: the function of `path` at `line`, from the analysis kept for `path` (set
 /// up first, its module code alone, if there is none).
-fn hover_request(sessions: &mut Vec<Session>, opts: &Opts, id: &serde_json::Value, path: &str, line: u32) -> String {
+fn hover_request(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, opts: &Opts, id: &serde_json::Value, path: &str, line: u32) -> String {
     let t0 = std::time::Instant::now();
-    let hash = |p: &str| std::fs::read_to_string(p).ok().map(|s| rowan::frontend::content_hash(&s)).unwrap_or(0);
     let mut setup = Ok(None);
-    if !sessions.iter().any(|s| s.path == path) {
-        setup = match spawn_analysis(path.to_string(), opts.clone(), false) {
+    let has = shared.lock().unwrap().sessions.iter().any(|s| s.path == path);
+    if !has {
+        setup = match spawn_analysis(path.to_string(), opts.clone(), Start::Module) {
             (Ok((_, deps, _)), Some(tx)) => {
-                let deps = deps.iter().map(|p| (p.clone(), hash(p))).collect();
-                keep_session(sessions, Session { path: path.to_string(), deps, tx });
+                keep_session(&mut shared.lock().unwrap().sessions, Session { path: path.to_string(), deps: hashed(&deps), tx });
                 Ok(Some(t0.elapsed().as_millis()))
             }
             (Err(e), _) => Err(e),
@@ -404,9 +546,9 @@ fn hover_request(sessions: &mut Vec<Session>, opts: &Opts, id: &serde_json::Valu
     }
     let t1 = std::time::Instant::now();
     let answer = setup.and_then(|setup_ms| {
-        let s = sessions.iter().find(|s| s.path == path).ok_or("the file could not be analysed")?;
-        let (tx, rx) = std::sync::mpsc::channel();
-        let _ = s.tx.send((line, tx));
+        let tx = shared.lock().unwrap().sessions.iter().find(|s| s.path == path).map(|s| s.tx.clone()).ok_or("the file could not be analysed")?;
+        let (rtx, rx) = std::sync::mpsc::channel();
+        let _ = tx.send((line, rtx));
         let h = rx.recv().unwrap_or_else(|_| Err("analysis panicked".to_string()))?;
         Ok((h, setup_ms))
     });

@@ -7,7 +7,7 @@ const fs = require("fs");
 const os = require("os");
 const { execFileSync } = require("child_process");
 const path = require("path");
-const { renderHover, indexResult, prettyValue, verdictsForWord, severityFor, diagnosticMessage, shorten, hoverServer, mergeResult, stopServers } = require("./extension.js");
+const { renderHover, indexResult, prettyValue, verdictsForWord, severityFor, diagnosticMessage, shorten, hoverServer, mergeResult, stopServers, runEngineServer, serverEvents } = require("./extension.js");
 
 const root = path.join(__dirname, "..");
 const bin = process.env.ROWAN_BIN || path.join(root, "rowan", "target", "release", "rowan");
@@ -384,7 +384,39 @@ async function onDemand() {
   return { m, d5 };
 }
 
-onDemand().then(({ m, d5 }) => {
+// ---- an early answer (`analyse` of a program whose whole analysis takes seconds): the module
+// code's document at once (on demand, `pending`), the whole program's as an event later
+async function early() {
+  // (module code that is quick; functions nothing calls whose nested loops of known items,
+  // unrolled, take the whole analysis seconds)
+  const loops = (op) => `    out = {}\n    for i in range(16):\n        for j in range(16):\n            for k in range(16):\n                out[(i, j, k)] = a * i ${op} b * j + k\n    return out\n`;
+  const f = path.join(tmp, "slow_whole_program.py");
+  const grids = Array.from({ length: 16 }, (_, n) => `def grid${n}(a, b):\n${loops(n % 2 ? "+" : "-")}\n\n`).join("");
+  fs.writeFileSync(f, `ROWS = [{"id": i, "name": "n%d" % i} for i in range(16)]\n\n\ndef label(row):\n    return row["name"] + "!"\n\n\n${grids}first = label(ROWS[0])\n`);
+  const got = new Promise((resolve) => {
+    const h = (m) => {
+      if (m.event === "analysed" && m.path === f) {
+        serverEvents.delete(h);
+        resolve(m);
+      }
+    };
+    serverEvents.add(h);
+  });
+  const t0 = Date.now();
+  const res = await runEngineServer(bin, f, [], 60, []);
+  const first = Date.now() - t0;
+  // (a machine fast enough to analyse it whole within the wait: one answer)
+  if (!res.pending) return `whole program at once (${first} ms)`;
+  assert(res.on_demand && first < 5000, `early answer: on demand at once (${first} ms)`);
+  const ev = await Promise.race([got, new Promise((r) => setTimeout(() => r(null), 60000))]);
+  assert(ev && ev.ok && !ev.result.on_demand && ev.result.facts.length > 0, "the whole program's document follows");
+  return `module code at ${first} ms, whole program at ${ev.ms} ms`;
+}
+
+onDemand().then(async ({ m, d5 }) => {
+const e = await early();
+stopServers();
+console.log(`early answer: ${e}`);
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`ok (${n} hovers checked, ${m} on demand)`);
 console.log("\n--- sample hover for qkv (nanoGPT attention) ---\n" + qkv);

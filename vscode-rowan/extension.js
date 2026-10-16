@@ -576,6 +576,13 @@ function spawnError(bin, err) {
  */
 const servers = new Map();
 
+/**
+ * Listeners for a server's events (lines without an id): `{"event":"analysed","path":P,…,
+ * "result":…}`, the whole program's document of a file whose `analyse` answered early from
+ * its module code (`pending`).
+ */
+const serverEvents = new Set();
+
 function getServer(bin, extraArgs) {
   const key = bin + "\u0000" + extraArgs.join("\u0000");
   let srv = servers.get(key);
@@ -594,6 +601,10 @@ function getServer(bin, extraArgs) {
       try {
         msg = JSON.parse(line);
       } catch (e) {
+        continue;
+      }
+      if (msg.event) {
+        for (const f of serverEvents) f(msg);
         continue;
       }
       const waiter = srv.pending.get(msg.id);
@@ -675,6 +686,7 @@ async function runEngineServer(bin, file, extraArgs, timeoutSeconds, changed) {
   if (changed && changed.length) await serverRequest(srv, { cmd: "changed", paths: changed }, timeoutSeconds);
   const msg = await serverRequest(srv, { cmd: "analyse", path: file }, timeoutSeconds);
   if (!msg.ok) throw Object.assign(new Error(msg.error || "rowan server error"), { spawn: !!msg.spawn });
+  if (msg.pending) msg.result.pending = true;
   return msg.result;
 }
 
@@ -758,53 +770,73 @@ function activate(context) {
       } else {
         res = await runEngine(bin, doc.uri.fsPath, extraArgs, timeoutSeconds);
       }
-      const idx = indexResult(res);
-      // (the whole program took too long: each function is analysed when hovered, once)
-      if (res.on_demand && config.get("useServer") !== false) idx.onDemand = { bin, extraArgs, timeoutSeconds, spans: [], pending: new Map() };
-      results.set(doc.uri.fsPath, idx);
-      const diags = [];
-      for (const [line, vs] of idx.verdicts) {
-        for (const v of vs) {
-          const sev = severityFor(v.tier);
-          if (!sev) continue;
-          const ln = Math.max(0, line - 1);
-          // (one line of the access: a text over several lines is marked on its first)
-          const textLen = (v.text || "").split("\n")[0].length || 1;
-          const range = new vscode.Range(ln, v.col, ln, v.col + textLen);
-          const d = new vscode.Diagnostic(range, diagnosticMessage(v), {
-            error: vscode.DiagnosticSeverity.Error,
-            warning: vscode.DiagnosticSeverity.Warning,
-            information: vscode.DiagnosticSeverity.Information,
-            hint: vscode.DiagnosticSeverity.Hint,
-          }[sev]);
-          d.source = "rowan";
-          diags.push(d);
-        }
-      }
-      // definite tensor-shape mismatches
-      const seenErr = new Set();
-      for (const e of res.shape_errors || []) {
-        if (e.file) continue; // mismatches in imported modules
-        if (seenErr.has(`${e.line}:${e.message}`)) continue;
-        seenErr.add(`${e.line}:${e.message}`);
-        const ln = Math.max(0, e.line - 1);
-        const lineText = doc.lineAt(Math.min(ln, doc.lineCount - 1)).text;
-        const start = lineText.length - lineText.trimStart().length;
-        const range = new vscode.Range(ln, start, ln, Math.max(start + 1, lineText.length));
-        const chain = e.chain && e.chain.length ? ` (via ${e.chain.map((c) => "L" + c).join(">")})` : "";
-        const d = new vscode.Diagnostic(range, `shape mismatch: ${e.message}${chain}`, vscode.DiagnosticSeverity.Error);
-        d.source = "rowan";
-        diags.push(d);
-      }
-      diagnostics.set(doc.uri, diags);
-      status.text = `$(check) rowan: ${diags.length} findings${idx.onDemand ? " (functions analysed when hovered)" : ""}`;
-      output.appendLine(`${new Date().toISOString()} ${doc.uri.fsPath}: ${res.facts.length} facts, ${diags.length} findings`);
+      show(doc, res, { bin, extraArgs, timeoutSeconds, server: config.get("useServer") !== false });
     } catch (e) {
       status.text = "$(warning) rowan failed";
       output.appendLine(`${doc.uri.fsPath}: ${e.message}`);
       vscode.window.showWarningMessage(`rowan: ${e.message.split("\n")[0]}`);
     }
   }
+
+  /** Index a document's result for hovers and set its diagnostics (`how`: the server's options). */
+  function show(doc, res, how) {
+    const idx = indexResult(res);
+    // (the whole program takes long: each function is analysed when hovered, once; while
+    // the whole program's analysis goes on, `pending`: its result replaces this one)
+    if (res.on_demand && how.server) idx.onDemand = { bin: how.bin, extraArgs: how.extraArgs, timeoutSeconds: how.timeoutSeconds, spans: [], pending: new Map() };
+    idx.how = how;
+    results.set(doc.uri.fsPath, idx);
+    const diags = [];
+    for (const [line, vs] of idx.verdicts) {
+      for (const v of vs) {
+        const sev = severityFor(v.tier);
+        if (!sev) continue;
+        const ln = Math.max(0, line - 1);
+        // (one line of the access: a text over several lines is marked on its first)
+        const textLen = (v.text || "").split("\n")[0].length || 1;
+        const range = new vscode.Range(ln, v.col, ln, v.col + textLen);
+        const d = new vscode.Diagnostic(range, diagnosticMessage(v), {
+          error: vscode.DiagnosticSeverity.Error,
+          warning: vscode.DiagnosticSeverity.Warning,
+          information: vscode.DiagnosticSeverity.Information,
+          hint: vscode.DiagnosticSeverity.Hint,
+        }[sev]);
+        d.source = "rowan";
+        diags.push(d);
+      }
+    }
+    // definite tensor-shape mismatches
+    const seenErr = new Set();
+    for (const e of res.shape_errors || []) {
+      if (e.file) continue; // mismatches in imported modules
+      if (seenErr.has(`${e.line}:${e.message}`)) continue;
+      seenErr.add(`${e.line}:${e.message}`);
+      const ln = Math.max(0, e.line - 1);
+      const lineText = doc.lineAt(Math.min(ln, doc.lineCount - 1)).text;
+      const start = lineText.length - lineText.trimStart().length;
+      const range = new vscode.Range(ln, start, ln, Math.max(start + 1, lineText.length));
+      const chain = e.chain && e.chain.length ? ` (via ${e.chain.map((c) => "L" + c).join(">")})` : "";
+      const d = new vscode.Diagnostic(range, `shape mismatch: ${e.message}${chain}`, vscode.DiagnosticSeverity.Error);
+      d.source = "rowan";
+      diags.push(d);
+    }
+    diagnostics.set(doc.uri, diags);
+    const mode = res.pending ? " (functions analysed when hovered; the whole program is still being analysed)" : idx.onDemand ? " (functions analysed when hovered)" : "";
+    status.text = `$(check) rowan: ${diags.length} findings${mode}`;
+    output.appendLine(`${new Date().toISOString()} ${doc.uri.fsPath}: ${res.facts.length} facts, ${diags.length} findings${res.pending ? " (on demand until the whole program is analysed)" : ""}`);
+  }
+
+  // (the whole program's result, after an early answer from the module code: it replaces it)
+  const onEvent = (msg) => {
+    if (msg.event !== "analysed" || !msg.ok) return;
+    const doc = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === msg.path);
+    const prev = results.get(msg.path);
+    if (!doc || !prev || !prev.how) return;
+    show(doc, msg.result, prev.how);
+    status.show();
+  };
+  serverEvents.add(onEvent);
+  context.subscriptions.push({ dispose: () => serverEvents.delete(onEvent) });
 
   context.subscriptions.push(
     vscode.languages.registerHoverProvider({ language: "python", scheme: "file" }, {
@@ -862,4 +894,4 @@ function deactivate() {
 
 module.exports = {
   shorten, activate, deactivate, renderHover, prettyValue, hoverValue, indexResult, severityFor, verdictsForWord, diagnosticMessage, findBinary,
-  binaryFormat, binaryMismatch, spawnError, runEngineServer, hoverServer, mergeResult, stopServers };
+  binaryFormat, binaryMismatch, spawnError, runEngineServer, hoverServer, mergeResult, stopServers, serverEvents };
