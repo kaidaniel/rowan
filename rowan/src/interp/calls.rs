@@ -119,16 +119,41 @@ impl Analyzer {
             }
         }
         let (groups, targets) = self.receiver_groups(targets);
+        let (skipped, groups, targets) = self.budget_skipped(groups, targets);
         // (several functions a value picks — a method of each of several receivers is the
         // receiver's own: not picked)
-        let picked = (groups.is_empty() && targets.iter().all(|o| !matches!(self.heap.kind(*o), Kind::Bound) && !matches!(self.heap.obj(*o).payload, Payload::Method(..) | Payload::Bound(..)))).then(|| self.node_text(node));
-        let (n, m) = (targets.len(), groups.len());
-        self.alternatives(n + m + usize::from(unknown.is_some()), false, state, &mut |an, i, st| {
+        let picked = (groups.is_empty() && skipped.is_empty() && targets.iter().all(|o| !matches!(self.heap.kind(*o), Kind::Bound) && !matches!(self.heap.obj(*o).payload, Payload::Method(..) | Payload::Bound(..)))).then(|| self.node_text(node));
+        let (n, m, k) = (targets.len(), groups.len(), usize::from(!skipped.is_empty()));
+        // (the callees left once none runs any more — on demand past the work its run may do,
+        // past the deadline: one call that does not run, for all of them)
+        let callee = |an: &Analyzer, j: usize| -> Option<(ObjId, Option<Value>)> {
+            match targets.get(j) {
+                Some(&o) => an.function_callee(o),
+                None => groups.get(j - n).map(|(f, r, _)| (*f, Some(r.clone()))),
+            }
+        };
+        let mut rest_skipped: Vec<usize> = Vec::new();
+        self.alternatives(n + m + k + usize::from(unknown.is_some()), false, state, &mut |an, i, st| {
+            if rest_skipped.contains(&i) {
+                st.reachable = false;
+                return Value::new();
+            }
+            if i < n + m && rest_skipped.is_empty() && (an.budget.past_hover_work(an.cx.frames.len(), an.hover_work()) || an.budget.over_hard_deadline()) {
+                let rest: Vec<usize> = (i..n + m).filter(|j| callee(an, *j).is_some()).collect();
+                if rest.len() > 1 && rest[0] == i {
+                    let fns: Vec<(ObjId, Option<Value>)> = rest.iter().filter_map(|j| callee(an, *j)).collect();
+                    rest_skipped = rest;
+                    return an.skipped_calls(&fns, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast);
+                }
+            }
             if let Some(&oid) = targets.get(i) {
                 return an.call_picked(oid, &picked, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast);
             }
             if let Some((f, recv, _)) = groups.get(i - n) {
                 return an.call_user(*f, Some(recv.clone()), args.clone(), kwargs.clone(), star_args.clone(), star_kwargs.clone(), st, node, false);
+            }
+            if i - n - m < k {
+                return an.skipped_calls(&skipped, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast);
             }
             let (q, recv) = unknown.as_ref().expect("an unknown callee");
             an.unknown_call(q, Some(recv), &args, &kwargs, &star_args, &star_kwargs, st, node)
@@ -170,11 +195,7 @@ impl Analyzer {
     #[allow(clippy::type_complexity)]
     fn receiver_groups(&self, targets: Vec<ObjId>) -> (Vec<(ObjId, Value, usize)>, Vec<ObjId>) {
         let on_demand = self.budget.hover.is_some();
-        let skips = |an: &Analyzer, f: ObjId| {
-            let fi = an.heap.func_info(f);
-            let runs = an.m.sdispatch.contains_key(&f) || fi.is_memo.get() || matches!(fi.node, FuncNode::Def(d) if is_generator(&d.body));
-            !runs && an.budget.exhausted(fi.node.addr()) && an.recursion.depth(f) == 0
-        };
+        let skips = |an: &Analyzer, f: ObjId| an.out_of_budget(f);
         let mut groups: Vec<(ObjId, Value, usize)> = Vec::new();
         for &o in &targets {
             if let (Kind::Bound, Payload::Bound(f, r)) = (self.heap.kind(o), &self.heap.obj(o).payload) {
@@ -190,6 +211,52 @@ impl Analyzer {
         groups.retain(|g| g.2 > 1 && (on_demand || skips(self, g.0)));
         let targets: Vec<ObjId> = targets.into_iter().filter(|o| !matches!(&self.heap.obj(*o).payload, Payload::Bound(f, _) if self.heap.kind(*o) == Kind::Bound && groups.iter().any(|g| g.0 == *f))).collect();
         (groups, targets)
+    }
+
+    /// A callee that is a plain function (not a class's) or a bound method: the function and
+    /// its receiver.
+    fn function_callee(&self, o: ObjId) -> Option<(ObjId, Option<Value>)> {
+        match (self.heap.kind(o), &self.heap.obj(o).payload) {
+            (Kind::Function, Payload::Func(_)) if self.heap.func_info(o).cls.is_none() => Some((o, None)),
+            (Kind::Bound, Payload::Bound(f, r)) if self.heap.kind(*f) == Kind::Function => Some((*f, Some(r.clone()))),
+            _ => None,
+        }
+    }
+
+    /// Would a call of `f` not run, its function out of its budget (`call_user_inner`)?
+    fn out_of_budget(&self, f: ObjId) -> bool {
+        let fi = self.heap.func_info(f);
+        let runs = self.m.sdispatch.contains_key(&f) || fi.is_memo.get() || matches!(fi.node, FuncNode::Def(d) if is_generator(&d.body));
+        !runs && self.budget.exhausted(fi.node.addr()) && self.recursion.depth(f) == 0
+    }
+
+    /// Among a call's callees (functions, methods, receiver groups), those out of their budget,
+    /// when several are: they make one call that does not run (`skipped_calls`; each its own
+    /// walked all it is given again — `self.__init__(**params)` on any of a thousand
+    /// instances). The rest stay.
+    #[allow(clippy::type_complexity)]
+    fn budget_skipped(&mut self, groups: Vec<(ObjId, Value, usize)>, targets: Vec<ObjId>) -> (Vec<(ObjId, Option<Value>)>, Vec<(ObjId, Value, usize)>, Vec<ObjId>) {
+        let callee = |an: &Analyzer, o: ObjId| an.function_callee(o);
+        let n = groups.iter().filter(|g| self.out_of_budget(g.0)).count() + targets.iter().filter(|o| callee(self, **o).is_some_and(|(f, _)| self.out_of_budget(f))).count();
+        if n < 2 {
+            return (Vec::new(), groups, targets);
+        }
+        let mut fns: Vec<(ObjId, Option<Value>)> = Vec::new();
+        let (out, groups): (Vec<_>, Vec<_>) = groups.into_iter().partition(|g| self.out_of_budget(g.0));
+        fns.extend(out.into_iter().map(|(f, r, _)| (f, Some(r))));
+        let mut rest = Vec::new();
+        for o in targets {
+            match callee(self, o).filter(|(f, _)| self.out_of_budget(*f)) {
+                Some(c) => fns.push(c),
+                None => rest.push(o),
+            }
+        }
+        for (f, _) in &fns {
+            self.budget.out.insert(*f);
+            let q = self.heap.func_info(*f).qualname.clone();
+            self.findings.note(format!("{} ran out of its budget: later calls are unknown code", q));
+        }
+        (fns, groups, rest)
     }
 
     /// One of several callees a value picks (`call_value`; `picked`: the call's text, when the
