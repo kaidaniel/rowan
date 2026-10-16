@@ -448,6 +448,11 @@ impl Analyzer {
         if call_ast.is_some() {
             crate::models::may_type_error(self, &qual, &call.args, kwargs, &r, state);
         }
+        // (a method of an object rowan knows nothing of, modelled as a dict's: a list's `pop`
+        // raises IndexError, a set's KeyError)
+        if matches!(qual.as_str(), "dict.pop" | "dict.popitem") && recv.pts.iter().any(|o| self.heap.kind(o) == Kind::Unknown) {
+            self.flag_may_raise(state);
+        }
         r
     }
 
