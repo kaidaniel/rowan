@@ -813,10 +813,7 @@ impl Analyzer {
         let Some(ge) = self.gens.eff.get(&o).cloned() else { return };
         let tk = key_str_lit("\u{1}effpos");
         let Some(expected) = effects_given(state, o, &ge) else { return };
-        if !gen_facts_equal(state, expected, &ge) {
-            state.set_slot(o, Ns::Attr, tk, Value::data("effpos"), true);
-            return;
-        }
+        let equal = gen_facts_equal(state, expected, &ge);
         let ended = at_end || matches!((c, self.heap.llen(o, state)), (Some(k), Some(n)) if k >= n);
         let (target, ntag): (&State, String) = match c {
             Some(0) => (&ge.pre, "pre".into()),
@@ -827,6 +824,12 @@ impl Analyzer {
             },
             None => (&ge.join, "join".into()),
         };
+        // (code between the items changed what the generator changes: both changes, joined)
+        if !equal {
+            gen_join_facts(state, target, &ge);
+            state.set_slot(o, Ns::Attr, tk, Value::data("effpos"), true);
+            return;
+        }
         gen_copy_facts(state, target, &ge);
         state.set_slot(o, Ns::Attr, tk, Value::lit(key_str_lit(&ntag)), true);
     }
@@ -837,6 +840,8 @@ impl Analyzer {
         let Some(ge) = self.gens.eff.get(&o).cloned() else { return };
         let Some(expected) = effects_given(state, o, &ge) else { return };
         if !gen_facts_equal(state, expected, &ge) {
+            gen_join_facts(state, &ge.join, &ge);
+            state.set_slot(o, Ns::Attr, key_str_lit("\u{1}effpos"), Value::data("effpos"), true);
             return;
         }
         // (every item has its yield's state when the generator yields a known number of items:
@@ -929,6 +934,36 @@ fn gen_facts_equal(a: &State, b: &State, ge: &crate::interp::GenEffects) -> bool
         && ge.slots.iter().all(|(o, sk)| a.slots.get(o, sk) == b.slots.get(o, sk))
         && ge.elems.iter().all(|o| a.elems.get(o) == b.elems.get(o))
         && ge.lens.iter().all(|o| a.lens.get(o) == b.lens.get(o))
+}
+
+/// Join `src`'s facts about a generator's affected objects into `dst`'s.
+fn gen_join_facts(dst: &mut State, src: &State, ge: &crate::interp::GenEffects) {
+    for k in &ge.rows {
+        if let (Some(a), Some(b)) = (dst.rows.get(k), src.rows.get(k)) {
+            dst.rows.insert(*k, a.join(&b));
+        }
+    }
+    for (o, sk) in &ge.slots {
+        if let (Some(a), Some(b)) = (dst.slots.get(o, sk), src.slots.get(o, sk)) {
+            dst.slots.set(o, *sk, a.join(&b));
+        }
+        if matches!(sk.0, Ns::Pos | Ns::Elem) {
+            dst.clear_last(*o);
+        }
+    }
+    for o in &ge.elems {
+        if let (Some(a), Some(b)) = (dst.elems.get(o), src.elems.get(o)) {
+            dst.elems.insert(*o, crate::domain::kv_join(&a, &b));
+        }
+    }
+    for o in &ge.lens {
+        match (dst.lens.get(o), src.lens.get(o)) {
+            (Some(a), Some(b)) => dst.set_lens(*o, crate::state::join_len(&a, &b)),
+            _ => {
+                dst.forget_len(o);
+            }
+        }
+    }
 }
 
 /// Install `src`'s facts about a generator's affected objects into `dst`.
