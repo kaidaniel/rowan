@@ -903,6 +903,12 @@ impl Analyzer {
                     continue;
                 }
                 let strong = single && self.heap.obj(oid).single;
+                // (an open record's key: its value is what the input or unknown code put there,
+                // kept as a slot so a store on another path joins with it)
+                if strong && row.open() && !state.has_slot(oid, ns, k) && ns == Ns::Item {
+                    let v = self.path_placeholder_value(oid, ns, k, &row, state);
+                    state.set_slot_found(oid, ns, k, v, false);
+                }
                 state.set_row_narrowed(oid, ns, row.narrow_in(k, strong));
                 if strong {
                     self.propagate_narrowing(oid, ns, k, state);
