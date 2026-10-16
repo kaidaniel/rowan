@@ -20,3 +20,14 @@ e.append(9)
 nb = len(b)                                  #@value nb: exactly={1, 2}
 ne = len(e)                                  #@value ne: includes={2}
 #@todo value ne: exactly={2}  (which list e is, and whether that one grew, are not related)
+
+# a list of one of two lengths, extended through a name that may be another list
+f = ["s"]
+if n == 3:
+    f.append(0)
+g = []
+if n == 4:
+    g = f
+g += [1.5]
+nf = len(f)                                  #@value nf: includes={1, 2}
+#@todo value nf: exactly={1, 2}  (n == 3 and n == 4 exclude each other)

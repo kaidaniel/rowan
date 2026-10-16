@@ -3009,10 +3009,12 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             st.set_sym_len(o, intern::s(&crate::models::shape::dim_label(crate::models::shape::add(d, crate::models::shape::lit(k as i64)))));
         }
     }
+    // (one of several lists: each may also not have grown)
+    let alone = c.recv.as_ref().is_some_and(|r| r.pts.len() == 1 && r.kv.is_bot());
     if let Some(k) = added {
         for (o, m) in before {
             if let Some((None, p, 0)) = st.lens.get(&o) {
-                let shifted = (m as u32) << k;
+                let shifted = ((m as u32) << k) | if alone { 0 } else { m as u32 };
                 if shifted <= 0xFFFF {
                     st.set_lens(o, (None, p, shifted as u16));
                 }
