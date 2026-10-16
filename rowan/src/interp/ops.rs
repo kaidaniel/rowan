@@ -19,6 +19,18 @@ enum Part {
     Opaque,
 }
 
+impl Part {
+    /// This part, a hole only when its value passes `keep` (else opaque).
+    fn clone_if(&self, keep: impl Fn(&Value) -> bool) -> Part {
+        match self {
+            Part::Hole(v) if !keep(v) => Part::Opaque,
+            Part::Hole(v) => Part::Hole(v.clone()),
+            Part::Lit(l) => Part::Lit(l.clone()),
+            Part::Opaque => Part::Opaque,
+        }
+    }
+}
+
 impl Analyzer {
     /// Literals other than None beside objects (`"dev" if c else ["p", "q"]`): a value whose
     /// parts Python treats as different types. (Beside an unknown object, which may be the
@@ -564,7 +576,8 @@ impl Analyzer {
             _ => self.run_dunder(&v, &["__repr__"], vec![], &nd, state),
         };
         if let Some((t, rest)) = ran {
-            let whole = rest.pts.is_empty() && rest.kv.is_bot() && (conversion == ast::ConversionFlag::None || spec_text.is_none());
+            // (no text known — a dunder of code rowan cannot see — is any text)
+            let whole = rest.pts.is_empty() && rest.kv.is_bot() && (conversion == ast::ConversionFlag::None || spec_text.is_none()) && !t.empty();
             return if whole { Part::Hole(t) } else { Part::Opaque };
         }
         // `{x!r}` / `{x!s}` / `{x!a}`: the converted text
@@ -624,7 +637,8 @@ impl Analyzer {
             return Value::lit(key_str_lit(&s));
         }
         if holes.len() == 1 {
-            if let Part::Hole(v) = &parts[holes[0]] {
+            // (an object with no text known, an unknown one's: any text — below)
+            if let Part::Hole(v) = parts[holes[0]].clone_if(|v| v.pts.is_empty() || v.kv.is_literal()) {
                 let i = holes[0];
                 let pre: String = parts[..i].iter().map(|p| if let Part::Lit(l) = p { l.as_str() } else { "" }).collect();
                 let post: String = parts[i + 1..].iter().map(|p| if let Part::Lit(l) = p { l.as_str() } else { "" }).collect();
