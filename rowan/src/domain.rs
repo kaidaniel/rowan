@@ -1187,6 +1187,9 @@ impl KeysOf {
     }
 }
 
+/// `KeysOf::exhaustive_depth` of a sequence's elements that are every key (`list(d)`).
+pub const ALL_KEYS: i32 = -2;
+
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum KeyVal {
     Lit(KeyId),

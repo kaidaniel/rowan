@@ -1192,6 +1192,15 @@ impl Analyzer {
     fn iter_sequence(&mut self, oid: ObjId, node: &Node, state: &mut State, acc: &mut ItemsAcc) {
         let ll = self.heap.llen(oid, state);
         acc.unordered |= self.heap.kind(oid) == Kind::Set && ll != Some(1);
+        // (a sequence of some of a dict's keys need not hold them all, `[k for k in d if …]`:
+        // only `list(d)` as made, as long as the dict's keys are known)
+        acc.exhaustive &= match state.elems.get(&oid) {
+            Some(KeyVal::KeysOf(ko)) if ko.exhaustive_depth == crate::domain::ALL_KEYS && ko.objs.len() == 1 && ko.exclude.is_empty() => {
+                let row = state.row(ko.objs.first().unwrap(), ko.ns);
+                !row.open() && row.present == row.definite && ll == Some(row.present.len())
+            }
+            _ => false,
+        };
         // a generator partly consumed by next(): iteration starts at its cursor
         let cursor = self.cursor_of(oid, state);
         match (ll, acc.items.as_mut(), cursor) {

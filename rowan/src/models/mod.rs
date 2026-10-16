@@ -855,7 +855,12 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             Elem::One(elem) => {
                 st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(elem.pts.clone(), crate::models::torch::elem_kv(&elem.kv)), true);
-                st.elems.insert(oid, elem.kv.clone());
+                // (every key of a dict: `list(d)` holds them all)
+                let kv = match &elem.kv {
+                    KeyVal::KeysOf(ko) if it.exhaustive => KeyVal::KeysOf(crate::domain::KeysOf { exhaustive_depth: crate::domain::ALL_KEYS, ..ko.clone() }),
+                    kv => kv.clone(),
+                };
+                st.elems.insert(oid, kv);
                 let reorders = matches!(c.qual.as_str(), "builtins.sorted" | "builtins.reversed");
                 if reorders {
                     if let Some(keyfn) = c.kw("key") {
