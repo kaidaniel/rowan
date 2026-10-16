@@ -582,6 +582,7 @@ impl State {
             && self.narrowed == o.narrowed
             && self.ret == o.ret
             && (Arc::ptr_eq(&self.tf, &o.tf) || self.tf == o.tf)
+            && (Arc::ptr_eq(&self.lasts, &o.lasts) || self.lasts == o.lasts)
             && self.exits.is_none() == o.exits.is_none()
             && self.rows.same(&o.rows)
             && self.slots.same(&o.slots)
