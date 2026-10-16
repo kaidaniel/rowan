@@ -320,18 +320,7 @@ pub fn py_str_repr(s: &str) -> String {
 }
 
 pub fn py_float_repr(f: f64) -> String {
-    if f.is_nan() {
-        return "nan".into();
-    }
-    if f.is_infinite() {
-        return if f > 0.0 { "inf".into() } else { "-inf".into() };
-    }
-    if f == f.trunc() && f.abs() < 1e16 {
-        format!("{:.1}", f)
-    } else {
-        let s = format!("{}", f);
-        s
-    }
+    crate::models::pyvalues::float_repr(f)
 }
 
 /// Sort key for `sorted(keys, key=str)`: the repr.
