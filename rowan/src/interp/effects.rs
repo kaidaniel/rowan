@@ -558,18 +558,8 @@ impl Analyzer {
     /// those left out hold (functions, instances' classes: what reading them may run).
     #[allow(clippy::type_complexity)]
     fn args_as_seen(&mut self, foid: ObjId, bound: bool, args: &[Value], kwargs: &IndexMap<StrId, Value>, state: &State) -> (Vec<Value>, IndexMap<StrId, Value>, Vec<ObjId>) {
-        let fi = self.heap.func_info(foid);
-        let (super::FuncNode::Def(f), Some(ps)) = (fi.node, fi.node.params()) else { return (args.to_vec(), kwargs.clone(), Vec::new()) };
-        if f.is_async || super::is_generator(&f.body) {
-            return (args.to_vec(), kwargs.clone(), Vec::new());
-        }
-        let uses = self.code_uses(&fi);
-        let flags = |n: &str| uses.params.get(&s(n)).copied().unwrap_or_default();
-        let positional: Vec<&str> = ps.posonlyargs.iter().chain(ps.args.iter()).skip(usize::from(bound)).map(|a| a.parameter.name.id.as_str()).collect();
-        let named: Vec<&str> = ps.args.iter().chain(ps.kwonlyargs.iter()).map(|a| a.parameter.name.id.as_str()).collect();
-        // (an argument past the named ones is a part of `*args`, a keyword one of `**kw`)
-        let rest = |p: Option<&ast::Parameter>| p.map(|p| flags(p.name.id.as_str())).map(|f| Flags { changes: f.changes || f.methods || f.held, ..Flags::default() }).unwrap_or_default();
-        let (va, kw) = (rest(ps.vararg.as_deref()), rest(ps.kwarg.as_deref()));
+        let pos: Vec<Flags> = (0..args.len()).map(|i| self.param_flags(foid, Slot::Pos(i + usize::from(bound)))).collect();
+        let kw: Vec<Flags> = kwargs.keys().map(|k| self.param_flags(foid, Slot::Kw(*k))).collect();
         let mut code: Vec<ObjId> = Vec::new();
         let mut seen = |an: &Analyzer, f: Flags, v: &Value| -> Value {
             let (own, held) = an.flag_effect(&f, v, state);
@@ -590,8 +580,8 @@ impl Analyzer {
                 _ => Value::new(),
             }
         };
-        let args = args.iter().enumerate().map(|(i, v)| seen(self, positional.get(i).map_or(va, |n| flags(n)), v)).collect();
-        let kwargs = kwargs.iter().map(|(k, v)| (*k, seen(self, if named.contains(&&*str_get(*k)) { flags(&str_get(*k)) } else { kw }, v))).collect();
+        let args = args.iter().zip(pos).map(|(v, f)| seen(self, f, v)).collect();
+        let kwargs = kwargs.iter().zip(kw).map(|((k, v), f)| (*k, seen(self, f, v))).collect();
         (args, kwargs, code)
     }
 
@@ -690,7 +680,8 @@ impl Analyzer {
     }
 
     /// What the code of function `f` may do with the argument in `slot` (given away when it is
-    /// a generator's or a coroutine's, or a part of `*args` / `**kw` it uses).
+    /// a generator's or a coroutine's, whose code runs later; a part of `*args` / `**kw` changes
+    /// where they or their parts may).
     fn param_flags(&mut self, f: ObjId, slot: Slot) -> Flags {
         let fi = self.heap.func_info(f);
         let Some(ps) = fi.node.params() else { return Flags::CHANGE };
@@ -701,7 +692,7 @@ impl Analyzer {
         }
         let uses = self.code_uses(&fi);
         let flags = |p: &ast::Parameter| uses.params.get(&s(p.name.id.as_str())).copied().unwrap_or_default();
-        let rest = |p: Option<&ast::Parameter>| p.map_or(Flags::CHANGE, |p| if flags(p).any() { Flags::CHANGE } else { Flags::default() });
+        let rest = |p: Option<&ast::Parameter>| p.map(flags).map(|f| Flags { changes: f.changes || f.methods || f.held, ..Flags::default() }).unwrap_or_default();
         match slot {
             Slot::Pos(i) => match ps.posonlyargs.iter().chain(ps.args.iter()).nth(i) {
                 Some(p) => flags(&p.parameter),
