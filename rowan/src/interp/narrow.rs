@@ -335,7 +335,7 @@ impl Analyzer {
                     // the name is None / is not None
                     if let ast::Expr::Name(l) = left {
                         let cur = self.load_name(s(l.id.as_str()), &Node::none(), state);
-                        let has_none = kv_literals(&cur.kv).contains(intern::key_none());
+                        let has_none = kv_literals(&cur.kv).contains(intern::key_none()) || matches!(cur.kv, KeyVal::Data(l) if intern::str_get(l).starts_with(crate::models::shape::OPT_PREFIX));
                         if has_none || is_none {
                             self.narrow_kv(s(l.id.as_str()), &KeySet::one(intern::key_none()), is_none, state);
                         }

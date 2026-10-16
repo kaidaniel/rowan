@@ -1587,6 +1587,15 @@ pub fn tensor_label(s: ShapeId) -> String {
 pub fn dim_label(d: DimId) -> String {
     format!("{}{}", DIM_PREFIX, d.0)
 }
+/// A tensor or None (`None if c else torch.zeros(3)`): `OPT_PREFIX` and the tensor's label. It
+/// is no tensor label (a tensor operation on it is an unknown's); `is not None` gives the tensor.
+pub const OPT_PREFIX: &str = "\u{1}N";
+pub fn optional_label(l: &str) -> String {
+    if l.starts_with(OPT_PREFIX) { l.to_string() } else { format!("{}{}", OPT_PREFIX, l) }
+}
+pub fn strip_optional(l: &str) -> Option<&str> {
+    l.strip_prefix(OPT_PREFIX)
+}
 pub fn parse_tensor_label(l: &str) -> Option<ShapeId> {
     let r = l.strip_prefix(TENSOR_PREFIX)?;
     let r = r.strip_prefix('B').unwrap_or(r);
@@ -1623,6 +1632,12 @@ pub fn dual_dim(l: &str) -> Option<DimId> {
 
 /// Join of two labelled data values (tensors, dims); None: not both ours.
 pub fn join_labels(a: &str, b: &str) -> Option<String> {
+    // (a tensor or None joined with a tensor, or with another: a tensor or None)
+    if let (Some(x), Some(y)) = (strip_optional(a).or(parse_tensor_label(a).map(|_| a)), strip_optional(b).or(parse_tensor_label(b).map(|_| b))) {
+        if (x != a || y != b) && parse_tensor_label(x).is_some() && parse_tensor_label(y).is_some() {
+            return join_labels(x, y).map(|j| optional_label(&j));
+        }
+    }
     if let (Some(x), Some(y)) = (parse_tensor_label(a), parse_tensor_label(b)) {
         let s = shape_id(join_shapes(&shape_get(x), &shape_get(y)));
         let both_bool = is_bool_label(a) && is_bool_label(b);

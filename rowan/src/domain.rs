@@ -1333,21 +1333,47 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
             let t = crate::intern::str_get(*x);
             if crate::models::shape::parse_dim_label(&t).is_some() {
                 let lits = kv_literals(l);
+                // (a dim or None, or a str: no dim)
+                if !lits.iter().all(crate::intern::key_is_number) {
+                    return DATA;
+                }
                 let same = crate::models::shape::parse_dim_label(&t).and_then(crate::models::shape::as_lit).map(|n| lits.iter().all(|k| crate::intern::key_as_int(k) == Some(n))).unwrap_or(false);
                 return if same { d.clone() } else { KeyVal::data(&crate::models::shape::dim_label(crate::models::shape::unknown())) };
             }
-            if let Some(sid) = crate::models::shape::parse_tensor_label(&t) {
-                if kv_literals(l).iter().any(crate::intern::key_is_number) {
-                    let s = crate::models::shape::join_shapes(&crate::models::shape::shape_get(sid), &crate::models::shape::Shape::known(vec![]));
-                    return KeyVal::data(&crate::models::shape::tensor_label(crate::models::shape::shape_id(s)));
+            if let Some(sid) = crate::models::shape::parse_tensor_label(crate::models::shape::strip_optional(&t).unwrap_or(&t)) {
+                // a tensor or a number: rank 0 possible; a tensor or None: an optional tensor;
+                // or anything else: an unknown (the literal stays possible)
+                let lits = kv_literals(l);
+                let none = crate::intern::key_none();
+                let (nums, rest): (Vec<KeyId>, Vec<KeyId>) = lits.iter().filter(|k| *k != none).partition(|k| crate::intern::key_is_number(*k));
+                if !rest.is_empty() {
+                    return DATA;
                 }
+                let mut out = t.to_string();
+                if !nums.is_empty() {
+                    let s = crate::models::shape::join_shapes(&crate::models::shape::shape_get(sid), &crate::models::shape::Shape::known(vec![]));
+                    out = crate::models::shape::tensor_label(crate::models::shape::shape_id(s));
+                    if crate::models::shape::strip_optional(&t).is_some() {
+                        out = crate::models::shape::optional_label(&out);
+                    }
+                }
+                if lits.contains(none) {
+                    out = crate::models::shape::optional_label(&out);
+                }
+                return KeyVal::data(&out);
             }
         }
     }
     // an unknown joined with literals: the unknown, of its type if they are of it too
     for (d, l) in [(a, b), (b, a)] {
         if let KeyVal::Data(x) = d {
-            let fits = label_type(&crate::intern::str_get(*x)).is_some_and(|t| kv_literals(l).iter().all(|k| key_type(k, t)));
+            let t = crate::intern::str_get(*x);
+            // (a label that says what the text is — a JSON or pickle text of known parts, a CSV
+            // text of known header — is no longer that)
+            if ["pyjsontext:", "pickletext:", "csvhdr:"].iter().any(|p| t.starts_with(p)) {
+                return DATA;
+            }
+            let fits = label_type(&t).is_some_and(|t| kv_literals(l).iter().all(|k| key_type(k, t)));
             return if fits || !l.is_literal() { d.clone() } else { untyped(*x) };
         }
     }
@@ -1397,6 +1423,11 @@ pub fn kv_exclude(kv: &KeyVal, keys: &KeySet) -> Option<KeyVal> {
             let mut ko2 = ko.clone();
             ko2.exclude = ko.exclude.union(keys);
             Some(KeyVal::KeysOf(ko2))
+        }
+        // a tensor or None, not None: the tensor
+        KeyVal::Data(l) if keys.contains(crate::intern::key_none()) => {
+            let t = crate::intern::str_get(*l);
+            Some(crate::models::shape::strip_optional(&t).map(KeyVal::data).unwrap_or_else(|| kv.clone()))
         }
         _ => Some(kv.clone()),
     }
