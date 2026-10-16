@@ -37,8 +37,9 @@ pub struct Havoc {
     walks: u32,
     /// per object, the last walk that met it
     marks: Vec<u32>,
-    /// per (unknown code, values given): what its last walk met, and the heap it left
-    memo: FxHashMap<(StrId, u64), HavocMemo>,
+    /// per values given (and receivers walked by names): what the last walk from them met, and
+    /// the heap it left
+    memo: FxHashMap<u64, HavocMemo>,
     /// the code objects the last walk met (functions, classes, bound methods)
     pub code: Vec<ObjId>,
     /// the receivers of a skipped method call (`skipped_call`), how often a walk met each, and
@@ -74,12 +75,15 @@ impl Havoc {
         // unchanged, or changed and walked here: only the changed ones are walked again)
         // (a skipped method's receiver walked by names: by the same names)
         let guard: Vec<(ObjId, std::rc::Rc<[KeyId]>)> = self.guard.iter().map(|(g, _, used)| (*g, used.clone())).collect();
-        let key = (site, {
+        // (keyed by what is walked, not by the code that walks it: any unknown code may do
+        // the same to what it reaches; a row the memo's walk left names that walk's call, for
+        // people only — any mutator makes a row open)
+        let key = {
             let mut h = rustc_hash::FxHasher::default();
             std::hash::Hash::hash(&roots, &mut h);
             std::hash::Hash::hash(&guard, &mut h);
             std::hash::Hasher::finish(&h)
-        });
+        };
         let memo = self.memo.remove(&key).filter(|m| m.roots == roots && m.guard.iter().map(|(g, u, _)| (*g, u.clone())).eq(guard.iter().cloned()));
         // (met through something else then: still, as what met it is as it was)
         let met: Vec<u32> = memo.as_ref().map(|m| m.guard.iter().map(|(_, _, n)| *n).collect()).unwrap_or_default();
