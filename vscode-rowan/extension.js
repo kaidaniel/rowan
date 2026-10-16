@@ -29,6 +29,12 @@ const MARK_TEXT = {
   "⚠~": "fails unless code rowan cannot see set the key",
   "◌": "the input must provide it",
 };
+/**
+ * A hover worked out on demand (the whole program took too long to analyse): from the function
+ * alone, for any call of it.
+ */
+const ON_DEMAND_LINE = "- for any call of this function, from its own analysis (the whole program took too long, so the values its calls pass are not shown)";
+
 /** The notation of values (as the engine prints them): a test on the text, and its meaning. */
 const NOTATION = [
   [(t) => /(^|[\s:=(\[,|])\?($|[\s,)\]}|])/.test(t.replace(/\*\*\?/g, "")), "`?` not known statically"],
@@ -326,6 +332,8 @@ function renderHover(name, facts, verdicts) {
       }
     }
     if (calls) info.splice(valueShown ? 0 : 1, 0, calls);
+    // (on demand: the function alone, run for any call; what the program's calls pass is not known)
+    if (f.on_demand) info.splice(valueShown ? 0 : 1, 0, ON_DEMAND_LINE);
     // tensor shapes: what this line needs of its inputs (rowan could not decide it here)
     for (const r of f.requires || []) info.push(`- needs \`${r}\``);
     // what the code reads of it, when it comes from outside (an argument, an input)
@@ -614,6 +622,25 @@ function stopServers() {
   servers.clear();
 }
 
+/**
+ * On demand (the whole program took too long): the `--facts` document of the function of `file`
+ * defined over `line`, its facts marked `on_demand`; `span` its first and last lines.
+ */
+async function hoverServer(bin, file, line, extraArgs, timeoutSeconds) {
+  const srv = getServer(bin, extraArgs);
+  const msg = await serverRequest(srv, { cmd: "hover", path: file, line }, timeoutSeconds);
+  if (!msg.ok) throw new Error(msg.error || "rowan server error");
+  for (const f of msg.result.facts || []) f.on_demand = true;
+  return { result: msg.result, span: msg.span };
+}
+
+/** Add an on-demand document's facts and verdicts to an indexed result (`indexResult`). */
+function mergeResult(idx, res) {
+  const more = indexResult(res);
+  for (const [k, fs_] of more.facts) idx.facts.set(k, (idx.facts.get(k) || []).concat(fs_));
+  for (const [l, vs] of more.verdicts) idx.verdicts.set(l, (idx.verdicts.get(l) || []).concat(vs));
+}
+
 async function runEngineServer(bin, file, extraArgs, timeoutSeconds, changed) {
   const srv = getServer(bin, extraArgs);
   if (changed && changed.length) await serverRequest(srv, { cmd: "changed", paths: changed }, timeoutSeconds);
@@ -703,6 +730,8 @@ function activate(context) {
         res = await runEngine(bin, doc.uri.fsPath, extraArgs, timeoutSeconds);
       }
       const idx = indexResult(res);
+      // (the whole program took too long: each function is analysed when hovered, once)
+      if (res.on_demand && config.get("useServer") !== false) idx.onDemand = { bin, extraArgs, timeoutSeconds, spans: [], pending: new Map() };
       results.set(doc.uri.fsPath, idx);
       const diags = [];
       for (const [line, vs] of idx.verdicts) {
@@ -739,7 +768,7 @@ function activate(context) {
         diags.push(d);
       }
       diagnostics.set(doc.uri, diags);
-      status.text = `$(check) rowan: ${diags.length} findings`;
+      status.text = `$(check) rowan: ${diags.length} findings${idx.onDemand ? " (functions analysed when hovered)" : ""}`;
       output.appendLine(`${new Date().toISOString()} ${doc.uri.fsPath}: ${res.facts.length} facts, ${diags.length} findings`);
     } catch (e) {
       status.text = "$(warning) rowan failed";
@@ -750,13 +779,28 @@ function activate(context) {
 
   context.subscriptions.push(
     vscode.languages.registerHoverProvider({ language: "python", scheme: "file" }, {
-      provideHover(doc, position) {
+      async provideHover(doc, position) {
         const idx = results.get(doc.uri.fsPath);
         if (!idx) return null;
         const wordRange = doc.getWordRangeAtPosition(position, /[A-Za-z_][A-Za-z0-9_]*/);
         if (!wordRange) return null;
         const name = doc.getText(wordRange);
         const line = position.line + 1;
+        const od = idx.onDemand;
+        if (od && !od.spans.some(([a, b]) => a <= line && line <= b)) {
+          // (one request per line at a time; a line outside any function is asked once)
+          if (!od.pending.has(line)) {
+            od.pending.set(line, hoverServer(od.bin, doc.uri.fsPath, line, od.extraArgs, od.timeoutSeconds).then(
+              (r) => {
+                mergeResult(idx, r.result);
+                od.spans.push(r.span);
+                status.text = `$(check) rowan: ${od.spans.length} function${od.spans.length > 1 ? "s" : ""} analysed on demand`;
+              },
+              (e) => output.appendLine(`${doc.uri.fsPath}:${line}: ${e.message}`)
+            ));
+          }
+          await od.pending.get(line);
+        }
         const facts = idx.facts.get(`${line}:${name}`) || [];
         const verdicts = verdictsForWord(idx.verdicts.get(line) || [], name, wordRange.start.character, wordRange.end.character);
         const md = renderHover(name, facts, verdicts);
@@ -789,4 +833,4 @@ function deactivate() {
 
 module.exports = {
   shorten, activate, deactivate, renderHover, prettyValue, hoverValue, indexResult, severityFor, verdictsForWord, diagnosticMessage, findBinary,
-  binaryFormat, binaryMismatch, spawnError, runEngineServer, stopServers };
+  binaryFormat, binaryMismatch, spawnError, runEngineServer, hoverServer, mergeResult, stopServers };

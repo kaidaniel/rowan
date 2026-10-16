@@ -17,6 +17,8 @@ bert = make_user({"name": "Bert"}, False)     # hover: {"name": "Bert"}
 Besides python builtins, rowan also has models for pytorch, pandas, pydantic, and a few other libraries. Local imports are resolved but other external dependencies are not analysed.
 
 Files are analysed when opened or
-saved, or with **Rowan: Analyse current file**.
+saved, or with **Rowan: Analyse current file**. When a whole file takes longer than 10 seconds,
+rowan analyses each function when you first hover in it, for any call of it (usually well under
+a second), and says so in the hover.
 
 Source, documentation and issues: [github.com/kaidaniel/rowan](https://github.com/kaidaniel/rowan).
