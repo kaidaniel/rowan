@@ -134,6 +134,30 @@ def table_k():
     return k
 
 
+ITEMS = {1: {"name": "pen"}}
+PEN = ITEMS[1]
+
+
+def get_item(iid):
+    return ITEMS.get(iid, {})
+
+
+GETTERS = [get_item]
+
+
+def rename():
+    for g in GETTERS:
+        g(1)["name"] = "cup"
+
+
+def pen_name():
+    p = PEN["name"]
+    # (get_item is called through a list: its callers may change the record it returns)
+    #@value p: exactly={"pen"}
+    #@general p: includes={"pen", "cup"}
+    return p
+
+
 CONF = {"mode": "a"}
 
 
@@ -162,3 +186,4 @@ if __name__ == "__main__":
     assert peek() == 1
     assert table_k() == 0
     assert mode() == "a"
+    assert pen_name() == "pen"

@@ -67,9 +67,12 @@ pub struct Closure {
     pub rebound: Vec<Loc>,
     pub values: Vec<Value>,
     pub held_values: Vec<Value>,
-    /// the slots and values changed in place as containers (their items, not what they are)
+    /// the slots and values changed in place as containers (their items, not what they are),
+    /// and those only iterated (what their items run when compared is met)
     pub edited_locs: Vec<Loc>,
     pub edited_values: Vec<Value>,
+    pub iterated_locs: Vec<Loc>,
+    pub iterated_values: Vec<Value>,
 }
 
 impl Analyzer {
@@ -157,7 +160,7 @@ impl Analyzer {
                 // (a value given to code rowan does not follow is walked; one only called or
                 // iterated: its instances likewise by name, the rest walked; a container changed
                 // in place: its items)
-                if self.edited(&f, &v, state) {
+                if self.edited(&f, &v, state).0 {
                     edited.extend(v.pts.iter());
                 }
                 let mut objs: Vec<ObjId> = Vec::new();
@@ -186,7 +189,7 @@ impl Analyzer {
         let rid = crate::interp::any_object(&mut self.heap);
         let w = self.havoc.new_walk();
         self.havoc.walk_from(&mut self.heap, &walk, rid, site, state, w);
-        self.havoc.edit(&mut self.heap, &edited, site, state);
+        self.havoc.edit(&mut self.heap, &edited, true, site, state);
     }
 
     /// What the program's own functions may do to the values of attributes by name, and the
@@ -572,6 +575,10 @@ impl Analyzer {
         let mut seen = |an: &Analyzer, f: Flags, v: &Value| -> Value {
             let (own, held) = an.flag_effect(&f, v, state);
             let own = own || f.edits;
+            // (a container iterated: what its items run when compared)
+            if !own && f.iterated {
+                v.pts.iter().for_each(|o| state.slots.each(&o, &mut |_, x| code.extend(x.pts.iter().filter_map(|i| super::unknown::code_of(&an.heap, i)))));
+            }
             if !own {
                 code.extend(v.pts.iter().filter_map(|o| match (an.heap.kind(o), &an.heap.obj(o).payload) {
                     (Kind::Function | Kind::Class | Kind::Bound | Kind::Partial, _) => Some(o),
@@ -616,8 +623,10 @@ impl Analyzer {
                 } else if held {
                     out.held_values.push(v.clone());
                 }
-                if self.edited(f, v, state) {
-                    out.edited_values.push(v.clone());
+                match self.edited(f, v, state) {
+                    (true, _) => out.edited_values.push(v.clone()),
+                    (false, true) => out.iterated_values.push(v.clone()),
+                    _ => {}
                 }
             }
         }
@@ -735,7 +744,8 @@ impl Analyzer {
     }
 
     /// For the program followed whole: per module-level function the program calls by name and
-    /// never uses as a value (its callers are the program's code), what they may do with its
+    /// never uses as a value (its callers are the program's code; a route handler's, the
+    /// framework too, which only serializes the result), what they may do with its
     /// result: where they use it, give it to the program's functions (their parameters'
     /// flags) or return it in turn (their own callers', to a fixpoint). Generators and coroutines
     /// give theirs away (their code runs later).
@@ -747,11 +757,15 @@ impl Analyzer {
             }
         }
         let mut funcs: Vec<std::rc::Rc<FuncInfo>> = Vec::new();
-        let mut seen: FxHashSet<usize> = FxHashSet::default();
+        let (mut seen, mut handlers): (FxHashSet<usize>, FxHashSet<usize>) = Default::default();
         for o in 1..self.heap.len() as ObjId {
             if let Payload::Func(fi) = &self.heap.obj(o).payload {
                 if seen.insert(fi.node.addr()) {
                     funcs.push(fi.clone());
+                }
+                // (a route handler's result goes to the framework, which serializes it)
+                if self.m.fa_handlers.contains(&o) {
+                    handlers.insert(fi.node.addr());
                 }
             }
         }
@@ -760,7 +774,11 @@ impl Analyzer {
         }
         names.close();
         let by_name = |fi: &FuncInfo| match fi.node {
-            super::FuncNode::Def(d) => fi.cls.is_none() && fi.qualname == fi.name && !d.is_async && !super::is_generator(&d.body) && names.called.contains(&s(&fi.name)) && !names.values.contains(&s(&fi.name)),
+            super::FuncNode::Def(d) => {
+                let (n, handler) = (s(&fi.name), handlers.contains(&fi.node.addr()));
+                let callers = handler || names.called.contains(&n) && !names.decorated.contains(&n);
+                fi.cls.is_none() && fi.qualname == fi.name && !d.is_async && !super::is_generator(&d.body) && callers && !names.values.contains(&n)
+            }
             super::FuncNode::Lambda(_) => false,
         };
         let mut ret: FxHashMap<usize, Flags> = funcs.iter().filter(|fi| by_name(fi)).map(|fi| (fi.node.addr(), Flags::default())).collect();
@@ -822,8 +840,10 @@ impl Analyzer {
         } else if held {
             out.held_locs.push(loc);
         }
-        if self.edited(f, &v, state) {
-            out.edited_locs.push(loc);
+        match self.edited(f, &v, state) {
+            (true, _) => out.edited_locs.push(loc),
+            (false, true) => out.iterated_locs.push(loc),
+            _ => {}
         }
         if f.rebinds {
             out.rebound.push(loc);
@@ -846,13 +866,16 @@ impl Analyzer {
         };
         // (a library layer called runs its model)
         let code_only = |o: ObjId| code_only(o) || crate::models::torch::t_layer_type(self, o).is_some() && crate::models::torch::t_inert_layer(self, o, _state);
-        let own = f.changes || f.methods || ((f.iterated || f.edits) && !v.pts.iter().all(plain)) || (f.called && !v.pts.iter().all(code_only));
-        (own, f.held || f.iterated)
+        let plain = v.pts.iter().all(plain);
+        let own = f.changes || f.methods || ((f.iterated || f.edits) && !plain) || (f.called && !v.pts.iter().all(code_only));
+        (own, f.held || f.iterated && !plain)
     }
 
-    /// Whether `f` changes `v` in place as plain containers only (`Flags::edits`).
-    fn edited(&self, f: &Flags, v: &Value, state: &State) -> bool {
-        f.edits && !self.flag_effect(f, v, state).0
+    /// Whether `f` changes `v` in place as plain containers only (`Flags::edits`), and whether it
+    /// only iterates them.
+    fn edited(&self, f: &Flags, v: &Value, state: &State) -> (bool, bool) {
+        let own = self.flag_effect(f, v, state).0;
+        (f.edits && !own, f.iterated && !own)
     }
 }
 

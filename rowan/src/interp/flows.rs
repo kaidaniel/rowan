@@ -628,6 +628,14 @@ impl<'a> Flow<'a> {
         self.expr(e, Pos::Bind);
         let (later, now): (Vec<Src>, Vec<Src>) = srcs.into_iter().partition(|(o, _)| matches!(o, Origin::Name(_) | Origin::NameAttr(..) | Origin::Result(..)));
         self.mark(&now, Pos::Change);
+        // (a name's value put off is a use of the name: `REG.get(k)` is one of `REG` too)
+        for (o, _) in &later {
+            match *o {
+                Origin::Name(n) => self.name(n, None),
+                Origin::NameAttr(n, a) => self.name(n, Some(a)),
+                _ => {}
+            }
+        }
         // (the receiver itself: it escapes)
         self.recv.escapes |= self.first.is_some_and(|f| now.contains(&(Origin::Param(f), Level::Own)));
         out.extend(later);
@@ -1041,12 +1049,14 @@ impl ast::visitor::Visitor<'static> for Binds<'_, '_> {
 }
 
 /// The names some code calls (`f(…)`, `m.f(…)`: f), and those it uses otherwise, as values that
-/// any code may call later (`g(f)`, `x = f`, `m.f` read, `getattr(m, "f")`, a decorated `def`'s
-/// name; an import's alias: the name it binds too).
+/// any code may call later (`g(f)`, `x = f`, `m.f` read, `getattr(m, "f")`, a `def`'s name with
+/// several decorators; an import's alias: the name it binds too); those of `def`s with one
+/// decorator (what calls them is the decorator's).
 #[derive(Default)]
 pub struct NameUses {
     pub called: FxHashSet<StrId>,
     pub values: FxHashSet<StrId>,
+    pub decorated: FxHashSet<StrId>,
     aliases: Vec<(StrId, StrId)>,
 }
 
@@ -1066,7 +1076,7 @@ impl NameUses {
 impl ast::visitor::Visitor<'static> for NameUses {
     fn visit_stmt(&mut self, st: &'static Stmt) {
         match st {
-            Stmt::FunctionDef(f) if !f.decorator_list.is_empty() => drop(self.values.insert(s(f.name.as_str()))),
+            Stmt::FunctionDef(f) if !f.decorator_list.is_empty() => drop(if f.decorator_list.len() == 1 { &mut self.decorated } else { &mut self.values }.insert(s(f.name.as_str()))),
             Stmt::ImportFrom(i) => self.aliases.extend(i.names.iter().filter_map(|a| Some((s(a.asname.as_ref()?.as_str()), s(a.name.as_str()))))),
             // (an import in a class body binds class attributes: methods' `self.f(…)`)
             Stmt::ClassDef(c) => {
