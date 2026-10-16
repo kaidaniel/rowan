@@ -955,12 +955,12 @@ fn cap_mutators(ms: StrSet) -> StrSet {
 }
 
 fn cap_sources(ss: SrcSet) -> SrcSet {
+    // (sorted by source: its lenses are consecutive)
     let mut by: Vec<(SourceId, Vec<LensId>)> = Vec::new();
     for (s, l) in ss.iter() {
-        if let Some(e) = by.iter_mut().find(|(x, _)| *x == s) {
-            e.1.push(l);
-        } else {
-            by.push((s, vec![l]));
+        match by.last_mut() {
+            Some(e) if e.0 == s => e.1.push(l),
+            _ => by.push((s, vec![l])),
         }
     }
     if by.iter().all(|(_, ls)| ls.len() <= MAX_LENSES) {

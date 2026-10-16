@@ -203,7 +203,7 @@ impl Analyzer {
             parts.push(v);
         }
         self.mode.recv_scalar = saved_scalar;
-        self.mode.wide_read = saved_wide;
+        self.end_wide_read(saved_wide, state);
         acc = acc.join(&crate::domain::join_values(parts));
         if obj.pts.is_empty() {
             return crate::models::scalar_attr(self, obj, name, report, state);

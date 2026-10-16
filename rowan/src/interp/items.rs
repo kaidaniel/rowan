@@ -63,7 +63,7 @@ impl Analyzer {
         let saved_wide = self.wide_read(obj, node);
         let v = self.load_item_inner(obj, ns, key, node, state, report);
         self.mode.recv_scalar = saved_scalar;
-        self.mode.wide_read = saved_wide;
+        self.end_wide_read(saved_wide, state);
         self.unwind.item_exc = saved;
         v
     }
@@ -673,6 +673,21 @@ impl Analyzer {
         std::mem::replace(&mut self.mode.wide_read, wide)
     }
 
+    /// A read started by `wide_read` ends: its placeholders' rows are the join of the rows of
+    /// what they stand for; `saved` is the setting before it.
+    pub(in crate::interp) fn end_wide_read(&mut self, saved: Option<(usize, String)>, state: &mut State) {
+        self.mode.wide_read = saved;
+        let mut pending = std::mem::take(&mut self.mode.wide_rows);
+        pending.sort_by_key(|(p, _)| *p);
+        for group in pending.chunk_by(|a, b| a.0 == b.0) {
+            let pid = group[0].0;
+            let old = state.has_row(pid, Ns::Item).then(|| state.row(pid, Ns::Item));
+            let r = crate::domain::join_rows(old.into_iter().chain(group.iter().map(|(_, r)| r.clone())));
+            state.set_row_narrowed(pid, Ns::Item, r.clone());
+            state.set_row_narrowed(pid, Ns::Attr, r);
+        }
+    }
+
     /// Is a read on many objects running in this frame (`wide_read`)?
     pub(in crate::interp) fn in_wide_read(&self) -> bool {
         self.mode.wide_read.as_ref().is_some_and(|(d, _)| *d == self.cx.frames.len())
@@ -742,8 +757,12 @@ impl Analyzer {
         } else {
             Row::from_data(crate::domain::RowData { sources: srcs, mutators: row.mutators.clone(), top: elem && row.top, ..Default::default() })
         };
-        // (a placeholder of several objects' parts: what each holds there)
-        let r = if shared && state.has_row(pid, Ns::Item) { state.row(pid, Ns::Item).join(&r) } else { r };
+        // (a placeholder of several objects' parts: what each holds there, joined when the
+        // read ends)
+        if shared {
+            self.mode.wide_rows.push((pid, r));
+            return;
+        }
         state.set_row_narrowed(pid, Ns::Item, r.clone());
         state.set_row_narrowed(pid, Ns::Attr, r);
     }
