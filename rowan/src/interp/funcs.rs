@@ -1359,7 +1359,7 @@ impl Analyzer {
         let row = state.row(oid, Ns::Item);
         // (keys stored under unknown names keep their values in the `*` slot: only content
         // from outside — a parameter, an input, unknown code — is not there)
-        let outside = row.top || row.sources.iter().any(|(src, _)| !crate::domain::source_is_data(src));
+        let outside = row.top || !row.mutators.is_empty() || row.sources.iter().any(|(src, _)| !crate::domain::source_is_data(src));
         if row.open() && outside {
             return v.join(&self.path_placeholder_value(oid, Ns::Item, STAR, &row, state));
         }
