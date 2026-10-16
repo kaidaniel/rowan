@@ -944,28 +944,40 @@ fn gen_facts_equal(a: &State, b: &State, ge: &crate::interp::GenEffects) -> bool
         && ge.lens.iter().all(|o| a.lens.get(o) == b.lens.get(o))
 }
 
-/// Join `src`'s facts about a generator's affected objects into `dst`'s.
+/// Join `src`'s facts about a generator's affected objects into `dst`'s: those the generator
+/// changed by then (from what it was given, `ge.pre`); the others are the consumer's as they are.
 fn gen_join_facts(dst: &mut State, src: &State, ge: &crate::interp::GenEffects) {
+    let pre = &ge.pre;
     for k in &ge.rows {
         if let (Some(a), Some(b)) = (dst.rows.get(k), src.rows.get(k)) {
-            dst.rows.insert(*k, a.join(&b));
+            if pre.rows.get(k).as_ref() != Some(&b) {
+                dst.rows.insert(*k, a.join(&b));
+            }
         }
     }
     for (o, sk) in &ge.slots {
         if let (Some(a), Some(b)) = (dst.slots.get(o, sk), src.slots.get(o, sk)) {
-            dst.slots.set(o, *sk, a.join(&b));
-        }
-        if matches!(sk.0, Ns::Pos | Ns::Elem) {
-            dst.clear_last(*o);
+            if pre.slots.get(o, sk).as_ref() != Some(&b) {
+                dst.slots.set(o, *sk, a.join(&b));
+                if matches!(sk.0, Ns::Pos | Ns::Elem) {
+                    dst.clear_last(*o);
+                }
+            }
         }
     }
     for o in &ge.elems {
         if let (Some(a), Some(b)) = (dst.elems.get(o), src.elems.get(o)) {
-            dst.elems.insert(*o, crate::domain::kv_join(&a, &b));
+            if pre.elems.get(o).as_ref() != Some(&b) {
+                dst.elems.insert(*o, crate::domain::kv_join(&a, &b));
+            }
         }
     }
     for o in &ge.lens {
-        match (dst.lens.get(o), src.lens.get(o)) {
+        let b = src.lens.get(o);
+        if pre.lens.get(o) == b {
+            continue;
+        }
+        match (dst.lens.get(o), b) {
             (Some(a), Some(b)) => dst.set_lens(*o, crate::state::join_len(&a, &b)),
             _ => {
                 dst.forget_len(o);
