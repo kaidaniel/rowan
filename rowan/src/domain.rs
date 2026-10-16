@@ -468,11 +468,15 @@ pub fn source_label(s: SourceId) -> String {
 
 /// Insertion orders of two joined rows: equal, or one a prefix of the other (the longer
 /// one; the extra keys are not definite then), else unknown.
-fn join_order(a: &Arc<[KeyId]>, b: &Arc<[KeyId]>) -> Arc<[KeyId]> {
-    if a == b || b.len() <= a.len() && a[..b.len()] == b[..] {
-        a.clone()
-    } else if b[..a.len().min(b.len())] == a[..] {
-        b.clone()
+/// The insertion order of two paths' rows: the longer when the other's is a prefix of it and
+/// the other has none of the keys it adds (else it holds them at another place: `b, a` on one
+/// path, `a` before `b` but not in its order on the other).
+fn join_order(a: &RowData, b: &RowData) -> Arc<[KeyId]> {
+    let extends = |x: &RowData, y: &RowData| y.order.len() <= x.order.len() && x.order[..y.order.len()] == y.order[..] && x.order[y.order.len()..].iter().all(|k| !y.present.contains(*k));
+    if a.order == b.order || extends(a, b) {
+        a.order.clone()
+    } else if extends(b, a) {
+        b.order.clone()
     } else {
         Arc::from(Vec::new())
     }
@@ -657,7 +661,7 @@ impl Row {
             sources,
             mutators: cap_mutators(self.mutators.union(&o.mutators)),
             top: self.top || o.top,
-            order: join_order(&self.order, &o.order),
+            order: join_order(self, o),
             stored: self.stored.union(&o.stored),
         }, &[self, o])
     }
@@ -848,14 +852,12 @@ impl Row {
     }
 
     pub fn narrow_in(&self, k: KeyId, strong: bool) -> Row {
-        // (the key was there: the program did not store it)
-        let was = self.stored.contains(k);
-        let r = self.store(k, strong);
-        if was {
-            return r;
+        // (the key was there: the program did not store it, nor last: the order stays)
+        let mut d = self.store(k, strong).data();
+        if !self.stored.contains(k) {
+            d.stored = d.stored.remove(k);
         }
-        let mut d = r.data();
-        d.stored = d.stored.remove(k);
+        d.order = self.order.clone();
         Row::from_data(d)
     }
 
