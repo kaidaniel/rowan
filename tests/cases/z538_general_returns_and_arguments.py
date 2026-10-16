@@ -158,6 +158,31 @@ def pen_name():
     return p
 
 
+TEAMS = {"a": {"members": ["ann"]}}
+TEAM_A = TEAMS["a"]
+MEMBERS_A = TEAM_A["members"]
+
+
+def team(k):
+    return TEAMS.get(k)
+
+
+def join(k, who):
+    t = team(k)
+    t["members"].append(who)
+
+
+def team_sizes():
+    keys = len(TEAM_A)
+    n = len(MEMBERS_A)
+    # (join changes what the record team returns holds, not the record's own keys)
+    #@value keys: exactly={1}
+    #@general keys: exactly={1}
+    #@value n: exactly={1}
+    #@general n: unknown
+    return keys, n
+
+
 CONF = {"mode": "a"}
 
 
@@ -187,3 +212,4 @@ if __name__ == "__main__":
     assert table_k() == 0
     assert mode() == "a"
     assert pen_name() == "pen"
+    assert team_sizes() == (1, 1)

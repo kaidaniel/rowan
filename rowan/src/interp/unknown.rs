@@ -383,12 +383,23 @@ impl Analyzer {
             let cl = self.code_closure(&roots, state);
             let mut vals: Vec<Value> = cl.locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).collect();
             vals.extend(cl.values.iter().cloned());
-            // (values whose parts may change, not themselves: their parts)
+            // (values whose parts may change, not themselves: their parts; whose parts' parts
+            // may: those)
             let mut parts: Vec<ObjId> = Vec::new();
             for v in cl.held_locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).chain(cl.held_values.iter().cloned()) {
                 for o in v.pts.iter() {
                     self.obj_edges(o, state, &mut parts);
                 }
+            }
+            let mut mid: Vec<ObjId> = Vec::new();
+            for v in cl.held2_locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)) {
+                for o in v.pts.iter() {
+                    self.obj_edges(o, state, &mut mid);
+                }
+            }
+            for o in mid {
+                self.havoc.code.extend(code_of(&self.heap, o));
+                self.obj_edges(o, state, &mut parts);
             }
             parts.sort_unstable();
             parts.dedup();

@@ -64,6 +64,8 @@ pub struct Closure {
     pub code: FxHashSet<ObjId>,
     pub locs: Vec<Loc>,
     pub held_locs: Vec<Loc>,
+    /// those whose values' parts' parts may (`Flags::held2`)
+    pub held2_locs: Vec<Loc>,
     pub rebound: Vec<Loc>,
     pub values: Vec<Value>,
     pub held_values: Vec<Value>,
@@ -157,6 +159,7 @@ impl Analyzer {
                 }
                 let Some(f) = by_name.get(&name).copied() else { continue };
                 let (own, held) = self.flag_effect(&f, &v, state);
+                let held = held || f.held2;
                 // (a value given to code rowan does not follow is walked; one only called or
                 // iterated: its instances likewise by name, the rest walked; a container changed
                 // in place: its items)
@@ -457,7 +460,7 @@ impl Analyzer {
                 }
             }
             if work.is_empty() {
-                for l in [&mut out.locs, &mut out.held_locs, &mut out.rebound] {
+                for l in [&mut out.locs, &mut out.held_locs, &mut out.held2_locs, &mut out.rebound] {
                     l.sort_unstable();
                     l.dedup();
                 }
@@ -574,7 +577,7 @@ impl Analyzer {
         let mut code: Vec<ObjId> = Vec::new();
         let mut seen = |an: &Analyzer, f: Flags, v: &Value| -> Value {
             let (own, held) = an.flag_effect(&f, v, state);
-            let own = own || f.edits;
+            let (own, held) = (own || f.edits, held || f.held2);
             // (a container iterated: what its items run when compared)
             if !own && f.iterated {
                 v.pts.iter().for_each(|o| state.slots.each(&o, &mut |_, x| code.extend(x.pts.iter().filter_map(|i| super::unknown::code_of(&an.heap, i)))));
@@ -620,7 +623,7 @@ impl Analyzer {
                 let (own, held) = self.flag_effect(f, v, state);
                 if own {
                     out.values.push(v.clone());
-                } else if held {
+                } else if held || f.held2 {
                     out.held_values.push(v.clone());
                 }
                 match self.edited(f, v, state) {
@@ -677,7 +680,7 @@ impl Analyzer {
                 }
                 // (`n.append(…)`: n changes in place as a container, if it is one)
                 let edit = f.called && super::flows::CONTAINER_MUTATORS.contains(&&*str_get(a));
-                f = Flags { changes: f.called && !edit || f.rebinds, edits: edit, held: f.changes || f.methods || f.held || f.iterated || f.edits, ..Flags::default() };
+                f = Flags { changes: f.called && !edit || f.rebinds, edits: edit, held: f.changes || f.methods || f.held || f.held2 || f.iterated || f.edits, ..Flags::default() };
             }
             self.apply_flags(&f, loc, state, out);
             code(self, &state.slot(loc.0, loc.1, loc.2), work);
@@ -839,6 +842,8 @@ impl Analyzer {
             out.locs.push(loc);
         } else if held {
             out.held_locs.push(loc);
+        } else if f.held2 {
+            out.held2_locs.push(loc);
         }
         match self.edited(f, &v, state) {
             (true, _) => out.edited_locs.push(loc),

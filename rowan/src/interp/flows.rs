@@ -66,6 +66,8 @@ pub struct Flags {
     pub changes: bool,
     /// what it holds may
     pub held: bool,
+    /// what its parts hold may (a part of it given to code that changes what that holds)
+    pub held2: bool,
     /// it is iterated: what it holds is used, and an iterator advances
     pub iterated: bool,
     /// it is called (its code runs; a library method runs on its receiver)
@@ -82,23 +84,24 @@ pub struct Flags {
 
 impl Flags {
     /// Given away: anything may happen to it.
-    pub const CHANGE: Flags = Flags { changes: true, held: false, iterated: false, called: false, methods: false, rebinds: false, edits: false };
+    pub const CHANGE: Flags = Flags { changes: true, held: false, held2: false, iterated: false, called: false, methods: false, rebinds: false, edits: false };
 
     /// What happens to a value, for its source at `level`: itself, or what holds it.
     pub fn lift(&self, level: Level) -> Flags {
         match level {
             Level::Own => Flags { rebinds: false, ..*self },
-            Level::Held => Flags { held: self.any(), ..Flags::default() },
+            Level::Held => Flags { held: self.changes || self.methods || self.edits || self.called || self.iterated, held2: self.held || self.held2, ..Flags::default() },
         }
     }
 
     pub fn any(&self) -> bool {
-        self.changes || self.held || self.iterated || self.called || self.rebinds || self.methods || self.edits
+        self.changes || self.held || self.held2 || self.iterated || self.called || self.rebinds || self.methods || self.edits
     }
 
     pub fn join(&mut self, o: &Flags) {
         self.changes |= o.changes;
         self.held |= o.held;
+        self.held2 |= o.held2;
         self.iterated |= o.iterated;
         self.called |= o.called;
         self.rebinds |= o.rebinds;
