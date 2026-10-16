@@ -191,9 +191,9 @@ impl Analyzer {
         // a try whose finally is the managers' `__exit__`: it runs however the body ends
         // (normally, by return / break / continue, or by an exception); a manager whose
         // `__exit__` returns True swallows the exception: a catch-all handler that does
-        // nothing
+        // nothing, for the exceptions it may swallow (the others go on)
         let swallows = managers.iter().any(|(v, _)| self.exit_swallows(v, state));
-        let handlers = if swallows { vec![Handler { types: None, name: None, body: &[], line: frontend::node(w).line }] } else { vec![] };
+        let handlers = if swallows { vec![Handler { types: None, name: None, body: &[], line: frontend::node(w).line, maybe: true }] } else { vec![] };
         self.stmt_try_parts(&w.body, handlers, &[], std::rc::Rc::new(Finally::Exit(managers)), state);
         for _ in 0..n_redirects {
             self.m.stdout_redirect.pop();
