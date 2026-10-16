@@ -43,6 +43,9 @@ fn slice_text(kv: &KeyVal) -> Option<String> {
 
 impl Analyzer {
     pub fn load_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
+        if let Some(r) = self.split_mixed(&[obj], state, &mut |an, vs, st| an.load_item(&vs[0], ns, key, node, st, report)) {
+            return r;
+        }
         if ns == Ns::Item {
             if let Some(v) = self.per_receiver(obj, &|an, o| an.has_user_method(o, "__getitem__"), state, &mut |an, o, st| an.load_item(o, ns, key, node, st, report)) {
                 return v;
