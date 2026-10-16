@@ -607,6 +607,16 @@ impl Analyzer {
             return v;
         }
         if let Some(v) = self.instance_getattr(oid, name, nk, node, state) {
+            // (found through `__getattr__`: on this object the read succeeds where it returned;
+            // beside other objects that lack the name, it may fail)
+            if state.reachable && (!single_target || self.mode.one_of_several) {
+                let cls = Classification::new(Tier::Proven);
+                if guarded {
+                    self.verdict_guarded(node, nk, &cls, oid, Ns::Attr);
+                } else {
+                    self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
+                }
+            }
             return v;
         }
         let v = state.slot_opt(oid, Ns::Attr, nk);

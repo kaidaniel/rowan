@@ -109,14 +109,20 @@ impl Analyzer {
         }
         let mut outs: Vec<Value> = Vec::new();
         let mut acc: Option<State> = None;
+        let saved = std::mem::replace(&mut self.mode.one_of_several, true);
         for p in parts {
             let mut st = state.copy();
-            outs.push(f(self, &p, &mut st));
+            let v = f(self, &p, &mut st);
+            // (a part whose access raised gives nothing)
+            if st.reachable {
+                outs.push(v);
+            }
             acc = Some(match acc {
                 None => st,
                 Some(mut a) => a.join(&mut st),
             });
         }
+        self.mode.one_of_several = saved;
         if let Some(a) = acc {
             state.replace_with(a);
         }
