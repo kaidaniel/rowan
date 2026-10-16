@@ -1809,6 +1809,10 @@ fn frame_meta_from_data(an: &mut Analyzer, st: &mut State, c: &Call, nid: u32, d
         if let Some(m) = st.slot_opt(d, Ns::Meta, mk("index")) {
             st.set_slot(nid, Ns::Meta, mk("index"), m, true);
         }
+    } else if c.kw("index").or_else(|| c.args.get(1).cloned()).is_some_and(|i| (i.pts.is_empty() && i.kv.as_lit() != Some(intern::key_none())) || !i.pts.iter().all(|o| matches!(an.heap.kind(o), Kind::List | Kind::Tuple))) {
+        // (an index given other than as a list: its levels' names are not known — an `Index`
+        // may have a name)
+        set_index_levels(st, nid, None);
     } else {
         set_index_levels(st, nid, Some(&[None]));
     }
@@ -2609,6 +2613,9 @@ fn reset_index(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             // (a level's name may already be a column: ValueError)
             an.may_raise_here("ValueError", st);
             d.sources = d.sources.insert((Source::new(&format!("reset_index@L{}", c.line), SourceKind::Call), EMPTY_LENS));
+            // (a level may be named as a column dropped before: it comes back)
+            d.absent = Default::default();
+            d.absent_likely = Default::default();
         }
         let r = Row::from_data(d);
         return derived(an, st, c, r, &fs, Rows::Other, false);
