@@ -748,13 +748,17 @@ fn m_fromkeys(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let val = c.args.get(1).cloned().unwrap_or_else(|| an.none_v.clone());
     let Some(a) = c.args.first() else { return Value::obj(oid) };
     // known items that are literals, in order (a list, a string's characters, a generator)
-    let items = an.iterate(a, &c.node, st).items;
-    let lits: Option<Vec<KeyId>> = items.and_then(|its| its.iter().map(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).collect());
+    let it = an.iterate(a, &c.node, st);
+    let lits: Option<Vec<KeyId>> = it.items.and_then(|its| its.iter().map(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).collect());
     let mut row = st.row(oid, Ns::Item);
     if let Some(ls) = lits {
         for k in ls {
             row = row.store(k, true);
             st.set_slot(oid, Ns::Item, k, val.clone(), true);
+        }
+        // (a set's items: in an order Python does not promise)
+        if it.unordered {
+            row = row.with_order(Vec::new());
         }
         st.set_row(oid, Ns::Item, row);
     } else if let Some(ks) = if a.pts.is_empty() { None } else { an.lit_keys(a, st) } {
