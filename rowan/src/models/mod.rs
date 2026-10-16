@@ -1863,20 +1863,23 @@ fn m_dc_fields(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn m_vars(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first() else { return Value::data("vars") };
-    if c.qual == "builtins.vars" {
-    }
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("vars@L{}", c.line));
     if c.qual == "builtins.vars" {
         if let Some(inst) = a.single().filter(|o| an.heap.kind(*o) == Kind::Instance) {
             an.m.attr_mirrors.insert(oid, inst);
         }
     }
+    // (one of several objects: the attributes of each, joined)
+    let empty = st.row(oid, Ns::Item);
+    let mut rows: Vec<Row> = Vec::new();
     for x in an.record_objects(a) {
-        let r = st.row(oid, Ns::Item).copy_from(&st.row(x, Ns::Attr), true, &KeySet::new(), intern::EMPTY_LENS);
-        st.set_row(oid, Ns::Item, r);
+        rows.push(empty.copy_from(&st.row(x, Ns::Attr), true, &KeySet::new(), intern::EMPTY_LENS));
         for (k, v) in st.obj_slots(x, Ns::Attr) {
             st.set_slot(oid, Ns::Item, k, v, false);
         }
+    }
+    if !rows.is_empty() {
+        st.set_row(oid, Ns::Item, crate::domain::join_rows(rows));
     }
     Value::obj(oid)
 }
