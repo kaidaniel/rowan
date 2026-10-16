@@ -3025,6 +3025,8 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual);
     let recv = c.recv.clone().unwrap_or_default();
+    // (a receiver that is one of several lists: each may or may not be the one that grows)
+    let alone = recv.pts.len() == 1 && recv.kv.is_bot();
     for oid in recv.pts.iter() {
         if !matches!(an.heap.kind(oid), Kind::List | Kind::Set | Kind::Tuple) {
             continue;
@@ -3046,7 +3048,7 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let ll = an.heap.llen(oid, st);
             if let Some(n) = ll {
                 let cap = if an.m.torch_on { 64 } else { 16 };
-                if an.heap.obj(oid).single && an.frame().loop_depth == 0 && n + items.len() <= cap {
+                if alone && an.heap.obj(oid).single && an.frame().loop_depth == 0 && n + items.len() <= cap {
                     for (i, item) in items.iter().enumerate() {
                         st.set_slot(oid, Ns::Pos, intern::key_int((n + i) as i64), item.clone(), true);
                         an.add_elem(oid, item, st);
@@ -3060,9 +3062,18 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         let ll = an.heap.llen(oid, st);
         let single = an.heap.obj(oid).single;
         if let Some(n) = ll {
-            if single && name == "append" && an.frame().loop_depth == 0 && n < if an.m.torch_on { 64 } else { 16 } {
+            if alone && single && name == "append" && an.frame().loop_depth == 0 && n < if an.m.torch_on { 64 } else { 16 } {
                 st.set_slot(oid, Ns::Pos, intern::key_int(n as i64), elem, true);
                 an.heap.set_llen(oid, st, Some(n + 1));
+                continue;
+            }
+            // one of several lists: this one as it was, or longer by the items
+            let items = if name == "append" { Some(vec![elem.clone()]) } else { ext_items.clone() };
+            if let Some(items) = items.filter(|its| !alone && an.frame().loop_depth == 0 && n + its.len() < 16) {
+                for (i, item) in items.iter().enumerate() {
+                    st.set_slot(oid, Ns::Pos, intern::key_int((n + i) as i64), item.clone(), false);
+                }
+                st.set_lens(oid, (None, n, (1u16 << n) | (1u16 << (n + items.len()))));
                 continue;
             }
             // appends of unknown count: the positions so far stay valid
