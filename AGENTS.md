@@ -21,10 +21,10 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   An open row's unread key holds a *placeholder* per object and key (`path_placeholder_value`, 3 deep); a
   read on more than 8 objects (`wide_read`) makes one per key there (weak; a library object's attribute: one unknown per name).
 * **State** (`State`, `state.rs`) is one point on one path: names → values, and per object
-  its **rows** (`(object, namespace)` → `Row`), slots (the value under each key), elements,
+  its **rows** (`(object, namespace)` → `Row`), slots (the value under each key), elements (scalars in
+  `elems`, objects in the `Elem` slot: written together, `add_elem` / `set_positions`; missing: unknown),
   lengths (one writer, `set_lens`; a tensor dim after `T` rounds of one append each, `sym_lens`),
-  and the requirements recorded so far. The maps are persistent Patricia tries
-  (`layered.rs`): a copy is O(1), and a join or diff costs what two states differ in.
+  and the requirements recorded so far. The maps are persistent Patricia tries (`layered.rs`): a copy is O(1), a join or diff costs what two states differ in.
 * **The analyzer** (`Analyzer`, `interp/mod.rs`) is components with private state, one file each
   (Layout); models, the report and the driver see the `Heap`, their `m` and `api.rs`. Its doc sorts
   them for a call memo: running context (a key), state changed outside `State`, output, caches.
@@ -111,7 +111,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   `getattr` with unknown names (known in part, an f-string's: the attributes whose names fit,
   `Payload::Affix`), metaclasses and monkey-patching (rebinding a function or class too;
   a module's function the program calls only by name has no other callers) are unknown or ignored. List lengths are tracked up to 15 (a few per path: each one's positions;
-  `xs[:n]` keeps xs's). An object a path has no facts of reads as unknown (`read_row`).
+  `xs[:n]` keeps xs's). An object a path has no facts of reads as unknown (`read_row`). A set's items have no order (`ordered_items`).
 
 ## Working conventions (the owner's standing instructions)
 
