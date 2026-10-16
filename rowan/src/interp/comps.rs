@@ -55,25 +55,7 @@ impl Analyzer {
         self.force_gen(&itv, state, true);
         let it = self.iterate(&itv, &gn, state);
         let understood = g.ifs.iter().all(|c| cond_is_exclusion(c, &g.target));
-        if let Some(items) = &it.items {
-            let same = self.identical_summaries(items);
-            if i == 0 && gens.len() == 1 && g.ifs.is_empty() && (limit == SUMMARY || same || items.len() > limit) {
-                self.cx.summary_items.insert(own, items.len());
-            }
-            if items.len() <= limit && !same {
-                let unordered = it.unordered;
-                self.cx.comp_unordered += usize::from(unordered);
-                let items: Vec<(Value, bool)> = items.iter().map(|v| (v.clone(), true)).collect();
-                self.comp_unrolled(gens, i, limit, &items, state, body, understood, own);
-                self.cx.comp_unordered -= usize::from(unordered);
-                self.exhaust(&exhaust_after, state);
-                return;
-            }
-        }
-        // a closed dict with some keys only maybe there: one iteration per key, a maybe one
-        // joined with skipping it
-        if let Some(items) = it.items.is_none().then(|| self.maybe_dict_items(&itv, state)).flatten().filter(|its| its.len() <= limit) {
-            self.comp_unrolled(gens, i, limit, &items, state, body, understood, own);
+        if self.comp_known_items(gens, i, limit, &itv, &it, state, body, understood, own) {
             self.exhaust(&exhaust_after, state);
             return;
         }
@@ -150,6 +132,35 @@ impl Analyzer {
         state.replace_with(head);
         // (a generator iterated: used up, its effects at its end)
         self.exhaust(&exhaust_after, state);
+    }
+
+    /// Generator `i`'s items when they are known (at most `limit`), each its own iteration; a
+    /// closed dict with some keys only maybe there: one iteration per key, a maybe one joined
+    /// with skipping it. False: not known.
+    #[allow(clippy::too_many_arguments)]
+    fn comp_known_items(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, itv: &Value, it: &super::funcs::Iteration, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) -> bool {
+        if let Some(items) = &it.items {
+            let same = self.identical_summaries(items);
+            if i == 0 && gens.len() == 1 && gens[i].ifs.is_empty() && (limit == SUMMARY || same || items.len() > limit) {
+                self.cx.summary_items.insert(own, items.len());
+            }
+            if items.len() <= limit && !same {
+                let unordered = it.unordered;
+                self.cx.comp_unordered += usize::from(unordered);
+                let items: Vec<(Value, bool)> = items.iter().map(|v| (v.clone(), true)).collect();
+                self.comp_unrolled(gens, i, limit, &items, state, body, understood, own);
+                self.cx.comp_unordered -= usize::from(unordered);
+                return true;
+            }
+            return false;
+        }
+        match self.maybe_dict_items(itv, state).filter(|its| its.len() <= limit) {
+            Some(items) => {
+                self.comp_unrolled(gens, i, limit, &items, state, body, understood, own);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Known items: each is its own straight-line iteration; a filter decided for the item
