@@ -1634,12 +1634,10 @@ fn scalar_ann_name(a: &ast::Expr) -> String {
 }
 
 /// The entry run of a FastAPI handler: called by the framework with any request (also when
-/// the program's own TestClient calls it), through its middlewares and dependencies; its
-/// requirements join `state`'s.
-pub(crate) fn fa_entry_run(an: &mut Analyzer, oid: ObjId, fi: &crate::interp::FuncInfo, state: &mut State) {
-    let mut st = state.copy();
-    st.ret = None;
-    an.as_entry_run(oid, fi, |an, fake| {
+/// the program's own TestClient calls it), through its middlewares and dependencies, from `st`;
+/// its requirements join `state`'s; `general`: its values hold for any request.
+pub(crate) fn fa_entry_run(an: &mut Analyzer, oid: ObjId, fi: &crate::interp::FuncInfo, mut st: State, state: &mut State, general: bool) {
+    an.as_entry_run(oid, fi, general, |an, fake| {
         if fa_entry_through_middleware(an, oid, &mut st, fake).is_none() {
             an.m.fa_dep_cache.push(rustc_hash::FxHashMap::default());
             if let Some(idx) = an.m.fa_routes.iter().position(|r| r.func == Some(oid)) {

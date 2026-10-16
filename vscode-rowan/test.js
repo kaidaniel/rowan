@@ -82,6 +82,27 @@ const z535src = fs.readFileSync(z535, "utf8").split("\n");
 const row11 = hover(indexResult(facts(z535)), z535src, z535src.indexOf('        return row["role"]') + 1, "row");
 assert(row11.includes('- on some paths the code reads `row["id"]` (only if `not admin`), `row["role"]` (only if `admin`)'), row11);
 assert(row11.includes("`(only if x)` read only on calls where `x` holds of the arguments as passed"), row11);
+// ---- a parameter in its `def`: what the function reads of it for any call (its contract),
+// apart from what each of the program's calls passes and whether the reads work for it
+{
+  const z537 = path.join(root, "tests", "cases", "z537_parameter_contracts.py");
+  const src = fs.readFileSync(z537, "utf8").split("\n");
+  const idx = indexResult(facts(z537));
+  const at = (pre) => src.findIndex((l) => l.startsWith(pre)) + 1;
+  const row = hover(idx, src, at("def make_user("), "row");
+  assert(row.includes('- for any call, the function reads `row["id"]`, `row["name"]`') && row.includes('- and on some paths `row["since"]` (only if `admin`)'), row);
+  assert(row.includes(`\`{"id": 1, "name": " ann "}\` (line ${at("a = make_user(")}) ✓`) && row.includes(`\`{"id": 2, "name": "bob"}\` (line ${at("b = make_user(")}) ✗ \`row["since"]\``), row);
+  assert(row.includes("✓ always works") && row.includes("✗ fails on every path"), row);
+  const order = hover(idx, src, at("def total("), "order");
+  assert(order.includes('- for any call, the function reads `order["items"][*]["price"]`, `order["items"][*]["qty"]`'), order);
+  assert(order.includes(`(line ${at("t = total(")}) ✓`) && order.includes(`(line ${at("    u = total(")}) ✗ \`item["price"]\``), order);
+  // (tensors: the shapes the function needs of it, relations to other parameters included)
+  const g = path.join(root, "tests", "torch", "models", "m02_nanogpt.py");
+  const gsrc = fs.readFileSync(g, "utf8").split("\n");
+  const line = gsrc.findIndex((l, i) => l.includes("def forward(self, x)") && gsrc[i + 1].includes("B, T, C = x.size()")) + 1;
+  const x = hover(indexResult(facts(g)), gsrc, line, "x");
+  assert(x.includes("- for any call, the function needs `x.dim() == 3`, `x.shape[2] == self.n_embd`"), x);
+}
 // an alternative too wide for its line keeps whole items (`…` for the rest), not a cut word
 assert.strictEqual(shorten('{"id": 1, "owner": "bo", "priority": 2, "tags": [], "title": "printer jam"}', 60), '{"id": 1, "owner": "bo", "priority": 2, "tags": [], …}');
 assert.strictEqual(shorten('Ticket(id=1, title="a very long title that goes on and on and on")', 30), "Ticket(id=1, …)");
@@ -94,7 +115,7 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   const idx = indexResult(facts(z532));
   const y = hover(idx, src, 6, "y");
   assert(y.includes("```python\n3 | x\n```") && y.includes("- in calls: `3` (line 44), `7` (line 45)"), y);
-  assert(y.includes("the value holds for any call once the module has run; `in calls`: what this program's calls give"), y);
+  assert(y.includes("the value holds for any call (this program's, and any once the module has run); `in calls`: what this program's calls give"), y);
   const b = hover(idx, src, 6, "b");
   assert(b.includes("- not known here: argument `b` of `pick`") && b.includes("- in calls: `False` (line 44), `True` (line 45)"), b);
   const m = hover(idx, src, 13, "m");

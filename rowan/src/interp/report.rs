@@ -1283,19 +1283,40 @@ pub fn facts_json(an: &Analyzer) -> J {
             })
             .collect();
         // tensor-shape requirements recorded on this line (in the line's own analysis), in
-        // the dim names of this fact
-        let (requires, extra_legend) = fact_shape_requires(an, f, *line);
+        // the dim names of this fact; a parameter's at its `def`: its function's for any call
+        // that name it
+        let (requires, extra_legend) = match f.param_of.and_then(|p| an.heap.func_info_opt(p)) {
+            Some(fi) => {
+                let (a, b) = (fi.node.node().line, fi.node.node().end_line);
+                let word = |t: &str| t.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| w == &*name.to_string());
+                fact_shape_requires(an, f, &|n| n.general && a <= n.line && n.line <= b, &|t| word(t))
+            }
+            None => fact_shape_requires(an, f, &|n| n.line == *line, &|_| true),
+        };
         // the value for any call (the general run's), and apart from it what the program's
         // calls gave (with their lines); without a general run (a closure, a lambda) what the
         // calls gave is the value
+        let call = |t: &String, lines: &Vec<u32>| {
+            let mut c = json!({"text": t, "lines": lines.iter().filter(|l| **l > 0).collect::<Vec<_>>()});
+            if f.param_of.is_some() {
+                c["check"] = call_check(an, f, lines);
+            }
+            c
+        };
         let (text, calls): (String, Vec<J>) = if f.general.is_empty() {
             (join_alternatives(&f.calls.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>()), vec![])
         } else {
             let g = join_alternatives(&f.general);
-            let calls = f.calls.iter().filter(|(t, _)| *t != g).map(|(t, lines)| json!({"text": t, "lines": lines.iter().filter(|l| **l > 0).collect::<Vec<_>>()})).collect();
+            let calls = f.calls.iter().filter(|(t, _)| *t != g || f.param_of.is_some()).map(|(t, lines)| call(t, lines)).collect();
             (g, calls)
         };
-        facts.push(json!({"line": line, "name": name.to_string(), "text": text, "general": !f.general.is_empty(), "calls": calls, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "general_unknowns": general_unknowns, "required": required, "requires": requires}));
+        let mut fact = json!({"line": line, "name": name.to_string(), "text": text, "general": !f.general.is_empty(), "calls": calls, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "general_unknowns": general_unknowns, "required": required, "requires": requires});
+        // a parameter at its `def`: what the function reads of it for any call (its contract)
+        if let Some(foid) = f.param_of {
+            fact["param"] = json!(true);
+            fact["contract"] = param_contract(an, foid, *name);
+        }
+        facts.push(fact);
     }
     // (columns in UTF-16 units, as editors count them; each finding with its message in words)
     let main_idx = an.heap.module_info(an.program.main_module).idx;
@@ -1374,14 +1395,73 @@ fn fact_required(an: &Analyzer, f: &crate::interp::Fact, name: crate::intern::St
     required
 }
 
-/// The tensor-shape requirements recorded on a hover's line (in the line's own analysis), in
-/// the fact's dim names, with the legend entries for the names they use.
+/// What function `foid`'s runs for any call read of its parameter `name`: access paths, on
+/// every path (`always`) or under tests of its parameters (`only_if`).
+fn param_contract(an: &Analyzer, foid: ObjId, name: crate::intern::StrId) -> J {
+    let (Some(st), Some(fi)) = (&an.findings.contracts, an.heap.func_info_opt(foid)) else { return json!([]) };
+    let src = crate::domain::Source::new(&format!("param {}.{}", fi.py_qualname(), name), crate::domain::SourceKind::Param);
+    let needs = reads_below(st, src, &crate::intern::str_get(name), false);
+    J::Array(needs.into_iter().map(|n| json!({"path": n.path, "always": n.always, "only_if": n.only_if})).collect())
+}
+
+/// Whether what the program's calls on `lines` passed for a parameter has what the function
+/// reads of it: the worst of the accesses of those calls' runs (in the function, its callees
+/// too) on what they passed, with the accesses that may fail (`mark`: ✓ ✓~ ◌ ⚠~ ⚠ ✗).
+fn call_check(an: &Analyzer, f: &crate::interp::Fact, lines: &[u32]) -> J {
+    let passed: Vec<&(crate::domain::Chain, Vec<ObjId>)> = f.passed.iter().filter(|(c, _)| c.last().is_some_and(|l| lines.contains(l))).collect();
+    let Some(st) = &an.findings.final_state else { return J::Null };
+    if passed.is_empty() {
+        return J::Null;
+    }
+    // (what they passed and what it holds)
+    let mut reach: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
+    let mut work: Vec<ObjId> = passed.iter().flat_map(|(_, o)| o.iter().copied()).collect();
+    while let Some(o) = work.pop() {
+        if reach.len() > 512 || !reach.insert(o) || matches!(an.heap.kind(o), Kind::Module | Kind::Class | Kind::Function) {
+            continue;
+        }
+        for ns in [Ns::Item, Ns::Attr, Ns::Pos, Ns::Elem] {
+            for (_, v) in st.obj_slots(o, ns) {
+                work.extend(v.pts.iter());
+            }
+        }
+    }
+    // (a chain into the function: the access's chain goes through it)
+    let within = |vc: &[u32], c: &[u32]| (0..vc.len()).any(|p| vc[..=p].len() <= c.len() && c.ends_with(&vc[..=p]) && vc[p] == *c.last().unwrap());
+    const ORDER: [Tier; 6] = [Tier::Missing, Tier::Possibly, Tier::LikelyMissing, Tier::Input, Tier::Likely, Tier::Proven];
+    let mut worst: Option<usize> = None;
+    let mut fails: Vec<String> = Vec::new();
+    for v in an.findings.verdicts() {
+        if !reach.contains(&v.oid) || !passed.iter().any(|(c, _)| !c.is_empty() && within(&v.chain, c)) {
+            continue;
+        }
+        let Some(i) = ORDER.iter().position(|t| *t == v.tier) else { continue };
+        worst = Some(worst.map_or(i, |w| w.min(i)));
+        if i <= 2 && !fails.contains(&v.text) {
+            fails.push(v.text.clone());
+        }
+    }
+    // (tensor shapes: a shape error in those calls' runs)
+    let mut errors: Vec<String> = Vec::new();
+    for n in &an.m.shape_errors {
+        if n.module == an.program.main_idx && passed.iter().any(|(c, _)| !c.is_empty() && within(&n.chain, c)) && !errors.contains(&n.text) {
+            errors.push(n.text.clone());
+            worst = Some(0);
+        }
+    }
+    let Some(w) = worst else { return J::Null };
+    json!({"tier": ORDER[w].name(), "fails": fails, "errors": errors})
+}
+
+/// The tensor-shape requirements a hover shows (`pick`: those of its line in the line's own
+/// analysis, or a parameter's function's that name it), in the fact's dim names, with the
+/// legend entries for the names they use.
 #[allow(clippy::type_complexity)]
-fn fact_shape_requires(an: &Analyzer, f: &crate::interp::Fact, line: u32) -> (Vec<String>, Vec<(String, String)>) {
+fn fact_shape_requires(an: &Analyzer, f: &crate::interp::Fact, pick: &dyn Fn(&crate::models::torch::ShapeNote) -> bool, names: &dyn Fn(&str) -> bool) -> (Vec<String>, Vec<(String, String)>) {
     let mut requires: Vec<String> = Vec::new();
     let mut extra_legend: Vec<(String, String)> = Vec::new();
     for n in &an.m.shape_reqs {
-        if n.line != line || !n.chain.is_empty() || n.module != an.program.main_idx {
+        if !pick(n) || !n.chain.is_empty() || n.module != an.program.main_idx {
             continue;
         }
         let t = match &n.cons {
@@ -1392,6 +1472,9 @@ fn fact_shape_requires(an: &Analyzer, f: &crate::interp::Fact, line: u32) -> (Ve
             }
             None => n.text.clone(),
         };
+        if !names(&t) {
+            continue;
+        }
         // the dim names the requirement uses, in the legend too
         if let Some((c, ctx)) = &n.cons {
             let mut atoms = Vec::new();

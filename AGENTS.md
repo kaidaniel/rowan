@@ -1,8 +1,7 @@
 # AGENTS.md: working on rowan
 
-`README.md` says what rowan does for a user. This file is for working on the engine: how it
-works, the owner's conventions, the tests, the debugging switches, and where things are. It
-must be true at the last commit. The details live in the code's doc comments.
+`README.md` says what rowan does for a user; this file is for working on the engine (how it works, the
+owner's conventions, tests, switches, layout), true at the last commit; details are in doc comments.
 
 ## How rowan works
 
@@ -66,10 +65,12 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model
     is unknown code. A TypeError may come from those taken to fail only on wrong types.
   * **Entry points, general runs:** functions the main run does not call (also those only entry
-    runs call) run with open parameters (`param F.x` schemas). A called function's requirement-only
-    run is its *general run* (`Entries::general`): parameters as annotated, a method on any instance
-    (`__init__` given any arguments); hovers keep what it records apart from the program's calls
-    (`Fact`). Verdict runs take `__init__`'s defaults; with facts on, a facts-only general run follows.
+    runs call) run with open parameters (`param F.x` schemas), from the module's end; a called
+    function gets a requirement-only run so too. A *general run* (`Entries::general`: hover values
+    for any call, apart from the program's calls, `Fact`) starts from `after_any_code`: the module's
+    end after any of the program's functions ran (`follow_code` over all; instances by name,
+    `methods_may_have_run`), joined with the heaps at module code's calls (`note_call`); parameters
+    as annotated, a method on any instance. With facts on, a facts-only general run follows where needed.
 * **Generators** run whole at their first consumption (`force_gen`), in the creating call's
   context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`; at a position
   not known, some yield's). If code between items (where the consumer asks for one:
@@ -80,6 +81,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   requirement on that input: `always` (every path), `sometimes`; `only_if`: tests of the
   function's parameters as passed that all its readers passed (`State::path`, `guards.rs`). A
   read guarded by a `KeyError` handler counts (a frame column read in a `try` is a probe: not).
+  A general run's on its own parameters are a hover's contract (`Findings::contracts`); a parameter's fact at its `def` keeps what each call passed (`Fact::passed`, checked by its run's verdicts).
 * **Verdicts:** every read, `del` and `pop` gets a tier per object from its row (`classify`):
   `proven`, `possibly`, `missing`, `input` are sound; `likely` / `likely-missing` optimistic
   (unknown code removed nothing). In one of several functions a value picks
@@ -92,9 +94,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   fact on the path; in torch modules `int` / `Tensor` annotations hold; a module-level unknown
   number names its dims, a module-level tensor's unknown dims are one value each).
 * **Deadline:** a safety net (`ms`, 10 s): past it user calls are unknown, running ones stop; the budget bounds the work.
-  **On demand** (`rowan serve` when it cuts a whole run; `on_demand`, `general_run_of`): the module's end state
-  as the program's functions may leave it (`follow_code`; instances by name: `methods_may_have_run`); a hovered
-  function's general run with verdicts (fresh budget; past four budgets of work its callees' calls are unknown).
+  **On demand** (`rowan serve` when it cuts a whole run; `on_demand`, `general_run_of`): from `after_any_code`, a
+  hovered function's general run with verdicts (fresh budget; past four budgets of work its callees' calls are unknown).
 * **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
   a general run's `x: int` is an int, not a subclass overriding int's operators). `exec`, `setattr` /
   `getattr` with unknown names (also in skipped code; a class attribute set there through data or a
@@ -160,8 +161,7 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
 * `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls, entry runs, a `work:` line of counters (statements,
   units = statements + walk visits / 16, body runs, objects, row joins, visits, havoc visits; ~25% slower). `2`: raises.
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (golden `#@limits` per case); `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check`.
-* **Profiling:** the bench workflow's `perf` profiles (`sample` hangs on macOS 27). Time a run inside
-  the guard (`.guard/run /usr/bin/time -l rowan …`); compare builds on `--json` tier counts and counters too.
+  Profiles: the bench workflow's `perf` (`sample` hangs on macOS 27); time inside the guard (`.guard/run /usr/bin/time -l`).
 
 ## Layout (`rowan/src/`, ~64k lines: the engine ~22k, the models ~42k)
 

@@ -45,7 +45,7 @@ const NOTATION = [
   [(t) => / \| |(^|\n)\| /.test(t), "`a | b` one of these, depending on the path or the call"],
   [(t) => t.includes("[*]"), "`[*]` any element"],
   [(t) => t.includes("…"), "`…` not shown"],
-  [(t) => t.includes("- in calls: "), "the value holds for any call once the module has run; `in calls`: what this program's calls give"],
+  [(t) => t.includes("- in calls: "), "the value holds for any call (this program's, and any once the module has run); `in calls`: what this program's calls give"],
   [(t) => t.includes(" (only if `"), "`(only if x)` read only on calls where `x` holds of the arguments as passed"],
 ];
 
@@ -243,20 +243,47 @@ function codeList(items, max = 6) {
  * What the program's own calls gave, apart from the value for any call: "- in calls: `3`
  * (line 5), `7` (lines 6, 9)" (null when there is nothing apart).
  */
-function callsLine(f) {
+function callsLine(f, marks) {
   const calls = f.calls || [];
   if (!calls.length) return null;
-  // (values the cut makes alike — they differ in what `…` hides: once, with all their lines)
+  // (values the cut makes alike — they differ in what `…` hides: once, with all their lines;
+  // a parameter's: whether the function's reads of what they pass work, the worst of them)
   const merged = new Map();
   for (const c of calls) {
     const t = shorten(c.text, VALUE_WIDTH);
-    const ls = merged.get(t) || [];
-    merged.set(t, ls.concat((c.lines || []).filter((l) => !ls.includes(l))));
+    const m = merged.get(t) || { lines: [], check: null };
+    m.lines = m.lines.concat((c.lines || []).filter((l) => !m.lines.includes(l)));
+    if (c.check && (!m.check || CHECK_ORDER.indexOf(c.check.tier) < CHECK_ORDER.indexOf(m.check.tier))) m.check = { tier: c.check.tier, fails: [...new Set([...(m.check ? m.check.fails : []), ...c.check.fails])], errors: [...new Set([...(m.check ? m.check.errors || [] : []), ...(c.check.errors || [])])] };
+    merged.set(t, m);
   }
   const lines = (ls) => (ls.length ? ` (line${ls.length > 1 ? "s" : ""} ${ls.slice(0, 3).join(", ")}${ls.length > 3 ? ", …" : ""})` : "");
+  const check = (c) => {
+    if (!c || !MARK[c.tier]) return "";
+    if (marks) marks.add(MARK[c.tier]);
+    return ` ${MARK[c.tier]}` + (c.fails.length ? " " + codeList(c.fails, 3) : "") + ((c.errors || []).length ? ` (${c.errors[0]})` : "");
+  };
   const all = [...merged];
-  const shown = all.slice(0, 3).map(([t, ls]) => "`" + t + "`" + lines(ls));
+  const shown = all.slice(0, 3).map(([t, m]) => "`" + t + "`" + lines(m.lines) + check(m.check));
   return `- in calls: ${shown.join(", ")}${all.length > 3 ? ` and ${all.length - 3} more` : ""}`;
+}
+
+/** The marks of a call's check, worst first (`callsLine`). */
+const CHECK_ORDER = ["missing", "possibly", "likely-missing", "input", "likely", "proven"];
+
+/**
+ * What the code reads of a name (`required`), or of a parameter for any call of its function
+ * (`contract`): "- the code reads `row["id"]`", reads under a test of the arguments first.
+ */
+function readsLines(req, who) {
+  const out = [];
+  const always = req.filter((r) => r.always).map((r) => r.path);
+  // (reads under a test of the arguments first: they say when)
+  const sometimes = req.filter((r) => !r.always).sort((a, b) => !!b.only_if - !!a.only_if);
+  if (always.length) out.push(`- ${who === "function" ? "for any call, the function reads" : "the code reads"} ${codeList(always)}`);
+  // (a read under a test of the arguments: `row["role"]` (only if `admin`))
+  const some = sometimes.slice(0, 6).map((r) => "`" + r.path + "`" + (r.only_if ? ` (only if \`${r.only_if}\`)` : "")).join(", ") + (sometimes.length > 6 ? ` and ${sometimes.length - 6} more` : "");
+  if (sometimes.length) out.push(`- ${always.length ? "and on some paths" : `on some paths the ${who} reads`} ${some}`);
+  return out;
 }
 
 /** The objects of a fact rowan knows (not unknown values): where they were created. */
@@ -294,6 +321,7 @@ function renderHover(name, facts, verdicts) {
   if (!facts.length && !verdicts.length) return null;
   const out = [`**rowan** · \`${name}\``, ""];
   const texts = [];
+  const marks = new Set();
   for (const f of facts) {
     const text = (f.text || "").trim() || "?";
     const objs = f.objects || [];
@@ -301,7 +329,7 @@ function renderHover(name, facts, verdicts) {
     const unknown = (f.general_unknowns || objs).filter((o) => o.kind === "unknown");
     const info = [];
     // what the program's calls gave (the value shown holds for any call): after the value
-    const calls = callsLine(f);
+    const calls = callsLine(f, marks);
     let valueShown = false;
     texts.push(...(f.calls || []).map((c) => shorten(c.text, VALUE_WIDTH)));
     // an unknown named by itself (a parameter, a name defined elsewhere): where it comes from
@@ -331,28 +359,29 @@ function renderHover(name, facts, verdicts) {
         else if ((o.from || []).length) info.push(`- \`?\` comes from ${o.from.join(" or ")}`);
       }
     }
-    if (calls) info.splice(valueShown ? 0 : 1, 0, calls);
+    // a parameter at its `def`: what the function needs of it for any call (its contract: tensor
+    // shapes, what it reads), then what each of the program's calls passes and whether that works
+    if (f.param) {
+      if ((f.requires || []).length) info.push(`- for any call, the function needs ${codeList(f.requires)}`);
+      info.push(...readsLines(f.contract || [], "function"));
+      if (calls) info.push(calls);
+    } else {
+      if (calls) info.splice(valueShown ? 0 : 1, 0, calls);
+      // tensor shapes: what this line needs of its inputs (rowan could not decide it here)
+      for (const r of f.requires || []) info.push(`- needs \`${r}\``);
+      // what the code reads of it, when it comes from outside (an argument, an input)
+      info.push(...readsLines(f.required || [], "code"));
+    }
     // (on demand: the function alone, run for any call; what the program's calls pass is not known)
     if (f.on_demand) info.splice(valueShown ? 0 : 1, 0, ON_DEMAND_LINE);
-    // tensor shapes: what this line needs of its inputs (rowan could not decide it here)
-    for (const r of f.requires || []) info.push(`- needs \`${r}\``);
-    // what the code reads of it, when it comes from outside (an argument, an input)
-    const req = f.required || [];
-    const always = req.filter((r) => r.always).map((r) => r.path);
-    // (reads under a test of the arguments first: they say when)
-    const sometimes = req.filter((r) => !r.always).sort((a, b) => !!b.only_if - !!a.only_if);
-    if (always.length) info.push(`- the code reads ${codeList(always)}`);
-    // (a read under a test of the arguments: `row["role"]` (only if `admin`))
-    const some = sometimes.slice(0, 6).map((r) => "`" + r.path + "`" + (r.only_if ? ` (only if \`${r.only_if}\`)` : "")).join(", ") + (sometimes.length > 6 ? ` and ${sometimes.length - 6} more` : "");
-    if (sometimes.length) info.push(`- ${always.length ? "and on some paths" : "on some paths the code reads"} ${some}`);
-    for (const l of objectLines(f).concat(info)) {
+    // (a parameter's objects are the calls': said by them)
+    for (const l of (f.param ? [] : objectLines(f)).concat(info)) {
       texts.push(l);
       out.push(l);
     }
   }
   // the accesses on this line, once each (the call paths they were reached by do not matter
   // here); one access found for several keys alike is one line (`keys "a", "b" are there`)
-  const marks = new Set();
   const groups = new Map();
   // (an input's key is in "the code reads" already)
   const reads = facts.some((f) => (f.required || []).length);

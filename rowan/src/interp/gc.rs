@@ -136,6 +136,7 @@ impl Analyzer {
         }
         work.extend(each(&self.entry.instances, o).flatten());
         work.extend(each(&self.entry.general_instances, o).flatten());
+        work.extend(each(&self.entry.any_instances, o).flatten());
         each(&self.m.sorted_items, o).flat_map(|items| items.iter()).for_each(|(_, v, _)| v.push_objs(work));
         for (f, args, kw) in each(&self.m.exit_callbacks, o).flatten() {
             f.push_objs(work);

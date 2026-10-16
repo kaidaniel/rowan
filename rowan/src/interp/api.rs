@@ -139,13 +139,13 @@ impl Analyzer {
 
     /// `f` runs as the entry run of `oid` (a framework calls it with any input), in a module
     /// frame of its module, given the node its calls are made at.
-    pub fn as_entry_run<R>(&mut self, oid: ObjId, fi: &FuncInfo, f: impl FnOnce(&mut Analyzer, &Node) -> R) -> R {
+    pub fn as_entry_run<R>(&mut self, oid: ObjId, fi: &FuncInfo, general: bool, f: impl FnOnce(&mut Analyzer, &Node) -> R) -> R {
         let mi = self.heap.module_info(fi.module);
         self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
         self.entry.scope = Some(oid);
         let fake = Node::synthetic(mi.idx, fi.node.node().line);
         let saved_entry = self.entry.run.replace(oid);
-        let saved_general = self.entry.general.replace(oid);
+        let saved_general = std::mem::replace(&mut self.entry.general, general.then_some(oid));
         let r = f(self, &fake);
         self.entry.scope = None;
         self.entry.run = saved_entry;
@@ -282,6 +282,17 @@ impl Analyzer {
         if !req.2.is_empty() && !self.findings.row_check_requests.contains(&req) {
             self.findings.row_check_requests.push(req);
         }
+    }
+
+    /// Does what is recorded here hold for any call of the running function (its run for any
+    /// call, or module code)?
+    pub fn for_any_call(&self) -> bool {
+        self.in_general_run()
+    }
+
+    /// The golden harness checks values for any call (`#@general`).
+    pub fn request_general_checks(&mut self) {
+        self.findings.general_checks = true;
     }
 
     /// A key a row check names as absent.
