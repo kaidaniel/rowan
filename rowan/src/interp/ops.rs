@@ -370,7 +370,7 @@ impl Analyzer {
     /// `seq * n` on a list / tuple with known positions and a known count (at most 64 items).
     fn binop_mult_seq(&mut self, a: &Value, b: &Value, node: &Node, state: &mut State) -> Option<Value> {
         // a list with known positions times a known count
-        let (seq, cnt) = if a.pts.len() == 1 { (a, b) } else { (b, a) };
+        let (seq, cnt) = if !a.pts.is_empty() { (a, b) } else { (b, a) };
         if let (Some(x), Some(n)) = (seq.single(), cnt.kv.as_lit().filter(|_| cnt.pts.is_empty()).and_then(intern::key_as_int)) {
             if matches!(self.heap.kind(x), Kind::List | Kind::Tuple) {
                 if let Some(len) = self.heap.llen(x, state) {
@@ -386,7 +386,18 @@ impl Analyzer {
                 }
             }
         }
-        None
+        // lists (tuples) of any length times a count: one of the same kind, of their elements
+        let kind = seq.pts.first().map(|o| self.heap.kind(o)).filter(|k| matches!(k, Kind::List | Kind::Tuple))?;
+        let count = match &cnt.kv {
+            KeyVal::Data(l) => crate::domain::label_type(&intern::str_get(*l)).is_none_or(|t| matches!(t, "int" | "bool")),
+            kv if kv.is_literal() => crate::domain::kv_literals(kv).iter().all(|k| intern::key_as_int(k).is_some()),
+            _ => false,
+        };
+        if !count || !seq.kv.is_bot() || !cnt.pts.is_empty() || seq.pts.iter().any(|o| self.heap.kind(o) != kind) {
+            return None;
+        }
+        let e = self.elem_of(seq, node, state);
+        Some(self.alloc_positional(kind, node, None, Value::objs(e.pts.clone()), e.kv, state))
     }
 
     /// `a + b` on texts of known affixes, lists with known positions, lists of known elements.

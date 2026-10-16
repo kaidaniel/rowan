@@ -26,8 +26,7 @@ if n > 2:
 first = b[0]                                 #@value first: includes={"s", 1}
 #@todo value first: exactly={"s", 1}
 for x in b:
-    vb = x                                   #@value vb: includes={"s", 1, 2}
-#@todo value vb: exactly={"s", 1, 2}
+    vb = x                                   #@value vb: exactly={"s", 1, 2}
 
 # cleared, then sorted on one path and filled on another
 d = ["s"]
@@ -49,8 +48,7 @@ if n > 2:
     src = g * 2
 cat = src + [0]
 for x in cat:
-    vcat = x                                 #@value vcat: includes={5, 6, 0}
-#@todo value vcat: exactly={5, 6, 0}
+    vcat = x                                 #@value vcat: exactly={5, 6, 0}
 
 # `+=` on a list or a number: the list is extended in place, the number added to
 num = [1] if n > 5 else 9
