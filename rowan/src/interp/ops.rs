@@ -404,8 +404,10 @@ impl Analyzer {
     fn binop_add_seq(&mut self, a: &Value, b: &Value, both: &crate::domain::ObjSet, node: &Node, state: &mut State) -> Option<Value> {
         let la = a.kv.as_lit();
         let lb = b.kv.as_lit();
-        // (a known text before or after one of several texts, or keys)
+        // (a known text before or after one of several texts, or keys; not beside an object:
+        // an unknown one may be any text)
         match (la.and_then(intern::key_as_str), lb.and_then(intern::key_as_str)) {
+            _ if !a.pts.is_empty() || !b.pts.is_empty() => {}
             (Some(x), _) if matches!(b.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) => return Some(Value::kv_only(self.affix(&b.kv, &x, ""))),
             (_, Some(y)) if matches!(a.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) => return Some(Value::kv_only(self.affix(&a.kv, "", &y))),
             _ => {}
