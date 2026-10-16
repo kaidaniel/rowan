@@ -83,29 +83,7 @@ impl Analyzer {
         if self.budget.over_hard_deadline() && targets.iter().all(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound)) {
             return self.unknown_call("?", None, &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
-        // (several values rowan knows nothing of, or their methods: any of them is any code, one
-        // unknown call for all of them — each its own would walk all it is given again, on a
-        // copy of the state)
-        let unknown_code = |o: ObjId| match (self.heap.kind(o), &self.heap.obj(o).payload) {
-            (Kind::Unknown, _) => Some(Value::obj(o)),
-            (Kind::Method, Payload::Method(q, r)) if q.starts_with("unknown.") => Some(r.clone()),
-            _ => None,
-        };
-        let (unknown, mut targets): (Vec<ObjId>, Vec<ObjId>) = targets.iter().partition(|o| unknown_code(**o).is_some());
-        let unknown = match unknown.len() {
-            0 => None,
-            1 => {
-                targets.push(unknown[0]);
-                None
-            }
-            _ => {
-                let q = match call_ast.and_then(|c| super::chain_text(&c.func)) {
-                    Some(text) => format!("call of {}", text),
-                    None => format!("call of {}", self.heap.obj(unknown[0]).label),
-                };
-                Some((q, join_values(unknown.iter().filter_map(|o| unknown_code(*o)).collect::<Vec<_>>())))
-            }
-        };
+        let (unknown, targets) = self.unknown_callees(targets, call_ast);
         if targets.is_empty() {
             let (q, recv) = unknown.expect("several unknown callees");
             return self.unknown_call(&q, Some(&recv), &args, &kwargs, &star_args, &star_kwargs, state, node);
@@ -122,10 +100,57 @@ impl Analyzer {
                 return self.skipped_calls(&fns, &args, &kwargs, &star_args, &star_kwargs, state, node, call_ast);
             }
         }
-        // (one method on several receivers: one call with all of them as the receiver, not one
-        // per receiver, when the call would not run — past the function's budget, no recursion
-        // of it running — or in a run on demand — a method of a base class run for the
-        // instances of every subclass)
+        let (groups, targets) = self.receiver_groups(targets);
+        // (several functions a value picks — a method of each of several receivers is the
+        // receiver's own: not picked)
+        let picked = (groups.is_empty() && targets.iter().all(|o| !matches!(self.heap.kind(*o), Kind::Bound) && !matches!(self.heap.obj(*o).payload, Payload::Method(..) | Payload::Bound(..)))).then(|| self.node_text(node));
+        let (n, m) = (targets.len(), groups.len());
+        self.alternatives(n + m + usize::from(unknown.is_some()), false, state, &mut |an, i, st| {
+            if let Some(&oid) = targets.get(i) {
+                return an.call_picked(oid, &picked, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast);
+            }
+            if let Some((f, recv, _)) = groups.get(i - n) {
+                return an.call_user(*f, Some(recv.clone()), args.clone(), kwargs.clone(), star_args.clone(), star_kwargs.clone(), st, node, false);
+            }
+            let (q, recv) = unknown.as_ref().expect("an unknown callee");
+            an.unknown_call(q, Some(recv), &args, &kwargs, &star_args, &star_kwargs, st, node)
+        })
+    }
+
+    /// Among a call's callees, the values rowan knows nothing of, or their methods: any of them is
+    /// any code, so several are one unknown call given all of them (each its own would walk all
+    /// it is given again, on a copy of the state): its name and receivers, and the other callees.
+    #[allow(clippy::type_complexity)]
+    fn unknown_callees(&self, targets: Vec<ObjId>, call_ast: Option<&'static ast::ExprCall>) -> (Option<(String, Value)>, Vec<ObjId>) {
+        let unknown_code = |o: ObjId| match (self.heap.kind(o), &self.heap.obj(o).payload) {
+            (Kind::Unknown, _) => Some(Value::obj(o)),
+            (Kind::Method, Payload::Method(q, r)) if q.starts_with("unknown.") => Some(r.clone()),
+            _ => None,
+        };
+        let (unknown, mut targets): (Vec<ObjId>, Vec<ObjId>) = targets.into_iter().partition(|o| unknown_code(*o).is_some());
+        let unknown = match unknown.len() {
+            0 => None,
+            1 => {
+                targets.push(unknown[0]);
+                None
+            }
+            _ => {
+                let q = match call_ast.and_then(|c| super::chain_text(&c.func)) {
+                    Some(text) => format!("call of {}", text),
+                    None => format!("call of {}", self.heap.obj(unknown[0]).label),
+                };
+                Some((q, join_values(unknown.iter().filter_map(|o| unknown_code(*o)).collect::<Vec<_>>())))
+            }
+        };
+        (unknown, targets)
+    }
+
+    /// A method on several receivers is one call with all of them as the receiver, not one per
+    /// receiver, when the call would not run (past the function's budget, no recursion of it
+    /// running) or in a run on demand (a base class's method run for the instances of every
+    /// subclass): the groups (function, receivers, how many), and the other callees.
+    #[allow(clippy::type_complexity)]
+    fn receiver_groups(&self, targets: Vec<ObjId>) -> (Vec<(ObjId, Value, usize)>, Vec<ObjId>) {
         let on_demand = self.budget.hover.is_some();
         let skips = |an: &Analyzer, f: ObjId| {
             let fi = an.heap.func_info(f);
@@ -146,20 +171,7 @@ impl Analyzer {
         }
         groups.retain(|g| g.2 > 1 && (on_demand || skips(self, g.0)));
         let targets: Vec<ObjId> = targets.into_iter().filter(|o| !matches!(&self.heap.obj(*o).payload, Payload::Bound(f, _) if self.heap.kind(*o) == Kind::Bound && groups.iter().any(|g| g.0 == *f))).collect();
-        // (several functions a value picks — a method of each of several receivers is the
-        // receiver's own: not picked)
-        let picked = (groups.is_empty() && targets.iter().all(|o| !matches!(self.heap.kind(*o), Kind::Bound) && !matches!(self.heap.obj(*o).payload, Payload::Method(..) | Payload::Bound(..)))).then(|| self.node_text(node));
-        let (n, m) = (targets.len(), groups.len());
-        self.alternatives(n + m + usize::from(unknown.is_some()), false, state, &mut |an, i, st| {
-            if let Some(&oid) = targets.get(i) {
-                return an.call_picked(oid, &picked, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast);
-            }
-            if let Some((f, recv, _)) = groups.get(i - n) {
-                return an.call_user(*f, Some(recv.clone()), args.clone(), kwargs.clone(), star_args.clone(), star_kwargs.clone(), st, node, false);
-            }
-            let (q, recv) = unknown.as_ref().expect("an unknown callee");
-            an.unknown_call(q, Some(recv), &args, &kwargs, &star_args, &star_kwargs, st, node)
-        })
+        (groups, targets)
     }
 
     /// One of several callees a value picks (`call_value`; `picked`: the call's text, when the
