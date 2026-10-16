@@ -120,8 +120,8 @@ impl Analyzer {
     /// it since it was made, given anything. An attribute some function stores may hold
     /// anything; what their code may do to the values of attributes, by name (`CodeUses::attrs`),
     /// is done: instances and torch layers held there (layers in a list, a called member)
-    /// likewise, other values walked by unknown code. A method of its class whose receiver escapes is a call that does
-    /// not run (`skipped_call`).
+    /// likewise, other values walked by unknown code. An instance a method of whose class gives
+    /// its receiver away is walked whole.
     pub(in crate::interp) fn methods_may_have_run(&mut self, inst: ObjId, state: &mut State) {
         let site = s("program@");
         let any = Value::obj(crate::interp::any_object(&mut self.heap));
@@ -130,13 +130,15 @@ impl Analyzer {
         let mut work: Vec<ObjId> = vec![inst];
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
         let mut walk: Vec<Value> = Vec::new();
-        let mut escaping: Vec<(ObjId, ObjId)> = Vec::new();
         while let Some(inst) = work.pop() {
             if !seen.insert(inst) {
                 continue;
             }
-            if let Some(cls) = self.heap.instance_class(inst) {
-                escaping.extend(self.escaping_methods(cls, state).into_iter().map(|m| (m, inst)));
+            // (a method that gives its receiver away: unknown code may do anything to it — what
+            // the program's code may change otherwise is changed already, `on_demand`)
+            if self.heap.instance_class(inst).is_some_and(|cls| self.escapes_in_methods(cls, state)) {
+                walk.push(Value::obj(inst));
+                continue;
             }
             for (k, v) in state.obj_slots(inst, Ns::Attr) {
                 let Some(name) = intern::key_as_str(k).map(|n| s(&n)) else { continue };
@@ -173,12 +175,6 @@ impl Analyzer {
         let rid = crate::interp::any_object(&mut self.heap);
         let w = self.havoc.new_walk();
         self.havoc.walk_from(&mut self.heap, &walk, rid, site, state, w);
-        for (m, inst) in escaping {
-            let fi = self.heap.func_info(m);
-            let n = fi.node.params().map(|p| p.posonlyargs.len() + p.args.len()).unwrap_or(1).saturating_sub(1);
-            let node = Node::synthetic(self.heap.module_info(fi.module).idx, fi.node.node().line);
-            self.skipped_call(m, &fi.qualname, Some(&Value::obj(inst)), &vec![any.clone(); n], &IndexMap::new(), &[], &[], state, &node);
-        }
     }
 
     /// What the program's own functions may do to the values of attributes by name, and the
@@ -210,24 +206,24 @@ impl Analyzer {
         u
     }
 
-    /// The methods of `cls` and its bases (but `__init__`, static and class methods) whose
-    /// receiver escapes.
-    fn escaping_methods(&mut self, cls: ObjId, state: &State) -> Vec<ObjId> {
-        let mut methods: Vec<ObjId> = Vec::new();
+    /// Does a method of `cls` or its bases (but `__init__`, static and class methods) give its
+    /// receiver away?
+    fn escapes_in_methods(&mut self, cls: ObjId, state: &State) -> bool {
         for c in self.heap.mro(cls) {
             for (k, v) in state.obj_slots(c, Ns::Attr) {
-                if intern::key_as_str(k).as_deref() != Some("__init__") {
-                    methods.extend(v.pts.iter().filter(|f| matches!(self.heap.obj(*f).payload, Payload::Func(_))));
+                if intern::key_as_str(k).as_deref() == Some("__init__") {
+                    continue;
+                }
+                for f in v.pts.iter() {
+                    let Payload::Func(fi) = &self.heap.obj(f).payload else { continue };
+                    let fi = fi.clone();
+                    if !fi.is_static.get() && !fi.is_classmethod.get() && self.code_uses(&fi).recv.as_ref().is_none_or(|r| r.escapes) {
+                        return true;
+                    }
                 }
             }
         }
-        methods.sort_unstable();
-        methods.dedup();
-        methods.retain(|&m| {
-            let fi = self.heap.func_info(m);
-            !fi.is_static.get() && !fi.is_classmethod.get() && self.code_uses(&fi).recv.as_ref().is_none_or(|r| r.escapes)
-        });
-        methods
+        false
     }
 
     /// What a call of method `foid` that does not run may do to its receiver `recv` itself, by
