@@ -3,7 +3,7 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{kv_join, KeyVal, KeysOf, Ns, Value, BOT};
+use crate::domain::{KeyVal, KeysOf, Ns, Value, BOT};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_int, s, KeyId, STAR};
 use crate::state::{Kind, State};
@@ -260,9 +260,7 @@ impl Analyzer {
             } else {
                 positional = false;
             }
-            st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), crate::models::torch::elem_kv(&v.kv)), false);
-            let cur = st.elems.get(&oid).unwrap_or_else(|| v.kv.clone());
-            st.elems.insert(oid, kv_join(&cur, &v.kv));
+            an.add_elem(oid, &v, st);
         };
         if state.elems.get(&oid).is_none() {
             state.elems.insert(oid, BOT);
