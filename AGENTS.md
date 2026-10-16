@@ -50,7 +50,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   function texts: globals, cells, defaults and arguments whose value, or what it holds, the code
   may change or give away (to the program's functions: as they use it; a dict, list or set changed
   in place: its items), a local aliasing what it is bound to; class attributes by name, rebound
-  where a store's base may be the class; a receiver by the names its code uses unless it escapes,
+  where a store's base may be the class (a call's result: the classes it may return, `result_classes`); a receiver by the names its code uses unless it escapes,
   `receiver_effects`; one call for several receivers), and the function gets a reporting run (open
   parameters) for the calls that did not run. Entry runs are not counted (one per function): work is bounded by functions × budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation

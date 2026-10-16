@@ -653,6 +653,15 @@ impl Analyzer {
                 out.rebound.extend(cs.into_iter().map(|c| (c, Ns::Attr, k)));
             }
         }
+        for (c, a) in &uses.class_stores_result {
+            let mut cs = Vec::new();
+            if self.result_classes(fi, &uses, *c, state, 2, &mut cs) {
+                class_stores.insert(*a);
+            } else {
+                let k = key_str_lit(&str_get(*a));
+                out.rebound.extend(cs.into_iter().map(|c| (c, Ns::Attr, k)));
+            }
+        }
         // (a default is the function's own state: it changes where its parameter does)
         for (p, v) in fi.defaults.iter() {
             code(self, v, work);
@@ -742,6 +751,15 @@ impl Analyzer {
     /// The program's functions a call by name in the code of `fi` calls (`callee`): those the name
     /// holds; with `all`, None unless it holds nothing else.
     fn program_callees(&self, fi: &FuncInfo, uses: &CodeUses, callee: Callee, state: &State, all: bool) -> Option<Vec<ObjId>> {
+        let v = self.callee_value(fi, uses, callee, state)?;
+        let fs: Vec<ObjId> = v.pts.iter().filter(|o| matches!(self.heap.obj(*o).payload, Payload::Func(_)) && self.heap.kind(*o) == Kind::Function).collect();
+        let whole = fs.len() == v.pts.len() && matches!(v.kv, crate::domain::KeyVal::Bot);
+        (!fs.is_empty() && (whole || !all)).then_some(fs)
+    }
+
+    /// What a call by name in the code of `fi` calls (`callee`): the value of the name (of a
+    /// module's attribute); None for a module or a name not resolved.
+    fn callee_value(&self, fi: &FuncInfo, uses: &CodeUses, callee: Callee, state: &State) -> Option<Value> {
         let loc = match (self.resolve_use(fi, uses, callee.0), callee.1) {
             (Ok(l), None) => l,
             (Ok(l), Some(a)) => {
@@ -751,10 +769,73 @@ impl Analyzer {
             (Err(m), Some(a)) => (m, Ns::Attr, key_str_lit(&str_get(a))),
             (Err(_), None) => return None,
         };
-        let v = state.slot(loc.0, loc.1, loc.2);
-        let fs: Vec<ObjId> = v.pts.iter().filter(|o| matches!(self.heap.obj(*o).payload, Payload::Func(_)) && self.heap.kind(*o) == Kind::Function).collect();
-        let whole = fs.len() == v.pts.len() && matches!(v.kv, crate::domain::KeyVal::Bot);
-        (!fs.is_empty() && (whole || !all)).then_some(fs)
+        Some(state.slot(loc.0, loc.1, loc.2))
+    }
+
+    /// The classes the program holds that a call by name in the code of `fi` may give back
+    /// (`out`, following calls `depth` deep), or true: any class (a library's or unknown
+    /// code's result, a function giving back a parameter or an attribute). A class of the
+    /// program makes an instance (unless a base or `__new__` of its own may make it otherwise);
+    /// a class a function makes is a new one, none the program holds.
+    fn result_classes(&mut self, fi: &FuncInfo, uses: &CodeUses, callee: Callee, state: &State, depth: usize, out: &mut Vec<ObjId>) -> bool {
+        let v = self.callee_value(fi, uses, callee, state).unwrap_or_default();
+        // (`object.__new__(cls)`: an instance)
+        if v.empty() && &*str_get(callee.0) == "object" && callee.1.is_some_and(|a| &*str_get(a) == "__new__") {
+            return false;
+        }
+        if v.pts.is_empty() || !v.kv.is_bot() {
+            return true;
+        }
+        for o in v.pts.iter() {
+            let code = match (self.heap.kind(o), &self.heap.obj(o).payload) {
+                // (an instance, or what a `__new__` of its own gives back)
+                (Kind::Class, _) if self.heap.class_info_opt(o).is_some_and(|ci| !ci.open_base) => match self.class_lookup(o, "__new__") {
+                    None => continue,
+                    Some(c) => match self.heap.cls_slots.get(&(c, Ns::Attr, key_str_lit("__new__"))).and_then(|f| f.single()) {
+                        Some(f) if self.heap.kind(f) == Kind::Function => f,
+                        _ => return true,
+                    },
+                },
+                (Kind::Function, Payload::Func(_)) => o,
+                _ => return true,
+            };
+            if self.returned_classes(code, state, depth, out) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The classes the program holds that function `f` may give back (`result_classes`).
+    fn returned_classes(&mut self, f: ObjId, state: &State, depth: usize, out: &mut Vec<ObjId>) -> bool {
+        let gi = self.heap.func_info(f);
+        let gu = self.code_uses(&gi);
+        if gu.returns_other {
+            return true;
+        }
+        for (src, l) in gu.returns.iter() {
+            match src {
+                Origin::Name(n) => {
+                    let v = match self.resolve_use(&gi, &gu, *n) {
+                        Ok(loc) => state.slot(loc.0, loc.1, loc.2),
+                        Err(m) => Value::obj(m),
+                    };
+                    // (what an object other than a container holds: a module's, an instance's
+                    // attribute by a computed name)
+                    if *l == Level::Held && v.pts.iter().any(|o| !matches!(self.heap.kind(o), Kind::Dict | Kind::List | Kind::Tuple | Kind::Set)) {
+                        return true;
+                    }
+                    self.classes_within(&v, state, if *l == Level::Held { 2 } else { 0 }, out);
+                }
+                Origin::Result(n, a) if depth > 0 => {
+                    if self.result_classes(&gi, &gu, (*n, *a), state, depth - 1, out) {
+                        return true;
+                    }
+                }
+                _ => return true,
+            }
+        }
+        false
     }
 
     /// What the code of function `f` may do with the argument in `slot` (given away when it is
