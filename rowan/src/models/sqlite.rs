@@ -119,7 +119,8 @@ fn lex(sql: &str) -> Option<Vec<Tok>> {
             }
             '?' => {
                 i += 1;
-                while i < cs.len() && cs[i].is_ascii_digit() {
+                // (a numbered parameter, `?1`: not modelled)
+                if i < cs.len() && cs[i].is_ascii_digit() {
                     return None;
                 }
                 out.push(Tok::Param(None));

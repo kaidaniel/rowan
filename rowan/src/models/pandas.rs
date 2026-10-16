@@ -4342,7 +4342,7 @@ fn pivot(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             None => known_or_open(None, &base, c.line, "pivot_table"),
         },
         Some(_) => {
-            let flat = values_single || (!table && values.as_ref().map(|v| v.len() == 1).unwrap_or(false) && values_single);
+            let flat = values_single;
             match (&colvals, &vcols) {
                 (Some(k), _) if flat => {
                     let mut r = k.row();
