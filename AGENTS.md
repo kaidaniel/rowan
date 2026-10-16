@@ -58,10 +58,11 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     records get a mutator, slots may hold anything (one shared unknown object, which no store
     changes: a value stored into it goes to unknown code, `escape`), lists and sets any items
     and length (NamedTuples, patterns, matches, paths, frozensets, enum members' name and value
-    cannot change); the program's functions among it may run (`follow_code`). A walk by the same
-    code from the same values redoes only what changed (`Havoc`'s memo). They return an unknown and may raise anything.
-    Library functions known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`) unless they
-    change their arguments (`random.shuffle`) or get the program's functions; several callees: `alternatives`.
+    cannot change); the program's functions among it may run (`follow_code`). A walk from the same
+    values (by any unknown code) redoes only what changed (`Havoc`'s memo). They return an unknown and may raise anything.
+    Library functions known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`) unless they change their
+    arguments (`random.shuffle`) or get the program's functions; several callees: `alternatives` (unknown values: one
+    unknown call; a method on several receivers: one call per function when it would not run, or on demand).
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model
     is unknown code. A TypeError may come from those taken to fail only on wrong types.
   * **Entry points, general runs:** functions the main run does not call (also those only entry
@@ -94,8 +95,10 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   fact on the path; in torch modules `int` / `Tensor` annotations hold; a module-level unknown
   number names its dims, a module-level tensor's unknown dims are one value each).
 * **Deadline:** a safety net (`ms`, 10 s): past it user calls are unknown, running ones stop; the budget bounds the work.
-  **On demand** (`rowan serve` when it cuts a whole run; `on_demand`, `general_run_of`): from `after_any_code`, a
-  hovered function's general run with verdicts (fresh budget; past four budgets of work its callees' calls are unknown).
+  **On demand** (`on_demand`, `general_run_of`): from `after_any_code`, a hovered function's general run with
+  verdicts (fresh budget; past four budgets of work its callees' calls are unknown, several callees one `skipped_calls`).
+  `rowan serve` starts the whole run and the module code's (`__main__` block's calls skipped) together; the latter
+  answers unless the former completes within `EARLY` (1 s), whose document then follows as an event.
 * **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
   a general run's `x: int` is an int, not a subclass overriding int's operators). `exec`, `setattr` /
   `getattr` with unknown names (also in skipped code; a class attribute set there through data or a
@@ -112,8 +115,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   keeping the line count. Value analysis matters more than bug-finding verdicts.
 * **Hypotheses need a repro.** For a suspected bug or slowdown, write a small program showing
   it first (a golden case; `#@work` / `#@tabulations` bounds for cost), fix it, then measure.
-* **Soundness first.** Where the runtime oracle and this file disagree, the oracle wins. Golden
-  cases matter; snapshot changes are fine when sound.
+* **Soundness first.** Where the runtime oracle and this file disagree, the oracle wins. Golden cases matter; snapshot changes are fine when sound.
 * **Commits.** Commit when a round of work is complete and golden, snapshots and `cargo test`
   pass; never commit a failing state. Review snapshot diffs before `--update`.
 * **Plans.** When a request mixes several things, write the plan first, then work it in order.
@@ -136,7 +138,8 @@ uv run --no-project --with pandas --with pydantic --with pydantic-settings --wit
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py [case…]
 cd vscode-rowan && node test.js && npm run package  # hovers; the .vsix (test_package.js X.vsix TARGET)
 uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"  # also email, stdlib12k, click; pip, timm, sktime, functional
-uv run --no-project python bench/hovers.py rowan/target/release/rowan pip  # each function on demand, timed; tests/ondemand_check.py: vs whole runs
+uv run --no-project python bench/hovers.py rowan/target/release/rowan pip  # each function on demand (`rowan hovers F --only NAME`: one); tests/ondemand_check.py: vs whole runs
+uv run --no-project python bench/first_hover.py rowan/target/release/rowan rich  # rowan serve: time to the first hover in a file
 ```
 
 Run the oracle on the cases you touched, in full before a commit that changes models. CI (`ci.yml`) runs the above but
@@ -150,20 +153,17 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
   `#@ tier key`, `#@row NAME: present= definite= absent= closed|open`,
   `#@value NAME: exactly= | unknown | includes=` (`#@general`: for any call), `#@schema src: …`,
   `#@only src: KEY if TEST | KEY none`, `#@todo …`, `#@argv`, `#@shape` (torch). Cost bounds, by hand:
-  `#@objects`, `#@tabulations`, `#@joins`, `#@work`, `#@visits`, `#@havoc <= N`; `#@limits
-  k=v,…` sets the case's `ROWAN_LIMITS`. A directive-only line applies to the code line above.
+  `#@objects`, `#@tabulations`, `#@joins`, `#@work`, `#@visits`, `#@havoc <= N`; `#@limits k=v,…` sets the case's `ROWAN_LIMITS`. A directive-only line applies to the code line above.
 * **Oracle** (`tests/oracle.py`): reruns each case under CPython (a tracer), checks every directive (schemas by dropping keys), strict on library suites.
-* **Snapshots** (`tests/snapshots/`): `--json` on `examples/etl_report.py`, `tests/fixtures/proto_*.py`:
-  the guard for internals (ids may shift). **Unit tests**: CPython values, the regex engine, tries.
+* **Snapshots** (`tests/snapshots/`): `--json` on `examples/etl_report.py`, `tests/fixtures/proto_*.py`: the guard for internals (ids may shift). **Unit tests**: CPython values, the regex engine, tries.
 
 ## Debugging switches
 
-* `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls, entry runs, a `work:` line of counters (statements,
-  units = statements + walk visits / 16, body runs, objects, row joins, visits, havoc visits; ~25% slower). `2`: raises.
+* `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls, entry runs, a `work:` line of counters (statements, units = statements + walk visits / 16, body runs, objects, row joins, visits, havoc visits; ~25% slower). `2`: raises.
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (golden `#@limits` per case); `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check`.
-  Profiles: the bench workflow's `perf` (`sample` hangs on macOS 27); time inside the guard (`.guard/run /usr/bin/time -l`).
+  Profiles: the bench workflow's `perf`; locally `xctrace record --template 'Time Profiler'` (symbols: `atos -l` with the binary's slide; `sample` hangs on macOS 27); time inside the guard (`.guard/run /usr/bin/time -l`).
 
-## Layout (`rowan/src/`, ~68k lines: the engine ~26k, the models ~42k)
+## Layout (`rowan/src/`, ~69k lines: the engine ~26k, the models ~42k)
 
 | file | role |
 | --- | --- |
@@ -190,9 +190,9 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
 | input | time |
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
-| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.3 / ~2.5 / ~8.8 / ~6.4 s; 0.12 / 0.07 / 0.16 / 0.09 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~13 / ~26 / ~24 / ~6.4 s; 0.30 / 0.75 / 0.39 / 0.34 GB |
-| on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.2 / 8.9 / 5.3 / 28 s; per function p50 ≤ 1.4 ms, p99 0.23-0.8 s, max 0.6 / 2.8 / 5 / 20 s (havoc walks) |
+| stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.7 / ~2.7 / ~8.7 / ~6.0 s; 0.13 / 0.07 / 0.18 / 0.10 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~12.4 / ~24 / ~13.5 / ~5.9 s; 0.31 / 0.78 / 0.26 / 0.33 GB |
+| on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.25 / 8.4 / 4.9 / 28 s; per function p50 ≤ 1.3 ms, p99 0.21-0.76 s, max 0.5 / 2.6 / 3.4 / 18 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 3.6 / 0.2 s, max 1.2 / 5.0 / 3.7 / 1.1 s |
 
 ## Known problems and next steps
 
