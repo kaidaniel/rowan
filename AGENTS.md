@@ -79,7 +79,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     of them: any attributes), a classmethod on the class or a subclass. Facts on: a facts-only general run where needed.
 * **Generators** run whole at their first consumption (`force_gen`), in the creating call's
   context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`; at a position
-  not known, some yield's). If code between items (where the consumer asks for one:
+  not known, or one object for several runs, some yield's; joined in where the consumer changed them). If code between items (where the consumer asks for one:
   `note_resume`; unknown code, deletes too) changes what the generator reads after a yield
   (`Gens::watch`, also after the call that started it while held, or a global holds it), it runs again
   with that changed at each yield (`with_gen_restart`). `@contextmanager` bodies run at yields. A `for`
@@ -110,7 +110,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   a general run's `x: int` is an int, not a subclass overriding int's operators). `exec`, `setattr` /
   `getattr` with unknown names (known in part, an f-string's: the attributes whose names fit,
   `Payload::Affix`), metaclasses and monkey-patching (rebinding a function or class too;
-  a module's function the program calls only by name has no other callers) are unknown or ignored. List lengths are tracked up to 15 (a few per path: each one's positions;
+  a module's function the program calls only by name has no other callers) are unknown or ignored;
+  unknown code does not shadow a class attribute on an instance; a generator expression runs when made. List lengths are tracked up to 15 (a few per path: each one's positions;
   `xs[:n]` keeps xs's). An object a path has no facts of reads as unknown (`read_row`). A set's items have no order (`ordered_items`).
 
 ## Working conventions (the owner's standing instructions)
@@ -122,11 +123,10 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Hypotheses need a repro.** For a suspected bug or slowdown, a small program showing it first (a golden case; `#@work` / `#@tabulations` bounds for cost), fix it, then measure.
 * **Soundness first.** Where the runtime oracle and this file disagree, the oracle wins. Golden cases matter; snapshot changes are fine when sound.
 * **Commits.** Commit when a round of work is complete and golden, snapshots and `cargo test` pass; never commit a failing state. Review snapshot diffs before `--update`.
-* **Plans.** When a request mixes several things, write the plan first, then work it in order.
+* **Plans.** When a request mixes several things, write the plan first, then work it in order. Keep this file under 200 lines and up to date with every change.
 * **Output is for Python engineers.** The text report, hovers and diagnostics use words and Python access paths
   (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source, placeholder) or internal site labels
   (`report::site_text` names unknown code by the call as written). A hover (`renderHover`): `name = value` (`(parameter) int(?)`), then Requirements (of parameters, and inputs read on the line), In Calls, Allocation Sites, Notes (only what is used above; last, a cut analysis). `vscode-rowan/test.js` checks real hovers.
-* Keep this file under 200 lines and up to date with every change.
 
 ## Commands
 
@@ -138,7 +138,7 @@ uv run --no-project python tests/run_snapshots.py   # --update only after review
 uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy \
     python tests/oracle.py [--strict|--lenient] [-v] [-j N] [case…]  # vs real runs, ~1.5 min
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py [case…]
-uv run --no-project python tests/fuzz.py [lists|objects|calls|scalars] [-n N] [--shrink]  # random programs' values vs CPython
+uv run --no-project python tests/fuzz.py [KIND…] [-n N] [--seed S] [--shrink]  # random programs vs CPython, also at budget=0 (CI: -n 15)
 cd vscode-rowan && node test.js && npm run package  # hovers; the .vsix (test_package.js X.vsix TARGET)
 uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"  # also email, stdlib12k, click; pip, timm, sktime, functional
 uv run --no-project python bench/hovers.py rowan/target/release/rowan pip  # each function on demand (`rowan hovers F --only NAME`: one); tests/ondemand_check.py: vs whole runs
@@ -155,7 +155,7 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
   `#@ tier key`, `#@row NAME: present= definite= absent= closed|open`,
   `#@value NAME: exactly= | unknown | includes=` (`#@general`: for any call), `#@schema src: …`, `#@only src: KEY if TEST | KEY none`, `#@todo …`, `#@argv`, `#@shape` (torch). Cost bounds, by hand:
   `#@objects`, `#@tabulations`, `#@joins`, `#@work`, `#@visits`, `#@havoc <= N`; `#@limits k=v,…` sets the case's `ROWAN_LIMITS`. A directive-only line applies to the code line above.
-* **Oracle** (`tests/oracle.py`): reruns each case under CPython (a tracer), checks every directive (schemas by dropping keys), strict on library suites. **Fuzzing** (`tests/fuzz.py`): random programs; each probe's CPython values must be among rowan's (`--shrink`: a repro).
+* **Oracle** (`tests/oracle.py`): reruns each case under CPython (a tracer), checks every directive (schemas by dropping keys), strict on library suites. **Fuzzing** (`tests/fuzz.py`): random programs in 11 areas (lists, dicts, attributes, try, generators, formatting, calls…); the values, key sets and access outcomes of CPython's runs must be among rowan's claims (`--shrink`: a repro).
 * **Snapshots** (`tests/snapshots/`): `--json` on `examples/etl_report.py`, `tests/fixtures/proto_*.py`: the guard for internals (ids may shift). **Unit tests**: CPython values, the regex engine, tries.
 
 ## Debugging switches

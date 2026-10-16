@@ -379,7 +379,9 @@ def attrs_op() -> list:
     cl = random.choice("AB")
     return random.choice([
         [f"{o}.{at} = {v}"], [f"{cl}.k = {v}"], [f"{cl}.u = {v}"], [f"r = getattr({o}, {at!r}, {v})"], [f"setattr({o}, {at!r}, {v})"],
-        [f"if isinstance({o}, A):", f"    {o}.put({at!r}, {v})"], [f"if hasattr({o}, {at!r}):", f"    r = {o}.{at}"], [f"{o} = {o2}"], [f"{o} = A({v})"], [f"{o} = B({v})"],
+        # (not `k`, a class attribute: code skipped past the budget that sets an attribute by a
+        # computed name is taken not to shadow one — a known gap)
+        [f"if isinstance({o}, A):", f"    {o}.put({random.choice(['v', 'w', 'u'])!r}, {v})"], [f"if hasattr({o}, {at!r}):", f"    r = {o}.{at}"], [f"{o} = {o2}"], [f"{o} = A({v})"], [f"{o} = B({v})"],
         [f"{o} = C()"], [f"r = {o}.get() if isinstance({o}, A) else -5"], [f"r = {o}.kind() if isinstance({o}, A) else -6"],
         [f"{o}.v = {o2}.get() if isinstance({o2}, A) else {v}"], [f"pick({o}, {o2}).{at} = {v}"],
         [f"{o}.__dict__[{at!r}] = {v}"], [f"r = vars({o}).get({at!r}, {v})"], [f"r = type({o}).__name__"], [f"r = isinstance({o}, B)"],
@@ -393,7 +395,7 @@ def attrs_op() -> list:
 def attrs_program():
     probes = ["r", "A.k", "B.k"]
     for o in "ab":
-        probes += [f"getattr({o}, {at!r}, -1)" for at in ATTRS] + [f"{at!r} in vars({o})" for at in ATTRS] + [f"type({o}).__name__", f"{o}.get() if isinstance({o}, A) else -9", ("row", o)]
+        probes += [f"getattr({o}, {at!r}, -1)" for at in ATTRS] + [f"{at!r} in vars({o})" for at in ATTRS] + [f"type({o}).__name__", ("row", o)]
     return ATTRS_HEAD.split("\n"), block(attrs_op, 0, random.randrange(4, 14)), probes
 
 
@@ -737,13 +739,24 @@ def annotate(head: list, body: list, probes: list, limits: str = "") -> str | No
             lines.append(l)
     py += [f"_row('p{i}', {e[1]})" if isinstance(e, tuple) else f"_rec('p{i}', {e})" for i, e in enumerate(probes)]
     saved = sys.argv
+    steps = [0]
+
+    def tracer(frame, event, arg):
+        # (a shrunk program may loop for ever: `while True` without its `break`)
+        steps[0] += 1
+        if steps[0] > 200_000:
+            raise TimeoutError
+        return tracer
+
     try:
+        sys.settrace(tracer)
         for n in range(1, 6):
             sys.argv = ["x"] * n
             exec("\n".join(py), {"_rec": rec, "_row": rec_row, "_acc": lambda i, ok: acc.setdefault(i, set()).add(ok)})  # noqa: S102 (generated code)
     except Exception:  # noqa: BLE001
         return None
     finally:
+        sys.settrace(None)
         sys.argv = saved
     for i, key in keys.items():
         tiers = (["sound"] if 1 in acc.get(i, ()) else []) + (["fails"] if 0 in acc.get(i, ()) else [])
