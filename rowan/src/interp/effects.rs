@@ -17,7 +17,7 @@ use super::flows::{Callee, CodeUses, Flags, Level, Like, NameUses, Origin, Pass,
 use super::{Analyzer, FuncInfo, Payload};
 
 /// What the cache of code closures (`code_closure`) may hold; past it the cache starts over.
-pub const CLOSURE_CACHE: usize = 1 << 18;
+pub const CLOSURE_CACHE: usize = 1 << 21;
 
 /// Caches of what code may change when it does not run. `code_uses` is a function of the
 /// program text; a closure is computed once per set of roots from the state of its first

@@ -88,33 +88,92 @@ impl Analyzer {
             let (q, recv) = unknown.expect("several unknown callees");
             return self.unknown_call(&q, Some(&recv), &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
-        // (on demand, past the work its run may do, several functions of the program none of
-        // which runs here: one call that does not run, for all of them)
         if unknown.is_none() && targets.len() > 1 && self.budget.past_hover_work(self.cx.frames.len(), self.hover_work()) {
-            let fns: Option<Vec<(ObjId, Option<Value>)>> = targets.iter().map(|&o| match (self.heap.kind(o), &self.heap.obj(o).payload) {
-                (Kind::Function, Payload::Func(_)) => Some((o, None)),
-                (Kind::Bound, Payload::Bound(f, r)) if self.heap.kind(*f) == Kind::Function => Some((*f, Some(r.clone()))),
-                _ => None,
-            }).collect();
-            if let Some(fns) = fns {
-                return self.skipped_calls(&fns, &args, &kwargs, &star_args, &star_kwargs, state, node, call_ast);
+            if let Some(r) = self.skipped_on_demand(&targets, &args, &kwargs, &star_args, &star_kwargs, state, node, call_ast) {
+                return r;
             }
         }
+        self.several_callees(targets, unknown, &args, &kwargs, &star_args, &star_kwargs, state, node, call_ast)
+    }
+
+    /// Several callees (functions, methods, classes; `unknown`: unknown code among them, one
+    /// call): alternatives, one state each — methods of one function on several receivers
+    /// together, those out of their budget one call that does not run (`budget_skipped`), and
+    /// once none runs any more (on demand past the work its run may do, past the deadline)
+    /// the rest one such call.
+    #[allow(clippy::too_many_arguments)]
+    fn several_callees(&mut self, targets: Vec<ObjId>, unknown: Option<(String, Value)>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
         let (groups, targets) = self.receiver_groups(targets);
+        let (skipped, groups, targets) = self.budget_skipped(groups, targets);
         // (several functions a value picks — a method of each of several receivers is the
         // receiver's own: not picked)
-        let picked = (groups.is_empty() && targets.iter().all(|o| !matches!(self.heap.kind(*o), Kind::Bound) && !matches!(self.heap.obj(*o).payload, Payload::Method(..) | Payload::Bound(..)))).then(|| self.node_text(node));
-        let (n, m) = (targets.len(), groups.len());
-        self.alternatives(n + m + usize::from(unknown.is_some()), false, state, &mut |an, i, st| {
+        let picked = (groups.is_empty() && skipped.is_empty() && targets.iter().all(|o| !matches!(self.heap.kind(*o), Kind::Bound) && !matches!(self.heap.obj(*o).payload, Payload::Method(..) | Payload::Bound(..)))).then(|| self.node_text(node));
+        let (n, m, k) = (targets.len(), groups.len(), usize::from(!skipped.is_empty()));
+        // (the callees left once none runs any more — on demand past the work its run may do,
+        // past the deadline: one call that does not run, for all of them)
+        let callee = |an: &Analyzer, j: usize| -> Option<(ObjId, Option<Value>)> {
+            match targets.get(j) {
+                Some(&o) => an.function_callee(o),
+                None => groups.get(j - n).map(|(f, r, _)| (*f, Some(r.clone()))),
+            }
+        };
+        let mut rest_skipped: Vec<usize> = Vec::new();
+        self.alternatives(n + m + k + usize::from(unknown.is_some()), false, state, &mut |an, i, st| {
+            if rest_skipped.contains(&i) {
+                st.reachable = false;
+                return Value::new();
+            }
+            if i < n + m && rest_skipped.is_empty() && (an.budget.past_hover_work(an.cx.frames.len(), an.hover_work()) || an.budget.over_hard_deadline()) {
+                let rest: Vec<usize> = (i..n + m).filter(|j| callee(an, *j).is_some()).collect();
+                if rest.len() > 1 && rest[0] == i {
+                    let fns: Vec<(ObjId, Option<Value>)> = rest.iter().filter_map(|j| callee(an, *j)).collect();
+                    rest_skipped = rest;
+                    return an.skipped_calls(&fns, args, kwargs, star_args, star_kwargs, st, node, call_ast);
+                }
+            }
             if let Some(&oid) = targets.get(i) {
-                return an.call_picked(oid, &picked, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast);
+                return an.call_picked(oid, &picked, args, kwargs, star_args, star_kwargs, st, node, call_ast);
             }
             if let Some((f, recv, _)) = groups.get(i - n) {
-                return an.call_user(*f, Some(recv.clone()), args.clone(), kwargs.clone(), star_args.clone(), star_kwargs.clone(), st, node, false);
+                return an.call_user(*f, Some(recv.clone()), args.to_vec(), kwargs.clone(), star_args.to_vec(), star_kwargs.to_vec(), st, node, false);
+            }
+            if i - n - m < k {
+                return an.skipped_calls(&skipped, args, kwargs, star_args, star_kwargs, st, node, call_ast);
             }
             let (q, recv) = unknown.as_ref().expect("an unknown callee");
-            an.unknown_call(q, Some(recv), &args, &kwargs, &star_args, &star_kwargs, st, node)
+            an.unknown_call(q, Some(recv), args, kwargs, star_args, star_kwargs, st, node)
         })
+    }
+
+    /// On demand, past the work its run may do, several functions of the program none of which
+    /// runs here: one call that does not run, for all of them. A class among them whose instance
+    /// only its `__init__` makes (`plain_init`) gives its instance, made here, as that
+    /// `__init__`'s receiver — `cls(**params)` for any of a thousand classes. None: a callee
+    /// is none of those.
+    #[allow(clippy::too_many_arguments)]
+    fn skipped_on_demand(&mut self, targets: &[ObjId], args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Option<Value> {
+        let callees: Vec<(Option<ObjId>, Option<Value>, bool)> = targets.iter().map(|&o| match (self.heap.kind(o), &self.heap.obj(o).payload) {
+            (Kind::Function, Payload::Func(_)) => Some((Some(o), None, false)),
+            (Kind::Bound, Payload::Bound(f, r)) if self.heap.kind(*f) == Kind::Function => Some((Some(*f), Some(r.clone()), false)),
+            (Kind::Class, _) => self.plain_init(o).map(|init| (init, Some(Value::obj(o)), true)),
+            _ => None,
+        }).collect::<Option<_>>()?;
+        let funcs = callees.iter().any(|(_, _, class)| !class);
+        let mut fns: Vec<(ObjId, Option<Value>)> = Vec::new();
+        let mut made = Value::new();
+        for (f, r, class) in callees {
+            let r = match r.as_ref().and_then(|c| c.single()).filter(|_| class) {
+                Some(cls) => {
+                    let inst = Value::obj(self.alloc_instance(cls, node, state));
+                    made = made.join(&inst);
+                    Some(inst)
+                }
+                None => r,
+            };
+            fns.extend(f.map(|f| (f, r)));
+        }
+        let r = if fns.is_empty() { Value::new() } else { self.skipped_calls(&fns, args, kwargs, star_args, star_kwargs, state, node, call_ast) };
+        Some(if made.pts.is_empty() || funcs { r.join(&made) } else { made })
     }
 
     /// Among a call's callees, the values rowan knows nothing of, or their methods: any of them is
@@ -152,11 +211,7 @@ impl Analyzer {
     #[allow(clippy::type_complexity)]
     fn receiver_groups(&self, targets: Vec<ObjId>) -> (Vec<(ObjId, Value, usize)>, Vec<ObjId>) {
         let on_demand = self.budget.hover.is_some();
-        let skips = |an: &Analyzer, f: ObjId| {
-            let fi = an.heap.func_info(f);
-            let runs = an.m.sdispatch.contains_key(&f) || fi.is_memo.get() || matches!(fi.node, FuncNode::Def(d) if is_generator(&d.body));
-            !runs && an.budget.exhausted(fi.node.addr()) && an.recursion.depth(f) == 0
-        };
+        let skips = |an: &Analyzer, f: ObjId| an.out_of_budget(f);
         let mut groups: Vec<(ObjId, Value, usize)> = Vec::new();
         for &o in &targets {
             if let (Kind::Bound, Payload::Bound(f, r)) = (self.heap.kind(o), &self.heap.obj(o).payload) {
@@ -172,6 +227,52 @@ impl Analyzer {
         groups.retain(|g| g.2 > 1 && (on_demand || skips(self, g.0)));
         let targets: Vec<ObjId> = targets.into_iter().filter(|o| !matches!(&self.heap.obj(*o).payload, Payload::Bound(f, _) if self.heap.kind(*o) == Kind::Bound && groups.iter().any(|g| g.0 == *f))).collect();
         (groups, targets)
+    }
+
+    /// A callee that is a plain function (not a class's) or a bound method: the function and
+    /// its receiver.
+    fn function_callee(&self, o: ObjId) -> Option<(ObjId, Option<Value>)> {
+        match (self.heap.kind(o), &self.heap.obj(o).payload) {
+            (Kind::Function, Payload::Func(_)) if self.heap.func_info(o).cls.is_none() => Some((o, None)),
+            (Kind::Bound, Payload::Bound(f, r)) if self.heap.kind(*f) == Kind::Function => Some((*f, Some(r.clone()))),
+            _ => None,
+        }
+    }
+
+    /// Would a call of `f` not run, its function out of its budget (`call_user_inner`)?
+    fn out_of_budget(&self, f: ObjId) -> bool {
+        let fi = self.heap.func_info(f);
+        let runs = self.m.sdispatch.contains_key(&f) || fi.is_memo.get() || matches!(fi.node, FuncNode::Def(d) if is_generator(&d.body));
+        !runs && self.budget.exhausted(fi.node.addr()) && self.recursion.depth(f) == 0
+    }
+
+    /// Among a call's callees (functions, methods, receiver groups), those out of their budget,
+    /// when several are: they make one call that does not run (`skipped_calls`; each its own
+    /// walked all it is given again — `self.__init__(**params)` on any of a thousand
+    /// instances). The rest stay.
+    #[allow(clippy::type_complexity)]
+    fn budget_skipped(&mut self, groups: Vec<(ObjId, Value, usize)>, targets: Vec<ObjId>) -> (Vec<(ObjId, Option<Value>)>, Vec<(ObjId, Value, usize)>, Vec<ObjId>) {
+        let callee = |an: &Analyzer, o: ObjId| an.function_callee(o);
+        let n = groups.iter().filter(|g| self.out_of_budget(g.0)).count() + targets.iter().filter(|o| callee(self, **o).is_some_and(|(f, _)| self.out_of_budget(f))).count();
+        if n < 2 {
+            return (Vec::new(), groups, targets);
+        }
+        let mut fns: Vec<(ObjId, Option<Value>)> = Vec::new();
+        let (out, groups): (Vec<_>, Vec<_>) = groups.into_iter().partition(|g| self.out_of_budget(g.0));
+        fns.extend(out.into_iter().map(|(f, r, _)| (f, Some(r))));
+        let mut rest = Vec::new();
+        for o in targets {
+            match callee(self, o).filter(|(f, _)| self.out_of_budget(*f)) {
+                Some(c) => fns.push(c),
+                None => rest.push(o),
+            }
+        }
+        for (f, _) in &fns {
+            self.budget.out.insert(*f);
+            let q = self.heap.func_info(*f).qualname.clone();
+            self.findings.note(format!("{} ran out of its budget: later calls are unknown code", q));
+        }
+        (fns, groups, rest)
     }
 
     /// One of several callees a value picks (`call_value`; `picked`: the call's text, when the
@@ -471,6 +572,23 @@ impl Analyzer {
             crate::models::dataclasses::exception_init(self, cls, inst, args, node, state);
         }
         Value::obj(inst)
+    }
+
+    /// A class whose call only makes an instance and runs its `__init__` on it (no `__new__`,
+    /// no generated or library construction, not abstract): Some(its `__init__`, if the
+    /// program defines one); None otherwise.
+    fn plain_init(&self, cls: ObjId) -> Option<Option<ObjId>> {
+        let ci = self.heap.class_info_opt(cls)?;
+        let fields = self.heap.mro(cls).iter().any(|c| self.heap.class_info_opt(*c).is_some_and(|x| x.has_fields() || x.lib.dict_base || x.lib.typed_dict));
+        if fields || ci.lib.typed_dict || self.m.enum_members.contains_key(&cls) || self.class_lookup(cls, "__new__").is_some() || crate::models::pydantic::is_validated(self, cls) || self.builtin_exc_base(cls) || crate::models::dataclasses::abstract_unimplemented(self, cls) {
+            return None;
+        }
+        let Some(owner) = self.class_lookup(cls, "__init__") else { return Some(None) };
+        let fv = self.heap.cls_slots.get(&(owner, Ns::Attr, key_str_lit("__init__")))?;
+        match fv.single() {
+            Some(f) if self.heap.kind(f) == Kind::Function && fv.kv.is_bot() => Some(Some(f)),
+            _ => None,
+        }
     }
 
     /// A fresh instance of user class `cls` allocated at `node`, without attributes (an

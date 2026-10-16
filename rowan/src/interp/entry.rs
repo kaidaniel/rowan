@@ -24,6 +24,8 @@ type Reqs = crate::layered::TwoLevel<crate::domain::SourceId, KeyId, crate::doma
 
 #[derive(Default)]
 pub struct Entries {
+    /// on demand: the state every function's run starts from (`on_demand`)
+    pub demand_start: Option<State>,
     /// the function an entry run (open parameters) is analysing
     pub run: Option<ObjId>,
     /// the function whose general run is going on (an entry run, or the `__init__` run that
@@ -98,6 +100,11 @@ struct ModuleEnd {
     cut: bool,
 }
 
+
+/// On demand, a method of a class with more subclasses than this runs for any call on an
+/// instance of the class made by its `__init__`, or of a subclass with any attributes
+/// (`entry_receiver`).
+const MANY_SUBCLASSES: usize = 64;
 impl Analyzer {
     pub fn run(&mut self) {
         let mut state = State::new();
@@ -190,6 +197,11 @@ impl Analyzer {
         self.budget.hard_cut
     }
 
+    /// The flag that, once set (from another thread), cuts the analysis as its deadline does.
+    pub fn set_cancel(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.budget.cancel = Some(flag);
+    }
+
     /// Before `run`, for runs on demand: the calls of the main module's `__main__` block run no
     /// body (they are skipped calls: what they may change, changed).
     pub fn main_block_unrun(&mut self) {
@@ -210,6 +222,7 @@ impl Analyzer {
         // what the module made is changed)
         let mut state = end.state;
         self.after_any_code(&mut state);
+        self.entry.demand_start = Some(state.copy());
         self.findings.final_state = Some(state);
         self.findings.drop_since(if end.cut { 0 } else { end.verdicts });
         self.findings.facts = end.facts;
@@ -269,7 +282,11 @@ impl Analyzer {
     /// On demand: the general run of function `oid` (hover facts and verdicts), from the state
     /// the module ended in, with a fresh budget and deadline; false if nothing is set up.
     pub fn general_run_of(&mut self, oid: ObjId) -> bool {
-        let Some(mut state) = self.findings.final_state.take() else { return false };
+        // (every run from the same state: a run's answer does not depend on the runs before it,
+        // and what they made does not weigh on it)
+        let Some(mut state) = self.entry.demand_start.as_ref().map(|s| s.copy()) else { return false };
+        self.entry.general_instances.clear();
+        self.entry.any_instances.clear();
         self.budget.fresh();
         // (the verdicts kept are this run's)
         self.findings.drop_since(0);
@@ -510,7 +527,18 @@ impl Analyzer {
                 // its own terms: its attributes as symbols)
                 let torch = self.entry.torch_modules.contains(&fi.module);
                 let subs: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| *c == cls || (!torch && self.heap.mro(*c).contains(&cls))).collect();
+                // (a classmethod's is the class or one of its subclasses)
+                if fi.is_classmethod.get() {
+                    if !params.is_empty() {
+                        params.remove(0);
+                    }
+                    return Some(Value::objs(crate::domain::ObjSet::from_vec(subs)));
+                }
                 let mut insts: Vec<ObjId> = Vec::new();
+                // (on demand, a base class of very many: any instance of a subclass has any
+                // attributes — each subclass's `__init__` run for any call made its methods' runs
+                // slow; a whole run makes each once)
+                let many = self.entry.on_demand && subs.len() > MANY_SUBCLASSES;
                 for c in subs {
                     // (the instance made with the defaults is made too, whichever run needs a
                     // receiver first: its `__init__` run's verdicts carry much of a library's
@@ -537,7 +565,12 @@ impl Analyzer {
                         None => {
                             let cname = self.heap.class_info(c).name.clone();
                             let home = if any && !plain { &mut *base } else { &mut *state };
-                            let i = self.fresh_instance(c, home, &format!("entry:{}", cname));
+                            let i = if any && many && c != cls {
+                                let ci = self.heap.class_info(c);
+                                Some(self.open_instance(c, &ci, home, &format!("entry:{}", cname)))
+                            } else {
+                                self.fresh_instance(c, home, &format!("entry:{}", cname))
+                            };
                             match (any, plain) {
                                 (false, _) => self.entry.instances.insert(c, i),
                                 (true, true) => self.entry.general_instances.insert(c, i),

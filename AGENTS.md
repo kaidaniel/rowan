@@ -18,6 +18,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   Allocating a site again while its earlier object is live gives a variant (up to 8), then a
   *merged* object (stores only join). Garbage collection at returns, loop and try exits drops
   the state of objects made since (`Obj::born`, renewed by a strong re-allocation) nothing reaches.
+  An open row's unread key holds a *placeholder* per object and key (`path_placeholder_value`, 3 deep); a
+  read on more than 8 objects (`wide_read`) makes one per key there (weak; a library object's attribute: one unknown per name).
 * **State** (`State`, `state.rs`) is one point on one path: names → values, and per object
   its **rows** (`(object, namespace)` → `Row`), slots (the value under each key), elements,
   lengths (one writer, `set_lens`; a tensor dim after `T` rounds of one append each, `sym_lens`),
@@ -62,7 +64,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     values (by any unknown code) redoes only what changed (`Havoc`'s memo). They return an unknown and may raise anything.
     Library functions known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`) unless they change their
     arguments (`random.shuffle`) or get the program's functions; several callees: `alternatives` (unknown values: one
-    unknown call; a method on several receivers: one call per function when it would not run, or on demand).
+    unknown call; a method on several receivers: one call per function when it would not run, or on demand; those
+    none of which runs — out of budget, past the work on demand or the deadline — one `skipped_calls`).
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model is unknown code. A TypeError
     may come from those taken to fail only on wrong types, and from hashing a list, dict or set (`check_hashable`). Models,
     operators and subscripts on literals beside objects (`"a" if c else [1]`) run on each part (`split_mixed`).
@@ -72,7 +75,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     for any call, apart from the program's calls, `Fact`) starts from `after_any_code`: the module's
     end after any of the program's functions ran (`follow_code` over all, a result as its callers
     use it, `caller_returns`; instances by name, `methods_may_have_run`), joined with the heaps at
-    module code's calls (`note_call`); parameters as annotated, a method on any instance. Facts on: a facts-only general run where needed.
+    module code's calls (`note_call`); parameters as annotated, a method on any instance (on demand, of a subclass past 64
+    of them: any attributes), a classmethod on the class or a subclass. Facts on: a facts-only general run where needed.
 * **Generators** run whole at their first consumption (`force_gen`), in the creating call's
   context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`; at a position
   not known, some yield's). If code between items (where the consumer asks for one:
@@ -97,9 +101,11 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   number names its dims, a module-level tensor's unknown dims are one value each).
 * **Deadline:** a safety net (`ms`, 10 s): past it user calls are unknown, running ones stop; the budget bounds the work.
   **On demand** (`on_demand`, `general_run_of`): from `after_any_code`, a hovered function's general run with
-  verdicts (fresh budget; past four budgets of work its callees' calls are unknown, several callees one `skipped_calls`).
-  `rowan serve` starts the whole run and the module code's (`__main__` block's calls skipped) together; the latter
-  answers unless the former completes within `EARLY` (1 s), whose document then follows as an event.
+  verdicts (fresh budget; past four budgets of work its callees' calls are unknown, several callees one `skipped_calls`,
+  classes among them their instances made there; every run starts from the module's end, `demand_start`). `rowan serve` starts the whole run and the module code's
+  (`__main__` block's calls skipped) together; the latter answers unless the former completes within `EARLY` (1 s), whose
+  document then follows as an event. A changed file, a newer `analyse` of it or a `cancel` (the extension's, when a
+  request times out) cuts the analyses running for it as the deadline does (`Budget::cancel`, read on its own thread).
 * **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
   a general run's `x: int` is an int, not a subclass overriding int's operators). `exec`, `setattr` /
   `getattr` with unknown names (known in part, an f-string's: the attributes whose names fit,
@@ -110,20 +116,16 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 ## Working conventions (the owner's standing instructions)
 
 * Python runs only through `uv run --no-project python` (3.14 pinned), for the test harnesses.
-* **New test cases are specifications.** Write the expected rows and verdicts by hand from
-  the program text first, then make the engine produce them. Never derive an expectation from
-  engine output. When an expectation turns out wrong, fix it with a comment saying why,
-  keeping the line count. Value analysis matters more than bug-finding verdicts.
-* **Hypotheses need a repro.** For a suspected bug or slowdown, write a small program showing
-  it first (a golden case; `#@work` / `#@tabulations` bounds for cost), fix it, then measure.
+* **New test cases are specifications.** Write the expected rows and verdicts by hand from the program text first,
+  then make the engine produce them. Never derive an expectation from engine output. When an expectation turns out
+  wrong, fix it with a comment saying why, keeping the line count. Value analysis matters more than bug-finding verdicts.
+* **Hypotheses need a repro.** For a suspected bug or slowdown, a small program showing it first (a golden case; `#@work` / `#@tabulations` bounds for cost), fix it, then measure.
 * **Soundness first.** Where the runtime oracle and this file disagree, the oracle wins. Golden cases matter; snapshot changes are fine when sound.
-* **Commits.** Commit when a round of work is complete and golden, snapshots and `cargo test`
-  pass; never commit a failing state. Review snapshot diffs before `--update`.
+* **Commits.** Commit when a round of work is complete and golden, snapshots and `cargo test` pass; never commit a failing state. Review snapshot diffs before `--update`.
 * **Plans.** When a request mixes several things, write the plan first, then work it in order.
-* **Output is for Python engineers.** The text report, hovers and diagnostics use words and
-  Python access paths (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source,
-  placeholder) or internal site labels (`report::site_text` names unknown code by the call as
-  written); every mark has a legend entry. `vscode-rowan/test.js` checks this on real hovers.
+* **Output is for Python engineers.** The text report, hovers and diagnostics use words and Python access paths
+  (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source, placeholder) or internal site labels
+  (`report::site_text` names unknown code by the call as written); every mark has a legend entry. `vscode-rowan/test.js` checks this on real hovers.
 * Keep this file under 200 lines and up to date with every change.
 
 ## Commands
@@ -147,8 +149,7 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
 
 ## Tests
 
-* **Golden suites** `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/`, ~1200
-  programs; library suites have `small/`, `models/` (torch `playground/`: the owner's), `PENDING`.
+* **Golden suites** `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/`, ~1200 programs; library suites have `small/`, `models/` (torch `playground/`: the owner's), `PENDING`.
 * **Directives** (full rules in `tests/CONVENTIONS.md`, also `tests/{torch,pandas}/`):
   `#@ tier key`, `#@row NAME: present= definite= absent= closed|open`,
   `#@value NAME: exactly= | unknown | includes=` (`#@general`: for any call), `#@schema src: …`,
@@ -190,8 +191,8 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
 | stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.7 / ~2.7 / ~8.7 / ~6.0 s; 0.13 / 0.07 / 0.18 / 0.10 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~12.4 / ~24 / ~13.5 / ~5.9 s; 0.31 / 0.78 / 0.26 / 0.33 GB |
-| on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.25 / 8.4 / 4.9 / 28 s; per function p50 ≤ 1.3 ms, p99 0.21-0.76 s, max 0.5 / 2.6 / 3.4 / 18 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 3.6 / 0.2 s, max 1.2 / 5.0 / 3.7 / 1.1 s |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~12.4 / ~24 / ~13.5 / ~5.9 s; 0.31 / 0.80 / 0.29 / 0.34 GB |
+| on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.23 / 8.7 / 5.0 / 28 s; per function p50 ≤ 7.6 ms, p99 0.16-0.45 s, max 0.5 / 0.5 / 0.7 / 3.3 s; first hover in a file (`bench/first_hover.py`) p50 1.0 / 1.0 / 3.7 / 0.2 s, max 1.2 / 4.8 / 3.8 / 1.1 s; `rowan serve` on each timm model file ≤ 0.9 GB |
 
 ## Known problems and next steps
 

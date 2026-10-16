@@ -124,11 +124,12 @@ fn on_big_stack<R: Send + 'static>(f: impl FnOnce() -> Result<R, String> + Send 
 ///   defined over line L, from its run for any call (open parameters as annotated, from the
 ///   state the module ended in), cached per function until a file it depends on changes; it
 ///   sets `P` up for that (its module code alone) if no analysis of `P` is kept.
-/// * `{"cmd":"changed","paths":[…]}` drops the cached results that depend on those files;
-///   `{"cmd":"shutdown"}` exits.
+/// * `{"cmd":"changed","paths":[…]}` drops the cached results that depend on those files and
+///   ends the analyses running for them (as their deadline would); `{"cmd":"cancel","paths":[…]}`
+///   only ends those (answered at once, before requests still running); `{"cmd":"shutdown"}` exits.
 ///
 /// Every response echoes the request's `id` and carries `ok`; a result has `cached`, `ms`,
-/// `deps` and `result` (responses come in order; an event has no `id`). Each analysis runs on a thread of its own (the engine's tables are
+/// `deps` and `result` (responses come in order, a cancel's aside; an event has no `id`). Each analysis runs on a thread of its own (the engine's tables are
 /// per thread); an analysis kept for `hover` keeps its thread (at most `SESSIONS`).
 /// Import options shared by the CLI and the server.
 #[derive(Clone)]
@@ -218,7 +219,7 @@ const EARLY: std::time::Duration = std::time::Duration::from_millis(1000);
 /// Analyse `path` on a thread of its own (`start`): the channel its first report comes on and
 /// the thread's request channel (for `hover` requests, when it goes on demand; dropping it
 /// ends the thread).
-fn start_analysis(path: String, opts: Opts, start: Start) -> (std::sync::mpsc::Receiver<First>, std::sync::mpsc::Sender<HoverReq>) {
+fn start_analysis(path: String, opts: Opts, start: Start, cancel: Cancel) -> (std::sync::mpsc::Receiver<First>, std::sync::mpsc::Sender<HoverReq>) {
     let (first_tx, first_rx) = std::sync::mpsc::channel::<First>();
     let (req_tx, req_rx) = std::sync::mpsc::channel::<HoverReq>();
     let whole = start != Start::Module;
@@ -230,10 +231,14 @@ fn start_analysis(path: String, opts: Opts, start: Start) -> (std::sync::mpsc::R
                 return;
             }
         };
+        an.set_cancel(cancel.clone());
         if !whole {
             an.main_block_unrun();
         }
         an.run();
+        if std::env::var("ROWAN_DEBUG").is_ok() {
+            eprintln!("{} ({} run of {})", an.work_line(), if whole { "whole" } else { "module" }, path);
+        }
         let deps = deps_of(&an, &path);
         let demand = !whole || an.was_cut();
         if !demand {
@@ -256,6 +261,8 @@ fn start_analysis(path: String, opts: Opts, start: Start) -> (std::sync::mpsc::R
                 let _ = reply.send(Ok(HoverReply { result: r.clone(), cached: true, span: *span }));
                 continue;
             }
+            // (a cancel ends the run it finds, not the next ones)
+            cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             let before = an.work_counts();
             let Some(span) = an.general_run_at(line) else {
                 let _ = reply.send(Err(format!("no function defined at line {}", line)));
@@ -279,6 +286,7 @@ fn start_analysis(path: String, opts: Opts, start: Start) -> (std::sync::mpsc::R
             if an.work_counts()[2] > setup_objects + REBUILD_OBJECTS {
                 let Ok(fresh) = analyser(&path, Opts { entry: false, ..opts.clone() }, true) else { break };
                 an = fresh;
+                an.set_cancel(cancel.clone());
                 an.main_block_unrun();
                 an.run();
                 an.on_demand();
@@ -295,8 +303,8 @@ fn start_analysis(path: String, opts: Opts, start: Start) -> (std::sync::mpsc::R
 }
 
 /// `start_analysis`, waiting for its first report; the request channel when it went on demand.
-fn spawn_analysis(path: String, opts: Opts, start: Start) -> (First, Option<std::sync::mpsc::Sender<HoverReq>>) {
-    let (first_rx, req_tx) = start_analysis(path, opts, start);
+fn spawn_analysis(path: String, opts: Opts, start: Start, cancel: Cancel) -> (First, Option<std::sync::mpsc::Sender<HoverReq>>) {
+    let (first_rx, req_tx) = start_analysis(path, opts, start, cancel);
     match first_rx.recv() {
         Ok(Ok((r, deps, true))) => (Ok((r, deps, true)), Some(req_tx)),
         Ok(other) => (other, None),
@@ -307,12 +315,36 @@ fn spawn_analysis(path: String, opts: Opts, start: Start) -> (First, Option<std:
 /// The server's state shared with the threads that wait for a whole program's analysis: the
 /// documents kept per file (with the files they depend on and their hashes), the analyses kept
 /// for `hover`, and per file the number of its latest `analyse` (a late answer to an earlier
-/// one is dropped).
+/// one is dropped), and the flags that cancel the analyses running for a file.
 #[derive(Default)]
 struct Shared {
     cache: std::collections::HashMap<String, (Vec<(String, u64)>, String)>,
     sessions: Vec<Session>,
     latest: std::collections::HashMap<String, u64>,
+    running: Vec<(String, Cancel)>,
+}
+
+/// Set from the server's reader: the analysis holding it is stale (its file changed, a newer
+/// `analyse` of it came, its request timed out) and ends as its deadline would end it.
+type Cancel = std::sync::Arc<std::sync::atomic::AtomicBool>;
+
+impl Shared {
+    /// A flag for an analysis of `path` starting now.
+    fn cancel_flag(&mut self, path: &str) -> Cancel {
+        // (flags no thread holds any more: their analyses ended)
+        self.running.retain(|(_, c)| std::sync::Arc::strong_count(c) > 1);
+        let c = Cancel::default();
+        self.running.push((path.to_string(), c.clone()));
+        c
+    }
+
+    /// Cancel the analyses running for `paths` (a whole program's, the module code's and its
+    /// runs on demand).
+    fn cancel(&mut self, paths: &[String]) {
+        for (_, c) in self.running.iter().filter(|(p, _)| paths.contains(p)) {
+            c.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 type Out = std::sync::Arc<std::sync::Mutex<std::io::Stdout>>;
@@ -333,23 +365,11 @@ fn hashed(deps: &[String]) -> Vec<(String, u64)> {
 }
 
 fn serve_loop(opts: Opts) {
-    use std::io::BufRead;
-    let stdin = std::io::stdin();
     let out: Out = std::sync::Arc::new(std::sync::Mutex::new(std::io::stdout()));
     let shared = std::sync::Arc::new(std::sync::Mutex::new(Shared::default()));
     let fresh = |deps: &[(String, u64)]| deps.iter().all(|(p, h)| file_hash(p) == Some(*h));
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let req: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(e) => {
-                send_line(&out, &serde_json::json!({"ok": false, "error": format!("bad request: {}", e)}).to_string());
-                continue;
-            }
-        };
+    let requests = read_requests(shared.clone(), out.clone());
+    for req in requests {
         let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
         let cmd = req.get("cmd").and_then(|c| c.as_str()).unwrap_or("").to_string();
         let path = req.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
@@ -394,6 +414,43 @@ fn serve_loop(opts: Opts) {
     }
 }
 
+/// The requests on stdin, read on a thread of their own so that a `cancel` (and the
+/// cancelling part of `changed`) acts while an earlier request still runs: `{"cmd":"cancel",
+/// "paths":[…]}` ends the analyses running for those files (answered at once).
+fn read_requests(shared: std::sync::Arc<std::sync::Mutex<Shared>>, out: Out) -> std::sync::mpsc::Receiver<serde_json::Value> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let req: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(e) => {
+                    send_line(&out, &serde_json::json!({"ok": false, "error": format!("bad request: {}", e)}).to_string());
+                    continue;
+                }
+            };
+            let cmd = req.get("cmd").and_then(|c| c.as_str()).unwrap_or("");
+            if matches!(cmd, "cancel" | "changed") {
+                let paths: Vec<String> = req.get("paths").and_then(|p| p.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()).unwrap_or_default();
+                shared.lock().unwrap().cancel(&paths);
+                if cmd == "cancel" {
+                    send_line(&out, &serde_json::json!({"id": req.get("id"), "ok": true}).to_string());
+                    continue;
+                }
+            }
+            let stop = cmd == "shutdown";
+            if tx.send(req).is_err() || stop {
+                break;
+            }
+        }
+    });
+    rx
+}
+
 /// An `analyse` request with nothing kept: the whole program's analysis and its module code's
 /// alone start together. The whole program's document answers if it comes within `EARLY`;
 /// else the module code's, once it is set up (`on_demand`, `pending`: its functions run when
@@ -404,12 +461,18 @@ fn analyse_request(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, out: &Out,
     let generation = {
         let mut sh = shared.lock().unwrap();
         sh.sessions.retain(|s| s.path != path);
+        // (an earlier analysis of the file still running is stale)
+        sh.cancel(&[path.to_string()]);
         let g = sh.latest.entry(path.to_string()).or_default();
         *g += 1;
         *g
     };
-    let (whole_rx, _whole_tx) = start_analysis(path.to_string(), opts.clone(), Start::Whole);
-    let (module_rx, module_tx) = start_analysis(path.to_string(), opts.clone(), Start::Module);
+    let (whole_cancel, module_cancel) = {
+        let mut sh = shared.lock().unwrap();
+        (sh.cancel_flag(path), sh.cancel_flag(path))
+    };
+    let (whole_rx, _whole_tx) = start_analysis(path.to_string(), opts.clone(), Start::Whole, whole_cancel);
+    let (module_rx, module_tx) = start_analysis(path.to_string(), opts.clone(), Start::Module, module_cancel);
     let whole_doc = |r: First| -> Option<Result<(String, Vec<String>), String>> {
         match r {
             Ok((doc, deps, false)) => Some(Ok((doc, deps))),
@@ -535,7 +598,8 @@ fn hover_request(shared: &std::sync::Arc<std::sync::Mutex<Shared>>, opts: &Opts,
     let mut setup = Ok(None);
     let has = shared.lock().unwrap().sessions.iter().any(|s| s.path == path);
     if !has {
-        setup = match spawn_analysis(path.to_string(), opts.clone(), Start::Module) {
+        let cancel = shared.lock().unwrap().cancel_flag(path);
+        setup = match spawn_analysis(path.to_string(), opts.clone(), Start::Module, cancel) {
             (Ok((_, deps, _)), Some(tx)) => {
                 keep_session(&mut shared.lock().unwrap().sessions, Session { path: path.to_string(), deps: hashed(&deps), tx });
                 Ok(Some(t0.elapsed().as_millis()))

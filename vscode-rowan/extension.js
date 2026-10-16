@@ -634,6 +634,14 @@ function serverRequest(srv, req, timeoutSeconds) {
     const id = srv.nextId++;
     const timer = setTimeout(() => {
       srv.pending.delete(id);
+      // (the analysis it started would run on, holding memory: the server ends it)
+      if (req.path) {
+        try {
+          srv.child.stdin.write(JSON.stringify({ id: srv.nextId++, cmd: "cancel", paths: [req.path] }) + "\n");
+        } catch (e) {
+          /* already gone */
+        }
+      }
       resolve({ ok: false, error: "rowan server timed out" });
     }, timeoutSeconds * 1000);
     srv.pending.set(id, (msg) => {

@@ -128,6 +128,7 @@ impl Analyzer {
         let scalar = self.may_be_scalar(obj);
         let single = obj.pts.len() == 1 && !scalar;
         let saved_scalar = std::mem::replace(&mut self.mode.recv_scalar, scalar);
+        let saved_wide = self.wide_read(obj, node);
         let nk = key_str_lit(name);
         for oid in obj.pts.iter() {
             let k = self.heap.kind(oid);
@@ -199,6 +200,7 @@ impl Analyzer {
             parts.push(v);
         }
         self.mode.recv_scalar = saved_scalar;
+        self.end_wide_read(saved_wide, state);
         acc = acc.join(&crate::domain::join_values(parts));
         if obj.pts.is_empty() {
             return crate::models::scalar_attr(self, obj, name, report, state);
@@ -289,6 +291,14 @@ impl Analyzer {
     /// An attribute of a library object rowan sees only by name: a class a model generates, a
     /// constant, a record, else the external object `qual.name`.
     fn external_attr(&mut self, oid: ObjId, name: &str, state: &mut State) -> Value {
+        // (in a read on many objects, an unknown value of the read and name: named by their
+        // access paths, attributes of attributes made names without end)
+        if let Some((_, site)) = self.mode.wide_read.clone().filter(|_| self.in_wide_read()) {
+            let ctx = self.frame().ctx.clone();
+            let o = self.heap.alloc_raw(Kind::Unknown, &format!("ext@{}:{}", site, name), &ctx, false, &format!("?.{}", name), Payload::None);
+            crate::state::mark_merged(o);
+            return Value::obj(o);
+        }
         let q = format!("{}.{}", self.heap.external_qual(oid), name);
         if let Some(v) = crate::models::generated_class(self, state, &q) {
             return v;

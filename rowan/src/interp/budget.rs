@@ -46,6 +46,9 @@ pub struct Budget {
     started: Clock,
     /// the hard deadline passed: function bodies stop, the calls they are in become unknown calls
     pub hard_cut: bool,
+    /// set from outside (`rowan serve`: the file changed, the request timed out): the
+    /// analysis is stale, its deadline has passed
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// a function's run on demand: the work done when it began (`Analyzer::hover_work`), and
     /// the frames it runs in (its own calls run; past `past_hover_work`, its callees' calls are
     /// unknown)
@@ -104,7 +107,7 @@ impl Budget {
 
     /// Past the deadline (`DEADLINE_MS`): calls of user code are unknown code from there on.
     pub fn over_hard_deadline(&self) -> bool {
-        self.started.elapsed().as_millis() as usize > limit("ms", DEADLINE_MS)
+        self.started.elapsed().as_millis() as usize > limit("ms", DEADLINE_MS) || self.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// A fresh budget for one function's run on demand (`general_run_of`): no statements
