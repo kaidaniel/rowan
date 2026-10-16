@@ -321,12 +321,12 @@ fn serve_loop(opts: Opts) {
                         match spawn_analysis(path.clone(), opts.clone(), true) {
                             (Ok((result, deps, demand)), tx) => {
                                 let hashed: Vec<(String, u64)> = deps.iter().map(|p| (p.clone(), file_hash(p).unwrap_or(0))).collect();
-                                match tx {
-                                    Some(tx) if demand => keep_session(&mut sessions, Session { path: path.clone(), deps: hashed, tx }),
-                                    _ => {
-                                        cache.insert(path.clone(), (hashed, result.clone()));
-                                    }
+                                // (on demand, the module's own document is kept too: asked again, it is
+                                // answered at once while the analysis waits for hovers)
+                                if let (Some(tx), true) = (tx, demand) {
+                                    keep_session(&mut sessions, Session { path: path.clone(), deps: hashed.clone(), tx });
                                 }
+                                cache.insert(path.clone(), (hashed, result.clone()));
                                 format!("{{\"id\":{},\"ok\":true,\"path\":{},\"cached\":false,\"ms\":{},\"deps\":{},\"result\":{}}}", id, serde_json::json!(path), t0.elapsed().as_millis(), serde_json::json!(deps), result)
                             }
                             (Err(e), _) => serde_json::json!({"id": id, "ok": false, "path": path, "error": e}).to_string(),

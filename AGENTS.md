@@ -92,9 +92,9 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   fact on the path; in torch modules `int` / `Tensor` annotations hold; a module-level unknown
   number names its dims, a module-level tensor's unknown dims are one value each).
 * **Deadline:** a safety net (`ms`, 10 s): past it user calls are unknown, running ones stop; the budget bounds the work.
-  **On demand** (`rowan serve` when it cuts a whole run; `on_demand`, `general_run_of`): back to the
-  module's end state, its module-level facts only; a hovered function gets its general run (fresh
-  budget; past four budgets of work its callees' calls are unknown), cached until a file changes.
+  **On demand** (`rowan serve` when it cuts a whole run; `on_demand`, `general_run_of`): the module's end state
+  as the program's functions may leave it (`follow_code`; instances by name: `methods_may_have_run`); a hovered
+  function's general run with verdicts (fresh budget; past four budgets of work its callees' calls are unknown).
 * **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
   a general run's `x: int` is an int, not a subclass overriding int's operators). `exec`, `setattr` /
   `getattr` with unknown names (also in skipped code; a class attribute set there through data or a
@@ -192,7 +192,7 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
 | golden / oracle | ~5 s / ~1.5 min |
 | stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.3 / ~2.5 / ~8.8 / ~6.4 s; 0.12 / 0.07 / 0.16 / 0.09 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
 | pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~13 / ~26 / ~23 / ~5.2 s; 0.30 / 0.75 / 0.39 / 0.30 GB |
-| on demand (`bench/hovers.py`, every function): pip / timm / sktime / rich | setup (all modules) ~9 / 5 / 27 / 0.2 s; per function p50 ≤1 ms, p99 0.25-0.8 s, max 0.6-20 s |
+| on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.2 / 8.9 / 5.3 / 28 s; per function p50 ≤ 1.4 ms, p99 0.23-0.8 s, max 0.6 / 2.8 / 5 / 20 s (havoc walks) |
 
 ## Known problems and next steps
 
