@@ -101,8 +101,9 @@ struct ModuleEnd {
 }
 
 
-/// A method of a class with more subclasses than this runs for any call on an instance of the
-/// class made by its `__init__`, or of a subclass with any attributes (`entry_receiver`).
+/// On demand, a method of a class with more subclasses than this runs for any call on an
+/// instance of the class made by its `__init__`, or of a subclass with any attributes
+/// (`entry_receiver`).
 const MANY_SUBCLASSES: usize = 64;
 impl Analyzer {
     pub fn run(&mut self) {
@@ -534,9 +535,10 @@ impl Analyzer {
                     return Some(Value::objs(crate::domain::ObjSet::from_vec(subs)));
                 }
                 let mut insts: Vec<ObjId> = Vec::new();
-                // (a base class of very many: any instance of a subclass has any attributes —
-                // running each subclass's `__init__` for any call made its methods' runs slow)
-                let many = subs.len() > MANY_SUBCLASSES;
+                // (on demand, a base class of very many: any instance of a subclass has any
+                // attributes — each subclass's `__init__` run for any call made its methods' runs
+                // slow; a whole run makes each once)
+                let many = self.entry.on_demand && subs.len() > MANY_SUBCLASSES;
                 for c in subs {
                     // (the instance made with the defaults is made too, whichever run needs a
                     // receiver first: its `__init__` run's verdicts carry much of a library's
