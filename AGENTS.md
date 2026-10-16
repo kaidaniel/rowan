@@ -123,8 +123,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   Python access paths (`row["id"]`, `items[*].sku`), never engine terms (row, tier, source,
   placeholder) or internal site labels (`report::site_text` names unknown code by the call as
   written); every mark has a legend entry. `vscode-rowan/test.js` checks this on real hovers.
-* `SUGGESTED_CHANGES.md` is the owner's list of open items, untracked: never commit it; keep it
-  to things still to do. Keep this file under 200 lines and up to date with every change.
+* Keep this file under 200 lines and up to date with every change.
 
 ## Commands
 
@@ -196,4 +195,4 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
 
 ## Known problems and next steps
 
-Open items, with repros and what was ruled out: `SUGGESTED_CHANGES.md`. Parked: `parked/joined-summaries` (unsound), `slotmap-trie`, `parked/memo-probe`.
+Open items and ideas ruled out are in the pull requests' descriptions (Remaining, Ideas not pursued). Parked: `parked/joined-summaries` (unsound), `slotmap-trie`, `parked/memo-probe`, `parked/suggested-changes` (the retired list of open items).

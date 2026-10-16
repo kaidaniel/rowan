@@ -1,5 +1,5 @@
 """Type hints are not trusted where the argument's class is known: a call that passes an
-object of another class gets that class's behaviour (SUGGESTED_CHANGES 2: soundness first).
+object of another class gets that class's behaviour (soundness first).
 The hint still types arguments whose class is unknown."""
 import sys
 from dataclasses import dataclass

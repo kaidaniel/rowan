@@ -1,5 +1,5 @@
 """A name bound on some paths only may be unbound where it is read: NameError at module level,
-UnboundLocalError in a function (SUGGESTED_CHANGES 1.1). The value is still what the binding
+UnboundLocalError in a function. The value is still what the binding
 paths gave, and after the read the name is bound (the program went on)."""
 import sys
 
