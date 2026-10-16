@@ -579,7 +579,8 @@ impl Analyzer {
         Some((0..n).map(|i| state.slot(oid, Ns::Pos, key_int(i as i64))).collect())
     }
 
-    /// The positions of `oid` become `vals`.
+    /// The positions of `oid` become `vals`, and its elements exactly their values (both the
+    /// objects in the element slot and the scalars in `state.elems`).
     pub fn set_positions(&mut self, oid: u32, vals: Vec<Value>, state: &mut State) {
         let old = self.heap.llen(oid, state).unwrap_or(0);
         for i in vals.len()..old {
@@ -588,11 +589,26 @@ impl Analyzer {
         for (i, v) in vals.iter().enumerate() {
             state.set_slot(oid, Ns::Pos, key_int(i as i64), v.clone(), true);
         }
-        let acc = crate::domain::join_values(vals.clone());
-        state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
+        if vals.is_empty() {
+            state.drop_obj_ns(oid, Ns::Elem);
+            state.elems.insert(oid, KeyVal::Lits(intern::KeySet::new()));
+        } else {
+            let acc = crate::domain::join_values(vals.clone());
+            state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
+            state.elems.insert(oid, acc.kv);
+        }
         self.heap.set_llen(oid, state, Some(vals.len()));
     }
 
+    /// One more value among the elements of a list / tuple / set (an append, a store at a
+    /// position not known): its objects join the element slot, its scalar part the
+    /// elements' (`state.elems`; none recorded there: not known, which a join with another
+    /// path's elements must not lose).
+    pub fn add_elem(&mut self, oid: u32, v: &Value, state: &mut State) {
+        state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), crate::models::torch::elem_kv(&v.kv)), false);
+        let cur = state.elems.get(&oid).unwrap_or(DATA);
+        state.elems.insert(oid, kv_join(&cur, &v.kv));
+    }
 }
 
 /// builtins whose calls do not raise for the values this analysis sees
@@ -602,9 +618,6 @@ pub fn is_exception_name(n: &str) -> bool {
 }
 
 
-
-impl Analyzer {
-}
 
 
 

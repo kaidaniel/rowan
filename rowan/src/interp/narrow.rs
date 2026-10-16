@@ -260,7 +260,7 @@ impl Analyzer {
                         if let ast::Expr::Compare(cmp) = &*g.elt {
                             if cmp.ops.first() == Some(&ast::CmpOp::In) {
                                 let (Some(itv), Some(rec)) = (self.traced(&g.generators[0].iter), self.traced(&cmp.comparators[0])) else { return };
-                                let ks = self.lit_keys(&itv, state);
+                                let ks = self.sure_lit_keys(&itv, state);
                                 if let Some(ks) = ks {
                                     if matches!(&*cmp.left, ast::Expr::Name(_)) {
                                         for k in ks.iter() {
@@ -278,7 +278,7 @@ impl Analyzer {
         if let ast::Expr::Attribute(fa) = &*call.func {
             if fa.attr.id.as_str() == "issubset" && args.len() == 1 && truth {
                 let (Some(v), Some(rec)) = (self.traced(&fa.value), self.traced(&args[0])) else { return };
-                let ks = self.lit_keys(&v, state);
+                let ks = self.sure_lit_keys(&v, state);
                 if let Some(ks) = ks {
                     for k in ks.iter() {
                         self.narrow_record(&rec, Ns::Item, k, true, state);
@@ -347,7 +347,7 @@ impl Analyzer {
                     if let ast::Expr::Attribute(ra) = &*rc.func {
                         if ra.attr.id.as_str() == "keys" {
                             let (Some(lv), Some(rec)) = (self.traced(left), self.traced(&ra.value)) else { return };
-                            let ks = self.lit_keys(&lv, state);
+                            let ks = self.sure_lit_keys(&lv, state);
                             if let Some(ks) = ks {
                                 if truth {
                                     for k in ks.iter() {
@@ -737,7 +737,8 @@ impl Analyzer {
         }
         // (a literal right side is a string: `in` tests substrings, not keys)
         if let (ast::Expr::Name(l), false) = (left, !rv.kv.is_bot() || rv.pts.is_empty()) {
-            let ks = self.lit_keys(&rv, state);
+            // (in: one of the literals it may hold; not in: none of those it surely holds)
+            let ks = if member { self.lit_keys(&rv, state) } else { self.sure_lit_keys(&rv, state) };
             if let Some(ks) = ks {
                 self.narrow_kv(s(l.id.as_str()), &ks, member, state);
             }

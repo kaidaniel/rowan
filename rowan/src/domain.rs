@@ -127,6 +127,21 @@ impl RenameFn {
         })
     }
 
+    /// About how long `apply`'s text is (in bytes) for `k`, without computing it.
+    pub fn out_len(&self, k: KeyId) -> usize {
+        let Some(s) = key_as_str(k) else { return 0 };
+        match self.fn_ {
+            FnKind::Replace => match self.replace_pair() {
+                Some((a, b)) if a.is_empty() => s.len() + (s.chars().count() + 1) * b.len(),
+                Some((a, b)) => s.len() + s.matches(&*a).count() * b.len(),
+                None => s.len(),
+            },
+            FnKind::Prefix | FnKind::Suffix => s.len() + self.arg_str().len(),
+            FnKind::Join => s.len() * (1 + self.arg_str().len()),
+            _ => s.len() * 4,
+        }
+    }
+
     pub fn apply(&self, k: KeyId) -> KeyId {
         if self.fn_ == FnKind::Join {
             let sep = self.arg_str();
@@ -699,6 +714,10 @@ impl Row {
     // -- transfers (§4.1) --------------------------------------------------
     pub fn store(&self, k: KeyId, strong: bool) -> Row {
         let mut d = self.data();
+        // (a key there on some paths only, stored: where it is in the order depends on the path)
+        if strong && d.order.contains(&k) && !d.definite.contains(k) {
+            d.order = Arc::from(Vec::new());
+        }
         if strong && !d.order.contains(&k) {
             let mut o = d.order.to_vec();
             o.push(k);
@@ -1201,6 +1220,15 @@ impl KeyVal {
     pub fn is_literal(&self) -> bool {
         matches!(self, KeyVal::Lit(_) | KeyVal::Lits(_))
     }
+    /// Whether a value of this scalar part may have items (be subscripted or iterated): an
+    /// unknown, a mapping's key, a str / bytes / tuple literal; not None, a number, a bool.
+    pub fn may_have_items(&self) -> bool {
+        match self {
+            KeyVal::Bot => false,
+            KeyVal::Lit(_) | KeyVal::Lits(_) => !kv_literals(self).iter().all(|k| intern::with_key(k, |kk| matches!(kk, intern::Key::None | intern::Key::Int(_) | intern::Key::Bool(_) | intern::Key::Float(_)))),
+            _ => true,
+        }
+    }
     pub fn as_lit(&self) -> Option<KeyId> {
         match self {
             KeyVal::Lit(k) => Some(*k),
@@ -1390,7 +1418,14 @@ pub fn kv_literals(kv: &KeyVal) -> KeySet {
     }
 }
 
+/// Texts longer than this are not computed: a str not known (`s.replace("", "ab")` in a loop
+/// triples each round).
+pub const TEXT_MAX: usize = 1 << 16;
+
 pub fn kv_map(kv: &KeyVal, step: &RenameFn) -> KeyVal {
+    if kv_literals(kv).iter().any(|k| step.out_len(k) > TEXT_MAX) {
+        return KeyVal::data(&typed_label("str", ""));
+    }
     match kv {
         KeyVal::Lit(k) => KeyVal::Lit(step.apply(*k)),
         KeyVal::Lits(ks) => KeyVal::Lits(ks.map(|k| step.apply(k))),
@@ -1579,7 +1614,7 @@ impl Value {
         Value { pts: ObjSet::new(), kv }
     }
     pub fn single(&self) -> Option<ObjId> {
-        if self.pts.len() == 1 {
+        if self.pts.len() == 1 && self.kv.is_bot() {
             self.pts.first()
         } else {
             None

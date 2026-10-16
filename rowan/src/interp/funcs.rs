@@ -39,6 +39,21 @@ pub struct Iteration {
     pub items: Option<Vec<Value>>,
     pub elem: Elem,
     pub exhaustive: bool,
+    /// the items are a set's, in an order Python does not promise
+    pub unordered: bool,
+}
+
+impl Iteration {
+    /// The items for a use their order matters to (a loop's iterations, `enumerate`, `zip`,
+    /// `str.join`): a set's are each any of them.
+    pub fn ordered_items(&self) -> Option<Vec<Value>> {
+        let items = self.items.as_ref()?;
+        if !self.unordered {
+            return Some(items.clone());
+        }
+        let any = join_values(items.iter().cloned());
+        Some(vec![any; items.len()])
+    }
 }
 
 pub fn cell_key() -> KeyId {
@@ -56,6 +71,8 @@ struct ItemsAcc {
     pairs: Vec<(Value, Value)>,
     pair: bool,
     exhaustive: bool,
+    /// a set's items among them (in an order Python does not promise)
+    unordered: bool,
 }
 
 impl Analyzer {
@@ -774,7 +791,7 @@ impl Analyzer {
         let multi_lits = v.pts.is_empty() && matches!(&v.kv, KeyVal::Lits(ks) if ks.len() > 1);
         let alts_mode = n_alts > 1 || multi_lits;
         let alt_items: Option<Vec<Value>> = if alts_mode { self.alternative_items(v, state) } else { None };
-        let mut acc = ItemsAcc { items: Some(Vec::new()), elems: Vec::new(), pairs: Vec::new(), pair: false, exhaustive: true };
+        let mut acc = ItemsAcc { items: Some(Vec::new()), elems: Vec::new(), pairs: Vec::new(), pair: false, exhaustive: true, unordered: false };
         let line_data = Value::data(&format!("L{}", node.line));
         for oid in v.pts.iter() {
             let kind = self.heap.kind(oid);
@@ -810,8 +827,9 @@ impl Analyzer {
                 }
             }
         }
-        let ItemsAcc { mut items, mut elems, pairs, pair, mut exhaustive } = acc;
-        if v.pts.is_empty() {
+        let ItemsAcc { mut items, mut elems, pairs, pair, mut exhaustive, unordered } = acc;
+        // (and a part that is no object: an unknown, a str)
+        if v.pts.is_empty() || v.kv.may_have_items() {
             self.iter_scalar(v, state, &line_data, &mut items, &mut elems, &mut exhaustive);
         }
         if let Some(its) = &items {
@@ -830,14 +848,14 @@ impl Analyzer {
             if alts_mode {
                 items = alt_items;
             }
-            return Iteration { items, elem: Elem::Pair(kacc, vacc), exhaustive: exh };
+            return Iteration { items, elem: Elem::Pair(kacc, vacc), exhaustive: exh, unordered };
         }
         let elem = join_values(elems.iter().cloned());
         let exh = exhaustive && elems.len() == 1 && matches!(elem.kv, KeyVal::KeysOf(_));
         if alts_mode {
             items = alt_items;
         }
-        Iteration { items, elem: Elem::One(elem), exhaustive: exh }
+        Iteration { items, elem: Elem::One(elem), exhaustive: exh, unordered }
     }
 
     /// The items of one of several containers (or strings), position by position: when every
@@ -991,7 +1009,7 @@ impl Analyzer {
     fn iter_enumerate(&mut self, oid: ObjId, node: &Node, state: &mut State, acc: &mut ItemsAcc) {
         let Payload::Enumerate(inner, start) = self.heap.obj(oid).payload.clone() else { return };
         let ii = self.iterate(&inner, node, state);
-        match (ii.items, acc.items.as_mut(), start) {
+        match (ii.ordered_items(), acc.items.as_mut(), start) {
             (Some(inner_items), Some(its), Some(start)) => {
                 // known items: (index, item) pairs with literal indices
                 let ctx = self.frame().ctx.clone();
@@ -1014,6 +1032,8 @@ impl Analyzer {
         let Payload::Zip(ks, vs) = self.heap.obj(oid).payload.clone() else { return };
         let mut ki = self.iterate(&ks, node, state);
         let mut vi = self.iterate(&vs, node, state);
+        // (a set's items paired in an order Python does not promise)
+        (ki.items, vi.items) = (ki.ordered_items(), vi.ordered_items());
         // an infinite side (or a generator known that far) yields as many items as the
         // other has
         if let (None, Some(n)) = (&ki.items, vi.items.as_ref().map(|x| x.len())) {
@@ -1128,6 +1148,7 @@ impl Analyzer {
     /// A list, tuple or set: its positions from the cursor on (a generator partly consumed).
     fn iter_sequence(&mut self, oid: ObjId, node: &Node, state: &mut State, acc: &mut ItemsAcc) {
         let ll = self.heap.llen(oid, state);
+        acc.unordered |= self.heap.kind(oid) == Kind::Set && ll != Some(1);
         // a generator partly consumed by next(): iteration starts at its cursor
         let cursor = self.cursor_of(oid, state);
         match (ll, acc.items.as_mut(), cursor) {
@@ -1308,6 +1329,31 @@ impl Analyzer {
         } else {
             Some(out)
         }
+    }
+
+    /// The literals a container surely holds, whichever of its objects it is: of a list,
+    /// tuple or set of known length the positions that are one literal, of a dict its keys
+    /// there on every path (the literals `lit_keys` gives may be there; these are).
+    pub fn sure_lit_keys(&mut self, v: &Value, state: &State) -> Option<KeySet> {
+        if v.pts.is_empty() || !v.kv.is_bot() {
+            return None;
+        }
+        let mut out: Option<KeySet> = None;
+        for oid in v.pts.iter() {
+            let ks: KeySet = match self.heap.kind(oid) {
+                Kind::List | Kind::Tuple | Kind::Set if self.heap.obj(oid).single && !crate::state::is_merged(oid) => {
+                    let n = self.heap.llen(oid, state)?;
+                    (0..n).filter_map(|i| { let sv = state.slot(oid, Ns::Pos, key_int(i as i64)); sv.kv.as_lit().filter(|_| sv.pts.is_empty()) }).collect()
+                }
+                Kind::Dict => state.row(oid, Ns::Item).definite.clone(),
+                _ => return None,
+            };
+            out = Some(match out {
+                None => ks,
+                Some(o) => o.filter(|k| ks.contains(k)),
+            });
+        }
+        out
     }
 
     pub fn literal_mapping(&mut self, v: &Value, state: &State) -> Option<Vec<(KeyId, KeyId)>> {

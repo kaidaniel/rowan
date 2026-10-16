@@ -434,7 +434,7 @@ impl Analyzer {
             }
         }
         let call = Call { qual: qual.clone(), recv: Some(recv.clone()), args, kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
-        let pure = if qual.starts_with("str.") { crate::models::pure::try_pure(self, state, &call) } else { None };
+        let pure = if qual.starts_with("str.") { self.in_model(|an| crate::models::pure::try_pure(an, state, &call)) } else { None };
         let r = match (pure, self.program.models.lookup(&qual)) {
             (Some(v), _) => v,
             (None, Some(m)) => self.run_model(m, state, &call),
@@ -456,7 +456,7 @@ impl Analyzer {
     pub fn call_external(&mut self, qual: &str, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
         let qual = qual.to_string();
         let call = Call { qual: qual.clone(), recv: None, args: args.to_vec(), kwargs: kwargs.clone(), star_args: star_args.to_vec(), star_kwargs: star_kwargs.to_vec(), node: *node, call_ast, site: format!("L{}", node.line), line: node.line };
-        if let Some(v) = crate::models::pure::try_pure(self, state, &call) {
+        if let Some(v) = self.in_model(|an| crate::models::pure::try_pure(an, state, &call)) {
             return self.as_type(v, crate::models::result_type(self, &qual, args), false);
         }
         // a builtin exception class: an exception object with its args
@@ -506,13 +506,20 @@ impl Analyzer {
         }) {
             return r;
         }
+        let r = self.in_model(|an| m(an, state, call));
+        crate::models::itertools::after_model_consume(self, call, &r, state);
+        r
+    }
+
+    /// Runs a model's code: the objects it makes are held by it until it returns (an
+    /// allocation at its node again is another object, not the first one renewed).
+    fn in_model<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
         if self.cx.model_depth == 0 {
             self.cx.model_epoch += 1;
         }
         self.cx.model_depth += 1;
-        let r = m(self, state, call);
+        let r = f(self);
         self.cx.model_depth -= 1;
-        crate::models::itertools::after_model_consume(self, call, &r, state);
         r
     }
 

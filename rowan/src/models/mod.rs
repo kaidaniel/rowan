@@ -928,12 +928,19 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         st.elems.insert(oid, KeyVal::Lits(KeySet::new()));
         an.heap.set_llen(oid, st, Some(0));
     }
-    // (a copy of a list / tuple whose length is one of a few: the same alternatives)
-    if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple" | "builtins.sorted" | "builtins.reversed") && an.heap.llen(oid, st).is_none() {
+    // (a copy of a list / tuple whose length is one of a few: the same alternatives, each
+    // with its positions — reversed, from each one's end)
+    if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple" | "builtins.reversed") && an.heap.llen(oid, st).is_none() {
         if let Some(src) = c.args.first().and_then(|a| a.single()).filter(|s| matches!(an.heap.kind(*s), Kind::List | Kind::Tuple)) {
-            if let Some((None, _, m)) = st.lens.get(&src).filter(|l| l.2 != 0) {
-                let p = an.heap.prefix(oid, st).unwrap_or(0);
-                st.set_lens(oid, (None, p, m));
+            if let (Some((None, _, m)), Some(alts)) = (st.lens.get(&src).filter(|l| l.2 != 0), an.heap.len_alts(src, st)) {
+                let longest = alts.iter().copied().max().unwrap_or(0);
+                let reversed = c.qual == "builtins.reversed";
+                for i in 0..longest {
+                    let at = |len: usize| if reversed { len - 1 - i } else { i };
+                    let v = join_values(alts.iter().filter(|l| **l > i).map(|l| st.slot(src, Ns::Pos, intern::key_int(at(*l) as i64))).collect::<Vec<_>>());
+                    st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), v, true);
+                }
+                st.set_lens(oid, (None, 0, m));
             }
         }
     }
@@ -2444,8 +2451,8 @@ fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual);
     let kv = c.recv.as_ref().map(|r| r.kv.clone()).unwrap_or(DATA);
     match name {
-        "upper" | "lower" | "strip" | "title" => Value::kv_only(an.rename_kv(&kv, &RenameFn::new(FnKind::from_name(name).unwrap()))),
-        "lstrip" | "rstrip" => Value::kv_only(an.rename_kv(&kv, &RenameFn::new(FnKind::Strip))),
+        // (`strip(chars)`, `lstrip()`, `rstrip()` are not `strip()`: a str not known)
+        "upper" | "lower" | "title" | "strip" if c.args.is_empty() && c.kwargs.is_empty() => Value::kv_only(an.rename_kv(&kv, &RenameFn::new(FnKind::from_name(name).unwrap()))),
         // positions / counts of a known substring in a known string
         "find" | "index" | "rfind" | "rindex" | "count" if c.args.len() == 1 => {
             let recv_s = kv.as_lit().and_then(intern::key_as_str);
@@ -2616,7 +2623,7 @@ fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     }
                 }
                 let it = an.iterate(arg, &c.node, st);
-                if let Some(items) = it.items {
+                if let Some(items) = it.ordered_items() {
                     let mut parts: Vec<String> = Vec::new();
                     let mut ok = true;
                     for item in &items {
@@ -3009,10 +3016,12 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             st.set_sym_len(o, intern::s(&crate::models::shape::dim_label(crate::models::shape::add(d, crate::models::shape::lit(k as i64)))));
         }
     }
+    // (one of several lists: each may also not have grown)
+    let alone = c.recv.as_ref().is_some_and(|r| r.pts.len() == 1 && r.kv.is_bot());
     if let Some(k) = added {
         for (o, m) in before {
             if let Some((None, p, 0)) = st.lens.get(&o) {
-                let shifted = (m as u32) << k;
+                let shifted = ((m as u32) << k) | if alone { 0 } else { m as u32 };
                 if shifted <= 0xFFFF {
                     st.set_lens(o, (None, p, shifted as u16));
                 }
@@ -3025,6 +3034,8 @@ fn m_append(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual);
     let recv = c.recv.clone().unwrap_or_default();
+    // (a receiver that is one of several lists: each may or may not be the one that grows)
+    let alone = recv.pts.len() == 1 && recv.kv.is_bot();
     for oid in recv.pts.iter() {
         if !matches!(an.heap.kind(oid), Kind::List | Kind::Set | Kind::Tuple) {
             continue;
@@ -3046,33 +3057,32 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             let ll = an.heap.llen(oid, st);
             if let Some(n) = ll {
                 let cap = if an.m.torch_on { 64 } else { 16 };
-                if an.heap.obj(oid).single && an.frame().loop_depth == 0 && n + items.len() <= cap {
+                if alone && an.heap.obj(oid).single && an.frame().loop_depth == 0 && n + items.len() <= cap {
                     for (i, item) in items.iter().enumerate() {
                         st.set_slot(oid, Ns::Pos, intern::key_int((n + i) as i64), item.clone(), true);
-                        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(item.pts.clone(), crate::models::torch::elem_kv(&item.kv)), false);
-                        let nk = match st.elems.get(&oid) {
-                            Some(cur) => kv_join(&cur, &item.kv),
-                            None => item.kv.clone(),
-                        };
-                        st.elems.insert(oid, nk);
+                        an.add_elem(oid, item, st);
                     }
                     an.heap.set_llen(oid, st, Some(n + items.len()));
                     continue;
                 }
             }
         }
-        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(elem.pts.clone(), crate::models::torch::elem_kv(&elem.kv)), false);
-        let nk = match st.elems.get(&oid) {
-            Some(cur) => kv_join(&cur, &elem.kv),
-            None => elem.kv.clone(),
-        };
-        st.elems.insert(oid, nk);
+        an.add_elem(oid, &elem, st);
         let ll = an.heap.llen(oid, st);
         let single = an.heap.obj(oid).single;
         if let Some(n) = ll {
-            if single && name == "append" && an.frame().loop_depth == 0 && n < if an.m.torch_on { 64 } else { 16 } {
+            if alone && single && name == "append" && an.frame().loop_depth == 0 && n < if an.m.torch_on { 64 } else { 16 } {
                 st.set_slot(oid, Ns::Pos, intern::key_int(n as i64), elem, true);
                 an.heap.set_llen(oid, st, Some(n + 1));
+                continue;
+            }
+            // one of several lists: this one as it was, or longer by the items
+            let items = if name == "append" { Some(vec![elem.clone()]) } else { ext_items.clone() };
+            if let Some(items) = items.filter(|its| !alone && an.frame().loop_depth == 0 && n + its.len() < 16) {
+                for (i, item) in items.iter().enumerate() {
+                    st.set_slot(oid, Ns::Pos, intern::key_int((n + i) as i64), item.clone(), false);
+                }
+                st.set_lens(oid, (None, n, (1u16 << n) | (1u16 << (n + items.len()))));
                 continue;
             }
             // appends of unknown count: the positions so far stay valid
@@ -3085,7 +3095,10 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             // the length was unknown already: the known prefix stays; one of a few lengths: the
             // items at each one's end (as each path has them)
             if let Some(alts) = alts {
-                match if name == "append" { Some(vec![elem.clone()]) } else { ext_items.clone() } {
+                // (the positions a longer alternative has must be known: a write at one joins them)
+                let longest = alts.iter().copied().max().unwrap_or(0);
+                let known = (0..longest).all(|p| st.has_slot(oid, Ns::Pos, intern::key_int(p as i64)));
+                match if name == "append" { Some(vec![elem.clone()]) } else { ext_items.clone() }.filter(|_| known) {
                     Some(items) => {
                         for n in alts {
                             for (i, item) in items.iter().enumerate() {
@@ -3093,7 +3106,10 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             }
                         }
                     }
-                    None => an.heap.set_prefix(oid, st, alts[0]),
+                    None => {
+                        let p = (0..alts[0]).take_while(|p| st.has_slot(oid, Ns::Pos, intern::key_int(*p as i64))).count();
+                        an.heap.set_prefix(oid, st, p)
+                    }
                 }
             }
             continue;
@@ -3732,8 +3748,17 @@ fn m_lpop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         };
         may_fail |= !ok;
         all_fail &= fails;
-        if !fails {
-            outs.push(list_pop_one(an, st, oid, c));
+        if fails {
+            continue;
+        }
+        // (a set of several members gives any of them: its order is not promised)
+        match n.filter(|n| *n > 1 && an.heap.kind(oid) == Kind::Set) {
+            Some(n) => {
+                outs.push(join_values((0..n).map(|i| st.slot(oid, Ns::Pos, intern::key_int(i as i64))).collect::<Vec<_>>()));
+                an.heap.set_llen(oid, st, None);
+                st.drop_obj_ns(oid, Ns::Pos);
+            }
+            None => outs.push(list_pop_one(an, st, oid, c)),
         }
     }
     let exc = if c.qual.starts_with("set.") { "KeyError" } else { "IndexError" };
@@ -3763,9 +3788,8 @@ fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             if name == "clear" {
                 if let Some(oid) = recv.single().filter(|o| an.heap.kind(*o) == Kind::List && an.heap.obj(*o).single && !crate::state::is_merged(*o)) {
                     st.drop_obj_ns(oid, Ns::Pos);
-                    st.drop_obj_ns(oid, Ns::Elem);
-                    st.elems.remove(&oid);
-                    an.heap.set_llen(oid, st, Some(0));
+                    an.set_positions(oid, Vec::new(), st);
+                    st.clear_last(oid);
                     return an.none_v.clone();
                 }
             }
@@ -3810,17 +3834,47 @@ fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 st.drop_obj_ns(oid, Ns::Pos);
                 if name == "insert" {
                     if let Some(x) = c.args.get(1) {
-                        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(x.pts.clone(), crate::models::torch::elem_kv(&x.kv)), false);
-                        let e = st.elems.get(&oid).unwrap_or_else(|| x.kv.clone());
-                        st.elems.insert(oid, kv_join(&e, &x.kv));
+                        an.add_elem(oid, x, st);
                     }
                 }
             }
             an.none_v.clone()
         }
+        // (the statements' dunders called by name: as the statements)
+        "__setitem__" if c.args.len() == 2 => {
+            an.store_item(&recv, Ns::Item, &c.args[0], &c.args[1], &c.node, st);
+            an.none_v.clone()
+        }
+        "__delitem__" if c.args.len() == 1 => {
+            an.delete_subscript(&recv, &c.args[0], &c.node, st);
+            an.none_v.clone()
+        }
+        "__iadd__" | "__ior__" | "__iand__" | "__isub__" | "__ixor__" if c.args.len() == 1 && recv.kv.is_bot() => {
+            let kind = |k: Kind| !recv.pts.is_empty() && recv.pts.iter().all(|o| an.heap.kind(o) == k);
+            let m = match name {
+                "__iadd__" if kind(Kind::List) => "list.extend",
+                "__ior__" if kind(Kind::Set) => "set.update",
+                "__iand__" if kind(Kind::Set) => "set.intersection_update",
+                "__isub__" if kind(Kind::Set) => "set.difference_update",
+                "__ixor__" if kind(Kind::Set) => "set.symmetric_difference_update",
+                _ => return an.unknown_call(&c.qual, c.recv.as_ref(), &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node),
+            };
+            let mv = an.method_value(m, &recv);
+            an.call_value(&mv, &c.node, None, st, Some(c.args.clone()));
+            recv
+        }
+        // (any other method of a list or set, called by name, may change it: unknown code,
+        // unless it only reads)
+        _ if !LIST_READERS.contains(&name) && recv.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::List | Kind::Set)) => an.unknown_call(&c.qual, c.recv.as_ref(), &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node),
         _ => Value::data(&format!("L{}", c.line)),
     }
 }
+
+/// The methods of a list or set that only read it (those `m_list_other` does not model).
+const LIST_READERS: &[&str] = &[
+    "index", "count", "__len__", "__contains__", "__getitem__", "__iter__", "__reversed__", "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__", "__hash__", "__repr__", "__str__", "__format__",
+    "__sizeof__", "__bool__", "__add__", "__mul__", "__rmul__", "__or__", "__and__", "__sub__", "__xor__", "__ror__", "__rand__", "__rsub__", "__rxor__",
+];
 
 fn m_view(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual);
@@ -5911,12 +5965,7 @@ match name {
     "func" => f,
     "args" => {
         let tid = an.alloc_at(Kind::Tuple, node, state, "partial.args", Payload::None, None, Ns::Item, None, Some(&format!("pargs{}", oid)));
-        for (i, a) in args.iter().enumerate() {
-            state.set_slot(tid, Ns::Pos, intern::key_int(i as i64), a.clone(), true);
-        }
-        let acc = join_values(args.clone());
-        state.set_slot(tid, Ns::Elem, STAR, acc, true);
-        an.heap.set_llen(tid, state, Some(args.len()));
+        an.set_positions(tid, args, state);
         Value::obj(tid)
     }
     _ => {

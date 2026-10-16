@@ -518,10 +518,7 @@ pub fn m_deque(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 fn forget(an: &mut Analyzer, oid: ObjId, arg: &Value, c: &Call, st: &mut State) {
     let name = c.qual.rsplit('.').next().unwrap_or("");
     let e = if matches!(name, "extend" | "extendleft") { { let it_ = an.iterate(arg, &c.node, st); an.elem_value(&it_.elem, &c.node, "el") } } else { arg.clone() };
-    let cur = st.slot(oid, Ns::Elem, intern::STAR);
-    st.set_slot(oid, Ns::Elem, intern::STAR, cur.join(&Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv))), false);
-    let kv = crate::domain::kv_join(&st.elems.get(&oid).unwrap_or(KeyVal::Bot), &e.kv);
-    st.elems.insert(oid, kv);
+    an.add_elem(oid, &e, st);
     an.heap.set_llen(oid, st, None);
     st.drop_obj_ns(oid, Ns::Pos);
 }

@@ -3,7 +3,7 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{kv_join, KeyVal, KeysOf, Ns, Value, BOT};
+use crate::domain::{KeyVal, KeysOf, Ns, Value, BOT};
 use crate::frontend::{self, Node};
 use crate::intern::{self, key_int, s, KeyId, STAR};
 use crate::state::{Kind, State};
@@ -60,7 +60,10 @@ impl Analyzer {
                 self.cx.summary_items.insert(own, items.len());
             }
             if items.len() <= limit && !same {
+                let unordered = it.unordered;
+                self.cx.comp_unordered += usize::from(unordered);
                 self.comp_unrolled(gens, i, limit, items, state, body, understood, own);
+                self.cx.comp_unordered -= usize::from(unordered);
                 self.exhaust(&exhaust_after, state);
                 return;
             }
@@ -169,7 +172,10 @@ impl Analyzer {
         if conditional {
             self.cx.cond_depth += 1;
         }
+        // (an item a filter may drop has no position of its own, understood filter or not)
+        self.cx.comp_maybe += usize::from(!decided);
         self.comp_gen(gens, i + 1, limit, st, body, own);
+        self.cx.comp_maybe -= usize::from(!decided);
         if conditional {
             self.cx.cond_depth -= 1;
         }
@@ -206,7 +212,7 @@ impl Analyzer {
             let k = an.eval_key(key_e, st);
             an.check_hashable(&k, st);
             let v = an.eval(val_e, st);
-            let strong = an.heap.obj(oid).single && an.cx.cond_depth == base_depth;
+            let strong = an.heap.obj(oid).single && an.cx.cond_depth == base_depth && an.cx.comp_maybe == 0;
             an.store_key(oid, Ns::Item, &k.kv, &v, strong, &nd, st);
         };
         let limit = comp_unroll_limit(&dc.generators, &[key_e, val_e], self.is_torch_module(self.frame().module));
@@ -228,6 +234,7 @@ impl Analyzer {
         let limit = comp_unroll_limit(gens, &[elt], self.is_torch_module(self.frame().module));
         // (a set's positions are its distinct members: a literal seen before adds none)
         let mut seen: Vec<KeyId> = Vec::new();
+        let mut counted: Option<(usize, usize)> = Some((0, 0));
         let mut body = |an: &mut Analyzer, st: &mut State| {
             let v = an.eval(elt, st);
             if kind == Kind::Set {
@@ -237,7 +244,14 @@ impl Analyzer {
                 seen.push(k);
                 false
             }) == Some(true);
-            let straight = positional && an.cx.comp_known.iter().all(|k| *k) && an.cx.cond_depth == base_depth;
+            let known = an.cx.comp_known.iter().all(|k| *k) && an.cx.cond_depth == base_depth;
+            let straight = positional && known && an.cx.comp_maybe == 0 && an.cx.comp_unordered == 0;
+            // (items known one by one: how many surely, how many a filter may drop)
+            match (known, an.cx.comp_maybe) {
+                (false, _) => counted = None,
+                (true, 0) => counted = counted.map(|(s, m)| (s + usize::from(!dup), m)),
+                (true, _) => counted = counted.map(|(s, m)| (s, m + 1)),
+            }
             if straight && dup {
                 // (already a member)
             } else if straight && n < limit {
@@ -246,9 +260,7 @@ impl Analyzer {
             } else {
                 positional = false;
             }
-            st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), crate::models::torch::elem_kv(&v.kv)), false);
-            let cur = st.elems.get(&oid).unwrap_or_else(|| v.kv.clone());
-            st.elems.insert(oid, kv_join(&cur, &v.kv));
+            an.add_elem(oid, &v, st);
         };
         if state.elems.get(&oid).is_none() {
             state.elems.insert(oid, BOT);
@@ -271,6 +283,10 @@ impl Analyzer {
         let summary_n = self.cx.summary_items.remove(&oid).filter(|_| strong && kind != Kind::Set);
         if positional {
             self.heap.set_llen(oid, state, Some(n));
+        } else if let Some((sure, maybe)) = counted.filter(|(s, m)| strong && kind != Kind::Set && s + m < 16) {
+            // (known items some filter may drop: the leading positions, and one of a few lengths)
+            let mask = (sure..=sure + maybe).fold(0u16, |m, l| m | (1 << l));
+            state.set_lens(oid, (None, n, mask));
         } else if let Some(n) = summary_n.filter(|n| *n <= 64) {
             // (known items in one pass: as many as there were, each the pass's element)
             let e = state.slot(oid, Ns::Elem, STAR);

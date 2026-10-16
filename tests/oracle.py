@@ -535,7 +535,7 @@ def run_one(path: str, strict: bool) -> Dict[str, Any]:
 def run_child(path: str, extra: List[str]) -> Dict[str, Any]:
     with tempfile.TemporaryDirectory() as tmp:
         try:
-            out = subprocess.run([sys.executable, __file__, "--child", path, *extra], capture_output=True, text=True, timeout=120, cwd=tmp, env=dict(os.environ, PYTHONHASHSEED="0"))
+            out = subprocess.run([sys.executable, __file__, "--child", path, *extra], capture_output=True, text=True, timeout=120, cwd=tmp, env=dict(os.environ, PYTHONHASHSEED="0"), stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
             return {"fails": ["timeout"], "total": 0, "unreached": 0, "crash": "timeout"}
         lines = [ln for ln in out.stdout.splitlines() if ln.startswith("@@ORACLE ")]

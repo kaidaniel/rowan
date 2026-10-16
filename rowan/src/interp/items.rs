@@ -136,8 +136,10 @@ impl Analyzer {
         }
         let line_data = rd.line_data;
         acc = crate::domain::join_values(parts);
-        if obj.pts.is_empty() {
-            acc = line_data;
+        // (a part that is no object: what an unknown, a mapping's key or a str / tuple literal
+        // holds is not known here; None or a number only fails the read)
+        if obj.pts.is_empty() || obj.kv.may_have_items() {
+            acc = if obj.pts.is_empty() { line_data } else { acc.join(&line_data) };
         }
         if let Some(ts) = frame_tiers {
             if ts.iter().all(|t| *t == Tier::Missing) {
@@ -321,7 +323,9 @@ impl Analyzer {
             // a slice is a container of the same elements (positions unknown)
             let elem = state.slot(oid, Ns::Elem, STAR);
             let kv = state.elems.get(&oid).unwrap_or(DATA);
-            let nid = self.alloc_at(kind, node, state, &format!("{}@L{}", kind.name(), node.line), Payload::None, None, Ns::Item, None, None);
+            // (one object per sequence sliced: of several, each its own)
+            let part = (!single_target).then(|| format!("part{}", parts.len()));
+            let nid = self.alloc_at(kind, node, state, &format!("{}@L{}", kind.name(), node.line), Payload::None, None, Ns::Item, None, part.as_deref());
             self.heap.set_llen(nid, state, None);
             state.set_slot(nid, Ns::Elem, STAR, elem, true);
             state.elems.insert(nid, kv);
@@ -601,24 +605,15 @@ impl Analyzer {
                 vals.extend(items.iter().cloned());
                 vals.extend((b..n).map(|i| state.slot(oid, Ns::Pos, intern::key_int(i as i64))));
                 if vals.len() < 16 {
-                    state.drop_obj_ns(oid, Ns::Pos);
-                    for (i, x) in vals.iter().enumerate() {
-                        state.set_slot(oid, Ns::Pos, intern::key_int(i as i64), x.clone(), true);
-                        state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(x.pts.clone(), crate::models::torch::elem_kv(&x.kv)), false);
-                    }
-                    self.heap.set_llen(oid, state, Some(vals.len()));
-                    return;
+                    return self.set_positions(oid, vals, state);
                 }
             }
             let e = self.elem_value(&it.elem, node, "el");
-            state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv)), false);
-            let kv = crate::domain::kv_join(&state.elems.get(&oid).unwrap_or(KeyVal::Bot), &e.kv);
-            state.elems.insert(oid, kv);
+            self.add_elem(oid, &e, state);
             state.drop_obj_ns(oid, Ns::Pos);
             self.heap.set_llen(oid, state, None);
             return;
         }
-        state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), crate::models::torch::elem_kv(&v.kv)), false);
         let idx = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
         let at: Vec<i64> = match (idx, self.heap.len_alts(oid, state)) {
             (Some(i), Some(alts)) => alts.iter().map(|n| if i < 0 { *n as i64 + i } else { i }).zip(alts.iter()).filter(|(p, n)| 0 <= *p && *p < **n as i64).map(|(p, _)| p).collect(),
@@ -627,6 +622,12 @@ impl Analyzer {
         let one = idx.is_some() && self.heap.llen(oid, state).is_some();
         for p in at {
             state.set_slot(oid, Ns::Pos, intern::key_int(p), v.clone(), strong && one);
+        }
+        // (every position known: the elements are exactly what they hold, the value
+        // overwritten gone)
+        match self.known_positions(oid, state).filter(|_| strong && one) {
+            Some(ps) => self.set_positions(oid, ps, state),
+            None => self.add_elem(oid, v, state),
         }
     }
 
@@ -1007,6 +1008,31 @@ impl Analyzer {
                 state.set_row(oid, Ns::Item, r);
             }
         }
+    }
+
+    /// `del obj[key]` (and `obj.__delitem__(key)`): on a list, later positions move down.
+    pub fn delete_subscript(&mut self, obj: &Value, key: &Value, node: &Node, state: &mut State) {
+        for o in obj.pts.iter() {
+            if self.heap.kind(o) != Kind::List {
+                continue;
+            }
+            let idx = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
+            match (self.known_positions(o, state), idx) {
+                (Some(mut ps), Some(i)) if obj.pts.len() == 1 => {
+                    let len = ps.len() as i64;
+                    let at = if i < 0 { len + i } else { i };
+                    if 0 <= at && at < len {
+                        ps.remove(at as usize);
+                        self.set_positions(o, ps, state);
+                    }
+                }
+                _ => {
+                    self.heap.set_llen(o, state, None);
+                    state.drop_obj_ns(o, Ns::Pos);
+                }
+            }
+        }
+        self.delete_item(obj, Ns::Item, key, node, state, true);
     }
 
     pub fn delete_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) {
