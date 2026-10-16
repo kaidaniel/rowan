@@ -3814,8 +3814,31 @@ fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             an.none_v.clone()
         }
-        // (any other method of a list or set, called by name — `xs.__setitem__(0, v)`,
-        // `s.__ior__(t)` — may change it: unknown code, unless it only reads)
+        // (the statements' dunders called by name: as the statements)
+        "__setitem__" if c.args.len() == 2 => {
+            an.store_item(&recv, Ns::Item, &c.args[0], &c.args[1], &c.node, st);
+            an.none_v.clone()
+        }
+        "__delitem__" if c.args.len() == 1 => {
+            an.delete_subscript(&recv, &c.args[0], &c.node, st);
+            an.none_v.clone()
+        }
+        "__iadd__" | "__ior__" | "__iand__" | "__isub__" | "__ixor__" if c.args.len() == 1 && recv.kv.is_bot() => {
+            let kind = |k: Kind| !recv.pts.is_empty() && recv.pts.iter().all(|o| an.heap.kind(o) == k);
+            let m = match name {
+                "__iadd__" if kind(Kind::List) => "list.extend",
+                "__ior__" if kind(Kind::Set) => "set.update",
+                "__iand__" if kind(Kind::Set) => "set.intersection_update",
+                "__isub__" if kind(Kind::Set) => "set.difference_update",
+                "__ixor__" if kind(Kind::Set) => "set.symmetric_difference_update",
+                _ => return an.unknown_call(&c.qual, c.recv.as_ref(), &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node),
+            };
+            let mv = an.method_value(m, &recv);
+            an.call_value(&mv, &c.node, None, st, Some(c.args.clone()));
+            recv
+        }
+        // (any other method of a list or set, called by name, may change it: unknown code,
+        // unless it only reads)
         _ if !LIST_READERS.contains(&name) && recv.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::List | Kind::Set)) => an.unknown_call(&c.qual, c.recv.as_ref(), &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node),
         _ => Value::data(&format!("L{}", c.line)),
     }

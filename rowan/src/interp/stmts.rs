@@ -609,28 +609,7 @@ impl Analyzer {
                     let obj = self.eval(&sub.value, state);
                     let key = self.eval_key(&sub.slice, state);
                     let n = frontend::node(t);
-                    // `del xs[i]` on a list: later positions move down
-                    for o in obj.pts.iter() {
-                        if self.heap.kind(o) != Kind::List {
-                            continue;
-                        }
-                        let idx = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
-                        match (self.known_positions(o, state), idx) {
-                            (Some(mut ps), Some(i)) if obj.pts.len() == 1 => {
-                                let len = ps.len() as i64;
-                                let at = if i < 0 { len + i } else { i };
-                                if 0 <= at && at < len {
-                                    ps.remove(at as usize);
-                                    self.set_positions(o, ps, state);
-                                }
-                            }
-                            _ => {
-                                self.heap.set_llen(o, state, None);
-                                state.drop_obj_ns(o, Ns::Pos);
-                            }
-                        }
-                    }
-                    self.delete_item(&obj, Ns::Item, &key, &n, state, true);
+                    self.delete_subscript(&obj, &key, &n, state);
                 }
                 ast::Expr::Attribute(a) => {
                     let obj = self.eval(&a.value, state);
