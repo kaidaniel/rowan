@@ -518,7 +518,21 @@ impl Analyzer {
                         match el {
                             ast::InterpolatedStringElement::Literal(l) => parts.push(Part::Lit(l.value.to_string())),
                             ast::InterpolatedStringElement::Interpolation(i) => {
-                                let part = self.fstring_hole(i, node, state);
+                                // `{x=}`: the expression's text, then its repr (unless a
+                                // conversion or a spec says otherwise)
+                                let mut conv = i.conversion;
+                                if let Some(dt) = &i.debug_text {
+                                    let src = frontend::text_in(node, ruff_text_size::Ranged::range(&*i.expression));
+                                    if src.is_empty() {
+                                        parts.push(Part::Opaque);
+                                        continue;
+                                    }
+                                    parts.push(Part::Lit(format!("{}{}{}", dt.leading, src, dt.trailing)));
+                                    if conv == ast::ConversionFlag::None && i.format_spec.is_none() {
+                                        conv = ast::ConversionFlag::Repr;
+                                    }
+                                }
+                                let part = self.fstring_hole(i, conv, node, state);
                                 parts.push(part);
                             }
                         }
@@ -530,14 +544,14 @@ impl Analyzer {
     }
 
     /// One `{expr!conv:spec}` of an f-string: its text when known, else what is known of it.
-    fn fstring_hole(&mut self, i: &'static ast::InterpolatedElement, node: &'static ast::Expr, state: &mut State) -> Part {
+    fn fstring_hole(&mut self, i: &'static ast::InterpolatedElement, conversion: ast::ConversionFlag, node: &'static ast::Expr, state: &mut State) -> Part {
         let v = self.eval(&i.expression, state);
         // the spec's text (`{n:03d}`, `{x:>{w}}`); None: a part of it is not known
         let spec_text: Option<Option<String>> = i.format_spec.as_ref().map(|spec| self.format_spec_text(spec, state));
         // an object of the program's classes: its `__format__` / `__str__` /
         // `__repr__` makes the text
         let nd = frontend::node(node);
-        let ran = match i.conversion {
+        let ran = match conversion {
             ast::ConversionFlag::None => {
                 let spec_v = match &spec_text {
                     None => Value::lit_str(""),
@@ -550,11 +564,11 @@ impl Analyzer {
             _ => self.run_dunder(&v, &["__repr__"], vec![], &nd, state),
         };
         if let Some((t, rest)) = ran {
-            let whole = rest.pts.is_empty() && rest.kv.is_bot() && (i.conversion == ast::ConversionFlag::None || spec_text.is_none());
+            let whole = rest.pts.is_empty() && rest.kv.is_bot() && (conversion == ast::ConversionFlag::None || spec_text.is_none());
             return if whole { Part::Hole(t) } else { Part::Opaque };
         }
         // `{x!r}` / `{x!s}` / `{x!a}`: the converted text
-        let v = match i.conversion {
+        let v = match conversion {
             ast::ConversionFlag::None => crate::models::enums::enum_text(self, &v, state).unwrap_or(v),
             conv => {
                 let name = match conv {
