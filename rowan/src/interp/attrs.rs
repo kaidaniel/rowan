@@ -614,20 +614,22 @@ impl Analyzer {
         let cls_of = self.heap.instance_class(oid);
         if let Some(mut v) = v {
             // (set on some paths only, over a class attribute of the name: the others read the
-            // class's — the read cannot fail)
-            let class_attr = cls_of.filter(|c| !row.definite.contains(nk) && !crate::models::dataclasses::dataclass_fields_mro(self, *c).iter().any(|(f, _)| f == name)).and_then(|c| match self.class_lookup_on_path(c, name, state) {
-                (defs, true) => defs.first().copied(),
-                _ => None,
-            });
-            if let (true, Some(defc)) = (row.present.contains(nk), class_attr) {
-                let cv = state.slot_opt(defc, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(defc, Ns::Attr, nk)).cloned()).unwrap_or_default();
+            // class's — the read cannot fail where the class surely has it)
+            let class_attr = cls_of.filter(|c| !row.definite.contains(nk) && !crate::models::dataclasses::dataclass_fields_mro(self, *c).iter().any(|(f, _)| f == name)).map(|c| self.class_lookup_on_path(c, name, state));
+            let mut class_v: Option<Value> = None;
+            if let (true, Some((defs, sure))) = (row.present.contains(nk), class_attr) {
+                let cv = join_values(defs.iter().map(|d| state.slot_opt(*d, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(*d, Ns::Attr, nk)).cloned()).unwrap_or_default()));
                 let plain = !cv.pts.iter().any(|f| matches!(self.heap.kind(f), Kind::Function | Kind::Bound));
-                if plain {
+                if plain && sure {
                     if !guarded {
                         self.verdict(node, nk, &Classification::new(Tier::Proven), oid, Ns::Attr, None, None);
                     }
                     return v.join(&cv);
                 }
+                class_v = (plain && !defs.is_empty()).then_some(cv);
+            }
+            if let Some(cv) = class_v {
+                v = v.join(&cv);
             }
             if row.present.contains(nk) {
                 let cls = classify(&row, nk);
