@@ -5,11 +5,12 @@
 //!
 //! * the `Heap` (objects, payloads, lengths, class attributes, keys standing for objects) and
 //!   its own `models::Tables`;
-//! * the methods in this file: modules and models, frames, branches, entry runs, notes, guarded
-//!   reads, raises with an exception object, catching frames, plain setattr, symbols;
+//! * the methods in this file: modules and models, frames (a local's assignments), branches,
+//!   entry runs, notes, guarded reads, raises with an exception object, catching frames, plain
+//!   setattr, symbols;
 //! * the interpreter's `pub` methods, which are these:
-//!   - evaluation: `eval`, `exec_block`, `run_module`, `stmt_try_parts`, `load_name`, `frame`,
-//!     `frame_mut`;
+//!   - evaluation: `eval`, `eval_key`, `exec_block`, `run_module`, `stmt_try_parts`, `load_name`,
+//!     `frame`, `frame_mut`;
 //!   - reads and writes: `load_attr`, `load_item`, `store_attr`, `store_item`, `store_key`,
 //!     `delete_item`, `copy_into`, `copy_object`, `method_value`, `class_lookup`, the literal
 //!     views (`lit_keys`, `literal_mapping`, `literal_dict_items`, `maybe_dict_items`,
@@ -199,6 +200,34 @@ impl Analyzer {
     /// Object `oid` is printed as `sym` (in function `scope`'s names; 0: module level).
     pub fn set_symbol(&mut self, oid: ObjId, sym: String, scope: u32) {
         self.names.set(oid, sym, scope);
+    }
+
+    /// What the running function's own code assigns to local `name` (`name = e`, `name &= e`:
+    /// each `e`; not in nested functions); empty at module level.
+    pub fn local_assignments(&self, name: &str) -> Vec<&'static ruff_python_ast::Expr> {
+        use ruff_python_ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
+        use ruff_python_ast::{Expr, Stmt};
+        struct V<'n>(&'n str, Vec<&'static Expr>);
+        impl SourceOrderVisitor<'static> for V<'_> {
+            fn visit_stmt(&mut self, st: &'static Stmt) {
+                let name = self.0;
+                let named = |t: &Expr| matches!(t, Expr::Name(n) if n.id.as_str() == name);
+                match st {
+                    Stmt::FunctionDef(_) | Stmt::ClassDef(_) => return,
+                    Stmt::Assign(a) if a.targets.iter().any(named) => self.1.push(&a.value),
+                    Stmt::AugAssign(a) if named(&a.target) => self.1.push(&a.value),
+                    Stmt::AnnAssign(a) if named(&a.target) => self.1.extend(a.value.as_deref()),
+                    _ => {}
+                }
+                walk_stmt(self, st);
+            }
+        }
+        let Some(fi) = self.frame().func.and_then(|f| self.heap.func_info_opt(f)) else { return vec![] };
+        let mut v = V(name, Vec::new());
+        for st in fi.node.body() {
+            v.visit_stmt(st);
+        }
+        v.1
     }
 
     // ------------------------------------------------------------ exceptions

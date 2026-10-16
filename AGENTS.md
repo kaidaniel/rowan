@@ -50,7 +50,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   function texts: globals, cells, defaults and arguments whose value, or what it holds, the code
   may change or give away (to the program's functions: as they use it; a dict, list or set changed
   in place: its items), a local aliasing what it is bound to; class attributes by name, rebound
-  where a store's base may be the class; a receiver by the names its code uses unless it escapes,
+  where a store's base may be the class (a call's result: the classes it may return, `result_classes`); a receiver by the names its code uses unless it escapes,
   `receiver_effects`; one call for several receivers), and the function gets a reporting run (open
   parameters) for the calls that did not run. Entry runs are not counted (one per function): work is bounded by functions × budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation
@@ -87,7 +87,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Requirements and schemas:** reading a key from a row open through an input records a
   requirement on that input: `always` (every path), `sometimes`; `only_if`: tests of the
   function's parameters as passed that all its readers passed (`State::path`, `guards.rs`). A
-  read guarded by a `KeyError` handler counts (a frame column read in a `try` is a probe: not).
+  read guarded by a `KeyError` handler counts (a frame column read in a `try` is a probe: not);
+  one on one of several objects needs each one's only sometimes (an element's: per element).
   A general run's on its own parameters are a hover's contract (`Findings::contracts`); a parameter's fact at its `def` keeps what each call passed (`Fact::passed`, checked by its run's verdicts).
 * **Verdicts:** every read, `del` and `pop` gets a tier per object from its row (`classify`): `proven`, `possibly`,
   `missing`, `input` are sound; `likely` / `likely-missing` optimistic (unknown code removed nothing). In one of
@@ -95,10 +96,9 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Models** (`models/`, by qualified name in `Registry`; free functions of `&mut Analyzer` that
   see the `Heap`, their `models::Tables` and the interpreter's public methods) compute
   CPython's result on known values (str / bytes, formatting, json, re, datetime, decimal,
-  sqlite, csv…), and simulate pandas columns, pydantic / FastAPI validation and routing, and
-  torch / numpy shapes (dims as polynomials; an undecided condition is a requirement and then a
-  fact on the path; in torch modules `int` / `Tensor` annotations hold; a module-level unknown
-  number names its dims, a module-level tensor's unknown dims are one value each).
+  sqlite, csv…), and simulate pandas columns (an unknown value's mask / column-list / `.loc`
+  selection holds its columns), pydantic / FastAPI validation and routing, and torch / numpy shapes
+  (dims as polynomials; an undecided condition is a requirement and then a fact on the path; in torch modules `int` / `Tensor` annotations hold; a module-level unknown number names its dims, a module-level tensor's unknown dims are one value each).
 * **Deadline:** a safety net (`ms`, 10 s): past it user calls are unknown, running ones stop; the budget bounds the work.
   **On demand** (`on_demand`, `general_run_of`): from `after_any_code`, a hovered function's general run with
   verdicts (fresh budget; past four budgets of work its callees' calls are unknown, several callees one `skipped_calls`,

@@ -813,10 +813,10 @@ impl Analyzer {
                 return self.fresh_instance(oid, state, &format!("entry:{}.{}", fi.qualname, pname)).map(Value::obj);
             }
             if o == Kind::External && self.heap.external_qual(oid).ends_with("DataFrame") {
-                let src = Source::new(&format!("param {}", fi.qualname), SourceKind::Param);
+                let src = Source::new(&format!("param {}.{}", fi.py_qualname(), pname), SourceKind::Param);
                 let fid = self.alloc(
                     Kind::Frame,
-                    &format!("param:{}", fi.qualname),
+                    &format!("param:{}.{}", fi.qualname, pname),
                     state,
                     "frame param",
                     Payload::None,

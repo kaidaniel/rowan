@@ -5577,3 +5577,156 @@ pub fn loc_set(an: &mut Analyzer, lo: u32, key: &Value, v: &Value, node: &Node, 
         }
     }
 }
+
+// ------------------------------------------------------------ selections of unknown values
+
+/// Is `v` a value of unknown type holding an input's content (a parameter nothing says is a
+/// frame, unknown code's result from one, its `copy()`)?
+fn unknown_input(an: &Analyzer, v: &Value, st: &State) -> bool {
+    let unknown = |o: u32| an.heap.kind(o) == Kind::Unknown || an.heap.copy_root.get(&o).is_some_and(|r| an.heap.kind(*r) == Kind::Unknown);
+    !v.pts.is_empty() && v.pts.iter().all(|o| unknown(o) && st.has_row(o, Ns::Item) && st.row(o, Ns::Item).has_input())
+}
+
+/// Does `e` read an item or attribute of `recv` (`recv["a"]`, `recv.a`), or use a mask of it
+/// held in a local?
+fn reads_part_of(an: &Analyzer, e: &'static ruff_python_ast::Expr, recv: &ruff_python_ast::Expr, depth: u32) -> bool {
+    use ruff_python_ast::comparable::ComparableExpr;
+    use ruff_python_ast::visitor::source_order::{walk_expr, SourceOrderVisitor};
+    use ruff_python_ast::Expr as E;
+    struct V<'a> {
+        an: &'a Analyzer,
+        recv: ComparableExpr<'a>,
+        recv_e: &'a E,
+        depth: u32,
+        hit: bool,
+    }
+    impl SourceOrderVisitor<'static> for V<'_> {
+        fn visit_expr(&mut self, e: &'static E) {
+            let base = match e {
+                E::Subscript(s) => Some(&*s.value),
+                E::Attribute(a) => Some(&*a.value),
+                _ => None,
+            };
+            self.hit |= base.is_some_and(|b| ComparableExpr::from(b) == self.recv);
+            self.hit |= matches!(e, E::Name(_)) && self.depth > 0 && is_mask(self.an, e, self.recv_e, self.depth - 1);
+            if !self.hit {
+                walk_expr(self, e);
+            }
+        }
+    }
+    let mut v = V { an, recv: ComparableExpr::from(recv), recv_e: recv, depth, hit: false };
+    v.visit_expr(e);
+    v.hit
+}
+
+/// Is key `e` of `recv[e]` a boolean mask computed from `recv`'s own items (`recv["a"] > 0`,
+/// `recv["a"].notna() & recv["b"].notna()`, `~m`, a local holding one): the array / frame
+/// reading of the subscript, a selection of `recv`'s rows, rather than a key of a mapping.
+fn is_mask(an: &Analyzer, e: &'static ruff_python_ast::Expr, recv: &ruff_python_ast::Expr, depth: u32) -> bool {
+    use ruff_python_ast::{Expr as E, Operator, UnaryOp};
+    match e {
+        E::Name(n) => {
+            let vs = an.local_assignments(n.id.as_str());
+            !vs.is_empty() && vs.iter().all(|v| is_mask(an, v, recv, depth))
+        }
+        E::Compare(_) => reads_part_of(an, e, recv, depth),
+        E::UnaryOp(u) if u.op == UnaryOp::Invert => reads_part_of(an, e, recv, depth),
+        E::BinOp(b) if matches!(b.op, Operator::BitAnd | Operator::BitOr | Operator::BitXor) => reads_part_of(an, e, recv, depth),
+        // (a method of an item: `recv["a"].isin(xs)`, `recv["s"].str.contains("x")`; not a
+        // mapping's own `get` / `pop`)
+        E::Call(c) => match &*c.func {
+            E::Attribute(a) if ruff_python_ast::comparable::ComparableExpr::from(&*a.value) == ruff_python_ast::comparable::ComparableExpr::from(recv) => {
+                !matches!(a.attr.as_str(), "get" | "pop" | "setdefault" | "keys" | "values" | "items")
+            }
+            E::Attribute(_) => reads_part_of(an, e, recv, depth),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// `x.loc[rows, cols]` / `x.iloc[rows]` (rows not one label written out) on a value of unknown
+/// type holding an input: a selection of x (`unknown_selection`), x's `loc` attribute not read.
+pub fn unknown_loc(an: &mut Analyzer, sub: &'static ruff_python_ast::ExprSubscript, node: &Node, st: &mut State) -> Option<Value> {
+    use ruff_python_ast::Expr as E;
+    let E::Attribute(a) = &*sub.value else { return None };
+    if !matches!(a.attr.as_str(), "loc" | "iloc") || !matches!(&*a.value, E::Name(_)) {
+        return None;
+    }
+    // (one row or cell by labels or positions written out, `x.loc["k1"]`, `x.iloc[-1, 0]`: its
+    // own path)
+    let constant = |e: &E| e.is_literal_expr() || matches!(e, E::UnaryOp(u) if u.operand.is_number_literal_expr());
+    if constant(&sub.slice) || matches!(&*sub.slice, E::Tuple(t) if t.elts.iter().all(constant)) {
+        return None;
+    }
+    let recv = an.eval(&a.value, st);
+    if !unknown_input(an, &recv, st) {
+        return None;
+    }
+    let key = an.eval_key(&sub.slice, st);
+    // (the columns: `.loc`'s second part; `.iloc`'s are positions)
+    let cols = match (&*sub.slice, key.single()) {
+        (E::Tuple(t), Some(tid)) if t.elts.len() == 2 && a.attr.as_str() == "loc" => Some(st.slot(tid, Ns::Pos, intern::key_int(1))),
+        _ => None,
+    };
+    Some(select_from(an, &recv, cols, node, st))
+}
+
+/// `x[mask]` (`is_mask`) / `x[["a", "b"]]` on a value of unknown type holding an input (an
+/// unannotated parameter given frames): a selection of x's rows or columns, which holds x's
+/// columns (those listed), so what code reads of it, it reads of x — `x["qty"]`, not a column
+/// of the column a mask was computed from. (A mapping indexed by such a key fails: a list is
+/// not hashable; a mapping keyed by a test of its own items is not taken into account.)
+pub fn unknown_selection(an: &mut Analyzer, obj: &Value, sub: &'static ruff_python_ast::ExprSubscript, key: &Value, node: &Node, st: &mut State) -> Option<Value> {
+    use ruff_python_ast::Expr as E;
+    if !unknown_input(an, obj, st) {
+        return None;
+    }
+    match &*sub.slice {
+        E::List(_) => Some(select_from(an, obj, Some(key.clone()), node, st)),
+        e if is_mask(an, e, &sub.value, 2) => Some(select_from(an, obj, None, node, st)),
+        _ => None,
+    }
+}
+
+/// The selection of `recv`'s rows with columns `cols` (a list of names: each read of `recv`;
+/// one name: that column of `recv`; None or not literal: all of `recv`'s).
+fn select_from(an: &mut Analyzer, recv: &Value, cols: Option<Value>, node: &Node, st: &mut State) -> Value {
+    if let Some(k) = cols.as_ref().filter(|c| c.pts.is_empty()).and_then(|c| c.kv.as_lit()) {
+        return an.load_item(recv, Ns::Item, &Value::lit(k), node, st, true);
+    }
+    let listed = cols.as_ref().and_then(|c| lit_key_seq(an, st, c));
+    let weak = recv.pts.len() > 1;
+    let mut slots: Vec<(Ns, KeyId, Value)> = Vec::new();
+    let item_row = match &listed {
+        Some(ks) => {
+            for k in ks {
+                let v = an.load_item(recv, Ns::Item, &Value::lit(*k), node, st, true);
+                slots.push((Ns::Item, *k, v));
+            }
+            closed_ordered(ks)
+        }
+        None => {
+            for o in recv.pts.iter() {
+                slots.extend(st.obj_slots(o, Ns::Item).into_iter().map(|(k, v)| (Ns::Item, k, v)));
+            }
+            join_rows(recv.pts.iter().map(|o| st.row(o, Ns::Item)))
+        }
+    };
+    for o in recv.pts.iter() {
+        slots.extend(st.obj_slots(o, Ns::Attr).into_iter().map(|(k, v)| (Ns::Attr, k, v)));
+    }
+    let attr_row = join_rows(recv.pts.iter().map(|o| if st.has_row(o, Ns::Attr) { st.row(o, Ns::Attr) } else { Row::top() }));
+    let label = format!("selection@L{}", node.line);
+    let sid = an.alloc_at(Kind::Unknown, node, st, &label, Payload::None, Some(item_row), Ns::Item, None, None);
+    st.set_row(sid, Ns::Attr, attr_row);
+    for (ns, k, v) in slots {
+        st.set_slot(sid, ns, k, v, !weak);
+    }
+    let text = crate::frontend::text_at(node);
+    if !text.is_empty() {
+        let scope = an.frame().func.unwrap_or(0);
+        an.set_symbol(sid, text.split_whitespace().collect::<Vec<_>>().join(" "), scope);
+    }
+    Value::obj(sid)
+}

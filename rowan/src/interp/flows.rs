@@ -154,6 +154,9 @@ pub struct CodeUses {
     /// (name, attribute) of an assignment to what a name it does not bind holds
     /// (`REGISTRY[k].a = …`): a class the name's value holds has its attribute rebound
     pub class_stores_in: Vec<(StrId, StrId)>,
+    /// (callee, attribute) of an assignment to what a call by name returns (`make().a = …`,
+    /// also through a local): a class the call may give back has its attribute rebound
+    pub class_stores_result: Vec<(Callee, StrId)>,
     /// the attribute names it reads at all (a method of a class runs only when its name is
     /// read, or for a dunder)
     pub reads: FxHashSet<StrId>,
@@ -164,6 +167,9 @@ pub struct CodeUses {
     /// what its own `return`s give back of names and calls' results (what may happen to them
     /// is what the callers do with the result, `effects::caller_returns`)
     pub returns: Vec<Src>,
+    /// a `return` may give back something else that may be a class: a parameter, an attribute,
+    /// `type(x)` (not only names' values, calls' results and new values)
+    pub returns_other: bool,
     /// names and calls' results it gives to calls by name
     pub passes: Vec<Pass>,
     /// the attribute names it calls on what is not a name it does not bind (`x.f(…)` of a
@@ -438,6 +444,9 @@ impl<'a> Flow<'a> {
             Expr::Call(c) => {
                 let args = || c.arguments.args.iter().chain(c.arguments.keywords.iter().map(|k| &k.value));
                 match &*c.func {
+                    // (`cast(T, x)`, `typing.cast(T, x)`: x)
+                    Expr::Name(f) if f.id.as_str() == "cast" && !self.local("cast") && c.arguments.args.len() == 2 => self.srcs(&c.arguments.args[1]),
+                    Expr::Attribute(a) if a.attr.as_str() == "cast" && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "typing") && c.arguments.args.len() == 2 => self.srcs(&c.arguments.args[1]),
                     // (a method that keeps nothing may give back what its receiver holds or an
                     // argument; a container's `pop` an item)
                     Expr::Attribute(a) if pure_method(a.attr.as_str()) || matches!(a.attr.as_str(), "pop" | "popitem" | "setdefault") => {
@@ -806,8 +815,9 @@ impl<'a> Flow<'a> {
                     self.name(n, None);
                     self.out.class_stores_in.push((n, a));
                 }
-                // (`make().a = …`: whatever the call gives, a class among others)
-                (Origin::Param(_) | Origin::TypeOf | Origin::Result(..), Level::Own) => drop(self.out.class_stores.insert(a)),
+                // (`make().a = …`: a class the call may give back)
+                (Origin::Result(n, f), Level::Own) => self.out.class_stores_result.push(((n, f), a)),
+                (Origin::Param(_) | Origin::TypeOf, Level::Own) => drop(self.out.class_stores.insert(a)),
                 _ => {}
             }
         }
@@ -943,12 +953,14 @@ impl<'a> Flow<'a> {
                 match &r.value {
                     Some(v) if self.depth == 0 && self.recv_base(v) => {
                         self.recv.returned = true;
+                        self.out.returns_other = true;
                         let first = self.first.map(|f| (Origin::Param(f), Level::Own));
                         let others: Vec<Src> = self.srcs(v).into_iter().filter(|x| Some(*x) != first).collect();
                         self.mark(&others, Pos::Change);
                     }
                     // (names' values and calls' results go to the callers)
                     Some(v) if self.depth == 0 => {
+                        self.out.returns_other |= self.srcs(v).iter().any(|(o, _)| !matches!(o, Origin::Name(_) | Origin::NameAttr(..) | Origin::Result(..)));
                         let mut srcs = Vec::new();
                         self.give(v, &mut srcs);
                         self.out.returns.extend(srcs);
