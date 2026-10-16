@@ -381,7 +381,8 @@ function runNote(run) {
   if (run.fn) {
     const a = run.analysis || {};
     const cut = a.cut ? `; this run was cut at its own ${secs(a.deadline_ms)} deadline too, so code it had not reached is taken as unknown code` : "";
-    return `analysed on demand: this function alone, for any call, in ${secs(a.ms || 0)} (${stmts(a.statements || 0)}), because ${whole}${cut}`;
+    const callees = a.callees_cut ? `; past ${stmts(a.callees_cut)}, the calls made by the functions it calls were taken as unknown code` : "";
+    return `analysed on demand: this function alone, for any call, in ${secs(a.ms || 0)} (${stmts(a.statements || 0)}), because ${whole}${callees}${cut}`;
   }
   if (run.module) return `from the module's own code only (its functions are analysed when you hover them), because ${whole}`;
   const a = run.analysis;

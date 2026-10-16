@@ -466,6 +466,15 @@ async function onDemand() {
   assert(d5.includes('```python\nd = {"id": user.id, "role"?: "admin"}\n```') && d5.includes('- `"k"?`: possible key'), d5);
   const u2 = hover(bidx, a01src, 2, "user");
   assert(u2.includes("```python\nuser = (parameter)\n```\n\n**Requirements**\n- `user.id`") && !u2.includes("In Calls"), u2);
+  // (its callees past the work a run on demand may do: the note says their calls were unknown)
+  const cutCallees = indexResult({ ...b.result, analysis: { ...b.result.analysis, callees_cut: 16384 } });
+  const d5c = hover(cutCallees, a01src, 5, "d");
+  assert(/\n- analysed on demand: this function alone, for any call, in [^\n]*, because the whole program's analysis took too long; past 16,384 statements, the calls made by the functions it calls were taken as unknown code$/.test(d5c), d5c);
+  // (and the engine says when it happened: `main` calls functions that call others, past a
+  // budget of 5 statements)
+  const deploy = path.join(root, "tests", "apps", "small", "a002_deploy_cli.py");
+  const runs = execFileSync(bin, ["hovers", deploy, "--only", "main"], { env: { ...process.env, ROWAN_LIMITS: "budget=5" } }).toString().trim().split("\n").slice(1).map((l) => JSON.parse(l));
+  assert(runs.length === 1 && runs[0].callees_cut === true, JSON.stringify(runs));
   // (a second hover in the same function: the cached document, merged once into the index)
   const again = await hoverServer(bin, a01, 4, [], 60);
   assert.deepStrictEqual(again.span, [1, 5]);
@@ -495,7 +504,7 @@ async function onDemand() {
       checkFormat(h, name, where, fs_);
       assert(!h.includes("**In Calls**"), where);
       // (said last: the function was analysed alone, for any call, and how long it took)
-      assert(/\n- analysed on demand: this function alone, for any call, in [^\n]* \([\d,]+ statements?\), because the whole program's analysis took too long$/.test(h), where);
+      assert(/\n- analysed on demand: this function alone, for any call, in [^\n]* \([\d,]+ statements?\), because the whole program's analysis took too long(; past [\d,]+ statements, the calls made by the functions it calls were taken as unknown code)?$/.test(h), where);
     }
   }
   stopServers();
