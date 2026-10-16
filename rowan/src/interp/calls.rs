@@ -110,24 +110,43 @@ impl Analyzer {
             let (q, recv) = unknown.expect("several unknown callees");
             return self.unknown_call(&q, Some(&recv), &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
-        // (one method past its budget on each of several receivers: one call past the budget
-        // with all of them as the receiver, not one per receiver)
-        let (targets, batch) = match self.skipped_on_receivers(&targets) {
-            Some((f, recv, rest)) if rest.is_empty() => return self.skipped_on(f, &recv, &args, &kwargs, &star_args, &star_kwargs, state, node),
-            Some((f, recv, rest)) => (rest, Some((f, recv))),
-            None => (targets, None),
+        // (one method on several receivers: one call with all of them as the receiver, not one
+        // per receiver, when the call would not run — past the function's budget, no recursion
+        // of it running — or in a run on demand — a method of a base class run for the
+        // instances of every subclass)
+        let on_demand = self.budget.hover.is_some();
+        let skips = |an: &Analyzer, f: ObjId| {
+            let fi = an.heap.func_info(f);
+            let runs = an.m.sdispatch.contains_key(&f) || fi.is_memo.get() || matches!(fi.node, FuncNode::Def(d) if is_generator(&d.body));
+            !runs && an.budget.exhausted(fi.node.addr()) && an.recursion.depth(f) == 0
         };
+        let mut groups: Vec<(ObjId, Value, usize)> = Vec::new();
+        for &o in &targets {
+            if let (Kind::Bound, Payload::Bound(f, r)) = (self.heap.kind(o), &self.heap.obj(o).payload) {
+                match groups.iter_mut().find(|g| g.0 == *f) {
+                    Some(g) => {
+                        g.1 = g.1.join(r);
+                        g.2 += 1;
+                    }
+                    None => groups.push((*f, r.clone(), 1)),
+                }
+            }
+        }
+        groups.retain(|g| g.2 > 1 && (on_demand || skips(self, g.0)));
+        let targets: Vec<ObjId> = targets.into_iter().filter(|o| !matches!(&self.heap.obj(*o).payload, Payload::Bound(f, _) if self.heap.kind(*o) == Kind::Bound && groups.iter().any(|g| g.0 == *f))).collect();
         // (several functions a value picks — a method of each of several receivers is the
         // receiver's own: not picked)
-        let picked = targets.iter().all(|o| !matches!(self.heap.kind(*o), Kind::Bound) && !matches!(self.heap.obj(*o).payload, Payload::Method(..) | Payload::Bound(..))).then(|| self.node_text(node));
-        let n = targets.len();
-        self.alternatives(n + usize::from(batch.is_some()) + usize::from(unknown.is_some()), false, state, &mut |an, i, st| {
-            match (targets.get(i), &batch, &unknown) {
-                (Some(&oid), _, _) => an.call_picked(oid, &picked, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast),
-                (None, Some((f, recv)), _) if i == n => an.skipped_on(*f, recv, &args, &kwargs, &star_args, &star_kwargs, st, node),
-                (None, _, Some((q, recv))) => an.unknown_call(q, Some(recv), &args, &kwargs, &star_args, &star_kwargs, st, node),
-                _ => unreachable!(),
+        let picked = (groups.is_empty() && targets.iter().all(|o| !matches!(self.heap.kind(*o), Kind::Bound) && !matches!(self.heap.obj(*o).payload, Payload::Method(..) | Payload::Bound(..)))).then(|| self.node_text(node));
+        let (n, m) = (targets.len(), groups.len());
+        self.alternatives(n + m + usize::from(unknown.is_some()), false, state, &mut |an, i, st| {
+            if let Some(&oid) = targets.get(i) {
+                return an.call_picked(oid, &picked, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast);
             }
+            if let Some((f, recv, _)) = groups.get(i - n) {
+                return an.call_user(*f, Some(recv.clone()), args.clone(), kwargs.clone(), star_args.clone(), star_kwargs.clone(), st, node, false);
+            }
+            let (q, recv) = unknown.as_ref().expect("an unknown callee");
+            an.unknown_call(q, Some(recv), &args, &kwargs, &star_args, &star_kwargs, st, node)
         })
     }
 
@@ -177,34 +196,6 @@ impl Analyzer {
             state.replace_with(j);
         }
         join_values(outs)
-    }
-
-    /// Among `targets`, bound methods of one function on several receivers whose calls would
-    /// not run (past the function's budget, no recursion of it running): the function, the
-    /// receivers, and the other targets.
-    fn skipped_on_receivers(&self, targets: &[ObjId]) -> Option<(ObjId, Value, Vec<ObjId>)> {
-        let bound = |o: ObjId| match &self.heap.obj(o).payload {
-            Payload::Bound(f, r) if self.heap.kind(o) == Kind::Bound && r.pts.len() == 1 => Some((*f, r)),
-            _ => None,
-        };
-        let skips = |f: ObjId| {
-            let fi = self.heap.func_info(f);
-            let runs = self.m.sdispatch.contains_key(&f) || fi.is_memo.get() || matches!(fi.node, FuncNode::Def(d) if is_generator(&d.body));
-            !runs && self.budget.exhausted(fi.node.addr()) && self.recursion.depth(f) == 0
-        };
-        let f = targets.iter().find_map(|o| bound(*o).map(|b| b.0).filter(|f| skips(*f)))?;
-        let (mine, rest): (Vec<ObjId>, Vec<ObjId>) = targets.iter().partition(|o| bound(**o).is_some_and(|b| b.0 == f));
-        (mine.len() > 1).then(|| (f, join_values(mine.iter().filter_map(|o| bound(*o).map(|b| b.1.clone())).collect::<Vec<Value>>()), rest))
-    }
-
-    /// A call of method `f` past its budget on `recv` (one or several receivers).
-    #[allow(clippy::too_many_arguments)]
-    fn skipped_on(&mut self, f: ObjId, recv: &Value, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) -> Value {
-        let q = self.heap.func_info(f).qualname.clone();
-        self.findings.note(format!("{} ran out of its budget: later calls are unknown code", q));
-        self.budget.out.insert(f);
-        self.entry.analysed.insert(f);
-        self.skipped_call(f, &q, Some(recv), args, kwargs, star_args, star_kwargs, state, node)
     }
 
     /// Several definitions of one method (conditional ones) on one receiver.
