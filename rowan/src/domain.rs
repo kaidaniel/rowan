@@ -822,8 +822,10 @@ impl Row {
             order: {
                 // a strong copy of a row whose order is known appends its new keys in order (a
                 // key there on some paths only: where it is depends on the path, as for `store`)
+                // (onto a row whose own order is not known: still not known)
                 let mut ord = self.order.to_vec();
-                if let (true, Some(ks)) = (strong, o.ordered_keys()) {
+                let known = self.present.is_empty() || self.ordered_keys().is_some();
+                if let (true, true, Some(ks)) = (strong, known, o.ordered_keys()) {
                     for k in ks.into_iter().filter(|k| !kill.contains(*k)).filter_map(|k| lens_apply(chain, k)) {
                         if !ord.contains(&k) {
                             ord.push(k);
