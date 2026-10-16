@@ -945,13 +945,17 @@ impl Analyzer {
         if !iters.is_empty() {
             acc.items = None;
             acc.exhaustive = false;
-            let mut none_taken = state.copy();
+            // `__next__` once per item, any number of times (none: StopIteration at once)
             let its = Value::objs(iters.iter().copied().collect());
-            let (nexts, rest) = self.run_dunder(&its, &["__next__"], Vec::new(), node, state).unwrap_or((Value::new(), its));
-            let nexts = if rest.empty() { nexts } else { nexts.join(&Value::data("next")) };
-            // (the loop may take no item: StopIteration at once)
-            let j = if state.reachable { state.join(&mut none_taken) } else { none_taken };
-            state.replace_with(j);
+            let mut nexts = Value::new();
+            let (head, _, _) = self.loop_fixpoint(state, &mut |an, s| {
+                let (v, rest) = an.run_dunder(&its, &["__next__"], Vec::new(), node, s).unwrap_or((Value::new(), its.clone()));
+                nexts = nexts.join(&v);
+                if !rest.empty() {
+                    nexts = nexts.join(&Value::data("next"));
+                }
+            });
+            state.replace_with(head);
             acc.elems.push(nexts);
             let rest = Value::with_kv(r.pts.filter(|p| !iters.contains(&p)), r.kv.clone());
             if rest.empty() {
