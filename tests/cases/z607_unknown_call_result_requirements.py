@@ -37,3 +37,13 @@ def merged(cfg, lib):
 def each(rows, lib):
     return [lib.normalize(r)["id"] for r in rows]
 #@schema param each.rows['*']: always={id} only={}
+
+
+def build(model_cls, pretrained, **kwargs):
+    # (`model_cls(**kwargs)` is given kwargs' values, not kwargs, and is not given itself)
+    model = model_cls(**kwargs)
+    if pretrained:
+        model["weights"]
+    return model
+#@schema param build.kwargs: only={}
+#@schema param build.model_cls: only={}

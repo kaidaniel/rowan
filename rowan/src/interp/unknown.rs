@@ -279,7 +279,12 @@ impl Analyzer {
         }
         self.havoc.code = found;
         self.name_unknown_result(rid, site_id, &arg_recs, node);
-        unknown_result_rows(state, rid, &site, site_id, &arg_recs);
+        // (the mappings it was given itself: `f(**d)` gives the code d's values, not d; an
+        // unknown callable called, `cls(x)`, is not given its own items)
+        let callee = recv.and_then(|r| r.single()).is_some_and(|o| qual == format!("call of {}", self.heap.obj(o).label));
+        let recv_given = recv.filter(|_| !callee);
+        let given: Vec<ObjId> = arg_recs.iter().filter(|(o, ns)| *ns == Ns::Item && args.iter().chain(kwargs.values()).chain(recv_given).any(|v| v.pts.contains(*o))).map(|(o, _)| *o).collect();
+        unknown_result_rows(state, rid, &site, site_id, &arg_recs, &given, callee);
         self.findings.note(format!("unknown call {}", site));
         // (it may raise anything, after any part of its effects: the state with all of them
         // stands for those with some)
@@ -525,12 +530,11 @@ fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: Str
 /// The rows of an unknown call's result: the items of the mappings it was given (up to
 /// `MAX_ARG_JOIN`; past that any record), else open through the call; changed by the call when
 /// it was given records.
-fn unknown_result_rows(state: &mut State, rid: ObjId, site: &str, site_id: StrId, arg_recs: &[(u32, Ns)]) {
+fn unknown_result_rows(state: &mut State, rid: ObjId, site: &str, site_id: StrId, arg_recs: &[(u32, Ns)], item_recs: &[ObjId], callee: bool) {
     // (many records given — a value joined over many contexts: the result is any record,
     // an open row, rather than the join of them all and a copy of all their slots)
     // (its items: those of the mappings it was given; an instance's attributes are not
     // items)
-    let item_recs: Vec<ObjId> = arg_recs.iter().filter(|(_, ns)| *ns == Ns::Item).map(|(o, _)| *o).collect();
     if !item_recs.is_empty() && item_recs.len() <= MAX_ARG_JOIN {
         let row = join_rows(item_recs.iter().map(|o| state.row(*o, Ns::Item)));
         let mut d = row.data();
@@ -541,16 +545,20 @@ fn unknown_result_rows(state: &mut State, rid: ObjId, site: &str, site_id: StrId
         // read from the result may be one it must have, on that guess (the requirement's caveat
         // is the call). A value read under a key of an input is taken as a value, not a
         // mapping: the result is open through the call, `consume(line["sku"])["picks"]` needs
-        // nothing of `line["sku"]`.)
+        // nothing of `line["sku"]`. An unknown callable's result is open through the call.)
         let src = Source::new(site, SourceKind::Call);
         let leaf = |(src, _): (crate::domain::SourceId, _)| intern::with_source(src, |s| s.path.last().is_some_and(|k| *k != intern::STAR));
-        if d.sources.iter().any(leaf) {
+        if callee {
+            // (it may give back anything: no key of what it was given is there unless removed)
+            d.likely = KeySet::new();
+        }
+        if callee || d.sources.iter().any(leaf) {
             d.sources = d.sources.filter(|x| !leaf(x)).insert((src, intern::EMPTY_LENS));
         }
         state.set_row(rid, Ns::Item, Row::from_data(d));
         // as an object the result is unknown: its attributes come from the call
         state.set_row(rid, Ns::Attr, Row::with_source(src).mutate(site_id));
-        for oid in &item_recs {
+        for oid in item_recs {
             for (k, v) in state.obj_slots(*oid, Ns::Item) {
                 state.set_slot(rid, Ns::Item, k, v, false);
             }
