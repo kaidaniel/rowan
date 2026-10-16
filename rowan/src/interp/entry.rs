@@ -190,6 +190,11 @@ impl Analyzer {
         self.budget.hard_cut
     }
 
+    /// The flag that, once set (from another thread), cuts the analysis as its deadline does.
+    pub fn set_cancel(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.budget.cancel = Some(flag);
+    }
+
     /// Before `run`, for runs on demand: the calls of the main module's `__main__` block run no
     /// body (they are skipped calls: what they may change, changed).
     pub fn main_block_unrun(&mut self) {
