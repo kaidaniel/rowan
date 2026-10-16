@@ -552,11 +552,14 @@ impl Analyzer {
 
     /// A class attribute's value: on this path when the path has it (a class attribute
     /// rebound after the class was made: `Cls.mode = "x"`), else what any path stored.
+    /// (One stored on some paths only over a base class's: either.)
     pub(in crate::interp) fn class_attr_value(&self, cls: u32, name: &str, state: &State) -> Value {
-        match self.class_lookup(cls, name) {
-            None => Value::new(),
-            Some(c) => state.slot_opt(c, Ns::Attr, key_str_lit(name)).or_else(|| self.heap.cls_slots.get(&(c, Ns::Attr, key_str_lit(name))).cloned()).unwrap_or_default(),
+        let nk = key_str_lit(name);
+        let (mut defs, _) = self.class_lookup_on_path(cls, name, state);
+        if defs.is_empty() {
+            defs.extend(self.class_lookup(cls, name));
         }
+        join_values(defs.iter().map(|c| state.slot_opt(*c, Ns::Attr, nk).or_else(|| self.heap.cls_slots.get(&(*c, Ns::Attr, nk)).cloned()).unwrap_or_default()))
     }
 
     pub(super) fn bound_outs(&mut self, cv: &Value, oid: u32, cls: u32, name: &str, node: &Node, state: &mut State) -> Value {
@@ -595,8 +598,9 @@ impl Analyzer {
                 outs.push(Value::obj(f));
             }
         }
-        if cv.pts.is_empty() {
-            outs.push(cv.clone());
+        // (and what is no object: literals beside the objects too)
+        if cv.pts.is_empty() || !cv.kv.is_bot() {
+            outs.push(Value::kv_only(cv.kv.clone()));
         }
         join_values(outs)
     }
@@ -669,7 +673,7 @@ impl Analyzer {
                 let cls = Classification::new(if sure { Tier::Proven } else { Tier::Possibly });
                 if !guarded && (plain || !single_target) {
                     self.verdict(node, nk, &cls, oid, Ns::Attr, None, None);
-                } else if guarded && !sure {
+                } else if guarded && (plain || !single_target) {
                     self.verdict_guarded(node, nk, &cls, oid, Ns::Attr);
                 }
                 if !sure && try_guard {
