@@ -790,11 +790,11 @@ function indexResult(res, parent = null) {
   const a = res.analysis;
   const run = res.span ? { fn: true, analysis: a, parent } : res.on_demand ? { module: true, pending: !!res.pending, whole: res.whole || null } : a && a.cut ? { analysis: a } : null;
   const facts = new Map();
+  // (copies: the document itself stays as the engine gave it)
   for (const f of res.facts || []) {
-    f.run = run;
     const key = `${f.line}:${f.name}`;
     if (!facts.has(key)) facts.set(key, []);
-    facts.get(key).push(f);
+    facts.get(key).push({ ...f, run });
   }
   const verdicts = new Map();
   for (const v of res.verdicts || []) {
