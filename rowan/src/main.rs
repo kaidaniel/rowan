@@ -74,44 +74,30 @@ fn main() {
             other => file = Some(other.to_string()),
         }
     }
+    let opts = Opts { search, follow, site, entry, imports };
     if serve {
-        let search2 = search.clone();
-        let opts = Opts { search: search2, follow: follow.clone(), site: site.clone(), entry, imports };
-        let out = std::thread::Builder::new()
-            .stack_size(1 << 30)
-            .spawn(move || serve_loop(opts))
-            .unwrap()
-            .join();
-        if out.is_err() {
-            eprintln!("rowan: server panicked");
-            std::process::exit(1);
-        }
-        return;
-    }
-    if let (Some(part), Some(file)) = (hovers, file.clone()) {
-        let opts = Opts { search, follow, site, entry, imports };
-        let out = std::thread::Builder::new().stack_size(1 << 30).spawn(move || time_hovers(&file, opts, part)).unwrap().join();
-        if let Ok(Err(e)) = out {
-            eprintln!("rowan: {}", e);
-            std::process::exit(1);
-        }
+        on_big_stack(move || Ok(serve_loop(opts)));
         return;
     }
     let Some(file) = file else {
         eprintln!("usage: rowan FILE.py [--json|--golden|--facts] [--no-rows] [--no-summaries] [--no-entry] [--no-imports] [--value-depth N] [--search-path DIR]... [--follow PKG]... [--site-packages DIR]...  |  rowan serve [options]");
         std::process::exit(2);
     };
-    let out = std::thread::Builder::new()
-        .stack_size(1 << 30)
-        .spawn(move || run(&file, Opts { search, follow, site, entry, imports }, json, golden, facts, show_rows, show_summaries))
-        .unwrap()
-        .join();
-    match out {
-        Ok(Ok(text)) => {
-            let mut so = std::io::stdout().lock();
-            let _ = so.write_all(text.as_bytes());
-            let _ = so.write_all(b"\n");
-        }
+    if let Some(part) = hovers {
+        on_big_stack(move || time_hovers(&file, opts, part));
+        return;
+    }
+    let text = on_big_stack(move || run(&file, opts, json, golden, facts, show_rows, show_summaries));
+    let mut so = std::io::stdout().lock();
+    let _ = so.write_all(text.as_bytes());
+    let _ = so.write_all(b"\n");
+}
+
+/// `f` on a thread with a 1 GiB stack (deep recursion of the interpreter); its error or panic
+/// ends the process.
+fn on_big_stack<R: Send + 'static>(f: impl FnOnce() -> Result<R, String> + Send + 'static) -> R {
+    match std::thread::Builder::new().stack_size(1 << 30).spawn(f).unwrap().join() {
+        Ok(Ok(r)) => r,
         Ok(Err(e)) => {
             eprintln!("rowan: {}", e);
             std::process::exit(1);
@@ -335,35 +321,8 @@ fn serve_loop(opts: Opts) {
                 }
             }
             "hover" => {
-                let t0 = std::time::Instant::now();
                 let line_no = req.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as u32;
-                let mut setup = Ok(None);
-                if !sessions.iter().any(|s| s.path == path) {
-                    setup = match spawn_analysis(path.clone(), opts.clone(), false) {
-                        (Ok((_, deps, _)), Some(tx)) => {
-                            let deps = deps.iter().map(|p| (p.clone(), file_hash(p).unwrap_or(0))).collect();
-                            keep_session(&mut sessions, Session { path: path.clone(), deps, tx });
-                            Ok(Some(t0.elapsed().as_millis()))
-                        }
-                        (Err(e), _) => Err(e),
-                        (Ok(_), None) => Err("the file could not be analysed".to_string()),
-                    };
-                }
-                let t1 = std::time::Instant::now();
-                let answer = setup.and_then(|setup_ms| {
-                    let s = sessions.iter().find(|s| s.path == path).ok_or("the file could not be analysed")?;
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    let _ = s.tx.send((line_no, tx));
-                    let h = rx.recv().unwrap_or_else(|_| Err("analysis panicked".to_string()))?;
-                    Ok((h, setup_ms))
-                });
-                match answer {
-                    Ok((h, setup_ms)) => format!(
-                        "{{\"id\":{},\"ok\":true,\"path\":{},\"cached\":{},\"ms\":{},\"setup_ms\":{},\"span\":[{},{}],\"result\":{}}}",
-                        id, serde_json::json!(path), h.cached, t1.elapsed().as_millis(), serde_json::json!(setup_ms), h.span.0, h.span.1, h.result
-                    ),
-                    Err(e) => serde_json::json!({"id": id, "ok": false, "path": path, "error": e}).to_string(),
-                }
+                hover_request(&mut sessions, &opts, &id, &path, line_no)
             }
             "changed" => {
                 let paths: Vec<String> = req.get("paths").and_then(|p| p.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()).unwrap_or_default();
@@ -424,6 +383,40 @@ fn time_hovers(file: &str, opts: Opts, (part, parts): (usize, usize)) -> Result<
         }
     }
     Ok(())
+}
+
+/// A `hover` request: the function of `path` at `line`, from the analysis kept for `path` (set
+/// up first, its module code alone, if there is none).
+fn hover_request(sessions: &mut Vec<Session>, opts: &Opts, id: &serde_json::Value, path: &str, line: u32) -> String {
+    let t0 = std::time::Instant::now();
+    let hash = |p: &str| std::fs::read_to_string(p).ok().map(|s| rowan::frontend::content_hash(&s)).unwrap_or(0);
+    let mut setup = Ok(None);
+    if !sessions.iter().any(|s| s.path == path) {
+        setup = match spawn_analysis(path.to_string(), opts.clone(), false) {
+            (Ok((_, deps, _)), Some(tx)) => {
+                let deps = deps.iter().map(|p| (p.clone(), hash(p))).collect();
+                keep_session(sessions, Session { path: path.to_string(), deps, tx });
+                Ok(Some(t0.elapsed().as_millis()))
+            }
+            (Err(e), _) => Err(e),
+            (Ok(_), None) => Err("the file could not be analysed".to_string()),
+        };
+    }
+    let t1 = std::time::Instant::now();
+    let answer = setup.and_then(|setup_ms| {
+        let s = sessions.iter().find(|s| s.path == path).ok_or("the file could not be analysed")?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = s.tx.send((line, tx));
+        let h = rx.recv().unwrap_or_else(|_| Err("analysis panicked".to_string()))?;
+        Ok((h, setup_ms))
+    });
+    match answer {
+        Ok((h, setup_ms)) => format!(
+            "{{\"id\":{},\"ok\":true,\"path\":{},\"cached\":{},\"ms\":{},\"setup_ms\":{},\"span\":[{},{}],\"result\":{}}}",
+            id, serde_json::json!(path), h.cached, t1.elapsed().as_millis(), serde_json::json!(setup_ms), h.span.0, h.span.1, h.result
+        ),
+        Err(e) => serde_json::json!({"id": id, "ok": false, "path": path, "error": e}).to_string(),
+    }
 }
 
 /// Keep `s` for `hover` requests, dropping the oldest past `SESSIONS` (its thread ends).
