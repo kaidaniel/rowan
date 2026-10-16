@@ -412,19 +412,11 @@ impl Analyzer {
         }
         let lists: Vec<u32> = both.iter().filter(|o| self.heap.kind(*o) == Kind::List).collect();
         if !lists.is_empty() {
+            // (the elements of every alternative of either side: a list's, an unknown's)
+            let acc = crate::domain::join_values([a, b].map(|v| self.iterate(v, node, state).elem.flat()));
             let oid = self.alloc_at(Kind::List, node, state, &format!("list@L{}", node.line), Payload::None, None, Ns::Item, None, None);
-            let mut acc = Value::new();
-            let mut kv: Option<KeyVal> = None;
-            for o in lists {
-                acc = acc.join(&state.slot(o, Ns::Elem, STAR));
-                let e = state.elems.get(&o).unwrap_or(DATA);
-                kv = Some(match kv {
-                    None => e,
-                    Some(k) => kv_join(&k, &e),
-                });
-            }
-            state.set_slot(oid, Ns::Elem, STAR, acc, true);
-            state.elems.insert(oid, kv.unwrap_or(DATA));
+            state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
+            state.elems.insert(oid, acc.kv);
             return Some(Value::obj(oid));
         }
         None

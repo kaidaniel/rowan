@@ -370,9 +370,12 @@ impl Analyzer {
                 _ => None,
             };
             if let Some(m) = m {
-                let mv = self.method_value(m, &cur);
+                // (and a part that is no object, `9` of `[1] | 9`: its own result)
+                let objs = Value::objs(cur.pts.clone());
+                let rest = (!cur.kv.is_bot()).then(|| self.binop(a.op, &Value::kv_only(cur.kv.clone()), &rhs, &n, state));
+                let mv = self.method_value(m, &objs);
                 self.call_value(&mv, &n, None, state, Some(vec![rhs]));
-                store(self, &cur, state);
+                store(self, &rest.map_or(objs.clone(), |r| objs.join(&r)), state);
                 return;
             }
         }

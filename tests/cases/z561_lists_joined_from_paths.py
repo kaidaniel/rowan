@@ -38,3 +38,22 @@ else:
     d += ["t"]
 for x in d + [0]:
     vd = x                                   #@value vd: exactly={"t", 0}
+
+# a list, or a list of a length not known repeated, concatenated: the result holds the
+# other's items too
+g = [5]
+for _ in range(n):
+    g.append(6)
+src = []
+if n > 2:
+    src = g * 2
+cat = src + [0]
+for x in cat:
+    vcat = x                                 #@value vcat: includes={5, 6, 0}
+#@todo value vcat: exactly={5, 6, 0}
+
+# `+=` on a list or a number: the list is extended in place, the number added to
+num = [1] if n > 5 else 9
+if n <= 5:
+    num += 1
+nv = num                                     #@value nv: includes={10}
