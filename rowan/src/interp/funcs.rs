@@ -811,7 +811,8 @@ impl Analyzer {
             }
         }
         let ItemsAcc { mut items, mut elems, pairs, pair, mut exhaustive } = acc;
-        if v.pts.is_empty() {
+        // (and a part that is no object: an unknown, a str)
+        if v.pts.is_empty() || v.kv.may_have_items() {
             self.iter_scalar(v, state, &line_data, &mut items, &mut elems, &mut exhaustive);
         }
         if let Some(its) = &items {

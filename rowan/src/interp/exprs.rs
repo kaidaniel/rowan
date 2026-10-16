@@ -589,20 +589,25 @@ impl Analyzer {
         for (i, v) in vals.iter().enumerate() {
             state.set_slot(oid, Ns::Pos, key_int(i as i64), v.clone(), true);
         }
-        let acc = crate::domain::join_values(vals.clone());
-        state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
-        state.elems.insert(oid, if vals.is_empty() { KeyVal::Lits(intern::KeySet::new()) } else { acc.kv });
+        if vals.is_empty() {
+            state.drop_obj_ns(oid, Ns::Elem);
+            state.elems.insert(oid, KeyVal::Lits(intern::KeySet::new()));
+        } else {
+            let acc = crate::domain::join_values(vals.clone());
+            state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), true);
+            state.elems.insert(oid, acc.kv);
+        }
         self.heap.set_llen(oid, state, Some(vals.len()));
     }
 
     /// One more value among the elements of a list / tuple / set (an append, a store at a
     /// position not known): its objects join the element slot, its scalar part the
-    /// elements' (`state.elems`; none recorded there means not known, and stays so).
+    /// elements' (`state.elems`; none recorded there: not known, which a join with another
+    /// path's elements must not lose).
     pub fn add_elem(&mut self, oid: u32, v: &Value, state: &mut State) {
         state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), crate::models::torch::elem_kv(&v.kv)), false);
-        if let Some(cur) = state.elems.get(&oid) {
-            state.elems.insert(oid, kv_join(&cur, &v.kv));
-        }
+        let cur = state.elems.get(&oid).unwrap_or(DATA);
+        state.elems.insert(oid, kv_join(&cur, &v.kv));
     }
 }
 

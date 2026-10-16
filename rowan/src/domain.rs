@@ -1201,6 +1201,15 @@ impl KeyVal {
     pub fn is_literal(&self) -> bool {
         matches!(self, KeyVal::Lit(_) | KeyVal::Lits(_))
     }
+    /// Whether a value of this scalar part may have items (be subscripted or iterated): an
+    /// unknown, a mapping's key, a str / bytes / tuple literal; not None, a number, a bool.
+    pub fn may_have_items(&self) -> bool {
+        match self {
+            KeyVal::Bot => false,
+            KeyVal::Lit(_) | KeyVal::Lits(_) => !kv_literals(self).iter().all(|k| intern::with_key(k, |kk| matches!(kk, intern::Key::None | intern::Key::Int(_) | intern::Key::Bool(_) | intern::Key::Float(_)))),
+            _ => true,
+        }
+    }
     pub fn as_lit(&self) -> Option<KeyId> {
         match self {
             KeyVal::Lit(k) => Some(*k),

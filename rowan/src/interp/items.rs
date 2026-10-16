@@ -136,8 +136,10 @@ impl Analyzer {
         }
         let line_data = rd.line_data;
         acc = crate::domain::join_values(parts);
-        if obj.pts.is_empty() {
-            acc = line_data;
+        // (a part that is no object: what an unknown, a mapping's key or a str / tuple literal
+        // holds is not known here; None or a number only fails the read)
+        if obj.pts.is_empty() || obj.kv.may_have_items() {
+            acc = if obj.pts.is_empty() { line_data } else { acc.join(&line_data) };
         }
         if let Some(ts) = frame_tiers {
             if ts.iter().all(|t| *t == Tier::Missing) {
@@ -321,7 +323,9 @@ impl Analyzer {
             // a slice is a container of the same elements (positions unknown)
             let elem = state.slot(oid, Ns::Elem, STAR);
             let kv = state.elems.get(&oid).unwrap_or(DATA);
-            let nid = self.alloc_at(kind, node, state, &format!("{}@L{}", kind.name(), node.line), Payload::None, None, Ns::Item, None, None);
+            // (one object per sequence sliced: of several, each its own)
+            let part = (!single_target).then(|| format!("part{}", parts.len()));
+            let nid = self.alloc_at(kind, node, state, &format!("{}@L{}", kind.name(), node.line), Payload::None, None, Ns::Item, None, part.as_deref());
             self.heap.set_llen(nid, state, None);
             state.set_slot(nid, Ns::Elem, STAR, elem, true);
             state.elems.insert(nid, kv);

@@ -3753,9 +3753,8 @@ fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             if name == "clear" {
                 if let Some(oid) = recv.single().filter(|o| an.heap.kind(*o) == Kind::List && an.heap.obj(*o).single && !crate::state::is_merged(*o)) {
                     st.drop_obj_ns(oid, Ns::Pos);
-                    st.drop_obj_ns(oid, Ns::Elem);
-                    st.elems.remove(&oid);
-                    an.heap.set_llen(oid, st, Some(0));
+                    an.set_positions(oid, Vec::new(), st);
+                    st.clear_last(oid);
                     return an.none_v.clone();
                 }
             }
