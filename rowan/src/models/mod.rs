@@ -1011,6 +1011,10 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(classes) = an.isinstance_classes(cv, st) else { return Value::data("bool") };
     let builtin = |an: &Analyzer, cls: u32| -> Option<String> { if an.heap.kind(cls) == Kind::External { Some(an.heap.external_qual(cls).rsplit('.').next().unwrap_or("").to_string()) } else { None } };
     let mut verdicts: Vec<bool> = Vec::new();
+    // (an unknown beside objects: it may be an instance or not)
+    if !v.pts.is_empty() && !v.kv.is_bot() && !v.kv.is_literal() {
+        return Value::data("bool");
+    }
     // literal values (with or without objects: both parts count)
     if v.pts.is_empty() || (v.kv.is_literal() && !crate::domain::kv_literals(&v.kv).is_empty()) {
         let lits = crate::domain::kv_literals(&v.kv);
