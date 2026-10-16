@@ -86,6 +86,9 @@ pub struct Modes {
     pub nonempty_gen: bool,
     /// whether the last `loop_fixpoint` converged (its last round ran from the fixpoint)
     pub loop_converged: bool,
+    /// a read on a value of more than `WIDE_READ` objects (its frame depth, site): what it
+    /// finds in their open rows is one placeholder per key there, not one per object
+    pub wide_read: Option<(usize, String)>,
 }
 
 /// An instance under construction, as raises see it (`Analyzer::drop_unreached`): the heap's

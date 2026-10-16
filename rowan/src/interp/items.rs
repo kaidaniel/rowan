@@ -8,7 +8,7 @@ use crate::frontend::Node;
 use crate::intern::{self, key_str_lit, s, KeyId, KeySet, STAR};
 use crate::state::{Kind, State};
 
-use super::{Analyzer, Payload, ViewKind, PATH_DEPTH};
+use super::{Analyzer, Payload, ViewKind, PATH_DEPTH, WIDE_READ};
 
 /// An item read `obj[key]` (an attribute read when `ns` is `Attr`): what each receiver's part
 /// of it needs.
@@ -60,8 +60,10 @@ impl Analyzer {
         let saved = std::mem::replace(&mut self.unwind.item_exc, exc);
         let scalar = self.may_be_scalar(obj);
         let saved_scalar = std::mem::replace(&mut self.mode.recv_scalar, scalar);
+        let saved_wide = self.wide_read(obj, node);
         let v = self.load_item_inner(obj, ns, key, node, state, report);
         self.mode.recv_scalar = saved_scalar;
+        self.mode.wide_read = saved_wide;
         self.unwind.item_exc = saved;
         v
     }
@@ -662,10 +664,27 @@ impl Analyzer {
         self.all_values(oid, ns, state).join(&Value::kv_only(DATA))
     }
 
+    /// A read on `obj` at `node` starts (`Modes::wide_read`); the previous setting, to restore.
+    /// (A value of many objects — a loop over every module of a model taking whatever
+    /// `getattr(m, name)` gives — made a placeholder per object and key, and the next round
+    /// read those too: objects grew with the keys to the power of the path depth.)
+    pub(in crate::interp) fn wide_read(&mut self, obj: &Value, node: &Node) -> Option<(usize, String)> {
+        let wide = (obj.pts.len() > WIDE_READ).then(|| (self.cx.frames.len(), self.site_of(node)));
+        std::mem::replace(&mut self.mode.wide_read, wide)
+    }
+
     /// `_path_placeholder`: the (unknown) content of an open object's slot.
     pub fn path_placeholder_value(&mut self, oid: u32, ns: Ns, k: KeyId, row: &Row, state: &mut State) -> Value {
         if self.heap.obj(oid).depth >= PATH_DEPTH {
             return Value::data("deep");
+        }
+        if let Some(site) = self.mode.wide_read.as_ref().filter(|(d, _)| *d == self.cx.frames.len()).map(|(_, s)| s.clone()) {
+            // (one placeholder of the read for every object it reads: weak, its row the join)
+            let ctx = self.frame().ctx.clone();
+            let pid = self.heap.alloc_raw(Kind::Unknown, &format!("path@{}:{}:{}", site, ns, intern::key_repr(k)), &ctx, false, &format!("{}[{}]", self.heap.obj(oid).label, intern::key_repr(k)), Payload::None);
+            crate::state::mark_merged(pid);
+            self.fill_placeholder(pid, oid, ns, k, row, false, state);
+            return Value::obj(pid);
         }
         let label = format!("{}[{}]", self.heap.obj(oid).label, intern::key_repr(k));
         // the content under an unknown key stands for many values: stores on it are weak
@@ -698,9 +717,10 @@ impl Analyzer {
         }
         let d = self.heap.obj(oid).depth + 1;
         let o = self.heap.obj_mut(pid);
-        o.depth = d;
+        let shared = o.site.starts_with("path@");
+        o.depth = if shared { o.depth.max(d) } else { d };
         o.iter_elem |= elem;
-        if state.has_row(pid, Ns::Item) {
+        if state.has_row(pid, Ns::Item) && !shared {
             return;
         }
         // (an input's parts below PATH_DEPTH + 1 keys are nothing more of it: data copied out of
@@ -717,6 +737,8 @@ impl Analyzer {
         } else {
             Row::from_data(crate::domain::RowData { sources: srcs, mutators: row.mutators.clone(), top: elem && row.top, ..Default::default() })
         };
+        // (a placeholder of several objects' parts: what each holds there)
+        let r = if shared && state.has_row(pid, Ns::Item) { state.row(pid, Ns::Item).join(&r) } else { r };
         state.set_row_narrowed(pid, Ns::Item, r.clone());
         state.set_row_narrowed(pid, Ns::Attr, r);
     }

@@ -128,6 +128,7 @@ impl Analyzer {
         let scalar = self.may_be_scalar(obj);
         let single = obj.pts.len() == 1 && !scalar;
         let saved_scalar = std::mem::replace(&mut self.mode.recv_scalar, scalar);
+        let saved_wide = self.wide_read(obj, node);
         let nk = key_str_lit(name);
         for oid in obj.pts.iter() {
             let k = self.heap.kind(oid);
@@ -199,6 +200,7 @@ impl Analyzer {
             parts.push(v);
         }
         self.mode.recv_scalar = saved_scalar;
+        self.mode.wide_read = saved_wide;
         acc = acc.join(&crate::domain::join_values(parts));
         if obj.pts.is_empty() {
             return crate::models::scalar_attr(self, obj, name, report, state);

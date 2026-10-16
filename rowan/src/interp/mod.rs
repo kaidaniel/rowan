@@ -64,6 +64,8 @@ pub const UNROLL_MAX: usize = 16;
 pub const LOOP_MAX_ITER: usize = 40;
 pub const REC_MAX_ITER: usize = 8;
 pub const PATH_DEPTH: u32 = 3;
+/// a read on a value of more objects than this shares its placeholders (`Modes::wide_read`)
+pub const WIDE_READ: usize = 8;
 pub const MAX_ACTIVE: usize = 4;
 /// records an unknown call's result joins at most (past that: an open row)
 pub const MAX_ARG_JOIN: usize = 64;
