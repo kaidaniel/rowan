@@ -151,6 +151,9 @@ pub struct CodeUses {
     /// those it assigns or deletes on something other than a method's own instance (`self`):
     /// a class's attribute among others
     pub class_stores: FxHashSet<StrId>,
+    /// (name, attribute) of an assignment to what a name it does not bind holds
+    /// (`REGISTRY[k].a = …`): a class the name's value holds has its attribute rebound
+    pub class_stores_in: Vec<(StrId, StrId)>,
     /// the attribute names it reads at all (a method of a class runs only when its name is
     /// read, or for a dunder)
     pub reads: FxHashSet<StrId>,
@@ -799,7 +802,12 @@ impl<'a> Flow<'a> {
                     self.name(n, Some(a));
                     self.flags.entry(Origin::NameAttr(n, a)).or_default().rebinds = true;
                 }
-                (Origin::Param(_) | Origin::TypeOf, Level::Own) => drop(self.out.class_stores.insert(a)),
+                (Origin::Name(n), Level::Held) => {
+                    self.name(n, None);
+                    self.out.class_stores_in.push((n, a));
+                }
+                // (`make().a = …`: whatever the call gives, a class among others)
+                (Origin::Param(_) | Origin::TypeOf | Origin::Result(..), Level::Own) => drop(self.out.class_stores.insert(a)),
                 _ => {}
             }
         }
@@ -1029,7 +1037,13 @@ impl ast::visitor::Visitor<'static> for Binds<'_, '_> {
             Stmt::AnnAssign(ast::StmtAnnAssign { target, value: Some(v), .. }) => self.0.bind_target(target, v, false, &mut self.1),
             // (`x += e`: x may hold what e holds)
             Stmt::AugAssign(a) => self.0.bind_target(&a.target, &a.value, true, &mut self.1),
-            Stmt::For(f) => self.0.bind_target(&f.target, &f.iter, true, &mut self.1),
+            // (`for c in [A, B]`: c is one of the items)
+            Stmt::For(f) => match &*f.iter {
+                Expr::List(ast::ExprList { elts, .. }) | Expr::Tuple(ast::ExprTuple { elts, .. }) | Expr::Set(ast::ExprSet { elts, .. }) if !elts.is_empty() && !elts.iter().any(|e| matches!(e, Expr::Starred(_))) => {
+                    elts.iter().for_each(|e| self.0.bind_target(&f.target, e, false, &mut self.1));
+                }
+                it => self.0.bind_target(&f.target, it, true, &mut self.1),
+            },
             Stmt::With(w) => {
                 for it in &w.items {
                     if let Some(v) = &it.optional_vars {
