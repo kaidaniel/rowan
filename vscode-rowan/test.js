@@ -322,9 +322,18 @@ const hd = renderHover("d", ki.facts.get("12:d"), verdictsForWord(ki.verdicts.ge
 assert(hd.includes('```python\nd = {"k": 1}\n```') && !hd.includes("✗") && diagnosticMessage(vq) === 'key "q" is never set', hd);
 // (the other `d` on the line, being assigned, has no access)
 assert(!hover(ki, ksrc, 12, "d").includes("✗"), hover(ki, ksrc, 12, "d"));
-// (where an object was made, when not on the hovered line; a key it never has here)
-assert(hover(ki, ksrc, 15, "e").endsWith('**Allocation Sites**\n- created on line 13\n- never has key "b" here'), hover(ki, ksrc, 15, "e"));
+// (where an object was made, when not on the hovered line nor by the name's own assignment;
+// a key it never has here, unless the headline shows the dict whole: `e = {"a": 1}` on line 15
+// says both)
+assert(!hover(ki, ksrc, 15, "e").includes("Allocation Sites"), hover(ki, ksrc, 15, "e"));
 assert(!hover(ki, ksrc, 13, "e").includes("Allocation Sites"), hover(ki, ksrc, 13, "e"));
+assert(hover(a01idx, a01src, 9, "r").includes("**Allocation Sites**\n- created on line 2\n"), hover(a01idx, a01src, 9, "r"));
+assert(!hover(a01idx, a01src, 5, "d").includes("Allocation Sites"), hover(a01idx, a01src, 5, "d"));
+{
+  const pm = path.join(root, "tests", "pandas", "models", "pm01_sales_etl.py");
+  const h = hover(indexResult(facts(pm)), fs.readFileSync(pm, "utf8").split("\n"), 71, "df");
+  assert(h.includes('**Allocation Sites**\n- one of 3 objects, all created on line 67 (by different calls or loop iterations)\n- never has key "discount" here'), h);
+}
 
 // ---- the owner's rnn (pytorch-playground): V = len(vocab) of unknown text names the dims
 {

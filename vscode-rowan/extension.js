@@ -335,9 +335,11 @@ const DEFS = ["function", "class", "module", "external", "bound", "method"];
  * Where the objects the name may hold were made ("created on line 28", "one of 7 objects, all
  * created on line 28 (by different calls or loop iterations)"), and the keys and attributes none
  * of them has here ("never has key "x" here"). Nothing for a parameter at its `def` (its objects
- * are the calls'), an unknown, or one object made on the hovered line itself.
+ * are the calls'), an unknown, one object made on the hovered line itself or by the name's own
+ * assignment (`d = {}` on line 2, hovered on line 5: `own`), nor keys a dict shown whole, closed
+ * (`shown`, the headline's value), plainly lacks.
  */
-function siteLines(f) {
+function siteLines(f, shown) {
   const listed = f.objects || [];
   const objs = listed.filter((o) => o.kind !== "unknown" && !DEFS.includes(o.kind));
   if (f.param || !objs.length) return [];
@@ -353,7 +355,7 @@ function siteLines(f) {
   if (total > 1) {
     const one = places.length === 1 && places[0].ls.length === 1;
     out.push(`one of ${total} objects${places.length ? `, ${one ? "all " : ""}created ${places.map((p) => p.text).join("; ")}` : ""}${one ? " (by different calls or loop iterations)" : ""}`);
-  } else if (places.length === 1 && !(places[0].ls[0] === f.line && !files[0])) {
+  } else if (places.length === 1 && !(places[0].ls[0] === f.line && !files[0]) && !(made.length === 1 && made[0].own)) {
     out.push(`created ${places[0].text}`);
   }
   // (what every one of them lacks: all of them listed, no unknown among them)
@@ -362,7 +364,8 @@ function siteLines(f) {
     const keys = common("absent");
     const attrs = common("absent_attrs").map((k) => k.replace(/^"|"$/g, ""));
     const list = (xs) => xs.slice(0, 6).join(", ") + (xs.length > 6 ? ` and ${xs.length - 6} more` : "");
-    if (keys.length) out.push(`never has key${keys.length > 1 ? "s" : ""} ${list(keys)} here`);
+    const closedDict = alternatives(shown || "").length === 1 && /^\{.*\}$/s.test(shown) && !/\*\*\?|…/.test(shown);
+    if (keys.length && !closedDict) out.push(`never has key${keys.length > 1 ? "s" : ""} ${list(keys)} here`);
     if (attrs.length) out.push(`never has attribute${attrs.length > 1 ? "s" : ""} ${list(attrs)} here`);
   }
   return out;
@@ -461,7 +464,7 @@ function renderHover(name, facts, verdicts) {
     add(reqs, requirementLines(f));
     // (on demand there are no calls of the program: the value is for any call)
     add(calls, callLines(f, marks));
-    add(sites, siteLines(f));
+    add(sites, siteLines(f, value));
   }
   // Notes: what the hover above uses, and only that — the symbols it mentions (with the
   // notation their descriptions use), the notation and marks it shows
@@ -799,6 +802,14 @@ function indexResult(res, parent = null) {
     const key = `${f.line}:${f.name}`;
     if (!facts.has(key)) facts.set(key, []);
     facts.get(key).push({ ...f, run });
+  }
+  // (an object made where the name itself is bound to it, `d = {}`: its `own` site, which the
+  // hover's Allocation Sites need not repeat)
+  const byLine = new Set((res.facts || []).map((f) => `${f.file || ""}:${f.line}:${f.name}`));
+  for (const fs_ of facts.values()) {
+    for (const f of fs_) {
+      f.objects = (f.objects || []).map((o) => (o.created && o.created.line !== f.line && (o.created.file || "") === (f.file || "") && byLine.has(`${f.file || ""}:${o.created.line}:${f.name}`) ? { ...o, own: true } : o));
+    }
   }
   const verdicts = new Map();
   for (const v of res.verdicts || []) {
