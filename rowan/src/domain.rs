@@ -820,17 +820,18 @@ impl Row {
             mutators: cap_mutators(self.mutators.union(&o.mutators)),
             top: self.top || o.top,
             order: {
-                // a strong copy of a row whose order is known appends its new keys in order
+                // a strong copy of a row whose order is known appends its new keys in order (a
+                // key there on some paths only: where it is depends on the path, as for `store`)
                 let mut ord = self.order.to_vec();
-                match (strong, o.ordered_keys()) {
-                    (true, Some(ks)) => {
-                        for k in ks.into_iter().filter(|k| !kill.contains(*k)).filter_map(|k| lens_apply(chain, k)) {
-                            if !ord.contains(&k) {
-                                ord.push(k);
-                            }
+                if let (true, Some(ks)) = (strong, o.ordered_keys()) {
+                    for k in ks.into_iter().filter(|k| !kill.contains(*k)).filter_map(|k| lens_apply(chain, k)) {
+                        if !ord.contains(&k) {
+                            ord.push(k);
+                        } else if !self.definite.contains(k) {
+                            ord.clear();
+                            break;
                         }
                     }
-                    _ => {}
                 }
                 ord.into()
             },
