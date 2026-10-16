@@ -379,9 +379,7 @@ def attrs_op() -> list:
     cl = random.choice("AB")
     return random.choice([
         [f"{o}.{at} = {v}"], [f"{cl}.k = {v}"], [f"{cl}.u = {v}"], [f"r = getattr({o}, {at!r}, {v})"], [f"setattr({o}, {at!r}, {v})"],
-        # (not `k`, a class attribute: code skipped past the budget that sets an attribute by a
-        # computed name is taken not to shadow one — a known gap)
-        [f"if isinstance({o}, A):", f"    {o}.put({random.choice(['v', 'w', 'u'])!r}, {v})"], [f"if hasattr({o}, {at!r}):", f"    r = {o}.{at}"], [f"{o} = {o2}"], [f"{o} = A({v})"], [f"{o} = B({v})"],
+        [f"if isinstance({o}, A):", f"    {o}.put({at!r}, {v})"], [f"if hasattr({o}, {at!r}):", f"    r = {o}.{at}"], [f"{o} = {o2}"], [f"{o} = A({v})"], [f"{o} = B({v})"],
         [f"{o} = C()"], [f"r = {o}.get() if isinstance({o}, A) else -5"], [f"r = {o}.kind() if isinstance({o}, A) else -6"],
         [f"{o}.v = {o2}.get() if isinstance({o2}, A) else {v}"], [f"pick({o}, {o2}).{at} = {v}"],
         [f"{o}.__dict__[{at!r}] = {v}"], [f"r = vars({o}).get({at!r}, {v})"], [f"r = type({o}).__name__"], [f"r = isinstance({o}, B)"],

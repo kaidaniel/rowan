@@ -111,7 +111,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   `getattr` with unknown names (known in part, an f-string's: the attributes whose names fit,
   `Payload::Affix`), metaclasses and monkey-patching (rebinding a function or class too;
   a module's function the program calls only by name has no other callers) are unknown or ignored;
-  unknown code does not shadow a class attribute on an instance; a generator expression runs when made. List lengths are tracked up to 15 (a few per path: each one's positions;
+  unknown code does not shadow a class attribute on an instance of a library-based class; a generator expression runs when made. List lengths are tracked up to 15 (a few per path: each one's positions;
   `xs[:n]` keeps xs's). An object a path has no facts of reads as unknown (`read_row`). A set's items have no order (`ordered_items`).
 
 ## Working conventions (the owner's standing instructions)

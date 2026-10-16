@@ -645,6 +645,12 @@ impl Analyzer {
             if let Some(cv) = class_v {
                 v = v.join(&cv);
             }
+            // (stored on some paths only, on an object unknown code changed: on the others it
+            // holds what that code put there — of a class of the program's only: a library
+            // base's own code is taken not to set the program's names, `nn.Module`'s)
+            if !row.mutators.is_empty() && !(row.definite.contains(nk) && row.stored.contains(nk)) && cls_of.is_some_and(|c| self.hierarchy_closed(c)) {
+                v = v.join(&self.path_placeholder_value(oid, Ns::Attr, nk, &row, state));
+            }
             if row.present.contains(nk) {
                 let cls = classify(&row, nk);
                 if !guarded {
@@ -683,7 +689,13 @@ impl Analyzer {
                 if !sure && try_guard {
                     self.may_raise_here("AttributeError", state);
                 }
-                return self.bound_outs(&cv, oid, c, name, node, state);
+                let out = self.bound_outs(&cv, oid, c, name, node, state);
+                // (an instance of a class of the program unknown code changed: it may hold the
+                // data name itself, over the class's)
+                if plain && !row.mutators.is_empty() && !row.absent.contains(nk) && self.hierarchy_closed(c) {
+                    return out.join(&self.path_placeholder_value(oid, Ns::Attr, nk, &row, state));
+                }
+                return out;
             }
         }
         let cls = classify(&row, nk);
