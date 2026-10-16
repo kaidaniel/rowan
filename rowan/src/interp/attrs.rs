@@ -291,10 +291,13 @@ impl Analyzer {
     /// An attribute of a library object rowan sees only by name: a class a model generates, a
     /// constant, a record, else the external object `qual.name`.
     fn external_attr(&mut self, oid: ObjId, name: &str, state: &mut State) -> Value {
-        // (in a read on many objects, any value: named by their access paths, attributes of
-        // attributes made names without end)
-        if self.in_wide_read() {
-            return Value::obj(super::any_object(&mut self.heap));
+        // (in a read on many objects, an unknown value of the read and name: named by their
+        // access paths, attributes of attributes made names without end)
+        if let Some((_, site)) = self.mode.wide_read.clone().filter(|_| self.in_wide_read()) {
+            let ctx = self.frame().ctx.clone();
+            let o = self.heap.alloc_raw(Kind::Unknown, &format!("ext@{}:{}", site, name), &ctx, false, &format!("?.{}", name), Payload::None);
+            crate::state::mark_merged(o);
+            return Value::obj(o);
         }
         let q = format!("{}.{}", self.heap.external_qual(oid), name);
         if let Some(v) = crate::models::generated_class(self, state, &q) {
