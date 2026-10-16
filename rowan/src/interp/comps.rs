@@ -49,6 +49,7 @@ impl Analyzer {
         let g = &gens[i];
         let nonempty = std::mem::take(&mut self.mode.nonempty_gen);
         let itv = self.eval(&g.iter, state);
+        let itv = self.iterable_part(&itv, state);
         let exhaust_after = itv.clone();
         let gn = frontend::node(&g.iter);
         self.force_gen(&itv, state, true);

@@ -597,7 +597,26 @@ impl Analyzer {
         }
     }
 
+    /// What of `v` Python can iterate: its literals that are numbers, None, … raise TypeError
+    /// (a `for`, a comprehension, unpacking, `list(v)`); with nothing else, the path ends here.
+    pub fn iterable_part(&mut self, v: &Value, state: &mut State) -> Value {
+        let ks = crate::domain::kv_literals(&v.kv);
+        let not_iterable = |k: KeyId| intern::with_key(k, |k| matches!(k, intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_) | intern::Key::None | intern::Key::Ellipsis | intern::Key::Dec(..) | intern::Key::Frac(..)));
+        if !v.kv.is_literal() || !ks.iter().any(not_iterable) {
+            return v.clone();
+        }
+        let rest: intern::KeySet = ks.iter().filter(|k| !not_iterable(*k)).collect();
+        let out = Value::with_kv(v.pts.clone(), if rest.is_empty() { crate::domain::BOT } else { KeyVal::lits(rest) });
+        if out.empty() {
+            self.raise_here("TypeError", state);
+        } else {
+            self.may_raise_here("TypeError", state);
+        }
+        out
+    }
+
     pub fn unpack(&mut self, v: &Value, n: usize, state: &mut State, node: &Node) -> Vec<Value> {
+        let v = &self.iterable_part(v, state);
         self.force_gen(v, state, false);
         let mut parts: Vec<Value> = (0..n).map(|_| Value::new()).collect();
         for oid in v.pts.iter() {

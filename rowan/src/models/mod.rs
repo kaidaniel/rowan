@@ -797,6 +797,7 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     if let Some(a) = c.args.first() {
+        let a = &an.iterable_part(a, st);
         let it = an.iterate(a, &c.node, st);
         if kind == Kind::Set {
             match &it.items {

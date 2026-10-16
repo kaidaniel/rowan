@@ -218,6 +218,7 @@ impl Analyzer {
 
     pub(super) fn stmt_for(&mut self, f: &'static ast::StmtFor, state: &mut State) {
         let itv = self.eval(&f.iter, state);
+        let itv = self.iterable_part(&itv, state);
         let iter_node = frontend::node(&*f.iter);
         if self.for_user_iterator(f, &itv, &iter_node, state) {
             return;
