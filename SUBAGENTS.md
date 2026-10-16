@@ -1,176 +1,102 @@
 # SUBAGENTS.md: one iteration of improvements
 
-You are a subagent making one iteration of improvements to rowan, an abstract interpreter for
-Python written in Rust. Read `README.md` (what it does for a user) and `AGENTS.md` (how the
-engine works, the owner's conventions, tests, debugging switches) before anything else. Every
-convention in `AGENTS.md` applies to you as well, unless this file says otherwise.
+You are a subagent making one iteration of improvements to rowan. Read `README.md` (what it
+does for a user) and `AGENTS.md` (how the engine works, the owner's conventions, commands,
+tests, debugging switches) first. Everything in `AGENTS.md` applies to you; this file adds
+what is specific to an iteration. Your brief may name a task; if it does, that task comes
+first, and the objectives below are how it is judged.
 
 ## The objectives
 
-All of these need to improve, and some of them conflict. When they do, weigh the trade-off
-and write down what you chose and why.
+All of these should improve, and some conflict. When they do, weigh the trade-off and write
+down what you chose and why.
 
-1. **Understandable insights.** What rowan reports, both in VS Code hovers and in the CLI,
-   should help a developer understand the code they are investigating:
-   * well formatted;
-   * every special symbol explained;
-   * not so many insights that they overwhelm.
-   * This objective is easy to put off behind the others, so make at least one improvement to
-     it in every iteration, and check it against real hovers on real programs.
+1. **Understandable insights.** Hovers and the CLI report should help a developer understand
+   the code: well formatted, every mark explained, not so much that it overwhelms. This is
+   easy to put off, so check it against real hovers on real programs in every iteration.
 2. **Correct (sound).** What rowan claims must hold for every run of the program. Soundness
-   beats everything else on this list.
-   * The golden suites must pass at every commit. Also count how many pass with
-     `ROWAN_LIMITS=budget=0`. That setting puts every call past its function's budget, so
-     calls are unknown calls (with what `effects.rs` says they may change) instead of runs of
-     the body at the call site. Large programs end up in this mode once their budgets run
-     out, and many cases fail in it today (the bench workflow reports the count). Raising it
-     is part of this objective: a sound and precise treatment of skipped calls is also a route
-     to objectives 4-8.
+   beats everything else here. Also count the golden cases passing with
+   `ROWAN_LIMITS=budget=0` (every call skipped: what large programs fall back to once budgets
+   run out); raising it is part of this objective.
 3. **Informative (precise).** Among sound answers, prefer the ones that say more.
-4. **Fast.** An analysis finishes in under 10 seconds.
+4. **Fast.** An analysis finishes in under 10 seconds; a hover answers in well under one.
 5. **Small.** An analysis takes at most 2 GB of memory.
-6. **Scalable.** The analysis works on files and programs of any size. Its cost has to be
-   bounded by the design, not only cut by a deadline.
-7. **Simple code.** The abstract interpreter should be at most 10k lines, and fewer is better.
-   * Library models (`rowan/src/models/`) don't count: they can be as long as they need to be.
-   * Don't game this number with denser, less readable code. The aim is code that a reader
-     can follow.
-   * Today the engine outside `models/` is about 21k lines, so there is a long way to go.
-     Measure with `wc -l` on `rowan/src/*.rs` and `rowan/src/interp/*.rs`.
-   * Fixes and features tend to add lines, so this one also slips easily. Leave the engine
-     smaller than you found it in every iteration: delete, merge or simplify something, not
-     just add.
-   * The line count is a goal, not a gate. A bigger idea that adds code now but pays for itself
-     later (a simpler design that makes other mechanisms deletable, a sound fix that needs new
-     machinery) is welcome even if the engine grows this iteration. Don't drop such an idea
-     for its size; pursue it, or record it, and explain the trade-off in your final message.
-   * Don't move engine logic into `models/` to lower the count: only library behaviour
-     belongs there.
-8. **Few knobs.** The interpreter should have few configs, limits and switches. Every
-   `ROWAN_*` variable and `ROWAN_LIMITS=` key (today only `budget` and `ms`) is a cost. A
-   simpler design that needs no knob is better than a tuned one.
-9. **Few open `#@todo`s.** A `#@todo` is an expectation the engine doesn't meet yet
-   (`run_golden.py` reports how many it skips). Fewer is better: implement them where you
-   can, and promote the ones that already hold (`ROWAN_TODO=check`). Adding an honest
-   `#@todo` is fine when a new case shows something the engine can't do yet; weigh this
-   count like the other objectives, not as a rule of its own.
-10. **Modular, readable code.** Small lines are not enough: a reader should be able to find
-    and change one concern without understanding all of them.
-    * Components with narrow interfaces instead of one struct everything reaches into. Today
-      `Analyzer` (`interp/mod.rs`) has about 137 fields, and every engine file and every
-      library model takes `&mut Analyzer`. Models should need only a narrow API, and code
-      for one concern (the heap, calls and budgets, verdicts and requirements, caches, the
-      report) should not touch another's fields.
-    * Functions short enough to read at once; one file per concern.
-    * Track it with proxies, reported before and after: `Analyzer`'s field count, the number
-      of engine functions over 100 lines, and the largest engine file.
-    * A pure restructuring is welcome on its own when it changes no behaviour: golden,
-      snapshots and the `--json` verdict counts stay identical. Leave the code you touch
-      easier to follow than you found it.
+6. **Scalable.** Cost bounded by the design, not only cut by a deadline.
+7. **Simple code.** The engine (`rowan/src/*.rs`, `rowan/src/interp/*.rs`; `wc -l`) should
+   shrink towards 10k lines. Models (`rowan/src/models/`) don't count, and engine logic must
+   not move there. Don't game the count with denser code. A bigger idea that adds code now
+   but pays for itself later is welcome; explain the trade-off.
+8. **Few knobs.** Every `ROWAN_*` variable and `ROWAN_LIMITS=` key is a cost.
+9. **Few open `#@todo`s.** Implement them where a general improvement does, promote the ones
+   that already hold (`ROWAN_TODO=check`). They are evidence, not targets: never shape a
+   mechanism to make particular golden cases pass.
+10. **Modular, readable code.** One concern per component and file, narrow interfaces,
+    functions short enough to read at once. Report `Analyzer`'s field count, engine
+    functions over 100 lines and the largest engine file before and after.
+
+**Small programs first.** Never trade speed, or more than a little precision, on the smaller
+programs (stdlib12k, email, rich, click, golden-sized code) for the large ones (pip, timm,
+sktime, functional). A real soundness fix may cost them some speed.
+
+**Imprecision is a trade-off,** never "accepted": call a gap "known" or "known to be hard",
+name its cost, and list it under Remaining.
 
 **Which libraries matter.** The owner cares most about the builtins, PyTorch, pydantic and
-pandas. If dropping another model (or trading some of its precision for simpler code) makes things materially
-easier, you may decide to do that. Examples are sqlite, configparser, argparse, csv, the regex
-engine, datetime and FastAPI. When you drop a model:
-* calls into the module become unknown calls, so the results stay sound;
-* remove the module's golden cases, or mark them `#@todo` with a reason;
-* say so in your final summary.
+pandas. You may drop another model (sqlite, configparser, argparse, csv, the regex engine,
+datetime, FastAPI…) if that makes things materially easier: its calls become unknown calls,
+its golden cases go or become `#@todo` with a reason, and your final message says so.
 
 ## How to work
 
-1. **Work on your own branch.** Create a branch from `main` (for example `iter/<topic>`) and
-   never commit to `main` directly. Push the branch, and open a draft pull request for it with
-   `gh pr create --draft`.
-2. **Review first.** Before reading `SUGGESTED_CHANGES.md`, review all of the code and its
-   high-level design. Note anything odd or overly complicated, and anything likely to be a
-   performance problem (CPU or memory). Write your notes down as hypotheses. The main loop
-   (statements, calls: per-call-site runs, budgets and skipped calls, joins, liveness, GC)
-   deserves the most attention.
-3. **Compare.** Now read `SUGGESTED_CHANGES.md`, the owner's list of open items. It is
-   untracked, in the repository root of the owner's checkout. Compare it with your notes:
-   * add what it lacks;
-   * drop items your review shows are wrong or already fixed.
-4. **Plan.** You are free to decide what kind of work to do: look for bugs to fix, make
-   iterative performance improvements, or do large-scale refactorings and redesigns. The test
-   suite (about a thousand golden programs, the runtime oracle, snapshots) catches many
-   regressions, so a big change is not reckless. Write a plan: the items you will work on,
-   in order, each with the objective(s) above it serves and how you will measure it. Prefer items that move several objectives at
-   once, for example a redesign that bounds work (4, 5, 6) and also removes code and knobs
-   (7, 8).
-5. **Implement the items one by one.** For each item:
-   * **Repro first.** Before fixing a suspected bug or slowdown, write a small program that
-     shows it. It becomes a golden case: expectations written by hand from the program
-     text, and for cost problems a `#@work`, `#@tabulations`, `#@joins` or `#@visits` bound.
-   * **Fix it**, then measure on the big benchmark programs (`bench/`).
-   * **Test.** Before every commit:
-     * `cargo test`, golden and snapshots must pass. Review the snapshot diffs: changes are
-       fine as long as the results are sound.
-     * Run the oracle in full when you change models or semantics.
-     * Never commit a failing state.
-   * **Commit and push**, one commit per item. Messages end with
-     `Co-Authored-By: Claude <model> <noreply@anthropic.com>`.
-6. **Check the benchmarks.**
-   * **Where results appear.** Every push to your pull request runs `.github/workflows/bench.yml`
-     on all eight benchmark programs (stdlib12k, email, rich, click; the frontier pip, timm,
-     sktime, functional), without deadlines, cut at 10 minutes. The workflow records wall
-     time, peak memory, work counters, verdict counts and a `perf` profile, and the golden
-     count with `budget=0`.
-     * Results take about 5-10 minutes. Read them with `gh run list --workflow bench.yml
-       --branch <branch>` and `gh run view <id>` (the job summary has the numbers and the
-       top functions).
-     * The chart at https://kaidaniel.github.io/rowan/dev/bench/ shows `main` only.
-   * **Locally,** run `bench/run.py` (see `AGENTS.md`), up to three runs in parallel, in the
-     background. Compare `--json` verdict counts between `main` and your branch on all eight
-     programs: a new false `missing` anywhere blocks the merge.
-   * **The goal** is for every benchmarked program to fit within the time and memory limits
-     above (10 s, 2 GB). The four smaller programs matter first: never trade their speed, or
-     more than a little of their precision, for the frontier ones. Savings found on the large
-     programs are welcome when they generalise. Once all fit, add more complicated benchmark
-     programs to `bench/` (real packages, larger and more dynamic code) and continue.
-7. **Iterate** until you think you have solved a good chunk of the problems you set out to
-   solve. Don't stop at the first improvement. Don't hand work back that you could finish.
-   Big refactors are welcome: the golden suites and the oracle are your safety net.
+1. **Branch.** From an up-to-date `main` (`iter/<topic>`); push it and open a draft pull
+   request (`gh pr create --draft`). Never commit to `main`, never merge, never launch
+   sub-agents of your own.
+2. **Review.** Unless your brief says otherwise, review the code and its design first, the
+   main loop most (statements, calls, budgets and skipped calls, joins, liveness, GC). Write
+   down what looks wrong, overcomplicated or costly as hypotheses.
+3. **Plan.** Choose your items: bugs, performance, refactorings or redesigns (the golden
+   suites, the oracle and the snapshots catch most regressions, so a big change is not
+   reckless). For each: the objectives it serves and how you will measure it. Prefer items
+   that move several at once.
+4. **Implement one item at a time,** as `AGENTS.md` says (repro first, then fix, then
+   measure; never commit a failing state), one measured commit per item, so the owner can
+   keep or revert each step.
+5. **Measure.** Locally, `bench/run.py` on all eight programs (up to three runs at a time),
+   comparing `--json` verdict counts between `main` and your branch: a new false `missing`
+   blocks the merge. Use the `ROWAN_DEBUG=1` `work:` counters for reproducible comparisons.
+   Every push runs `bench.yml` (all eight, no deadlines, 10 minute cut, `perf` profiles,
+   the `budget=0` golden count): `gh run list --workflow bench.yml --branch <branch>`,
+   `gh run view <id>`. The chart at https://kaidaniel.github.io/rowan/dev/bench/ shows `main`.
+6. **Iterate** until a good chunk of what you set out to do is done. Don't hand back work you
+   could finish.
 
-## Rules that still hold
+## On the owner's Mac
 
-* **Python** runs only through `uv run --no-project python`.
-* **Golden cases.** Expectations are written by hand before the engine produces them, and are
-  never derived from engine output.
-* **Soundness.** If the oracle and an expectation disagree, the oracle wins.
-* **`SUGGESTED_CHANGES.md`.** Never commit it. It lists only avenues not yet explored: open
-  bugs, ideas and gaps, each with a repro or a pointer, grouped by topic (not by iteration).
-  It is not a changelog (the PRs are): no "done in PR #N", no measurements of past work.
-  Remove what you finished or ruled out (a ruled-out idea goes in your final message's "Ideas
-  not pursued", and stays in the file only as one line saying why, so nobody retries it
-  blindly), and add what you found under its topic.
-* **`AGENTS.md`.** Keep it under 200 lines and true at every commit: update its overview
-  when the design changes, and its switches when you remove a knob.
-* **Measuring.**
-  * Compare builds on results (proven / possibly / missing / schema counts of `--json`), not
-    only on time.
-  * For reproducible comparisons use the deterministic counters of `ROWAN_DEBUG=1` (the final
-    `work:` line), not only wall time.
-  * On the owner's Mac, every local run of rowan (and of a harness that spawns it) goes
-    through `.guard/run [-m MB] [-t S] cmd…` (16 GB per run and in total, three runs at a
-    time, `-t 0` for no time limit). Leave no orphan processes. Unguarded runs once crashed
-    the machine; a guard kill for memory is a finding.
+* Every local run of rowan, or of a harness that runs it, goes through `.guard/run [-m MB]
+  [-t S] cmd…` (16 GB, three runs at a time, `-t 0` for no time limit). Unguarded runs once
+  crashed the machine; a guard kill for memory is a finding.
+* Leave no processes behind: no orphan runs, no background wait loops.
+* Don't touch: the VS Code extension's own `rowan serve`, `../pytorch-playground` (read-only),
+  the git stash, `.github/workflows/`.
+
+## Before you hand back
+
+All must pass, on your last commit: `cargo test --release --lib`, golden (and the
+`budget=0` count), snapshots (diffs reviewed), the full runtime oracle, the torch oracle,
+`cd vscode-rowan && node test.js`, all eight benchmarks run serially before and after, and
+CI and Bench green on the pull request. `AGENTS.md` true and under 200 lines.
 
 ## Your final message
 
-Summarise what you changed, for the owner:
-* **Commits:** each commit, one line each, with its effect.
-* **Objectives:**
-  * the benchmark numbers before and after (time, memory, verdict counts);
-  * the golden pass count with `ROWAN_LIMITS=budget=0`, before and after;
-  * the number of `#@todo` expectations, before and after;
-  * the engine's and the models' line counts before and after;
-  * the modularity proxies before and after (`Analyzer` fields, engine functions over 100
-    lines, largest engine file);
-  * the knobs removed;
-  * any change to what users see.
-* **Trade-offs:** what you dropped or made less precise, and why.
-* **Ideas not pursued:** ideas you considered but didn't pursue or cut back, each with why
-  (unsound, too costly, too much code, no time). Include the ones you dropped because of their
-  size.
-* **Remaining:** what you found but didn't do, and where it is recorded.
-* **Not run:** what you did not verify (a test suite not run, a benchmark not finished).
+Also put it in the pull request's description.
+* **Commits:** one line each, with its effect.
+* **Objectives, before → after** (a table): benchmark time, memory and verdict counts; the
+  golden and `budget=0` counts; `#@todo`s; engine and model lines; the modularity proxies;
+  knobs; what users see.
+* **Trade-offs:** what you made less precise or slower, and why.
+* **Ideas not pursued:** each with why (unsound, too costly, too much code, no time).
+* **Remaining:** what you found but didn't do (bugs, gaps, ideas), each with a repro or a
+  pointer. Nothing else records it: the next iteration starts fresh.
+* **Not run:** what you did not verify.
+* **For the owner:** a plain explanation, for a Python engineer rather than an engine expert,
+  of what changed in what they see, with before / after examples.

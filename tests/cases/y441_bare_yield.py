@@ -1,4 +1,4 @@
-"""A bare `yield` produces None (SUGGESTED_CHANGES 1.2); a `yield` expression's value is None
+"""A bare `yield` produces None; a `yield` expression's value is None
 when the generator is iterated (nothing is sent)."""
 
 
