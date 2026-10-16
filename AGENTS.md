@@ -138,6 +138,7 @@ uv run --no-project python tests/run_snapshots.py   # --update only after review
 uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy \
     python tests/oracle.py [--strict|--lenient] [-v] [-j N] [case…]  # vs real runs, ~1.5 min
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py [case…]
+uv run --no-project python tests/fuzz.py [lists|objects|calls|scalars] [-n N] [--shrink]  # random programs' values vs CPython
 cd vscode-rowan && node test.js && npm run package  # hovers; the .vsix (test_package.js X.vsix TARGET)
 uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"  # also email, stdlib12k, click; pip, timm, sktime, functional
 uv run --no-project python bench/hovers.py rowan/target/release/rowan pip  # each function on demand (`rowan hovers F --only NAME`: one); tests/ondemand_check.py: vs whole runs
@@ -152,10 +153,9 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
 * **Golden suites** `tests/{cases,torch,pandas,pydantic,fastapi,stdlib,apps,numpy}/`, ~1200 programs; library suites have `small/`, `models/` (torch `playground/`: the owner's), `PENDING`.
 * **Directives** (full rules in `tests/CONVENTIONS.md`, also `tests/{torch,pandas}/`):
   `#@ tier key`, `#@row NAME: present= definite= absent= closed|open`,
-  `#@value NAME: exactly= | unknown | includes=` (`#@general`: for any call), `#@schema src: …`,
-  `#@only src: KEY if TEST | KEY none`, `#@todo …`, `#@argv`, `#@shape` (torch). Cost bounds, by hand:
+  `#@value NAME: exactly= | unknown | includes=` (`#@general`: for any call), `#@schema src: …`, `#@only src: KEY if TEST | KEY none`, `#@todo …`, `#@argv`, `#@shape` (torch). Cost bounds, by hand:
   `#@objects`, `#@tabulations`, `#@joins`, `#@work`, `#@visits`, `#@havoc <= N`; `#@limits k=v,…` sets the case's `ROWAN_LIMITS`. A directive-only line applies to the code line above.
-* **Oracle** (`tests/oracle.py`): reruns each case under CPython (a tracer), checks every directive (schemas by dropping keys), strict on library suites.
+* **Oracle** (`tests/oracle.py`): reruns each case under CPython (a tracer), checks every directive (schemas by dropping keys), strict on library suites. **Fuzzing** (`tests/fuzz.py`): random programs; each probe's CPython values must be among rowan's (`--shrink`: a repro).
 * **Snapshots** (`tests/snapshots/`): `--json` on `examples/etl_report.py`, `tests/fixtures/proto_*.py`: the guard for internals (ids may shift). **Unit tests**: CPython values, the regex engine, tries.
 
 ## Debugging switches
