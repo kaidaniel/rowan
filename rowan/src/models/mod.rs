@@ -1446,9 +1446,32 @@ fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         return lit.unwrap();
     }
     // a name not known: any of the object's attributes (of a library object, anything), or the
-    // default; known in part: that attribute, or one rowan does not follow (AGENTS.md: getattr
-    // by unknown names is not followed; every attribute and method of `self` was too costly)
-    let mut v = if lit.is_some() { Value::obj(crate::interp::any_object(&mut an.heap)) } else { join_values(obj.pts.iter().map(|o| an.all_values(o, Ns::Attr, st))) };
+    // default; known in part: that attribute, or one whose name fits the text known of it
+    // (`f"run_{mode}"`: `run_*`), else one rowan does not follow (AGENTS.md: getattr by unknown
+    // names is not followed; every attribute and method of `self` was too costly)
+    let affixes: Option<Vec<(String, String)>> = name_v.pts.iter().map(|o| match &an.heap.obj(o).payload {
+        Payload::Affix(p, s) => Some((p.clone(), s.clone())),
+        _ => None,
+    }).collect();
+    let mut v = match (lit.is_some(), affixes) {
+        (true, Some(afs)) if !afs.is_empty() => {
+            let names = attr_names_like(an, &obj, &afs, st);
+            let mut v = Value::new();
+            for n in names {
+                let has = m_hasattr(an, st, &Call { args: vec![obj.clone(), Value::lit_str(&n)], ..c.clone() });
+                if has.kv.as_lit() != Some(intern::key_bool(false)) || !has.pts.is_empty() {
+                    v = v.join(&an.load_attr(&obj, &n, &c.node, st, false));
+                }
+            }
+            // (an object of unknown class may have others)
+            if obj.pts.iter().any(|o| !matches!(an.heap.kind(o), Kind::Instance | Kind::Class | Kind::Module)) {
+                v = v.join(&Value::obj(crate::interp::any_object(&mut an.heap)));
+            }
+            v
+        }
+        (true, _) => Value::obj(crate::interp::any_object(&mut an.heap)),
+        _ => join_values(obj.pts.iter().map(|o| an.all_values(o, Ns::Attr, st))),
+    };
     if obj.pts.iter().any(|o| an.heap.kind(o) == Kind::External) {
         let lib: Vec<Value> = vec![Value::with_kv(obj.pts.filter(|o| an.heap.kind(o) == Kind::External), crate::domain::BOT)];
         v = v.join(&an.unknown_call(&c.qual, None, &lib, &IndexMap::new(), &[], &[], st, &c.node));
@@ -1457,6 +1480,35 @@ fn m_getattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         v = v.join(x);
     }
     v
+}
+
+/// The attribute names of `obj` (its own and its classes') that start and end with one of the
+/// affix pairs.
+fn attr_names_like(an: &Analyzer, obj: &Value, afs: &[(String, String)], st: &State) -> Vec<String> {
+    let fits = |n: &str| afs.iter().any(|(p, s)| n.len() >= p.len() + s.len() && n.starts_with(p.as_str()) && n.ends_with(s.as_str()));
+    let mut owners: Vec<u32> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for o in obj.pts.iter() {
+        for k in st.row(o, Ns::Attr).present.iter() {
+            names.extend(intern::key_as_str(k).map(|n| n.to_string()));
+        }
+        match an.heap.kind(o) {
+            Kind::Instance => owners.extend(an.heap.instance_class(o).map(|c| an.heap.mro(c)).unwrap_or_default()),
+            Kind::Class => owners.extend(an.heap.mro(o)),
+            _ => {}
+        }
+    }
+    if !owners.is_empty() {
+        for (c, ns, k) in an.heap.cls_slots.keys() {
+            if *ns == Ns::Attr && owners.contains(c) {
+                names.extend(intern::key_as_str(*k).map(|n| n.to_string()));
+            }
+        }
+    }
+    names.retain(|n| fits(n));
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn m_setattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {

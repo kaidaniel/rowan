@@ -615,6 +615,7 @@ impl Analyzer {
                     let nd = frontend::node(node);
                     let site = format!("fstring@L{}", nd.line);
                     let o = self.unknown_source(&site, crate::domain::SourceKind::Data, state, &site, "", Ns::Item, vec![]);
+                    self.heap.obj_mut(o).payload = Payload::Affix(pre, post);
                     return Value::with_kv(ObjSet::one(o), kv);
                 }
                 return Value::kv_only(kv);

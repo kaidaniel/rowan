@@ -79,6 +79,8 @@ pub enum Payload {
     Locidx(String, ObjId),
     /// `range(start, stop, step)` with known bounds
     Range(i64, i64, i64),
+    /// a str known to start and end with these texts (an f-string with one unknown hole)
+    Affix(String, String),
 }
 
 impl Payload {
