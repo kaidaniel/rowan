@@ -652,6 +652,10 @@ impl Analyzer {
                 } else {
                     self.verdict_guarded(node, nk, &cls, oid, Ns::Attr);
                 }
+                // (there on some paths only: an AttributeError the enclosing try handles)
+                if try_guard && !matches!(cls.tier, Tier::Proven | Tier::Likely | Tier::Map) && !self.class_resolves(oid, name) {
+                    self.may_raise_here("AttributeError", state);
+                }
                 if let Some(c) = cls_of {
                     if self.field_is_any(c, name) {
                         let label = format!("{}.{}", self.heap.obj(oid).label, name);
