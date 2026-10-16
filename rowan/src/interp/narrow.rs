@@ -432,6 +432,11 @@ impl Analyzer {
                 }
                 let bo = recs[0];
                 let attr = key_str_lit(a.attr.id.as_str());
+                // (one the instance has on some paths only reads its class's on the others: its
+                // slot is not all it may be)
+                if !state.row(bo, Ns::Attr).definite.contains(attr) {
+                    return;
+                }
                 let cur = state.slot(bo, Ns::Attr, attr);
                 (cur, StoreTarget::Slot(bo, Ns::Attr, attr))
             }
