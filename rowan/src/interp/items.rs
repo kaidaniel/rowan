@@ -1104,7 +1104,10 @@ impl Analyzer {
                     raise = Some((surely || raise.map(|r| r.0).unwrap_or(false), k));
                 }
                 row = row.delete(k, strong && is_lit);
-                state.pop_slot(oid, ns, k);
+                // (one of several objects, or one of several keys: the value may still be there)
+                if strong && is_lit {
+                    state.pop_slot(oid, ns, k);
+                }
             }
             // (an instance attribute's `del` raises AttributeError the same way, a class attribute
             // of the name notwithstanding, unless the class takes it: `__delattr__`, a descriptor)
