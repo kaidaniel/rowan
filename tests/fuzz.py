@@ -11,7 +11,8 @@ expectations written by hand.
 
     uv run --no-project python tests/fuzz.py [KIND…] [--seed S] [-n N] [-j J] [--out DIR] [--shrink]
 
-KIND: lists, objects, calls, scalars (default: all of them). Run it under `.guard/run`.
+KIND: lists, objects, calls, scalars (default: all of them). Run it under `.guard/run`;
+`FUZZ_TRACE=1` (with `-j 1`) names each program before its check, to find one that a guard killed.
 """
 from __future__ import annotations
 
@@ -79,7 +80,7 @@ def lists_op() -> list:
         [f"if {x}:", f"    {x}.pop()"], [f"if {x}:", f"    {x}.pop(0)"], [f"{x}.extend([{v}, {w}])"], [f"{x}.reverse()"],
         [f"{x}[0:1] = [{v}]"], [f"{x} += [{v}]"], [f"{x} = {y}"], [f"{x} = {y}[:]"], [f"{x} = list({y})"],
         [f"{x} = [e for e in {y} if e != {v}]"], [f"{x} = {y} + [{v}]"], [f"{x}.clear()"], [f"{x} = sorted({y}, key=str)"],
-        [f"{x}[:] = {y}"], [f"{x} = {y} * 2"], [f"{x} = [{v}, {w}]"], [f"{x}.sort(key=str)"], [f"{x} = list(reversed({y}))"],
+        [f"{x}[:] = {y}"], [f"{x} = ({y} * 2)[:99]"], [f"{x} = [{v}, {w}]"], [f"{x}.sort(key=str)"], [f"{x} = list(reversed({y}))"],
         [f"{x}[-1:] = [{v}, {w}]"], [f"{x}, *_r = {y} + [0]", f"{x} = [{x}]"], [f"{x} = [*{y}, {v}]"], [f"f_app({x}, {v})"],
         [f"f_set({x}, {v})"], [f"{x} = f_new({y})"], [f"{x} = f_ret({y}, {v})"], [f"d[{v}] = {x}"], [f"{x} = d.get({v}, {y})"],
         [f"d.setdefault({v}, []).append({w})"], [f"{x} = list(d)"], [f"s.add({v})"], [f"{x} = sorted(s, key=str)"], [f"s.discard({v})"],
@@ -246,7 +247,13 @@ NV = ["0", "1", "-3", "7", "2.5", "-0.5", "True", "10**20", "3"]
 
 def scalars_op() -> list:
     s, t, i, j = random.choice("st"), random.choice("st"), random.choice("ij"), random.choice("ij")
-    return [random.choice([
+    op = scalars_choice(s, t, i, j)
+    # (a text stays short: CPython too would run out of memory on what loops make of it)
+    return [re.sub(r"^([st]) = (.*)$", r"\1 = (\2)[:999]", op)]
+
+
+def scalars_choice(s: str, t: str, i: str, j: str) -> str:
+    return random.choice([
         f"{s} = {s}.upper()", f"{s} = {s}.lower()", f"{s} = {s}.strip()", f"{s} = {s}.title()", f"{s} = {s}.lstrip('-')",
         f"{s} = {s}.replace({random.choice(SV)}, {random.choice(SV)})", f"{s} = {s} + {t}", f"{s} = {s} * 2", f"{s} = {s}[1:]",
         f"{s} = {s}[::-1]", f"{s} = ','.join({s}.split(','))", f"{s} = '-'.join(sorted({s}))", f"{s} = {s}.zfill(4)",
@@ -257,7 +264,7 @@ def scalars_op() -> list:
         f"{i} = {i} ** 2 if abs({i}) < 100 else {i}", f"{i} = max({i}, {j})", f"{i} = min({i}, {j}, 5)", f"{i} = {i} == {j}",
         f"{i} = {s} < {t}", f"{i} = {s}.startswith({random.choice(SV)})", f"{i} = 'b' in {s}", f"{i} = float({i})",
         f"{s} = {s}.split('.')[-1]", f"{s} = {s}.partition(',')[2]", f"{s} = {s}.encode().decode()", f"{s} = chr(65 + len({s}) % 26)",
-    ])]
+    ])
 
 
 def scalars_program():
@@ -299,6 +306,8 @@ def annotate(head: list, body: list, probes: list) -> str | None:
 
 
 def fails(path: str) -> list:
+    if os.environ.get("FUZZ_TRACE"):
+        print(f"checking {path}", file=sys.stderr, flush=True)
     ok, problems = run_case(path)
     return [] if ok else problems
 
@@ -352,6 +361,8 @@ def main() -> int:
         for k in range(a.n):
             seed = a.seed + k
             random.seed(f"{kind}{seed}")
+            if os.environ.get("FUZZ_TRACE"):
+                print(f"making {kind} {seed}", file=sys.stderr, flush=True)
             head, body, probes = KINDS[kind]()
             text = annotate(head, body, probes)
             if text is None:
