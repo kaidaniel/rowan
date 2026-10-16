@@ -138,9 +138,6 @@ impl Analyzer {
                     let q = self.heap.external_qual(oid);
                     Value::lit(key_str_lit(q.rsplit('.').next().unwrap_or("")))
                 }
-                // (in a read on many objects, a library object's attribute is any value: by
-                // its qualified name, attributes of attributes made names without end)
-                Kind::External if self.in_wide_read() => Value::obj(super::any_object(&mut self.heap)),
                 Kind::External => self.external_attr(oid, name, state),
                 Kind::Partial if matches!(name, "func" | "args" | "keywords") => crate::models::partial_attr(self, oid, name, node, state),
                 Kind::Parser | Kind::Groupby | Kind::Partial => self.method_value(&format!("{}.{}", k.name(), name), &Value::obj(oid)),
@@ -294,6 +291,11 @@ impl Analyzer {
     /// An attribute of a library object rowan sees only by name: a class a model generates, a
     /// constant, a record, else the external object `qual.name`.
     fn external_attr(&mut self, oid: ObjId, name: &str, state: &mut State) -> Value {
+        // (in a read on many objects, any value: named by their access paths, attributes of
+        // attributes made names without end)
+        if self.in_wide_read() {
+            return Value::obj(super::any_object(&mut self.heap));
+        }
         let q = format!("{}.{}", self.heap.external_qual(oid), name);
         if let Some(v) = crate::models::generated_class(self, state, &q) {
             return v;
