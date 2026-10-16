@@ -816,8 +816,9 @@ impl Analyzer {
         let equal = gen_facts_equal(state, expected, &ge);
         let ended = at_end || matches!((c, self.heap.llen(o, state)), (Some(k), Some(n)) if k >= n);
         let (target, ntag): (&State, String) = match c {
-            Some(0) => (&ge.pre, "pre".into()),
+            // (used up: at its end, also when it yields nothing)
             _ if ended && ge.end.is_some() => (ge.end.as_ref().unwrap(), "end".into()),
+            Some(0) => (&ge.pre, "pre".into()),
             Some(k) => match ge.at.get(k - 1).and_then(|x| x.as_ref()) {
                 Some(s) => (s, format!("at{}", k - 1)),
                 None => (&ge.join, "join".into()),
