@@ -249,7 +249,12 @@ impl Analyzer {
                     // (an instance whose class defines the name has it whatever its own
                     // attributes are: its row says nothing about it)
                     let by_class = |an: &Analyzer, o: u32| intern::key_as_str(k).is_some_and(|n| an.class_resolves(o, &n));
-                    rec = Value::with_kv(rec.pts.filter(|o| !builtin(self, o) && !by_class(self, o)), KeyVal::Bot);
+                    let kept = rec.pts.filter(|o| !builtin(self, o) && !by_class(self, o));
+                    // (where it holds, it may hold for those others: the rest say nothing)
+                    if truth && kept.len() < rec.pts.len() {
+                        return;
+                    }
+                    rec = Value::with_kv(kept, KeyVal::Bot);
                     self.narrow_record(&rec, Ns::Attr, k, truth, state);
                 }
                 return;
@@ -427,6 +432,11 @@ impl Analyzer {
                 }
                 let bo = recs[0];
                 let attr = key_str_lit(a.attr.id.as_str());
+                // (one the instance has on some paths only reads its class's on the others: its
+                // slot is not all it may be)
+                if !state.row(bo, Ns::Attr).definite.contains(attr) {
+                    return;
+                }
                 let cur = state.slot(bo, Ns::Attr, attr);
                 (cur, StoreTarget::Slot(bo, Ns::Attr, attr))
             }
@@ -898,6 +908,12 @@ impl Analyzer {
                     continue;
                 }
                 let strong = single && self.heap.obj(oid).single;
+                // (an open record's key: its value is what the input or unknown code put there,
+                // kept as a slot so a store on another path joins with it)
+                if strong && row.open() && !state.has_slot(oid, ns, k) && ns == Ns::Item {
+                    let v = self.path_placeholder_value(oid, ns, k, &row, state);
+                    state.set_slot_found(oid, ns, k, v, false);
+                }
                 state.set_row_narrowed(oid, ns, row.narrow_in(k, strong));
                 if strong {
                     self.propagate_narrowing(oid, ns, k, state);

@@ -19,6 +19,18 @@ enum Part {
     Opaque,
 }
 
+impl Part {
+    /// This part, a hole only when its value passes `keep` (else opaque).
+    fn clone_if(&self, keep: impl Fn(&Value) -> bool) -> Part {
+        match self {
+            Part::Hole(v) if !keep(v) => Part::Opaque,
+            Part::Hole(v) => Part::Hole(v.clone()),
+            Part::Lit(l) => Part::Lit(l.clone()),
+            Part::Opaque => Part::Opaque,
+        }
+    }
+}
+
 impl Analyzer {
     /// Literals other than None beside objects (`"dev" if c else ["p", "q"]`): a value whose
     /// parts Python treats as different types. (Beside an unknown object, which may be the
@@ -404,10 +416,12 @@ impl Analyzer {
     fn binop_add_seq(&mut self, a: &Value, b: &Value, both: &crate::domain::ObjSet, node: &Node, state: &mut State) -> Option<Value> {
         let la = a.kv.as_lit();
         let lb = b.kv.as_lit();
-        // (a known text before or after one of several texts, or keys)
+        // (a known text before or after one of several texts, or keys; beside an unknown
+        // object, which may be any text: that object stands for the rest of the result)
+        let unknown_only = |v: &Value| v.pts.iter().all(|o| self.heap.kind(o) == Kind::Unknown);
         match (la.and_then(intern::key_as_str), lb.and_then(intern::key_as_str)) {
-            (Some(x), _) if matches!(b.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) => return Some(Value::kv_only(self.affix(&b.kv, &x, ""))),
-            (_, Some(y)) if matches!(a.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) => return Some(Value::kv_only(self.affix(&a.kv, "", &y))),
+            (Some(x), _) if a.pts.is_empty() && unknown_only(b) && matches!(b.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) => return Some(Value::with_kv(b.pts.clone(), self.affix(&b.kv, &x, ""))),
+            (_, Some(y)) if b.pts.is_empty() && unknown_only(a) && matches!(a.kv, KeyVal::Lits(_) | KeyVal::KeysOf(_)) => return Some(Value::with_kv(a.pts.clone(), self.affix(&a.kv, "", &y))),
             _ => {}
         }
         // two lists with known positions: the concatenation's positions
@@ -516,7 +530,21 @@ impl Analyzer {
                         match el {
                             ast::InterpolatedStringElement::Literal(l) => parts.push(Part::Lit(l.value.to_string())),
                             ast::InterpolatedStringElement::Interpolation(i) => {
-                                let part = self.fstring_hole(i, node, state);
+                                // `{x=}`: the expression's text, then its repr (unless a
+                                // conversion or a spec says otherwise)
+                                let mut conv = i.conversion;
+                                if let Some(dt) = &i.debug_text {
+                                    let src = frontend::text_in(node, ruff_text_size::Ranged::range(&*i.expression));
+                                    if src.is_empty() {
+                                        parts.push(Part::Opaque);
+                                        continue;
+                                    }
+                                    parts.push(Part::Lit(format!("{}{}{}", dt.leading, src, dt.trailing)));
+                                    if conv == ast::ConversionFlag::None && i.format_spec.is_none() {
+                                        conv = ast::ConversionFlag::Repr;
+                                    }
+                                }
+                                let part = self.fstring_hole(i, conv, node, state);
                                 parts.push(part);
                             }
                         }
@@ -528,14 +556,14 @@ impl Analyzer {
     }
 
     /// One `{expr!conv:spec}` of an f-string: its text when known, else what is known of it.
-    fn fstring_hole(&mut self, i: &'static ast::InterpolatedElement, node: &'static ast::Expr, state: &mut State) -> Part {
+    fn fstring_hole(&mut self, i: &'static ast::InterpolatedElement, conversion: ast::ConversionFlag, node: &'static ast::Expr, state: &mut State) -> Part {
         let v = self.eval(&i.expression, state);
         // the spec's text (`{n:03d}`, `{x:>{w}}`); None: a part of it is not known
         let spec_text: Option<Option<String>> = i.format_spec.as_ref().map(|spec| self.format_spec_text(spec, state));
         // an object of the program's classes: its `__format__` / `__str__` /
         // `__repr__` makes the text
         let nd = frontend::node(node);
-        let ran = match i.conversion {
+        let ran = match conversion {
             ast::ConversionFlag::None => {
                 let spec_v = match &spec_text {
                     None => Value::lit_str(""),
@@ -548,11 +576,12 @@ impl Analyzer {
             _ => self.run_dunder(&v, &["__repr__"], vec![], &nd, state),
         };
         if let Some((t, rest)) = ran {
-            let whole = rest.pts.is_empty() && rest.kv.is_bot() && (i.conversion == ast::ConversionFlag::None || spec_text.is_none());
+            // (no text known — a dunder of code rowan cannot see — is any text)
+            let whole = rest.pts.is_empty() && rest.kv.is_bot() && (conversion == ast::ConversionFlag::None || spec_text.is_none()) && !t.empty();
             return if whole { Part::Hole(t) } else { Part::Opaque };
         }
         // `{x!r}` / `{x!s}` / `{x!a}`: the converted text
-        let v = match i.conversion {
+        let v = match conversion {
             ast::ConversionFlag::None => crate::models::enums::enum_text(self, &v, state).unwrap_or(v),
             conv => {
                 let name = match conv {
@@ -608,7 +637,8 @@ impl Analyzer {
             return Value::lit(key_str_lit(&s));
         }
         if holes.len() == 1 {
-            if let Part::Hole(v) = &parts[holes[0]] {
+            // (an object with no text known, an unknown one's: any text — below)
+            if let Part::Hole(v) = parts[holes[0]].clone_if(|v| v.pts.is_empty() || v.kv.is_literal()) {
                 let i = holes[0];
                 let pre: String = parts[..i].iter().map(|p| if let Part::Lit(l) = p { l.as_str() } else { "" }).collect();
                 let post: String = parts[i + 1..].iter().map(|p| if let Part::Lit(l) = p { l.as_str() } else { "" }).collect();

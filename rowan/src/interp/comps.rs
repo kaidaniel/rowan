@@ -49,24 +49,15 @@ impl Analyzer {
         let g = &gens[i];
         let nonempty = std::mem::take(&mut self.mode.nonempty_gen);
         let itv = self.eval(&g.iter, state);
+        let itv = self.iterable_part(&itv, state);
         let exhaust_after = itv.clone();
         let gn = frontend::node(&g.iter);
         self.force_gen(&itv, state, true);
         let it = self.iterate(&itv, &gn, state);
         let understood = g.ifs.iter().all(|c| cond_is_exclusion(c, &g.target));
-        if let Some(items) = &it.items {
-            let same = self.identical_summaries(items);
-            if i == 0 && gens.len() == 1 && g.ifs.is_empty() && (limit == SUMMARY || same || items.len() > limit) {
-                self.cx.summary_items.insert(own, items.len());
-            }
-            if items.len() <= limit && !same {
-                let unordered = it.unordered;
-                self.cx.comp_unordered += usize::from(unordered);
-                self.comp_unrolled(gens, i, limit, items, state, body, understood, own);
-                self.cx.comp_unordered -= usize::from(unordered);
-                self.exhaust(&exhaust_after, state);
-                return;
-            }
+        if self.comp_known_items(gens, i, limit, &itv, &it, state, body, understood, own) {
+            self.exhaust(&exhaust_after, state);
+            return;
         }
         self.cx.comp_known.push(false);
         let depth = self.cx.cond_depth;
@@ -98,7 +89,11 @@ impl Analyzer {
         self.rename_recent(&mut s2, state, recs, hmark);
         if it.exhaustive && understood && s2.reachable {
             self.cx.comp_known.pop();
-            state.replace_with(s2);
+            // (one pass stands for every key; for none, too, only where the keys may be none:
+            // what it stores under keys of its own may not be there)
+            let out = if nonempty || surely_some_keys(&elem, state) { s2 } else { state.join(&mut s2) };
+            state.replace_with(out);
+            self.exhaust(&exhaust_after, state);
             return;
         }
         // (an iteration that changed nothing an older object or a name holds, but the result
@@ -117,6 +112,7 @@ impl Analyzer {
             let ev = elem.value_part();
             self.promote_elem_reqs(&mut joined, &s2, &ev, state);
             state.replace_with(joined);
+            self.exhaust(&exhaust_after, state);
             return;
         }
         // items of unknown number: what one iteration did, the next one sees too (a walrus
@@ -134,18 +130,55 @@ impl Analyzer {
         let ev = elem.value_part();
         self.promote_elem_reqs(&mut head, &s2, &ev, state);
         state.replace_with(head);
+        // (a generator iterated: used up, its effects at its end)
+        self.exhaust(&exhaust_after, state);
+    }
+
+    /// Generator `i`'s items when they are known (at most `limit`), each its own iteration; a
+    /// closed dict with some keys only maybe there: one iteration per key, a maybe one joined
+    /// with skipping it. False: not known.
+    #[allow(clippy::too_many_arguments)]
+    fn comp_known_items(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, itv: &Value, it: &super::funcs::Iteration, state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) -> bool {
+        if let Some(items) = &it.items {
+            let same = self.identical_summaries(items);
+            if i == 0 && gens.len() == 1 && gens[i].ifs.is_empty() && (limit == SUMMARY || same || items.len() > limit) {
+                self.cx.summary_items.insert(own, items.len());
+            }
+            if items.len() <= limit && !same {
+                let unordered = it.unordered;
+                self.cx.comp_unordered += usize::from(unordered);
+                let items: Vec<(Value, bool)> = items.iter().map(|v| (v.clone(), true)).collect();
+                self.comp_unrolled(gens, i, limit, &items, state, body, understood, own);
+                self.cx.comp_unordered -= usize::from(unordered);
+                return true;
+            }
+            return false;
+        }
+        match self.maybe_dict_items(itv, state).filter(|its| its.len() <= limit) {
+            Some(items) => {
+                self.comp_unrolled(gens, i, limit, &items, state, body, understood, own);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Known items: each is its own straight-line iteration; a filter decided for the item
     /// keeps it straight-line (positions survive), an undecided one makes the iteration
     /// conditional (joined with skipping the item).
     #[allow(clippy::too_many_arguments)]
-    fn comp_unrolled(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, items: &[Value], state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) {
+    fn comp_unrolled(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, items: &[(Value, bool)], state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) {
         self.cx.comp_known.push(true);
-        for (idx, item) in items.iter().enumerate() {
+        for (idx, (item, sure)) in items.iter().enumerate() {
             let mut s2 = state.copy();
             self.frame_mut().unroll.push(idx);
-            let decided = self.comp_run_one(&gens[i], gens, i, limit, &Elem::One(item.clone()), &mut s2, body, understood, own);
+            // (an item there on some paths only: its iteration is conditional)
+            let maybe = usize::from(!*sure);
+            self.cx.comp_maybe += maybe;
+            self.cx.cond_depth += maybe as i32;
+            let decided = self.comp_run_one(&gens[i], gens, i, limit, &Elem::One(item.clone()), &mut s2, body, understood, own) && *sure;
+            self.cx.comp_maybe -= maybe;
+            self.cx.cond_depth -= maybe as i32;
             self.frame_mut().unroll.pop();
             if s2.reachable {
                 let j = if decided { s2 } else { state.join(&mut s2) };
@@ -375,6 +408,19 @@ pub fn cond_is_exclusion(cond: &ast::Expr, target: &ast::Expr) -> bool {
             }
             false
         }
+        _ => false,
+    }
+}
+
+/// The keys an iteration's element ranges over are surely some (every object they are the
+/// keys of surely has one).
+fn surely_some_keys(elem: &Elem, state: &State) -> bool {
+    let kv = match elem {
+        Elem::One(v) => &v.kv,
+        Elem::Pair(k, _) => &k.kv,
+    };
+    match kv {
+        KeyVal::KeysOf(ko) => ko.objs.iter().all(|o| !state.row(o, ko.ns).definite.is_empty()),
         _ => false,
     }
 }

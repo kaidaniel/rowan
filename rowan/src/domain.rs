@@ -714,11 +714,11 @@ impl Row {
     // -- transfers (§4.1) --------------------------------------------------
     pub fn store(&self, k: KeyId, strong: bool) -> Row {
         let mut d = self.data();
-        // (a key there on some paths only, stored: where it is in the order depends on the path)
-        if strong && d.order.contains(&k) && !d.definite.contains(k) {
+        // (a key there on some paths only, stored: where it is in the order depends on the path;
+        // so for a key there already at no known place)
+        if strong && ((d.order.contains(&k) && !d.definite.contains(k)) || (!d.order.contains(&k) && d.present.contains(k))) {
             d.order = Arc::from(Vec::new());
-        }
-        if strong && !d.order.contains(&k) {
+        } else if strong && !d.order.contains(&k) {
             let mut o = d.order.to_vec();
             o.push(k);
             d.order = o.into();
@@ -820,17 +820,20 @@ impl Row {
             mutators: cap_mutators(self.mutators.union(&o.mutators)),
             top: self.top || o.top,
             order: {
-                // a strong copy of a row whose order is known appends its new keys in order
+                // a strong copy of a row whose order is known appends its new keys in order (a
+                // key there on some paths only: where it is depends on the path, as for `store`)
+                // (onto a row whose own order is not known: still not known)
                 let mut ord = self.order.to_vec();
-                match (strong, o.ordered_keys()) {
-                    (true, Some(ks)) => {
-                        for k in ks.into_iter().filter(|k| !kill.contains(*k)).filter_map(|k| lens_apply(chain, k)) {
-                            if !ord.contains(&k) {
-                                ord.push(k);
-                            }
+                let known = self.present.is_empty() || self.ordered_keys().is_some();
+                if let (true, true, Some(ks)) = (strong, known, o.ordered_keys()) {
+                    for k in ks.into_iter().filter(|k| !kill.contains(*k)).filter_map(|k| lens_apply(chain, k)) {
+                        if !ord.contains(&k) {
+                            ord.push(k);
+                        } else if !self.definite.contains(k) {
+                            ord.clear();
+                            break;
                         }
                     }
-                    _ => {}
                 }
                 ord.into()
             },
@@ -1185,6 +1188,9 @@ impl KeysOf {
         KeysOf { objs, ns, exclude: KeySet::new(), chain: EMPTY_LENS, exhaustive_depth: -1 }
     }
 }
+
+/// `KeysOf::exhaustive_depth` of a sequence's elements that are every key (`list(d)`).
+pub const ALL_KEYS: i32 = -2;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum KeyVal {

@@ -54,6 +54,11 @@ impl Analyzer {
                 self.check_hashable(key, state);
             }
         }
+        // (a sequence's position is read without a verdict: a running generator that yielded
+        // reads the whole sequence, for code between its items that may change it)
+        for o in obj.pts.iter().filter(|o| matches!(self.heap.kind(*o), Kind::List | Kind::Tuple)) {
+            self.gens.read(o, None);
+        }
         // a numpy structured array's missing field raises ValueError
         let exc = if ns == Ns::Item && !obj.pts.is_empty() && !self.m.np_struct.is_empty() && obj.pts.iter().all(|o| self.m.np_struct.contains(&o)) { Some("ValueError") } else { None };
         let exc = if ns == Ns::Item { self.unwind.item_exc_force.or(exc) } else { exc };
@@ -652,8 +657,8 @@ impl Analyzer {
             v = v.join(&Value::with_kv(star.pts, DATA));
         }
         // (a key of an open record stored on some paths only: on the others its value is
-        // the input's, which a slot one path made does not cover)
-        let partly_stored = !v.empty() && row0.has_input() && !(row0.definite.contains(k) && row0.stored.contains(k));
+        // the input's, or what unknown code put there, which a slot one path made does not cover)
+        let partly_stored = !v.empty() && (row0.has_input() || !row0.mutators.is_empty()) && !(row0.definite.contains(k) && row0.stored.contains(k));
         if !from_map && (partly_stored || (v.pts.is_empty() && matches!(v.kv, KeyVal::Data(_) | KeyVal::Bot) && (row.open() || cls.tier == Tier::Map))) {
             let p = self.path_placeholder_value(oid, ns, k, row, state);
             v = v.join(&p);
@@ -1099,9 +1104,17 @@ impl Analyzer {
                     raise = Some((surely || raise.map(|r| r.0).unwrap_or(false), k));
                 }
                 row = row.delete(k, strong && is_lit);
-                state.pop_slot(oid, ns, k);
+                // (one of several objects, or one of several keys: the value may still be there)
+                if strong && is_lit {
+                    state.pop_slot(oid, ns, k);
+                }
             }
-            if let Some((surely, k)) = raise.filter(|_| ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) {
+            // (an instance attribute's `del` raises AttributeError the same way, a class attribute
+            // of the name notwithstanding, unless the class takes it: `__delattr__`, a descriptor)
+            let cls = self.heap.instance_class(oid).filter(|_| ns == Ns::Attr && kind == Kind::Instance);
+            let attr_raises = cls.is_some_and(|c| self.class_lookup(c, "__delattr__").is_none() && self.slots_of(c).is_none());
+            let raise = raise.map(|(surely, k)| (surely && !cls.is_some_and(|c| self.class_lookup(c, &intern::key_py_str(k)).is_some_and(|d| !self.plain_class_attr(d, k, state))), k));
+            if let Some((surely, k)) = raise.filter(|_| (ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) || attr_raises) {
                 state.set_row(oid, ns, row.clone());
                 let exc = if ns == Ns::Item { "KeyError" } else { "AttributeError" };
                 if !self.unwind.tries.is_empty() {

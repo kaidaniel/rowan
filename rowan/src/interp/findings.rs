@@ -471,6 +471,11 @@ impl Analyzer {
                     info.unknown = true;
                     typed(&mut info, self.heap.obj(o).ty);
                 }
+                // (an unknown's attribute nothing is known of: perhaps a method, perhaps any value)
+                Kind::Method if matches!(&self.heap.obj(o).payload, crate::interp::Payload::Method(q, _) if q.starts_with("unknown.")) => {
+                    info.unknown = true;
+                    info.untyped = true;
+                }
                 // a tuple of known literals is that literal (as Python prints it)
                 Kind::Tuple | Kind::Pair if self.heap.literal_tuple(o, state, 0).is_some() => info.lits.push(self.heap.literal_tuple(o, state, 0).unwrap()),
                 _ => info.objects.push(self.heap.obj(o).label.to_string()),

@@ -554,6 +554,7 @@ impl Analyzer {
             }
             ast::Expr::Tuple(ast::ExprTuple { elts, .. }) | ast::Expr::List(ast::ExprList { elts, .. }) => {
                 let n = frontend::node(t);
+                self.check_unpack_len(v, elts.len(), state);
                 let parts = self.unpack(v, elts.len(), state, &n);
                 for (sub, pv) in elts.iter().zip(parts.iter()) {
                     if let ast::Expr::Starred(st) = sub {
@@ -597,7 +598,53 @@ impl Analyzer {
         }
     }
 
+    /// What of `v` Python can iterate: its literals that are numbers, None, … raise TypeError
+    /// (a `for`, a comprehension, unpacking, `list(v)`); with nothing else, the path ends here.
+    pub fn iterable_part(&mut self, v: &Value, state: &mut State) -> Value {
+        let ks = crate::domain::kv_literals(&v.kv);
+        let not_iterable = |k: KeyId| intern::with_key(k, |k| matches!(k, intern::Key::Int(_) | intern::Key::Float(_) | intern::Key::Bool(_) | intern::Key::None | intern::Key::Ellipsis | intern::Key::Dec(..) | intern::Key::Frac(..)));
+        if !v.kv.is_literal() || !ks.iter().any(not_iterable) {
+            return v.clone();
+        }
+        let rest: intern::KeySet = ks.iter().filter(|k| !not_iterable(*k)).collect();
+        let out = Value::with_kv(v.pts.clone(), if rest.is_empty() { crate::domain::BOT } else { KeyVal::lits(rest) });
+        if out.empty() {
+            self.raise_here("TypeError", state);
+        } else {
+            self.may_raise_here("TypeError", state);
+        }
+        out
+    }
+
+    /// Unpacking into `n` names raises ValueError for a sequence of another known length (a
+    /// list, tuple or generator's items, a known string): on every path when each part does,
+    /// on some when a part's length is not known.
+    fn check_unpack_len(&mut self, v: &Value, n: usize, state: &mut State) {
+        self.force_gen(v, state, false);
+        let mut parts: Vec<Option<bool>> = v.pts.iter().map(|o| match (self.heap.kind(o), self.heap.llen(o, state)) {
+            (Kind::List | Kind::Tuple, Some(l)) => Some(l != n),
+            // (a dict's item, an enumerate's or zip's of two)
+            (Kind::Pair, _) => Some(n != 2),
+            _ => None,
+        }).collect();
+        if !v.kv.is_bot() {
+            let ks = crate::domain::kv_literals(&v.kv);
+            if v.kv.is_literal() && ks.iter().all(intern::key_is_str) {
+                parts.extend(ks.iter().map(|k| Some(intern::key_as_str(k).is_some_and(|t| t.chars().count() != n))));
+            } else {
+                parts.push(None);
+            }
+        }
+        // (of a length not known: it may raise)
+        if parts.iter().all(|p| *p == Some(true)) && !parts.is_empty() {
+            self.raise_here("ValueError", state);
+        } else if parts.iter().any(|p| *p != Some(false)) {
+            self.may_raise_here("ValueError", state);
+        }
+    }
+
     pub fn unpack(&mut self, v: &Value, n: usize, state: &mut State, node: &Node) -> Vec<Value> {
+        let v = &self.iterable_part(v, state);
         self.force_gen(v, state, false);
         let mut parts: Vec<Value> = (0..n).map(|_| Value::new()).collect();
         for oid in v.pts.iter() {
@@ -844,7 +891,8 @@ impl Analyzer {
             for e in &elems {
                 kacc = kacc.join(e);
             }
-            let exh = exhaustive && pairs.len() == 1;
+            // (pairs whose first items are a dict's keys: `d.items()`, not an `enumerate`'s)
+            let exh = exhaustive && pairs.len() == 1 && matches!(kacc.kv, KeyVal::KeysOf(_));
             if alts_mode {
                 items = alt_items;
             }
@@ -1140,6 +1188,14 @@ impl Analyzer {
         let lit = self.literal_dict_items(oid, state);
         match (lit, acc.items.as_mut()) {
             (Some(l), Some(its)) => its.extend(l.into_iter().map(|(k, _)| Value::lit(k))),
+            // (known keys in no known order: each item is any of them, as a set's)
+            (None, Some(its)) => match self.unordered_dict_keys(oid, state) {
+                Some(ks) => {
+                    its.extend(ks.into_iter().map(Value::lit));
+                    acc.unordered = true;
+                }
+                None => acc.items = None,
+            },
             _ => acc.items = None,
         }
         acc.elems.push(Value::kv_only(KeyVal::KeysOf(KeysOf::new(ObjSet::one(oid), Ns::Item))));
@@ -1149,6 +1205,15 @@ impl Analyzer {
     fn iter_sequence(&mut self, oid: ObjId, node: &Node, state: &mut State, acc: &mut ItemsAcc) {
         let ll = self.heap.llen(oid, state);
         acc.unordered |= self.heap.kind(oid) == Kind::Set && ll != Some(1);
+        // (a sequence of some of a dict's keys need not hold them all, `[k for k in d if …]`:
+        // only `list(d)` as made, as long as the dict's keys are known)
+        acc.exhaustive &= match state.elems.get(&oid) {
+            Some(KeyVal::KeysOf(ko)) if ko.exhaustive_depth == crate::domain::ALL_KEYS && ko.objs.len() == 1 && ko.exclude.is_empty() => {
+                let row = state.row(ko.objs.first().unwrap(), ko.ns);
+                !row.open() && row.present == row.definite && ll == Some(row.present.len())
+            }
+            _ => false,
+        };
         // a generator partly consumed by next(): iteration starts at its cursor
         let cursor = self.cursor_of(oid, state);
         match (ll, acc.items.as_mut(), cursor) {
@@ -1243,6 +1308,13 @@ impl Analyzer {
         Some(out)
     }
 
+    /// The keys of a closed dict whose keys are all known but not their order.
+    fn unordered_dict_keys(&self, oid: u32, state: &State) -> Option<Vec<KeyId>> {
+        let row = state.row(oid, Ns::Item);
+        let plain = !row.open() && row.present == row.definite && row.present.len() <= UNROLL_MAX && !state.has_slot(oid, Ns::Item, STAR) && !self.m.counters.contains(&oid);
+        (plain && row.ordered_keys().is_none()).then(|| intern::sorted_by_str(row.present.iter()))
+    }
+
     pub fn literal_dict_items(&mut self, oid: u32, state: &State) -> Option<Vec<(KeyId, Value)>> {
         let row = state.row(oid, Ns::Item);
         // an empty closed dict iterates zero times (known), like an empty list
@@ -1292,7 +1364,7 @@ impl Analyzer {
         let row = state.row(oid, Ns::Item);
         // (keys stored under unknown names keep their values in the `*` slot: only content
         // from outside — a parameter, an input, unknown code — is not there)
-        let outside = row.top || row.sources.iter().any(|(src, _)| !crate::domain::source_is_data(src));
+        let outside = row.top || !row.mutators.is_empty() || row.sources.iter().any(|(src, _)| !crate::domain::source_is_data(src));
         if row.open() && outside {
             return v.join(&self.path_placeholder_value(oid, Ns::Item, STAR, &row, state));
         }
@@ -1395,12 +1467,15 @@ impl Analyzer {
         let kind = if matches!(o_kind, Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance | Kind::Frame) { o_kind } else { Kind::Dict };
         let tag = if deep { "deep" } else { "copy" };
         // (the original's id in the site: a deep copy's nested copies are distinct objects; a
-        // copy of a copy made at this node counts as a copy of the first original)
+        // copy of a copy, made here or elsewhere, counts as a copy of the first original — else
+        // copies of copies in a loop make new sites every round)
         let prefix = format!("{}:{}:", tag, self.site_of(node));
-        let site_root = self.heap.obj(oid).site.strip_prefix(&prefix).and_then(|rest| rest.split(['#', ':']).nth(1)).and_then(|r| r.parse::<u32>().ok());
+        // (a copy renamed since, `#recent`: its site still names its original)
+        let site = &self.heap.obj(oid).site;
+        let site_root = (site.starts_with("copy:") || site.starts_with("deep:")).then(|| site.split('#').next().and_then(|s| s.rsplit(':').next()).and_then(|r| r.parse::<u32>().ok())).flatten();
         let root = match (self.heap.copy_root.get(&oid), site_root) {
-            (Some(&r), _) if self.heap.obj(oid).site.starts_with(&prefix) => r,
-            (_, Some(r)) if (r as usize) < self.heap.len() => r,
+            (Some(&r), _) => r,
+            (_, Some(r)) if (r as usize) < self.heap.len() => self.heap.copy_root.get(&r).copied().unwrap_or(r),
             _ => oid,
         };
         // (a copy of a copy made elsewhere is named by the first original: `copy of X@L5`)

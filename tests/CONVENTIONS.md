@@ -42,7 +42,8 @@ fields — and the **values** of names when they follow from the program text.
   program makes (they pass what the annotations say).
 * `#@ TIER key` on an access line (`d["k"]`, `o.k`, `d.pop("k")`, `M(**d)`, …): `ok` (never
   fails), `missing` (always fails), `possibly` (some paths), `input` (depends on input data),
-  `sound` (anything but missing), `none` (no verdict: guarded / `.get`). Several:
+  `sound` (anything but missing), `fails` (anything but ok: the fuzzer's floor), `none` (no
+  verdict: guarded / `.get`). Several:
   `#@ ok a ; missing b`. A variable read is checked the same way (`#@ possibly x`: x bound on
   some paths only; the oracle counts a NameError / UnboundLocalError for x).
 * `#@schema SOURCE: always={…} sometimes={…} only={…}` — what the program requires of an

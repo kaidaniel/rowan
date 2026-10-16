@@ -8,5 +8,4 @@ if n % 2 == 0:
     e["m"] = 1
 e["z"] = 2
 e["m"] = 3
-first = list(e)[0]                           #@value first: includes={"m", "z"}
-#@todo value first: exactly={"m", "z"}  (the keys of a dict in no known order are not taken as literals)
+first = list(e)[0]                           #@value first: exactly={"m", "z"}

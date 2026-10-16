@@ -378,6 +378,16 @@ pub fn text<T: Ranged>(n: &T) -> String {
     })
 }
 
+/// The source text of `range` in the module node `n` (registered) is in.
+pub fn text_in<T: Ranged>(n: &T, range: ruff_text_size::TextRange) -> String {
+    let addr = n as *const T as usize;
+    REG.with(|r| {
+        let r = r.borrow();
+        let Some(&m) = r.nodes.get(&addr) else { return String::new() };
+        r.modules[m as usize].source.get(range.start().to_usize()..range.end().to_usize()).map(|s| s.to_string()).unwrap_or_default()
+    })
+}
+
 pub fn module_name(idx: u32) -> String {
     REG.with(|r| r.borrow().modules[idx as usize].name.clone())
 }

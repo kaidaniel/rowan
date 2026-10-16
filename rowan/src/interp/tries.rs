@@ -99,6 +99,8 @@ pub struct Handler {
     pub name: Option<&'static str>,
     pub body: &'static [ast::Stmt],
     pub line: u32,
+    /// it may catch any exception, or not (an `__exit__` that may return a true value)
+    pub maybe: bool,
 }
 
 impl Handler {
@@ -451,7 +453,7 @@ impl Analyzer {
                 ast::Expr::Tuple(tup) => tup.elts.iter().collect(),
                 other => vec![other],
             });
-            Handler { types, name: h.name.as_ref().map(|n| n.id.as_str()), body: &h.body, line: frontend::node(h).line }
+            Handler { types, name: h.name.as_ref().map(|n| n.id.as_str()), body: &h.body, line: frontend::node(h).line, maybe: false }
         });
         self.stmt_try_parts(&t.body, handlers.collect(), &t.orelse, fin, state);
     }
@@ -526,6 +528,10 @@ impl Analyzer {
     /// decided miss needs it).
     fn handler_classes(&mut self, handlers: &[Handler], pre: &State) -> Vec<(FxHashSet<String>, bool)> {
         handlers.iter().map(|h| {
+            // (one that may catch anything: no class it surely catches or surely misses)
+            if h.maybe {
+                return (FxHashSet::default(), false);
+            }
             let Some(elts) = &h.types else { return (h.names(), true) };
             // (no decided miss unless every name is a known exception class)
             let known = elts.iter().all(|e| {

@@ -748,13 +748,17 @@ fn m_fromkeys(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let val = c.args.get(1).cloned().unwrap_or_else(|| an.none_v.clone());
     let Some(a) = c.args.first() else { return Value::obj(oid) };
     // known items that are literals, in order (a list, a string's characters, a generator)
-    let items = an.iterate(a, &c.node, st).items;
-    let lits: Option<Vec<KeyId>> = items.and_then(|its| its.iter().map(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).collect());
+    let it = an.iterate(a, &c.node, st);
+    let lits: Option<Vec<KeyId>> = it.items.and_then(|its| its.iter().map(|v| v.kv.as_lit().filter(|_| v.pts.is_empty())).collect());
     let mut row = st.row(oid, Ns::Item);
     if let Some(ls) = lits {
         for k in ls {
             row = row.store(k, true);
             st.set_slot(oid, Ns::Item, k, val.clone(), true);
+        }
+        // (a set's items: in an order Python does not promise)
+        if it.unordered {
+            row = row.with_order(Vec::new());
         }
         st.set_row(oid, Ns::Item, row);
     } else if let Some(ks) = if a.pts.is_empty() { None } else { an.lit_keys(a, st) } {
@@ -793,6 +797,7 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         }
     }
     if let Some(a) = c.args.first() {
+        let a = &an.iterable_part(a, st);
         let it = an.iterate(a, &c.node, st);
         if kind == Kind::Set {
             match &it.items {
@@ -850,7 +855,12 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             Elem::One(elem) => {
                 st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(elem.pts.clone(), crate::models::torch::elem_kv(&elem.kv)), true);
-                st.elems.insert(oid, elem.kv.clone());
+                // (every key of a dict: `list(d)` holds them all)
+                let kv = match &elem.kv {
+                    KeyVal::KeysOf(ko) if it.exhaustive => KeyVal::KeysOf(crate::domain::KeysOf { exhaustive_depth: crate::domain::ALL_KEYS, ..ko.clone() }),
+                    kv => kv.clone(),
+                };
+                st.elems.insert(oid, kv);
                 let reorders = matches!(c.qual.as_str(), "builtins.sorted" | "builtins.reversed");
                 if reorders {
                     if let Some(keyfn) = c.kw("key") {
@@ -900,7 +910,7 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             st.set_slot(oid, Ns::Pos, intern::key_int(pos as i64), v, true);
                         }
                         // the items of a set come in an order Python does not promise
-                        let from_set = a.pts.iter().any(|o| an.heap.kind(o) == Kind::Set);
+                        let from_set = it.unordered || a.pts.iter().any(|o| an.heap.kind(o) == Kind::Set);
                         if from_set && kind != Kind::Set && !sorted {
                             for i in 0..n {
                                 st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), all.clone(), true);
@@ -1006,6 +1016,19 @@ fn m_isinstance(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(classes) = an.isinstance_classes(cv, st) else { return Value::data("bool") };
     let builtin = |an: &Analyzer, cls: u32| -> Option<String> { if an.heap.kind(cls) == Kind::External { Some(an.heap.external_qual(cls).rsplit('.').next().unwrap_or("").to_string()) } else { None } };
     let mut verdicts: Vec<bool> = Vec::new();
+    // (an unknown beside objects: of the program's classes it is no instance — unknown values
+    // are not taken for the program's instances — of a builtin one perhaps, by its type)
+    if !v.pts.is_empty() && !v.kv.is_bot() && !v.kv.is_literal() {
+        let user = classes.iter().all(|c| an.heap.kind(*c) == Kind::Class);
+        let ty = v.kv.data_site().and_then(|l| crate::domain::label_type(&intern::str_get(l)));
+        match (user, ty) {
+            (true, _) => verdicts.push(false),
+            (false, Some(t)) if classes.iter().all(|c| builtin(an, *c).is_some()) => verdicts.push(classes.iter().any(|c| builtin(an, *c).is_some_and(|b| b == t || b == "object" || (b == "int" && t == "bool")))),
+            // (a library class's: decided by the objects, as for the program's classes)
+            _ if classes.iter().all(|c| an.heap.kind(*c) != Kind::External || !an.heap.external_qual(*c).starts_with("builtins.")) => verdicts.push(false),
+            _ => return Value::data("bool"),
+        }
+    }
     // literal values (with or without objects: both parts count)
     if v.pts.is_empty() || (v.kv.is_literal() && !crate::domain::kv_literals(&v.kv).is_empty()) {
         let lits = crate::domain::kv_literals(&v.kv);
@@ -1762,13 +1785,16 @@ fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 None => return unknown,
             }
         }
-        if an.class_lookup(cls, &name).is_some() {
+        let (defs, sure) = an.class_lookup_on_path(cls, &name, st);
+        if sure {
             verdicts.push(true);
             continue;
         }
         let row = st.row(o, Ns::Attr);
         if row.definite.contains(k) {
             verdicts.push(true);
+        } else if !defs.is_empty() {
+            return unknown;
         } else if row.closed() && !row.present.contains(k) {
             verdicts.push(false);
         } else {
@@ -1854,20 +1880,23 @@ fn m_dc_fields(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn m_vars(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(a) = c.args.first() else { return Value::data("vars") };
-    if c.qual == "builtins.vars" {
-    }
     let oid = an.alloc_simple(Kind::Dict, &c.node, st, &format!("vars@L{}", c.line));
     if c.qual == "builtins.vars" {
         if let Some(inst) = a.single().filter(|o| an.heap.kind(*o) == Kind::Instance) {
             an.m.attr_mirrors.insert(oid, inst);
         }
     }
+    // (one of several objects: the attributes of each, joined)
+    let empty = st.row(oid, Ns::Item);
+    let mut rows: Vec<Row> = Vec::new();
     for x in an.record_objects(a) {
-        let r = st.row(oid, Ns::Item).copy_from(&st.row(x, Ns::Attr), true, &KeySet::new(), intern::EMPTY_LENS);
-        st.set_row(oid, Ns::Item, r);
+        rows.push(empty.copy_from(&st.row(x, Ns::Attr), true, &KeySet::new(), intern::EMPTY_LENS));
         for (k, v) in st.obj_slots(x, Ns::Attr) {
             st.set_slot(oid, Ns::Item, k, v, false);
         }
+    }
+    if !rows.is_empty() {
+        st.set_row(oid, Ns::Item, crate::domain::join_rows(rows));
     }
     Value::obj(oid)
 }
@@ -2032,7 +2061,11 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let cv = st.slot(moid, Ns::Attr, key_str_lit(&name));
                 if let Some(cls) = cv.single() {
                     for k in row.present.iter().filter(|k| intern::key_as_str(*k).is_some()) {
-                        an.heap.cls_slots.insert((cls, Ns::Attr, k), st.slot(ns, Ns::Item, k));
+                        let v = st.slot(ns, Ns::Item, k);
+                        an.heap.cls_slots.insert((cls, Ns::Attr, k), v.clone());
+                        st.set_slot(cls, Ns::Attr, k, v, true);
+                        let r = st.row(cls, Ns::Attr).store(k, row.definite.contains(k));
+                        st.set_row(cls, Ns::Attr, r);
                     }
                     if lit_name.is_none() {
                         for k in ["__name__", "__qualname__"] {

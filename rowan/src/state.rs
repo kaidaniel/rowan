@@ -174,6 +174,12 @@ impl Joins {
     }
 }
 
+thread_local! {
+    /// How often all name facts were dropped (a deletion, unknown code): a callee that did
+    /// drops its caller's too.
+    pub static NAME_KEY_DROPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 impl State {
     /// The name's object has `k` from here on.
     pub fn add_name_key(&mut self, n: StrId, k: KeyId) {
@@ -193,6 +199,9 @@ impl State {
 
     /// Forget name facts (all of them, or those of one name).
     pub fn drop_name_keys(&mut self, n: Option<StrId>) {
+        if n.is_none() {
+            NAME_KEY_DROPS.with(|c| c.set(c.get() + 1));
+        }
         if self.name_keys.is_empty() {
             return;
         }
@@ -573,6 +582,7 @@ impl State {
             && self.narrowed == o.narrowed
             && self.ret == o.ret
             && (Arc::ptr_eq(&self.tf, &o.tf) || self.tf == o.tf)
+            && (Arc::ptr_eq(&self.lasts, &o.lasts) || self.lasts == o.lasts)
             && self.exits.is_none() == o.exits.is_none()
             && self.rows.same(&o.rows)
             && self.slots.same(&o.slots)

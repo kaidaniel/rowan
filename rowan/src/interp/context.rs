@@ -73,6 +73,9 @@ pub struct Modes {
     /// the access being made is on a value that may also be a scalar (a str, a number): no
     /// object's lack of the key makes it fail for sure
     pub recv_scalar: bool,
+    /// the access being made is on one of several receivers (`per_receiver`): an object that
+    /// answers it through `__getattr__` says so, against those that lack it
+    pub one_of_several: bool,
     /// (canonical key, key as written) while an access with a numerically-equal key runs
     pub key_alias: Option<(KeyId, KeyId)>,
     /// inside `object.__setattr__`: a plain store even when the class defines `__setattr__`
