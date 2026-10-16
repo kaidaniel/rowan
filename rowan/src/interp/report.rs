@@ -1034,8 +1034,10 @@ fn render_sequence(an: &Analyzer, state: &State, o: ObjId, kind: Kind, depth: u3
             let ekv = state.elems.get(&o);
             let known_empty = matches!(&ekv, Some(KeyVal::Lits(ks)) if ks.is_empty());
             let mut ev = elem.unwrap_or_default();
+            // (the scalar part of the elements is kept apart, as iterating and indexing read it:
+            // literals, an unknown of a type, `int(?)`; the slot keeps plain data)
             if let Some(kv) = ekv {
-                if kv.is_literal() && ev.kv.is_bot() {
+                if ev.kv.is_bot() || ev.kv == crate::domain::DATA {
                     ev = Value::with_kv(ev.pts.clone(), kv);
                 }
             }
@@ -1187,6 +1189,14 @@ fn render_record(an: &Analyzer, state: &State, o: ObjId, ns: Ns, name: Option<&s
     }
     if keys.len() > MAX_ITEMS {
         items.push("…".into());
+    }
+    // (a dict whose keys only the program's stores under keys not known put there: what any
+    // of them holds, in typing notation, `dict[?, int(?)]`)
+    let stored_only = ns == Ns::Item && items.is_empty() && row.mutators.is_empty() && !row.top && !row.sources.is_empty() && row.sources.iter().all(|(src, _)| intern::with_source(src, |s| s.kind == crate::domain::SourceKind::Data && s.site.starts_with("store@L")));
+    if let (true, Some(v)) = (stored_only, state.slot_opt(o, ns, STAR)) {
+        let shown = render_value(an, state, &v, depth + 1, seen);
+        seen.pop();
+        return format!("dict[?, {}]", shown);
     }
     if !row.closed() {
         items.push("**?".into());
