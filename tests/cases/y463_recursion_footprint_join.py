@@ -1,9 +1,9 @@
 """A recursive call answered by its running activation joins the activation's effects (its
-footprint) into the caller's state. Here the footprint is 150 records the recursion touches:
-joining it entry by entry at every recursive call visited the whole footprint each time; only
-where the two states differ (a structural diff: they share most of their structure) can the
-join change anything. The work: the walks and the differing entries, with a margin."""
-#@visits <= 15000
+footprint) into the caller's state. The footprint is 150 records the recursion touches: joining
+it entry by entry at every call visited it whole each time; only where the two states differ
+can the join change anything. The work: the walks and the differing entries, with a margin
+(15000 -> 30000: what a recursive call changed of every older object joins, a global too)."""
+#@visits <= 30000
 import sys
 
 

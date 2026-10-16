@@ -151,14 +151,11 @@ impl Analyzer {
         if let Some((pre, grown, mark)) = self.recursion.heap.get(key) {
             let (pre, mark) = (pre.clone(), *mark);
             let had = grown.is_some();
-            let roots: Vec<Value> = self_v.iter().chain(args.iter()).chain(kwargs.values()).cloned().collect();
+            // (every object older than the activation it changed: what the arguments reach, a
+            // global, a cell — what the callee may read)
             let fp = state.footprint(&pre);
             let old = |o: ObjId| self.heap.born_before(o, mark);
-            let mut targets: Vec<ObjId> = fp.rows.iter().map(|k| k.0).chain(fp.slots.iter().map(|k| k.0)).chain(fp.elems.iter().copied()).filter(|o| old(*o)).collect();
-            targets.sort_unstable();
-            targets.dedup();
-            let reach = if targets.is_empty() { FxHashSet::default() } else { self.reach_among(&roots, &targets, state) };
-            let fp = crate::state::Footprint { rows: fp.rows.into_iter().filter(|k| reach.contains(&k.0)).collect(), slots: fp.slots.into_iter().filter(|k| reach.contains(&k.0)).collect(), elems: fp.elems.into_iter().filter(|o| reach.contains(o)).collect() };
+            let fp = crate::state::Footprint { rows: fp.rows.into_iter().filter(|k| old(k.0)).collect(), slots: fp.slots.into_iter().filter(|k| old(k.0)).collect(), elems: fp.elems.into_iter().filter(|o| old(*o)).collect() };
             if !fp.rows.is_empty() || !fp.slots.is_empty() || !fp.elems.is_empty() {
                 let mut g = self.recursion.heap.get_mut(key).and_then(|e| e.1.take()).unwrap_or_else(|| pre.copy());
                 let before = g.copy();
