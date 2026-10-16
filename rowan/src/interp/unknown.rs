@@ -537,9 +537,18 @@ fn unknown_result_rows(state: &mut State, rid: ObjId, site: &str, site_id: StrId
         d.definite = KeySet::new();
         d.absent = KeySet::new();
         d.mutators = d.mutators.insert(site_id);
+        // (an input given whole, or an element of one, may come back with its items: a key
+        // read from the result may be one it must have, on that guess (the requirement's caveat
+        // is the call). A value read under a key of an input is taken as a value, not a
+        // mapping: the result is open through the call, `consume(line["sku"])["picks"]` needs
+        // nothing of `line["sku"]`.)
+        let src = Source::new(site, SourceKind::Call);
+        let leaf = |(src, _): (crate::domain::SourceId, _)| intern::with_source(src, |s| s.path.last().is_some_and(|k| *k != intern::STAR));
+        if d.sources.iter().any(leaf) {
+            d.sources = d.sources.filter(|x| !leaf(x)).insert((src, intern::EMPTY_LENS));
+        }
         state.set_row(rid, Ns::Item, Row::from_data(d));
         // as an object the result is unknown: its attributes come from the call
-        let src = Source::new(site, SourceKind::Call);
         state.set_row(rid, Ns::Attr, Row::with_source(src).mutate(site_id));
         for oid in &item_recs {
             for (k, v) in state.obj_slots(*oid, Ns::Item) {
