@@ -515,6 +515,13 @@ impl Analyzer {
                 // its own terms: its attributes as symbols)
                 let torch = self.entry.torch_modules.contains(&fi.module);
                 let subs: Vec<ObjId> = self.program.user_classes.iter().copied().filter(|c| *c == cls || (!torch && self.heap.mro(*c).contains(&cls))).collect();
+                // (a classmethod's is the class or one of its subclasses)
+                if fi.is_classmethod.get() {
+                    if !params.is_empty() {
+                        params.remove(0);
+                    }
+                    return Some(Value::objs(crate::domain::ObjSet::from_vec(subs)));
+                }
                 let mut insts: Vec<ObjId> = Vec::new();
                 for c in subs {
                     // (the instance made with the defaults is made too, whichever run needs a
