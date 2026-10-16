@@ -343,7 +343,12 @@ impl Analyzer {
         let out = self.leave_try();
         let mut stops: Option<State> = None;
         for (cls, st, exc) in out.recs {
-            let stop = cls.as_ref().map(|(names, _)| names.iter().any(|n| n == "StopIteration"));
+            // (Some(true): StopIteration; Some(false): surely another class; None: may be either)
+            let stop = match cls.as_ref() {
+                Some((names, _)) if names.iter().any(|n| n == "StopIteration") => Some(true),
+                Some((_, true)) => Some(false),
+                _ => None,
+            };
             if stop != Some(false) {
                 let mut s2 = st.copy();
                 s2.reachable = true;
