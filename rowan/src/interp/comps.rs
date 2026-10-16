@@ -107,7 +107,18 @@ impl Analyzer {
         self.rename_recent(&mut s2, state, recs, hmark);
         if it.exhaustive && understood && s2.reachable {
             self.cx.comp_known.pop();
-            state.replace_with(s2);
+            // (one pass stands for every key; for none, too, only where the keys may be none:
+            // what it stores under keys of its own may not be there)
+            let keys = match &elem {
+                Elem::One(v) => v.kv.clone(),
+                Elem::Pair(k, _) => k.kv.clone(),
+            };
+            let some = match &keys {
+                KeyVal::KeysOf(ko) => ko.objs.iter().all(|o| !state.row(o, ko.ns).definite.is_empty()),
+                _ => false,
+            };
+            let out = if some || nonempty { s2 } else { state.join(&mut s2) };
+            state.replace_with(out);
             self.exhaust(&exhaust_after, state);
             return;
         }

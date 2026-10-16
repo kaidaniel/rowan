@@ -891,7 +891,8 @@ impl Analyzer {
             for e in &elems {
                 kacc = kacc.join(e);
             }
-            let exh = exhaustive && pairs.len() == 1;
+            // (pairs whose first items are a dict's keys: `d.items()`, not an `enumerate`'s)
+            let exh = exhaustive && pairs.len() == 1 && matches!(kacc.kv, KeyVal::KeysOf(_));
             if alts_mode {
                 items = alt_items;
             }
