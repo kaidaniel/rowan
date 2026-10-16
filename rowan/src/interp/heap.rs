@@ -3,9 +3,8 @@
 //!
 //! The heap is flow-insensitive: an object, once made, exists on every path; what a path knows
 //! of it (rows, slots, elements, lengths) is in its `State`. Only an object's identity and its
-//! payload (the function, class or module it is, a bound method's parts, …) live here, plus
-//! two per-object fallbacks for lengths (`literal_len`, `known_prefix`) that a state not
-//! descended from the allocation reads. Allocation *policy* (contexts, strong / recent /
+//! payload (the function, class or module it is, a bound method's parts, …) live here; a
+//! path without a length for an object does not know it. Allocation *policy* (contexts, strong / recent /
 //! variant / merged objects) is `Analyzer::alloc` (`interp/alloc.rs`); this is the table.
 
 use std::rc::Rc;
@@ -80,6 +79,8 @@ pub enum Payload {
     Locidx(String, ObjId),
     /// `range(start, stop, step)` with known bounds
     Range(i64, i64, i64),
+    /// a str known to start and end with these texts (an f-string with one unknown hole)
+    Affix(String, String),
 }
 
 impl Payload {
@@ -99,10 +100,6 @@ pub struct Obj {
     pub single: bool,
     pub label: std::sync::Arc<str>,
     pub payload: Payload,
-    /// containers built from a literal: positional slots are valid
-    pub literal_len: Option<usize>,
-    /// after appends of unknown count: positions below this are still valid
-    pub known_prefix: Option<usize>,
     /// an element record a model or an iteration made (a frame's row, a csv row, an input's
     /// element): a loop takes one of its own per iteration (`bind_views`)
     pub iter_elem: bool,
@@ -156,7 +153,7 @@ pub struct Heap {
 
 impl Default for Heap {
     fn default() -> Heap {
-        let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, literal_len: None, known_prefix: None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None };
+        let none = Obj { id: 0, kind: Kind::Unknown, site: "".into(), ctx: "".into(), single: true, label: "<none>".into(), payload: Payload::None, iter_elem: false, derived_from: None, depth: 0, iterator: false, born: 0, ty: None };
         Heap { objects: vec![none], index: FxHashMap::default(), site_clones: FxHashMap::default(), serial: 0, keys: ObjKeys::default(), cls_slots: FxHashMap::default(), prop_setters: FxHashMap::default(), copy_root: FxHashMap::default() }
     }
 }
@@ -243,8 +240,6 @@ impl Heap {
             single,
             label: intern::str_get(intern::s(label)),
             payload,
-            literal_len: None,
-            known_prefix: None,
             iter_elem: false,
             derived_from: None,
             depth: 0,
@@ -311,10 +306,7 @@ impl Heap {
     // ------------------------------------------------------------ lengths
     /// The length of a list / tuple on this path (positions 0..n are its items), else None.
     pub fn llen(&self, o: ObjId, st: &State) -> Option<usize> {
-        match st.lens.get(&o) {
-            Some(v) => v.0,
-            None => self.objects[o as usize].literal_len,
-        }
+        st.lens.get(&o).and_then(|v| v.0)
     }
 
     /// The possible lengths of a list / tuple on this path: the exact one, or the alternatives
@@ -335,24 +327,18 @@ impl Heap {
         let p = match st.lens.get(&o) {
             Some((Some(n), _, _)) => n,
             Some((None, p, _)) => p,
-            None => self.objects[o as usize].literal_len.or(self.objects[o as usize].known_prefix).unwrap_or(0),
+            None => 0,
         };
         Some(p).filter(|p| *p > 0)
     }
 
-    /// (also the object's own field: what a state not descended from the one it was made in
-    /// reads)
     pub fn set_llen(&mut self, o: ObjId, st: &mut State, v: Option<usize>) {
         st.set_lens(o, (v, v.unwrap_or(0), 0));
-        self.objects[o as usize].literal_len = v;
-        self.objects[o as usize].known_prefix = None;
     }
 
     /// The length is unknown now, its first `n` positions are still known.
     pub fn set_prefix(&mut self, o: ObjId, st: &mut State, n: usize) {
         st.set_lens(o, (None, n, 0));
-        self.objects[o as usize].literal_len = None;
-        self.objects[o as usize].known_prefix = Some(n);
     }
 
     /// The literal a tuple object stands for: every position one known literal (nested

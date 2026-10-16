@@ -134,6 +134,7 @@ impl Analyzer {
                 None => self.copy_into(oid, Ns::Item, &val, state, true, &intern::KeySet::new()),
                 Some(k) => {
                     let kv = self.eval_key(k, state);
+                    self.check_hashable(&kv, state);
                     self.store_key(oid, Ns::Item, &kv.kv, &val, true, &nd, state);
                 }
             }
@@ -307,7 +308,7 @@ impl Analyzer {
         match node {
             ast::Expr::Tuple(t) => {
                 let parts: Vec<Value> = t.elts.iter().map(|e| self.eval(e, state)).collect();
-                if parts.iter().all(|p| p.kv.as_lit().is_some()) {
+                if parts.iter().all(|p| p.pts.is_empty() && p.kv.as_lit().is_some()) {
                     return Value::lit(intern::key_tuple(parts.iter().map(|p| p.kv.as_lit().unwrap()).collect()));
                 }
                 let nd = frontend::node(node);
@@ -366,6 +367,9 @@ impl Analyzer {
                 let v = self.eval(e, state);
                 if let Some(p) = size_parts.as_mut() {
                     p.push(Ok(v.clone()));
+                }
+                if kind == Kind::Set {
+                    self.check_hashable(&v, state);
                 }
                 vals.push(v);
             }

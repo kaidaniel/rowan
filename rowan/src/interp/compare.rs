@@ -135,7 +135,13 @@ impl Analyzer {
             // identity of objects: distinct abstract objects are distinct objects; one strong
             // object is itself
             ast::CmpOp::Is | ast::CmpOp::IsNot if !a.pts.is_empty() && a.kv.is_bot() => self.compare_identity(op, a, b),
-            ast::CmpOp::In | ast::CmpOp::NotIn => self.compare_in(op, a, b, right, &lits, state),
+            ast::CmpOp::In | ast::CmpOp::NotIn if self.mixed(b) => None,
+            ast::CmpOp::In | ast::CmpOp::NotIn => {
+                if b.pts.iter().any(|o| self.hashes_keys(o)) {
+                    self.check_hashable(a, state);
+                }
+                self.compare_in(op, a, b, right, &lits, state)
+            }
             ast::CmpOp::Eq | ast::CmpOp::NotEq => self.compare_eq(op, a, b, lits),
             ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE => {
                 // two single literals of one kind (numbers, or strings) are ordered here;

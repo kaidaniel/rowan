@@ -148,6 +148,7 @@ impl Analyzer {
             work.push(*f);
         }
         each(&self.m.fa_app_deps, o).flatten().for_each(|v| v.push_objs(work));
+        each(&self.m.argp, o).for_each(|a| crate::models::argparse::push_objs(a, work));
     }
 
     /// Objects the analyzer itself holds beyond the state: what side tables keyed by other
@@ -239,7 +240,6 @@ impl Analyzer {
             {
                 let so = self.heap.obj_mut(sid);
                 so.single = false;
-                so.literal_len = None;
                 so.iter_elem = iter_elem;
                 so.depth = depth;
                 if so.derived_from.is_none() {

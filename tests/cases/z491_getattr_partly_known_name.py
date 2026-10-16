@@ -1,6 +1,6 @@
 """getattr by a name known only in part (`f"run_{mode}"` with mode from the environment or
-"0"): the attribute of the known name, or one rowan does not follow, whose call is unknown
-code: `r` is not run_0's 0 only. (An f-string of such a name was exactly its literal's text,
+"0"): any attribute whose name fits `run_*`, each call runs the 30 methods (bound 400 -> 1000):
+`r` is not run_0's 0 only. (An f-string of such a name was exactly its literal's text,
 unsound; made fully unknown, every attribute read for it cost sktime 70 s -> past 4 minutes.)
 Expectations and the cost bound were written from the program text.
 """
@@ -141,4 +141,4 @@ j = Job()
 for _ in range(10):
     r = j.go()
 #@value r: unknown
-#@work <= 400
+#@work <= 1000

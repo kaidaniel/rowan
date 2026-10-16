@@ -219,6 +219,9 @@ impl Analyzer {
     pub(super) fn stmt_for(&mut self, f: &'static ast::StmtFor, state: &mut State) {
         let itv = self.eval(&f.iter, state);
         let iter_node = frontend::node(&*f.iter);
+        if self.for_user_iterator(f, &itv, &iter_node, state) {
+            return;
+        }
         self.force_gen(&itv, state, true);
         self.gens.for_iters.push(itv.pts.clone());
         let it = self.iterate(&itv, &iter_node, state);
@@ -312,6 +315,108 @@ impl Analyzer {
         }
         join_breaks(&mut exit_s, prefix_breaks);
         state.replace_with(exit_s);
+    }
+
+    /// An instance of a class of the program with `__iter__` and `__next__` whose `__iter__`
+    /// gives itself back: the iterator a `for` asks for each item in turn.
+    fn user_iterator(&mut self, itv: &Value, node: &frontend::Node, state: &mut State) -> Option<ObjId> {
+        let o = itv.single().filter(|o| itv.kv.is_bot() && self.heap.kind(*o) == Kind::Instance)?;
+        let c = self.heap.instance_class(o)?;
+        self.class_lookup(c, "__iter__")?;
+        self.class_lookup(c, "__next__")?;
+        let r = self.call_method_with(itv, "__iter__", Vec::new(), node, state)?;
+        // (`__iter__` gave something else: iterated as that, `__iter__` asked again)
+        (r.single() == Some(o) && r.kv.is_bot()).then_some(o)
+    }
+
+    /// `__next__` of iterator `it`: the item on the path where it returns, and the state where
+    /// it raised StopIteration (other raises leave the loop as raises).
+    fn next_step(&mut self, it: ObjId, node: &frontend::Node, state: &mut State) -> (Value, Option<State>) {
+        let mut pre = state.copy();
+        self.enter_try(rustc_hash::FxHashSet::from_iter(["StopIteration".to_string()]), &mut pre);
+        let v = match self.run_dunder(&Value::obj(it), &["__next__"], Vec::new(), node, state) {
+            Some((v, rest)) if rest.empty() => v,
+            Some((v, _)) => v.join(&Value::data("next")),
+            None => Value::data("next"),
+        };
+        let out = self.leave_try();
+        let mut stops: Option<State> = None;
+        for (cls, st, exc) in out.recs {
+            // (Some(true): StopIteration; Some(false): surely another class; None: may be either)
+            let stop = match cls.as_ref() {
+                Some((names, _)) if names.iter().any(|n| n == "StopIteration") => Some(true),
+                Some((_, true)) => Some(false),
+                _ => None,
+            };
+            if stop != Some(false) {
+                let mut s2 = st.copy();
+                s2.reachable = true;
+                join_into(&mut stops, s2);
+            }
+            if stop != Some(true) {
+                self.reraise_rec((cls, st, exc));
+            }
+        }
+        (v, stops)
+    }
+
+    /// `for x in it` over a user iterator (`user_iterator`): `__next__` runs before each
+    /// iteration, after the body before it changed what it reads. Unrolled while each call is
+    /// decided (an item, or StopIteration), then to a fixpoint; the loop ends where StopIteration
+    /// was raised.
+    fn for_user_iterator(&mut self, f: &'static ast::StmtFor, itv: &Value, node: &frontend::Node, state: &mut State) -> bool {
+        let Some(it) = self.user_iterator(itv, node, state) else { return false };
+        let mut stops: Option<State> = None;
+        let mut breaks: Option<State> = None;
+        let mut decided = true;
+        for idx in 0..=UNROLL_MAX {
+            if !state.reachable {
+                break;
+            }
+            let mut probe = state.copy();
+            let (v, stop) = self.next_step(it, node, &mut probe);
+            match (probe.reachable, stop) {
+                (true, None) if idx < UNROLL_MAX => {
+                    state.replace_with(probe);
+                    self.unrolled_iteration(idx, &f.body, state, &mut breaks, &mut |an, st| an.bind_iter_target(&f.target, &Elem::One(v.clone()), st));
+                }
+                (false, Some(s)) => {
+                    stops = Some(s);
+                    state.reachable = false;
+                }
+                (false, None) => state.replace_with(probe),
+                _ => {
+                    decided = false;
+                    break;
+                }
+            }
+        }
+        if !decided {
+            let (_, exit_acc, _) = self.loop_fixpoint(state, &mut |an, body_s| {
+                let (v, stop) = an.next_step(it, node, body_s);
+                if let Some(s) = stop {
+                    join_into(&mut stops, s);
+                }
+                if body_s.reachable {
+                    an.bind_iter_target(&f.target, &Elem::One(v), body_s);
+                    an.exec_block(&f.body, body_s);
+                }
+            });
+            if let Some(b) = exit_acc {
+                join_into(&mut breaks, b);
+            }
+        }
+        let mut exit_s = stops.unwrap_or_else(|| {
+            let mut s = state.copy();
+            s.reachable = false;
+            s
+        });
+        if !f.orelse.is_empty() && exit_s.reachable {
+            self.exec_block(&f.orelse, &mut exit_s);
+        }
+        join_breaks(&mut exit_s, breaks);
+        state.replace_with(exit_s);
+        true
     }
 
     /// The loop ran at least once exactly when its iterable was non-empty: a later test of
@@ -477,9 +582,10 @@ impl Analyzer {
         if !self.heap.obj(i).single || self.has_facts(i, state) {
             return None;
         }
-        let (ll, kp) = (self.heap.obj(o).literal_len, self.heap.obj(o).known_prefix);
+        if let Some(l) = state.lens.get(&o) {
+            state.set_lens(i, l);
+        }
         let io = self.heap.obj_mut(i);
-        (io.literal_len, io.known_prefix) = (ll, kp);
         io.derived_from = derived;
         io.depth = depth;
         self.heap.renew(i);

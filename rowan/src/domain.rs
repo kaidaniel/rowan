@@ -468,11 +468,15 @@ pub fn source_label(s: SourceId) -> String {
 
 /// Insertion orders of two joined rows: equal, or one a prefix of the other (the longer
 /// one; the extra keys are not definite then), else unknown.
-fn join_order(a: &Arc<[KeyId]>, b: &Arc<[KeyId]>) -> Arc<[KeyId]> {
-    if a == b || b.len() <= a.len() && a[..b.len()] == b[..] {
-        a.clone()
-    } else if b[..a.len().min(b.len())] == a[..] {
-        b.clone()
+/// The insertion order of two paths' rows: the longer when the other's is a prefix of it and
+/// the other has none of the keys it adds (else it holds them at another place: `b, a` on one
+/// path, `a` before `b` but not in its order on the other).
+fn join_order(a: &RowData, b: &RowData) -> Arc<[KeyId]> {
+    let extends = |x: &RowData, y: &RowData| y.order.len() <= x.order.len() && x.order[..y.order.len()] == y.order[..] && x.order[y.order.len()..].iter().all(|k| !y.present.contains(*k));
+    if a.order == b.order || extends(a, b) {
+        a.order.clone()
+    } else if extends(b, a) {
+        b.order.clone()
     } else {
         Arc::from(Vec::new())
     }
@@ -657,7 +661,7 @@ impl Row {
             sources,
             mutators: cap_mutators(self.mutators.union(&o.mutators)),
             top: self.top || o.top,
-            order: join_order(&self.order, &o.order),
+            order: join_order(self, o),
             stored: self.stored.union(&o.stored),
         }, &[self, o])
     }
@@ -848,14 +852,12 @@ impl Row {
     }
 
     pub fn narrow_in(&self, k: KeyId, strong: bool) -> Row {
-        // (the key was there: the program did not store it)
-        let was = self.stored.contains(k);
-        let r = self.store(k, strong);
-        if was {
-            return r;
+        // (the key was there: the program did not store it, nor last: the order stays)
+        let mut d = self.store(k, strong).data();
+        if !self.stored.contains(k) {
+            d.stored = d.stored.remove(k);
         }
-        let mut d = r.data();
-        d.stored = d.stored.remove(k);
+        d.order = self.order.clone();
         Row::from_data(d)
     }
 
@@ -1333,21 +1335,47 @@ pub fn kv_join(a: &KeyVal, b: &KeyVal) -> KeyVal {
             let t = crate::intern::str_get(*x);
             if crate::models::shape::parse_dim_label(&t).is_some() {
                 let lits = kv_literals(l);
+                // (a dim or None, or a str: no dim)
+                if !lits.iter().all(crate::intern::key_is_number) {
+                    return DATA;
+                }
                 let same = crate::models::shape::parse_dim_label(&t).and_then(crate::models::shape::as_lit).map(|n| lits.iter().all(|k| crate::intern::key_as_int(k) == Some(n))).unwrap_or(false);
                 return if same { d.clone() } else { KeyVal::data(&crate::models::shape::dim_label(crate::models::shape::unknown())) };
             }
-            if let Some(sid) = crate::models::shape::parse_tensor_label(&t) {
-                if kv_literals(l).iter().any(crate::intern::key_is_number) {
-                    let s = crate::models::shape::join_shapes(&crate::models::shape::shape_get(sid), &crate::models::shape::Shape::known(vec![]));
-                    return KeyVal::data(&crate::models::shape::tensor_label(crate::models::shape::shape_id(s)));
+            if let Some(sid) = crate::models::shape::parse_tensor_label(crate::models::shape::strip_optional(&t).unwrap_or(&t)) {
+                // a tensor or a number: rank 0 possible; a tensor or None: an optional tensor;
+                // or anything else: an unknown (the literal stays possible)
+                let lits = kv_literals(l);
+                let none = crate::intern::key_none();
+                let (nums, rest): (Vec<KeyId>, Vec<KeyId>) = lits.iter().filter(|k| *k != none).partition(|k| crate::intern::key_is_number(*k));
+                if !rest.is_empty() {
+                    return DATA;
                 }
+                let mut out = t.to_string();
+                if !nums.is_empty() {
+                    let s = crate::models::shape::join_shapes(&crate::models::shape::shape_get(sid), &crate::models::shape::Shape::known(vec![]));
+                    out = crate::models::shape::tensor_label(crate::models::shape::shape_id(s));
+                    if crate::models::shape::strip_optional(&t).is_some() {
+                        out = crate::models::shape::optional_label(&out);
+                    }
+                }
+                if lits.contains(none) {
+                    out = crate::models::shape::optional_label(&out);
+                }
+                return KeyVal::data(&out);
             }
         }
     }
     // an unknown joined with literals: the unknown, of its type if they are of it too
     for (d, l) in [(a, b), (b, a)] {
         if let KeyVal::Data(x) = d {
-            let fits = label_type(&crate::intern::str_get(*x)).is_some_and(|t| kv_literals(l).iter().all(|k| key_type(k, t)));
+            let t = crate::intern::str_get(*x);
+            // (a label that says what the text is — a JSON or pickle text of known parts, a CSV
+            // text of known header — is no longer that)
+            if ["pyjsontext:", "pickletext:", "csvhdr:"].iter().any(|p| t.starts_with(p)) {
+                return DATA;
+            }
+            let fits = label_type(&t).is_some_and(|t| kv_literals(l).iter().all(|k| key_type(k, t)));
             return if fits || !l.is_literal() { d.clone() } else { untyped(*x) };
         }
     }
@@ -1397,6 +1425,11 @@ pub fn kv_exclude(kv: &KeyVal, keys: &KeySet) -> Option<KeyVal> {
             let mut ko2 = ko.clone();
             ko2.exclude = ko.exclude.union(keys);
             Some(KeyVal::KeysOf(ko2))
+        }
+        // a tensor or None, not None: the tensor
+        KeyVal::Data(l) if keys.contains(crate::intern::key_none()) => {
+            let t = crate::intern::str_get(*l);
+            Some(crate::models::shape::strip_optional(&t).map(KeyVal::data).unwrap_or_else(|| kv.clone()))
         }
         _ => Some(kv.clone()),
     }

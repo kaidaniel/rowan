@@ -63,8 +63,9 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     Library functions known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`) unless they change their
     arguments (`random.shuffle`) or get the program's functions; several callees: `alternatives` (unknown values: one
     unknown call; a method on several receivers: one call per function when it would not run, or on demand).
-  * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model
-    is unknown code. A TypeError may come from those taken to fail only on wrong types.
+  * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model is unknown code. A TypeError
+    may come from those taken to fail only on wrong types, and from hashing a list, dict or set (`check_hashable`). Models,
+    operators and subscripts on literals beside objects (`"a" if c else [1]`) run on each part (`split_mixed`).
   * **Entry points, general runs:** functions the main run does not call (also those only entry
     runs call) run with open parameters (`param F.x` schemas), from the module's end; a called
     function gets a requirement-only run so too. A *general run* (`Entries::general`: hover values
@@ -76,17 +77,17 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`; at a position
   not known, some yield's). If code between items (where the consumer asks for one:
   `note_resume`; unknown code, deletes too) changes what the generator reads after a yield
-  (`Gens::watch`, also after the call that started it while held), it runs again with that
-  changed at each yield (`with_gen_restart`). `@contextmanager` bodies run at yields.
+  (`Gens::watch`, also after the call that started it while held, or a global holds it), it runs again
+  with that changed at each yield (`with_gen_restart`). `@contextmanager` bodies run at yields. A `for`
+  over a user iterator (`__iter__` returns self) calls `__next__` before each iteration (`for_user_iterator`).
 * **Requirements and schemas:** reading a key from a row open through an input records a
   requirement on that input: `always` (every path), `sometimes`; `only_if`: tests of the
   function's parameters as passed that all its readers passed (`State::path`, `guards.rs`). A
   read guarded by a `KeyError` handler counts (a frame column read in a `try` is a probe: not).
   A general run's on its own parameters are a hover's contract (`Findings::contracts`); a parameter's fact at its `def` keeps what each call passed (`Fact::passed`, checked by its run's verdicts).
-* **Verdicts:** every read, `del` and `pop` gets a tier per object from its row (`classify`):
-  `proven`, `possibly`, `missing`, `input` are sound; `likely` / `likely-missing` optimistic
-  (unknown code removed nothing). In one of several functions a value picks
-  (`CONVERTERS[k](x)`, `k` unknown: `cx.picked`) a `missing` is `possibly`.
+* **Verdicts:** every read, `del` and `pop` gets a tier per object from its row (`classify`): `proven`, `possibly`,
+  `missing`, `input` are sound; `likely` / `likely-missing` optimistic (unknown code removed nothing). In one of
+  several functions a value picks (`CONVERTERS[k](x)`, `k` unknown: `cx.picked`) a `missing` is `possibly`.
 * **Models** (`models/`, by qualified name in `Registry`; free functions of `&mut Analyzer` that
   see the `Heap`, their `models::Tables` and the interpreter's public methods) compute
   CPython's result on known values (str / bytes, formatting, json, re, datetime, decimal,
@@ -101,8 +102,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   answers unless the former completes within `EARLY` (1 s), whose document then follows as an event.
 * **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
   a general run's `x: int` is an int, not a subclass overriding int's operators). `exec`, `setattr` /
-  `getattr` with unknown names (also in skipped code; a class attribute set there through data or a
-  call's result, `f().x = 1`), metaclasses and monkey-patching (rebinding a function or class too;
+  `getattr` with unknown names (known in part, an f-string's: the attributes whose names fit,
+  `Payload::Affix`), metaclasses and monkey-patching (rebinding a function or class too;
   a module's function the program calls only by name has no other callers) are unknown or ignored. List lengths are tracked up to 15 (a few per path: each one's positions;
   `xs[:n]` keeps xs's). An object a path has no facts of reads as unknown (`read_row`).
 
@@ -179,8 +180,7 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
 
 * **Models allocating several objects at one node** must give each its own context.
 * **Callees** run with the caller's `state.exits` taken out and restored (y438).
-* **GC roots.** A side table keyed by objects goes into `side_edges`; anything else the
-  analyzer holds (a running with's managers) into `gc_pinned`: else a read gets an empty row.
+* **GC roots.** A side table keyed by objects goes into `side_edges`; anything else the analyzer holds (a running with's managers) into `gc_pinned`: else a read gets an empty row (and a list no length).
 * **Generator yields** use `alloc_raw` for per-yield states. **Stdlib objects** (`stdobj.<kind>`): Attr slots, `m_stdobj`.
 * **Attributes resolved by class** (`class_resolves`): class, model and `__getattr__` objects have more than their rows show.
 

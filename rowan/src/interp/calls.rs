@@ -391,6 +391,20 @@ impl Analyzer {
     /// A model call: objects it allocates at one site stay distinct from each other (one
     /// weak object) even while only the model's own code holds them.
     pub(in crate::interp) fn run_model(&mut self, m: crate::models::Model, state: &mut State, call: &Call) -> Value {
+        // (an argument or receiver of literals beside objects: each part on its own)
+        let recv = call.recv.clone().unwrap_or_default();
+        let mut vs: Vec<&Value> = vec![&recv];
+        vs.extend(call.args.iter());
+        if let Some(r) = self.split_mixed(&vs, state, &mut |an, vs, st| {
+            let mut c = call.clone();
+            if c.recv.is_some() {
+                c.recv = Some(vs[0].clone());
+            }
+            c.args = vs[1..].to_vec();
+            an.run_model(m, st, &c)
+        }) {
+            return r;
+        }
         if self.cx.model_depth == 0 {
             self.cx.model_epoch += 1;
         }

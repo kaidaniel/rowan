@@ -203,7 +203,16 @@ impl Analyzer {
         if obj.pts.is_empty() {
             return crate::models::scalar_attr(self, obj, name, report, state);
         }
-        acc
+        acc.join(&self.mixed_literals_attr(obj, name, state))
+    }
+
+    /// The attribute of the literals beside a value's objects (`ops::mixed`), else nothing.
+    fn mixed_literals_attr(&mut self, obj: &Value, name: &str, state: &mut State) -> Value {
+        if !self.mixed(obj) {
+            return Value::new();
+        }
+        let lits = Value::kv_only(crate::domain::kv_exclude(&obj.kv, &crate::intern::KeySet::one(crate::intern::key_none())).unwrap_or(crate::domain::BOT));
+        crate::models::scalar_attr(self, &lits, name, false, state)
     }
 
     /// A deque's `maxlen` and methods.

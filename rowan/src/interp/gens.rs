@@ -185,6 +185,8 @@ pub struct Gens {
     /// at the yield, the env stack's length then), so a try in the generator around the
     /// yield sees its own names when the body raises
     pub cm_frames: Vec<(usize, IndexMap<StrId, Value>, usize)>,
+    /// generators stored into a module's global (watched after the call that started them)
+    pub global_held: FxHashSet<ObjId>,
 }
 
 impl Gens {
@@ -312,12 +314,7 @@ impl Analyzer {
         // joined. A fact a state does not change equals the previous state's, joined already
         // (a generator can hold thousands of yield states, and joining every touched fact with
         // each was facts × yields).
-        let entry = |an: &Analyzer, s: &State, o: ObjId| -> (Option<usize>, usize, u16) {
-            s.lens.get(&o).unwrap_or_else(|| {
-                let ob = an.heap.obj(o);
-                (ob.literal_len, ob.literal_len.or(ob.known_prefix).unwrap_or(0), 0)
-            })
-        };
+        let entry = |_: &Analyzer, s: &State, o: ObjId| -> (Option<usize>, usize, u16) { s.lens.get(&o).unwrap_or((None, 0, 0)) };
         // (with the distinct rows already joined: most yield states share their rows)
         let mut rows: rustc_hash::FxHashMap<(ObjId, Ns), (crate::domain::Row, rustc_hash::FxHashSet<crate::domain::Row>)> = rustc_hash::FxHashMap::default();
         for (o, ns) in fp.rows.iter().copied().filter(|(o, _)| old(*o)) {
@@ -484,7 +481,10 @@ impl Analyzer {
             FxHashSet::default()
         } else {
             let roots: Vec<Value> = state.ret.iter().chain(pre.env.values()).cloned().collect();
-            self.reach_among(&roots, &gids, at)
+            let mut kept = self.reach_among(&roots, &gids, at);
+            // (a generator a global holds is resumed by later calls)
+            kept.extend(gids.iter().filter(|g| self.gens.global_held.contains(g)));
+            kept
         };
         let tail = self.gens.watch.split_off(wmark.min(self.gens.watch.len()));
         self.gens.watch.extend(tail.into_iter().filter(|w| kept.contains(&w.gid)));
@@ -1022,9 +1022,6 @@ impl Analyzer {
                 // the endless loop is known to give first)
                 while ys.has_slot(gid, Ns::Pos, intern::key_int(p as i64)) {
                     p += 1;
-                }
-                if p > 0 {
-                    self.heap.obj_mut(gid).known_prefix = Some(p);
                 }
                 ys.set_lens(gid, (None, p, 0));
                 *st = ys;

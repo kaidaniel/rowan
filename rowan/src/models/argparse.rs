@@ -93,6 +93,23 @@ pub enum ArgObj {
     Group(ObjId),
 }
 
+/// The objects a parser's table entry holds (defaults, constants, choices, subparsers, groups'
+/// parsers): GC edges of the parser.
+pub fn push_objs(a: &ArgObj, work: &mut Vec<ObjId>) {
+    match a {
+        ArgObj::Parser(p) => {
+            for s in &p.args {
+                s.default.push_objs(work);
+                s.konst.push_objs(work);
+                s.choices.iter().flatten().for_each(|v| v.push_objs(work));
+            }
+            p.defaults.iter().for_each(|(_, v)| v.push_objs(work));
+            work.extend(p.sub.iter().flat_map(|s| s.parsers.iter().map(|(_, c)| *c)));
+        }
+        ArgObj::Subs(o) | ArgObj::Group(o) => work.push(*o),
+    }
+}
+
 fn lit_str(v: &Value) -> Option<String> {
     v.kv.as_lit().filter(|_| v.pts.is_empty()).and_then(intern::key_as_str).map(|s| s.to_string())
 }
@@ -745,8 +762,26 @@ fn parse_into(an: &mut Analyzer, st: &mut State, c: &Call, spec: &ParserSpec, to
         ns.insert(d, Value::lit(intern::key_int(n)));
     }
     for (d, vs) in appends {
-        // (appending to a list default copies it first)
-        let lv = list_value(an, st, c, vs, &format!("apl{}", d));
+        // (appending to a list default copies it first: its items come first)
+        let default = opts.iter().find(|a| a.dest == d && a.has_default).map(|a| a.default.clone()).filter(|v| !(v.pts.is_empty() && v.kv == an.none_v.kv));
+        let (mut items, mut known) = (Vec::new(), true);
+        if let Some(dv) = default {
+            let it = an.iterate(&dv, &c.node, st);
+            match it.items {
+                Some(xs) => items = xs,
+                None => {
+                    known = false;
+                    items.push(it.elem.flat());
+                }
+            }
+        }
+        items.extend(vs);
+        let lv = list_value(an, st, c, items, &format!("apl{}", d));
+        if !known {
+            let l = lv.single().unwrap();
+            st.drop_obj_ns(l, Ns::Pos);
+            an.heap.set_llen(l, st, None);
+        }
         ns.insert(d, lv);
     }
     // required options

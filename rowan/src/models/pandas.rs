@@ -660,10 +660,10 @@ fn series_method(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     // (strings stay the same strings)
                     if astype_dtype(an, &c.arg(0, Some("dtype"))) == Some("object") {
                         if let [one] = ss.as_slice() {
-                            let nan = |k: KeyId| k == none_key() || k == intern::key_float(f64::NAN);
+                            let nan = |k: KeyId| k == none_key() || k == nan_key();
                             if let Some(v) = vals(st, *one, vkey()).filter(|v| v.may.iter().all(|k| intern::key_is_str(k) || nan(k))) {
-                                // (NaN becomes "nan")
-                                let fix = |ks: &KeySet| KeySet::from_iter(ks.iter().map(|k| if nan(k) { mk("nan") } else { k }));
+                                // (a missing value stays missing: NaN, which get_dummies / groupby drop)
+                                let fix = |ks: &KeySet| KeySet::from_iter(ks.iter().map(|k| if nan(k) { nan_key() } else { k }));
                                 set_vals(st, sid, vkey(), Some(&Known { may: fix(&v.may), sure: fix(&v.sure) }));
                             }
                         }
@@ -1726,7 +1726,6 @@ fn frame_meta_from_data(an: &mut Analyzer, st: &mut State, c: &Call, nid: u32, d
     let index_kw = c.kw("index").and_then(|v| lit_key_seq(an, st, &v));
     let mut n: Option<i64> = index_kw.as_ref().map(|i| i.len() as i64);
     let mut labs: Option<Known> = index_kw.as_ref().map(|i| Known::exact(KeySet::from_iter(i.iter().copied())));
-    let none = an.none_v.kv.as_lit();
     let mut colvals: Vec<(KeyId, Option<Known>)> = Vec::new();
     match an.heap.kind(d) {
         Kind::Dict if index_orient => {
@@ -1783,7 +1782,8 @@ fn frame_meta_from_data(an: &mut Analyzer, st: &mut State, c: &Call, nid: u32, d
                                 if rr.definite.contains(k) {
                                     cell_lit(&st.slot(o, Ns::Item, k))
                                 } else if !rr.present.contains(k) && rr.closed() {
-                                    none
+                                    // (a record without the key: NaN)
+                                    Some(nan_key())
                                 } else {
                                     None
                                 }
@@ -1816,9 +1816,28 @@ fn frame_meta_from_data(an: &mut Analyzer, st: &mut State, c: &Call, nid: u32, d
     set_labels(st, nid, labs.as_ref());
     for (k, v) in colvals {
         if cols.present.contains(k) {
-            set_vals(st, nid, k, v.as_ref());
+            set_vals(st, nid, k, v.map(missing_as_nan).as_ref());
         }
     }
+}
+
+/// A column's values as pandas stores them: in a column of numbers or of strs, None is NaN
+/// (and ints with a missing value are floats); a column of other values keeps None.
+fn missing_as_nan(k: Known) -> Known {
+    let (none, nan) = (none_key(), nan_key());
+    let rest: Vec<KeyId> = k.may.iter().filter(|x| *x != none && *x != nan).collect();
+    if rest.is_empty() || !(k.may.contains(none) || k.may.contains(nan)) {
+        return k;
+    }
+    let num = |x: &KeyId| intern::with_key(*x, |kk| matches!(kk, intern::Key::Int(_) | intern::Key::Float(_)));
+    let fix: Box<dyn Fn(KeyId) -> KeyId> = if rest.iter().all(num) {
+        Box::new(move |x: KeyId| if x == none { nan } else { intern::key_as_int(x).map(|i| intern::key_float(i as f64)).unwrap_or(x) })
+    } else if rest.iter().all(|x| intern::key_is_str(*x)) {
+        Box::new(move |x: KeyId| if x == none { nan } else { x })
+    } else {
+        return k;
+    };
+    Known { may: KeySet::from_iter(k.may.iter().map(&fix)), sure: KeySet::from_iter(k.sure.iter().map(&fix)) }
 }
 
 fn open_frame_call(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {

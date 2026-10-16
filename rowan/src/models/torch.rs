@@ -3215,7 +3215,8 @@ pub fn t_forward_hooks(an: &mut Analyzer, o: ObjId, args: &[Value], out: Value, 
     let j = st.join(&mut not_run);
     st.replace_with(j);
     let none = an.none_v.clone();
-    let other = Value::with_kv(r.pts.iter().filter(|x| !none.pts.contains(*x)).collect(), if r.kv == none.kv { crate::domain::BOT } else { r.kv.clone() });
+    let kv = crate::domain::kv_exclude(&r.kv, &crate::intern::KeySet::one(crate::intern::key_none())).unwrap_or(crate::domain::BOT);
+    let other = Value::with_kv(r.pts.iter().filter(|x| !none.pts.contains(*x)).collect(), kv);
     if other.empty() {
         out
     } else {
@@ -4879,6 +4880,9 @@ pub fn t_render(an: &Analyzer, v: &Value, st: &State) -> Option<String> {
         return Some(tensor_text(&s));
     }
     let l = label(v)?;
+    if let Some(t) = sh::strip_optional(&l) {
+        return Some(format!("{} | None", t_render(an, &Value::data(t), st)?));
+    }
     if let Some(sid) = sh::parse_tensor_label(&l) {
         let s = sh::canon(sh::norm_shape(&sh::shape_get(sid), &st.tf));
         if let Some(d) = sh::dual_dim(&l) {

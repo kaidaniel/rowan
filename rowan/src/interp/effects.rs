@@ -645,6 +645,14 @@ impl Analyzer {
         }
         reads.extend(uses.reads.iter().copied());
         class_stores.extend(uses.class_stores.iter().copied());
+        for (n, a) in &uses.class_stores_in {
+            if let Ok(loc) = self.resolve_use(fi, &uses, *n) {
+                let k = key_str_lit(&str_get(*a));
+                let mut cs = Vec::new();
+                self.classes_within(&state.slot(loc.0, loc.1, loc.2), state, 2, &mut cs);
+                out.rebound.extend(cs.into_iter().map(|c| (c, Ns::Attr, k)));
+            }
+        }
         // (a default is the function's own state: it changes where its parameter does)
         for (p, v) in fi.defaults.iter() {
             code(self, v, work);
@@ -713,6 +721,21 @@ impl Analyzer {
             }
             self.apply_flags(&f, loc, state, out);
             code(self, &state.slot(loc.0, loc.1, loc.2), work);
+        }
+    }
+
+    /// The classes a value is or its containers hold (`depth` levels of items).
+    fn classes_within(&self, v: &Value, state: &State, depth: usize, out: &mut Vec<ObjId>) {
+        for o in v.pts.iter() {
+            match self.heap.kind(o) {
+                Kind::Class => out.push(o),
+                Kind::Dict | Kind::List | Kind::Tuple | Kind::Set if depth > 0 => {
+                    for ns in [Ns::Item, Ns::Pos, Ns::Elem] {
+                        self.classes_within(&state.all_slots(o, ns), state, depth - 1, out);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 

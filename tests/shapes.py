@@ -519,6 +519,7 @@ class ShapeExpectations:
             for r in rs:
                 got = r.get("dim")
                 g = "?" if got is None else norm_dim(got, {})
+                g = "?" if g == Q else g
                 if want != "_" and g != want:
                     fails.append(f"L{line} dim {name}: {got if got is not None else 'unknown'}, want {want}")
                     break

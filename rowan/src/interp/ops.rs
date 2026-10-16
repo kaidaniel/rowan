@@ -20,6 +20,36 @@ enum Part {
 }
 
 impl Analyzer {
+    /// Literals other than None beside objects (`"dev" if c else ["p", "q"]`): a value whose
+    /// parts Python treats as different types. (Beside an unknown object, which may be the
+    /// literals too, no: what is done with it covers them.)
+    pub(in crate::interp) fn mixed(&self, v: &Value) -> bool {
+        !v.pts.is_empty() && v.kv.is_literal() && crate::domain::kv_literals(&v.kv).iter().any(|k| k != intern::key_none()) && v.pts.iter().all(|o| self.heap.kind(o) != Kind::Unknown)
+    }
+
+    /// An operation on values of which one is `mixed`: on its objects and on its literals, each
+    /// on a copy of the state; the results and the states joined. None: no such value.
+    pub(in crate::interp) fn split_mixed(&mut self, vs: &[&Value], state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &[Value], &mut State) -> Value) -> Option<Value> {
+        let i = vs.iter().position(|v| self.mixed(v))?;
+        let mut out = Value::new();
+        let mut acc: Option<State> = None;
+        for part in [Value::objs(vs[i].pts.clone()), Value::kv_only(vs[i].kv.clone())] {
+            let mut st = state.copy();
+            let mut args: Vec<Value> = vs.iter().map(|v| (*v).clone()).collect();
+            args[i] = part;
+            let r = f(self, &args, &mut st);
+            if st.reachable {
+                out = out.join(&r);
+            }
+            acc = Some(match acc {
+                None => st,
+                Some(mut a) => a.join(&mut st),
+            });
+        }
+        state.replace_with(acc.unwrap());
+        Some(out)
+    }
+
     /// `a op b` (`binop`).
     pub(super) fn expr_binop(&mut self, b: &'static ast::ExprBinOp, node: &'static ast::Expr, state: &mut State) -> Value {
         let a = self.eval(&b.left, state);
@@ -150,6 +180,9 @@ impl Analyzer {
     }
 
     pub fn binop(&mut self, op: ast::Operator, a: &Value, b: &Value, node: &Node, state: &mut State) -> Value {
+        if let Some(r) = self.split_mixed(&[a, b], state, &mut |an, vs, st| an.binop(op, &vs[0], &vs[1], node, st)) {
+            return r;
+        }
         let r = self.binop_untyped(op, a, b, node, state);
         let ty = binop_type(op, self.value_type(a), self.value_type(b));
         self.as_type(r, ty, true)
@@ -582,6 +615,7 @@ impl Analyzer {
                     let nd = frontend::node(node);
                     let site = format!("fstring@L{}", nd.line);
                     let o = self.unknown_source(&site, crate::domain::SourceKind::Data, state, &site, "", Ns::Item, vec![]);
+                    self.heap.obj_mut(o).payload = Payload::Affix(pre, post);
                     return Value::with_kv(ObjSet::one(o), kv);
                 }
                 return Value::kv_only(kv);

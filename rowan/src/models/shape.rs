@@ -327,7 +327,15 @@ pub fn is_vague(d: DimId) -> bool {
     has_unknown(d) || poly(d).iter().any(|(m, _)| m.iter().any(|(a, _)| matches!(atom_get(*a), Atom::Join(_))))
 }
 
-fn norm_poly(mut terms: Vec<(Mono, i64)>) -> Poly {
+/// A polynomial's dim, or unknown when a coefficient left i64 (Python's ints do not wrap).
+fn poly_dim(terms: Vec<(Mono, Option<i64>)>) -> DimId {
+    match terms.into_iter().map(|(m, c)| c.map(|c| (m, c))).collect::<Option<Vec<_>>>().and_then(norm_poly) {
+        Some(p) => poly_id(p),
+        None => unknown(),
+    }
+}
+
+fn norm_poly(mut terms: Vec<(Mono, i64)>) -> Option<Poly> {
     for t in terms.iter_mut() {
         t.0.sort();
         // merge equal atoms in a monomial
@@ -348,29 +356,27 @@ fn norm_poly(mut terms: Vec<(Mono, i64)>) -> Poly {
     for (m, c) in terms {
         if let Some(last) = out.last_mut() {
             if last.0 == m {
-                last.1 += c;
+                last.1 = last.1.checked_add(c)?;
                 continue;
             }
         }
         out.push((m, c));
     }
     out.retain(|(_, c)| *c != 0);
-    out
+    Some(out)
 }
 
 pub fn add(a: DimId, b: DimId) -> DimId {
     if has_unknown(a) || has_unknown(b) {
         return unknown();
     }
-    let mut t = poly(a);
-    t.extend(poly(b));
-    poly_id(norm_poly(t))
+    poly_dim(poly(a).into_iter().chain(poly(b)).map(|(m, c)| (m, Some(c))).collect())
 }
 pub fn scale(a: DimId, k: i64) -> DimId {
     if has_unknown(a) {
         return if k == 0 { lit(0) } else { unknown() };
     }
-    poly_id(norm_poly(poly(a).into_iter().map(|(m, c)| (m, c * k)).collect()))
+    poly_dim(poly(a).into_iter().map(|(m, c)| (m, c.checked_mul(k))).collect())
 }
 pub fn sub(a: DimId, b: DimId) -> DimId {
     add(a, scale(b, -1))
@@ -386,10 +392,10 @@ pub fn mul(a: DimId, b: DimId) -> DimId {
         for (m2, c2) in &pb {
             let mut m = m1.clone();
             m.extend(m2.iter().copied());
-            t.push((m, c1 * c2));
+            t.push((m, c1.checked_mul(*c2)));
         }
     }
-    poly_id(norm_poly(t))
+    poly_dim(t)
 }
 pub fn product(ds: &[DimId]) -> DimId {
     ds.iter().fold(lit(1), |acc, d| mul(acc, *d))
@@ -410,7 +416,7 @@ pub fn div_exact(a: DimId, b: DimId) -> Option<DimId> {
         // (k*p) / p
         if !pa.is_empty() && pa.len() == pb.len() {
             let k0 = pa[0].1 / pb[0].1;
-            if k0 != 0 && pa.iter().zip(pb.iter()).all(|((m1, c1), (m2, c2))| m1 == m2 && *c1 == k0 * *c2) {
+            if k0 != 0 && pa.iter().zip(pb.iter()).all(|((m1, c1), (m2, c2))| m1 == m2 && Some(*c1) == k0.checked_mul(*c2)) {
                 return Some(lit(k0));
             }
         }
@@ -419,7 +425,7 @@ pub fn div_exact(a: DimId, b: DimId) -> Option<DimId> {
     let (bm, bc) = &pb[0];
     let mut out = Vec::new();
     for (m, c) in &pa {
-        if *bc == 0 || c % bc != 0 {
+        if c.checked_rem(*bc) != Some(0) {
             return None;
         }
         let mut mm: Mono = m.clone();
@@ -435,13 +441,13 @@ pub fn div_exact(a: DimId, b: DimId) -> Option<DimId> {
         }
         out.push((mm, c / bc));
     }
-    Some(poly_id(norm_poly(out)))
+    Some(poly_id(norm_poly(out)?))
 }
 
 pub fn floordiv(a: DimId, b: DimId) -> DimId {
     if let (Some(x), Some(y)) = (as_lit(a), as_lit(b)) {
-        if y != 0 {
-            return lit(x.div_euclid(y) - if x.rem_euclid(y) != 0 && y < 0 { 1 } else { 0 });
+        if let (Some(q), Some(r)) = (x.checked_div_euclid(y), x.checked_rem_euclid(y)) {
+            return lit(q - if r != 0 && y < 0 { 1 } else { 0 });
         }
     }
     if as_lit(b) == Some(1) {
@@ -472,7 +478,7 @@ pub fn floordiv(a: DimId, b: DimId) -> DimId {
                     _ => rest.push((m, c)),
                 }
             }
-            let rest = poly_id(norm_poly(rest));
+            let rest = poly_dim(rest.into_iter().map(|(m, c)| (m, Some(c))).collect());
             if as_lit(rest) == Some(0) {
                 return out;
             }
@@ -481,7 +487,9 @@ pub fn floordiv(a: DimId, b: DimId) -> DimId {
                     if rm.len() == 1 && rm[0].1 == 1 {
                         if let Atom::FloorDiv(y, k1) = atom_get(rm[0].0) {
                             if let Some(k) = as_lit(k1) {
-                                return add(out, floordiv(y, lit(k * bc)));
+                                if let Some(kb) = k.checked_mul(*bc) {
+                                    return add(out, floordiv(y, lit(kb)));
+                                }
                             }
                         }
                     }
@@ -496,8 +504,9 @@ pub fn floordiv(a: DimId, b: DimId) -> DimId {
 }
 pub fn modulo(a: DimId, b: DimId) -> DimId {
     if let (Some(x), Some(y)) = (as_lit(a), as_lit(b)) {
-        if y != 0 {
-            return lit(x.rem_euclid(y));
+        if let Some(r) = x.checked_rem_euclid(y) {
+            // Python's `%` takes the divisor's sign
+            return lit(if r != 0 && y < 0 { r + y } else { r });
         }
     }
     if div_exact(a, b).is_some() {
@@ -797,7 +806,7 @@ pub fn learn_eq(f: &mut TFacts, a: DimId, b: DimId) {
     if let Some((_, at, c)) = best {
         // c*at + rest == 0  →  at = -rest / c
         let rest: Vec<(Mono, i64)> = diff.iter().filter(|(m, _)| !(m.len() == 1 && m[0].0 == at && m[0].1 == 1)).cloned().collect();
-        let rest = poly_id(norm_poly(rest));
+        let rest = poly_dim(rest.into_iter().map(|(m, c)| (m, Some(c))).collect());
         let val = scale(rest, -c);
         if !mentions(val, at) {
             f.subst.insert(at, val);
@@ -1578,6 +1587,15 @@ pub fn tensor_label(s: ShapeId) -> String {
 pub fn dim_label(d: DimId) -> String {
     format!("{}{}", DIM_PREFIX, d.0)
 }
+/// A tensor or None (`None if c else torch.zeros(3)`): `OPT_PREFIX` and the tensor's label. It
+/// is no tensor label (a tensor operation on it is an unknown's); `is not None` gives the tensor.
+pub const OPT_PREFIX: &str = "\u{1}N";
+pub fn optional_label(l: &str) -> String {
+    if l.starts_with(OPT_PREFIX) { l.to_string() } else { format!("{}{}", OPT_PREFIX, l) }
+}
+pub fn strip_optional(l: &str) -> Option<&str> {
+    l.strip_prefix(OPT_PREFIX)
+}
 pub fn parse_tensor_label(l: &str) -> Option<ShapeId> {
     let r = l.strip_prefix(TENSOR_PREFIX)?;
     let r = r.strip_prefix('B').unwrap_or(r);
@@ -1614,6 +1632,12 @@ pub fn dual_dim(l: &str) -> Option<DimId> {
 
 /// Join of two labelled data values (tensors, dims); None: not both ours.
 pub fn join_labels(a: &str, b: &str) -> Option<String> {
+    // (a tensor or None joined with a tensor, or with another: a tensor or None)
+    if let (Some(x), Some(y)) = (strip_optional(a).or(parse_tensor_label(a).map(|_| a)), strip_optional(b).or(parse_tensor_label(b).map(|_| b))) {
+        if (x != a || y != b) && parse_tensor_label(x).is_some() && parse_tensor_label(y).is_some() {
+            return join_labels(x, y).map(|j| optional_label(&j));
+        }
+    }
     if let (Some(x), Some(y)) = (parse_tensor_label(a), parse_tensor_label(b)) {
         let s = shape_id(join_shapes(&shape_get(x), &shape_get(y)));
         let both_bool = is_bool_label(a) && is_bool_label(b);
