@@ -3,7 +3,7 @@
 
 use std::cmp::Ordering;
 
-use crate::domain::{join_values, Ns, ObjId, Value};
+use crate::domain::{Ns, ObjId, Value};
 use crate::intern::{self, KeyId};
 use crate::interp::{Analyzer, Call};
 use crate::state::{Kind, State};
@@ -65,23 +65,13 @@ fn list_items(an: &Analyzer, st: &State, o: ObjId) -> Option<Vec<Value>> {
 
 /// The list's items set to `vals` (positions known).
 fn set_items(an: &mut Analyzer, st: &mut State, o: ObjId, vals: Vec<Value>) {
-    st.drop_obj_ns(o, Ns::Pos);
-    for (i, v) in vals.iter().enumerate() {
-        st.set_slot(o, Ns::Pos, intern::key_int(i as i64), v.clone(), true);
-    }
-    let acc = join_values(vals.clone());
-    st.set_slot(o, Ns::Elem, intern::STAR, Value::with_kv(acc.pts.clone(), crate::models::torch::elem_kv(&acc.kv)), false);
-    let cur = st.elems.get(&o).unwrap_or_else(|| acc.kv.clone());
-    st.elems.insert(o, crate::domain::kv_join(&cur, &acc.kv));
-    an.heap.set_llen(o, st, Some(vals.len()));
+    an.set_positions(o, vals, st);
 }
 
 /// The list's positions are no longer known; `x` may be among its items.
 fn blur(an: &mut Analyzer, st: &mut State, o: ObjId, x: Option<&Value>) {
     if let Some(x) = x {
-        st.set_slot(o, Ns::Elem, intern::STAR, Value::with_kv(x.pts.clone(), crate::models::torch::elem_kv(&x.kv)), false);
-        let cur = st.elems.get(&o).unwrap_or_else(|| x.kv.clone());
-        st.elems.insert(o, crate::domain::kv_join(&cur, &x.kv));
+        an.add_elem(o, x, st);
     }
     an.heap.set_llen(o, st, None);
     st.drop_obj_ns(o, Ns::Pos);

@@ -601,24 +601,15 @@ impl Analyzer {
                 vals.extend(items.iter().cloned());
                 vals.extend((b..n).map(|i| state.slot(oid, Ns::Pos, intern::key_int(i as i64))));
                 if vals.len() < 16 {
-                    state.drop_obj_ns(oid, Ns::Pos);
-                    for (i, x) in vals.iter().enumerate() {
-                        state.set_slot(oid, Ns::Pos, intern::key_int(i as i64), x.clone(), true);
-                        state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(x.pts.clone(), crate::models::torch::elem_kv(&x.kv)), false);
-                    }
-                    self.heap.set_llen(oid, state, Some(vals.len()));
-                    return;
+                    return self.set_positions(oid, vals, state);
                 }
             }
             let e = self.elem_value(&it.elem, node, "el");
-            state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(e.pts.clone(), crate::models::torch::elem_kv(&e.kv)), false);
-            let kv = crate::domain::kv_join(&state.elems.get(&oid).unwrap_or(KeyVal::Bot), &e.kv);
-            state.elems.insert(oid, kv);
+            self.add_elem(oid, &e, state);
             state.drop_obj_ns(oid, Ns::Pos);
             self.heap.set_llen(oid, state, None);
             return;
         }
-        state.set_slot(oid, Ns::Elem, STAR, Value::with_kv(v.pts.clone(), crate::models::torch::elem_kv(&v.kv)), false);
         let idx = key.kv.as_lit().filter(|_| key.pts.is_empty()).and_then(intern::key_as_int);
         let at: Vec<i64> = match (idx, self.heap.len_alts(oid, state)) {
             (Some(i), Some(alts)) => alts.iter().map(|n| if i < 0 { *n as i64 + i } else { i }).zip(alts.iter()).filter(|(p, n)| 0 <= *p && *p < **n as i64).map(|(p, _)| p).collect(),
@@ -627,6 +618,12 @@ impl Analyzer {
         let one = idx.is_some() && self.heap.llen(oid, state).is_some();
         for p in at {
             state.set_slot(oid, Ns::Pos, intern::key_int(p), v.clone(), strong && one);
+        }
+        // (every position known: the elements are exactly what they hold, the value
+        // overwritten gone)
+        match self.known_positions(oid, state).filter(|_| strong && one) {
+            Some(ps) => self.set_positions(oid, ps, state),
+            None => self.add_elem(oid, v, state),
         }
     }
 

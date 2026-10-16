@@ -3049,24 +3049,14 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 if an.heap.obj(oid).single && an.frame().loop_depth == 0 && n + items.len() <= cap {
                     for (i, item) in items.iter().enumerate() {
                         st.set_slot(oid, Ns::Pos, intern::key_int((n + i) as i64), item.clone(), true);
-                        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(item.pts.clone(), crate::models::torch::elem_kv(&item.kv)), false);
-                        let nk = match st.elems.get(&oid) {
-                            Some(cur) => kv_join(&cur, &item.kv),
-                            None => item.kv.clone(),
-                        };
-                        st.elems.insert(oid, nk);
+                        an.add_elem(oid, item, st);
                     }
                     an.heap.set_llen(oid, st, Some(n + items.len()));
                     continue;
                 }
             }
         }
-        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(elem.pts.clone(), crate::models::torch::elem_kv(&elem.kv)), false);
-        let nk = match st.elems.get(&oid) {
-            Some(cur) => kv_join(&cur, &elem.kv),
-            None => elem.kv.clone(),
-        };
-        st.elems.insert(oid, nk);
+        an.add_elem(oid, &elem, st);
         let ll = an.heap.llen(oid, st);
         let single = an.heap.obj(oid).single;
         if let Some(n) = ll {
@@ -3810,9 +3800,7 @@ fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 st.drop_obj_ns(oid, Ns::Pos);
                 if name == "insert" {
                     if let Some(x) = c.args.get(1) {
-                        st.set_slot(oid, Ns::Elem, STAR, Value::with_kv(x.pts.clone(), crate::models::torch::elem_kv(&x.kv)), false);
-                        let e = st.elems.get(&oid).unwrap_or_else(|| x.kv.clone());
-                        st.elems.insert(oid, kv_join(&e, &x.kv));
+                        an.add_elem(oid, x, st);
                     }
                 }
             }
@@ -5911,12 +5899,7 @@ match name {
     "func" => f,
     "args" => {
         let tid = an.alloc_at(Kind::Tuple, node, state, "partial.args", Payload::None, None, Ns::Item, None, Some(&format!("pargs{}", oid)));
-        for (i, a) in args.iter().enumerate() {
-            state.set_slot(tid, Ns::Pos, intern::key_int(i as i64), a.clone(), true);
-        }
-        let acc = join_values(args.clone());
-        state.set_slot(tid, Ns::Elem, STAR, acc, true);
-        an.heap.set_llen(tid, state, Some(args.len()));
+        an.set_positions(tid, args, state);
         Value::obj(tid)
     }
     _ => {
