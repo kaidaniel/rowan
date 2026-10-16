@@ -1,6 +1,7 @@
 // node test.js — checks the hover and diagnostic rendering against real --facts documents:
-// what particular hovers say, and that no hover on several real programs uses internal
-// names or a mark it does not explain.
+// what particular hovers say, and that every hover on several real programs has the owner's
+// format (`name = value`, then Requirements / In Calls / Notes), no internal names, no marks
+// for accesses that work, and every mark it uses explained in its Notes.
 "use strict";
 const assert = require("assert");
 const fs = require("fs");
@@ -41,47 +42,47 @@ const a01 = path.join(root, "tests", "cases", "a01_conditional_key.py");
 const a01src = fs.readFileSync(a01, "utf8").split("\n");
 const a01idx = indexResult(facts(a01));
 const r8 = hover(a01idx, a01src, 8, "r");
-assert(r8.includes('```python\n{"id": u.id, "role"?: "admin"}\n```'), r8);
-assert(r8.includes('`"k"?:` set on some paths only'), r8);
-assert(r8.includes("- created on line 2"), r8);
+assert(r8.includes('```python\nr = {"id": u.id, "role"?: "admin"}\n```'), r8);
+assert(r8.includes('**Notes**\n- `"k"?`: possible key'), r8);
+assert(!r8.includes("**In Calls**") && !r8.includes("**Requirements**"), r8);
 // ---- several objects made on one line (one parser per call of build_parser): where from
 const a002 = path.join(root, "tests", "apps", "small", "a002_deploy_cli.py");
 const p28 = hover(indexResult(facts(a002)), fs.readFileSync(a002, "utf8").split("\n"), 28, "p");
-assert(p28.includes("- one of 7 objects, all created on line 28 (by different calls or loop iterations)"), p28);
+assert.strictEqual(p28, "```python\np = <ArgumentParser>\n```");
 // (two Settings the calls give that differ only past the cut — retries=2 / retries=5 — are one
 // entry, not two alike)
 const s57 = hover(indexResult(facts(a002)), fs.readFileSync(a002, "utf8").split("\n"), 57, "s");
-const s57calls = (s57.split("\n").find((l) => l.startsWith("- in calls: ")) || "").match(/`Settings\([^`]*`/g) || [];
+const s57calls = s57.split("\n").filter((l) => l.startsWith("- `Settings(") && l.endsWith(" on line 93."));
 assert(s57calls.length === 3 && new Set(s57calls).size === 3, s57);
 // (the legend explains only marks the shown value uses: `**?` and `[*]` are in the cut parts)
 const a002idx = indexResult(facts(a002));
 const a002src = fs.readFileSync(a002, "utf8").split("\n");
 const set96 = hover(a002idx, a002src, 96, "settings");
-// (the legend explains the marks the hover shows, not those of parts the cuts leave out)
-const body96 = set96.split("\n").filter((l) => !l.startsWith("*")).join("\n");
-assert(set96.includes("`**?` other keys") === body96.includes("**?") && set96.includes("`[*]` any element") === body96.includes("[*]") && set96.includes("`a | b` one of these"), set96);
-// (one access, two explanations of why it works: one line)
+// (Notes explain the marks the hover shows, not those of parts the cuts leave out)
+const [body96, notes96] = set96.split("**Notes**");
+assert(notes96.includes("- `**?`: other keys") === body96.includes("**?") && notes96.includes("- `[*]`: any element") === body96.includes("[*]") && notes96.includes("- `a | b`: either a or b"), set96);
+// (an access that works has no mark: the hover says what may fail)
 const cfg63 = hover(a002idx, a002src, 63, "cfg");
-assert(cfg63.split("\n").filter((l) => l.startsWith('- ✓ `cfg["notify"]`')).length === 1, cfg63);
+assert(!cfg63.includes("✓") && cfg63.includes('**Requirements**\n- `cfg["name"]`'), cfg63);
+// (an access that may fail is a diagnostic, which the editor shows in the same hover: not repeated)
 const r9 = hover(a01idx, a01src, 9, "r");
-assert(r9.includes('- ⚠ `r["role"]`: key "role" is only set on some paths'), r9);
-assert(r9.includes("⚠ fails on some paths"), r9);
+assert(!r9.includes("⚠") && (a01idx.verdicts.get(9) || []).some((v) => severityFor(v.tier) === "warning" && v.message === 'key "role" is only set on some paths'), r9);
 const r13 = hover(a01idx, a01src, 13, "r");
-assert(r13.includes('- ✗ `r["rolle"]`: key "rolle" is never set'), r13);
+assert(!r13.includes("✗") && (a01idx.verdicts.get(13) || []).some((v) => severityFor(v.tier) === "error"), r13);
 const u8 = hover(a01idx, a01src, 8, "u");
-assert(u8.includes("- the code reads `u.id`"), u8);
-assert(u8.includes("not defined in this file"), u8);
+assert(u8.includes("```python\nu = ?\n```\n\n**Requirements**\n- `u.id`"), u8);
+assert(u8.includes("- `?`: unknown (`u` is not defined in this file)"), u8);
 // a parameter: any argument (the function's value for any call), what the program's call passes
 // (`u`, line 8), what the function reads of it
 const user2 = hover(a01idx, a01src, 2, "user");
-assert(user2.includes("- not known here: argument `user` of `build`") && user2.includes("- in calls: `u` (line 8)") && user2.includes("- the code reads `user.id`"), user2);
+assert(user2.includes("```python\nuser = (parameter)\n```") && user2.includes("**In Calls**\n- `u` on line 8.") && user2.includes("**Requirements**\n- `user.id`"), user2);
 assert.strictEqual(renderHover("zzz", [], []), null);
 // a key read only under a test of another argument: "(only if `admin`)", with its legend entry
 const z535 = path.join(root, "tests", "cases", "z535_requirements_under_parameter_tests.py");
 const z535src = fs.readFileSync(z535, "utf8").split("\n");
 const row11 = hover(indexResult(facts(z535)), z535src, z535src.indexOf('        return row["role"]') + 1, "row");
-assert(row11.includes('- on some paths the code reads `row["id"]` (only if `not admin`), `row["role"]` (only if `admin`)'), row11);
-assert(row11.includes("`(only if x)` read only on calls where `x` holds of the arguments as passed"), row11);
+assert(row11.includes('**Requirements**\n- `row["id"]` (only if `not admin`)\n- `row["role"]` (only if `admin`)'), row11);
+assert(row11.includes("- `(only if x)`: needed only on calls where `x` holds of the arguments as passed"), row11);
 // ---- a parameter in its `def`: what the function reads of it for any call (its contract),
 // apart from what each of the program's calls passes and whether the reads work for it
 {
@@ -90,18 +91,18 @@ assert(row11.includes("`(only if x)` read only on calls where `x` holds of the a
   const idx = indexResult(facts(z537));
   const at = (pre) => src.findIndex((l) => l.startsWith(pre)) + 1;
   const row = hover(idx, src, at("def make_user("), "row");
-  assert(row.includes('- for any call, the function reads `row["id"]`, `row["name"]`') && row.includes('- and on some paths `row["since"]` (only if `admin`)'), row);
-  assert(row.includes(`\`{"id": 1, "name": " ann "}\` (line ${at("a = make_user(")}) ✓`) && row.includes(`\`{"id": 2, "name": "bob"}\` (line ${at("b = make_user(")}) ✗ \`row["since"]\``), row);
-  assert(row.includes("✓ always works") && row.includes("✗ fails on every path"), row);
+  assert(row.includes('```python\nrow = (parameter)\n```\n\n**Requirements**\n- `row["id"]`\n- `row["name"]`\n- `row["since"]` (only if `admin`)'), row);
+  assert(row.includes(`- \`{"id": 1, "name": " ann "}\` on line ${at("a = make_user(")}.`) && row.includes(`- \`{"id": 2, "name": "bob"}\` on line ${at("b = make_user(")}: ✗ \`row["since"]\``), row);
+  assert(!row.includes("✓") && row.includes("- ✗: fails on every path"), row);
   const order = hover(idx, src, at("def total("), "order");
-  assert(order.includes('- for any call, the function reads `order["items"][*]["price"]`, `order["items"][*]["qty"]`'), order);
-  assert(order.includes(`(line ${at("t = total(")}) ✓`) && order.includes(`(line ${at("    u = total(")}) ✗ \`item["price"]\``), order);
+  assert(order.includes('**Requirements**\n- `order["items"][*]["price"]`\n- `order["items"][*]["qty"]`'), order);
+  assert(order.includes(` on line ${at("t = total(")}.`) && order.includes(` on line ${at("    u = total(")}: ✗ \`item["price"]\``), order);
   // (tensors: the shapes the function needs of it, relations to other parameters included)
   const g = path.join(root, "tests", "torch", "models", "m02_nanogpt.py");
   const gsrc = fs.readFileSync(g, "utf8").split("\n");
   const line = gsrc.findIndex((l, i) => l.includes("def forward(self, x)") && gsrc[i + 1].includes("B, T, C = x.size()")) + 1;
   const x = hover(indexResult(facts(g)), gsrc, line, "x");
-  assert(x.includes("- for any call, the function needs `x.dim() == 3`, `x.shape[2] == self.n_embd`"), x);
+  assert(x.includes("```python\nx = (parameter)\n```\n\n**Requirements**\n- `x.dim() == 3`\n- `x.shape[2] == self.n_embd`\n\n**In Calls**\n- `Tensor[3, 10, 32]` on line "), x);
 }
 // an alternative too wide for its line keeps whole items (`…` for the rest), not a cut word
 assert.strictEqual(shorten('{"id": 1, "owner": "bo", "priority": 2, "tags": [], "title": "printer jam"}', 60), '{"id": 1, "owner": "bo", "priority": 2, "tags": [], …}');
@@ -114,22 +115,22 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   const src = fs.readFileSync(z532, "utf8").split("\n");
   const idx = indexResult(facts(z532));
   const y = hover(idx, src, 6, "y");
-  assert(y.includes("```python\n3 | x\n```") && y.includes("- in calls: `3` (line 44), `7` (line 45)"), y);
-  assert(y.includes("the value holds for any call (this program's, and any once the module has run); `in calls`: what this program's calls give"), y);
+  assert(y.includes("```python\ny = 3 | x\n```") && y.includes("**In Calls**\n- `3` on line 44.\n- `7` on line 45."), y);
+  assert(y.includes("- `a | b`: either a or b"), y);
   const b = hover(idx, src, 6, "b");
-  assert(b.includes("- not known here: argument `b` of `pick`") && b.includes("- in calls: `False` (line 44), `True` (line 45)"), b);
+  assert(b.includes("```python\nb = (parameter)\n```") && b.includes("**In Calls**\n- `False` on line 44.\n- `True` on line 45."), b);
   const m = hover(idx, src, 13, "m");
-  assert(m.includes("```python\nn * 2\n```") && m.includes("- in calls: `10` (line 46), `14` (line 46)"), m);
+  assert(m.includes("```python\nm = n * 2\n```") && m.includes("**In Calls**\n- `10` on line 46.\n- `14` on line 46."), m);
   // a function nothing calls: only the value for any call
   const z = hover(idx, src, 27, "z");
-  assert(z.includes("```python\nk + 1\n```") && !z.includes("in calls"), z);
+  assert(z.includes("```python\nz = k + 1\n```") && !z.includes("In Calls"), z);
   // a method: on any instance (its `__init__` given any arguments), apart from the program's
   const v = hover(idx, src, 38, "v");
-  assert(v.includes("```python\n0 | int(?)\n```") && v.includes("- in calls: `4` (line 49)"), v);
-  assert(v.includes("`int(?)` an int not known statically"), v);
+  assert(v.includes("```python\nv = 0 | int(?)\n```") && v.includes("**In Calls**\n- `4` on line 49."), v);
+  assert(v.includes("- `int(?)`: an int not known statically"), v);
   // a method nothing calls: on any instance, not only one made with `__init__`'s defaults
   const a = hover(idx, src, 58, "a");
-  assert(a.includes("```python\nself.size * self.size\n```") && !a.includes("in calls"), a);
+  assert(a.includes("```python\na = self.size * self.size\n```") && !a.includes("In Calls"), a);
 }
 
 // ---- unknowns of a known type: `str(?)`, from an annotation, a builtin, an operator
@@ -138,11 +139,11 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   const src = fs.readFileSync(z533, "utf8").split("\n");
   const idx = indexResult(facts(z533));
   const label = hover(idx, src, 10, "label");
-  assert(label.includes("```python\nstr(?)\n```") && label.includes("- in calls: `\"AB\"` (line 45)"), label);
+  assert(label.includes("```python\nlabel = str(?)\n```") && label.includes("**In Calls**\n- `\"AB\"` on line 45."), label);
   const size = hover(idx, src, 13, "size");
-  assert(size.includes("```python\nint(?)\n```"), size);
+  assert(size.includes("```python\nsize = int(?)\n```"), size);
   const shown = hover(idx, src, 43, "shown");
-  assert(shown.includes("```python\nstr(?)\n```") && shown.includes("`int(?)` an int not known statically (`str(?)` a str, …)"), shown);
+  assert(shown.includes("```python\nshown = str(?)\n```") && shown.includes("- `int(?)`: an int not known statically (`str(?)` a str, …)"), shown);
 }
 
 // ---- a call rowan no longer follows (past its function's budget): said where it changes a value
@@ -150,15 +151,15 @@ assert.strictEqual(shorten('x' + "y".repeat(70), 10), "xyyyyyyyy…");
   const z440 = path.join(root, "tests", "cases", "z440_past_budget_changes_globals.py");
   const res = JSON.parse(execFileSync(bin, [z440, "--facts"], { env: { ...process.env, ROWAN_LIMITS: "budget=2" }, maxBuffer: 64 * 1024 * 1024 }).toString());
   const h = hover(indexResult(res), fs.readFileSync(z440, "utf8").split("\n"), 58, "STATE");
-  assert(h.includes("- may have been changed by `drop()` (line 57, a call rowan no longer follows)"), h);
+  assert(h.includes("- `?`: unknown (may have been changed by `drop()` on line 57, a call rowan no longer follows)"), h);
   // (a list too; a default the call only reads is not said to change)
   const z525 = path.join(root, "tests", "cases", "z525_skipped_call_parameter_escape.py");
   const r525 = JSON.parse(execFileSync(bin, [z525, "--facts"], { env: { ...process.env, ROWAN_LIMITS: "budget=1" }, maxBuffer: 64 * 1024 * 1024 }).toString());
   const s525 = fs.readFileSync(z525, "utf8").split("\n");
   const log = hover(indexResult(r525), s525, 46, "LOG");
-  assert(log.includes("- may have been changed by `update(2)` (line 39, a call rowan no longer follows)"), log);
+  assert(log.includes("may have been changed by `update(2)` on line 39, a call rowan no longer follows"), log);
   const opts = hover(indexResult(r525), s525, 40, "OPTS");
-  assert(!opts.includes("may have been changed") && opts.includes("✓ always works"), opts);
+  assert(!opts.includes("may have been changed") && !opts.includes("✓"), opts);
 }
 
 // ---- diagnostics: only accesses that may fail, in words, with their call path
@@ -199,10 +200,10 @@ const z = path.join(root, "tests", "cases", "z419_manually_created.py");
 const zsrc = fs.readFileSync(z, "utf8").split("\n");
 const zi = indexResult(facts(z));
 const x1 = hover(zi, zsrc, 6, "x1");
-assert(x1.includes("```python\nb\n```"), x1);
+assert(x1.includes("```python\nx1 = b\n```"), x1);
 assert(!x1.includes("**?") && !x1.includes("unknown"), x1);
 const u8z = hover(zi, zsrc, 8, "_");
-assert(u8z.includes("```python\na(b)(a)\n```"), u8z);
+assert(u8z.includes("```python\n_ = a(b)(a)\n```"), u8z);
 
 // ---- tensors (nanoGPT's attention): the shape in the function's own terms, dims named by
 // the locals that hold them, the line's requirement, what calls gave
@@ -210,11 +211,11 @@ const g = path.join(root, "tests", "torch", "models", "m02_nanogpt.py");
 const gsrc = fs.readFileSync(g, "utf8").split("\n");
 const gi = indexResult(facts(g));
 const qkv = hover(gi, gsrc, 64, "qkv");
-assert(qkv.includes("```python\nTensor[B, T, 3*self.n_embd]\n```"), qkv);
-assert(qkv.includes("- `B` = `x.shape[0]`") && qkv.includes("- needs `C == self.n_embd`"), qkv);
-assert(qkv.includes("- in calls: `Tensor[3, 10, 96]` (line "), qkv);
+assert(qkv.includes("```python\nqkv = Tensor[B, T, 3*self.n_embd]\n```"), qkv);
+assert(qkv.includes("**Notes**\n- `B`: `x.shape[0]`") && qkv.includes("**Requirements**\n- `C == self.n_embd`"), qkv);
+assert(qkv.includes("**In Calls**\n- `Tensor[3, 10, 96]` on line "), qkv);
 const gx = hover(gi, gsrc, 64, "x");
-assert(gx.includes("Tensor[B, T, C]") && gx.includes("- `B, T, C` = `x.shape`"), gx);
+assert(gx.includes("x = Tensor[B, T, C]") && gx.includes("- `B, T, C`: `x.shape`"), gx);
 
 // ---- model objects by their type, not as `{}`; names of definitions get no hover
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rowan-test-"));
@@ -247,7 +248,7 @@ const vq = (ki.verdicts.get(12) || []).find((v) => v.text === "d['q']");
 assert(vq && vq.col === ksrc[11].indexOf("d['q']"), JSON.stringify(vq));
 const dq = ksrc[11].indexOf("d['q']");
 const hd = renderHover("d", ki.facts.get("12:d"), verdictsForWord(ki.verdicts.get(12), "d", dq, dq + 1));
-assert(hd.includes("- ✗ `d['q']`: key \"q\" is never set"), hd);
+assert(hd.includes('```python\nd = {"k": 1}\n```') && !hd.includes("✗") && diagnosticMessage(vq) === 'key "q" is never set', hd);
 // (the other `d` on the line, being assigned, has no access)
 assert(!hover(ki, ksrc, 12, "d").includes("✗"), hover(ki, ksrc, 12, "d"));
 
@@ -258,7 +259,7 @@ assert(!hover(ki, ksrc, 12, "d").includes("✗"), hover(ki, ksrc, 12, "d"));
   const idx = indexResult(facts(rnn));
   const at = (pre) => src.findIndex((l) => l.startsWith(pre)) + 1;
   const hv = hover(idx, src, at("V: int = len(vocab)"), "V");
-  assert(hv.includes("- not known statically; tensor dims equal to it are written `V`"), hv);
+  assert(hv.includes("```python\nV = ?\n```") && hv.includes("- `?`: unknown (tensor dims equal to it are written `V`)"), hv);
   const hl = hover(idx, src, at("    logits, _ = model(x)"), "logits");
   assert(hl.includes("Tensor[64, ?, V]"), hl);
 }
@@ -274,7 +275,7 @@ assert(!hover(ki, ksrc, 12, "d").includes("✗"), hover(ki, ksrc, 12, "d"));
   const hl = hover(idx, src, at("        logits: Tensor = model(x)"), "logits");
   assert(hl.includes("Tensor[68, 64, V]"), hl);
   const hx = hover(idx, src, at("            x = block(x)"), "x");
-  assert(hx.includes("Tensor[A, T, d]") && hx.includes("- `A, T` = `ids.shape`"), hx);
+  assert(hx.includes("x = Tensor[A, T, d]") && hx.includes("- `A, T`: `ids.shape`"), hx);
 }
 
 // ---- a list appended to on some paths: each list it may be, not `list[?]`; an item of a
@@ -306,7 +307,7 @@ assert(!hover(ki, ksrc, 12, "d").includes("✗"), hover(ki, ksrc, 12, "d"));
   const found = path.join(tmp, "found.py");
   fs.writeFileSync(found, ["import sys", "text = sys.argv[1]", "idx = {c: i for i, c in enumerate(sorted(set(text)))}", "def enc(s):", "    return [idx[c] for c in s]", 'a = enc("ab")', 'b = enc("ab")', ""].join("\n"));
   const h = hover(indexResult(facts(found)), fs.readFileSync(found, "utf8").split("\n"), 5, "idx");
-  assert(h.includes('- ✓ `idx[c]`: keys "a", "b" are there: an earlier read or test on this path found it'), h);
+  assert(h.includes("```python\nidx = {") && !h.includes("✓"), h);
 }
 
 // ---- every hover of several real programs: no internal names, every mark explained
@@ -317,21 +318,38 @@ const files = [
   path.join(root, "tests", "apps", "large", "c001_platform_pkg", "dp", "pipeline.py"),
   path.join(root, "tests", "pandas", "models", fs.readdirSync(path.join(root, "tests", "pandas", "models")).filter((f) => f.endsWith(".py"))[0]),
 ];
-const INTERNAL = [/PH@/, /\bM\d+:L\d+/, /#\d{3,}/, /\bparam [\w.]+\.\w/, /\b(item|attr)\[/, /`\?`: unknown/, /\bdef \w/, /\bresult of [^`]*@L/, /\u0001/];
+const INTERNAL = [/PH@/, /\bM\d+:L\d+/, /#\d{3,}/, /\bparam [\w.]+\.\w/, /\b(item|attr)\[/, /\bdef \w/, /\bresult of [^`]*@L/, /\u0001/];
+/**
+ * The owner's format: `name = value` in a code block, then only the sections Requirements, In
+ * Calls and Notes, in that order, each a non-empty list; no mark for an access that works; every
+ * mark and notation the hover shows explained in its Notes.
+ */
+function checkFormat(h, name, where) {
+  for (const re of INTERNAL) assert(!re.test(h), `internal name ${re} in ${where}`);
+  const parts = h.split("\n\n");
+  assert(parts[0].startsWith("```python\n" + name + " = ") && parts[0].endsWith("\n```"), `headline in ${where}`);
+  const titles = parts.slice(1).map((p) => p.split("\n")[0]);
+  const order = ["**Requirements**", "**In Calls**", "**Notes**"];
+  assert(titles.every((t, k) => order.includes(t) && (k === 0 || order.indexOf(titles[k - 1]) < order.indexOf(t))), `sections in ${where}`);
+  for (const p of parts.slice(1)) assert(p.split("\n").slice(1).every((l) => l.startsWith("- ")) && p.includes("\n- "), `section in ${where}`);
+  assert(!h.includes("✓"), `a mark for an access that works in ${where}`);
+  const [body, notes = ""] = h.split("**Notes**");
+  const code = body.replace(/\(only if `[^`]*`\)/g, "");
+  if (code.includes("**?")) assert(notes.includes("- `**?`:"), `unexplained **? in ${where}`);
+  if (/["'\w]\?[:=]/.test(code)) assert(notes.includes('- `"k"?`:'), `unexplained ?: in ${where}`);
+  if (/["'\w]~[:=]/.test(code)) assert(notes.includes('- `"k"~`:'), `unexplained ~: in ${where}`);
+  if (/(^|[\s:=(\[,|`])\?($|[\s,)\]}|`])/m.test(code.replace(/\*\*\?/g, ""))) assert(notes.includes("- `?`:"), `unexplained ? in ${where}`);
+  if (/ \| /.test(code)) assert(notes.includes("- `a | b`:"), `unexplained | in ${where}`);
+  if (code.includes("…")) assert(notes.includes("- `…`:"), `unexplained … in ${where}`);
+  if (/\[\*\]/.test(code.replace(/Tensor\[\*\]/g, ""))) assert(notes.includes("- `[*]`:"), `unexplained [*] in ${where}`);
+  if (body.includes("(only if `")) assert(notes.includes("- `(only if x)`:"), `unexplained (only if) in ${where}`);
+  for (const m of ["✗", "⚠~", "⚠", "◌"]) if (body.includes(m)) assert(notes.includes(`- ${m}: `), `unexplained ${m} in ${where}`);
+}
 let n = 0;
 for (const f of files) {
   for (const { line, name, h } of allHovers(f).hovers) {
     n++;
-    const where = `${path.basename(f)}:${line} ${name}\n${h}`;
-    for (const re of INTERNAL) assert(!re.test(h), `internal name ${re} in ${where}`);
-    const code = (h.match(/```python\n([\s\S]*?)```/g) || []).join("\n");
-    const legend = h.split("\n").filter((l) => l.startsWith("*")).join(" ");
-    if (code.includes("**?")) assert(legend.includes("`**?`"), `unexplained **? in ${where}`);
-    if (/["'\w]\?:/.test(code)) assert(legend.includes('`"k"?:`'), `unexplained ?: in ${where}`);
-    if (/(^|[\s:=(\[,|])\?($|[\s,)\]}|])/m.test(code.replace(/\*\*\?/g, ""))) assert(legend.includes("`?`"), `unexplained ? in ${where}`);
-    for (const m of ["✗", "⚠", "◌"]) if (h.includes(`- ${m} `)) assert(legend.includes(m), `unexplained ${m} in ${where}`);
-    // (a value block is the first thing after the title, or there is none)
-    assert(h.startsWith(`**rowan** · \`${name}\`\n\n`), where);
+    checkFormat(h, name, `${path.basename(f)}:${line} ${name}\n${h}`);
   }
 }
 assert(n > 100, `only ${n} hovers checked`);
@@ -344,9 +362,9 @@ async function onDemand() {
   assert.deepStrictEqual(b.span, [1, 5]);
   const bidx = indexResult(b.result);
   const d5 = hover(bidx, a01src, 5, "d");
-  assert(d5.includes('{"id": user.id, "role"?: "admin"}') && d5.includes("from its own analysis") && d5.includes('`"k"?:` set on some paths only'), d5);
+  assert(d5.includes('```python\nd = {"id": user.id, "role"?: "admin"}\n```') && d5.includes('- `"k"?`: possible key'), d5);
   const u2 = hover(bidx, a01src, 2, "user");
-  assert(u2.includes("- the code reads `user.id`") && !u2.includes("in calls"), u2);
+  assert(u2.includes("```python\nuser = (parameter)\n```\n\n**Requirements**\n- `user.id`") && !u2.includes("In Calls"), u2);
   // (a second hover in the same function: the cached document, merged once into the index)
   const again = await hoverServer(bin, a01, 4, [], 60);
   assert.deepStrictEqual(again.span, [1, 5]);
@@ -373,10 +391,8 @@ async function onDemand() {
       if (!h) continue;
       m++;
       const where = `${path.basename(f)}:${line} ${name} (on demand)\n${h}`;
-      for (const re of INTERNAL) assert(!re.test(h), `internal name ${re} in ${where}`);
-      assert(!h.includes("- in calls: "), where);
-      const legend = h.split("\n").filter((l) => l.startsWith("*")).join(" ");
-      for (const mk of ["✗", "⚠", "◌"]) if (h.includes(`- ${mk} `)) assert(legend.includes(mk), `unexplained ${mk} in ${where}`);
+      checkFormat(h, name, where);
+      assert(!h.includes("**In Calls**"), where);
     }
   }
   stopServers();

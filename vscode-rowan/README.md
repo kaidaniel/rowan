@@ -19,6 +19,11 @@ Besides python builtins, rowan also has models for pytorch, pandas, pydantic, an
 Files are analysed when opened or
 saved, or with **Rowan: Analyse current file**. When a whole file takes longer than 10 seconds,
 rowan analyses each function when you first hover in it, for any call of it (usually well under
-a second), and says so in the hover.
+a second), and says so in the status bar.
+
+A hover shows `name = value` (a parameter: `name = (parameter)`), then what the code needs of it
+(**Requirements**: `row["id"]`, `row["since"] (only if admin)`, `x.dim() == 3`), what the
+program's own calls give or pass (**In Calls**: `{"id": 2} on line 24: ✗ row["since"]`), and
+what each mark it uses means (**Notes**). Accesses that may fail are diagnostics.
 
 Source, documentation and issues: [github.com/kaidaniel/rowan](https://github.com/kaidaniel/rowan).

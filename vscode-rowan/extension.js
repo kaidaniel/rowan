@@ -1,6 +1,6 @@
 // rowan VS Code extension: runs `rowan FILE --facts` and shows what rowan inferred about a
-// variable on hover (its value as Python, what the code reads of it, the accesses on the
-// line) and the accesses that may fail as diagnostics.  Plain JavaScript, no build step.
+// variable on hover (`name = value` as Python; what the code needs of it, what the program's
+// calls give, what the marks mean) and the accesses that may fail as diagnostics.  Plain JavaScript, no build step.
 "use strict";
 
 const path = require("path");
@@ -16,37 +16,35 @@ try {
 
 // ----------------------------------------------------------------- rendering (pure)
 
-/** The mark of each kind of finding (the engine's `--facts` verdict tiers). */
-const MARK = {
-  proven: "✓", likely: "✓~", possibly: "⚠", missing: "✗", "likely-missing": "⚠~", input: "◌", datakey: "⚠",
-};
-/** What each mark means, for the hover's legend line. */
+/**
+ * The mark of a call's check of a parameter (the engine's `--facts` verdict tiers), worst first.
+ * Accesses that work (`proven`, `likely`) get no mark: the hover says only what may fail.
+ */
+const MARK = { missing: "✗", possibly: "⚠", "likely-missing": "⚠~", input: "◌" };
+const CHECK_ORDER = ["missing", "possibly", "likely-missing", "input", "likely", "proven"];
+/** What each mark means (Notes). */
 const MARK_TEXT = {
-  "✓": "always works",
-  "✓~": "works unless code rowan cannot see removed the key",
   "⚠": "fails on some paths",
   "✗": "fails on every path",
   "⚠~": "fails unless code rowan cannot see set the key",
-  "◌": "the input must provide it",
+  "◌": "works if the input has what the function reads",
 };
-/**
- * A hover worked out on demand (the whole program took too long to analyse): from the function
- * alone, for any call of it.
- */
-const ON_DEMAND_LINE = "- for any call of this function, from its own analysis (the whole program took too long, so the values its calls pass are not shown)";
 
-/** The notation of values (as the engine prints them): a test on the text, and its meaning. */
+/**
+ * The notation of values (as the engine prints them): a test on the text, the mark, and its
+ * meaning (Notes). `?` is said apart: with where its unknowns come from.
+ */
+const UNKNOWN = (t) => /(^|[\s:=(\[,|`])\?($|[\s,)\]}|`])/.test(t.replace(/\*\*\?/g, ""));
 const NOTATION = [
-  [(t) => /(^|[\s:=(\[,|])\?($|[\s,)\]}|])/.test(t.replace(/\*\*\?/g, "")), "`?` not known statically"],
-  [(t) => /\b(int|str|bool|bytes|float|list|dict|set|tuple|frozenset)\(\?\)/.test(t), "`int(?)` an int not known statically (`str(?)` a str, …)"],
-  [(t) => /["'\w]\?[:=]/.test(t), '`"k"?:` set on some paths only'],
-  [(t) => /["'\w]~[:=]/.test(t), '`"k"~:` there unless code rowan cannot see removed it'],
-  [(t) => t.includes("**?"), "`**?` other keys may exist"],
-  [(t) => / \| |(^|\n)\| /.test(t), "`a | b` one of these, depending on the path or the call"],
-  [(t) => t.includes("[*]"), "`[*]` any element"],
-  [(t) => t.includes("…"), "`…` not shown"],
-  [(t) => t.includes("- in calls: "), "the value holds for any call (this program's, and any once the module has run); `in calls`: what this program's calls give"],
-  [(t) => t.includes(" (only if `"), "`(only if x)` read only on calls where `x` holds of the arguments as passed"],
+  [(t) => /\b(int|str|bool|bytes|float|list|dict|set|tuple|frozenset)\(\?\)/.test(t), "int(?)", "an int not known statically (`str(?)` a str, …)"],
+  [(t) => /["'\w]\?[:=]/.test(t), '"k"?', "possible key"],
+  [(t) => /["'\w]~[:=]/.test(t), '"k"~', "there unless code rowan cannot see removed it"],
+  [(t) => t.includes("**?"), "**?", "other keys may exist"],
+  [(t) => / \| |(^|\n)\s*\| /.test(t), "a | b", "either a or b (depending on the path or the call)"],
+  [(t) => /\bTensor\[\*\]/.test(t), "Tensor[*]", "a tensor of unknown number of dimensions"],
+  [(t) => /\[\*\]/.test(t.replace(/\bTensor\[\*\]/g, "")), "[*]", "any element"],
+  [(t) => t.includes("…"), "…", "not shown"],
+  [(t) => t.includes(" (only if `"), "(only if x)", "needed only on calls where `x` holds of the arguments as passed"],
 ];
 
 /**
@@ -225,196 +223,167 @@ function hoverValue(text, maxLines = 16) {
   return lines;
 }
 
-/** The legend line: what each mark and notation used in `texts` means (only those used). */
-function legendLine(texts, marks) {
-  const t = texts.join("\n");
-  const parts = NOTATION.filter(([used]) => used(t)).map(([, meaning]) => meaning);
-  for (const m of Object.keys(MARK_TEXT)) if (marks.has(m)) parts.push(`${m} ${MARK_TEXT[m]}`);
-  return parts.length ? `*${parts.join(" · ")}*` : null;
+/**
+ * Where an unknown comes from, in words (`site_text`'s forms): "`u` is not defined in this
+ * file", "the result of `load(…)` on line 6", "argument `x` of `f`".
+ */
+function fromText(t) {
+  let m = /^(`\w+`) \(not defined in this file\)$/.exec(t);
+  if (m) return `${m[1]} is not defined in this file`;
+  if (CALL_AT.test(t)) return "the result of " + callText(t);
+  return t.startsWith("argument ") || t.startsWith("the ") ? t : `from ${t}`;
 }
 
-/** `a`, `b`, `c` and 3 more */
-function codeList(items, max = 6) {
-  const shown = items.slice(0, max).map((x) => "`" + x + "`");
-  return shown.join(", ") + (items.length > max ? ` and ${items.length - max} more` : "");
+/** A call where it is: "`drop()` (line 57, …)" as "`drop()` on line 57, …". */
+const CALL_AT = /^(`[^`]*`) \(([^()]*?)line (\d+)(.*)\)$/;
+function callText(t) {
+  return t.replace(CALL_AT, "$1 on $2line $3$4");
+}
+
+/** At most `max` bullets, the rest counted. */
+function bullets(items, max) {
+  return items.length > max ? items.slice(0, max - 1).concat([`and ${items.length - max + 1} more`]) : items;
 }
 
 /**
- * What the program's own calls gave, apart from the value for any call: "- in calls: `3`
- * (line 5), `7` (lines 6, 9)" (null when there is nothing apart).
+ * The headline's lines: `name = value`, the value pretty-printed (`hoverValue`); a value that
+ * is one of several long alternatives continues with `| B` lines, indented.
  */
-function callsLine(f, marks) {
-  const calls = f.calls || [];
-  if (!calls.length) return null;
-  // (values the cut makes alike — they differ in what `…` hides: once, with all their lines;
-  // a parameter's: whether the function's reads of what they pass work, the worst of them)
+function headLines(name, value) {
+  const pre = `${name} = `;
+  if (value === "(parameter)") return [pre + value];
+  const lines = hoverValue(value);
+  const alts = lines.length > 1 && lines[0].startsWith("  ") && lines.some((l) => l.startsWith("| "));
+  if (alts) return [pre + lines[0].slice(2), ...lines.slice(1).map((l) => "  " + l)];
+  return [pre + lines[0], ...lines.slice(1)];
+}
+
+/**
+ * What the code needs of the name: the access paths it reads of it (`required`; a parameter at
+ * its `def`: for any call, `contract`), always first, then under a test of the arguments
+ * (`(only if admin)`), then on some paths; and tensor shapes (`x.dim() == 3`).
+ */
+function requirementLines(f) {
+  const reads = (f.param ? f.contract : f.required) || [];
+  const rank = (r) => (r.always ? 0 : r.only_if ? 1 : 2);
+  const out = (f.requires || []).map((r) => "`" + r + "`");
+  for (const r of [...reads].sort((a, b) => rank(a) - rank(b))) {
+    out.push("`" + r.path + "`" + (r.always ? "" : r.only_if ? ` (only if \`${r.only_if}\`)` : " on some paths"));
+  }
+  return out;
+}
+
+/**
+ * What the program's own calls gave, apart from the value for any call: "`3` on line 5.", values
+ * the cut makes alike once with all their lines; a parameter's: what fails in the function for
+ * what they pass, the worst mark first (`✗ \`row["since"]\``), nothing when it all works.
+ */
+function callLines(f, marks) {
   const merged = new Map();
-  for (const c of calls) {
+  for (const c of f.calls || []) {
     const t = shorten(c.text, VALUE_WIDTH);
     const m = merged.get(t) || { lines: [], check: null };
     m.lines = m.lines.concat((c.lines || []).filter((l) => !m.lines.includes(l)));
     if (c.check && (!m.check || CHECK_ORDER.indexOf(c.check.tier) < CHECK_ORDER.indexOf(m.check.tier))) m.check = { tier: c.check.tier, fails: [...new Set([...(m.check ? m.check.fails : []), ...c.check.fails])], errors: [...new Set([...(m.check ? m.check.errors || [] : []), ...(c.check.errors || [])])] };
     merged.set(t, m);
   }
-  const lines = (ls) => (ls.length ? ` (line${ls.length > 1 ? "s" : ""} ${ls.slice(0, 3).join(", ")}${ls.length > 3 ? ", …" : ""})` : "");
+  const where = (ls) => (ls.length ? ` on line${ls.length > 1 ? "s" : ""} ${ls.length > 3 ? `${ls.slice(0, 3).join(", ")} and ${ls.length - 3} more` : ls.join(", ")}` : "");
   const check = (c) => {
-    if (!c || !MARK[c.tier]) return "";
-    if (marks) marks.add(MARK[c.tier]);
-    return ` ${MARK[c.tier]}` + (c.fails.length ? " " + codeList(c.fails, 3) : "") + ((c.errors || []).length ? ` (${c.errors[0]})` : "");
+    const mark = c && MARK[c.tier];
+    if (!mark) return ".";
+    marks.add(mark);
+    const fails = c.fails.slice(0, 3).map((x) => "`" + x + "`").join(", ") + (c.fails.length > 3 ? ` and ${c.fails.length - 3} more` : "");
+    return `: ${mark}` + (fails ? " " + fails : "") + ((c.errors || []).length ? ` (${c.errors[0]})` : "");
   };
-  const all = [...merged];
-  const shown = all.slice(0, 3).map(([t, m]) => "`" + t + "`" + lines(m.lines) + check(m.check));
-  return `- in calls: ${shown.join(", ")}${all.length > 3 ? ` and ${all.length - 3} more` : ""}`;
-}
-
-/** The marks of a call's check, worst first (`callsLine`). */
-const CHECK_ORDER = ["missing", "possibly", "likely-missing", "input", "likely", "proven"];
-
-/**
- * What the code reads of a name (`required`), or of a parameter for any call of its function
- * (`contract`): "- the code reads `row["id"]`", reads under a test of the arguments first.
- */
-function readsLines(req, who) {
-  const out = [];
-  const always = req.filter((r) => r.always).map((r) => r.path);
-  // (reads under a test of the arguments first: they say when)
-  const sometimes = req.filter((r) => !r.always).sort((a, b) => !!b.only_if - !!a.only_if);
-  if (always.length) out.push(`- ${who === "function" ? "for any call, the function reads" : "the code reads"} ${codeList(always)}`);
-  // (a read under a test of the arguments: `row["role"]` (only if `admin`))
-  const some = sometimes.slice(0, 6).map((r) => "`" + r.path + "`" + (r.only_if ? ` (only if \`${r.only_if}\`)` : "")).join(", ") + (sometimes.length > 6 ? ` and ${sometimes.length - 6} more` : "");
-  if (sometimes.length) out.push(`- ${always.length ? "and on some paths" : `on some paths the ${who} reads`} ${some}`);
-  return out;
-}
-
-/** The objects of a fact rowan knows (not unknown values): where they were created. */
-function objectLines(f) {
-  const out = [];
-  const objs = f.objects || [];
-  const known = objs.filter((o) => o.kind !== "unknown");
-  const total = Math.max(f.objects_total || 0, objs.length) - (objs.length - known.length);
-  // (functions, classes, modules, library objects: their name in the value says it)
-  const made = known.filter((o) => ["dict", "list", "tuple", "set", "frame", "instance", "namespace", "series"].includes(o.kind));
-  // (where any object the program made comes from: a parser, a model object too)
-  const named = known.filter((o) => !["function", "class", "module", "external", "bound", "method"].includes(o.kind));
-  const lines = [...new Set(named.map((o) => (/@L(\d+)$/.exec(o.label) || [])[1]).filter(Boolean))].map(Number).sort((a, b) => a - b);
-  const where = lines.length > 1 ? `, created on lines ${lines.join(", ")}` : lines.length ? `, all created on line ${lines[0]} (by different calls or loop iterations)` : "";
-  if (total > 1) out.push(`- one of ${total} objects${where}`);
-  else if (lines.length === 1) out.push(`- created on line ${lines[0]}`);
-  const changed = [...new Set(known.flatMap((o) => o.changed_by || []))].sort((a, b) => (a === "other calls") - (b === "other calls"));
-  const more = changed.length - 2;
-  if (changed.length) out.push(`- may have been changed by ${changed.slice(0, 2).join(" or ")}${more > 0 ? ` (or ${more} other call${more > 1 ? "s" : ""})` : ""}`);
-  const absent = [...new Set(made.flatMap((o) => o.absent || []))];
-  if (absent.length) out.push(`- never has ${absent.join(", ")} here`);
-  return out;
+  return [...merged].map(([t, m]) => "`" + t + "`" + where(m.lines) + check(m.check));
 }
 
 /**
- * Markdown for one name: its value as Python, what the code reads of it when it comes from
- * outside, where unknowns come from, the accesses on this line, and a legend of the marks
- * used. `facts`: the entries for (line, name); `verdicts`: the accesses on that line that
- * involve the name.
+ * Markdown for one name, in the owner's format: a headline `name = value` (a parameter:
+ * `name = (parameter)`), then the sections that have something: **Requirements** (what the code
+ * needs of it), **In Calls** (what the program's own calls give, apart from the value for any
+ * call) and **Notes** (what each name, mark and notation the hover uses means). `facts`: the
+ * entries for (line, name); `verdicts`: the accesses on that line that involve the name (those
+ * that may fail are diagnostics, which the editor shows in the same hover; an input's key
+ * the code reads is a requirement).
  */
 function renderHover(name, facts, verdicts) {
   // (a name of a function, class, module or library object: the language server says it)
   const DEFS = ["function", "class", "module", "external", "bound", "method"];
   facts = facts.filter((f) => !((f.objects || []).length && f.objects.every((o) => DEFS.includes(o.kind)) && !(f.text || "").includes("(")));
-  if (!facts.length && !verdicts.length) return null;
-  const out = [`**rowan** · \`${name}\``, ""];
-  const texts = [];
+  if (!facts.length) return null;
+  const head = [];
+  const reqs = [];
+  const calls = [];
+  const symbols = [];
+  const origins = [];
+  const changed = [];
   const marks = new Set();
+  // (what the notation is looked for in: what the hover shows, Notes' own words apart)
+  const texts = [];
+  const add = (list, xs) => xs.forEach((x) => list.includes(x) || list.push(x));
   for (const f of facts) {
     const text = (f.text || "").trim() || "?";
     const objs = f.objects || [];
+    const legend = (f.legend || []).filter(([, d]) => d !== "?");
     // (the unknowns of the value shown: the objects are the calls' when there are some)
     const unknown = (f.general_unknowns || objs).filter((o) => o.kind === "unknown");
-    const info = [];
-    // what the program's calls gave (the value shown holds for any call): after the value
-    const calls = callsLine(f, marks);
-    let valueShown = false;
-    texts.push(...(f.calls || []).map((c) => shorten(c.text, VALUE_WIDTH)));
-    // an unknown named by itself (a parameter, a name defined elsewhere): where it comes from
-    if (text === name && !objs.length && !(f.legend || []).length) {
+    const origin = (o) => (o.origin ? `the result of \`${o.origin.text}\` on line ${o.origin.line}` : (o.from || []).length ? o.from.map(fromText).join(" or ") : null);
+    // (an unknown named by itself, with what is known of it: that is its value)
+    const self = legend.findIndex(([sym]) => sym === name);
+    let value = text;
+    if (text === name && self >= 0) {
+      value = legend[self][1];
+      legend.splice(self, 1);
+    }
+    const own = value === name && !legend.length;
+    if (f.param || (own && unknown.length === 1 && (unknown[0].from || []).some((t) => t.startsWith(`argument \`${name}\` of `)))) {
+      value = "(parameter)";
+    } else if (own && !objs.length) {
       // a number the module computes from data rowan cannot see, named by its variable
-      info.push(`- not known statically; tensor dims equal to it are written \`${name}\``);
-    } else if (text === name && unknown.length === 1 && !(f.legend || []).length) {
-      const o = unknown[0];
-      info.push(o.origin ? `- not known here: the result of \`${o.origin.text}\` (line ${o.origin.line})` : `- not known here: ${(o.from || [])[0] || "it comes from outside"}`);
-    } else if (text === "?" && !(f.legend || []).length) {
-      const o = unknown.find((o) => o.origin);
-      info.push(o ? `- not known statically: the result of \`${o.origin.text}\` (line ${o.origin.line})` : "- not known statically");
+      value = "?";
+      add(origins, [`tensor dims equal to it are written \`${name}\``]);
+    } else if (own && unknown.length === 1) {
+      value = "?";
+      add(origins, [origin(unknown[0])].filter(Boolean));
+    } else if (value === "?" && !legend.length) {
+      add(origins, unknown.map(origin).filter(Boolean).slice(0, 1));
     } else {
-      // (the legend explains the marks shown: not those of parts the cut leaves out)
-      const shown = hoverValue(text);
-      valueShown = true;
-      texts.push(shown.join("\n"));
-      out.push("```python", ...shown, "```", "");
-      // the names the value mentions, with what is known about each
-      for (const [sym, desc] of f.legend || []) {
-        texts.push(desc);
-        info.push(`- \`${sym}\` = \`${desc}\``);
-      }
-      // an unknown printed as `?`: where it comes from
-      for (const o of unknown.filter((o) => !o.symbol)) {
-        if (o.origin) info.push(`- \`?\` is the result of \`${o.origin.text}\` (line ${o.origin.line})`);
-        else if ((o.from || []).length) info.push(`- \`?\` comes from ${o.from.join(" or ")}`);
-      }
+      // the names the value mentions, with what is known about each; where an unknown printed
+      // as `?` comes from
+      for (const [sym, desc] of legend) add(symbols, [`\`${sym}\`: \`${desc}\``]);
+      texts.push(...legend.map(([, d]) => d));
+      add(origins, unknown.filter((o) => !o.symbol).map(origin).filter(Boolean));
     }
-    // a parameter at its `def`: what the function needs of it for any call (its contract: tensor
-    // shapes, what it reads), then what each of the program's calls passes and whether that works
-    if (f.param) {
-      if ((f.requires || []).length) info.push(`- for any call, the function needs ${codeList(f.requires)}`);
-      info.push(...readsLines(f.contract || [], "function"));
-      if (calls) info.push(calls);
-    } else {
-      if (calls) info.splice(valueShown ? 0 : 1, 0, calls);
-      // tensor shapes: what this line needs of its inputs (rowan could not decide it here)
-      for (const r of f.requires || []) info.push(`- needs \`${r}\``);
-      // what the code reads of it, when it comes from outside (an argument, an input)
-      info.push(...readsLines(f.required || [], "code"));
-    }
-    // (on demand: the function alone, run for any call; what the program's calls pass is not known)
-    if (f.on_demand) info.splice(valueShown ? 0 : 1, 0, ON_DEMAND_LINE);
-    // (a parameter's objects are the calls': said by them)
-    for (const l of (f.param ? [] : objectLines(f)).concat(info)) {
-      texts.push(l);
-      out.push(l);
-    }
+    // (what unknown code may have changed of the program's objects: where their `?` and `~` come from)
+    if (value !== "(parameter)") add(changed, objs.filter((o) => o.kind !== "unknown").flatMap((o) => (o.changed_by || []).map(callText)));
+    const hl = headLines(name, value);
+    head.push(...hl);
+    texts.push(hl.join("\n"));
+    const r = requirementLines(f);
+    add(reqs, r);
+    // (on demand there are no calls of the program: the value is for any call)
+    const c = callLines(f, marks);
+    add(calls, c);
+    texts.push(...r, ...c);
   }
-  // the accesses on this line, once each (the call paths they were reached by do not matter
-  // here); one access found for several keys alike is one line (`keys "a", "b" are there`)
-  const groups = new Map();
-  // (an input's key is in "the code reads" already)
-  const reads = facts.some((f) => (f.required || []).length);
-  // (one access with one mark is one line, whichever of its explanations came first)
-  const seen = new Set();
-  for (const v of verdicts) {
-    const mark = MARK[v.tier];
-    if (!mark || (mark === "◌" && reads)) continue;
-    const ak = `${mark}\u0000${v.text}\u0000${v.key_str}`;
-    if (seen.has(ak)) continue;
-    seen.add(ak);
-    const msg = v.message || v.tier;
-    const keyText = typeof v.key_str === "string" ? `key ${JSON.stringify(v.key_str)}` : null;
-    const shape = keyText && msg.startsWith(keyText + " ") ? msg.slice(keyText.length) : null;
-    const gk = `${mark}\u0000${v.text}\u0000${shape === null ? msg : shape}`;
-    if (!groups.has(gk)) groups.set(gk, { mark, text: v.text, msg, shape, keys: [] });
-    const g = groups.get(gk);
-    if (shape !== null && !g.keys.includes(v.key_str)) g.keys.push(v.key_str);
-    marks.add(mark);
-  }
-  const acc = [];
-  for (const g of groups.values()) {
-    let msg = g.msg;
-    if (g.keys.length > 1) {
-      const shown = g.keys.slice(0, 6).map((k) => JSON.stringify(k)).join(", ") + (g.keys.length > 6 ? ` and ${g.keys.length - 6} more` : "");
-      msg = `keys ${shown}${g.shape.replace(/^ is /, " are ")}`;
-    }
-    acc.push(`- ${g.mark} \`${g.text}\`: ${msg}`);
-  }
-  if (acc.length) out.push("", ...acc);
-  const legend = legendLine(texts, marks);
-  if (legend) out.push("", legend);
-  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  // an input's key read on this line, when the code's reads of it do not say it already
+  if (!facts.some((f) => (f.required || []).length)) add(reqs, verdicts.filter((v) => v.tier === "input").map((v) => "`" + v.text + "`"));
+  const all = texts.join("\n");
+  const notes = [...symbols];
+  changed.sort((a, b) => (a === "other calls") - (b === "other calls"));
+  const by = changed.length ? `may have been changed by ${changed.slice(0, 2).join(" or ")}${changed.length > 2 ? ` (or ${changed.length - 2} other call${changed.length > 3 ? "s" : ""})` : ""}` : null;
+  const unknown = UNKNOWN(all) || head.some((l) => / = \?$/.test(l));
+  const why = origins.slice(0, 3).concat(by && unknown ? [by] : []);
+  if (unknown) notes.push(`\`?\`: unknown${why.length ? ` (${why.join("; ")})` : ""}`);
+  for (const [used, mark, meaning] of NOTATION) if (used(all)) notes.push(`\`${mark}\`: ${meaning}${mark === '"k"~' && by && !unknown ? ` (${by})` : ""}`);
+  for (const m of Object.keys(MARK_TEXT)) if (marks.has(m)) notes.push(`${m}: ${MARK_TEXT[m]}`);
+  const out = ["```python", ...head, "```"];
+  const section = (title, items, max) => items.length && out.push("", `**${title}**`, ...bullets(items, max).map((x) => `- ${x}`));
+  section("Requirements", reqs, 10);
+  section("In Calls", calls, 6);
+  section("Notes", notes, 20);
+  return out.join("\n");
 }
 
 /**
