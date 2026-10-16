@@ -249,7 +249,12 @@ impl Analyzer {
                     // (an instance whose class defines the name has it whatever its own
                     // attributes are: its row says nothing about it)
                     let by_class = |an: &Analyzer, o: u32| intern::key_as_str(k).is_some_and(|n| an.class_resolves(o, &n));
-                    rec = Value::with_kv(rec.pts.filter(|o| !builtin(self, o) && !by_class(self, o)), KeyVal::Bot);
+                    let kept = rec.pts.filter(|o| !builtin(self, o) && !by_class(self, o));
+                    // (where it holds, it may hold for those others: the rest say nothing)
+                    if truth && kept.len() < rec.pts.len() {
+                        return;
+                    }
+                    rec = Value::with_kv(kept, KeyVal::Bot);
                     self.narrow_record(&rec, Ns::Attr, k, truth, state);
                 }
                 return;
