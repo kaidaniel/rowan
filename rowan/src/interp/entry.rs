@@ -67,6 +67,21 @@ pub struct Entries {
     /// functions run one at a time when asked (`general_run_of`): no instances made with
     /// `__init__`'s defaults
     pub on_demand: bool,
+    /// per class: the instance runs for any call take, made in their start state (`base`)
+    pub any_instances: FxHashMap<ObjId, Option<ObjId>>,
+    /// the module's end is where any call starts: no function of the program may change what
+    /// it holds (`after_any_code` changed nothing)
+    plain_is_any: bool,
+    /// the instances made now are for a run for any call (`entry_start`): the program's
+    /// constructions and functions may have made and changed them
+    for_any: bool,
+    /// while the main module runs: the program's calls are noted (`note_call`)
+    recording: bool,
+    /// the functions the program called while the main module ran
+    noted: FxHashSet<ObjId>,
+    /// when values for any call are asked for: the heap at the last call module code made, and
+    /// joined over them (`note_call`)
+    calls_heap: Option<(State, State)>,
 }
 
 /// The analysis as the main module's run left it, before the entry runs: its state, the hover
@@ -82,11 +97,20 @@ impl Analyzer {
     pub fn run(&mut self) {
         let mut state = State::new();
         let main = self.program.main_module;
+        self.entry.recording = true;
         self.run_module(main, &mut state);
+        self.entry.recording = false;
+        if let Some((last, _)) = self.entry.calls_heap.as_mut() {
+            *last = State::new();
+        }
         let facts = if self.findings.facts_on { self.findings.facts.clone() } else { IndexMap::new() };
         self.entry.module_end = Some(ModuleEnd { state: state.copy(), facts, verdicts: self.findings.mark(), cut: self.budget.hard_cut });
         if self.program.analyse_entry_points {
-            self.analyse_uncalled(&mut state);
+            // (a function's run for any call starts after any of the program's functions ran)
+            let mut base = state.copy();
+            self.after_any_code(&mut base);
+            self.entry.plain_is_any = base.same(&state);
+            self.analyse_uncalled(&mut base, &mut state);
         }
         self.findings.final_state = Some(state);
     }
@@ -104,6 +128,54 @@ impl Analyzer {
         state.ret = ret;
     }
 
+    /// The program's call of `foid` from `state`, while the main module runs. A run for any
+    /// call starts from the heaps of module code's calls too, joined (`calls_heap`): a call from
+    /// inside a function sees what module code's last call saw, changed by the program's
+    /// functions (`after_any_code` has that).
+    pub(in crate::interp) fn note_call(&mut self, foid: ObjId, self_v: Option<&Value>, state: &State) {
+        if !self.entry.recording || !state.reachable {
+            return;
+        }
+        self.entry.noted.insert(foid);
+        if !self.findings.wants_general() || self.frame().kind == FrameKind::Function {
+            return;
+        }
+        let mut snap = state.heap_only();
+        // (not the instance an `__init__` is making: no other code has it yet)
+        if let Some(v) = self_v.filter(|_| self.heap.func_info(foid).name == "__init__") {
+            v.pts.iter().for_each(|o| snap.forget_obj(o));
+        }
+        // (only what changed since the last one adds to the join)
+        match self.entry.calls_heap.as_mut() {
+            Some((last, joined)) => {
+                joined.join_from(last, &snap, false);
+                *last = snap;
+            }
+            None => self.entry.calls_heap = Some((snap.copy(), snap)),
+        }
+    }
+
+    /// `state` after any of the program's functions ran, given anything (unknown code's walk of
+    /// what their code may change), and as module code's calls saw it.
+    fn after_any_code(&mut self, state: &mut State) {
+        let code: Vec<ObjId> = (1..self.heap.len() as ObjId).filter(|o| self.heap.kind(*o) == Kind::Function && self.is_local_module(self.heap.func_info(*o).module)).collect();
+        let rid = crate::interp::any_object(&mut self.heap);
+        self.follow_code(code, rid, s("program@"), state);
+        // (and as module code's calls saw it: what it changed later, of the objects it still has)
+        if let Some((_, joined)) = &self.entry.calls_heap {
+            state.join_known(joined);
+        }
+    }
+
+    /// Where a run of `oid` for any call starts: `base`; the requirements are `reqs`' (a run
+    /// keeps what it adds to them).
+    pub(in crate::interp) fn entry_start(&self, base: &State, reqs: &State) -> State {
+        let mut st = base.copy();
+        st.reqs = reqs.reqs.clone();
+        (st.ret, st.exits, st.reachable) = (None, None, true);
+        st
+    }
+
     /// Did the deadline cut the analysis (`run`)?
     pub fn was_cut(&self) -> bool {
         self.budget.hard_cut
@@ -118,12 +190,11 @@ impl Analyzer {
         // (the instances entry runs made live in their states, not in the module's)
         self.entry.instances.clear();
         self.entry.general_instances.clear();
+        self.entry.any_instances.clear();
         // (a call may come after any of the program's functions ran: what they may change of
         // what the module made is changed)
         let mut state = end.state;
-        let code: Vec<ObjId> = (1..self.heap.len() as ObjId).filter(|o| self.heap.kind(*o) == Kind::Function && self.is_local_module(self.heap.func_info(*o).module)).collect();
-        let rid = crate::interp::any_object(&mut self.heap);
-        self.follow_code(code, rid, s("program@"), &mut state);
+        self.after_any_code(&mut state);
         self.findings.final_state = Some(state);
         self.findings.drop_since(if end.cut { 0 } else { end.verdicts });
         self.findings.facts = end.facts;
@@ -190,14 +261,18 @@ impl Analyzer {
         let fi = self.heap.func_info(oid);
         // (its own calls run whole; theirs, past the work a run on demand may do, are unknown)
         self.budget.hover = Some((self.hover_work(), 2));
-        self.entry_run(oid, &fi, Run::OnDemand, &mut state);
+        // (the instances made live on in the state; the requirements found go to it too)
+        let mut reqs = state.copy();
+        self.entry_run(oid, &fi, Run::OnDemand, &mut state, &mut reqs);
+        state.reqs = reqs.reqs;
         self.budget.hover = None;
         self.findings.final_state = Some(state);
         true
     }
 
-    /// Entry-point rule (§6.4): functions never called get analysed with open parameters.
-    pub(super) fn analyse_uncalled(&mut self, state: &mut State) {
+    /// Entry-point rule (§6.4): functions never called get analysed with open parameters, from
+    /// `base` (instances for them are made there); the requirements they find go to `state`.
+    pub(super) fn analyse_uncalled(&mut self, base: &mut State, state: &mut State) {
         self.entry.called = (self.heap.len() as ObjId, self.entry.analysed.clone());
         // entry runs can make functions (closures, lambdas, inner defs) nobody calls either:
         // a few rounds, each over the functions made so far
@@ -207,27 +282,35 @@ impl Analyzer {
             if start >= n {
                 break;
             }
-            self.analyse_uncalled_range(start, n, state, false);
+            self.analyse_uncalled_range(start, n, base, state, false);
             start = n;
         }
         // then the requirement-only runs of the functions the program calls (last: runs made
         // while quiet hold no verdicts)
         let n = self.heap.len() as ObjId;
-        self.analyse_uncalled_range(1, n, state, true);
+        self.analyse_uncalled_range(1, n, base, state, true);
         // the general runs (hover facts only) of functions whose entry run took an instance
         // made with `__init__`'s defaults
-        if self.findings.facts_on || !self.findings.row_check_requests.is_empty() {
+        if self.findings.wants_general() {
             for oid in std::mem::take(&mut self.entry.facts_runs) {
                 if self.budget.over_hard_deadline() {
                     break;
                 }
                 let fi = self.heap.func_info(oid);
-                self.entry_run(oid, &fi, Run::FactsOnly, state);
+                if self.m.fa_handlers.contains(&oid) {
+                    // (a handler's run for any request: its requirements are its run's with verdicts)
+                    let st = self.entry_start(base, state);
+                    let (saved, mut scratch) = (std::mem::replace(&mut self.findings.quiet, true), state.copy());
+                    crate::models::fastapi::fa_entry_run(self, oid, &fi, st, &mut scratch, true);
+                    self.findings.quiet = saved;
+                    continue;
+                }
+                self.entry_run(oid, &fi, Run::FactsOnly, base, state);
             }
         }
     }
 
-    pub(super) fn analyse_uncalled_range(&mut self, from: ObjId, n: ObjId, state: &mut State, quiet_pass: bool) {
+    pub(super) fn analyse_uncalled_range(&mut self, from: ObjId, n: ObjId, base: &mut State, state: &mut State, quiet_pass: bool) {
         for oid in from..n {
             if self.budget.over_hard_deadline() {
                 break;
@@ -257,23 +340,30 @@ impl Analyzer {
                 continue;
             }
             if handler {
-                crate::models::fastapi::fa_entry_run(self, oid, &fi, state);
+                // (with verdicts, from the module's end: its values hold for any request only if
+                // that is where any call starts)
+                let general = self.entry.plain_is_any && !self.entry.noted.contains(&oid);
+                let mut st = state.copy();
+                st.ret = None;
+                crate::models::fastapi::fa_entry_run(self, oid, &fi, st, state, general);
+                if !general && (self.findings.wants_general()) {
+                    self.entry.facts_runs.push(oid);
+                }
                 continue;
             }
-            self.entry_run(oid, &fi, if quiet { Run::Quiet } else { Run::Verdicts }, state);
+            self.entry_run(oid, &fi, if quiet { Run::Quiet } else { Run::Verdicts }, base, state);
         }
     }
 
-    /// The entry run of `oid` with open parameters, from `state`; the requirements it finds on
-    /// the inputs are kept in `state` (not those of a facts-only run).
-    fn entry_run(&mut self, oid: ObjId, fi: &FuncInfo, run: Run, state: &mut State) {
+    /// The entry run of `oid` with open parameters, from `base` (`entry_start`); the requirements
+    /// it finds on the inputs are kept in `state` (not those of a facts-only run).
+    fn entry_run(&mut self, oid: ObjId, fi: &FuncInfo, run: Run, base: &mut State, state: &mut State) {
         // (on demand: verdicts, for any call)
         let quiet = !matches!(run, Run::Verdicts | Run::OnDemand);
         let Some(fparams) = fi.node.params() else {
             // a lambda without parameters
             if let FuncNode::Lambda(_) = fi.node {
-                let mut st = state.copy();
-                st.ret = None;
+                let mut st = self.entry_start(base, state);
                 let mi = self.heap.module_info(fi.module);
                 self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
                 let fake = Node::synthetic(mi.idx, fi.node.node().line);
@@ -285,17 +375,6 @@ impl Analyzer {
         if debug_enabled() {
             eprintln!("[rowan] entry {} L{} t={:.1}s objs={} verdicts={} run={:?} stmts={}", fi.qualname, fi.node.node().line, self.budget.now(), self.heap.len(), self.findings.mark(), run, self.budget.statements);
         }
-        // a closure made by a factory's entry run starts from that run's state (its cells)
-        let mut st = match self.entry.closure_states.get(&oid) {
-            Some(cs) => {
-                let mut c = cs.copy();
-                c.reachable = true;
-                c.exits = None;
-                c
-            }
-            None => state.copy(),
-        };
-        st.ret = None;
         let mi = self.heap.module_info(fi.module);
         self.cx.frames.push(Frame::new(FrameKind::Module, mi.scopes.module(), fi.module, &format!("entry:{}", fi.qualname), true, "<entry>"));
         self.entry.scope = Some(oid);
@@ -306,19 +385,33 @@ impl Analyzer {
         let saved_used = std::mem::replace(&mut self.entry.used_defaults, false);
         let saved_q = std::mem::replace(&mut self.findings.quiet, quiet);
         let mut params = scopemod::all_params(fparams);
-        let self_val = self.entry_receiver(fi, &mut params, &mut st, state);
+        // (a run with verdicts, or with its own requirements, is one call right after the module
+        // ran, from `state`; the others hold for any call, from `base` and the program's calls:
+        // `entry_start`)
+        let plain = matches!(run, Run::Verdicts | Run::Quiet);
+        let saved_for_any = std::mem::replace(&mut self.entry.for_any, !plain);
+        base.reqs = state.reqs.clone();
+        let self_val = self.entry_receiver(fi, &mut params, state, base, plain);
+        if !plain {
+            state.reqs = base.reqs.clone();
+        }
+        let mut st = self.entry_run_start(oid, run, base, state);
         let (args, kwargs, star_args, star_kwargs) = self.entry_arguments(oid, fi, fparams, params, false, &mut st);
         self.findings.quiet = saved_q;
         let defaults = std::mem::replace(&mut self.entry.used_defaults, saved_used);
         self.entry.any_instance = saved_any;
+        self.entry.for_any = saved_for_any;
         self.entry.scope = None;
-        if defaults && run == Run::Verdicts && (self.findings.facts_on || !self.findings.row_check_requests.is_empty()) {
+        // (its values hold for any call: not one with an instance made with the defaults, nor
+        // one from the module's end unless that is where any call starts)
+        let general = !defaults && (!plain || (self.entry.plain_is_any && !self.entry.noted.contains(&oid)));
+        if !general && plain && self.findings.wants_general() {
             self.entry.facts_runs.push(oid);
         }
         let fake = Node::synthetic(mi.idx, fi.node.node().line);
         let saved_entry = self.entry.run.replace(oid);
-        let saved_general = std::mem::replace(&mut self.entry.general, (!defaults).then_some(oid));
-        let saved_nofacts = std::mem::replace(&mut self.entry.no_facts, defaults.then_some(oid));
+        let saved_general = std::mem::replace(&mut self.entry.general, general.then_some(oid));
+        let saved_nofacts = std::mem::replace(&mut self.entry.no_facts, (!general).then_some(oid));
         let before = self.heap.len() as ObjId;
         let saved_quiet = std::mem::replace(&mut self.findings.quiet, quiet);
         let called_torch = self.entry.analysed.contains(&oid) && self.entry.torch_modules.contains(&fi.module);
@@ -329,9 +422,36 @@ impl Analyzer {
         self.entry.run = saved_entry;
         self.entry.general = saved_general;
         self.entry.no_facts = saved_nofacts;
+        self.functions_made(fi, quiet, before, &st);
+        self.cx.frames.pop();
+        if run != Run::FactsOnly {
+            self.keep_entry_requirements(fi, quiet || run == Run::OnDemand, &st, state);
+        }
+    }
+
+    /// Where an entry run of `oid` starts: a closure made by a factory's entry run, from that
+    /// run's state (its cells); a run with verdicts or its own requirements, from `state`; one
+    /// for any call, from `entry_start`.
+    fn entry_run_start(&mut self, oid: ObjId, run: Run, base: &State, state: &State) -> State {
+        let mut st = match self.entry.closure_states.get(&oid) {
+            Some(cs) => {
+                let mut c = cs.copy();
+                (c.reachable, c.exits) = (true, None);
+                c
+            }
+            None if matches!(run, Run::Verdicts | Run::Quiet) => state.copy(),
+            None => self.entry_start(base, state),
+        };
+        st.ret = None;
+        st
+    }
+
+    /// After an entry run of `fi` (`st` its end, `before` the objects made by its start): the
+    /// functions a requirement-only run made are not the program's; the closures a torch
+    /// module's function made start from its end.
+    fn functions_made(&mut self, fi: &FuncInfo, quiet: bool, before: ObjId, st: &State) {
+        let after = self.heap.len() as ObjId;
         if quiet {
-            // functions made by a requirement-only run are not the program's
-            let after = self.heap.len() as ObjId;
             for o in before..after {
                 if self.heap.kind(o) == Kind::Function {
                     self.entry.done.insert(o);
@@ -339,7 +459,6 @@ impl Analyzer {
             }
         }
         if self.entry.torch_modules.contains(&fi.module) {
-            let after = self.heap.len() as ObjId;
             let made: Vec<ObjId> = (before..after).filter(|o| self.heap.kind(*o) == Kind::Function && !self.heap.func_info(*o).closure.is_empty()).collect();
             if !made.is_empty() {
                 let snap = std::rc::Rc::new(st.copy());
@@ -348,15 +467,11 @@ impl Analyzer {
                 }
             }
         }
-        self.cx.frames.pop();
-        if run != Run::FactsOnly {
-            self.keep_entry_requirements(fi, quiet || run == Run::OnDemand, &st, state);
-        }
     }
 
     /// The receiver of a method's entry run: an instance of its class or of one of its
-    /// subclasses (made once per class, from `state`; `st` starts over from it then).
-    fn entry_receiver(&mut self, fi: &FuncInfo, params: &mut Vec<&'static ast::Parameter>, st: &mut State, state: &mut State) -> Option<Value> {
+    /// subclasses (made once per class, in `state`).
+    fn entry_receiver(&mut self, fi: &FuncInfo, params: &mut Vec<&'static ast::Parameter>, state: &mut State, base: &mut State, plain: bool) -> Option<Value> {
         let mut self_val: Option<Value> = None;
         if let Some(cls) = fi.cls {
             if !fi.is_static.get() {
@@ -377,23 +492,27 @@ impl Analyzer {
                         let i = self.fresh_instance(c, state, &format!("entry:{}", cname));
                         self.entry.instances.insert(c, i);
                         (self.entry.any_instance, self.entry.used_defaults) = saved;
-                        *st = state.copy();
-                        st.ret = None;
                     }
-                    let made = if self.entry.any_instance { self.entry.general_instances.get(&c) } else { self.entry.instances.get(&c) };
-                    self.entry.used_defaults |= !self.entry.any_instance;
+                    // (a run for any call takes its instance from `base`)
+                    let any = self.entry.any_instance;
+                    let cache = match (any, plain) {
+                        (false, _) => &mut self.entry.instances,
+                        (true, true) => &mut self.entry.general_instances,
+                        (true, false) => &mut self.entry.any_instances,
+                    };
+                    let made = cache.get(&c).copied();
+                    self.entry.used_defaults |= !any;
                     let inst = match made {
-                        Some(&i) => i,
+                        Some(i) => i,
                         None => {
                             let cname = self.heap.class_info(c).name.clone();
-                            let i = self.fresh_instance(c, state, &format!("entry:{}", cname));
-                            if self.entry.any_instance {
-                                self.entry.general_instances.insert(c, i);
-                            } else {
-                                self.entry.instances.insert(c, i);
-                            }
-                            *st = state.copy();
-                            st.ret = None;
+                            let home = if any && !plain { &mut *base } else { &mut *state };
+                            let i = self.fresh_instance(c, home, &format!("entry:{}", cname));
+                            match (any, plain) {
+                                (false, _) => self.entry.instances.insert(c, i),
+                                (true, true) => self.entry.general_instances.insert(c, i),
+                                (true, false) => self.entry.any_instances.insert(c, i),
+                            };
                             i
                         }
                     };
@@ -402,7 +521,8 @@ impl Analyzer {
                 // (no `__init__` with its defaults completes: an instance some other call made)
                 if insts.is_empty() {
                     let ci = self.heap.class_info(cls);
-                    insts.push(self.open_instance(cls, &ci, st, &format!("entry:{}", ci.name)));
+                    let home = if plain { &mut *state } else { &mut *base };
+                    insts.push(self.open_instance(cls, &ci, home, &format!("entry:{}", ci.name)));
                 }
                 self_val = Some(Value::objs(crate::domain::ObjSet::from_vec(insts)));
                 if !params.is_empty() {
@@ -757,7 +877,7 @@ impl Analyzer {
             }
             state.set_row(inst, Ns::Attr, row);
         }
-        if self.entry.on_demand && self.entry.any_instance {
+        if self.entry.any_instance && self.entry.for_any {
             self.methods_may_have_run(inst, state);
         }
         Some(inst)

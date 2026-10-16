@@ -559,7 +559,7 @@ impl Analyzer {
         let positional: Vec<&str> = ps.posonlyargs.iter().chain(ps.args.iter()).skip(usize::from(bound)).map(|a| a.parameter.name.id.as_str()).collect();
         let named: Vec<&str> = ps.args.iter().chain(ps.kwonlyargs.iter()).map(|a| a.parameter.name.id.as_str()).collect();
         // (an argument past the named ones is a part of `*args`, a keyword one of `**kw`)
-        let rest = |p: Option<&ast::Parameter>| p.map(|p| flags(p.name.id.as_str())).map(|f| Flags { changes: f.changes || f.held, ..Flags::default() }).unwrap_or_default();
+        let rest = |p: Option<&ast::Parameter>| p.map(|p| flags(p.name.id.as_str())).map(|f| Flags { changes: f.changes || f.methods || f.held, ..Flags::default() }).unwrap_or_default();
         let (va, kw) = (rest(ps.vararg.as_deref()), rest(ps.kwarg.as_deref()));
         let mut code: Vec<ObjId> = Vec::new();
         let mut seen = |an: &Analyzer, f: Flags, v: &Value| -> Value {
@@ -627,6 +627,10 @@ impl Analyzer {
                 }
             };
             if let (Some(a), false) = (u.attr, in_module) {
+                // (a method of library layers that changes nothing they hold)
+                if f.called && crate::models::torch::t_keeping_method(&str_get(a)) && self.inert_layers(&state.slot(loc.0, loc.1, loc.2), state) {
+                    f.called = false;
+                }
                 let by_name = Flags { rebinds: false, called: false, ..f };
                 attrs.entry(a).or_default().join(&by_name);
                 // (`K.x = …` of a class K: K's attribute rebound)
@@ -634,7 +638,7 @@ impl Analyzer {
                     let k = key_str_lit(&str_get(a));
                     out.rebound.extend(state.slot(loc.0, loc.1, loc.2).pts.iter().filter(|c| self.heap.kind(*c) == Kind::Class).map(|c| (c, Ns::Attr, k)));
                 }
-                f = Flags { changes: f.called || f.rebinds, held: f.changes || f.held || f.iterated, ..Flags::default() };
+                f = Flags { changes: f.called || f.rebinds, held: f.changes || f.methods || f.held || f.iterated, ..Flags::default() };
             }
             self.apply_flags(&f, loc, state, out);
             code(self, &state.slot(loc.0, loc.1, loc.2), work);
@@ -668,12 +672,19 @@ impl Analyzer {
             (Kind::Method, Payload::Method(q, _)) => q.rsplit('.').next().is_some_and(|m| super::PURE_METHODS.contains(&m)),
             _ => false,
         };
-        let own = f.changes || (f.iterated && !v.pts.iter().all(plain)) || (f.called && !v.pts.iter().all(code_only));
+        // (a library layer called runs its model)
+        let code_only = |o: ObjId| code_only(o) || crate::models::torch::t_layer_type(self, o).is_some() && crate::models::torch::t_inert_layer(self, o, _state);
+        let own = f.changes || f.methods || (f.iterated && !v.pts.iter().all(plain)) || (f.called && !v.pts.iter().all(code_only));
         (own, f.held || f.iterated)
     }
 }
 
 impl Analyzer {
+    /// Is every object of `v` a library layer that calling changes nothing of (and is there one)?
+    fn inert_layers(&self, v: &Value, state: &State) -> bool {
+        !v.pts.is_empty() && v.pts.iter().all(|o| crate::models::torch::t_layer_type(self, o).is_some() && crate::models::torch::t_inert_layer(self, o, state))
+    }
+
     /// Whether attribute `k` of instance `o` is a property with a setter (a store runs it).
     fn setter_of(&self, o: ObjId, k: KeyId) -> bool {
         let Some(c) = self.heap.instance_class(o) else { return false };

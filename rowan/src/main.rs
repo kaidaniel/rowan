@@ -570,6 +570,9 @@ fn golden_requests(an: &mut Analyzer, rel: &str, src: &str) {
             let skip = if rest.starts_with("@L") { rest.find(char::is_whitespace).unwrap_or(rest.len()) } else { 0 };
             Some(p + skip)
         });
+        if line.contains("#@general") || line.contains("#@todo general") {
+            an.request_general_checks();
+        }
         let vhit = ["#@value", "#@todo value", "#@general", "#@todo general"].iter().find_map(|d| line.find(d).map(|p| p + d.len())).or(shape_hit);
         if let Some(pos) = vhit {
             for clause in line[pos..].split(';') {

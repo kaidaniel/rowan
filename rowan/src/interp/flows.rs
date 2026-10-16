@@ -49,13 +49,16 @@ pub struct Flags {
     pub iterated: bool,
     /// it is called (its code runs; a library method runs on its receiver)
     pub called: bool,
+    /// a method is called on it (`v.m(…)`, not one known to change nothing): on an instance of
+    /// the program's classes that runs their code, which changes it only by attribute names
+    pub methods: bool,
     /// the code binds the name (a `global` / `nonlocal` assignment, `m.x = …` of a module)
     pub rebinds: bool,
 }
 
 impl Flags {
     pub fn any(&self) -> bool {
-        self.changes || self.held || self.iterated || self.called || self.rebinds
+        self.changes || self.held || self.iterated || self.called || self.rebinds || self.methods
     }
 
     pub fn join(&mut self, o: &Flags) {
@@ -64,6 +67,7 @@ impl Flags {
         self.iterated |= o.iterated;
         self.called |= o.called;
         self.rebinds |= o.rebinds;
+        self.methods |= o.methods;
     }
 }
 
@@ -78,6 +82,8 @@ enum Pos {
     Change,
     Iterate,
     Call,
+    /// a method is called on it
+    Method,
 }
 
 /// A name the code reads that it does not bind, with an attribute read on it (`m.x`).
@@ -415,6 +421,7 @@ impl<'a> Flow<'a> {
                 (Pos::Change, Level::Own) => f.changes = true,
                 (Pos::Iterate, Level::Own) => f.iterated = true,
                 (Pos::Call, Level::Own) => f.called = true,
+                (Pos::Method, Level::Own) => f.methods = true,
             }
         }
     }
@@ -578,7 +585,7 @@ impl<'a> Flow<'a> {
                     }
                     v => {
                         let recv = self.srcs(v);
-                        self.mark(&recv, if pure { Pos::Read } else { Pos::Change });
+                        self.mark(&recv, if pure { Pos::Read } else { Pos::Method });
                         self.expr(v, Pos::Read);
                     }
                 }
@@ -612,6 +619,11 @@ impl<'a> Flow<'a> {
                     }
                     _ => args.iter().for_each(|x| self.expr(x, Pos::Change)),
                 }
+            }
+            // (the receiver called: its `__call__` runs, a torch module's `forward`)
+            f if self.recv_base(f) => {
+                self.recv.calls.extend([s("__call__"), s("forward")]);
+                args.iter().for_each(|x| self.expr(x, Pos::Change));
             }
             f => {
                 self.expr(f, Pos::Call);

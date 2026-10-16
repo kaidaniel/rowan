@@ -50,7 +50,7 @@ impl Verdict {
 /// the rows of the objects it pointed to. Two sets of values, never joined into one: what holds
 /// for any call of the function the line is in (its general run, with open parameters of their
 /// annotated types; module code), and what the program's own calls gave (with their lines).
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Fact {
     /// object -> (item row, attr row) as they were when the name was read / written: in the
     /// program's calls, and in the general run (the objects a hover describes are the calls'
@@ -185,6 +185,8 @@ pub struct Findings {
     pub t_row_values: FxHashMap<(u32, String, Vec<u32>, bool), Value>,
     /// collect `facts` (the `--facts` mode)
     pub facts_on: bool,
+    /// the golden harness checks values for any call (`#@general`)
+    pub general_checks: bool,
     pub facts: IndexMap<(u32, StrId), Fact>,
     /// the next hover fact is an assignment's
     pub t_fact_write: bool,
@@ -199,6 +201,12 @@ pub struct Findings {
 }
 
 impl Findings {
+    /// Are values for any call asked for (hover facts, `#@general` checks)? Functions whose run
+    /// with verdicts is not one for any call then get a run for any call of their own.
+    pub(in crate::interp) fn wants_general(&self) -> bool {
+        self.facts_on || self.general_checks
+    }
+
     pub(in crate::interp) fn verdicts(&self) -> &[Verdict] {
         &self.verdicts
     }
@@ -328,11 +336,9 @@ impl Analyzer {
         if node.module != self.heap.module_info(self.program.main_module).idx {
             return;
         }
-        // the set the value goes to: the general one, or that of the call (its line); a
-        // requirement-only run records only its function's own lines
+        // the set the value goes to: the general one, or that of the call (its line)
         let general = self.in_general_run();
-        // (on demand, what the program's calls give is not known: only the values for any call)
-        if ((self.findings.quiet || self.entry.on_demand) && !general) || (self.entry.no_facts.is_some() && self.entry.no_facts == self.frame().func) {
+        if self.no_facts_here(general) {
             return;
         }
         let call = if general { None } else { Some(self.cx.call_chain.last().copied().unwrap_or(0)) };
@@ -365,7 +371,7 @@ impl Analyzer {
         };
         legend.extend(tlegend);
         let writing = std::mem::take(&mut self.findings.t_fact_write);
-        let e = self.findings.facts.entry((node.line, name)).or_insert_with(|| Fact { rows: IndexMap::new(), general_rows: IndexMap::new(), general: Vec::new(), calls: Vec::new(), legend: Vec::new(), t_names: FxHashMap::default(), written: false });
+        let e = self.findings.facts.entry((node.line, name)).or_default();
         // in torch programs an assignment's value is what the hover shows (`y = f(y)`)
         if self.m.torch_on {
             if writing && !e.written {
@@ -387,6 +393,13 @@ impl Analyzer {
         }
         e.add_text(text, call, legend);
         e.join_rows(rows, general);
+    }
+
+    /// Does this run record no hover facts on the running function's lines? A requirement-only
+    /// run records only its function's own lines; on demand, what the program's calls give is
+    /// not known (only values for any call); a run with an instance made with defaults, neither.
+    fn no_facts_here(&self, general: bool) -> bool {
+        ((self.findings.quiet || self.entry.on_demand) && !general) || (self.entry.no_facts.is_some() && self.entry.no_facts == self.frame().func)
     }
 
     /// The rows a hover shows for the objects of `v`: item rows of records, attribute rows of

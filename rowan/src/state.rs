@@ -236,6 +236,75 @@ impl State {
         self.clone()
     }
 
+    /// What this state says of the heap (objects' rows, slots, elements, lengths, tensor facts),
+    /// without the running frame's names, path, returns or requirements.
+    pub fn heap_only(&self) -> State {
+        State { rows: self.rows.clone(), slots: self.slots.clone(), elems: self.elems.clone(), lens: self.lens.clone(), lasts: self.lasts.clone(), tf: self.tf.clone(), sym_lens: self.sym_lens.clone(), reachable: self.reachable, ..State::new() }
+    }
+
+    /// Join what `o` says of the objects this state knows (rows, slots, elements, lengths) into
+    /// it: an object only `o` has facts of reads as unknown here. Costs what the two differ in.
+    pub fn join_known(&mut self, o: &State) {
+        if o.reachable {
+            let prev = self.copy();
+            self.join_from(&prev, o, true);
+        }
+    }
+
+    /// Join into this state, which is at least `prev` (a join of states up to it), the heap of
+    /// `o`: only where `o` differs from `prev` can it add anything (states made one after the
+    /// other: what changed between them). `known`: only of the objects this state has facts of.
+    pub fn join_from(&mut self, prev: &State, o: &State, known: bool) {
+        let mut facts_of: FxHashMap<ObjId, bool> = FxHashMap::default();
+        let mut new_ok = |s: &State, oid: ObjId| !known || *facts_of.entry(oid).or_insert_with(|| s.has_facts(oid));
+        for k in o.rows.diff_keys(&prev.rows) {
+            let Some(v) = o.rows.get(&k) else { continue };
+            match self.rows.get(&k) {
+                Some(cur) if cur == v => {}
+                Some(cur) => self.rows.insert(k, cur.join(&v)),
+                None if new_ok(self, k.0) => self.rows.insert(k, v),
+                None => {}
+            }
+        }
+        for (oid, sk) in o.slots.diff_keys(&prev.slots) {
+            let Some(v) = o.slots.get(&oid, &sk) else { continue };
+            match self.slots.get(&oid, &sk) {
+                Some(cur) if cur == v => {}
+                Some(cur) => self.slots.set(&oid, sk, cur.join(&v)),
+                None if new_ok(self, oid) => self.slots.set(&oid, sk, v),
+                None => {}
+            }
+        }
+        for k in o.elems.diff_keys(&prev.elems) {
+            match (o.elems.get(&k), self.elems.get(&k)) {
+                (Some(v), Some(cur)) => self.elems.insert(k, kv_join(&cur, &v)),
+                (Some(v), None) if !known => self.elems.insert(k, v),
+                _ => {}
+            }
+        }
+        for k in o.lens.diff_keys(&prev.lens) {
+            match (o.lens.get(&k), self.lens.get(&k)) {
+                (Some(v), Some(cur)) => self.lens.insert(k, join_len(&cur, &v)),
+                (Some(v), None) if !known => self.lens.insert(k, v),
+                _ => {}
+            }
+        }
+        self.lasts = join_lasts(&self.lasts, &o.lasts);
+        if !Arc::ptr_eq(&self.sym_lens, &o.sym_lens) {
+            self.sym_lens = Arc::new(self.sym_lens.iter().filter(|x| o.sym_lens.contains(x)).copied().collect());
+        }
+        if !(Arc::ptr_eq(&self.tf, &o.tf) || self.tf == o.tf) {
+            self.tf = Arc::new(self.tf.join(&o.tf));
+        }
+        self.facts = Arc::new(Vec::new());
+        self.name_keys = Arc::new(Vec::new());
+    }
+
+    /// Has this state facts of object `oid` (a row, a length, elements, a cell's value)?
+    pub fn has_facts(&self, oid: ObjId) -> bool {
+        [Ns::Item, Ns::Attr, Ns::Pos, Ns::Elem].iter().any(|ns| self.rows.get(&(oid, *ns)).is_some()) || self.lens.get(&oid).is_some() || self.elems.get(&oid).is_some() || self.slots.get(&oid, &(Ns::Cell, crate::intern::key_str_lit("v"))).is_some()
+    }
+
     /// Snapshot the heap at a `return` so the caller sees it joined over all return points.
     pub fn record_exit(&mut self) {
         let mut snap = self.copy();

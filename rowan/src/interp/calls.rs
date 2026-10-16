@@ -479,6 +479,8 @@ impl Analyzer {
 
     #[allow(clippy::too_many_arguments)]
     pub fn call_user(&mut self, foid: u32, self_v: Option<Value>, args: Vec<Value>, kwargs: IndexMap<StrId, Value>, star_args: Vec<Value>, star_kwargs: Vec<Value>, state: &mut State, node: &Node, entry: bool) -> Value {
+        // (its run for any call starts from the heap here too)
+        self.note_call(foid, self_v.as_ref(), state);
         // (on demand, past the work a function's run may do, its callees' calls are unknown)
         if self.budget.past_hover_work(self.cx.frames.len(), self.hover_work()) {
             self.gens.force_at = None;

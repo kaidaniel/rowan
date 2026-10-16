@@ -643,12 +643,13 @@ pub fn t_print_ctx_at(an: &Analyzer, scope: u32, env: &IndexMap<StrId, Value>, s
                         let p = format!("{}.{}", path, name);
                         if !v.pts.is_empty() && !v.kv.is_bot() {
                             // several possibilities: the joined dim
-                            if let Some(d) = t_dim(an, &v, st) {
+                            // (not the unknown dim: no name says what it is)
+                            if let Some(d) = t_dim(an, &v, st).filter(|d| *d != sh::unknown()) {
                                 ctx.dim_alias.entry(d).or_insert_with(|| p.clone());
                             }
                             continue;
                         }
-                        if let Some(d) = dim_of_label(&v).or_else(|| label(&v).and_then(|l| sh::dual_dim(&l))) {
+                        if let Some(d) = dim_of_label(&v).or_else(|| label(&v).and_then(|l| sh::dual_dim(&l))).filter(|d| *d != sh::unknown()) {
                             ctx.dim_alias.entry(d).or_insert_with(|| p.clone());
                             continue;
                         }
@@ -4324,6 +4325,43 @@ pub fn m_nnmodule(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         "to" | "cuda" | "cpu" | "eval" | "train" | "requires_grad_" | "half" | "float" | "double" | "bfloat16" | "type" | "share_memory" => recv,
         _ => Value::data(&format!("L{}", c.line)),
     }
+}
+
+/// Does calling layer `o` change nothing of what it holds? A library layer (or a container of
+/// such) without forward hooks: its model runs, no code of the program.
+pub fn t_inert_layer(an: &Analyzer, o: ObjId, st: &State) -> bool {
+    let mut work = vec![o];
+    let mut seen: rustc_hash::FxHashSet<ObjId> = rustc_hash::FxHashSet::default();
+    while let Some(o) = work.pop() {
+        if !seen.insert(o) || seen.len() > 256 {
+            if seen.len() > 256 {
+                return false;
+            }
+            continue;
+        }
+        let layer = t_layer_type(an, o).is_some();
+        if layer && st.has_slot(o, Ns::Attr, key_str_lit(FWD_HOOKS)) {
+            return false;
+        }
+        if !layer {
+            if matches!(an.heap.kind(o), Kind::Instance | Kind::Function | Kind::Bound | Kind::Method | Kind::Partial | Kind::Class | Kind::Unknown) {
+                return false;
+            }
+            continue;
+        }
+        for ns in [Ns::Attr, Ns::Pos, Ns::Elem, Ns::Item] {
+            for (_, v) in st.obj_slots(o, ns) {
+                work.extend(v.pts.iter());
+            }
+        }
+    }
+    true
+}
+
+/// The `nn.Module` methods that change nothing of the shapes a layer holds (a layer's mode,
+/// device, dtype, gradients; what it holds, read).
+pub fn t_keeping_method(name: &str) -> bool {
+    matches!(name, "to" | "cuda" | "cpu" | "eval" | "train" | "requires_grad_" | "half" | "float" | "double" | "bfloat16" | "type" | "share_memory" | "zero_grad" | "parameters" | "named_parameters" | "buffers" | "named_buffers" | "children" | "named_children" | "modules" | "named_modules" | "state_dict" | "extra_repr")
 }
 
 /// The slot of a module holding its forward hooks.
