@@ -46,20 +46,20 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   of one `def`) may run 4,096 statements in all (`budget`); past that its calls are unknown
   calls that may also change what its code reaches (`effects.rs`, by `flows.rs`'s reading of
   function texts: globals, cells, defaults and arguments whose value, or what it holds, the code
-  may change or give away, a local aliasing what it is bound to; class attributes by name,
-  rebound where a store's base may be the class; a receiver by the names its code uses unless it
-  escapes, `receiver_effects`; one call for several receivers), and the function gets a
-  reporting run with open parameters (for the calls that did not run). Entry runs are not
-  counted (one per function): work is bounded by functions × budget.
+  may change or give away (to the program's functions: as they use it; a dict, list or set changed
+  in place: its items), a local aliasing what it is bound to; class attributes by name, rebound
+  where a store's base may be the class; a receiver by the names its code uses unless it escapes,
+  `receiver_effects`; one call for several receivers), and the function gets a reporting run (open
+  parameters) for the calls that did not run. Entry runs are not counted (one per function): work is bounded by functions × budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation
     reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened.
   * **Unknown values** are not taken for the program's instances: their methods are unknown calls.
   * **Unknown calls** may change everything they reach through what they are given, at any depth:
     records get a mutator, slots may hold anything (one shared unknown object, which no store
     changes: a value stored into it goes to unknown code, `escape`), lists and sets any items
-    and length (NamedTuples, patterns, matches, paths, frozensets cannot change); the program's
-    functions among it may run (`follow_code`). A walk by the same code from the same values
-    redoes only what changed (`Havoc`'s memo). They return an unknown and may raise anything.
+    and length (NamedTuples, patterns, matches, paths, frozensets, enum members' name and value
+    cannot change); the program's functions among it may run (`follow_code`). A walk by the same
+    code from the same values redoes only what changed (`Havoc`'s memo). They return an unknown and may raise anything.
     Library functions known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`) unless they
     change their arguments (`random.shuffle`) or get the program's functions; several callees: `alternatives`.
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model
@@ -68,9 +68,9 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
     runs call) run with open parameters (`param F.x` schemas), from the module's end; a called
     function gets a requirement-only run so too. A *general run* (`Entries::general`: hover values
     for any call, apart from the program's calls, `Fact`) starts from `after_any_code`: the module's
-    end after any of the program's functions ran (`follow_code` over all; instances by name,
-    `methods_may_have_run`), joined with the heaps at module code's calls (`note_call`); parameters
-    as annotated, a method on any instance. With facts on, a facts-only general run follows where needed.
+    end after any of the program's functions ran (`follow_code` over all, a result as its callers
+    use it, `caller_returns`; instances by name, `methods_may_have_run`), joined with the heaps at
+    module code's calls (`note_call`); parameters as annotated, a method on any instance. Facts on: a facts-only general run where needed.
 * **Generators** run whole at their first consumption (`force_gen`), in the creating call's
   context; a consumer of item *k* sees the effects up to yield *k* (`GenEffects`; at a position
   not known, some yield's). If code between items (where the consumer asks for one:
@@ -99,8 +99,8 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
 * **Soundness** holds relative to the models and to annotations (of values whose class is unknown;
   a general run's `x: int` is an int, not a subclass overriding int's operators). `exec`, `setattr` /
   `getattr` with unknown names (also in skipped code; a class attribute set there through data or a
-  call's result, `f().x = 1`), metaclasses and monkey-patching (rebinding a function or class too)
-  are unknown or ignored. List lengths are tracked up to 15 (a few per path: each one's positions;
+  call's result, `f().x = 1`), metaclasses and monkey-patching (rebinding a function or class too;
+  a module's function the program calls only by name has no other callers) are unknown or ignored. List lengths are tracked up to 15 (a few per path: each one's positions;
   `xs[:n]` keeps xs's). An object a path has no facts of reads as unknown (`read_row`).
 
 ## Working conventions (the owner's standing instructions)
@@ -163,7 +163,7 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (golden `#@limits` per case); `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check`.
   Profiles: the bench workflow's `perf` (`sample` hangs on macOS 27); time inside the guard (`.guard/run /usr/bin/time -l`).
 
-## Layout (`rowan/src/`, ~64k lines: the engine ~22k, the models ~42k)
+## Layout (`rowan/src/`, ~68k lines: the engine ~26k, the models ~42k)
 
 | file | role |
 | --- | --- |
@@ -191,7 +191,7 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
 | --- | --- |
 | golden / oracle | ~5 s / ~1.5 min |
 | stdlib12k (12k lines) / email (10k) / rich (27k) / click (10k), no deadlines | ~2.3 / ~2.5 / ~8.8 / ~6.4 s; 0.12 / 0.07 / 0.16 / 0.09 GB (`--facts`: ~4.7 / 2.5 / 8.9 / 6.4 s) |
-| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~13 / ~26 / ~23 / ~5.2 s; 0.30 / 0.75 / 0.39 / 0.30 GB |
+| pip (134k) / timm (132k) / sktime (355k) / functional (213k), no deadlines | ~13 / ~26 / ~24 / ~6.4 s; 0.30 / 0.75 / 0.39 / 0.34 GB |
 | on demand (`bench/hovers.py`, every function): rich / pip / timm / sktime | setup (every module) 0.2 / 8.9 / 5.3 / 28 s; per function p50 ≤ 1.4 ms, p99 0.23-0.8 s, max 0.6 / 2.8 / 5 / 20 s (havoc walks) |
 
 ## Known problems and next steps

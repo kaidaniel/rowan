@@ -943,6 +943,8 @@ fn render_object(an: &Analyzer, state: &State, o: ObjId, depth: u32, seen: &mut 
             out
         }
         Kind::List | Kind::Tuple | Kind::Set => render_sequence(an, state, o, kind, depth, seen),
+        // (an enum member as the program names it: `Color.RED`)
+        Kind::Instance if an.heap.keys.member_key.contains_key(&o) => intern::with_key(an.heap.keys.member_key[&o], |k| if let intern::Key::Member(q, _) = k { q.to_string() } else { "?".into() }),
         Kind::Instance => {
             let name = an.heap.instance_class(o).and_then(|c| an.heap.class_info_opt(c)).map(|ci| ci.name.clone()).unwrap_or_else(|| "object".into());
             if depth >= max_depth {

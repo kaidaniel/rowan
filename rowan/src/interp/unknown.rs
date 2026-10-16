@@ -164,6 +164,24 @@ impl Havoc {
         self.memo.insert(key, HavocMemo { roots, rows: state.rows.clone(), slots: state.slots.clone(), elems: state.elems.clone(), lens: state.lens.clone(), visited, code, guard });
     }
 
+    /// Code rowan does not follow changed the containers `objs` in place (`Flags::edits`; with
+    /// `change` false, only iterated them): their items may be anything, what they held is as it
+    /// was. The code their items hold or are instances of is met (dunders: `__hash__`, `__lt__`).
+    pub(in crate::interp) fn edit(&mut self, heap: &mut Heap, objs: &[ObjId], change: bool, site: StrId, state: &mut State) {
+        let any_id = any_object(heap);
+        let any = Value::obj(any_id);
+        let mut met: Vec<ObjId> = Vec::new();
+        for &o in objs {
+            if change {
+                let k = heap.kind(o);
+                havoc_object(heap, state, o, k, site, any_id, &any, &mut met);
+            } else {
+                state.slots.each(&o, &mut |_, v| met.extend(v.pts.iter()));
+            }
+        }
+        self.code.extend(met.into_iter().filter_map(|o| code_of(heap, o)));
+    }
+
     /// Where a walk from the same values by the same code left off (`memo`): the objects it
     /// met, the code it met, and what changed since (none: walk all again). The changed objects
     /// it met are walked again.
@@ -365,17 +383,32 @@ impl Analyzer {
             let cl = self.code_closure(&roots, state);
             let mut vals: Vec<Value> = cl.locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).collect();
             vals.extend(cl.values.iter().cloned());
-            // (values whose parts may change, not themselves: their parts)
+            // (values whose parts may change, not themselves: their parts; whose parts' parts
+            // may: those)
             let mut parts: Vec<ObjId> = Vec::new();
             for v in cl.held_locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).chain(cl.held_values.iter().cloned()) {
                 for o in v.pts.iter() {
                     self.obj_edges(o, state, &mut parts);
                 }
             }
+            let mut mid: Vec<ObjId> = Vec::new();
+            for v in cl.held2_locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)) {
+                for o in v.pts.iter() {
+                    self.obj_edges(o, state, &mut mid);
+                }
+            }
+            for o in mid {
+                self.havoc.code.extend(code_of(&self.heap, o));
+                self.obj_edges(o, state, &mut parts);
+            }
             parts.sort_unstable();
             parts.dedup();
             vals.extend(parts.into_iter().map(Value::obj));
             self.havoc.walk_from(&mut self.heap, &vals, rid, site, state, walk);
+            for (locs, values, change) in [(&cl.edited_locs, &cl.edited_values, true), (&cl.iterated_locs, &cl.iterated_values, false)] {
+                let objs: Vec<ObjId> = locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).chain(values.iter().cloned()).flat_map(|v| v.pts.to_vec()).collect();
+                self.havoc.edit(&mut self.heap, &objs, change, site, state);
+            }
             for (o, ns, k) in &cl.rebound {
                 let v = state.slot(*o, *ns, *k).join(&any);
                 state.set_slot(*o, *ns, *k, v, false);
@@ -396,6 +429,15 @@ impl Analyzer {
         if kept.len() != state.facts.len() {
             state.facts = std::sync::Arc::new(kept);
         }
+    }
+}
+
+/// The code object `o` is or is an instance of (what running or comparing it may run).
+pub(in crate::interp) fn code_of(heap: &Heap, o: ObjId) -> Option<ObjId> {
+    match (heap.kind(o), &heap.obj(o).payload) {
+        (Kind::Class | Kind::Function | Kind::Bound | Kind::Partial, _) => Some(o),
+        (Kind::Instance, Payload::Cls(c)) => Some(*c),
+        _ => None,
     }
 }
 
@@ -423,10 +465,13 @@ fn receiver_by_names(heap: &Heap, state: &State, o: ObjId, used: &[KeyId], work:
 /// the slots hold is walked next).
 #[allow(clippy::too_many_arguments)]
 fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: StrId, any_id: ObjId, any: &Value, work: &mut Vec<ObjId>) {
+    // (an enum member's `name` and `value` cannot be set or deleted)
+    let member = heap.keys.member_key.contains_key(&o);
+    let fixed = |ns: Ns, k: KeyId| member && ns == Ns::Attr && intern::key_as_str(k).is_some_and(|n| matches!(&*n, "name" | "value"));
     let mut writes: Vec<(crate::state::SlotKey, Value)> = Vec::new();
     state.slots.each(&o, &mut |sk, v| {
         work.extend(v.pts.iter());
-        if matches!(sk.0, Ns::Item | Ns::Attr | Ns::Pos | Ns::Elem) && !v.pts.contains(any_id) {
+        if matches!(sk.0, Ns::Item | Ns::Attr | Ns::Pos | Ns::Elem) && !v.pts.contains(any_id) && !fixed(sk.0, sk.1) {
             writes.push((*sk, v.join(any)));
         }
     });
@@ -442,7 +487,7 @@ fn havoc_object(heap: &mut Heap, state: &mut State, o: ObjId, k: Kind, site: Str
             None if (ns == Ns::Item && matches!(k, Kind::Dict | Kind::Frame)) || (ns == Ns::Attr && k == Kind::Instance) => Row::new(),
             None => continue,
         };
-        let r = r0.mutate(site);
+        let r = if member { r0.mutate_like(site, &|k| !fixed(ns, k)) } else { r0.mutate(site) };
         if r != r0 {
             state.set_row(o, ns, r);
         }
