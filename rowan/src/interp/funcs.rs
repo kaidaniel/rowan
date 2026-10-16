@@ -1462,12 +1462,15 @@ impl Analyzer {
         let kind = if matches!(o_kind, Kind::Dict | Kind::List | Kind::Tuple | Kind::Set | Kind::Instance | Kind::Frame) { o_kind } else { Kind::Dict };
         let tag = if deep { "deep" } else { "copy" };
         // (the original's id in the site: a deep copy's nested copies are distinct objects; a
-        // copy of a copy made at this node counts as a copy of the first original)
+        // copy of a copy, made here or elsewhere, counts as a copy of the first original — else
+        // copies of copies in a loop make new sites every round)
         let prefix = format!("{}:{}:", tag, self.site_of(node));
-        let site_root = self.heap.obj(oid).site.strip_prefix(&prefix).and_then(|rest| rest.split(['#', ':']).nth(1)).and_then(|r| r.parse::<u32>().ok());
+        // (a copy renamed since, `#recent`: its site still names its original)
+        let site = &self.heap.obj(oid).site;
+        let site_root = (site.starts_with("copy:") || site.starts_with("deep:")).then(|| site.split('#').next().and_then(|s| s.rsplit(':').next()).and_then(|r| r.parse::<u32>().ok())).flatten();
         let root = match (self.heap.copy_root.get(&oid), site_root) {
-            (Some(&r), _) if self.heap.obj(oid).site.starts_with(&prefix) => r,
-            (_, Some(r)) if (r as usize) < self.heap.len() => r,
+            (Some(&r), _) => r,
+            (_, Some(r)) if (r as usize) < self.heap.len() => self.heap.copy_root.get(&r).copied().unwrap_or(r),
             _ => oid,
         };
         // (a copy of a copy made elsewhere is named by the first original: `copy of X@L5`)
