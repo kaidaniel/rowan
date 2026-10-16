@@ -80,6 +80,11 @@ impl<T: Clone + Eq + std::hash::Hash> Table<T> {
 
 struct Interners {
     keys: Table<Key>,
+    /// str keys by their text (a lookup without allocating)
+    str_keys: FxHashMap<Arc<str>, u32>,
+    /// per key, the id of its text as a small string, plus one (0: not looked up yet; a key
+    /// that is not a str: u32::MAX)
+    key_names: Vec<u32>,
     strs: Table<Arc<str>>,
     sources: Table<Source>,
     lenses: Table<Lens>,
@@ -93,6 +98,8 @@ impl Interners {
     fn fresh() -> Self {
         let mut it = Interners {
             keys: Table::new(),
+            str_keys: FxHashMap::default(),
+            key_names: Vec::new(),
             strs: Table::new(),
             sources: Table::new(),
             lenses: Table::new(),
@@ -117,7 +124,33 @@ pub fn key(k: Key) -> KeyId {
 }
 
 pub fn key_str_lit(s: &str) -> KeyId {
-    key(Key::Str(Arc::from(s)))
+    if let Some(k) = INTERN.with(|i| i.borrow().str_keys.get(s).copied()) {
+        return KeyId(k);
+    }
+    let a: Arc<str> = Arc::from(s);
+    let k = key(Key::Str(a.clone()));
+    INTERN.with(|i| i.borrow_mut().str_keys.insert(a, k.0));
+    k
+}
+
+/// The text of a str key as a small string (None for other key types); remembered per key.
+pub fn key_str_id(id: KeyId) -> Option<StrId> {
+    let known = INTERN.with(|i| i.borrow().key_names.get(id.0 as usize).copied().unwrap_or(0));
+    match known {
+        u32::MAX => None,
+        0 => {
+            let n = key_as_str(id).map(|t| s(&t));
+            INTERN.with(|i| {
+                let mut i = i.borrow_mut();
+                if i.key_names.len() <= id.0 as usize {
+                    i.key_names.resize(id.0 as usize + 1, 0);
+                }
+                i.key_names[id.0 as usize] = n.map_or(u32::MAX, |n| n.0 + 1);
+            });
+            n
+        }
+        n => Some(StrId(n - 1)),
+    }
 }
 
 pub fn key_int(i: i64) -> KeyId {
@@ -319,6 +352,9 @@ pub fn keys_str(keys: impl IntoIterator<Item = KeyId>) -> String {
 // ---------------------------------------------------------------------------
 
 pub fn s(st: &str) -> StrId {
+    if let Some(n) = INTERN.with(|i| i.borrow().strs.index.get(st).copied()) {
+        return StrId(n);
+    }
     INTERN.with(|i| StrId(i.borrow_mut().strs.intern(Arc::from(st))))
 }
 

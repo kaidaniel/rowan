@@ -447,7 +447,7 @@ impl Analyzer {
             // and their attributes it may change or rebind
             for &c in &classes {
                 for (k, v) in state.obj_slots(c, Ns::Attr) {
-                    let name = intern::key_as_str(k).map(|n| s(&n));
+                    let name = intern::key_str_id(k);
                     if (name.is_some_and(|n| reads.contains(&n) || str_get(n).starts_with("__"))) && done.insert((c, k)) {
                         code(self, &v, &mut work);
                     }
