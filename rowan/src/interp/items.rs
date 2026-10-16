@@ -657,8 +657,8 @@ impl Analyzer {
             v = v.join(&Value::with_kv(star.pts, DATA));
         }
         // (a key of an open record stored on some paths only: on the others its value is
-        // the input's, which a slot one path made does not cover)
-        let partly_stored = !v.empty() && row0.has_input() && !(row0.definite.contains(k) && row0.stored.contains(k));
+        // the input's, or what unknown code put there, which a slot one path made does not cover)
+        let partly_stored = !v.empty() && (row0.has_input() || !row0.mutators.is_empty()) && !(row0.definite.contains(k) && row0.stored.contains(k));
         if !from_map && (partly_stored || (v.pts.is_empty() && matches!(v.kv, KeyVal::Data(_) | KeyVal::Bot) && (row.open() || cls.tier == Tier::Map))) {
             let p = self.path_placeholder_value(oid, ns, k, row, state);
             v = v.join(&p);
