@@ -63,11 +63,19 @@ impl Analyzer {
             if items.len() <= limit && !same {
                 let unordered = it.unordered;
                 self.cx.comp_unordered += usize::from(unordered);
-                self.comp_unrolled(gens, i, limit, items, state, body, understood, own);
+                let items: Vec<(Value, bool)> = items.iter().map(|v| (v.clone(), true)).collect();
+                self.comp_unrolled(gens, i, limit, &items, state, body, understood, own);
                 self.cx.comp_unordered -= usize::from(unordered);
                 self.exhaust(&exhaust_after, state);
                 return;
             }
+        }
+        // a closed dict with some keys only maybe there: one iteration per key, a maybe one
+        // joined with skipping it
+        if let Some(items) = it.items.is_none().then(|| self.maybe_dict_items(&itv, state)).flatten().filter(|its| its.len() <= limit) {
+            self.comp_unrolled(gens, i, limit, &items, state, body, understood, own);
+            self.exhaust(&exhaust_after, state);
+            return;
         }
         self.cx.comp_known.push(false);
         let depth = self.cx.cond_depth;
@@ -145,12 +153,18 @@ impl Analyzer {
     /// keeps it straight-line (positions survive), an undecided one makes the iteration
     /// conditional (joined with skipping the item).
     #[allow(clippy::too_many_arguments)]
-    fn comp_unrolled(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, items: &[Value], state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) {
+    fn comp_unrolled(&mut self, gens: &'static [ast::Comprehension], i: usize, limit: usize, items: &[(Value, bool)], state: &mut State, body: &mut dyn FnMut(&mut Analyzer, &mut State), understood: bool, own: ObjId) {
         self.cx.comp_known.push(true);
-        for (idx, item) in items.iter().enumerate() {
+        for (idx, (item, sure)) in items.iter().enumerate() {
             let mut s2 = state.copy();
             self.frame_mut().unroll.push(idx);
-            let decided = self.comp_run_one(&gens[i], gens, i, limit, &Elem::One(item.clone()), &mut s2, body, understood, own);
+            // (an item there on some paths only: its iteration is conditional)
+            let maybe = usize::from(!*sure);
+            self.cx.comp_maybe += maybe;
+            self.cx.cond_depth += maybe as i32;
+            let decided = self.comp_run_one(&gens[i], gens, i, limit, &Elem::One(item.clone()), &mut s2, body, understood, own) && *sure;
+            self.cx.comp_maybe -= maybe;
+            self.cx.cond_depth -= maybe as i32;
             self.frame_mut().unroll.pop();
             if s2.reachable {
                 let j = if decided { s2 } else { state.join(&mut s2) };
