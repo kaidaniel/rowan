@@ -83,6 +83,33 @@ impl Analyzer {
         if self.budget.over_hard_deadline() && targets.iter().all(|o| matches!(self.heap.kind(*o), Kind::Function | Kind::Bound)) {
             return self.unknown_call("?", None, &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
+        // (several values rowan knows nothing of, or their methods: any of them is any code, one
+        // unknown call for all of them — each its own would walk all it is given again, on a
+        // copy of the state)
+        let unknown_code = |o: ObjId| match (self.heap.kind(o), &self.heap.obj(o).payload) {
+            (Kind::Unknown, _) => Some(Value::obj(o)),
+            (Kind::Method, Payload::Method(q, r)) if q.starts_with("unknown.") => Some(r.clone()),
+            _ => None,
+        };
+        let (unknown, mut targets): (Vec<ObjId>, Vec<ObjId>) = targets.iter().partition(|o| unknown_code(**o).is_some());
+        let unknown = match unknown.len() {
+            0 => None,
+            1 => {
+                targets.push(unknown[0]);
+                None
+            }
+            _ => {
+                let q = match call_ast.and_then(|c| super::chain_text(&c.func)) {
+                    Some(text) => format!("call of {}", text),
+                    None => format!("call of {}", self.heap.obj(unknown[0]).label),
+                };
+                Some((q, join_values(unknown.iter().filter_map(|o| unknown_code(*o)).collect::<Vec<_>>())))
+            }
+        };
+        if targets.is_empty() {
+            let (q, recv) = unknown.expect("several unknown callees");
+            return self.unknown_call(&q, Some(&recv), &args, &kwargs, &star_args, &star_kwargs, state, node);
+        }
         // (one method past its budget on each of several receivers: one call past the budget
         // with all of them as the receiver, not one per receiver)
         let (targets, batch) = match self.skipped_on_receivers(&targets) {
@@ -93,11 +120,13 @@ impl Analyzer {
         // (several functions a value picks — a method of each of several receivers is the
         // receiver's own: not picked)
         let picked = targets.iter().all(|o| !matches!(self.heap.kind(*o), Kind::Bound) && !matches!(self.heap.obj(*o).payload, Payload::Method(..) | Payload::Bound(..))).then(|| self.node_text(node));
-        self.alternatives(targets.len() + usize::from(batch.is_some()), false, state, &mut |an, i, st| {
-            match (targets.get(i), &batch) {
-                (Some(&oid), _) => an.call_picked(oid, &picked, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast),
-                (None, Some((f, recv))) => an.skipped_on(*f, recv, &args, &kwargs, &star_args, &star_kwargs, st, node),
-                (None, None) => unreachable!(),
+        let n = targets.len();
+        self.alternatives(n + usize::from(batch.is_some()) + usize::from(unknown.is_some()), false, state, &mut |an, i, st| {
+            match (targets.get(i), &batch, &unknown) {
+                (Some(&oid), _, _) => an.call_picked(oid, &picked, &args, &kwargs, &star_args, &star_kwargs, st, node, call_ast),
+                (None, Some((f, recv)), _) if i == n => an.skipped_on(*f, recv, &args, &kwargs, &star_args, &star_kwargs, st, node),
+                (None, _, Some((q, recv))) => an.unknown_call(q, Some(recv), &args, &kwargs, &star_args, &star_kwargs, st, node),
+                _ => unreachable!(),
             }
         })
     }
