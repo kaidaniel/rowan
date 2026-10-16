@@ -98,6 +98,10 @@ struct ModuleEnd {
     cut: bool,
 }
 
+
+/// A method of a class with more subclasses than this runs for any call on an instance of the
+/// class made by its `__init__`, or of a subclass with any attributes (`entry_receiver`).
+const MANY_SUBCLASSES: usize = 64;
 impl Analyzer {
     pub fn run(&mut self) {
         let mut state = State::new();
@@ -523,6 +527,9 @@ impl Analyzer {
                     return Some(Value::objs(crate::domain::ObjSet::from_vec(subs)));
                 }
                 let mut insts: Vec<ObjId> = Vec::new();
+                // (a base class of very many: any instance of a subclass has any attributes —
+                // running each subclass's `__init__` for any call made its methods' runs slow)
+                let many = subs.len() > MANY_SUBCLASSES;
                 for c in subs {
                     // (the instance made with the defaults is made too, whichever run needs a
                     // receiver first: its `__init__` run's verdicts carry much of a library's
@@ -549,7 +556,12 @@ impl Analyzer {
                         None => {
                             let cname = self.heap.class_info(c).name.clone();
                             let home = if any && !plain { &mut *base } else { &mut *state };
-                            let i = self.fresh_instance(c, home, &format!("entry:{}", cname));
+                            let i = if any && many && c != cls {
+                                let ci = self.heap.class_info(c);
+                                Some(self.open_instance(c, &ci, home, &format!("entry:{}", cname)))
+                            } else {
+                                self.fresh_instance(c, home, &format!("entry:{}", cname))
+                            };
                             match (any, plain) {
                                 (false, _) => self.entry.instances.insert(c, i),
                                 (true, true) => self.entry.general_instances.insert(c, i),
