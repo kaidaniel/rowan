@@ -68,7 +68,14 @@ pub struct Fact {
     pub t_names: FxHashMap<crate::models::shape::AtomId, String>,
     /// recorded by an assignment (whose value the hover shows, not the reads on the line)
     pub written: bool,
+    /// a parameter's fact at its `def`: its function, and what the program's calls passed (the
+    /// call chain into the function, the objects given; at most `PASSED`)
+    pub param_of: Option<ObjId>,
+    pub passed: Vec<(Chain, Vec<ObjId>)>,
 }
+
+/// The calls' arguments a parameter's fact keeps (`Fact::passed`).
+const PASSED: usize = 32;
 
 /// Distinct texts a fact keeps per set: more are not shown.
 const FACT_TEXTS: usize = 4;
@@ -198,6 +205,9 @@ pub struct Findings {
     pub quiet_records: bool,
     /// the state the main module ended in (the report's rows)
     pub final_state: Option<State>,
+    /// what functions' runs for any call read of their own parameters (`param F.x`
+    /// requirements: a hovered parameter's contract)
+    pub contracts: Option<State>,
 }
 
 impl Findings {
@@ -400,6 +410,31 @@ impl Analyzer {
     /// not known (only values for any call); a run with an instance made with defaults, neither.
     fn no_facts_here(&self, general: bool) -> bool {
         ((self.findings.quiet || self.entry.on_demand) && !general) || (self.entry.no_facts.is_some() && self.entry.no_facts == self.frame().func)
+    }
+
+    /// The facts of the running function's parameters at its `def`, as a call binds them: their
+    /// values, and for the program's calls what each passed (`Fact::passed`).
+    pub(in crate::interp) fn record_param_facts(&mut self, fi: &super::FuncInfo, bound: &IndexMap<StrId, Value>, state: &State) {
+        let (Some(params), Some(foid)) = (fi.node.params(), self.frame().func) else { return };
+        let module = fi.node.node().module;
+        if !self.findings.facts_on || module != self.heap.module_info(self.program.main_module).idx {
+            return;
+        }
+        let general = self.in_general_run();
+        if self.no_facts_here(general) {
+            return;
+        }
+        for p in crate::scopes::all_params(params) {
+            let name = s(p.name.id.as_str());
+            let Some(v) = bound.get(&name) else { continue };
+            let node = frontend::node_in(module, p);
+            self.record_fact(&node, name, v, state);
+            let Some(f) = self.findings.facts.get_mut(&(node.line, name)) else { continue };
+            f.param_of = Some(foid);
+            if !general && f.passed.len() < PASSED && !f.passed.iter().any(|(c, _)| *c == self.cx.call_chain) {
+                f.passed.push((self.cx.call_chain.clone(), v.pts.to_vec()));
+            }
+        }
     }
 
     /// The rows a hover shows for the objects of `v`: item rows of records, attribute rows of

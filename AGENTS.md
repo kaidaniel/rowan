@@ -1,8 +1,7 @@
 # AGENTS.md: working on rowan
 
-`README.md` says what rowan does for a user. This file is for working on the engine: how it
-works, the owner's conventions, the tests, the debugging switches, and where things are. It
-must be true at the last commit. The details live in the code's doc comments.
+`README.md` says what rowan does for a user; this file is for working on the engine (how it works, the
+owner's conventions, tests, switches, layout), true at the last commit; details are in doc comments.
 
 ## How rowan works
 
@@ -82,6 +81,7 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   requirement on that input: `always` (every path), `sometimes`; `only_if`: tests of the
   function's parameters as passed that all its readers passed (`State::path`, `guards.rs`). A
   read guarded by a `KeyError` handler counts (a frame column read in a `try` is a probe: not).
+  A general run's on its own parameters are a hover's contract (`Findings::contracts`); a parameter's fact at its `def` keeps what each call passed (`Fact::passed`, checked by its run's verdicts).
 * **Verdicts:** every read, `del` and `pop` gets a tier per object from its row (`classify`):
   `proven`, `possibly`, `missing`, `input` are sound; `likely` / `likely-missing` optimistic
   (unknown code removed nothing). In one of several functions a value picks
@@ -161,7 +161,7 @@ torch and the benchmark (`bench.yml`, also the `budget=0` golden count), and a p
 * `ROWAN_DEBUG=1`: body runs (`run F at SITE`), skipped calls, entry runs, a `work:` line of counters (statements,
   units = statements + walk visits / 16, body runs, objects, row joins, visits, havoc visits; ~25% slower). `2`: raises.
 * `ROWAN_LIMITS=budget=4096,ms=10000`: the only knobs (golden `#@limits` per case); `ROWAN_FOLLOW=pkg,…` is `--follow`; `ROWAN_TODO=check`.
-* **Profiling:** the bench workflow's `perf` profiles (`sample` hangs on macOS 27); time inside the guard (`.guard/run /usr/bin/time -l rowan …`).
+  Profiles: the bench workflow's `perf` (`sample` hangs on macOS 27); time inside the guard (`.guard/run /usr/bin/time -l`).
 
 ## Layout (`rowan/src/`, ~64k lines: the engine ~22k, the models ~42k)
 

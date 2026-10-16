@@ -19,6 +19,9 @@ use crate::intern::{self, key_str_lit, s, KeyId, KeySet, StrId};
 use crate::scopes as scopemod;
 use crate::state::{Kind, State};
 
+/// Requirements per input (`State::reqs`).
+type Reqs = crate::layered::TwoLevel<crate::domain::SourceId, KeyId, crate::domain::ReqInfo>;
+
 #[derive(Default)]
 pub struct Entries {
     /// the function an entry run (open parameters) is analysing
@@ -298,11 +301,14 @@ impl Analyzer {
                 }
                 let fi = self.heap.func_info(oid);
                 if self.m.fa_handlers.contains(&oid) {
-                    // (a handler's run for any request: its requirements are its run's with verdicts)
-                    let st = self.entry_start(base, state);
-                    let (saved, mut scratch) = (std::mem::replace(&mut self.findings.quiet, true), state.copy());
+                    // (a handler's run for any request: its requirements are its run's with
+                    // verdicts; what it reads of its parameters, its contract)
+                    let mut st = self.entry_start(base, state);
+                    st.reqs = Default::default();
+                    let (saved, mut scratch) = (std::mem::replace(&mut self.findings.quiet, true), State::new());
                     crate::models::fastapi::fa_entry_run(self, oid, &fi, st, &mut scratch, true);
                     self.findings.quiet = saved;
+                    self.note_contract(&fi, &scratch.reqs, &Default::default());
                     continue;
                 }
                 self.entry_run(oid, &fi, Run::FactsOnly, base, state);
@@ -345,7 +351,11 @@ impl Analyzer {
                 let general = self.entry.plain_is_any && !self.entry.noted.contains(&oid);
                 let mut st = state.copy();
                 st.ret = None;
+                let before = state.reqs.clone();
                 crate::models::fastapi::fa_entry_run(self, oid, &fi, st, state, general);
+                if general {
+                    self.note_contract(&fi, &state.reqs.clone(), &before);
+                }
                 if !general && (self.findings.wants_general()) {
                     self.entry.facts_runs.push(oid);
                 }
@@ -416,7 +426,11 @@ impl Analyzer {
         let saved_quiet = std::mem::replace(&mut self.findings.quiet, quiet);
         let called_torch = self.entry.analysed.contains(&oid) && self.entry.torch_modules.contains(&fi.module);
         let saved_qr = std::mem::replace(&mut self.findings.quiet_records, called_torch);
+        let start_reqs = st.reqs.clone();
         self.call_user(oid, self_val, args, kwargs, star_args, star_kwargs, &mut st, &fake, true);
+        if general {
+            self.note_contract(fi, &st.reqs, &start_reqs);
+        }
         self.findings.quiet_records = saved_qr;
         self.findings.quiet = saved_quiet;
         self.entry.run = saved_entry;
@@ -431,7 +445,8 @@ impl Analyzer {
 
     /// Where an entry run of `oid` starts: a closure made by a factory's entry run, from that
     /// run's state (its cells); a run with verdicts or its own requirements, from `state`; one
-    /// for any call, from `entry_start`.
+    /// for any call, from `entry_start` (a facts-only one with only its own requirements: its
+    /// function's contract).
     fn entry_run_start(&mut self, oid: ObjId, run: Run, base: &State, state: &State) -> State {
         let mut st = match self.entry.closure_states.get(&oid) {
             Some(cs) => {
@@ -443,6 +458,9 @@ impl Analyzer {
             None => self.entry_start(base, state),
         };
         st.ret = None;
+        if run == Run::FactsOnly {
+            st.reqs = Default::default();
+        }
         st
     }
 
@@ -566,6 +584,24 @@ impl Analyzer {
             }
         }
         (args, kwargs, star_args, star_kwargs)
+    }
+
+    /// Keep what a run of `fi` for any call read of its own parameters (`reqs` since `start`):
+    /// its contract (`Findings::contracts`).
+    fn note_contract(&mut self, fi: &FuncInfo, reqs: &Reqs, start: &Reqs) {
+        let own = format!("param {}.", fi.py_qualname());
+        let c = self.findings.contracts.get_or_insert_with(State::new);
+        for (src, k) in reqs.diff_keys(start) {
+            if !crate::domain::source_label(src).starts_with(&own) {
+                continue;
+            }
+            let Some(info) = reqs.get(&src, &k) else { continue };
+            let nv = match c.reqs.get(&src, &k) {
+                Some(cur) => cur.join(&info),
+                None => info,
+            };
+            c.reqs.set(&src, k, nv);
+        }
     }
 
     /// Keep the schema requirements an entry run found (a requirement-only run: those of the

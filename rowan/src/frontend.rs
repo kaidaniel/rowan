@@ -356,6 +356,12 @@ pub fn node<T: Ranged>(n: &T) -> Node {
     Node { addr, module, line, end_line, col, end_col }
 }
 
+/// The node of `n` in module `module` (a part the registry does not keep: a parameter).
+pub fn node_in<T: Ranged>(module: u32, n: &T) -> Node {
+    let (line, end_line, col, end_col) = locate(module, n.range());
+    Node { addr: n as *const T as usize, module, line, end_line, col, end_col }
+}
+
 pub fn module_of_addr(addr: usize) -> Option<u32> {
     REG.with(|r| r.borrow().nodes.get(&addr).copied())
 }

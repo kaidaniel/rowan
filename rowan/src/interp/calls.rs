@@ -685,6 +685,7 @@ impl Analyzer {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::interp) fn bind_params(&mut self, fi: &FuncInfo, self_v: &Option<Value>, args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node) {
         let bound = self.compute_bindings(fi, self_v, args, kwargs, star_args, star_kwargs, state, node);
+        self.record_param_facts(fi, &bound, state);
         for (name, v) in bound {
             self.store_name(name, v, state);
         }

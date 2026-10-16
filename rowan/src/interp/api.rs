@@ -284,6 +284,12 @@ impl Analyzer {
         }
     }
 
+    /// Does what is recorded here hold for any call of the running function (its run for any
+    /// call, or module code)?
+    pub fn for_any_call(&self) -> bool {
+        self.in_general_run()
+    }
+
     /// The golden harness checks values for any call (`#@general`).
     pub fn request_general_checks(&mut self) {
         self.findings.general_checks = true;

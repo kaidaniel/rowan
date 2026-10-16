@@ -23,6 +23,8 @@ pub struct ShapeNote {
     pub line: u32,
     pub chain: Vec<u32>,
     pub entry: bool,
+    /// recorded in a run of its function for any call
+    pub general: bool,
     pub text: String,
     /// the requirement and how to print it (the hover renders it with its dim names)
     pub cons: Option<(Cons, sh::PrintCtx)>,
@@ -676,8 +678,8 @@ pub fn t_print_ctx_at(an: &Analyzer, scope: u32, env: &IndexMap<StrId, Value>, s
 
 pub fn t_require_note(an: &mut Analyzer, node: &Node, text: String, cons: Option<(Cons, sh::PrintCtx)>) {
     let (chain, entry) = t_note_ctx(an);
-    let n = ShapeNote { module: node.module, line: node.line, chain, entry, text, cons };
-    if !an.m.shape_reqs.iter().any(|x| x.module == n.module && x.line == n.line && x.chain == n.chain && x.entry == n.entry && x.text == n.text) {
+    let n = ShapeNote { module: node.module, line: node.line, chain, entry, general: an.for_any_call(), text, cons };
+    if !an.m.shape_reqs.iter().any(|x| x.module == n.module && x.line == n.line && x.chain == n.chain && x.entry == n.entry && x.general == n.general && x.text == n.text) {
         an.m.shape_reqs.push(n);
     }
 }
@@ -687,7 +689,7 @@ pub fn t_error(an: &mut Analyzer, node: &Node, msg: String, st: &mut State) {
         return;
     }
     let (chain, entry) = t_note_ctx(an);
-    let n = ShapeNote { module: node.module, line: node.line, chain, entry, text: msg, cons: None };
+    let n = ShapeNote { module: node.module, line: node.line, chain, entry, general: an.for_any_call(), text: msg, cons: None };
     if !an.m.shape_errors.iter().any(|x| x.module == n.module && x.line == n.line && x.chain == n.chain && x.text == n.text) {
         an.m.shape_errors.push(n);
     }

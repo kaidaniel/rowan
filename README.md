@@ -311,7 +311,9 @@ Other options: `--no-entry` (don't analyse uncalled functions with unknown argum
 (inside a function: for any call — the program's own, and any once the module has run, after any of
 its functions —, its parameters as annotated, and apart from it what the program's own calls give,
 `in calls: 3 (line 5)`), what the code reads of it and the accesses on the line, with a legend of
-the marks used;
+the marks used. Over a parameter in its `def`: what the function reads of it for any call (its
+contract: `row["id"]` always, `row["since"]` only if `admin`, tensor shapes it needs), and what each
+of the program's calls passes, marked ✓ or with the reads that fail for it;
 accesses that may fail are diagnostics. Its source is in `vscode-rowan/`; the
 `.vsix` packages of each version are attached to the
 [GitHub releases](https://github.com/kaidaniel/rowan/releases).
