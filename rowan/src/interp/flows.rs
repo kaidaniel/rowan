@@ -175,6 +175,8 @@ pub struct CodeUses {
 #[derive(Default)]
 pub struct RecvUse {
     pub(in crate::interp) escapes: bool,
+    /// the method returns its receiver (`return self`: a builder)
+    pub(in crate::interp) returned: bool,
     pub(in crate::interp) loads: FxHashSet<StrId>,
     pub(in crate::interp) stores: FxHashSet<StrId>,
     pub(in crate::interp) deletes: FxHashSet<StrId>,
@@ -932,6 +934,7 @@ impl<'a> Flow<'a> {
                 // (`return self`: the caller gets the receiver back, no other code changes it)
                 match &r.value {
                     Some(v) if self.depth == 0 && self.recv_base(v) => {
+                        self.recv.returned = true;
                         let first = self.first.map(|f| (Origin::Param(f), Level::Own));
                         let others: Vec<Src> = self.srcs(v).into_iter().filter(|x| Some(*x) != first).collect();
                         self.mark(&others, Pos::Change);

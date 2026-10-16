@@ -563,7 +563,11 @@ impl Analyzer {
             }
             state.set_row(o, Ns::Attr, row);
         }
-        r
+        // (a method returning its receiver gives it back: a call chained on the result runs on it)
+        match self_v.filter(|_| self.code_uses(&self.heap.func_info(foid)).recv.as_ref().is_some_and(|u| u.returned)) {
+            Some(v) => r.join(v),
+            None => r,
+        }
     }
 
     /// The arguments of a call of `foid` that does not run, as what its code may change of
