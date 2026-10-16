@@ -834,20 +834,20 @@ impl Analyzer {
     /// An item of generator `o` was taken at a position not known: its effects are those of
     /// some yield or of its end, not those before its first item.
     pub fn gen_took_item(&mut self, o: ObjId, state: &mut State) {
-        if self.cursor_of(o, state).is_some() {
-            return;
-        }
         let Some(ge) = self.gens.eff.get(&o).cloned() else { return };
-        // (every item has its yield's state: the generator yields a known number of items)
-        if self.heap.llen(o, state) != Some(ge.at.len()) {
-            return;
-        }
-        let (Some(expected), Some(taken)) = (effects_given(state, o, &ge), ge.taken()) else { return };
+        let Some(expected) = effects_given(state, o, &ge) else { return };
         if !gen_facts_equal(state, expected, &ge) {
             return;
         }
-        gen_copy_facts(state, taken, &ge);
-        state.set_slot(o, Ns::Attr, key_str_lit("\u{1}effpos"), Value::lit(key_str_lit("taken")), true);
+        // (every item has its yield's state when the generator yields a known number of items:
+        // some yield's or the end's; else any point it may be suspended at)
+        let (target, tag) = match ge.taken() {
+            Some(t) if self.heap.llen(o, state) == Some(ge.at.len()) => (t, "taken"),
+            _ => (&ge.join, "join"),
+        };
+        gen_copy_facts(state, target, &ge);
+        state.set_slot(o, Ns::Attr, key_str_lit("__cursor"), Value::data("cursor"), true);
+        state.set_slot(o, Ns::Attr, key_str_lit("\u{1}effpos"), Value::lit(key_str_lit(tag)), true);
     }
 
     /// The consumer asks a watched generator `o` for an item in `state`: what it changed by

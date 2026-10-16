@@ -54,6 +54,11 @@ impl Analyzer {
                 self.check_hashable(key, state);
             }
         }
+        // (a sequence's position is read without a verdict: a running generator that yielded
+        // reads the whole sequence, for code between its items that may change it)
+        for o in obj.pts.iter().filter(|o| matches!(self.heap.kind(*o), Kind::List | Kind::Tuple)) {
+            self.gens.read(o, None);
+        }
         // a numpy structured array's missing field raises ValueError
         let exc = if ns == Ns::Item && !obj.pts.is_empty() && !self.m.np_struct.is_empty() && obj.pts.iter().all(|o| self.m.np_struct.contains(&o)) { Some("ValueError") } else { None };
         let exc = if ns == Ns::Item { self.unwind.item_exc_force.or(exc) } else { exc };
