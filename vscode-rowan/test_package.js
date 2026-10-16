@@ -100,13 +100,15 @@ assert(found && fs.realpathSync(found) === fs.realpathSync(bin), `the extension 
       return extension.renderHover(name, idx.facts.get(`${line}:${name}`) || [], extension.verdictsForWord(idx.verdicts.get(line) || [], name, start, start + name.length));
     };
     const r2 = hover(2, "r");
-    assert(r2 && r2.includes('```python\n{"a": 1, "b": 2}\n```'), `hover of r on line 2:\n${r2}`);
+    assert(r2 && r2.includes('```python\nr = {"a": 1, "b": 2}\n```'), `hover of r on line 2:\n${r2}`);
     const x3 = hover(3, "x");
-    assert(x3 && x3.includes("```python\n1\n```"), `hover of x on line 3:\n${x3}`);
+    assert(x3 && x3.includes("```python\nx = 1\n```"), `hover of x on line 3:\n${x3}`);
+    // (an access that fails is a diagnostic: the editor shows it in the same hover)
     const r4 = hover(4, "r");
-    assert(r4 && r4.includes('- ✗ `r["c"]`: key "c" is never set') && r4.includes("✗ fails on every path"), `hover of r on line 4:\n${r4}`);
+    const v4 = (idx.verdicts.get(4) || []).find((v) => v.tier === "missing");
+    assert(r4 && r4.includes('```python\nr = {"a": 1, "b": 2}\n```') && v4 && extension.diagnosticMessage(v4) === 'key "c" is never set', `hover of r on line 4:\n${r4}`);
     const t5 = hover(5, "total");
-    assert(t5 && t5.includes("```python\n2\n```"), `hover of total on line 5:\n${t5}`);
+    assert(t5 && t5.includes("```python\ntotal = 2\n```"), `hover of total on line 5:\n${t5}`);
     // (an access over several lines, `r[` / `"a"]`: no `\r` from the Windows line ends)
     assert((res.verdicts || []).some((v) => v.line === 7 && v.tier === "proven"), JSON.stringify(res.verdicts));
     for (const v of res.verdicts || []) assert(!(v.text || "").includes("\r"), JSON.stringify(v));

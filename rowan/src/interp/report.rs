@@ -1261,9 +1261,9 @@ pub fn value_legend(an: &Analyzer, state: &State, v: &Value) -> Vec<(String, Str
 pub fn facts_json(an: &Analyzer) -> J {
     let mut facts: Vec<J> = Vec::new();
     for ((line, name), f) in &an.findings.facts {
-        // (a hover lists the objects a name may hold: past `MAX_FACT_OBJECTS` only the count —
-        // a name holding hundreds of objects made the document hundreds of MB)
-        let objects_total = f.shown_rows().len();
+        // (the objects a name may hold, for where its unknowns come from and what changed them:
+        // the first `MAX_FACT_OBJECTS` — a name holding hundreds of objects made the document
+        // hundreds of MB)
         let objects: Vec<J> = f
             .shown_rows()
             .iter()
@@ -1312,7 +1312,7 @@ pub fn facts_json(an: &Analyzer) -> J {
             let calls = f.calls.iter().filter(|(t, _)| *t != g || f.param_of.is_some()).map(|(t, lines)| call(t, lines)).collect();
             (g, calls)
         };
-        let mut fact = json!({"line": line, "name": name.to_string(), "text": text, "general": !f.general.is_empty(), "calls": calls, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "objects_total": objects_total, "general_unknowns": general_unknowns, "required": required, "requires": requires});
+        let mut fact = json!({"line": line, "name": name.to_string(), "text": text, "general": !f.general.is_empty(), "calls": calls, "legend": f.legend.iter().filter(|(_, d)| d != "?").chain(extra_legend.iter()).map(|(s0, d)| json!([s0, d])).collect::<Vec<_>>(), "objects": objects, "general_unknowns": general_unknowns, "required": required, "requires": requires});
         // a parameter at its `def`: what the function reads of it for any call (its contract)
         if let Some(foid) = f.param_of {
             fact["param"] = json!(true);
@@ -1337,16 +1337,14 @@ pub fn facts_json(an: &Analyzer) -> J {
     json!({"file": an.program.filename, "facts": facts, "verdicts": verdicts, "shape_errors": shape_errors})
 }
 
-/// One object a hover's name may hold: what may have changed it, where it comes from, what it
-/// never has, its label, kind, origin and symbol.
+/// One object a hover's name may hold: what may have changed it, where it comes from, its kind,
+/// origin and symbol.
 fn fact_object_json(an: &Analyzer, f: &crate::interp::Fact, oid: ObjId, item: &Option<Row>, attr: &Option<Row>) -> J {
-    let o = an.heap.obj(oid);
     let origin = an.names.origins.get(&oid).map(|(t, l, g)| json!({"text": t, "line": l, "given": g}));
-    // for people: what may have changed it, what it never has, where it comes from
+    // for people: what may have changed it, where it comes from
     let rows = [item, attr].into_iter().flatten();
     let mut changed_by: Vec<String> = Vec::new();
     let mut from: Vec<String> = Vec::new();
-    let mut absent: Vec<String> = Vec::new();
     for r in rows {
         for m in r.mutators.iter() {
             let t = site_text(an, &intern::str_get(m));
@@ -1361,14 +1359,11 @@ fn fact_object_json(an: &Analyzer, f: &crate::interp::Fact, oid: ObjId, item: &O
                 from.push(t);
             }
         }
-        absent.extend(intern::sorted_by_str(r.absent.iter()).iter().map(|k| crate::domain::key_display(*k)));
     }
     json!({
         "changed_by": changed_by,
         "from": from,
-        "absent": absent,
-        "label": &*o.label,
-        "kind": o.kind.name(),
+        "kind": an.heap.kind(oid).name(),
         "origin": origin,
         "symbol": an.names.get(oid).filter(|_| f.legend.iter().any(|(s0, _)| Some(s0) == an.names.get(oid))),
     })
