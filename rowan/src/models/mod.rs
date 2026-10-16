@@ -3806,9 +3806,18 @@ fn m_list_other(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             }
             an.none_v.clone()
         }
+        // (any other method of a list or set, called by name — `xs.__setitem__(0, v)`,
+        // `s.__ior__(t)` — may change it: unknown code, unless it only reads)
+        _ if !LIST_READERS.contains(&name) && recv.pts.iter().any(|o| matches!(an.heap.kind(o), Kind::List | Kind::Set)) => an.unknown_call(&c.qual, c.recv.as_ref(), &c.args, &c.kwargs, &c.star_args, &c.star_kwargs, st, &c.node),
         _ => Value::data(&format!("L{}", c.line)),
     }
 }
+
+/// The methods of a list or set that only read it (those `m_list_other` does not model).
+const LIST_READERS: &[&str] = &[
+    "index", "count", "__len__", "__contains__", "__getitem__", "__iter__", "__reversed__", "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__", "__hash__", "__repr__", "__str__", "__format__",
+    "__sizeof__", "__bool__", "__add__", "__mul__", "__rmul__", "__or__", "__and__", "__sub__", "__xor__", "__ror__", "__rand__", "__rsub__", "__rxor__",
+];
 
 fn m_view(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let name = last(&c.qual);
