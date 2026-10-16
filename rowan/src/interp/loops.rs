@@ -577,9 +577,10 @@ impl Analyzer {
         if !self.heap.obj(i).single || self.has_facts(i, state) {
             return None;
         }
-        let (ll, kp) = (self.heap.obj(o).literal_len, self.heap.obj(o).known_prefix);
+        if let Some(l) = state.lens.get(&o) {
+            state.set_lens(i, l);
+        }
         let io = self.heap.obj_mut(i);
-        (io.literal_len, io.known_prefix) = (ll, kp);
         io.derived_from = derived;
         io.depth = depth;
         self.heap.renew(i);
