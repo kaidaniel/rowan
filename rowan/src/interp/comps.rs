@@ -60,7 +60,10 @@ impl Analyzer {
                 self.cx.summary_items.insert(own, items.len());
             }
             if items.len() <= limit && !same {
+                let unordered = it.unordered;
+                self.cx.comp_unordered += usize::from(unordered);
                 self.comp_unrolled(gens, i, limit, items, state, body, understood, own);
+                self.cx.comp_unordered -= usize::from(unordered);
                 self.exhaust(&exhaust_after, state);
                 return;
             }
@@ -242,7 +245,7 @@ impl Analyzer {
                 false
             }) == Some(true);
             let known = an.cx.comp_known.iter().all(|k| *k) && an.cx.cond_depth == base_depth;
-            let straight = positional && known && an.cx.comp_maybe == 0;
+            let straight = positional && known && an.cx.comp_maybe == 0 && an.cx.comp_unordered == 0;
             // (items known one by one: how many surely, how many a filter may drop)
             match (known, an.cx.comp_maybe) {
                 (false, _) => counted = None,

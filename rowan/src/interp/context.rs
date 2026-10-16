@@ -34,6 +34,9 @@ pub struct Context {
     pub comp_known: Vec<bool>,
     /// filters not decided for the comprehension item being run (it may be dropped)
     pub comp_maybe: usize,
+    /// generator levels of the running comprehension that iterate a set of several items (in
+    /// an order Python does not promise: the result has no positions)
+    pub comp_unordered: usize,
     /// per running comprehension: the cells of its variables (closed over by functions made
     /// inside it, which see the variable's latest value)
     pub comp_cells: Vec<FxHashMap<StrId, ObjId>>,

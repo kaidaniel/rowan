@@ -2616,7 +2616,7 @@ fn m_str_method_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                     }
                 }
                 let it = an.iterate(arg, &c.node, st);
-                if let Some(items) = it.items {
+                if let Some(items) = it.ordered_items() {
                     let mut parts: Vec<String> = Vec::new();
                     let mut ok = true;
                     for item in &items {
@@ -3722,8 +3722,17 @@ fn m_lpop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         };
         may_fail |= !ok;
         all_fail &= fails;
-        if !fails {
-            outs.push(list_pop_one(an, st, oid, c));
+        if fails {
+            continue;
+        }
+        // (a set of several members gives any of them: its order is not promised)
+        match n.filter(|n| *n > 1 && an.heap.kind(oid) == Kind::Set) {
+            Some(n) => {
+                outs.push(join_values((0..n).map(|i| st.slot(oid, Ns::Pos, intern::key_int(i as i64))).collect::<Vec<_>>()));
+                an.heap.set_llen(oid, st, None);
+                st.drop_obj_ns(oid, Ns::Pos);
+            }
+            None => outs.push(list_pop_one(an, st, oid, c)),
         }
     }
     let exc = if c.qual.starts_with("set.") { "KeyError" } else { "IndexError" };

@@ -247,7 +247,7 @@ impl Analyzer {
         }
         // unrolled: `continue` rejoins at the next iteration, `break` at the exit; a closed dict
         // with some keys only maybe there: a maybe one runs on one path and is skipped on the other
-        let unrolled = match &it.items {
+        let unrolled = match &it.ordered_items() {
             Some(items) if items.len() <= UNROLL_MAX && !self.identical_summaries(items) => Some((items.iter().map(|i| (i.clone(), true)).collect(), once.filter(|_| has_jump).map(|o| (o, c0)))),
             None => self.maybe_dict_items(&itv, state).map(|items| (items, None)),
             _ => None,
