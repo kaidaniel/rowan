@@ -714,11 +714,11 @@ impl Row {
     // -- transfers (§4.1) --------------------------------------------------
     pub fn store(&self, k: KeyId, strong: bool) -> Row {
         let mut d = self.data();
-        // (a key there on some paths only, stored: where it is in the order depends on the path)
-        if strong && d.order.contains(&k) && !d.definite.contains(k) {
+        // (a key there on some paths only, stored: where it is in the order depends on the path;
+        // so for a key there already at no known place)
+        if strong && ((d.order.contains(&k) && !d.definite.contains(k)) || (!d.order.contains(&k) && d.present.contains(k))) {
             d.order = Arc::from(Vec::new());
-        }
-        if strong && !d.order.contains(&k) {
+        } else if strong && !d.order.contains(&k) {
             let mut o = d.order.to_vec();
             o.push(k);
             d.order = o.into();
