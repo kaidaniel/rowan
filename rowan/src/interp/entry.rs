@@ -24,6 +24,8 @@ type Reqs = crate::layered::TwoLevel<crate::domain::SourceId, KeyId, crate::doma
 
 #[derive(Default)]
 pub struct Entries {
+    /// on demand: the state every function's run starts from (`on_demand`)
+    pub demand_start: Option<State>,
     /// the function an entry run (open parameters) is analysing
     pub run: Option<ObjId>,
     /// the function whose general run is going on (an entry run, or the `__init__` run that
@@ -219,6 +221,7 @@ impl Analyzer {
         // what the module made is changed)
         let mut state = end.state;
         self.after_any_code(&mut state);
+        self.entry.demand_start = Some(state.copy());
         self.findings.final_state = Some(state);
         self.findings.drop_since(if end.cut { 0 } else { end.verdicts });
         self.findings.facts = end.facts;
@@ -278,7 +281,11 @@ impl Analyzer {
     /// On demand: the general run of function `oid` (hover facts and verdicts), from the state
     /// the module ended in, with a fresh budget and deadline; false if nothing is set up.
     pub fn general_run_of(&mut self, oid: ObjId) -> bool {
-        let Some(mut state) = self.findings.final_state.take() else { return false };
+        // (every run from the same state: a run's answer does not depend on the runs before it,
+        // and what they made does not weigh on it)
+        let Some(mut state) = self.entry.demand_start.as_ref().map(|s| s.copy()) else { return false };
+        self.entry.general_instances.clear();
+        self.entry.any_instances.clear();
         self.budget.fresh();
         // (the verdicts kept are this run's)
         self.findings.drop_since(0);

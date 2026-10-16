@@ -124,11 +124,12 @@ fn on_big_stack<R: Send + 'static>(f: impl FnOnce() -> Result<R, String> + Send 
 ///   defined over line L, from its run for any call (open parameters as annotated, from the
 ///   state the module ended in), cached per function until a file it depends on changes; it
 ///   sets `P` up for that (its module code alone) if no analysis of `P` is kept.
-/// * `{"cmd":"changed","paths":[…]}` drops the cached results that depend on those files;
-///   `{"cmd":"shutdown"}` exits.
+/// * `{"cmd":"changed","paths":[…]}` drops the cached results that depend on those files and
+///   ends the analyses running for them (as their deadline would); `{"cmd":"cancel","paths":[…]}`
+///   only ends those (answered at once, before requests still running); `{"cmd":"shutdown"}` exits.
 ///
 /// Every response echoes the request's `id` and carries `ok`; a result has `cached`, `ms`,
-/// `deps` and `result` (responses come in order; an event has no `id`). Each analysis runs on a thread of its own (the engine's tables are
+/// `deps` and `result` (responses come in order, a cancel's aside; an event has no `id`). Each analysis runs on a thread of its own (the engine's tables are
 /// per thread); an analysis kept for `hover` keeps its thread (at most `SESSIONS`).
 /// Import options shared by the CLI and the server.
 #[derive(Clone)]
