@@ -699,7 +699,12 @@ impl Analyzer {
         // (the arguments, for the unknown call that replaces this one when the hard deadline cuts it)
         let was_cut = self.budget.hard_cut;
         let keep = (self_v.clone(), args.clone(), kwargs.clone(), star_args.clone(), star_kwargs.clone());
+        // (facts of keys stored through names are the caller's names': a callee's names are its
+        // own; what it deletes or gives unknown code voids the caller's)
+        let names = std::mem::take(&mut state.name_keys);
+        let drops = crate::state::NAME_KEY_DROPS.with(|c| c.get());
         let r = self.call_user_inner(foid, self_v, args, kwargs, star_args, star_kwargs, state, node, entry);
+        state.name_keys = if crate::state::NAME_KEY_DROPS.with(|c| c.get()) == drops { names } else { Default::default() };
         self.cx.model_depth = saved_md;
         if self.budget.hard_cut && !was_cut {
             let q = self.heap.func_info(foid).qualname.clone();
