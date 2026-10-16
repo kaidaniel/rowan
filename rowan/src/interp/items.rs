@@ -111,8 +111,28 @@ impl Analyzer {
         // (all targets' values joined at once: a pairwise join over many targets is quadratic)
         let mut parts: Vec<Value> = vec![std::mem::take(&mut acc)];
         let rd = ItemRead { obj, ns, key, node, report, guarded, try_guard, single_target, line_data };
+        // (a receiver of several objects is one of them on a run: what one needs, the input
+        // needs only sometimes — each read from the requirements before it)
+        // (a scalar part is not counted: indexed by a key it fails, or holds no input's data)
+        let several = obj.pts.len() > 1;
+        let base = several.then(|| state.reqs.clone());
+        let mut outs: Vec<(bool, Reqs)> = Vec::new();
         for oid in obj.pts.iter() {
+            // (one that surely lacks the key fails the read: runs that go on took another)
+            let fails = several && self.heap.kind(oid).is_record() && key.pts.is_empty() && {
+                let (row, ks) = (state.row(oid, ns), crate::domain::kv_literals(&key.kv));
+                !ks.is_empty() && ks.iter().all(|k| classify(&row, k).tier == Tier::Missing)
+            };
+            if let Some(b) = &base {
+                state.reqs = b.clone();
+            }
             self.item_of(oid, &rd, state, &mut parts);
+            if several {
+                outs.push((!fails, state.reqs.clone()));
+            }
+        }
+        if let Some(base) = base {
+            needs_of_one(&base, &outs, state);
         }
         let line_data = rd.line_data;
         acc = crate::domain::join_values(parts);
@@ -473,7 +493,7 @@ impl Analyzer {
         if (row.closed() || own_map) && !row.top {
             return v;
         }
-        if v.pts.is_empty() && row.open() {
+        if row.open() {
             let p = self.path_placeholder_value(oid, ns, STAR, &row, state);
             v = v.join(&p);
         }
@@ -1079,4 +1099,31 @@ impl Analyzer {
             state.set_row(oid, ns, row);
         }
     }
+}
+
+/// A read on one of several objects (`outs`: the requirements after each one's part, from
+/// `base`, and whether runs may take it): all are made, but one not made on every part runs
+/// may take is needed only sometimes, unless it was before or is an element's.
+type Reqs = crate::layered::TwoLevel<crate::domain::SourceId, KeyId, crate::domain::ReqInfo>;
+fn needs_of_one(base: &Reqs, outs: &[(bool, Reqs)], state: &mut State) {
+    let mut reqs = base.clone();
+    let mut changed: Vec<(crate::domain::SourceId, KeyId)> = Vec::new();
+    for (_, out) in outs {
+        reqs.copy_changes(out, base);
+        changed.extend(out.diff_keys(base));
+    }
+    for (src, k) in changed {
+        // (an element's are per element: a list of two inputs' elements has each read)
+        if intern::with_source(src, |s| s.path.last() == Some(&STAR)) {
+            continue;
+        }
+        let all = outs.iter().filter(|(taken, _)| *taken).all(|(_, o)| o.get(&src, &k).is_some_and(|r| r.always));
+        if all || base.get(&src, &k).is_some_and(|r| r.always) {
+            continue;
+        }
+        if let Some(cur) = reqs.get(&src, &k).filter(|r| r.always) {
+            reqs.set(&src, k, cur.sometimes());
+        }
+    }
+    state.reqs = reqs;
 }

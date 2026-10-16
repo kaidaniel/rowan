@@ -243,6 +243,9 @@ impl Analyzer {
 
     /// `obj[key]`: an item read (a tensor's indexing goes to the torch model).
     fn expr_subscript(&mut self, sub: &'static ast::ExprSubscript, node: &'static ast::Expr, state: &mut State) -> Value {
+        if let Some(v) = crate::models::pandas::unknown_loc(self, sub, &frontend::node(node), state) {
+            return v;
+        }
         let obj = self.eval(&sub.value, state);
         // a generic pydantic model parametrised: `Page[User]`
         if let Some(c) = obj.single().filter(|c| self.heap.kind(*c) == Kind::Class && crate::models::pydantic::is_validated(self, *c)) {
@@ -257,6 +260,9 @@ impl Analyzer {
             }
         }
         let key = self.eval_key(&sub.slice, state);
+        if let Some(v) = crate::models::pandas::unknown_selection(self, &obj, sub, &key, &frontend::node(node), state) {
+            return v;
+        }
         let bounds = Self::slice_label_bounds(&key.kv);
         if let Some(v) = bounds.and_then(|b| self.slice_positional(&obj, b, node, state)) {
             return v;
@@ -304,7 +310,7 @@ impl Analyzer {
         self.load_item(&obj, Ns::Item, &key, &nd, state, true)
     }
 
-    pub(in crate::interp) fn eval_key(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {
+    pub fn eval_key(&mut self, node: &'static ast::Expr, state: &mut State) -> Value {
         match node {
             ast::Expr::Tuple(t) => {
                 let parts: Vec<Value> = t.elts.iter().map(|e| self.eval(e, state)).collect();

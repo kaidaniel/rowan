@@ -747,6 +747,18 @@ impl<K: PKey, IK: IKey, V: Clone + PartialEq> TwoLevel<K, IK, V> {
         self.diff_upto(base, usize::MAX).unwrap_or_default()
     }
 
+    /// What `other` changed from `base` (markers too), made in this map.
+    pub fn copy_changes(&mut self, other: &Self, base: &Self) {
+        for p in other.m.diff_keys(&base.m) {
+            match other.m.get(&p) {
+                Some(v) => self.m.insert(p, v),
+                None => {
+                    self.m.remove(&p);
+                }
+            }
+        }
+    }
+
     pub fn diff_upto(&self, base: &Self, limit: usize) -> Option<Vec<(K, IK)>> {
         Some(self.m.diff_upto(&base.m, limit)?.into_iter().filter(|p| p.1.key32() != SENTINEL).map(|Pair(k, ik)| (k, ik)).collect())
     }

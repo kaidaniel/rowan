@@ -233,3 +233,4 @@ if __name__ == "__main__":
 #@schema read_csv@L56: always={order_id,customer_id,product_id,status,order_date,qty,unit_price} only={order_id,customer_id,product_id,status,order_date,qty,unit_price}
 #@schema read_csv@L87: always={customer_id,name,region,signup_date} sometimes={segment} only={customer_id,name,region,signup_date}
 #@schema read_csv@L101: always={product_id,name,category,list_price} only={product_id,name,category,list_price}
+#@schema param clean_orders.raw: always={order_id,customer_id,product_id,status,order_date,qty,unit_price}
