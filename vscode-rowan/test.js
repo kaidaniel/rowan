@@ -50,6 +50,12 @@ assert(!r8.includes("**In Calls**") && !r8.includes("**Requirements**"), r8);
 const a002 = path.join(root, "tests", "apps", "small", "a002_deploy_cli.py");
 const p28 = hover(indexResult(facts(a002)), fs.readFileSync(a002, "utf8").split("\n"), 28, "p");
 assert.strictEqual(p28, "```python\np = <ArgumentParser>\n```\n\n**Allocation Sites**\n- one of 7 objects, all created on line 28 (by different calls or loop iterations)");
+// (an object made in another file of the program: where)
+{
+  const b001 = path.join(root, "tests", "apps", "medium", "b001_shop_pkg", "b001_shop.py");
+  const h = hover(indexResult(facts(b001)), fs.readFileSync(b001, "utf8").split("\n"), 51, "short3");
+  assert(h.includes("**Allocation Sites**\n- created on line 14 in shop/repo.py"), h);
+}
 // (two Settings the calls give that differ only past the cut — retries=2 / retries=5 — are one
 // entry, not two alike)
 const s57 = hover(indexResult(facts(a002)), fs.readFileSync(a002, "utf8").split("\n"), 57, "s");

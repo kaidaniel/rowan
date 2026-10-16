@@ -343,7 +343,7 @@ function siteLines(f) {
   const files = [...new Set(made.map((o) => o.created.file))];
   const where = (file) => {
     const ls = [...new Set(made.filter((o) => o.created.file === file).map((o) => o.created.line))].sort((a, b) => a - b);
-    return { ls, text: `${file ? `${file}, ` : ""}${onLines(ls)}` };
+    return { ls, text: `${onLines(ls)}${file ? ` in ${file}` : ""}` };
   };
   const places = files.map(where);
   const out = [];

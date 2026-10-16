@@ -1385,8 +1385,9 @@ fn fact_object_json(an: &Analyzer, f: &crate::interp::Fact, oid: ObjId, item: &O
         None => (Some(an.program.main_idx), &*site),
     };
     let line = rest.strip_prefix('L').and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next()).and_then(|l| l.parse::<u32>().ok());
+    // (of a module with a file: not a model's own, `re`'s patterns)
     let created = match (module, line) {
-        (Some(m), Some(l)) if an.heap.kind(oid) != Kind::Unknown => json!({"file": an.program.rel_file(m), "line": l}),
+        (Some(m), Some(l)) if an.heap.kind(oid) != Kind::Unknown && (m == an.program.main_idx || crate::frontend::module_path(m).is_some_and(|p| p.ends_with(".py"))) => json!({"file": an.program.rel_file(m), "line": l}),
         _ => J::Null,
     };
     json!({
