@@ -57,3 +57,11 @@ num = [1] if n > 5 else 9
 if n <= 5:
     num += 1
 nv = num                                     #@value nv: includes={10}
+
+# a copy of a list of one of two lengths, appended to: its first item is either
+h = []
+if n > 2:
+    h.append(0)
+h2 = list(h)
+h2 += ["s"]
+h0 = h2[0]                                   #@value h0: exactly={0, "s"}

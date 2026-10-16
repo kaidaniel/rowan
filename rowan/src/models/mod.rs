@@ -928,12 +928,19 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         st.elems.insert(oid, KeyVal::Lits(KeySet::new()));
         an.heap.set_llen(oid, st, Some(0));
     }
-    // (a copy of a list / tuple whose length is one of a few: the same alternatives)
-    if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple" | "builtins.sorted" | "builtins.reversed") && an.heap.llen(oid, st).is_none() {
+    // (a copy of a list / tuple whose length is one of a few: the same alternatives, each
+    // with its positions — reversed, from each one's end)
+    if matches!(c.qual.as_str(), "builtins.list" | "builtins.tuple" | "builtins.reversed") && an.heap.llen(oid, st).is_none() {
         if let Some(src) = c.args.first().and_then(|a| a.single()).filter(|s| matches!(an.heap.kind(*s), Kind::List | Kind::Tuple)) {
-            if let Some((None, _, m)) = st.lens.get(&src).filter(|l| l.2 != 0) {
-                let p = an.heap.prefix(oid, st).unwrap_or(0);
-                st.set_lens(oid, (None, p, m));
+            if let (Some((None, _, m)), Some(alts)) = (st.lens.get(&src).filter(|l| l.2 != 0), an.heap.len_alts(src, st)) {
+                let longest = alts.iter().copied().max().unwrap_or(0);
+                let reversed = c.qual == "builtins.reversed";
+                for i in 0..longest {
+                    let at = |len: usize| if reversed { len - 1 - i } else { i };
+                    let v = join_values(alts.iter().filter(|l| **l > i).map(|l| st.slot(src, Ns::Pos, intern::key_int(at(*l) as i64))).collect::<Vec<_>>());
+                    st.set_slot(oid, Ns::Pos, intern::key_int(i as i64), v, true);
+                }
+                st.set_lens(oid, (None, 0, m));
             }
         }
     }
@@ -3088,7 +3095,10 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             // the length was unknown already: the known prefix stays; one of a few lengths: the
             // items at each one's end (as each path has them)
             if let Some(alts) = alts {
-                match if name == "append" { Some(vec![elem.clone()]) } else { ext_items.clone() } {
+                // (the positions a longer alternative has must be known: a write at one joins them)
+                let longest = alts.iter().copied().max().unwrap_or(0);
+                let known = (0..longest).all(|p| st.has_slot(oid, Ns::Pos, intern::key_int(p as i64)));
+                match if name == "append" { Some(vec![elem.clone()]) } else { ext_items.clone() }.filter(|_| known) {
                     Some(items) => {
                         for n in alts {
                             for (i, item) in items.iter().enumerate() {
@@ -3096,7 +3106,10 @@ fn m_append_inner(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                             }
                         }
                     }
-                    None => an.heap.set_prefix(oid, st, alts[0]),
+                    None => {
+                        let p = (0..alts[0]).take_while(|p| st.has_slot(oid, Ns::Pos, intern::key_int(*p as i64))).count();
+                        an.heap.set_prefix(oid, st, p)
+                    }
                 }
             }
             continue;
