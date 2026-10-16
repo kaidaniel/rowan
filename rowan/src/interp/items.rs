@@ -1101,7 +1101,12 @@ impl Analyzer {
                 row = row.delete(k, strong && is_lit);
                 state.pop_slot(oid, ns, k);
             }
-            if let Some((surely, k)) = raise.filter(|_| ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) {
+            // (an instance attribute's `del` raises AttributeError the same way, a class attribute
+            // of the name notwithstanding, unless the class takes it: `__delattr__`, a descriptor)
+            let cls = self.heap.instance_class(oid).filter(|_| ns == Ns::Attr && kind == Kind::Instance);
+            let attr_raises = cls.is_some_and(|c| self.class_lookup(c, "__delattr__").is_none() && self.slots_of(c).is_none());
+            let raise = raise.map(|(surely, k)| (surely && !cls.is_some_and(|c| self.class_lookup(c, &intern::key_py_str(k)).is_some_and(|d| !self.plain_class_attr(d, k, state))), k));
+            if let Some((surely, k)) = raise.filter(|_| (ns == Ns::Item && matches!(kind, Kind::Dict | Kind::Unknown)) || attr_raises) {
                 state.set_row(oid, ns, row.clone());
                 let exc = if ns == Ns::Item { "KeyError" } else { "AttributeError" };
                 if !self.unwind.tries.is_empty() {

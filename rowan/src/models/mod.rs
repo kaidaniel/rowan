@@ -1771,13 +1771,16 @@ fn m_hasattr(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 None => return unknown,
             }
         }
-        if an.class_lookup(cls, &name).is_some() {
+        let (defs, sure) = an.class_lookup_on_path(cls, &name, st);
+        if sure {
             verdicts.push(true);
             continue;
         }
         let row = st.row(o, Ns::Attr);
         if row.definite.contains(k) {
             verdicts.push(true);
+        } else if !defs.is_empty() {
+            return unknown;
         } else if row.closed() && !row.present.contains(k) {
             verdicts.push(false);
         } else {
@@ -2044,7 +2047,11 @@ fn m_type(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
                 let cv = st.slot(moid, Ns::Attr, key_str_lit(&name));
                 if let Some(cls) = cv.single() {
                     for k in row.present.iter().filter(|k| intern::key_as_str(*k).is_some()) {
-                        an.heap.cls_slots.insert((cls, Ns::Attr, k), st.slot(ns, Ns::Item, k));
+                        let v = st.slot(ns, Ns::Item, k);
+                        an.heap.cls_slots.insert((cls, Ns::Attr, k), v.clone());
+                        st.set_slot(cls, Ns::Attr, k, v, true);
+                        let r = st.row(cls, Ns::Attr).store(k, row.definite.contains(k));
+                        st.set_row(cls, Ns::Attr, r);
                     }
                     if lit_name.is_none() {
                         for k in ["__name__", "__qualname__"] {
