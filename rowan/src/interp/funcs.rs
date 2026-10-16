@@ -617,11 +617,14 @@ impl Analyzer {
     }
 
     /// Unpacking into `n` names raises ValueError for a sequence of another known length (a
-    /// list, tuple or generator's items, a known string): on every path when each part does.
+    /// list, tuple or generator's items, a known string): on every path when each part does,
+    /// on some when a part's length is not known.
     fn check_unpack_len(&mut self, v: &Value, n: usize, state: &mut State) {
         self.force_gen(v, state, false);
         let mut parts: Vec<Option<bool>> = v.pts.iter().map(|o| match (self.heap.kind(o), self.heap.llen(o, state)) {
             (Kind::List | Kind::Tuple, Some(l)) => Some(l != n),
+            // (a dict's item, an enumerate's or zip's of two)
+            (Kind::Pair, _) => Some(n != 2),
             _ => None,
         }).collect();
         if !v.kv.is_bot() {
@@ -632,9 +635,10 @@ impl Analyzer {
                 parts.push(None);
             }
         }
+        // (of a length not known: it may raise)
         if parts.iter().all(|p| *p == Some(true)) && !parts.is_empty() {
             self.raise_here("ValueError", state);
-        } else if parts.iter().any(|p| *p == Some(true)) {
+        } else if parts.iter().any(|p| *p != Some(false)) {
             self.may_raise_here("ValueError", state);
         }
     }

@@ -38,3 +38,13 @@ except ValueError:
 r4 = r                                       #@value r4: exactly={"ve"}
 a, b = "xy"
 r5 = b                                       #@value r5: exactly={"y"}
+# (in loops of unknown count the generator object stands for several: its length is not
+# known, the unpacking may raise)
+y = 5
+for _i in range(n - 1):
+    for _j in range(n - 1):
+        try:
+            y, w = counter(3)
+        except ValueError:
+            y = -1
+r6 = y                                       #@value r6: includes={5, -1}
