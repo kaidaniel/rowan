@@ -4,7 +4,7 @@
 
 use ruff_python_ast as ast;
 
-use crate::domain::{Classification, Ns, Row, Value};
+use crate::domain::{Classification, Ns, ObjId, Row, Value};
 use crate::intern::{self, KeyId};
 use crate::state::State;
 
@@ -87,15 +87,23 @@ impl Analyzer {
     }
 
 
-    /// A receiver of several objects (or objects and a scalar) one of which runs user code for
-    /// the operation: they are alternatives, one state each (the second must not see the
-    /// first's effects, nor the first's raise end the others' paths).
-    pub(crate) fn split_dispatch(&self, obj: &Value, dispatch: &dyn Fn(&Analyzer, u32) -> bool) -> bool {
-        obj.pts.len() + usize::from(!obj.kv.is_bot()) > 1 && obj.pts.iter().any(|o| dispatch(self, o))
-    }
-
-    pub(crate) fn per_receiver(&mut self, obj: &Value, state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &Value, &mut State) -> Value) -> Value {
-        let mut parts: Vec<Value> = obj.pts.iter().map(Value::obj).collect();
+    /// A receiver of several objects (or objects and a scalar) some of which run user code for
+    /// the operation (`dispatch`): those are alternatives, one state each (the second must not
+    /// see the first's effects, nor the first's raise end the others' paths); the other objects
+    /// are one more (no code of theirs runs), the scalar another. None: no object runs code
+    /// (or there is only one part), the operation runs on `obj` as it is.
+    pub(crate) fn per_receiver(&mut self, obj: &Value, dispatch: &dyn Fn(&Analyzer, u32) -> bool, state: &mut State, f: &mut dyn FnMut(&mut Analyzer, &Value, &mut State) -> Value) -> Option<Value> {
+        if obj.pts.len() + usize::from(!obj.kv.is_bot()) <= 1 {
+            return None;
+        }
+        let (runs, rest): (Vec<ObjId>, Vec<ObjId>) = obj.pts.iter().partition(|o| dispatch(self, *o));
+        if runs.is_empty() {
+            return None;
+        }
+        let mut parts: Vec<Value> = runs.into_iter().map(Value::obj).collect();
+        if !rest.is_empty() {
+            parts.push(Value::objs(crate::domain::ObjSet::from_vec(rest)));
+        }
         if !obj.kv.is_bot() {
             parts.push(Value::kv_only(obj.kv.clone()));
         }
@@ -112,7 +120,7 @@ impl Analyzer {
         if let Some(a) = acc {
             state.replace_with(a);
         }
-        crate::domain::join_values(outs)
+        Some(crate::domain::join_values(outs))
     }
 
 

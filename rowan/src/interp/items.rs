@@ -43,8 +43,10 @@ fn slice_text(kv: &KeyVal) -> Option<String> {
 
 impl Analyzer {
     pub fn load_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) -> Value {
-        if ns == Ns::Item && self.split_dispatch(obj, &|an, o| an.has_user_method(o, "__getitem__")) {
-            return self.per_receiver(obj, state, &mut |an, o, st| an.load_item(o, ns, key, node, st, report));
+        if ns == Ns::Item {
+            if let Some(v) = self.per_receiver(obj, &|an, o| an.has_user_method(o, "__getitem__"), state, &mut |an, o, st| an.load_item(o, ns, key, node, st, report)) {
+                return v;
+            }
         }
         // a numpy structured array's missing field raises ValueError
         let exc = if ns == Ns::Item && !obj.pts.is_empty() && !self.m.np_struct.is_empty() && obj.pts.iter().all(|o| self.m.np_struct.contains(&o)) { Some("ValueError") } else { None };
@@ -727,12 +729,14 @@ impl Analyzer {
     }
 
     pub fn store_item(&mut self, obj: &Value, ns: Ns, key: &Value, v: &Value, node: &Node, state: &mut State) {
-        if ns == Ns::Item && self.split_dispatch(obj, &|an, o| an.has_user_method(o, "__setitem__")) {
-            self.per_receiver(obj, state, &mut |an, o, st| {
+        if ns == Ns::Item {
+            let split = self.per_receiver(obj, &|an, o| an.has_user_method(o, "__setitem__"), state, &mut |an, o, st| {
                 an.store_item(o, ns, key, v, node, st);
                 Value::new()
             });
-            return;
+            if split.is_some() {
+                return;
+            }
         }
         let okey = if ns == Ns::Item { self.opaque_key(key, state) } else { key.clone() };
         let key = &okey;
@@ -931,12 +935,14 @@ impl Analyzer {
     }
 
     pub fn delete_item(&mut self, obj: &Value, ns: Ns, key: &Value, node: &Node, state: &mut State, report: bool) {
-        if ns == Ns::Item && self.split_dispatch(obj, &|an, o| an.has_user_method(o, "__delitem__")) {
-            self.per_receiver(obj, state, &mut |an, o, st| {
+        if ns == Ns::Item {
+            let split = self.per_receiver(obj, &|an, o| an.has_user_method(o, "__delitem__"), state, &mut |an, o, st| {
                 an.delete_item(o, ns, key, node, st, report);
                 Value::new()
             });
-            return;
+            if split.is_some() {
+                return;
+            }
         }
         let objs: Vec<u32> = obj.pts.iter().collect();
         self.kill_facts_on(&objs, state);

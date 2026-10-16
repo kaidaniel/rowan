@@ -46,11 +46,13 @@ pub struct Budget {
     started: Clock,
     /// the hard deadline passed: function bodies stop, the calls they are in become unknown calls
     pub hard_cut: bool,
-    cut_tick: u32,
     /// a function's run on demand: the work done when it began (`Analyzer::hover_work`), and
     /// the frames it runs in (its own calls run; past `past_hover_work`, its callees' calls are
     /// unknown)
     pub hover: Option<(usize, usize)>,
+    /// calls run no body (`skips_calls`): the main module's `if __name__ == "__main__":` block
+    /// while the module code is set up for runs on demand (`Analyzer::main_block_unrun`)
+    pub skip_calls: bool,
 }
 
 impl Budget {
@@ -117,18 +119,15 @@ impl Budget {
     /// A call made with `frames` frames running, on demand, the work done so far `work`: is it
     /// one of a callee's, past the work a function's run on demand may do (four budgets)?
     pub fn past_hover_work(&self, frames: usize, work: usize) -> bool {
-        self.hover.is_some_and(|(w0, depth)| frames > depth && work - w0 > 4 * limit("budget", FN_BUDGET))
+        self.skip_calls || self.hover.is_some_and(|(w0, depth)| frames > depth && work - w0 > 4 * limit("budget", FN_BUDGET))
     }
 
-    /// Has the deadline cut the analysis? Checked every 64 statements (`cut_body`).
+    /// Has the deadline cut the analysis? Checked at every statement (`cut_body`): one statement
+    /// may take long (a loop's round over values of many objects).
     pub fn tick(&mut self) -> bool {
-        if !self.hard_cut {
-            self.cut_tick = self.cut_tick.wrapping_add(1);
-            if self.cut_tick % 64 != 0 || !self.over_hard_deadline() {
-                return false;
-            }
+        if !self.hard_cut && self.over_hard_deadline() {
             self.hard_cut = true;
         }
-        true
+        self.hard_cut
     }
 }

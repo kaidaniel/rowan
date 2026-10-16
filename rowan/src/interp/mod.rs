@@ -438,7 +438,7 @@ impl Analyzer {
 
     /// Past the deadline a statement in a function body does not run: its path ends, and
     /// the call it belongs to is replaced by an unknown call (`call_user`). Module code goes on
-    /// (its calls are unknown calls). Checked every 64 statements.
+    /// (its calls are unknown calls). Checked at every statement.
     pub(in crate::interp) fn cut_body(&mut self, state: &mut State) -> bool {
         if !self.budget.tick() {
             return false;
@@ -494,7 +494,20 @@ pub fn contains_jump(body: &[ast::Stmt]) -> bool {
     body.iter().any(visit)
 }
 
-pub fn is_generator(body: &[ast::Stmt]) -> bool {
+/// Does a function body yield (its own yields: not a nested function's)? Remembered per body
+/// (trees are leaked: a body's address is its identity), as calls ask it at every call.
+pub fn is_generator(body: &'static [ast::Stmt]) -> bool {
+    thread_local! { static GENS: std::cell::RefCell<rustc_hash::FxHashMap<(usize, usize), bool>> = Default::default(); }
+    let key = (body.as_ptr() as usize, body.len());
+    if let Some(g) = GENS.with(|g| g.borrow().get(&key).copied()) {
+        return g;
+    }
+    let g = yields(body);
+    GENS.with(|m| m.borrow_mut().insert(key, g));
+    g
+}
+
+fn yields(body: &[ast::Stmt]) -> bool {
     struct V(bool);
     impl<'a> ast::visitor::source_order::SourceOrderVisitor<'a> for V {
         fn visit_expr(&mut self, e: &'a ast::Expr) {

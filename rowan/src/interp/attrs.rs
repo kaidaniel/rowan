@@ -110,8 +110,8 @@ impl Analyzer {
 
     // ---------------------------------------------------------- attributes
     pub fn load_attr(&mut self, obj: &Value, name: &str, node: &Node, state: &mut State, report: bool) -> Value {
-        if self.split_dispatch(obj, &|an, o| an.attr_runs_user_code(o, name, false)) {
-            return self.per_receiver(obj, state, &mut |an, o, st| an.load_attr(o, name, node, st, report));
+        if let Some(v) = self.per_receiver(obj, &|an, o| an.attr_runs_user_code(o, name, false), state, &mut |an, o, st| an.load_attr(o, name, node, st, report)) {
+            return v;
         }
         let unk = self.unkey(obj);
         let obj = &unk;
@@ -842,11 +842,11 @@ impl Analyzer {
     }
 
     pub fn store_attr(&mut self, obj: &Value, name: &str, v: &Value, node: &Node, state: &mut State) {
-        if self.split_dispatch(obj, &|an, o| an.attr_runs_user_code(o, name, true)) {
-            self.per_receiver(obj, state, &mut |an, o, st| {
-                an.store_attr(o, name, v, node, st);
-                Value::new()
-            });
+        let split = self.per_receiver(obj, &|an, o| an.attr_runs_user_code(o, name, true), state, &mut |an, o, st| {
+            an.store_attr(o, name, v, node, st);
+            Value::new()
+        });
+        if split.is_some() {
             return;
         }
         if !state.narrowed.is_empty() {

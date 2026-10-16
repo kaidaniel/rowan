@@ -404,11 +404,11 @@ impl Analyzer {
         // (one of several values, some of them instances of the program's classes: each
         // compared on its own path)
         let user = |an: &Analyzer, o: ObjId| an.heap.kind(o) == Kind::Instance && an.heap.instance_class(o).is_some();
-        if self.split_dispatch(a, &user) {
-            return Some(self.per_receiver(a, state, &mut |an, p, st| an.rich_compare(op, p, b, node, st).unwrap_or_else(|| Value::data("bool"))));
+        if let Some(v) = self.per_receiver(a, &user, state, &mut |an, p, st| an.rich_compare(op, p, b, node, st).unwrap_or_else(|| Value::data("bool"))) {
+            return Some(v);
         }
-        if self.split_dispatch(b, &user) {
-            return Some(self.per_receiver(b, state, &mut |an, p, st| an.rich_compare(op, a, p, node, st).unwrap_or_else(|| Value::data("bool"))));
+        if let Some(v) = self.per_receiver(b, &user, state, &mut |an, p, st| an.rich_compare(op, a, p, node, st).unwrap_or_else(|| Value::data("bool"))) {
+            return Some(v);
         }
         let inst = |an: &Analyzer, v: &Value| v.single().filter(|o| an.heap.kind(*o) == Kind::Instance && v.kv.is_bot());
         let (ai, bi) = (inst(self, a), inst(self, b));
