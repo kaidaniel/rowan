@@ -138,7 +138,7 @@ uv run --no-project python tests/run_snapshots.py   # --update only after review
 uv run --no-project --with pandas --with pydantic --with pydantic-settings --with fastapi --with httpx --with numpy \
     python tests/oracle.py [--strict|--lenient] [-v] [-j N] [case…]  # vs real runs, ~1.5 min
 uv run --no-project --with torch --with numpy python tests/torch_oracle.py [case…]
-uv run --no-project python tests/fuzz.py [KIND…] [-n N] [--seed S] [--shrink]  # random programs vs CPython, also at budget=0 (CI: -n 15)
+uv run --no-project python tests/fuzz.py [KIND…] [-n N] [--seed S] [--shrink]  # random programs vs CPython, also at budget=0; -n 50: ~5 s
 cd vscode-rowan && node test.js && npm run package  # hovers; the .vsix (test_package.js X.vsix TARGET)
 uv run --no-project python bench/run.py rich rowan/target/release/rowan "$(uv run --no-project python bench/prepare.py rich)"  # also email, stdlib12k, click; pip, timm, sktime, functional
 uv run --no-project python bench/hovers.py rowan/target/release/rowan pip  # each function on demand (`rowan hovers F --only NAME`: one); tests/ondemand_check.py: vs whole runs
