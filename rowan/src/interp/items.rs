@@ -673,12 +673,17 @@ impl Analyzer {
         std::mem::replace(&mut self.mode.wide_read, wide)
     }
 
+    /// Is a read on many objects running in this frame (`wide_read`)?
+    pub(in crate::interp) fn in_wide_read(&self) -> bool {
+        self.mode.wide_read.as_ref().is_some_and(|(d, _)| *d == self.cx.frames.len())
+    }
+
     /// `_path_placeholder`: the (unknown) content of an open object's slot.
     pub fn path_placeholder_value(&mut self, oid: u32, ns: Ns, k: KeyId, row: &Row, state: &mut State) -> Value {
         if self.heap.obj(oid).depth >= PATH_DEPTH {
             return Value::data("deep");
         }
-        if let Some(site) = self.mode.wide_read.as_ref().filter(|(d, _)| *d == self.cx.frames.len()).map(|(_, s)| s.clone()) {
+        if let Some(site) = self.mode.wide_read.as_ref().filter(|_| self.in_wide_read()).map(|(_, s)| s.clone()) {
             // (one placeholder of the read for every object it reads: weak, its row the join)
             let ctx = self.frame().ctx.clone();
             let pid = self.heap.alloc_raw(Kind::Unknown, &format!("path@{}:{}:{}", site, ns, intern::key_repr(k)), &ctx, false, &format!("{}[{}]", self.heap.obj(oid).label, intern::key_repr(k)), Payload::None);

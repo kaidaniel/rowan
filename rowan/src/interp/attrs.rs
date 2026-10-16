@@ -138,6 +138,9 @@ impl Analyzer {
                     let q = self.heap.external_qual(oid);
                     Value::lit(key_str_lit(q.rsplit('.').next().unwrap_or("")))
                 }
+                // (in a read on many objects, a library object's attribute is any value: by
+                // its qualified name, attributes of attributes made names without end)
+                Kind::External if self.in_wide_read() => Value::obj(super::any_object(&mut self.heap)),
                 Kind::External => self.external_attr(oid, name, state),
                 Kind::Partial if matches!(name, "func" | "args" | "keywords") => crate::models::partial_attr(self, oid, name, node, state),
                 Kind::Parser | Kind::Groupby | Kind::Partial => self.method_value(&format!("{}.{}", k.name(), name), &Value::obj(oid)),

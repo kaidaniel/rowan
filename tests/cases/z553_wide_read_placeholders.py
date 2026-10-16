@@ -2,8 +2,10 @@
 value read stands for every module and every attribute read from one so far, and the next
 round reads attributes of all of those. A placeholder per object read and key made objects
 grow with the keys to the power of the path depth (timm's `adapt_model_from_string`: 1.2M
-objects); a read on a value of many objects makes one placeholder per key instead."""
-#@objects <= 500
+objects); a read on a value of many objects makes one placeholder per key instead. A library
+object's attributes were named by their access paths (`Formatter.fmt.act.fmt…`), without end:
+in such a read they are any value."""
+#@objects <= 600
 import os
 from string import Formatter
 
@@ -16,6 +18,7 @@ class Module(Formatter):
 class Conv(Module):
     def __init__(self, c):
         self.c = c
+        self.fmt = Formatter  # (a library class: its attributes are the library's)
 
 
 class Block(Module):
@@ -55,6 +58,7 @@ def adapt(parent, names):
     for n in names:
         old = extract_layer(parent, n)
         c = getattr(old, "c", None)
+        old.act = getattr(old, "fmt", None)  # (kept on the module: read again next time)
 #@value c: includes={8, 16, 32, 64, None}
         out.append((c, getattr(old, "stride", 1), getattr(old, "padding", 0), getattr(old, "groups", 1),
                     getattr(old, "bias", None), getattr(old, "eps", 1e-5), getattr(old, "momentum", 0.1),
