@@ -570,6 +570,31 @@ impl Analyzer {
         }
     }
 
+    /// One call of several of the program's functions (with their receivers, if bound) none of
+    /// which runs (on demand, past the work its run may do): an unknown call given the arguments
+    /// and every receiver whole, that may also change what all their code reaches. It covers
+    /// each one's `skipped_call` (which leaves out what a function only reads, and walks a
+    /// receiver by the names its code uses); a method returning its receiver gives it back.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn skipped_calls(&mut self, fns: &[(ObjId, Option<Value>)], args: &[Value], kwargs: &IndexMap<StrId, Value>, star_args: &[Value], star_kwargs: &[Value], state: &mut State, node: &Node, call_ast: Option<&'static ast::ExprCall>) -> Value {
+        for (f, r) in fns {
+            self.note_call(*f, r.as_ref(), state);
+        }
+        self.gens.force_at = None;
+        let recv = crate::domain::join_values(fns.iter().filter_map(|(_, r)| r.clone()).collect::<Vec<_>>());
+        let text = call_ast.and_then(|c| super::chain_text(&c.func)).unwrap_or_else(|| self.heap.func_info(fns[0].0).qualname.clone());
+        let r = self.unknown_call(&format!("call of {}", text), (!recv.pts.is_empty()).then_some(&recv), args, kwargs, star_args, star_kwargs, state, node);
+        let site = s(&format!("call of {}@L{}", text, node.line));
+        self.names.skipped_sites.insert(site);
+        let mut roots: Vec<ObjId> = fns.iter().map(|(f, _)| *f).collect();
+        roots.append(&mut self.havoc.code);
+        let rid = r.single().unwrap_or(0);
+        self.follow_code(roots, rid, site, state);
+        self.flag_may_raise(state);
+        let back: Vec<Value> = fns.iter().filter(|(f, r)| r.is_some() && self.code_uses(&self.heap.func_info(*f)).recv.as_ref().is_some_and(|u| u.returned)).filter_map(|(_, r)| r.clone()).collect();
+        crate::domain::join_values(std::iter::once(r).chain(back).collect::<Vec<_>>())
+    }
+
     /// The arguments of a call of `foid` that does not run, as what its code may change of
     /// them: one its parameter only reads is left out, one whose parts only it may change gives
     /// its parts (a generator's or coroutine's code runs later: all of them); and the code

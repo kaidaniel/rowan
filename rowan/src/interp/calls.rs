@@ -110,6 +110,18 @@ impl Analyzer {
             let (q, recv) = unknown.expect("several unknown callees");
             return self.unknown_call(&q, Some(&recv), &args, &kwargs, &star_args, &star_kwargs, state, node);
         }
+        // (on demand, past the work its run may do, several functions of the program none of
+        // which runs here: one call that does not run, for all of them)
+        if unknown.is_none() && targets.len() > 1 && self.budget.past_hover_work(self.cx.frames.len(), self.hover_work()) {
+            let fns: Option<Vec<(ObjId, Option<Value>)>> = targets.iter().map(|&o| match (self.heap.kind(o), &self.heap.obj(o).payload) {
+                (Kind::Function, Payload::Func(_)) => Some((o, None)),
+                (Kind::Bound, Payload::Bound(f, r)) if self.heap.kind(*f) == Kind::Function => Some((*f, Some(r.clone()))),
+                _ => None,
+            }).collect();
+            if let Some(fns) = fns {
+                return self.skipped_calls(&fns, &args, &kwargs, &star_args, &star_kwargs, state, node, call_ast);
+            }
+        }
         // (one method on several receivers: one call with all of them as the receiver, not one
         // per receiver, when the call would not run — past the function's budget, no recursion
         // of it running — or in a run on demand — a method of a base class run for the
