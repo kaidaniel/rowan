@@ -46,20 +46,20 @@ abstract values. Imports run as Python runs them (`TYPE_CHECKING` False, `import
   of one `def`) may run 4,096 statements in all (`budget`); past that its calls are unknown
   calls that may also change what its code reaches (`effects.rs`, by `flows.rs`'s reading of
   function texts: globals, cells, defaults and arguments whose value, or what it holds, the code
-  may change or give away (to the program's functions: as their code uses the parameter), a local
-  aliasing what it is bound to; class attributes by name, rebound where a store's base may be the
-  class; a receiver by the names its code uses unless it escapes, `receiver_effects`; one call for
-  several receivers), and the function gets a reporting run with open parameters (for the calls
-  that did not run). Entry runs are not counted (one per function): work is bounded by functions × budget.
+  may change or give away (to the program's functions: as they use it; a dict, list or set changed
+  in place: its items), a local aliasing what it is bound to; class attributes by name, rebound
+  where a store's base may be the class; a receiver by the names its code uses unless it escapes,
+  `receiver_effects`; one call for several receivers), and the function gets a reporting run (open
+  parameters) for the calls that did not run. Entry runs are not counted (one per function): work is bounded by functions × budget.
   * **Recursion:** the inner call uses the running activation's partial result; the activation
     reruns from the heaps of its recursive calls too (`Recursion`), 8 rounds, then widened.
   * **Unknown values** are not taken for the program's instances: their methods are unknown calls.
   * **Unknown calls** may change everything they reach through what they are given, at any depth:
     records get a mutator, slots may hold anything (one shared unknown object, which no store
     changes: a value stored into it goes to unknown code, `escape`), lists and sets any items
-    and length (NamedTuples, patterns, matches, paths, frozensets cannot change); the program's
-    functions among it may run (`follow_code`). A walk by the same code from the same values
-    redoes only what changed (`Havoc`'s memo). They return an unknown and may raise anything.
+    and length (NamedTuples, patterns, matches, paths, frozensets, enum members' name and value
+    cannot change); the program's functions among it may run (`follow_code`). A walk by the same
+    code from the same values redoes only what changed (`Havoc`'s memo). They return an unknown and may raise anything.
     Library functions known to have no effect are `noeffect` (`ALLOWLIST_PREFIXES`) unless they
     change their arguments (`random.shuffle`) or get the program's functions; several callees: `alternatives`.
   * **Builtins** run the dunders Python calls for them (`builtin_dunder`); one without a model

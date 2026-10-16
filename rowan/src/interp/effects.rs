@@ -67,6 +67,9 @@ pub struct Closure {
     pub rebound: Vec<Loc>,
     pub values: Vec<Value>,
     pub held_values: Vec<Value>,
+    /// the slots and values changed in place as containers (their items, not what they are)
+    pub edited_locs: Vec<Loc>,
+    pub edited_values: Vec<Value>,
 }
 
 impl Analyzer {
@@ -133,7 +136,7 @@ impl Analyzer {
         let (by_name, stored) = (&uses.0, &uses.1);
         let mut work: Vec<ObjId> = vec![inst];
         let mut seen: FxHashSet<ObjId> = FxHashSet::default();
-        let mut walk: Vec<Value> = Vec::new();
+        let (mut walk, mut edited): (Vec<Value>, Vec<ObjId>) = Default::default();
         while let Some(inst) = work.pop() {
             if !seen.insert(inst) {
                 continue;
@@ -152,7 +155,11 @@ impl Analyzer {
                 let Some(f) = by_name.get(&name).copied() else { continue };
                 let (own, held) = self.flag_effect(&f, &v, state);
                 // (a value given to code rowan does not follow is walked; one only called or
-                // iterated: its instances likewise by name, the rest walked)
+                // iterated: its instances likewise by name, the rest walked; a container changed
+                // in place: its items)
+                if self.edited(&f, &v, state) {
+                    edited.extend(v.pts.iter());
+                }
                 let mut objs: Vec<ObjId> = Vec::new();
                 if own && f.changes {
                     walk.push(v.clone());
@@ -179,6 +186,7 @@ impl Analyzer {
         let rid = crate::interp::any_object(&mut self.heap);
         let w = self.havoc.new_walk();
         self.havoc.walk_from(&mut self.heap, &walk, rid, site, state, w);
+        self.havoc.edit(&mut self.heap, &edited, site, state);
     }
 
     /// What the program's own functions may do to the values of attributes by name, and the
@@ -563,6 +571,7 @@ impl Analyzer {
         let mut code: Vec<ObjId> = Vec::new();
         let mut seen = |an: &Analyzer, f: Flags, v: &Value| -> Value {
             let (own, held) = an.flag_effect(&f, v, state);
+            let own = own || f.edits;
             if !own {
                 code.extend(v.pts.iter().filter_map(|o| match (an.heap.kind(o), &an.heap.obj(o).payload) {
                     (Kind::Function | Kind::Class | Kind::Bound | Kind::Partial, _) => Some(o),
@@ -606,6 +615,9 @@ impl Analyzer {
                     out.values.push(v.clone());
                 } else if held {
                     out.held_values.push(v.clone());
+                }
+                if self.edited(f, v, state) {
+                    out.edited_values.push(v.clone());
                 }
             }
         }
@@ -654,7 +666,9 @@ impl Analyzer {
                     let k = key_str_lit(&str_get(a));
                     out.rebound.extend(state.slot(loc.0, loc.1, loc.2).pts.iter().filter(|c| self.heap.kind(*c) == Kind::Class).map(|c| (c, Ns::Attr, k)));
                 }
-                f = Flags { changes: f.called || f.rebinds, held: f.changes || f.methods || f.held || f.iterated, ..Flags::default() };
+                // (`n.append(…)`: n changes in place as a container, if it is one)
+                let edit = f.called && super::flows::CONTAINER_MUTATORS.contains(&&*str_get(a));
+                f = Flags { changes: f.called && !edit || f.rebinds, edits: edit, held: f.changes || f.methods || f.held || f.iterated || f.edits, ..Flags::default() };
             }
             self.apply_flags(&f, loc, state, out);
             code(self, &state.slot(loc.0, loc.1, loc.2), work);
@@ -801,11 +815,15 @@ impl Analyzer {
 
     /// What `f` makes of a slot's value: it may change, what it holds may, it may be rebound.
     fn apply_flags(&self, f: &Flags, loc: Loc, state: &State, out: &mut Closure) {
-        let (own, held) = self.flag_effect(f, &state.slot(loc.0, loc.1, loc.2), state);
+        let v = state.slot(loc.0, loc.1, loc.2);
+        let (own, held) = self.flag_effect(f, &v, state);
         if own {
             out.locs.push(loc);
         } else if held {
             out.held_locs.push(loc);
+        }
+        if self.edited(f, &v, state) {
+            out.edited_locs.push(loc);
         }
         if f.rebinds {
             out.rebound.push(loc);
@@ -828,8 +846,13 @@ impl Analyzer {
         };
         // (a library layer called runs its model)
         let code_only = |o: ObjId| code_only(o) || crate::models::torch::t_layer_type(self, o).is_some() && crate::models::torch::t_inert_layer(self, o, _state);
-        let own = f.changes || f.methods || (f.iterated && !v.pts.iter().all(plain)) || (f.called && !v.pts.iter().all(code_only));
+        let own = f.changes || f.methods || ((f.iterated || f.edits) && !v.pts.iter().all(plain)) || (f.called && !v.pts.iter().all(code_only));
         (own, f.held || f.iterated)
+    }
+
+    /// Whether `f` changes `v` in place as plain containers only (`Flags::edits`).
+    fn edited(&self, f: &Flags, v: &Value, state: &State) -> bool {
+        f.edits && !self.flag_effect(f, v, state).0
     }
 }
 

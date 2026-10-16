@@ -164,6 +164,26 @@ impl Havoc {
         self.memo.insert(key, HavocMemo { roots, rows: state.rows.clone(), slots: state.slots.clone(), elems: state.elems.clone(), lens: state.lens.clone(), visited, code, guard });
     }
 
+    /// Code rowan does not follow changed the containers `objs` in place (`Flags::edits`): their
+    /// items may be anything, what they held is as it was. The code their items hold or are
+    /// instances of is met (dunders: `__hash__`, `__eq__`, `__lt__`).
+    pub(in crate::interp) fn edit(&mut self, heap: &mut Heap, objs: &[ObjId], site: StrId, state: &mut State) {
+        let any_id = any_object(heap);
+        let any = Value::obj(any_id);
+        let mut met: Vec<ObjId> = Vec::new();
+        for &o in objs {
+            let k = heap.kind(o);
+            havoc_object(heap, state, o, k, site, any_id, &any, &mut met);
+        }
+        for o in met {
+            match (heap.kind(o), &heap.obj(o).payload) {
+                (Kind::Class | Kind::Function | Kind::Bound | Kind::Partial, _) => self.code.push(o),
+                (Kind::Instance, Payload::Cls(c)) => self.code.push(*c),
+                _ => {}
+            }
+        }
+    }
+
     /// Where a walk from the same values by the same code left off (`memo`): the objects it
     /// met, the code it met, and what changed since (none: walk all again). The changed objects
     /// it met are walked again.
@@ -376,6 +396,8 @@ impl Analyzer {
             parts.dedup();
             vals.extend(parts.into_iter().map(Value::obj));
             self.havoc.walk_from(&mut self.heap, &vals, rid, site, state, walk);
+            let edited: Vec<ObjId> = cl.edited_locs.iter().map(|(o, ns, k)| state.slot(*o, *ns, *k)).chain(cl.edited_values.iter().cloned()).flat_map(|v| v.pts.to_vec()).collect();
+            self.havoc.edit(&mut self.heap, &edited, site, state);
             for (o, ns, k) in &cl.rebound {
                 let v = state.slot(*o, *ns, *k).join(&any);
                 state.set_slot(*o, *ns, *k, v, false);

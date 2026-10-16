@@ -75,11 +75,14 @@ pub struct Flags {
     pub methods: bool,
     /// the code binds the name (a `global` / `nonlocal` assignment, `m.x = …` of a module)
     pub rebinds: bool,
+    /// it is changed in place as a container (`v[k] = …`, `del v[k]`, `v.append(…)`, `v.pop()`):
+    /// a dict, list or set changes its items, not what they are
+    pub edits: bool,
 }
 
 impl Flags {
     /// Given away: anything may happen to it.
-    pub const CHANGE: Flags = Flags { changes: true, held: false, iterated: false, called: false, methods: false, rebinds: false };
+    pub const CHANGE: Flags = Flags { changes: true, held: false, iterated: false, called: false, methods: false, rebinds: false, edits: false };
 
     /// What happens to a value, for its source at `level`: itself, or what holds it.
     pub fn lift(&self, level: Level) -> Flags {
@@ -90,7 +93,7 @@ impl Flags {
     }
 
     pub fn any(&self) -> bool {
-        self.changes || self.held || self.iterated || self.called || self.rebinds || self.methods
+        self.changes || self.held || self.iterated || self.called || self.rebinds || self.methods || self.edits
     }
 
     pub fn join(&mut self, o: &Flags) {
@@ -100,6 +103,7 @@ impl Flags {
         self.called |= o.called;
         self.rebinds |= o.rebinds;
         self.methods |= o.methods;
+        self.edits |= o.edits;
     }
 }
 
@@ -116,6 +120,8 @@ enum Pos {
     Call,
     /// a method is called on it
     Method,
+    /// changed in place as a container
+    Edit,
 }
 
 /// A name the code reads that it does not bind, with an attribute read on it (`m.x`).
@@ -228,6 +234,10 @@ fn template(e: &Expr) -> Option<Like> {
 fn pure_method(m: &str) -> bool {
     super::PURE_METHODS.contains(&m) || matches!(m, "__getitem__" | "__contains__" | "__len__" | "__eq__" | "__hash__" | "__str__" | "__repr__" | "__format__")
 }
+
+/// The methods by which a dict, list or set changes its items (`pop`, `popitem` and
+/// `setdefault` give one back: `srcs`); on other objects, a method that may change them.
+pub const CONTAINER_MUTATORS: &[&str] = &["append", "extend", "insert", "remove", "pop", "clear", "sort", "reverse", "update", "setdefault", "popitem", "add", "discard", "difference_update", "intersection_update", "symmetric_difference_update"];
 
 /// Builtins that iterate their first argument and keep nothing of it but in their result.
 const PASSING_BUILTINS: &[&str] = &["list", "tuple", "set", "frozenset", "dict", "sorted", "reversed", "enumerate", "zip", "min", "max", "sum", "any", "all", "iter"];
@@ -420,8 +430,9 @@ impl<'a> Flow<'a> {
             Expr::Call(c) => {
                 let args = || c.arguments.args.iter().chain(c.arguments.keywords.iter().map(|k| &k.value));
                 match &*c.func {
-                    // (a method that keeps nothing may give back what its receiver holds or an argument)
-                    Expr::Attribute(a) if pure_method(a.attr.as_str()) => {
+                    // (a method that keeps nothing may give back what its receiver holds or an
+                    // argument; a container's `pop` an item)
+                    Expr::Attribute(a) if pure_method(a.attr.as_str()) || matches!(a.attr.as_str(), "pop" | "popitem" | "setdefault") => {
                         let mut out = held(self.srcs(&a.value));
                         out.extend(args().flat_map(|x| self.srcs(x)));
                         out
@@ -469,6 +480,7 @@ impl<'a> Flow<'a> {
                 (Pos::Iterate, Level::Own) => f.iterated = true,
                 (Pos::Call, Level::Own) => f.called = true,
                 (Pos::Method, Level::Own) => f.methods = true,
+                (Pos::Edit, Level::Own) => f.edits = true,
             }
         }
     }
@@ -624,28 +636,18 @@ impl<'a> Flow<'a> {
     /// The arguments of a call of a name the function does not bind (after a `*xs`, or in a
     /// `**kw`: given away).
     fn pass_args(&mut self, callee: Callee, c: &'static ast::ExprCall) {
-        let mut known = true;
-        for (i, x) in c.arguments.args.iter().enumerate() {
-            known &= !matches!(x, Expr::Starred(_));
-            if !known {
+        let star = c.arguments.args.iter().position(|x| matches!(x, Expr::Starred(_))).unwrap_or(usize::MAX);
+        let pos = c.arguments.args.iter().enumerate().map(|(i, x)| (x, (i < star).then_some(Slot::Pos(i))));
+        let kw = c.arguments.keywords.iter().map(|k| (&k.value, k.arg.as_ref().map(|a| Slot::Kw(s(a.as_str())))));
+        for (x, slot) in pos.chain(kw).collect::<Vec<_>>() {
+            let Some(slot) = slot else {
                 self.expr(x, Pos::Change);
-                continue;
-            }
-            let mut srcs = Vec::new();
-            self.give(x, &mut srcs);
-            if !srcs.is_empty() {
-                self.out.passes.push(Pass { callee, slot: Slot::Pos(i), srcs });
-            }
-        }
-        for k in &c.arguments.keywords {
-            let Some(a) = &k.arg else {
-                self.expr(&k.value, Pos::Change);
                 continue;
             };
             let mut srcs = Vec::new();
-            self.give(&k.value, &mut srcs);
+            self.give(x, &mut srcs);
             if !srcs.is_empty() {
-                self.out.passes.push(Pass { callee, slot: Slot::Kw(s(a.as_str())), srcs });
+                self.out.passes.push(Pass { callee, slot, srcs });
             }
         }
     }
@@ -675,7 +677,7 @@ impl<'a> Flow<'a> {
                     }
                     v => {
                         let recv = self.srcs(v);
-                        self.mark(&recv, if pure { Pos::Read } else { Pos::Method });
+                        self.mark(&recv, if pure { Pos::Read } else if CONTAINER_MUTATORS.contains(&m) { Pos::Edit } else { Pos::Method });
                         self.expr(v, Pos::Read);
                         // (a module's function called through a local, say: its result is not followed)
                         self.out.untracked.insert(s(m));
@@ -837,7 +839,7 @@ impl<'a> Flow<'a> {
             }
             Expr::Subscript(x) => {
                 let base = self.srcs(&x.value);
-                self.mark(&base, Pos::Change);
+                self.mark(&base, Pos::Edit);
                 self.expr(&x.value, Pos::Read);
                 self.expr(&x.slice, Pos::Read);
             }
