@@ -182,3 +182,88 @@ fn numeric_of(k: KeyId) -> Option<(i64, u64)> {
         _ => None,
     })
 }
+
+/// Whether hashing a value raises TypeError.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Hashing {
+    Hashable,
+    Maybe,
+    Unhashable,
+}
+
+impl Analyzer {
+    /// Hashing `v` (a dict key, a set item, `in` a dict or set, `hash(v)`) raises TypeError for a
+    /// list, dict or set, and for a tuple holding one: on every path when all of `v` is one, a
+    /// possible raise when part of it is, or may be (in a running try: an unknown of no known
+    /// type, an instance of a class with `__eq__` and no `__hash__`, a dataclass or model not
+    /// frozen).
+    pub fn check_hashable(&mut self, v: &Value, state: &mut State) {
+        self.check_hashable_if(v, true, state)
+    }
+
+    /// `check_hashable`, of a value that is hashed only if `hashed` (else maybe: the items of
+    /// an iterable that may be empty).
+    pub fn check_hashable_if(&mut self, v: &Value, hashed: bool, state: &mut State) {
+        if v.pts.is_empty() && !(self.in_try() && kv_hashing(&v.kv) == Hashing::Maybe) {
+            return;
+        }
+        let hs: Vec<Hashing> = v.pts.iter().map(|o| self.obj_hashing(o, state, 0)).collect();
+        let worst = hs.iter().copied().max().unwrap_or(Hashing::Hashable).max(kv_hashing(&v.kv));
+        if worst == Hashing::Hashable || (worst == Hashing::Maybe && !self.in_try()) {
+            return;
+        }
+        if hashed && v.kv.is_bot() && hs.iter().all(|h| *h == Hashing::Unhashable) {
+            self.raise_here("TypeError", state);
+        } else {
+            self.may_raise_here("TypeError", state);
+        }
+    }
+
+    fn obj_hashing(&self, o: u32, state: &State, depth: usize) -> Hashing {
+        let ob = self.heap.obj(o);
+        match ob.kind {
+            Kind::List | Kind::Dict if !ob.iterator => Hashing::Unhashable,
+            Kind::Set if !ob.iterator && !ob.label.starts_with("frozenset") => Hashing::Unhashable,
+            Kind::Tuple if depth < 3 => {
+                let item = |v: &Value| {
+                    let hs: Vec<Hashing> = v.pts.iter().map(|x| self.obj_hashing(x, state, depth + 1)).collect();
+                    match hs.iter().copied().max() {
+                        Some(Hashing::Unhashable) if v.kv.is_bot() && hs.iter().all(|h| *h == Hashing::Unhashable) => Hashing::Unhashable,
+                        Some(Hashing::Hashable) | None => kv_hashing(&v.kv),
+                        _ => Hashing::Maybe,
+                    }
+                };
+                match self.heap.llen(o, state) {
+                    Some(n) if ob.single && n <= 16 => (0..n).map(|i| item(&state.slot(o, Ns::Pos, intern::key_int(i as i64)))).max().unwrap_or(Hashing::Hashable),
+                    _ => item(&state.slot(o, Ns::Elem, intern::STAR)).min(Hashing::Maybe),
+                }
+            }
+            Kind::Unknown => Hashing::Maybe,
+            Kind::Instance => match self.heap.instance_class(o).and_then(|c| Some((c, self.heap.class_info_opt(c)?))) {
+                Some((c, ci)) => {
+                    let unfrozen = (ci.dataclass_fields.borrow().is_some() && !ci.dc_frozen.get()) || self.m.pyd_classes.get(&c).is_some_and(|p| !p.frozen);
+                    let eq_only = self.class_lookup(c, "__eq__").is_some() && self.class_lookup(c, "__hash__").is_none();
+                    if unfrozen || eq_only { Hashing::Maybe } else { Hashing::Hashable }
+                }
+                None => Hashing::Maybe,
+            },
+            _ => Hashing::Hashable,
+        }
+    }
+}
+
+/// An unknown of no known type may be anything, a list too; literals and keys hash.
+fn kv_hashing(kv: &KeyVal) -> Hashing {
+    match kv {
+        KeyVal::Data(l) if crate::domain::label_type(&intern::str_get(*l)).is_none() => Hashing::Maybe,
+        _ => Hashing::Hashable,
+    }
+}
+
+impl Analyzer {
+    /// A dict or set: its keys are hashed (a key that cannot be raises TypeError).
+    pub fn hashes_keys(&self, o: u32) -> bool {
+        let ob = self.heap.obj(o);
+        matches!(ob.kind, Kind::Dict | Kind::Set) && !ob.iterator
+    }
+}

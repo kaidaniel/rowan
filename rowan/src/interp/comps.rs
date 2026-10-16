@@ -204,6 +204,7 @@ impl Analyzer {
         let val_e: &'static ast::Expr = &dc.value;
         let mut body = |an: &mut Analyzer, st: &mut State| {
             let k = an.eval_key(key_e, st);
+            an.check_hashable(&k, st);
             let v = an.eval(val_e, st);
             let strong = an.heap.obj(oid).single && an.cx.cond_depth == base_depth;
             an.store_key(oid, Ns::Item, &k.kv, &v, strong, &nd, st);
@@ -229,6 +230,9 @@ impl Analyzer {
         let mut seen: Vec<KeyId> = Vec::new();
         let mut body = |an: &mut Analyzer, st: &mut State| {
             let v = an.eval(elt, st);
+            if kind == Kind::Set {
+                an.check_hashable(&v, st);
+            }
             let dup = kind == Kind::Set && v.pts.is_empty() && v.kv.as_lit().map(|k| seen.contains(&k) || {
                 seen.push(k);
                 false

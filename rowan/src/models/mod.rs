@@ -394,6 +394,10 @@ pub fn may_type_error(an: &mut Analyzer, qual: &str, args: &[Value], kwargs: &In
     if !state.reachable {
         return;
     }
+    if let ("builtins.hash", [a]) = (qual, args) {
+        an.check_hashable(a, state);
+        return;
+    }
     if sure_type_error(an, qual, args, kwargs, state) {
         an.raise_here("TypeError", state);
         return;
@@ -456,7 +460,7 @@ fn lit_kind(v: &Value) -> Option<u8> {
     ks.iter().all(|k| kind(*k) == Some(first)).then_some(first)
 }
 
-/// A builtin given arguments of a type it rejects on every run: `len(5)`, `hash([])`,
+/// A builtin given arguments of a type it rejects on every run: `len(5)`,
 /// `sorted([1, "a"])` (a sort that compares no int with a str cannot order them),
 /// `",".join([1])`, `sum(["a"])` (`0 + "a"`).
 fn sure_type_error(an: &Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<StrId, Value>, st: &State) -> bool {
@@ -469,9 +473,6 @@ fn sure_type_error(an: &Analyzer, qual: &str, args: &[Value], kwargs: &IndexMap<
     let [a] = args else { return false };
     match qual {
         "builtins.len" => matches!(lit_kind(a), Some(0 | 3)),
-        "builtins.hash" => {
-            !a.pts.is_empty() && a.kv.is_bot() && a.pts.iter().all(|o| an.heap.kind(o) == Kind::Dict || (!an.heap.obj(o).iterator && ["list@", "set@"].iter().any(|p| an.heap.obj(o).label.starts_with(p))))
-        }
         "builtins.sorted" | "builtins.min" | "builtins.max" if kwargs.keys().all(|k| *k == s("reverse")) => items(a).is_some_and(|xs| {
             let ks: Vec<Option<u8>> = xs.iter().map(lit_kind).collect();
             xs.len() >= 2 && (ks.contains(&Some(3)) || ks.iter().flatten().any(|k| ks.iter().flatten().any(|j| j != k)))
@@ -793,6 +794,12 @@ fn m_list(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     }
     if let Some(a) = c.args.first() {
         let it = an.iterate(a, &c.node, st);
+        if kind == Kind::Set {
+            match &it.items {
+                Some(items) => items.iter().for_each(|x| an.check_hashable(x, st)),
+                None => an.check_hashable_if(&it.elem.flat(), false, st),
+            }
+        }
         if c.qual == "builtins.iter" {
             an.heap.obj_mut(oid).iterator = true;
         } else {
@@ -2623,6 +2630,7 @@ fn dict_recv(an: &Analyzer, c: &Call) -> Vec<u32> {
 
 fn m_get(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(key) = c.args.first() else { return Value::data("get") };
+    an.check_hashable(key, st);
     // (a key that may be an object: an unknown key)
     let okey = an.opaque_key(key, st);
     let key = &okey;
@@ -2650,6 +2658,7 @@ fn m_get(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
 
 fn m_setdefault(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
     let Some(key) = c.args.first() else { return Value::data("setdefault") };
+    an.check_hashable(key, st);
     let okey = an.opaque_key(key, st);
     let key = &okey;
     let default = c.args.get(1).cloned().unwrap_or_else(|| an.none_v.clone());
@@ -2792,6 +2801,9 @@ fn m_pop(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
         return m_lpop(an, st, c);
     }
     let Some(key) = c.args.first() else { return Value::data("pop") };
+    if recv.pts.iter().any(|o| an.hashes_keys(o)) {
+        an.check_hashable(key, st);
+    }
     let has_default = c.args.len() > 1;
     if let Some(k) = key.kv.as_lit() {
         let recs = an.record_objects(&recv);
@@ -3146,6 +3158,11 @@ fn m_set(an: &mut Analyzer, st: &mut State, c: &Call) -> Value {
             Value::data("set")
         }
         "add" | "discard" | "remove" | "update" | "intersection_update" | "difference_update" | "symmetric_difference_update" | "clear" => {
+            if matches!(name.as_str(), "add" | "discard" | "remove") {
+                if let Some(a) = c.args.first() {
+                    an.check_hashable(a, st);
+                }
+            }
             // (a tuple of known values: its key)
             let item = c.args.first().and_then(|a| match a.single() {
                 Some(o) if a.kv.is_bot() && an.heap.kind(o) == Kind::Tuple => an.value_key(o, st, 0),
